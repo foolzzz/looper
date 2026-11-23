@@ -84,7 +84,7 @@ class LarkApi:
             return await self._http.request(method, self._base_url + path, headers=headers, params=params,
                                             json=body, timeout=20.0)
         except httpx.HTTPError as exc:
-            raise LarkApiError(f"could not reach the Lark platform: {type(exc).__name__}") from None
+            raise LarkApiError(f"could not reach the Lark platform: {type(exc).__name__}") from exc
 
     @staticmethod
     def _json(response: httpx.Response) -> dict[str, Any]:

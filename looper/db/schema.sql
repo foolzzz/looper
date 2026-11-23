@@ -1285,6 +1285,23 @@ CREATE INDEX IF NOT EXISTS idx_llm_records_task ON llm_records(task_id, created_
 CREATE INDEX IF NOT EXISTS idx_llm_records_parent ON llm_records(parent_record_id) WHERE parent_record_id IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_llm_records_failures ON llm_records (created_at) WHERE failure_class IS NOT NULL;
 
+-- provider limit windows begin
+CREATE TABLE IF NOT EXISTS provider_limit_windows (
+    provider_id TEXT NOT NULL REFERENCES llm_providers(id) ON DELETE CASCADE,
+    window_name TEXT NOT NULL CHECK (window_name ~ '^[a-z0-9_]{1,40}$'),
+    status TEXT NOT NULL CHECK (status IN ('allowed', 'warning', 'rejected')),
+    utilization DOUBLE PRECISION CHECK (utilization BETWEEN 0 AND 1),
+    resets_at TIMESTAMPTZ,
+    window_minutes INTEGER CHECK (window_minutes > 0),
+    source TEXT NOT NULL CHECK (source IN ('claude_stream', 'codex_app_server', 'api_headers', 'proxy')),
+    record_id BIGINT REFERENCES llm_records(id) ON DELETE SET NULL,
+    observed_at TIMESTAMPTZ NOT NULL,
+    PRIMARY KEY (provider_id, window_name)
+);
+-- provider limit windows end
+CREATE INDEX IF NOT EXISTS idx_llm_records_provider_day
+    ON llm_records ((metadata->'profile'->'provider'->>'id'), created_at);
+
 -- The run's stream-json events, appended as they arrive.
 CREATE TABLE IF NOT EXISTS llm_record_events (
     record_id   BIGINT NOT NULL REFERENCES llm_records(id) ON DELETE CASCADE,
@@ -1885,6 +1902,30 @@ ALTER TABLE manager_events ADD COLUMN IF NOT EXISTS delivery_claim UUID;
 ALTER TABLE schedule_notifications ADD COLUMN IF NOT EXISTS manager_event_id BIGINT
     REFERENCES manager_events(id) ON DELETE SET NULL;
 -- manager events end
+-- The default Manager's group and other-sender direct-chat sessions (the main one stays in agent_sessions).
+-- manager sessions begin
+CREATE TABLE IF NOT EXISTS manager_sessions (
+    manager_id      TEXT NOT NULL REFERENCES managers(id) ON DELETE CASCADE,
+    session_key     TEXT NOT NULL,
+    kind            TEXT NOT NULL CHECK (kind IN ('group', 'dm')),
+    channel_id      TEXT NOT NULL,
+    chat            TEXT NOT NULL,
+    session_id      TEXT,
+    session_totals  JSONB NOT NULL DEFAULT '{}',
+    runtime_type    TEXT,
+    profile_id      TEXT,
+    provider_id     TEXT,
+    clean_start     BOOLEAN NOT NULL DEFAULT false,
+    pending_handoff TEXT,
+    context_tokens  INTEGER,
+    last_turn_cost_usd DOUBLE PRECISION,
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+    last_active_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (manager_id, session_key),
+    CONSTRAINT manager_sessions_key CHECK (session_key = kind || ':' || channel_id || ':' || chat)
+);
+CREATE INDEX IF NOT EXISTS idx_manager_sessions_active ON manager_sessions (manager_id, last_active_at DESC);
+-- manager sessions end
 -- A database that gets the column above later builds this index online (connection.py ``_ONLINE_STEPS``).
 CREATE INDEX IF NOT EXISTS idx_schedule_notifications_manager_event ON schedule_notifications (manager_event_id)
     WHERE manager_event_id IS NOT NULL;
