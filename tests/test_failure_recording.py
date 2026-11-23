@@ -143,3 +143,64 @@ def test_a_processor_run_s_rate_limit_event_is_seen_before_the_record_s_filter(a
     stored = [call.args[1][0][1]["type"] for call in agent_db.append_events.await_args_list]
     assert "rate_limit_event" not in stored
     assert (_closed(agent_db)["failure_class"], _closed(agent_db)["failure_cause"]) == ("quota", "usage_limit")
+
+
+def test_recorder_feeds_admission_once_with_the_classified_failure(agent_db, typing, monkeypatch):
+    from unittest.mock import AsyncMock
+    from looper.agents import admission, failures
+
+    typing("record")
+    monkeypatch.setattr(admission, "enabled", lambda: True)
+    saved = AsyncMock()
+    monkeypatch.setattr(admission, "recorded", saved)
+    _run("claude_usage_limit.jsonl")
+    saved.assert_awaited_once()
+    provider, owner, record_id, failure = saved.await_args.args
+    assert provider == "prov-claude-subscription" and owner == "worker-failure"
+    assert record_id is not None and failure.cls is failures.FailureClass.QUOTA
+    assert saved.await_args.kwargs == {"interrupted": False}
+
+    saved.reset_mock()
+    _run([{"type": "result", "subtype": "success", "result": "{}"}], error=None, outcome="completed")
+    assert saved.await_args.args[3] is None  # successful probes also report their end
+
+
+def test_slow_freeze_notice_does_not_delay_record_or_cost_close(agent_db, typing, monkeypatch):
+    from unittest.mock import AsyncMock
+    from looper.agents import admission, cost_guard
+    from looper.db import provider_admission
+
+    typing("record")
+
+    async def scenario():
+        c = admission.Controller()
+        c.active = True
+        monkeypatch.setattr(admission, "_controller", c)
+        monkeypatch.setattr(admission, "transition", c.transition)
+        monkeypatch.setattr(provider_admission, "save", AsyncMock(return_value=1))
+        finish_cost = AsyncMock()
+        monkeypatch.setattr(cost_guard, "finish", finish_cost)
+        notice_started, release_notice = asyncio.Event(), asyncio.Event()
+
+        async def slow_notice(*args, **kwargs):
+            notice_started.set()
+            await release_notice.wait()
+
+        monkeypatch.setattr(admission, "_freeze_alert", slow_notice)
+        try:
+            async with _recorder() as recorder:
+                events = _sample("claude_usage_limit.jsonl")
+                for event in events:
+                    await recorder.record(event)
+                # Use a shorter budget than the normal five seconds; the transport never returns.
+                await asyncio.wait_for(recorder.finish(
+                    output_text=None, result_event=events[-1], error="quota", outcome="run_failed"), .5)
+                await asyncio.wait_for(notice_started.wait(), .5)
+                agent_db.finish_record.assert_awaited_once()
+                finish_cost.assert_awaited_once()
+                assert not release_notice.is_set()
+        finally:
+            release_notice.set()
+            await asyncio.sleep(0)
+
+    asyncio.run(asyncio.wait_for(scenario(), 3))
