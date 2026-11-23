@@ -120,8 +120,11 @@ def test_events_link_their_sources_mark_instructions_and_leave_uncited_messages_
         assert important["flagged"] and not digest["flagged"]
         assert ignored["title"] == ignored["summary"] == ""
         assert all(row["run_id"] == run["id"] and row["schedule_id"] == sid for row in rows)
-        assert all(row["manager_event_id"] is None for row in rows)
-        assert await env.pool.fetchval("SELECT count(*) FROM manager_events") == 0
+        # Only the important event is handed off; this scenario names no chat to tell, so it waits for the brief.
+        [handoff] = await env.pool.fetch("SELECT id, kind, state, reason FROM manager_events")
+        assert (handoff["kind"], handoff["state"], handoff["reason"]) == ("triage", "fallback", "no_chat")
+        assert {row["id"]: row["manager_event_id"] for row in rows} == {
+            important["id"]: handoff["id"], digest["id"]: None, ignored["id"]: None}
         links = await env.pool.fetch("SELECT event_id, event_seq FROM triage_event_sources")
         assert {(row["event_id"], row["event_seq"]) for row in links} == {
             (important["id"], seqs[2]), (digest["id"], seqs[0]), (digest["id"], context),

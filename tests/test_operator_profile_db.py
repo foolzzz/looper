@@ -8,7 +8,7 @@ import pytest
 
 from looper.agents.operator_profile import SOURCE_KEY, ProfileError, profile_view, update_source
 from looper.db import connection
-from tests.db_support import run_db
+from tests.db_support import dropped_tables, run_db
 
 
 async def _arm(pool: Any, root: Path) -> None:
@@ -156,10 +156,11 @@ def test_the_table_rejects_an_oversized_text_and_a_bad_version(monkeypatch) -> N
 
 def test_a_database_without_the_table_gets_it_on_upgrade(monkeypatch) -> None:
     async def test(pool: Any) -> None:
-        await pool.execute("DROP TABLE profile_blocks; DELETE FROM schema_migrations WHERE name = 'profile_blocks'")
-        async with pool.acquire() as conn:
-            assert await connection.schema_change_pending(conn)
-        await connection.ensure_schema(pool)
+        async with dropped_tables(pool, "profile_blocks"):
+            await pool.execute("DELETE FROM schema_migrations WHERE name = 'profile_blocks'")
+            async with pool.acquire() as conn:
+                assert await connection.schema_change_pending(conn)
+            await connection.ensure_schema(pool)
         async with pool.acquire() as conn:
             assert not await connection.schema_change_pending(conn)
         assert await pool.fetchval(
