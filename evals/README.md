@@ -904,6 +904,17 @@ database, a disposable `looper serve`, and fake or real mode.
 | `session_profile_switch` | the Manager's session changes its Agent Profile through `/profile`, which Looper answers itself: `/profile` lists `eval/switch` with a number and starts no Manager run; `/profile <number>` selects it (`POST /api/v1/manager_session/get` `selected`, and a run recording the choice); the next message runs on it (`metadata.profile.source` `session`), after a `[HANDOFF]` run on the old profile and with a `[RESUME]` input when the switch starts a new session; `/profile 0` follows the settings again, and the next message no longer runs on the session's profile and (real mode) still knows the code word |
 | `session_profile_ask` | asked to switch the session's profile, the Manager changes nothing (no `looper_settings` `set`), selects nothing and does not claim a change; it points the user to `/profile` (real mode) |
 
+The explicitly selected fake-only `session_bound_rotate` fixture turns on `manager.turn_budget_usd`, reports
+40001 context tokens against a 40000-token limit, and lets `/compact` return without a boundary. It checks
+that rotation is recorded and that the next reply recovers a seeded ended task's title and summary from the
+actual "Recent task results" resume brief. The fake Manager reads that input rather than returning a fixed
+answer. It is excluded from the default dialog set because its measurements are scripted:
+
+```bash
+uv run --extra test python -m evals.prompt_regression dialogs --mode fake \
+  --dialogs session_bound_rotate --reps 2 --pg-url "$LOOPER_EVAL_DATABASE_URL"
+```
+
 Each (dialog, rep) runs on a database, a `looper serve`, a working directory
 and a project of its own, so nothing one dialog leaves behind (a ready task, a
 changed setting) reaches the next; their spend adds up for
