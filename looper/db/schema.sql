@@ -2352,7 +2352,7 @@ CREATE INDEX IF NOT EXISTS idx_reminders_due ON reminders (due_at) WHERE status 
 -- card actions begin
 CREATE TABLE IF NOT EXISTS card_actions (
     token       TEXT PRIMARY KEY,
-    kind        TEXT NOT NULL CHECK (kind IN ('confirmation', 'gate')),
+    kind        TEXT NOT NULL CHECK (kind IN ('confirmation', 'gate', 'intent', 'ledger')),
     subject     TEXT NOT NULL,
     digest      TEXT NOT NULL,
     payload     JSONB NOT NULL DEFAULT '{}'::jsonb CHECK (jsonb_typeof(payload) = 'object'),

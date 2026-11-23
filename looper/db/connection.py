@@ -172,6 +172,7 @@ _MODEL_NAME_PARAMETERS = "model_name_parameters"
 _LLM_REQUESTS_STORED_BYTES = "llm_requests_stored_bytes"
 _OUTBOUND_REVIEWS = "outbound_reviews"
 _CARD_ACTIONS = "card_actions"
+_CARD_ACTIONS_INTENTS_LEDGER = "card_actions_intents_ledger"
 
 _UNCERTAIN_DELIVERIES = "uncertain_deliveries"
 # The partial indexes of uncertain deliveries, as schema.sql's last lines create them.
@@ -373,6 +374,8 @@ class _OnlineStep:
 
 
 _ONLINE_STEPS = (
+    _OnlineStep(_CARD_ACTIONS_INTENTS_LEDGER, "card_actions_intents_ledger_online",
+                validate=(("card_actions", "card_actions_kind_check"),)),
     _OnlineStep(_RUN_TREE, "run_tree_online",
                 validate=(("llm_records", "llm_records_run_kind_check"),
                           ("llm_records", "llm_records_parent_record_id_fkey")),
@@ -551,6 +554,11 @@ async def _card_actions_pending(conn: asyncpg.Connection) -> bool:
     if await conn.fetchval("SELECT EXISTS (SELECT 1 FROM schema_migrations WHERE name = $1)", _CARD_ACTIONS):
         return False
     return not await conn.fetchval("SELECT to_regclass('card_actions') IS NOT NULL")
+
+
+async def _card_actions_intents_ledger_pending(conn: asyncpg.Connection) -> bool:
+    return not await conn.fetchval("SELECT EXISTS (SELECT 1 FROM schema_migrations WHERE name = $1)",
+                                   _CARD_ACTIONS_INTENTS_LEDGER)
 
 
 def _ledger_ddl() -> str:
@@ -1565,6 +1573,11 @@ async def ensure_schema(pool: asyncpg.Pool | asyncpg.Connection | None = None) -
         if await _card_actions_pending(conn):
             await conn.execute(_card_actions_ddl())
             await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", _CARD_ACTIONS)
+        if await _card_actions_intents_ledger_pending(conn):
+            await conn.execute("ALTER TABLE card_actions DROP CONSTRAINT card_actions_kind_check, "
+                               "ADD CONSTRAINT card_actions_kind_check "
+                               "CHECK (kind IN ('confirmation', 'gate', 'intent', 'ledger')) NOT VALID")
+            await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", _CARD_ACTIONS_INTENTS_LEDGER)
         if await _manager_events_pending(conn):
             await conn.execute(_manager_events_ddl())
             await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", _MANAGER_EVENTS)
@@ -1784,6 +1797,7 @@ async def schema_change_pending(conn: asyncpg.Connection) -> bool:
             or await _subscriptions_pending(conn) or await _message_stream_deletions_pending(conn)
             or await _subscription_rules_pending(conn) or await _subscription_lookback_pending(conn)
             or await _ledger_pending(conn) or await _card_actions_pending(conn)
+            or await _card_actions_intents_ledger_pending(conn)
             or await _manager_events_pending(conn) or await _schedule_notification_events_pending(conn)
             or await _manager_event_reasons_pending(conn) or await _manager_event_delivery_pending(conn)
             or await _message_leads_pending(conn)
