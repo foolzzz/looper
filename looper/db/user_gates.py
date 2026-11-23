@@ -217,6 +217,16 @@ async def pending(task_id: str, *, pool: asyncpg.Pool | asyncpg.Connection | Non
     return [dict(row) for row in rows]
 
 
+async def answers(task_id: str, *, pool: asyncpg.Pool | asyncpg.Connection | None = None) -> list[dict[str, Any]]:
+    """The user's messages in all the task's gates (not the ends of a discussion), oldest first, each with its
+    gate's ``step_key``."""
+    pool = pool or get_pool()
+    rows = await pool.fetch(
+        "SELECT m.*, s.step_key FROM task_user_gate_messages m JOIN task_steps s ON s.id = m.step_id "
+        "WHERE m.task_id = $1 AND m.role = 'user' AND m.kind = 'message' ORDER BY m.id", task_id)
+    return [dict(row) for row in rows]
+
+
 async def thread(step_id: str, *, pool: asyncpg.Pool | asyncpg.Connection | None = None) -> list[dict[str, Any]]:
     """A gate's discussion, oldest first."""
     pool = pool or get_pool()
