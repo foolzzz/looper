@@ -48,7 +48,7 @@ from dataclasses import dataclass, field, replace
 from datetime import datetime
 from enum import Enum
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol
 
 from .. import child_env
 from ..db import projects as db_projects, room as db_room, steps as db_steps, tasks as db_tasks
@@ -151,6 +151,16 @@ class RoomDelivery:
     ids: tuple[int, ...]
     addressed: bool
     more: int
+
+
+class RoomDeliveryState(Protocol):
+    """A run's push cursor, retained by inbox waits even after the run ends."""
+
+    @property
+    def through(self) -> int: ...
+
+    @property
+    def lock(self) -> asyncio.Lock: ...
 
 
 @dataclass(frozen=True)
@@ -946,6 +956,10 @@ class RoomService:
         unless ``peek``. With ``wait_seconds`` and nothing for it yet, waits (up to the project's
         ``room_wait_max_seconds``) for a message addressed to it or an interface post (what a colleague builds
         against); other posts to everyone do not end the wait."""
+        pool = self.worker_pool
+        # Retain this run's cursor before any query can outlast its cleanup.
+        delivery_state = (pool.room_delivery_state(seat.run) if seat.run and pool is not None
+                          and hasattr(pool, "room_delivery_state") else None)
         context = await self._context(task_id, live=False)
         wait = max(0, min(int(wait_seconds or 0), context.limits.wait_max_seconds))
         loop = asyncio.get_running_loop()
@@ -965,7 +979,12 @@ class RoomService:
                 # INSERT is visible before stdin delivery finishes. Join the run's serialized reminder
                 # send before deciding whether these rows still belong in its pull inbox.
                 await self.worker_pool.remind(seat.run)
-            through = self._in_flight(seat)  # A delivery may finish during the query.
+            if wait and delivery_state is not None:
+                # Cleanup can remove the run while its last push is still awaiting acceptance.
+                async with delivery_state.lock:
+                    through = delivery_state.through
+            else:
+                through = self._in_flight(seat)
             delivered = [r["id"] for r in rows if wait and r["id"] <= through
                          and r["sender_seat"] != seat.key and visible(r, seat) and _ends_wait(r, seat)]
             waited = waited or bool(delivered)
