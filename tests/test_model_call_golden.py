@@ -27,6 +27,7 @@ import pytest
 from looper import child_env
 from tests.db_support import DSN, run_db
 from tests.fake_claude import fake_claude
+from tests.model_call_support import frozen_columns
 
 pytestmark = pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
 _BASELINE = "2b77afb1672cda93be6681259623bafa4e290f2d"
@@ -205,6 +206,15 @@ def test_tool_less_call_preserves_launch_prompt_and_rows(
         if os.environ.get("UPDATE_MODEL_CALL_GOLDENS") == "1":
             _FIXTURES.mkdir(parents=True, exist_ok=True)
             fixture.write_text(actual)
-        assert actual == fixture.read_text()
+        expected = fixture.read_text()
+        if caller == "leads_check":
+            # The only intentional record delta: checks now have their own kind. Keep main's golden untouched.
+            baseline = json.loads(expected)
+            check_record, = [row for row in baseline["tables"]["llm_records"]
+                             if row["agent_id"] == "leads_check:golden-check"]
+            assert check_record["run_kind"] is None
+            check_record["run_kind"] = "leads_check"
+            expected = _json(baseline)
+        assert _json(frozen_columns(json.loads(expected), json.loads(actual))) == expected
 
     run_db(test, monkeypatch, setup=seed_role_configs)

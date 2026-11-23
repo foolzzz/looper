@@ -218,11 +218,12 @@ def _add_leads_parser(commands: argparse._SubParsersAction) -> None:
 
 def _add_memory_parser(commands: argparse._SubParsersAction) -> None:
     memory = commands.add_parser(
-        "memory", allow_abbrev=False, help="Read memory candidates and check what a memory write needs.",
+        "memory", allow_abbrev=False, help="Read and manage memory candidates; check what a write needs.",
         description="Read memory candidates (what Looper may write to the knowledge vault once the operator confirms "
                     "it) directly in PostgreSQL, also with the service stopped. Confirming is the dashboard's or the "
                     "operator's direct chat's only. Exit codes: 0 done, 1 nothing found or a check failed, 2 usage, "
-                    "3 not configured, 4 refused (inside an agent run), 5 no such candidate, 6 database unusable.")
+                    "3 not enabled, 4 refused (inside an agent run), 5 no such candidate, 6 database unusable, "
+                    "7 state does not allow the action.")
     sub = memory.add_subparsers(dest="memory_command", required=True)
     listing = sub.add_parser("list", allow_abbrev=False, help="List memory candidates, newest first.")
     listing.add_argument("--state", default="open",
@@ -237,7 +238,16 @@ def _add_memory_parser(commands: argparse._SubParsersAction) -> None:
     check = sub.add_parser("check", allow_abbrev=False,
                            help="Check what a write needs now (setting, git, branch, worktree folder); changes nothing.")
     check.add_argument("--json", action="store_true")
-    for command in (listing, show, check):
+    writes = []
+    for name, help_text in (("reject", "Reject an unwritten memory candidate."),
+                            ("retry", "Retry a blocked write, preserving its confirmed content."),
+                            ("delete", "Delete a candidate, leaving its fingerprint tombstone and vault notes.")):
+        command = sub.add_parser(name, allow_abbrev=False, help=help_text)
+        command.add_argument("candidate", help="M-0042 or M-42.")
+        if name == "reject":
+            command.add_argument("--reason", help="Why this memory is not useful (at most 300 characters).")
+        writes.append(command)
+    for command in (listing, show, check, *writes):
         _add_location_flags(command)
 
 

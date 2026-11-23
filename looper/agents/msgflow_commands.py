@@ -174,7 +174,8 @@ async def _backfill(database_url: str, *, days: int, schedule_id: str | None, ru
     from datetime import datetime, timedelta, timezone
 
     from ..db import connection, subscriptions as db_subs, system_settings
-    from . import extraction, leads_model, processor
+    from . import extraction, leads_model, model_call, processor
+    from .agent_settings import AgentType
     from .source_service import own_bot_app_ids
 
     pool = await connection.init_pool(database_url, min_size=1, max_size=4)
@@ -262,13 +263,14 @@ async def _backfill(database_url: str, *, days: int, schedule_id: str | None, ru
                          "events": len(found.rows), "context": found.context, "known": found.known}
 
             async def ask(reminder: str, budget: float, timeout_s: float) -> processor.ProcessorRun:
-                return await processor.run(
+                return model_call.processor_result(await model_call.call(model_call.ProcessorCall(
                     owner=f"{sid}:backfill",
                     instructions=schedule["requirement"] + (f"\n\n{reminder}" if reminder else ""),
                     input_text=found.text, input_ref=reference, quiet_word=extraction.QUIET_WORD, budget_usd=budget,
                     timeout_s=timeout_s, runtime_root=runtime_root, claude_bin=claude_bin,
                     project_id=schedule["project_id"], schedule_id=sid, contract=extraction.LEADS_CONTRACT,
-                    metadata={"backfill": {**reference, "reminded": bool(reminder)}})
+                    metadata={"backfill": {**reference, "reminded": bool(reminder)}},
+                    role=AgentType.PROCESSOR), parse=str))
 
             asked = await extraction.ask(
                 ask, lambda reply: extraction.parse(

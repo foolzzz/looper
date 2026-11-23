@@ -335,7 +335,7 @@ def test_with_triage_off_a_push_run_keeps_the_parent_stored_outcome_and_readback
         assert await env.pool.fetchval("SELECT count(*) FROM message_leads") == 0
         assert await env.pool.fetchval("SELECT count(*) FROM intents") == 0
         [call] = fake.calls
-        assert call["instructions"] == "Synthetic push criteria" and "contract" not in call
+        assert call["instructions"] == "Synthetic push criteria" and call.get("contract") is None
 
     scenario(check, monkeypatch, tmp_path, reply="Synthetic summary")
 

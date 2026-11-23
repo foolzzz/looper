@@ -108,7 +108,7 @@ def _row_to_dict(row: asyncpg.Record) -> dict[str, Any]:
 # have no run_kind (its migration rewrites no row), and readers take theirs from these too (``RUN_KIND``). An agent
 # id none of them matches has no kind.
 RUN_KINDS = ("manager", "planner", "worker", "reviewer", "processor", "consult", "advisor", "advice_check",
-             "outbound_check", "explorer")
+             "outbound_check", "explorer", "leads_check")
 _RUN_KIND_IDS: tuple[tuple[str, tuple[str, ...], tuple[str, ...]], ...] = (
     # (kind, exact ids, id prefixes)
     ("manager", ("manager",), ("manager-",)),
@@ -116,6 +116,7 @@ _RUN_KIND_IDS: tuple[tuple[str, tuple[str, ...], tuple[str, ...]], ...] = (
     ("worker", (), ("worker-",)),
     ("reviewer", (), ("reviewer-",)),
     ("processor", (), ("processor:",)),
+    ("leads_check", (), ("leads_check:",)),
     ("consult", (), ("consult-",)),
 )
 
