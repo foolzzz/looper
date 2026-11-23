@@ -1012,4 +1012,121 @@ describe("subscription schedules", () => {
     });
     expect(writes[0]).not.toHaveProperty("notify_target");
   });
+
+  it.each([false, "unavailable"])("hides the triage preset when its switch is %s", async (enabled) => {
+    const fetch = vi.fn(async (url: RequestInfo | URL) => {
+      let result: unknown;
+      if (url === "/api/v1/schedule_admin/project_list") result = { schedules: [], limits: {
+        default_timezone: "UTC", name_max_chars: 80, requirement_max_chars: 10000, run_timeout_default_seconds: 60,
+        run_timeout_max_seconds: 2592000, roles: ["planner"], gate_command_max_chars: 2000, gate_timeout_default_seconds: 30,
+        gate_timeout_max_seconds: 300, max_parallel_runs_limit: 10, concurrency_max: 100, notify_targets: [],
+      } };
+      else if (url === "/api/v1/managers/list") result = { managers: [], max_enabled: 8 };
+      else if (url === "/api/v1/registry/view") result = { providers: [], profiles: [] };
+      else if (url === "/api/v1/triage_settings/get") {
+        if (enabled === "unavailable") return Response.json({ status: "error", error: { code: "unavailable", message: "Unavailable" } }, { status: 503 });
+        result = { enabled };
+      } else throw new Error(`Unexpected request: ${url}`);
+      return Response.json({ status: "ok", result });
+    });
+    vi.stubGlobal("fetch", fetch);
+    await act(async () => root.render(<ProjectSchedulesSection project={{ project_id: "project", name: "Example" } as Project} linked="" onLink={() => {}} />));
+    const button = (text: string) => [...container.querySelectorAll("button")].find((item) => item.textContent === text);
+    await act(async () => button("New schedule")!.click());
+    await act(async () => container.querySelector<HTMLInputElement>('input[type="radio"][value="subscription"]')!.click());
+    expect(button("事件分流")).toBeUndefined();
+    expect(button("消息线索")).toBeDefined();
+    expect(button("意图识别")).toBeDefined();
+    expect(fetch.mock.calls.every(([url]) => url !== "/api/v1/schedule_admin/subscription_preset")).toBe(true);
+  });
+
+  it("offers the triage preset and saves it without a delivery target", async () => {
+    const writes: Record<string, unknown>[] = [];
+    const fetch = vi.fn(async (url: RequestInfo | URL, init?: RequestInit) => {
+      let result: unknown;
+      if (url === "/api/v1/schedule_admin/project_list") result = { schedules: [], limits: {
+        default_timezone: "UTC", name_max_chars: 80, requirement_max_chars: 10000, run_timeout_default_seconds: 60,
+        run_timeout_max_seconds: 2592000, roles: ["planner"], gate_command_max_chars: 2000, gate_timeout_default_seconds: 30,
+        gate_timeout_max_seconds: 300, max_parallel_runs_limit: 10, concurrency_max: 100,
+        notify_targets: [{ channel: "lark", chat: "ou_synthetic", label: "Synthetic direct chat", channel_enabled: true }],
+      } };
+      else if (url === "/api/v1/triage_settings/get") result = { enabled: true };
+      else if (url === "/api/v1/managers/list") result = { managers: [{ id: "manager", enabled: true }], max_enabled: 8 };
+      else if (url === "/api/v1/registry/view") result = { providers: [], profiles: [] };
+      else if (url === "/api/v1/schedule_admin/subscription_preset") result = { fields: {
+        kind: "subscription", name: "事件分流", cron: "*/10 * * * *", timezone: "UTC", requirement: "Classify operator events",
+        run_budget_usd: 0.3, daily_budget_usd: 3, notify: "failures", subscription: {
+          source_id: "synthetic-stream", chat_kinds: ["p2p", "group", "topic"], sender_kinds: ["user", "app"],
+          include_history: false, max_age_minutes: 10080, max_events: 500, text_max_chars: 500,
+          quiet_word: "NONE", output_header: "", output_kind: "triage",
+        },
+      } };
+      else if (url === "/api/v1/schedule_admin/create") {
+        writes.push(JSON.parse(String(init?.body)).fields);
+        result = { schedule: { ...subscription(null), ...JSON.parse(String(init?.body)).fields } };
+      } else if (url === "/api/v1/schedule_admin/preview") result = { valid: true, next: [], description: "Every ten minutes" };
+      else if (url === "/api/v1/schedule_admin/runs") result = { runs: [], next_before: null, routine_skips: { skipped_gate: 0, skipped_overlap: 0 } };
+      else throw new Error(`Unexpected request: ${url}`);
+      return Response.json({ status: "ok", result });
+    });
+    vi.stubGlobal("fetch", fetch);
+    await act(async () => root.render(<ProjectSchedulesSection project={{ project_id: "project", name: "Example" } as Project} linked="" onLink={() => {}} />));
+    const button = (text: string) => [...container.querySelectorAll("button")].find((item) => item.textContent === text)!;
+    await act(async () => button("New schedule").click());
+    await act(async () => container.querySelector<HTMLInputElement>('input[type="radio"][value="subscription"]')!.click());
+    const target = container.querySelector<HTMLSelectElement>('[id$="-target"]')!;
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, "value")!.set!.call(target, "lark\nou_synthetic");
+      target.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+    await act(async () => button("事件分流").click());
+    expect(fetch).toHaveBeenCalledWith("/api/v1/schedule_admin/subscription_preset", expect.objectContaining({
+      body: JSON.stringify({ output_kind: "triage" }),
+    }));
+    expect(container.querySelector<HTMLInputElement>('[id$="-name"]')!.value).toBe("事件分流");
+    expect(container.textContent).toContain("结果仅存储，暂不发送");
+    expect(container.textContent).toContain("固定范围：私聊、@你的消息、你自己发的消息和已登记的告警机器人");
+    expect(container.textContent).toContain("按最旧消息优先读取，读不完的下一次继续");
+    expect(container.querySelectorAll('input[type="checkbox"]')).toHaveLength(0);
+    expect(container.querySelector('[id$="-quiet"]')).toBeNull();
+    expect(container.querySelector('[id$="-header"]')).toBeNull();
+    expect(container.querySelector('[id$="-target"]')).toBeNull();
+    await act(async () => button("Create").click());
+    expect(writes).toHaveLength(1);
+    expect(writes[0]).toMatchObject({ name: "事件分流", subscription: {
+      source_id: "synthetic-stream", output_kind: "triage", chat_kinds: ["p2p", "group", "topic"],
+      sender_kinds: ["user", "app"], include_history: false, quiet_word: "NONE", output_header: "",
+    } });
+    expect(writes[0]).not.toHaveProperty("notify_target");
+    expect((writes[0] as { subscription: object }).subscription).not.toHaveProperty("include_chats");
+  });
+
+  it("confirms a triage run without a push target and shows the server's scope, estimated cost and storage notice", async () => {
+    const triage = { ...subscription(null), notify_target: null,
+      subscription: { ...subscription(null).subscription!, output_kind: "triage" as const,
+        confirmation: "范围：私聊、@你、自己发的消息、告警机器人\n每次运行估算 $0.008\n结果仅存储，暂不发送；重要事件等待管家交接，摘要等待晨报接入。" } };
+    const fetch = vi.fn(async (url: RequestInfo | URL) => {
+      if (url === "/api/v1/schedule_admin/get") return Response.json({ status: "ok", result: { schedule: triage } });
+      if (url === "/api/v1/schedule_admin/confirm_target") return Response.json({ status: "ok", result: { schedule: {
+        ...triage, subscription: { ...triage.subscription, target_confirmed_at: "2026-11-22T10:00:00Z" },
+      } } });
+      throw new Error(`Unexpected request: ${url}`);
+    });
+    vi.stubGlobal("fetch", fetch);
+    const onChange = vi.fn();
+    await act(async () => root.render(<SubscriptionStatus schedule={triage} onChange={onChange} />));
+    expect(container.textContent).toContain("确认后才读取消息");
+    const button = (text: string) => [...container.querySelectorAll("button")].find((item) => item.textContent === text)!;
+    await act(async () => button("确认事件分流…").click());
+    expect(container.querySelector("pre")?.textContent).toBe(triage.subscription.confirmation);
+    expect(container.textContent).toContain("估算 $0.008");
+    await act(async () => button("Confirm").click());
+    expect(fetch).toHaveBeenLastCalledWith("/api/v1/schedule_admin/confirm_target", expect.objectContaining({
+      body: JSON.stringify({ schedule_id: "sched/a", config_version: "v-shown" }),
+    }));
+    expect(onChange).toHaveBeenCalledTimes(1);
+    await act(async () => root.render(<SubscriptionStatus schedule={onChange.mock.calls[0][0]} onChange={onChange} />));
+    expect(container.textContent).toContain("事件分流已确认：结果仅存储，暂不发送");
+    expect(container.textContent).not.toContain("确认事件分流…");
+  });
 });
