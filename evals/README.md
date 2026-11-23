@@ -57,6 +57,13 @@ directories), one at a time over the HTTP API:
 | `reviewer_unrelated_note` | the same, the other way: the retry note is about the file's separator, and the work it leads to still lacks a region, so the Reviewer must not pass it; the next attempt has it and passes (exactly two reviews and two retries) |
 | `reviewer_elsewhere` | only the Reviewer is Claude Code: the correct summary lives only in another worktree and branch; its reported location lets the Reviewer inspect it and pass in one review, with no retry |
 | `reviewer_elsewhere_wrong` | the same location, but the first summary lacks a region; the Reviewer must fail it, then pass the corrected summary (exactly two reviews and one retry) |
+| `hidden_precondition` | add `greet(name)` and make `make test` pass. The test requires `APP_MODE=demo`, which the requirement does not mention; the Makefile comment does, and the recipe does not set it. The check rejects a changed test and a recipe that still omits the variable |
+| `rethink_bug` | `item_total` adds its arguments, so `test_cart.py` fails, but `legacy_sum` depends on that addition. Multiplying in `cart.py` alone breaks `test_receipt.py`. Both tests must pass and must stay as they were |
+| `misleading_error` | `test_app.py` fails saying `app.py` expected `ready`. The value comes from `config.py`. The check rejects an `app.py` that contains that literal |
+
+`hidden_precondition`, `rethink_bug` and `misleading_error` are the hard set
+(`--tasks hard`): synthetic trees, no network. A fake run's default script
+passes each one. A variant of that script, not another task id, fails it.
 
 For each task it reads back from the API: success (the task completed, its
 files are right and the flow happened, such as the review or the retry), step
@@ -90,9 +97,17 @@ and escalations apart; of them `room_questions`, `room_unanswered` and `room_int
 `room_consults_answered`). No count of answers the asker used is reported: consult records have no reliable
 usage signal), retries, reviews, cost (the task cost API), tokens (the runs' records: prompt, uncached
 and cached, and output; what a runtime without prices still reports), contract violations
-(replies the Planner's reply parser or the Worker/Reviewer report check
-rejected; the JSON keeps why the parser rejected each Planner reply,
-`planner_violation_reasons`), whether the Planner modified files itself (its file-editing tool
+(`contract_violations`; from result schema `looper-prompt-eval/v3` the Planner's
+`metadata.contract_rejections` plus attempts whose `run_outcome` is `contract`,
+read once from `metrics.step_attempts`, not from activity text. The comparison
+column stays `violations` and still reads `contract_violations.total`, so a v2
+file's log-counted total still fills it. The JSON keeps why the parser rejected
+each Planner reply, `planner_violation_reasons`), and, on a v3 row, `attempts`,
+`first_pass_steps`, `accepted_steps`, `failure_kinds` and `cost_split` (first
+and retry; planning, execution, review and advisor; `unattributed`; both billing
+bases as `metrics.step_attempts` returned them, with a Worker group named
+`execution`). A failed read of that operation, or a read whose `missing_attempts`
+is not zero, leaves the three counts off the row. Whether the Planner modified files itself (its file-editing tool
 calls, and files changed while only a Planner turn ran), the tool calls its runtime refused the read-only Planner
 (`planner_denials`, from its runs' `permission_denials`), the task's vault commits (`vault_writes`, identified by
 the exact `looper: <task_id> ` subject prefix), their unique committed paths outside `codex-mem/`
@@ -103,9 +118,15 @@ in an error (`run_errors`, by their records' status) and the models each role's 
 Each run writes a JSON file and the server log to `evals/runs/` (ignored by
 git) and prints a Markdown table comparing it with a base: by default the
 committed baseline of the same mode and model in
-`evals/prompt_regression/baselines/` (`real-<model>.json`; there is none for
-fake mode); with `--baseline previous`, the newest earlier run of the same mode
-and model in `--out-dir`; or the run file `--baseline` names. It prints which
+`evals/prompt_regression/baselines/` (`<suite>-real-<model>.json`;
+`real-<model>.json` is the `tasks` suite, and dialogs use
+`dialogs-real-<model>.json`; there is none for fake mode). A baseline records
+the commit, the date (`started_at`), the repetitions, the runtime version
+(`runtime_version`, the first line of `claude --version` on a real run; a fake
+run stores null; an older file may omit it) and every row. Refresh a whole tier
+before a release. A new case adds one row. A changed check voids that case's
+row. With `--baseline previous`, the newest earlier run of the same mode
+and model in `--out-dir` is the base; or the run file `--baseline` names. It prints which
 base it used, with its commit and its reps. The default used to be the newest
 earlier run in `evals/runs/`, which differs from one checkout to the next: use
 `--baseline previous` for that.
@@ -175,8 +196,11 @@ API call, the server, a check that raised; the task is cancelled and the run
 goes on with the next), and `error` gives the message. `success` stays, true
 only for a pass. The JSON is written however the run ends; a run that stopped
 midway (an interrupt, a setup that failed) has `aborted` with the reason. A
-comparison accepts only `looper-prompt-eval/v2` for tasks and
-`looper-manager-dialogs/v2` for dialogs. The dialog table shows a row that
+comparison accepts `looper-prompt-eval/v2` and `looper-prompt-eval/v3` for tasks
+(a new run writes v3) and `looper-manager-dialogs/v2` for dialogs. A v2 task row
+has no attempt fields. The three columns added in v3 show an en dash (`–`) for
+a missing value, never 0, including a task whose attempt read failed or whose
+`missing_attempts` is not zero. The dialog table shows a row that
 omits `rep` as rep 1. A row cancelled at its timeout or at the cap is an error.
 
 In the table, success is `k/n`, the passes over the scored reps, with ` · e
@@ -187,9 +211,20 @@ rows with their Wilson 95% interval, such as `41/48 (85%, 73–93%)`, the errors
 by class, and the tasks' means added up (one pass through the set). Against a
 base, the total row covers only the tasks both runs have (`total (7 shared
 tasks)` when the sets differ), and a second row gives the new run's own total
-when it has tasks the base lacks. Below it: the tasks whose pass rate changed,
-a note for a side that ran each task once, the tasks with no baseline, and the
-tasks of the base the new run lacks. Read the errors as well as `k/n`: a task
+when it has tasks the base lacks. Three task-suite columns are pooled over the
+rows that carry the attempt fields, not summed like the other means: first-pass
+rate (first-pass steps divided by accepted steps, with a Wilson interval), mean
+attempts per passing case, and mean cost per passing case. When either side
+lacks those fields the cells are an en dash and a higher cost is not marked.
+Below the table: the tasks whose pass rate changed, a note for a side that ran
+each task once, the tasks with no baseline, and the tasks of the base the new
+run lacks. A task suite can also carry markers a person judges. They do not
+change the exit code. 「回退」 when the suite pass-rate Wilson intervals do not
+overlap (touching at a point is overlap). 「用例回退」 when a case with at least
+two non-skipped reps on both sides went from all passes to any failure.
+「代价回退」 when mean cost per passing case rose by 25% or more (a base of 0
+and a new cost above 0 counts; 24% does not) or mean attempts rose by 0.5 or
+more. Dialogs do not get these columns or markers. Read the errors as well as `k/n`: a task
 that never finishes is a `timeout` error, not a fail, so a change that makes
 the Planner loop shows up as more timeouts. The exit code is 0 only
 when every row ran and passed, 1 when a row failed, is an error or was
@@ -381,7 +416,8 @@ Unknown prices retain tokens with unknown cost; they cannot prove a spend cap.
 Registration success alone is not a real-model evaluation.
 
 Other options: `--tasks
-single_step,chat_correction` (task ids, or a named set: `planner`, the tasks
+single_step,chat_correction` (task ids, or a named set: `hard`
+(`hidden_precondition`, `rethink_bug`, `misleading_error`) or `planner`, the tasks
 whose pass or fail turns on the Planner's judgment, `dependent_steps`,
 `parallel_parts`, `interface_first`, `supplement_replan`,
 `supplement_no_change`, `requirement_edit`, `roles_tester_docs`,
@@ -578,7 +614,7 @@ Do not rerun after a change the model cannot see.
 
 Once before a release, on the release candidate (`main` after every merge):
 
-- haiku on all 39 tasks: `run --mode real --reps 3 --jobs 4
+- haiku on every task: `run --mode real --reps 3 --jobs 4
   --max-budget-usd 1.0 --case-budget-usd 2.0 --total-cap-usd 20`
   (the earlier baseline cost about $12.32);
 - sonnet on all tasks: `run --mode real --model sonnet --reps 3 --jobs 4

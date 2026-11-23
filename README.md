@@ -341,8 +341,8 @@ disposable v2.13.165 installation can do the import. v2.13.165 may export v3;
 exporting again there does not produce v4. This release rejects any other
 format, and it rejects a retired layer `model` or `effort` and a retired
 provider `protocols`, `base_url` or `models`, before it writes. A task
-comparison accepts only `looper-prompt-eval/v2`; a dialog comparison accepts
-only `looper-manager-dialogs/v2`.
+comparison accepts `looper-prompt-eval/v2` and `looper-prompt-eval/v3` (a new
+run writes v3); a dialog comparison accepts only `looper-manager-dialogs/v2`.
 
 An empty database runs the current schema once and records
 `post_bridge_baseline`. A current database does not replay that DDL.
