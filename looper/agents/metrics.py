@@ -362,6 +362,28 @@ def step_cost_per_accepted(d: Data) -> dict[str, Any]:
     return result
 
 
+def alert_step_cost(d: Data) -> dict[str, Any]:
+    """Median accepted-step cost, counting only known steps with runs of that billing basis.
+
+    Unlike the public average, an absent basis is no observation for this rule. An unknown run excludes that
+    step from that basis; it is never silently turned into a free step. Failed attempts and attributed child
+    runs still belong to the accepted step's total (D8).
+    """
+    tree = attribute(d.part("records"))
+    costs = [_sum(cost for attempt in step.attempts for cost in tree.attempts.get(attempt["id"], {}).values())
+             for step in d.accepted_steps()]
+    result = {}
+    for basis in ("provider_priced", "equivalent"):
+        values = [cost.usd[basis] for cost in costs if cost.runs[basis] and not cost.unknown[basis]]
+        result[basis] = {"n": len(values), "median": percentile(values, 0.5)}
+    return result
+
+
+def alert_review_misses(d: Data) -> dict[str, Any]:
+    """The count's sample is the decided attempts in the window, including reopen decisions."""
+    return {"n": len(d.decided), **review_misses(d)}
+
+
 def review_block_rate(d: Data) -> dict[str, Any]:
     reviewed = [a for a in d.decided if a["review_outcome"] in ("passed", "not_passed", "passed_by_adjudication")]
     return _share(reviewed, lambda a: a["review_outcome"] == "not_passed")
@@ -476,7 +498,8 @@ async def load(lo: datetime, hi: datetime, filters: Filters, floor: datetime | N
     return data
 
 
-async def compute(days: int, filters: Filters, *, now: datetime | None = None, pool=None) -> dict[str, Any]:
+async def compute(days: int, filters: Filters, *, now: datetime | None = None, pool=None,
+                  alerts: bool = False) -> dict[str, Any]:
     """Every figure of the window (the last ``days`` days) and the same figure of the comparison window (the
     ``COMPARISON_FACTOR * days`` days before it). ``coverage_since`` says from when the records exist (D18);
     ``missing_attempts`` counts Worker runs since then that have no attempt (a failed write, section 11)."""
@@ -500,6 +523,14 @@ async def compute(days: int, filters: Filters, *, now: datetime | None = None, p
             if "error" not in item:
                 item["previous"] = _evaluate(figure, loaded["previous"])
             result[group][name] = item
+    if alerts:
+        # Internal rule inputs reuse the same read. Public metrics keep their exact response schema.
+        result["alert_figures"] = {}
+        for name, figure in (("cost", alert_step_cost), ("misses", alert_review_misses)):
+            item = _evaluate(figure, loaded["current"])
+            if "error" not in item:
+                item["previous"] = _evaluate(figure, loaded["previous"])
+            result["alert_figures"][name] = item
     return result
 
 

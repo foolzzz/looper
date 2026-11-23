@@ -142,3 +142,20 @@ async def task_missing_attempts(task_id: str, floor: datetime | None, *, pool: D
     return await (pool or get_pool()).fetchval(
         f"""SELECT count(*) FROM llm_records WHERE task_id = $1 AND {TASK_RUN} AND {RUN_KIND} = 'worker'
             AND attempt_id IS NULL AND created_at >= $2""", task_id, floor)
+
+
+async def missing_attempts(*, pool: Database | None = None) -> int:
+    """Worker runs without an attempt since coverage began, including tasks that have not ended.
+
+    The hourly check reads each task's runs through its task-id index. It must not depend on a terminal
+    outcome: a failed attempt write needs to alert while that task is still running.
+    """
+    pool = pool or get_pool()
+    floor = await coverage_since(pool=pool)
+    if floor is None:
+        return 0
+    return await pool.fetchval(
+        f"""SELECT COALESCE(sum(m.n), 0)::bigint FROM tasks t CROSS JOIN LATERAL (
+                SELECT count(*) AS n FROM llm_records r
+                WHERE r.task_id = t.id AND {TASK_RUN} AND {RUN_KIND} = 'worker'
+                  AND r.attempt_id IS NULL AND r.created_at >= $1) m""", floor)
