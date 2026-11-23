@@ -81,7 +81,7 @@ def test_typed_fields_keep_provenance_and_document_order(tmp_path: Path) -> None
         "- 第一条",
         "- 回复先给结论",
     ))
-    assert compiled.fields["name"] == {"value": "Ada", "path": "关于我.md", "heading": "名字"}
+    assert compiled.fields["name"] == {"value": "Ada", "path": "关于我.md", "heading": "名字", "line": 3}
     assert compiled.fields["address"]["heading"] == "称呼"
     assert compiled.fields["reply_language"]["value"] == "中文"
     assert compiled.fields["time_zone"]["heading"] == "时区"
@@ -90,7 +90,7 @@ def test_typed_fields_keep_provenance_and_document_order(tmp_path: Path) -> None
     assert [item["value"] for item in compiled.fields["standing_rules"]] == [
         "一条一段", "先标题", "第二条", "第一条", "回复先给结论"]
     assert compiled.fields["standing_rules"][4] == {
-        "value": "回复先给结论", "path": "偏好/reply.md", "heading": "回复"}
+        "value": "回复先给结论", "path": "偏好/reply.md", "heading": "回复", "line": 5}
     assert compiled.fields["standing_rules"][2]["path"] == "偏好/nested/tone.md"
     assert "不要这条" not in compiled.text and "下棋" not in compiled.text and "正文不进规则" not in compiled.text
     assert compiled.omitted == () and compiled.skipped == ()
@@ -114,7 +114,7 @@ teacher
 """)
     compiled = compile_profile(root)
     assert compiled.fields["name"] == {
-        "value": "Ada ### aka Lovelace", "path": "记忆/关于我.md", "heading": "Name"}
+        "value": "Ada ### aka Lovelace", "path": "记忆/关于我.md", "heading": "Name", "line": 3}
     assert compiled.fields["address"]["heading"] == "Address"
     assert compiled.text.startswith("Name: Ada ### aka Lovelace\nAddress: teacher")
 
@@ -136,7 +136,7 @@ Ada   Lovelace
     compiled = compile_profile(root)
     assert compiled.fields["name"]["value"] == "Ada Lovelace"
     assert compiled.fields["communication_preferences"] == [{
-        "value": "- 先给结论 补充一句", "path": "关于我.md", "heading": "沟通偏好"}]
+        "value": "- 先给结论 补充一句", "path": "关于我.md", "heading": "沟通偏好", "line": 6}]
     assert compiled.fields["working_hours"] is None
     assert "Working hours" not in compiled.text and compiled.text.count("Communication:") == 1
 
@@ -173,7 +173,8 @@ def test_over_the_cap_drops_the_lowest_priority_and_keeps_its_source(tmp_path: P
     assert compiled.text == name and len(compiled.text) <= len(name)
     assert compiled.fields["name"]["value"] == "Ada"
     assert compiled.fields["standing_rules"] == []
-    assert compiled.omitted == ({"field": "standing_rules", "path": "偏好/rule.md", "heading": "规则"},)
+    assert compiled.omitted == (
+        {"field": "standing_rules", "path": "偏好/rule.md", "heading": "规则", "line": 4},)
     assert compiled.sources == ("偏好/rule.md", "关于我.md")
 
 
@@ -309,3 +310,104 @@ def test_directory_accepts_only_an_absolute_directory(tmp_path: Path) -> None:
     with pytest.raises(ProfileError, match="absolute directory"):
         directory("/" + ("a" * 1100))
     assert CAP == 1500
+
+
+_ENTRY = "- 回复用中文 [kind:: preference] [source:: 对话 2026-11-20] [confidence:: high]"
+
+
+def test_inline_entries_are_classified_by_kind_and_cite_the_line(tmp_path: Path) -> None:
+    root = tmp_path / "vault"
+    _note(root, "关于我.md", f"""# 关于我
+
+{_ENTRY}
+- 工作日下午开会 [kind:: habit] [source:: 对话 2026-11-20] [confidence:: high]
+- 在上海 [kind:: fact] [source:: 对话 2026-11-20] [confidence:: high]
+- 旧称呼 [kind:: preference] [source:: 对话 2026-11-20] [confidence:: high] [status:: superseded]
+- 神秘 [kind:: mystery] [source:: 对话 2026-11-20] [confidence:: high]
+""")
+    _note(root, "偏好/nested/reply.md", _ENTRY + "\n")
+    compiled = compile_profile(root)
+
+    assert compiled.fields["communication_preferences"][0] == {
+        "value": "回复用中文", "path": "关于我.md", "heading": "关于我", "line": 3, "kind": "preference"}
+    assert compiled.fields["communication_preferences"][1]["kind"] == "habit"
+    assert compiled.fields["communication_preferences"][1]["line"] == 4
+    assert compiled.fields["standing_rules"] == [{
+        "value": "在上海", "path": "关于我.md", "heading": "关于我", "line": 5, "kind": "fact"}]
+    assert compiled.fields["communication_preferences"][-1] == {
+        "value": "回复用中文", "path": "偏好/nested/reply.md", "heading": "preference", "line": 1,
+        "kind": "preference"}
+    assert compiled.skipped == ({"path": "关于我.md", "reason": "unknown kind"},)
+    assert compiled.sources == ("偏好/nested/reply.md", "关于我.md")
+    blob = compiled.text + repr(compiled.payload())
+    for hidden in ("旧称呼", "神秘", "[kind::", "[source::", "对话 2026-11-20", "`"):
+        assert hidden not in blob
+
+
+def test_a_preference_note_does_not_need_a_summary_when_it_has_entries(tmp_path: Path) -> None:
+    root = tmp_path / "vault"
+    _note(root, "偏好/reply.md", """---
+summary: 不要把摘要再算一条
+---
+
+# 回复
+
+""" + _ENTRY + "\n")
+    compiled = compile_profile(root)
+    assert compiled.fields["name"] is None
+    assert compiled.skipped == ()
+    assert compiled.fields["communication_preferences"] == [{
+        "value": "回复用中文", "path": "偏好/reply.md", "heading": "回复", "line": 7, "kind": "preference"}]
+    assert compiled.text == "Communication:\n- 回复用中文"
+    assert "不要把摘要再算一条" not in compiled.text
+
+
+def test_code_fences_are_not_fields_and_backticks_are_normalized(tmp_path: Path) -> None:
+    root = tmp_path / "vault"
+    _note(root, "关于我.md", """## 名字
+Ada
+
+```markdown
+## 名字
+NotAda
+""" + _ENTRY + """
+```
+
+~~~
+## 称呼
+Fenced
+~~~
+
+## 称呼
+call me `Ada` ~~~ now
+""")
+    _note(root, "偏好/sample.md", """---
+summary: 真实规则
+---
+
+# 规则
+
+```
+""" + _ENTRY + """
+```
+""")
+    compiled = compile_profile(root)
+    assert compiled.fields["name"]["value"] == "Ada"
+    assert compiled.fields["address"]["value"] == "call me 'Ada' --- now"
+    assert compiled.fields["communication_preferences"] == []
+    blob = compiled.text + repr(compiled.payload())
+    for hidden in ("NotAda", "Fenced", "回复用中文", "`"):
+        assert hidden not in blob
+    assert "真实规则" in compiled.text
+
+
+def test_a_single_value_field_rejects_a_second_bullet(tmp_path: Path) -> None:
+    root = tmp_path / "vault"
+    _note(root, "关于我.md", """## 名字
+- Ada
+- Bee
+""")
+    with pytest.raises(ProfileError, match="name has more than one value") as raised:
+        compile_profile(root)
+    assert raised.value.reason == "multiple_values"
+    assert str(root) not in str(raised.value)

@@ -11,6 +11,13 @@ from looper.db import connection
 from tests.db_support import run_db
 
 
+async def _arm(pool: Any, root: Path) -> None:
+    await pool.execute(
+        "INSERT INTO system_settings (key, value) VALUES ($1, $2)",
+        "knowledge_vault",
+        json.dumps({"path": str(root.resolve()), "writable": [], "rules_file": None}))
+
+
 def _vault(root: Path, name: str = "Ada") -> None:
     root.mkdir(parents=True, exist_ok=True)
     (root / "关于我.md").write_text(f"## 名字\n{name}\n\n## 爱好\n下棋\n", encoding="utf-8")
@@ -29,6 +36,7 @@ def test_a_read_keeps_the_version_until_the_compiled_body_changes(monkeypatch, t
 
     async def test(pool: Any) -> None:
         assert await pool.fetchval("SELECT to_regclass('profile_blocks') IS NOT NULL")
+        await _arm(pool, root)
         assert await profile_view() == {
             "configured": False, "version": None, "cap": 1500, "text": "",
             "fields": {"name": None, "address": None, "working_hours": None, "time_zone": None,
@@ -69,6 +77,7 @@ def test_clearing_the_folder_deletes_the_block(monkeypatch, tmp_path: Path) -> N
     _vault(root)
 
     async def test(pool: Any) -> None:
+        await _arm(pool, root)
         await update_source(str(root))
         await profile_view()
         assert await update_source(None) == {"source": None}
@@ -86,6 +95,7 @@ def test_a_bad_stored_folder_fails_and_leaves_the_block(monkeypatch, tmp_path: P
     _vault(root)
 
     async def test(pool: Any) -> None:
+        await _arm(pool, root)
         await update_source(str(root))
         await profile_view()
         await pool.execute("UPDATE system_settings SET value = 'notes' WHERE key = $1", SOURCE_KEY)
@@ -108,6 +118,7 @@ def test_changing_the_folder_keeps_the_block_until_the_next_different_profile(mo
     _vault(second, "Bee")
 
     async def test(pool: Any) -> None:
+        await _arm(pool, tmp_path)
         await update_source(str(first))
         await update_source(str(first.resolve()))
         assert await pool.fetchval("SELECT count(*) FROM profile_blocks") == 0

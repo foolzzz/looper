@@ -10,7 +10,7 @@ from unittest.mock import AsyncMock
 import pytest
 
 from looper import loopercli
-from looper.agents import api_v1, chat_settings, operator_profile
+from looper.agents import api_v1, chat_settings, operator_profile, vault
 from looper.agents.action_levels import ActionLevel
 from looper.agents.ops import OpError
 from looper.agents.ops.clients import ClientOps
@@ -60,6 +60,11 @@ def _vault(tmp_path: Path) -> Path:
     root.mkdir()
     (root / "关于我.md").write_text("## 名字\nAda\n", encoding="utf-8")
     return root
+
+
+def _arm(saved: dict, folder: Path) -> None:
+    saved[vault.SETTING_KEY] = json.dumps(
+        {"path": str(folder.resolve()), "writable": [], "rules_file": None})
 
 
 def test_descriptions_levels_and_cli_commands_are_operator_only_and_inside() -> None:
@@ -115,6 +120,7 @@ def test_an_unset_read_compiles_nothing(store) -> None:
 def test_null_clears_and_a_relative_path_is_not_stored(store, tmp_path: Path) -> None:
     saved, block, writes = store
     folder = _vault(tmp_path)
+    _arm(saved, folder)
 
     async def check():
         stored = await operator_profile.update_source(str(folder))
@@ -125,10 +131,10 @@ def test_null_clears_and_a_relative_path_is_not_stored(store, tmp_path: Path) ->
         assert [item[0] for item in writes] == ["put", "put"]
         assert block["version"] == 3
         cleared = await operator_profile.update_source(None)
-        assert cleared == {"source": None} and saved == {} and block == {}
+        assert cleared == {"source": None} and set(saved) == {vault.SETTING_KEY} and block == {}
         with pytest.raises(operator_profile.ProfileError, match="absolute directory"):
             await operator_profile.update_source("vault")
-        assert saved == {} and writes[-1][0] == "clear"
+        assert set(saved) == {vault.SETTING_KEY} and writes[-1][0] == "clear"
 
     asyncio.run(check())
 
@@ -137,6 +143,7 @@ def test_update_impact_names_the_folder_and_stores_nothing(store, tmp_path: Path
     operation = api_v1.find("POST", "/api/v1/profile_source/update")
     folder = _vault(tmp_path)
     shown = str(folder.resolve())
+    _arm(store[0], folder)
 
     async def check():
         domain = api_v1.domain_for(operation)
@@ -150,7 +157,7 @@ def test_update_impact_names_the_folder_and_stores_nothing(store, tmp_path: Path
             "Nothing is injected into the Manager.")
         with pytest.raises(OpError, match="absolute directory"):
             await domain.impact(None, operation, {"source": "vault"}, api_v1.OPERATOR, {})
-        assert store[0] == {} and store[2] == []
+        assert operator_profile.SOURCE_KEY not in store[0] and store[2] == []
 
     asyncio.run(check())
 
@@ -182,6 +189,7 @@ def test_the_operator_reads_and_clears_the_profile_through_v1(tmp_path, monkeypa
     monkeypatch.setattr(manager_actions, "record", AsyncMock(return_value=1))
     folder = _vault(tmp_path)
     shown = str(folder.resolve())
+    _arm(store[0], folder)
 
     async def check():
         async with _serving(tmp_path) as server:
@@ -199,7 +207,8 @@ def test_the_operator_reads_and_clears_the_profile_through_v1(tmp_path, monkeypa
             assert await post("/api/v1/profile_source/update", {"source": str(folder)}) == {"source": shown}
             compiled = await post("/api/v1/profile/get", {})
             assert compiled["configured"] is True and compiled["version"] == 1
-            assert compiled["fields"]["name"] == {"value": "Ada", "path": "关于我.md", "heading": "名字"}
+            assert compiled["fields"]["name"] == {
+                "value": "Ada", "path": "关于我.md", "heading": "名字", "line": 1}
             assert compiled["text"] == "Name: Ada"
             again = await post("/api/v1/profile/get", {})
             assert again["version"] == 1
@@ -209,6 +218,49 @@ def test_the_operator_reads_and_clears_the_profile_through_v1(tmp_path, monkeypa
             status, _, answer = await _send(server, "POST /api/v1/profile_source/update", _bearer(TOKEN),
                                             json.dumps({"source": "vault"}))
             assert status == 400 and answer["error"]["code"] == "invalid"
-            assert store[0] == {}
+            assert set(store[0]) == {vault.SETTING_KEY}
+
+    asyncio.run(check())
+
+
+def test_the_source_must_resolve_inside_the_knowledge_vault(store, tmp_path: Path) -> None:
+    saved, _block, writes = store
+    vault_root = tmp_path / "vault"
+    vault_root.mkdir()
+    notes = vault_root / "notes"
+    notes.mkdir()
+    (notes / "关于我.md").write_text("## 名字\nAda\n", encoding="utf-8")
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "关于我.md").write_text("## 名字\nLeak\n", encoding="utf-8")
+
+    async def check():
+        with pytest.raises(operator_profile.ProfileError, match="knowledge vault is not configured") as missing:
+            await operator_profile.update_source(str(notes))
+        assert missing.value.reason == "vault_unconfigured"
+        assert [item[0] for item in writes] == []
+        _arm(saved, vault_root)
+
+        stored = await operator_profile.update_source(str(notes))
+        assert stored == {"source": str(notes.resolve())}
+        link = vault_root / "alias"
+        link.symlink_to(outside, target_is_directory=True)
+        with pytest.raises(operator_profile.ProfileError, match="resolves outside") as escaped:
+            await operator_profile.update_source(str(link))
+        assert escaped.value.reason == "outside_vault"
+        assert "Leak" not in str(escaped.value)
+        assert all(item[0] != "retain" for item in writes)
+
+        jump = tmp_path / "jump"
+        jump.symlink_to(notes, target_is_directory=True)
+        assert await operator_profile.update_source(str(jump)) == {"source": str(notes.resolve())}
+
+        kept = vault_root / "kept"
+        notes.rename(kept)
+        notes.symlink_to(outside, target_is_directory=True)
+        with pytest.raises(operator_profile.ProfileError, match="resolves outside") as reread:
+            await operator_profile.profile_view()
+        assert reread.value.reason == "outside_vault"
+        assert "Leak" not in repr(writes)
 
     asyncio.run(check())

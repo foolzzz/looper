@@ -10,14 +10,15 @@ from ..action_levels import ActionLevel
 from ..api_v1 import Operation, _BOOL, _INT, _NULL_STR, _STR, _array, _object
 from ..ops import ErrorCode, OpError
 
-_ITEM = {"type": "object", "properties": {"value": _STR, "path": _STR, "heading": _STR, "truncated": _BOOL},
-         "required": ["value", "path", "heading"], "additionalProperties": False}
+_ITEM = {"type": "object", "properties": {
+    "value": _STR, "path": _STR, "heading": _STR, "line": _INT, "kind": _STR, "truncated": _BOOL},
+         "required": ["value", "path", "heading", "line"], "additionalProperties": False}
 _FIELD = {**_ITEM, "type": ["object", "null"]}
 _FIELDS = _object({
     "name": _FIELD, "address": _FIELD, "working_hours": _FIELD, "time_zone": _FIELD, "reply_language": _FIELD,
     "communication_preferences": _array(_ITEM), "standing_rules": _array(_ITEM),
 }, closed=True)
-_CITE = _object({"field": _STR, "path": _STR, "heading": _STR}, closed=True)
+_CITE = _object({"field": _STR, "path": _STR, "heading": _STR, "line": _INT}, closed=True)
 _SKIP = _object({"path": _STR, "reason": _STR}, closed=True)
 PROFILE = _object({
     "configured": _BOOL, "version": {"type": ["integer", "null"]}, "cap": _INT, "text": _STR,
@@ -37,8 +38,9 @@ OPERATIONS = (
               _object({}, closed=True), SOURCE, risk="read", operator_only=True, level=ActionLevel.INSIDE),
     Operation("profile_source.update", "POST", "/api/v1/profile_source/update",
               "Set the operator profile source folder.",
-              "Set the operator profile source folder. An absolute directory is compiled on the next read; null "
-              "clears it and nothing is compiled. Nothing is injected into the Manager.",
+              "Set the operator profile source folder. An absolute directory inside the configured knowledge "
+              "vault is compiled on the next read; a symlink is followed and must still resolve inside that "
+              "vault. Null clears the folder and nothing is compiled. Nothing is injected into the Manager.",
               _object({"source": _NULL_STR}, closed=True), SOURCE,
               risk="high", confirms=True, operator_only=True, level=ActionLevel.INSIDE),
 )
@@ -53,7 +55,7 @@ async def impact(server, operation, arguments, principal, headers):
         return None
     try:
         value = operator_profile.checked_update(arguments)
-        shown = "unset (nothing compiled)" if value is None else operator_profile.directory(value)
+        shown = "unset (nothing compiled)" if value is None else await operator_profile.bound_directory(value)
     except operator_profile.ProfileError as exc:
         raise _invalid(exc) from None
     return (f"Set {operator_profile.SOURCE_KEY} to {shown}? This stores the folder. "

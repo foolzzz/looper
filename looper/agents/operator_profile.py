@@ -1,9 +1,10 @@
 """Compile a typed operator profile from vault notes. No model call, no Manager injection.
 
 The source folder is the operator-only setting ``manager.profile.source``. Unset, nothing is compiled.
-Notes come only from ``关于我.md`` (or ``记忆/关于我.md``) and ``偏好/**/*.md``. Each field cites the note
-path and the heading it came from. The rendered text stays within ``CAP`` characters; lower-priority
-fields are dropped first.
+The folder must resolve inside the configured knowledge vault. Notes come only from ``关于我.md`` (or
+``记忆/关于我.md``) and ``偏好/**/*.md``. Heading fields cite the note path, heading and line. Inline
+entries (one bullet per line, with ``[kind:: …]``) are classified by kind and cite the note path and
+that line. The rendered text stays within ``CAP`` characters; lower-priority fields are dropped first.
 """
 
 from __future__ import annotations
@@ -33,6 +34,14 @@ _FIELDS = {
     "工作时间": "working_hours", "Working hours": "working_hours",
     "沟通偏好": "communication_preferences", "Communication": "communication_preferences",
 }
+# One bullet, one entry: ``- 回复用中文 [kind:: preference] [source:: 对话 2026-11-20] [confidence:: high]``.
+# ``source`` and ``confidence`` stay in the note. ``kind`` chooses the field. Case-sensitive.
+_KIND_FIELD = {
+    "preference": "communication_preferences", "habit": "communication_preferences",
+    "fact": "standing_rules", "decision": "standing_rules", "commitment": "standing_rules",
+    "request": "standing_rules", "deadline": "standing_rules", "person": "standing_rules",
+}
+_INACTIVE = frozenset({"superseded", "deleted"})
 # Highest priority first. A profile over CAP drops from the end of this order.
 _ORDER = ("name", "address", "reply_language", "time_zone", "working_hours",
           "communication_preferences", "standing_rules")
@@ -50,7 +59,15 @@ def _blank_fields() -> dict[str, Any]:
 
 
 class ProfileError(ValueError):
-    """The source folder or a note in it cannot be compiled. The message names a relative path."""
+    """The source folder or a note in it cannot be compiled. The message names a relative path.
+
+    ``reason`` is set for a rule a caller can match: ``multiple_values``, ``outside_vault``,
+    ``vault_unconfigured``.
+    """
+
+    def __init__(self, message: str, *, reason: str | None = None) -> None:
+        super().__init__(message)
+        self.reason = reason
 
 
 @dataclass(frozen=True)
@@ -59,10 +76,15 @@ class Piece:
     value: str
     path: str
     heading: str
+    line: int
+    kind: str = ""
     truncated: bool = False
 
     def cited(self) -> dict[str, Any]:
-        cited: dict[str, Any] = {"value": self.value, "path": self.path, "heading": self.heading}
+        cited: dict[str, Any] = {
+            "value": self.value, "path": self.path, "heading": self.heading, "line": self.line}
+        if self.kind:
+            cited["kind"] = self.kind
         if self.truncated:
             cited["truncated"] = True
         return cited
@@ -96,6 +118,13 @@ def _one_line(text: str) -> str:
     return re.sub(r"\s+", " ", text).strip()
 
 
+def _clean(text: str) -> str:
+    """One line, with fence markers neutralized so a value cannot open or close a fence."""
+    text = text.replace("`", "'")
+    text = re.sub(r"~{3,}", "---", text)
+    return _one_line(text)
+
+
 def _scalar(raw: str) -> str:
     value = raw.strip()
     if len(value) > 1 and value[0] == value[-1] == '"':
@@ -105,17 +134,20 @@ def _scalar(raw: str) -> str:
     return value
 
 
-def _split(text: str, where: str) -> tuple[str | None, str]:
-    """The note's single-line ``summary`` and the body after its frontmatter."""
-    lines = text.removeprefix("\ufeff").split("\n")
-    if not lines or lines[0].rstrip("\r").strip() != "---":
-        return None, text
-    end = next((index for index in range(1, len(lines)) if lines[index].rstrip("\r").strip() == "---"), None)
+_FENCE_LINE = re.compile(r"^[ \t]{0,3}(`{3,}|~{3,})(.*)$")
+_BULLET = re.compile(r"^[ \t]*[-*+][ \t]+(.*)$")
+_INLINE = re.compile(r"\[([A-Za-z][\w]*)::([^\]]*)\]")
+
+
+def _frontmatter(lines: list[str], where: str) -> tuple[str | None, int]:
+    """The note's single-line ``summary``, and the index of the first line after the frontmatter."""
+    if not lines or lines[0].strip() != "---":
+        return None, 0
+    end = next((index for index in range(1, len(lines)) if lines[index].strip() == "---"), None)
     if end is None:
         raise ProfileError(f"{where} frontmatter never closes")
     summary: str | None = None
-    for line in lines[1:end]:
-        raw = line.rstrip("\r")
+    for raw in lines[1:end]:
         if not raw.strip() or raw[0] in " \t":
             continue
         if raw.startswith("summary:"):
@@ -125,56 +157,101 @@ def _split(text: str, where: str) -> tuple[str | None, str]:
             if re.fullmatch(r"[>|][+-]?", value):
                 raise ProfileError(f"{where} summary must be a single line")
             summary = _scalar(value)
-    body = "\n".join(line.rstrip("\r") for line in lines[end + 1:])
-    return (summary or None), body
+    return (summary or None), end + 1
 
 
-def _sections(body: str, level: int) -> list[tuple[str, str]]:
-    found: list[tuple[str, str]] = []
+def _visible(lines: list[str], start: int) -> list[tuple[int, str]]:
+    """1-based lines outside code fences. An unclosed fence hides the rest of the note."""
+    visible: list[tuple[int, str]] = []
+    fence: tuple[str, int] | None = None
+    for index in range(start, len(lines)):
+        line = lines[index]
+        match = _FENCE_LINE.match(line)
+        if fence is None:
+            if match is not None:
+                fence = (match.group(1)[0], len(match.group(1)))
+                continue
+            visible.append((index + 1, line))
+            continue
+        if (match is not None and match.group(1)[0] == fence[0] and len(match.group(1)) >= fence[1]
+                and not match.group(2).strip()):
+            fence = None
+    return visible
+
+
+def _note_lines(text: str, where: str) -> tuple[str | None, list[tuple[int, str]]]:
+    lines = [line.rstrip("\r") for line in text.removeprefix("\ufeff").split("\n")]
+    summary, start = _frontmatter(lines, where)
+    return summary, _visible(lines, start)
+
+
+def _sections(lines: list[tuple[int, str]], level: int) -> list[tuple[str, int, list[tuple[int, str]]]]:
+    found: list[tuple[str, int, list[tuple[int, str]]]] = []
     heading: str | None = None
-    chunk: list[str] = []
-    for line in body.split("\n"):
-        match = _HEADING.match(line.rstrip("\r"))
+    heading_line = 0
+    chunk: list[tuple[int, str]] = []
+    for line_no, line in lines:
+        match = _HEADING.match(line)
         if match and len(match.group(1)) <= level:
-            if heading is not None and len(match.group(1)) == level:
-                found.append((heading, "\n".join(chunk)))
-            elif heading is not None:
-                found.append((heading, "\n".join(chunk)))
-                heading = None
+            if heading is not None:
+                found.append((heading, heading_line, chunk))
+            heading = None
+            chunk = []
             if len(match.group(1)) == level:
                 heading = match.group(2).strip()
-                chunk = []
+                heading_line = line_no
             continue
         if heading is not None:
-            chunk.append(line.rstrip("\r"))
+            chunk.append((line_no, line))
     if heading is not None:
-        found.append((heading, "\n".join(chunk)))
+        found.append((heading, heading_line, chunk))
     return found
 
 
-def _first_heading(body: str) -> str | None:
-    for line in body.split("\n"):
-        match = _HEADING.match(line.rstrip("\r"))
+def _first_heading(lines: list[tuple[int, str]]) -> tuple[int, str] | None:
+    for line_no, line in lines:
+        match = _HEADING.match(line)
         if match:
-            return match.group(2).strip()
+            return line_no, match.group(2).strip()
     return None
 
 
-def _values(text: str) -> list[str]:
-    """Bullet items when every non-blank line is a bullet; otherwise the section as one line."""
+def _inline_entry(line: str) -> tuple[str, dict[str, str]] | None:
+    """A markdown bullet carrying a ``kind`` field, or None when the line is not that format."""
+    match = _BULLET.match(line)
+    if match is None:
+        return None
+    fields: dict[str, str] = {}
+
+    def _grab(found: re.Match[str]) -> str:
+        fields[found.group(1)] = _scalar(found.group(2).strip())
+        return " "
+
+    text = _INLINE.sub(_grab, match.group(1))
+    if "kind" not in fields:
+        return None
+    return text, fields
+
+
+def _values(lines: list[tuple[int, str]]) -> list[str]:
+    """Bullet items when every content line is a plain bullet; otherwise the section as one line.
+
+    A bullet with ``[kind:: …]`` belongs to the inline-entry pass, not to the heading.
+    """
+    content = [(line_no, line) for line_no, line in lines if _inline_entry(line) is None]
     bullets: list[str] = []
     prose = False
-    for line in text.split("\n"):
+    for _, line in content:
         stripped = line.strip()
         if not stripped:
             continue
-        if stripped.startswith(("- ", "* ")):
+        if stripped.startswith(("- ", "* ", "+ ")):
             bullets.append(stripped[2:].strip())
         else:
             prose = True
     if bullets and not prose:
-        return [item for item in bullets if _one_line(item)]
-    one = _one_line(text)
+        return [item for item in (_clean(item) for item in bullets) if item]
+    one = _clean("\n".join(line for _, line in content))
     return [one] if one else []
 
 
@@ -200,7 +277,7 @@ def _truncate(piece: Piece, cap: int) -> Piece:
         raise ProfileError("profile cap is smaller than a field label")
     keep = cap - len(prefix) - 1
     value = piece.value[:keep].rstrip() + "…"
-    return Piece(piece.field, value, piece.path, piece.heading, truncated=True)
+    return Piece(piece.field, value, piece.path, piece.heading, piece.line, piece.kind, truncated=True)
 
 
 def _fit(pieces: list[Piece], cap: int) -> tuple[str, list[Piece], list[Piece]]:
@@ -288,40 +365,87 @@ def _about(root: Path) -> Path | None:
     return path
 
 
-def _about_pieces(root: Path, path: Path) -> list[Piece]:
+def _kind_pieces(lines: list[tuple[int, str]], rel: str, skipped: list[dict[str, str]]) -> list[Piece]:
+    """Inline entries in file order. Inactive rows are left out. An unknown kind is skipped."""
+    pieces: list[Piece] = []
+    nearest = ""
+    for line_no, line in lines:
+        match = _HEADING.match(line)
+        if match is not None:
+            nearest = match.group(2).strip()
+            continue
+        parsed = _inline_entry(line)
+        if parsed is None:
+            continue
+        raw, fields = parsed
+        kind = fields.get("kind", "").strip()
+        status = fields.get("status", "").strip() or "active"
+        if status in _INACTIVE:
+            continue
+        field = _KIND_FIELD.get(kind)
+        if field is None:
+            skipped.append({"path": rel, "reason": "unknown kind"})
+            continue
+        value = _clean(raw)
+        if not value:
+            continue
+        pieces.append(Piece(field, value, rel, _clean(nearest) or kind, line_no, kind))
+    return pieces
+
+
+def _about_pieces(root: Path, path: Path, skipped: list[dict[str, str]]) -> list[Piece]:
     rel = _rel(root, path)
-    _, body = _split(_read(root, path), rel)
+    _, lines = _note_lines(_read(root, path), rel)
     pieces: list[Piece] = []
     seen: set[str] = set()
-    for heading, text in _sections(body, 2):
+    for heading, line_no, chunk in _sections(lines, 2):
         field = _FIELDS.get(heading)
         if field is None:
             continue
         if field in seen:
             raise ProfileError(f"{rel} has two headings for {field}")
         seen.add(field)
-        for value in _values(text):
-            pieces.append(Piece(field, _one_line(value), rel, heading))
+        for value in _values(chunk):
+            pieces.append(Piece(field, value, rel, _clean(heading), line_no))
+    pieces.extend(_kind_pieces(lines, rel, skipped))
     return pieces
 
 
 def _rule_pieces(root: Path, path: Path, skipped: list[dict[str, str]]) -> list[Piece]:
     rel = _rel(root, path)
-    summary, body = _split(_read(root, path), rel)
-    sections = [(heading, text) for heading, text in _sections(body, 2) if _values(text)]
+    summary, lines = _note_lines(_read(root, path), rel)
+    # Inline entries are the note. A summary is not required and is not a second rule.
+    if entries := _kind_pieces(lines, rel, skipped):
+        return entries
     pieces: list[Piece] = []
-    if sections:
-        for heading, text in sections:
-            for value in _values(text):
-                pieces.append(Piece("standing_rules", _one_line(value), rel, heading))
+    for heading, line_no, chunk in _sections(lines, 2):
+        for value in _values(chunk):
+            pieces.append(Piece("standing_rules", value, rel, _clean(heading), line_no))
+    if pieces:
         return pieces
-    heading = _first_heading(body)
-    one = _one_line(summary or "")
-    if one and heading:
-        return [Piece("standing_rules", one, rel, heading)]
-    if one or heading:
-        skipped.append({"path": rel, "reason": "no heading to cite" if not heading else "no summary"})
+    found = _first_heading(lines)
+    one = _clean(summary or "")
+    if one and found is not None:
+        line_no, heading = found
+        return [Piece("standing_rules", one, rel, _clean(heading), line_no)]
+    if one or found is not None:
+        skipped.append({"path": rel, "reason": "no heading to cite" if found is None else "no summary"})
     return pieces
+
+
+def _reject_duplicates(pieces: list[Piece]) -> None:
+    """A single-value field has one value. A second one fails the compile; nothing is merged."""
+    seen: dict[str, Piece] = {}
+    for piece in pieces:
+        if piece.field in _GROUPS:
+            continue
+        previous = seen.get(piece.field)
+        if previous is not None:
+            raise ProfileError(
+                f"{piece.field} has more than one value "
+                f"({previous.path}:{previous.line} and {piece.path}:{piece.line})",
+                reason="multiple_values")
+        seen[piece.field] = piece
 
 
 def compile_profile(root: Path, *, cap: int = CAP) -> Compiled:
@@ -336,9 +460,10 @@ def compile_profile(root: Path, *, cap: int = CAP) -> Compiled:
     about = _about(root)
     notes = _preferences(root)
     skipped: list[dict[str, str]] = []
-    pieces = _about_pieces(root, about) if about is not None else []
+    pieces = _about_pieces(root, about, skipped) if about is not None else []
     for note in notes:
         pieces.extend(_rule_pieces(root, note, skipped))
+    _reject_duplicates(pieces)
     rank = {field: index for index, field in enumerate(_ORDER)}
     pieces.sort(key=lambda piece: rank[piece.field])
     text, kept, omitted = _fit(pieces, cap)
@@ -349,7 +474,8 @@ def compile_profile(root: Path, *, cap: int = CAP) -> Compiled:
         else:
             fields[piece.field] = piece.cited()
     sources = tuple(sorted({piece.path for piece in pieces}))
-    dropped = tuple({"field": piece.field, "path": piece.path, "heading": piece.heading} for piece in omitted)
+    dropped = tuple({"field": piece.field, "path": piece.path, "heading": piece.heading, "line": piece.line}
+                    for piece in omitted)
     return Compiled(text, fields, dropped, tuple(skipped), sources)
 
 
@@ -384,14 +510,27 @@ async def source_view() -> dict[str, Any]:
     return {"source": await stored_source()}
 
 
+async def bound_directory(value: str) -> str:
+    """``value`` resolved, and inside the configured knowledge vault. Symlinks are followed."""
+    resolved = directory(value)
+    from . import vault as knowledge
+
+    config, _problem = await knowledge.load()
+    if config is None:
+        raise ProfileError("knowledge vault is not configured", reason="vault_unconfigured")
+    if not Path(resolved).is_relative_to(config.path):
+        raise ProfileError("source folder resolves outside the knowledge vault", reason="outside_vault")
+    return resolved
+
+
 async def update_source(value: str | None) -> dict[str, Any]:
-    """Store an absolute directory, or clear it. Null deletes the compiled block."""
+    """Store an absolute directory inside the knowledge vault, or clear it. Null deletes the block."""
     if value is None:
         await blocks.clear_source(SOURCE_KEY)
         return {"source": None}
     if not isinstance(value, str):
         raise ProfileError("source must be an absolute directory, or null to clear it")
-    path = directory(value)
+    path = await bound_directory(value)
     await blocks.put_source(SOURCE_KEY, path)
     return {"source": path}
 
@@ -399,15 +538,13 @@ async def update_source(value: str | None) -> dict[str, Any]:
 async def profile_view() -> dict[str, Any]:
     """Compile the configured folder and keep the stored version when the body is unchanged.
 
-    Unset compiles nothing and writes nothing. A read is what refreshes the stored block.
+    Unset compiles nothing and writes nothing. A read checks the vault boundary again, then refreshes
+    the stored block.
     """
     source = await stored_source()
     if source is None:
         return _unconfigured()
-    try:
-        root = Path(directory(source))
-    except ProfileError:
-        raise
+    root = Path(await bound_directory(source))
     compiled = compile_profile(root)
     version = await blocks.retain_or_replace(text=compiled.text, body=compiled.payload())
     return compiled.view(version)
