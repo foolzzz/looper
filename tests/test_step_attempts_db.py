@@ -3,9 +3,9 @@
 import pytest
 
 from looper.agents import attempts
-from looper.agents.attempts import Decision, FailureKind, RunFailure, Trigger
+from looper.agents.attempts import Decision, FailureKind, ReviewResult, RunFailure, RunResult, Trigger
 from looper.agents.tiers.worker import RunOutcome
-from looper.db import llm_records
+from looper.db import llm_records, step_attempts
 from tests.db_support import DSN, run_db
 
 pytestmark = pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
@@ -68,6 +68,7 @@ def test_dispatch_resolves_current_run_and_same_attempt_without_backfill(monkeyp
         retry = await attempts.dispatch_attempt('t', 's', 's1')
         assert await pool.fetchval('SELECT trigger FROM step_attempts WHERE id=$1', retry) == 'retry'
         await attempts.close_attempts('t', failure_kind=FailureKind.STOPPED)
+        await pool.execute("UPDATE tasks SET run_no=2 WHERE id='t'")
         restarted = await attempts.dispatch_attempt('t', 's', 's1', Trigger.RESTART)
         assert await attempts.resolve_attempt('t', 's1') == restarted
         assert await pool.fetchval('SELECT trigger FROM step_attempts WHERE id=$1', restarted) == 'restart'
@@ -93,8 +94,52 @@ def test_resume_recovers_a_pending_replanned_step_from_its_creation_boundary(mon
         assert await pool.fetchval('SELECT trigger FROM step_attempts WHERE id=$1', added) == 'replanned'
         assert await pool.fetchval('SELECT trigger FROM step_attempts WHERE id=$1', original) == 'first'
         await pool.execute("UPDATE tasks SET run_no=2 WHERE id='t'")
-        restarted = await attempts.dispatch_attempt('t', 's', 's1', Trigger.FIRST)
+        restarted = await attempts.dispatch_attempt('t', 's', 's1')
         assert await pool.fetchval('SELECT trigger FROM step_attempts WHERE id=$1', restarted) == 'restart'
+
+    run_db(test, monkeypatch, setup=seed)
+
+
+@pytest.mark.parametrize('trigger', [None, Trigger.FIRST, Trigger.RESTART])
+@pytest.mark.parametrize('history', ['same_step', 'unstarted', 'start_over'])
+def test_restart_requires_an_attempt_for_the_same_step_in_an_earlier_run(monkeypatch, trigger, history):
+    async def test(pool):
+        if history != 'unstarted':
+            first = await attempts.dispatch_attempt('t', 's', 's1')
+            await attempts.decide_attempt(first, Decision.FAIL)
+        if history == 'start_over':
+            await pool.execute("DELETE FROM task_steps WHERE id='s'")
+            await pool.execute("INSERT INTO task_steps(id,task_id,step_index,instruction,step_key) "
+                               "VALUES ('replacement','t',0,'Synthetic replacement step','s1')")
+        await pool.execute("UPDATE tasks SET run_no=2 WHERE id='t'")
+        step_id = 'replacement' if history == 'start_over' else 's'
+        current = await attempts.dispatch_attempt('t', step_id, 's1', trigger)
+        expected = 'restart' if history == 'same_step' else 'first'
+        assert await pool.fetchval('SELECT trigger FROM step_attempts WHERE id=$1', current) == expected
+
+    run_db(test, monkeypatch, setup=seed)
+
+
+@pytest.mark.parametrize("decision,run,review,expected", [
+    (Decision.RETRY, RunResult.COMPLETED, ReviewResult.NOT_PASSED, FailureKind.REVIEW_REJECTED),
+    (Decision.REPLAN, RunResult.CONTRACT, ReviewResult.NOT_PASSED, FailureKind.REVIEW_REJECTED),
+    (Decision.FAIL, RunResult.COMPLETED, ReviewResult.NOT_PASSED, FailureKind.REVIEW_REJECTED),
+    *[(Decision.FAIL, RunResult(value), None, FailureKind(value)) for value in (
+        "contract", "files_mismatch", "reported_failed", "run_error", "timeout", "run_cap", "crash")],
+    (Decision.ACCEPT, RunResult.CONTRACT, ReviewResult.NOT_PASSED, None),
+    (Decision.RETRY, RunResult.COMPLETED, ReviewResult.PASSED, None),
+    (Decision.TASK_ENDED, RunResult.COMPLETED, None, None),
+    (Decision.FAIL, None, None, None),
+])
+def test_decision_persists_failure_kind_from_typed_results(monkeypatch, decision, run, review, expected):
+    async def test(pool):
+        attempt = await attempts.open_attempt('t', 's', 's1', 1, Trigger.FIRST)
+        await pool.execute('UPDATE step_attempts SET run_outcome=$2,review_outcome=$3 WHERE id=$1',
+                           attempt, run, review)
+        await step_attempts.decide_attempt(attempt, decision, pool=pool)
+        assert await pool.fetchval('SELECT failure_kind FROM step_attempts WHERE id=$1', attempt) == expected
+        if review is None:
+            assert await pool.fetchval('SELECT review_outcome FROM step_attempts WHERE id=$1', attempt) == 'none'
 
     run_db(test, monkeypatch, setup=seed)
 

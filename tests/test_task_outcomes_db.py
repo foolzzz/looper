@@ -1,12 +1,13 @@
 """Immutable per-run terminal observations, time ranges and split billing."""
 
 from datetime import datetime, timedelta, timezone
+import json
 
 import pytest
 
 from looper.agents import attempts
 from looper.agents.attempts import Decision, StopCause, TaskOutcome, Trigger
-from looper.db import llm_records, tasks
+from looper.db import advisor_advice, agent_spawns, llm_records, task_outcomes, tasks
 from tests.db_support import DSN, run_db
 
 pytestmark = pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
@@ -65,7 +66,7 @@ def test_orphan_status_and_restart_continue_when_observation_writers_fail(monkey
 
     async def test(pool):
         await pool.execute("UPDATE tasks SET status='running' WHERE id='t'")
-        monkeypatch.setattr(step_attempts, 'close_attempts', broken)
+        monkeypatch.setattr(step_attempts, 'close_attempts_batch', broken)
         monkeypatch.setattr(task_outcomes, 'record_outcomes', broken)
         assert await tasks.mark_orphaned_tasks_stopped() == 1
         assert await pool.fetchval("SELECT status FROM tasks WHERE id='t'") == 'stopped'
@@ -80,18 +81,30 @@ def test_attempt_planning_and_unattributed_costs_partition_task_costs_on_each_ba
     async def test(pool):
         attempt = await attempts.dispatch_attempt('t', 's', 's1')
         planning = await llm_records.start_record(agent_id='planner-t', task_id='t')
+        advise = await llm_records.start_record(agent_id='planner-t', task_id='t')
         deciding = await llm_records.start_record(agent_id='planner-t', task_id='t')
         worker = await llm_records.start_record(agent_id='worker-s', task_id='t')
         reviewer = await llm_records.start_record(agent_id='reviewer-s', task_id='t')
         await attempts.worker_started(attempt, worker, 'synthetic-profile')
         await attempts.link_record(attempt, reviewer)
-        await attempts.decide_attempt(attempt, Decision.ACCEPT, record_id=deciding)
         advisor = await llm_records.start_record(agent_id='consult-test', run_kind='advisor', task_id='t',
-                                                parent_record_id=deciding)
+                                                parent_record_id=advise)
         judge = await llm_records.start_record(agent_id='consult-judge', run_kind='advice_check', task_id='t',
                                               parent_record_id=advisor)
+        consult = await agent_spawns.create(kind='advisor', task_id='t', step_id='s',
+                                             parent_record_id=advise, brief={}, inputs={}, budget_usd=1)
+        await advisor_advice.record_question(spawn_id=consult['id'], task_id='t', step_id='s', attempt=1,
+                                            source='optional', kind='plan_review', question={})
+        await attempts.link_advice(attempt, consult['id'])
+        assert await pool.fetchval('SELECT attempt_id FROM llm_records WHERE id=$1', advise) == attempt
+        assert await pool.fetchval('SELECT attempt_id FROM advisor_advice WHERE spawn_id=$1', consult['id']) == attempt
+        await attempts.decide_attempt(attempt, Decision.ACCEPT, record_id=deciding)
+        # A consult on a later attempt must preserve its parent's earlier attribution.
+        later = await attempts.open_attempt('t', 's', 's1', 1, Trigger.RETRY)
+        await attempts.link_advice(later, consult['id'])
+        assert await pool.fetchval('SELECT attempt_id FROM llm_records WHERE id=$1', advise) == attempt
         unattributed = await llm_records.start_record(agent_id='worker-unattributed', task_id='t')
-        for index, record in enumerate((planning, deciding, worker, reviewer, advisor, judge, unattributed)):
+        for index, record in enumerate((planning, advise, deciding, worker, reviewer, advisor, judge, unattributed)):
             await llm_records.finish_record(record, status='completed', cost_usd=(index+1)/10)
             if index % 2:
                 await llm_records.add_metadata(record, {'accounting_basis': 'subscription_equivalent'})
@@ -161,5 +174,29 @@ def test_snapshot_counts_steps_wait_union_and_task_costs_on_both_bases(monkeypat
         row = await pool.fetchrow('SELECT * FROM task_outcomes WHERE run_no=2')
         assert row['provider_priced_usd'] == pytest.approx(.7)
         assert row['equivalent_usd'] == 0 and row['attempts'] == 0 and row['human_wait_ms'] == 0
+
+    run_db(test, monkeypatch, setup=seed)
+
+
+def test_snapshot_cost_query_filters_records_by_requested_tasks(monkeypatch):
+    async def test(pool):
+        class CheckedDatabase:
+            async def execute(self, sql, *args):
+                # Force index selection on this small fixture; inspect the real snapshot query.
+                async with pool.acquire() as conn, conn.transaction():
+                    await conn.execute('SET LOCAL enable_seqscan=off')
+                    plan = json.loads(await conn.fetchval('EXPLAIN (FORMAT JSON) ' + sql, *args))[0]['Plan']
+                    nodes = [plan]
+                    indexed_tasks = False
+                    while nodes:
+                        node = nodes.pop()
+                        indexed_tasks |= (node.get('Index Name') == 'idx_llm_records_task'
+                                          and 'task_id = ANY' in node.get('Index Cond', ''))
+                        nodes.extend(node.get('Plans', []))
+                    assert indexed_tasks, plan
+                    return await conn.execute(sql, *args)
+
+        await task_outcomes.record_outcomes(['t'], 'completed', 'planner_end', pool=CheckedDatabase())
+        assert await pool.fetchval("SELECT count(*) FROM task_outcomes WHERE task_id='t'") == 1
 
     run_db(test, monkeypatch, setup=seed)

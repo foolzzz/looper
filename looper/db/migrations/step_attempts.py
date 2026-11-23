@@ -40,7 +40,9 @@ CREATE INDEX IF NOT EXISTS idx_step_attempts_decided ON step_attempts (decided_a
 
 
 async def pending(conn):
-    return not await conn.fetchval("SELECT EXISTS (SELECT 1 FROM schema_migrations WHERE name=$1)", name)
+    if await conn.fetchval("SELECT EXISTS (SELECT 1 FROM schema_migrations WHERE name=$1)", name):
+        return False
+    return not await conn.fetchval("SELECT to_regclass('step_attempts') IS NOT NULL")
 
 
 async def apply(conn, *, sql, state):

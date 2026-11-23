@@ -15,6 +15,7 @@ def test_attempt_migrations_are_idempotent_and_online_constraints_are_valid():
     async def test():
         async with fresh_connection() as conn:
             await connection.ensure_schema(conn)
+            assert await conn.fetchval("SELECT array_agg(name) FROM schema_migrations") == ['post_bridge_baseline']
             await connection.ensure_schema(conn)
             for module in (step_attempts, task_outcomes, attempt_ids):
                 assert not await module.pending(conn)
@@ -41,7 +42,20 @@ def test_upgrade_keeps_existing_rows_null_and_does_not_backfill_attempts():
             await conn.execute("DELETE FROM schema_migrations WHERE name=ANY($1::text[])", [
                 'step_attempts', 'task_outcomes', 'attempt_ids', 'attempt_ids_online'])
             assert await connection.schema_change_pending(conn)
+            for module in (step_attempts, task_outcomes, attempt_ids):
+                assert await module.pending(conn)
+                await module.apply(conn, sql='', state='')
+            assert not await conn.fetchval(
+                "SELECT bool_or(convalidated) FROM pg_constraint "
+                "WHERE conname IN ('llm_records_attempt_id_fkey','advisor_advice_attempt_id_fkey') "
+                "AND connamespace=current_schema()::regnamespace")
+            assert await conn.fetchval("SELECT to_regclass('idx_llm_records_attempt')") is None
             await connection.ensure_schema(conn)
+            assert await conn.fetchval(
+                "SELECT bool_and(convalidated) FROM pg_constraint "
+                "WHERE conname IN ('llm_records_attempt_id_fkey','advisor_advice_attempt_id_fkey') "
+                "AND connamespace=current_schema()::regnamespace")
+            assert await conn.fetchval("SELECT indisvalid FROM pg_index WHERE indexrelid='idx_llm_records_attempt'::regclass")
             assert await conn.fetchval('SELECT attempt_id FROM llm_records') is None
             assert await conn.fetchval('SELECT run_no FROM tasks') == 1
             assert await conn.fetchval('SELECT count(*) FROM step_attempts') == 0

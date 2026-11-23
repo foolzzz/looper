@@ -558,12 +558,16 @@ class TaskRouter:
             await attempts.close_attempts(
                 task_id, failure_kind=attempts.FailureKind.TASK_BUDGET if budget else
                 attempts.FailureKind.STOPPED if status in ("stopped", "cancelled") else None)
+            outcome_failure = None
+            if status == "failed":
+                try:
+                    outcome_failure = attempts.TaskFailure(envelope.payload.get("outcome_failure_kind"))
+                except (TypeError, ValueError):
+                    outcome_failure = attempts.TaskFailure.PLANNER_FAILED
             await attempts.record_outcome(
                 task_id, attempts.TaskOutcome(status),
                 attempts.StopCause.TASK_BUDGET if budget else attempts.StopCause.PLANNER_END,
-                attempts.TaskFailure.TASK_BUDGET if budget else
-                (envelope.payload.get("outcome_failure_kind") or attempts.TaskFailure.PLANNER_FAILED)
-                if status == "failed" else None)
+                attempts.TaskFailure.TASK_BUDGET if budget else outcome_failure)
             task.status = status  # teardown persists this; it would default to "completed"
             await self._teardown_task(task_id)
 
@@ -736,6 +740,7 @@ class TaskRouter:
                     logger.warning("could not remove the step worktrees of task %s", task_id, exc_info=True)
                 # And the sessions its runs kept for the room (its room goes with the steps).
                 await asyncio.to_thread(remove_run_sessions, self._runtime_root, task_id)
+            await attempts.close_attempts(task_id, failure_kind=attempts.FailureKind.STOPPED)
             try:
                 if not await db_tasks.reset_task_for_restart(task_id, keep_steps=not start_over):
                     return

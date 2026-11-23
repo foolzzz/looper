@@ -2938,7 +2938,7 @@ class PlannerAgent:
                 step.reviewer_id = None
                 await self._role_review_done(plan, step, item, {
                     "passed": False, "summary": (problem := f"Cannot read role {item.role}, which reviews step "
-                                                           f"{step.label}"), "findings": [problem], "learnings": []})
+                                                           f"{step.label}"), "findings": [problem], "learnings": []}, ran=False)
                 return
             item.version = task_role.version
         elif step.review_stage is None:
@@ -3037,7 +3037,7 @@ class PlannerAgent:
         await self._activity("phase", f"Review {step.label} dispatched", worker=step.reviewer_id)
         if step.role and role is None:
             await self._review_done(plan, step, {"passed": False, "findings": [
-                {"severity": "blocking", "where": "", "text": f"Cannot read role {step.role}"}]})
+                {"severity": "blocking", "where": "", "text": f"Cannot read role {step.role}"}]}, ran=False)
             return
         await self._bus.publish(MessageEnvelope.create(
             source=self.agent_address, target=worker_address(step.reviewer_id), message_type=MessageType.VERIFY_REQUEST,
@@ -3053,7 +3053,7 @@ class PlannerAgent:
                      **({"task_role": role.payload()} if role else {})},
             correlation_id=plan.correlation_id, metadata={"origin_channel_id": plan.origin_channel_id}))
 
-    async def _review_done(self, plan: TaskPlan, seat: PlanStep, result: dict[str, Any]) -> None:
+    async def _review_done(self, plan: TaskPlan, seat: PlanStep, result: dict[str, Any], *, ran: bool = True) -> None:
         from .review_panel import blocking, merged
         self._adopted_runs.discard(seat.reviewer_id)
         await self._record_profile_fallbacks(plan, seat.role or "reviewer", result.get("fallback") or [], seat)
@@ -3068,7 +3068,7 @@ class PlannerAgent:
             target.attempt_loaded = True
             await attempts.link_review_record(target.attempt_id, self._task_id, seat.reviewer_id)
         await attempts.review_finished(await self._attempt(target), result.get("passed") is True,
-                                       self._blocking_findings(result.get("findings") or []))
+                                       self._blocking_findings(result.get("findings") or []), ran=ran)
         target.result = {**(target.result or {}), **merged(plan, target)}
         entries = []
         if target.status == "verified":
@@ -3196,13 +3196,13 @@ class PlannerAgent:
         return step.review_roles[position]
 
     async def _role_review_done(self, plan: TaskPlan, step: PlanStep, item: StepReviewRole,
-                                verdict: Mapping[str, Any]) -> None:
+                                verdict: Mapping[str, Any], *, ran: bool = True) -> None:
         """Keep review role ``item``'s ``verdict`` on ``step`` (its review ran, or could not start), then go on: the
         next review role reviews it, unless this one was required and did not pass or was the last; then the
         Planner decides, the step acceptable only when every required review passed."""
         passed = verdict.get("passed") is True
         await attempts.review_finished(await self._attempt(step), passed,
-                                       self._blocking_findings(verdict.get("findings") or []), required=item.required)
+                                       self._blocking_findings(verdict.get("findings") or []), required=item.required, ran=ran)
         step.result = {**(step.result or {}), "role_reviews": [
             *_role_reviews(step.result or {}),
             {"role": item.role, "version": item.version, "required": item.required, **verdict}]}
@@ -3974,8 +3974,6 @@ class PlannerAgent:
         for target in [s for s in again if s.accept_when is not None]:
             await self._reset_reviews(plan, target)
         for step in again:
-            await attempts.close_attempts(self._task_id, failure_kind=attempts.FailureKind.STOPPED,
-                                          step_key=step.label)
             step.attempt_id, step.attempt_trigger = None, attempts.Trigger.RESTART
             step.attempt_loaded = False
             step.status, step.worker_id, step.reviewer_id = "pending", None, None
@@ -6253,9 +6251,9 @@ class PlannerAgent:
                                 **({"waits": wait_rows} if wait_rows else {}))
         except Exception:
             logger.exception("failed to save the plan of task %s", self._task_id)
-        for step in unique:
-            if step.status == "skipped" and step.kind == "work":
-                await attempts.close_attempts(self._task_id, decision=attempts.Decision.SKIP, step_key=step.label)
+        skipped = [step.label for step in unique if step.status == "skipped" and step.kind == "work"]
+        if skipped:
+            await attempts.close_attempts(self._task_id, decision=attempts.Decision.SKIP, step_keys=skipped)
 
     async def _claim_schedule_session(self, plan: TaskPlan) -> None:
         """Only a new non-parallel schedule plan borrows the stored conversation."""

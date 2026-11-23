@@ -5,7 +5,7 @@ from . import OnlineStep
 name = "attempt_ids"
 order = 1102
 pending_order = 1102
-fresh_ddl = """
+_DDL = """
 ALTER TABLE llm_records ADD COLUMN IF NOT EXISTS attempt_id BIGINT;
 ALTER TABLE tasks ADD COLUMN IF NOT EXISTS run_no INTEGER NOT NULL DEFAULT 1;
 DO $$ BEGIN
@@ -21,15 +21,25 @@ DO $$ BEGIN
     END IF;
 END $$;
 """
+fresh_ddl = _DDL.replace(" NOT VALID", "") + """
+CREATE INDEX IF NOT EXISTS idx_llm_records_attempt
+    ON llm_records(attempt_id) WHERE attempt_id IS NOT NULL;
+"""
 
 
 async def pending(conn):
-    return not await conn.fetchval("SELECT EXISTS (SELECT 1 FROM schema_migrations WHERE name=$1)", name)
+    if await conn.fetchval("SELECT EXISTS (SELECT 1 FROM schema_migrations WHERE name=$1)", name):
+        return False
+    return await conn.fetchval(
+        "SELECT EXISTS (SELECT 1 FROM (VALUES ('llm_records', 'attempt_id'), ('tasks', 'run_no')) "
+        "AS required(table_name, column_name) WHERE NOT EXISTS (SELECT 1 FROM pg_attribute "
+        "WHERE attrelid=to_regclass(required.table_name) AND attname=required.column_name "
+        "AND attnum>0 AND NOT attisdropped))")
 
 
 async def apply(conn, *, sql, state):
     if await pending(conn):
-        await conn.execute(fresh_ddl)
+        await conn.execute(_DDL)
         await conn.execute("INSERT INTO schema_migrations(name) VALUES ($1)", name)
 
 

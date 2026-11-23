@@ -610,3 +610,39 @@ def test_where_the_project_lets_its_planner_define_no_role_no_turn_lists_its_tem
     drive(claude, lambda e: WORK_OK)
 
     assert "role templates" not in claude.turns()[0]["text"]
+
+
+@pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
+def test_unavailable_review_role_keeps_failure_without_counting_a_run(
+    planner_claude, agent_db, roles, monkeypatch, tmp_path,
+):
+    from looper.db import plans
+    from tests.test_planner_agent import Harness
+
+    monkeypatch.setattr(plans, "save", _real_save_plan)
+    roles.add("gone", "review", "Check the work.")
+    spec = {**step("s1", review=True), "review_roles": ["gone"]}
+    claude = planner_claude(plan(spec), decide("review"), decide("fail", reason="Review unavailable"))
+
+    async def scenario(pool):
+        await pool.execute("INSERT INTO projects(id,name) VALUES ('proj-1','Synthetic project')")
+        await pool.execute("INSERT INTO tasks(id,requirement,project_id) VALUES ('t1','Synthetic task','proj-1')")
+
+        def outcome(envelope):
+            if envelope.message_type == MessageType.WORK_ITEM:
+                roles.rows = [r for r in roles.rows if r["role_key"] != "gone"]
+                return WORK_OK
+            return REVIEW_PASS
+
+        h = Harness(tmp_path, claude, outcome)
+        try:
+            await h.start()
+            assert (await h.finished()).payload["status"] == "failed"
+            row = await pool.fetchrow("SELECT review_runs,review_outcome FROM step_attempts WHERE task_id='t1'")
+            assert tuple(row) == (1, "not_passed")
+            assert len(h.reviews) == 1
+        finally:
+            await h.planner.stop()
+            await h.bus.shutdown()
+
+    run_db(scenario, monkeypatch, timeout=30)

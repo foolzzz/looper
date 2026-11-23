@@ -5,7 +5,7 @@ import asyncio
 import pytest
 
 from looper.agents import attempts
-from looper.agents.attempts import Decision, FailureKind, ReviewResult, RunFailure, RunResult
+from looper.agents.attempts import Decision, RunFailure, RunResult
 from looper.agents.tiers.worker import RunOutcome
 
 
@@ -22,20 +22,6 @@ from looper.agents.tiers.worker import RunOutcome
 ])
 def test_run_result_uses_typed_failure_before_a_fallback_report(outcome, failure, expected):
     assert attempts.run_result(outcome, failure) is expected
-
-
-@pytest.mark.parametrize("decision,run,review,expected", [
-    (Decision.RETRY, RunResult.COMPLETED, ReviewResult.NOT_PASSED, FailureKind.REVIEW_REJECTED),
-    (Decision.REPLAN, RunResult.CONTRACT, ReviewResult.NOT_PASSED, FailureKind.REVIEW_REJECTED),
-    (Decision.FAIL, RunResult.COMPLETED, ReviewResult.NOT_PASSED, FailureKind.REVIEW_REJECTED),
-    *[(Decision.FAIL, RunResult(value), ReviewResult.NONE, FailureKind(value)) for value in (
-        "contract", "files_mismatch", "reported_failed", "run_error", "timeout", "run_cap", "crash")],
-    (Decision.ACCEPT, RunResult.CONTRACT, ReviewResult.NOT_PASSED, None),
-    (Decision.RETRY, RunResult.COMPLETED, ReviewResult.PASSED, None),
-    (Decision.TASK_ENDED, RunResult.COMPLETED, ReviewResult.NONE, None),
-])
-def test_failure_kind_table(decision, run, review, expected):
-    assert attempts.failure_kind(decision, run, review) is expected
 
 
 @pytest.mark.parametrize("name,args", [
@@ -67,8 +53,3 @@ def test_observation_failures_are_logged_and_do_not_escape(name, args, caplog):
     result = asyncio.run(getattr(attempts, name)(*args, pool=BrokenPool()))
     assert result is None
     assert "observation unavailable" in caplog.text
-
-
-def test_check_failed_is_reserved_and_never_inferred():
-    assert FailureKind.CHECK_FAILED.value == "check_failed"
-    assert attempts.failure_kind(Decision.FAIL, None, None) is None

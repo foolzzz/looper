@@ -29,7 +29,9 @@ CREATE INDEX IF NOT EXISTS idx_task_outcomes_ended ON task_outcomes (ended_at);
 
 
 async def pending(conn):
-    return not await conn.fetchval("SELECT EXISTS (SELECT 1 FROM schema_migrations WHERE name=$1)", name)
+    if await conn.fetchval("SELECT EXISTS (SELECT 1 FROM schema_migrations WHERE name=$1)", name):
+        return False
+    return not await conn.fetchval("SELECT to_regclass('task_outcomes') IS NOT NULL")
 
 
 async def apply(conn, *, sql, state):

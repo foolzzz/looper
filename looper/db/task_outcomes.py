@@ -43,7 +43,7 @@ async def record_outcomes(
                    COALESCE(sum(cost_usd) FILTER (WHERE NOT {EQUIVALENT}),0) AS provider_priced_usd,
                    COALESCE(sum(cost_usd) FILTER (WHERE {EQUIVALENT}),0) AS equivalent_usd,
                    count(*) FILTER (WHERE status<>'running' AND cost_usd IS NULL) AS unpriced_runs
-            FROM llm_records r WHERE {TASK_RUN} AND EXISTS (
+            FROM llm_records r WHERE r.task_id=ANY($1::text[]) AND {TASK_RUN} AND EXISTS (
                 SELECT 1 FROM spans s WHERE s.task_id=r.task_id
                 AND r.created_at>=s.lower_at AND r.created_at<s.ended_at)
             GROUP BY task_id

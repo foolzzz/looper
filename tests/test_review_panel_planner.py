@@ -1162,3 +1162,38 @@ def test_verification_review_policy_with_and_without_a_panel(planner_claude, age
     assert verification.review is needs_review
     assert verification.accept_when is None
     assert h.work_items[-1].payload["verification"] is True
+
+
+@pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
+def test_unavailable_panel_roles_fail_without_counting_review_runs(
+    planner_claude, agent_db, monkeypatch, tmp_path,
+):
+    from looper.db import plans
+    from tests.test_planner_agent import Harness
+
+    configure(agent_db, monkeypatch)
+    monkeypatch.setattr(plans, "save", _real_save_plan)
+    claude = planner_claude(plan(step("s1", review=True)), decide("review"),
+                            decide("fail", reason="Review unavailable"))
+
+    async def scenario(pool):
+        await pool.execute("INSERT INTO projects(id,name) VALUES ('proj-1','Synthetic project')")
+        await pool.execute("INSERT INTO tasks(id,requirement,project_id) VALUES ('t1','Synthetic task','proj-1')")
+
+        def outcome(envelope):
+            assert envelope.message_type == MessageType.WORK_ITEM
+            monkeypatch.setattr(task_roles, "get", AsyncMock(return_value=None))
+            return WORK_OK
+
+        h = Harness(tmp_path, claude, outcome)
+        try:
+            await h.start()
+            assert (await h.finished()).payload["status"] == "failed"
+            row = await pool.fetchrow("SELECT review_runs,review_outcome FROM step_attempts WHERE task_id='t1'")
+            assert tuple(row) == (0, "not_passed")
+            assert not h.reviews
+        finally:
+            await h.planner.stop()
+            await h.bus.shutdown()
+
+    run_db(scenario, monkeypatch, timeout=30)

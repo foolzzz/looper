@@ -11,6 +11,12 @@ async def task_run_no(task_id: str, *, pool: Database | None = None) -> int | No
     return await (pool or get_pool()).fetchval('SELECT run_no FROM tasks WHERE id=$1', task_id)
 
 
+async def step_attempted_before_run(task_id: str, step_id: str | None, run_no: int, *, pool: Database | None = None) -> bool:
+    return await (pool or get_pool()).fetchval(
+        "SELECT EXISTS (SELECT 1 FROM step_attempts "
+        "WHERE task_id=$1 AND step_id=$2 AND task_run_no<$3)", task_id, step_id, run_no)
+
+
 async def step_added_during_run(task_id: str, step_id: str | None, run_no: int, *, pool: Database | None = None) -> bool:
     return await (pool or get_pool()).fetchval(
         "SELECT EXISTS (SELECT 1 FROM task_steps s JOIN step_attempts a ON a.task_id=s.task_id "
@@ -53,19 +59,22 @@ async def link_review_record(attempt_id: int, task_id: str, agent_id: str, *, po
 
 async def link_advice(attempt_id: int, spawn_id: int, *, pool: Database | None = None) -> None:
     await (pool or get_pool()).execute(
-        'UPDATE advisor_advice SET attempt_id=$1 WHERE spawn_id=$2', attempt_id, spawn_id)
+        "WITH linked AS (UPDATE advisor_advice SET attempt_id=$1 WHERE spawn_id=$2 RETURNING spawn_id) "
+        "UPDATE llm_records r SET attempt_id=$1 FROM agent_spawns s "
+        "WHERE s.id=$2 AND r.id=s.parent_record_id AND r.attempt_id IS NULL "
+        "AND EXISTS (SELECT 1 FROM linked)", attempt_id, spawn_id)
 
 
 async def worker_finished(attempt_id: int, result: str, *, pool: Database | None = None) -> None:
     await (pool or get_pool()).execute('UPDATE step_attempts SET run_outcome=$2 WHERE id=$1', attempt_id, result)
 
 
-async def review_finished(attempt_id: int, passed: bool, blocking_findings: int, *, required: bool = True, pool: Database | None = None) -> None:
+async def review_finished(attempt_id: int, passed: bool, blocking_findings: int, *, required: bool = True, ran: bool = True, pool: Database | None = None) -> None:
     await (pool or get_pool()).execute(
-        "UPDATE step_attempts SET review_runs=review_runs+1,blocking_findings=blocking_findings+$3, "
+        "UPDATE step_attempts SET review_runs=review_runs+$5::integer,blocking_findings=blocking_findings+$3, "
         "review_outcome=CASE WHEN NOT $4::boolean THEN review_outcome "
         "WHEN NOT $2::boolean OR review_outcome='not_passed' THEN 'not_passed' ELSE 'passed' END WHERE id=$1",
-        attempt_id, passed, blocking_findings, required)
+        attempt_id, passed, blocking_findings, required, int(ran))
 
 
 async def decide_attempt(attempt_id: int, decision: str, record_id: int | None = None, adjudicated: bool = False, *, pool: Database | None = None) -> None:
@@ -76,13 +85,20 @@ async def decide_attempt(attempt_id: int, decision: str, record_id: int | None =
         "WHEN run_outcome IN ('contract','files_mismatch','reported_failed','run_error','timeout','run_cap','crash') "
         "THEN run_outcome END, adjudicated=adjudicated OR $4, "
         "review_outcome=CASE WHEN $4 AND $2='accept' AND review_outcome='not_passed' "
-        "THEN 'passed_by_adjudication' ELSE review_outcome END WHERE id=$1 AND decision IS NULL RETURNING id) "
+        "THEN 'passed_by_adjudication' ELSE COALESCE(review_outcome,'none') END WHERE id=$1 AND decision IS NULL RETURNING id) "
         "UPDATE llm_records SET attempt_id=$1 WHERE id=$3 AND EXISTS (SELECT 1 FROM settled)",
         attempt_id, decision, record_id, adjudicated)
 
 
-async def close_attempts(task_id: str, decision: str, failure_kind: str | None = None, step_key: str | None = None, *, pool: Database | None = None) -> None:
+async def close_attempts(task_id: str, decision: str, failure_kind: str | None = None, step_key: str | None = None,
+                         *, step_keys: list[str] | None = None, pool: Database | None = None) -> None:
+    await close_attempts_batch([task_id], decision, failure_kind,
+                               step_keys=[step_key] if step_key is not None else step_keys, pool=pool)
+
+
+async def close_attempts_batch(task_ids: list[str], decision: str, failure_kind: str | None = None,
+                               *, step_keys: list[str] | None = None, pool: Database | None = None) -> None:
     await (pool or get_pool()).execute(
         "UPDATE step_attempts a SET decision=$2,decided_at=now(),failure_kind=$3 FROM tasks t "
-        "WHERE t.id=$1 AND a.task_id=t.id AND a.task_run_no=t.run_no AND a.decision IS NULL "
-        "AND ($4::text IS NULL OR a.step_key=$4)", task_id, decision, failure_kind, step_key)
+        "WHERE t.id=ANY($1::text[]) AND a.task_id=t.id AND a.task_run_no=t.run_no AND a.decision IS NULL "
+        "AND ($4::text[] IS NULL OR a.step_key=ANY($4::text[]))", task_ids, decision, failure_kind, step_keys)

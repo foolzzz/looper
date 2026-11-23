@@ -110,17 +110,6 @@ def run_result(outcome: RunOutcome, failure: RunFailure | None) -> RunResult:
     return RunResult(outcome.value)
 
 
-def failure_kind(decision: Decision, run_result: RunResult | None,
-                 review_result: ReviewResult | None) -> FailureKind | None:
-    if decision is Decision.ACCEPT:
-        return None
-    if review_result is ReviewResult.NOT_PASSED and decision in (Decision.RETRY, Decision.REPLAN, Decision.FAIL):
-        return FailureKind.REVIEW_REJECTED
-    if run_result is not None and run_result is not RunResult.COMPLETED:
-        return FailureKind(run_result.value)
-    return None
-
-
 async def _observe(operation, *args, **kwargs):
     try:
         return await operation(*args, **kwargs)
@@ -151,14 +140,16 @@ async def dispatch_attempt(task_id: str, step_id: str | None, step_key: str, tri
     run_no = await _observe(step_attempts.task_run_no, task_id, pool=pool)
     if run_no is None:
         return None
-    if trigger is None:
-        previous = await _observe(step_attempts.latest_attempt, task_id, step_key, run_no, pool=pool)
-        added = (previous is None and await _observe(
-            step_attempts.step_added_during_run, task_id, step_id, run_no, pool=pool))
-        trigger = (Trigger.RETRY if previous is not None and previous['decision'] == Decision.RETRY else
-                   Trigger.REPLANNED if added else Trigger.RESTART if run_no > 1 else Trigger.FIRST)
-    elif trigger is Trigger.FIRST and run_no > 1:
-        trigger = Trigger.RESTART
+    if trigger in (None, Trigger.FIRST, Trigger.RESTART):
+        restarted = await _observe(step_attempts.step_attempted_before_run, task_id, step_id, run_no, pool=pool)
+        if trigger is None:
+            previous = await _observe(step_attempts.latest_attempt, task_id, step_key, run_no, pool=pool)
+            added = (previous is None and await _observe(
+                step_attempts.step_added_during_run, task_id, step_id, run_no, pool=pool))
+            trigger = (Trigger.RETRY if previous is not None and previous['decision'] == Decision.RETRY else
+                       Trigger.REPLANNED if added else Trigger.RESTART if restarted else Trigger.FIRST)
+        else:
+            trigger = Trigger.RESTART if restarted else Trigger.FIRST
     return await open_attempt(task_id, step_id, step_key, run_no, trigger, pool=pool)
 
 
@@ -192,9 +183,9 @@ async def worker_finished(attempt_id: int | None, outcome: RunOutcome, failure: 
 
 
 async def review_finished(attempt_id: int | None, passed: bool, blocking_findings: int,
-                          *, required: bool = True, pool=None):
+                          *, required: bool = True, ran: bool = True, pool=None):
     if attempt_id is not None:
-        await _observe(step_attempts.review_finished, attempt_id, passed, blocking_findings, required=required, pool=pool)
+        await _observe(step_attempts.review_finished, attempt_id, passed, blocking_findings, required=required, ran=ran, pool=pool)
 
 
 async def decide_attempt(attempt_id: int | None, decision: Decision, record_id: int | None = None,
@@ -204,8 +195,10 @@ async def decide_attempt(attempt_id: int | None, decision: Decision, record_id: 
 
 
 async def close_attempts(task_id: str, decision: Decision = Decision.TASK_ENDED,
-                         failure_kind: FailureKind | None = None, step_key: str | None = None, *, pool=None):
-    await _observe(step_attempts.close_attempts, task_id, decision, failure_kind, step_key, pool=pool)
+                         failure_kind: FailureKind | None = None, step_key: str | None = None,
+                         *, step_keys: list[str] | None = None, pool=None):
+    await _observe(step_attempts.close_attempts, task_id, decision, failure_kind, step_key,
+                   step_keys=step_keys, pool=pool)
 
 
 async def record_outcomes(task_ids, outcome: TaskOutcome, stop_cause: StopCause,
