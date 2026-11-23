@@ -35,6 +35,8 @@ def normalize_record_metadata(metadata: Any) -> Any:
 
     if not isinstance(metadata, dict):
         return metadata
+    metadata = {key: value for key, value in metadata.items()
+                if key not in ("reservation", "cost_guard", "cost_guard_schedule_id")}
     def obj(value):
         return value if isinstance(value, dict) else {}
 
@@ -106,7 +108,7 @@ def _row_to_dict(row: asyncpg.Record) -> dict[str, Any]:
 # have no run_kind (its migration rewrites no row), and readers take theirs from these too (``RUN_KIND``). An agent
 # id none of them matches has no kind.
 RUN_KINDS = ("manager", "planner", "worker", "reviewer", "processor", "consult", "advisor", "advice_check",
-             "outbound_check", "leads_check")
+             "outbound_check", "explorer", "leads_check")
 _RUN_KIND_IDS: tuple[tuple[str, tuple[str, ...], tuple[str, ...]], ...] = (
     # (kind, exact ids, id prefixes)
     ("manager", ("manager",), ("manager-",)),
@@ -398,7 +400,7 @@ _STEP_RUNS = f"({_ROLE_FILTERS['worker']} OR {_ROLE_FILTERS['reviewer']})"
 TASK_ROLES = ("planner", "worker", "reviewer")
 _PLANNER_SPAWNS = f"{RUN_KIND} IN ('advisor', 'advice_check', 'outbound_check')"
 _TASK_ROLE = (
-    f"CASE WHEN {_PLANNER_SPAWNS} THEN 'planner' "
+    f"CASE WHEN {RUN_KIND} = 'explorer' THEN 'explorer' WHEN {_PLANNER_SPAWNS} THEN 'planner' "
     + " ".join(f"WHEN {_ROLE_FILTERS[role]} THEN '{role}'" for role in TASK_ROLES) + " END"
 )
 # A run of one of a task's agents (Planner, Worker, Reviewer), as task_costs counts them; the Manager is not one.
@@ -644,10 +646,16 @@ async def task_costs(
         """,
         task_ids, RecordStatus.INTERRUPTED.value,
     )
+    # An unused/off project keeps its existing response shape. Historical
+    # explorer spend remains visible if an operator later disables the project.
+    explorer_tasks = {row["task_id"] for row in rows if row["role"] == "explorer"}
+    explorer_tasks.update(row["id"] for row in await pool.fetch(
+        "SELECT t.id FROM tasks t JOIN projects p ON p.id=t.project_id "
+        "WHERE t.id=ANY($1::text[]) AND p.subagents='on'", task_ids))
     costs = {
         task_id: {"cost_usd": Decimal(0), "runs": 0, "running": 0, "unpriced_runs": 0, "equivalent_runs": 0,
                   "provider_price_runs": 0, "by_role": {role: {"cost_usd": Decimal(0), "runs": 0}
-                                                      for role in TASK_ROLES},
+                                                      for role in TASK_ROLES + (("explorer",) if task_id in explorer_tasks else ())},
                   "by_model": {}, "manager_by_model": {}}
         for task_id in task_ids
     }

@@ -56,6 +56,7 @@ class RetrySafety(str, Enum):
     NOT_RETRYABLE = "not_retryable"
     READ_ONLY = "read_only"
     READ_ONLY_IF_PEEK = "read_only_if_peek"
+    IDEMPOTENT = "idempotent"  # the same bridged call id returns the existing effect
 
 
 class ErrorCode(str, Enum):

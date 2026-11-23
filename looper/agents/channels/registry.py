@@ -258,6 +258,15 @@ class ChannelRegistry:
                                           outcome=receipt.result.value, dedupe_key=idempotency_key)
         return receipt
 
+    async def edit_card(self, channel_id: str, target: NotifyTarget, external_id: str, card: Any) -> PostReceipt:
+        """Update a posted card through its adapter, preserving its format and the delivery result."""
+        adapter = self._channels.get(channel_id)
+        if adapter is None:
+            return PostReceipt(False, error=self._not_running(channel_id), outcome=PostOutcome.REJECTED)
+        if target.group and (checked := for_group(card.text)) != card.text:
+            card = replace(card, text=checked, buttons=())
+        return await adapter.edit_card(target, external_id, card)
+
     async def edit(self, channel_id: str, target: NotifyTarget, external_id: str, text: str) -> PostReceipt:
         """Edit one message through its running adapter, preserving the platform's delivery result."""
         adapter = self._channels.get(channel_id)
