@@ -5856,14 +5856,16 @@ On a workday (Monday to Friday; a weekday holiday still sends), at
 zone, `turn_context.zone()`), one brief goes to each enabled bot's operator
 direct chat. It names what waits (the needs-you summary), reminders due that
 local day, and proactive messages deferred into the digest (`decision`
-`digest`). A chat's first brief takes that day's digest, and Monday also
-Saturday and Sunday; a brief that ran records `consumed_until`, and the next
-takes every digest decided after that. Until a brief has recorded that
-boundary, a later day still reads from the first attempt's dates, so a
-rejected Tuesday brief's digest is still in Wednesday's. Every section empty
-means nothing is sent. The switch, whether the channel is enabled and who the
-operator is are read again after the summary is collected and again
-immediately before the post. The switch is read again after the operator
+`digest`). Every brief reads from the first attempt's dates (Monday also
+Saturday and Sunday) through the day being sent, except digest rows already
+recorded by id in `morning_brief_consumed`. A sent or uncertain brief records,
+in the same transaction as its row, only the rows that read returned, so a
+rejected Tuesday brief's digest is still in Wednesday's, and a row whose insert
+had not committed is read once it has. `consumed_until` is the check time, not
+a watermark. Every section empty means nothing is sent. The switch, whether the
+channel is enabled and who the operator is are read again after the summary is
+collected and again immediately before the post. The switch is read again after
+the operator
 query returns. A fresh claim that then fails that check is deleted; a claim
 that continued a refusal is put back as that refusal, with the attempt count
 it had. The switch
