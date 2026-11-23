@@ -11,10 +11,10 @@ from datetime import datetime, timedelta, timezone as dt_timezone
 from typing import Any, Callable, Mapping
 from zoneinfo import ZoneInfo
 
-from ..db import connection, schedules as db_schedules, subscriptions as db_subs
-from . import leads_model, subscriptions
+from ..db import connection, proactive_deliveries as db_deliveries, schedules as db_schedules, subscriptions as db_subs
+from . import chat_settings, leads_model, proactive_delivery as delivery, subscriptions
 from .channels.base import PostOutcome
-from .message import builtin_channel_id, parse_channel_id
+from .message import builtin_channel_id, channel_thread_id, parse_channel_id
 from .operator_identity import operator_sender_id
 from .subscription_runs import push_target
 
@@ -257,6 +257,25 @@ class IntentPushService:
             if not reply:
                 return
         now = self._clock()
+        decided = None
+        delivery_key = f"intent_post:{post['id']}"
+        # Final edits and their fallback replies report an already handled intent, not a new suggestion.
+        if post["kind"] in ("push", "progress") and chat_settings.delivery_enabled():
+            try:
+                # The unsuffixed bot-owner conversation, as for the native incoming DM.
+                thread = channel_thread_id(post["channel_id"], post["chat"], "manager", "manager")
+                spoke = await conn.fetchval("SELECT max(created_at) FROM chat_messages "
+                                            "WHERE session_id=$1 AND role='user'", thread)
+                # An intent marked urgent is neither a blocking gate nor a user-set reminder.
+                decided = await delivery.decide(
+                    delivery.Delivery(delivery.DeliveryKind.INTENT, delivery.Urgency.NORMAL, delivery.ChatKind.DIRECT),
+                    dedupe_key=delivery_key, channel_id=post["channel_id"], chat=post["chat"],
+                    last_user_message_at=spoke, schedule_id=schedule["id"], now=now)
+            except Exception:
+                logger.warning("intent post %s delivery decision failed; waiting to retry", post["id"], exc_info=True)
+                return
+            if decided.outcome is not delivery.Outcome.SEND:
+                return
         claimed = await conn.fetchval("UPDATE intent_posts SET state='sending', attempts=attempts+1, updated_at=$2 "
                                       "WHERE id=$1 AND state IN ('pending','failed') AND attempts<$3 RETURNING id",
                                       post["id"], now, db_subs.DELIVERY_ATTEMPTS)
@@ -275,6 +294,11 @@ class IntentPushService:
         await conn.execute("UPDATE intent_posts SET state=$2, external_id=$3, error=$4, updated_at=$5 WHERE id=$1",
                            post["id"], state, external, error, now)
         if state == "sent":
+            if decided is not None:
+                try:
+                    await db_deliveries.mark_sent(delivery_key)
+                except Exception:
+                    logger.warning("intent post %s delivery receipt not recorded", post["id"], exc_info=True)
             parent_id = intent["merged_into"] if post["kind"] == "progress" else intent["id"]
             if post["kind"] in ("push", "progress"):
                 await conn.execute("UPDATE intents SET expires_at=$2, updated_at=$3 WHERE id=$1 AND state='pending'",
