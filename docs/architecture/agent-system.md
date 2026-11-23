@@ -3402,6 +3402,20 @@ evaluation is required before the original schedule requirement is complete.
   `next_fire_at` the next one after now. Enabling a schedule, or changing the
   rule of an enabled one, sets `next_fire_at` from now: nothing missed before
   runs.
+- **Throttle fields** (`schedule_throttle`, default off). `active_hours`
+  (`HH:MM-HH:MM` in the schedule's timezone, may cross midnight; null all
+  day): a scheduled or catch-up firing whose fire time or now is outside it
+  does not happen at all (no run, `last_fired_at` unchanged, `next_fire_at`
+  the next one), as if the rule had not fired. `idle_only`: a firing while the
+  schedule's Manager answers a message (`ManagerAgent.busy`) is recorded
+  `skipped_busy` and the next firing tries again. "Run now" is never throttled.
+  The schedule's view has them as `throttle` with the two the schedule already
+  had: `allows_silence` (a subscription's quiet word; else `notify` other than
+  `always`) and `pre_check` (`gate_command` for an agent schedule with a gate,
+  `window` for a subscription, else `none`). API, generated CLI and config
+  export carry `active_hours` and `idle_only` (the export only when set); the
+  dashboard form does not edit them yet, and the Manager's `looper_schedules`
+  does not list them.
 - **A firing** while one of the schedule's tasks is still active (running,
   or created and about to start) is recorded `skipped_overlap`, or,
   with `overlap` `queue`, waits as the one `queued` run, which starts when that
@@ -3561,7 +3575,7 @@ evaluation is required before the original schedule requirement is complete.
   that stopped is `gate_failed` at the next start. A gate never runs twice at
   once: a firing while the schedule's run is `gating` is `skipped_overlap`.
 - **Repeated skips are counted, not stored.** A skipped firing (`skipped_gate`,
-  `skipped_overlap`, `skipped_missed`, `skipped_budget`) whose schedule's latest
+  `skipped_overlap`, `skipped_missed`, `skipped_budget`, `skipped_busy`) whose schedule's latest
   run is a skip for the same reason recorded the same day (the scheduler's day)
   is counted on that run (`schedule_runs.firings` one more, `finished_at` the
   latest firing), and a gate that found nothing leaves no row of its own
@@ -5387,7 +5401,18 @@ Manager's `looper_schedules` cannot create or change one.
 - **The push** goes through the channel's `post` as the bot, to the target the
   run started with (`subscription_runs.target_channel`, `target_chat`, pinned
   only when the target was confirmed for the configuration then in force:
-  `config_version`). The output is split at 4,000 characters by the group
+  `config_version`). With `delivery.enabled` on, the whole digest gets one
+  delivery decision (`kind=subscription`, `urgency=digest`) before its first
+  eligible segment is claimed; its segments and retries share that decision
+  and one daily slot. A deferred digest keeps its full output on the dashboard,
+  advances its cursor, and records its reason and `digest_date`; it is not
+  posted. Keep the switch off until a morning-report reader can surface those
+  deferred outputs. Recent Lark direct replies are observed from admitted
+  user messages, keyed by bot and user (history uses a native chat id instead).
+  This five-minute exemption is memory-only and resets on restart; existing
+  digest decisions still survive. Native-chat histories supply the other
+  targets' last user message. Off, the posts and existing run, segment and notification
+  writes are unchanged. The output is split at 4,000 characters by the group
   notice's splitter and cut at three messages, and each message is a row of
   `subscription_deliveries` (`pending`, `sending`, `sent`, `failed`,
   `uncertain`) with an idempotency key, the run id and, for a later part, the
@@ -5795,6 +5820,20 @@ subscription's current configuration is confirmed. Quiet types stay on the
 operator's intents list. New evidence replies to the original push, extending
 a pending suggestion's expiry to 24 hours after that delivery.
 
+With `delivery.enabled` on (off by default), the initial push and new-evidence
+reply ask `proactive_delivery.decide` before claiming a send. Both are `intent`
+with `normal` urgency, including a type whose display priority is `urgent`:
+neither is a blocking gate or a reminder the user set. The target chat's most
+recent user message supplies the five-minute grace. A `send` keeps the exact
+text, target, reply and idempotency key; its channel receipt records `outcome`,
+`external_id` and `sent_at`. Retries reuse `intent-<intent id>-<post id>` and
+its first decision, refreshing the receipt on the same row. A digest or drop
+keeps the original `intent_posts` text without spending a send attempt; a
+decision failure logs and waits for the next poll. Final edits and their
+fallback replies keep their existing path. With the switch off there are no
+additional decision reads or writes. Keep delivery off until the briefing can
+surface deferred intents, as required by the [delivery RFC](rfcs/proactive-delivery-v0.zh-CN.md#3-发送点的接入顺序).
+
 `建 I-0042` (or `建` quoting a push) creates and starts one task;
 `驳回 I-0042` rejects the suggestion. Code handles these before the Manager's
 model and checks the operator's typed identity, including dashboard turns.
@@ -5926,7 +5965,7 @@ writes nothing.
 ### Proactive messages: the delivery layer
 
 A proactive message is one Looper sends without being asked in that moment (a
-gate reminder; later a task notice, a subscription's push, an intent, a
+gate reminder, a task notice; later a subscription's push, an intent, a
 completion turn, a reminder the user set). With the system setting
 `delivery.enabled` on (operator-only `proactive_delivery.update`; off by
 default, and then no send point asks), a send point asks
@@ -5944,14 +5983,35 @@ message's `digest_date` is the local date the next quiet hours end on. The
 decision goes into the message's row of `proactive_deliveries`, the table the
 proactive-message metrics keep (`decision`, `reason`, `counted`, `local_date`,
 `digest_date`, `decided_at`), under the send point's key for the message (a
-gate's `gate-<message id>`, its posts' idempotency key), so a message tried
+gate's `gate-<message id>` or an intent's `intent-<intent id>-<post id>`,
+its posts' idempotency key), so a message tried
 again keeps its first decision and the channel's receipt lands on the same
 row; decisions on one chat are taken one at a time, so the cap holds across
 send points. After the post the send point records the receipt (`outcome`
-`sent` or `rejected`, `sent_at`, `external_id`) unless the metrics already
-did. Off, the layer writes nothing. Wired so far: gate
-reminders only, which are always `blocking`; a decision that fails is logged
-and the reminder posted as with the switch off. Design: [proactive delivery RFC](rfcs/proactive-delivery-v0.zh-CN.md).
+`sent`, `rejected` or `unknown`, `sent_at`, `external_id`) on the same row as
+the metrics. Off, the layer writes nothing. Wired so far: gate
+reminders, task notices to Lark and Telegram, subscription digest pushes, and
+initial and new-evidence intent pushes. A completed or failed task's code notice is `normal`; an opened, updated or resumed gate that needs the
+user is `blocking`, like its reminders. The channel checks a task-end notice
+immediately before sending it, retaining its text and target; a completion
+fallback keeps the original notice's decision key. Recent user messages are
+looked up by bot and chat, including its routed Manager histories. Only a
+successful channel receipt records the receipt; a deferred notice records its
+decision without calling the channel. A decision that fails is logged and
+the notice posted as with the switch off. Subscription digest pushes use
+`digest` urgency, subject to the ordinary quiet hours and cap. Digest decisions
+use `subscription_run:<run id>` across retries and restarts, with the receipt
+on the first accepted segment; an uncertain channel outcome is never marked
+sent. A failed digest decision prevents the channel call; a failed receipt
+write is logged without changing an accepted send. Intent pushes use `normal`
+urgency even when their display urgency is high; a decision failure waits for
+the next poll. Deferred or dropped intents retain their post without claiming
+it or consuming a send attempt, and uncertain sends are never retried. Final
+intent edits and fallback replies, subscription alerts and failure notices,
+task progress, completion turns, the dashboard chat and other senders retain
+their existing paths. Keep the switch off until the briefing can read deferred messages; digest consumption
+and the delivery settings UI are not delivered here.
+Design: [proactive delivery RFC](rfcs/proactive-delivery-v0.zh-CN.md).
 
 ### Card buttons
 
@@ -7035,7 +7095,7 @@ PostgreSQL is a hard startup dependency. All data paths:
 | `schedules` | A project's schedules: `name` (unique in the project ignoring case), `cron`, `timezone`, `requirement`, `work_dir` (`''`: the project's default), `overlap` (`skip`, `queue`, `parallel`), `max_parallel_runs` (1–10, default 3: a parallel schedule's runs at once), `catch_up`, `run_timeout_mode` (`inherit`, `seconds` or `none`) and `run_timeout_seconds` (with `seconds`), `run_budget_usd`, `gate_command`, `gate_timeout_seconds`, `daily_budget_usd`, `notify`, `user_gates` (`off` by default, or `on` to opt its tasks into user gates), `notify_channel` and `notify_chat` (both or neither), `enabled` (false when created), `enabled_at` (when it was created or last enabled) and `rule_changed_at` (when its rule or zone last changed; the no-success alert counts from the later of them), `next_fire_at` (null while disabled), `last_fired_at`, `last_success_at`, `last_ok_at`, `consecutive_failures`, `failures_alert_at` and `stale_alert_at` (set while that alert is active), `created_via` (`dashboard`, `manager` or `import`); a project with schedules is not deleted |
 | `schedule_profile_overrides` | A schedule's Agent Profile per task role, copied into each task it fires; a profile a schedule chose is not deleted |
 | `schedule_task_limits` | A schedule's `task_limits`: per role (`worker`, `reviewer`), `max_concurrency` (1–64), copied into each task it fires (`task_concurrency_limits`); going with its schedule |
-| `schedule_runs` | Each firing of a schedule: `scheduled_for`, `fired_at`, `trigger` (`scheduled`, `catch_up`, `manual`), `missed`, `status` (`queued`, `gating`, `running`, then once `completed`, `failed`, `stopped`, `cancelled`, `timed_out`, `gate_failed`, or `skipped_overlap`, `skipped_missed`, `skipped_gate`, `skipped_budget`), `task_id` (null when skipped, or once the task is deleted), `summary`, `cost_usd`, `error`, `gate_output`, `run_timeout_seconds` (the timeout it started with; null: none), `carried_from` (the latest run whose unfinished input it was given), `carried_on` (its own unfinished input was handed on to a later run), `finished_at`, `firings` (how many firings it stands for: a repeated skip is counted on one run, from `scheduled_for` to `finished_at`); going with its schedule |
+| `schedule_runs` | Each firing of a schedule: `scheduled_for`, `fired_at`, `trigger` (`scheduled`, `catch_up`, `manual`), `missed`, `status` (`queued`, `gating`, `running`, then once `completed`, `failed`, `stopped`, `cancelled`, `timed_out`, `gate_failed`, or `skipped_overlap`, `skipped_missed`, `skipped_gate`, `skipped_budget`, `skipped_busy`), `task_id` (null when skipped, or once the task is deleted), `summary`, `cost_usd`, `error`, `gate_output`, `run_timeout_seconds` (the timeout it started with; null: none), `carried_from` (the latest run whose unfinished input it was given), `carried_on` (its own unfinished input was handed on to a later run), `finished_at`, `firings` (how many firings it stands for: a repeated skip is counted on one run, from `scheduled_for` to `finished_at`); going with its schedule |
 | `schedule_notifications` | Every message about a schedule: `run_id`, `kind` (`run`, `failures_alert`, `failures_recovered`, `stale_alert`, `stale_recovered`), `channel`, `chat`, `text`, `status` (`sent`, `failed`, `dashboard`), `error`, `manager_event_id` (the completion event that told a run's message: the Manager's reply or its fallback; NULL otherwise; a partial index, built online on an existing database); going with its schedule |
 | `system_settings` | Settings shared by the whole system, one value per key (no row = the built-in default), such as the last library import's report and the scheduler's `scheduler.min_interval_seconds` and `scheduler.run_timeout_seconds` |
 | `library_items` | The capability catalog: kind, name, `origin` (`machine`, `upload`, `git`, `ui` or `project`), `modified`, `owner_project_id` (a project-authored item; goes with its project), `description`, source label, declared version, `sha256` of the files, size, file count, `imported_at` |
@@ -8092,11 +8152,11 @@ implementation supplies it and is retested.
   attachment paths, including filenames with spaces and Unicode. Dashboard
   turns with attachments show the final answer without streaming text deltas,
   so a path split across chunks cannot escape redaction. With `channels.outbound.enabled` off (the default),
-  both Lark transports retain their original calls and write no outbox rows. Settings → Chat reads and updates
+  Lark and Telegram retain their original calls and write no new outbox rows. Settings → Chat reads and updates
   `outbound_enabled` through the separate operator-only `outbound_gateway.get/update` operations; the existing
   `chat_settings` response fields, accepted writes and Manager tools remain unchanged. Gateway updates are
   high-risk operations with confirmation for callers that require it; null restores each field's default.
-  On, `GatedLarkTransport` routes every write through
+  On, `GatedLarkTransport` routes every Lark write through
   one gateway per channel, sharing its in-flight cap and both send/reply and total-write token buckets
   by the verified app id across CLI/Bot channels (defaults 5/s and 15/s),
   at most four platform calls in flight, classified errors, up to five retries with jitter and
@@ -8110,7 +8170,7 @@ implementation supplies it and is retested.
   the gateway. Answers, progress, notices, notifications and posts first enter
   `channel_outbox`, ordered per chat and concurrent across chats. Caller keys win; otherwise envelope ids
   and part numbers derive stable keys. The first possibly delivered attempt is saved before platform I/O.
-  Every retry checks the one-hour dedupe window, including pending/unknown rows and waits for capacity or
+  Every Lark retry checks the one-hour dedupe window, including pending/unknown rows and waits for capacity or
   persistence; expired possibly delivered rows become `uncertain` and are never resent. Older rows without
   an attempt timestamp conservatively use their creation time on upgrade. A delivery past its total deadline
   becomes `uncertain` if attempted, otherwise `failed`, releasing the chat head even if a saved retry is far
@@ -8124,9 +8184,23 @@ implementation supplies it and is retested.
   and cannot block legacy startup, receiving or catch-up. An empty disabled outbox performs no recovery writes. Waiters share in-process
   completion futures; the scanner sleeps until the earliest unblocked retry or new work. Notifications can
   carry a caller-supplied event key to deduplicate retries. An insert failure logs a warning and falls back to the gateway. Status
-  lines and reactions use the gateway alone. Housekeeping retains sent rows for seven days and other rows
-  for thirty. The CLI mapping for real HTTP 429 remains unverified on the real platform. Telegram wiring
-  and dashboard metrics follow separately; the standalone probe remains independent.
+  edits and reactions use the gateway alone; Telegram's first status message uses the outbox.
+  Housekeeping retains sent rows for seven days and other rows
+  for thirty. The CLI mapping for real HTTP 429 remains unverified on the real platform. Dashboard metrics
+  follow separately; the standalone probe remains independent.
+
+  | Telegram path | With `channels.outbound.enabled` on |
+  | --- | --- |
+  | Non-polling `GatedRequest(HTTPXRequest)` | `sendMessage`, `editMessageText`, `setMessageReaction`, `sendDocument`, `sendPhoto`, `sendChatAction`, `setMyCommands` and `answerCallbackQuery` use the gateway, with limits shared by bot identity. Edits use `chat_id:message_id`. Reads and durable `PollingRequest` bypass it. |
+  | Answers, notices, progress, command replies, posts, cards and notifications | Each chunk enters the outbox. Envelope ids derive stable per-chunk keys; caller keys win for posts and notifications. A rejected formatted chunk or card can replace only its own row's body with plain text. Earlier chunks are retained. The existing MarkdownV2 format stays in use; the same outbox rule covers HTML bodies. |
+  | Lost responses and restart | Telegram has no platform idempotency key: unknown attempts become `uncertain`, and every row left `sending` after a crash becomes `uncertain`, without resending. Its platform dedupe window is zero. Explicit 429s (including JSON `parameters.retry_after`) and pre-send connection failures can retry; other 4xx responses are rejected. |
+
+  Telegram uses the same configurable per-bot limits; there are no hardcoded per-chat caps.
+  The [official FAQ](https://core.telegram.org/bots/faq#my-bot-is-hitting-limits-how-do-i-avoid-this)
+  advises roughly 30 bulk messages per second per bot, one per second per chat and 20 per minute per group
+  (paid broadcasts can differ). These are guidance, not guaranteed capacity; tune the operator controls
+  and honor runtime 429 responses. Telegram has no stand-in serve: validation uses real PTB adapters
+  with fake HTTP responses, and never calls the real Bot API.
   The CLI transport sends with `lark-cli im
   +messages-send --as bot`: a reply as Markdown (`--markdown`, a rich-text
   post) to the chat its message came from, a schedule's message as text to a
