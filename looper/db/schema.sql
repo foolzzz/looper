@@ -447,7 +447,10 @@ CREATE TABLE IF NOT EXISTS task_journal (
     learnings   TEXT[] NOT NULL DEFAULT '{}',
     created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
     via TEXT NOT NULL DEFAULT '',
-    delivered_at TIMESTAMPTZ
+    delivered_at TIMESTAMPTZ,
+    -- A supplement: whether the operator gave it in their own turn (code decides as it is stored; NULL: not known,
+    -- or Looper's own note). The untrusted fence takes any but TRUE as outside content.
+    from_operator BOOLEAN
 );
 CREATE INDEX IF NOT EXISTS idx_task_journal_task ON task_journal (task_id, id);
 -- A step is accepted once.
@@ -938,7 +941,10 @@ CREATE TABLE IF NOT EXISTS task_user_gate_messages (
     post_error TEXT,
     post_attempts INT NOT NULL DEFAULT 0,
     post_retry_at TIMESTAMPTZ,
-    channel_id TEXT
+    channel_id TEXT,
+    -- A user's message: whether the operator wrote it in their own turn (code decides as it is stored; NULL: not
+    -- known, a message from before the column). The untrusted fence takes any but TRUE as outside content.
+    from_operator BOOLEAN
 );
 CREATE INDEX IF NOT EXISTS idx_task_user_gate_messages_step ON task_user_gate_messages (step_id, id);
 CREATE INDEX IF NOT EXISTS idx_task_user_gate_messages_unposted ON task_user_gate_messages (id)

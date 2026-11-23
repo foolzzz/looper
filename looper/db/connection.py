@@ -174,6 +174,9 @@ _OUTBOUND_REVIEWS = "outbound_reviews"
 _CARD_ACTIONS = "card_actions"
 
 _UNCERTAIN_DELIVERIES = "uncertain_deliveries"
+# Whether a user's gate message and a supplement came from the operator (the untrusted fence); NULL before them.
+_GATE_MESSAGE_SENDER = "gate_message_sender"
+_JOURNAL_SUPPLEMENT_SENDER = "journal_supplement_sender"
 # The partial indexes of uncertain deliveries, as schema.sql's last lines create them.
 _UNCERTAIN_DELIVERY_INDEXES = (
     ("idx_subscription_deliveries_uncertain", "ON subscription_deliveries (updated_at) WHERE state = 'uncertain'"),
@@ -903,6 +906,14 @@ async def _message_stream_pending(conn: asyncpg.Connection) -> bool:
 async def _message_stream_deletions_pending(conn: asyncpg.Connection) -> bool:
     return (await _column_pending(conn, _MESSAGE_STREAM_DELETIONS, "event_sources", "retention_last_at")
             or await _column_pending(conn, _MESSAGE_STREAM_DELETIONS, "source_runs", "skipped_by_deletion"))
+
+
+async def _gate_message_sender_pending(conn: asyncpg.Connection) -> bool:
+    return await _column_pending(conn, _GATE_MESSAGE_SENDER, "task_user_gate_messages", "from_operator")
+
+
+async def _journal_supplement_sender_pending(conn: asyncpg.Connection) -> bool:
+    return await _column_pending(conn, _JOURNAL_SUPPLEMENT_SENDER, "task_journal", "from_operator")
 
 
 async def _column_pending(conn: asyncpg.Connection, marker: str, table: str, column: str) -> bool:
@@ -1716,6 +1727,13 @@ async def ensure_schema(pool: asyncpg.Pool | asyncpg.Connection | None = None) -
             await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", _OUTBOUND_REVIEWS)
         if await _uncertain_deliveries_pending(conn):
             await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", _UNCERTAIN_DELIVERIES)
+        # Nullable without a default: neither column rewrites a row, and existing rows stay unknown (NULL).
+        if await _gate_message_sender_pending(conn):
+            await conn.execute("ALTER TABLE task_user_gate_messages ADD COLUMN from_operator BOOLEAN")
+            await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", _GATE_MESSAGE_SENDER)
+        if await _journal_supplement_sender_pending(conn):
+            await conn.execute("ALTER TABLE task_journal ADD COLUMN from_operator BOOLEAN")
+            await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", _JOURNAL_SUPPLEMENT_SENDER)
         # Current databases never replay initialization DDL. Missing builtins
         # are inserted without changing any saved choice or creation time.
         await conn.execute(SEEDS_PATH.read_text(encoding="utf-8"))
@@ -1770,6 +1788,7 @@ async def schema_change_pending(conn: asyncpg.Connection) -> bool:
             or await _run_skips_pending(conn)
             or await _outbound_reviews_pending(conn)
             or await _uncertain_deliveries_pending(conn)
+            or await _gate_message_sender_pending(conn) or await _journal_supplement_sender_pending(conn)
             or await _run_tree_pending(conn) or await _step_difficulty_pending(conn)
             or await _agent_spawns_pending(conn) or await _advisor_roles_pending(conn)
             or await _decision_snapshots_pending(conn)

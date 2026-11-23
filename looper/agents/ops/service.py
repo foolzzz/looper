@@ -65,7 +65,7 @@ from ..managers_api import DEFAULT_MANAGER_ID, ManagerDefinition, ManagerTools, 
 from ..message import BOT_CHANNEL_TYPES, MessageEnvelope, builtin_channel_id
 from ..operator_identity import is_operator, operator_sender_id
 from ..tiers.manager_session import MAIN_SESSION
-from . import Audience, Call, ErrorCode, OpError, RestrictedTool, Risk, Tool, Turn, TurnState, check_arguments
+from . import API_CHANNEL, Audience, Call, ErrorCode, OpError, RestrictedTool, Risk, Tool, Turn, TurnState, check_arguments
 from .concurrency import TOOLS as CONCURRENCY_TOOLS
 from . import ledger as ledger_tools
 from .config import TOOLS as CONFIG_TOOLS, project_tool
@@ -997,6 +997,14 @@ class _Recorded(OpError):
 
 def _audience(tool: Tool) -> Audience:
     return tool.audience if isinstance(tool, RestrictedTool) else Audience.ANY
+
+
+async def operator_call(turn: Turn) -> bool:
+    """Whether a call is the operator's own: in their own turn (``_operator_turn``), or through the API with the
+    operator's token (no client)."""
+    if turn.channel == API_CHANNEL:
+        return turn.client_id is None
+    return await _operator_turn(turn)
 
 
 async def _operator_turn(turn: Turn) -> bool:
