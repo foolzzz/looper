@@ -295,10 +295,10 @@ function isDirectChat(chat: string): boolean {
   return /^(?:ou_[0-9A-Za-z]+|[1-9][0-9]{0,19})$/.test(chat);
 }
 
-type OutputKind = "" | "push" | "leads" | "intents";
+type OutputKind = "" | "push" | "leads" | "intents" | "triage";
 
 function outputKindOf(value: string | undefined): OutputKind {
-  return value === "push" || value === "leads" || value === "intents" ? value : "";
+  return value === "push" || value === "leads" || value === "intents" || value === "triage" ? value : "";
 }
 
 function draftOf(schedule: ScheduleInfo | null, limits: ScheduleLimits): Draft {
@@ -1507,7 +1507,7 @@ function subDraftOf(schedule: ScheduleInfo | null, limits: ScheduleLimits): SubD
   };
 }
 
-/** Fill a new subscription from a preset. An intents preset drops a group target: it only pushes to a direct chat. */
+/** Fill a new subscription from a preset, keeping only targets supported by its output kind. */
 function draftFromPreset(current: SubDraft, fields: SubscriptionPresetFields): SubDraft {
   const sub = fields.subscription;
   const chat = current.notifyTarget.includes("\n") ? current.notifyTarget.slice(current.notifyTarget.indexOf("\n") + 1) : "";
@@ -1519,7 +1519,7 @@ function draftFromPreset(current: SubDraft, fields: SubscriptionPresetFields): S
     ...(sub.exclude_mentions_me === undefined ? {} : { excludeMe: sub.exclude_mentions_me }),
     history: sub.include_history, maxAge: String(sub.max_age_minutes), maxEvents: String(sub.max_events),
     textChars: String(sub.text_max_chars), quiet: sub.quiet_word, header: sub.output_header, outputKind: sub.output_kind,
-    notifyTarget: sub.output_kind === "intents" && chat && !isDirectChat(chat) ? "" : current.notifyTarget,
+    notifyTarget: sub.output_kind === "triage" || (sub.output_kind === "intents" && chat && !isDirectChat(chat)) ? "" : current.notifyTarget,
   };
 }
 
@@ -1600,7 +1600,7 @@ function SubscriptionForm({
   const targets = limits.notify_targets;
   const shownTargets = draft.outputKind === "intents" ? targets.filter((target) => isDirectChat(target.chat)) : targets;
   const gone = draft.notifyTarget && !shownTargets.some((t) => targetKey(t) === draft.notifyTarget) ? targetOf(draft.notifyTarget) : null;
-  const applyPreset = async (outputKind: "leads" | "intents") => {
+  const applyPreset = async (outputKind: "leads" | "intents" | "triage") => {
     setBusy(true);
     setError("");
     try {
@@ -1650,6 +1650,7 @@ function SubscriptionForm({
         <div className="flex flex-wrap gap-2">
           <Button type="button" variant="outline" size="sm" disabled={busy} onClick={() => void applyPreset("leads")}>消息线索</Button>
           <Button type="button" variant="outline" size="sm" disabled={busy} onClick={() => void applyPreset("intents")}>意图识别</Button>
+          <Button type="button" variant="outline" size="sm" disabled={busy} onClick={() => void applyPreset("triage")}>事件分流</Button>
         </div>
       )}
       <div className="grid gap-3 sm:grid-cols-2">
@@ -1723,7 +1724,7 @@ function SubscriptionForm({
       </fieldset>
 
       <fieldset className="space-y-2 border-t border-border pt-4">
-        <legend className={cn(LABEL, "mb-1")}>What it pushes</legend>
+        <legend className={cn(LABEL, "mb-1")}>{draft.outputKind === "triage" ? "结果与预算" : "What it pushes"}</legend>
         <div className="grid gap-3 sm:grid-cols-2">
           <div className="space-y-1">
             <label htmlFor={id("quiet")} className={LABEL}>Quiet word</label>
@@ -1744,6 +1745,7 @@ function SubscriptionForm({
             <Input id={id("daily")} inputMode="decimal" value={draft.dailyBudget} onChange={(e) => set("dailyBudget", e.target.value)} placeholder="No daily cap" />
           </div>
           <div className="space-y-1">
+            {draft.outputKind === "triage" ? <p className="text-xs text-muted-foreground">结果仅存储，暂不发送；重要事件等待管家交接，摘要等待晨报接入。</p> : <>
             <label htmlFor={id("target")} className={LABEL}>Push to</label>
             <select id={id("target")} value={draft.notifyTarget} onChange={(e) => set("notifyTarget", e.target.value)} className={SELECT}>
               <option value="">Dashboard only</option>
@@ -1756,6 +1758,7 @@ function SubscriptionForm({
               A direct chat or a bound group. Changing it, the rule or the zone, or turning the subscription on, asks you to
               confirm before anything is pushed; until then the output stays on this page.
             </p>
+            </>}
           </div>
           <Choices name={id("notify")} legend="Failures" value={draft.notify} onChange={(value) => set("notify", value)}
             options={scheduleNotifyOptions("agent", 3).filter((option) => option.value !== "always")} />
@@ -1810,6 +1813,7 @@ export function SubscriptionStatus({ schedule, onChange }: { schedule: ScheduleI
   const [error, setError] = useState("");
   const [moved, setMoved] = useState("");
   if (!sub) return null;
+  const triage = sub.output_kind === "triage";
   const target = schedule.notify_target;
   const close = () => { setPanel(""); setError(""); };
   const openConfirm = async () => {
@@ -1845,7 +1849,10 @@ export function SubscriptionStatus({ schedule, onChange }: { schedule: ScheduleI
   return (
     <div className="basis-full space-y-2 text-xs">
       <p className="flex flex-wrap items-center gap-x-2 gap-y-1 text-muted-foreground">
-        {target ? (sub.target_confirmed_at
+        {triage ? (sub.target_confirmed_at
+          ? <><CheckCircle2 className="h-3.5 w-3.5 text-success" aria-hidden="true" />事件分流已确认：结果仅存储，暂不发送。</>
+          : <><AlertCircle className="h-3.5 w-3.5 text-warning" aria-hidden="true" /><span className="text-warning">事件分流尚未确认：确认后才读取消息。</span></>)
+          : target ? (sub.target_confirmed_at
           ? <><CheckCircle2 className="h-3.5 w-3.5 text-success" aria-hidden="true" />Pushes to {target.channel} · {target.chat}, confirmed {formatInZone(sub.target_confirmed_at, schedule.timezone)}</>
           : <><AlertCircle className="h-3.5 w-3.5 text-warning" aria-hidden="true" /><span className="text-warning">Push target not confirmed: output stays on this page.</span></>)
           : "Dashboard only: nothing is pushed."}
@@ -1855,14 +1862,14 @@ export function SubscriptionStatus({ schedule, onChange }: { schedule: ScheduleI
         {!!sub.uncertain_deliveries && <span className="text-warning" role="status">
           {sub.uncertain_deliveries} message{sub.uncertain_deliveries === 1 ? "" : "s"} of the last 7 days may not have been sent
           (cut off while sending; never sent again)</span>}
-        {target && !sub.target_confirmed_at && panel !== "confirm" && (
-          <Button type="button" variant="outline" size="sm" onClick={openConfirm} className="h-11 sm:h-7">Confirm push target…</Button>)}
+        {(triage || target) && !sub.target_confirmed_at && panel !== "confirm" && (
+          <Button type="button" variant="outline" size="sm" onClick={openConfirm} className="h-11 sm:h-7">{triage ? "确认事件分流…" : "Confirm push target…"}</Button>)}
         {panel !== "reset" && <Button type="button" variant="ghost" size="sm" onClick={() => { setPanel("reset"); setMoved(""); }} className="h-11 sm:h-7">Reset cursor…</Button>}
       </p>
       {moved && <p role="status" className="text-muted-foreground">{moved}</p>}
       {panel === "confirm" && (
         <section role="group" aria-labelledby={`${id}-confirm`} className="space-y-2 rounded-md border border-warning/50 bg-muted/20 p-3">
-          <h4 id={`${id}-confirm`} className="font-semibold">Confirm the push target</h4>
+          <h4 id={`${id}-confirm`} className="font-semibold">{triage ? "确认事件分流" : "Confirm the push target"}</h4>
           {text == null && !error ? <Loader2 className="h-4 w-4 animate-spin" aria-label="Loading" />
             : <pre className="max-h-72 overflow-auto whitespace-pre-wrap break-words font-sans text-xs leading-relaxed">{text}</pre>}
           {error && <p role="alert" className="text-destructive">{error}</p>}

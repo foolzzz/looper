@@ -1,9 +1,7 @@
-"""The foundation leaves model-visible tools and public subscription creation unchanged."""
+"""Event triage leaves model-visible tools unchanged and has its own subscription kind."""
 
 import hashlib
 import json
-
-import pytest
 
 from looper.agents import subscriptions
 from looper.agents.ops.clients import CLIENT_TOOLS
@@ -18,6 +16,5 @@ def test_tools_are_byte_identical_to_before_the_triage_foundation():
         assert hashlib.sha256(json.dumps(value, sort_keys=True).encode()).hexdigest() == expected
 
 
-def test_triage_cannot_be_created_before_its_execution_is_installed():
-    with pytest.raises(ValueError, match="output_kind"):
-        subscriptions.parse({"output_kind": "triage"}, update=True)
+def test_triage_is_a_recognized_subscription_kind():
+    assert subscriptions.parse({"output_kind": "triage"}, update=True)["output_kind"] == "triage"

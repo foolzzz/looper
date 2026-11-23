@@ -37,8 +37,7 @@ def test_triage_setting_defaults_off_and_only_the_operator_can_store_or_reset_it
     run_db(check, monkeypatch)
 
 
-@pytest.mark.parametrize("enabled", [False, True])
-def test_triage_firing_stays_inert_even_when_the_foundation_setting_is_on(monkeypatch, tmp_path, enabled):
+def test_triage_firing_stays_inert_while_the_switch_is_off(monkeypatch, tmp_path):
     from looper.agents import extraction
     from looper.agents.scheduler import Scheduler
     from looper.db import schedules
@@ -46,7 +45,7 @@ def test_triage_firing_stays_inert_even_when_the_foundation_setting_is_on(monkey
 
     async def check(pool):
         await source(pool)
-        await triage_settings.update(enabled)
+        await triage_settings.update(False)
         await pool.execute("INSERT INTO projects (id, name) VALUES ('p', 'Synthetic project')")
         await pool.execute("INSERT INTO schedules (id, project_id, name, cron, timezone, kind, requirement) "
                            "VALUES ('s', 'p', 'Triage', '0 * * * *', 'UTC', 'subscription', 'Synthetic triage')")
@@ -66,7 +65,7 @@ def test_triage_firing_stays_inert_even_when_the_foundation_setting_is_on(monkey
                 common={"schedule_id": "s", "scheduled_for": now, "trigger": "manual"}, timeout={})
         run = await schedules.get_run(result.run_id, pool=pool)
         assert run["status"] == "skipped_gate"
-        assert run["error"] == (triage_settings.NOT_IMPLEMENTED if enabled else triage_settings.TURNED_OFF)
+        assert run["error"] == triage_settings.TURNED_OFF
         assert await pool.fetchval("SELECT cursor_seq FROM subscriptions WHERE schedule_id = 's'") == 42
         assert await pool.fetchval("SELECT count(*) FROM subscription_runs") == 0
         assert await pool.fetchval("SELECT count(*) FROM manager_events") == 0

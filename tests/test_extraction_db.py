@@ -322,6 +322,7 @@ def test_a_leads_run_from_its_preset_stores_the_leads_its_reply_names_and_moves_
         before = await cursor(env, sid)
         run = await fire(env, sid)
         assert run["status"] == "completed" and run["stream"]["outcome"] == "extracted"
+        assert "window_seqs" not in await db_subs.get_run(run["id"], db=env.pool)
         counts = json.loads(run["stream"]["extract_counts"])
         assert counts == {"new": 1, "merged": 0, "superseded": 0, "dropped": {}, "instructions_seen": 0,
                           "more": False}
@@ -366,6 +367,7 @@ def test_an_intents_run_stores_pending_and_flagged_intents_and_pushes_nothing(mo
         await add(env.pool, "lunch?", sent_at=minutes_ago(env, 6))  # group chatter: out of scope
         run = await fire(env, sid)
         assert run["status"] == "completed" and run["stream"]["outcome"] == "extracted"
+        assert "window_seqs" not in await db_subs.get_run(run["id"], db=env.pool)
         counts = json.loads(run["stream"]["extract_counts"])
         assert (counts["new"], counts["dropped"], counts["instructions_seen"]) == (3, {"app_only_not_alert": 1}, 1)
         rows = await env.pool.fetch("SELECT * FROM intents ORDER BY id")

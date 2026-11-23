@@ -201,7 +201,7 @@ export interface SubscriptionPresetFields {
     text_max_chars: number;
     quiet_word: string;
     output_header: string;
-    output_kind: "leads" | "intents";
+    output_kind: "leads" | "intents" | "triage";
     exclude_mentions_me?: boolean;
   };
 }
@@ -244,7 +244,7 @@ export function leadsSetChat(args: {
   return call("/api/v1/leads/set_chat", args);
 }
 
-export function subscriptionPreset(args: { output_kind: "leads" | "intents" }): Promise<{ fields: SubscriptionPresetFields }> {
+export function subscriptionPreset(args: { output_kind: "leads" | "intents" | "triage" }): Promise<{ fields: SubscriptionPresetFields }> {
   return call("/api/v1/schedule_admin/subscription_preset", args);
 }
 

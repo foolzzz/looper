@@ -10,6 +10,7 @@ import asyncio
 import hashlib
 import json
 from dataclasses import replace
+from datetime import datetime, timezone
 from pathlib import Path
 
 from looper.agents import extraction, processor, subscriptions
@@ -102,3 +103,29 @@ def test_with_the_check_off_an_extractions_prompt_and_version_are_unchanged():
     on = asyncio.run(subscriptions.config_version(checked, profile=FACTS, checker=FACTS))
     other = asyncio.run(subscriptions.config_version(checked, profile=FACTS, checker={**FACTS, "effort": "high"}))
     assert len({version, on, other}) == 3
+
+
+def test_leads_and_intents_instructions_and_contracts_match_the_parent_branch():
+    # Frozen on the parent branch before triage execution was added.
+    expected = {
+        "LEADS_INSTRUCTIONS": "a9a52bf682a687f31d86f2262685a6ba3426cd6ac72231881c361cdc8500e9ed",
+        "INTENTS_INSTRUCTIONS": "4a624ca0122ea382a62046dae151fd061509de12a6a6ef4806a493b3fd643466",
+        "LEADS_CONTRACT": "652b522619f35c002ec63dd3cc29cfde1199c6e6514097390dc715b633eaa13f",
+        "INTENTS_CONTRACT": "85519bbba55d7894333e571301e7ae23dfe87a24a3e71aa85f3612fb27f70e10",
+    }
+    for name, digest in expected.items():
+        assert hashlib.sha256(getattr(extraction, name).encode()).hexdigest() == digest
+
+
+def test_existing_subscription_rendered_inputs_match_the_parent_branch():
+    rows = [{"seq": 11, "sent_at": datetime(2026, 1, 2, 3, 4, tzinfo=timezone.utc), "chat_id": "synthetic-chat",
+             "chat_kind": "p2p", "chat_name": "Synthetic chat", "sender_id": "synthetic-peer", "sender_name": "Peer",
+             "sender_kind": "user", "text": "Synthetic status update", "external_id": "synthetic-message",
+             "parent_id": None}]
+    for kind in ("leads", "intents", "push"):
+        text = (subscriptions.processor_input(rows, text_max_chars=200, zone_name="UTC") if kind == "push" else
+                extraction.render(kind, rows, context=[], participants=extraction.Participants(
+                    {"synthetic-peer": "Peer"}, "synthetic-operator"), known=[], zone_name="UTC", text_max_chars=200)[0])
+        expected = ("cb93601fa21feeb389636cc71aee891745b946e975b409b9cfd7ca3214810291" if kind == "push" else
+                    "b1c69d64003a6f05951176d3ca7f623430e1bc5c1bd8c14e06b332b8173e50d8")
+        assert hashlib.sha256(text.encode()).hexdigest() == expected

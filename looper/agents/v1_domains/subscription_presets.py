@@ -9,14 +9,14 @@ from ..ops import ErrorCode, OpError
 from .schedule_reads import _enum
 
 RESULTS = {}
-_SUMMARY = "Read the schedule fields a message-lead or intent subscription is created from."
+_SUMMARY = "Read the schedule fields a message-lead, intent or event-triage subscription is created from."
 _DESCRIPTION = (f"{_SUMMARY} They are a complete fields object for schedule_admin.create, except project_id and, for "
                 "intents, notify_target (a direct chat). Its chat kinds, sender kinds and rendering only satisfy "
                 "validation: an extraction's scope is fixed by its output kind.")
 OPERATIONS = (
     Operation("schedule_admin.subscription_preset", "POST", "/api/v1/schedule_admin/subscription_preset",
               _SUMMARY, _DESCRIPTION,
-              _object({"output_kind": _enum("leads", "intents")}, ["output_kind"], closed=True),
+              _object({"output_kind": _enum("leads", "intents", "triage")}, ["output_kind"], closed=True),
               _object({"fields": _OBJ}, ["fields"], closed=True), risk="read", operator_only=True),
 )
 
