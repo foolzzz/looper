@@ -22,6 +22,7 @@ if TYPE_CHECKING:
     from ..system_prompt import SystemPrompt
     from .state_view import StateShown
     from .turn_token import TurnToken
+    from .manager_budget import BudgetTurn
 
 MAIN_SESSION = "main"
 
@@ -84,6 +85,7 @@ class ManagerSession:
     # The agent settings the last turn ran with, kept when a turn cannot read them (None before any).
     agent_settings: AgentSettings | None = None
     last_activity: float
+    budget: BudgetTurn | None = None  # enabled turn only; retained through reply and session maintenance
 
 
 _FIELDS = frozenset(f.name for f in fields(ManagerSession))
