@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import json
 import uuid
-from collections.abc import Mapping, Sequence
+from collections.abc import Collection, Mapping, Sequence
 from types import EllipsisType
 from typing import Any
 
@@ -137,6 +137,17 @@ async def create_project(
         *values,
     )
     return dict(row)
+
+
+async def names_of(
+    project_ids: Collection[str], *, pool: asyncpg.Pool | asyncpg.Connection | None = None,
+) -> dict[str, str]:
+    """Current project names; an empty id set reads nothing, and a missing project is left out."""
+    if not project_ids:
+        return {}
+    pool = pool or get_pool()
+    rows = await pool.fetch("SELECT id, name FROM projects WHERE id = ANY($1::text[])", list(project_ids))
+    return {row["id"]: row["name"] for row in rows}
 
 
 async def update_project(

@@ -661,6 +661,22 @@ async def running_runs(*, pool: Db | None = None) -> list[dict[str, Any]]:
     return [dict(row) for row in rows]
 
 
+async def named_running(*, pool: Db | None = None) -> list[dict[str, Any]]:
+    """Running schedule runs with the schedule's name, its timezone and its project's name."""
+    db = pool or get_pool()
+    rows = await db.fetch(
+        """
+        SELECT r.id, r.schedule_id, r.fired_at, s.name, s.timezone, p.name AS project_name
+        FROM schedule_runs r
+        JOIN schedules s ON s.id = r.schedule_id
+        JOIN projects p ON p.id = s.project_id
+        WHERE r.status = 'running'
+        ORDER BY r.fired_at, r.id
+        """,
+    )
+    return [dict(row) for row in rows]
+
+
 async def schedules_with_queued_runs(*, kinds: Sequence[str] | None = None, pool: Db | None = None) -> list[str]:
     db = pool or get_pool()
     rows = await db.fetch(
