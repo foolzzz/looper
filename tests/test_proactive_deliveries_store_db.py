@@ -47,6 +47,9 @@ def test_delivery_table_has_nullable_decision_columns_and_one_migration(upgrade,
         if restore:
             await restore()
         assert await pool.fetchval("SELECT count(*) FROM proactive_deliveries") == 0
+        assert await pool.fetchval("SELECT count(*) FROM pg_constraint WHERE contype = 'f' "
+                                   "AND conrelid = 'morning_brief_consumed'::regclass "
+                                   "AND confrelid = 'proactive_deliveries'::regclass") == 1
         # Fresh schemas use the baseline marker; upgrades record the one named migration.
         assert await pool.fetchval("SELECT count(*) FROM schema_migrations WHERE name='proactive_deliveries'") == int(upgrade)
         columns = await pool.fetch("SELECT column_name, data_type, is_nullable FROM information_schema.columns "
@@ -75,7 +78,9 @@ def test_delivery_table_has_nullable_decision_columns_and_one_migration(upgrade,
     run_db(check, monkeypatch)
 
 
-def test_housekeeping_retains_ninety_days_and_drains_batches_only_when_enabled(monkeypatch, tmp_path):
+def test_housekeeping_retains_ninety_days_and_drains_batches_when_rows_exist(monkeypatch, tmp_path):
+    """Old rows are removed in batches even when metrics are off. Delivery writes this table without that switch.
+    The cutoff row and a current row stay. A later pass with nothing older deletes nothing."""
     from looper.agents import chat_settings, housekeeping
 
     async def check(pool):
@@ -88,10 +93,6 @@ def test_housekeeping_retains_ninety_days_and_drains_batches_only_when_enabled(m
             await pool.execute("INSERT INTO proactive_deliveries (source, channel_id, chat, chat_kind, outcome, sent_at) "
                                "VALUES ('gate', 'synthetic-channel', 'synthetic-chat', 'direct', 'sent', $1)", sent)
         monkeypatch.setattr(chat_settings, "_metrics_enabled", False)
-        report = await housekeeping.run_once(tmp_path, now, current_runner=None, commands=None)
-        assert report.proactive_deliveries == 0
-        assert await pool.fetchval("SELECT count(*) FROM proactive_deliveries") == 5003
-        monkeypatch.setattr(chat_settings, "_metrics_enabled", True)
         report = await housekeeping.run_once(tmp_path, now, current_runner=None, commands=None)
         assert report.proactive_deliveries == 5001 and not report.failed_steps
         assert await pool.fetchval("SELECT array_agg(sent_at ORDER BY sent_at) FROM proactive_deliveries") == [cutoff, now]
