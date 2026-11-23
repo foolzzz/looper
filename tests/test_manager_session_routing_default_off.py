@@ -80,4 +80,3 @@ def test_off_one_session_one_process_and_the_same_command_line_and_mcp_entry(mon
         assert _command(command, tmp_path) == COMMAND_SHA256, _command(command, tmp_path)
 
     run_db(body, monkeypatch, timeout=90)
-

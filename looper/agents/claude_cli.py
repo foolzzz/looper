@@ -1661,6 +1661,12 @@ class ClaudeRunRecorder:
 
     async def persist(self, event: dict[str, Any]) -> None:
         """Write ``event``, once ``account`` has taken it, to the run's record."""
+        from . import limit_signals
+
+        if event.get("type") in ("rate_limit_event", limit_signals.CODEX_EVENT):
+            await limit_signals.observe(event, self._provider().id, self._record_id)
+        if event.get("type") == limit_signals.CODEX_EVENT:
+            return
         await self._heartbeat()
         if self._record_id is None or event.get("type") in ("usage", "stream_event"):
             return
