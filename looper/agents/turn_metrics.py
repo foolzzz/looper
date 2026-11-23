@@ -3,16 +3,20 @@ from __future__ import annotations
 
 import asyncio
 from collections import OrderedDict
-from collections.abc import Coroutine, Iterable
+from collections.abc import Coroutine
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from enum import Enum
 import logging
 import time
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from . import chat_settings
 from .ops import TurnOrigin
+
+if TYPE_CHECKING:
+    from .tiers.manager_session import ManagerSession
+    from .tiers.turn_token import TurnToken
 
 logger = logging.getLogger(__name__)
 
@@ -72,35 +76,39 @@ class TurnTimes:
         return record
 
 
-def queued_behind(ended: Iterable[tuple[TurnOrigin, datetime]], received_at: datetime) -> QueuedBehind:
+def queued_behind(session: ManagerSession, received_at: datetime) -> QueuedBehind:
     """What this message waited behind in its own session between arrival and its turn.
 
-    Turns that ended at or after ``received_at`` count. A completion turn, or any
-    other non-user origin, is ``background`` and wins over a user turn. A user
-    turn alone is ``user``. An empty window is ``none``. Own turns are not recorded.
+    The session keeps when its last user turn ended and when its last background
+    turn ended. A turn that ended at or after ``received_at`` counts. A background
+    turn wins over a user turn. A user turn alone is ``user``. Neither is ``none``.
     """
-    relevant = [origin for origin, ended_at in ended if ended_at >= received_at]
-    if any(origin != TurnOrigin.USER for origin in relevant):
+    background_ended_at = session.last_background_turn_ended_at
+    user_ended_at = session.last_user_turn_ended_at
+    if background_ended_at is not None and background_ended_at >= received_at:
         return QueuedBehind.BACKGROUND
-    if any(origin == TurnOrigin.USER for origin in relevant):
+    if user_ended_at is not None and user_ended_at >= received_at:
         return QueuedBehind.USER
     return QueuedBehind.NONE
 
 
-def note_lock_end(session: Any, token: Any, origin: TurnOrigin) -> None:
-    """Remember that ``token`` held this session's turn lock, once, while metrics are on.
+def note_lock_end(session: ManagerSession, token: TurnToken | None, origin: TurnOrigin) -> None:
+    """Remember when ``token`` released this session's turn lock, while metrics are on.
 
-    A turn that never owned the lock blocked nobody. The turn is recorded even when
-    post-reply maintenance keeps the lock afterwards; that hold is not another turn,
-    so callers do not record it again when the lock is released. The completion
-    deadline path and the turn's ``finally`` share one record.
+    A turn that never owned the lock blocked nobody. Callers record a turn once,
+    while ``lock_owner`` is still ``token``, and then clear the owner, so the
+    completion deadline path and the turn's ``finally`` share one record. Post-reply
+    maintenance may keep the lock; that hold is not another turn, and callers do
+    not record it again when the lock is released. Any origin other than a user
+    turn is a background turn.
     """
     if token is None or not chat_settings.metrics_enabled() or session.lock_owner is not token:
         return
-    if getattr(token, '_queued_end_noted', False):
-        return
-    token._queued_end_noted = True
-    session.turns_ended.append((origin, datetime.now(timezone.utc)))
+    ended_at = datetime.now(timezone.utc)
+    if origin is TurnOrigin.USER:
+        session.last_user_turn_ended_at = ended_at
+    else:
+        session.last_background_turn_ended_at = ended_at
 
 
 class AckBoard:

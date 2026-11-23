@@ -1748,7 +1748,7 @@ class ManagerAgent:
             await token.step("turn_lock", self._turn_lock.acquire())
             if token.times is not None:
                 token.times.queued_behind = turn_metrics.queued_behind(
-                    self._session_now().turns_ended, token.times.received_at)
+                    self._session_now(), token.times.received_at)
             self._lock_owner = token
             waiting = (self.ops.begin_turn(turn, binding=token.binding, session_key=self._session_now().key)
                        if self.ops is not None else "")

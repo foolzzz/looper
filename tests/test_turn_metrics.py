@@ -34,27 +34,27 @@ def test_turn_metadata_contract():
 
 
 def test_queued_behind_counts_turns_that_ended_at_or_after_arrival():
-    from looper.agents.ops import TurnOrigin
+    from types import SimpleNamespace
     from looper.agents.turn_metrics import QueuedBehind, queued_behind
     received = datetime(2026, 1, 1, tzinfo=timezone.utc)
-    user, completion, own = TurnOrigin.USER, TurnOrigin.COMPLETION, TurnOrigin.OWN
 
-    def ended(*pairs: tuple[TurnOrigin, float]) -> list[tuple[TurnOrigin, datetime]]:
-        return [(origin, received + timedelta(seconds=delta)) for origin, delta in pairs]
+    def session(user: float | None, background: float | None) -> SimpleNamespace:
+        def at(delta: float | None) -> datetime | None:
+            return None if delta is None else received + timedelta(seconds=delta)
+        return SimpleNamespace(last_user_turn_ended_at=at(user), last_background_turn_ended_at=at(background))
 
     cases = [
-        ([], QueuedBehind.NONE),
-        (ended((user, -1), (completion, -1)), QueuedBehind.NONE),
-        (ended((user, 1)), QueuedBehind.USER),
-        (ended((completion, 1)), QueuedBehind.BACKGROUND),
-        (ended((user, 1), (completion, 1)), QueuedBehind.BACKGROUND),
-        (ended((user, 0)), QueuedBehind.USER),
-        (ended((completion, 0)), QueuedBehind.BACKGROUND),
-        (ended((own, 1)), QueuedBehind.BACKGROUND),
-        (ended((completion, -1), (user, 1)), QueuedBehind.USER),
+        (None, None, QueuedBehind.NONE),
+        (-1, -1, QueuedBehind.NONE),
+        (1, None, QueuedBehind.USER),
+        (None, 1, QueuedBehind.BACKGROUND),
+        (1, 1, QueuedBehind.BACKGROUND),
+        (0, None, QueuedBehind.USER),
+        (None, 0, QueuedBehind.BACKGROUND),
+        (1, -1, QueuedBehind.USER),
     ]
-    for entries, expected in cases:
-        assert queued_behind(entries, received) is expected
+    for user, background, expected in cases:
+        assert queued_behind(session(user, background), received) is expected
 
 
 def test_queued_behind_is_appended_last_and_a_completion_record_omits_it():
@@ -72,25 +72,68 @@ def test_queued_behind_is_appended_last_and_a_completion_record_omits_it():
         'origin': 'completion', 'tool_calls': 0, 'delivery': 'failed'}
 
 
-def test_note_lock_end_appends_once_for_the_owner_while_metrics_are_on(monkeypatch):
+def _ended_session(owner: object) -> object:
     from types import SimpleNamespace
-    from collections import deque
+    return SimpleNamespace(lock_owner=owner, last_user_turn_ended_at=None, last_background_turn_ended_at=None)
+
+
+def test_note_lock_end_records_the_owner_while_metrics_are_on(monkeypatch):
     from looper.agents import chat_settings, turn_metrics
     from looper.agents.ops import TurnOrigin
     monkeypatch.setattr(chat_settings, '_metrics_enabled', True)
-    token = SimpleNamespace()
-    session = SimpleNamespace(lock_owner=token, turns_ended=deque(maxlen=16))
+
+    class Untouched:
+        __slots__ = ()
+
+    token = Untouched()
+    session = _ended_session(token)
     turn_metrics.note_lock_end(session, token, TurnOrigin.USER)
-    recorded = session.turns_ended[0]
+    recorded = session.last_user_turn_ended_at
+    assert recorded is not None and session.last_background_turn_ended_at is None
+    # The caller clears the owner after recording, so a later call does not write again.
+    session.lock_owner = None
     turn_metrics.note_lock_end(session, token, TurnOrigin.COMPLETION)
-    assert list(session.turns_ended) == [recorded]
-    assert recorded[0] is TurnOrigin.USER
-    assert token._queued_end_noted is True
+    assert session.last_user_turn_ended_at is recorded
+    assert session.last_background_turn_ended_at is None
+
+
+def test_a_completion_still_counts_after_more_than_sixteen_user_turns(monkeypatch):
+    """A message that arrived before a completion ended still waited behind it.
+
+    Seventeen user turns after that completion used to push it out of a 16-long
+    deque and leave only user turns, so the message was classified as ``user``.
+    """
+    from looper.agents import chat_settings, turn_metrics
+    from looper.agents.ops import TurnOrigin
+    from looper.agents.turn_metrics import QueuedBehind
+    monkeypatch.setattr(chat_settings, '_metrics_enabled', True)
+
+    class Untouched:
+        __slots__ = ()
+
+    received = datetime.now(timezone.utc) - timedelta(seconds=30)
+    session = _ended_session(None)
+    completion = Untouched()
+    session.lock_owner = completion
+    turn_metrics.note_lock_end(session, completion, TurnOrigin.COMPLETION)
+    session.lock_owner = None
+    for _ in range(17):
+        token = Untouched()
+        session.lock_owner = token
+        turn_metrics.note_lock_end(session, token, TurnOrigin.USER)
+        session.lock_owner = None
+    assert session.last_background_turn_ended_at is not None
+    assert session.last_user_turn_ended_at is not None
+    assert turn_metrics.queued_behind(session, received) is QueuedBehind.BACKGROUND
+    # A non-user origin is a background turn, the same as a completion.
+    own = Untouched()
+    session.lock_owner = own
+    turn_metrics.note_lock_end(session, own, TurnOrigin.OWN)
+    assert session.last_background_turn_ended_at >= session.last_user_turn_ended_at
 
 
 def test_note_lock_end_leaves_the_token_alone_when_metrics_are_off_or_it_does_not_own_the_lock(monkeypatch):
     from types import SimpleNamespace
-    from collections import deque
     from looper.agents import chat_settings, turn_metrics
     from looper.agents.ops import TurnOrigin
 
@@ -98,15 +141,15 @@ def test_note_lock_end_leaves_the_token_alone_when_metrics_are_off_or_it_does_no
         __slots__ = ()
 
     token = Untouched()
-    session = SimpleNamespace(lock_owner=token, turns_ended=deque(maxlen=16))
+    session = _ended_session(token)
     monkeypatch.setattr(chat_settings, '_metrics_enabled', False)
     turn_metrics.note_lock_end(session, token, TurnOrigin.USER)
-    assert list(session.turns_ended) == []
+    assert session.last_user_turn_ended_at is None and session.last_background_turn_ended_at is None
     monkeypatch.setattr(chat_settings, '_metrics_enabled', True)
     session.lock_owner = SimpleNamespace()
     turn_metrics.note_lock_end(session, token, TurnOrigin.COMPLETION)
     turn_metrics.note_lock_end(session, None, TurnOrigin.COMPLETION)
-    assert list(session.turns_ended) == []
+    assert session.last_user_turn_ended_at is None and session.last_background_turn_ended_at is None
 
 
 def test_metrics_write_is_bounded_and_failure_is_throttled(monkeypatch, caplog):

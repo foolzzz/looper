@@ -1,14 +1,17 @@
 """What a user turn waited behind in its own session (``turn_metrics.queued_behind``).
 
 Metrics on, the user-turn record says ``none``, ``user`` or ``background``. Metrics off, the same
-arrival writes no ``turn_metrics`` and leaves the session's deque empty. Runs only when
+arrival writes no ``turn_metrics`` and leaves both end times unset. The metrics-off prompt hash
+and command line are pinned to this scenario on main. Runs only when
 LOOPER_TEST_DATABASE_URL points at a disposable database.
 """
 
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
+import re
 from pathlib import Path
 from typing import Any
 
@@ -17,7 +20,6 @@ import pytest
 from looper.agents import chat_settings, operator_identity, session_routing, turn_metrics
 from looper.agents.bus import MessageBus
 from looper.agents.message import MANAGER_ADDRESS, MessageEnvelope, MessageType, channel_address
-from looper.agents.ops import TurnOrigin
 from looper.agents.tiers.manager import ManagerAgent, ManagerConfig
 from tests.db_support import DSN, run_db, until
 from tests.lark_cli_stand_in import OPEN_ID
@@ -29,6 +31,48 @@ pytestmark = pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not
 
 _PREVIOUS = {"v", "origin", "chat", "received_at", "ack", "ack_ms", "first_reply_ms", "tool_calls",
              "delivery", "replayed"}
+
+# origin/main (d375a17bc) for this scenario with metrics off. The prompt and the command are built by
+# code this branch does not change. ``--settings`` embeds parent directories and the home directory, so
+# that argument is ``<settings>``; the executable is ``<claude>``. The prompt file keeps its content hash.
+# The completion turn and the user turn that follows it share this command.
+_MAIN_SYSTEM_PROMPT_SHA256 = "91ead4013184f8884ce8380726099e8adc82e5584e54ddac2d73ac0cf44b5808"
+_MAIN_COMMAND = [
+    "<claude>",
+    "--print",
+    "--verbose",
+    "--output-format",
+    "stream-json",
+    "--input-format",
+    "stream-json",
+    "--include-partial-messages",
+    "--replay-user-messages",
+    "--setting-sources",
+    "project",
+    "--strict-mcp-config",
+    "--settings",
+    "<settings>",
+    "--system-prompt-file",
+    "<root>/.local/prompts/91ead4013184f8884ce8380726099e8adc82e5584e54ddac2d73ac0cf44b5808.md",
+    "--system-prompt-snapshot",
+    "off",
+    "--dangerously-skip-permissions",
+    "--disallowedTools",
+    "ListAgents",
+    "--model",
+    "opus",
+    "--teammate-mode",
+    "in-process",
+]
+
+
+def _command_line(command: list[str], root: Path) -> list[str]:
+    """The command line with this run's paths removed, so it can be pinned."""
+    root_text = str(root)
+    line = [part.replace(str(root.resolve()), "<root>").replace(root_text, "<root>") for part in command]
+    line[0] = "<claude>"
+    line[line.index("--settings") + 1] = "<settings>"
+    return [re.sub(r"/[0-9a-f]{64}\.(json)", r"/<sha>.\1", part) for part in line]
 
 
 async def _rows(pool: Any) -> list[tuple[str, dict[str, Any]]]:
@@ -107,9 +151,10 @@ def test_a_user_message_that_arrived_during_a_completion_turn_waited_behind_back
         assert metrics["replayed"] is False and metrics["chat"] == "dashboard"
         completion = _row(await _rows(pool), "[COMPLETION]")
         assert completion["turn_metrics"] == {"origin": "completion", "tool_calls": 0, "delivery": "reply"}
-        assert [origin for origin, _ended in manager._sessions["main"].turns_ended] == [
-            TurnOrigin.COMPLETION, TurnOrigin.USER]
-        assert manager._sessions["main"].turns_ended.maxlen == 16
+        session = manager._sessions["main"]
+        assert session.last_background_turn_ended_at is not None
+        assert session.last_user_turn_ended_at is not None
+        assert session.last_background_turn_ended_at <= session.last_user_turn_ended_at
 
     run_db(run, monkeypatch, timeout=90)
 
@@ -121,8 +166,24 @@ def test_metrics_off_matches_the_same_arrival_with_metrics_on_except_the_new_key
         monkeypatch.setattr(chat_settings, "_metrics_enabled", False)
         off_metadata, off_prompt, off_manager = await _behind_a_completion(pool, tmp_path)
         assert "turn_metrics" not in off_metadata
-        assert list(off_manager._sessions["main"].turns_ended) == []
-        assert off_manager._sessions["main"].turns_ended.maxlen == 16
+        session = off_manager._sessions["main"]
+        assert session.last_user_turn_ended_at is None and session.last_background_turn_ended_at is None
+        rows = await _rows(pool)
+        user, completion = _row(rows, "queued-user"), _row(rows, "[COMPLETION]")
+        assert hashlib.sha256(user["system_prompt"].encode()).hexdigest() == user["system_prompt_sha256"]
+        assert hashlib.sha256(completion["system_prompt"].encode()).hexdigest() == completion["system_prompt_sha256"]
+        observed = {
+            "system_prompt_sha256": user["system_prompt_sha256"],
+            "completion_system_prompt_sha256": completion["system_prompt_sha256"],
+            "completion_command": _command_line(completion["command"], tmp_path),
+            "user_command": _command_line(user["command"], tmp_path),
+        }
+        assert observed == {
+            "system_prompt_sha256": _MAIN_SYSTEM_PROMPT_SHA256,
+            "completion_system_prompt_sha256": _MAIN_SYSTEM_PROMPT_SHA256,
+            "completion_command": _MAIN_COMMAND,
+            "user_command": _MAIN_COMMAND,
+        }
         await pool.execute(
             "TRUNCATE llm_records, manager_events, tasks, projects, agent_sessions, manager_sessions, "
             "chat_messages CASCADE")
@@ -148,7 +209,7 @@ def test_a_second_user_message_waited_behind_the_user_and_a_lone_one_behind_noth
         await rig.bus.publish(lone)
         await rig.reply(lone)
         session = rig.manager._sessions["main"]
-        await until(lambda: len(session.turns_ended) == 1)
+        await until(lambda: session.last_user_turn_ended_at is not None)
         rig.main.hold = True
         first = _web("first-msg")
         await rig.bus.publish(first)
@@ -179,12 +240,13 @@ def test_an_operator_direct_message_does_not_wait_behind_another_sessions_turn(m
         asked = _lark("group-msg", GROUP_A, OPEN_ID, group=True)
         await rig.bus.publish(asked)
         await asyncio.wait_for(group.running.wait(), 20)
-        assert list(rig.session(GROUP_A).turns_ended) == []
+        group_session = rig.session(GROUP_A)
+        assert group_session.last_user_turn_ended_at is None and group_session.last_background_turn_ended_at is None
         direct = _lark("dm-msg", "oc_synthetic_operator", OPEN_ID, group=False)
         await rig.bus.publish(direct)
         await rig.reply(direct)
         assert (await _wait_metric(pool, "dm-msg"))["turn_metrics"]["queued_behind"] == "none"
-        assert list(rig.session(GROUP_A).turns_ended) == []
+        assert group_session.last_user_turn_ended_at is None and group_session.last_background_turn_ended_at is None
         group.release.set()
         await rig.reply(asked)
 
