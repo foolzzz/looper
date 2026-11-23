@@ -7,6 +7,7 @@ import {
   deprecateProjectSkill,
   fetchCatalog,
   fetchContextBudget,
+  fetchSkillUsage,
   fetchProjectInstalls,
   fetchSkillProposals,
   fetchSkillVersions,
@@ -24,6 +25,7 @@ vi.mock("@/lib/api", async (original) => ({
   fetchProjectInstalls: vi.fn(),
   fetchCatalog: vi.fn(),
   fetchContextBudget: vi.fn(),
+  fetchSkillUsage: vi.fn(),
   fetchSkillProposals: vi.fn(),
   fetchSkillVersions: vi.fn(),
   fetchProjectSkill: vi.fn(),
@@ -161,6 +163,7 @@ beforeEach(() => {
   vi.mocked(fetchProjectInstalls).mockResolvedValue(view());
   vi.mocked(fetchCatalog).mockResolvedValue({ items: [] } as unknown as Catalog);
   vi.mocked(fetchContextBudget).mockResolvedValue(budget());
+  vi.mocked(fetchSkillUsage).mockResolvedValue([]);
   vi.mocked(fetchSkillProposals).mockResolvedValue({ mode: "off", proposals: [] });
   vi.mocked(fetchSkillVersions).mockResolvedValue(versions([{ project_id: "proj-1", project_name: "Calc" }]));
   vi.mocked(deprecateProjectSkill).mockResolvedValue({} as never);
@@ -296,6 +299,15 @@ describe("ProjectSkillsSection lifecycle", () => {
     vi.mocked(fetchContextBudget).mockResolvedValue(budget({ planner: true, worker: true, reviewer: true }));
     await renderSection();
     expect(host.textContent).toContain("planner, worker and reviewer are over 8000 characters.");
+  });
+
+  it("mounts the usage line on the skills the project wrote and says when the read fails", async () => {
+    vi.mocked(fetchSkillUsage).mockRejectedValue(new Error("usage unavailable"));
+    await renderSection();
+    const row = [...host.querySelectorAll("li")].find((r) => r.textContent?.includes("project:deploy-check"));
+    expect(row?.textContent).toContain("Usage unavailable: usage unavailable");
+    const inherited = [...host.querySelectorAll("li")].find((r) => r.textContent?.includes("elsewhere"));
+    expect(inherited?.textContent).not.toContain("Usage");
   });
 
   it("shows a failed budget read and does not invent a zero count", async () => {

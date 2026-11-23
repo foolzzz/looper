@@ -1,0 +1,80 @@
+{
+  "step_worker": [
+    [
+      "## How you work",
+      "cc5c4935f9b0f29e24df8644af44bb3a74e3aae316786f065b6c35871dec79ac"
+    ],
+    [
+      "## Boundaries",
+      "29ac3f2676b5a4fb8c177bc6c1dc2154d61163d448c842ba0760e4e2c87db424"
+    ],
+    [
+      "## Communication",
+      "27f53737b01e188d5459b33ea3863015f2a2e488032b9872b5a816f3c3be9554"
+    ],
+    [
+      "## Task",
+      "7184d8f97c840a00ffc9e2354da19da80b3ddbf12ce9367d37883561f1f5aa4b"
+    ],
+    [
+      "## Your step and its report (required; code checks the report)",
+      "ac9f8a0bca5ee5a86259d4b4043154e8841de92dc1c20f94e34a1b5a8ecb79e6"
+    ]
+  ],
+  "step_reviewer": [
+    [
+      "## How you work",
+      "cc5c4935f9b0f29e24df8644af44bb3a74e3aae316786f065b6c35871dec79ac"
+    ],
+    [
+      "## Boundaries",
+      "29ac3f2676b5a4fb8c177bc6c1dc2154d61163d448c842ba0760e4e2c87db424"
+    ],
+    [
+      "## Communication",
+      "3bd7fcff0100dc12b44ed688efac58d8da2458220b1d97d1eacc0d305e295371"
+    ],
+    [
+      "## Task",
+      "249d879537a297b963858b2d4167cec46013c1dc3fa142eb295935bbe51526eb"
+    ],
+    [
+      "## Your review and its verdict (required; code reads the verdict)",
+      "4605220c239c54b4fc3321f2423720cbea8e6aa4102c6493ebd3f1eabe1ae3e4"
+    ]
+  ],
+  "panel_work": [
+    [
+      "",
+      "4172e5583bf4f0b99f703e687c89c2bf162e456547e6c814f29305a7a9c229f9"
+    ],
+    [
+      "## Task",
+      "a6edb91fa4fa3806dbdd59e7844ff0047d706fc89181988dc823266b150f3931"
+    ],
+    [
+      "## Your step and its report (required; code checks the report)",
+      "ac9f8a0bca5ee5a86259d4b4043154e8841de92dc1c20f94e34a1b5a8ecb79e6"
+    ]
+  ],
+  "panel_review": [
+    [
+      "",
+      "4172e5583bf4f0b99f703e687c89c2bf162e456547e6c814f29305a7a9c229f9"
+    ],
+    [
+      "## Task",
+      "ed67520448f4e0d2157d053ef9821fa4fb7560348270e269ec10446700baf43b"
+    ],
+    [
+      "## Your review and its verdict (required; code reads the verdict)",
+      "4605220c239c54b4fc3321f2423720cbea8e6aa4102c6493ebd3f1eabe1ae3e4"
+    ]
+  ],
+  "review_contract": [
+    [
+      "## Your review and its verdict (required; code reads the verdict)",
+      "4605220c239c54b4fc3321f2423720cbea8e6aa4102c6493ebd3f1eabe1ae3e4"
+    ]
+  ]
+}

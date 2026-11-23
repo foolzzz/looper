@@ -61,7 +61,7 @@ def checked(body: Mapping[str, Any]) -> dict[str, str | None]:
     values: dict[str, str | None] = {}
     if "mode" in body:
         raw = body["mode"]
-        if raw is not None and raw not in (Mode.OFF.value, Mode.OBSERVE.value, Mode.ENFORCE.value):
+        if raw is not None and raw not in tuple(mode.value for mode in Mode):
             raise ValueError("mode must be off, observe, enforce or null")
         values[PREFIX + "mode"] = raw
     for cap in CAPS:

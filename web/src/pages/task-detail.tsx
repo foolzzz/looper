@@ -186,6 +186,8 @@ function taskStatusBadge(status: string) {
       return <Badge variant="outline" className="text-sm">Cancelled</Badge>;
     case "pending":
       return <Badge variant="warning" className="text-sm">Pending</Badge>;
+    case "awaiting_budget":
+      return <Badge variant="warning" className="text-sm">等你决定花费</Badge>;
     case "waiting_user":
       return <Badge variant="warning" className="text-sm">Waiting for you</Badge>;
     case READY_STATUS:

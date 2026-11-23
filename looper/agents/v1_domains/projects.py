@@ -20,7 +20,7 @@ EXECUTION = {
     **dict.fromkeys((*ADVISOR_BUDGETS, *SUBAGENT_BUDGETS), {"type": ["number", "null"]}),
     **dict.fromkeys(("supervise_interval_seconds", "max_step_retries", "role_text_max_chars",
                      "gate_reminder_hours", *ROOM_LIMITS, *ADVISOR_COUNTS, *SUBAGENT_COUNTS), {"type": ["integer", "null"]}),
-    "task_budget_action": _choice("wrap_up", "fail"), "review_policy": _choice("planner", "all"),
+    "task_budget_action": _choice("wrap_up", "fail", "ask"), "review_policy": _choice("planner", "all"),
     "step_workspaces": _choice("shared", "worktree"), "task_workspaces": _choice("in_place", "worktree"),
     **dict.fromkeys(("planner_roles", "wait_commands", "user_gates", "agent_room", "operator_notes", "vault",
                     "dependency_conditions", "advisor", "subagents"),

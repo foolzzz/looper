@@ -1019,7 +1019,7 @@ async def task_detail(task_id: str, *, compact: bool = False) -> dict[str, Any]:
         "journal": raw.get("journal", []),
         # The Planner's progress notes (journal kind progress), newest first: done, now, next, risks, estimate, at.
         "progress": progress_notes(raw.get("journal", [])),
-        # What the task's Planner, Workers and Reviewers spent: the total, by role, and the run count.
+        # What the task spent: the total, by role (room consults included), and the run count.
         "cost": cost,
     }
 

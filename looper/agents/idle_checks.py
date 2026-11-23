@@ -237,6 +237,7 @@ RULES: dict[str, SectionRule | None] = {
     "ledger": SectionRule(_ledger_due,
                           lambda item: (item["key"], item["since"], bool(item["facts"].get("overdue")))),
     "deliveries": SectionRule(lambda item, now: True, lambda item: (item["key"], item["since"])),
+    "cost": None,  # a pending spend hold already asked the operator to decide; not repeated here
 }
 
 
