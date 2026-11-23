@@ -125,7 +125,7 @@ def test_the_turn_past_the_daily_cap_falls_back_without_running_the_model(monkey
             await pool.execute(
                 "INSERT INTO manager_events (manager_id, kind, origin, target_kind, channel_id, chat, dedupe_key, "
                 "payload, fallback, state, batch, started_at, reason, finished_at) VALUES ('manager', 'triage', 'chat', "
-                "'dm', 'channel-lark', $1, 'earlier', '{}', '[]', 'skipped', $2, now(), 'manager_silent', now())",
+                "'dm', 'channel-lark', $1, 'earlier', jsonb_build_object('admitted_at', now()::text), '[]', 'skipped', $2, now(), 'manager_silent', now())",
                 CHAT, earlier)
             await chat.manager._handle(_wake())
             assert (await _states(pool))[0] == ("fallback", "daily_cap", None)
