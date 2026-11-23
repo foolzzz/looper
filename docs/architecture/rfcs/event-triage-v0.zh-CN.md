@@ -57,7 +57,7 @@
 | 方案 | 做法 | 取舍 |
 |---|---|---|
 | 逐条消息 | 每条消息都给类别和理由 | 一段 500 条，输出比输入还长，花费翻倍 |
-| **按事件（推荐）** | 重要和进摘要的逐个列成事件；忽略的按理由分组，只列引用（`m3`、`m7`），不复述内容。没被任何一项引用的消息，由代码记为忽略，理由类型是 `uncited` | 输出和线索相当；每条消息都有类别；`uncited` 的比例本身就是一个质量指标 |
+| **按事件（推荐）** | 重要和进摘要的逐个列成事件；忽略的按理由分组，只列引用（`m3`、`m7`），不复述内容。没被任何一项引用的消息，只在运行计数中归入忽略和 `uncited`，不新建事件行；查询时由 `window_seqs` 与出处链接判定 | 输出和线索相当；每条消息都有类别；`uncited` 的比例本身就是一个质量指标 |
 
 ## 3. 决定
 
@@ -84,10 +84,10 @@
 | 表或列 | 说明 |
 |---|---|
 | `subscriptions.output_kind` | 取值加 `triage` |
-| `triage_events` | 列：`id`（显示为 `E-123`）、`source_id`、`schedule_id`、`run_id`、`record_id`、`category`、`title`（不超过 60 字，忽略组为空）、`summary`（不超过 400 字，忽略组为空）、`reason`（不超过 100 字，不能为空）、`reason_kind`、`confidence`、`flagged`、`first_sent_at`、`last_sent_at`、`manager_event_id`、`briefed_run_id`、`created_at`。`reason_kind` 取值：`model` 表示模型给的理由，`uncited` 表示没被引用，`raised` 表示被代码调高。`flagged` 表示出处在 `instructions_seen` 里。约束：只有 `important` 能有 `manager_event_id`；只有 `digest` 和改进晨报的 `important` 能有 `briefed_run_id` |
+| `triage_events` | 列：`id`（显示为 `E-123`）、`source_id`、`schedule_id`、`run_id`、`record_id`、`category`、`title`（不超过 60 字，忽略组为空）、`summary`（不超过 400 字，忽略组为空）、`reason`（不超过 100 字，不能为空）、`reason_kind`、`confidence`、`flagged`、`first_sent_at`、`last_sent_at`、`manager_event_id`、`briefed_run_id`、`created_at`。`reason_kind` 取值：`model` 表示模型给的理由，`raised` 表示被代码调高；`uncited` 仅保留为存储兼容值，新运行未引用的消息只计数、不写事件行。`flagged` 表示出处在 `instructions_seen` 里。约束：只有 `important` 能有 `manager_event_id`；只有 `digest` 和改进晨报的 `important` 能有 `briefed_run_id` |
 | `triage_event_sources` | `(event_id, event_seq)`，两个外键都是 `ON DELETE CASCADE` |
 | `subscription_runs.window_seqs` | `BIGINT[]`，只有分流运行写：这次窗口选中的消息。第 7 节据此精确回答「这条消息在不在这次运行里」。500 个 seq 约 4 KB |
-| `subscription_runs.extract_counts` | 分流运行记 `important`、`digest`、`ignore`、`uncited`、`raised`、`dropped`（按原因计） |
+| `subscription_runs.extract_counts` | 分流运行记 `important`、`digest`、`ignore`、`uncited`、`raised`、`dropped`（按原因计），以及布尔值 `none`（模型明确回复 NONE；代码保底调高后仍保留） |
 | `manager_events.kind` | 加 `triage`；`task_id` 只在 `task_end` 时必填（约束改为 `(kind = 'task_end') = (task_id IS NOT NULL)`）；`reason` 加 `manager_silent` |
 
 ## 5. 分流运行
@@ -108,7 +108,7 @@
 ```
 
 - 每个事件至少有一个 `m` 出处。
-- 一条消息只能出现在一项里；出现在多项时，取类别最高的那一项。
+- 分类计数时一条窗口消息只算一项：取类别最高的那一项，同类别取第一项。所有事件仍保留完整出处链接，并以所有出处计算 `flagged`，包括计数为零的事件。
 - 不在任何一项里的 `m`，按 `ignore` / `uncited` 计数，由 `window_seqs` 回答「处理器没有提到」，不逐条写事件行；第 7 节规则 6 是它的查询依据。
 
 ### 5.3 解析
@@ -121,7 +121,7 @@
 
 ### 5.4 代码保底（只调高）
 
-- 私聊操作者或 @操作者的消息，如果到窗口结束时操作者还没在那个会话里回过话，类别至少是 `digest`，不能是 `ignore`。
+- 实时用户（`sender_kind = user` 且 `origin != import`）私聊操作者或 @操作者的消息，如果到窗口结束时操作者还没在那个会话里回复，类别至少是 `digest`，不能是 `ignore`。回复必须同样是非导入的用户消息，且 `sent_at` 晚于待分类消息，不能按入库 seq 把旧消息算作回复。
 - 被调高的记 `reason_kind = raised`。
 - 第一版只有这一条。点名的发件人一律 `important` 不做；等真实标注显示有漏判再加，加的时候用类型化的发件人列表，不用关键词（D12）。
 
@@ -168,7 +168,7 @@
 | 2 | 消息在订阅范围之外：会话被排除、发送人类型不符、是导入的历史 | 不在范围，并说明是哪条范围规则 |
 | 3 | 消息还在游标之后 | 还没轮到它，并给出下次运行的时间 |
 | 4 | 它所在窗口的运行被跳过，或在失败后又跳过 | 这一段被跳过，并给出 `skip_reason` |
-| 5 | 有事件引用它 | 给出类别、理由（标出是模型给的、没被引用还是被代码调高）、事件编号；重要的事件再给出管家怎么处理的（说了、没说、改进晨报）以及送达层的决定 |
+| 5 | 有事件引用它 | 多个事件引用时取最高类别（重要 > 进摘要 > 忽略，同类别取最早事件），给出类别、理由（标出是模型给的还是被代码调高）、事件编号；重要的事件再给出管家怎么处理的（说了、没说、改进晨报）以及送达层的决定 |
 | 6 | 在 `window_seqs` 里但没有事件引用 | 忽略（`uncited`） |
 
 入口：
@@ -235,7 +235,7 @@
 
 ①②③ 可以先做，不依赖还没合入的送达层和晨报。④⑤ 等各自的前提合入后再开工。
 
-PR ① 提供基础层：迁移 `event_triage`、在线校验 `event_triage_online`、类型和只读查询，以及操作者专用的 `triage_settings.get/update`（`subscriptions.triage.enabled` 默认关闭）。PR ② 接入「事件分流」预设、确认、抽取运行、解析、代码保底和事件入库。关闭时拒绝创建或更新分流订阅，已有订阅触发仍为 `skipped_gate`，不读消息、不启动 processor、不动游标。打开后只有确认仍有效的订阅会运行，结果仅存储；不交给管家、不投递、不进入晨报。
+PR ① 提供基础层：迁移 `event_triage`、在线校验 `event_triage_online`、类型和只读查询，以及操作者专用的 `triage_settings.get/update`（`subscriptions.triage.enabled` 默认关闭）。PR ② 接入「事件分流」预设、确认、抽取运行、解析、代码保底和事件入库。关闭时只拒绝创建分流订阅，已有订阅仍可停用、改名和修改配置，已有订阅触发仍为 `skipped_gate`，不读消息、不启动 processor、不动游标。打开后只有确认仍有效的订阅会运行，结果仅存储；不交给管家、不投递、不进入晨报。
 
 PR ② 的真实模型验证尚未执行：`evals/processor` 有 6 个 `triage_*` 合成窗口、18 条逐条标注消息，指标在代码保底前计算，避免保底掩盖模型漏判。拟用 Sonnet、每例 2 次；若实际 processor 用 Haiku，再对该 Profile 重复。命令、每窗口预算及总上限见 [evals/README.md](../../../evals/README.md)；获批后才执行，并把首次实测成本和分类指标写回第 9 节。
 

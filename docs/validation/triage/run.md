@@ -49,3 +49,36 @@ approval, and repeat with Haiku if it is the live processor profile. Commands, a
 $0.48 combined cap are in [the eval guide](../../../evals/README.md#the-processor-evalsprocessor).
 Record the first measured cost and classification metrics in RFC section 9 after the run. No real-model quality
 or cost claim is established by this scripted validation.
+
+## Review regression checks
+
+The switch now gates creation and execution. An isolated `looper serve` with a fresh database and throwaway
+runtime root refused creation while off, allowed creation and enabling while on, returned `skipped_gate` after
+turning the switch off, and accepted disabling and renaming the existing subscription while off. Database
+readback confirmed the renamed, disabled schedule and zero events and model records. The server was stopped
+and its disposable database dropped.
+
+Both blocking regressions were reproduced with failing PostgreSQL tests before changing the implementation:
+subscription disabling returned 400; overlapping event citations lost provenance and dropped a valid event.
+The fixed storage test retains every message and context link, flags every event whose citations include an
+instruction marker, counts each window message only in its highest category, reads that category first, and
+verifies deletion of a shared source removes all derived events. Events with no exclusive counted messages
+still retain their citations. Code-floor tests cover alert bots, imported messages, imported replies and replies
+inserted later with an earlier send time. Fenced NONE, an omitted `ignored` list and the shared `ITEMS_MAX` cap
+are covered too. `extract_counts.none` preserves the explicit NONE reason even when the code floor raises a
+message; uncited messages remain counted without individual event rows.
+
+Validation after merging the current base branches and main:
+
+- Python: **486 passed**, no skips, using `-n 2` and a dedicated disposable database. Files:
+  `test_extraction_db.py`, `test_extraction_default_off.py`, `test_triage_default_off.py`, `test_triage_run.py`,
+  `test_triage_run_db.py`, `test_triage_settings_db.py`, `test_triage_reads_db.py`, `test_api_v1_document.py`,
+  `test_tool_levels.py`. Every failing file was rerun to green.
+- Dashboard: **62 passed** in `project-schedules.test.tsx`; production build passed with the existing chunk-size
+  advisory. The preset button is shown only after the operator switch is confirmed enabled. Off or unavailable,
+  it is hidden; existing subscription editing remains available. Headless Chromium checked enabled, disabled
+  and unavailable settings at 1280, 768, 390 and 844 × 390, with synthetic HTTP responses and no browser errors.
+- The dashboard is the changed entry point. CLI, Telegram and Lark retain the shared schedule-update semantics;
+  they need no new control or schema. No real-model calls or manually triggered CI runs were performed.
+
+![Disabled triage preset at 390 px](preset-off-390.png)
