@@ -221,7 +221,11 @@ export function useStepEvidence(
     }
     const controller = new AbortController();
     let cancelled = false;
-    setLoad({ status: "loading" });
+    // A later read keeps the evidence already on screen. Replacing it with loading
+    // would flash the section and close an output the operator had opened.
+    setLoad((current) => (
+      current.status === "ready" && current.data.task_id === taskId ? current : { status: "loading" }
+    ));
     fetchTaskEvidence(taskId, controller.signal).then(
       (data) => { if (!cancelled) setLoad({ status: "ready", data }); },
       (error: unknown) => {

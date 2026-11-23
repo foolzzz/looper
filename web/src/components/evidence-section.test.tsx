@@ -281,4 +281,91 @@ describe("a missing image", () => {
     await act(async () => { root.unmount(); });
     host.remove();
   });
+
+  it("says the session is required when the image answers 401", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ status: 401 }));
+    const { host, root, image } = await showImage();
+    await act(async () => { image.dispatchEvent(new Event("error")); });
+    expect(host.textContent).toContain("operator session required");
+    expect(host.textContent).not.toContain("file missing");
+    expect(host.querySelector("img")).toBeNull();
+    await act(async () => { root.unmount(); });
+    host.remove();
+  });
+});
+
+describe("evidence stays while it is read again", () => {
+  let root: Root;
+  let host: HTMLElement;
+
+  beforeEach(() => {
+    vi.mocked(callV1).mockReset();
+    host = document.createElement("div");
+    document.body.appendChild(host);
+    root = createRoot(host);
+  });
+
+  afterEach(async () => {
+    await act(async () => { root.unmount(); });
+    host.remove();
+  });
+
+  function pending<T>() {
+    let resolve: (value: T) => void = () => {};
+    const promise = new Promise<T>((done) => { resolve = done; });
+    return { promise, resolve };
+  }
+
+  function Board({ status, steps }: { status: string; steps: TaskStep[] }) {
+    const load = useStepEvidence("t1", stepsNeedEvidence(steps), status, steps);
+    const step = steps[0];
+    const card = stepCard(step, {
+      taskId: "t1", active: false, look: LOOK, lookOf: () => LOOK, stepsById: new Map([[step.id, step]]), evidence: load,
+    });
+    return <NodeCardView card={card} />;
+  }
+
+  it("keeps the previous evidence and an expanded output while the next read is in flight", async () => {
+    const step = taskStep({
+      status: "running",
+      acceptance_criteria: ["the picture is saved"],
+      checks: [check("c-shot", 1, "python3 -B write_shot.py")],
+    });
+    const payload = (tail: string): TaskEvidence => ({
+      task_id: "t1",
+      steps: [{
+        step_id: step.id, step: "build", checks: [],
+        runs: [evidenceRun({ check_id: "c-shot", state: "passed", output_tail: tail })],
+      }],
+    });
+    const first = pending<TaskEvidence>();
+    vi.mocked(callV1).mockReturnValueOnce(first.promise);
+    await act(async () => { root.render(<Board status="running" steps={[step]} />); });
+    expect(host.textContent).toContain("Loading evidence…");
+    await act(async () => { first.resolve(payload("kept-tail")); await first.promise; });
+    expect(host.textContent).toContain("kept-tail");
+    expect(host.textContent).not.toContain("Loading evidence…");
+
+    const output = [...host.querySelectorAll("summary")].find((item) => item.textContent?.includes("Output"));
+    expect(output).toBeTruthy();
+    await act(async () => { output!.click(); });
+    expect((output!.closest("details") as HTMLDetailsElement).open).toBe(true);
+
+    const next = pending<TaskEvidence>();
+    vi.mocked(callV1).mockReturnValueOnce(next.promise);
+    await act(async () => {
+      root.render(<Board status="failed" steps={[{ ...step, status: "failed" }]} />);
+    });
+    expect(callV1).toHaveBeenCalledTimes(2);
+    expect(host.textContent).toContain("kept-tail");
+    expect(host.textContent).not.toContain("Loading evidence…");
+    const still = [...host.querySelectorAll("summary")].find((item) => item.textContent?.includes("Output"));
+    expect((still?.closest("details") as HTMLDetailsElement | undefined)?.open).toBe(true);
+
+    await act(async () => { next.resolve(payload("next-tail")); await next.promise; });
+    expect(host.textContent).toContain("next-tail");
+    expect(host.textContent).not.toContain("kept-tail");
+    const after = [...host.querySelectorAll("summary")].find((item) => item.textContent?.includes("Output"));
+    expect((after?.closest("details") as HTMLDetailsElement | undefined)?.open).toBe(true);
+  });
 });

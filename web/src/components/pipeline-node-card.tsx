@@ -98,7 +98,7 @@ function ArtifactThumb({ artifact }: { artifact: EvidenceArtifactView }) {
         className="max-h-24 max-w-full rounded border border-border"
         onError={() => {
           void fetch(artifact.href).then(
-            (response) => setProblem(response.status === 403 ? "operator session required" : "file missing"),
+            (response) => setProblem(response.status === 401 || response.status === 403 ? "operator session required" : "file missing"),
             () => setProblem("file missing"),
           );
         }}
