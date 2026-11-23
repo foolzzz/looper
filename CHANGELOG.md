@@ -18,6 +18,30 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.15.25] - 2026-11-22
+
+### Added
+
+- **Failed channel starts are retried, and a sustained outage is reported. On by default.** ([#1550](https://github.com/foolzzz/looper/pull/1550)) A failed startup probe used to leave the channel down until the next service restart. Transport failures wait 30 seconds, doubling up to 10 minutes; a credential or configuration failure waits 10 minutes. After more than `channels.down_alert_minutes` (default 10), a bot that is not running, or whose deliveries have all failed, raises `channel_down:<channel_id>` and one alert through another healthy bot that has an operator id, then one recovery notice. Only the operator can call `channel_down_alert.get` and `channel_down_alert.update`. A positive whole number of minutes sets the threshold; `null` restores 10. There is no switch that turns the retry or the alert off.
+- **Proactive delivery, off by default.** ([#1486](https://github.com/foolzzz/looper/pull/1486)) `delivery.enabled` must be the string `true`. Only the operator can call `proactive_delivery.get` and `proactive_delivery.update`. While it is on, a gate reminder is decided and still sent: a reminder is `blocking`, so quiet hours and the daily cap do not hold it. No other send point asks. The decision is written on the message's `proactive_deliveries` row. This pull request adds no table.
+- **Manager metrics, off by default.** ([#1488](https://github.com/foolzzz/looper/pull/1488), [#1509](https://github.com/foolzzz/looper/pull/1509)) `manager.metrics.enabled` must be the string `true`. Only the operator can call `manager_metrics_settings.get`, `manager_metrics_settings.update` and `manager_metrics.get`. While it is on, a user turn records `metadata.turn_metrics` and a proactive send records a receipt. Settings → Chat saves the checkbox 「记录管家体验指标」 through that update. The dashboard home reads the summary every 60 seconds and, while the switch is off, shows only that metrics are off.
+- **Turn context, off by default.** ([#1497](https://github.com/foolzzz/looper/pull/1497)) `manager.turn_context.enabled` must be the string `true`. Only the operator can call `turn_context_settings.get` and `turn_context_settings.update`, which also store `user.timezone` and `user.reply_language`. Saving them changes no prompt, tool list or authorization: the Manager does not inject the block or set `Turn.speaker`.
+- **One-time reminders, off by default.** ([#1505](https://github.com/foolzzz/looper/pull/1505)) `reminders.enabled` must be the string `true`. There is no dashboard switch and no HTTP write of that setting. While it is on, the default Manager lists `looper_reminder_create`, `looper_reminder_list` and `looper_reminder_cancel` on the operator's own turns, and code sends the user's words back to that direct chat. The system prompt is unchanged.
+- **Card buttons, off by default.** ([#1489](https://github.com/foolzzz/looper/pull/1489)) `cards.actions.enabled` must be the string `true`. There is no dashboard switch and no HTTP write of that setting. While it is on, a high-risk confirmation is stored and, on `lark_bot` and Telegram, the reply carries 确认 / 取消; a gate that asks for an answer is a card. The web chat and the lark-cli channel stay text.
+
+### Changed
+
+- **Each session keeps its own lifecycle lock, research sources and last settings.** ([#1516](https://github.com/foolzzz/looper/pull/1516)) With only `main`, prompts, tool lists, command lines and channel behavior are unchanged. `group_isolation` reports the shared session.
+- **Pull-request tests run in six shards.** ([#1536](https://github.com/foolzzz/looper/pull/1536)) The per-shard limit stays 20 minutes. A pull request whose diff is only documentation skips the test steps and still reports the required checks successful. Installed Looper is unchanged.
+
+### Fixed
+
+- **The reminder dialog no longer depends on the clock.** ([#1534](https://github.com/foolzzz/looper/pull/1534)) The eval freezes its fake tools at 2026-11-22 12:00 UTC. Production prompts, tools and reminder delivery are unchanged.
+
+### Documentation
+
+- Event triage ([#1511](https://github.com/foolzzz/looper/pull/1511)), executable acceptance ([#1520](https://github.com/foolzzz/looper/pull/1520)), task metrics and evaluation ([#1523](https://github.com/foolzzz/looper/pull/1523)), platform sub-agents ([#1522](https://github.com/foolzzz/looper/pull/1522)) and browser and computer use ([#1525](https://github.com/foolzzz/looper/pull/1525)). None of these is implemented. The v2.15.24 addendum ([#1524](https://github.com/foolzzz/looper/pull/1524)) only records pulls already on that tag.
+
 ## [2.15.24] - 2026-11-20
 
 ### Added
