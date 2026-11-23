@@ -25,6 +25,7 @@ from enum import Enum
 from typing import Any
 
 from ..db import tasks as db_tasks
+from .acceptance_result import ResultEvidence
 from .links import is_public, task_link
 from .message import builtin_channel_id, is_lark, parse_channel_id
 
@@ -186,7 +187,7 @@ def lead(summary: str | None) -> str:
 
 def notice_text(task_id: str, name: str, status: str, summary: str | None, *, channel: NotifyChannel,
                 dashboard_url: str = "", extra: str | None = None, delivery_summary: str | None = None,
-                group: bool = False) -> str:
+                group: bool = False, evidence: ResultEvidence | None = None) -> str:
     """What ended and how, the start of its summary (or closing note), ``extra`` (where a worktree task's work is),
     and the link to the task, as Markdown for ``channel``. ``name`` is what the user asked for, else the
     requirement; the task id when both are empty. In a group chat (``group``) the whole summary, which the people
@@ -198,6 +199,8 @@ def notice_text(task_id: str, name: str, status: str, summary: str | None, *, ch
     if group:
         # The persisted summary already ends with the delivery summary, which follows once below.
         whole = (summary or "").strip()
+        if evidence is not None:
+            whole = whole.replace("\n\n" + evidence.section, "")
         text = whole.removesuffix(delivery_summary).rstrip() if delivery_summary else whole
     else:
         text = lead(summary)
@@ -205,6 +208,8 @@ def notice_text(task_id: str, name: str, status: str, summary: str | None, *, ch
         lines.append(text)
     if delivery_summary:
         lines.append(delivery_summary)
+    if evidence is not None and (count_line := evidence.counts.line()):
+        lines.append(count_line)
     if extra:
         lines.append(extra)
     if link := task_link_line(dashboard_url, task_id, channel, group=group):
