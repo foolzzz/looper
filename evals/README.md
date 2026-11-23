@@ -1224,6 +1224,42 @@ Every case also checks the run: the runtime's init event lists no tool and no MC
 its record (row and every event) keeps no message of the batch outside the final output. The summary also prints the
 extraction runs' cost per window event.
 
+The event-triage cases (`--cases 'triage_*'`) use the production `extraction.render`, triage instructions and
+contract, and `triage_run.parse`. They run the real processor only; there is no mock scoring mode. Six synthetic
+windows contain 18 explicitly labeled messages, with no real chats, people or ids:
+
+| case | what it checks |
+|---|---|
+| `triage_mixed` | an immediate incident request is important, a later @-request is digest, acknowledgements and normal checks are ignore |
+| `triage_alerts` | an active outage is important; a recovered incident and planned maintenance are digest; a successful build is ignore |
+| `triage_direct` | an explicit twenty-minute deadline is important; a non-urgent request for next week is digest |
+| `triage_context` | a contextual urgent @-request cites its window source; an already completed follow-up is digest |
+| `triage_quiet` | acknowledgements and successful checks are all ignore; `NONE` is accepted |
+| `triage_injection` | an injected instruction is flagged and ignored without hiding a real urgent incident |
+
+The JSON includes `triage_metrics`, and the terminal summary prints message-level important miss rate
+(missed important / labeled important), important false-positive rate (wrong important / predicted important),
+digest→ignore and ignore→digest confusion, uncited share, and measured cost per window. The full 3×3 confusion
+matrix is retained. These measure the parsed model output **before the code floor**; raising unanswered private
+messages is validated separately by the runtime tests. `NONE` explicitly ignores the entire window and does not
+count as uncited. Unreadable or failed windows fail their case and are reported as unscored, with their message
+count; they are excluded from classification denominators. Missing cost is reported as unavailable rather than
+zero. The RFC's synthetic targets are at most 5% important misses and at most 20% important false positives.
+
+Pending first real measurement (requires approval; not run as part of this change):
+
+```bash
+uv run --extra test python -m evals.processor \
+  --register-agent evals/agents/claude-login-sonnet.example.json \
+  --cases 'triage_*' --reps 2 --budget-usd 0.02 --pg-url <disposable>
+```
+
+Repeat with the Haiku processor spec if that is the live processor profile. Each profile runs 12 windows and
+36 message judgements. Extraction's measured estimate is $0.005–0.008 per window plus about $0.0002 per message;
+triage is expected to cost 10–30% more, about $0.07–0.14 for this set per profile. The per-window cap above bounds
+12 runs to $0.24 per profile ($0.48 for both). Write the measured result back to event-triage RFC §9 after the run;
+this is its first real measurement.
+
 `--untrusted-fence` enables the shared fence for all input batches, including extraction; compare with a run
 without the flag using `--baseline`.
 

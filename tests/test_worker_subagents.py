@@ -21,6 +21,10 @@ from tests.run_handle_support import ScriptedRun
 from tests.runtime_model_helpers import builtin_launch
 
 
+BASELINE_SHA = "0a8b16d112752ff09e5701cabb91767c022d19c1"
+# main before #1566 merged; update only with an intentional off-path change, and say why in the PR.
+
+
 def _item(root, *, review=False):
     return MessageEnvelope.create(
         source=planner_address("task-subagents"), target=worker_address("worker-subagents"),
@@ -77,9 +81,9 @@ def test_worker_tools_and_instructions_require_the_project_switch(tmp_path, monk
 
 
 def test_worker_off_launch_matches_main_bytes(tmp_path, monkeypatch, agent_db):
-    """Compare the actual opt-out preparation with main's implementation using the same dependencies."""
+    """Compare opt-out preparation with pinned main using the same dependencies."""
     source = subprocess.run(
-        ["git", "show", "origin/main:looper/agents/tiers/worker.py"], check=True, capture_output=True, text=True,
+        ["git", "show", f"{BASELINE_SHA}:looper/agents/tiers/worker.py"], check=True, capture_output=True, text=True,
     ).stdout
     definition = next(node for node in ast.parse(source).body
                       if isinstance(node, ast.ClassDef) and node.name == "WorkerPool")
