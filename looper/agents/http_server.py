@@ -1140,13 +1140,17 @@ class AgentHTTPServer:
             writer.write(_json_response(HTTP_401, {"error": "this Planner's token no longer works: its task ended or "
                                                             "a new Planner took over"}))
         elif path == f"{AGENT_API}tools" and method == "GET":
-            writer.write(_json_response(HTTP_200, {"tools": await ops.listing(header)}))
+            answer = {"tools": await ops.listing(header)}
+            if (retry_safety := await ops.retry_safety(header)) is not None:
+                answer["retry_safety"] = retry_safety
+            writer.write(_json_response(HTTP_200, answer))
         elif (m := _RE_AGENT_OP.match(path)) and method == "POST":
             try:
                 arguments = json.loads(body.decode("utf-8")) if body.strip() else {}
             except (json.JSONDecodeError, UnicodeDecodeError):
                 arguments = None
-            writer.write(_json_response(HTTP_200, await ops.call(header, m.group(1), arguments)))
+            writer.write(_json_response(HTTP_200, await ops.call(
+                header, m.group(1), arguments, call_id=headers.get("x-looper-call"))))
         else:
             writer.write(_json_response(HTTP_404, {"error": f"no {method} {path}"}))
         await writer.drain()

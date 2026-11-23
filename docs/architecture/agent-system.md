@@ -5227,7 +5227,7 @@ channel command is added.
 
 With a project's `subagents` set to `on` (unset is off), a Worker's `run.` token
 also has `looper_agent_spawn`, `looper_agent_wait` and `looper_agent_cancel`.
-Reviewers and explorers never receive them; Planner support is a later slice.
+Reviewers and explorers never receive them. A task's Planner gets them too, below.
 The run's recorded identity, working directory and live spend supply the parent
 authority; model arguments cannot select a different task or parent. Spawn and
 cancel are write tools, wait is read; all three declare the `inside` action level.
@@ -5254,6 +5254,19 @@ detaches keeps its children across the planned handover. The serve lifecycle
 recovers existing rows, retries queued work and pending room delivery, and
 cancels or hands over children on shutdown. With the switch off, existing
 prompts, tool listings, run grants and launch parameters retain their bytes.
+
+With the same switch on, a task's Planner lists the three tools and its system
+prompt gets an explorers guide (`PlannerSubagents`, the Workers' code path with
+the Planner as spawner and its running turn's record as parent). Spawn and cancel
+run only in a turn Looper sent (`needs_user_turn` otherwise); wait without ids lists
+every explorer the task's Planner spawned, across turns. The Planner's spend is not
+streamed to the server, so the parent-budget term does not take part
+(`parent_spend_known` is false). A result the Planner did not wait for goes to
+the room as a `spawn_result` message pending for it, which wakes it, or, with the room
+off, is appended to its next turn (4,000 characters, the rest by wait); a tool,
+room or turn receipt claims the first delivery under one row lock. A Planner's turn
+ending cancels nothing; the task leaving `running` cancels its explorers
+(`task_ended`).
 
 ### A task's Planner's tools
 

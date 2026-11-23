@@ -159,7 +159,7 @@ from ..runtimes.runner.protocol import ProtocolError as RunnerProtocolError
 from ..session_switch import SessionSwitch, SwitchReason
 from ..step_workspaces import MergeError, MergeResult, Repo, StepWorkspace, StepWorkspaceState, Unusable
 from ..task_roles import RoleKind, TaskRole
-from .. import waits
+from .. import subagent_delivery, waits
 from .. import workflow_reporting as workflows
 from ..workflow_reporting import Phase
 from ..waits import (
@@ -4981,6 +4981,11 @@ class PlannerAgent:
         started ``resuming``, the session it was told to resume."""
         plan = self._plan
         assert plan is not None
+        # With the room off, finished explorer results ride the next turn (none: no change to the text).
+        note, delivered = await subagent_delivery.planner_turn_note(
+            self._task_id, on=self._room is None and self._execution.subagents_on and not maintenance)
+        text += note
+        turn_kwargs, claimed = subagent_delivery.claim_when_sent(delivered)
         recorder = self._recorder(plan, text, process)
         last_context: int | None = None
         compacted: dict[str, Any] | None = None
@@ -5037,8 +5042,9 @@ class PlannerAgent:
                     launch = process.launch
                     self._claude.set_turn_budget(provider_id=launch.profile.provider.id, model=launch.model,
                                                  price=launch.price, limits=limits)
-                turn = await asyncio.wait_for(self._claude.run_turn(text, on_event, stop=lambda: recorder.cap_stop),
-                                              limit if limit > 0 else None)
+                turn = await asyncio.wait_for(
+                    self._claude.run_turn(text, on_event, stop=lambda: recorder.cap_stop, **turn_kwargs),
+                    limit if limit > 0 else None)
             except TurnBlocked as exc:
                 await recorder.finish(output_text=None, result_event=None, error=str(exc))
                 raise
@@ -5052,6 +5058,7 @@ class PlannerAgent:
                 await recorder.finish(output_text=None, result_event=None, error=error)
                 raise PlannerTurnError(error) from None
             finally:
+                await claimed()  # the results were claimed the moment the runtime sent the prompt, if it did
                 if self._ops is not None and self._token is not None:
                     self._ops.end_turn(self._token)
 
@@ -5361,7 +5368,8 @@ class PlannerAgent:
                                     adjudication=self._panel_on and bool((self._workflow or {}).get("adjudication")),
                                     advisor=self._execution.advisor_on, acceptance_checks=self._execution.acceptance_checks)
             + ("\n" + self._ops.guide_for(roles=self._execution.roles_on, room=self._room is not None,
-                                         vault=planner_guide(self._vault) if self._vault else "")
+                                         vault=planner_guide(self._vault) if self._vault else "",
+                                         subagents=self._execution.subagents_on)
                if self._ops else ""),
             knowledge=knowledge,
         )
