@@ -72,6 +72,9 @@ TOOL_LEVELS: Mapping[str, ActionLevel | LevelOf] = {
     "looper_confirm": INSIDE,
     "looper_ledger_add": INSIDE, "looper_ledger_update": INSIDE,
     "looper_leads_search": INSIDE,
+    "looper_reminder_list": INSIDE,
+    # Reminder writes affect delivery only to the operator's own direct chat.
+    "looper_reminder_create": OPERATOR, "looper_reminder_cancel": OPERATOR,
     # An API client's own
     "looper_task_pipeline": INSIDE,
     "looper_gates": _gates,
