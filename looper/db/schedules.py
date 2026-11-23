@@ -20,7 +20,7 @@ from typing import Any
 import asyncpg
 
 from .connection import get_pool
-from .llm_records import TASK_RUN, _TASK_ROLE
+from .llm_records import TASK_SPEND, _SPEND_ROLE
 from . import agent_sessions, subscriptions, tasks
 
 # The schedule fields a request sets (looper/agents/schedules.py validates them).
@@ -732,8 +732,8 @@ async def spent_since_each(conn: Db, schedule_ids: list[str], since: datetime) -
                    (SELECT sum(g.cost_usd) FROM (
                        SELECT round(sum(l.cost_usd::numeric), 6) AS cost_usd
                        FROM llm_records l WHERE l.task_id = r.task_id
-                       AND {TASK_RUN.replace("agent_id", "l.agent_id")}
-                       GROUP BY {_TASK_ROLE.replace("agent_id", "l.agent_id")}, l.model
+                       AND {TASK_SPEND.replace("agent_id", "l.agent_id")}
+                       GROUP BY {_SPEND_ROLE.replace("agent_id", "l.agent_id")}, l.model
                    ) g))) AS spent
         FROM schedule_runs r WHERE r.schedule_id = ANY($1::text[]) AND r.fired_at >= $2 GROUP BY r.schedule_id
         """,

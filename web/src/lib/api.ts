@@ -161,7 +161,10 @@ export interface TaskCost {
   equivalent_runs?: number;
   /** Runs Looper priced at their provider's prices. */
   provider_price_runs?: number;
-  by_role: Record<TaskRole, { cost_usd: number; runs: number }> & { explorer?: { cost_usd: number; runs: number } };
+  by_role: Record<TaskRole, { cost_usd: number; runs: number }> & {
+    explorer?: { cost_usd: number; runs: number };
+    consult?: { cost_usd: number; runs: number };
+  };
   by_model: TaskModelCost[];
   /** The Manager's turns about the task, by model; not in cost_usd or the spend cap. */
   manager_by_model: TaskModelCost[];

@@ -14,7 +14,8 @@ TASK_COST = _object({
     "cost_usd": _NUMBER, "runs": _INT, "running": _INT, "unpriced_runs": _INT,
     "equivalent_runs": _INT, "provider_price_runs": _INT,
     "by_role": _object({role: _object({"cost_usd": _NUMBER, "runs": _INT}, closed=True)
-                        for role in ("planner", "worker", "reviewer")}, closed=True),
+                        for role in ("planner", "worker", "reviewer", "consult")},
+                       ["planner", "worker", "reviewer"], closed=True),
     "by_model": _array(TASK_MODEL_COST), "manager_by_model": _array(TASK_MODEL_COST)},
     ["cost_usd", "runs", "running", "unpriced_runs", "by_role", "by_model", "manager_by_model"], closed=True)
 

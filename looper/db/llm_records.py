@@ -399,12 +399,20 @@ _STEP_RUNS = f"({_ROLE_FILTERS['worker']} OR {_ROLE_FILTERS['reviewer']})"
 # Planner's.
 TASK_ROLES = ("planner", "worker", "reviewer")
 _PLANNER_SPAWNS = f"{RUN_KIND} IN ('advisor', 'advice_check', 'outbound_check')"
+_ROLE_BRANCHES = " ".join(f"WHEN {_ROLE_FILTERS[role]} THEN '{role}'" for role in TASK_ROLES)
 _TASK_ROLE = (
     f"CASE WHEN {RUN_KIND} = 'explorer' THEN 'explorer' WHEN {_PLANNER_SPAWNS} THEN 'planner' "
-    + " ".join(f"WHEN {_ROLE_FILTERS[role]} THEN '{role}'" for role in TASK_ROLES) + " END"
+    f"{_ROLE_BRANCHES} END"
 )
 # A run of one of a task's agents (Planner, Worker, Reviewer), as task_costs counts them; the Manager is not one.
 TASK_RUN = f"{_TASK_ROLE} IS NOT NULL"
+# The same runs, plus a room consult. The consult branch is before the id prefixes, so an explicit consult kind
+# wins over an agent id that also matches a role prefix. Run listings stay on ``TASK_RUN``.
+_SPEND_ROLE = (
+    f"CASE WHEN {RUN_KIND} = 'explorer' THEN 'explorer' WHEN {_PLANNER_SPAWNS} THEN 'planner' "
+    f"WHEN {RUN_KIND} = 'consult' THEN 'consult' {_ROLE_BRANCHES} END"
+)
+TASK_SPEND = f"{_SPEND_ROLE} IS NOT NULL"
 
 
 async def manager_spend(
@@ -601,7 +609,7 @@ async def task_costs(
     *,
     pool: asyncpg.Pool | None = None,
 ) -> dict[str, dict[str, Any]]:
-    """Each task's cost: the sum of its Planner's, Workers' and Reviewers' runs, in total and by role.
+    """Each task's cost: the sum of its Planner's, Workers' and Reviewers' runs and its room consults, in total and by role.
 
     Every given task id gets an entry. ``runs`` counts every run; ``running``
     those still going, whose cost is not known yet; ``unpriced_runs`` the
@@ -622,7 +630,7 @@ async def task_costs(
     pool = pool or get_pool()
     rows = await pool.fetch(
         f"""
-        SELECT task_id, CASE WHEN {_ROLE_FILTERS['manager']} THEN 'manager' ELSE {_TASK_ROLE} END AS role,
+        SELECT task_id, CASE WHEN {_ROLE_FILTERS['manager']} THEN 'manager' ELSE {_SPEND_ROLE} END AS role,
                model, count(*) AS runs,
                count(*) FILTER (WHERE status = 'running') AS running,
                count(*) FILTER (WHERE status <> 'running' AND cost_usd IS NULL) AS unpriced_runs,
@@ -641,7 +649,7 @@ async def task_costs(
                COALESCE(sum(cache_read_tokens) FILTER (WHERE {_CACHE_USAGE_REPORTED}), 0)::bigint AS cache_hit_read_tokens,
                round(sum(cost_usd::numeric), 6) AS cost_usd
         FROM llm_records
-        WHERE task_id = ANY($1::text[]) AND ({_TASK_ROLE} IS NOT NULL OR {_ROLE_FILTERS['manager']})
+        WHERE task_id = ANY($1::text[]) AND ({TASK_SPEND} OR {_ROLE_FILTERS['manager']})
         GROUP BY 1, 2, 3
         """,
         task_ids, RecordStatus.INTERRUPTED.value,
@@ -652,10 +660,14 @@ async def task_costs(
     explorer_tasks.update(row["id"] for row in await pool.fetch(
         "SELECT t.id FROM tasks t JOIN projects p ON p.id=t.project_id "
         "WHERE t.id=ANY($1::text[]) AND p.subagents='on'", task_ids))
+    # Consult is a key only for a task that has consult rows, not for every task.
+    consult_tasks = {row["task_id"] for row in rows if row["role"] == "consult"}
     costs = {
         task_id: {"cost_usd": Decimal(0), "runs": 0, "running": 0, "unpriced_runs": 0, "equivalent_runs": 0,
                   "provider_price_runs": 0, "by_role": {role: {"cost_usd": Decimal(0), "runs": 0}
-                                                      for role in TASK_ROLES + (("explorer",) if task_id in explorer_tasks else ())},
+                                                      for role in TASK_ROLES
+                                                      + (("explorer",) if task_id in explorer_tasks else ())
+                                                      + (("consult",) if task_id in consult_tasks else ())},
                   "by_model": {}, "manager_by_model": {}}
         for task_id in task_ids
     }
