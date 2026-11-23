@@ -83,6 +83,7 @@ from .runtimes import TOOL_ROLES as TOOL_ROLE_NAMES, ApiProtocol, AuthKind, Capa
 from .system_prompt_mode import SystemPromptMode, system_prompt_mode
 
 if TYPE_CHECKING:
+    from .acp_reviewer_settings import AcpReviewerSettings
     from .runtimes import RuntimeAdapter
     from .runtimes.pricing import PriceSnapshot
 
@@ -832,6 +833,10 @@ async def fallback_settings(settings: AgentSettings, role: AgentType) -> AgentSe
     from ..db import profile_registry
 
     target = settings.profile.fallback_profile_id
+    if target and settings.profile.runtime.type == "acp":
+        from .runtimes import RuntimeUnsupported
+
+        raise RuntimeUnsupported("ACP Reviewer pilot cannot enter or leave a Profile fallback")
     if not target:
         return None
     try:
@@ -841,7 +846,12 @@ async def fallback_settings(settings: AgentSettings, role: AgentType) -> AgentSe
         return None
     if row is None:
         return None
-    return await _check_profile_settings(replace(settings, profile=_stored_profile(row),
+    profile = _stored_profile(row)
+    if "acp" in (settings.profile.runtime.type, profile.runtime.type):
+        from .runtimes import RuntimeUnsupported
+
+        raise RuntimeUnsupported("ACP Reviewer pilot cannot enter or leave a Profile fallback")
+    return await _check_profile_settings(replace(settings, profile=profile,
                                                  profile_error=None, pricing_catalog=()), role)
 
 
@@ -978,6 +988,8 @@ class Launch:
     llmrec: LlmrecRoute | LlmrecSkip | None = None
     # The outbound review's PreToolUse hook (``outbound_hook.ToolHook``) on a runtime with one; None: no hook.
     tool_hook: Any = None
+    # Frozen only for ACP; existing launch signatures and records do not include it.
+    acp_reviewer: AcpReviewerSettings | None = None
 
     @property
     def access_level(self) -> Access:
@@ -1113,6 +1125,18 @@ class Launch:
             raise RuntimeUnsupported(f"{self.runtime.label} cannot restrict a routed Manager session to platform tools")
         if self.settings.profile_error:
             raise RuntimeUnsupported(self.settings.profile_error)
+        if self.profile.runtime.type == "acp":
+            from .acp_reviewer_settings import check_pairing
+
+            if self.role is not AgentType.REVIEWER or self.consult:
+                raise RuntimeUnsupported("ACP Reviewer pilot runs only the Reviewer role")
+            if self.acp_reviewer is None:
+                raise RuntimeUnsupported("acp_reviewer launch settings are missing")
+            try:
+                check_pairing(self.acp_reviewer, self.profile.provider, self.model, self.effort,
+                              profile_effort=self.profile.effort)
+            except ValueError as exc:
+                raise RuntimeUnsupported(str(exc)) from exc
         if isinstance(self.profile, ResolvedAgentProfile):
             self.profile.resolved_model.check_runtime(self.profile.runtime, self.profile.effort)
 
@@ -1232,6 +1256,12 @@ class Launch:
         if self.profile.runtime.launcher is Launcher.TTADK and self.runtime.ttadk_tool is not None:
             if note := ttadk.launch_note(self.profile.runtime.executable or "ttadk", self.runtime.ttadk_tool):
                 record["ttadk_check"] = note
+        if self.profile.runtime.type == "acp" and self.acp_reviewer is not None:
+            from .runtimes.acp import record_command
+
+            config = self.acp_reviewer
+            record["acp_command"] = {"argv": record_command(config.command), "account": config.account,
+                "model": config.model, "config_dir_is_scratch": not bool(config.config_dir)}
         return {**record, **self.runtime.launch_record(self)}
 
 

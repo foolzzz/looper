@@ -101,6 +101,12 @@ async def allowed_profile(project_id: str | None, wanted: str, kind: RoleKind) -
     from .profile_registry import RegistryError, check_selection
     from .projects import choosable_profiles
 
+    from .acp_guards import AcpSelectionError, refuse_profile
+
+    try:
+        await refuse_profile(wanted, "task roles")
+    except AcpSelectionError as exc:
+        raise RoleForbidden(str(exc)) from None
     allowed, restricted = await choosable_profiles(project_id)
     profile = next((p for p in allowed if p["id"] == wanted), None) or next(
         (p for p in allowed if str(p["name"]).casefold() == str(wanted).strip().casefold()), None)

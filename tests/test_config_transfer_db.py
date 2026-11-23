@@ -1145,3 +1145,57 @@ def test_import_rejects_invalid_profile_fallback_graph_without_writes(tmp_path, 
                 assert await _rows(pool) == before
 
     asyncio.run(asyncio.wait_for(run(), timeout=30))
+
+
+@pytest.mark.parametrize("existing", [False, True])
+def test_acp_selections_are_skipped_without_substituting_defaults(tmp_path, existing):
+    """A file cannot introduce an ACP binding, even through a forward fallback or stored Profile."""
+    async def run():
+        from looper.db.config_transfer import read_profiles
+
+        async with _installation() as (pool, url):
+            async with pool.acquire() as conn:
+                builtin = next(row for row in await read_profiles(conn) if row["id"] == "agent-claude-code-opus")
+            if existing:
+                await pool.execute("INSERT INTO agent_runtimes (id,name,type,capabilities,builtin) "
+                                   "VALUES ('rt-acp','acp','acp',ARRAY['run'],true)")
+                await pool.execute("INSERT INTO llm_providers (id,name,vendor_type,auth,oauth_runtime_type) "
+                                   "VALUES ('acp-account','ACP account','acp-command','oauth','acp')")
+                await pool.execute("INSERT INTO llm_provider_endpoints (provider_id,protocol,base_url) "
+                                   "VALUES ('acp-account','openai-responses','')")
+                await pool.execute("INSERT INTO llm_models (id,provider_id,name,protocol) "
+                                   "VALUES ('model-acp','acp-account','review-model','openai-responses')")
+                await pool.execute("INSERT INTO agent_profiles (id,name,runtime_id,model_id) "
+                                   "VALUES ('acp-review','ACP review','rt-acp','model-acp')")
+            document = {"format": "looper-config/v4", "runtimes": [{"name": "ACP alias", "type": "acp", "executable": ""}],
+                "profiles": [{"name": "Fallback source", "runtime": builtin["runtime"],
+                              "model": {"provider": builtin["provider"], "name": builtin["model"], "protocol": builtin["protocol"]},
+                              "fallback": "ACP review"}],
+                "settings": {"layers": [{"scope": "role", "role": "reviewer", "profile": "ACP review"}]},
+                "projects": [{"name": "review-target", "description": "", "background": "", "execution": {},
+                              "role_templates": [{"key": "inspect", "kind": "review", "role_prompt": "Inspect.", "profile": "ACP review"}]}],
+                "workflows": [{"key": "inspect-flow", "name": "Inspect flow", "profiles": {"reviewer": "ACP review"}}],
+                "managers": [{"id": "manager-inspector", "name": "Inspector", "system_prompt": "Manage reviews.",
+                              "templates": [{"key": "inspect", "name": "Inspect", "requirement": "Inspect changes.",
+                                             "profiles": {"reviewer": "ACP review"}},
+                                            {"key": "plain", "name": "Plain", "requirement": "Plain task."}]}]}
+            if not existing:
+                document["profiles"].append({"name": "ACP review", "runtime": "ACP alias", "model": {
+                    "provider": "ACP account", "name": "review-model", "protocol": "openai-responses"}})
+            path = tmp_path / "acp-config.json"
+            path.write_text(json.dumps(document))
+            for apply in (False, True):
+                code, output, error = await _transfer_file(url, "import", str(path), apply=apply, json_output=True)
+                assert code == 0, error
+                changes = _plan(output)["changes"]
+                for section, key in [("profiles", "Fallback source"), ("settings.layers", "role:reviewer"),
+                                     ("project.role_templates", "review-target / inspect"), ("workflows", "inspect-flow"),
+                                     ("manager.templates", "manager-inspector/inspect")]:
+                    change = next(c for c in changes if c["section"] == section and c["key"] == key)
+                    assert change["action"] == "skipped" and "ACP" in change["reason"], change
+            assert await pool.fetchval("SELECT count(*) FROM agent_profiles WHERE name='Fallback source'") == 0
+            assert await pool.fetchval("SELECT count(*) FROM workflows WHERE key='inspect-flow'") == 0
+            assert await pool.fetchval("SELECT count(*) FROM manager_task_templates WHERE key='inspect'") == 0
+            assert await pool.fetchval("SELECT count(*) FROM manager_task_templates WHERE key='plain'") == 1
+            assert await pool.fetchval("SELECT count(*) FROM system_settings WHERE key='acp_reviewer.enabled'") == 0
+    asyncio.run(asyncio.wait_for(run(), timeout=30))

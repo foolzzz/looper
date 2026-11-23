@@ -86,6 +86,12 @@ async def _profile_id(project_id: str | None, wanted: Any, kind: RoleKind, *,
     if not isinstance(wanted, str):
         raise RequestError(HTTP_400, "profile_id must be an Agent Profile's id or name, or null for none")
     try:
+        from .acp_guards import AcpSelectionError, refuse_profile
+
+        try:
+            await refuse_profile(wanted, "task roles and role templates")
+        except AcpSelectionError as exc:
+            raise RoleError(str(exc)) from None
         if workflow_profile:
             from ..db import profile_registry as db_profiles
             from .profile_registry import RegistryError, check_selection

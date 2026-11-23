@@ -118,6 +118,12 @@ async def _layer_data(place: _Place, values: Mapping[str, Any]) -> dict[str, Any
                 raise OpError(ErrorCode.INVALID, "timeout_seconds is a role's own (Settings → Roles): give role "
                                                  "without project")
         elif name == "profile":
+            from ..acp_guards import AcpSelectionError, refuse_profile
+
+            try:
+                await refuse_profile(value, "looper_settings")
+            except AcpSelectionError as exc:
+                raise OpError(ErrorCode.FORBIDDEN, str(exc)) from None
             data["profile_id"] = None if value is None else by_id_or_name(
                 await db_profiles.list_profiles(), value, id_key="id", what="Agent Profile")["id"]
         elif name == "env":

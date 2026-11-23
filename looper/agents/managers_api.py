@@ -462,6 +462,15 @@ async def delete_manager(manager_id: str, *, fleet: Any = None) -> dict[str, Any
 
 async def _template_profiles(raw: Any, project_id: str | None, *,
                               conn: asyncpg.Connection | None = None) -> dict[str, str]:
+    from .acp_guards import AcpSelectionError, refuse_profile
+
+    if isinstance(raw, Mapping):
+        for wanted in raw.values():
+            if isinstance(wanted, str):
+                try:
+                    await refuse_profile(wanted, "task templates", pool=conn)
+                except AcpSelectionError as exc:
+                    raise _refuse(str(exc)) from None
     chosen = await projects.profile_choices(raw, clearing=False, field="profiles", pool=conn)
     profiles = {role: profile for role, profile in chosen.items() if profile}
     if project_id and profiles:
@@ -527,8 +536,15 @@ async def checked_template_values(manager_id: str, key: str, data: Mapping[str, 
     if check_references:
         profiles = await _template_profiles(data.get("profiles"), project_id, conn=conn)
         for role_key in role_templates:
-            if await db_role_templates.get_template(project_id, role_key, pool=conn) is None:
+            row = await db_role_templates.get_template(project_id, role_key, pool=conn)
+            if row is None:
                 raise _refuse(f"project {project_id!r} has no role template {role_key!r}")
+            from .acp_guards import AcpSelectionError, refuse_profile
+
+            try:
+                await refuse_profile(row["profile_id"], "task templates", pool=conn)
+            except AcpSelectionError as exc:
+                raise _refuse(str(exc)) from None
     else:
         profiles = data.get("profiles") or {}
         if not isinstance(profiles, dict):

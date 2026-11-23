@@ -1388,9 +1388,9 @@ async def choosable_profiles(project_id: str | None, *,
 
     listed = await db_projects.allowed_profiles(project_id, pool=pool) if project_id else []
     if listed:
-        return listed, True
+        return [row for row in listed if row["runtime_type"] != "acp"], True
     return [row for row in await db_profiles.list_profiles(pool=pool)
-            if set(servable_roles((profile := AgentProfile.from_row(row)).runtime.capabilities,
+            if row["runtime_type"] != "acp" and set(servable_roles((profile := AgentProfile.from_row(row)).runtime.capabilities,
                                   profile.runtime.type)) & set(_CHOOSABLE)], False
 
 

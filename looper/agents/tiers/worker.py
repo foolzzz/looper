@@ -47,7 +47,7 @@ import time
 import uuid
 from collections import Counter
 from collections.abc import AsyncIterator, Awaitable, Callable, Collection, Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from enum import Enum, StrEnum
 from pathlib import Path
@@ -525,9 +525,15 @@ class ProcessRun:
         self.process: asyncio.subprocess.Process | None = None
         self._channel: RunChannel | None = None
         self._ended = False
+        self._acp_policy = None
+        self.launch_record: dict[str, Any] = {}
 
     @property
     def command(self) -> list[str]:
+        if self._runtime.type == "acp":
+            from ..runtimes.acp import record_command
+
+            return record_command(self._command)
         return self._command
 
     @property
@@ -540,9 +546,38 @@ class ProcessRun:
         return self._channel
 
     async def launch(self) -> None:
+        command = self._command
+        if self._runtime.type == "acp":
+            from ..acp_reviewer_settings import read, check_pairing
+            from ..runtimes.acp_policy import prepare_policy, PolicyError
+
+            try:
+                config = await read()
+                check_pairing(config, self._launch.profile.provider, self._launch.model, self._launch.effort,
+                              profile_effort=self._launch.profile.effort)
+                if config != self._launch.acp_reviewer:
+                    raise ValueError("acp_reviewer settings changed before launch; retry the review")
+                self._launch._check_binding()
+                self._acp_policy = await prepare_policy(config.command, cwd=self._cwd,
+                    inspect_roots=(*self._launch.read_dirs, *config.inspect_roots), config_dir=config.config_dir)
+                self.launch_record = {"acp_write_policy": self._acp_policy.record}
+                command = self._acp_policy.wrap()
+                environment = self._acp_policy.environment(self._launch.environment())
+            except PolicyError as exc:
+                self.launch_record = {"acp_write_policy": exc.record}
+                raise
+            except (ValueError, RuntimeUnsupported) as exc:
+                self.launch_record = {"acp_write_policy": {"reason": "settings_refused", "detail": str(exc)}}
+                raise RunStartError(str(exc)) from exc
+            except Exception as exc:
+                detail = f"acp_reviewer settings unavailable: {type(exc).__name__}"
+                self.launch_record = {"acp_write_policy": {"reason": "settings_unavailable", "detail": detail}}
+                raise RunStartError(detail) from exc
         try:
+            if self._runtime.type != "acp":
+                environment = self._launch.environment()
             self.process = await proc_tree.spawn(
-                *self.command, cwd=self._cwd, env=self._launch.environment(),
+                *command, cwd=self._cwd, env=environment,
                 stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
         except OSError as exc:
             raise RunStartError(str(exc)) from exc
@@ -557,8 +592,17 @@ class ProcessRun:
     async def end(self) -> None:
         if not self._ended:
             self._ended = True
-            if self.process is not None:
-                await proc_tree.end(self.process, label=self._label)
+            try:
+                if self._runtime.type == "acp" and self._channel is not None:
+                    try:
+                        self._channel.end_input()
+                    except Exception:
+                        logger.warning("%s could not close ACP input", self._label, exc_info=True)
+                if self.process is not None:
+                    await proc_tree.end(self.process, label=self._label)
+            finally:
+                if self._acp_policy is not None:
+                    self._acp_policy.cleanup()
 
     async def wait(self) -> int:
         assert self.process is not None
@@ -2091,13 +2135,13 @@ class WorkerPool:
             agent, project_id, parent_task_id or None, step_id=payload.get("task_id") or None,
             task_role=(task_role.key, task_role.version) if task_role is not None and parent_task_id else None)
         fallbacks = fallbacks if fallbacks is not None else []
-        while agent_settings.profile_error:
+        while agent_settings.profile_error and agent_settings.profile.runtime.type != "acp":
             next_settings = await self._fallback_profile(agent_settings, agent, fallbacks, "profile_error",
                                                          parent_task_id, worker_id)
             if next_settings is None:
                 break
             agent_settings = next_settings
-        if agent_settings.profile_error:
+        if agent_settings.profile_error and agent_settings.profile.runtime.type != "acp":
             logger.error("worker %s: %s", worker_id, agent_settings.profile_error)
             if parent_task_id:
                 await self._activity(parent_task_id, worker_id, "error", agent_settings.profile_error[:500])
@@ -2122,6 +2166,16 @@ class WorkerPool:
         hosted = profile_runtime is not None and profile_runtime.hosts_runs
         launch = Launch(agent_settings, library, knowledge, role=AgentType.REVIEWER if is_verify else AgentType.WORKER)
         runtime = launch.runtime
+        acp_settings = None
+        if runtime.type == "acp":
+            from ..acp_reviewer_settings import AcpReviewerSettings, read
+
+            try:
+                acp_settings = await read()
+            except Exception as exc:
+                # Keep a refused launch in the normal run recorder; no command will be spawned.
+                acp_settings = AcpReviewerSettings()
+                agent_settings = replace(agent_settings, profile_error=f"acp_reviewer settings unavailable: {type(exc).__name__}: {exc}")
         if (wp := self._active.get(worker_id)) is not None:
             wp.runtime_id = launch.profile.runtime.id
             wp.runtime_type = launch.profile.runtime.type
@@ -2133,7 +2187,7 @@ class WorkerPool:
         room_on = execution.room_on
         vault_config = await vault.for_project(project) if parent_task_id else None
         seat, room_text, vault_text = None, "", ""
-        if self.room_ops is not None and parent_task_id and (room_on or vault_config is not None):
+        if runtime.type != "acp" and self.room_ops is not None and parent_task_id and (room_on or vault_config is not None):
             seat = run_seat(payload, is_verify=is_verify, run=worker_id)
             try:
                 mode = room_input(launch, is_verify=is_verify)
@@ -2155,6 +2209,11 @@ class WorkerPool:
                                      f"Warning: {unavailable} is unavailable ({type(exc).__name__}: {exc}); this "
                                      "run goes without it"[:500])
         launch = Launch(agent_settings, library, knowledge, role=AgentType.REVIEWER if is_verify else AgentType.WORKER)
+        if runtime.type == "acp":
+            from ..runtimes.acp_policy import report_inspect_roots
+
+            inspect_roots = report_inspect_roots(payload.get("work_result"), work_dir)
+            launch = replace(launch, acp_reviewer=acp_settings, read_dirs=inspect_roots)
         from ..llmrec.control import attach
 
         launch = await attach(launch, agent_id=worker_id, task_id=parent_task_id or None,
@@ -2316,8 +2375,11 @@ class WorkerPool:
         verification = None
         verification_ctx = None
         while True:
-            ctx = await self._prepare(envelope, is_verify=is_verify, started_at=started_at,
-                                      agent_settings=settings, fallbacks=fallbacks)
+            try:
+                ctx = await self._prepare(envelope, is_verify=is_verify, started_at=started_at,
+                                          agent_settings=settings, fallbacks=fallbacks)
+            except RuntimeUnsupported as exc:
+                return _verify_failed(str(exc)) if is_verify else _work_failed(str(exc))
             if isinstance(ctx, dict):
                 result = ctx
                 break
@@ -2348,8 +2410,12 @@ class WorkerPool:
                         raise timeout
                     result = _verify_failed(str(timeout)) if is_verify else _work_failed(str(timeout))
                 break
-            settings = await self._fallback_profile(ctx.launch.settings, ctx.launch.role, fallbacks,
-                                                    ctx.fallback_reason, ctx.parent_task_id, ctx.worker_id)
+            try:
+                settings = await self._fallback_profile(ctx.launch.settings, ctx.launch.role, fallbacks,
+                                                        ctx.fallback_reason, ctx.parent_task_id, ctx.worker_id)
+            except RuntimeUnsupported as exc:
+                result = _verify_failed(str(exc)) if is_verify else _work_failed(str(exc))
+                break
             if settings is None:
                 if timeout is not None:
                     if not fallbacks:
@@ -2376,6 +2442,8 @@ class WorkerPool:
                                 fallbacks: list[dict[str, str]], reason: str,
                                 task_id: str, worker_id: str) -> AgentSettings | None:
         target = settings.profile.fallback_profile_id
+        if target and settings.profile.runtime.type == "acp":
+            raise RuntimeUnsupported("ACP Reviewer pilot cannot enter or leave a Profile fallback")
         if not target or len(fallbacks) >= 3 or target in {entry["from"] for entry in fallbacks} \
                 or target == settings.profile.id:
             return None
@@ -2433,6 +2501,8 @@ class WorkerPool:
                 if isinstance(handle, KeptRun):
                     handle.set_record(recorder.record_id)
                 await handle.launch()
+                if runtime.type == "acp":
+                    await recorder.annotate(handle.launch_record)
                 logger.info("%s %s%s run started (pid=%s)", role, worker_id, task_step, handle.pid)
                 wp = self._active.get(worker_id)
                 if wp is not None:
@@ -2448,14 +2518,19 @@ class WorkerPool:
                 result = _verify_failed(error) if is_verify else _work_failed(error)
                 return await self._verification_result(ctx, result) if ctx.verification is not None else result
             except RunStartError as exc:
-                ctx.fallback_reason = "start_error"
+                ctx.fallback_reason = None if runtime.type == "acp" else "start_error"
+                if runtime.type == "acp":
+                    await recorder.annotate(handle.launch_record)
+                    await handle.end()
                 if hosted:
                     await handle.end()
                 logger.error("worker %s failed to start run: %s", worker_id, exc)
                 error = f"Cannot start {runtime.label}: {exc}"
                 await recorder.finish(output_text=None, result_event=None, error=error,
                                       outcome=RunOutcome.RUN_FAILED.value, failure=failures.start_failure(exc))
-                result = {"status": "failed", "error": error}
+                result = _verify_failed(error) if is_verify and runtime.type == "acp" else {"status": "failed", "error": error}
+                if runtime.type == "acp":
+                    result["acp_write_policy"] = handle.launch_record.get("acp_write_policy")
                 return await self._verification_result(ctx, result) if ctx.verification is not None else result
             except BaseException as exc:
                 # Launch can fail after it has started a process. Stop it before
@@ -2849,8 +2924,13 @@ class WorkerPool:
                 await asyncio.wait_for(_read_output(), timeout=max(0, deadline - time.monotonic())
                                        if deadline is not None else None)
                 _end_input()
-                return_code = await asyncio.wait_for(handle.wait(), timeout=max(0, deadline - time.monotonic())
-                                                     if deadline is not None else None)
+                if runtime.type == "acp":
+                    # A v1 prompt response ends the review, not necessarily the CLI process.
+                    await _end_run()
+                    return_code = await handle.wait()
+                else:
+                    return_code = await asyncio.wait_for(handle.wait(), timeout=max(0, deadline - time.monotonic())
+                                                         if deadline is not None else None)
                 waited = True
                 result_ok = (result_event is not None and not result_event.get("is_error")
                              and result_event.get("subtype") == "success")
@@ -2915,7 +2995,7 @@ class WorkerPool:
                         "prompt_blocked": {"reason": exc.reason, "work_dir": exc.work_dir}}
             timed_out = isinstance(exc, asyncio.TimeoutError)
             error = (
-                f"Claude ran longer than the {run_timeout} s limit (timeout_seconds)" if timed_out
+                f"{runtime.label if runtime.type == 'acp' else 'Claude'} ran longer than the {run_timeout} s limit (timeout_seconds)" if timed_out
                 else str(exc) if isinstance(exc, KeeperLost)
                 else f"worker stopped reading Claude: {type(exc).__name__}"
             )
@@ -2932,7 +3012,7 @@ class WorkerPool:
             if check_task is not None:
                 await asyncio.gather(check_task, return_exceptions=True)
             self._inputs.pop(worker_id, None)
-            if not waited or ctx.verification is not None:
+            if not waited or ctx.verification is not None or runtime.type == "acp":
                 # Successful CLIs can leave children behind. End the whole run
                 # before the write monitor drains, including their final writes.
                 await _end_run()
