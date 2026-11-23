@@ -174,6 +174,7 @@ _LLM_REQUESTS_STORED_BYTES = "llm_requests_stored_bytes"
 _OUTBOUND_REVIEWS = "outbound_reviews"
 _CARD_ACTIONS = "card_actions"
 
+_MEMORY_CANDIDATES = "memory_candidates"
 _UNCERTAIN_DELIVERIES = "uncertain_deliveries"
 # The partial indexes of uncertain deliveries, as schema.sql's last lines create them.
 _UNCERTAIN_DELIVERY_INDEXES = (
@@ -323,6 +324,16 @@ def _mcp_tool_levels_ddl() -> str:
 
 
 _OUTBOUND_REVIEWS_BLOCK = re.compile(r"-- outbound reviews begin\n(.*?)-- outbound reviews end", re.S)
+_MEMORY_CANDIDATES_BLOCK = re.compile(r"-- memory candidates begin\n(.*?)-- memory candidates end", re.S)
+
+
+def _memory_candidates_ddl() -> str:
+    """The memory candidate tables and their triggers as schema.sql defines them (idempotent), so a database that
+    predates them gets the same text."""
+    found = _MEMORY_CANDIDATES_BLOCK.search(SCHEMA_PATH.read_text(encoding="utf-8"))
+    if found is None:
+        raise RuntimeError("schema.sql lost its memory candidates block")
+    return found.group(1)
 
 
 # The checks that list the classifier: (table, constraint).
@@ -1006,6 +1017,12 @@ async def _outbound_reviews_pending(conn: asyncpg.Connection) -> bool:
         if await _lacks_outbound_check(conn, table, constraint):
             return True
     return False
+
+
+async def _memory_candidates_pending(conn: asyncpg.Connection) -> bool:
+    if await conn.fetchval("SELECT EXISTS (SELECT 1 FROM schema_migrations WHERE name = $1)", _MEMORY_CANDIDATES):
+        return False
+    return not await conn.fetchval("SELECT to_regclass('memory_candidates') IS NOT NULL")
 
 
 async def _subscriptions_pending(conn: asyncpg.Connection) -> bool:
@@ -1802,6 +1819,10 @@ async def ensure_schema(pool: asyncpg.Pool | asyncpg.Connection | None = None) -
             for ddl in _failure_typing_ddl():
                 await conn.execute(ddl)
             await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", _FAILURE_TYPING)
+        # After every table its keys point at (projects, managers, manager_actions, task_journal, message_leads).
+        if await _memory_candidates_pending(conn):
+            await conn.execute(_memory_candidates_ddl())
+            await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", _MEMORY_CANDIDATES)
         # Current databases never replay initialization DDL. Missing builtins
         # are inserted without changing any saved choice or creation time.
         await conn.execute(SEEDS_PATH.read_text(encoding="utf-8"))
@@ -1858,6 +1879,7 @@ async def schema_change_pending(conn: asyncpg.Connection) -> bool:
             or await _outbound_reviews_pending(conn)
             or await _uncertain_deliveries_pending(conn) or await _mcp_tool_levels_pending(conn)
             or await _failure_typing_pending(conn)
+            or await _memory_candidates_pending(conn)
             or await _run_tree_pending(conn) or await _step_difficulty_pending(conn)
             or await _agent_spawns_pending(conn) or await _advisor_roles_pending(conn)
             or await _decision_snapshots_pending(conn)

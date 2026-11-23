@@ -145,6 +145,11 @@ def _operations() -> dict[str, Any]:
 
 # The operations whose level was decided one by one (every other one is inside).
 DECIDED_OPERATIONS: dict[str, ActionLevel] = {
+    "memory.list": INSIDE,  # reads stored candidates
+    "memory.get": INSIDE,  # reads one stored candidate
+    "memory.settings_get": INSIDE,  # reads and validates Looper's memory settings
+    "memory.settings_put": INSIDE,  # stores settings; writes no vault files and sends nothing
+    "memory.check": INSIDE,  # checks prerequisites without changing files or sending messages
     "outbound_review.get": INSIDE,  # reads Looper's own review setting
     "outbound_review.update": INSIDE,  # changes Looper's own review setting
     "mcp_tool_levels.get": INSIDE,  # reads stored MCP trust declarations
