@@ -52,6 +52,7 @@ beforeEach(() => {
   vi.stubGlobal("confirm", vi.fn(() => true));
   vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = String(input);
+    if (url === "/api/v1/admission_settings/get") return Response.json({ status: "ok", result: { enabled: false } });
     if (url === "/api/v1/registry/view") { registryReads++; return Response.json({ status: "ok", result: data }); }
     const body = init?.body ? JSON.parse(String(init.body)) : {};
     writes.push({ url, method: init!.method!, body });

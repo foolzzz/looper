@@ -52,7 +52,7 @@ from .channels.registry import ChannelRegistry
 from .channels.chat_routing import ChatResolver, ChatStop
 from .channels.telegram import TelegramChannelAdapter
 from .channels.web import WebChannelAdapter
-from . import db_backup, keeper, self_check
+from . import admission, db_backup, keeper, self_check
 from .kept_run import KeeperSettings
 from .gate_courier import GateCourier
 from .gate_service import GateReminders
@@ -818,6 +818,7 @@ async def _run_agent_system_watched(
                 await chat_settings.load()
                 from . import lanes_settings
                 await lanes_settings.load()
+                await admission.initialize()
                 await persona.load()
                 from .channels import down_alert_settings
                 await down_alert_settings.load()
@@ -967,6 +968,8 @@ async def _run_agent_system_watched(
             # It fires the schedules once the agents and the HTTP server are up, and hears from the TaskRouter when a
             # task ends, to record a scheduled run's outcome.
             drain = DrainState()  # A new control plane always starts serving; drain is never stored.
+            admission.configure_drain(lambda: drain.draining)
+            drain.add_waker(lambda: asyncio.create_task(admission.wake()))
             scheduler = Scheduler(bus=bus, sender=registry.notify, dashboard_url=dashboard_url,
                                   runtime_root=runtime_root, drain=drain, poster=registry.post,
                                   claude_bin=claude_bin, own_apps=own_bot_app_ids,
@@ -978,6 +981,8 @@ async def _run_agent_system_watched(
             # The advisor's alerts go to the operator's chat through the same channels.
             from . import advisor_alerts, outbound_hook, usage_windows
             advisor_alerts.configure(registry.notify)
+            from . import admission_notices
+            admission_notices.configure(registry.notify)
             # So does the daily note that skill proposals wait for the operator (names and reasons, never content).
             from . import skill_proposal_notice
             skill_proposal_notice.configure(registry.notify, dashboard_url=dashboard_url)
@@ -1253,6 +1258,7 @@ async def _run_agent_system_watched(
             await supervisor.stop_all()
             for runner_supervisor in runner_supervisors:
                 await runner_supervisor.stop()
+            await admission.stop()
             await registry.stop_all()
             await bus.shutdown()
             if control is not None:
@@ -1304,6 +1310,8 @@ def _pending_advisory_checks() -> list[list[self_check.Check]]:
         (("lark_cli", "Lark channel"),), (("git", "git"),), (("projects_root", "Projects root"),),
         (("provider_limits", "Provider quotas"),),
     )
+    if admission.enabled():
+        groups += ((("admission", "Account admission"),),)
     return [[self_check.Check(id, label, self_check.PENDING, "Startup check in progress") for id, label in group]
             for group in groups]
 
@@ -1338,6 +1346,9 @@ async def _advisory_startup_checks(snapshot: list[dict[str, str]], database: sel
             asyncio.to_thread(self_check.check_projects_root, projects_root),
             self_check.provider_limit_checks(),
         )
+        # Keep the disabled path's checks unchanged; every enabled probe needs its own slots.
+        if admission.enabled():
+            probes += (self_check.admission_checks(),)
         await asyncio.gather(*(record(index, probe) for index, probe in enumerate(probes)))
         self_check.log_problems([database, *(check for group in groups for check in group)])
     except Exception:
