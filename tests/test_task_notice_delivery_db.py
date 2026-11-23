@@ -14,6 +14,7 @@ from looper.agents.bus import MessageBus
 from looper.agents.channels.allowlist import SenderAllowlist
 from looper.agents.channels.base import DeliveryReceipt
 from looper.agents.channels.lark import LarkChannelAdapter
+from looper.agents.channels.outbound import OutboxSource
 from looper.agents.channels.telegram import TelegramChannelAdapter
 from looper.agents.message import MANAGER_ADDRESS, TASK_ROUTER_ADDRESS, MessageEnvelope, MessageType
 from looper.agents.task_notice import Notice, NotifyChannel, NotifyTarget, TargetKind
@@ -75,8 +76,15 @@ def test_off_keeps_exact_envelope_and_channel_calls(tmp_path, monkeypatch, chann
         assert queued.payload == notice.payload()
         assert queued.metadata == {"origin_channel_id": notice.channel_id}
         assert (await adapter.deliver(queued)).success
-        assert sender.await_args_list == [((int(notice.target.id) if channel == "telegram" else notice.target,
-                                            notice.text), {})]
+        [call] = sender.await_args_list
+        assert call.args == (int(notice.target.id) if channel == "telegram" else notice.target, notice.text)
+        if channel == "telegram":
+            # The answer call also names the message (per part) and its outbox source for the outbound gateway,
+            # which stays inert while it is off.
+            assert set(call.kwargs) == {"message_id", "source"} and call.kwargs["source"] is OutboxSource.NOTICE
+            assert call.kwargs["message_id"].startswith(queued.message_id)
+        else:
+            assert call.kwargs == {}
         assert await pool.fetchval("SELECT count(*) FROM proactive_deliveries") == 0
     run_db(check, monkeypatch)
 
