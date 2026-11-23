@@ -18,15 +18,21 @@ describe("Chat settings", () => {
   let container: HTMLDivElement;
   let root: Root;
   let stored: { stop_enabled: boolean; completion_turns: string; ledger_enabled: boolean };
+  let persona: { name: string; address: string; tone: string; notes: string };
   let missing: { channel_id: string; channel_type: string; name: string }[];
   let summary: Record<string, unknown> | null;
   let puts: unknown[];
+  let personaPuts: unknown[];
+  let refusePersona: string | null;
 
   beforeEach(() => {
     stored = { stop_enabled: false, completion_turns: "off", ledger_enabled: false };
+    persona = { name: "", address: "", tone: "", notes: "" };
     missing = [];
     summary = SUMMARY;
     puts = [];
+    personaPuts = [];
+    refusePersona = null;
     vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const path = String(input);
       if (path === "/api/v1/manager_events/summary") {
@@ -35,6 +41,19 @@ describe("Chat settings", () => {
                                { status: 403 });
         }
         return Response.json({ status: "ok", result: summary });
+      }
+      if (path === "/api/v1/manager_persona/get") {
+        return Response.json({ status: "ok", result: persona });
+      }
+      if (path === "/api/v1/manager_persona/update") {
+        const body = JSON.parse(String(init?.body));
+        personaPuts.push(body);
+        if (refusePersona) {
+          return Response.json({ status: "error", error: { code: "invalid", message: refusePersona } },
+                               { status: 400 });
+        }
+        persona = { ...persona, ...body };
+        return Response.json({ status: "ok", result: persona });
       }
       if (!["/api/v1/chat_settings/get", "/api/v1/chat_settings/update"].includes(path)) {
         throw new Error(`Unexpected request: ${input}`);
@@ -128,5 +147,27 @@ describe("Chat settings", () => {
     expect(puts).toEqual([{ ledger_enabled: true }]);
     expect(container.querySelector("[role=status]")).toBeNull();
     expect(container.textContent).not.toContain(LEDGER_NOTICE);
+  });
+
+  it("counts a persona as it is typed, saves it, and shows a refusal", async () => {
+    await act(async () => root.render(<ChatSettingsSection />));
+    const name = container.querySelector('input[placeholder="管家"]') as HTMLInputElement;
+    expect(container.textContent).toContain("管家人格");
+    expect(container.textContent).toContain("合计 0/600");
+    expect(container.textContent).toContain("只作用于默认管家；改了以后下一轮生效。群里只用名字和称呼。");
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(name, "管家");
+      name.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    expect(container.textContent).toContain("2/20");
+    expect(container.textContent).toContain("合计 2/600");
+    const save = [...container.querySelectorAll("button")].find((button) => button.textContent === "保存")!;
+    await act(async () => save.click());
+    expect(personaPuts).toEqual([{ name: "管家", address: "", tone: "", notes: "" }]);
+
+    refusePersona = "manager.persona is 601 characters; the limit is 600";
+    await act(async () => save.click());
+    expect(container.textContent).toContain("manager.persona is 601 characters; the limit is 600");
+    expect((container.querySelector('input[placeholder="管家"]') as HTMLInputElement).value).toBe("管家");
   });
 });

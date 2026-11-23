@@ -3,14 +3,22 @@ import { useEffect, useId, useState } from "react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
+import { Input } from "@/components/ui/input";
 import {
-  fetchChatSettings, fetchCompletionSummary, updateChatSettings, type ChatSettings, type CompletionSummary,
-  type CompletionTurns, type MissingOperatorBot,
+  fetchChatSettings, fetchCompletionSummary, fetchManagerPersona, updateChatSettings, updateManagerPersona,
+  type ChatSettings, type CompletionSummary, type CompletionTurns, type ManagerPersona, type MissingOperatorBot,
 } from "@/lib/api";
 import { errorText } from "@/lib/use-action";
 
 const SELECT = "mt-1 w-full max-w-sm rounded-md border border-input bg-transparent px-3 py-1.5 text-sm text-foreground "
   + "pointer-coarse:h-11 pointer-coarse:text-base focus:outline-none focus:ring-2 focus:ring-primary/50";
+const PERSONA_TOTAL = 600;
+const PERSONA_FIELDS = [
+  { key: "name", label: "名字", placeholder: "管家", limit: 20 },
+  { key: "address", label: "称呼", placeholder: "你", limit: 20 },
+  { key: "tone", label: "语气", placeholder: "简洁、直接", limit: 200 },
+  { key: "notes", label: "补充说明", limit: 400 },
+] as const;
 
 const LEDGER_NOTICE = "这些机器人的私聊里，你做的决定会记成转述，直到你在 Settings → Channels 填上『我的 ID』";
 
@@ -28,9 +36,9 @@ const FALLBACK_REASONS: Record<string, string> = {
   target_changed: "the schedule's target changed",
 };
 
-/** Settings → Chat: whether a reply can be stopped (Esc, the Stop button, /stop; experimental, off by default), and
+/** Settings → Chat: whether a reply can be stopped (Esc, the Stop button, /stop; experimental, off by default),
  * whether the Manager tells a direct chat or the dashboard chat that its task ended (off by default), with the last
- * 24 hours of task ends by how they were told. */
+ * 24 hours of task ends by how they were told, and the default Manager's persona (unset until the operator sets it). */
 export function ChatSettingsSection() {
   const id = useId();
   const [settings, setSettings] = useState<ChatSettings | null>(null);
@@ -40,6 +48,9 @@ export function ChatSettingsSection() {
   const [attempt, setAttempt] = useState(0);
   const [saving, setSaving] = useState(false);
   const [missingBots, setMissingBots] = useState<MissingOperatorBot[]>([]);
+  const [draft, setDraft] = useState<ManagerPersona | null>(null);
+  const [personaError, setPersonaError] = useState("");
+  const [savingPersona, setSavingPersona] = useState(false);
 
   useEffect(() => {
     let alive = true;
@@ -47,6 +58,11 @@ export function ChatSettingsSection() {
       if (alive) setSettings(value);
     }).catch((err: unknown) => {
       if (alive) setError(errorText(err));
+    });
+    fetchManagerPersona().then((value) => {
+      if (alive) setDraft(value);
+    }).catch((err: unknown) => {
+      if (alive) setPersonaError(errorText(err));
     });
     fetchCompletionSummary().then((value) => {
       if (alive) setSummary(value);
@@ -69,6 +85,19 @@ export function ChatSettingsSection() {
       setError(errorText(err));
     } finally {
       setSaving(false);
+    }
+  };
+
+  const savePersona = async () => {
+    if (!draft) return;
+    setSavingPersona(true);
+    setPersonaError("");
+    try {
+      setDraft(await updateManagerPersona(draft));
+    } catch (err) {
+      setPersonaError(errorText(err));
+    } finally {
+      setSavingPersona(false);
     }
   };
 
@@ -127,10 +156,52 @@ export function ChatSettingsSection() {
             </p>
             {missingBots.length > 0 && <LedgerNotice bots={missingBots} />}
           </div>
+          <PersonaFields id={id} draft={draft} error={personaError} saving={savingPersona}
+                         onDraft={setDraft} onSave={() => void savePersona()} />
           {error && <p role="alert" className="break-words text-sm text-destructive">{error}</p>}
         </div>
       )}
     </Card>
+  );
+}
+
+function PersonaFields({ id, draft, error, saving, onDraft, onSave }: {
+  id: string;
+  draft: ManagerPersona | null;
+  error: string;
+  saving: boolean;
+  onDraft: (value: ManagerPersona) => void;
+  onSave: () => void;
+}) {
+  if (!draft) {
+    return error
+      ? <p role="alert" className="break-words text-sm text-destructive">{error}</p>
+      : <p role="status" className="text-sm text-muted-foreground">Loading…</p>;
+  }
+  const total = PERSONA_FIELDS.reduce((sum, field) => sum + draft[field.key].length, 0);
+  return (
+    <div className="space-y-3 border-t border-border pt-5">
+      <div className="space-y-1">
+        <p className="text-sm font-medium">管家人格</p>
+        <p className="text-xs text-muted-foreground">只作用于默认管家；改了以后下一轮生效。群里只用名字和称呼。</p>
+      </div>
+      {PERSONA_FIELDS.map((field) => (
+        <div key={field.key} className="space-y-1">
+          <div className="flex items-baseline justify-between gap-3">
+            <label htmlFor={`${id}-persona-${field.key}`} className="text-sm font-medium">{field.label}</label>
+            <span className="text-xs tabular-nums text-muted-foreground">{draft[field.key].length}/{field.limit}</span>
+          </div>
+          <Input id={`${id}-persona-${field.key}`} value={draft[field.key]} maxLength={field.limit}
+                 placeholder={"placeholder" in field ? field.placeholder : undefined} disabled={saving}
+                 onChange={(event) => onDraft({ ...draft, [field.key]: event.target.value })} />
+        </div>
+      ))}
+      <p className={`text-xs tabular-nums ${total > PERSONA_TOTAL ? "text-destructive" : "text-muted-foreground"}`}>
+        合计 {total}/{PERSONA_TOTAL}
+      </p>
+      {error && <p role="alert" className="break-words text-sm text-destructive">{error}</p>}
+      <Button type="button" disabled={saving} onClick={onSave}>保存</Button>
+    </div>
   );
 }
 
