@@ -199,6 +199,11 @@ class SubscriptionRuns:
         stream = await db_subs.get_run(run_id)
         if run is None or schedule is None or stream is None or run["status"] != db_schedules.RUNNING:
             return False
+        if run["fired_at"] is None:
+            # Without the original age cutoff, a recovered attempt cannot reproduce its planned window.
+            await self._end(run_id, status="cancelled", outcome="failed",
+                            error="the run has no firing time; the next run reads its window again")
+            return False
         if subscriptions.is_extraction(schedule["subscription"]):
             pool = db_connection.get_pool()
             snapshot = run.get("execution_snapshot") or {}
