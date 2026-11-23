@@ -1,6 +1,7 @@
 """Full dashboard catalog projections and the existing compact Tool results."""
 
 from .. import catalog, catalog_sources, project_skills
+from ..skill_lifecycle import Lifecycle
 from ..api_v1 import Operation, STATUS, _array, _object, _STR, _NULL_STR, _INT, _BOOL
 from ..ops import ErrorCode, OpError, PublicOpError
 from ..ops.service import _plain
@@ -36,6 +37,7 @@ CATALOG_ITEM = _object({
     "owner_project_id": _NULL_STR, "owner_project_name": _NULL_STR, "description": _STR,
     "source": _STR, "version": _STR, "sha256": _STR, "size_bytes": _INT, "file_count": _INT,
     "modified": _BOOL, "imported_at": _STR, "updated_at": _STR,
+    "lifecycle": _enum(*(member.value for member in Lifecycle)),
     "mcp": _nullable(MCP_CONFIG), "installs": _array(INSTALL), "manager_install_count": _INT})
 _SKIPPED = {"item": _STR, "path": _STR, "reason": _STR}
 LIBRARY_SKIPPED = _object({**_SKIPPED, "size_bytes": {"type": ["integer", "null"]}})

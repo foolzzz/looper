@@ -10,6 +10,7 @@ import {
   Radio,
   ListChecks,
   BellRing,
+  BrainCircuit,
   ChevronDown,
   Sliders,
   Folder,
@@ -30,7 +31,7 @@ import { cn } from "@/lib/utils";
 
 /** "history" is one agent's session, or every run of one role; "projects" is one project, from the
  * sidebar's project list; "settings" is one of the Settings pages, from the group at the bottom. */
-export type Page = "dashboard" | "todo" | "chat" | "tasks" | "gates" | "projects" | "schedules" | "messages" | "intents" | "settings" | "history";
+export type Page = "dashboard" | "todo" | "chat" | "tasks" | "gates" | "projects" | "schedules" | "messages" | "intents" | "memory" | "settings" | "history";
 
 const NAV_ITEMS: { page: Page; label: string; icon: React.ElementType }[] = [
   { page: "dashboard", label: "Dashboard", icon: LayoutDashboard },
@@ -39,6 +40,7 @@ const NAV_ITEMS: { page: Page; label: string; icon: React.ElementType }[] = [
   { page: "gates", label: "User Gates", icon: MessageCircleQuestion },
   { page: "schedules", label: "Schedules", icon: CalendarClock },
   { page: "messages", label: "Message stream", icon: Radio },
+  { page: "memory", label: "Memory 记忆", icon: BrainCircuit },
 ];
 
 interface SidebarProps {

@@ -165,6 +165,8 @@ class Turn:
     debt: DeliveryDebt | None = None
     # The outside content its calls brought in (source, text), as the outbound review reads it: the leads it found.
     outside: list[tuple[str, str]] = field(default_factory=list)
+    # The receipts whose lines are among ``blocks`` (``agents.receipts``); empty while receipts are off.
+    receipts: list[Any] = field(default_factory=list)
 
     def __post_init__(self) -> None:
         if self.origin is None:
@@ -270,7 +272,7 @@ _TYPES: dict[str, tuple[type, ...]] = {"string": (str,), "boolean": (bool,), "ob
 
 def check_arguments(schema: Mapping[str, Any], arguments: Any) -> dict[str, Any]:
     """``arguments`` checked against ``schema``: an object with the properties it declares (``type`` string,
-    integer, boolean, object or array of strings, a nullable type, ``enum``, ``minLength``, ``minimum``/``maximum``,
+    integer, boolean, object or array of strings/declared objects, a nullable type, ``enum``, ``minLength``, ``minimum``/``maximum``,
     ``maxLength``), its ``required`` ones present, no others. Raises ``OpError(INVALID)`` naming the first
     problem, or ``OpError(FORBIDDEN)`` for an argument named like a secret, which no tool takes."""
     from ...db.manager_actions import SECRET_KEY
@@ -314,8 +316,12 @@ def _check_value(name: str, spec: Mapping[str, Any], value: Any) -> None:
     if kind == "string" and "maxLength" in spec and len(value) > spec["maxLength"]:
         raise OpError(ErrorCode.INVALID, f"{name} has {len(value)} characters; at most {spec['maxLength']} are "
                                          "allowed")
-    if kind == "array" and any(not isinstance(item, str) for item in value):
-        raise OpError(ErrorCode.INVALID, f"{name} must be a list of strings")
+    if kind == "array":
+        if isinstance(spec.get("items"), Mapping) and spec["items"].get("type") == "object":
+            for index, item in enumerate(value):
+                _check_value(f"{name}[{index}]", spec["items"], item)
+        elif any(not isinstance(item, str) for item in value):
+            raise OpError(ErrorCode.INVALID, f"{name} must be a list of strings")
     if kind == "object":
         for key, item in value.items():
             allowed = spec.get("properties")

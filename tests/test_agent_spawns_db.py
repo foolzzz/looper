@@ -94,7 +94,7 @@ async def _shape(conn: Any) -> dict[str, Any]:
 
 
 async def _before_the_run_tree(conn: Any) -> None:
-    """Before the run tree and its dependent explorer and failure-typing migrations."""
+    """Before the run tree and its dependent explorer, failure-typing and attempt migrations."""
     # Roll back the dependent explorer migration too, so recreating this older
     # table exercises the complete forward migration path.
     await conn.execute("DELETE FROM schema_migrations WHERE name IN "
@@ -104,12 +104,12 @@ async def _before_the_run_tree(conn: Any) -> None:
                        "DROP COLUMN subagents_per_task")
     await conn.execute("DROP TABLE advisor_advice, agent_spawns")
     await conn.execute("ALTER TABLE llm_records DROP COLUMN parent_record_id, DROP COLUMN run_kind, "
-                       "DROP COLUMN failure_class, DROP COLUMN failure_cause")
+                       "DROP COLUMN failure_class, DROP COLUMN failure_cause, DROP COLUMN attempt_id")
     await conn.execute("ALTER TABLE task_steps DROP COLUMN difficulty, DROP COLUMN checks")
     await conn.execute("ALTER TABLE projects DROP COLUMN acceptance_checks")
     await conn.execute("DELETE FROM schema_migrations WHERE name = ANY($1)", [
         "run_tree", "agent_spawns", "step_difficulty", "run_tree_online", "step_difficulty_online",
-        "failure_typing", "failure_typing_online", "acceptance_checks"])
+        "failure_typing", "failure_typing_online", "acceptance_checks", "attempt_ids", "attempt_ids_online"])
 
 
 def test_a_database_from_before_the_run_tree_gets_it_without_a_row_rewritten_and_with_the_fresh_shape() -> None:

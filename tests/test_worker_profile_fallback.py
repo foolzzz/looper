@@ -97,7 +97,7 @@ def run_primary(agent_db, tmp_path, monkeypatch):
     monkeypatch.setattr(worker, "fallback_settings", AsyncMock(return_value=backup))
 
     def run(runtime, launcher=Launcher.NATIVE, *, events=(), exit_code=1, wait=False, steer=False,
-            error=ERROR, startup=True, fallback=True, verify=False, web_search=True):
+            error=ERROR, startup=True, fallback=True, verify=False, web_search=True, attempt_id=None):
         transcript = "Launcher ready\n" + "\n".join(json.dumps(e) for e in [
             *(_launch_lines(runtime) if startup else []), *events])
         body = f'''
@@ -136,13 +136,98 @@ for line in sys.stdin:
         pool = worker.WorkerPool(config=worker.WorkerConfig(), runtime_root=tmp_path / "runtime")
 
         async def execute():
+            envelope = _step_envelope(tmp_path / "work", verify=verify)
+            envelope.payload["attempt_id"] = attempt_id
             return await asyncio.wait_for(pool._execute(
-                _step_envelope(tmp_path / "work", verify=verify), is_verify=verify), 10)
+                envelope, is_verify=verify), 10)
 
         return asyncio.run(execute()), records
 
     yield run
     assert all(process.returncode is not None for process in processes)
+
+
+def test_profile_fallback_runs_share_the_attempt(run_primary, monkeypatch, agent_db):
+    from looper.agents import attempts
+
+    started, finished = AsyncMock(), AsyncMock()
+    monkeypatch.setattr(attempts, "worker_started", started)
+    monkeypatch.setattr(attempts, "worker_finished", finished)
+    result, records = run_primary("claude-code", attempt_id=41)
+    assert result["status"] == "completed"
+    assert [call.args for call in started.await_args_list] == [(41, 1, "primary"), (41, 2, "backup")]
+    assert [call.args for call in finished.await_args_list] == [
+        (41, worker.RunOutcome.RUN_FAILED, attempts.RunFailure.CRASH),
+        (41, worker.RunOutcome.COMPLETED, None),
+    ]
+    assert [call.kwargs["outcome"] for call in agent_db.finish_record.await_args_list] == [
+        "run_failed", "completed"]
+    assert all("attempt_id" not in record["input_text"] for record in records)
+
+
+@pytest.mark.parametrize(("events", "exit_code", "failure"), [
+    ([], 2, "crash"),
+    ([{"type": "result", "subtype": "error_max_budget_usd", "is_error": True}], 1, "run_cap"),
+    ([{"type": "result", "subtype": "error_during_execution", "is_error": True}], 1, None),
+    ([SUCCESS], 1, None),
+])
+def test_attempt_failure_uses_runtime_signals(run_primary, monkeypatch, events, exit_code, failure):
+    from looper.agents import attempts
+
+    finished = AsyncMock()
+    monkeypatch.setattr(attempts, "worker_started", AsyncMock())
+    monkeypatch.setattr(attempts, "worker_finished", finished)
+    result, _ = run_primary("claude-code", attempt_id=41, events=events, exit_code=exit_code, fallback=False)
+    assert finished.await_count == 1
+    assert finished.await_args.args[2] == (attempts.RunFailure(failure) if failure else None)
+    assert finished.await_args.args[1] == (worker.RunOutcome.COMPLETED if events == [SUCCESS]
+                                          else worker.RunOutcome.RUN_FAILED)
+
+
+def test_attempt_timeout_marker_survives_timeout_propagation(run_primary, monkeypatch):
+    from looper.agents import attempts
+
+    finished = AsyncMock()
+    monkeypatch.setattr(attempts, "worker_started", AsyncMock())
+    monkeypatch.setattr(attempts, "worker_finished", finished)
+    monkeypatch.setattr(worker, "_load_settings", AsyncMock(return_value=worker.WorkerSettings(0.2, 0, "ROLE")))
+    with pytest.raises(asyncio.TimeoutError):
+        run_primary("claude-code", wait=True, attempt_id=41)
+    finished.assert_awaited_once_with(41, worker.RunOutcome.RUN_FAILED, attempts.RunFailure.TIMEOUT)
+
+
+def test_reviewer_links_record_without_counting_worker_run(run_primary, monkeypatch):
+    from looper.agents import attempts
+
+    link, started, finished = AsyncMock(), AsyncMock(), AsyncMock()
+    monkeypatch.setattr(attempts, "link_record", link)
+    monkeypatch.setattr(attempts, "worker_started", started)
+    monkeypatch.setattr(attempts, "worker_finished", finished)
+    event = {**SUCCESS, "result": json.dumps({"passed": True, "summary": "checked", "findings": []})}
+    result, _ = run_primary("claude-code", attempt_id=41, events=[event], verify=True)
+    assert result["passed"]
+    link.assert_awaited_once_with(41, 1)
+    started.assert_not_awaited()
+    finished.assert_not_awaited()
+
+
+@pytest.mark.parametrize("writer", ["worker_started", "worker_finished", "link_record"])
+def test_attempt_database_failure_keeps_the_run_usable(run_primary, monkeypatch, caplog, writer):
+    from looper.agents import attempts
+    from looper.db import step_attempts
+
+    writes = {name: AsyncMock(side_effect=ConnectionError("synthetic database failure") if name == writer else None)
+              for name in ("worker_started", "worker_finished", "link_record")}
+    for name, operation in writes.items():
+        operation.__name__ = name
+        monkeypatch.setattr(step_attempts, name, operation)
+    review = writer == "link_record"
+    event = {**SUCCESS, "result": json.dumps({"passed": True, "summary": "checked", "findings": []})} \
+        if review else SUCCESS
+    result, _ = run_primary("claude-code", attempt_id=41, events=[event], verify=review)
+    assert result["passed"] if review else result["status"] == "completed"
+    writes[writer].assert_awaited_once()
+    assert any(record.name == attempts.__name__ and writer in record.message for record in caplog.records)
 
 
 @pytest.mark.parametrize(("runtime", "launcher"), LAUNCHES)

@@ -2185,3 +2185,85 @@ class TestProgressAndFinalSummary:
         assert note == ("## Why it ended\nThe task was stopped before it finished.\n\n## Done\n- a: parser written"
                         "\n\n## Not done\n- b (was running)")
 
+
+
+def test_attempt_wiring_preserves_model_inputs(planner_claude, agent_db, monkeypatch):
+    """Observation fields stay out of launches, decision turns, journal and resume briefs."""
+    import re
+    from looper.agents import attempts
+    from looper.agents.tiers import planner as module
+
+    async def run(with_rows):
+        claude = planner_claude(plan(step("s1", review=True)),
+                                decide("retry", feedback="Add tests"), decide("review"), decide("accept"))
+        with tempfile.TemporaryDirectory() as directory:
+            h = Harness(Path(directory), claude, always(WORK_OK, REVIEW_PASS))
+            monkeypatch.setattr(attempts, "dispatch_attempt", AsyncMock(return_value=41 if with_rows else None))
+            monkeypatch.setattr(attempts, "resolve_attempt", AsyncMock(return_value=41 if with_rows else None))
+            monkeypatch.setattr(attempts, "decide_attempt", AsyncMock())
+            monkeypatch.setattr(attempts, "review_finished", AsyncMock())
+            try:
+                await h.start()
+                await h.finished()
+                brief = h.planner._resume_brief(h.planner._plan)
+                rendered = json.dumps({"commands": claude.argvs(), "prompts": claude.prompts(),
+                    "turns": [turn["text"] for turn in claude.turns()], "brief": brief}, sort_keys=True)
+                for forbidden in ("attempt_id", "contract_rejections", "run_no", "reopen_late_review",
+                                  "reopen_verification", "passed_by_adjudication"):
+                    assert forbidden not in rendered
+                # Only fixture paths and generated identifiers vary between these two identical tasks.
+                rendered = rendered.replace(directory, "<runtime>").replace(str(claude.state), "<cli>")
+                rendered = re.sub(r"(?:step|plan|worker|reviewer)-[0-9a-f]{8,12}", "<id>", rendered)
+                rendered = re.sub(r"[0-9a-f]{64}\.md", "<prompt>.md", rendered)
+                return hashlib.sha256(rendered.encode()).hexdigest()
+            finally:
+                await h.planner.stop()
+                await h.bus.shutdown()
+
+    assert asyncio.run(run(False)) == asyncio.run(run(True))
+
+
+def test_contract_rejections_record_each_rejected_reply(agent_db, tmp_path, monkeypatch):
+    from looper.agents import attempts
+    from looper.agents.tiers.planner_protocol import TurnKind, ProtocolError
+    from looper.agents.tiers.planner import PlannerTurnError
+
+    async def run():
+        planner = PlannerAgent(task_id="t1", runtime_root=tmp_path)
+        planner._last_record_id = 23
+        count = AsyncMock()
+        monkeypatch.setattr(attempts, "count_contract_rejection", count)
+        def reject(text):
+            raise ProtocolError("invalid synthetic reply")
+        with pytest.raises(PlannerTurnError):
+            await planner._ask(TurnKind.PLAN, "Plan", reject, run=AsyncMock(return_value="invalid"))
+        assert count.await_count == 2
+        assert all(item.args == (23, "PLAN") for item in count.await_args_list)
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("missing", [1, 2])
+def test_attempt_insert_failure_still_dispatches_and_does_not_reuse_an_old_row(
+    planner_claude, agent_db, monkeypatch, caplog, missing,
+):
+    from looper.agents import attempts
+    from looper.db import step_attempts
+
+    opened = 0
+    async def insert(*args, **kwargs):
+        nonlocal opened
+        opened += 1
+        if opened == missing:
+            raise ConnectionError("synthetic attempt insert failure")
+        return opened
+    monkeypatch.setattr(step_attempts, "task_run_no", AsyncMock(return_value=1))
+    monkeypatch.setattr(step_attempts, "latest_attempt", AsyncMock(return_value={"id": 100, "decision": "retry"}))
+    monkeypatch.setattr(step_attempts, "open_attempt", insert)
+    monkeypatch.setattr(step_attempts, "decide_attempt", AsyncMock())
+    claude = planner_claude(plan(step("s1")), decide("retry", feedback="Fix the test"), decide("accept"))
+    h = drive(claude, lambda envelope: WORK_FAILED if envelope.payload["attempt"] == 1 else WORK_OK)
+    assert h.final().payload["status"] == "completed"
+    assert len(h.work_items) == 2
+    assert h.work_items[missing - 1].payload["attempt_id"] is None
+    assert "synthetic attempt insert failure" in caplog.text
+    assert 100 not in [item.args[0] for item in step_attempts.decide_attempt.await_args_list]
