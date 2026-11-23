@@ -43,6 +43,22 @@ def _row(rows: list[tuple[str, dict[str, Any]]], text: str) -> dict[str, Any]:
     return matches[0]
 
 
+async def _wait_metric(pool: Any, text: str) -> dict[str, Any]:
+    """The reply is published before the turn's metrics annotate is scheduled."""
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + 15
+    while True:
+        pending = list(turn_metrics._pending)
+        if pending:
+            await asyncio.gather(*pending)
+        matches = [metadata for body, metadata in await _rows(pool)
+                   if text in body and "turn_metrics" in metadata]
+        if len(matches) == 1:
+            return matches[0]
+        assert loop.time() < deadline, f"timed out waiting for {text}"
+        await asyncio.sleep(0.02)
+
+
 async def _behind_a_completion(pool: Any, tmp_path: Path) -> tuple[dict[str, Any], str, ManagerAgent]:
     """A user message arrives while a completion turn holds the session, then runs after it."""
     claude = tmp_path / "claude"
@@ -141,11 +157,9 @@ def test_a_second_user_message_waited_behind_the_user_and_a_lone_one_behind_noth
         await rig.bus.publish(second)
         rig.main.release.set()
         await rig.reply(second)
-        await asyncio.gather(*turn_metrics._pending)
-        rows = await _rows(pool)
-        assert _row(rows, "lone-msg")["turn_metrics"]["queued_behind"] == "none"
-        assert _row(rows, "first-msg")["turn_metrics"]["queued_behind"] == "none"
-        assert _row(rows, "second-msg")["turn_metrics"]["queued_behind"] == "user"
+        assert (await _wait_metric(pool, "lone-msg"))["turn_metrics"]["queued_behind"] == "none"
+        assert (await _wait_metric(pool, "first-msg"))["turn_metrics"]["queued_behind"] == "none"
+        assert (await _wait_metric(pool, "second-msg"))["turn_metrics"]["queued_behind"] == "user"
 
     _run(test, monkeypatch, tmp_path)
 
@@ -169,8 +183,7 @@ def test_an_operator_direct_message_does_not_wait_behind_another_sessions_turn(m
         direct = _lark("dm-msg", "oc_synthetic_operator", OPEN_ID, group=False)
         await rig.bus.publish(direct)
         await rig.reply(direct)
-        await asyncio.gather(*turn_metrics._pending)
-        assert _row(await _rows(pool), "dm-msg")["turn_metrics"]["queued_behind"] == "none"
+        assert (await _wait_metric(pool, "dm-msg"))["turn_metrics"]["queued_behind"] == "none"
         assert list(rig.session(GROUP_A).turns_ended) == []
         group.release.set()
         await rig.reply(asked)
@@ -188,8 +201,7 @@ def test_a_merged_message_records_that_it_waited_behind_the_user_turn(monkeypatc
         await until(lambda: bool(rig.main.inputs))
         rig.main.release.set()
         await rig.reply(first)
-        await asyncio.gather(*turn_metrics._pending)
-        (metadata,) = [item for _body, item in await _rows(pool)]
+        metadata = await _wait_metric(pool, "first")
         assert metadata["turn_metrics"]["queued_behind"] == "none"
         assert metadata["merged"][0]["turn_metrics"]["queued_behind"] == "user"
 
