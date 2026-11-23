@@ -42,8 +42,24 @@ def needs_service():
 async def initialize(*, pool=None):
     from . import cost_guard
 
-    cost_guard.current().holds_need_recovery = await (pool or get_pool()).fetchval(
+    pool = pool or get_pool()
+    cost_guard.current().holds_need_recovery = await pool.fetchval(
         "SELECT EXISTS (SELECT 1 FROM cost_holds WHERE state='pending' OR applied_at IS NULL)")
+    await resume_unanswered_questions(pool=pool)
+
+
+async def resume_unanswered_questions(*, pool=None):
+    """Send questions that were stored but never delivered. A timeout leaves ``asked_at`` null, so a restart retries."""
+    pool = pool or get_pool()
+    rows = await pool.fetch(
+        "SELECT h.*, s.name AS schedule_name FROM cost_holds h "
+        "LEFT JOIN schedules s ON h.scope = 'schedule' AND s.id = h.scope_ref "
+        "WHERE h.state = 'pending' AND h.reason = 'unanswered' AND h.asked_at IS NULL ORDER BY h.id")
+    for row in rows:
+        try:
+            await _unanswered_question(dict(row), pool=pool)
+        except Exception:
+            logger.exception('cannot resume unanswered question %s', row['id'])
 
 
 def configure(platform=None, *, sender=None, dashboard_url=''):
@@ -73,7 +89,7 @@ async def create_hold(scope, ref, currency=None, limit=None, spent=None, reason=
             task.status = 'awaiting_budget'
     if created:
         try:
-            await _question(row)
+            await _question(row, pool=pool)
         except Exception:
             # A notification failure never releases the waiting task; the dashboard still holds its decision.
             logger.exception('cannot notify spend hold %s', row['id'])
@@ -89,33 +105,36 @@ async def _schedule_name(row) -> str:
     return _plain(name or row['scope_ref'])
 
 
-async def _send_hold(row, text, *, urgency, dedupe_key, source_ref=None, proactive_dedupe=None):
+async def _send_hold(row, text, *, urgency, dedupe_key, source_ref=None, proactive_dedupe=None) -> bool:
     from . import chat_settings, proactive_delivery as delivery
     from .gate_service import dashboard_target
     from .turn_metrics import ProactiveSource, proactive_kwargs
 
     target = await dashboard_target()
     if target is None or _sender is None:
-        return
+        return False
     if chat_settings.delivery_enabled():
-        await delivery.decide(delivery.Delivery(delivery.DeliveryKind.ADVISOR_ALERT, urgency,
+        decision = await delivery.decide(delivery.Delivery(delivery.DeliveryKind.ADVISOR_ALERT, urgency,
             delivery.ChatKind.GROUP if target.target.group else delivery.ChatKind.DIRECT),
             dedupe_key=dedupe_key, channel_id=target.channel_id, chat=target.target.id,
             last_user_message_at=None, source_ref=source_ref,
             task_id=row['scope_ref'] if row['scope'] == 'task' else None)
+        if decision.outcome is not delivery.Outcome.SEND:
+            return False
     proactive = proactive_kwargs(ProactiveSource.ADVISOR_ALERT,
                                  row['scope_ref'] if row['scope'] == 'task' else None, dedupe_key=proactive_dedupe)
     sent, error = await _sender(target.channel_id, target.target.id, text, idempotency_key=dedupe_key,
                                  group=target.target.group, **proactive)
     if not sent:
         logger.warning('cannot send spend hold %s: %s', dedupe_key, error)
+    return bool(sent)
 
 
-async def _question(row):
+async def _question(row, *, pool=None):
     from . import proactive_delivery as delivery
 
     if row.get('reason') == 'unanswered':
-        await _unanswered_question(row)
+        await _unanswered_question(row, pool=pool)
         return
     label = f"C-{row['id']}"
     scope = '任务' if row['scope'] == 'task' else '今天的全局花费'
@@ -129,7 +148,7 @@ async def _question(row):
                      source_ref=label)
 
 
-async def _unanswered_question(row):
+async def _unanswered_question(row, *, pool=None):
     from . import cost_guard_settings, proactive_delivery as delivery
 
     rule = cost_guard_settings.cached().unanswered
@@ -140,8 +159,10 @@ async def _unanswered_question(row):
             f"还要继续推吗？回复「继续 {label}」（{rule.snooze_days} 天内不再问）或「停 {label}」（暂停这个定时任务）。"
             f"{rule.pause_after_days} 天内不回答、也没回过它的推送，会自动暂停。控制台：{link}")
     logger.warning('unanswered pushes %s wait for the operator', label)
-    await _send_hold(row, text, urgency=delivery.Urgency.BLOCKING, dedupe_key=f"cost-hold:{row['id']}",
-                     source_ref=label)
+    if await _send_hold(row, text, urgency=delivery.Urgency.BLOCKING, dedupe_key=f"cost-hold:{row['id']}",
+                        source_ref=label):
+        await (pool or get_pool()).execute(
+            "UPDATE cost_holds SET asked_at = COALESCE(asked_at, now()) WHERE id = $1", row['id'])
 
 
 async def _paused_notice(hold_id, name, pause_days):

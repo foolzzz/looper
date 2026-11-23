@@ -167,11 +167,14 @@ def _unanswered_view(rule: UnansweredRule) -> dict[str, Any]:
 
 
 def view() -> dict[str, Any]:
-    return {"mode": _config.mode.value, "daily_usd": _config.daily_usd,
-            "daily_equivalent_usd": _config.daily_equivalent_usd,
-            "roles": {name: {cap: getattr(limits, cap) for cap in CAPS}
-                      for name, limits in _config.roles.items()},
-            "unanswered_pushes": _unanswered_view(_config.unanswered), "problem": _problem}
+    body: dict[str, Any] = {"mode": _config.mode.value, "daily_usd": _config.daily_usd,
+                            "daily_equivalent_usd": _config.daily_equivalent_usd,
+                            "roles": {name: {cap: getattr(limits, cap) for cap in CAPS}
+                                      for name, limits in _config.roles.items()}}
+    if _config.unanswered.enabled:
+        body["unanswered_pushes"] = _unanswered_view(_config.unanswered)
+    body["problem"] = _problem
+    return body
 
 
 async def update(body: Mapping[str, Any], *, pool: Any = None) -> dict[str, Any]:

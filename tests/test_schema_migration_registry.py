@@ -84,6 +84,24 @@ def test_new_fresh_ddl_is_appended_without_changing_the_baseline_bytes():
     )
 
 
+def test_unanswered_pause_migrations_sort_after_every_other_order():
+    discovered = migrations.discover()
+    by_name = {migration.name: migration for migration in discovered}
+    pause = by_name["schedule_pause_reasons"]
+    holds = by_name["cost_holds_unanswered"]
+    assert (pause.order, pause.pending_order, pause.online_order) == (1700, 1700, 1700)
+    assert (holds.order, holds.pending_order, holds.online_order) == (1701, 1701, 1701)
+    for migration in discovered:
+        if migration.name in ("schedule_pause_reasons", "cost_holds_unanswered"):
+            continue
+        assert migration.order < 1700
+        if migration.pending_order is not None:
+            assert migration.pending_order < 1700
+        online_order = getattr(migration, "online_order", None)
+        if online_order is not None:
+            assert online_order < 1700
+
+
 def test_current_baseline_additions_have_upgrade_and_admission_migrations():
     discovered = migrations.discover()
     expected = {"mcp_tool_levels", "failure_typing", "memory_candidates", "channel_outbox"}

@@ -232,7 +232,7 @@ def test_pause_expires_on_a_reply_and_resume_snoozes(monkeypatch):
         await pool.execute(
             "UPDATE proactive_deliveries SET replied_at=$1, reply_match='next_message' "
             "WHERE source_ref='sched-answered-0'", aged)
-        await pool.execute("UPDATE cost_holds SET created_at=$2 WHERE id=ANY($1::bigint[])",
+        await pool.execute("UPDATE cost_holds SET created_at=$2, asked_at=$2 WHERE id=ANY($1::bigint[])",
                            [pause_id, answered_id], _MOMENT - timedelta(days=3, minutes=1))
         await unanswered_pushes.check(_MOMENT + timedelta(hours=2))
         assert await pool.fetchval("SELECT state FROM cost_holds WHERE id=$1", answered_id) == "expired"
@@ -335,7 +335,7 @@ def test_decide_and_pause_claim_the_pending_hold_exactly_once(monkeypatch):
         await _enable()
         row, _ = await store.create_hold("schedule", "sched-race", None, None, None, "unanswered", pushes=15,
                                          pool=pool)
-        await pool.execute("UPDATE cost_holds SET created_at=$2 WHERE id=$1",
+        await pool.execute("UPDATE cost_holds SET created_at=$2, asked_at=$2 WHERE id=$1",
                            row["id"], _MOMENT - timedelta(days=4))
 
         async def wait_lock(holder_pid):
@@ -386,6 +386,145 @@ def test_decide_and_pause_claim_the_pending_hold_exactly_once(monkeypatch):
         assert await pool.fetchval("SELECT pause_reason FROM schedules WHERE id='sched-race'") == "unanswered"
 
     run_db(body, monkeypatch, timeout=60, max_size=6)
+
+
+def test_a_reply_after_the_question_expires_a_push_sent_earlier(monkeypatch):
+    async def body(pool):
+        await pool.execute("INSERT INTO projects(id,name) VALUES ('p-ask','Ask')")
+        await _schedule(pool, "sched-early")
+        asked = _MOMENT - timedelta(days=4)
+        await _pushes(pool, "sched-early", 1, asked - timedelta(minutes=10))
+        row, _ = await store.create_hold("schedule", "sched-early", None, None, None, "unanswered", pushes=1,
+                                         pool=pool)
+        await pool.execute("UPDATE cost_holds SET created_at=$2, asked_at=$2 WHERE id=$1", row["id"], asked)
+        await pool.execute(
+            "UPDATE proactive_deliveries SET replied_at=$2, reply_match='next_message' WHERE source_ref=$1",
+            "sched-early-0", asked + timedelta(minutes=1))
+        await _enable()
+        _capture(monkeypatch)
+        await unanswered_pushes.check(_MOMENT)
+        assert await pool.fetchval("SELECT state FROM cost_holds WHERE id=$1", row["id"]) == "expired"
+        assert await pool.fetchval("SELECT enabled FROM schedules WHERE id='sched-early'") is True
+        assert await pool.fetchval("SELECT pause_reason FROM schedules WHERE id='sched-early'") is None
+
+    run_db(body, monkeypatch, timeout=60)
+
+
+def test_a_question_that_times_out_is_resent_after_restart_and_does_not_pause(monkeypatch):
+    async def body(pool):
+        await pool.execute("INSERT INTO projects(id,name) VALUES ('p-ask','Ask')")
+        await _schedule(pool, "sched-timeout")
+        await _pushes(pool, "sched-timeout", 15, _MOMENT - timedelta(hours=2))
+        await _enable()
+        calls = {"n": 0}
+
+        async def sender(channel_id, chat, text, **kwargs):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise TimeoutError("injected")
+            return True, None
+
+        cost_holds.configure(sender=sender, dashboard_url="https://console.example")
+        monkeypatch.setattr("looper.agents.gate_service.dashboard_target", AsyncMock(return_value=SimpleNamespace(
+            channel_id="web", target=SimpleNamespace(id="direct-chat", group=False))))
+        await unanswered_pushes.check(_MOMENT)
+        hold_id = await pool.fetchval("SELECT id FROM cost_holds WHERE scope_ref='sched-timeout'")
+        assert calls["n"] == 1
+        assert await pool.fetchval("SELECT asked_at FROM cost_holds WHERE id=$1", hold_id) is None
+        await pool.execute("UPDATE cost_holds SET created_at=$2 WHERE id=$1",
+                           hold_id, _MOMENT - timedelta(days=4))
+        await unanswered_pushes.check(_MOMENT + timedelta(days=4))
+        assert calls["n"] == 1
+        assert await pool.fetchval("SELECT enabled FROM schedules WHERE id='sched-timeout'") is True
+        await cost_holds.initialize(pool=pool)
+        assert calls["n"] == 2
+        assert await pool.fetchval("SELECT asked_at FROM cost_holds WHERE id=$1", hold_id) is not None
+        assert await pool.fetchval("SELECT enabled FROM schedules WHERE id='sched-timeout'") is True
+
+    run_db(body, monkeypatch, timeout=60)
+
+
+def test_a_digested_pause_notice_is_not_sent(monkeypatch):
+    async def body(pool):
+        from looper.agents import chat_settings, proactive_delivery as delivery
+
+        await pool.execute("INSERT INTO projects(id,name) VALUES ('p-ask','Ask')")
+        await _schedule(pool, "sched-quiet")
+        await _pushes(pool, "sched-quiet", 15, _MOMENT - timedelta(hours=2))
+        await _enable()
+        sent = _capture(monkeypatch)
+        monkeypatch.setattr(chat_settings, "delivery_enabled", lambda: True)
+
+        async def decide(message, **kwargs):
+            if str(kwargs.get("dedupe_key", "")).startswith("unanswered-pause:"):
+                return delivery.Decision(delivery.Outcome.DIGEST, delivery.Reason.QUIET_HOURS,
+                                         digest_date=_MOMENT.date())
+            return delivery.Decision(delivery.Outcome.SEND, delivery.Reason.URGENT)
+
+        monkeypatch.setattr(delivery, "decide", decide)
+        await unanswered_pushes.check(_MOMENT)
+        hold_id = await pool.fetchval("SELECT id FROM cost_holds WHERE scope_ref='sched-quiet'")
+        assert len(sent) == 1
+        assert await pool.fetchval("SELECT asked_at FROM cost_holds WHERE id=$1", hold_id) is not None
+        await pool.execute("UPDATE cost_holds SET created_at=$2, asked_at=$2 WHERE id=$1",
+                           hold_id, _MOMENT - timedelta(days=4))
+        await unanswered_pushes.check(_MOMENT + timedelta(days=4))
+        assert len(sent) == 1
+        assert await pool.fetchval("SELECT enabled FROM schedules WHERE id='sched-quiet'") is False
+        assert await pool.fetchval("SELECT pause_reason FROM schedules WHERE id='sched-quiet'") == "unanswered"
+
+    run_db(body, monkeypatch, timeout=60)
+
+
+def test_a_reply_committed_before_the_pause_update_expires_the_hold(monkeypatch):
+    async def body(pool):
+        from looper.db import unanswered_pushes as pauses
+
+        await pool.execute("INSERT INTO projects(id,name) VALUES ('p-ask','Ask')")
+        await _schedule(pool, "sched-race-reply")
+        asked = _MOMENT - timedelta(days=4)
+        await _pushes(pool, "sched-race-reply", 1, asked)
+        row, _ = await store.create_hold("schedule", "sched-race-reply", None, None, None, "unanswered", pushes=1,
+                                         pool=pool)
+        await pool.execute("UPDATE cost_holds SET created_at=$2, asked_at=$2 WHERE id=$1", row["id"], asked)
+
+        async def before_write():
+            async with pool.acquire() as other:
+                await other.execute(
+                    "UPDATE proactive_deliveries SET replied_at=$2, reply_match='next_message' WHERE source_ref=$1",
+                    "sched-race-reply-0", asked + timedelta(minutes=1))
+
+        async with pool.acquire() as conn, conn.transaction():
+            outcome = await pauses.claim_pause(conn, row["id"], _MOMENT, before_write=before_write)
+        assert outcome["paused"] is False and outcome["expired"] is True
+        assert await pool.fetchval("SELECT state FROM cost_holds WHERE id=$1", row["id"]) == "expired"
+        assert await pool.fetchval("SELECT enabled FROM schedules WHERE id='sched-race-reply'") is True
+
+    run_db(body, monkeypatch, timeout=60, max_size=4)
+
+
+def test_migration_pending_sees_a_dropped_check_while_the_marker_remains(monkeypatch):
+    async def body(pool):
+        async with pool.acquire() as conn:
+            await conn.execute(
+                "INSERT INTO schema_migrations (name) VALUES ('schedule_pause_reasons'), ('cost_holds_unanswered') "
+                "ON CONFLICT DO NOTHING")
+            await conn.execute("ALTER TABLE schedules DROP CONSTRAINT schedules_pause_reason_check")
+            await conn.execute("ALTER TABLE cost_holds DROP CONSTRAINT cost_holds_reason_shape")
+            assert await schedule_pause_reasons.pending(conn)
+            assert await cost_holds_unanswered.pending(conn)
+            await schedule_pause_reasons.apply(conn, sql=None, state=None)
+            await cost_holds_unanswered.apply(conn, sql=None, state=None)
+            assert not await schedule_pause_reasons.pending(conn)
+            assert not await cost_holds_unanswered.pending(conn)
+            names = {row["name"] for row in await conn.fetch("SELECT name FROM schema_migrations")}
+            assert "schedule_pause_reasons" in names and "cost_holds_unanswered" in names
+            assert await conn.fetchval(
+                "SELECT pg_get_constraintdef(oid) FROM pg_constraint WHERE conname='schedules_pause_reason_check'")
+            assert await conn.fetchval(
+                "SELECT pg_get_constraintdef(oid) FROM pg_constraint WHERE conname='cost_holds_reason_shape'")
+
+    run_db(body, monkeypatch, timeout=60)
 
 
 def test_fresh_and_upgraded_holds_keep_budget_rows_valid(monkeypatch):

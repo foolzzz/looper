@@ -26,38 +26,46 @@ async def schedules_to_ask(start: datetime, end: datetime, now: datetime, minimu
 
 
 async def due_hold_ids(cutoff: datetime, *, pool=None) -> list[int]:
+    """Holds whose question was delivered at or before ``cutoff``. An unsent question has no ``asked_at``."""
     return [row["id"] for row in await (pool or get_pool()).fetch(
-        "SELECT id FROM cost_holds WHERE state = 'pending' AND reason = 'unanswered' AND created_at <= $1 "
-        "ORDER BY id", cutoff)]
+        "SELECT id FROM cost_holds WHERE state = 'pending' AND reason = 'unanswered' "
+        "AND asked_at IS NOT NULL AND asked_at <= $1 ORDER BY id", cutoff)]
 
 
-async def claim_pause(conn, hold_id: int, now: datetime) -> dict | None:
-    """Stop one pending unanswered hold, or expire it when a direct push was answered.
+async def claim_pause(conn, hold_id: int, now: datetime, *, before_write=None) -> dict | None:
+    """Stop one pending unanswered hold, or expire it when a direct push was answered after the question.
 
-    The ``state = 'pending'`` claim is the only writer that pauses the schedule. Zero rows means another
-    decision already owns the hold.
+    A reply counts only when ``replied_at`` is at or after ``asked_at`` (or ``created_at`` when the question
+    predates that column). ``sent_at`` does not: a reply to an older push still answers the question.
+
+    The reply check and the state change are one ``UPDATE``. Under READ COMMITTED that command sees replies
+    committed before it starts. ``FOR UPDATE`` locks the hold only, not ``proactive_deliveries``, so a reply that
+    commits after the command's snapshot can still lose this pass. ``before_write`` runs after the lock and before
+    that command; production leaves it unset. The ``state = 'pending'`` claim is the only writer that pauses the
+    schedule. Zero rows means another decision already owns the hold.
     """
     row = await conn.fetchrow(
-        "SELECT * FROM cost_holds WHERE id = $1 AND state = 'pending' AND reason = 'unanswered' FOR UPDATE",
-        hold_id)
+        "SELECT id, scope_ref FROM cost_holds "
+        "WHERE id = $1 AND state = 'pending' AND reason = 'unanswered' FOR UPDATE", hold_id)
     if row is None:
         return None
-    replies = await conn.fetchval(
-        "SELECT count(d.replied_at) FROM proactive_deliveries d "
-        "JOIN schedule_runs r ON r.id = d.source_ref "
-        "WHERE r.schedule_id = $1 AND d.source IN ('schedule', 'subscription') "
-        "AND d.outcome = 'sent' AND d.chat_kind = 'direct' AND d.sent_at >= $2",
-        row["scope_ref"], row["created_at"])
-    if replies:
-        await conn.execute(
-            "UPDATE cost_holds SET state = 'expired', applied_at = $2 WHERE id = $1 AND state = 'pending'",
-            hold_id, now)
-        return {"paused": False, "expired": True}
-    claimed = await conn.execute(
-        "UPDATE cost_holds SET state = 'stopped', decided_at = $2, applied_at = $2 "
-        "WHERE id = $1 AND state = 'pending'", hold_id, now)
-    if not str(claimed).endswith("1"):
+    if before_write is not None:
+        await before_write()
+    claimed = await conn.fetchrow(
+        "UPDATE cost_holds AS h SET "
+        "state = CASE WHEN answered.yes THEN 'expired' ELSE 'stopped' END, "
+        "decided_at = CASE WHEN answered.yes THEN h.decided_at ELSE $2 END, applied_at = $2 "
+        "FROM (SELECT EXISTS (SELECT 1 FROM proactive_deliveries d "
+        "JOIN schedule_runs r ON r.id = d.source_ref WHERE r.schedule_id = h2.scope_ref "
+        "AND d.source IN ('schedule', 'subscription') AND d.outcome = 'sent' AND d.chat_kind = 'direct' "
+        "AND d.replied_at >= COALESCE(h2.asked_at, h2.created_at)) AS yes "
+        "FROM cost_holds h2 WHERE h2.id = $1) AS answered "
+        "WHERE h.id = $1 AND h.state = 'pending' AND h.reason = 'unanswered' "
+        "RETURNING h.state, answered.yes", hold_id, now)
+    if claimed is None:
         return {"paused": False, "expired": False}
+    if claimed["yes"]:
+        return {"paused": False, "expired": True}
     name = await conn.fetchval("SELECT name FROM schedules WHERE id = $1", row["scope_ref"])
     paused = await conn.execute(
         "UPDATE schedules SET enabled = false, pause_reason = 'unanswered', paused_at = $2, next_fire_at = NULL "

@@ -152,8 +152,7 @@ def test_guard_settings_never_expand_chat_settings(stored):
 def test_unanswered_rule_stays_off_until_reply_metrics_are_on(stored):
     from looper.agents import chat_settings
 
-    assert settings.view()["unanswered_pushes"] == {
-        "enabled": False, "window_days": 3, "min_pushes": 15, "pause_after_days": 3, "snooze_days": 30}
+    assert "unanswered_pushes" not in settings.view()
     assert settings.cached() == settings.Config()
 
     async def check():
@@ -166,6 +165,8 @@ def test_unanswered_rule_stays_off_until_reply_metrics_are_on(stored):
         finally:
             chat_settings.set_metrics_enabled(False)
         assert settings.cached().unanswered == settings.UnansweredRule(enabled=True, min_pushes=15)
+        assert settings.view()["unanswered_pushes"] == {
+            "enabled": True, "window_days": 3, "min_pushes": 15, "pause_after_days": 3, "snooze_days": 30}
         assert stored[0]["cost_guard.unanswered_pushes.enabled"] == "true"
         assert stored[0]["cost_guard.unanswered_pushes.min_pushes"] == "15"
         assert "cost_guard.unanswered_pushes.window_days" not in stored[0]

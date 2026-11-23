@@ -36,7 +36,7 @@ VIEW = _object({"mode": _MODE, **dict.fromkeys(settings.CAPS, _CAP), "roles": _R
                 "counters": _array(_COUNTER), "recent": _array(_RECENT),
                 "recommended_daily_usd": _CAP, "recommended_daily_equivalent_usd": _CAP,
                 "problem": _NULL_STR, "holds": _array(_HOLD)}, closed=True)
-VIEW["required"] = [name for name in VIEW["required"] if name != "holds"]
+VIEW["required"] = [name for name in VIEW["required"] if name not in ("holds", "unanswered_pushes")]
 _PATCH_ROLES = _object({role: _object(dict.fromkeys(settings.CAPS, _CAP), [], closed=True)
                         for role in settings.ROLES}, [], closed=True)
 PATCH = _object({"mode": {"type": ["string", "null"], "enum": ["off", "observe", "enforce", None]},
@@ -47,6 +47,7 @@ HOLD = _object({"id": _INT, "scope": _STR, "scope_ref": _STR, "currency": _NULL_
                 "limit_usd": _NULL_NUMBER, "spent_usd": _NULL_NUMBER,
                 "pushes": {"type": ["integer", "null"]}, "reason": _STR,
                 "state": _STR, "created_at": _STR, "decided_at": _NULL_STR, "decided_via": _NULL_STR}, closed=True)
+HOLD["required"] = [name for name in HOLD["required"] if name != "pushes"]
 _DECIDE = _object({"hold_id": {"type": "integer", "minimum": 1},
                    "decision": {"type": "string", "enum": ["continue", "stop"]},
                    "new_limit_usd": {"type": "number", "minimum": 0},
@@ -121,7 +122,10 @@ async def impact(server, operation, arguments, principal, headers):
 
 
 def _hold(row):
-    return {key: row[key].isoformat() if hasattr(row[key], 'isoformat') else row[key] for key in HOLD['properties']}
+    body = {key: row[key].isoformat() if hasattr(row[key], 'isoformat') else row[key] for key in HOLD['properties']}
+    if body.get("pushes") is None:
+        del body["pushes"]
+    return body
 
 
 async def run(server, operation, arguments, principal, headers):
