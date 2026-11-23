@@ -424,10 +424,11 @@ def test_a_schedule_that_cannot_fire_holds_up_no_other(monkeypatch: pytest.Monke
                                "WHERE id = $1) WHERE id = $2", broken, working)
         fire = env.scheduler._fire_schedule
 
-        async def failing(conn: Any, schedule: dict[str, Any], now: datetime) -> str | None:
+        async def failing(conn: Any, schedule: dict[str, Any], now: datetime,
+                          notices: list[tuple[str | None, Any]]) -> Any:
             if schedule["id"] == broken:
                 raise RuntimeError("boom")
-            return await fire(conn, schedule, now)
+            return await fire(conn, schedule, now, notices)
 
         monkeypatch.setattr(env.scheduler, "_fire_schedule", failing)
         await env.scheduler.tick()
