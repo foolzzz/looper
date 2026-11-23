@@ -3,8 +3,8 @@
 from . import _widen_check
 
 name = "intent_group_reads"
-order = 1500
-pending_order = 1500
+order = 1800
+pending_order = 1800
 fresh_ddl = """
 CREATE TABLE IF NOT EXISTS intent_group_reads (
     source_id TEXT NOT NULL,

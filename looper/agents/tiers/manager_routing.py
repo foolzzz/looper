@@ -319,7 +319,8 @@ class SessionRouter:
                 finally:
                     self._handling.pop(session.key, None)
                     session.last_activity = agent._clock()
-                    session.turn_ended_at = session.last_activity
+                    if isinstance(item, _Completion) or envelope.message_type is MessageType.USER_MESSAGE:
+                        session.turn_ended_at = session.last_activity
                 if not agent._running:
                     break  # left unsettled: a restart replays it
                 if isinstance(item, _Completion) or not self.holds_completion(envelope):

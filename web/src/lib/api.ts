@@ -67,6 +67,15 @@ export interface ProviderDailyUsage {
   quota_failures: number | null;
 }
 
+export interface ProviderAdmissionStatus {
+  state: "open" | "frozen" | "probing" | "degraded";
+  until: string | null;
+  until_known: boolean;
+  waiting: Record<"interactive" | "user_task" | "recovery" | "background", number>;
+  running: number;
+  limit: number | null;
+}
+
 export interface ProviderLimits {
   enabled: boolean;
   providers: {
@@ -75,7 +84,7 @@ export interface ProviderLimits {
     cost_basis: "api_equivalent" | "reported";
     windows: ProviderLimitWindow[];
     usage: ProviderDailyUsage[];
-    admission: null;
+    admission?: ProviderAdmissionStatus | null;
   }[];
 }
 
@@ -83,6 +92,22 @@ export async function fetchProviderLimits(providerId: string, signal?: AbortSign
   const result = await callV1<ProviderLimits>("/api/v1/providers/limits", { provider_id: providerId }, { signal });
   if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
   return result;
+}
+
+export async function fetchAdmissionSettings(signal?: AbortSignal): Promise<{ enabled: boolean }> {
+  const result = await callV1<{ enabled: boolean }>("/api/v1/admission_settings/get", {}, { signal });
+  if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
+  return result;
+}
+
+export function updateAdmissionSettings(enabled: boolean, confirmation?: V1PendingConfirmation) {
+  return confirmation ? confirmV1<{ enabled: boolean }>(confirmation.confirmation_id, confirmation.session)
+    : callV1<{ enabled: boolean }>("/api/v1/admission_settings/update", { enabled });
+}
+
+export function clearProviderLimits(providerId: string, confirmation?: V1PendingConfirmation) {
+  return confirmation ? confirmV1<{ state: string }>(confirmation.confirmation_id, confirmation.session)
+    : callV1<{ state: string }>("/api/v1/providers/limits_clear", { provider_id: providerId });
 }
 
 export function updateLimitSignalsSettings(enabled: boolean, confirmation?: V1PendingConfirmation) {

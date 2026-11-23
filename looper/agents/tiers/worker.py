@@ -57,7 +57,7 @@ from ..acp_guards import AcpFallbackError
 from ..agent_settings import AgentSettings, AgentType, Launch, fallback_settings, load_agent_settings, load_task_limit
 from ..bus import MessageBus
 from ..claude_cli import ClaudeRunRecorder, RecordNotResumable, TurnBlocked, budget_error, ended_by, prompt_block
-from .. import attempts, cost_guard, cost_dispatch, failures, outbound_hook, proc_tree, reported_files, vault
+from .. import admission, attempts, cost_guard, cost_dispatch, failures, outbound_hook, proc_tree, reported_files, vault
 from ...db import tasks as db_tasks
 from .. import keeper, kept_dirs
 from ..keeper.client import KeeperGone
@@ -1089,6 +1089,8 @@ class WorkerPool:
         self._tasks: dict[str, asyncio.Task[Any]] = {}
         # The runs counted against their task's limit: worker id -> (role, task id).
         self._slots: dict[str, tuple[AgentType, str]] = {}
+        # A task slot can precede account admission; no runtime needs draining yet.
+        self._admission_waiting: set[str] = set()
         # Held to check a limit and take a place, so two runs cannot both take a task's last one.
         self._slot_lock = asyncio.Lock()
         # The runs waiting for a place, by (role, task id): woken to check again when a run of theirs ends, and all of
@@ -1412,6 +1414,7 @@ class WorkerPool:
                 self._reminders[run_id] = reminders
             self._active[run_id] = wp
             self._slots[run_id] = (agent, task_id)
+            await admission.register(launch.profile.provider.id, admission.Lane.RECOVERY, owner=run_id)
             self._input_ready[run_id] = asyncio.Event()
             task = asyncio.create_task(self._run_adopted(wp, ctx, handle, recorder, reply,
                                                         (record.get("metadata") or {}).get("fallback", [])))
@@ -1497,7 +1500,10 @@ class WorkerPool:
                     if not ctx.is_verify and handle.state is not KeptRunState.DETACHED:
                         await attempts.worker_finished(ctx.attempt_id, ctx.outcome, ctx.run_failure)
 
-        await self._finish_run(wp, ctx.seat, reply, run, fallbacks=fallbacks, severity=ctx.severity)
+        try:
+            await self._finish_run(wp, ctx.seat, reply, run, fallbacks=fallbacks, severity=ctx.severity)
+        finally:
+            await admission.release(wp.worker_id)
 
     async def _listen_loop(self) -> None:
         """Listen for work items addressed to any worker-* queue.
@@ -1860,6 +1866,7 @@ class WorkerPool:
             ready.set()  # startup failed or was cancelled: waiting input returns undelivered
         self._tasks.pop(worker_id, None)
         self._active.pop(worker_id, None)
+        self._admission_waiting.discard(worker_id)
         held = self._slots.pop(worker_id, None)
         if held is not None:
             self._wake_slot_waiters(held)
@@ -1876,7 +1883,8 @@ class WorkerPool:
         return {"runs": [{"worker_id": wp.worker_id, "task_id": wp.parent_task_id or wp.task_id,
                           "role": wp.role.value, "since": wp.since.isoformat(), "keepable": wp.keepable,
                           "runtime_id": wp.runtime_id, "runtime_type": wp.runtime_type}
-                         for wid, wp in self._active.items() if wid in self._slots]}
+                         for wid, wp in self._active.items()
+                         if wid in self._slots and wid not in self._admission_waiting]}
 
     async def recheck(self) -> None:
         """Let every run waiting for room in its task check its task's limit again (a limit changed)."""
@@ -2443,6 +2451,7 @@ class WorkerPool:
         settings = None
         verification = None
         verification_ctx = None
+        lane = None
         while True:
             try:
                 ctx = await self._prepare(envelope, is_verify=is_verify, started_at=started_at,
@@ -2461,7 +2470,19 @@ class WorkerPool:
             timeout = None
             admission_refused = False
             try:
-                result = await self._execute_once(ctx, fallbacks)
+                if lane is None:
+                    lane = await admission.worker_lane(ctx.parent_task_id, envelope.payload, role=ctx.launch.role)
+                if admission.enabled():
+                    self._admission_waiting.add(ctx.worker_id)
+                async with admission.slot(ctx.launch.profile.provider.id, lane, owner=ctx.worker_id,
+                        on_wait=lambda text: self._activity(ctx.parent_task_id, ctx.worker_id, "phase", text),
+                        draining=lambda: self._drain is not None and self._drain.draining):
+                    self._admission_waiting.discard(ctx.worker_id)
+                    if admission.enabled():
+                        ctx.started_at = datetime.now(timezone.utc)
+                        if isinstance(ctx.handle, KeptRun):
+                            ctx.handle.manifest["started_at"] = ctx.started_at.isoformat()
+                    result = await self._execute_once(ctx, fallbacks)
             except asyncio.TimeoutError as exc:
                 ctx.run_failure = attempts.RunFailure.TIMEOUT
                 timeout = exc
@@ -2474,6 +2495,7 @@ class WorkerPool:
                 result = _verify_failed(str(exc)) if is_verify else _work_failed(str(exc))
                 break
             finally:
+                self._admission_waiting.discard(ctx.worker_id)
                 if not admission_refused and not is_verify and not (isinstance(ctx.handle, KeptRun)
                                           and ctx.handle.state is KeptRunState.DETACHED):
                     await attempts.worker_finished(ctx.attempt_id, ctx.outcome, ctx.run_failure)

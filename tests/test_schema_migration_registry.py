@@ -95,3 +95,9 @@ def test_current_baseline_additions_have_upgrade_and_admission_migrations():
     assert failure.validate == (("llm_records", "llm_records_failure_check"),)
     assert failure.indexes == (("idx_llm_records_failures",
                                 "ON llm_records (created_at) WHERE failure_class IS NOT NULL"),)
+
+
+def test_followed_group_migration_uses_its_reserved_order():
+    discovered = migrations.discover()
+    group_reads = next(migration for migration in discovered if migration.name == "intent_group_reads")
+    assert (group_reads.order, group_reads.pending_order) == (1800, 1800)
