@@ -29,11 +29,14 @@ def dedupe_key(event_id: int) -> str:
 
 
 async def _web_session(conn: Any) -> str | None:
-    """The operator's most recently active dashboard chat session with the default Manager (not an API client's)."""
-    for session in await db_chat.list_sessions(limit=20, manager_id=DEFAULT_MANAGER_ID, pool=conn):
-        if session["channel"] == "web" and session["client_id"] is None:
-            return session["session_id"]
-    return None
+    """The operator's most recently active dashboard chat session with the default Manager: filtered to the
+    operator's dashboard first (not another channel's, not an API client's, not a Planner thread), then the newest."""
+    return await conn.fetchval(
+        "SELECT m.session_id FROM chat_messages m LEFT JOIN chat_threads t USING (session_id) "
+        "WHERE m.channel = 'web' AND NOT starts_with(m.session_id, $2) AND t.client_id IS NULL "
+        "AND coalesce(t.manager_id, 'manager') = $1 "
+        "GROUP BY m.session_id ORDER BY max(m.created_at) DESC, max(m.id) DESC LIMIT 1",
+        DEFAULT_MANAGER_ID, db_chat.PLANNER_THREAD_PREFIX)
 
 
 async def hand_off(conn: Any, run_id: str) -> list[int]:

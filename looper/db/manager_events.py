@@ -203,14 +203,43 @@ async def skip_batch(batch: UUID, *, reason: str, record_id: int | None = None,
     return sorted((dict(row) for row in rows), key=lambda row: row["id"])
 
 
-async def triage_turns_between(start: datetime, end: datetime, *, except_batch: UUID | None = None,
-                               pool: Db | None = None) -> int:
-    """How many triage turns started in [``start``, ``end``): the distinct batches of triage events, leaving out
-    ``except_batch`` and the batches that fell back for ``daily_cap`` (they never ran)."""
-    return int(await (pool or get_pool()).fetchval(
-        "SELECT count(DISTINCT batch) FROM manager_events WHERE kind = 'triage' AND batch IS NOT NULL "
-        "AND started_at >= $1 AND started_at < $2 AND ($3::uuid IS NULL OR batch <> $3) "
-        "AND reason IS DISTINCT FROM 'daily_cap'", start, end, except_batch))
+async def admit_triage_batch(batch: UUID, *, start: datetime, end: datetime, cap: int, now: datetime,
+                             pool: Db | None = None) -> bool:
+    """Take one of the day's triage turns for ``batch``, serially: with fewer than ``cap`` other batches admitted in
+    [``start``, ``end``) the batch is marked admitted (``payload.admitted_at``, persisted, so a replay is admitted
+    again and a concurrent caller sees it); otherwise its running events fall back for ``daily_cap``."""
+    db = pool or get_pool()
+    async with db.acquire() as conn, conn.transaction():
+        await conn.execute("SELECT pg_advisory_xact_lock(hashtextextended('triage-admit', 0))")
+        if await conn.fetchval("SELECT bool_or(payload ? 'admitted_at') FROM manager_events WHERE batch = $1", batch):
+            return True
+        used = await conn.fetchval(
+            "SELECT count(DISTINCT batch) FROM manager_events WHERE kind = 'triage' AND batch IS NOT NULL "
+            "AND payload ? 'admitted_at' AND (payload->>'admitted_at')::timestamptz >= $1 "
+            "AND (payload->>'admitted_at')::timestamptz < $2", start, end)
+        if used < cap:
+            await conn.execute(
+                "UPDATE manager_events SET payload = payload || jsonb_build_object('admitted_at', $2::text) "
+                "WHERE batch = $1 AND kind = 'triage'", batch, now.isoformat())
+            return True
+        await conn.execute(
+            "UPDATE manager_events SET state = 'fallback', reason = 'daily_cap', finished_at = now(), delivery = NULL "
+            "WHERE batch = $1 AND kind = 'triage' AND state = 'running'", batch)
+        return False
+
+
+async def batch_state(batch: UUID, *, pool: Db | None = None) -> tuple[str, str | None] | None:
+    """The state and reason of the first event of ``batch`` (None for an unknown batch)."""
+    row = await (pool or get_pool()).fetchrow(
+        "SELECT state, reason FROM manager_events WHERE batch = $1 ORDER BY id LIMIT 1", batch)
+    return (row["state"], row["reason"]) if row is not None else None
+
+
+async def reply_open(batch: UUID, *, pool: Db | None = None) -> bool:
+    """Whether ``batch`` is still running with no reply handed to a channel (it may still be told)."""
+    return bool(await (pool or get_pool()).fetchval(
+        "SELECT EXISTS (SELECT 1 FROM manager_events WHERE batch = $1 AND state = 'running' AND delivery IS NULL)",
+        batch))
 
 
 async def claim_deliveries(*, now: datetime | None = None, ids: Sequence[int] | None = None,
