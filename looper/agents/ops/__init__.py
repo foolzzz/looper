@@ -111,13 +111,14 @@ class TurnState(str, Enum):
 
 class TurnOrigin(str, Enum):
     """Why a Manager turn runs: a user's message (``user``), Claude on its own (``own``), or Looper telling the chat
-    that tasks ended (``completion``) or that something may need them (``idle_check``). Only a user's turn changes
-    anything."""
+    that tasks ended (``completion``), that something may need them (``idle_check``) or that important messages
+    arrived (``triage``). Only a user's turn changes anything."""
 
     USER = "user"
     OWN = "own"
     COMPLETION = "completion"
     IDLE_CHECK = "idle_check"
+    TRIAGE = "triage"
 
 
 @dataclass
