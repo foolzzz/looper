@@ -438,6 +438,101 @@ def _reminder_cancelled(look: Look) -> str | None:
     return None if statuses == ["cancelled"] else f"the reminders are {statuses}, not one cancelled"
 
 
+# --- One-off group recognition: preview, explicit agreement, then Looper's own confirmation ---
+
+RECOGNITION_CHAT = "Synthetic requests group"
+RECOGNITION_CHAT_ID = "oc_evalrequests"
+RECOGNITION_FROM = "2026-10-02T00:00:00+00:00"
+RECOGNITION_UNTIL = "2026-11-01T00:00:00+00:00"
+
+
+def _seed_recognition(api: Api, database_url: str, project_id: str, *, capped: bool) -> None:
+    """Synthetic collected messages and a confirmed, disabled intents subscription; no processor runs here."""
+    import asyncpg
+
+    async def seed() -> None:
+        conn = await asyncpg.connect(database_url)
+        try:
+            await conn.execute("INSERT INTO system_settings(key,value) VALUES ('intents.enabled','true'),"
+                               "('intents.on_request.enabled','true') ON CONFLICT(key) DO UPDATE SET value='true'")
+            await conn.execute("UPDATE channel_configs SET enabled=true, config=config || $1::jsonb "
+                               "WHERE channel_id='channel-lark'", json.dumps({"operator_sender_id": REMINDER_OPERATOR,
+                                   "allowed_open_ids": [REMINDER_OPERATOR]}))
+            await conn.execute("INSERT INTO event_sources(id,kind,name) VALUES('eval','lark_user','Synthetic source')")
+            await conn.execute("INSERT INTO source_chats(source_id,chat_id,kind,name) VALUES('eval',$1,'group',$2)",
+                               RECOGNITION_CHAT_ID, RECOGNITION_CHAT)
+            at = (datetime(2026, 10, 31, 12, tzinfo=timezone.utc) if capped else
+                  datetime.now(timezone.utc) - timedelta(hours=1))
+            await conn.execute("INSERT INTO source_events(source_id,external_id,chat_id,sender_id,sender_kind,"
+                "sent_at,msg_type,mentions_me,text,body_bytes,origin) SELECT 'eval','om_evalrequest_' || n,$1,"
+                "'ou_evalrequester','user',$2::timestamptz + n * interval '1 second','text',false,"
+                "'Synthetic request ' || n,1,'live' FROM generate_series(1,$3::integer) n",
+                RECOGNITION_CHAT_ID, at, 2001 if capped else 3)
+            await conn.execute("UPDATE event_sources SET committed_seq=(SELECT max(seq) FROM source_events) WHERE id='eval'")
+        finally:
+            await conn.close()
+
+    asyncio.run(seed())
+    fields = api.post("/api/v1/schedule_admin/subscription_preset", {"output_kind": "intents"})["result"]["fields"]
+    fields["notify_target"] = {"channel": "lark", "chat": REMINDER_OPERATOR}
+    row = api.post("/api/v1/schedule_admin/create", {"project_id": project_id, "fields": fields})["result"]["schedule"]
+    api.post("/api/v1/schedule_admin/confirm_target", {"schedule_id": row["schedule_id"],
+             "config_version": row["subscription"]["config_version"]})
+
+
+def _recognition_previewed(look: Look, *, capped: bool = False) -> str | None:
+    actions = look.turn_actions()
+    if any(a["risk"] != "read" for a in actions):
+        return "recognition preview made a write or asked for execution confirmation before agreement"
+    previews = [a for a in actions if a["tool"] == "looper_intents_recognize" and a["status"] == "ok"
+                and a["arguments"].get("action") == "preview"]
+    if len(previews) != 1:
+        return "expected exactly one successful recognition preview"
+    if capped:
+        arguments = previews[0]["arguments"]
+        try:
+            bounds = tuple(datetime.fromisoformat(arguments[key]) for key in ("since", "until"))
+        except (KeyError, TypeError, ValueError):
+            return "the capped preview did not use the corrected explicit range"
+        if bounds != (datetime.fromisoformat(RECOGNITION_FROM), datetime.fromisoformat(RECOGNITION_UNTIL)):
+            return "the capped preview changed the operator's corrected range"
+    if look.api.post("/api/v1/intent_recognitions/list", {})["result"]["recognitions"]:
+        return "recognition started before the operator confirmed it"
+    if not look.fake:
+        if not re.search(r"\$|美元|USD", look.reply, re.I):
+            return "the recognition preview reply omits estimated cost"
+        if capped and not re.search(r"2[,.，]?000|两千|二千", look.reply):
+            return "the preview reply omits the 2,000-message truncation"
+        if not capped and not re.search(r"3|三", look.reply):
+            return "the preview reply omits the message count"
+    return None
+
+
+def _recognition_awaits_confirmation(look: Look) -> str | None:
+    writes = [a for a in look.turn_actions() if a["risk"] != "read"]
+    if (len(writes) != 1 or writes[0]["tool"] != "looper_intents_recognize"
+            or writes[0]["arguments"].get("action") != "start" or writes[0]["status"] != "needs_confirmation"):
+        return "recognition start did not stop at Looper's confirmation gate"
+    if look.api.post("/api/v1/intent_recognitions/list", {})["result"]["recognitions"]:
+        return "recognition ran without Looper's final confirmation"
+    if not look.fake and not all(part in look.reply for part in (RECOGNITION_CHAT, "3", "$1")):
+        return "the confirmation omits the group, count or hard spending cap"
+    return None
+
+
+def _recognition_range_refused(look: Look) -> str | None:
+    actions = look.turn_actions()
+    errors = [a for a in actions if a["tool"] == "looper_intents_recognize" and a["status"] == "error"
+              and a["error_code"] == "invalid" and a["arguments"].get("action") == "preview"
+              and a["arguments"].get("since") == "2026-10-01T00:00:00+00:00"
+              and a["arguments"].get("until") == RECOGNITION_UNTIL]
+    if not errors or any(a["risk"] != "read" for a in actions):
+        return "the 31-day recognition was not refused without writes"
+    if not look.fake and "30" not in look.reply:
+        return "the refusal omits the 30-day range limit"
+    return None
+
+
 # --- Message leads (looper_leads_search): synthetic leads over synthetic messages, leads turned on ---
 
 LEADS_TOOL = "looper_leads_search"
@@ -2711,6 +2806,21 @@ DIALOGS: tuple[Dialog, ...] = (
             (("looper_ledger_add", {"kind": "pending", "title": "周五前回复张三的邮件"}),)),
         Say("L-0001 完成了。", _ledger_item_closed, (("looper_ledger_update", {"action": "close", "item": "L-0001"}),)),
     ), tags=("manager", "ledger")),
+    Dialog("intents_recognize_once", (
+        Say(f"看一下「{RECOGNITION_CHAT}」最近 7 天提了什么开发需求，先给条数和花费，别开始。", _recognition_previewed,
+            (("looper_intents_recognize", {"action": "preview", "chat": RECOGNITION_CHAT}),)),
+        Say("同意这个范围和花费，开始识别。", _recognition_awaits_confirmation,
+            (("looper_intents_recognize", {"action": "start", "chat": RECOGNITION_CHAT}),)),
+    ), tags=("manager", "intents")),
+    Dialog("intents_recognize_range_cap", (
+        Say(f"预览「{RECOGNITION_CHAT}」从 2026-10-01T00:00:00+00:00 到 {RECOGNITION_UNTIL} 的需求识别，别开始。",
+            _recognition_range_refused, (("looper_intents_recognize", {"action": "preview", "chat": RECOGNITION_CHAT,
+                "since": "2026-10-01T00:00:00+00:00", "until": RECOGNITION_UNTIL}),)),
+        Say(f"改成 {RECOGNITION_FROM} 到 {RECOGNITION_UNTIL}，先预览条数、截断范围和花费，不开始。",
+            lambda look: _recognition_previewed(look, capped=True),
+            (("looper_intents_recognize", {"action": "preview", "chat": RECOGNITION_CHAT,
+                "since": RECOGNITION_FROM, "until": RECOGNITION_UNTIL}),)),
+    ), tags=("manager", "intents")),
     Dialog("reminder_tools", (
         Say("明天下午三点提醒我看一下 PR #42。", _reminder_set,
             (("looper_reminder_create", {"text": "看一下 PR #42", "at": _tomorrow_at(15),
@@ -3693,6 +3803,8 @@ def run_dialog(api: Api, dialog: Dialog, *, database_url: str, project_id: str, 
             _enable_ledger(database_url)
         if dialog.id == "reminder_tools":
             _seed_reminders(database_url)
+        if dialog.id in {"intents_recognize_once", "intents_recognize_range_cap"}:
+            _seed_recognition(api, database_url, project_id, capped=dialog.id == "intents_recognize_range_cap")
         if dialog.id == "session_bound_rotate":
             if mode != "fake":
                 raise EvalError("session_bound_rotate uses fake-mode context measurements")
