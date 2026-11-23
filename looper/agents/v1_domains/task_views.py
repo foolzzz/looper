@@ -29,6 +29,12 @@ TASK_INFO = _object({
     **dict.fromkeys(("planner_id", "completed_at", "schedule_id", "schedule_name", "manager_name"), _NULL_STR),
     "group": _GROUP, "continues_schedule_session": _BOOL, "cost": _nullable(TASK_COST),
     "workflow": _nullable(_OBJ), "template": _nullable(_TEMPLATE)}, closed=True)
+# Optional, and only on a tasks.page row: adding them to TASK_INFO would make them required there and on
+# the task detail, which does not carry them. Absent unless an attention row has a failed required check.
+_TASK_LIST = _object({
+    **TASK_INFO["properties"],
+    "failed_checks": _array(_STR), "failed_check_step": _STR,
+}, TASK_INFO["required"], closed=True)
 _STEP = _object({
     **dict.fromkeys(("id", "task_id", "step_key", "kind", "instruction", "status", "created_at", "updated_at"), _STR),
     **dict.fromkeys(("step_index", "retries"), _INT), "review": _BOOL,
@@ -147,7 +153,7 @@ OPERATIONS = (
             "exclude_scheduled": {"type": "boolean", "description":
                 "Leave out tasks an agent schedule created (default false); not with schedule_id."}},
             [], closed=True),
-        _object({"tasks": _array(TASK_INFO), "counts": {"type": "object", "additionalProperties": _INT,
+        _object({"tasks": _array(_TASK_LIST), "counts": {"type": "object", "additionalProperties": _INT,
                  "description": "Counts by status filter; each task counted once. Unknown statuses keep their keys."},
                  "next_before": _NULL_STR,
                  "hidden_scheduled": {**_INT, "description": "How many tasks exclude_scheduled left out under the "

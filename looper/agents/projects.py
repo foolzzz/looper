@@ -819,8 +819,30 @@ async def list_tasks_page(
             # What the task's Planner, Workers and Reviewers spent so far.
             "cost": costs.get(t.get("id", "")),
         })
+    await _attach_failed_checks(result)
     return {"tasks": result, "next_before": tasks[-1]["id"] if len(page) > limit else None, "counts": counts,
             "hidden_scheduled": hidden}
+
+
+async def _attach_failed_checks(rows: list[dict[str, Any]]) -> None:
+    """Name the required checks that failed, on attention rows only, and only when there is one.
+
+    One query covers the page. The keys stay off every other row, so a list with no such failure
+    is unchanged. The compact Manager list never reaches here.
+    """
+    attention = [row["task_id"] for row in rows
+                 if row.get("group") == db_tasks.TaskGroup.ATTENTION.value and row.get("task_id")]
+    if not attention:
+        return
+    from ..db import step_check_runs
+
+    found = await step_check_runs.failed_required_current(attention)
+    for row in rows:
+        items = found.get(row["task_id"])
+        if not items:
+            continue
+        row["failed_checks"] = [item["check_id"] for item in items]
+        row["failed_check_step"] = items[0]["step_id"]
 
 
 async def task_readiness(task: dict[str, Any], *, compact: bool = False) -> list[dict[str, Any]]:

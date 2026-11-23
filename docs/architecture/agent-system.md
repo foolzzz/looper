@@ -3265,8 +3265,31 @@ the Planner runs checks before asking for its decision and stores append-only
 `step_check_runs` evidence. This stage does not change decisions or Reviewer prompts.
 The operator-only `task_evidence.get` operation (also available through `loopercli`)
 accepts `task` and optional `step`, returning definitions and all evidence attempts,
-including history retained after disabling checks; artifact bytes and storage paths
-are excluded. No evidence tool is added to the Manager or Planner.
+including history retained after disabling checks. It returns no artifact bytes and
+no storage path. No evidence tool is added to the Manager or Planner.
+
+`GET /api/v1/evidence/<task_id>/<run_id>/<index>` returns one artifact's bytes.
+This prefix uses the operator gate, ahead of the `/api/v1/` client API. The handler
+then requires an operator browser session, so a bearer token and an API client are
+refused. The file path is rebuilt
+from the run row that belongs to that task. The URL supplies the task, the run id
+and the artifact index, not a path. The content type is the extension of the stored
+name: `image/png`, `image/jpeg`, `image/webp`, `image/gif`, `text/plain` or
+`application/json`. Those four image types are `Content-Disposition: inline`. Every
+other type is `attachment` with `filename` set to the stored name. A mime recorded
+on the row is ignored, so a row that claims `text/html` or `image/svg+xml` is not
+served as that type. The response also sets `X-Content-Type-Options: nosniff`,
+`Content-Security-Policy: sandbox` and `Cache-Control: no-store`. A run id outside
+the signed 64-bit range is 404 and is not queried.
+
+An attention row from `tasks.page` carries `failed_checks` and `failed_check_step`
+when a required check's current evidence failed. Current evidence is the greatest
+run of the latest attempt. The names are check ids that the step's current `checks`
+still define. A skipped step is omitted. An advisory failure, an error and a stale
+row are omitted. The same name is listed once, on its earliest step.
+`failed_check_step` is that step's id. A row without such a failure, the compact
+task list and task detail omit both keys. The task page reads `task_evidence.get`
+again when the task status or a step's id, status or retries change.
 
 Git checks reuse the verification runner's private checkout, runtime-path copying
 and kernel write notifications. Writing existing code, even restoring its bytes,
@@ -3314,7 +3337,7 @@ views of previously enabled projects with saved checks. Definitions remain in
 the database for operator evidence reads. See the
 [executable acceptance RFC](rfcs/executable-acceptance-v0.zh-CN.md), sections 6
 and 13, for the protocol and subsequent stages (decision gates, Reviewer evidence,
-artifact downloads and task-page evidence are still pending).
+and result or channel evidence lines are still pending).
 
 A task can also have a spend cap of its own (`tasks.budget_usd`, a scheduled
 run's `run_budget_usd`), which replaces its project's `task_budget_usd` for it
