@@ -1,6 +1,5 @@
 """Dependency conditions at the Planner reply and project configuration boundaries."""
 
-import hashlib
 import json
 from dataclasses import replace
 
@@ -11,6 +10,7 @@ from looper.agents.tiers.planner_protocol import (
     PlanView, ProtocolError, parse_chat, parse_plan, reply_contract,
 )
 from looper.agents.user_gates import GatePolicy
+from tests.prompt_sections import assert_frozen
 
 
 def reply(data):
@@ -53,7 +53,7 @@ def test_chat_add_steps_uses_the_plan_condition_permission():
 
 
 def test_default_contract_bytes_are_unchanged():
-    assert hashlib.sha256(reply_contract().encode()).hexdigest() == "2f72cd02be65030f0d1635b2c276dc6debac28eac9d378040c3aa3d5ef6ddc42"
+    assert_frozen("reply_contract", reply_contract())
     assert "any_of" not in reply_contract()
 
 

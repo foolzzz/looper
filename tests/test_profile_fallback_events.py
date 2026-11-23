@@ -12,6 +12,7 @@ from looper.agents.system_prompt import REVIEW_CONTRACT, WORK_CONTRACT, build_sy
 from looper.agents.tiers.planner import DEFAULT_SYSTEM_PROMPT as PLANNER_PROMPT
 from looper.agents.tiers.planner_protocol import REPLY_CONTRACT
 from looper.agents.tiers.worker import DEFAULT_SYSTEM_PROMPT as WORKER_PROMPT, REVIEWER_SYSTEM_PROMPT
+from tests.prompt_sections import assert_frozen
 
 
 @pytest.mark.parametrize(("event", "expected"), [
@@ -113,10 +114,16 @@ def test_grok_acp_assistant_does_not_report_the_configured_model():
     assert ADAPTERS["grok"].reported_model(assistant) is None
 
 
+def test_profiles_without_fallback_preserve_the_planner_prompt_and_contract_sections() -> None:
+    prompt = build_system_prompt(
+        harness=BUILTIN_SETTINGS.harness, role_id="planner", role=PLANNER_PROMPT, recommended=True,
+        task_kind="planner", task="## Task\nCheck the result.", contract_name="REPLY_CONTRACT", contract=REPLY_CONTRACT,
+    )
+    assert_frozen("planner_prompt_check_task", prompt.text)
+    assert_frozen("reply_contract", REPLY_CONTRACT)
+
+
 @pytest.mark.parametrize(("role", "text", "contract", "prompt_hash", "contract_hash"), [
-    ("planner", PLANNER_PROMPT, REPLY_CONTRACT,
-     "ff9db55ffd76cb47c881cd261e215a82545587d36e3977bb6529ec7f0a824c78",
-     "2f72cd02be65030f0d1635b2c276dc6debac28eac9d378040c3aa3d5ef6ddc42"),
     ("worker", WORKER_PROMPT, WORK_CONTRACT,
      "d758330eb7193a80e5e8ce8c02a9ca19b788bd9f60e6a679734a7381efb8e1ed",
      "ac9f8a0bca5ee5a86259d4b4043154e8841de92dc1c20f94e34a1b5a8ecb79e6"),
@@ -127,7 +134,7 @@ def test_grok_acp_assistant_does_not_report_the_configured_model():
 def test_profiles_without_fallback_preserve_prompt_and_contract_bytes(
     role: str, text: str, contract: str, prompt_hash: str, contract_hash: str,
 ) -> None:
-    contract_name = {"planner": "REPLY_CONTRACT", "worker": "WORK_CONTRACT", "reviewer": "REVIEW_CONTRACT"}[role]
+    contract_name = {"worker": "WORK_CONTRACT", "reviewer": "REVIEW_CONTRACT"}[role]
     prompt = build_system_prompt(
         harness=BUILTIN_SETTINGS.harness, role_id=role, role=text, recommended=True,
         task_kind=role, task="## Task\nCheck the result.", contract_name=contract_name, contract=contract,

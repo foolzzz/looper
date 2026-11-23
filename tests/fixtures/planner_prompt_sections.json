@@ -1,0 +1,200 @@
+{
+ "planner_prompt": [
+  [
+   "",
+   "d06ef50a44681dcf62c5086cd36b543341a2b2aed34ad5327ec669eaeadb2431"
+  ],
+  [
+   "## Task",
+   "69ba11c7b9794acf60b07a33ecf17d8eb5bd94eb45ca9a930bc5cfe0200d3fcc"
+  ],
+  [
+   "## Reply contract (required; code parses it)",
+   "737534fdef030ed028e3cc3d153c26611e4b6586677e37dffc850e9698ba14a4"
+  ],
+  [
+   "[PLAN]",
+   "f114bcb8cc76de44cc00abfaf960765b544f2e5ccd88b182a84bfb5a9d4fcab0"
+  ],
+  [
+   "[DECISION]",
+   "943d0e5af11b18cf8f2a10de3f8e43808b4559344b6805958817d6e7b12d7d3b"
+  ],
+  [
+   "[CHAT]",
+   "61ba763716727ab53ff47d579c901cef5a502254bccabbd93ea945fa165352fa"
+  ],
+  [
+   "[RESTART]",
+   "1631b5793c41e44b19e700c040cfce33be04a77752d8ce83f4d6fa90b06e0e3d"
+  ],
+  [
+   "[GATE]",
+   "547c5d13d4cee7a2f2669d30b365fc18903eed1c59a877e0ddd04cfb788ae0aa"
+  ],
+  [
+   "[SUPERVISE]",
+   "1e3e1829a160f33b73bab6eabcc8b09ee9b1e8f0e5cbd56ea21bc172f28347e4"
+  ]
+ ],
+ "planner_prompt_acceptance_off": [
+  [
+   "## How you work",
+   "cc5c4935f9b0f29e24df8644af44bb3a74e3aae316786f065b6c35871dec79ac"
+  ],
+  [
+   "## Boundaries",
+   "29ac3f2676b5a4fb8c177bc6c1dc2154d61163d448c842ba0760e4e2c87db424"
+  ],
+  [
+   "## Communication",
+   "4ba6889680493db6e2c7fbbb436dc18760ac1ec246e7ebf6156caa232d328948"
+  ],
+  [
+   "## Project: Reports",
+   "91d5a6dd9e3ce2011f4c8f37f6da6fa85a7463c11151761250c8628c99e9cc00"
+  ],
+  [
+   "## Task",
+   "894bbb929ef0c90be4cf0b0fe3062a01376512f576d923c91906137563785a6b"
+  ],
+  [
+   "## Reply contract (required; code parses it)",
+   "737534fdef030ed028e3cc3d153c26611e4b6586677e37dffc850e9698ba14a4"
+  ],
+  [
+   "[PLAN]",
+   "f114bcb8cc76de44cc00abfaf960765b544f2e5ccd88b182a84bfb5a9d4fcab0"
+  ],
+  [
+   "[DECISION]",
+   "943d0e5af11b18cf8f2a10de3f8e43808b4559344b6805958817d6e7b12d7d3b"
+  ],
+  [
+   "[CHAT]",
+   "61ba763716727ab53ff47d579c901cef5a502254bccabbd93ea945fa165352fa"
+  ],
+  [
+   "[RESTART]",
+   "1631b5793c41e44b19e700c040cfce33be04a77752d8ce83f4d6fa90b06e0e3d"
+  ],
+  [
+   "[GATE]",
+   "547c5d13d4cee7a2f2669d30b365fc18903eed1c59a877e0ddd04cfb788ae0aa"
+  ],
+  [
+   "[SUPERVISE]",
+   "1e3e1829a160f33b73bab6eabcc8b09ee9b1e8f0e5cbd56ea21bc172f28347e4"
+  ]
+ ],
+ "planner_prompt_builtin_harness": [
+  [
+   "## How you work",
+   "cc5c4935f9b0f29e24df8644af44bb3a74e3aae316786f065b6c35871dec79ac"
+  ],
+  [
+   "## Boundaries",
+   "29ac3f2676b5a4fb8c177bc6c1dc2154d61163d448c842ba0760e4e2c87db424"
+  ],
+  [
+   "## Communication",
+   "2e3755e390ed8d5d08a8391ad71bee2f04037880d804f203467886a9c618a470"
+  ],
+  [
+   "## Task",
+   "cf9e646454bf825dde699c9df3fbfdc03fd7b1129b671eeccd7a0ffe17f1daba"
+  ],
+  [
+   "## Reply contract (required; code parses it)",
+   "2f8eb1eee91098698dfdfc334c3c82d4e69c05c6bcb6b94e19ecde84c5fd2646"
+  ],
+  [
+   "[PLAN]",
+   "a5b61b47a5d2930b9369d9046279c6b4b259a0eabed0253b7de4b7357c83c13f"
+  ],
+  [
+   "[DECISION]",
+   "e890c8e9a6816c3549ad868fd0901531f0f0a6c0b71169f6839ca101439c3db6"
+  ],
+  [
+   "[CHAT]",
+   "5c8484b2d5e065c48752bca7f1e1adb846b9362fa77b0bf6db9f92b0218f0be0"
+  ],
+  [
+   "[RESTART]",
+   "1631b5793c41e44b19e700c040cfce33be04a77752d8ce83f4d6fa90b06e0e3d"
+  ],
+  [
+   "[SUPERVISE]",
+   "1e3e1829a160f33b73bab6eabcc8b09ee9b1e8f0e5cbd56ea21bc172f28347e4"
+  ]
+ ],
+ "planner_prompt_check_task": [
+  [
+   "## How you work",
+   "cc5c4935f9b0f29e24df8644af44bb3a74e3aae316786f065b6c35871dec79ac"
+  ],
+  [
+   "## Boundaries",
+   "29ac3f2676b5a4fb8c177bc6c1dc2154d61163d448c842ba0760e4e2c87db424"
+  ],
+  [
+   "## Communication",
+   "2e3755e390ed8d5d08a8391ad71bee2f04037880d804f203467886a9c618a470"
+  ],
+  [
+   "## Task",
+   "c9ccba870260c2cfeb37dab718783332b413966734780a2141a58fa901bc8f72"
+  ],
+  [
+   "## Reply contract (required; code parses it)",
+   "2f8eb1eee91098698dfdfc334c3c82d4e69c05c6bcb6b94e19ecde84c5fd2646"
+  ],
+  [
+   "[PLAN]",
+   "a5b61b47a5d2930b9369d9046279c6b4b259a0eabed0253b7de4b7357c83c13f"
+  ],
+  [
+   "[DECISION]",
+   "e890c8e9a6816c3549ad868fd0901531f0f0a6c0b71169f6839ca101439c3db6"
+  ],
+  [
+   "[CHAT]",
+   "5c8484b2d5e065c48752bca7f1e1adb846b9362fa77b0bf6db9f92b0218f0be0"
+  ],
+  [
+   "[RESTART]",
+   "1631b5793c41e44b19e700c040cfce33be04a77752d8ce83f4d6fa90b06e0e3d"
+  ],
+  [
+   "[SUPERVISE]",
+   "1e3e1829a160f33b73bab6eabcc8b09ee9b1e8f0e5cbd56ea21bc172f28347e4"
+  ]
+ ],
+ "reply_contract": [
+  [
+   "## Reply contract (required; code parses it)",
+   "2f8eb1eee91098698dfdfc334c3c82d4e69c05c6bcb6b94e19ecde84c5fd2646"
+  ],
+  [
+   "[PLAN]",
+   "a5b61b47a5d2930b9369d9046279c6b4b259a0eabed0253b7de4b7357c83c13f"
+  ],
+  [
+   "[DECISION]",
+   "e890c8e9a6816c3549ad868fd0901531f0f0a6c0b71169f6839ca101439c3db6"
+  ],
+  [
+   "[CHAT]",
+   "5c8484b2d5e065c48752bca7f1e1adb846b9362fa77b0bf6db9f92b0218f0be0"
+  ],
+  [
+   "[RESTART]",
+   "1631b5793c41e44b19e700c040cfce33be04a77752d8ce83f4d6fa90b06e0e3d"
+  ],
+  [
+   "[SUPERVISE]",
+   "1e3e1829a160f33b73bab6eabcc8b09ee9b1e8f0e5cbd56ea21bc172f28347e4"
+  ]
+ ]
+}
