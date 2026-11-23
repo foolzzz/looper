@@ -35,6 +35,7 @@ from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from .llmrec.control import ProxyControl
+    from .managers import ManagerFleet
 
 from .. import ops_config
 from ..ops_config import KeeperMode, OpsConfig
@@ -61,6 +62,7 @@ from .ledger_reconciler import LedgerReconciler
 from .source_service import SourceService, own_bot_app_ids
 from .intent_push import IntentPushService
 from .reminders import ReminderService
+from .idle_checks import IdleCheckService, PostFn
 from .http_server import AgentHTTPServer
 from .loop_watch import LoopWatch
 from .log_redaction import log_to_stderr
@@ -73,6 +75,17 @@ from .tiers.task import TaskRouter
 from .tiers.worker import WorkerConfig, WorkerPool
 
 logger = logging.getLogger(__name__)
+
+
+async def _start_idle_checks(bus: MessageBus, fleet: ManagerFleet, drain: DrainState, *, post: PostFn) -> IdleCheckService:
+    """Start after the Managers; resolve the current default after a settings-driven replacement too."""
+    from .tiers import idle_check_turn
+
+    idle_check_turn.configure(post)
+    service = IdleCheckService(bus, idle_for=lambda: fleet.default.idle_for(),
+                               manager_running=lambda: fleet.is_running("manager"), drain=drain)
+    await service.start()
+    return service
 
 
 class _SuspendDetector:
@@ -1114,6 +1127,7 @@ async def _run_agent_system_watched(
         await source_service.start()
         await intent_push_service.start()
         await reminder_service.start()  # idle while reminders are off
+        idle_check_service = await _start_idle_checks(bus, fleet, drain, post=registry.post)
         await ledger_reconciler.start()  # idle while the ledger is off
         await gate_courier.start()
 
@@ -1183,6 +1197,7 @@ async def _run_agent_system_watched(
             await source_service.stop()
             await intent_push_service.stop()
             await reminder_service.stop()
+            await idle_check_service.stop()
             await ledger_reconciler.stop()
             await gate_courier.stop()
             await scheduler.stop()

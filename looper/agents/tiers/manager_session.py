@@ -91,6 +91,7 @@ class ManagerSession:
     # The agent settings the last turn ran with, kept when a turn cannot read them (None before any).
     agent_settings: AgentSettings | None = None
     last_activity: float
+    turn_ended_at: float | None = None  # this session's own worker/loop end, for main's idle-check clock
     budget: BudgetTurn | None = None  # enabled turn only; retained through reply and session maintenance
 
 
