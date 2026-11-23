@@ -658,14 +658,14 @@ def test_restart_redispatches_reviews_and_ignores_old_run_results(planner_claude
 
 
 def test_panel_contract_is_opt_in_and_exposes_adjudication_only_when_enabled():
-    import hashlib
     from looper.agents.tiers.planner_protocol import REPLY_CONTRACT, reply_contract
+    from tests.prompt_sections import assert_frozen
     assert reply_contract() == REPLY_CONTRACT
     assert "adjudications" not in reply_contract(review_panel=True)
     assert "adjudications" in reply_contract(review_panel=True, adjudication=True)
     panel = reply_contract(workflow_roles=True, review_panel=True)
     assert 'fixed workflow work role' in panel and 'review_roles", fixed workflow' not in panel
-    assert hashlib.sha256(reply_contract().encode()).hexdigest() == '2f72cd02be65030f0d1635b2c276dc6debac28eac9d378040c3aa3d5ef6ddc42'
+    assert_frozen("reply_contract", reply_contract())
 
 
 def test_invalid_work_decision_cannot_bypass_panel(planner_claude, agent_db, monkeypatch):

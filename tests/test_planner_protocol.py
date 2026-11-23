@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 from dataclasses import replace
-from hashlib import sha256
 from typing import Any
 
 import pytest
@@ -25,6 +24,7 @@ from looper.agents.tiers.planner_protocol import (
     parse_plan,
     parse_supervise,
 )
+from tests.prompt_sections import assert_frozen
 from tests.test_planner_agent import FINAL, FINAL_RESULT, chat, decide, plan, reply, step
 
 
@@ -315,9 +315,7 @@ def test_final_summary_uses_the_users_language() -> None:
     final = contract.split("- final (", 1)[1].split("[CHAT]", 1)[0]
     assert language_rule in final
     assert contract.count(language_rule) == 1
-    # The language rule is the only change to the previously pinned default contract.
-    assert sha256(contract.replace(language_rule, "", 1).encode()).hexdigest() == (
-        "b70ffeae8558158dbf5c765d6b8ffe9fe8ef425d7aede3a1e9ce6f5af5adb588")
+    assert_frozen("reply_contract", contract)
 
 
 def test_contract_examples_parse() -> None:

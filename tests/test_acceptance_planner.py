@@ -11,7 +11,7 @@ from looper.agents import system_prompt
 from looper.agents.project_execution import AcceptanceChecksMode, ProjectExecution
 from looper.agents.tiers import planner, planner_protocol, worker
 from looper.db import plans, projects, tasks
-from test_acceptance_checks_off import BASELINE, _main_modules, _outputs, _step
+from test_acceptance_checks_off import _PLANNER_TEXT, BASELINE, _assert_planner_text, _main_modules, _outputs, _step
 from test_planner_agent import WORK_FAILED, WORK_OK, decide, drive, plan, step
 from test_planner_workspaces import git, init_repo, project
 from tests.db_support import DSN, run_db
@@ -169,8 +169,11 @@ def test_switch_off_stored_rows_and_prompts_match_pinned_main_bytes(tmp_path, mo
     baseline = _main_modules(BASELINE["main_revision"])
     current = SimpleNamespace(planner=planner, protocol=planner_protocol, prompt=system_prompt,
                               tasks=tasks, worker=worker)
-    assert _outputs(current, tmp_path, ProjectExecution.from_row({"acceptance_checks": "off"})) == (
-        _outputs(baseline, tmp_path))
+    outputs = _outputs(current, tmp_path, ProjectExecution.from_row({"acceptance_checks": "off"}))
+    pinned = _outputs(baseline, tmp_path)
+    assert {name: text for name, text in outputs.items() if name not in _PLANNER_TEXT} == (
+        {name: text for name, text in pinned.items() if name not in _PLANNER_TEXT})
+    _assert_planner_text(outputs)
 
     async def check(pool):
         owner = await projects.create_project(name="Default-off compatibility", pool=pool)
