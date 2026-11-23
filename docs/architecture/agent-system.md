@@ -5067,14 +5067,14 @@ its own refusal text, and its listing's hash is in the process signature. Until 
 conversation, the user's own turns are what keeps it to the session key `main`: it searches, of the default
 Manager's threads without an API client, the dashboard chat, the dashboard's chats with the Planners of the tasks it
 created, and the Lark and Telegram direct chats whose recorded sender is the bot's `operator_sender_id` now. While the
-switch is on, storing a direct chat's user message records who the chat is with (`chat_direct_threads`, the first
-record stays); a group chat, another sender's direct chat, a scenario Manager's or an API client's thread is never
-searched. Candidates come from `idx_chat_messages_search`, a GIN index on the messages' tokens
+switch or idle checks are on, storing a direct chat's user message records who the chat is with
+(`chat_direct_threads`, the first record stays); a group chat, another sender's direct chat, a scenario Manager's or
+an API client's thread is never searched. Candidates come from `idx_chat_messages_search`, a GIN index on the messages' tokens
 (`array_to_tsvector(looper_search_tokens(content))`, built online on upgrade): each word brings at most its 2,000
 newest messages in scope, and only those are read and scored, with JIT off for the query. Every passage it returns is
 fenced (`<untrusted source="chat_history" where=… who=… at=…>`, its own `<untrusted`/`</untrusted` escaped) and goes
 into the leads search's group backstop. Off, the tool list, the prompt, the signature and the command are what they
-were before, and nothing is recorded.
+were before; direct-chat provenance is recorded only if idle checks are on.
 
 **One-time reminders** ([reminders RFC](rfcs/reminders-v0.zh-CN.md)). With `reminders.enabled` on, `current_scope`
 adds the three reminder tools to the default Manager's tools; they are `RestrictedTool`s with `audience` `operator`,
@@ -6733,8 +6733,11 @@ row is off), set only through the operator-only `idle_check_settings.get` and
   setting and stops. A tick that decides not to check writes nothing (it counts
   the reason and logs it at DEBUG). The advisory lock covers only "decide,
   insert, publish". Before bus replay starts, checks left `running` by an earlier
-  server fail as `restart`; recovery failure blocks startup.
+  server fail as `restart`; checks left `sending` become `uncertain`, count as
+  mentioned and are never sent again. Recovery records an `unknown` receipt;
+  recovery failure blocks startup.
 - Rows: `idle_checks` (kept 90 days; migration `idle_checks`). The migration
+  `idle_check_sending` adds the in-flight `sending` state without rewriting rows;
   `idle_check_source` adds `idle_check` to the source check of
   `proactive_deliveries`, built from the check's current values, so it composes
   with the morning brief's and triage's widenings.
@@ -6745,8 +6748,9 @@ row is off), set only through the operator-only `idle_check_settings.get` and
   if it is replaced. With all prerequisites on, enabling the switch takes effect
   on the next tick.
 - `ManagerAgent.idle_for()` reads only main's lock, running token, worker and
-  resident. Its clock is `ManagerSession.turn_ended_at`, written by that session's
-  worker (or the message loop for its own turns), falling back to service start.
+  resident. Its clock is `ManagerSession.turn_ended_at`, written when that session
+  handles a user message or runs a background turn, falling back to service start.
+  A wake that runs no turn leaves the clock unchanged.
   Group arrivals can update `last_activity` without resetting main's idle clock.
 - `IDLE_CHECK_DUE` runs on main's background lane through `tiers/background_turn.py`,
   sharing completion token registration, preparation, locking and bounded late
@@ -6758,6 +6762,11 @@ row is off), set only through the operator-only `idle_check_settings.get` and
   acknowledging their wakes. An interrupted running check also records `preempted`
   and leaves one stopped note for the next user turn; it sends nothing. Lark
   `/stop` matches the operator's sender id even though its DM has a different id.
+  A user message in the target direct chat after the check started also voids
+  its delivery as `preempted`, checked before the decision and again before sending.
+  Both channels look up the sender through `chat_direct_threads`, since a Lark DM's
+  chat id differs from its sender id; the same timestamp goes to the delivery layer.
+  Idle checks record this provenance even when session search is off.
 - A sent morning brief suppresses checks for two hours in that same channel and
   direct chat. Real-model idle and concurrent preemption evals remain pending;
   loopback runtimes cover the service and Manager paths.
@@ -7779,7 +7788,7 @@ PostgreSQL is a hard startup dependency. All data paths:
 | `manager_actions` | The Manager's tool calls (`looper/agents/ops`), one row each: `manager_id`, `channel`, `chat` and `message_id` of the turn (empty for a turn Claude ran on its own), `tool`, `arguments` (secret values masked), `risk` (`read`, `write`, `high`), `status` (`ok`, `needs_confirmation`, `error` with `error_code`), `result` (of a change; a read's is not kept), `confirmation_id` (the call that asked, on a confirmed one) and `task_id` (the task it acted on, no foreign key) |
 | `activity` | Execution trace events (SSE streaming to frontend) |
 | `chat_messages` | Chat conversation history of every channel: `session_id` (the web session or stable bot/chat/Manager thread described above; not Telegram groups), `message_id`, `role`, `content`, `channel` (`web`, `telegram`, `lark` or `lark_bot`; rows from before it read `web`), `delivery_failure` and `delivery_error` (a Lark or Telegram answer its channel did not deliver: `no_chat` or `send_failed`, and the channel's error; NULL otherwise); a new Manager session's resume brief reads the recent chats that are not a task's Planner thread (`planner-<task_id>`) |
-| `chat_direct_threads` | Who a stored Lark or Telegram direct chat (`session_id`) is with: its bot (`channel_id`) and `sender_id`, recorded when one of their messages is stored while the session search is in effect, the first record kept; the session search counts the chat as the user's own while the sender is the bot's `operator_sender_id` |
+| `chat_direct_threads` | Who a stored Lark or Telegram direct chat (`session_id`) is with: its bot (`channel_id`) and `sender_id`, recorded when one of their messages is stored while session search or idle checks are on, the first record kept; the session search counts the chat as the user's own while the sender is the bot's `operator_sender_id` |
 | `llm_records` | One row per agent run: input and output text, status (`running`, `completed`, `failed`, `interrupted`), the run's own `cost_usd` and its `cost_source` (`runtime` or `provider_price`), `input_tokens`, `output_tokens`, `cache_read_tokens` and `cache_creation_tokens`, its final `context_tokens` and its `compactions`; `metadata` holds the exact argv (`command`), `cwd`, the supplied `system_prompt`, its `system_prompt_mode` (`append` for old records without it), its `system_prompt_sha256`, its `prompt_layers`, the `profile` (`agent` on runs recorded before the rename), the `model_choice`, the Settings `env` names, the `library` items loaded, the `project_instructions` the runtime was given and a task agent's `project_skills`, and for a Worker's or Reviewer's run its `outcome` (`completed`, `reported_failed`, `files_mismatch`, `passed`, `not_passed`, `contract`, `run_failed`; `worker.RunOutcome`); `run_kind` (`manager`, `planner`, `worker`, `reviewer`, `processor`, `consult`, `advisor`, `advice_check`, `outbound_check`, `leads_check`: what the record's agent id says, or what a spawned run names; null on rows from before it, which no migration rewrites: readers take those rows' kind from their agent id, `llm_records.RUN_KIND`) and `parent_record_id` (the run that started it: a spawned run's parent) |
 | `role_configs` | Each role's own settings, keyed by `role` (`manager`, `planner`, `worker`, `reviewer`): display name, role prompt and its recommended `default_prompt`, turns, timeout, enabled |
 | `agent_setting_layers` | Agent settings by layer: `scope` (`system`, `role`, `project`, `role_project`), `role`, `project_id` (goes with its project), and the nullable `harness_prompt`, `profile_id` (the effort is the profile's), `env` (ordered `[{key, value}]`, `null` value = unset), `run_budget_usd`, `max_concurrency` (the `worker` or `reviewer` `role` layer only: the default for every task) and `system_prompt_mode` (`append` or `replace`, the `role` layers only, enforced by a CHECK; null: the role's built-in value); one row per layer and place |

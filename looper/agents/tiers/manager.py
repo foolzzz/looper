@@ -1372,8 +1372,7 @@ class ManagerAgent:
                 finally:
                     self._handling = None
                     self._last_activity = self._clock()
-                    if envelope.message_type in (MessageType.USER_MESSAGE, MessageType.COMPLETION_DUE,
-                                                  MessageType.IDLE_CHECK_DUE) and not self._router.holds_completion(envelope):
+                    if envelope.message_type is MessageType.USER_MESSAGE:
                         self._sessions[MAIN_SESSION].turn_ended_at = self._clock()
                 # Cleanup may consume cancellation. Do not wait for another bus message after shutdown.
                 if not self._running:
