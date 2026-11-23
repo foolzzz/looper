@@ -35,6 +35,9 @@ class MessageType(str, Enum):
     # A Manager → itself: completion events of one chat wait for its completion turn (payload: ``manager_id``,
     # ``channel_id``, ``chat``; ``completion_events``). Only a wake-up: the events are claimed from the table.
     COMPLETION_DUE = "completion_due"
+    # A Manager → itself: an idle check (a row of ``idle_checks``) waits for its turn (payload: ``check_id``).
+    # Only a wake-up: the check is read from its row, and one that is not ``running`` is not handled.
+    IDLE_CHECK_DUE = "idle_check_due"
 
     # Manager ↔ Planner
     TASK_REQUEST = "task_request"

@@ -35,6 +35,7 @@ from looper.agents.runtimes import (
 )
 from looper.agents.runtimes.pi import PROBE_HELP_TOKENS, PiRuntime
 from tests.pi_runtime_support import KEY, launch as _launch, provider as _provider
+from tests.role_support import ROLES_WITH_TOOLS
 
 PI = PiRuntime()
 
@@ -90,7 +91,7 @@ def test_the_module_imports_and_pi_runtime_can_be_constructed() -> None:
     assert PI.auth_kinds == frozenset({AuthKind.API_KEY})
     assert AuthKind.OAUTH not in PI.auth_kinds
     assert adapter("pi") is ADAPTERS["pi"]
-    assert servable_roles(PI.capabilities) == ["manager", "planner", "worker", "explorer", "reviewer"]
+    assert servable_roles(PI.capabilities) == ROLES_WITH_TOOLS
 
 
 def test_the_probe_requires_the_launch_flags() -> None:

@@ -19,6 +19,8 @@ failure.
 from __future__ import annotations
 
 import asyncio
+import errno
+import fcntl
 import hashlib
 import json
 import math
@@ -178,18 +180,41 @@ def fresh_database(admin_url: str, *, keep: bool = False) -> Iterator[tuple[str,
 # Set when a run is interrupted: cases in flight cancel their task and end, so no thread outlives the run.
 INTERRUPTED = threading.Event()
 
+# The server binds its port only at the end of its startup, seconds after free_port() found it free. Meanwhile the
+# kernel can hand a port of its dynamic range (Linux 32768-60999, macOS 49152-65535) to any socket that binds port 0
+# or connects out, so the ports come from below that range; and a lock on the port's byte of a per-user file, held
+# while this process lives, keeps every other free_port() caller (other pytest-xdist workers, other runs) off it.
+_PORTS = range(20000, 32768)
+_PORT_FILE = Path(tempfile.gettempdir()) / f"looper-eval-ports-{os.getuid()}.lock"
 _ISSUED_PORTS: set[int] = set()
 _PORT_LOCK = threading.Lock()
+_port_fd: int | None = None  # never closed: closing any descriptor of the file would drop this process's locks
+
+
+def _claim(port: int) -> bool:
+    """Whether this process now holds ``port``: the port's lock is this process's, and nothing listens on it."""
+    global _port_fd
+    if _port_fd is None:
+        _port_fd = os.open(_PORT_FILE, os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        fcntl.lockf(_port_fd, fcntl.LOCK_EX | fcntl.LOCK_NB, 1, port)
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+            sock.bind(("127.0.0.1", port))
+    except OSError as exc:  # another process holds the lock, or something listens on the port
+        if exc.errno not in (errno.EACCES, errno.EAGAIN, errno.EADDRINUSE):
+            raise
+        return False
+    return True
 
 
 def free_port() -> int:
-    """A free port, never one this process handed out before: parallel runs pick theirs before their servers bind."""
-    while True:
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-            sock.bind(("127.0.0.1", 0))
-            port = sock.getsockname()[1]
-        with _PORT_LOCK:
-            if port != RESERVED_PORT and port not in _ISSUED_PORTS:
+    """A port free now that this process never handed out before and that, while this process lives, neither
+    another free_port() caller on this machine nor the kernel hands to anyone else: parallel runs pick theirs before
+    their servers bind."""
+    with _PORT_LOCK:
+        while True:
+            port = _PORTS[int.from_bytes(os.urandom(2), "big") % len(_PORTS)]
+            if port not in _ISSUED_PORTS and _claim(port):
                 _ISSUED_PORTS.add(port)
                 return port
 
@@ -394,6 +419,9 @@ def running_server(*, database_url: str, runtime_root: Path, bin_dir: Path, log_
         deadline = time.monotonic() + startup_timeout
         while True:
             if process.poll() is not None:
+                # Where the log is gone with its run (a CI job keeps only the output), say why the server stopped.
+                tail = log_path.read_text(encoding="utf-8", errors="replace").splitlines()[-40:]
+                print(f"the last lines of {log_path.name}:", *tail, sep="\n", file=sys.stderr)
                 raise EvalError(f"the server exited ({process.returncode}) before it answered; see {log_path.name}")
             try:
                 api.token = operator_auth.read_token(runtime_root)
