@@ -1256,11 +1256,13 @@ only when assigned the baseline run:
 
 ```bash
 uv run --extra test python -m evals.assistant_experience --model sonnet --reps 3 \
+  --categories time,identity,crosstalk,tone \
   --jobs 3 --case-budget-usd 1 --total-cap-usd 6 \
   --claude ~/.local/bin/claude --pg-url "$LOOPER_EVAL_DATABASE_URL"
 
 uv run --extra test python -m evals.assistant_experience --model sonnet \
   --manager-model opus --manager-effort xhigh --reps 2 \
+  --categories time,identity,crosstalk,tone \
   --jobs 3 --case-budget-usd 1 --total-cap-usd 6 \
   --claude ~/.local/bin/claude --pg-url "$LOOPER_EVAL_DATABASE_URL"
 ```
@@ -1270,6 +1272,13 @@ Use `--claude ~/.local/bin/claude` explicitly: the PATH shim hangs inside serve.
 Use `--categories time,identity` or `--cases time_now,short_answer` for a subset.
 The completion subset is `--categories memory,proactivity,latency`: 7 conversations,
 10 user turns per repetition. No paid completion run is included in this change.
+Run the new subset in fake mode with:
+
+```bash
+uv run --extra test python -m evals.assistant_experience --fake \
+  --categories memory,proactivity,latency --pg-url "$LOOPER_EVAL_DATABASE_URL"
+```
+
 Needed baseline extension: sonnet `--reps 3` (30 turns, estimated $0.99, cap $2),
 then opus xhigh Manager `--reps 2` (20 turns, estimated $1.30, cap $3), each with
 `--jobs 2 --case-budget-usd 1` and the same disposable-server/Claude arguments above.
