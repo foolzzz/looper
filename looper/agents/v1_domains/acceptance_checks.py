@@ -17,7 +17,7 @@ OPERATIONS = (
     Operation("acceptance_checks.update", "POST", "/api/v1/acceptance_checks/update",
               "Set a project's acceptance check permission.",
               "Set a project's acceptance check permission. Runs checks after Worker success and stores evidence; "
-              "evidence does not affect decisions yet. Commands run as the server user and can read its files; local denies network, "
+              "required checks must pass before review or acceptance. Commands run as the server user and can read its files; local denies network, "
               "network permits it only when a check requests it. A private checkout is not a sandbox.",
               _object({"project_id": _STR, "acceptance_checks": MODE}, closed=True), VIEW,
               risk="high", confirms=True, operator_only=True,
@@ -29,7 +29,8 @@ async def impact(server, operation, arguments, principal, headers):
     if operation.operation_id != "acceptance_checks.update":
         return None
     return (f"Set project {arguments['project_id']}'s acceptance_checks to {arguments['acceptance_checks']}? "
-            "This permits checks after Worker success; evidence does not affect decisions yet. Commands run as the "
+            "This permits checks after Worker success. Required checks must pass before review or acceptance. "
+            "Disabling checks does not unblock an already blocked step. Commands run as the "
             "server user and can read its files; network mode permits network only when a check requests it.")
 
 

@@ -4,15 +4,12 @@ Pure functions over the API's rows (task detail, activity, Claude run records
 and their events) and a working-directory diff, so they can be checked
 without a server.
 
-Contract violations are counted where the agent system rejects a reply:
-
-- the Planner: ``PlannerAgent._ask`` logs ``Planner reply broke the <KIND>
-  contract (...)`` for a reply its parser rejects and asks again; a repair
-  reply that is rejected too raises ``invalid reply after a repair turn``,
-  which every caller logs once;
-- a Worker or Reviewer: ``worker.judge_result`` fails the step when the final
-  message has no JSON report (or verdict) of the contract's shape.
-  ``report_violation`` applies the same reading with the same parser.
+Contract violations on a task row come from stored records, not activity text:
+the integers in each run's ``metadata.contract_rejections``, plus attempts in
+``metrics.step_attempts`` whose ``run_outcome`` is ``contract``.
+``planner_violation_reasons`` still quotes the Planner's activity lines.
+``report_violation`` is the same reading ``worker.judge_result`` uses, kept
+for a run's runtime evidence.
 
 Whether the Planner modified files (it must leave that to Workers) is read two
 ways: its runs' file-editing tool calls, and files of the working directory
@@ -60,6 +57,75 @@ _REPAIR_REJECTED = "invalid reply after a repair turn"
 # The Planner's answer to a change to the task, with the action it chose.
 _CHANGE_ANSWERED = re.compile(r"^Planner answered a change to the task \((\w+)\)")
 _TURN_KIND = re.compile(r"^\[(PLAN|DECISION|CHAT|SUPERVISE|GATE|ROOM|VAULT)\]( Your last reply broke the reply contract)?")
+
+
+def contract_violation_counts(records: Iterable[Mapping[str, Any]],
+                              attempts_view: Mapping[str, Any] | None = None) -> dict[str, int]:
+    """Violations from stored records, not from activity text.
+
+    Planner parser rejections are the integers in ``metadata.contract_rejections``. Worker and Reviewer runs that
+    broke their report contract are attempts whose ``run_outcome`` is ``contract`` (``metrics.step_attempts``).
+    """
+    rejections = 0
+    for record in records:
+        raw = (record.get("metadata") or {}).get("contract_rejections")
+        if not isinstance(raw, Mapping):
+            continue
+        for value in raw.values():
+            if isinstance(value, bool):
+                continue
+            if isinstance(value, int):
+                rejections += value
+    contracts = 0
+    for step in (attempts_view or {}).get("steps") or []:
+        if not isinstance(step, Mapping):
+            continue
+        for attempt in step.get("attempts") or []:
+            if isinstance(attempt, Mapping) and attempt.get("run_outcome") == "contract":
+                contracts += 1
+    return {"planner_rejections": rejections, "attempt_contracts": contracts, "total": rejections + contracts}
+
+
+def _rename_execution(group: Any) -> Any:
+    """The attempt cost tree calls a Worker run ``worker``; the eval row calls that spend ``execution``."""
+    if not isinstance(group, Mapping) or "worker" not in group:
+        return group
+    return {("execution" if key == "worker" else key): value for key, value in group.items()}
+
+
+def cost_split(costs: Mapping[str, Any] | None) -> dict[str, Any] | None:
+    """First and retry, planning, execution, review, advisor and unattributed, both billing bases as returned."""
+    if not isinstance(costs, Mapping):
+        return None
+    return {"first": _rename_execution(costs.get("first")), "retry": _rename_execution(costs.get("retry")),
+            "planning": costs.get("planning"), "unattributed": _rename_execution(costs.get("unattributed"))}
+
+
+def attempt_fields(attempts_view: Mapping[str, Any] | None) -> dict[str, Any]:
+    """The row fields taken from one ``metrics.step_attempts`` result. Absent when that read did not return them.
+
+    ``missing_attempts`` other than 0 means the attempt rows are incomplete. The counts stay off the row, so a
+    comparison shows them unavailable instead of a 0 or a short count.
+    """
+    if not isinstance(attempts_view, Mapping):
+        return {}
+    summary = attempts_view.get("summary") if isinstance(attempts_view.get("summary"), Mapping) else {}
+    missing = attempts_view.get("missing_attempts", 0)
+    counts_known = isinstance(missing, int) and not isinstance(missing, bool) and missing == 0
+    fields: dict[str, Any] = {}
+    if counts_known:
+        for key in ("attempts", "first_pass_steps", "accepted_steps"):
+            value = summary.get(key)
+            if isinstance(value, int) and not isinstance(value, bool):
+                fields[key] = value
+    kinds = summary.get("failure_kinds")
+    if isinstance(kinds, Mapping):
+        fields["failure_kinds"] = {str(key): value for key, value in kinds.items()
+                                   if isinstance(value, int) and not isinstance(value, bool)}
+    split = cost_split(attempts_view.get("costs") if isinstance(attempts_view.get("costs"), Mapping) else None)
+    if split is not None:
+        fields["cost_split"] = split
+    return fields
 
 
 def planner_violations(activity: Iterable[Mapping[str, Any]]) -> int:
@@ -640,25 +706,18 @@ def task_metrics(
     vault_dir: Path | None = None,
     vault_log: str = "",
     vault_check: Callable[[Path, list[str]], str | None] | None = None,
+    attempts_view: Mapping[str, Any] | None = None,
     now: float,
 ) -> dict[str, Any]:
     """One task's result: success and why not, the flow counts, cost, contract violations and the Planner's
     file changes. ``expect`` may bound ``contract_violations`` (their total) and ``planner_modified_files`` too, and
     the gates the scripted user ended because the Planner asked after its script ran out
-    (``gate_asks_beyond_script``, the runner's count)."""
+    (``gate_asks_beyond_script``, the runner's count). Contract violations come from ``attempts_view`` and the
+    runs' ``metadata.contract_rejections``, not from activity text."""
     by_role: dict[str, list[Mapping[str, Any]]] = {}
     for record in records:
         by_role.setdefault(role(record), []).append(record)
 
-    worker_violations = reviewer_violations = 0
-    for name in ("worker", "reviewer"):
-        for record in by_role.get(name, []):
-            text = result_text(events.get(int(record["id"]), []))
-            if text is not None and report_violation(text, is_verify=name == "reviewer"):
-                if name == "worker":
-                    worker_violations += 1
-                else:
-                    reviewer_violations += 1
     planner_edits = sorted({
         path for record in by_role.get("planner", []) for path in edit_tool_paths(
             events.get(int(record["id"]), []), work_dir,
@@ -701,8 +760,7 @@ def task_metrics(
         **vault_metrics(vault_log, task_id),
         "vault_closeout": int(any(str(row.get("summary") or "").startswith("Vault closeout:") for row in activity)),
     }
-    violations = {"planner": planner_violations(activity), "worker": worker_violations,
-                  "reviewer": reviewer_violations}
+    violations = contract_violation_counts(records, attempts_view)
     status = str(detail.get("status") or "")
     problems = []
     if status != "completed":
@@ -714,7 +772,7 @@ def task_metrics(
         if problem := vault_check(vault_dir, observed["vault_paths"]):
             problems.append(problem)
     problems += flow_problems({"max_vault_outside": 0, **expect}, {
-        **observed, "contract_violations": sum(violations.values()),
+        **observed, "contract_violations": violations["total"],
         "planner_modified_files": len(set(planner_edits) | set(changed_by_planner))})
 
     cost = detail.get("cost") or {}
@@ -777,7 +835,7 @@ def task_metrics(
         # the built-in prices), by Looper at an API key provider's prices, or not at all (tokens only).
         "cost_basis": {name: int(cost.get(f"{name}_runs") or 0) for name in ("equivalent", "provider_price",
                                                                             "unpriced")},
-        "contract_violations": {**violations, "total": sum(violations.values())},
+        "contract_violations": violations,
         "planner_violation_reasons": planner_violation_reasons(activity),
         "planner_edit_tool_paths": planner_edits,
         "planner_changed_files": changed_by_planner,
