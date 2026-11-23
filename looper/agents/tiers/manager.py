@@ -85,7 +85,8 @@ from ..gate_service import dashboard_target as gate_dashboard_target, gate_chat 
 from ..library import EMPTY_LIBRARY, load_installed
 from ..run_usage import Usage
 from ..reported_files import prompt_name
-from .. import leads_model, research_order, session_switch, untrusted as untrusted_text
+from .. import leads_model, manager_turn_context, research_order, session_switch, untrusted as untrusted_text
+from ..turn_context import TURN_CONTEXT_CONTRACT, render as render_turn_context
 from ..research_order import ResearchSources
 from ..runtimes import CLAUDE_CODE, ImageInput, InProcessTools, ReportsContext, ResidentSession
 from ..runtimes.api.loop import ToolCall, ToolOutcome, ToolSpec
@@ -102,6 +103,7 @@ from .manager_session import MAIN_SESSION, ManagerSession, _Process, session_fie
 from .manager_routing import SessionRouter
 from . import group_session
 from .. import session_routing
+from ..mid_turn_input import MidTurnInputs
 from ..ops import Turn, TurnOrigin, leads as ops_leads, manager_vault as ops_vault
 from ..channels.base import PostOutcome
 from ..ops.service import _operator_turn, tools_down_reply
@@ -907,6 +909,7 @@ class ManagerAgent:
             key=MAIN_SESSION, claude=CLAUDE_CODE.resident_session(self.agent_id), claude_runtime=CLAUDE_CODE,
             last_activity=clock())}
         self._clock = clock
+        self._mid_turn = MidTurnInputs(self)
         self._router = SessionRouter(self)  # the sessions' workers while session routing is on
         self._turns = TurnRegistry()  # every user message from its delivery to its end (stop_turn's targets)
         self._persisted: set[str] = set()  # user messages already stored in chat_messages
@@ -1327,7 +1330,8 @@ class ManagerAgent:
                 if self._drain is not None:
                     await self._drain.wait_serving()
                 if (session := await self._router.target(envelope)) is not None:
-                    self._router.dispatch(session, envelope)  # its session's worker handles and settles it
+                    if not await self._mid_turn.merge(session, envelope):
+                        self._router.dispatch(session, envelope)  # its worker handles and settles it
                     continue
                 self._handling = envelope
                 try:
@@ -1503,6 +1507,7 @@ class ManagerAgent:
             token.metrics_delivery = TurnDelivery.FAILED
             raise
         finally:
+            await self._mid_turn.finish(token)
             self._record_turn_metrics(token, token.metrics_prepared, token.metrics_delivery)
             self._metrics_reply_tokens.pop(token.message_id, None)
 
@@ -2045,6 +2050,8 @@ class ManagerAgent:
         Does not wait for the turn's lock: the turn ends by itself, replying with what it had written. Refused when
         the Manager's runtime cannot interrupt a turn (``can_interrupt``): its processes are never killed for it."""
         token = self._turns.find(message_id)
+        if token is not None:
+            token = self._turns.find(self._mid_turn.parent(token.message_id))
         if token is None:
             return StopResult.NOT_RUNNING
         if token.phase is TurnPhase.STOPPING:
@@ -2054,6 +2061,7 @@ class ManagerAgent:
         # Before anything is awaited: the stop is for this turn, never for one that starts meanwhile.
         if not token.request_stop(via):
             return StopResult.NOT_RUNNING
+        self._mid_turn.stop(token)
         if token.ops_turn is not None and self.ops is not None:
             # At once, before Claude is stopped: a call it still has under way asks the user nothing and runs nothing.
             self.ops.stop_turn(token.ops_turn)
@@ -2560,6 +2568,9 @@ class ManagerAgent:
         if getattr(self, "_stable_context", False):  # last, so every part before it reads as it does without it
             contract_name += "+STABLE_CONTEXT_CONTRACT"
             contract += "\n" + state_view.STABLE_CONTEXT_CONTRACT
+        if chat_settings.turn_context_enabled():
+            contract_name += "+TURN_CONTEXT_CONTRACT"
+            contract += "\n" + TURN_CONTEXT_CONTRACT
         return build_system_prompt(
             harness=agent_settings.harness,
             custom_prompt=agent_settings.profile.custom_prompt,
@@ -2773,8 +2784,12 @@ class ManagerAgent:
                 if isinstance(self._claude, RunnerSession):
                     self._claude.set_turn_budget(provider_id=launch.profile.provider.id, model=launch.model,
                                                  price=launch.price, limits=self._runner_limits)
-                turn = await self._claude.run_turn(turn_text, on_event, tag=context_envelope,
-                                                   stop=lambda: recorder.cap_stop, cancel=token.cancel)
+                turn_text = self._mid_turn.open(token, prepared, turn_text)
+                try:
+                    turn = await self._claude.run_turn(turn_text, on_event, tag=context_envelope,
+                                                       stop=lambda: recorder.cap_stop, cancel=token.cancel)
+                finally:
+                    await self._mid_turn.close(token)
             except TurnCancelled:
                 # A runtime that lets the turn's cancel escape was stopped by the user: not a failure.
                 token.settle(ReplyOutcome.STOPPED)
@@ -3447,7 +3462,10 @@ class ManagerAgent:
         # The untrusted fence (``untrusted``): a chat message from someone other than the operator, its quotes and
         # its attachments' names go in <untrusted> blocks, after one line saying how to read them.
         fence = await untrusted_text.enabled()
-        if channel:
+        context = await manager_turn_context.prepare(envelope, turn)
+        if context is not None:
+            parts += render_turn_context(context)
+        elif channel:
             # Rebuild the channel label without the sender-controlled name. Its name belongs to the message's
             # provenance, inside the same fence; off, keep even a caller-supplied label byte for byte.
             parts += [channel_line(envelope, fence=True)
@@ -3685,6 +3703,7 @@ class ManagerAgent:
         outcome = outcome or (ReplyOutcome.FAILED if error else ReplyOutcome.ANSWERED)
         await self._bus.publish(reply_envelope(original, text, self.agent_address, error=error, outcome=outcome,
                                                record=record, snapshot=snapshot, cards=cards))
+        await self._mid_turn.reply(original, text, error=error, outcome=outcome)
         token = self._turns.find(original.message_id) or self._metrics_reply_tokens.get(original.message_id)
         if token is not None and token.message_id == original.message_id and token.times is not None and text and error is None:
             if token.times.first_reply_at is None:
