@@ -272,6 +272,8 @@ print(json.dumps({'type': 'agent_settled', 'aborted': False}))
                 return {"status": "ok", "result": {"messages": self.messages}}
             if path == "/api/v1/tasks/activity":
                 return {"status": "ok", "result": {"activity": []}}
+            if path == "/api/v1/metrics/step_attempts":
+                return {"status": "ok", "result": {"missing_attempts": 0, "steps": [], "summary": {}}}
             self.posts.append((path, body))
             if path == "/api/v1/provider_accounts/create":
                 assert "api_key_env" not in body
@@ -955,6 +957,8 @@ def test_vault_tasks_enable_the_project_and_read_back_their_commits(
             return {"status": "ok", "result": get(path, **body)}
         if path == "/api/v1/tasks/activity":
             return {"status": "ok", "result": {"activity": [{"kind": "phase", "summary": "Vault closeout: done"}]}}
+        if path == "/api/v1/metrics/step_attempts":
+            return {"status": "ok", "result": {"missing_attempts": 0, "steps": [], "summary": {}}}
         posts.append((path, body))
         if path == "/api/v1/ops/task_control/start":
             for name, content in task.fake["attempts"]["s1"][0]["files"].items():
@@ -1418,6 +1422,8 @@ def test_run_task_pushes_fixes_without_resuming_the_pr_wait(
             return {"status": "ok", "result": get(path, **body)}
         if path == "/api/v1/tasks/activity":
             return {"status": "ok", "result": {"activity": []}}
+        if path == "/api/v1/metrics/step_attempts":
+            return {"status": "ok", "result": {"missing_attempts": 0, "steps": [], "summary": {}}}
         posted.append((path, body))
         return {"status": "ok", "result": {"task_id": "t1", "project_id": "p1"}} if path == "/api/v1/tasks/create" else {}
 
@@ -2208,6 +2214,8 @@ class _CostlyApi:
             return {"status": "ok", "result": self.get(path, **body)}
         if path == "/api/v1/tasks/activity":
             return {"status": "ok", "result": {"activity": []}}
+        if path == "/api/v1/metrics/step_attempts":
+            return {"status": "ok", "result": {"missing_attempts": 0, "steps": [], "summary": {}}}
         self.posts.append((path, body))
         if path == "/api/v1/ops/task_control/cancel":
             self.cancelled = True

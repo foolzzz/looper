@@ -17,6 +17,7 @@ from evals.prompt_regression import compare, metrics, runner
 from evals.prompt_regression.tasks import (
     HARD_TASKS,
     TASKS,
+    EvalTask,
     _HIDDEN_FEATURE_OK,
     _HIDDEN_MAKEFILE,
     _HIDDEN_MAKEFILE_OK,
@@ -118,6 +119,26 @@ def test_misleading_error_rejects_a_hardcoded_answer(tmp_path: Path) -> None:
     assert check_misleading_error(untouched) == "config.py does not set VALUE to ready"
 
 
+def test_misleading_error_checks_behavior_and_keeps_the_seeded_test(tmp_path: Path) -> None:
+    noted = tmp_path / "noted"
+    _write(noted, {"config.py": _MISLEAD_CONFIG_OK + "# ready for the demo\n",
+                   "app.py": _MISLEAD_APP + "# ready is the name the failure uses\n",
+                   "test_app.py": _MISLEAD_TEST})
+    assert check_misleading_error(noted) is None
+    decoy = tmp_path / "decoy"
+    _write(decoy, {"config.py": _MISLEAD_CONFIG + "# ready\n", "app.py": _MISLEAD_APP,
+                   "test_app.py": _MISLEAD_TEST})
+    assert check_misleading_error(decoy) == "config.py does not set VALUE to ready"
+    edited = tmp_path / "edited"
+    _write(edited, {"config.py": _MISLEAD_CONFIG_OK, "app.py": _MISLEAD_APP,
+                    "test_app.py": _MISLEAD_TEST + "# tampered\n"})
+    assert check_misleading_error(edited) == "test_app.py was changed"
+    bypass = tmp_path / "bypass"
+    _write(bypass, {"config.py": _MISLEAD_CONFIG + "# ready\n", "app.py": _MISLEAD_APP,
+                    "test_app.py": "raise SystemExit(0)\n"})
+    assert check_misleading_error(bypass) == "test_app.py was changed"
+
+
 def test_contract_violations_come_from_records_not_logs(tmp_path: Path) -> None:
     activity = [{"kind": "error", "summary": "Planner reply broke the PLAN contract (no json); asking again"}]
     record = {"id": 1, "agent_id": "planner-task-1", "metadata": {}, "status": "completed"}
@@ -155,11 +176,30 @@ def test_attempt_fields_rename_worker_spend_and_skip_absent_counts() -> None:
     assert metrics.attempt_fields(None) == {}
 
 
+def test_missing_attempts_are_unavailable_and_never_shown_as_zero() -> None:
+    incomplete = {"missing_attempts": 2, "summary": {"attempts": 0, "first_pass_steps": 0, "accepted_steps": 0}}
+    fields = metrics.attempt_fields(incomplete)
+    assert "attempts" not in fields and "first_pass_steps" not in fields and "accepted_steps" not in fields
+    partial = {"missing_attempts": 1, "summary": {"attempts": 3, "first_pass_steps": 1, "accepted_steps": 1}}
+    assert "attempts" not in metrics.attempt_fields(partial)
+    assert "attempts" not in metrics.attempt_fields({**incomplete, "missing_attempts": None})
+    assert metrics.attempt_fields(
+        {"missing_attempts": 0, "summary": {"attempts": 0, "first_pass_steps": 0, "accepted_steps": 0}})["attempts"] == 0
+    hidden = _run(case={**_OK, **fields})
+    assert _column(compare.markdown(hidden), "case", "attempts per passing case") == _EN_DASH
+
+
 def test_v2_task_reports_still_compare_and_new_runs_write_v3() -> None:
     old = {"schema": "looper-prompt-eval/v2", "tasks": []}
     assert runner.validate_report(old)["schema"] == "looper-prompt-eval/v2"
     assert runner.validate_report({"schema": runner.SCHEMA, "tasks": []})["schema"] == "looper-prompt-eval/v3"
     assert runner.SCHEMA == "looper-prompt-eval/v3"
+
+
+@pytest.mark.parametrize("schema", [[], {}])
+def test_a_list_or_object_schema_is_refused(schema: Any) -> None:
+    with pytest.raises(runner.EvalError, match="unsupported report schema"):
+        runner.validate_report({"schema": schema, "tasks": []})
 
 
 def test_claude_version_keeps_the_first_line(tmp_path: Path) -> None:
@@ -195,6 +235,32 @@ def test_new_columns_pool_passing_rows_and_old_rows_stay_blank() -> None:
     for header in _NEW_COLUMNS:
         assert _column(compare.markdown(legacy), "old", header) == _EN_DASH
         assert _column(compare.markdown(legacy), "**total**", header) == _EN_DASH
+
+
+def test_a_failed_metrics_read_leaves_counts_unavailable_and_still_scores(tmp_path: Path) -> None:
+    class Api:
+        def post(self, path: str, body: dict[str, Any]) -> dict[str, Any]:
+            if path == "/api/v1/tasks/create":
+                return {"result": {"task_id": "t1", "project_id": "p1"}}
+            if path == "/api/v1/tasks/detail":
+                return {"result": {"status": "completed", "steps": [], "cost": {"cost_usd": 0.1}}}
+            if path == "/api/v1/runs/list":
+                return {"result": {"records": []}}
+            if path == "/api/v1/tasks/activity":
+                return {"result": {"activity": []}}
+            if path == "/api/v1/metrics/step_attempts":
+                raise runner.EvalError("POST /api/v1/metrics/step_attempts answered 500: metrics down")
+            if path == "/api/v1/ops/task_control/start":
+                return {"result": {}}
+            raise AssertionError(path)
+
+    task = EvalTask("metrics_down", "Do the work.", lambda _work: None)
+    row = runner.run_task(Api(), task, tmp_path, timeout=1, poll=0)
+    assert row["outcome"] == "pass", row
+    assert row["success"] is True
+    for key in ("attempts", "first_pass_steps", "accepted_steps"):
+        assert key not in row
+    assert "metrics down" not in " ".join(row["problems"])
 
 
 def test_markers_are_notes_and_do_not_decide_the_exit_code() -> None:

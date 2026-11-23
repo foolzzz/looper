@@ -102,15 +102,22 @@ def cost_split(costs: Mapping[str, Any] | None) -> dict[str, Any] | None:
 
 
 def attempt_fields(attempts_view: Mapping[str, Any] | None) -> dict[str, Any]:
-    """The row fields taken from one ``metrics.step_attempts`` result. Absent when that read did not return them."""
+    """The row fields taken from one ``metrics.step_attempts`` result. Absent when that read did not return them.
+
+    ``missing_attempts`` other than 0 means the attempt rows are incomplete. The counts stay off the row, so a
+    comparison shows them unavailable instead of a 0 or a short count.
+    """
     if not isinstance(attempts_view, Mapping):
         return {}
     summary = attempts_view.get("summary") if isinstance(attempts_view.get("summary"), Mapping) else {}
+    missing = attempts_view.get("missing_attempts", 0)
+    counts_known = isinstance(missing, int) and not isinstance(missing, bool) and missing == 0
     fields: dict[str, Any] = {}
-    for key in ("attempts", "first_pass_steps", "accepted_steps"):
-        value = summary.get(key)
-        if isinstance(value, int) and not isinstance(value, bool):
-            fields[key] = value
+    if counts_known:
+        for key in ("attempts", "first_pass_steps", "accepted_steps"):
+            value = summary.get(key)
+            if isinstance(value, int) and not isinstance(value, bool):
+                fields[key] = value
     kinds = summary.get("failure_kinds")
     if isinstance(kinds, Mapping):
         fields["failure_kinds"] = {str(key): value for key, value in kinds.items()

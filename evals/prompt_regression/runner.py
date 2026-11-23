@@ -760,7 +760,13 @@ def run_task(
         records = [api.post("/api/v1/runs/get", {"record_id": int(r["id"])})["result"]["record"]
                    for r in sorted(records, key=lambda r: int(r["id"]))]
         events = {int(r["id"]): _all_events(api, int(r["id"])) for r in records if metrics.role(r) != "other"}
-        attempts_view = api.post("/api/v1/metrics/step_attempts", {"task_id": task_id})["result"]
+        # One read, bounded by this client's timeout. A failure leaves the attempt fields off the row.
+        try:
+            attempts_view = api.post("/api/v1/metrics/step_attempts", {"task_id": task_id})["result"]
+        except Exception:
+            attempts_view = None
+        if not isinstance(attempts_view, dict):
+            attempts_view = None
         result = metrics.task_metrics(
             detail=detail,
             activity=_all_activity(api, task_id),
@@ -1440,9 +1446,11 @@ def validate_report(data: Any, *, dialogs: bool | None = None) -> dict[str, Any]
     if is_dialogs:
         if data.get("schema") != "looper-manager-dialogs/v2":
             raise EvalError(f"unsupported report schema {data.get('schema')!r}; expected looper-manager-dialogs/v2")
-    elif data.get("schema") not in ACCEPTED_TASK_SCHEMAS:
-        accepted = ", ".join(sorted(ACCEPTED_TASK_SCHEMAS))
-        raise EvalError(f"unsupported report schema {data.get('schema')!r}; expected one of {accepted}")
+    else:
+        schema = data.get("schema")
+        if not isinstance(schema, str) or schema not in ACCEPTED_TASK_SCHEMAS:
+            accepted = ", ".join(sorted(ACCEPTED_TASK_SCHEMAS))
+            raise EvalError(f"unsupported report schema {schema!r}; expected one of {accepted}")
     return data
 
 
