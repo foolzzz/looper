@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import socket
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -11,7 +12,7 @@ from typing import Any
 
 import pytest
 
-from looper.agents.claude_cli import ResidentClaude, _UserTurn
+from looper.agents.claude_cli import ResidentClaude, _Output, _UserTurn
 from looper.agents.runtimes.cancel import TurnCancel
 
 
@@ -110,6 +111,71 @@ def test_buffered_result_is_checked_again_immediately_before_writing() -> None:
         asyncio.get_running_loop().call_soon(setattr, turn, "result_received", True)
         assert await resident.write_mid_turn("too late") is False
         assert writer.lines == []
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("result_at", ["before_write", "after_write"])
+def test_kernel_buffered_result_with_immediate_drain_refuses_input(monkeypatch, result_at) -> None:
+    """Poll must wake the transport and then the blocked reader before admission decides."""
+    async def run() -> None:
+        resident, _, turn = _running()
+        client, peer = socket.socketpair()
+        reader, writer = await asyncio.open_connection(sock=client)
+        result = b'{"type":"result","subtype":"success","result":"original only"}\n'
+        writes, retired = [], []
+
+        async def observe(event):
+            pass
+
+        turn.on_event = observe
+        output = resident._output = _Output(resident, reader, None)
+        output.turn = turn
+        process = resident._process
+
+        class Writer:
+            def is_closing(self):
+                return writer.is_closing()
+
+            def write(self, line):
+                writes.append(line)
+                writer.write(line)
+                if result_at == "after_write":
+                    peer.sendall(result)
+
+            async def drain(self):
+                # Assert this real short-line drain does not suspend.
+                resumed = []
+                asyncio.get_running_loop().call_soon(resumed.append, True)
+                await writer.drain()
+                assert not resumed
+
+        async def retire(**kwargs):
+            retired.append(kwargs)
+            process.returncode = -9
+            resident._process = None
+            writer.close()
+            await writer.wait_closed()
+
+        process.stdin = Writer()
+        monkeypatch.setattr(resident, "stop", retire)
+        output.read()
+        try:
+            await asyncio.sleep(0)  # the real read loop blocks waiting for OS data
+            assert reader._waiter is not None and not reader._buffer
+            if result_at == "before_write":
+                peer.sendall(result)  # kernel bytes, no feed_data/call_soon wake-up
+            assert await resident.write_mid_turn("B") is False
+            assert turn.result_received
+            assert len(writes) == int(result_at == "after_write")
+            assert retired == ([{"kill": True}] if writes else [])
+            if writes:
+                assert process.returncode == -9 and writer.is_closing()
+        finally:
+            peer.close()
+            writer.close()
+            await writer.wait_closed()
+            await asyncio.wait_for(output._task, 5)
 
     asyncio.run(run())
 

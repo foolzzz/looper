@@ -1144,8 +1144,8 @@ class ResidentClaude:
         """Write another input into the current user turn, without starting a new one.
 
         A prompt queued behind an autonomous turn is not running yet. Give buffered
-        output a chance to close admission before writing. If the result races the
-        drain, retire this process and let the owner queue the input on a fresh one;
+        output a chance to close admission before and after writing. If the result races
+        the write, retire this process and let the owner queue the input on a fresh one;
         the old pipe must never consume it alongside that queued turn.
         """
         process, output, turn, cancel = self._process, self._output, self._user_turn, self._cancel
@@ -1159,11 +1159,19 @@ class ResidentClaude:
 
         if not accepting():
             return False
+        # Poll can enqueue a transport callback behind this task's continuation;
+        # that callback in turn wakes the output reader. Let all three stages run.
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
         await asyncio.sleep(0)
         if not accepting():
             return False
         async with asyncio.timeout(5):
             await write_user_turn(process.stdin, text)
+        # A short write's drain() need not suspend. Observe stdout independently.
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
         if not accepting():
             # The write has no acknowledgement tying it to the completed result.
             # Discard its pipe before the queued owner can send the input again.

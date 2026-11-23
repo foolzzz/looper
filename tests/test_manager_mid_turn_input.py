@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import socket
 from typing import Any
 
 import pytest
@@ -288,13 +289,17 @@ def test_real_manager_resident_path_with_scripted_cli(enabled, tmp_path):
     run_db(test, enabled, timeout=45)
 
 
-@pytest.mark.parametrize("result_during_drain", [False, True])
-def test_buffered_result_queues_followup_once_without_merging_or_settling(enabled, tmp_path, result_during_drain):
+@pytest.mark.parametrize("timing", ["buffered", "drain", "kernel_before_write", "kernel_after_write"])
+def test_buffered_result_queues_followup_once_without_merging_or_settling(enabled, tmp_path, timing):
     """Drive the real Manager/read loop while controlling exactly when stdout is consumed."""
     from looper.agents.claude_cli import ResidentClaude
     from tests.test_manager_reply import _fake_claude
 
     async def test(pool):
+        kernel = timing.startswith("kernel_")
+        result_during_drain = timing in {"drain", "kernel_after_write"}
+        read_end, write_end = socket.socketpair()
+        loop = asyncio.get_running_loop()
         rig = _Rig(tmp_path)
         resident = ResidentClaude(label="synthetic-manager-race")
         rig.manager._sessions["main"].claude = resident
@@ -322,6 +327,12 @@ def test_buffered_result_queues_followup_once_without_merging_or_settling(enable
             running = rig.manager._mid_turn._turns[first.message_id]
             process, output = resident._process, resident._output
             original_pid = resident.pid
+            result = json.dumps({"type": "result", "subtype": "success", "is_error": False,
+                "session_id": "synthetic-race", "result": "original only"}).encode() + b"\n"
+            if kernel:
+                # An actual selector read callback, not a pre-scheduled task wake-up.
+                loop.add_reader(read_end, lambda: output._stdout.feed_data(read_end.recv(4096)))
+                await until(lambda: output._stdout._waiter is not None)
             release_result = asyncio.Event()
             dispatch_event = output._dispatch
             async def dispatch(event):
@@ -338,20 +349,29 @@ def test_buffered_result_queues_followup_once_without_merging_or_settling(enable
                 def write(self, line):
                     writes.append(json.loads(line))
                     writer.write(line)
+                    if timing == "kernel_after_write":
+                        write_end.sendall(result)
 
                 async def drain(self):
-                    if result_during_drain:
+                    if timing == "drain":
                         release_result.set()
                         await until(lambda: not running.accepting)
+                    resumed = []
+                    loop.call_soon(resumed.append, True)
                     await writer.drain()
+                    if kernel:
+                        assert not resumed  # short line: real drain did not yield
             process.stdin = Writer()
             write = resident.write_mid_turn
             async def followup(text):
                 # The result is already in stdout before B's admission check. In
                 # the drain case the reader deliberately cannot finish until B writes.
-                output._stdout.feed_data(json.dumps({"type": "result", "subtype": "success",
-                    "is_error": False, "session_id": "synthetic-race", "result": "original only"}).encode() + b"\n")
-                if not result_during_drain:
+                if timing == "kernel_before_write":
+                    assert output._stdout._waiter is not None
+                    write_end.sendall(result)
+                elif not kernel:
+                    output._stdout.feed_data(result)
+                if timing != "drain":
                     release_result.set()
                 return await write(text)
             enabled.setattr(resident, "write_mid_turn", followup)
@@ -402,6 +422,9 @@ def test_buffered_result_queues_followup_once_without_merging_or_settling(enable
             rows = await pool.fetch("SELECT metadata FROM llm_records WHERE agent_id='manager'")
             assert len(rows) == 2 and all(not json.loads(row["metadata"]).get("merged") for row in rows)
         finally:
+            loop.remove_reader(read_end)
+            read_end.close()
+            write_end.close()
             await rig.close()
     run_db(test, enabled, timeout=45)
 
