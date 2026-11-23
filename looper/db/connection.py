@@ -165,6 +165,7 @@ _PROJECT_ADVISOR = "project_advisor"
 _PROJECT_ACTIVITY = "project_activity"
 _CHANNEL_OUTBOX = "channel_outbox"
 _LEDGER = "ledger"
+_MANAGER_SESSIONS = "manager_sessions"
 _MESSAGE_LEADS = "message_leads"
 _INTENT_MERGES = "intent_merges"
 _LEADS_CHECK = "leads_check"
@@ -180,6 +181,7 @@ _OUTBOUND_REVIEWS = "outbound_reviews"
 _CARD_ACTIONS = "card_actions"
 
 _MEMORY_CANDIDATES = "memory_candidates"
+_PROVIDER_LIMIT_WINDOWS = "provider_limit_windows"
 _UNCERTAIN_DELIVERIES = "uncertain_deliveries"
 # The partial indexes of uncertain deliveries, as schema.sql's last lines create them.
 _UNCERTAIN_DELIVERY_INDEXES = (
@@ -281,6 +283,7 @@ _SOURCE_DELETIONS_BLOCK = re.compile(r"-- source deletions begin\n(.*?)-- source
 _SUBSCRIPTIONS_BLOCK = re.compile(r"-- subscriptions begin\n(.*?)-- subscriptions end", re.S)
 _PROACTIVE_DELIVERIES_BLOCK = re.compile(r"-- proactive deliveries begin\n(.*?)-- proactive deliveries end", re.S)
 _MANAGER_EVENTS_BLOCK = re.compile(r"-- manager events begin\n(.*?)-- manager events end", re.S)
+_MANAGER_SESSIONS_BLOCK = re.compile(r"-- manager sessions begin\n(.*?)-- manager sessions end", re.S)
 _AGENT_SPAWNS_BLOCK = re.compile(r"-- agent spawns begin\n(.*?)-- agent spawns end", re.S)
 _DECISION_SNAPSHOTS_BLOCK = re.compile(r"-- decision snapshots begin\n(.*?)-- decision snapshots end", re.S)
 
@@ -457,6 +460,9 @@ _ONLINE_STEPS = (
     _OnlineStep(_FAILURE_TYPING, "failure_typing_online",
                 validate=(("llm_records", "llm_records_failure_check"),),
                 indexes=(("idx_llm_records_failures", "ON llm_records (created_at) WHERE failure_class IS NOT NULL"),)),
+    _OnlineStep(_PROVIDER_LIMIT_WINDOWS, "provider_limit_windows_online",
+                indexes=(("idx_llm_records_provider_day",
+                          "ON llm_records ((metadata->'profile'->'provider'->>'id'), created_at)"),)),
 )
 
 
@@ -632,6 +638,14 @@ def _proactive_deliveries_ddl() -> str:
     found = _PROACTIVE_DELIVERIES_BLOCK.search(SCHEMA_PATH.read_text(encoding="utf-8"))
     if found is None:
         raise RuntimeError("schema.sql lost its proactive deliveries block")
+    return found.group(1)
+
+
+def _manager_sessions_ddl() -> str:
+    """The Manager session table as schema.sql defines it, so a database that predates it gets the same text."""
+    found = _MANAGER_SESSIONS_BLOCK.search(SCHEMA_PATH.read_text(encoding="utf-8"))
+    if found is None:
+        raise RuntimeError("schema.sql lost its manager sessions block")
     return found.group(1)
 
 
@@ -1012,6 +1026,20 @@ async def _mcp_tool_levels_pending(conn: asyncpg.Connection) -> bool:
     return not await conn.fetchval("SELECT to_regclass('mcp_tool_levels') IS NOT NULL")
 
 
+async def _provider_limit_windows_pending(conn: asyncpg.Connection) -> bool:
+    if await conn.fetchval("SELECT EXISTS (SELECT 1 FROM schema_migrations WHERE name=$1)", _PROVIDER_LIMIT_WINDOWS):
+        return False
+    return not await conn.fetchval("SELECT to_regclass('provider_limit_windows') IS NOT NULL")
+
+
+def _provider_limit_windows_ddl() -> str:
+    found = re.search(r"-- provider limit windows begin\n(.*?)-- provider limit windows end",
+                      SCHEMA_PATH.read_text(encoding="utf-8"), re.S)
+    if found is None:
+        raise RuntimeError("schema.sql lost its provider limit windows block")
+    return found.group(1)
+
+
 async def _outbound_reviews_pending(conn: asyncpg.Connection) -> bool:
     if await conn.fetchval("SELECT EXISTS (SELECT 1 FROM schema_migrations WHERE name = $1)", _OUTBOUND_REVIEWS):
         return False
@@ -1208,6 +1236,12 @@ async def _proactive_deliveries_pending(conn: asyncpg.Connection) -> bool:
     if await conn.fetchval("SELECT EXISTS (SELECT 1 FROM schema_migrations WHERE name = $1)", _PROACTIVE_DELIVERIES):
         return False
     return not await conn.fetchval("SELECT to_regclass('proactive_deliveries') IS NOT NULL")
+
+
+async def _manager_sessions_pending(conn: asyncpg.Connection) -> bool:
+    if await conn.fetchval("SELECT EXISTS (SELECT 1 FROM schema_migrations WHERE name = $1)", _MANAGER_SESSIONS):
+        return False
+    return not await conn.fetchval("SELECT to_regclass('manager_sessions') IS NOT NULL")
 
 
 async def _manager_event_reasons_pending(conn: asyncpg.Connection) -> bool:
@@ -1846,6 +1880,12 @@ async def ensure_schema(pool: asyncpg.Pool | asyncpg.Connection | None = None) -
         if await _channel_outbox_pending(conn):
             await conn.execute(_channel_outbox_ddl())
             await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1) ON CONFLICT DO NOTHING", _CHANNEL_OUTBOX)
+        if await _manager_sessions_pending(conn):
+            await conn.execute(_manager_sessions_ddl())
+            await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", _MANAGER_SESSIONS)
+        if await _provider_limit_windows_pending(conn):
+            await conn.execute(_provider_limit_windows_ddl())
+            await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", _PROVIDER_LIMIT_WINDOWS)
         # Current databases never replay initialization DDL. Missing builtins
         # are inserted without changing any saved choice or creation time.
         await conn.execute(SEEDS_PATH.read_text(encoding="utf-8"))
@@ -1899,6 +1939,7 @@ async def schema_change_pending(conn: asyncpg.Connection) -> bool:
             or await _manager_event_reasons_pending(conn) or await _manager_event_delivery_pending(conn)
             or await _message_leads_pending(conn)
             or await _intent_merges_pending(conn) or await _leads_check_pending(conn)
+            or await _provider_limit_windows_pending(conn)
             or await _run_skips_pending(conn)
             or await _outbound_reviews_pending(conn)
             or await _uncertain_deliveries_pending(conn) or await _mcp_tool_levels_pending(conn)
@@ -1919,4 +1960,4 @@ async def schema_change_pending(conn: asyncpg.Connection) -> bool:
             or await _verification_paths_pending(conn) or await _task_chat_group_pending(conn)
             or await _processor_role_pending(conn) or await _headless_compaction_pending(conn)
             or await _mid_turn_input_pending(conn)
-            or await _reminders_pending(conn)))
+            or await _reminders_pending(conn) or await _manager_sessions_pending(conn)))
