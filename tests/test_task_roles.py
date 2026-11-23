@@ -34,14 +34,12 @@ from looper.agents.tiers.planner_protocol import (
     reply_contract,
 )
 from looper.agents.tiers.worker import RunOutcome, judge_result, run_outcome
+from tests.prompt_sections import assert_frozen
 from tests.test_planner_agent import plan, reply, step
 
-# The built-in harness as main had it before roles. The reply-contract pin is that contract plus the PLAN
-# wait section below (how a wait is written, and how "waits" cancels one). Both reply-contract pins include
-# the final-summary language rule; dropping the wait section isolates the rest of the contract.
+# The built-in harness as main had it before roles. The default reply contract (frozen per section in
+# tests/prompt_sections.py) has the PLAN wait section below: how a wait is written, and how "waits" cancels one.
 MAIN_HARNESS_SHA256 = "3140e3ed78dceb72af395f9d2e1d9438e1e0cae06abccad6f216f683ce95b340"
-MAIN_REPLY_CONTRACT_SHA256 = "2f72cd02be65030f0d1635b2c276dc6debac28eac9d378040c3aa3d5ef6ddc42"
-_PREVIOUS_REPLY_CONTRACT_SHA256 = "d7f9c49c63f1e67a3b3df28395926d5987ef2de8a2fea91c23b0bb1c5966339d"
 _PLAN_WAIT_SECTION = """\
 - Waits: when something outside the task must happen before some steps can
   run (a pull request's author pushes fixes, CI finishes, another system's
@@ -81,8 +79,8 @@ def test_the_built_in_harness_is_unchanged_and_the_reply_contract_adds_only_the_
         "\n\n## Communication", f"\n\n## Boundaries\n{HARNESS_BOUNDARIES}\n\n## Communication")
     assert _PLAN_WAIT_SECTION in REPLY_CONTRACT
     assert ', or {"type": "command", "command": "..."}' not in REPLY_CONTRACT
-    assert _sha(REPLY_CONTRACT.replace(_PLAN_WAIT_SECTION, "", 1)) == _PREVIOUS_REPLY_CONTRACT_SHA256
-    assert _sha(REPLY_CONTRACT) == _sha(reply_contract(roles=False)) == MAIN_REPLY_CONTRACT_SHA256
+    assert REPLY_CONTRACT == reply_contract(roles=False)
+    assert_frozen("reply_contract", REPLY_CONTRACT)
     assert "review_roles" not in REPLY_CONTRACT and "review_roles" in reply_contract(roles=True)
 
 

@@ -272,6 +272,8 @@ print(json.dumps({'type': 'agent_settled', 'aborted': False}))
                 return {"status": "ok", "result": {"messages": self.messages}}
             if path == "/api/v1/tasks/activity":
                 return {"status": "ok", "result": {"activity": []}}
+            if path == "/api/v1/metrics/step_attempts":
+                return {"status": "ok", "result": {"missing_attempts": 0, "steps": [], "summary": {}}}
             self.posts.append((path, body))
             if path == "/api/v1/provider_accounts/create":
                 assert "api_key_env" not in body
@@ -955,6 +957,8 @@ def test_vault_tasks_enable_the_project_and_read_back_their_commits(
             return {"status": "ok", "result": get(path, **body)}
         if path == "/api/v1/tasks/activity":
             return {"status": "ok", "result": {"activity": [{"kind": "phase", "summary": "Vault closeout: done"}]}}
+        if path == "/api/v1/metrics/step_attempts":
+            return {"status": "ok", "result": {"missing_attempts": 0, "steps": [], "summary": {}}}
         posts.append((path, body))
         if path == "/api/v1/ops/task_control/start":
             for name, content in task.fake["attempts"]["s1"][0]["files"].items():
@@ -1030,6 +1034,7 @@ def test_task_metrics_read_the_flow_cost_and_violations(tmp_path: Path) -> None:
         _record(6, "planner-task-1", input_text="[CHAT] A message from the user."),
         _record(7, "reviewer-c"),
     ]
+    records[1]["metadata"] = {"contract_rejections": {"plan": 1, "ignored": True}}
     records[2].update(input_tokens=100, output_tokens=20, cache_read_tokens=3000, cache_creation_tokens=None,
                       status="failed", model="claude-haiku")
     records[4].update(input_tokens=50, output_tokens=5, cache_read_tokens=None, cache_creation_tokens=400,
@@ -1037,17 +1042,20 @@ def test_task_metrics_read_the_flow_cost_and_violations(tmp_path: Path) -> None:
     events = {3: _result("no report"), 5: _result(good), 7: _result('{"passed": true}')}
     detail = {"status": "completed", "steps": [{"id": "step-1"}],
               "cost": {"cost_usd": 0.0123, "runs": 7, "by_role": {"planner": {"cost_usd": 0.004, "runs": 4}}}}
+    # The activity line is the old log signal. It does not add a violation; the record and the attempt do.
     activity = [{"kind": "error", "summary": "Planner reply broke the PLAN contract (the reply has no ```json "
                                              "fenced block); asking again"}]
+    attempts_view = {"steps": [{"attempts": [{"run_outcome": "contract"}, {"run_outcome": "completed"}]}]}
     result = metrics.task_metrics(
         detail=detail, activity=activity, records=records, events=events, changes={}, work_dir=tmp_path,
-        check_problem=None, expect={"min_retries": 1, "min_reviews": 2, "max_contract_violations": 1}, now=0.0,
+        check_problem=None, expect={"min_retries": 1, "min_reviews": 2, "max_contract_violations": 1},
+        attempts_view=attempts_view, now=0.0,
     )
     assert result["success"] is False
     assert len(result["problems"]) == 2  # too few reviews, too many contract violations
     assert (result["steps"], result["retries"], result["reviews"], result["chat_turns"]) == (1, 1, 1, 1)
     assert result["planner_turns"] == {"plan": 1, "repair": 1, "decision": 1, "chat": 1}
-    assert result["contract_violations"] == {"planner": 1, "worker": 1, "reviewer": 0, "total": 2}
+    assert result["contract_violations"] == {"planner_rejections": 1, "attempt_contracts": 1, "total": 2}
     assert (result["cost_usd"], result["cost_by_role"], result["planner_modified_files"]) == (
         0.0123, {"planner": 0.004}, 0)
     # Tokens are summed whether or not a run's cost is known.
@@ -1414,6 +1422,8 @@ def test_run_task_pushes_fixes_without_resuming_the_pr_wait(
             return {"status": "ok", "result": get(path, **body)}
         if path == "/api/v1/tasks/activity":
             return {"status": "ok", "result": {"activity": []}}
+        if path == "/api/v1/metrics/step_attempts":
+            return {"status": "ok", "result": {"missing_attempts": 0, "steps": [], "summary": {}}}
         posted.append((path, body))
         return {"status": "ok", "result": {"task_id": "t1", "project_id": "p1"}} if path == "/api/v1/tasks/create" else {}
 
@@ -1733,7 +1743,7 @@ def test_recorded_sonnet_baseline_preserves_every_original_measurement():
     import hashlib
 
     run = json.loads((runner.BASELINES_DIR / "real-sonnet.json").read_text())
-    assert run.pop("schema") == runner.SCHEMA
+    assert run.pop("schema") == "looper-prompt-eval/v2"
     assert run.pop("reps") == 1 and run.pop("aborted") is None
     assert len(run["tasks"]) == 5 and compare._tally(run["tasks"]) == (5, 5, {})
     for row in run["tasks"]:
@@ -2204,6 +2214,8 @@ class _CostlyApi:
             return {"status": "ok", "result": self.get(path, **body)}
         if path == "/api/v1/tasks/activity":
             return {"status": "ok", "result": {"activity": []}}
+        if path == "/api/v1/metrics/step_attempts":
+            return {"status": "ok", "result": {"missing_attempts": 0, "steps": [], "summary": {}}}
         self.posts.append((path, body))
         if path == "/api/v1/ops/task_control/cancel":
             self.cancelled = True
@@ -2368,7 +2380,8 @@ _FLOW = {"skill_proposal_useful": (2, 0, 0, 0), "skill_proposal_not_needed": (1,
          "planner_plan_file": (2, 0, 0, 0), "reviewer_retry_note": (1, 1, 1, 0),
          "reviewer_unrelated_note": (1, 2, 2, 0), "reviewer_elsewhere": (1, 0, 1, 0),
          "reviewer_elsewhere_wrong": (1, 1, 2, 0), "advisor_checkpoint": (1, 0, 0, 0),
-         "advisor_optional_flaky": (1, 1, 0, 0)}
+         "advisor_optional_flaky": (1, 1, 0, 0),
+         "hidden_precondition": (1, 0, 0, 0), "rethink_bug": (1, 0, 0, 0), "misleading_error": (1, 0, 0, 0)}
 # (independent pairs, bracketed pairs, parallel workers): only the parts that need nothing of each other run side by
 # side; interface_first's sit between its interface step and its integration step.
 _SHAPE = {"skill_proposal_useful": (0, 0, 1), "skill_proposal_not_needed": (0, 0, 1),
@@ -2398,7 +2411,8 @@ _SHAPE = {"skill_proposal_useful": (0, 0, 1), "skill_proposal_not_needed": (0, 0
           "room_interface": (1, 0, 2), "room_consult": (0, 0, 1), "room_quiet": (0, 0, 1),
           "planner_plan_file": (0, 0, 1), "reviewer_retry_note": (0, 0, 1),
           "reviewer_unrelated_note": (0, 0, 1), "reviewer_elsewhere": (0, 0, 1),
-          "reviewer_elsewhere_wrong": (0, 0, 1)}
+          "reviewer_elsewhere_wrong": (0, 0, 1),
+          "hidden_precondition": (0, 0, 1), "rethink_bug": (0, 0, 1), "misleading_error": (0, 0, 1)}
 # What only some tasks do; a task not named in a table is checked to do none of it. Tasks with Planner-defined or
 # template-installed roles run steps as them: each run on a stored version, with the boundaries before its contract, and the reviewed step
 # accepted only after both reviews passed. An advisory review role's failing review does not keep its step from being
@@ -2446,7 +2460,7 @@ _ROOM = {"room_interface": (3, 1, 0, 1, 0, 2, 0, 0), "room_consult": (2, 1, 0, 0
 # The Planner turns of each kind that some tasks take.
 _PLANNER_TURNS = {"chat_correction": ("chat", 1), "gate_ambiguous": ("gate", 1), "room_interface": ("room", 1)}
 _VAULT = {"vault_closeout_keeps": (1, 1), "vault_closeout_nothing": (0, 1)}
-_MISBEHAVING_RESULT = {"contract_violations": {"planner": 1, "worker": 1, "reviewer": 0, "total": 2},
+_MISBEHAVING_RESULT = {"contract_violations": {"planner_rejections": 1, "attempt_contracts": 1, "total": 2},
                        "planner_edit_tool_paths": ["planner-notes.txt"],
                        "planner_changed_files": ["planner-notes.txt"], "planner_modified_files": 1}
 

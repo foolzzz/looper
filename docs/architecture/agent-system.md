@@ -172,6 +172,27 @@ Manager has no tool for it. The dashboard shows the task page's 指标 card and 
     through the group backstop (`ops.leads.for_group`), like a group's. With the untrusted
     fence enabled, stored user messages in this excerpt use the same typed group or direct-message
     fence as new messages, with chat and time provenance; assistant messages and handoffs stay unchanged.
+- **Manager lanes** (`manager.lanes.enabled`, off by default): each session has
+  interactive and background FIFO lanes. User messages overtake queued completion
+  batches and interrupt a running completion turn when that session's runtime can
+  interrupt. The completion sends its code notices before its wake is settled;
+  the next user turn gets one explanation through the session's stopped notes.
+  With routing off, both kinds of turn use main's worker, keeping the message
+  loop available. Claimed, unstarted batches expire 15 minutes after their earliest
+  event was recorded, even while the interactive lane stays busy. Their deadline
+  callback and the worker claim a typed queue state atomically. The completion's
+  running token is registered before loading task facts, so arrivals can interrupt
+  preparation too. Control interrupts clean children first observed after the turn's
+  `system/init` checkpoint, preserving tools initialized by a cold resident;
+  uncertain process ownership or a missing checkpoint falls
+  back to killing the resident and resuming the session on the next turn.
+  The operator-only `manager_lanes.get/update` operations and generated
+  `loopercli manager-lanes get/update` commands manage the switch. Update is high
+  risk and requires confirmation; null restores off. Configuration export/import
+  carries it separately under `settings.manager_lanes`. Lark, Telegram and dashboard
+  chat share the behavior; status cards show both queue counts. Background records
+  add `metadata.lane` with the preempting message id, and more than 20 preemptions
+  in a UTC day produce one warning. Off, input, record and FIFO behavior stay unchanged.
 - Acts on Looper only through its platform tools
   ([The Manager's platform tools](#the-managers-platform-tools)): the MCP
   server `looper` is in every launch of its Claude, and each turn tells
@@ -3314,7 +3335,25 @@ set it; omission preserves the target permission. With it enabled, Planner work 
 `command` or `artifact` checks bound to a criterion; definitions persist in
 `task_steps.checks` through plan edits and restarts. After a successful Worker,
 the Planner runs checks before asking for its decision and stores append-only
-`step_check_runs` evidence. This stage does not change decisions or Reviewer prompts.
+`step_check_runs` evidence. A pure evidence gate removes `accept` (including adjudicated acceptance)
+and `review` until every required check passes on the current content hash (a commit that leaves the content unchanged,
+such as a review freeze, keeps the measured version; HEAD decides only for a directory without one).
+Missing, failed, errored and stale evidence cannot be accepted, even after a passing Reviewer verdict
+or a failed Planner turn. Advisory checks do not block. Steps without required review can be accepted
+by the gate without starting a Reviewer.
+
+A required check error offers `recheck` up to twice per step: only the checks run again, with the same
+Worker attempt and a new run number, without consuming a Worker retry. Each ordinary retry appends
+failed required checks, their criteria, commands, exit codes and fenced output after the Planner's
+feedback. Reviewer messages include one code-rendered Acceptance evidence section for every seat,
+and a conditional contract asks them to assess uncovered criteria and check coverage rather than
+override measured results. The verdict JSON is unchanged.
+
+Before review and acceptance, version changes append stale rows and rerun checks at most twice,
+separately from rechecks. A changed version invalidates its previous review round. Counts and pending
+rerun intent persist in the step result so restarts resume a partially completed rerun. Turning checks
+off stops new launches but retains a previously blocked step's gate; only a logged replan that removes
+or rewrites the checks can replace that obligation.
 The operator-only `task_evidence.get` operation (also available through `loopercli`)
 accepts `task` and optional `step`, returning definitions and all evidence attempts,
 including history retained after disabling checks. It returns no artifact bytes and
@@ -3363,8 +3402,7 @@ Commands receive an OS-only subset of `child_env.inherited()`, without runtime
 credentials, proxies or SSH agents. This is not a file sandbox: commands retain the
 service user's file access.
 
-The runner allows two checks service-wide, a cumulative 900 seconds per step
-attempt, and a 16 MiB output read limit; commands have their declared timeout
+The runner allows two checks service-wide, a cumulative 900 seconds per step across attempts, and a 16 MiB output read limit; commands have their declared timeout
 (default 300 seconds, maximum 1800). Output stores a redacted 4000-character tail,
 captured byte count and SHA-256; activities contain status and exit code only.
 Artifacts are content-typed PNG/JPEG/WebP/UTF-8 text/JSON, at most three files of
@@ -3388,8 +3426,7 @@ while off, Planner contracts and prompts remain byte-identical, including plan
 views of previously enabled projects with saved checks. Definitions remain in
 the database for operator evidence reads. See the
 [executable acceptance RFC](rfcs/executable-acceptance-v0.zh-CN.md), sections 6
-and 13, for the protocol and subsequent stages (decision gates, Reviewer evidence,
-and result or channel evidence lines are still pending).
+and 13, for the protocol and remaining result or channel evidence summaries.
 
 A task can also have a spend cap of its own (`tasks.budget_usd`, a scheduled
 run's `run_budget_usd`), which replaces its project's `task_budget_usd` for it
@@ -4138,8 +4175,8 @@ can do the import. A layer `model` or `effort`, and a provider `protocols`,
 `base_url` or `models`, are retired fields and stop the import before it
 writes. Unknown top-level fields are refused the same way. Role and task
 prompt-mode choices keep their existing meaning. Prompt-eval comparisons
-accept only `looper-prompt-eval/v2` for tasks and `looper-manager-dialogs/v2`
-for dialogs.
+accept `looper-prompt-eval/v2` and `looper-prompt-eval/v3` for tasks (a new run
+writes v3) and `looper-manager-dialogs/v2` for dialogs.
 
 Secrets (MCP environment and header values, a provider's API key, a channel
 config's keys other than its sender allowlist, its `operator_sender_id`, `*_env` names and description)
@@ -6642,17 +6679,35 @@ row is off), set only through the operator-only `idle_check_settings.get` and
 - `IdleCheckService` ticks every 5 minutes. With the switch off a tick reads the
   setting and stops. A tick that decides not to check writes nothing (it counts
   the reason and logs it at DEBUG). The advisory lock covers only "decide,
-  insert, publish". Checks left `running` by an earlier server fail as `restart`.
+  insert, publish". Before bus replay starts, checks left `running` by an earlier
+  server fail as `restart`; recovery failure blocks startup.
 - Rows: `idle_checks` (kept 90 days; migration `idle_checks`). The migration
   `idle_check_source` adds `idle_check` to the source check of
   `proactive_deliveries`, built from the check's current values, so it composes
   with the morning brief's and triage's widenings.
 - `attention.summary`'s `schedules` items gain the fact `last_ok_at`; `/todo`
   and the Needs you page are unchanged.
-- The Manager side (its `idle_for()`, the shared background-turn entry, the lane
-  a check runs in, `IDLE_CHECK_DUE` routing, and what a user message does to a
-  queued or running check) and the service's start in `serve` come after the
-  lanes change; until then nothing starts a service and the switch has no effect.
+- `serve` starts the service after the Managers and stops it during shutdown;
+  draining prevents new checks. Callbacks follow the current default Manager
+  if it is replaced. With all prerequisites on, enabling the switch takes effect
+  on the next tick.
+- `ManagerAgent.idle_for()` reads only main's lock, running token, worker and
+  resident. Its clock is `ManagerSession.turn_ended_at`, written by that session's
+  worker (or the message loop for its own turns), falling back to service start.
+  Group arrivals can update `last_activity` without resetting main's idle clock.
+- `IDLE_CHECK_DUE` runs on main's background lane through `tiers/background_turn.py`,
+  sharing completion token registration, preparation, locking and bounded late
+  cleanup. The deadline is 90 seconds, followed by the completion path's cleanup
+  grace. Records add `metadata.idle_check.check_id`, lane metadata and short turn
+  metrics. Completion input, records, fallback reasons and settlement order stay
+  unchanged.
+- A main user arrival removes queued checks and records `preempted` before
+  acknowledging their wakes. An interrupted running check also records `preempted`
+  and leaves one stopped note for the next user turn; it sends nothing. Lark
+  `/stop` matches the operator's sender id even though its DM has a different id.
+- A sent morning brief suppresses checks for two hours in that same channel and
+  direct chat. Real-model idle and concurrent preemption evals remain pending;
+  loopback runtimes cover the service and Manager paths.
 
 ### User gates
 

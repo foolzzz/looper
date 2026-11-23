@@ -119,6 +119,7 @@ from pathlib import Path
 from typing import Any, TypeVar
 
 from ..acceptance_checks import Check, parse_checks
+from .. import acceptance_decisions
 from ..project_execution import AcceptanceChecksMode
 from ..bus import MessageBus
 from ..supervisor import cancel_and_wait
@@ -1348,7 +1349,8 @@ class PlannerAgent:
             step.role = (spec.role or (self._workflow or {}).get("work_role")
                          if spec.gate is None and spec.wait is None else None)
             step.review = (spec.gate is None and spec.wait is None
-                           and (spec.review or (self._execution.review_all and not self._is_verification(step)))
+                           and (spec.review or (self._execution.review_all and not any(c.required for c in spec.checks)
+                                                   and not self._is_verification(step)))
                            and not (self._panel_on and self._is_verification(step)))
             step.review_roles = [StepReviewRole(item.role, item.required) for item in spec.review_roles]
             step.difficulty = spec.difficulty if spec.gate is None and spec.wait is None else None
@@ -2788,6 +2790,8 @@ class PlannerAgent:
         current = step.workspace
         if current is None or current.state not in (StepWorkspaceState.ACTIVE, StepWorkspaceState.MERGING):
             return True
+        if not await acceptance_decisions.resume_merge(self, plan, step, decide=decide):
+            return False
         outcome = await workspaces.merge(current, step_key=step.label, title=_clip(step.instruction, 72),
                                          save=self._save_workspace)
         merged = step.workspace = outcome.workspace
@@ -2917,7 +2921,8 @@ class PlannerAgent:
             return
 
         await self._record_profile_fallbacks(plan, step.role or "worker", result.get("fallback") or [], step)
-        if step.checks and self._execution.acceptance_checks is not AcceptanceChecksMode.OFF:
+        if step.checks and (self._execution.acceptance_checks is not AcceptanceChecksMode.OFF
+                            or (step.result or {}).get("acceptance")):
             from ..acceptance_context import worker_result
 
             result = worker_result(result, step.result, step.retries + 1)
@@ -2949,6 +2954,9 @@ class PlannerAgent:
         role at ``review_position`` (the version it ran with, for the ``same_attempt`` a restart runs again)."""
         assert self._bus is not None
         if not await self._within_budget(plan):
+            return
+        evidence = await acceptance_decisions.reviewer_payload(self, plan, step)
+        if evidence is None:
             return
         task_role: TaskRole | None = None
         if (item := self._reviewing_role(step)) is not None:
@@ -2985,6 +2993,7 @@ class PlannerAgent:
                 "step_key": step.label,
                 "instruction": step.instruction,
                 "work_result": step.result or {},
+                **evidence,
                 "attempt_id": await self._attempt(step),
                 "acceptance_criteria": step.acceptance_criteria,
                 # The notes the step was retried with: the Planner's changes to it, which its Worker had too.
@@ -3030,6 +3039,9 @@ class PlannerAgent:
         await self._save(plan, step)
         if not await self._prepare_panel_review(plan, target):
             return
+        evidence = await acceptance_decisions.reviewer_payload(self, plan, target)
+        if evidence is None:
+            return
         context = {"work_dir": plan.work_dir}
         head = target.workspace.result_commit if target.workspace is not None else (target.result or {}).get("head")
         if head:
@@ -3060,7 +3072,7 @@ class PlannerAgent:
             return
         await self._bus.publish(MessageEnvelope.create(
             source=self.agent_address, target=worker_address(step.reviewer_id), message_type=MessageType.VERIFY_REQUEST,
-            payload={"task_id": step.step_id, "parent_task_id": self._task_id, "plan_id": plan.plan_id,
+            payload={**evidence, "task_id": step.step_id, "parent_task_id": self._task_id, "plan_id": plan.plan_id,
                      "requirement": plan.requirement, "supplements": journal.supplement_texts(plan.journal, fence=self._fence),
                      "step_key": target.label, "instruction": target.instruction,
                      "work_result": target.result or {}, "acceptance_criteria": target.acceptance_criteria,
@@ -3314,21 +3326,7 @@ class PlannerAgent:
         report = [*report, *await self._room_lines(step)]
         # Saved with its result and the late messages, so a restart can take the decision again.
         await self._save(plan, step, entries=entries)
-        if (context.result is ResultKind.WORK and context.succeeded and step.checks
-                and self._execution.acceptance_checks is not AcceptanceChecksMode.OFF):
-            from ..acceptance_runner import run_step_checks
-            from ..acceptance_context import AcceptanceBaseline
-
-            baseline = AcceptanceBaseline.from_result(step.result, step.retries + 1)
-            try:
-                await run_step_checks(task_id=self._task_id, step_id=step.step_id, checks=step.checks,
-                    mode=self._execution.acceptance_checks, attempt=step.retries + 1, runtime_root=self._runtime_root,
-                    work_dir=Path(step.workspace.work_dir if step.isolated else plan.work_dir),
-                    base_commit=baseline.head_sha if baseline else None,
-                    runtime_paths=(*self._execution.link_paths, *(self._execution.verification_paths or ())))
-            except Exception:
-                logger.warning("planner %s could not collect acceptance evidence for %s", self._task_id, step.step_id)
-                await self._activity("error", f"Acceptance evidence unavailable for step {step.label}")
+        context = await acceptance_decisions.decision_context(self, plan, step, context)
         for entry in entries:
             if entry.kind is JournalKind.VERIFICATION_ROUND:
                 await self._report_progress(plan, phase=Phase.VERIFICATION_ROUND,
@@ -3368,6 +3366,9 @@ class PlannerAgent:
     async def _undecided(self, plan: TaskPlan, step: PlanStep, context: DecisionContext, exc: Exception) -> None:
         """No valid decision on ``step``'s result came: a mandatory review still runs, else the step's own verdict
         decides."""
+        context = await acceptance_decisions.fallback_context(self, plan, step, context)
+        if context is None:
+            return
         if (((self._execution.review_all or (self._workflow or {}).get("escalate_on_exhaustion")
                 or self._verification_repair_required(plan)) and self._needs_review(step))
                 or step.accept_when is not None) and not context.escalate \
@@ -3387,7 +3388,8 @@ class PlannerAgent:
         step.status = "verified" if succeeded else "failed"
         await attempts.decide_attempt(await self._attempt(step),
                                       attempts.Decision.ACCEPT if succeeded else attempts.Decision.FAIL,
-                                      record_id=self._last_record_id)
+                                      record_id=self._last_record_id,
+                                      failure_kind=acceptance_decisions.failure_kind(context))
         await self._activity(
             "error",
             f"Warning: the Planner could not decide on step {step.index + 1} ({step.label}): {exc}. "
@@ -3402,6 +3404,9 @@ class PlannerAgent:
     ) -> None:
         """Do what a DECISION reply decided: its changes to gates and waits first, then the decision on ``step``
         (``adjudicated_accept``: its turn was offered an accept that downgrades blocking findings)."""
+        reply = await acceptance_decisions.before_decision(self, plan, step, context, reply)
+        if reply is None:
+            return
         await decisions.step_decision(self._task_id, step, context, reply, self._last_record_id,
                                       adjudicated_accept=adjudicated_accept)
         at = f"the decision on step {step.label}"
@@ -3443,7 +3448,8 @@ class PlannerAgent:
             return  # the decision turn on the failed merge took over
         if decision in (Decision.ACCEPT, Decision.RETRY, Decision.REPLAN, Decision.FAIL):
             await attempts.decide_attempt(await self._attempt(step), attempts.Decision(decision.value),
-                                          record_id=self._last_record_id, adjudicated=bool(reply.adjudications))
+                                          record_id=self._last_record_id, adjudicated=bool(reply.adjudications),
+                                          failure_kind=acceptance_decisions.failure_kind(context))
         if reply.final is not None:
             plan.final_summary = await skill_proposal_sources.final_summary(self, plan, reply)
 
@@ -3465,7 +3471,7 @@ class PlannerAgent:
             if step.accept_when is not None:
                 await self._reset_reviews(plan, step)
             step.retries += 1
-            step.feedback.append(reply.feedback)
+            step.feedback.append(acceptance_decisions.retry_feedback(step, context, reply.feedback))
             step.reviewer_id, step.review_stage, step.review_position = None, None, None
             await self._save(plan, step, entries=[retried])
             await self._dispatch_step(plan, step)
@@ -3555,6 +3561,8 @@ class PlannerAgent:
         project reviews every step."""
         if self._panel_on and self._is_verification(step):
             return False
+        if any(c.required for c in step.checks) and self._execution.acceptance_checks is not AcceptanceChecksMode.OFF:
+            return step.review
         return step.review or (self._execution.review_all and not self._is_verification(step))
 
     def _is_verification(self, step: PlanStep) -> bool:
@@ -5358,6 +5366,7 @@ class PlannerAgent:
                 task_id=self._task_id, requirement=plan.requirement, project_name=plan.project_name,
                 project_description=_clip(plan.project_description, 300), work_dir=plan.work_dir,
                 template=self._template, workflow=self._workflow,
+                checks=self._execution.acceptance_checks is not AcceptanceChecksMode.OFF,
             ),
             contract_name="REPLY_CONTRACT",
             # With its platform tools, how to use them follows the reply contract.
@@ -5607,6 +5616,7 @@ class PlannerAgent:
             PLAN_VIEW,
             "",
             *report,
+            *(["", acceptance_decisions.evidence_text(step, context.evidence)] if context.evidence else []),
         ]
         if step.missed_messages:
             lines += ["", "The user sent this to the step's Worker through you; delivery not confirmed; the Worker may already have acted on it:"]
@@ -5628,7 +5638,9 @@ class PlannerAgent:
                       "Any new verification step must depend on a new user gate added in the same reply."]
         lines += self._final_notes(step, context)
         separator = "; " if adjudicated_accept else ", "
-        lines += [*advice, "", f"Allowed decisions now: {separator.join(allowed)}.", "Reply with the DECISION JSON."]
+        # Without ADVISE on offer (a failed evidence gate removes it), a request-the-advisor hint would mislead.
+        offered = advice if context.evidence is None or Decision.ADVISE in choices else ()
+        lines += [*offered, "", f"Allowed decisions now: {separator.join(allowed)}.", "Reply with the DECISION JSON."]
         return "\n".join(lines)
 
     def _gate_message(self, plan: TaskPlan, step: PlanStep, messages: list[dict[str, Any]],
