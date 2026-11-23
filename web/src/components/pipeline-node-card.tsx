@@ -1,5 +1,5 @@
 import { memo, useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
-import { AlertTriangle, CheckCircle2, Circle, History, Loader2, XCircle } from "lucide-react";
+import { AlertTriangle, CheckCircle2, ChevronDown, Circle, History, Loader2, XCircle } from "lucide-react";
 import { useStore } from "@xyflow/react";
 import {
   type Box,
@@ -83,22 +83,49 @@ function StateMark({ state, words }: { state: string; words: string }) {
 }
 
 function ArtifactThumb({ artifact }: { artifact: EvidenceArtifactView }) {
-  const [missing, setMissing] = useState(false);
-  if (missing) return <span className="text-xs text-destructive">file missing</span>;
+  const [problem, setProblem] = useState<string | null>(null);
+  if (problem) return <span className="text-xs text-destructive">{problem}</span>;
   return (
-    <img
-      src={artifact.href}
-      alt={artifact.name}
-      className="mt-1 max-h-24 max-w-full rounded border border-border"
-      onError={() => setMissing(true)}
+    <a
+      href={artifact.href}
+      target="_blank"
+      rel="noopener"
+      className="mt-1 inline-block max-w-full pointer-coarse:inline-flex pointer-coarse:min-h-11 pointer-coarse:items-center"
+    >
+      <img
+        src={artifact.href}
+        alt={artifact.name}
+        className="max-h-24 max-w-full rounded border border-border"
+        onError={() => {
+          void fetch(artifact.href).then(
+            (response) => setProblem(response.status === 403 ? "operator session required" : "file missing"),
+            () => setProblem("file missing"),
+          );
+        }}
+      />
+    </a>
+  );
+}
+
+function ExpandMark({ variant }: { variant: "run" | "output" | "earlier" }) {
+  return (
+    <ChevronDown
+      aria-hidden="true"
+      className={cn(
+        "h-3.5 w-3.5 shrink-0 -rotate-90 text-muted-foreground transition-transform duration-150 motion-reduce:transition-none",
+        variant === "run" && "group-open:rotate-0",
+        variant === "output" && "group-open/output:rotate-0",
+        variant === "earlier" && "group-open/earlier:rotate-0",
+      )}
     />
   );
 }
 
 function RunDetails({ view, preview, command }: { view: EvidenceRunView; preview: string; command: string }) {
   return (
-    <details className="text-xs">
-      <summary className="flex cursor-pointer flex-wrap items-center gap-x-2 gap-y-1">
+    <details className="group text-xs">
+      <summary className="flex cursor-pointer list-none flex-wrap items-center gap-x-2 gap-y-1 pointer-coarse:min-h-11 [&::-webkit-details-marker]:hidden">
+        <ExpandMark variant="run" />
         <span className="font-mono break-all">{preview}</span>
         <StateMark state={view.state} words={view.words} />
         {view.exitCode !== null && <span className="font-mono">exit {view.exitCode}</span>}
@@ -108,8 +135,11 @@ function RunDetails({ view, preview, command }: { view: EvidenceRunView; preview
         {view.advisory && <span>advisory</span>}
       </summary>
       <p className="mt-1 whitespace-pre-wrap break-all font-mono">{command}</p>
-      <details className="mt-1">
-        <summary className="cursor-pointer text-muted-foreground">Output</summary>
+      <details className="group/output mt-1">
+        <summary className="flex cursor-pointer list-none items-center gap-1 text-muted-foreground pointer-coarse:min-h-11 [&::-webkit-details-marker]:hidden">
+          <ExpandMark variant="output" />
+          Output
+        </summary>
         <pre className="mt-1 whitespace-pre-wrap break-words font-mono text-xs">{view.outputTail || "No output"}</pre>
       </details>
       {view.artifacts.length > 0 && (
@@ -117,7 +147,7 @@ function RunDetails({ view, preview, command }: { view: EvidenceRunView; preview
           {view.artifacts.map((artifact) => (
             <li key={artifact.href}>
               {artifact.image ? <ArtifactThumb artifact={artifact} /> : (
-                <a href={artifact.href} className="font-mono underline decoration-dotted underline-offset-2">{artifact.name}</a>
+                <a href={artifact.href} className="inline-flex items-center font-mono underline decoration-dotted underline-offset-2 pointer-coarse:min-h-11">{artifact.name}</a>
               )}
             </li>
           ))}
@@ -148,8 +178,11 @@ function CheckBlock({ check }: { check: EvidenceCheckView }) {
     <div className="space-y-1">
       <RunDetails view={check.current} preview={check.preview} command={check.command} />
       {check.earlier.length > 0 && (
-        <details className="text-xs">
-          <summary className="cursor-pointer text-muted-foreground">Earlier attempts</summary>
+        <details className="group/earlier text-xs">
+          <summary className="flex cursor-pointer list-none items-center gap-1 text-muted-foreground pointer-coarse:min-h-11 [&::-webkit-details-marker]:hidden">
+            <ExpandMark variant="earlier" />
+            Earlier attempts
+          </summary>
           <div className="mt-1 space-y-2">
             {check.earlier.map((run) => (
               <RunDetails key={`${run.attempt}-${run.run}`} view={run} preview={check.preview} command={check.command} />

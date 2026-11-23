@@ -204,8 +204,16 @@ export async function fetchTaskEvidence(taskId: string, signal?: AbortSignal): P
   return result;
 }
 
-export function useStepEvidence(taskId: string, needed: boolean): EvidenceLoad {
+export function useStepEvidence(
+  taskId: string,
+  needed: boolean,
+  status: string,
+  steps: readonly { id: string; status: string; retries: number }[],
+): EvidenceLoad {
   const [load, setLoad] = useState<EvidenceLoad>({ status: "idle" });
+  // The task page polls the task. Read evidence again when the task or a step's attempt moves,
+  // not on every poll: status, and each step's id, status and retries.
+  const changes = [status, ...steps.map((step) => `${step.id}:${step.status}:${step.retries}`)].join("|");
   useEffect(() => {
     if (!needed) {
       setLoad({ status: "idle" });
@@ -226,6 +234,6 @@ export function useStepEvidence(taskId: string, needed: boolean): EvidenceLoad {
       cancelled = true;
       controller.abort();
     };
-  }, [taskId, needed]);
+  }, [taskId, needed, changes]);
   return load;
 }

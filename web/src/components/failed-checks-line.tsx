@@ -10,7 +10,7 @@ export function FailedChecksLine({ taskId, checks, stepId }: {
     <a
       href={`#tasks/${encodeURIComponent(taskId)}?${query}`}
       onClick={(event) => event.stopPropagation()}
-      className="mt-1 inline-flex text-xs text-destructive underline decoration-dotted underline-offset-2"
+      className="mt-1 inline-flex items-center text-xs text-destructive underline decoration-dotted underline-offset-2 pointer-coarse:min-h-11"
     >
       required check failed: {checks.join(", ")}
     </a>

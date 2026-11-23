@@ -1932,7 +1932,7 @@ function PipelineMeasurements({ nodes }: { nodes: Node[] }) {
 function PipelineTab({ task, runs, onOpenGate, pinned }: {
   task: TaskDetail; runs: TaskRuns | null; onOpenGate: (step: TaskStep) => void; pinned?: string | null;
 }) {
-  const evidence = useStepEvidence(task.task_id, stepsNeedEvidence(task.steps || []));
+  const evidence = useStepEvidence(task.task_id, stepsNeedEvidence(task.steps || []), task.status, task.steps || []);
   const [hideSkipped, setHideSkipped] = useState(storedHideSkipped);
   const container = useRef<HTMLDivElement>(null);
   const [full, toggleFull] = useFullScreen(container);

@@ -192,24 +192,59 @@ describe("evidence requests", () => {
     host.remove();
   });
 
-  function Probe({ steps }: { steps: TaskStep[] }) {
-    useStepEvidence("t1", stepsNeedEvidence(steps));
+  function Probe({ status, steps }: { status: string; steps: TaskStep[] }) {
+    useStepEvidence("t1", stepsNeedEvidence(steps), status, steps);
     return null;
   }
 
   it("does not ask when no step has checks", async () => {
-    await act(async () => { root.render(<Probe steps={[taskStep()]} />); });
+    await act(async () => { root.render(<Probe status="failed" steps={[taskStep()]} />); });
     expect(callV1).not.toHaveBeenCalled();
   });
 
   it("asks with task_evidence.get when a step has checks", async () => {
-    await act(async () => { root.render(<Probe steps={[checked]} />); });
+    await act(async () => { root.render(<Probe status="failed" steps={[checked]} />); });
     expect(callV1).toHaveBeenCalledWith("/api/v1/task_evidence/get", { task: "t1" }, expect.any(Object));
+  });
+
+  it("reads evidence again after a step status change", async () => {
+    const step = { ...checked, status: "running", retries: 1 };
+    await act(async () => { root.render(<Probe status="running" steps={[step]} />); });
+    expect(callV1).toHaveBeenCalledTimes(1);
+    await act(async () => { root.render(<Probe status="running" steps={[{ ...step }]} />); });
+    expect(callV1).toHaveBeenCalledTimes(1);
+    await act(async () => { root.render(<Probe status="running" steps={[{ ...step, status: "failed" }]} />); });
+    expect(callV1).toHaveBeenCalledTimes(2);
+    expect(callV1).toHaveBeenLastCalledWith("/api/v1/task_evidence/get", { task: "t1" }, expect.any(Object));
+    await act(async () => { root.render(<Probe status="running" steps={[{ ...step, status: "failed", retries: 2 }]} />); });
+    expect(callV1).toHaveBeenCalledTimes(3);
+  });
+});
+
+describe("evidence targets", () => {
+  it("gives every summary and link a coarse-pointer height and a visible expand mark", () => {
+    const host = document.createElement("div");
+    host.innerHTML = draw(checked, ready);
+    const summaries = [...host.querySelectorAll("summary")];
+    expect(summaries.length).toBeGreaterThanOrEqual(3);
+    for (const summary of summaries) {
+      expect(summary.className).toContain("pointer-coarse:min-h-11");
+      expect(summary.className).toContain("items-center");
+      expect(summary.innerHTML).toContain("-rotate-90");
+    }
+    const download = [...host.querySelectorAll("a")].find((link) => link.textContent === "2.txt");
+    expect(download?.className).toContain("pointer-coarse:min-h-11");
+    const image = host.querySelector("img");
+    expect(image?.closest("a")?.getAttribute("href")).toBe("/api/evidence/t1/1/0");
+    expect(image?.closest("a")?.getAttribute("target")).toBe("_blank");
+    const line = document.createElement("div");
+    line.innerHTML = renderToStaticMarkup(<FailedChecksLine taskId="t1" checks={["c1"]} stepId="step-a" />);
+    expect(line.querySelector("a")?.className).toContain("pointer-coarse:min-h-11");
   });
 });
 
 describe("a missing image", () => {
-  it("says the file is missing", async () => {
+  async function showImage() {
     const card: NodeCard = stepCard(checked, {
       taskId: "t1", active: false, look: LOOK, lookOf: () => LOOK, stepsById: new Map([[checked.id, checked]]),
       evidence: ready,
@@ -220,8 +255,28 @@ describe("a missing image", () => {
     await act(async () => { root.render(<NodeCardView card={card} />); });
     const image = host.querySelector("img");
     expect(image).not.toBeNull();
-    await act(async () => { image!.dispatchEvent(new Event("error")); });
+    return { host, root, image: image! };
+  }
+
+  afterEach(() => { vi.unstubAllGlobals(); });
+
+  it("says the file is missing when the image answers 404", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ status: 404 }));
+    const { host, root, image } = await showImage();
+    await act(async () => { image.dispatchEvent(new Event("error")); });
     expect(host.textContent).toContain("file missing");
+    expect(host.textContent).not.toContain("operator session required");
+    expect(host.querySelector("img")).toBeNull();
+    await act(async () => { root.unmount(); });
+    host.remove();
+  });
+
+  it("says the session is required when the image answers 403", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ status: 403 }));
+    const { host, root, image } = await showImage();
+    await act(async () => { image.dispatchEvent(new Event("error")); });
+    expect(host.textContent).toContain("operator session required");
+    expect(host.textContent).not.toContain("file missing");
     expect(host.querySelector("img")).toBeNull();
     await act(async () => { root.unmount(); });
     host.remove();
