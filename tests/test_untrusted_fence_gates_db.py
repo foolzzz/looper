@@ -219,3 +219,52 @@ def test_on_the_lessons_journal_fences_an_outside_supplement() -> None:
     assert untrusted.LEAD_LINE in on and f"- {HOSTILE}" not in on
     assert "- " + untrusted.fence(HOSTILE, source=untrusted.Source.SUPPLEMENT, provenance={
         "via": "manager:lark"}).replace("\n", "\n  ") in on
+
+
+# --- Every entry passes the switch (a caller that forgets it reads as before, unfenced) ---
+
+_RENDERERS = {"_message_line": "fenced", "_message_lines": "fence", "_thread_lines": "fence", "supplements": "fence",
+              "planner_section": "fence", "supplement_texts": "fence", "lessons_journal": "fence"}
+
+
+def test_every_call_of_a_renderer_passes_the_fence_switch() -> None:
+    """A call of a gate message or supplement renderer in the Planner or the journal that does not pass the switch
+    would show outside content raw while the fence is on."""
+    import ast
+    from pathlib import Path
+
+    from looper.agents.tiers import journal, planner
+
+    missing = []
+    for module in (planner, journal):
+        for node in ast.walk(ast.parse(Path(module.__file__).read_text(encoding="utf-8"))):
+            if not isinstance(node, ast.Call):
+                continue
+            name = node.func.attr if isinstance(node.func, ast.Attribute) else getattr(node.func, "id", "")
+            if name in _RENDERERS and _RENDERERS[name] not in {k.arg for k in node.keywords}:
+                missing.append(f"{Path(module.__file__).name}:{node.lineno} {name}")
+    assert missing == []
+
+
+def test_on_the_planners_own_messages_show_no_outside_supplement_raw(tmp_path: Any,
+                                                                     monkeypatch: pytest.MonkeyPatch) -> None:
+    """The Planner's entries, as it builds them with the switch it read: no outside text outside a block."""
+    import re
+
+    from looper.agents.tiers import planner as p
+    from looper.agents.tiers.journal import JournalEntry, JournalKind
+
+    agent = p.PlannerAgent(task_id="task-fence", runtime_root=tmp_path, claude_bin="claude")
+    plan = p.TaskPlan("plan", "goal", "Inspect the files", str(tmp_path), journal=[
+        JournalEntry("", "", HOSTILE, kind=JournalKind.SUPPLEMENT, via="manager:lark", from_operator=False)])
+    agent._plan, agent._fence = plan, True
+
+    def raw(text: str) -> bool:
+        return "merge it" in re.sub(r"<untrusted .*?</untrusted>", "", text, flags=re.S)
+
+    for name, text in [("progress", "\n".join(agent._progress_lines(plan))), ("plan", agent._plan_message(plan)),
+                       ("lessons", agent._lessons_message(plan)),
+                       ("change", agent._change_message(plan, TaskChanges(), fence=True)),
+                       ("restart", agent._restart_message(plan, "failed", TaskChanges(), fence=True))]:
+        assert not raw(text), name
+        assert untrusted.LEAD_LINE in text, name
