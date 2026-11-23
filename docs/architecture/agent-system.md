@@ -8883,14 +8883,17 @@ implementation supplies it and is retested.
   `[event] ready event_key=im.message.receive_v1` (or its first live message),
   a background catch-up lists raw history with `lark-cli api GET
   /open-apis/im/v1/messages --as bot` (chat containers), ascending, from the saved boundary minus
-  10 seconds through the consumer's ready time. It scans explicit channel
-  bindings first, then unbound chats observed by `observe_chat` in the last
+  10 seconds through the current time after discovery and consumer readiness
+  complete, including on retries. Durable processed ids deduplicate overlap.
+  It scans explicit channel bindings first, then unbound chats observed by
+  `observe_chat` in the last
   24 hours when the default Manager accepts unbound chats. At most 100 chats,
   5 pages per chat and 50 messages per page are scanned. Embedded thread replies
   use the same admission path. For groups and topics, a separate root scan reads
   newest first and stops at the first root older than 24 hours, up to 5 pages of
-  50 roots. Reaching this discovery cap logs an INFO count and completes the chat's
-  window. Candidates also include threads this channel handled or sent a message
+  50 roots. Reaching this discovery cap logs an INFO count, records the unscanned
+  window as dropped with `page_cap`, and completes the chat's scan. Candidates also
+  include threads this channel handled or sent a message
   in during the last 7 days, persisted in the inbox with their activity time
   (at most 1,000 entries per channel). These active threads take priority over
   new roots. At most 50 distinct threads per chat are listed, with at most 4
@@ -8898,7 +8901,8 @@ implementation supplies it and is retested.
   stopping at the first reply older than the recovery window; replies are
   admitted oldest first within that thread. A failed thread listing logs its
   thread id and increments `thread_failures`; its already-read pages are still
-  admitted and it does not leave the chat's main window unfinished.
+  admitted. Thread debt is persisted independently, so only that thread retries;
+  a failed thread does not keep the whole chat window owed.
   Recovered messages use the live admission, group bot-mention, routing,
   attachment and disabled-chat
   checks. Known p2p chats participate only when bot identity can resolve their
@@ -8917,25 +8921,59 @@ implementation supplies it and is retested.
   consumer retains the earlier live boundary. Each chat's unfinished recovery
   window is stored separately before scanning, retained on errors or cancellation,
   and merged with that chat's next startup window. Discovery work is also durable
-  until its windows have been assigned to chats. Debt older than 15 minutes is
-  dropped (partially expired windows keep their recent portion), with skipped-window
-  and duration counts in the log. Thread containers use the same raw history API;
+  until its windows have been assigned to chats. While the service runs, unfinished
+  windows retry after 30 seconds, 1 minute, 2 minutes, 5 minutes, then 10 minutes
+  between attempts. Discovery, chat and thread debt are clamped to the most
+  recent 15 minutes before scanning, using the same chat, page, thread and
+  transport limits; unfinished discovery extends through the current time once
+  the consumer is ready. Completed windows
+  cause no retry work. Page caps, non-advancing pagination and permission errors
+  are terminal typed failures: their windows become `dropped` immediately.
+  Other failures exhaust ten attempts, counted durably across restarts, before
+  becoming `dropped` with `reason: retry_exhausted`. Shutdown cancels and joins
+  retries without consuming an attempt for an interrupted request. Pending and
+  dropped windows survive restarts. Catch-up admission in `_handle_lark_event`
+  rejects messages older than 15 minutes after filtering self-sent posts and
+  unmentioned group messages. A remaining message that expires before handling
+  records a visible `stale` dropped window. Admitted
+  messages carry their original send time in the turn's envelope timestamp.
+  `system.status.channels.<channel-id>.catchup` reports `pending`, `dropped` and
+  `windows` (chat id, start/end epoch seconds, state, attempts, reason and the
+  optional thread id and the dropped record's `recorded_at` timestamp); an empty
+  chat id denotes discovery work. Channel health reports the same fields, and
+  system checks show pending windows as warnings and dropped windows as failures.
+  With Needs you enabled, its existing messages section and the operator's `/todo`
+  also list dropped windows so missed messages can be checked and forwarded.
+  Catch-up items in Attention read only `registry.catchup_checks()`, without
+  additional status checks or their PostgreSQL reads. Dropped windows remain visible for
+  `DELIVERY_WINDOW` (72 hours) from `recorded_at`; reads filter expired entries
+  and inbox status refreshes clean them up. There is no acknowledgement control.
+  Thread containers use the same raw history API;
   no message search or search scopes are required. Raw parent/root ids take the
   same gate routing path as live replies.
   After a crash, that last heartbeat is the recovery boundary. A missing
-  boundary initializes the state without replaying history; one older than
-  15 minutes skips the whole window. Individual recovered messages older than
-  15 minutes at handling time are also skipped. Each startup logs one INFO
+  boundary initializes the state without replaying history. A boundary older
+  than 15 minutes records the expired portion as a visible `boundary_expired`
+  dropped window and still discovers the most recent 15 minutes. Pending
+  discovery and assigned chat/thread debt record their expired portions as
+  `stale`, aggregated once per chat in each pass. Expired portions end at the
+  earlier of the cutoff and the owed endpoint. The drop and the advanced start
+  (or removal of a fully expired window) are committed together, so a failed
+  scan or restart cannot record the same expired prefix again.
+  Adjacent or overlapping dropped windows with the same chat, thread and reason
+  are merged, retaining the highest attempt count and the latest recording time.
+  Each startup or retry pass logs one INFO
   `lark_catchup` summary: boundary, expired-window flag, chats scanned, messages
   found, handled, duplicate and too-old skips, failures, `threads_scanned`,
-  `thread_failures` and `thread_roots_capped`. The too-old count covers messages
+  `thread_failures`, `thread_roots_capped`, `pending` and `dropped`. The too-old count covers messages
   older than the recovery start in listed containers, including the first old
   reply that stops a thread listing; root discovery does not count messages.
   Message counts cover
   listed messages only; an expired window is not listed and its message count
   is unknown. A consumer that does not signal readiness within 60 seconds,
-  chat list failures and exhausted chat or thread reply page limits warn without blocking
-  the consumer. This recovery applies to the CLI channel; the bot-token channel
+  chat list failures and terminal chat or thread history failures leave visible
+  pending or dropped state without blocking the consumer. This recovery applies
+  to the CLI channel; the bot-token channel
   is unchanged.
 
   At startup the channel runs `lark-cli
