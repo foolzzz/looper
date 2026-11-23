@@ -1,0 +1,35 @@
+{
+  "commit": "b977f802f230e31069610bbee1bf0e012898b614",
+  "completion_input": "[COMPLETION] Looper reports tasks that ended. This is not a message from the user, and nobody asked you anything.\nChannel: the Looper dashboard chat\nEnded tasks (1):\n1. baseline-task \"baseline task\" (project baseline-project): completed in under a minute, $0.00; asked for in this chat.\n   Result (the start of its summary): Done\n\nWrite one message to this chat, in the user's language:\n- First, one sentence per task: what it delivered, or why it failed.\n- Then only what the user needs from here: the key outputs the result names (a pull request, a file, a branch to merge), and the decisions the facts above leave to the user (a branch to merge, a failure to retry or drop). Do not make up decisions; when there are none, say nothing about them.\n- At most two next steps, each as a question (\"要我…吗？\"). In this turn you cannot act: your tools only read, and a change answers needs_user_turn. Never say you started, created or changed anything.\n- Looper adds each task's link after your message: do not write links, and do not repeat the whole result.\n- At most 8 lines. No headings, no tables, no account of your tool calls.\nRead with your tools (looper_tasks get, looper_costs) only when the facts above are not enough.",
+  "completion_metadata": {
+    "batch": "<batch>",
+    "event_ids": [
+      1
+    ],
+    "task_ids": [
+      "baseline-task"
+    ]
+  },
+  "fallback_reasons": {
+    "empty": "empty_reply",
+    "error": "turn_failed",
+    "timeout": "turn_timeout",
+    "stop": "turn_stopped"
+  },
+  "fallback_payload": {
+    "text": "任务「baseline task」已完成：Done",
+    "chat_session_id": "baseline-chat"
+  },
+  "off_counts": {
+    "idle_checks": 0,
+    "llm_records": 0,
+    "proactive_deliveries": 0
+  },
+  "generation": "completion_message, CONTRACT, _json and _indented extracted from the pinned commit with ast; seeded task facts are baseline-project, under a minute and $0.00. The pinned task_costs initializes every requested task to Decimal(0), including tasks with no runs.",
+  "event_record_link": {
+    "empty": true,
+    "error": true,
+    "timeout": false,
+    "stop": true
+  }
+}
