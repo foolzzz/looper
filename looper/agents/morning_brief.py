@@ -54,7 +54,7 @@ _LOCK = (741926, 1)  # session advisory lock; 741923 is intent push, 741925 is r
 _WEEKDAYS = "一二三四五六日"
 _BOT_TYPES = frozenset({"telegram", "lark", "lark_bot"})
 _KIND_LABELS = {"gate_reminder": "关卡提醒", "task_notice": "任务通知", "subscription": "订阅推送",
-                "intent": "意图", "completion": "收尾", "user_reminder": "提醒"}
+                "intent": "意图", "completion": "收尾", "user_reminder": "提醒", "metrics_alert": "质量告警"}
 _REASON_LABELS = {"outside_active_hours": "不在生效时段", "quiet_hours": "免打扰", "daily_cap": "超过当天上限"}
 _DETAIL_MAX = 500
 

@@ -95,4 +95,4 @@ def test_a_run_whose_runtime_reports_at_turn_end_counts_in_the_total_only() -> N
 
 
 def test_only_the_runtimes_that_report_usage_at_turn_end_have_no_rate_while_they_run() -> None:
-    assert {kind for kind, runtime in ADAPTERS.items() if not runtime.streams_usage} == {"codex", "coco", "cursor-agent"}
+    assert {kind for kind, runtime in ADAPTERS.items() if not runtime.streams_usage} == {"codex", "coco", "cursor-agent", "acp"}
