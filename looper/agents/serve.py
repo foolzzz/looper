@@ -942,6 +942,9 @@ async def _run_agent_system_watched(
                                   runtime_root=runtime_root, drain=drain, poster=registry.post,
                                   claude_bin=claude_bin, own_apps=own_bot_app_ids,
                                   message_backup=db_backup.message_backup_for(ops, runtime_root))
+            from . import cost_guard
+
+            await cost_guard.initialize(day_start=scheduler.day_start, pool=pool)
             bus.subscribe_topic(MessageType.USER_MESSAGE, scheduler.observe_user)
             # The advisor's alerts go to the operator's chat through the same channels.
             from . import advisor_alerts, outbound_hook

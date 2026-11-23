@@ -23,6 +23,7 @@ export const SETTINGS_PAGES = [
   { id: "catalog", label: "Skills & MCP", icon: Puzzle },
   { id: "channels", label: "Channels", icon: MessageCircle },
   { id: "chat", label: "Chat", icon: MessageSquare },
+  { id: "cost", label: "花费", icon: Library },
   { id: "scheduler", label: "Scheduler", icon: CalendarClock },
   { id: "vault", label: "Knowledge vault", icon: Library },
   { id: "recording", label: "Request recording", icon: Library },

@@ -589,6 +589,9 @@ class Scheduler:
         """One pass: finish ended runs, stop timed-out ones, start queued ones, fire due schedules, and start the
         stale alerts that are due. When a daily message backup is configured, start one that is due."""
         now = self._clock()
+        from .cost_guard import refresh_day
+
+        await refresh_day()
         await self._settle_running(now)
         kinds = ("command",) if self._drain is not None and self._drain.draining else None
         for schedule_id in await db_schedules.schedules_with_queued_runs(kinds=kinds):
@@ -872,6 +875,9 @@ class Scheduler:
         if not subscription and await db_schedules.owner_error(conn, schedule["manager_id"],
                                                                 template_key=schedule.get("template_key")):
             return await self._create_run(conn, schedule, firing, now, common=common, run_id=run_id)
+        from .cost_guard import observe_schedule
+
+        await observe_schedule(schedule)
         budget = schedule["daily_budget_usd"]
         if budget is not None:
             spent = await db_schedules.spent_since(conn, schedule["id"], self.day_start(now))
