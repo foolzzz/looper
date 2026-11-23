@@ -14,7 +14,7 @@ from typing import Any
 
 import pytest
 
-from tests.db_support import DSN, run_db
+from tests.db_support import DSN, run_db, v1_api
 from tests.fake_claude import fake_claude
 from tests.test_ops_tasks_db import _Chat, _project
 from tests.test_outbound_db import ALLOW, BLOCK, _STAND_IN, _isolated, _seen, _setup  # noqa: F401 - the fixture
@@ -124,6 +124,38 @@ def test_an_allowed_external_call_runs_and_a_call_that_is_not_external_is_not_re
     run_db(test, monkeypatch, setup=_setup)
 
 
+@pytest.mark.parametrize("action", ["enable", "run", "update"])
+def test_a_stored_external_target_is_shown_to_the_classifier(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, action: str,
+) -> None:
+    from looper.agents import outbound_hook
+
+    async def test(pool: Any) -> None:
+        await _schedule(pool, tmp_path)
+        (retargeted,) = await _chat(tmp_path).say("发到合作方群", _retarget(OUTSIDE))
+        assert retargeted["status"] == "ok", retargeted
+        await outbound_hook.set_enabled(True)
+        monkeypatch.setenv("OUTBOUND_REPLY", BLOCK)
+        chat = _chat(tmp_path)
+        arguments = {"action": action, "project": "calc", "schedule": "daily"}
+        if action == "update":
+            arguments["fields"] = {"requirement": "Summarize the week."}
+        (answer,) = await chat.say("启用 daily", ("looper_schedules", arguments))
+        assert answer["error"]["code"] == "blocked", answer
+        (seen,) = _seen(tmp_path)
+        shown = json.loads(seen["turn"].split("<action>\n", 1)[1].split("\n</action>", 1)[0])
+        assert shown["target"] == {"kind": "notify_target", "label": "lark:oc_partners"}
+        content = json.loads(shown["content"])
+        assert content["fields"]["notify_target"] == OUTSIDE
+        if action == "update":
+            assert content["fields"]["requirement"] == "Summarize the week."
+        row = await pool.fetchrow("SELECT enabled, requirement FROM schedules WHERE name = 'daily'")
+        assert not row["enabled"] and row["requirement"] == "Summarize the day."
+        assert chat.ops._pending == {}
+
+    run_db(test, monkeypatch, setup=_setup)
+
+
 def test_an_external_call_in_a_group_turn_is_blocked_by_code(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     from looper.agents import outbound_hook
 
@@ -159,6 +191,9 @@ def test_an_api_clients_external_call_is_blocked_by_code_and_the_operators_own_i
         assert answer["status"] == "error" and answer["error"]["code"] == "blocked", answer
         assert await _stored_target(pool) == OPERATOR and _seen(tmp_path) == []
         assert await pool.fetchval("SELECT failure FROM outbound_reviews") == "not_operator"
+        trail = await pool.fetchrow("SELECT id, client_id, error_code FROM manager_actions WHERE client_id = 'cl-1'")
+        assert trail["error_code"] == "blocked"
+        assert await pool.fetchval("SELECT manager_action_id FROM outbound_reviews") == trail["id"]
         operator = await ops.call(Principal("operator"), "s-1", name, arguments)
         assert operator["status"] == "ok", operator
         assert await pool.fetchval("SELECT count(*) FROM outbound_reviews") == 1
@@ -198,5 +233,32 @@ def test_a_v1_operations_level_is_its_own(monkeypatch: pytest.MonkeyPatch, tmp_p
         blocked = await ops.call(client, "s-1", tool.name, {}, tool=tool, level_of=external)
         assert blocked["error"]["code"] == "blocked"
         assert json.loads(json.dumps(blocked))["error"]["message"].endswith("another way.")
+
+    run_db(test, monkeypatch, setup=_setup)
+
+
+@pytest.mark.parametrize("action", ["update", "run", "confirm_target"])
+def test_a_v1_stored_external_target_is_reviewed_and_linked(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, action: str,
+) -> None:
+    from looper.agents import outbound_hook
+
+    async def test(pool: Any) -> None:
+        await _schedule(pool, tmp_path)
+        (retargeted,) = await _chat(tmp_path).say("发到合作方群", _retarget(OUTSIDE))
+        assert retargeted["status"] == "ok", retargeted
+        schedule_id = await pool.fetchval("SELECT id FROM schedules WHERE name = 'daily'")
+        await outbound_hook.set_enabled(True)
+        arguments = {"schedule_id": schedule_id}
+        if action == "update":
+            arguments["fields"] = {"requirement": "Summarize the week."}
+        async with v1_api(tmp_path, pool) as call:
+            status, answer = await call(f"schedule_admin.{action}", arguments, client=True)
+        assert status == 403 and answer["error"]["code"] == "blocked", answer
+        review = await pool.fetchrow("SELECT target_kind, target, manager_action_id FROM outbound_reviews")
+        assert (review["target_kind"], review["target"]) == ("notify_target", "lark:oc_partners")
+        trail = await pool.fetchrow("SELECT tool, error_code FROM manager_actions WHERE id = $1",
+                                    review["manager_action_id"])
+        assert tuple(trail) == (f"schedule_admin.{action}", "blocked")
 
     run_db(test, monkeypatch, setup=_setup)

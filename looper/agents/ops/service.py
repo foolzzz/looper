@@ -883,7 +883,7 @@ class ManagerOps:
         level = await levels.level_of(tool, arguments, turn)
         if level not in outbound.REVIEWED:
             return None
-        action = layer_one.action_of(tool.name, arguments, level)
+        action = await layer_one.action_of(tool.name, arguments, level)
         checked = await outbound.review(
             action, outbound.Asker(await _who(turn), turn.channel or "", _message(turn)),
             outbound.Origin(self._scope.manager_id, outbound.Source.TOOL, channel=turn.channel, chat=turn.chat),
