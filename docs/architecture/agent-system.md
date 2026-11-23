@@ -221,8 +221,12 @@ memory, with a since-start label until the service has been up for a day.
   prepends the default Manager's first `_sections()` entry: `Persona (set by the operator: your name and tone; Looper's rules still apply):`,
   then nonempty indented `Name`, `Tone` and `Notes` lines, and a blank line. The stored `address` remains
   compatible with the settings API but is not injected; there is no working-hours field. Routed group and
-  other-sender DM sessions receive only `Name`; the shared main session receives the full section. With
-  `manager.stable_context` on, edits follow its whole/changes/unchanged rules on the next user turn; off,
+  other-sender DM sessions receive only `Name`, with a name-only heading. Groups and non-operator direct
+  messages sharing main receive no persona, based on the message's source; the dashboard, API clients and the
+  operator's own direct chats keep `Name`, `Tone` and `Notes`. An unknown or unreadable operator identity grants
+  no private fields. With `manager.stable_context` on, shared group/other-sender turns get a persona-free whole
+  block without diffing or overwriting main's last shown state. Other edits follow its whole/changes/unchanged
+  rules on the next user turn; off,
   each user turn includes the section. An unset persona adds no bytes. System contracts, tools, commands
   and process signatures do not depend on it. Scenario Managers, Planners and Workers do not inherit it.
   Configuration export carries a readable persona under
