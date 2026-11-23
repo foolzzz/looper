@@ -5875,6 +5875,8 @@ operator direct chat, only when that target is offered by the channel and the
 subscription's current configuration is confirmed. Quiet types stay on the
 operator's intents list. New evidence replies to the original push, extending
 a pending suggestion's expiry to 24 hours after that delivery.
+Until a push succeeds, expiry falls back to 24 hours after creation, including
+legacy rows with a null `expires_at`; a channel outage cannot leave them pending forever.
 
 With `delivery.enabled` on (off by default), the initial push and new-evidence
 reply ask `proactive_delivery.decide` before claiming a send. Both are `intent`
@@ -5908,11 +5910,19 @@ marked as background rather than instructions. Tasks created from the dashboard
 leave `origin_channel_id` empty, as other dashboard-created tasks do.
 
 The one state writer permits `pending → tasked | rejected | expired` and
-`expired → tasked`. Handling attempts one final edit per transition, tracked by
-`intent_posts.edited_at >= intents.handled_at`; type, sender or chat renames,
-added evidence and timezone changes do not edit an already finalized push.
-`expired → tasked` advances `handled_at`, allowing one further edit. A failed
-edit queues one final-state reply, with the existing bounded delivery retries.
+`expired → tasked`. Each transition gets one final notice: an edit of the original
+push, falling back to one quoted reply. Either succeeding completes it; type,
+sender or chat renames, added evidence and timezone changes do not repeat it.
+The additive `intent_final_notices` migration stores the transition's `handled_at`,
+attempts, fallback post and next attempt, without rewriting old rows. The periodic
+task retries unsuccessful notices up to three rounds, after 30 and 60 seconds
+(backoff capped at five minutes), including across restarts. An uncertain reply is
+never resent; its idempotent edit can still be retried. Exhaustion stops retries
+with `final_notice_retry_exhausted`, visible in the existing attention delivery
+section. `expired → tasked` starts a fresh notice for the new state. The next pass
+also adopts legacy failed final replies, even when their old reply attempts are
+exhausted, into one bounded notice budget. Previously stuck intents expire on
+upgrade, so the operator may receive one delayed expiry reply.
 Lark post edits use Markdown rich-text posts, matching the original message;
 status-message edits keep their original plain-text format. Delivery claims
 commit before sending; an uncertain result is never resent, while an explicit failure has a bounded
@@ -6149,9 +6159,10 @@ list or command line changes either way.
   (pending, only while intents are on), `ledger` (own open items that wait
   for the user: a to-do, an unconfirmed relayed decision, anything overdue;
   only while the ledger is on) and `deliveries` (`uncertain` subscription
-  pushes, intent messages and task-end messages of the last 72 hours; each
-  table has a partial index of its `uncertain` rows, built online for an
-  existing database by the `uncertain_deliveries` migration). A
+  pushes, intent messages and task-end messages of the last 72 hours, plus intent
+  final notices whose bounded retries exhausted in that window. The
+  `uncertain_deliveries` migration builds the existing tables' uncertain-row
+  indexes online; the final-notice table has its own failed-row index). A
   section is `ok`, `error` (its source could not be read, with the reason;
   never shown as empty) or `unknown` (this caller cannot read it); a
   feature that is off leaves its section out. Each lists up to 20 items and
