@@ -279,11 +279,20 @@ class _Gateway:
 
 
 @pytest.mark.parametrize("gated", [False, True])
-def test_lark_card_writes_go_through_the_outbound_gateway_while_it_is_on(gated: bool) -> None:
+def test_lark_card_writes_go_through_the_outbound_gateway_while_it_is_on(
+        gated: bool, monkeypatch: pytest.MonkeyPatch) -> None:
     transport = SimpleNamespace(send_card=AsyncMock(return_value="om_1"), reply_card=AsyncMock(return_value="om_2"),
                                 update_card=AsyncMock())
     gateway = _Gateway()
-    cards = lark.CardWrites(transport, gateway=gateway, enabled=lambda: gated)
+    from looper.agents import chat_settings
+    from looper.agents.channels import outbound
+
+    monkeypatch.setattr(chat_settings, "_outbound_enabled", gated)
+    monkeypatch.setattr(outbound, "Gateway", lambda *args, **kwargs: gateway)
+    adapter = lark.LarkChannelAdapter(allowlist=SenderAllowlist("channel-lark_bot", frozenset({ASKER})),
+                                      channel_type="lark_bot", transport=transport)
+    cards = adapter._cards
+    assert cards is not None
 
     async def main() -> None:
         assert await cards.send({"c": 1}, chat_id="oc_dm", idempotency_key="gate-1") == "om_1"

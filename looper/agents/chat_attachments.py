@@ -195,10 +195,15 @@ def from_payload(raw: Any, runtime_root: Path) -> list[Attachment]:
     return sorted(attachments, key=lambda item: item.index)
 
 
-def section(attachments: Sequence[Attachment], image_input: ImageInput) -> list[str]:
+def section(attachments: Sequence[Attachment], image_input: ImageInput, *, fence: bool = False) -> list[str]:
+    """The attachments' list in the Manager's turn; with ``fence`` (the untrusted fence is on), its items, whose
+    names the sender chose, in an ``<untrusted source="attachment">`` block."""
+    from . import untrusted
+
     if not attachments:
         return []
     lines = ["Attachments sent with this message (kept on this machine for 7 days; never put their paths in a reply):"]
+    header = len(lines)
     for item in attachments:
         name = item.name.replace('"', "'")
         line = f'  {item.index}. {item.kind.value} "{name}"'
@@ -211,6 +216,8 @@ def section(attachments: Sequence[Attachment], image_input: ImageInput) -> list[
                 item.state, item.reason or "the download failed")
             line += f": not received ({reason})" + ("; the user was told" if item.told else "")
         lines.append(line)
+    if fence:
+        lines[header:] = [untrusted.fence("\n".join(lines[header:]), source=untrusted.Source.ATTACHMENT)]
     lines.append("Open one with your file-reading tool when the message needs it." if image_input is ImageInput.READ_TOOL else
                  "Open a file with your file-reading tool when the message needs it; your runtime cannot view images, "
                  "so if the user asks what an image shows, say you cannot see it.")

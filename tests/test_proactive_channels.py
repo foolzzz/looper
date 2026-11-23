@@ -120,7 +120,8 @@ def test_lark_metrics_only_request_ids_for_proactive_envelopes(monkeypatch, tmp_
         async def send(*args, **kwargs):
             return "om_sent" if kwargs.get("return_id") else None
 
-        adapter._transport = SimpleNamespace(send=AsyncMock(side_effect=send), reply=AsyncMock(side_effect=send))
+        transport = SimpleNamespace(send=AsyncMock(side_effect=send), reply=AsyncMock(side_effect=send))
+        adapter._transport.inner = transport
         adapter._status.finish = AsyncMock()
         payload = {"text": "Synthetic answer"}
         message_type = MessageType.AGENT_REPLY
@@ -139,7 +140,7 @@ def test_lark_metrics_only_request_ids_for_proactive_envelopes(monkeypatch, tmp_
             adapter._group_message[envelope.correlation_id] = "om_parent"
         receipt = await adapter.deliver(envelope)
         assert receipt.success
-        calls = adapter._transport.send.await_args_list + adapter._transport.reply.await_args_list
+        calls = transport.send.await_args_list + transport.reply.await_args_list
         assert len(calls) == 1
         assert calls[0].kwargs.get("return_id", False) is proactive
         assert receipt.external_id == ("om_sent" if proactive else None)

@@ -202,3 +202,16 @@ def test_error_details_are_optional_and_typed():
     assert details["additionalProperties"] is False and "required" not in details
     assert details["properties"] == {"manager_id": {"type": "string"}, "state": {"type": "string"},
         "phase": {"type": ["string", "null"]}, "method": {"type": ["string", "null"]}}
+
+
+def test_channel_start_state_is_read_only_and_described():
+    from looper.agents.v1_domains.channel_configs import CHANNEL_CONFIG
+
+    runtime = CHANNEL_CONFIG["properties"]["runtime"]
+    assert runtime["readOnly"] and len(runtime["description"]) <= 120
+    for state in ("starting", "running", "retrying", "failed"):
+        api_v1.validate_arguments(runtime, {"state": state, "last_error": None, "next_attempt_at": None})
+    update = api_v1.find("POST", "/api/v1/channel_configs/update")
+    with pytest.raises(OpError):
+        api_v1.validate_arguments(update.request, {"channel_id": "channel-lark", "fields": {
+            "runtime": {"state": "running", "last_error": None, "next_attempt_at": None}}})
