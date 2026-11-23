@@ -981,6 +981,8 @@ M7 先让计划状态有唯一来源（M7a），再在其上加任务记忆（M7
 
 ### 5.2 工程待办
 
+- **助理人格接线**（本分支已实现，未设置即关闭，依赖 #1533）：默认 Manager 把名字、语气和补充说明放在 `_sections()` 第一段，沿用稳定块更新规则；不注入称呼、不增加工作时间，独立群和他人私聊会话只给名字，场景管家和其他角色不继承。固定 main 哈希、下一轮更新/清空、稳定块及隔离服务重启由定向测试覆盖；真实模型语气和改名评测待批准，尚未执行（[RFC §5.2](../architecture/rfcs/assistant-layer-v0.zh-CN.md#52-12-人格与称呼)）。
+
 - **助理每轮上下文接线**（本分支已实现，默认关）：Manager 用户回合用现有渲染器替换 `Channel:` 行，并按渠道发送者设置 `Turn.speaker`，接通现有升级和确认的授权检查；收尾、自主回合不注入。新增 main 的关闭路径固定基准及渠道身份、确认劫持、稳定块、隔离 serve 测试；真实模型的时间/身份评测未执行，待维护者批准后用 `evals.assistant_experience --turn-context --categories time,identity` 对比基线（[RFC §5.1](../architecture/rfcs/assistant-layer-v0.zh-CN.md#51-11-每轮上下文)）。
 
 - **引擎可靠性：用量和限流信号**（[RFC](../architecture/rfcs/engine-reliability-v0.zh-CN.md)）：本分支实现默认关闭的 Claude Code / Codex app-server 窗口采集、账号七天用量、只读 `providers.limits`、额度块和自检；独立服务用替身事件验证，真实额度耗尽与重置未测。准入、冻结、失败处理和降级仍待后续实现。
