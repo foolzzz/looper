@@ -355,6 +355,22 @@ async def add_metadata(record_id: int, metadata: dict[str, Any], *, pool: asyncp
     )
 
 
+async def increment_contract_rejections(
+    record_id: int, contract_kind: str, *, pool: asyncpg.Pool | None = None,
+) -> None:
+    """Count a parser rejection on its turn, atomically and without retaining the rejected reply."""
+    pool = pool or get_pool()
+    await pool.execute(
+        """UPDATE llm_records
+           SET metadata = COALESCE(metadata, '{}'::jsonb) || jsonb_build_object(
+               'contract_rejections', COALESCE(metadata->'contract_rejections', '{}'::jsonb)
+               || jsonb_build_object($2::text,
+                   COALESCE((metadata->'contract_rejections'->>$2::text)::integer, 0) + 1))
+           WHERE id = $1""",
+        record_id, contract_kind,
+    )
+
+
 async def list_events(
     record_id: int,
     *,

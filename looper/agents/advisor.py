@@ -76,6 +76,7 @@ class Brief:
     parent_record_id: int | None = None
     asked: str | None = None
     evidence: str | None = None
+    attempt_id: int | None = None
 
     @property
     def kind(self) -> AdviceKind | None:
@@ -85,6 +86,7 @@ class Brief:
     def row(self) -> dict[str, Any]:
         return {"task_id": self.task_id, "step_id": self.step_id, "attempt": self.attempt,
                 "source": self.source.value, **({"asked": self.asked} if self.asked else {}),
+                **({"attempt_id": self.attempt_id} if self.attempt_id is not None else {}),
                 **({"evidence": self.evidence} if self.evidence else {})}
 
 
@@ -157,7 +159,7 @@ async def open_consult(brief: Brief, *, budget_usd: float) -> int:
 def _brief(row: Mapping[str, Any]) -> Brief:
     data = row["brief"]
     return Brief(row["task_id"], row["step_id"], int(data["attempt"]), Source(data["source"]), row["parent_record_id"],
-                 data.get("asked"), data.get("evidence"))
+                 data.get("asked"), data.get("evidence"), data.get("attempt_id"))
 
 
 def _left(row: Mapping[str, Any]) -> float:
@@ -262,6 +264,8 @@ async def submit(spawn_id: int, raw_request: Any, raw_bindings: Any = None, *, c
     await advisor_advice.record_question(spawn_id=spawn_id, task_id=brief.task_id, step_id=brief.step_id,
                                          attempt=brief.attempt, source=brief.source.value, kind=request.kind.value,
                                          question=request.fields)
+    from . import attempts
+    await attempts.link_advice(brief.attempt_id, spawn_id)
     if round(_left(row) - spent, 6) < MIN_RUN_USD:
         return await _end(row, SpawnState.OVER_BUDGET, failure="budget",
                           detail="too little is left for a round of the advisor after the judge",

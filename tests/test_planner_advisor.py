@@ -151,6 +151,10 @@ def _texts(claude: Any) -> list[str]:
 def test_a_critical_step_starts_after_the_advisor_reviewed_its_plan_with_the_planners_note(
     planner_claude: Any, agent_db: Any, advisor_on: None, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    from looper.agents import attempts
+    from unittest.mock import AsyncMock
+
+    monkeypatch.setattr(attempts, "dispatch_attempt", AsyncMock(return_value=41))
     consults = FakeConsults(_answered())
     consults.install(monkeypatch)
     claude = planner_claude(plan(_critical("s1")),
@@ -170,6 +174,7 @@ def test_a_critical_step_starts_after_the_advisor_reviewed_its_plan_with_the_pla
     assert "The Planner's note before this step starts: read each key once" in payload["instruction"]
     assert "cache the reads" not in str(payload)  # the advisor's words never reach the Worker
     brief, spend = consults.opened[0]
+    assert brief.attempt_id is None and payload["attempt_id"] == 41
     assert (brief.source.value, brief.attempt, brief.asked, spend) == ("checkpoint", 1, "plan_review", 1.0)
     assert brief.evidence and consults.adopted[0]["adoption"] == "adopted"
     assert consults.unlocked == [(payload["task_id"], 1, True)]
@@ -194,7 +199,10 @@ def test_a_checkpoint_without_an_answer_starts_the_step_as_planned(
 def test_after_a_failure_the_planner_asks_with_returns_and_questions_then_retries_in_its_own_words(
     planner_claude: Any, agent_db: Any, advisor_on: None, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from looper.agents import advisor
+    from looper.agents import advisor, attempts
+    from unittest.mock import AsyncMock
+
+    monkeypatch.setattr(attempts, "dispatch_attempt", AsyncMock(side_effect=[41, 42]))
 
     consults = FakeConsults(advisor.Returned(("problem (characters 3–20) looks like a local path",), 1),
                             _asked(), _answered())
@@ -222,6 +230,8 @@ def test_after_a_failure_the_planner_asks_with_returns_and_questions_then_retrie
         {"needs_info_id": "n1", "answer": "Most of them."}]
     assert (consults.opened[0][0].source.value, consults.opened[0][0].attempt) == ("optional", 2)
     first, second = h.work_items
+    assert consults.opened[0][0].attempt_id == first.payload["attempt_id"] == 41
+    assert second.payload["attempt_id"] == 42
     assert "advisor_consult" not in first.payload and second.payload["advisor_consult"] == 1
     assert second.payload["feedback"] == ["read each key once and cache it"]
     assert "Read each key once and keep it." not in str(second.payload)
