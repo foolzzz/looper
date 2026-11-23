@@ -11,7 +11,7 @@ import re
 import time
 import uuid
 from dataclasses import dataclass, field
-from enum import Enum
+from enum import Enum, StrEnum
 from typing import Any, TypedDict
 
 
@@ -84,6 +84,13 @@ class MessageType(str, Enum):
     HEARTBEAT = "heartbeat"
     AGENT_LIFECYCLE = "agent_lifecycle"
     SYSTEM_EVENT = "system_event"
+
+
+class CancelBy(StrEnum):
+    """The control caller responsible for a task cancellation, carried in its envelope."""
+
+    USER = "user"
+    MANAGER = "manager"
 
 
 class RestartMode(str, Enum):
