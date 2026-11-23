@@ -511,7 +511,11 @@ class Session:
                 api.post('/api/v1/manager_persona/update', {'address': '阿星'})
             except runner.EvalError:
                 supported = False
-        settings = api.post('/api/v1/chat_settings/get', {})['result']
+        if getattr(self.args, 'turn_context', False):
+            api.post('/api/v1/turn_context_settings/update', {'turn_context_enabled': True})
+            settings = api.post('/api/v1/turn_context_settings/get', {})['result']
+        else:
+            settings = api.post('/api/v1/chat_settings/get', {})['result']
 
         async def read() -> dict[str, Any]:
             conn = await asyncpg.connect(database_url)
@@ -709,6 +713,8 @@ def main() -> int:
     parser.add_argument('--timeout', type=float, default=180)
     parser.add_argument('--ack-max-ms', type=int, default=2000)
     parser.add_argument('--first-reply-max-ms', type=int, default=15000)
+    parser.add_argument('--turn-context', action='store_true',
+                        help='enable per-turn context through the operator-only settings')
     parser.add_argument('--session-routing', action='store_true',
                         help="turn the default Manager's session routing on (manager.session_routing.enabled)")
     args = parser.parse_args()
@@ -783,6 +789,7 @@ def main() -> int:
     run = {'schema': SCHEMA, 'commit': runner._git()['commit'], 'date': datetime.now().astimezone().isoformat(),
            'mode': 'fake' if args.fake else 'real', 'model': args.model, 'manager_model': args.manager_model,
            'manager_effort': args.manager_effort, 'reps': args.reps, 'session_routing': args.session_routing,
+           'turn_context': args.turn_context,
            'cases': grouped, 'categories': categories_out,
            'latency_thresholds_ms': {'ack': args.ack_max_ms, 'first_reply': args.first_reply_max_ms},
            'total_cost_usd': sum(r.get('cost_usd', 0) for r in rows), 'stopped_by_cap': stopped}
