@@ -76,13 +76,13 @@ class ChannelRegistry:
                 state, chat, start = window["state"], window["chat_id"], window["start"]
                 times = [datetime.fromtimestamp(window[key], timezone.utc).isoformat() for key in ("start", "end")]
                 checks.append({
-                    "id": f"lark_catchup:{channel['channel_id']}:{chat}:{start}:{state}",
-                    "label": f"飞书消息补收{'失败' if state == 'dropped' else '等待重试'}",
+                    "id": f"lark_catchup:{channel['channel_id']}:{chat}:{window.get('thread_id', '')}:{start}:{state}:{window['reason']}",
+                    "label": f"Lark catch-up {'dropped' if state == 'dropped' else 'pending retry'}",
                     "status": "fail" if state == "dropped" else "warn",
-                    "detail": f"{chat or '聊天发现'}: {times[0]} – {times[1]}; {state}; "
+                    "detail": f"{chat or 'Chat discovery'}{'/' + window['thread_id'] if window.get('thread_id') else ''}: {times[0]} – {times[1]}; {state}; "
                               f"attempts={window['attempts']}; {window['reason'] or ''}",
-                    "fix": "检查聊天并把遗漏的消息转发给 Looper。" if state == "dropped"
-                           else "服务会自动重试这个窗口。",
+                    "fix": "Check the chat and forward any missed messages to Looper." if state == "dropped"
+                           else "Looper will retry this window automatically.",
                 })
         return checks
 

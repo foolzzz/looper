@@ -16,7 +16,7 @@ import uuid as _uuid
 from collections import deque
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
 from dataclasses import dataclass, replace
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from random import uniform as _reconnect_jitter
 from time import monotonic, time
@@ -47,7 +47,7 @@ from .chat_routing import ChatResolver, RouteAction, RouteDecision, SenderPolicy
 from . import lark_content, lark_quote
 from .lark_cli import MESSAGE_GONE_CODES, RECEIVE_EVENT, LarkCliError, LarkCliOutputError, mention
 from .lark_transport import CliTransport, LarkTransport, LarkTransportKind, GatedLarkTransport
-from .lark_inbox import LarkInbox, history_event
+from .lark_inbox import CatchupDropReason, LarkInbox, history_event
 from .lark_quote import QuoteKind, QuoteRead, QuoteRef
 from .status_line import Reactions, StatusKind, StatusLines, status_kind
 
@@ -110,6 +110,22 @@ def _history_created(message: dict[str, Any]) -> _HistoryTime:
         raise ValueError("history creation time is not finite")
     return _HistoryTime(created, isinstance(raw_time, str) and bool(
         re.fullmatch(r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}", raw_time)))
+
+
+class _HistoryFailure(ValueError):
+    def __init__(self, reason: CatchupDropReason) -> None:
+        super().__init__(reason.value)
+        self.reason = reason
+
+
+def _terminal_history_failure(error: Exception) -> CatchupDropReason | None:
+    if isinstance(error, _HistoryFailure):
+        return error.reason
+    if (isinstance(error, PermissionError) or isinstance(error, LarkCliError)
+            and (error.code in {lark_quote.MISSING_SCOPE_CODE, 230002}
+                 or getattr(error, "http_status", None) == 403 or error.error_type in {"permission", "forbidden"})):
+        return CatchupDropReason.PERMISSION
+    return None
 
 
 def _not_received(attachments: list[Attachment]) -> str:
@@ -277,7 +293,7 @@ class LarkChannelAdapter(ChannelAdapter):
                 self._transport.inner.on_thread_activity = self._remember_thread
             boundary = self._inbox.boundary
             # Discovery itself can fail or be cancelled while live checkpoints advance.
-            if boundary is not None and time() - boundary <= _CATCHUP_MAX_AGE:
+            if boundary is not None:
                 await self._inbox.defer_discovery(boundary - _CATCHUP_OVERLAP, time())
             # Keep the live boundary until the consumer is healthy.
             await self._inbox.checkpoint(boundary if boundary is not None else time())
@@ -725,7 +741,13 @@ class LarkChannelAdapter(ChannelAdapter):
         }
 
         if self.channel_type == "lark":
-            info["catchup"] = self._catchup_status
+            from ..attention import DELIVERY_WINDOW
+
+            windows = [window for window in self._catchup_status["windows"]
+                       if window["state"] != "dropped"
+                       or window["recorded_at"] >= time() - DELIVERY_WINDOW.total_seconds()]
+            info["catchup"] = {"pending": self._catchup_status["pending"],
+                               "dropped": sum(w["state"] == "dropped" for w in windows), "windows": windows}
         if self._transport.kind is LarkTransportKind.CLI:
             info["lark_cli_available"] = self._transport.available()
         else:
@@ -749,9 +771,9 @@ class LarkChannelAdapter(ChannelAdapter):
                 return
             next_token = page.get("page_token")
             if not next_token or next_token == token:
-                raise ValueError("history pagination did not advance")
+                raise _HistoryFailure(CatchupDropReason.PAGINATION)
             token = next_token
-        raise ValueError("catch-up page limit reached")
+        raise _HistoryFailure(CatchupDropReason.PAGE_CAP)
 
     async def _catchup_messages(self, page: dict[str, Any], chat_id: str, *, start: float, end: float,
                                 stats: dict[str, int], bots_only: bool = False) -> None:
@@ -812,13 +834,18 @@ class LarkChannelAdapter(ChannelAdapter):
                         stats["thread_roots_capped"] += 1
                         logger.info("%s: catch-up roots capped chat=%s roots_scanned=%s "
                                     "unscanned_root_pages_at_least=1", self.channel_id, chat_id, roots_scanned)
+                        await self._inbox.drop_window(chat_id, start, end, CatchupDropReason.PAGE_CAP)
                         break
                     next_token = page.get("page_token")
                     if not next_token or next_token == token:
-                        raise ValueError("history pagination did not advance")
+                        raise _HistoryFailure(CatchupDropReason.PAGINATION)
                     token = next_token
-            except Exception:
-                stats["failures"] += 1
+            except Exception as exc:
+                terminal = _terminal_history_failure(exc)
+                if terminal is not None:
+                    await self._inbox.drop_window(chat_id, start, end, terminal)
+                else:
+                    stats["failures"] += 1
                 logger.warning("%s: catch-up thread discovery failed chat=%s", self.channel_id, chat_id, exc_info=True)
         skipped = len(candidates) - _CATCHUP_MAX_THREADS
         if skipped > 0:
@@ -844,6 +871,10 @@ class LarkChannelAdapter(ChannelAdapter):
             seen.add(thread_id)
         stats["threads_scanned"] += 1
         pages = []
+        assert self._inbox is not None
+        if not bots_only:
+            await self._inbox.defer_thread(thread_id, chat_id, start, end)
+        failure = None
         try:
             async for page in self._history_pages(
                 self._transport.list_thread_messages, thread_id,  # type: ignore[attr-defined]
@@ -856,7 +887,8 @@ class LarkChannelAdapter(ChannelAdapter):
                 else:
                     continue
                 break
-        except Exception:
+        except Exception as exc:
+            failure = exc
             stats["thread_failures"] += 1
             logger.warning("%s: catch-up thread failed chat=%s thread=%s", self.channel_id, chat_id,
                            thread_id, exc_info=True)
@@ -866,6 +898,11 @@ class LarkChannelAdapter(ChannelAdapter):
                 {**page, "messages": [{**message, "thread_id": thread_id}
                                       for message in reversed(page["messages"])]}, chat_id,
                 start=start, end=end, stats=stats, bots_only=bots_only)
+
+        if not bots_only:
+            await self._inbox.settle_thread(thread_id, _CATCHUP_MAX_ATTEMPTS,
+                                             _terminal_history_failure(failure) if failure else None,
+                                             failed=failure is not None)
 
     async def _startup_catchup(self, boundary: float | None) -> None:
         await self._catch_up(boundary)
@@ -893,12 +930,18 @@ class LarkChannelAdapter(ChannelAdapter):
             assert self._inbox is not None
             debts = await self._inbox.debts()
             discovery = await self._inbox.discovery()
-            live_start = boundary - _CATCHUP_OVERLAP if boundary is not None and not expired else None
+            live_start = boundary - _CATCHUP_OVERLAP if boundary is not None else None
             live_end = time()
             if discovery is not None:
                 live_start = min(live_start, discovery[0]) if live_start is not None else discovery[0]
                 live_end = max(live_end, discovery[1]) if boundary is not None else discovery[1]
-            if (live_start is None and not debts) or not hasattr(self._transport, "list_messages"):
+            if live_start is not None and live_start < time() - _CATCHUP_MAX_AGE:
+                cutoff = time() - _CATCHUP_MAX_AGE
+                await self._inbox.drop_window("", live_start, cutoff,
+                    CatchupDropReason.BOUNDARY_EXPIRED if expired else CatchupDropReason.STALE)
+                live_start = cutoff
+            thread_debts = await self._inbox.thread_debts()
+            if (live_start is None and not debts and not thread_debts) or not hasattr(self._transport, "list_messages"):
                 return
             discovering = live_start is not None
             chats = await self._catchup_chats() if discovering else []
@@ -918,34 +961,39 @@ class LarkChannelAdapter(ChannelAdapter):
                 waiting_for_consumer = False
             if discovering:
                 # Include messages arriving while the live consumer was becoming ready.
-                end = time() if boundary is not None else live_end
+                end = time()
                 for chat_id, (start, previous_end) in windows.items():
                     windows[chat_id] = (start, max(end, previous_end))
                     await self._inbox.defer(chat_id, *windows[chat_id])
                 await self._inbox.complete_discovery()
             discovering = False
+            seen_threads: set[str] = set()
             for chat_id, (start, end) in list(windows.items())[:_CATCHUP_MAX_CHATS]:
                 stats["chats_scanned"] += 1
-                failures = stats["failures"] + stats["thread_failures"]
+                failures = stats["failures"]
+                terminal = None
                 try:
                     async for page in self._history_pages(
                         self._transport.list_messages, chat_id, start=start, end=end,  # type: ignore[attr-defined]
                     ):
                         await self._catchup_messages(page, chat_id, start=start, end=end, stats=stats)
-                    await self._catchup_threads(chat_id, start=start, end=end, stats=stats)
-                    if failures == stats["failures"] + stats["thread_failures"]:
+                    await self._catchup_threads(chat_id, start=start, end=end, stats=stats, seen=seen_threads)
+                    if failures == stats["failures"]:
                         await self._inbox.complete(chat_id)
                         continue
-                except Exception:
+                except Exception as exc:
+                    terminal = _terminal_history_failure(exc)
                     stats["failures"] += 1
                     logger.warning("%s: catch-up chat failed chat=%s", self.channel_id, chat_id, exc_info=True)
-                await self._inbox.fail_catchup(chat_id, _CATCHUP_MAX_ATTEMPTS)
-        except Exception:
+                await self._inbox.fail_catchup(chat_id, _CATCHUP_MAX_ATTEMPTS, terminal)
+            for thread_id, chat_id, start, end in thread_debts:
+                await self._catchup_thread(thread_id, chat_id, start=start, end=end, stats=stats, seen=seen_threads)
+        except Exception as exc:
             stats["failures"] += 1
             logger.warning("%s: catch-up discovery failed", self.channel_id, exc_info=True)
             if self._inbox is not None:
                 if discovering:
-                    await self._inbox.fail_catchup(None, _CATCHUP_MAX_ATTEMPTS)
+                    await self._inbox.fail_catchup(None, _CATCHUP_MAX_ATTEMPTS, _terminal_history_failure(exc))
                 if waiting_for_consumer:
                     for chat_id in await self._inbox.debts():
                         await self._inbox.fail_catchup(chat_id, _CATCHUP_MAX_ATTEMPTS)
@@ -1095,6 +1143,13 @@ class LarkChannelAdapter(ChannelAdapter):
             if self._inbox is not None and message_id and await self._inbox.processed(message_id):
                 return "duplicate"
             created = event.get("_catchup_created_at")
+            if created is not None and created.before(time() - _CATCHUP_MAX_AGE):
+                if self._inbox is not None:
+                    await self._inbox.drop_window(event.get("chat_id") or "", created.at, created.at,
+                                                  CatchupDropReason.STALE)
+                    if message_id:
+                        await self._inbox.finish(message_id)
+                return "too_old"
             if (self._inbox is not None and event.get("type") == RECEIVE_EVENT
                     and created is None and event.get("sender_type") in {"app", "bot"} and event.get("chat_id")):
                 await self._inbox.remember_bot(event["chat_id"], time())
@@ -1276,6 +1331,8 @@ class LarkChannelAdapter(ChannelAdapter):
             correlation_id=correlation_id,
             metadata=metadata,
         )
+        if created := event.get("_catchup_created_at"):
+            envelope = replace(envelope, timestamp=datetime.fromtimestamp(created.at, timezone.utc).isoformat())
         await self._bus.publish(envelope)
         return True
 

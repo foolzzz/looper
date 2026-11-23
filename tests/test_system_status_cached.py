@@ -108,7 +108,8 @@ def test_proxy_health_is_read_once_and_storage_is_cached(server, monkeypatch):
     asyncio.run(run())
 
 
-def test_status_exposes_pending_and_dropped_lark_catchup_windows(server):
+@pytest.mark.parametrize("reason", ["retry_exhausted", "stale", "boundary_expired", "page_cap", "pagination", "permission"])
+def test_status_exposes_pending_and_dropped_lark_catchup_windows(server, reason):
     from looper.agents import api_v1
     from looper.agents.channels.registry import ChannelRegistry
 
@@ -118,7 +119,7 @@ def test_status_exposes_pending_and_dropped_lark_catchup_windows(server):
         {"chat_id": "chat-pending", "start": 100.0, "end": 160.0, "state": "pending",
          "attempts": 1, "reason": None},
         {"chat_id": "chat-dropped", "start": 200.0, "end": 260.0, "state": "dropped",
-         "attempts": 8, "reason": "retry_exhausted"},
+         "attempts": 8, "reason": reason, "recorded_at": 300.0, "thread_id": "omt_dropped"},
     ]
     health = {"channel": "lark", "healthy": True, "active_conversations": 0, "lark_cli_available": True,
               "catchup": {"pending": 1, "dropped": 1, "windows": windows}}
@@ -133,7 +134,8 @@ def test_status_exposes_pending_and_dropped_lark_catchup_windows(server):
         assert result["channels"]["channel-lark"]["catchup"]["windows"] == windows
         checks = [check for check in result["checks"] if check["id"].startswith("lark_catchup:")]
         assert [check["status"] for check in checks] == ["warn", "fail"]
-        assert "chat-dropped" in checks[1]["detail"] and "retry_exhausted" in checks[1]["detail"]
+        assert "chat-dropped" in checks[1]["detail"] and reason in checks[1]["detail"]
+        assert "omt_dropped" in checks[1]["detail"]
         assert "1970-01-01T00:03:20" in checks[1]["detail"]
         operation = api_v1.find("POST", "/api/v1/system/status")
         api_v1.validate_arguments(operation.result, result)

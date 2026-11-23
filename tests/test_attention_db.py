@@ -20,6 +20,7 @@ NOW = datetime.now(timezone.utc)
 @pytest.fixture(autouse=True)
 def no_status_reader(monkeypatch):
     monkeypatch.setattr(attention, "_status_checks", None)  # what a serve elsewhere in this process may have set
+    monkeypatch.setattr(attention, "_catchup_checks", None, raising=False)
 
 
 def section(summary, kind):
@@ -151,6 +152,30 @@ def test_deliveries_lists_what_may_not_have_arrived_in_the_window(monkeypatch):
     run_db(check, monkeypatch, timeout=20)
 
 
+@pytest.mark.parametrize("reader", ["deliveries", "earliest"])
+def test_catchup_without_debt_does_not_rerun_status_or_its_database_reads(monkeypatch, reader):
+    async def check(pool):
+        reads = []
+
+        async def status_checks():
+            reads.append(await pool.fetchval("SELECT 1"))
+            return []
+
+        monkeypatch.setattr(attention, "_status_checks", status_checks)
+        monkeypatch.setattr(attention, "_catchup_checks", lambda: [], raising=False)
+        # Positive control: the configured login reader really executes its PG read.
+        await attention._logins(None)
+        assert reads == [1]
+        reads.clear()
+        if reader == "deliveries":
+            assert await attention._deliveries(None) == ([], 0)
+        else:
+            assert await attention.earliest("deliveries") is None
+        assert reads == []
+
+    run_db(check, monkeypatch, timeout=20)
+
+
 def test_dropped_catchup_windows_stay_in_deliveries_until_recovered(monkeypatch):
     checks = [
         {"id": "lark_catchup:channel-lark:chat-pending:100:pending", "status": "warn",
@@ -160,11 +185,11 @@ def test_dropped_catchup_windows_stay_in_deliveries_until_recovered(monkeypatch)
          "fix": "Check the chat and forward any missed messages to Looper."},
     ]
 
-    async def read_checks():
+    def read_checks():
         return checks
 
     async def check(pool):
-        monkeypatch.setattr(attention, "_status_checks", read_checks)
+        monkeypatch.setattr(attention, "_catchup_checks", read_checks, raising=False)
         summary = await attention.collect()
         deliveries = section(summary, "deliveries")
         assert deliveries["count"] == 1

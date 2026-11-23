@@ -7,6 +7,7 @@ from ... import __version__
 from ..api_v1 import Operation, _array, _object, _STR, _NULL_STR, _INT, _BOOL
 
 from .. import completion_service
+from ..channels.lark_inbox import CatchupDropReason
 from .drain import DRAIN
 
 ORDER = 1
@@ -20,8 +21,10 @@ _BINDING = _object({
     "matches": _array(_object({"by": _STR, "when": _STR, "count": _INT}))}, ["enforced", "mismatches", "by"])
 _CATCHUP_WINDOW = _object({
     "chat_id": _STR, "start": {"type": "number"}, "end": {"type": "number"},
-    "state": {"type": "string", "enum": ["pending", "dropped"]}, "attempts": _INT, "reason": {"enum": [None, "retry_exhausted"]},
-})
+    "state": {"type": "string", "enum": ["pending", "dropped"]}, "attempts": _INT,
+    "reason": {"enum": [None, *(reason.value for reason in CatchupDropReason)]},
+    "recorded_at": {"type": "number"}, "thread_id": _STR,
+}, ["chat_id", "start", "end", "state", "attempts", "reason"])
 _CHANNELS = _object({"web": _object({"channel": {"const": "web"}, "healthy": _BOOL,
                                    "active_sse_streams": _INT})})
 _CHANNELS["additionalProperties"] = _object({

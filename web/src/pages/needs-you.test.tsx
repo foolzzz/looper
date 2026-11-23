@@ -98,12 +98,14 @@ describe("Needs you page", () => {
         { key: "catchup:synthetic", title: "chat-synthetic: 08:00–08:02; retry_exhausted", context: "channel-lark",
           since: null, href: "#settings/channels", ref: null,
           facts: { source: "catchup", channel: "lark", state: "dropped",
-            fix: "检查聊天并把遗漏的消息转发给 Looper。" } }] },
+            fix: "Check the chat and forward missed messages to Looper." } }] },
     ] });
     await render();
-    expect(host.textContent).toContain("飞书消息补收失败");
+    expect(host.textContent).toContain("Lark catch-up dropped");
+    expect(host.textContent).toContain("Looper never sends these again: check the chat, and resend by hand if it is missing.");
+    expect(host.textContent).toContain("from Lark");
     expect(host.textContent).toContain("chat-synthetic: 08:00–08:02");
-    expect(host.textContent).toContain("检查聊天并把遗漏的消息转发给 Looper。");
+    expect(host.textContent).toContain("Check the chat and forward missed messages to Looper.");
     expect(host.querySelector('a[href="#settings/channels"]')).not.toBeNull();
   });
 

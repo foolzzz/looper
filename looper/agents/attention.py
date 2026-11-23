@@ -52,6 +52,7 @@ DELIVERY_WINDOW = timedelta(hours=72)
 LOGIN_CHECKS = ("codex_login", "coco_login", "grok_login", "cursor_login", "ttadk")
 
 StatusChecks = Callable[[], Awaitable[Sequence[Mapping[str, Any]]]]
+CatchupChecks = Callable[[], Sequence[Mapping[str, Any]]]
 
 
 class NotRead(Enum):
@@ -64,6 +65,7 @@ class NotRead(Enum):
 
 Read = tuple[list[dict[str, Any]], int] | NotRead
 _status_checks: StatusChecks | None = None
+_catchup_checks: CatchupChecks | None = None
 
 
 async def enabled() -> bool:
@@ -71,13 +73,15 @@ async def enabled() -> bool:
     return (await db_settings.get_settings([ENABLED_KEY])).get(ENABLED_KEY) == "true"
 
 
-def use_status_checks(read: StatusChecks | None, *, owner: StatusChecks | None = None) -> None:
+def use_status_checks(read: StatusChecks | None, *, owner: StatusChecks | None = None,
+                      catchup: CatchupChecks | None = None) -> None:
     """Where ``logins`` is read from: the HTTP server's startup checks with the logins read now, set while it runs
     (``AgentHTTPServer.start``). None: ``logins`` is ``unknown``; with ``owner``, only if ``owner`` is the reader
-    (a server that stops clears its own, never a newer one's)."""
-    global _status_checks
+    (a server that stops clears its own, never a newer one's). ``catchup`` reads only the registry's cached windows."""
+    global _status_checks, _catchup_checks
     if owner is None or _status_checks == owner:
         _status_checks = read
+        _catchup_checks = catchup
 
 
 def _item(key: str, title: str, *, context: str = "", since: datetime | None = None, href: str | None = None,
@@ -231,11 +235,11 @@ async def _deliveries(_: Any) -> Read:
 
 
 async def _catchup_items() -> list[dict[str, Any]]:
-    if _status_checks is None:
+    if _catchup_checks is None:
         return []
     return [_item(check["id"], str(check["detail"]), context=str(check["label"]), href="#settings/channels",
                   source="catchup", channel="lark", state="dropped", fix=str(check["fix"]))
-            for check in await _status_checks()
+            for check in _catchup_checks()
             if str(check.get("id", "")).startswith("lark_catchup:") and check.get("status") == "fail"]
 
 

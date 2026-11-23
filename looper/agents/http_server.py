@@ -290,7 +290,8 @@ class AgentHTTPServer:
         self._server = await asyncio.start_server(
             self._handle_connection, self._host, self._port
         )
-        attention.use_status_checks(self._checks_now)  # the "needs you" logins, as system/status reads them
+        attention.use_status_checks(self._checks_now,
+                                    catchup=self._channels.catchup_checks if self._channels is not None else None)
         if self._port == 0:
             self._port = self._server.sockets[0].getsockname()[1]
         from .. import _PROCESS_STARTED_AT
