@@ -52,6 +52,8 @@ agent system started it in:
   calls, ``<task id>`` is the last task id an answer gave and
   ``<confirmation>`` the confirmation id the note before the message names;
   a call of ``__reply__`` (``{"text": "..."}``) supplies the final reply without a tool call;
+  ``__context__`` (``{"tokens": n}``) reports that turn's request context; ``__recent_task_results__``
+  answers with the first task result in the received resume brief, or says that none was supplied;
   a call of ``sleep`` (``{"seconds": n}``), no tool, makes the reply that much
   later; a call of ``__hold__``, no tool either, ends the calls and emits nothing until the Manager's control
   request (the user's stop) comes on stdin, then answers it and ends the turn as an interrupted one.
@@ -515,10 +517,18 @@ def _manager(scenarios_path: str, args: list[str], stdin: _Stdin) -> None:
         named = re.search(r"confirmation_id (c-[0-9a-f]+)", content)
         with open(scenarios_path, encoding="utf-8") as handle:
             calls = (json.load(handle).get("manager") or {}).get(message.strip(), [])
-        answers, held, reply = [], False, None
+        answers, held, reply, request_usage = [], False, None, None
         for name, arguments in calls:
             if name == "__reply__":
                 reply = arguments["text"]
+                continue
+            if name == "__context__":
+                request_usage = {"usage": {"input_tokens": arguments["tokens"]}}
+                continue
+            if name == "__recent_task_results__":
+                _, heading, results = content.partition("Recent task results")
+                first = re.search(r"^- .+$", results, re.MULTILINE) if heading else None
+                reply = first.group(0) if first else "没有收到最近的任务结果。"
                 continue
             if name == "sleep":
                 time.sleep(float(arguments["seconds"]))
@@ -543,7 +553,8 @@ def _manager(scenarios_path: str, args: list[str], stdin: _Stdin) -> None:
             continue
         done = "；".join(f"{name}：{answer.get('status')}" for name, answer in answers)
         _answer("fake-manager", reply if reply is not None else (
-            f"已处理（{done}）。" if answers else "放在哪个项目、哪个目录？"), cost)
+            f"已处理（{done}）。" if answers else "放在哪个项目、哪个目录？"), cost,
+            request_usage=request_usage)
 
 
 def main(argv: list[str]) -> int:

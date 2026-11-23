@@ -1927,6 +1927,7 @@ def test_case_allowances_fit_the_reservations_and_total_cap(jobs: int) -> None:
     ("failed", "harness"), ("budget_words_only", "harness"), ("incomplete", "harness"),
     ("missing", "harness"), ("failed_after_completed", "harness"),
     ("autonomous_after_failed", "harness"), ("autonomous_after_completed", "pass"),
+    ("maintenance_after_failed", "harness"), ("maintenance_after_completed", "pass"),
     ("error_result_completed", "harness"), ("typed_budget", "spending_cap"),
     ("paged_budget", "spending_cap"),
 ])
@@ -1980,8 +1981,11 @@ def test_dialog_checks_the_final_manager_run_before_scoring_a_reply(
                     if case.startswith("autonomous_after_"):
                         rows.append({"id": final_id + 1, "status": "completed" if status == "failed" else "running",
                                      "error": None, "metadata": {"autonomous": True}})
+                    if case.startswith("maintenance_after_"):
+                        rows.append({"id": final_id + 1, "status": "completed" if status == "failed" else "failed",
+                                     "error": None, "metadata": {"maintenance": "session_bound"}})
                 return {"records": list(reversed(rows))}
-            event_ids = {final_id, final_id + 1} if case.startswith("autonomous_after_") else {final_id}
+            event_ids = {final_id, final_id + 1} if case.startswith(("autonomous_after_", "maintenance_after_")) else {final_id}
             assert path == "/api/v1/runs/events" and query["record_id"] in event_ids
             after = int(query.get("after", 0))
             limit = int(query.get("limit", 1000))

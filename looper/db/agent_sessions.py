@@ -122,6 +122,18 @@ async def save_session(
         )
 
 
+async def save_measurements(
+    agent_id: str, *, context_tokens: int | None, last_turn_cost_usd: float | None,
+    pool: asyncpg.Pool | asyncpg.Connection | None = None,
+) -> None:
+    """Store this turn's measurements only; an unknown value clears the preceding turn's measurement."""
+    pool = pool or get_pool()
+    await pool.execute(
+        "UPDATE agent_sessions SET context_tokens = $2, last_turn_cost_usd = $3 WHERE agent_id = $1",
+        agent_id, context_tokens, last_turn_cost_usd,
+    )
+
+
 async def other_live_task_has_session(
     session_id: str, task_id: str, *, pool: asyncpg.Pool | asyncpg.Connection | None = None,
 ) -> bool:

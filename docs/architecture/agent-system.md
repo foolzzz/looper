@@ -129,6 +129,10 @@ memory, with a since-start label until the service has been up for a day.
     it leaves main's pending confirmations and remembered leads alone. The
     profile chosen for the session (`/profile`, `select_session_profile`) is
     main's: another session follows the settings and refuses `/profile`.
+    The dashboard's Manager section lists these sessions (name, kind, whether
+    a process is running, last activity, cost) and can reset one. That reset
+    clears the session the same way `/new` does and does not post into the
+    chat. `loopercli manager-sessions list` reads the same list.
   - Switched off, new messages go to `main` again. Turns under way finish,
     what main's worker holds keeps its order, and the other sessions'
     processes stop once idle (the fleet's idle sweep). Their rows and saved
@@ -213,6 +217,19 @@ memory, with a since-start label until the service has been up for a day.
   turn's record has `metadata.looper_state` (`view`, `rev`, `reason`). Off,
   the turns, the prompt, the tool list and the process signature are as they
   were without the setting
+- **Manager persona** (`looper/agents/persona.py`; Settings → Chat, `manager.persona`, unset by default).
+  A JSON object: `name` and `address` (20 characters each), `tone` (200) and `notes` (400), 600 characters
+  in total. Whitespace-only is unset and the row is removed. Only the operator reads or changes it
+  (`manager_persona.get`, risk read, level inside; `manager_persona.update`, risk write, level inside; both
+  operator-only). The Manager's `looper_settings` tool does not list it. `persona.section` renders the block
+  the default Manager will prepend as its first section, so it rides `manager.stable_context` once that call
+  is in place. The heading is `Persona (set by the operator: your name, how you address them, your tone; Looper's rules still apply):`,
+  then indented `Name`, `Address the operator as`, `Tone` and `Notes` lines, and a blank line. An empty
+  field is left out. `section(..., group=True)` keeps only the name and the address; nothing calls that yet.
+  This change does not call `section` from `ManagerAgent._sections`, so the prompt is unchanged. A scenario
+  Manager does not inherit the persona. Configuration export carries a readable persona under
+  `settings.system`; import checks it with the same limits. An unreadable stored value adds no section and logs
+  `manager.persona is unreadable` once for that payload
 - **Research order** (`looper/agents/research_order.py`; Settings → Chat, `manager.research_order`, off by default,
   `chat_settings.update` `research_order`). On, the default Manager's contract gets a `## Looking things up`
   section (`+RESEARCH_ORDER` in its contract layer; before `STABLE_CONTEXT_CONTRACT`, which stays last). It says where to look when an answer needs facts the Manager
@@ -271,18 +288,27 @@ memory, with a since-start label until the service has been up for a day.
   follow-up, produce the fixed failure notice with the turn's existing blocks. Off, replies, prompts,
   command lines, record writes and channel calls retain their existing behavior. Dashboard controls and
   turn metrics await their respective UI and metrics work.
-- **Session budget rules** (`session_budget.py`, `manager.turn_budget_usd`, default off; assistant-layer RFC
-  section 5.4): `decide` takes a turn's context and cost and keeps the session, compacts it (a runtime with
-  `HEADLESS_COMPACTION`) or rotates it. It uses #1473's `schedule_session.session_bound` and the threshold
-  `scheduler.session_context_max_tokens` that schedule Planners use. A turn with an unknown context is kept, and
-  so is every turn while the budget is unset. Unlike #1473, an unknown turn cost skips the cost rule; context
-  alone can still compact or rotate. `after_compaction` rotates when the `/compact` failed, had no
-  `compact_boundary` or left the context over the threshold. `turn_cap` caps a turn at the budget when its model
-  has a price (`no_price` otherwise), and `over_cap_reply` is the fixed reply to a turn stopped there. The
-  operator-only v1 operations `session_budget.get` and `session_budget.update` read or store the budget (a
-  positive number of US dollars, null for off; the recommended value is $4.00) and report a stored value that is
-  not a budget. **Manager wiring is pending:** storing the budget changes no turn, prompt, record or command line
-  yet.
+- **Session budget** (`session_budget.py`, `tiers/manager_budget.py`, `manager.turn_budget_usd`, default off;
+  assistant-layer RFC section 5.4): after handing a user or completion turn's reply to its channel, the Manager
+  keeps that session's lock while it records the final main-loop context and turn cost and applies `decide`.
+  It shares #1473's `schedule_session.session_bound` and `scheduler.session_context_max_tokens` with schedule
+  Planners. Unknown context keeps the session; unknown cost skips the cost rule. Over the context threshold,
+  a running session with `HEADLESS_COMPACTION` gets one recorded maintenance `/compact`. A failed exchange,
+  missing `compact_boundary` or context still over the threshold queues a rotation; a runtime without the
+  capability rotates directly. At half the context threshold or more, a turn costing over half its budget
+  also rotates. Rotation stops the process; the next turn resumes the old session for its handoff and starts
+  a new one with that handoff. Main also receives the Manager's three latest ended task results, newest first;
+  group and DM sessions keep only their own chat excerpt. Measurements are stored in each session's own
+  row, and maintenance and handoff reopening use its isolated directory and environment. Compactions and
+  rotations carry `metadata.session_bound` with the action, reason and before/after token counts.
+  The budget also supplies a per-turn soft cap, including subscription runs priced from the model catalog;
+  the existing process budget is unchanged. A capped turn gets the fixed `over_cap_reply`, and its next message
+  starts a process that resumes the session. An unpriced model gets no additional soft cap and logs a warning
+  once per profile/model; the Settings price warning and dashboard controls are not implemented yet.
+  Operator-only v1 operations `session_budget.get` and `session_budget.update` read or store a positive dollar
+  budget (null unsets it; the recommended value is $4.00) and report invalid stored values. While unset, there
+  is no additional recorder cap, session measurement write or maintenance check, and prompts, tools and
+  command lines stay unchanged.
 - The reply is Claude's words, then what Looper itself writes to the user in
   that turn (`Turn.blocks`): a new task's configuration with the question
   whether to start it, and what an operation needing confirmation does. In a
