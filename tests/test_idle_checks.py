@@ -25,7 +25,7 @@ def ready(**changes) -> ic.IdleState:
     """A state in which every rule holds and everything that needs a read has been read."""
     state = ic.IdleState(switch=True, lanes=True, delivery=True, attention=True, manager_running=True,
                          draining=False, idle_seconds=31 * 60.0, quiet=False, dm_cap=5, checks_today=0,
-                         since_last_check=None, target=TARGET, dm_counted=0, new_items=1)
+                         since_last_check=None, target=TARGET, since_morning_brief=None, dm_counted=0, new_items=1)
     return replace(state, **changes)
 
 
@@ -45,6 +45,7 @@ def ready(**changes) -> ic.IdleState:
     ({"checks_today": 4}, ic.Skip.DAY_LIMIT),
     ({"since_last_check": 2 * 3600 - 1.0}, ic.Skip.TOO_SOON),
     ({"target": None}, ic.Skip.NO_TARGET),
+    ({"since_morning_brief": 2 * 3600 - 1.0}, ic.Skip.MORNING_BRIEF_RECENT),
     ({"dm_counted": 5}, ic.Skip.DM_CAP_FULL),
     ({"dm_counted": 7}, ic.Skip.DM_CAP_FULL),
     ({"new_items": 0}, ic.Skip.NO_NEW_ITEMS),
@@ -56,18 +57,21 @@ def test_plan_skips_for_the_rule_that_fails(changes, skip):
 
 def test_plan_checks_when_every_rule_holds_at_its_edges():
     for changes in ({}, {"idle_seconds": 30 * 60.0}, {"checks_today": 3}, {"since_last_check": 2 * 3600.0},
-                    {"dm_counted": 4}, {"since_last_check": None}):
+                    {"dm_counted": 4}, {"since_last_check": None}, {"since_morning_brief": 2 * 3600.0}):
         assert ic.plan(ready(**changes)) == ic.IdlePlan(ic.Action.CHECK), changes
 
 
 def test_plan_asks_for_the_next_read_only_once_the_cheaper_rules_hold():
     """The reads come in order, and a rule that fails ahead of a read spares it."""
-    unread = ready(checks_today=ic.UNREAD, since_last_check=ic.UNREAD, target=ic.UNREAD, dm_counted=ic.UNREAD,
-                   new_items=ic.UNREAD)
+    unread = ready(checks_today=ic.UNREAD, since_last_check=ic.UNREAD, target=ic.UNREAD, since_morning_brief=ic.UNREAD,
+                   dm_counted=ic.UNREAD, new_items=ic.UNREAD)
     assert ic.plan(unread).need is ic.Need.COUNTS
     assert ic.plan(replace(unread, checks_today=0, since_last_check=None)).need is ic.Need.TARGET
-    assert ic.plan(replace(unread, checks_today=0, since_last_check=None, target=TARGET)).need is ic.Need.DM_COUNT
-    assert ic.plan(replace(unread, checks_today=0, since_last_check=None, target=TARGET, dm_counted=0)
+    assert ic.plan(replace(unread, checks_today=0, since_last_check=None, target=TARGET)).need is ic.Need.MORNING_BRIEF
+    assert ic.plan(replace(unread, checks_today=0, since_last_check=None, target=TARGET,
+                           since_morning_brief=None)).need is ic.Need.DM_COUNT
+    assert ic.plan(replace(unread, checks_today=0, since_last_check=None, target=TARGET,
+                           since_morning_brief=None, dm_counted=0)
                    ).need is ic.Need.ITEMS
     # Quiet hours, a busy main and a switch that is off decide before any read.
     for changes, skip in (({"quiet": True}, ic.Skip.QUIET_HOURS), ({"idle_seconds": None}, ic.Skip.NOT_IDLE),
