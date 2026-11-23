@@ -739,12 +739,12 @@ def _ago(moment: datetime) -> str:
     return f"{int(seconds // 86_400)} d"
 
 
-def _message_line(message: Mapping[str, Any]) -> str:
+def _message_line(message: Mapping[str, Any], *, fenced: bool = False) -> str:
     """A message of a gate's discussion as a turn's message shows it: who (the user's: from where), when, the option
     chosen."""
     role = str(message.get("role") or MessageRole.USER.value)
     where = [str(message.get("via") or "") or "dashboard"] if role == MessageRole.USER.value else []
-    if message.get("author"):
+    if message.get("author") and not fenced:  # a fenced message names its author inside its block
         where.append(str(message["author"]))
     created = message.get("created_at")
     if isinstance(created, datetime):
@@ -754,8 +754,22 @@ def _message_line(message: Mapping[str, Any]) -> str:
     if message.get("kind") == MessageKind.END.value:
         where.append("ended the discussion")
     who = {MessageRole.PLANNER.value: "you", MessageRole.LOOPER.value: "Looper"}.get(role, "")
-    text = journal.kept_text(message.get("text"), MESSAGE_MAX_CHARS).replace("\n", "\n  ")
+    text = journal.kept_text(message.get("text"), MESSAGE_MAX_CHARS)
+    if fenced:  # after the cut, so the block always closes
+        provenance = {"via": str(message.get("via") or ""), "from": str(message.get("author") or "")}
+        text = untrusted.fence(text, source=untrusted.Source.GATE_MESSAGE,
+                               provenance={key: value for key, value in provenance.items() if value})
+    text = text.replace("\n", "\n  ")
     return f"- ({', '.join(filter(None, [who, *where]))}) {text}".rstrip()
+
+
+def _message_lines(messages: Sequence[Mapping[str, Any]], *, fence: bool) -> list[str]:
+    """A gate turn's new messages (``_message_line``); with ``fence`` (the untrusted fence is on), a user's message
+    the operator did not write in their own turn has its text in a ``gate_message`` block, after one lead line."""
+    outside = [m for m in messages if fence and str(m.get("role") or MessageRole.USER.value) == MessageRole.USER.value
+               and m.get("from_operator") is not True and m.get("text")]
+    lead = [untrusted.LEAD_LINE] if outside else []
+    return [*lead, *(_message_line(message, fenced=any(message is m for m in outside)) for message in messages)]
 
 
 def _retry_due(gate: Gate, now: datetime) -> bool:
@@ -1999,7 +2013,8 @@ class PlannerAgent:
         view = self._checked(plan.view())
         newest = max(int(m["id"]) for m in messages)
         try:
-            reply = await self._ask(TurnKind.GATE, self._gate_message(plan, step, messages, context),
+            reply = await self._ask(TurnKind.GATE, self._gate_message(plan, step, messages, context,
+                                                                      fence=await untrusted.enabled()),
                                     lambda text: parse_gate(text, context, view))
         except PlannerTurnError as exc:
             # The same messages again (an automatic retry) count on; a newer one starts the count again.
@@ -3936,7 +3951,8 @@ class PlannerAgent:
         await self._read_changes(plan, changes)
         view = plan.view()
         try:
-            message = self._restart_message(plan, why, changes, await self._template_lines(plan))
+            message = self._restart_message(plan, why, changes, await self._template_lines(plan),
+                                            fence=await untrusted.enabled())
             reply: ChatReply | None = await self._ask(TurnKind.RESTART, message,
                                                       lambda answer: parse_chat(answer, self._checked(view)))
         except PlannerTurnError as exc:
@@ -4018,8 +4034,10 @@ class PlannerAgent:
         if not isinstance(supplement, int):
             # Stored when it was sent (``projects.store_chat_supplement``); one that was not is stored now.
             try:
+                context = envelope.payload.get("channel_context")
                 supplement = await db_changes.add_supplement(
-                    self._task_id, journal.kept_text(text, journal.SUPPLEMENTS_MAX_CHARS), via="chat")
+                    self._task_id, journal.kept_text(text, journal.SUPPLEMENTS_MAX_CHARS), via="chat",
+                    from_operator=not (isinstance(context, dict) and context.get("client")))  # not an API client's
             except Exception:
                 logger.exception("planner %s could not store a chat message as a supplement", self.agent_id)
                 supplement = None
@@ -4069,7 +4087,7 @@ class PlannerAgent:
             return None
         await self._read_changes(plan, changes)
         view = plan.view()
-        message = self._change_message(plan, changes)
+        message = self._change_message(plan, changes, fence=await untrusted.enabled())
         try:
             reply = await self._ask(TurnKind.CHAT, message, lambda answer: parse_chat(answer, self._checked(view)))
         except PlannerTurnError as exc:
@@ -5505,7 +5523,7 @@ class PlannerAgent:
         return "\n".join(lines)
 
     def _gate_message(self, plan: TaskPlan, step: PlanStep, messages: list[dict[str, Any]],
-                      context: GateContext) -> str:
+                      context: GateContext, *, fence: bool = False) -> str:
         """A GATE turn's message: the gate, its agenda, the user's new messages and the plan as it is (a new
         session's resume brief has the discussion before them)."""
         gate = step.gate
@@ -5518,7 +5536,7 @@ class PlannerAgent:
                  "", "Agenda:", *(item.line() for item in gate.agenda)]
         if gate.findings:
             lines += [f"Your findings so far: {gate.findings}"]
-        lines += ["", "New messages from the user (oldest first):", *(_message_line(m) for m in messages)]
+        lines += ["", "New messages from the user (oldest first):", *_message_lines(messages, fence=fence)]
         if context.forced:
             lines += ["", 'The user ended the discussion and asked you to go on with the current conclusions: reply '
                           'with "gate": "close", and state an assumption for every agenda item still open.']
@@ -5529,12 +5547,12 @@ class PlannerAgent:
         lines += ["", f"Allowed actions: {', '.join(actions)}.", "Reply with the GATE JSON."]
         return "\n".join(lines)
 
-    def _change_message(self, plan: TaskPlan, changes: TaskChanges) -> str:
+    def _change_message(self, plan: TaskPlan, changes: TaskChanges, *, fence: bool = False) -> str:
         """A CHAT turn's message: the task's changes the Planner has not had, and the plan as it is."""
         running = [s for s in plan.steps if s.status == "dispatched"]
         running_text = ", ".join(f"{s.label} ({s.worker_id})" for s in running) or "none"
         actions = ["none", "add_steps", "replan"] + (["forward (to a running step)"] if running else [])
-        lines, progress = self._change_lines(plan, changes)
+        lines, progress = self._change_lines(plan, changes, fence=fence)
         return "\n".join([
             "[CHAT] The task changed.",
             *lines,
@@ -5549,11 +5567,12 @@ class PlannerAgent:
             "Reply with the CHAT JSON.",
         ])
 
-    def _restart_message(self, plan: TaskPlan, why: str, changes: TaskChanges, templates: Sequence[str] = ()) -> str:
+    def _restart_message(self, plan: TaskPlan, why: str, changes: TaskChanges, templates: Sequence[str] = (), *,
+                         fence: bool = False) -> str:
         """A RESTART turn's message: why the task ended, the task's changes the Planner has not had, the plan as
         it is now and the journal."""
         self._plan_shown = None
-        lines, progress = self._change_lines(plan, changes)
+        lines, progress = self._change_lines(plan, changes, fence=fence)
         return "\n".join([
             f"[RESTART] {_sentence(f'The task {why}')} The user restarted it, and it goes on from its plan: the "
             "accepted steps stay done and do not run again; the steps that did not finish are back to not started "
@@ -5574,15 +5593,22 @@ class PlannerAgent:
         ])
 
     @staticmethod
-    def _change_lines(plan: TaskPlan, changes: TaskChanges) -> tuple[list[str], list[str]]:
+    def _change_lines(plan: TaskPlan, changes: TaskChanges, *, fence: bool = False) -> tuple[list[str], list[str]]:
         """The task's changes the Planner has not had, after a blank line each, and the journal's section without
-        them (the supplements given before, and the rest of the journal)."""
+        them (the supplements given before, and the rest of the journal). With ``fence`` (the untrusted fence is
+        on), a supplement the operator did not give in their own turn is a ``supplement`` block."""
         new = {supplement.id for supplement in changes.supplements}
         lines: list[str] = []
         if changes.supplements:
             lines += ["", "The user added to the task (new supplements, oldest first; every message the user sends "
                           "you is one):"]
-            lines += ["- " + supplement.text.strip().replace("\n", "\n  ") for supplement in changes.supplements]
+            outside = [s for s in changes.supplements if fence and s.from_operator is not True]
+            if outside:
+                lines.append(untrusted.LEAD_LINE)
+            lines += ["- " + (untrusted.fence(supplement.text.strip(), source=untrusted.Source.SUPPLEMENT,
+                                              provenance={"via": supplement.via}) if supplement in outside
+                              else supplement.text.strip()).replace("\n", "\n  ")
+                      for supplement in changes.supplements]
         if changes.requirement is not None:
             edit = changes.requirement
             lines += ["", f"The requirement was edited (version {edit.before_version} -> {edit.version}); the Task "
