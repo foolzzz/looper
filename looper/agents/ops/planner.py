@@ -45,6 +45,9 @@ logged.
   history), acting as the seat ``planner``; elsewhere they are refused.
 - **The knowledge vault.** With its project's knowledge vault on and configured,
   its read and write tools are listed too (``ops.vault``); elsewhere they are refused.
+- **Explorers.** With its project's ``subagents`` on, ``looper_agent_spawn``, ``looper_agent_wait`` and
+  ``looper_agent_cancel`` are listed too (``ops.subagents``): spawn and cancel only in Looper's turn, results by
+  wait, in the room or in the next turn; elsewhere they are refused.
 """
 
 from __future__ import annotations
@@ -79,6 +82,7 @@ from ..tiers.journal import SUMMARY_MAX_CHARS, JournalKind, clip
 from ..tiers.worker import recheck_limits
 from . import ErrorCode, OpError, Risk, Tool, check_arguments
 from .concurrency import COUNTS, NOTE, limits_argument, set_task_limits, shown
+from . import subagents as subagent_ops
 from .room import TOOL_NAMES as ROOM_TOOL_NAMES, normalize_room_arguments, run_tool as run_room_tool
 from .room import tools_for as room_tools_for
 from .service import MANAGER_TOOLS, library_with_server, server_config
@@ -204,6 +208,8 @@ class PlannerOps:
         self._grants: dict[str, _Grant] = {}  # a token's hash -> what it is good for
         # The tasks' agent rooms (``room.RoomService``); without them the Planner has no room tools.
         self.room: Any = None
+        # The explorer tools (``ops.subagents.PlannerSubagents``); without them the Planner has none.
+        self.subagents: Any = None
 
     # --- Tokens ---
 
@@ -260,10 +266,20 @@ class PlannerOps:
             config, _ = await vault.for_task(grant.task_id)
             if config is not None:
                 tools += [tool.listing() for tool in vault_ops.tools_for(config)]
+            if self.subagents is not None and await _subagents_on(grant.task_id):
+                tools += [tool.listing() for tool in subagent_ops.TOOLS]
         return tools
 
-    async def call(self, header: str | None, name: str, raw: Any) -> dict[str, Any]:
-        """Run one tool call of the Planner whose token ``header`` carries; the protocol's answer."""
+    async def retry_safety(self, header: str | None) -> dict[str, str] | None:
+        """How the MCP bridge may repeat the explorer tools (with a call id, a spawn is idempotent); None without them."""
+        grant = self._grant(header)
+        if grant is None or self.subagents is None or not await _subagents_on(grant.task_id):
+            return None
+        return {tool.name: subagent_ops.RETRY_SAFETY[tool.name].value for tool in subagent_ops.TOOLS}
+
+    async def call(self, header: str | None, name: str, raw: Any, *, call_id: str | None = None) -> dict[str, Any]:
+        """Run one tool call of the Planner whose token ``header`` carries; the protocol's answer. ``call_id`` is the
+        runtime's own id of the call, which makes a repeated spawn return the first one."""
         grant = self._grant(header)
         if grant is None:
             return _error(ErrorCode.FORBIDDEN, "this Planner's token no longer works: its task ended or a new "
@@ -273,6 +289,8 @@ class PlannerOps:
             return await self._room_call(grant, name, raw)
         if name in VAULT_TOOL_NAMES:
             return await self._vault_call(grant, name, raw)
+        if name in subagent_ops.TOOL_NAMES and self.subagents is not None:
+            return await self._subagent_call(grant, name, raw, call_id)
         tool = self._tools.get(name)
         if tool is None:
             manager = name in {t.name for t in MANAGER_TOOLS}
@@ -330,6 +348,20 @@ class PlannerOps:
                                                  "again later")
         return {"status": "ok", "result": json.loads(json.dumps(result, ensure_ascii=False, default=str))}
 
+    async def _subagent_call(self, grant: _Grant, name: str, raw: Any, call_id: str | None) -> dict[str, Any]:
+        """A call of an explorer tool, as the Planner of its token's task: spawn and cancel change things, so they
+        run only in a turn Looper sent; the rest is the Workers' code (``PlannerSubagents``)."""
+        task_id = grant.task_id
+        task = await db_tasks.get_task(task_id)
+        if task is None or task["status"] not in EDITABLE_STATUSES:
+            self._drop(task_id)
+            return _error(ErrorCode.FORBIDDEN, f"task {task_id} has ended: its Planner's tools no longer work")
+        if name != subagent_ops.WAIT and not grant.in_turn:
+            await _activity(task_id, f"Planner's {name} refused ({ErrorCode.NEEDS_USER_TURN.value}): not in Looper's turn")
+            return _error(ErrorCode.NEEDS_USER_TURN, "Looper changes things only in a turn it sent you, not in a "
+                                                     "turn you run on your own; do it in your next turn")
+        return await self.subagents.call(task_id, name, raw, call_id=call_id, in_turn=grant.in_turn)
+
     async def _vault_call(self, grant: _Grant, name: str, raw: Any) -> dict[str, Any]:
         """A knowledge vault call, as the Planner of its token's task."""
         task_id = grant.task_id
@@ -363,12 +395,14 @@ class PlannerOps:
         """How the Planner uses its tools, for its system prompt."""
         return TOOLS_GUIDE
 
-    def guide_for(self, *, roles: bool, room: bool = False, vault: str = "") -> str:
+    def guide_for(self, *, roles: bool, room: bool = False, vault: str = "", subagents: bool = False) -> str:
         """How the Planner uses its tools, with the role tools where its project lets it define roles, and the room's
         where its project has the agent room on, followed by its knowledge vault guide."""
         guide = f"{TOOLS_GUIDE}\n{ROLES_GUIDE}" if roles else TOOLS_GUIDE
         if room and self.room is not None:
             guide = f"{guide}\n{PLANNER_ROOM_GUIDE}"
+        if subagents and self.subagents is not None:
+            guide = f"{guide}\n{subagent_ops.PLANNER_SUBAGENTS_GUIDE}"
         return f"{guide}\n{vault}" if vault else guide
 
     async def library_with_server(self, library: Any, runtime_root: Path, token: str) -> Any:
@@ -398,6 +432,12 @@ async def _roles_on(task_id: str) -> bool:
     """Whether task ``task_id``'s project lets its Planner define roles, read now."""
     task = await db_tasks.get_task(task_id)
     return task is not None and (await _execution(task)).roles_on
+
+
+async def _subagents_on(task_id: str) -> bool:
+    """Whether task ``task_id``'s project has platform sub-agents on, read now."""
+    task = await db_tasks.get_task(task_id)
+    return task is not None and (await _execution(task)).subagents_on
 
 
 async def _task(task_id: str) -> dict[str, Any]:

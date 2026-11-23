@@ -1031,11 +1031,12 @@ async def _run_agent_system_watched(
             planner_ops.room = room
             room_ops = RoomOps(room, url=_local_url(host, port))
             from .subagents import SpawnService
-            from .ops.subagents import WorkerSubagents
+            from .ops.subagents import PlannerSubagents, WorkerSubagents
             explorers = WorkerSubagents(SpawnService(runtime_root, claude_bin=claude_bin,
                 keeper=KeeperSettings(epoch) if lease is not None else None,
                 on_stale=lease.lose if lease is not None else None), room, worker_pool=worker_pool)
             room_ops.subagents = explorers
+            planner_ops.subagents = PlannerSubagents(explorers)
             worker_pool.room_ops = room_ops
             for candidate in scan.candidates:
                 if candidate.grant:

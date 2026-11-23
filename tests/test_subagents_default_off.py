@@ -58,3 +58,43 @@ def test_disabled_run_grant_lists_exactly_the_existing_worker_tools() -> None:
     token = ops.issue("task", Seat("worker@s1", "worker", MemberKind.WORK, run="worker-1"))
     assert ops.listing("Bearer " + token) == [tool.listing() for tool in room.tools_for(MemberKind.WORK)]
     assert "subagents" not in ops.export_run("worker-1")
+
+
+def test_planner_guide_is_byte_identical_unless_subagents_are_on_and_wired() -> None:
+    from looper.agents.ops.planner import PlannerOps
+    from looper.agents.ops.subagents import PLANNER_SUBAGENTS_GUIDE
+
+    ops = PlannerOps(object(), url="http://localhost:1")
+    for roles in (False, True):
+        for room in (False, True):
+            for vault in ("", "VAULT GUIDE"):
+                plain = ops.guide_for(roles=roles, room=room, vault=vault)
+                # The switch off, or the tools not wired: the same bytes as before the feature.
+                assert ops.guide_for(roles=roles, room=room, vault=vault, subagents=False) == plain
+                assert ops.guide_for(roles=roles, room=room, vault=vault, subagents=True) == plain
+    ops.subagents = object()
+    base = ops.guide_for(roles=True, room=False)
+    assert ops.guide_for(roles=True, room=False, subagents=False) == base
+    assert ops.guide_for(roles=True, room=False, subagents=True) == f"{base}\n{PLANNER_SUBAGENTS_GUIDE}"
+    assert ops.guide_for(roles=False, vault="V", subagents=True).endswith(f"{PLANNER_SUBAGENTS_GUIDE}\nV")
+
+
+def test_project_execution_reads_the_switch_without_changing_its_view() -> None:
+    from looper.agents.project_execution import ProjectExecution
+
+    assert ProjectExecution.from_row(None) == ProjectExecution()
+    for value in (None, "off", ""):
+        assert not ProjectExecution.from_row({"subagents": value}).subagents_on
+    on = ProjectExecution.from_row({"subagents": "on"})
+    assert on.subagents_on and on.view() == ProjectExecution().view()
+    assert "subagents_on" not in on.view() and "subagents" not in on.view()
+
+
+def test_planner_turn_text_is_untouched_when_off_or_nothing_finished() -> None:
+    import asyncio
+
+    from looper.agents.subagent_delivery import mark_turn_delivered, planner_turn_note
+
+    # ``on=False`` never reads the database, so a turn of a project with the switch off adds nothing.
+    assert asyncio.run(planner_turn_note("task", on=False)) == ("", [])
+    assert asyncio.run(mark_turn_delivered([])) is None
