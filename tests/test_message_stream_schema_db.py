@@ -58,7 +58,7 @@ def test_a_database_without_the_tables_gets_them_on_upgrade(monkeypatch):
         migration for migration in modules if migration.name != "platform_subagents"))
     # A database older than the stream is older than the leads and intents made from it too, and than the memory
     # candidates that point at leads and triage events that point at stream runs.
-    leads = ("intent_posts", "intent_sources", "intents", "intent_alert_senders", "message_chat_projects",
+    leads = ("intent_final_notices", "intent_posts", "intent_sources", "intents", "intent_alert_senders", "message_chat_projects",
              "intent_type_projects", "intent_type_versions", "intent_types", "message_lead_people",
              "message_lead_sources", "message_leads")
     tables = ("triage_event_sources", "triage_events", *leads, "subscription_deliveries", "subscription_runs", "subscription_daily_claims", "subscriptions",
@@ -72,7 +72,8 @@ def test_a_database_without_the_tables_gets_them_on_upgrade(monkeypatch):
             expected = await structure(fresh)
         await pool.execute(memory.DROP_MEMORY + "DROP FUNCTION triage_drop_event() CASCADE; " + "; ".join(f"DROP TABLE {table}" for table in tables)
                            + "; DELETE FROM schema_migrations WHERE name IN ('message_stream', 'subscriptions', "
-                           "'subscription_rules', 'subscription_lookback', 'message_leads', 'event_triage', 'event_triage_online')")
+                           "'subscription_rules', 'subscription_lookback', 'message_leads', 'event_triage', 'event_triage_online', "
+                           "'intent_final_notices')")
         async with pool.acquire() as conn:
             assert await connection.schema_change_pending(conn)
         await connection.ensure_schema(pool)
