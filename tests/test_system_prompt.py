@@ -418,14 +418,12 @@ def test_vault_section_follows_task_and_room_and_has_its_own_hash(defined_role: 
     assert prompt.layers["task"] == original.layers["task"]
 
 
-@pytest.mark.parametrize(("role", "expected_sha"), [
-    ("worker", "ca974aa80d6e37125fb94e529f7d3f3184ae582adf16fbc79515ffcbf5c31632"),
-    ("reviewer", "532864961524034dd9469dcbf02a0963aad88cd146454160b11258347eb12a66"),
-])
-def test_default_step_system_prompts_keep_their_bytes_without_conditions(role: str, expected_sha: str) -> None:
+@pytest.mark.parametrize("role", ["worker", "reviewer"])
+def test_default_step_system_prompts_keep_their_bytes_without_conditions(role: str) -> None:
     from looper.agents.agent_settings import DEFAULT_HARNESS_PROMPT
     from looper.agents.system_prompt import build_system_prompt
     from looper.agents.tiers.worker import DEFAULT_SYSTEM_PROMPT, REVIEWER_SYSTEM_PROMPT, WorkerPool
+    from tests.prompt_sections import assert_sections
 
     verify = role == "reviewer"
     payload = {"requirement": "Build the project", "step_key": "dev",
@@ -438,4 +436,5 @@ def test_default_step_system_prompts_keep_their_bytes_without_conditions(role: s
         contract_name="REVIEW_CONTRACT" if verify else "WORK_CONTRACT",
         contract=REVIEW_CONTRACT if verify else WORK_CONTRACT,
     )
-    assert prompt.sha256 == expected_sha
+    frozen = json.loads((Path(__file__).parent / "fixtures" / "worker_prompt_sections.json").read_text())
+    assert_sections(prompt.text, frozen["step_reviewer" if verify else "step_worker"], label=role)
