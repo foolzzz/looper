@@ -145,6 +145,40 @@ def run_with_models(test: Callable[[Any], Awaitable[None]], monkeypatch: pytest.
     run_db(test, monkeypatch, setup=setup, timeout=30)
 
 
+@asynccontextmanager
+async def dropped_tables(conn: Any, *tables: str) -> AsyncIterator[None]:
+    """Drop ``tables`` for the block, in one statement, as a database from before them lacks them; when the block
+    ends, also by an error, put back the foreign keys other tables had into them.
+
+    A table added later may point at one an upgrade test drops. Its migration is not the one under test, so it stays:
+    only its foreign keys into ``tables`` are set aside, and a new table never has to join an older test's list. End
+    the block once the upgrade has recreated the tables. A key no longer fitting its recreated table fails there; one
+    into a table still missing stays out. After an error in the block, that error is the one reported.
+    """
+    keys = await conn.fetch(
+        "SELECT conrelid::regclass::text AS dependent, confrelid::regclass::text AS referenced, conname, "
+        "pg_get_constraintdef(oid) AS definition FROM pg_constraint WHERE contype = 'f' "
+        "AND confrelid = ANY(SELECT to_regclass(name) FROM unnest($1::text[]) AS name) "
+        "AND conrelid <> ALL(SELECT to_regclass(name) FROM unnest($1::text[]) AS name) "
+        "ORDER BY 1, 3", list(tables))
+    for key in keys:
+        await conn.execute(f'ALTER TABLE {key["dependent"]} DROP CONSTRAINT "{key["conname"]}"')
+    await conn.execute(f"DROP TABLE {', '.join(tables)}")
+    raised = True
+    try:
+        yield
+        raised = False
+    finally:
+        for key in keys:
+            try:
+                if await conn.fetchval("SELECT to_regclass($1) IS NOT NULL", key["referenced"]):
+                    await conn.execute(
+                        f'ALTER TABLE {key["dependent"]} ADD CONSTRAINT "{key["conname"]}" {key["definition"]}')
+            except Exception:
+                if not raised:
+                    raise
+
+
 async def until(check: Callable[[], Any], what: str = "the condition", timeout: float = 15.0) -> None:
     """Wait until ``check()`` holds, looking every 10 ms; fail after ``timeout`` seconds."""
     loop = asyncio.get_running_loop()

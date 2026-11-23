@@ -5890,6 +5890,25 @@ triage preset, renderer, parser, writer, why API/CLI, UI, Manager hand-off or
 briefing reader yet. The dashboard, Lark and Telegram therefore gain no new
 message behavior; CLI configuration can call the operator-only operations.
 
+### Event triage Manager handoff
+
+An important triage event that owns at least one message of its run is handed to the Manager:
+`agents.triage_run.store` calls `agents.triage_handoff` in the same transaction, which writes one
+`manager_events` row of kind `triage` (no task) per owning event and sets `triage_events.manager_event_id`.
+Ownership is the highest category that cites a window message, then the earliest event id
+(`db.triage_events.owned_counts`, which the brief reads too); an event fully covered by another has no row.
+The row targets the default Manager's operator direct chat (`operator_dm_target`), else the operator's newest
+dashboard chat, else it falls back at once (`no_chat`). It never targets a group, and holds ids only.
+`manager_events.claim` takes a `kind` (default `task_end`), so a triage event never joins a task-end batch.
+`agents.triage_turn` is what a turn runs on: the `[TRIAGE]` message with every event fenced as outside content,
+the reply contract (a message, or exactly `NO_REPLY`), the daily cap (`subscriptions.triage.max_turns_per_day`,
+default 12, in `triage_settings.get/update`; past it the batch falls back as `daily_cap`) and `finish`, which
+settles the batch: `NO_REPLY` is `skipped`/`manager_silent`, a message goes through the delivery layer
+(`ProactiveSource.TRIAGE`) to `delivered`, `delivery_deferred` or `send_failed`, and a failed, timed-out or
+preempted turn falls back (`turn_failed`, `turn_timeout`, `turn_stopped`). A triage fallback sends nothing:
+it has no code notice and the processor's text is never sent; the event waits for the brief. The Manager does
+not run these turns yet (`manager.py` is untouched); an unclaimed triage row falls back as `queue_deadline`.
+
 ### Message leads
 
 Message leads are sourced, unconfirmed notes, stored in PostgreSQL rather than
@@ -6522,6 +6541,44 @@ list or command line changes either way.
   `/new` and `/gates`, only in the operator's own turns
   (`operator_identity.is_operator`); a group, another sender and an API
   client get a refusal.
+
+### Idle checks
+
+([RFC](rfcs/assistant-phase3-v0.zh-CN.md) section 4.)
+
+When the default Manager has been idle for 30 minutes, code reads the needs-you
+summary, picks what is new since it last looked, and only then asks the Manager
+(a read-only turn in `main`) whether to say something; the Manager may answer
+`NO_REPLY`, and what it writes goes to the operator's direct chat through the
+delivery layer. The switch is `manager.idle_checks.enabled` (default off, no
+row is off), set only through the operator-only `idle_check_settings.get` and
+`update`; `update(true)` answers `conflict` unless `delivery.enabled`,
+`attention.enabled` and `manager.lanes.enabled` are on. Not in `chat_settings`.
+
+- `agents/idle_checks.py`: `plan(state)` is a pure function of typed inputs
+  (the rules of RFC 4.3, cheap ones first, each skip typed); `select` takes the
+  summary's sections by a typed table (`gates` and `confirmations` never; the
+  rest by their own rule) and drops what a check of the last 7 days that ended
+  `silent`, `sent` or `uncertain` already named, by a per-section fingerprint
+  (a schedule's includes `last_ok_at`, so "fail, skipped gate, fail" is new);
+  `render_message` writes the English `[IDLE CHECK]` text with every title
+  fenced (`untrusted.Source.NEEDS_YOU`); `parse_reply` accepts `NO_REPLY`
+  exactly; `deliver_result` settles the check (`silent`, `sent`, `uncertain`,
+  `deferred`, `failed`) after `proactive_delivery.decide`.
+- `IdleCheckService` ticks every 5 minutes. With the switch off a tick reads the
+  setting and stops. A tick that decides not to check writes nothing (it counts
+  the reason and logs it at DEBUG). The advisory lock covers only "decide,
+  insert, publish". Checks left `running` by an earlier server fail as `restart`.
+- Rows: `idle_checks` (kept 90 days; migration `idle_checks`). The migration
+  `idle_check_source` adds `idle_check` to the source check of
+  `proactive_deliveries`, built from the check's current values, so it composes
+  with the morning brief's and triage's widenings.
+- `attention.summary`'s `schedules` items gain the fact `last_ok_at`; `/todo`
+  and the Needs you page are unchanged.
+- The Manager side (its `idle_for()`, the shared background-turn entry, the lane
+  a check runs in, `IDLE_CHECK_DUE` routing, and what a user message does to a
+  queued or running check) and the service's start in `serve` come after the
+  lanes change; until then nothing starts a service and the switch has no effect.
 
 ### User gates
 
