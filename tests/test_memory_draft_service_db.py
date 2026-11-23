@@ -31,6 +31,47 @@ def reply(**fields):
                        "reason": "Seed supports this", "instructions_seen": [], **fields})
 
 
+def test_notifications_draft_without_reserving_a_pool_connection(monkeypatch, tmp_path):
+    from looper.agents import memory_draft_service
+
+    repo = sup.synthetic_vault(tmp_path)
+    monkeypatch.setattr(memory_draft_service, "TICK_SECONDS", 3600)
+
+    async def check(pool):
+        await sup.configure_write(repo, pool)
+        service = memory_draft_service.MemoryDraftService(tmp_path / "runtime", db=pool, backend=Backend(reply()))
+        idle, drafted = asyncio.Event(), asyncio.Event()
+        run_once = service.run_once
+
+        async def pass_once():
+            processed = await run_once()
+            if processed:
+                drafted.set()
+            else:
+                idle.set()
+            return processed
+
+        monkeypatch.setattr(service, "run_once", pass_once)
+        try:
+            await service.start(DSN)
+            listener = service._listener
+            await asyncio.wait_for(idle.wait(), 5)
+            # Every pool slot remains available while LISTEN waits on its own session.
+            async with pool.acquire(timeout=5) as conn, pool.acquire(timeout=5), pool.acquire(timeout=5):
+                cid = await sup.candidate(conn)
+                await conn.execute("SELECT pg_notify('looper_memory_draft', '')")
+
+            await asyncio.wait_for(drafted.wait(), 5)
+            assert (await store.get(cid, db=pool))["candidate"]["state"] == "pending"
+            assert not (repo / sup.NOTE["path"]).exists()
+        finally:
+            await service.stop()
+        assert listener.is_closed()
+        await service.stop()
+
+    run_db(check, monkeypatch, timeout=30)
+
+
 def test_draft_to_pending_then_confirmed_write(monkeypatch, tmp_path):
     from looper.agents.memory_draft_service import MemoryDraftService
     from looper.agents.memory_write import MemoryWriteService

@@ -1167,7 +1167,7 @@ async def _run_agent_system_watched(
         await source_service.start()
         await intent_push_service.start()
         await memory_writer.start()
-        await memory_drafter.start()
+        await memory_drafter.start(dsn)
         await memory_push_service.start()
         await reminder_service.start()  # idle while reminders are off
         await idle_check_service.start()

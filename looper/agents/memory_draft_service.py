@@ -15,6 +15,8 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
+import asyncpg
+
 from ..db import connection, memory as store, system_settings
 from . import memory_draft, memory_draft_role, memory_model as model, memory_settings, memory_write, vault
 from .model_call import CallFailed, CallFailure, Execution
@@ -52,10 +54,11 @@ class MemoryDraftService:
     def _notified(self, *_args) -> None:
         self.wake()
 
-    async def start(self) -> None:
+    async def start(self, database_url: str) -> None:
         if self._task is None:
             self._stopping = False
-            self._listener = await (self.db or connection.get_pool()).acquire()
+            # LISTEN owns a session for the service's lifetime; leave pooled slots for short queries.
+            self._listener = await asyncpg.connect(database_url, timeout=10)
             await self._listener.add_listener(_WAKE, self._notified)
             self._task = asyncio.create_task(self._loop(), name="memory-draft")
 
@@ -66,8 +69,7 @@ class MemoryDraftService:
             await asyncio.shield(self._task)
             self._task = None
         if self._listener is not None:
-            await self._listener.remove_listener(_WAKE, self._notified)
-            await (self.db or connection.get_pool()).release(self._listener)
+            await self._listener.close()
             self._listener = None
 
     async def _loop(self) -> None:
