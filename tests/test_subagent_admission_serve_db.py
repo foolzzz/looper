@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 import shlex
 import sys
 import time
@@ -148,26 +149,30 @@ def _screenshots(api, task_id, phase, work_dir):
                     extra_http_headers={"Authorization": f"Bearer {api.token}"})
                 page.goto(f"{api.base_url}/#tasks/{task_id}?tab=run-tree", timeout=15000)
                 page.get_by_text("quota-child", exact=False).first.wait_for(timeout=15000)
-                _public_work_dir(page, work_dir)
+                _public_paths(page, work_dir)
                 page.screenshot(path=str(output / f"explorer-admission-{phase}-{width}.png"), full_page=True)
-                page.goto(f"{api.base_url}/#tasks/{task_id}?tab=overview", timeout=15000)
-                page.get_by_text("Explorer", exact=False).first.wait_for(timeout=15000)
-                _public_work_dir(page, work_dir)
+                page.goto(f"{api.base_url}/#tasks/{task_id}?tab=sessions", timeout=15000)
+                activity = page.get_by_text(re.compile(r"^Explorer \d+:")).first
+                activity.wait_for(timeout=15000)
+                activity.scroll_into_view_if_needed()
+                _public_paths(page, work_dir)
                 page.screenshot(path=str(output / f"explorer-activity-{phase}-{width}.png"), full_page=True)
                 page.close()
         finally:
             browser.close()
 
 
-def _public_work_dir(page, work_dir):
-    # Redact the disposable directory in exported screenshots only.
-    page.evaluate("""path => {
+def _public_paths(page, work_dir):
+    # Redact disposable source and runtime paths in exported screenshots only.
+    page.evaluate("""replacements => {
         const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
         while (walker.nextNode()) {
             const node = walker.currentNode;
-            if (node.nodeValue.includes(path)) node.nodeValue = node.nodeValue.split(path).join('/workspace');
+            for (const [path, label] of replacements) {
+                if (node.nodeValue.includes(path)) node.nodeValue = node.nodeValue.split(path).join(label);
+            }
         }
-    }""", str(work_dir))
+    }""", [[str(work_dir), "/workspace"], [str(work_dir.parent), "/validation"]])
 
 
 def test_serve_worker_lends_one_slot_then_reads_quota_hold(tmp_path, monkeypatch):
