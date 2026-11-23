@@ -2825,6 +2825,23 @@ def test_refused_model_configuration_allows_login_probe_progress_only(monkeypatc
     assert dialogs._model_refused(look) == ("a refused configuration changed the registry" if changed else None)
 
 
+def test_dialog_selection_keeps_fake_only_and_unavailable_cases_explicit(monkeypatch):
+    from evals.prompt_regression import dialogs
+
+    selected = dialogs.select(None)
+    assert all(dialog in selected for dialog in dialogs.DIALOGS if dialog.sessions)
+    assert not any(dialog in selected for dialog in dialogs.FAKE_DIALOGS)
+    fake = dialogs.FAKE_DIALOGS[0]
+    assert dialogs.select([fake.id]) == (fake,)
+    with pytest.raises(ValueError, match="unknown dialog id"):
+        dialogs.select(["missing-dialog"])
+    unavailable = next(dialog for dialog in dialogs.DIALOGS if dialog.sessions)
+    monkeypatch.setattr(dialogs, "_runnable", lambda dialog: dialog is not unavailable)
+    assert unavailable not in dialogs.select(None)
+    with pytest.raises(ValueError, match="session routing"):
+        dialogs.select([fake.id, unavailable.id])
+
+
 @pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
 @pytest.mark.parametrize("dialog", MANAGER_DIALOGS, ids=lambda dialog: dialog.id)
 def test_the_managers_dialog_passes_in_fake_mode(tmp_path: Path, dialog: Any) -> None:
