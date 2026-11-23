@@ -8,7 +8,9 @@ The claim stores the ids that read returned, in that same write. A sent or uncer
 in the same transaction as its row. A refusal records none and clears the stored ids, so a Tuesday brief that
 was rejected is still in Wednesday's. If the sender stops before that record, recovery consumes exactly the
 stored ids and does not scan by time: a row whose insert had not committed is still read once, on the next
-brief. Nothing in any section means
+brief. With triage enabled, the operator DM also gets owned digest and important fallback events, using
+the same window and exact-id claim/settlement/recovery policy. No model sees those rendered fields.
+Nothing in any section means
 nothing is sent. The switch, the channel and the operator are read again after the summary and again
 immediately before the post. The switch is read once more after the operator query returns: it can be turned
 off while that query runs. A fresh claim that then fails the check is deleted. A claim that continued a refusal
@@ -27,17 +29,20 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 from collections.abc import Callable, Mapping
 from datetime import date, datetime, time, timedelta, timezone
 from typing import Any
 from zoneinfo import ZoneInfo
 
-from ..db import connection, morning_briefs as store, proactive_deliveries as deliveries
-from . import attention, chat_settings, proactive_delivery, turn_metrics
+from ..db import connection, morning_briefs as store, proactive_deliveries as deliveries, triage_events
+from ..db.triage_events import BriefEvent
+from . import attention, chat_settings, proactive_delivery, triage_settings, turn_metrics
 from .channels.base import PostOutcome
-from .operator_identity import OPERATOR_KEY
+from .operator_identity import OPERATOR_KEY, operator_dm_target
 from .proactive_delivery import ChatKind, Delivery, DeliveryKind, DeliveryState, Outcome, Urgency
 from .reminders import target
+from .subscriptions import strip_mentions
 
 logger = logging.getLogger(__name__)
 
@@ -103,7 +108,7 @@ def _digest_line(row: Mapping[str, Any], tz: ZoneInfo) -> str:
 
 
 def render(*, day: date, needs: str | None, reminders: list[Mapping[str, Any]], digests: list[Mapping[str, Any]],
-           tz: ZoneInfo) -> str | None:
+           tz: ZoneInfo, triage: list[BriefEvent] = (), triage_more: int = 0) -> str | None:
     """The brief, or None when every section is empty. ``needs`` is the needs-you summary; the empty summary is
     not a section."""
     sections: list[str] = []
@@ -113,10 +118,29 @@ def render(*, day: date, needs: str | None, reminders: list[Mapping[str, Any]], 
         sections.append("今天的提醒\n" + "\n".join(_reminder_line(row, tz) for row in reminders))
     if digests:
         sections.append("推迟到这份晨报的消息\n" + "\n".join(_digest_line(row, tz) for row in digests))
+    if triage:
+        lines = [_triage_line(event, tz) for event in triage]
+        if triage_more > 0:
+            lines.append(f"另有 {triage_more} 条，见消息流页")
+        sections.append("进摘要的事件\n" + "\n".join(lines))
     if not sections:
         return None
     title = f"晨报 · {day:%m-%d}（周{_WEEKDAYS[day.weekday()]}）"
     return "\n\n".join([title, *sections])
+
+
+def _triage_line(event: BriefEvent, tz: ZoneInfo) -> str:
+    # Use memory_push's literal Markdown escaping after removing Lark mention markup.
+    title, chat, summary = (re.sub(r'([\\`*_{}\[\]<>()#+\-.!|~])', r'\\\1',
+                                   strip_mentions(_plain(value)).replace("@", ""))
+                            for value in (event.title, event.chat_name, event.summary))
+    when = event.last_sent_at.astimezone(tz)
+    line = f"E-{event.id} {title}（{chat} · {when:%H:%M}）：{summary}"
+    if event.flagged:
+        line += "（含要求助手做事的话）"
+    if event.category == "important":
+        line += "（重要，未能及时告诉你）"
+    return line
 
 
 def _detail(text: str | None) -> str | None:
@@ -271,7 +295,15 @@ class MorningBriefService:
         dates = list(digest_dates_through(origin, day))
         deferred = await store.digests(
             conn, channel_id=channel_id, chat=chat, until=now, dates=dates)
-        text = render(day=day, needs=needs, reminders=reminders, digests=deferred, tz=policy.timezone)
+        triage: list[BriefEvent] = []
+        triage_more = 0
+        if await triage_settings.enabled(db=conn):
+            dm = await operator_dm_target()
+            if dm is not None and (channel_id, chat) == (dm.channel_id, dm.chat):
+                dates_start = datetime.combine(min(dates), time.min, tzinfo=policy.timezone)
+                triage, triage_more = await triage_events.for_brief(conn, dates_start=dates_start)
+        text = render(day=day, needs=needs, reminders=reminders, digests=deferred, tz=policy.timezone,
+                      triage=triage, triage_more=triage_more)
         delivery = Delivery(DeliveryKind.MORNING_BRIEF, Urgency.NORMAL, ChatKind.DIRECT, silent=text is None)
         decision = proactive_delivery.deliver(delivery, policy, DeliveryState(now))
         if not await self._accepts(channel_id, chat):
@@ -280,7 +312,9 @@ class MorningBriefService:
             await store.skip(conn, day, channel_id, chat, now, "nothing to say")
             return
         read_ids = [row["id"] for row in deferred]
-        if not await store.claim(conn, day, channel_id, chat, now, attempts_limit=ATTEMPTS, read_ids=read_ids):
+        triage_ids = [event.id for event in triage]
+        if not await store.claim(conn, day, channel_id, chat, now, attempts_limit=ATTEMPTS, read_ids=read_ids,
+                                 triage_ids=triage_ids):
             return
         key = _key(day, channel_id, chat)
         decided = False
@@ -311,7 +345,8 @@ class MorningBriefService:
             status = "uncertain"
         await store.settle(conn, day, channel_id, chat, status, now=self._clock(), detail=_detail(error),
                            consumed_until=None if status == "failed" else now,
-                           read_ids=None if status == "failed" else read_ids)
+                           read_ids=None if status == "failed" else read_ids,
+                           triage_ids=None if status == "failed" else triage_ids)
         if decided:
             try:
                 await deliveries.record_receipt(key, outcome.value, external)

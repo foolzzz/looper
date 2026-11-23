@@ -74,6 +74,7 @@ from .scheduler import Scheduler
 from .message import MessageType
 from .runtimes.runner.supervisor import RunnerSupervisor
 from .supervisor import AgentSupervisor
+from .tiers import triage_background
 from .tiers.manager import ManagerConfig
 from .tiers.task import TaskRouter
 from .tiers.worker import WorkerConfig, WorkerPool
@@ -1162,6 +1163,7 @@ async def _run_agent_system_watched(
         await memory_writer.start()
         await memory_push_service.start()
         await reminder_service.start()  # idle while reminders are off
+        triage_background.configure(registry.post)
         await idle_check_service.start()
         await morning_brief_service.start()  # idle while the morning brief is off
         await metrics_alert_service.start()

@@ -132,7 +132,15 @@ async def plan_message(planner: Any, kind: Any, message: str) -> AsyncIterator[s
         yield message + "\n\n" + "\n".join(notes) if notes else message
     except BaseException:
         # A timeout, cancellation or invalid repaired reply did not deliver feedback successfully.
+        # A database error here must not replace that exception. except Exception leaves a second
+        # cancellation free to propagate. Claims that stay told are the same loss as a crash
+        # between the claim and this release.
         if claimed:
-            await get_pool().execute("UPDATE skill_proposal_events SET told_at = NULL WHERE id = ANY($1::bigint[])",
-                                     claimed)
+            try:
+                await get_pool().execute(
+                    "UPDATE skill_proposal_events SET told_at = NULL WHERE id = ANY($1::bigint[])", claimed)
+            except Exception:
+                logger.warning(
+                    "project %s: could not release %d skill proposal feedback claim(s); they stay told",
+                    planner._plan.project_id, len(claimed), exc_info=True)
         raise

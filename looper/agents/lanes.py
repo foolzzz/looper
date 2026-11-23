@@ -30,7 +30,7 @@ class Lane(IntEnum):
 
 def manager_lane(origin: TurnOrigin) -> Lane | None:
     return {TurnOrigin.USER: Lane.INTERACTIVE, TurnOrigin.COMPLETION: Lane.BACKGROUND,
-            TurnOrigin.IDLE_CHECK: Lane.BACKGROUND,
+            TurnOrigin.IDLE_CHECK: Lane.BACKGROUND, TurnOrigin.TRIAGE: Lane.BACKGROUND,
             TurnOrigin.OWN: None}[origin]
 
 
