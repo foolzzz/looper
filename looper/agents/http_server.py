@@ -768,8 +768,12 @@ class AgentHTTPServer:
             tool = Tool(name=operation.operation_id, description=operation.description, schema=operation.request or {},
                         risk=Risk(operation.risk), run=run,
                         escalate=impact if callable(getattr(domain, "impact", None)) else None)
+            async def level(arguments: Mapping[str, Any]) -> Any:
+                # where the operation's call reaches, for the outbound review (``Operation.level``)
+                return await operation.level_of(arguments) if operation.level_of is not None else operation.level
+
             answer = await self._call_v1(principal, headers.get("x-looper-session") or DEFAULT_SESSION,
-                                         tool.name, data, tool=tool,
+                                         tool.name, data, tool=tool, level_of=level,
                                          validator=getattr(domain, "validate_arguments", api_v1.validate_arguments))
             if answer.get("status") == "error":
                 log_refusal(logger, operation, principal, answer["error"]["code"])
@@ -1378,7 +1382,7 @@ class AgentHTTPServer:
         if target.agent_type == "planner":
             return await projects.add_task_supplement(
                 target.agent_id.removeprefix("planner-"), text, via=projects.VIA_CHAT,
-                wake=deliver, best_effort=True)
+                wake=deliver, best_effort=True, from_operator=client is None)  # the dashboard's, not a client's
         return await deliver(None)
 
     async def _foreign_thread_error(self, owner: str) -> OpError:
