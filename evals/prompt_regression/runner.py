@@ -394,6 +394,9 @@ def running_server(*, database_url: str, runtime_root: Path, bin_dir: Path, log_
         deadline = time.monotonic() + startup_timeout
         while True:
             if process.poll() is not None:
+                # Where the log is gone with its run (a CI job keeps only the output), say why the server stopped.
+                tail = log_path.read_text(encoding="utf-8", errors="replace").splitlines()[-40:]
+                print(f"the last lines of {log_path.name}:", *tail, sep="\n", file=sys.stderr)
                 raise EvalError(f"the server exited ({process.returncode}) before it answered; see {log_path.name}")
             try:
                 api.token = operator_auth.read_token(runtime_root)

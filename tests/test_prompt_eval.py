@@ -1453,6 +1453,23 @@ def test_every_server_installs_gh_before_starting(tmp_path: Path, monkeypatch: p
         pytest.fail("no server may start")
 
 
+def test_a_server_that_exits_before_answering_shows_its_log(tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+                                                            capsys: pytest.CaptureFixture[str]) -> None:
+    def exits(*_: Any, stdout: Any, **__: Any) -> SimpleNamespace:
+        stdout.write("OSError: [Errno 98] address already in use\n")
+        stdout.flush()
+        return SimpleNamespace(poll=lambda: 1, returncode=1)
+
+    monkeypatch.setattr(runner, "free_port", lambda: 49152)
+    monkeypatch.setattr(runner.subprocess, "Popen", exits)
+    with pytest.raises(runner.EvalError, match=r"exited \(1\)"), runner.running_server(
+        database_url="unused", runtime_root=tmp_path / "runtime", bin_dir=tmp_path / "bin",
+        log_path=tmp_path / "serve.log",
+    ):
+        pytest.fail("no server may start")
+    assert "address already in use" in capsys.readouterr().err
+
+
 @pytest.mark.parametrize("rooted", [False, True])
 def test_eval_server_projects_root_preserves_default_ops(tmp_path, monkeypatch, rooted):
     import tomllib
