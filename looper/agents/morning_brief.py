@@ -5,10 +5,14 @@ service sends one brief through ``deliver``: what waits for the operator (the ne
 that local day, and proactive messages held for the digest. A chat's first brief reads that day's digest dates
 (Monday also Saturday and Sunday). One that ran records how far it read; the next reads every digest decided
 after that and no later than this check, so a custom time does not drop a message held later that morning.
-Nothing in any section means nothing is sent. The switch, the channel and the operator are read again after the
-summary and again immediately before the post. A brief with something to say is sent uncounted and never
-deferred: it is the digest. ``decide`` records that only while ``delivery.enabled`` is on, under the same key
-as the post, and the channel receipt is written on that row.
+A refusal does not record that boundary. Until one is recorded, a later day still reads from the first
+attempt's dates, so a Tuesday brief that was rejected is still in Wednesday's. Nothing in any section means
+nothing is sent. The switch, the channel and the operator are read again after the summary and again
+immediately before the post. The switch is read once more after the operator query returns: it can be turned
+off while that query runs, and a claim that then fails the check is deleted. A brief with something to say is
+sent uncounted and never deferred: it is the digest. ``decide`` records that only while ``delivery.enabled``
+is on, under the same key as the post, and the channel receipt is written on that row. A later try replaces a
+rejected receipt on that row.
 
 ``morning_brief.enabled`` is off by default. While it is off a tick reads the in-memory switch and stops. One
 row of ``morning_briefs`` per local date and direct chat makes a restart and a second server send it at most
@@ -52,6 +56,17 @@ def digest_dates(day: date) -> tuple[date, ...]:
     if day.weekday() == 0:
         return (day - timedelta(days=2), day - timedelta(days=1), day)
     return (day,)
+
+
+def digest_dates_through(origin: date, day: date) -> tuple[date, ...]:
+    """Digest dates from a chat's first attempt ``origin`` through ``day``.
+
+    The attempt's own window is ``digest_dates(origin)`` (Monday also takes the weekend). While no brief has
+    recorded a consumption boundary, a later day keeps reading from the start of that window."""
+    start = min(digest_dates(origin))
+    if day < start:
+        return digest_dates(origin)
+    return tuple(start + timedelta(days=offset) for offset in range((day - start).days + 1))
 
 
 def is_due(local: datetime, send_at: time) -> bool:
@@ -171,10 +186,13 @@ class MorningBriefService:
             self._drain is None or not self._drain.draining)
 
     async def _accepts(self, channel_id: str, chat: str) -> bool:
-        """The switch is still on, and ``chat`` is still this enabled channel's operator."""
+        """The switch is still on, and ``chat`` is still this enabled channel's operator.
+
+        The switch is read again after the operator query returns: it can be turned off while that query runs."""
         if not self._running():
             return False
-        return (channel_id, chat) in await operator_targets()
+        current = (channel_id, chat) in await operator_targets()
+        return current and self._running()
 
     async def _loop(self) -> None:
         while not self._stopping.is_set():
@@ -242,9 +260,15 @@ class MorningBriefService:
         boundary = await store.consumption_boundary(conn, channel_id, chat)
         reminders = await store.reminders_today(conn, channel_id=channel_id, chat=chat, start=start,
                                                 end=start + timedelta(days=1))
+        # No boundary yet: keep the first attempt's window through today. A refusal leaves the boundary unset,
+        # and the next day's own dates would otherwise drop what that attempt read.
+        if boundary is None:
+            origin = await store.first_attempt_date(conn, channel_id, chat) or day
+            dates: list[date] | None = list(digest_dates_through(origin, day))
+        else:
+            dates = None
         deferred = await store.digests(
-            conn, channel_id=channel_id, chat=chat, until=now, after=boundary,
-            dates=None if boundary is not None else list(digest_dates(day)))
+            conn, channel_id=channel_id, chat=chat, until=now, after=boundary, dates=dates)
         text = render(day=day, needs=needs, reminders=reminders, digests=deferred, tz=policy.timezone)
         delivery = Delivery(DeliveryKind.MORNING_BRIEF, Urgency.NORMAL, ChatKind.DIRECT, silent=text is None)
         decision = proactive_delivery.deliver(delivery, policy, DeliveryState(now))

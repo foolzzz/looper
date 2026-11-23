@@ -8,7 +8,7 @@ from datetime import date, datetime, time, timezone
 from zoneinfo import ZoneInfo
 
 from looper.agents import attention, chat_settings, morning_brief
-from looper.agents.morning_brief import digest_dates, is_due, render
+from looper.agents.morning_brief import digest_dates, digest_dates_through, is_due, render
 from looper.db import connection
 
 ZONE = ZoneInfo("America/Los_Angeles")
@@ -20,6 +20,16 @@ def test_monday_covers_the_weekend_and_another_workday_covers_itself() -> None:
     assert digest_dates(MONDAY) == (date(2026, 11, 21), date(2026, 11, 22), MONDAY)
     assert digest_dates(FRIDAY) == (FRIDAY,)
     assert digest_dates(date(2026, 11, 24)) == (date(2026, 11, 24),)
+
+
+def test_a_later_day_keeps_the_first_attempts_window() -> None:
+    """A refusal records no boundary, so the next day still starts where the first attempt did."""
+    tuesday = date(2026, 11, 24)
+    wednesday = date(2026, 11, 25)
+    assert digest_dates_through(tuesday, tuesday) == (tuesday,)
+    assert digest_dates_through(tuesday, wednesday) == (tuesday, wednesday)
+    assert digest_dates_through(MONDAY, wednesday) == (
+        date(2026, 11, 21), date(2026, 11, 22), MONDAY, tuesday, wednesday)
 
 
 def test_it_is_due_on_a_workday_at_the_configured_time() -> None:

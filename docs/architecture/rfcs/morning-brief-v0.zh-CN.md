@@ -18,7 +18,7 @@
 
 1. **等你处理的：** Needs you 的 `summary_text`。`attention.enabled` 只关页面和 `/todo`，晨报照样读汇总。汇总说「现在没有需要你处理的事」时这一节不出现。读失败或读不到不算空，照写进晨报，避免把没读到说成没有。
 2. **今天的提醒：** 这条私聊里 `pending`、`due_at` 落在当地今天的提醒，按时间排序。提醒服务周末也会发，所以这里只看今天，不补周末。
-3. **推迟到这份晨报的消息：** `proactive_deliveries` 里 `decision = digest` 的行（`source` 是发送点）。这个会话还没有消费边界时，取 `digest_date` 是今天的，周一同时收进周六和周日，否则周五夜里推迟的（`digest_date` 是周六）会丢掉。一份晨报发出、跳过或记为不确定时，把这次检查的时间记在 `morning_briefs.consumed_until`；下一份只取 `decided_at` 晚于该边界、且不晚于这次检查的。这样自定义时间早于免打扰结束时，晨报发出后才被按住的消息（例如周二 07:00 发出，07:30 的消息落在周二的摘要）会进以后的晨报，而不是被丢掉。拒绝留下的行不记边界，重试仍读这些摘要。不收 `source = morning_brief` 自己的行。表里没有正文，晨报只写出种类、原因、时间和关联 id。
+3. **推迟到这份晨报的消息：** `proactive_deliveries` 里 `decision = digest` 的行（`source` 是发送点）。这个会话还没有消费边界时，取首次尝试那天的摘要日期（周一同时收进周六和周日），并一直取到今天：首次尝试在周二被拒绝后，周三的晨报仍包含周二的摘要。一份晨报发出、跳过或记为不确定时，把这次检查的时间记在 `morning_briefs.consumed_until`；下一份只取 `decided_at` 晚于该边界、且不晚于这次检查的。这样自定义时间早于免打扰结束时，晨报发出后才被按住的消息（例如周二 07:00 发出，07:30 的消息落在周二的摘要）会进以后的晨报，而不是被丢掉。拒绝留下的行不记边界，重试仍读这些摘要。不收 `source = morning_brief` 自己的行。表里没有正文，晨报只写出种类、原因、时间和关联 id。
 
 每个开着的、配置了 `operator_sender_id` 的 Telegram / Lark 机器人各发一条，按 `(本地日期, channel_id, chat)` 幂等。一个都没有时写一行空的 `channel_id` 和 `chat`，不调用渠道。
 
@@ -26,7 +26,7 @@
 
 晨报走 `deliver()`。`silent`（三节都空）是 `drop`，不发。有内容时 `source` 是 `morning_brief`：在静默规则之后、紧急类之前命中，结果是 `decision = send`、`reason = within_limits`、不计数，免打扰时段和每日上限都不能把它再推进摘要。
 
-`decide()` 只在 `delivery.enabled` 开着时把这次判断写进那条消息的 `proactive_deliveries` 行。去重键 `morning_brief:<本地日期>:<channel_id>:<chat>` 也是这次 `post` 的幂等键。发出后 `record_receipt()` 把渠道回执写回同一行（`outcome`、`sent_at`、`external_id`）。送达层关着时晨报照发，那张表不变。
+`decide()` 只在 `delivery.enabled` 开着时把这次判断写进那条消息的 `proactive_deliveries` 行。去重键 `morning_brief:<本地日期>:<channel_id>:<chat>` 也是这次 `post` 的幂等键。发出后 `record_receipt()` 把渠道回执写回同一行（`outcome`、`sent_at`、`external_id`）。同一键上先前的 `rejected` 回执会被这次的结果替换。送达层关着时晨报照发，那张表不变。
 
 已经建过 `proactive_deliveries` 的库不会重放建表语句，所以另有一次迁移把 `source` 检查放宽到包含 `morning_brief`。
 
@@ -40,7 +40,7 @@
 - `uncertain`：发送方在记下结果前停了，或渠道的答复丢了。可能已经发出，不再发。
 - `failed`：渠道拒绝。`attempts` 小于 3 时下次检查再试；第 3 次仍拒绝就留下。
 
-检查间隔 30 秒。开关关闭时每次只读内存里的开关，不调用 `deliver`，不写库，不发消息。
+检查间隔 30 秒。开关关闭时每次只读内存里的开关，不调用 `deliver`，不写库，不发消息。认领之后、发出之前再查一次开关和操作者；查询操作者返回后再读一次开关。这次等待期间关掉开关，删掉 `sending` 行，当天稍后重新打开仍会发。
 
 ## 5. 动作级别
 

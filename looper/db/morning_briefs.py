@@ -5,7 +5,8 @@ say, or there was no operator chat. ``uncertain`` may have gone out (the sender 
 was lost) and is never sent again. ``failed`` is a refusal, tried again while ``attempts`` is under the limit.
 The delivery (``agents.morning_brief``) is the only writer. Weekends write nothing. ``consumed_until`` is how far
 that chat's briefs have read: a sent, skipped or uncertain brief sets it to the check's time, and the next brief
-reads digests decided after it. A refusal leaves it unset, so the retry reads the same digests.
+reads digests decided after it. A refusal leaves it unset, so the retry reads the same digests. Until a boundary
+is recorded, a later day still starts from the first attempt's date.
 """
 
 from __future__ import annotations
@@ -100,12 +101,18 @@ async def consumption_boundary(conn: Any, channel_id: str, chat: str) -> datetim
         "SELECT max(consumed_until) FROM morning_briefs WHERE channel_id = $1 AND chat = $2", channel_id, chat)
 
 
+async def first_attempt_date(conn: Any, channel_id: str, chat: str) -> date | None:
+    """The local date of this chat's earliest brief, including a refusal. None before the first attempt."""
+    return await conn.fetchval(
+        "SELECT min(local_date) FROM morning_briefs WHERE channel_id = $1 AND chat = $2", channel_id, chat)
+
+
 async def digests(conn: Any, *, channel_id: str, chat: str, until: datetime, dates: list[date] | None = None,
                   after: datetime | None = None) -> list[dict[str, Any]]:
     """Proactive messages deferred for this chat, oldest first, decided at or before ``until``. With ``after``
     (the previous brief's boundary) that is every one decided since; without it, those whose ``digest_date`` is in
-    ``dates`` (a chat's first brief). A morning brief is not one of them. ``source`` is what the metrics call the
-    send point."""
+    ``dates`` (a chat that has not recorded a boundary: its first attempt's dates through the day being sent). A
+    morning brief is not one of them. ``source`` is what the metrics call the send point."""
     if after is not None:
         rows = await conn.fetch(
             "SELECT id, source AS kind, reason, decided_at, task_id, schedule_id FROM proactive_deliveries "

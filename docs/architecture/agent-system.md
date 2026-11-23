@@ -5662,7 +5662,7 @@ again keeps its first decision and the channel's receipt lands on the same
 row; decisions on one chat are taken one at a time, so the cap holds across
 send points. After the post the send point records the receipt (`outcome`
 `sent` or `rejected`, `sent_at`, `external_id`) unless the metrics already
-did. A morning brief (`source` `morning_brief`) is sent uncounted and is never
+did. A later try of the same message replaces a `rejected` receipt. A morning brief (`source` `morning_brief`) is sent uncounted and is never
 deferred: it is the digest. Off, a send point that switch controls writes
 nothing; the brief has its own switch and still calls `deliver`. Wired so far:
 gate reminders, which are always `blocking`, and the morning brief; a decision
@@ -5678,15 +5678,21 @@ direct chat. It names what waits (the needs-you summary), reminders due that
 local day, and proactive messages deferred into the digest (`decision`
 `digest`). A chat's first brief takes that day's digest, and Monday also
 Saturday and Sunday; a brief that ran records `consumed_until`, and the next
-takes every digest decided after that. Every section empty means nothing is
-sent. The switch, whether the channel is enabled and who the operator is are
-read again after the summary is collected and again immediately before the
-post. The switch `morning_brief.enabled` is off by default and operator-only
+takes every digest decided after that. Until a brief has recorded that
+boundary, a later day still reads from the first attempt's dates, so a
+rejected Tuesday brief's digest is still in Wednesday's. Every section empty
+means nothing is sent. The switch, whether the channel is enabled and who the
+operator is are read again after the summary is collected and again
+immediately before the post. The switch is read again after the operator
+query returns; a claim that then fails that check is deleted. The switch
+`morning_brief.enabled` is off by default and operator-only
 (`morning_brief.get`, `morning_brief.update`); off, a tick reads the in-memory
 switch and does nothing else. One `morning_briefs` row per local date and chat
 makes a restart and a second server send it at most once. A send that stops
 mid-way is `uncertain` and is not sent again. With `delivery.enabled` on, the
-decision and the channel receipt share one `proactive_deliveries` row. Design:
+decision and the channel receipt share one `proactive_deliveries` row. A later
+successful try replaces a rejected receipt on that row (`outcome`, `sent_at`,
+`external_id`). Design:
 [morning brief RFC](rfcs/morning-brief-v0.zh-CN.md).
 
 ### Card buttons

@@ -377,6 +377,52 @@ def test_a_change_while_collection_is_awaited_is_rechecked_before_sending(
     run_with_channel_configs(operator_changed, monkeypatch)
 
 
+def test_turning_the_brief_off_during_the_last_operator_check_drops_the_claim(
+        monkeypatch: pytest.MonkeyPatch) -> None:
+    """The switch is read again after ``operator_targets`` returns. Turning it off during that wait, once the day
+    is claimed, sends nothing and deletes the ``sending`` row, so a later tick the same day still sends."""
+
+    async def test(pool: Any) -> None:
+        await _zone(pool)
+        await _operator(pool)
+        monkeypatch.setattr(attention, "collect", _collect(_summary("error", "db down")))
+        claimed = False
+        flips = 0
+        real_claim = morning_brief.store.claim
+        real_targets = morning_brief.operator_targets
+
+        async def claim(conn: Any, local_date: date, channel_id: str, chat: str, now: datetime, *,
+                        attempts_limit: int) -> bool:
+            nonlocal claimed
+            ok = await real_claim(conn, local_date, channel_id, chat, now, attempts_limit=attempts_limit)
+            claimed = claimed or bool(ok)
+            return ok
+
+        async def targets() -> list[tuple[str, str]]:
+            nonlocal flips
+            found = await real_targets()
+            if claimed:
+                flips += 1
+                chat_settings.set_morning_brief_enabled(False)
+            return found
+
+        monkeypatch.setattr(morning_brief.store, "claim", claim)
+        monkeypatch.setattr(morning_brief, "operator_targets", targets)
+        channel = _Channel()
+        service = _service(channel, MONDAY)
+        await service.run_once()
+        assert flips == 1
+        assert channel.posts == []
+        assert await _rows(pool) == []
+        monkeypatch.setattr(morning_brief.store, "claim", real_claim)
+        monkeypatch.setattr(morning_brief, "operator_targets", real_targets)
+        chat_settings.set_morning_brief_enabled(True)
+        await service.run_once()
+        assert len(channel.posts) == 1 and channel.posts[0]["to"] == OP
+
+    run_with_channel_configs(test, monkeypatch)
+
+
 def test_a_message_held_after_an_early_brief_is_read_by_a_later_one(monkeypatch: pytest.MonkeyPatch) -> None:
     """Tuesday's brief is 07:00. A 07:30 message quiet hours put in Tuesday's digest is still unread on Thursday
     when Wednesday did not run, and Friday does not repeat it."""
@@ -403,6 +449,34 @@ def test_a_message_held_after_an_early_brief_is_read_by_a_later_one(monkeypatch:
     run_with_channel_configs(test, monkeypatch)
 
 
+def test_a_rejected_first_brief_keeps_that_days_digest_on_the_next(
+        monkeypatch: pytest.MonkeyPatch) -> None:
+    """Tuesday is the first brief and the channel rejects it, so no boundary is recorded. Wednesday still includes
+    Tuesday's digest, the one the refusal already read and the one held after it. Thursday does not repeat them."""
+
+    async def test(pool: Any) -> None:
+        await _zone(pool)
+        await _operator(pool)
+        chat_settings.set_morning_brief_time("07:00")
+        monkeypatch.setattr(attention, "collect", _collect(_summary("error", "db down")))
+        tuesday = datetime(2026, 11, 24, 7, 0, tzinfo=ZONE)
+        await _digest(pool, "early", tuesday.date(), hour=6, minute=30)
+        channel = _Channel(PostOutcome.REJECTED, PostOutcome.SENT)
+        await _service(channel, tuesday).run_once()
+        assert "11-24 06:30" in channel.posts[0]["text"]
+        assert await pool.fetchval("SELECT consumed_until FROM morning_briefs") is None
+        await _digest(pool, "held", tuesday.date(), hour=7, minute=30)
+        wednesday = datetime(2026, 11, 25, 7, 0, tzinfo=ZONE)
+        await _service(channel, wednesday).run_once()
+        assert "11-24 06:30" in channel.posts[1]["text"]
+        assert "11-24 07:30" in channel.posts[1]["text"]
+        thursday = datetime(2026, 11, 26, 7, 0, tzinfo=ZONE)
+        await _service(channel, thursday).run_once()
+        assert "11-24" not in channel.posts[2]["text"]
+
+    run_with_channel_configs(test, monkeypatch)
+
+
 def test_delivery_on_records_the_receipt_on_the_decision_row(monkeypatch: pytest.MonkeyPatch) -> None:
     async def test(pool: Any) -> None:
         await _zone(pool)
@@ -422,6 +496,51 @@ def test_delivery_on_records_the_receipt_on_the_decision_row(monkeypatch: pytest
                                 "FROM proactive_deliveries")
         assert [dict(row) for row in rows] == [
             {"dedupe_key": key, "decision": "send", "outcome": "sent", "external_id": "om_1", "sent": True}]
+
+    run_with_channel_configs(test, monkeypatch)
+
+
+def test_a_successful_retry_replaces_a_rejected_receipt_when_metrics_are_off(
+        monkeypatch: pytest.MonkeyPatch) -> None:
+    """Delivery on, metrics off: the send point writes the receipt itself. A refusal records ``rejected``; the
+    successful retry of the same key replaces outcome, sent_at and external_id."""
+
+    async def test(pool: Any) -> None:
+        await _zone(pool)
+        await _operator(pool)
+        chat_settings.set_delivery_enabled(True)
+        chat_settings.set_metrics_enabled(False)
+        monkeypatch.setattr(attention, "collect", _collect(_summary("error", "db down")))
+
+        class _Retry:
+            def __init__(self) -> None:
+                self.posts: list[dict[str, Any]] = []
+
+            async def post(self, channel_id: str, target: Any, text: str, *, reply_to: str | None = None,
+                           idempotency_key: str | None = None, proactive: Any = None) -> PostReceipt:
+                self.posts.append({"channel_id": channel_id, "to": target.id, "key": idempotency_key,
+                                   "proactive": proactive})
+                if len(self.posts) == 1:
+                    return PostReceipt(False, external_ids=("om_rejected",), error="refused",
+                                       outcome=PostOutcome.REJECTED)
+                return PostReceipt(True, external_ids=("om_sent",))
+
+        channel = _Retry()
+        service = _service(channel, MONDAY)
+        await service.run_once()
+        key = f"morning_brief:{MONDAY.date().isoformat()}:channel-lark:{OP}"
+        assert channel.posts[0]["proactive"] is None and channel.posts[0]["key"] == key
+        rejected = await pool.fetchrow(
+            "SELECT decision, outcome, external_id FROM proactive_deliveries WHERE dedupe_key = $1", key)
+        assert dict(rejected) == {"decision": "send", "outcome": "rejected", "external_id": "om_rejected"}
+        stale = datetime(2020, 1, 1, tzinfo=timezone.utc)
+        await pool.execute("UPDATE proactive_deliveries SET sent_at = $1 WHERE dedupe_key = $2", stale, key)
+        await service.run_once()
+        row = await pool.fetchrow(
+            "SELECT decision, outcome, external_id, sent_at FROM proactive_deliveries WHERE dedupe_key = $1", key)
+        assert dict(row)["decision"] == "send"
+        assert row["outcome"] == "sent" and row["external_id"] == "om_sent" and row["sent_at"] > stale
+        assert await pool.fetchval("SELECT count(*) FROM proactive_deliveries WHERE dedupe_key = $1", key) == 1
 
     run_with_channel_configs(test, monkeypatch)
 

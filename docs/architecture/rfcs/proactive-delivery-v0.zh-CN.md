@@ -77,7 +77,7 @@
 | `source`、`source_ref`、`manager_id`、`channel_id`、`chat`、`chat_kind` | 先写的一方 | `source` 是度量的来源枚举（`ProactiveSource`，送达层的 `DeliveryKind` 就是它） |
 | `urgency`、`task_id`、`step_id`、`schedule_id` | 送达层 | 第 1.1 节的输入和关联对象 |
 | `decision`、`reason`、`counted`、`local_date`、`digest_date`、`decided_at` | 送达层 | 判断结果；`local_date` 是判断时在 `policy.timezone` 的本地日期，每日上限按它计；`decided_at` 由送达层填（清理按 `COALESCE(sent_at, decided_at)`，进摘要和不发的行也能删） |
-| `outcome`（`sent`、`rejected`、`unknown`）、`sent_at`、`external_id` | 度量或发送点 | 渠道回执；两者成对。度量开着时它在发送后按 `dedupe_key` 只更新这三列，不碰判断；度量关着时发送点自己记 |
+| `outcome`（`sent`、`rejected`、`unknown`）、`sent_at`、`external_id` | 度量或发送点 | 渠道回执；两者成对。度量开着时它在发送后按 `dedupe_key` 只更新这三列，不碰判断；度量关着时发送点自己记。已经记下的 `sent` 或 `unknown` 保持不动，`rejected` 会被同键的下一次尝试替换 |
 | `replied_at`、`reply_match` | 度量 | 发出后用户的回复 |
 
 - **一次一个：** `decide` 在一个事务里对这个会话加咨询锁，读当天计数、判断、写入，所以两个发送点不会同时拿到当天最后一个额度。
