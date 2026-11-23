@@ -505,6 +505,8 @@ class Session:
             asyncio.run(seed_sources())
         if getattr(self.args, 'session_routing', False):
             api.post('/api/v1/session_routing/update', {'session_routing_enabled': True})
+        if getattr(self.args, 'lanes', False):
+            api.post('/api/v1/manager_lanes/update', {'enabled': True})
         supported = True
         if self.case.id == 'address_user':
             try:
@@ -717,6 +719,8 @@ def main() -> int:
                         help='enable per-turn context through the operator-only settings')
     parser.add_argument('--session-routing', action='store_true',
                         help="turn the default Manager's session routing on (manager.session_routing.enabled)")
+    parser.add_argument('--lanes', action='store_true',
+                        help='enable Manager lanes only in this disposable run')
     args = parser.parse_args()
     if args.ack_max_ms <= 0 or args.first_reply_max_ms <= 0:
         parser.error('latency thresholds must be positive milliseconds')
@@ -789,7 +793,7 @@ def main() -> int:
     run = {'schema': SCHEMA, 'commit': runner._git()['commit'], 'date': datetime.now().astimezone().isoformat(),
            'mode': 'fake' if args.fake else 'real', 'model': args.model, 'manager_model': args.manager_model,
            'manager_effort': args.manager_effort, 'reps': args.reps, 'session_routing': args.session_routing,
-           'turn_context': args.turn_context,
+           'turn_context': args.turn_context, 'lanes': args.lanes,
            'cases': grouped, 'categories': categories_out,
            'latency_thresholds_ms': {'ack': args.ack_max_ms, 'first_reply': args.first_reply_max_ms},
            'total_cost_usd': sum(r.get('cost_usd', 0) for r in rows), 'stopped_by_cap': stopped}

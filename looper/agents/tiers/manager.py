@@ -100,13 +100,14 @@ from .journal import HANDOFF_MAX_CHARS, clip, kept_text
 from . import state_view
 from .state_view import Rendered
 from .manager_session import MAIN_SESSION, ManagerSession, _Process, session_field
-from . import manager_budget
+from . import background_turn, idle_check_turn, manager_budget, triage_background
+from .background_turn import completion_context as _completion_context  # noqa: F401 (router compatibility)
+from .. import lanes, lanes_settings
 from .manager_routing import SessionRouter
 from . import group_session
 from .. import session_routing
 from ..mid_turn_input import MidTurnInputs
 from ..ops import Turn, TurnOrigin, leads as ops_leads, manager_vault as ops_vault
-from ..channels.base import PostOutcome
 from ..ops.service import _operator_turn, tools_down_reply
 from ..ops import session_search as ops_sessions
 from ..task_notice import Notice, ends_task, web_end_text
@@ -717,31 +718,6 @@ def _reply_route(envelope: MessageEnvelope) -> dict[str, Any]:
     return {**attachments, "reply_route": route}
 
 
-def _completion_context(row: dict[str, Any], manager: AgentAddress, batch: uuid.UUID) -> MessageEnvelope:
-    """The envelope a completion turn runs on, as if it came from the chat its event names: what the turn's
-    ``Channel:`` line, its chat's live turns (``/stop``) and the replies Claude writes on its own afterwards take
-    their chat from. Its type is ``COMPLETION_DUE``: nothing treats it as the user's message."""
-    payload = json.loads(row["payload"]) if isinstance(row["payload"], str) else row["payload"]
-    fallback = json.loads(row["fallback"]) if isinstance(row["fallback"], str) else row["fallback"]
-    first = fallback[0] if fallback else {}
-    if row["target_kind"] == "web":
-        source = channel_address("web")
-        context: dict[str, Any] = {"session_id": row["chat"]}
-        metadata = {"origin_channel_id": first.get("origin_channel_id") or source.agent_id}
-    else:
-        parsed = parse_channel_id(row["channel_id"])
-        source = channel_address(parsed.channel_type if parsed is not None else "lark", row["channel_id"])
-        notice = first.get("notice") or {}
-        # A Lark notice names the person; the chat it was asked in is the task's reply route.
-        context = {"chat_id": payload.get("chat_id") or row["chat"], "chat_type": "p2p"}
-        if notice.get("kind") == "user":
-            context["sender_id"] = notice.get("chat")
-        metadata = {"origin_channel_id": row["channel_id"]}
-    return MessageEnvelope.create(source=source, target=manager, message_type=MessageType.COMPLETION_DUE,
-                                  payload={"text": "", "channel_context": context},
-                                  correlation_id=f"completion-{batch}", metadata=metadata)
-
-
 def _with_blocks(text: str, blocks: list[str]) -> str:
     """A reply: Claude's words, then what Looper itself writes to the user (``Turn.blocks``)."""
     return "\n\n".join(part for part in (text.strip(), *blocks) if part)
@@ -920,6 +896,7 @@ class ManagerAgent:
             key=MAIN_SESSION, claude=CLAUDE_CODE.resident_session(self.agent_id), claude_runtime=CLAUDE_CODE,
             last_activity=clock())}
         self._clock = clock
+        self._idle_started_at = clock()
         self._mid_turn = MidTurnInputs(self)
         self._router = SessionRouter(self)  # the sessions' workers while session routing is on
         self._turns = TurnRegistry()  # every user message from its delivery to its end (stop_turn's targets)
@@ -1086,6 +1063,7 @@ class ManagerAgent:
         self._bus = bus
         self._running = True
         main.last_activity = self._clock()
+        self._idle_started_at = self._clock()
 
         await self._load_db_config()
         if not main.session_loaded:
@@ -1205,7 +1183,8 @@ class ManagerAgent:
             if self.stop_chat is not None:
                 from ..managers import chat_stop_reply
 
-                summary = await self.stop_chat(origin["channel_id"] or channel or "", chat or "", via=channel or "")
+                summary = await self.stop_chat(origin["channel_id"] or channel or "", chat or "", via=channel or "",
+                    sender_id=origin["sender"] if not origin["group"] else None)
                 reply = chat_stop_reply(summary)
                 # Only an empty fleet lookup falls back to the receiving runtime's legacy idle answer.
                 if summary.state == "enabled" and not summary.matched and not self.can_interrupt:
@@ -1218,7 +1197,8 @@ class ManagerAgent:
             if not self.can_interrupt:
                 await self._send_reply(envelope, STOP_UNSUPPORTED_REPLY, persist=False)
                 return
-            tokens = self._turns.live_for(origin["channel_id"] or channel, chat) if channel and chat else []
+            tokens = self.live_for_chat(origin["channel_id"] or channel, chat,
+                sender_id=origin["sender"] if not origin["group"] else None) if channel and chat else []
             stopped = 0
             for token in tokens:
                 result = await self.stop_turn(token.message_id, via=channel)
@@ -1353,6 +1333,15 @@ class ManagerAgent:
         runs on its own does not count."""
         return any(session.turn_lock.locked() for session in self._sessions.values())  # any session's
 
+    def idle_for(self) -> float | None:
+        """Seconds since main's last completed turn; other sessions never reset this clock."""
+        main = self._sessions[MAIN_SESSION]
+        if (main.turn_lock.locked() or main.running_token is not None or self._router.holds(main)
+                or (main.claude.started and not main.claude.idle)):
+            return None
+        return max(0.0, self._clock() - (main.turn_ended_at if main.turn_ended_at is not None
+                                       else self._idle_started_at))
+
     async def _message_loop(self) -> None:
         assert self._bus is not None
         try:
@@ -1370,7 +1359,9 @@ class ManagerAgent:
                 if self._drain is not None:
                     await self._drain.wait_serving()
                 if (session := await self._router.target(envelope)) is not None:
-                    if not await self._mid_turn.merge(session, envelope):
+                    merged = (await lanes.route_arrival(self, session, envelope) if lanes_settings.enabled()
+                              else await self._mid_turn.merge(session, envelope))
+                    if not merged:
                         self._router.dispatch(session, envelope)  # its worker handles and settles it
                     continue
                 self._handling = envelope
@@ -1381,6 +1372,9 @@ class ManagerAgent:
                 finally:
                     self._handling = None
                     self._last_activity = self._clock()
+                    if envelope.message_type in (MessageType.USER_MESSAGE, MessageType.COMPLETION_DUE,
+                                                  MessageType.IDLE_CHECK_DUE) and not self._router.holds_completion(envelope):
+                        self._sessions[MAIN_SESSION].turn_ended_at = self._clock()
                 # Cleanup may consume cancellation. Do not wait for another bus message after shutdown.
                 if not self._running:
                     break
@@ -1395,6 +1389,8 @@ class ManagerAgent:
                 await self._handle_user_message(envelope)
             case MessageType.GOAL_STATUS:
                 await self._handle_goal_status(envelope)
+            case MessageType.IDLE_CHECK_DUE:
+                await idle_check_turn.handle(self, envelope)
             case MessageType.COMPLETION_DUE:
                 await self._handle_completion_due(envelope)
             case MessageType.TASK_ACCEPTED:
@@ -1861,7 +1857,7 @@ class ManagerAgent:
                 profile=self._session_profile, provider=self._session_provider)
         state: list[str] | None = None
         persona_scope = manager_persona_context.Scope.FULL
-        if ask.turn is not None and ask.turn.origin is TurnOrigin.COMPLETION:
+        if ask.turn is not None and lanes.manager_lane(ask.turn.origin) is lanes.Lane.BACKGROUND:
             turn_text = ask.message  # Looper's own message, without the sections before a user's
         else:
             attachments = chat_attachments.from_payload(envelope.payload.get("attachments"), self._runtime_root)
@@ -2144,9 +2140,9 @@ class ManagerAgent:
         """The live turn of a message, by the envelope's id or the web page's own."""
         return self._turns.find(message_id)
 
-    def live_for_chat(self, channel_id: str, chat_id: str) -> list[TurnToken]:
+    def live_for_chat(self, channel_id: str, chat_id: str, *, sender_id: str | None = None) -> list[TurnToken]:
         """Snapshot this bot/chat's live turns using its full channel identity."""
-        return self._turns.live_for(channel_id, chat_id)
+        return background_turn.live_tokens(self, channel_id, sender_id, self._turns.live_for(channel_id, chat_id))
 
     def current_turn_for(self, channel: str, chat: str) -> TurnToken | None:
         """The oldest live user turn of ``chat`` on ``channel``: the one being answered, else the first queued."""
@@ -2328,6 +2324,7 @@ class ManagerAgent:
         target = completion_events.Target.from_payload(envelope.payload)
         if target is None or target.manager_id != self.agent_id or self._bus is None:
             return
+        await triage_background.dispatch(self, envelope, target)  # its own batch, claimed apart from task ends
         off = chat_settings.completion_turns() is chat_settings.CompletionTurns.OFF
         routed = session_routing.routes(self.agent_id)
         try:
@@ -2347,157 +2344,18 @@ class ManagerAgent:
             await self._bus.publish(completion_events.wake(self.agent_address, target))
             return
         if rows:
-            if routed:
+            if routed or lanes_settings.enabled():
                 self._router.dispatch_completion(envelope, rows, batch, operator)
             else:
                 await self._tell_completion(rows, batch)
 
     @manager_budget.after_reply
     async def _tell_completion(self, rows: list[dict[str, Any]], batch: uuid.UUID) -> None:
-        """Run the completion turn of the claimed events (``batch``) within ``TURN_SECONDS``: its reply, with the
-        tasks' links code adds, goes to their chat (``delivered``); anything else sends their notices
-        (``fallback``). At the deadline the notices go at once, and a runtime that can be interrupted is stopped
-        the way ``/stop`` stops it; one that cannot runs to its end, and its reply only stays on its record."""
-        assert self._bus is not None
-        started = time.monotonic()
-        logger.info("completion turn started batch=%s manager=%s events=%d", batch, self.agent_id, len(rows))
-        state: dict[str, Any] = {}
-        run = asyncio.create_task(self._completion_turn(rows, batch, state))
-        try:
-            done, _ = await asyncio.wait({run}, timeout=completion_events.TURN_SECONDS)
-        except asyncio.CancelledError:
-            await cancel_and_wait(run)
-            raise
-        reason: str | None = None
-        delivery = TurnDelivery.REPLY
-        rejected = False  # the channel refused the reply: its notices may go
-        text = ""
-        if not done:
-            reason = "turn_timeout"
-            delivery = TurnDelivery.FAILED
-            await self._fall_back_completion(batch, reason, state)
-            await self._end_late_completion(run, batch, state)
-        else:
-            try:
-                text = run.result().strip()
-            except TurnStopped:
-                delivery = TurnDelivery.STOPPED
-                reason = "turn_stopped"
-            except _CompletionNotTaken:
-                reason = "manager_off"
-            except NoReply:
-                delivery = TurnDelivery.EMPTY
-                reason = "empty_reply"
-            except OverCap:
-                delivery = TurnDelivery.OVER_CAP
-                reason = "turn_failed"
-            except Exception as exc:
-                logger.error("%s: the completion turn %s failed: %s", self._log, batch, type(exc).__name__)
-                reason = "turn_failed"
-            else:
-                turn = state.get("turn")
-                if turn is not None and turn.refused:
-                    reason = "turn_failed"
-                elif not text:
-                    reason = "empty_reply"
-            if reason is None:
-                body = "\n\n".join(part for part in (
-                    text, completion_events.link_block(rows, base=self._config.dashboard_url)) if part)
-                try:
-                    outcome, error = await completion_events.send_reply(self._bus, self.agent_address, rows, body,
-                                                                        metadata=state.get("chat_record"))
-                except completion_events.TargetChanged as exc:
-                    logger.warning("%s: the completion turn %s's reply is not sent: %s", self._log, batch, exc)
-                    reason = "target_changed"
-                except Exception:  # before its events were ``sending``: nothing went
-                    logger.exception("%s: the completion turn %s's reply could not be sent", self._log, batch)
-                    reason = "send_failed"
-                else:
-                    if outcome is PostOutcome.REJECTED:  # the channel did not send it: its notices may go
-                        logger.warning("%s: the completion turn %s's reply was refused: %s", self._log, batch, error)
-                        reason, rejected = "send_failed", True
-                    else:  # sent, or it may have been (an unknown post is final: nothing more is sent)
-                        if outcome is not PostOutcome.SENT:
-                            logger.warning("%s: the completion turn %s's reply may not have been sent: %s",
-                                           self._log, batch, error)
-                        # The record only is tried again; one never written stays ``sending`` until the service
-                        # settles it ``uncertain``: the reply is not sent again.
-                        await completion_events.record_reply(rows, outcome, error, record_id=state.get("record_id"))
-            if reason is not None:
-                await self._fall_back_completion(batch, reason, state, rejected=rejected)
-        cost = None
-        metrics_token = state.get("token")
-        if metrics_token is not None and metrics_token.times is not None and state.get("record_id") is not None:
-            if reason and delivery is TurnDelivery.REPLY:
-                delivery = TurnDelivery.EMPTY if reason == "empty_reply" else TurnDelivery.FAILED
-            writing = turn_metrics.background(db_llm_records.add_metadata(state["record_id"], {"turn_metrics":
-                metrics_token.times.to_metadata(delivery, TurnOrigin.COMPLETION, False)}))
-            if writing is not None and manager_budget.holds_lock(self._session_now(), metrics_token):
-                await writing
-        if state.get("record_id") is not None:
-            try:
-                cost = await db_connection.get_pool().fetchval("SELECT cost_usd FROM llm_records WHERE id = $1",
-                                                               state["record_id"])
-            except Exception:
-                pass
-        logger.info("completion turn ended batch=%s outcome=%s reason=%s seconds=%.1f cost_usd=%s", batch,
-                    "fallback" if reason else "delivered", reason, time.monotonic() - started, cost)
-        if reason in db_manager_events.FAILING_REASONS:
-            try:
-                if await db_manager_events.failing():
-                    logger.warning("completion turns failing: the last %d batches all fell back to their notices",
-                                   db_manager_events.FAILING_BATCHES)
-            except Exception:
-                pass
+        await background_turn._tell_completion(self, rows, batch)
 
     async def _end_late_completion(self, run: asyncio.Task[str], batch: uuid.UUID, state: dict[str, Any]) -> None:
-        """End a completion turn past its deadline (its notices are out) within ``END_SECONDS`` twice, so the
-        Manager's next message is not held behind it: first stopped as a stop ends a turn (a runtime run per turn
-        ends its process tree), then cancelled. A cancelled turn may have left its runtime mid-turn, so that runtime
-        is stopped and the next message starts a fresh one. A turn that ends even then is left to end on its own:
-        the Manager lets go of it (its lock, its binding) and answers on a fresh runtime; it only writes its record."""
-        token, turn = state.get("token"), state.get("turn")
-        if token is not None and token.request_stop("completion_timeout") and turn is not None \
-                and self.ops is not None:
-            self.ops.stop_turn(turn)
-        cancelled = False
-        for _ in range(2):
-            try:
-                done, _ = await asyncio.wait({run}, timeout=completion_events.END_SECONDS)
-            except asyncio.CancelledError:
-                run.cancel()
-                raise
-            if done:
-                break
-            cancelled = True
-            run.cancel()
-        if run.done():
-            if not run.cancelled() and run.exception() is not None:
-                logger.info("%s: the completion turn %s ended after its deadline (%s)", self._log, batch,
-                            type(run.exception()).__name__)
-            if cancelled:
-                try:
-                    await asyncio.wait_for(self._claude.stop(kill=True), completion_events.END_SECONDS)
-                except Exception:
-                    logger.warning("%s: the runtime of the cancelled completion turn %s did not stop", self._log,
-                                   batch, exc_info=True)
-            return
-        logger.error("%s: the completion turn %s did not end once cancelled; it is left to end on its own",
-                     self._log, batch)
-        if token is not None:
-            token.abandoned = True
-        self._late_turns.add(run)
-        run.add_done_callback(self._late_turns.discard)
-        if self._lock_owner is token:
-            turn_metrics.note_lock_end(self._session_now(), token, TurnOrigin.COMPLETION)
-            self._lock_owner = None
-            self._turn_lock.release()
-        if self._running_token is token:
-            self._running_token = None
-        self._publish_binding(None)
-        late, self._claude = self._claude, self._claude_runtime.resident_session(self._resident_label())
-        self._process = None
-        self._track_runtime_cleanup(late)
+        await background_turn.end_late(self, run, batch, state, origin=TurnOrigin.COMPLETION,
+                                       stop_reason="completion_timeout")
 
     async def _fall_back_completion(self, batch: uuid.UUID, reason: str, state: dict[str, Any], *,
                                     rejected: bool = False) -> None:
@@ -2505,65 +2363,12 @@ class ManagerAgent:
         try:
             await completion_events.fall_back(self._bus, self.agent_address, reason=reason, batch=batch,
                                               record_id=state.get("record_id"), rejected=rejected)
+            lanes.completion_note(self._session_now(), state.get("token"), len(state.get("rows", ())))
         except Exception:
             logger.exception("%s: the completion turn %s's events could not fall back", self._log, batch)
 
     async def _completion_turn(self, rows: list[dict[str, Any]], batch: uuid.UUID, state: dict[str, Any]) -> str:
-        """The completion turn: Looper's ``[COMPLETION]`` message, in the Manager's session, as a turn that answers
-        no user (``TurnOrigin.COMPLETION``: its calls only read). It is the chat's live turn while it runs, so a
-        ``/stop`` there stops it; nothing about it is shown in the chat until its reply. ``state`` keeps its token,
-        its ops turn, its record's id and the reply's chat record."""
-        context = _completion_context(rows[0], self.agent_address, batch)
-        origin = _message_origin(context)
-        try:
-            state["chat_record"] = _chat_record(context, f"completion-{batch}")
-        except ValueError:
-            state["chat_record"] = {}
-        token = self._turns.receive(context, channel=origin["channel"] or "", chat=origin["chat"] or "",
-                                    channel_id=origin["channel_id"])
-        if chat_settings.metrics_enabled():
-            token.times = TurnTimes(received_at=datetime.now(timezone.utc))
-        token.envelope = None  # no status line: the chat sees only the reply
-        turn = Turn(channel=origin["channel"], chat=origin["chat"], channel_id=origin["channel_id"],
-                    sender=origin["sender"], envelope=context, origin=TurnOrigin.COMPLETION,
-                    require_match=self._claude.shares_bridge)
-        token.ops_turn = turn
-        delivery_guard.initialize(turn)
-        state["token"], state["turn"] = token, turn
-        prepared: Prepared | None = None
-        try:
-            token.advance(TurnPhase.PREPARING)
-            more = await token.step("task_facts", completion_events.task_facts([row["task_id"] for row in rows]))
-            message = completion_events.completion_message(rows, channel_line=channel_line(context), more=more)
-            await token.step("turn_lock", self._turn_lock.acquire())
-            self._lock_owner = token
-            self._running_token = token
-            if self.ops is not None:
-                self.ops.begin_turn(turn, binding=token.binding, session_key=self._session_now().key)
-            prepared = await self._prepare_turn(token, context, ask=Ask(message, "", turn))
-            if prepared.action is not None:  # turned off since: it does not act as the Manager
-                raise _CompletionNotTaken()
-            return await manager_budget.completion_reply(self, token, prepared)
-        finally:
-            if self._running_token is token:  # (a turn let go of past its deadline: another may run by now)
-                self._running_token = None
-            turn_metrics.note_lock_end(self._session_now(), token, TurnOrigin.COMPLETION)
-            if self._lock_owner is token and not manager_budget.holds_lock(self._session_now(), token):
-                self._lock_owner = None
-                self._turn_lock.release()
-            if self.ops is not None:
-                self.ops.end_turn(turn)
-            token.settle(token.outcome)
-            recorder = prepared.run.recorder if prepared is not None else None
-            if recorder is not None and recorder.record_id is not None:
-                state["record_id"] = recorder.record_id
-                try:
-                    await recorder.annotate({"completion": {
-                        "batch": str(batch), "event_ids": [row["id"] for row in rows],
-                        "task_ids": [row["task_id"] for row in rows]}})
-                except Exception:
-                    logger.warning("%s: could not mark run %s as a completion turn", self._log,
-                                   recorder.record_id, exc_info=True)
+        return await background_turn.completion_turn(self, rows, batch, state)
 
     async def _handle_task_accepted(self, envelope: MessageEnvelope) -> None:
         if envelope.payload.get("phase_notices"):
@@ -2659,7 +2464,7 @@ class ManagerAgent:
     async def _link_turn_task(self, recorder: ClaudeRunRecorder, turn: Turn | None) -> None:
         """A turn recorded without a task whose calls all named one task belongs to it (its cost is counted apart
         on that task, as the Manager's)."""
-        if turn is not None and turn.origin is not TurnOrigin.COMPLETION and recorder.task_id is None \
+        if turn is not None and lanes.manager_lane(turn.origin) is not lanes.Lane.BACKGROUND and recorder.task_id is None \
                 and recorder.record_id is not None and len(turn.task_ids) == 1 and None not in turn.task_ids:
             try:
                 await db_llm_records.link_task(recorder.record_id, next(iter(turn.task_ids)))
@@ -2765,7 +2570,7 @@ class ManagerAgent:
                 await abandon(handling)
 
         # A completion turn shows nothing in the chat until its reply (``_tell_completion``).
-        quiet = ops_turn is not None and ops_turn.origin is TurnOrigin.COMPLETION
+        quiet = ops_turn is not None and lanes.manager_lane(ops_turn.origin) is lanes.Lane.BACKGROUND
 
         async def show(text: str, **kwargs: Any) -> None:
             if not token.cancel.requested and not quiet:  # (R1: what a stopped turn wrote before the stop is handled after it)

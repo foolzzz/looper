@@ -4,7 +4,8 @@ Off until the system setting ``status_card.enabled`` is ``true`` (no row, or any
 While it is off, ``status_card.get`` answers conflict and ``/status`` stays an ordinary message. The snapshot
 itself does not check the switch, so a test can build one either way. A section is ``ok``, ``error`` (its source
 could not be read: the text never says that source is empty) or ``unknown`` (this caller cannot read it). A
-feature that is off leaves its section out. There is no recent-receipts section and no per-lane queue count.
+feature that is off leaves its section out. Manager lanes add separate interactive and background queue counts
+only while their switch is on. There is no recent-receipts section.
 """
 
 from __future__ import annotations
@@ -68,6 +69,8 @@ class _SessionView(TypedDict):
     started_at: str | None
     elapsed_seconds: int | None
     queued: int
+    queued_interactive: NotRequired[int]
+    queued_background: NotRequired[int]
 
 
 class _ManagerRow(TypedDict):
@@ -231,6 +234,8 @@ class SessionActivity:
     client_id: str | None
     started_at: datetime | None
     queued: int
+    queued_interactive: int | None = None
+    queued_background: int | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.state, SessionState):
@@ -250,13 +255,15 @@ class SoloFleet:
 def session_activity(agent: Any) -> list[SessionActivity]:
     """What each of ``agent``'s sessions is doing, and how many messages wait for it.
 
-    With session routing off, the main session's count also includes the bus queue and a message the loop has
-    taken that is not the running turn. Those are not lanes. With routing on, only each session's own queue counts.
+    With lanes off and session routing off, the main session's count also includes the bus queue and a message
+    the loop has taken that is not the running turn. With lanes or routing on, each session counts its own queue.
     """
-    from . import session_routing
+    from . import lanes_settings, session_routing
+    from .lanes import Lane
     from .tiers.manager_session import MAIN_SESSION
 
     routing = session_routing.routes(agent.agent_id)
+    lanes_on = lanes_settings.enabled()
     sessions = sorted(agent._sessions.values(), key=lambda session: (session.key != MAIN_SESSION, session.key))
     found = []
     for session in sessions:
@@ -273,12 +280,16 @@ def session_activity(agent: Any) -> list[SessionActivity]:
             channel, chat, group, client_id = _session_place(token)
             started = token.received_at if token is not None else None
         queued = agent._router.queued_count(session)
-        if not routing and session.key == MAIN_SESSION:
+        if not lanes_on and not routing and session.key == MAIN_SESSION:
             pending = agent._bus.pending_count(agent.agent_id) if agent._bus is not None else 0
             handling = agent._handling
             extra = 1 if handling is not None and (token is None or handling.message_id != token.message_id) else 0
             queued += pending + extra
-        found.append(SessionActivity(session.key, state, origin, channel, chat, group, client_id, started, queued))
+        activity = SessionActivity(session.key, state, origin, channel, chat, group, client_id, started, queued)
+        if lanes_on:
+            activity.queued_interactive = agent._router.queued_count(session, Lane.INTERACTIVE)
+            activity.queued_background = agent._router.queued_count(session, Lane.BACKGROUND)
+        found.append(activity)
     return found
 
 
@@ -382,9 +393,12 @@ def _session_payload(item: SessionActivity, now: datetime) -> dict[str, Any]:
     elapsed = None
     if item.started_at is not None:
         elapsed = max(0, int((now - item.started_at).total_seconds()))
-    return {"key": item.key, "state": item.state, "origin": item.origin, "channel": item.channel,
-            "chat": item.chat, "group": item.group, "client_id": item.client_id,
-            "started_at": item.started_at, "elapsed_seconds": elapsed, "queued": item.queued}
+    result = {"key": item.key, "state": item.state, "origin": item.origin, "channel": item.channel,
+              "chat": item.chat, "group": item.group, "client_id": item.client_id,
+              "started_at": item.started_at, "elapsed_seconds": elapsed, "queued": item.queued}
+    if item.queued_interactive is not None and item.queued_background is not None:
+        result.update(queued_interactive=item.queued_interactive, queued_background=item.queued_background)
+    return result
 
 
 async def _tasks_section(task_router: Any, worker_pool: Any) -> dict[str, Any]:
@@ -588,7 +602,12 @@ def _manager_text(section: Mapping[str, Any]) -> str:
         label = "管家" if single else (manager["name"] or manager["manager_id"])
         phrases = [_session_phrase(session) for session in manager["sessions"] if session["state"] != "idle"]
         body = "；".join(phrases) if phrases else "空闲"
-        lines.append(f"{label}：{body}；排队 {manager['queued']} 条")
+        if any("queued_interactive" in session for session in manager["sessions"]):
+            interactive = sum(session.get("queued_interactive", 0) for session in manager["sessions"])
+            background = sum(session.get("queued_background", 0) for session in manager["sessions"])
+            lines.append(f"{label}：{body}；交互排队 {interactive} 条；后台排队 {background} 条")
+        else:
+            lines.append(f"{label}：{body}；排队 {manager['queued']} 条")
     return "\n".join(lines)
 
 

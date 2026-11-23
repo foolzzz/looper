@@ -11,6 +11,7 @@ import inspect
 import logging
 from collections.abc import Awaitable, Callable
 from datetime import datetime, timezone
+from enum import Enum
 from typing import Any, TypeVar
 
 logger = logging.getLogger(__name__)
@@ -22,8 +23,17 @@ class TurnCancelled(Exception):
     """The turn's cancel was requested while waiting."""
 
 
+class StopCleanup(Enum):
+    """Whether a resident turn records its process boundary and must clean it after a control stop."""
+
+    NONE = "none"
+    TRACK = "track"
+    REQUIRED = "required"
+
+
 class TurnCancel:
     def __init__(self) -> None:
+        self.cleanup = StopCleanup.NONE
         self._requested = False
         self.requested_at: datetime | None = None
         self._callbacks: list[Callable[[], None]] = []

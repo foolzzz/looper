@@ -127,7 +127,7 @@ class Action(str, Enum):
     SKIPPED = "skipped"
 
 
-SECTIONS = ("runtimes", "providers", "models", "profiles", "gateway.aliases", "settings.layers", "settings.roles", "settings.scheduler", "settings.chat", "settings.system", "settings.cost_guard", "channels",
+SECTIONS = ("runtimes", "providers", "models", "profiles", "gateway.aliases", "settings.layers", "settings.roles", "settings.scheduler", "settings.chat", "settings.system", "settings.cost_guard", "settings.manager_lanes", "channels",
             "catalog", "installs", "workflows",
             "projects", "project.layers", "project.items", "project.knowledge", "project.role_templates",
             "project.schedules", "project.installs", "managers", "manager.templates", "manager.installs")
@@ -576,12 +576,19 @@ async def export_chunks(
         head["settings"]["chat"] = chat
     if cost_guard := await stored_cost_guard_settings(conn):
         head["settings"]["cost_guard"] = cost_guard
+    from . import lanes_settings
+
+    if manager_lanes := await lanes_settings.portable(conn):
+        head["settings"]["manager_lanes"] = manager_lanes
+        if manager_lanes["enabled"]:
+            summary.counts["settings.manager_lanes"] = len(manager_lanes)
     summary.counts.update({"runtimes": len(head["runtimes"]), "providers": len(providers),
                            "models": len(head["models"]), "profiles": len(head["profiles"]),
                            "settings.layers": len(head["settings"]["layers"]),
                            "settings.roles": len(head["settings"]["roles"]),
                            "settings.scheduler": len(scheduler), "settings.chat": len(chat),
-                           "settings.cost_guard": len(cost_guard), "channels": len(channels),
+                           "settings.cost_guard": len(cost_guard),
+                           "channels": len(channels),
                            "installs": len(head["installs"])})
     summary.secrets += sum(_secret_count(entry) for entry in [*channels, *providers])
     yield "{" + ",\n".join(f"{_dump(k)}:{_dump(v)}" for k, v in head.items())
@@ -732,6 +739,8 @@ def validate_document(data: Any, *, label: str = "configuration") -> None:
         raise ConfigFileError("settings.chat must be a JSON object")
     if not isinstance(data.get("settings", {}).get("cost_guard", {}), dict):
         raise ConfigFileError("settings.cost_guard must be a JSON object")
+    if not isinstance(data.get("settings", {}).get("manager_lanes", {}), dict):
+        raise ConfigFileError("settings.manager_lanes must be a JSON object")
     _check_retired_fields(data.get("settings", {}).get("layers", []), "settings.layers", ("model", "effort"))
     _check_retired_fields(data.get("providers", []), "providers", ("protocols", "base_url", "models"))
     for index, project in enumerate(data.get("projects", [])):
@@ -2753,6 +2762,10 @@ async def import_config(conn: Any, data: Mapping[str, Any], *, apply: bool,
         await importer.chat(settings["chat"])
     if "cost_guard" in settings:
         await importer.cost_guard(settings["cost_guard"])
+    if "manager_lanes" in settings:
+        from . import lanes_settings
+
+        await lanes_settings.import_into(importer, settings["manager_lanes"])
     for entry in data.get("catalog", []):
         await importer.item(entry, None)
 
