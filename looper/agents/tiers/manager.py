@@ -2142,7 +2142,7 @@ class ManagerAgent:
 
     def live_for_chat(self, channel_id: str, chat_id: str, *, sender_id: str | None = None) -> list[TurnToken]:
         """Snapshot this bot/chat's live turns using its full channel identity."""
-        return idle_check_turn.live_tokens(self, channel_id, sender_id, self._turns.live_for(channel_id, chat_id))
+        return background_turn.live_tokens(self, channel_id, sender_id, self._turns.live_for(channel_id, chat_id))
 
     def current_turn_for(self, channel: str, chat: str) -> TurnToken | None:
         """The oldest live user turn of ``chat`` on ``channel``: the one being answered, else the first queued."""

@@ -8,7 +8,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from looper.agents import chat_settings, completion_events, idle_checks, lanes_settings, proactive_delivery
+from looper.agents import chat_settings, completion_events, idle_checks, lanes_settings, proactive_delivery, turn_metrics
 from looper.agents.channels.base import PostReceipt
 from looper.agents.managers import ManagerFleet
 from looper.agents.supervisor import AgentSupervisor
@@ -57,6 +57,7 @@ def test_idle_reply_records_its_origin_and_sends_only_a_valid_message(monkeypatc
             row = await store.get(check_id)
             assert (row["state"], row["reason"]) == (state, reason)
             assert row["record_id"] is not None
+            await until(lambda: not turn_metrics._pending, "idle turn metrics written")
             metadata = json.loads(await pool.fetchval("SELECT metadata FROM llm_records WHERE id=$1", row["record_id"]))
             assert metadata["idle_check"] == {"check_id": check_id}
             assert metadata["turn_metrics"] == {"origin": "idle_check", "tool_calls": 0,

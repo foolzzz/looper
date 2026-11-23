@@ -53,11 +53,18 @@ async def run(agent: ManagerAgent, *, origin: TurnOrigin, deadline_seconds: floa
         if target is None:
             raise ValueError("a background turn needs a target chat")
         work = turn(agent, origin_kind=origin, message=message, metadata=metadata or {}, target=target, state=state)
+    if target is not None:
+        register(agent, origin, target, state)
     task = asyncio.create_task(work)
     try:
         done, _ = await asyncio.wait({task}, timeout=deadline_seconds)
     except asyncio.CancelledError:
         await cancel_and_wait(task)
+        token = state.get("token")
+        if token is not None and token.live:  # the child may not have taken its first step
+            if agent._running_token is token:
+                agent._running_token = None
+            token.settle(token.outcome)
         raise
     if not done:
         await fallback("turn_timeout")
@@ -69,11 +76,21 @@ async def run(agent: ManagerAgent, *, origin: TurnOrigin, deadline_seconds: floa
     return Result(not done, task)
 
 
-async def turn(self: ManagerAgent, *, origin_kind: TurnOrigin, message: Message, metadata: dict[str, Any],
-               target: MessageEnvelope, state: dict[str, Any]) -> str:
-    from .manager import Ask, Prepared, _CompletionNotTaken, _chat_record, _message_origin
+def live_tokens(agent: ManagerAgent, channel_id: str, sender_id: str | None,
+                found: list[TurnToken]) -> list[TurnToken]:
+    """A direct background target can name the sender while /stop names the actual DM."""
+    if not sender_id:
+        return found
+    return [*found, *(token for token in agent._turns.live() if token not in found
+        and (turn := token.ops_turn) is not None and lanes.manager_lane(turn.origin) is lanes.Lane.BACKGROUND
+        and not turn.group and turn.channel_id == channel_id and turn.sender == sender_id)]
 
-    context = target
+
+def register(self: ManagerAgent, origin_kind: TurnOrigin, context: MessageEnvelope,
+             state: dict[str, Any]) -> TurnToken:
+    """Publish the token in the caller's claim section, before a child task or an input read can yield."""
+    from .manager import _chat_record, _message_origin
+
     origin = _message_origin(context)
     try:
         state["chat_record"] = _chat_record(context, context.correlation_id)
@@ -91,12 +108,24 @@ async def turn(self: ManagerAgent, *, origin_kind: TurnOrigin, message: Message,
     lanes.prepare_background(self._session_now(), token)
     delivery_guard.initialize(turn)
     state["token"], state["turn"] = token, turn
+    if lanes_settings.enabled():
+        self._running_token = token
+        if self._router.queued_count(self._session_now(), lanes.Lane.INTERACTIVE):
+            token.request_stop("preempt")  # input may have arrived during the caller's admission reads
+    return token
+
+
+async def turn(self: ManagerAgent, *, origin_kind: TurnOrigin, message: Message, metadata: dict[str, Any],
+               target: MessageEnvelope, state: dict[str, Any]) -> str:
+    from .manager import Ask, Prepared, _CompletionNotTaken
+
+    context = target
+    token = state.get("token") or register(self, origin_kind, context, state)
+    turn = state["turn"]
     prepared: Prepared | None = None
     try:
-        if lanes_settings.enabled():
-            self._running_token = token  # arrivals can preempt even while task facts are loading
         token.advance(TurnPhase.PREPARING)
-        text = await message(token, context) if callable(message) else message
+        text = await token.step("background_input", message(token, context)) if callable(message) else message
         await token.step("turn_lock", self._turn_lock.acquire())
         self._lock_owner = token
         self._running_token = token
@@ -196,6 +225,7 @@ async def _tell_completion(self, rows: list[dict[str, Any]], batch: uuid.UUID) -
 
     result = await run(self, origin=TurnOrigin.COMPLETION, deadline_seconds=completion_events.TURN_SECONDS,
                        fallback=fallback, state=state,
+                       target=completion_context(rows[0], self.agent_address, batch) if rows else None,
                        work=self._completion_turn(rows, batch, state),
                        late=lambda task: self._end_late_completion(task, batch, state))
     reason: str | None = None

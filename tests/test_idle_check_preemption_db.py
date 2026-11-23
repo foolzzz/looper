@@ -7,7 +7,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from looper.agents import idle_checks, lanes, lanes_settings, session_routing
+from looper.agents import chat_settings, idle_checks, lanes, lanes_settings, proactive_delivery, session_routing
 from looper.agents.tiers import background_turn, idle_check_turn
 from looper.db import idle_checks as store
 from tests.api_manager_support import USAGE, _manager, _message
@@ -69,8 +69,12 @@ def test_user_queued_during_check_read_preempts_before_model_turn(monkeypatch, t
     run_db(check, monkeypatch, timeout=60)
 
 
-def test_cancel_requested_after_model_return_prevents_delivery(monkeypatch, tmp_path):
+@pytest.mark.parametrize("cancel_at", ["model_return", "delivery_decision"])
+def test_cancel_requested_after_model_return_prevents_delivery(monkeypatch, tmp_path, cancel_at):
     monkeypatch.setattr(lanes_settings, "_enabled", True)
+    monkeypatch.setattr(chat_settings, "_delivery_enabled", True)
+    monkeypatch.setattr(proactive_delivery, "load_policy", lambda: proactive_delivery.DeliveryPolicy(
+        timezone=timezone.utc, quiet_hours=None))
     async def check(pool):
         async with _manager(pool, tmp_path, monkeypatch,
                             [ResponseScript(events=text_events("A stale reminder", usage=USAGE))]) as chat:
@@ -78,11 +82,22 @@ def test_cancel_requested_after_model_return_prevents_delivery(monkeypatch, tmp_
             post = AsyncMock(return_value=True)
             monkeypatch.setattr(idle_check_turn, "_post", post)
             run = background_turn.run
+            state = {}
             async def cancel_at_return(*args, **kwargs):
                 result = await run(*args, **kwargs)
-                kwargs["state"]["token"].cancel.request()
+                state.update(kwargs["state"])
+                if cancel_at == "model_return":
+                    state["token"].cancel.request()
                 return result
             monkeypatch.setattr(background_turn, "run", cancel_at_return)
+            decide = proactive_delivery.decide
+            async def cancel_at_decision(*args, **kwargs):
+                result = await decide(*args, **kwargs)
+                assert result.outcome is proactive_delivery.Outcome.SEND
+                state["token"].cancel.request()
+                return result
+            if cancel_at == "delivery_decision":
+                monkeypatch.setattr(proactive_delivery, "decide", cancel_at_decision)
             await chat.manager._handle(idle_checks.due_envelope(check_id))
             assert len(chat.model.requests) == 1
             assert (await store.get(check_id))["state"] == "preempted"

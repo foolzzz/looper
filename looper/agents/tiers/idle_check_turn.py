@@ -15,7 +15,6 @@ from .turn_token import TurnStopped
 
 if TYPE_CHECKING:
     from .manager import ManagerAgent
-    from .turn_token import TurnToken
 
 logger = logging.getLogger(__name__)
 IDLE_TURN_SECONDS = 90
@@ -39,22 +38,18 @@ def _context(agent: ManagerAgent, check: dict[str, Any]) -> MessageEnvelope:
         correlation_id=f"idle-{check['id']}", metadata={"origin_channel_id": check["channel_id"]})
 
 
-def live_tokens(agent: ManagerAgent, channel_id: str, sender_id: str | None,
-                found: list[TurnToken]) -> list[TurnToken]:
-    """Lark's send target is an open_id; /stop arrives with the actual DM's chat_id."""
-    token = agent._sessions["main"].running_token
-    turn = token.ops_turn if token is not None else None
-    if (sender_id and token is not None and token.live and token not in found and turn is not None
-            and turn.origin is TurnOrigin.IDLE_CHECK and not turn.group
-            and channel_id == turn.channel_id and sender_id == turn.sender):
-        return [*found, token]
-    return found
-
-
 def _record_id(state: dict[str, Any]) -> int | None:
     prepared = state.get("prepared")
     recorder = prepared.run.recorder if prepared is not None else None
     return state.get("record_id") or (recorder.record_id if recorder is not None else None)
+
+
+def _note_preemption(agent: ManagerAgent, state: dict[str, Any]) -> None:
+    token = state.get("token")
+    if token is not None and not token.preemption_noted:
+        session = agent._session_now()
+        session.stopped_notes = [*session.stopped_notes, _INTERRUPTED][-3:]
+        token.preemption_noted = True
 
 
 @manager_budget.after_reply
@@ -95,11 +90,7 @@ async def handle(agent: ManagerAgent, envelope: MessageEnvelope) -> None:
         except TurnStopped:
             delivery = TurnDelivery.STOPPED
             await idle_checks.settle(check_id, "preempted", record_id=_record_id(state))
-            token = state.get("token")
-            if token is not None and not token.preemption_noted:
-                session = agent._session_now()
-                session.stopped_notes = [*session.stopped_notes, _INTERRUPTED][-3:]
-                token.preemption_noted = True
+            _note_preemption(agent, state)
             return
         except _CompletionNotTaken:
             delivery = TurnDelivery.FAILED
@@ -122,7 +113,12 @@ async def handle(agent: ManagerAgent, envelope: MessageEnvelope) -> None:
             delivery = TurnDelivery.FAILED
             await fallback("delivery_failed")
             return
-        outcome = await idle_checks.deliver_result(check, reply, post=_post, record_id=_record_id(state))
+        token = state.get("token")
+        outcome = await idle_checks.deliver_result(check, reply, post=_post, record_id=_record_id(state),
+            cancelled=lambda: token is not None and token.cancel.requested)
+        if outcome == "preempted":
+            delivery = TurnDelivery.STOPPED
+            _note_preemption(agent, state)
         if outcome == "failed":
             delivery = TurnDelivery.FAILED
     finally:

@@ -453,7 +453,7 @@ async def _remember(check: Mapping[str, Any], text: str, *, failure: str | None 
 
 
 async def deliver_result(check: Mapping[str, Any], reply: str, *, post: PostFn, record_id: int | None = None,
-                         now: datetime | None = None) -> str:
+                         now: datetime | None = None, cancelled: Callable[[], bool] | None = None) -> str:
     """End a ``running`` check with the Manager's ``reply``: ``silent``; ``failed`` (``invalid_reply``,
     ``delivery_failed``, ``send_rejected``); ``deferred`` when the delivery layer says digest; or ``sent`` /
     ``uncertain`` after the send (``post``: ``ChannelRegistry.post``). Answers the state the check ended in."""
@@ -476,6 +476,9 @@ async def deliver_result(check: Mapping[str, Any], reply: str, *, post: PostFn, 
         logger.warning("idle check %s: the delivery decision failed", check_id, exc_info=True)
         await settle(check_id, "failed", reason="delivery_failed", reply=reply, record_id=record_id)
         return "failed"
+    if cancelled is not None and cancelled():
+        await settle(check_id, "preempted", record_id=record_id)
+        return "preempted"
     if decided.outcome is not delivery.Outcome.SEND:
         await settle(check_id, "deferred", reply=reply, record_id=record_id)
         return "deferred"
