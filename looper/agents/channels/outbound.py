@@ -19,6 +19,8 @@ from uuid import uuid4
 from weakref import WeakValueDictionary
 
 from .base import PostOutcome, PostReceipt
+from . import outbound_metrics
+from .outbound_metrics import EventKind
 from .lark_api import LarkApiError, MAX_RETRY_HINT
 from .lark_cli import LarkCliError, MESSAGE_GONE_CODES, TIMEOUT
 
@@ -114,12 +116,30 @@ class TokenBucket:
                 await self.sleep((1 - self.tokens) / self.rate)
 
 
+class BreakerState(StrEnum):
+    CLOSED = 'closed'
+    OPEN = 'open'
+    HALF_OPEN = 'half_open'
+
+
 class Breaker:
-    def __init__(self, clock=time.monotonic):
+    def __init__(self, clock=time.monotonic, *, on_transition: Callable[[BreakerState], None] | None = None):
         self.clock = clock
-        self.state = 'closed'
+        self._state = BreakerState.CLOSED
+        self._on_transition = on_transition
         self.open_until = 0.0
         self._failures = deque()
+
+    @property
+    def state(self) -> BreakerState:
+        return self._state
+
+    @state.setter
+    def state(self, state: BreakerState | str):
+        state = BreakerState(state)
+        previous, self._state = self._state, state
+        if state != previous and self._on_transition is not None:
+            self._on_transition(state)
 
     def allow(self) -> bool:
         if self.state == 'closed':
@@ -225,9 +245,20 @@ class Gateway:
             self._app = _AppLimits(settings, clock, sleep)
             if app_id:
                 _APP_LIMITS[app_id] = self._app
-        self.breaker = Breaker(clock)
         self.counters = Counters()
+        self.breaker = Breaker(clock, on_transition=self._breaker_transition)
         self._edits: dict[str, _Edit] = {}
+
+    def _breaker_transition(self, state: BreakerState):
+        kind = {"open": EventKind.BREAKER_OPEN, "half_open": EventKind.BREAKER_HALF_OPEN,
+                "closed": EventKind.BREAKER_RECOVERED}[state]
+        outbound_metrics.events.record(self.channel_id, kind)
+        if state == 'open':
+            self.counters.breaker_opens += 1
+
+    def record_backoff(self):
+        self.counters.backoffs += 1
+        outbound_metrics.events.record(self.channel_id, EventKind.BACKOFF)
 
     @property
     def bucket(self):
@@ -258,15 +289,12 @@ class Gateway:
             except Exception as exc:
                 error_class, retry_after = classify(exc)
                 self.counters.failures[error_class] += 1
-                previous = self.breaker.state
                 self.breaker.record(error_class)
-                if self.breaker.state == 'open' and previous != 'open':
-                    self.counters.breaker_opens += 1
                 retryable = error_class in {ErrorClass.RATE_LIMITED, ErrorClass.TRANSIENT} or (
                     error_class == ErrorClass.UNKNOWN and keyed)
                 if not retry or not retryable or attempt == MAX_RETRIES:
                     raise
-                self.counters.backoffs += 1
+                self.record_backoff()
                 delay = backoff(attempt + 1, retry_after)
                 if self.breaker.state == 'open':
                     delay = max(delay, self.breaker.open_until - self.clock())
@@ -556,7 +584,7 @@ class Outbox:
             elif error_class == ErrorClass.REJECTED or row['attempts'] > MAX_RETRIES:
                 await self._persist(lambda: self.db.mark_failed(row['id'], error_class, error))
             else:
-                self.gateway.counters.backoffs += 1
+                self.gateway.record_backoff()
                 delay = backoff(row['attempts'], retry_after)
                 if breaker.state == 'open':
                     delay = max(delay, breaker.open_until - self.gateway.clock())

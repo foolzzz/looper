@@ -167,3 +167,23 @@ async def next_attempt(channel_id: str, *, delivery_deadline: float | None = Non
               WHERE prior.channel_id=o.channel_id AND prior.chat=o.chat
                 AND (prior.state='sending' OR (prior.state='pending' AND prior.id < o.id)))
         """, channel_id, delivery_deadline)
+
+
+async def metric_counts(since: datetime, *, pool: asyncpg.Pool | None = None) -> dict[str, dict[str, Any]]:
+    """Current backlog (of any age), and terminal outcomes created in the window."""
+    result: dict[str, dict[str, Any]] = {}
+    for row in await (pool or get_pool()).fetch("""
+        SELECT channel_id, state, error_class, count(*) AS n FROM channel_outbox
+        WHERE state IN ('pending', 'sending') OR (state IN ('failed', 'uncertain') AND created_at >= $1)
+        GROUP BY channel_id, state, error_class
+        """, since):
+        counts = result.setdefault(row["channel_id"], {"queued": 0, "failed_24h": {}, "uncertain_24h": 0})
+        if row["state"] in (State.PENDING, State.SENDING):
+            counts["queued"] += row["n"]
+        elif row["state"] == State.FAILED:
+            # Historical rows may have no classification; preserve them as unknown failures.
+            key = row["error_class"] or "unknown"
+            counts["failed_24h"][key] = counts["failed_24h"].get(key, 0) + row["n"]
+        else:
+            counts["uncertain_24h"] += row["n"]
+    return result
