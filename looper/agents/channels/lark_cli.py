@@ -453,10 +453,14 @@ def mismatch(built_for: str | None, identity: Identity) -> str | None:
     return None
 
 
-async def check(config: Mapping[str, Any], *, fresh: bool = False) -> tuple[str | None, Identity | None]:
+async def check(config: Mapping[str, Any], *, fresh: bool = False,
+                raise_errors: bool = False) -> tuple[str | None, Identity | None]:
     """Whether lark-cli can run the channel as configured: (why not, or None; the bot it acts as, when known)."""
     try:
         found = await identity(config.get("profile") or None, fresh=fresh)
     except LarkCliError as exc:
+        if raise_errors:
+            from .startup import ChannelStartError, transient
+            raise ChannelStartError(f"lark-cli cannot act as the bot: {exc}", transient=transient(exc)) from exc
         return f"lark-cli cannot act as the bot: {exc}", None
     return mismatch(config.get("allowlist_app_id"), found), found
