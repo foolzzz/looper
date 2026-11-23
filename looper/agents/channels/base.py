@@ -32,6 +32,11 @@ class DeliveryReceipt:
     external_id: str | None = None
     error: str | None = None
     failure: DeliveryFailure | None = None  # when not ``success``: why, if not SEND_FAILED
+    outcome: PostOutcome | None = None
+
+    @property
+    def result(self) -> PostOutcome:
+        return PostOutcome.SENT if self.success else (self.outcome or PostOutcome.UNKNOWN)
 
 
 class PostOutcome(StrEnum):

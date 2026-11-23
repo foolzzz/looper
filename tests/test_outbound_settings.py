@@ -205,3 +205,39 @@ def test_outbound_update_requires_confirmation_without_writing(monkeypatch):
         assert "channels.outbound.send_qps to 5" in impact
         writes.assert_not_awaited()
     asyncio.run(run())
+
+
+def test_gateway_updates_preserve_metrics_and_turn_context(monkeypatch):
+    stored = {chat_settings.METRICS_ENABLED_KEY: "true", chat_settings.TURN_CONTEXT_KEY: "true",
+              chat_settings.TIMEZONE_KEY: "Asia/Shanghai", chat_settings.REPLY_LANGUAGE_KEY: "en"}
+
+    async def get(keys):
+        return {key: stored[key] for key in keys if key in stored}
+
+    async def put(values):
+        for key, value in values.items():
+            if value is None:
+                stored.pop(key, None)
+            else:
+                stored[key] = value
+
+    monkeypatch.setattr(chat_settings.db_settings, "get_settings", get)
+    monkeypatch.setattr(chat_settings.db_settings, "put_settings", put)
+    for name in ("_metrics_enabled", "_turn_context_enabled", "_outbound_enabled"):
+        monkeypatch.setattr(chat_settings, name, False)
+    monkeypatch.setattr(chat_settings, "_timezone", None)
+    monkeypatch.setattr(chat_settings, "_reply_language", "zh-CN")
+    monkeypatch.setattr(chat_settings, "_outbound_limits", dict(chat_settings.OUTBOUND_DEFAULTS))
+
+    async def run():
+        await chat_settings.update_outbound({"outbound_enabled": True, "send_qps": 2})
+        assert chat_settings.metrics_enabled() and chat_settings.turn_context_enabled()
+        assert chat_settings.timezone() == "Asia/Shanghai" and chat_settings.reply_language() == "en"
+        await chat_settings.update_metrics(False)
+        await chat_settings.update_turn_context({"turn_context_enabled": False})
+        assert chat_settings.outbound_enabled() and chat_settings.outbound_limits()["send_qps"] == 2
+        await chat_settings.update_outbound({"outbound_enabled": None, "send_qps": None})
+        assert not chat_settings.metrics_enabled() and not chat_settings.turn_context_enabled()
+        assert chat_settings.timezone() == "Asia/Shanghai" and chat_settings.reply_language() == "en"
+
+    asyncio.run(run())

@@ -974,6 +974,8 @@ class Launch:
     # Additional directories a read-only run may inspect, such as its steps' isolated worktrees.
     read_dirs: tuple[str, ...] = ()
     llmrec: LlmrecRoute | LlmrecSkip | None = None
+    # The outbound review's PreToolUse hook (``outbound_hook.ToolHook``) on a runtime with one; None: no hook.
+    tool_hook: Any = None
 
     @property
     def access_level(self) -> Access:

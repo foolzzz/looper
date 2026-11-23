@@ -19,13 +19,14 @@ OPERATIONS = (
     Operation("outbound_gateway.get", "POST", "/api/v1/outbound_gateway/get",
               "Read the outbound gateway controls.",
               "Read the outbound gateway controls. The gateway is disabled by default.",
-              _object({}, closed=True), VIEW, operator_only=True, level=ActionLevel.INSIDE),
+              _object({}, closed=True), VIEW, operator_only=True,
+              level=ActionLevel.INSIDE),  # reads only Looper's own gateway settings
     Operation("outbound_gateway.update", "POST", "/api/v1/outbound_gateway/update",
               "Configure the outbound gateway and durable channel outbox.",
               "Configure the outbound gateway and durable channel outbox. Null restores a default; "
               "rate and edit defaults are conservative and remain to verify.",
               _object(UPDATE, [], closed=True), VIEW, risk="high", confirms=True, operator_only=True,
-              level=ActionLevel.INSIDE),
+              level=ActionLevel.INSIDE),  # changes only Looper's own gateway settings; sends no message
 )
 
 

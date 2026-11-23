@@ -8,14 +8,23 @@ from looper.agents.channels.registry import ChannelRegistry
 from looper.agents.bus import MessageBus
 
 
-def test_registry_notify_passes_retry_key(tmp_path):
+def test_registry_notify_passes_retry_key(tmp_path, monkeypatch):
+    from looper.agents import turn_metrics
+
+    observed = []
+    monkeypatch.setattr(turn_metrics, "record_proactive", lambda ref, **fields: observed.append(fields))
+    ref = turn_metrics.ProactiveRef(turn_metrics.ProactiveSource.SCHEDULE, "event-1")
+
     async def run():
         registry = ChannelRegistry(MessageBus(tmp_path))
         adapter = AsyncMock()
         adapter.notify.return_value = DeliveryReceipt('lark', True)
         registry._channels['channel-lark'] = adapter
-        assert await registry.notify('channel-lark', 'oc_synthetic', 'hello', idempotency_key='event-1') == (True, None)
+        assert await registry.notify('channel-lark', 'oc_synthetic', 'hello',
+                                     idempotency_key='event-1', proactive=ref) == (True, None)
         adapter.notify.assert_awaited_once_with('oc_synthetic', 'hello', idempotency_key='event-1')
+        assert observed[0]["dedupe_key"] == "event-1"
+        assert observed[0]["outcome"] == "sent"
     asyncio.run(run())
 
 
@@ -89,6 +98,7 @@ def test_disabled_lark_starts_without_outbox_database(monkeypatch, tmp_path, fai
             receipt = await adapter.notify('oc_synthetic', 'hello')
             assert receipt.success
             assert len(transport.calls) == 1
+            await asyncio.wait_for(adapter._channel_outbox._recovery_task, 1)
             probe.assert_awaited_once_with('channel-lark_bot')
         finally:
             await adapter.stop()
