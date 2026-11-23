@@ -270,13 +270,14 @@ def _candidate_reason(path: Path, record: KeeperRecord, alive: bool, epoch: int,
 
 
 async def scan_at_start(runtime_root: Path, *, epoch: int | None = None,
-                        resumable: Collection[str] = (), pool=None) -> StartScan:
+                        resumable: Collection[str] = (), pool=None,
+                        reserved_runs: Collection[str] = ()) -> StartScan:
     scan = StartScan()
     runs = runtime_root / RUNS_DIR
     if not runs.exists():
         return scan
     records = {path: KeeperRecord.read(path / STATE, diagnose=True)
-               for path in sorted(runs.iterdir()) if path.is_dir()}
+               for path in sorted(runs.iterdir()) if path.is_dir() and path.name not in reserved_runs}
     bad_files = {path for path, record in records.items() if record is None}
     for path in bad_files:
         records[path] = _recover(path, runtime_root / proc_tree.RECORDS_DIR)

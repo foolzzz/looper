@@ -32,6 +32,7 @@ RFC_TABLE: dict[str, ActionLevel | str] = {
     "looper_task_role_set": INSIDE, "looper_task_concurrency": ORIGIN,
     "looper_room_roster": INSIDE, "looper_room_post": INSIDE, "looper_room_inbox": INSIDE, "looper_room_read": INSIDE,
     "looper_room_watch": INSIDE,
+    "looper_agent_spawn": INSIDE, "looper_agent_wait": INSIDE, "looper_agent_cancel": INSIDE,
     "looper_vault_search": INSIDE, "looper_vault_read": INSIDE, "looper_vault_write": MACHINE,
 }
 
@@ -145,8 +146,9 @@ def _operations() -> dict[str, Any]:
 
 # The operations whose level was decided one by one (every other one is inside).
 DECIDED_OPERATIONS: dict[str, ActionLevel] = {
-    # Stores protocol permission only; no check runs in this stage.
+    # Stores permission only; the runner executes checks separately after Worker success.
     "acceptance_checks.get": INSIDE, "acceptance_checks.update": INSIDE,
+    "task_evidence.get": INSIDE,  # reads only stored check definitions and measured evidence
 
     "manager_persona.get": INSIDE,  # reads Looper's stored persona; sends nothing
     "manager_persona.update": INSIDE,  # changes Looper's stored persona; sends nothing

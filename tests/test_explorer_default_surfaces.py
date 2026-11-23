@@ -4,9 +4,12 @@ Digests were captured from origin/main before the explorer implementation. They
 cover argv, generated configuration, reported catalog tools and prompt blocks.
 """
 from dataclasses import replace
+import ast
 import hashlib
 import json
 from pathlib import Path
+import subprocess
+import sys
 
 import pytest
 
@@ -74,3 +77,40 @@ BASELINE = {
 @pytest.mark.parametrize('role', ['manager', 'planner', 'worker'])
 def test_existing_role_runtime_inputs_byte_identical(kind, role):
     assert hashlib.sha256(surfaces(kind, role)).hexdigest() == BASELINE[f'{kind}/{role}']
+
+
+@pytest.mark.parametrize('role', ['manager', 'planner'])
+def test_resident_process_signature_inputs_match_main(role):
+    """Together with argv/prompt snapshots, pin the resident restart boundary to main."""
+    path = f'looper/agents/tiers/{role}.py'
+    baseline = subprocess.run(['git', 'show', f'origin/main:{path}'],
+                              capture_output=True, check=True, text=True).stdout
+    current = (Path(__file__).resolve().parents[1] / path).read_text()
+
+    def signatures(source):
+        return [ast.dump(node.value) for node in ast.walk(ast.parse(source)) if isinstance(node, ast.Assign)
+                and any(isinstance(target, ast.Name) and target.id == 'signature' for target in node.targets)]
+
+    expected = signatures(baseline)
+    assert expected and signatures(current) == expected
+
+
+@pytest.mark.parametrize("probe", ["looper/_component_probe.py", "tests/fixtures/component_probe_v2_14_69.py"])
+def test_component_probe_reads_the_unchanged_seat_tool_catalog(probe):
+    from looper.agents.ops import room, vault
+    from looper.agents.room import MemberKind
+
+    root = Path(__file__).resolve().parents[1]
+    paths = ('looper/agents/ops/__init__.py', 'looper/agents/room.py',
+             'looper/agents/ops/room.py', 'looper/agents/ops/vault.py')
+    completed = subprocess.run(
+        [sys.executable, '-I', str(root / probe)],
+        input=json.dumps({path: (root / path).read_text() for path in paths}),
+        capture_output=True, text=True, timeout=10)
+    assert completed.returncode == 0, completed.stderr
+    expected = {role: [tool.listing() for tool in (*room.tools_for(kind), *vault.TOOLS)]
+                for role, kind in (('worker', MemberKind.WORK), ('reviewer', MemberKind.REVIEW))}
+    assert json.loads(completed.stdout) == expected
+    read = next(tool for tool in expected['worker'] if tool['name'] == room.READ)
+    assert read['inputSchema']['properties']['kind']['enum'] == [
+        'info', 'question', 'answer', 'interface', 'announce', 'notice', 'escalation']
