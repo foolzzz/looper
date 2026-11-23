@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import uuid
 from collections.abc import Mapping, Sequence
 from datetime import datetime
@@ -19,9 +20,12 @@ from typing import Any
 
 import asyncpg
 
+from ..agents.run_usage import CostStatus
 from .connection import get_pool
 from .llm_records import TASK_SPEND, _SPEND_ROLE
 from . import agent_sessions, subscriptions, tasks
+
+logger = logging.getLogger(__name__)
 
 # The schedule fields a request sets (looper/agents/schedules.py validates them).
 FIELDS = ("name", "cron", "timezone", "requirement", "work_dir", "overlap", "max_parallel_runs", "catch_up",
@@ -739,7 +743,8 @@ async def spent_since_each(conn: Db, schedule_ids: list[str], since: datetime) -
         SELECT r.schedule_id, sum(
                    CASE WHEN consult.spent > 0
                         THEN GREATEST(COALESCE(r.cost_usd::numeric, 0), COALESCE(live.spent, 0))
-                        ELSE COALESCE(r.cost_usd::numeric, live.spent) END) AS spent
+                        ELSE COALESCE(r.cost_usd::numeric, live.spent) END) AS spent,
+               string_agg(DISTINCT unknown.models, ', ') AS unknown_models
         FROM schedule_runs r
         LEFT JOIN LATERAL (
             SELECT sum(g.cost_usd) AS spent FROM (
@@ -753,10 +758,25 @@ async def spent_since_each(conn: Db, schedule_ids: list[str], since: datetime) -
             SELECT COALESCE(sum(l.cost_usd::numeric), 0) AS spent
             FROM llm_records l WHERE l.task_id = r.task_id AND ({role}) = 'consult'
         ) consult ON true
+        LEFT JOIN LATERAL (
+            SELECT string_agg(DISTINCT COALESCE(
+                       CASE WHEN jsonb_typeof(l.metadata->'unknown_price_models') = 'array'
+                            THEN NULLIF(l.metadata->>'unknown_price_models', '[]') END,
+                       l.metadata->>'model_reported', l.model, 'unknown model'), ', ') AS models
+            FROM llm_records l
+            WHERE ((l.task_id = r.task_id AND {TASK_SPEND.replace("agent_id", "l.agent_id")})
+                   OR l.id = (SELECT record_id FROM subscription_runs WHERE run_id = r.id))
+                AND l.status <> 'running' AND l.cost_usd IS NULL
+        ) unknown ON true
         WHERE r.schedule_id = ANY($1::text[]) AND r.fired_at >= $2 GROUP BY r.schedule_id
         """,
         schedule_ids, since,
     )
+    for row in rows:
+        if row["unknown_models"]:
+            logger.warning("Schedule %s daily spend cap cannot be verified: cost_status=%s for models %s; "
+                           "spend is only the known subtotal", row["schedule_id"], CostStatus.UNKNOWN.value,
+                           row["unknown_models"])
     spent = {row["schedule_id"]: float(row["spent"] or 0) for row in rows}
     return {schedule_id: spent.get(schedule_id, 0.0) for schedule_id in schedule_ids}
 

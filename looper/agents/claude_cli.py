@@ -21,7 +21,7 @@ from uuid import uuid4
 
 from . import failures, live_runs, proc_tree
 from .live_runs import LiveRun
-from .run_usage import Price, Usage, compaction, reported_totals, request_context, request_tokens, run_usage
+from .run_usage import CostStatus, Price, Usage, compaction, reported_totals, request_context, request_tokens, run_usage
 from .system_prompt_mode import SystemPromptMode
 
 if TYPE_CHECKING:
@@ -1804,7 +1804,9 @@ class ClaudeRunRecorder:
             result.update(usage_complete=False, root_usage_complete=spend.budget_verifiable,
                           cost_basis="observed", observed_cost_usd=spend.observed_cost_usd)
         if spend.budget_unverifiable:
-            result["errors"] = ["Cannot verify the configured budget: root step usage is missing or unpriced"]
+            result["errors"] = ["Cannot verify the configured budget: " + (
+                "price unknown for model(s): " + ", ".join(sorted(spend.unknown_models)) if spend.unknown_models
+                else "root step usage is missing or unpriced")]
         return CapStop(result, spend.usage)
 
     def _track(self, started_at: datetime) -> None:
@@ -2018,6 +2020,13 @@ class ClaudeRunRecorder:
 
                 cost = replace(cost, source=CostSource.PROVIDER_PRICE)
             usage = cost.usage
+            if self._spend is not None and self._spend.unknown_models:
+                # A final result or explicit usage cannot erase a request priced with a missing rate.
+                usage = replace(usage, cost_usd=None)
+            if usage.cost_status is CostStatus.UNKNOWN:
+                metadata = {"cost_status": usage.cost_status.value, **(metadata or {})}
+                if self._spend is not None and self._spend.unknown_models:
+                    metadata["unknown_price_models"] = sorted(self._spend.unknown_models)
             if self._model_reported:
                 metadata = {"model_reported": self._model_reported, **(metadata or {})}
             if self._model_display:
@@ -2089,7 +2098,9 @@ class ClaudeRunRecorder:
         from . import cost_guard
 
         await cost_guard.finish(self._record_id, cost_usd=fields.get("cost_usd"),
-                                cost_source=fields.get("cost_source"))
+                                cost_source=fields.get("cost_source"),
+                                model=self._model_reported or fields.get("model"),
+                                unknown_models=(fields.get("metadata") or {}).get("unknown_price_models", ()))
 
     def _closed_write(self, write: asyncio.Task[None]) -> None:
         _closing.discard(write)

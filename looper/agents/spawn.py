@@ -203,7 +203,7 @@ async def run_child(child: ChildRun, *, parent: SpawnParent, settings: AgentSett
     from ..db import llm_records
     from .claude_cli import ClaudeRunRecorder
     from .processor import run_cost, typed_events
-    from .run_usage import cache_split_known
+    from .run_usage import CostStatus, cost_status, cache_split_known
     from .runtimes import CostSource, RuntimeUnsupported
     from .system_prompt import sha256_text
 
@@ -319,7 +319,7 @@ async def run_child(child: ChildRun, *, parent: SpawnParent, settings: AgentSett
     elif launch.cost_source is CostSource.PROVIDER_PRICE and not cache_split_known(result):
         failed = ChildFailure.BUDGET, ("its cache writes do not say how long they last, so its cost at its "
                                        f"provider's prices is not exact and its cap of {cap:g} USD cannot be checked")
-    elif cost is None:
+    elif cost_status(cost) is CostStatus.UNKNOWN:
         failed = ChildFailure.BUDGET, f"its cost is unknown, so its cap of {cap:g} USD cannot be checked"
     elif cost > cap:
         failed = ChildFailure.BUDGET, f"it cost {cost:.4f} USD, over its cap of {cap:g} USD"

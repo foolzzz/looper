@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from collections.abc import Collection, Sequence
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
@@ -11,7 +12,10 @@ from typing import Any
 
 import asyncpg
 
+from ..agents.run_usage import CostStatus
 from .connection import get_pool
+
+logger = logging.getLogger(__name__)
 
 
 class RecordStatus(str, Enum):
@@ -639,6 +643,8 @@ async def task_costs(
     whose cost is what a subscription's usage would cost at API prices
     (``EQUIVALENT``), and ``provider_price_runs`` the others Looper priced at
     their provider's prices.
+    An ended run without a cost adds ``cost_status=unknown`` and a warning naming its model;
+    ``cost_usd`` remains the known subtotal. ``by_model`` uses the same status for its unknown groups.
     ``by_model`` splits those runs and tokens by model, with costs adding up to ``cost_usd``.
     ``cache_reported_runs`` and ``cache_missing_runs`` count complete and incomplete prompt usage;
     ``cache_hit_read_tokens`` / ``cache_hit_prompt_tokens`` uses only the complete runs, unlike token totals.
@@ -655,6 +661,11 @@ async def task_costs(
                model, count(*) AS runs,
                count(*) FILTER (WHERE status = 'running') AS running,
                count(*) FILTER (WHERE status <> 'running' AND cost_usd IS NULL) AS unpriced_runs,
+               array_agg(DISTINCT COALESCE(
+                   CASE WHEN jsonb_typeof(metadata->'unknown_price_models') = 'array'
+                        THEN NULLIF(metadata->>'unknown_price_models', '[]') END,
+                   metadata->>'model_reported', model, 'unknown model'))
+                   FILTER (WHERE status <> 'running' AND cost_usd IS NULL) AS unknown_models,
                count(*) FILTER (WHERE status = $2) AS interrupted_runs,
                count(*) FILTER (WHERE cost_usd IS NOT NULL AND {EQUIVALENT}) AS equivalent_runs,
                count(*) FILTER (WHERE cost_usd IS NOT NULL AND cost_source = 'provider_price' AND NOT {EQUIVALENT})
@@ -712,7 +723,13 @@ async def task_costs(
             model[key] += row[key]
         if row["cost_usd"] is not None:
             model["cost_usd"] = (model["cost_usd"] or Decimal(0)) + row["cost_usd"]
-    for cost in costs.values():
+    for task_id, cost in costs.items():
+        if cost["unpriced_runs"]:
+            cost["cost_status"] = CostStatus.UNKNOWN.value
+            unknown_models = sorted({model for row in rows if row["task_id"] == task_id
+                                     and row["role"] != "manager" for model in row["unknown_models"] or []})
+            logger.warning("Task %s spend cap cannot be verified: unknown cost for models %s; "
+                           "cost_usd is only the known subtotal", task_id, ", ".join(unknown_models))
         cost["cost_usd"] = float(cost["cost_usd"])
         for role in cost["by_role"].values():
             role["cost_usd"] = float(role["cost_usd"])
@@ -721,6 +738,8 @@ async def task_costs(
                 model["cost_usd"] is None, -(model["cost_usd"] or Decimal(0)), -model["runs"],
                 model["model"] is None, model["model"] or ""))
             for model in cost[key]:
+                if model["unpriced_runs"]:
+                    model["cost_status"] = CostStatus.UNKNOWN.value
                 if model["cost_usd"] is not None:
                     model["cost_usd"] = float(model["cost_usd"])
     return costs
@@ -790,7 +809,10 @@ async def spend_since(since: datetime | None, *, until: datetime | None = None, 
         f"SELECT {_SPEND} FROM llm_records r LEFT JOIN tasks t ON t.id = r.task_id WHERE {_IN_RANGE}{by_manager}",
         since, until, project_id, *args,
     )
-    return dict(row)
+    result = dict(row)
+    if result["unpriced_runs"]:
+        result["cost_status"] = CostStatus.UNKNOWN.value
+    return result
 
 
 async def task_spend(since: datetime | None, until: datetime | None = None, *, project_id: str | None = None,

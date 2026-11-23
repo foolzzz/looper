@@ -241,7 +241,7 @@ def test_step_attempts_adds_up_to_the_task_cost_and_keeps_unattributed_advisor_s
             assert costs["first"]["review"]["provider_priced"]["usd"] == 0.25
             assert costs["retry"]["advisor"]["provider_priced"]["usd"] == 0.5
             assert costs["retry"]["worker"]["equivalent"]["usd"] == 3.0
-            assert costs["retry"]["worker"]["provider_priced"] == {"usd": None, "runs": 1, "unknown_runs": 1}
+            assert costs["retry"]["worker"]["provider_priced"] == {"usd": None, "runs": 1, "unknown_runs": 1, "cost_status": "unknown"}
             assert costs["unattributed"]["advisor"]["provider_priced"]["usd"] == 2.0
             assert costs["planning"]["provider_priced"]["usd"] == 0.5 + 0.125 + 0.0625 + 0.03125
             paid = llm_records.task_costs

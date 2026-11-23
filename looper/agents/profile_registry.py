@@ -1019,7 +1019,7 @@ def model_view(row: Mapping[str, Any]) -> dict[str, Any]:
               for name in PRICE_FIELDS}
     warnings = []
     if not effective.complete:
-        warnings.append("This model has no full price: runs may record tokens only and spend caps may not apply.")
+        warnings.append("This model has no full price: runs record tokens only; configured per-run caps stop on unpriced usage, and cumulative caps report the gap.")
     if row["protocol"] != ApiProtocol.ANTHROPIC_MESSAGES.value:
         warnings += _context_suffix_warnings(name for name in (row["name"], row["background_model"]) if name)
     return {
@@ -1093,7 +1093,7 @@ def unset_price_defaults(provider: ProviderSpec, name: str) -> dict[str, float |
 def cost_basis(profile: LegacyAgentProfile) -> dict[str, Any]:
     """How a profile's runs are priced: by its runtime (``runtime``), or by Looper at its provider's prices
     (``provider_price``), with the models of its runs that have no full price (``unpriced``: those runs record
-    tokens only and no spend cap applies to them); ``equivalent`` when the figure is what a subscription's usage
+    tokens only and capped runs stop on unpriced usage); ``equivalent`` when the figure is what a subscription's usage
     would cost at API prices, not money spent."""
     from .runtimes.pricing import model_price
 
@@ -1115,7 +1115,7 @@ def cost_warnings(profile: LegacyAgentProfile) -> list[str]:
     """What registering ``profile`` should warn about: models it would run without a full price, and a runtime
     whose own cost figure no per-run cap can stop (``RuntimeAdapter.runtime_cost_capped``)."""
     warnings = [f"model {model!r} has no full price with provider {profile.provider.name!r} (input, output, cache "
-                "read and cache write): its runs record tokens only and spend caps do not apply to them; add its "
+                "read and cache write): its runs record tokens only; capped runs stop on unpriced usage and cumulative caps report the gap; add its "
                 "prices to the provider's model catalog" for model in cost_basis(profile)["unpriced"]]
     adapter = runtimes.ADAPTERS.get(profile.runtime.type)
     if adapter is not None and adapter.cost_source(profile.provider) is runtimes.CostSource.RUNTIME \

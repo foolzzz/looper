@@ -891,3 +891,25 @@ def test_the_dashboard_summary(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) 
                                             "skipped_budget": 0, "skipped_busy": 0}
 
     run_scheduled(test, monkeypatch, tmp_path)
+
+
+@pytest.mark.parametrize("with_cap", [False, True])
+def test_daily_spend_unknown_price_is_reported_when_a_cap_is_checked(monkeypatch, tmp_path, caplog, with_cap):
+    async def test(env):
+        from looper.db import llm_records
+
+        sid = (await env.enabled(daily_budget_usd=0.5 if with_cap else None))["schedule_id"]
+        first = await _fire(env, sid)
+        record = await llm_records.start_record(agent_id="worker-unpriced", task_id=first["task_id"], pool=env.pool)
+        await llm_records.finish_record(record, status="completed", cost_usd=None,
+                                       model="claude-haiku-5-5", pool=env.pool)
+        await env.end_task(first["task_id"], "completed")
+        caplog.clear()
+        second = await _fire(env, sid)
+        assert second["status"] == "running"
+        warnings = [record.message for record in caplog.records if record.levelname == "WARNING"]
+        if with_cap:
+            assert any("claude-haiku-5-5" in text and "daily spend cap" in text for text in warnings)
+        else:
+            assert not any("daily spend cap" in text for text in warnings)
+    run_scheduled(test, monkeypatch, tmp_path)

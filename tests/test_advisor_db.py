@@ -570,3 +570,22 @@ def test_the_advisors_alerts_tell_the_operator_once_each(monkeypatch: pytest.Mon
             advisor_alerts.configure(None)
 
     run_db(test, monkeypatch, setup=_setup)
+
+
+def test_unknown_advisor_cost_does_not_retry_with_a_full_budget(monkeypatch, tmp_path, caplog):
+    from unittest.mock import AsyncMock
+    from looper.agents import advisor
+    from looper.agents.model_call import CallFailed, CallFailure, Execution
+    from looper.agents.spawn import ChildRun, SpawnKind
+
+    failed = CallFailed(execution=Execution(None, record_id=1, models=("claude-haiku-5-5",)),
+                        failure=CallFailure.RUNTIME, reason="runtime failed")
+    called = AsyncMock(return_value=failed)
+    monkeypatch.setattr(advisor, "call", called)
+    child = ChildRun(SpawnKind.ADVISOR, "system", "input", timeout_s=30)
+    result, spent = asyncio.run(advisor._run(child, spawn_id=1,
+        brief=advisor.Brief("task", None, 1, advisor.Source.OPTIONAL), settings=None, cap_usd=.5,
+        runtime_root=tmp_path, claude_bin="claude", parse=lambda text: text))
+    assert called.await_count == 1
+    assert result.failure is CallFailure.BUDGET and spent is None
+    assert "claude-haiku-5-5" in caplog.text and "budget" in caplog.text

@@ -53,7 +53,7 @@ _reply_scope: contextvars.ContextVar[_ReplyScope | None] = contextvars.ContextVa
 
 @lru_cache(maxsize=64)
 def _no_price(profile: str, model: str) -> None:
-    logger.warning("Manager profile %s model %s: no price; the per-turn session budget has no soft cap", profile, model)
+    logger.warning("Manager profile %s model %s: no price; the per-turn session budget stops on unpriced usage", profile, model)
 
 
 async def prepare(session: ManagerSession, token: TurnToken, launch: Launch) -> dict[str, Any]:
@@ -67,11 +67,9 @@ async def prepare(session: ManagerSession, token: TurnToken, launch: Launch) -> 
     if usd is None:
         return {}
     price = launch.price or pricer(launch.settings.resolved_model, catalog=launch.settings.pricing_catalog)
-    spend = None
-    if policy.turn_cap(usd, priced=price.model_price(launch.model).complete) is policy.TurnCap.CAPPED:
-        cap = min(usd, launch.max_budget_usd) if launch.max_budget_usd is not None else usd
-        spend = RunSpend(price, launch.model, cap)
-    else:
+    cap = min(usd, launch.max_budget_usd) if launch.max_budget_usd is not None else usd
+    spend = RunSpend(price, launch.model, cap)
+    if not price.model_price(launch.model).complete:
         _no_price(launch.profile.id, launch.model)
     session.budget = BudgetTurn(token, usd, spend, switch=pending(session))
     if (scope := _reply_scope.get()) is not None:

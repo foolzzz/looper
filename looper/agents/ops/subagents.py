@@ -11,6 +11,7 @@ from typing import Any
 
 from ...db import agent_spawns
 from ...db.agent_spawns import CancelReason, FINISHED, SpawnState
+from ..run_usage import CostStatus, cost_status
 from ..spawn import SpawnParent
 from ..subagents import Delivery, Refused, RefusalReason, Spawner, SpawnService
 from . import ErrorCode, OpError, RetrySafety, Risk, Tool, check_arguments
@@ -127,11 +128,16 @@ class _Parent:
     def caller(self) -> Spawner:
         usage = self.recorder._usage_so_far
         cost = usage.cost_usd
-        if cost is None and any(getattr(usage, field, None) is not None for field in
-                                ("input_tokens", "output_tokens", "cache_read_tokens", "cache_creation_tokens")):
+        spend = getattr(self.recorder, "_spend", None)
+        if cost_status(cost) is CostStatus.UNKNOWN and spend is None and any(
+                getattr(usage, field, None) is not None for field in
+                ("input_tokens", "output_tokens", "cache_read_tokens", "cache_creation_tokens")):
             from ..runtimes.pricing import pricer
             price = pricer(self.launch.settings.resolved_model, catalog=self.launch.settings.pricing_catalog)
             cost = price(self.launch.model, usage)
+        if self.launch.max_budget_usd is not None and cost_status(cost) is CostStatus.UNKNOWN:
+            models = sorted(getattr(spend, "unknown_models", ())) or [getattr(self.launch, "model", "unknown")]
+            logger.warning("models %s: parent spend cap cannot be verified: cost unknown", ", ".join(models))
         return Spawner(SpawnParent(self.task_id, self.seat.step_id, self.recorder.record_id),
                        "worker", Path(self.seat.work_dir), self.seat.key,
                        budget_usd=self.launch.max_budget_usd, spent_usd=cost)

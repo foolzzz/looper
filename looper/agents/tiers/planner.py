@@ -6108,12 +6108,19 @@ class PlannerAgent:
         if plan.status not in _LIVE:
             return False  # stopping or ended already
         try:
-            spent = float((await db_llm_records.task_costs([self._task_id]))[self._task_id]["cost_usd"])
+            costs = (await db_llm_records.task_costs([self._task_id]))[self._task_id]
+            spent = float(costs["cost_usd"])
         except Exception as exc:
             logger.warning("planner %s cannot read its task's cost", self.agent_id, exc_info=True)
             await self._activity("error", f"Warning: the task's cost is unavailable ({exc}); its spend cap "
                                           "is not checked this time"[:500])
             return True
+        from ..run_usage import CostStatus
+
+        if costs.get("cost_status") == CostStatus.UNKNOWN.value:
+            models = ", ".join(str(row["model"]) for row in costs["by_model"] if row["unpriced_runs"])
+            await self._activity("error", f"Warning: the task spend cap cannot be verified: unknown cost for "
+                                         f"models {models}; ${format_usd(spent)} is only the known subtotal"[:500])
         if spent < cap:
             return True
         held = self._adopted_runs | self._ending_runs

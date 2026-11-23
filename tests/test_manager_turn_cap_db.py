@@ -41,15 +41,15 @@ def test_subscription_turn_cap_replies_and_resumes(monkeypatch, tmp_path):
     run_db(check, monkeypatch, timeout=30)
 
 
-def test_no_catalog_price_has_no_soft_cap_and_warns_once(monkeypatch, tmp_path, caplog):
+def test_no_catalog_price_stops_at_the_soft_cap_and_warns_once(monkeypatch, tmp_path, caplog):
     async def check(pool):
         await session_budget.update({"turn_budget_usd": 0.01})
         manager_budget._no_price.cache_clear()
-        monkeypatch.setattr(manager_budget, "pricer", lambda *a, **k: SimpleNamespace(model_price=lambda _: ModelPrice()))
+        monkeypatch.setattr(manager_budget, "pricer", lambda *a, **k: type("UnknownPrice", (), {"model_price": lambda self, _: ModelPrice(), "__call__": lambda self, model, usage: None})())
         async with manager(pool, tmp_path, monkeypatch, context=1000) as chat:
-            assert await chat.ask() == ["answer"]
-            assert chat.manager._session_now().budget.spend is None
-            assert await chat.ask("again") == ["answer"]
+            assert await chat.ask() == [session_budget.over_cap_reply(0.01)]
+            assert chat.manager._session_now().budget.spend.budget_unverifiable
+            assert await chat.ask("again") == [session_budget.over_cap_reply(0.01)]
         assert sum("no price;" in record.message for record in caplog.records) == 1
     run_db(check, monkeypatch, timeout=30)
 

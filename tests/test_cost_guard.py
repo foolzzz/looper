@@ -242,3 +242,88 @@ def test_schedule_observes_its_existing_shared_daily_cap_without_combining_globa
         result = await g.admit(cg.RunKind.WORKER, global_scopes, currency, 1, reserve=False)
         assert result.would is cg.Decision.ADMIT
     asyncio.run(check())
+
+
+@pytest.mark.parametrize('mode', [Mode.OBSERVE, Mode.ENFORCE])
+@pytest.mark.parametrize('kind', [cg.RunKind.WORKER, cg.RunKind.PROCESSOR])
+def test_unknown_spend_alerts_every_affected_cap_on_rebuild_and_admission(monkeypatch, caplog, mode, kind):
+    from looper.agents.cost_guard_settings import RoleLimits
+
+    async def check():
+        rows = [dict(id=1, run_kind=kind.value, task_id='task-a', schedule_id='schedule-a', created_at=NOW,
+                     model='claude-haiku-5-5', status='completed', cost_usd=None,
+                     currency=cg.Currency.PROVIDER.value, metadata={})]
+        g = guard(monkeypatch, rows=rows)
+        g.config = Config(mode=mode, daily_usd=10, roles={'processor': RoleLimits(daily_usd=10)})
+        cg.store.limits.return_value = {'tasks': {'task-a': {'cap': 10, 'schedule_id': 'schedule-a'}},
+                                       'schedules': {'schedule-a': 10}}
+        await g.rebuild()
+        snapshot = g.snapshot()
+        assert 'claude-haiku-5-5' in snapshot['problem']
+        assert all(row['cost_status'] == 'unknown' and row['unknown_models'] == ['claude-haiku-5-5']
+                   for row in snapshot['counters'])
+        assert {row['scope'] for row in snapshot['counters']} == (
+            {'task', 'schedule_day', 'global_day', 'role_day'} if kind is cg.RunKind.PROCESSOR else
+            {'task', 'schedule_day', 'global_day'})
+        caplog.clear()
+        await g.admit(kind, g.scopes(kind, 'task-a', 'schedule-a', cg.Currency.PROVIDER),
+                      cg.Currency.PROVIDER, .1)
+        assert 'claude-haiku-5-5' in caplog.text and 'cannot verify' in caplog.text
+        assert all(record.levelname == 'WARNING' for record in caplog.records)
+    asyncio.run(check())
+
+
+def test_unknown_settlement_retains_visible_gap_until_rebuild(monkeypatch, caplog):
+    async def check():
+        g = guard(monkeypatch)
+        await g.rebuild()
+        scopes = (cg.Scope(cg.BudgetScope.TASK, 'task-a', 10),)
+        reservation = (await g.admit(cg.RunKind.WORKER, scopes, cg.Currency.PROVIDER, 1)).reservation
+        g.bind(reservation, 1)
+        g.finish(1, None, model='new-unpriced-model')
+        row = g.snapshot()['counters'][0]
+        assert row['spent_usd'] == 0 and row['reserved_usd'] == 0
+        assert row['cost_status'] == 'unknown' and row['unknown_models'] == ['new-unpriced-model']
+        assert 'new-unpriced-model' in g.snapshot()['problem']
+        assert 'new-unpriced-model' in caplog.text
+        # An unrelated refresh failure must still be visible beside the price gap.
+        g.problem = 'Synthetic refresh failure'
+        assert 'Synthetic refresh failure' in g.snapshot()['problem']
+        assert 'new-unpriced-model' in g.snapshot()['problem']
+    asyncio.run(check())
+
+
+def test_unknown_equivalent_cost_does_not_warn_for_separate_provider_daily_cap(monkeypatch, caplog):
+    async def check():
+        rows = [dict(id=1, run_kind='worker', task_id=None, schedule_id=None, created_at=NOW,
+                     model='unpriced-subscription', status='completed', cost_usd=None,
+                     currency=cg.Currency.EQUIVALENT.value, metadata={})]
+        g = guard(monkeypatch, rows=rows, cap=1)
+        await g.rebuild()
+        caplog.clear()
+        scopes = g.scopes(cg.RunKind.WORKER, None, None, cg.Currency.PROVIDER)
+        await g.admit(cg.RunKind.WORKER, scopes, cg.Currency.PROVIDER, .1)
+        assert not caplog.records
+        assert next(row for row in g.snapshot()['counters'] if row['currency'] == cg.Currency.PROVIDER.value)[
+            'cost_status'] == 'known'
+    asyncio.run(check())
+
+
+def test_unknown_auxiliary_prices_survive_settlement_and_rebuild(monkeypatch, caplog):
+    async def check():
+        g = guard(monkeypatch, cap=1)
+        await g.rebuild()
+        scopes = g.scopes(cg.RunKind.WORKER, None, None, cg.Currency.PROVIDER)
+        reservation = (await g.admit(cg.RunKind.WORKER, scopes, cg.Currency.PROVIDER, .1)).reservation
+        g.bind(reservation, 1)
+        unknown = ['aux-unpriced-a', 'aux-unpriced-b']
+        g.finish(1, None, model='known-main', unknown_models=unknown)
+        assert g.snapshot()['counters'][0]['unknown_models'] == unknown
+        assert all(model in caplog.text for model in unknown)
+        cg.store.history.return_value = [dict(id=1, run_kind='worker', task_id=None, schedule_id=None,
+            created_at=NOW, status='completed', model='known-main', cost_usd=None,
+            currency=cg.Currency.PROVIDER.value, metadata={'unknown_price_models': unknown})]
+        await g.rebuild()
+        assert g.snapshot()['counters'][0]['unknown_models'] == unknown
+        assert 'known-main' not in g.snapshot()['problem']
+    asyncio.run(check())

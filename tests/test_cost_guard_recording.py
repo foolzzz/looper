@@ -170,7 +170,7 @@ def test_finished_record_replaces_reservation_only_after_its_cost_is_saved(monke
     recorder._record_id = 42
     asyncio.run(recorder._write_end({"status": "completed", "cost_usd": 0.25, "cost_source": "runtime"}))
     assert [event[0] for event in events] == ["record", "settle"]
-    assert events[-1][1:] == ((42,), {"cost_usd": 0.25, "cost_source": "runtime"})
+    assert events[-1][1:] == ((42,), {"cost_usd": 0.25, "cost_source": "runtime", "model": None, "unknown_models": ()})
 
 
 @pytest.mark.parametrize('failure', ['guard', 'reservation', 'audit', 'guard_audit', None])

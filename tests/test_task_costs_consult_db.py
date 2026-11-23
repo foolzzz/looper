@@ -88,7 +88,7 @@ def test_a_task_without_consults_keeps_the_recorded_cost():
     run_db(check)
 
 
-def test_a_room_consult_is_in_the_task_cost_and_can_cross_its_budget():
+def test_a_room_consult_is_in_the_task_cost_and_can_cross_its_budget(caplog):
     async def check(pool):
         task = "consult-task"
         await _finish(pool, "worker-consult-task", task, 0.10, "worker-model")
@@ -103,6 +103,12 @@ def test_a_room_consult_is_in_the_task_cost_and_can_cross_its_budget():
         assert cost["cost_usd"] == 0.17
         assert cost["runs"] == 4
         assert cost["unpriced_runs"] == 1
+        assert cost["cost_status"] == "unknown"
+        gap = next(row for row in cost["by_model"] if row["model"] == "consult-gap")
+        assert gap["cost_status"] == "unknown"
+        assert "consult-gap" in caplog.text and "spend cap" in caplog.text
+        total = await llm_records.spend_since(None, pool=pool)
+        assert total["cost_status"] == "unknown"
         assert cost["equivalent_runs"] == 1
         assert cost["by_role"]["consult"] == {"cost_usd": 0.07, "runs": 3}
         assert list(cost["by_role"]) == ["planner", "worker", "reviewer", "consult"]
@@ -333,3 +339,64 @@ def test_a_consult_makes_the_planner_stop_at_the_task_cap(tmp_path, monkeypatch)
         assert message.payload["status"] == "failed"
         assert await pool.fetchval("SELECT phase FROM tasks WHERE id = 'capped-task'") == "failed"
     run_db(check, monkeypatch)
+
+
+def test_a_task_cap_reports_unknown_price_instead_of_treating_it_as_free(tmp_path, monkeypatch, caplog):
+    async def check(pool):
+        from looper.agents.project_execution import ProjectExecution
+        from looper.agents.tiers.planner import PlannerAgent, TaskPlan
+
+        await _finish(pool, "worker-unpriced", "unpriced-task", None, "haiku",
+                      metadata={"model_reported": "claude-haiku-5-5"})
+        planner = PlannerAgent(task_id="unpriced-task", runtime_root=tmp_path)
+        planner._execution = ProjectExecution(task_budget_usd=0.15)
+        planner._activity = AsyncMock()
+        plan = TaskPlan(plan_id="plan", goal_id="goal", requirement="Run",
+                        work_dir=str(tmp_path), status="executing")
+        assert await planner._within_budget(plan) is True
+        assert "claude-haiku-5-5" in caplog.text and "spend cap" in caplog.text
+        planner._activity.assert_awaited_once()
+        assert "cannot be verified" in planner._activity.await_args.args[1]
+    run_db(check, monkeypatch)
+
+
+def test_task_cap_warning_names_unknown_auxiliary_models_instead_of_known_main(caplog):
+    async def check(pool):
+        await _finish(pool, "worker-auxiliary", "auxiliary-task", None, "known-main",
+                      metadata={"model_reported": "known-main", "unknown_price_models": ["unknown-one", "unknown-two"]})
+        cost = (await llm_records.task_costs(["auxiliary-task"], pool=pool))["auxiliary-task"]
+        assert cost["cost_status"] == "unknown"
+        assert "unknown-one" in caplog.text and "unknown-two" in caplog.text
+        assert "known-main" not in caplog.text
+    run_db(check)
+
+
+@pytest.mark.parametrize("kind", ["agent", "subscription"])
+def test_schedule_budget_reports_unknown_auxiliary_models_without_a_task_for_subscriptions(kind, caplog):
+    async def check(pool):
+        from looper.db.projects import create_project
+        from looper.db.schedules import spent_since
+
+        project = await create_project(name="Unknown budget", pool=pool)
+        fired = datetime(2026, 11, 23, 12, 0, tzinfo=timezone.utc)
+        await pool.execute(
+            "INSERT INTO schedules (id, project_id, name, cron, timezone, requirement, kind, daily_budget_usd) "
+            "VALUES ('aux-schedule', $1, 'nightly', '0 0 * * *', 'UTC', 'do the thing', $2, 1)",
+            project["id"], kind)
+        task = "aux-schedule-task" if kind == "agent" else None
+        if task:
+            await pool.execute("INSERT INTO tasks (id, project_id, requirement, status) VALUES ($1, $2, 'Run', 'completed')",
+                               task, project["id"])
+        await pool.execute(
+            "INSERT INTO schedule_runs (id, schedule_id, scheduled_for, fired_at, trigger, status, task_id) "
+            "VALUES ('aux-run', 'aux-schedule', $1, $1, 'scheduled', 'completed', $2)", fired, task)
+        record = await _finish(pool, "worker-aux" if task else "processor-aux", task, None, "known-main",
+                               metadata={"model_reported": "known-main", "unknown_price_models": ["unknown-one", "unknown-two"]})
+        if kind == "subscription":
+            await pool.execute("INSERT INTO subscription_runs (run_id, from_seq, to_seq, record_id) VALUES ('aux-run', 0, 0, $1)",
+                               record)
+        assert await spent_since(pool, "aux-schedule", fired - timedelta(seconds=1)) == 0
+        assert "daily spend cap" in caplog.text
+        assert "unknown-one" in caplog.text and "unknown-two" in caplog.text
+        assert "known-main" not in caplog.text
+    run_db(check)

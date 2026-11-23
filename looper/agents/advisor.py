@@ -43,6 +43,7 @@ from .advice import (
 from .advice_lint import describe, lint
 from .agent_settings import AgentSettings, AgentType, load_agent_settings
 from .model_call import CallFailed, CallFailure, CallResult, ChildCall, Execution, call
+from .run_usage import CostStatus, cost_status
 from .spawn import MIN_RUN_USD, ChildRun, SpawnKind, SpawnParent
 
 logger = logging.getLogger(__name__)
@@ -172,7 +173,7 @@ def _failure_state(failure: CallFailure) -> SpawnState:
 
 async def _run(child: ChildRun, *, spawn_id: int, brief: Brief, settings: AgentSettings, cap_usd: float,
                runtime_root: Path, claude_bin: str, parse: Callable[[str], T],
-               deadline: float | None = None) -> tuple[CallResult[T], float]:
+               deadline: float | None = None) -> tuple[CallResult[T], float | None]:
     """Run ``child``, and once more when it ended in error (not when it was refused, rate-limited, over budget or
     out of time), within ``deadline``; the last run's result, and what both spent. Each run is noted on the consult
     when it starts and its spend booked when it ends, so a consult stopped meanwhile keeps what its runs spent
@@ -182,6 +183,17 @@ async def _run(child: ChildRun, *, spawn_id: int, brief: Brief, settings: AgentS
 
     async def booked(done: Execution) -> None:
         await _book(spawn_id, done)
+
+    def unknown_cost(result: CallResult[T]) -> CallFailed | None:
+        if result.record_id is None or cost_status(result.cost_usd) is CostStatus.KNOWN:
+            return None
+        models = ", ".join(result.execution.models) or "unknown"
+        reason = f"models {models}: consult budget cannot be verified: cost unknown; no retry or answer"
+        logger.warning(reason)
+        if isinstance(result, CallFailed) and result.failure is not CallFailure.RUNTIME:
+            return result  # Keep timeout/refusal classification; these failures never retry or return advice.
+        return CallFailed(execution=replace(result.execution, failure=CallFailure.BUDGET, reason=reason),
+                          failure=CallFailure.BUDGET, reason=reason)
 
     from .cost_guard import Held
 
@@ -193,6 +205,8 @@ async def _run(child: ChildRun, *, spawn_id: int, brief: Brief, settings: AgentS
         failed = CallFailed(execution=Execution(None, failure=CallFailure.UNAVAILABLE, reason=str(held)),
                             failure=CallFailure.UNAVAILABLE, reason=str(held))
         return failed, 0.0
+    if failed := unknown_cost(done):
+        return failed, None
     spent = done.cost_usd or 0.0
     left = _time_left(deadline)
     if (isinstance(done, CallFailed) and done.failure is CallFailure.RUNTIME
@@ -209,6 +223,8 @@ async def _run(child: ChildRun, *, spawn_id: int, brief: Brief, settings: AgentS
             failed = CallFailed(execution=Execution(None, failure=CallFailure.UNAVAILABLE, reason=str(held)),
                                 failure=CallFailure.UNAVAILABLE, reason=str(held))
             return failed, spent
+        if failed := unknown_cost(done):
+            return failed, None
         spent = round(spent + (done.cost_usd or 0.0), 6)
     return done, spent
 
