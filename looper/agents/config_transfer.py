@@ -127,7 +127,7 @@ class Action(str, Enum):
     SKIPPED = "skipped"
 
 
-SECTIONS = ("runtimes", "providers", "models", "profiles", "gateway.aliases", "settings.layers", "settings.roles", "settings.scheduler", "settings.chat", "settings.system", "channels",
+SECTIONS = ("runtimes", "providers", "models", "profiles", "gateway.aliases", "settings.layers", "settings.roles", "settings.scheduler", "settings.chat", "settings.system", "settings.cost_guard", "channels",
             "catalog", "installs", "workflows",
             "projects", "project.layers", "project.items", "project.knowledge", "project.role_templates",
             "project.schedules", "project.installs", "managers", "manager.templates", "manager.installs")
@@ -444,6 +444,12 @@ async def stored_chat_settings(conn: Any) -> dict[str, bool]:
     return {"metrics_enabled": value == "true"} if value in ("true", "false") else {}
 
 
+async def stored_cost_guard_settings(conn: Any) -> dict[str, Any]:
+    from .cost_guard_settings import portable
+
+    return await portable(conn)
+
+
 def schedule_entry(row: Mapping[str, Any], profile_names: Mapping[str, str]) -> dict[str, Any]:
     """A schedule as the file holds it: no enabled flag, runs or counters, and no directory (``repoint`` when it had
     one of its own)."""
@@ -568,11 +574,14 @@ async def export_chunks(
         summary.counts["settings.system"] = 1
     if chat := await stored_chat_settings(conn):
         head["settings"]["chat"] = chat
+    if cost_guard := await stored_cost_guard_settings(conn):
+        head["settings"]["cost_guard"] = cost_guard
     summary.counts.update({"runtimes": len(head["runtimes"]), "providers": len(providers),
                            "models": len(head["models"]), "profiles": len(head["profiles"]),
                            "settings.layers": len(head["settings"]["layers"]),
                            "settings.roles": len(head["settings"]["roles"]),
-                           "settings.scheduler": len(scheduler), "settings.chat": len(chat), "channels": len(channels),
+                           "settings.scheduler": len(scheduler), "settings.chat": len(chat),
+                           "settings.cost_guard": len(cost_guard), "channels": len(channels),
                            "installs": len(head["installs"])})
     summary.secrets += sum(_secret_count(entry) for entry in [*channels, *providers])
     yield "{" + ",\n".join(f"{_dump(k)}:{_dump(v)}" for k, v in head.items())
@@ -721,6 +730,8 @@ def validate_document(data: Any, *, label: str = "configuration") -> None:
         raise ConfigFileError("settings.system must be a JSON object")
     if not isinstance(data.get("settings", {}).get("chat", {}), dict):
         raise ConfigFileError("settings.chat must be a JSON object")
+    if not isinstance(data.get("settings", {}).get("cost_guard", {}), dict):
+        raise ConfigFileError("settings.cost_guard must be a JSON object")
     _check_retired_fields(data.get("settings", {}).get("layers", []), "settings.layers", ("model", "effort"))
     _check_retired_fields(data.get("providers", []), "providers", ("protocols", "base_url", "models"))
     for index, project in enumerate(data.get("projects", [])):
@@ -1686,6 +1697,11 @@ class _Importer:
                 await self.conn.execute("INSERT INTO system_settings (key, value) VALUES ($1, $2) "
                     "ON CONFLICT (key) DO UPDATE SET value=EXCLUDED.value, updated_at=now()",
                     chat_settings.METRICS_ENABLED_KEY, "true" if value else "false")
+
+    async def cost_guard(self, entry: Any) -> None:
+        from .cost_guard_settings import import_into
+
+        await import_into(self, entry)
 
     async def channel(self, entry: Any) -> None:
         from .channels.allowlist import AllowlistError, normalized_config
@@ -2735,6 +2751,8 @@ async def import_config(conn: Any, data: Mapping[str, Any], *, apply: bool,
         await importer.system(settings["system"])
     if "chat" in settings:
         await importer.chat(settings["chat"])
+    if "cost_guard" in settings:
+        await importer.cost_guard(settings["cost_guard"])
     for entry in data.get("catalog", []):
         await importer.item(entry, None)
 

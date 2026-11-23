@@ -11,5 +11,8 @@
     "tools:manager": "ef59c300712b485e48f7a3944ee85b3fdd6ed87233db35636713c7f0726c574d",
     "tools:planner": "51a5b1b26f2a8b8cae7ef31508855c9798d1f47e3bcdc3e5be5f49cd18189fd4",
     "tools:worker": "426e7f8bc0c780e49dec5d4612b15cbeac413f2a23accc4a771c4ca6416190a1"
+  },
+  "baseline_overrides": {
+    "prompts:tiers.manager": "b3ee3b601ba6f4b76c5ce9eaba63aa9b30976330"
   }
 }

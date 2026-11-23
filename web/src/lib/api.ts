@@ -2122,6 +2122,70 @@ export async function deleteProjectSkill(
   return result;
 }
 
+export type SkillAuthorKind = "operator" | "proposal" | "rollback";
+
+/** One saved version of a project skill. The list leaves out the body. */
+export interface SkillVersion {
+  version: number;
+  name: string;
+  description: string;
+  sha256: string;
+  author_kind: SkillAuthorKind;
+  author_ref: string | null;
+  reason: string;
+  created_at: string;
+}
+
+/** The difference between two versions: names, descriptions, and a unified diff of the bodies. */
+export interface SkillVersionDiff {
+  from_version: number;
+  to_version: number;
+  name: { from: string; to: string };
+  description: { from: string; to: string };
+  content: string;
+}
+
+export interface SkillVersions {
+  skill_id: string;
+  current_version: number | null;
+  versions: SkillVersion[];
+  affected_projects: { project_id: string; project_name: string }[];
+  diff: SkillVersionDiff | null;
+}
+
+/** List one project skill's versions. Pass both ends of a range to also get their difference. */
+export async function fetchSkillVersions(
+  projectId: string,
+  skillId: string,
+  range?: { fromVersion: number; toVersion: number },
+): Promise<SkillVersions> {
+  const result = await callV1<SkillVersions>("/api/v1/project_skills/versions", {
+    project_id: projectId,
+    skill_id: skillId,
+    ...(range ? { from_version: range.fromVersion, to_version: range.toVersion } : {}),
+  });
+  if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
+  return result;
+}
+
+export interface ProjectSkillRollback extends ProjectInstalls {
+  skill: ProjectSkill;
+  version: number;
+  affected_projects: SkillVersions["affected_projects"];
+}
+
+/** Write a new version whose content is an older version's. Answers with the project's installs. */
+export async function rollbackProjectSkill(
+  projectId: string,
+  skillId: string,
+  version: number,
+): Promise<ProjectSkillRollback> {
+  const result = await callV1<ProjectSkillRollback>(
+    "/api/v1/project_skills/rollback", { project_id: projectId, skill_id: skillId, version });
+  if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
+  return result;
+}
+
 export async function updateTaskConfig(
   taskId: string,
   fields: { requirement?: string; work_dir?: string; config?: Record<string, unknown> },
