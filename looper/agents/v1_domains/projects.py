@@ -5,7 +5,8 @@ from .. import projects as core
 from ..api_v1 import Operation, _array, _object, _STR, _NULL_STR, _INT, _BOOL, _summary
 from ..ops import Call, ErrorCode, OpError, Turn
 from ..ops.config import _deleting_project, answered, directory_change_impact, project_named
-from ..project_execution import ADVISOR_BUDGETS, ADVISOR_COUNTS, ADVISOR_FIELDS, FIELDS, ROOM_LIMITS
+from ..project_execution import (ADVISOR_BUDGETS, ADVISOR_COUNTS, ADVISOR_FIELDS, FIELDS, ROOM_LIMITS,
+                                 SUBAGENT_BUDGETS, SUBAGENT_COUNTS, SUBAGENT_FIELDS)
 
 
 def _choice(*values):
@@ -16,13 +17,13 @@ def _choice(*values):
 EXECUTION = {
     "task_budget_usd": {"type": ["number", "null"]},
     "room_consult_budget_usd": {"type": ["number", "null"]},
-    **dict.fromkeys(ADVISOR_BUDGETS, {"type": ["number", "null"]}),
+    **dict.fromkeys((*ADVISOR_BUDGETS, *SUBAGENT_BUDGETS), {"type": ["number", "null"]}),
     **dict.fromkeys(("supervise_interval_seconds", "max_step_retries", "role_text_max_chars",
-                     "gate_reminder_hours", *ROOM_LIMITS, *ADVISOR_COUNTS), {"type": ["integer", "null"]}),
+                     "gate_reminder_hours", *ROOM_LIMITS, *ADVISOR_COUNTS, *SUBAGENT_COUNTS), {"type": ["integer", "null"]}),
     "task_budget_action": _choice("wrap_up", "fail"), "review_policy": _choice("planner", "all"),
     "step_workspaces": _choice("shared", "worktree"), "task_workspaces": _choice("in_place", "worktree"),
     **dict.fromkeys(("planner_roles", "wait_commands", "user_gates", "agent_room", "operator_notes", "vault",
-                    "dependency_conditions", "advisor"),
+                    "dependency_conditions", "advisor", "subagents"),
                     _choice("off", "on")),
     **dict.fromkeys(("workspace_links", "verification_paths", "advisor_internal_domains"),
                     {"type": ["array", "null"], "items": _STR}),
@@ -30,10 +31,13 @@ EXECUTION = {
     "distill_lessons": {"type": "string", "enum": ["off", "draft", "write"]},
 }
 assert set(EXECUTION) == set(FIELDS)
+ACCEPTANCE_CHECKS = {"type": "string", "enum": ["local", "network"]}
 PROJECT = _object({"project_id": _STR, "name": _STR, "description": _STR, "work_dir": _STR,
     "default_workflow": _NULL_STR,
     "background": _STR, "created_at": _STR, "updated_at": _STR,
     "task_count": _INT, "active_count": _INT, "schedule_count": _INT, **EXECUTION})
+PROJECT["required"] = [name for name in PROJECT["required"] if name not in SUBAGENT_FIELDS]
+PROJECT["properties"]["acceptance_checks"] = ACCEPTANCE_CHECKS
 INPUT_EXECUTION = {}
 for field, schema in EXECUTION.items():
     if field in ("task_budget_usd", "room_consult_budget_usd"):
@@ -55,12 +59,12 @@ MOVED = _object({"project": PROJECT, "old_dir": _STR, "new_dir": _STR, "link_old
     "notes": _object({"moved": _BOOL, "from": _STR, "to": _STR, "reason": _STR}, required=("moved",))})
 # The Manager's compact project leaves out the advisor's settings while the project's advisor is off (the advisor
 # RFC, section 13: what the model sees stays as it was).
-COMPACT_PROJECT = _object(PROJECT["properties"], [name for name in PROJECT["properties"] if name not in ADVISOR_FIELDS])
+COMPACT_PROJECT = _object(PROJECT["properties"], [name for name in PROJECT["properties"] if name not in (*ADVISOR_FIELDS, *SUBAGENT_FIELDS, "acceptance_checks")])
 COMPACT_PROJECT_RESULT = _object({"project": COMPACT_PROJECT})
 COMPACT_MOVED = {**MOVED, "properties": {**MOVED["properties"], "project": COMPACT_PROJECT}}
 MOVE_PREVIEW = _object({"old_dir": _STR, "new_dir": _STR, "impact": _STR, "move_version": _STR})
 MOVE_REQUEST = {"project": _STR, "to": _STR, "link_old": _BOOL}
-SCHEMAS = {"Project": PROJECT, "ProjectExecution": _object(EXECUTION), "ProjectPatch": PATCH}
+SCHEMAS = {"Project": PROJECT, "ProjectExecution": _object(EXECUTION, [field for field in EXECUTION if field not in SUBAGENT_FIELDS]), "ProjectPatch": PATCH}
 RESULTS = {
     # The compact Manager list omits the root when unset to preserve its model-visible result.
     "projects.list": _object({"projects": _array(_object({"project": _STR, "work_dir": _NULL_STR,
@@ -177,7 +181,7 @@ async def run(server, operation, arguments, principal, headers):
     before = core.project_view(await answered(core._existing_project(project_id)))
     # A confirmed directory update must reach the version check even if another writer set the same target.
     if arguments.get("_directory_version") is None and (
-            not changes or all(before[key] == value for key, value in changes.items())):
+            not changes or all(before.get(key) == value for key, value in changes.items())):
         raise OpError(ErrorCode.INVALID, "give at least one changed project field")
     return {"project": await answered(core.update_project(
         project_id, fields, expected_directory_version=arguments.get("_directory_version")))}

@@ -127,7 +127,7 @@ class Action(str, Enum):
     SKIPPED = "skipped"
 
 
-SECTIONS = ("runtimes", "providers", "models", "profiles", "gateway.aliases", "settings.layers", "settings.roles", "settings.scheduler", "settings.chat", "settings.system", "channels",
+SECTIONS = ("runtimes", "providers", "models", "profiles", "gateway.aliases", "settings.layers", "settings.roles", "settings.scheduler", "settings.chat", "settings.system", "settings.cost_guard", "channels",
             "catalog", "installs", "workflows",
             "projects", "project.layers", "project.items", "project.knowledge", "project.role_templates",
             "project.schedules", "project.installs", "managers", "manager.templates", "manager.installs")
@@ -444,6 +444,12 @@ async def stored_chat_settings(conn: Any) -> dict[str, bool]:
     return {"metrics_enabled": value == "true"} if value in ("true", "false") else {}
 
 
+async def stored_cost_guard_settings(conn: Any) -> dict[str, Any]:
+    from .cost_guard_settings import portable
+
+    return await portable(conn)
+
+
 def schedule_entry(row: Mapping[str, Any], profile_names: Mapping[str, str]) -> dict[str, Any]:
     """A schedule as the file holds it: no enabled flag, runs or counters, and no directory (``repoint`` when it had
     one of its own)."""
@@ -505,6 +511,7 @@ async def export_chunks(
     from .. import __version__
     from ..db import config_transfer as db
     from ..db.projects import EXECUTION_COLUMNS
+    from .project_execution import omit_unset_subagents
     from ..db import workflows as db_workflows
 
     summary = summary if summary is not None else ExportSummary()
@@ -567,11 +574,14 @@ async def export_chunks(
         summary.counts["settings.system"] = 1
     if chat := await stored_chat_settings(conn):
         head["settings"]["chat"] = chat
+    if cost_guard := await stored_cost_guard_settings(conn):
+        head["settings"]["cost_guard"] = cost_guard
     summary.counts.update({"runtimes": len(head["runtimes"]), "providers": len(providers),
                            "models": len(head["models"]), "profiles": len(head["profiles"]),
                            "settings.layers": len(head["settings"]["layers"]),
                            "settings.roles": len(head["settings"]["roles"]),
-                           "settings.scheduler": len(scheduler), "settings.chat": len(chat), "channels": len(channels),
+                           "settings.scheduler": len(scheduler), "settings.chat": len(chat),
+                           "settings.cost_guard": len(cost_guard), "channels": len(channels),
                            "installs": len(head["installs"])})
     summary.secrets += sum(_secret_count(entry) for entry in [*channels, *providers])
     yield "{" + ",\n".join(f"{_dump(k)}:{_dump(v)}" for k, v in head.items())
@@ -601,7 +611,8 @@ async def export_chunks(
             entry = {
                 "name": project["name"], "description": project["description"], "background": project["background"],
                 "default_workflow": project["default_workflow"],
-                "execution": {column: project[column] for column in EXECUTION_COLUMNS},
+                "execution": omit_unset_subagents({column: project[column] for column in EXECUTION_COLUMNS}) | (
+                    {"acceptance_checks": project["acceptance_checks"]} if project.get("acceptance_checks") else {}),
                 "layers": [layer_entry(r) for r in layers if r["project_id"] == project["id"]],
                 "knowledge": [document_entry(r) for r in documents[project["id"]]],
                 "items": owned,
@@ -719,6 +730,8 @@ def validate_document(data: Any, *, label: str = "configuration") -> None:
         raise ConfigFileError("settings.system must be a JSON object")
     if not isinstance(data.get("settings", {}).get("chat", {}), dict):
         raise ConfigFileError("settings.chat must be a JSON object")
+    if not isinstance(data.get("settings", {}).get("cost_guard", {}), dict):
+        raise ConfigFileError("settings.cost_guard must be a JSON object")
     _check_retired_fields(data.get("settings", {}).get("layers", []), "settings.layers", ("model", "effort"))
     _check_retired_fields(data.get("providers", []), "providers", ("protocols", "base_url", "models"))
     for index, project in enumerate(data.get("projects", [])):
@@ -1685,6 +1698,11 @@ class _Importer:
                     "ON CONFLICT (key) DO UPDATE SET value=EXCLUDED.value, updated_at=now()",
                     chat_settings.METRICS_ENABLED_KEY, "true" if value else "false")
 
+    async def cost_guard(self, entry: Any) -> None:
+        from .cost_guard_settings import import_into
+
+        await import_into(self, entry)
+
     async def channel(self, entry: Any) -> None:
         from .channels.allowlist import AllowlistError, normalized_config
 
@@ -1972,7 +1990,7 @@ class _Importer:
     async def project(self, entry: Mapping[str, Any]) -> str | None:
         """Add or update a project's own fields; its id (``new:...`` in a preview), or None when skipped."""
         from ..db.projects import EXECUTION_COLUMNS
-        from .project_execution import execution_fields
+        from .project_execution import execution_fields, acceptance_checks_mode, AcceptanceChecksMode
         from .projects import RequestError, _create_project_row, project_background, project_name, project_work_dir
 
         raw_name = entry.get("name") if isinstance(entry, Mapping) else None
@@ -1983,6 +2001,8 @@ class _Importer:
                 background = project_background(entry.get("background", ""))
                 execution = execution_fields({column: _mapping(entry.get("execution", {}), "execution").get(column)
                                               for column in EXECUTION_COLUMNS})
+                mode = acceptance_checks_mode(_mapping(entry.get("execution", {}), "execution").get("acceptance_checks"))
+                acceptance = None if mode is AcceptanceChecksMode.OFF else mode.value
             except ValueError as exc:
                 raise _Skip(str(exc)) from None
             if name.lower() in self.seen_projects:
@@ -1999,6 +2019,8 @@ class _Importer:
             self.record("projects", str(raw_name), Action.SKIPPED, reason=str(exc))
             return None
         row = self.target.projects.get(name.lower())
+        if "acceptance_checks" in entry.get("execution", {}):
+            values["acceptance_checks"] = acceptance
         if row is None:
             try:
                 values["work_dir"] = project_work_dir(entry.get("work_dir", ""))
@@ -2023,6 +2045,8 @@ class _Importer:
 
             await update_project(row["id"], description=values["description"], background=background,
                                  execution=execution, default_workflow=default, pool=self.conn)
+        if self.apply and action in (Action.ADDED, Action.CHANGED) and "acceptance_checks" in values:
+            await self.conn.execute("UPDATE projects SET acceptance_checks = $2 WHERE id = $1", project_id, acceptance)
         self.project_ids[name.lower()] = project_id
         self.project_values[project_id] = {**(row or {}), "id": project_id, "name": name, **values}
         from .project_execution import ProjectExecution
@@ -2727,6 +2751,8 @@ async def import_config(conn: Any, data: Mapping[str, Any], *, apply: bool,
         await importer.system(settings["system"])
     if "chat" in settings:
         await importer.chat(settings["chat"])
+    if "cost_guard" in settings:
+        await importer.cost_guard(settings["cost_guard"])
     for entry in data.get("catalog", []):
         await importer.item(entry, None)
 

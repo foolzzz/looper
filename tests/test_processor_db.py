@@ -306,10 +306,11 @@ def test_the_processor_upgrade_widens_the_role_and_capability_checks_and_keeps_e
     from looper.db import connection
     from tests.bridge_schema_support import structure, witness
     from tests.db_support import fresh_connection
+    from tests.subagents_schema_support import ensure_before_platform_subagents
 
     async def test() -> None:
         async with fresh_connection() as old, fresh_connection() as fresh:
-            await connection.ensure_schema(old)
+            await ensure_before_platform_subagents(old)
             # The released checks and capabilities, a layer and a Claude Code runtime the operator registered.
             await old.execute("""
                 UPDATE agent_runtimes SET capabilities =
@@ -334,7 +335,8 @@ def test_the_processor_upgrade_widens_the_role_and_capability_checks_and_keeps_e
             assert await connection.schema_change_pending(old)
             await connection.ensure_schema(old)
             after = await witness(old)
-            assert after == {**before, "schema_migrations": after["schema_migrations"]}
+            assert after == {**before, "schema_migrations": after["schema_migrations"],
+                             "schema_fingerprint": after["schema_fingerprint"]}
             await old.execute("DELETE FROM agent_setting_layers")
             await old.execute("DELETE FROM agent_runtimes WHERE id = 'rt-claude-2'")
             await old.execute("UPDATE agent_runtimes SET capabilities = $1 WHERE id = 'rt-claude-code'",
@@ -343,6 +345,8 @@ def test_the_processor_upgrade_widens_the_role_and_capability_checks_and_keeps_e
                               "VALUES ('role', 'processor', 1)")
             await old.execute("DELETE FROM agent_setting_layers")
             assert await structure(old) == await structure(fresh)
+            assert await old.fetchval("SELECT sha256 FROM schema_fingerprint") == await fresh.fetchval(
+                "SELECT sha256 FROM schema_fingerprint")
             assert not await connection.schema_change_pending(old)
             assert await old.fetchval("SELECT count(*) FROM schema_migrations WHERE name='processor_role'") == 1
 

@@ -94,7 +94,8 @@ class Backend(Protocol):
     async def run(self, request: Request) -> Execution: ...
 
 
-_CHILD_FAILURES = {failure: CallFailure(failure.value) for failure in ChildFailure}
+_CHILD_FAILURES = {failure: (CallFailure.RUNTIME if failure is ChildFailure.START_FAILURE else CallFailure(failure.value))
+                   for failure in ChildFailure}
 
 
 class SubscriptionBackend:

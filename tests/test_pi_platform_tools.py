@@ -56,9 +56,9 @@ def _launch(role: str, library: AgentLibrary = AgentLibrary(), *, endpoint: str 
     return Launch(AgentSettings(profile=profile), library=library, role=AgentType(role), access=Access.CONSULT if consult else None)
 
 
-def test_pi_advertises_only_the_rfc_capabilities_and_all_four_roles() -> None:
+def test_pi_advertises_only_the_rfc_capabilities_and_supported_roles() -> None:
     assert PI.capabilities == CAPABILITIES
-    assert servable_roles(PI.capabilities) == ROLES
+    assert servable_roles(PI.capabilities) == ["manager", "planner", "worker", "explorer", "reviewer"]
     # The remaining RuntimeUnsupported cases validate input/version/session
     # boundaries; none of these execution entry points is a rollout placeholder.
     for method in ("run_command", "resident_session", "consult_command", "steer_command", "run_channel",

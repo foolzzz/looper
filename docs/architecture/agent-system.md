@@ -21,10 +21,12 @@ bounded background tasks and failures leave replies unaffected. The read-only
 `manager_metrics.get` operation (also available through the CLI) returns delivery
 counts, P50/P95 latencies excluding replayed and completion turns, daily proactive
 counts in the server timezone and mature, successfully sent delivery reply rates
-for 1–30 days. Housekeeping retains proactive rows for 90 days. Proactive delivery
-recording owns the table's single named migration:
+for 1–30 days. Housekeeping retains proactive rows for 90 days whether or not
+metrics are on, because delivery writes the same table while that switch is off.
+Proactive delivery recording owns the table's single named migration:
 one row per message, with the send receipt in `outcome`. `source` includes
-`completion` and `user_reminder`; `chat_kind` is `direct` or `group`.
+`completion`, `user_reminder` and `morning_brief` (the digest itself); `chat_kind`
+is `direct` or `group`.
 Unsent decisions leave both `outcome` and `sent_at` null. Registry sends reuse
 idempotency keys and bus sends reuse envelope ids as `dedupe_key`; retries update
 only the receipt, preserving the first decision. Nullable `decision`, `reason`,
@@ -3251,6 +3253,69 @@ and `advisor_internal_domains` (at most 20 domains whose names, and the hosts
 under them, the code checks refuse in a request) ([Consults of the
 advisor](#consults-of-the-advisor)).
 
+Executable acceptance definitions are opt-in per project: `acceptance_checks`
+is `off` by default (stored as NULL), `local` or `network`. Only the operator
+can read or change this permission through `acceptance_checks.get/update`,
+including from Project → Settings. It is separate from agent-writable execution
+fields and chat settings. Configuration imports require operator identity to
+set it; omission preserves the target permission. With it enabled, Planner work steps may carry typed
+`command` or `artifact` checks bound to a criterion; definitions persist in
+`task_steps.checks` through plan edits and restarts. After a successful Worker,
+the Planner runs checks before asking for its decision and stores append-only
+`step_check_runs` evidence. This stage does not change decisions or Reviewer prompts.
+The operator-only `task_evidence.get` operation (also available through `loopercli`)
+accepts `task` and optional `step`, returning definitions and all evidence attempts,
+including history retained after disabling checks; artifact bytes and storage paths
+are excluded. No evidence tool is added to the Manager or Planner.
+
+Git checks reuse the verification runner's private checkout, runtime-path copying
+and kernel write notifications. Writing existing code, even restoring its bytes,
+records `error: changed_code`; the private baseline is restored and discarded.
+Protected paths touched by a check remain listed even if it restores their bytes.
+Non-Git directories run in place with `guarded: false` (report only). Protected paths
+are compared with the server-recorded step start commit; changed paths produce a
+failed row. Missing write monitoring or evidence storage prevents execution.
+
+Local checks on macOS use `sandbox-exec -p
+'(version 1)(allow default)(deny network*)(deny job-creation)' /bin/sh -c <check>`.
+Before execution, a fixed probe must prove both launch and network denial; missing
+or ineffective facilities record `error: sandbox_unavailable`, with no unsandboxed
+fallback. DNS, loopback and pathname Unix sockets are denied; file IO and pipes
+remain available. Linux uses `unshare -rn --` with the same fail-closed preflight
+and a distinct network-namespace check; this path has not been verified on Linux.
+Only a check requesting `network: true` in a `network` project bypasses that launcher.
+Commands receive an OS-only subset of `child_env.inherited()`, without runtime
+credentials, proxies or SSH agents. This is not a file sandbox: commands retain the
+service user's file access.
+
+The runner allows two checks service-wide, a cumulative 900 seconds per step
+attempt, and a 16 MiB output read limit; commands have their declared timeout
+(default 300 seconds, maximum 1800). Output stores a redacted 4000-character tail,
+captured byte count and SHA-256; activities contain status and exit code only.
+Artifacts are content-typed PNG/JPEG/WebP/UTF-8 text/JSON, at most three files of
+2 MiB each. Files live under the runtime's `evidence/` tree, are deleted with the
+task, and are pruned oldest-round-first above 50 MiB per task while rows remain.
+At startup, after orphan processes are swept, running evidence becomes
+`error: interrupted`; resuming a saved Worker-success decision reruns only
+interrupted or missing checks. Completed checks are not repeated for that attempt.
+The current project permission is checked before every new check, including after
+waiting for concurrency. Disabling it prevents new launches and retains history.
+Unexpected execution or preflight exceptions settle their row as
+`error: evidence_unavailable` before propagating. An uncertain terminal database
+write remains unfinished and cannot be skipped as completed in the same process.
+Exhausting the remaining step budget records `error: budget`; a command's own
+timeout records `error: timeout`. A saved network check refused after a downgrade
+to `local` records `error: could_not_start`, without launching it.
+
+Empty checks
+and the disabled permission are omitted from existing responses and exports;
+while off, Planner contracts and prompts remain byte-identical, including plan
+views of previously enabled projects with saved checks. Definitions remain in
+the database for operator evidence reads. See the
+[executable acceptance RFC](rfcs/executable-acceptance-v0.zh-CN.md), sections 6
+and 13, for the protocol and subsequent stages (decision gates, Reviewer evidence,
+artifact downloads and task-page evidence are still pending).
+
 A task can also have a spend cap of its own (`tasks.budget_usd`, a scheduled
 run's `run_budget_usd`), which replaces its project's `task_budget_usd` for it
 (`get_task_project` reads it in its place). Continuing such a task at its cap
@@ -4291,6 +4356,35 @@ So:
   turn's context, cost and compactions. That is the Manager's and the
   Planners' context over time.
 
+### Cost guard observation
+
+`cost_guard.mode` defaults to `off`; this first stage accepts only `off` and `observe`.
+Global and background-role daily caps have no default. Observe for a week before choosing limits;
+the read-only Settings → 花费 page then offers the last 30 days' daily P95 × 1.5 as advice, never an applied cap.
+The operator-only `cost_guard.get/update` operations expose this configuration and accounting; updates declare
+confirmation. They are separate from `chat_settings`, add no agent tool, and are available through the generated CLI.
+Configuration export/import includes explicit cost settings, never runtime observations; a client cannot import them.
+Lark and Telegram share the same observed Manager/model-run paths, with no new command, reply or notification.
+
+`agents/cost_guard.py` reserves before every model turn through `ClaudeRunRecorder.start`, including resident
+Manager/Planner turns, Worker/Reviewer runs, processor/leads checks, advisor/judge/outbound checks and room consults.
+A schedule firing is observed separately without reserving twice. The effective run cap is the estimate; without one,
+use the same role/currency's last 30 days' P95, at least $0.50 ($0.05 for processors and classifiers).
+No samples uses the floor with `estimate_source=floor_no_samples`. OAuth subscription equivalents and real spend
+use separate counters. Startup and each new scheduler day rebuild history, P95 and running reservations; the
+scheduler, subscriptions and guard share `Scheduler.day_start`, with the existing server-local default.
+A completed record replaces its reservation with actual cost. Unknown costs remain unknown; these estimates are
+admission accounting, not a provider billing guarantee.
+
+Observe adds only internal `metadata.reservation` and `metadata.cost_guard` and server log records. It records
+would-admit/ask/deny outcomes, but never enforces, asks, sends, changes retries, adds a soft cap or changes a
+profile. Record presentation removes these fields. Off performs no admission I/O and adds no record fields;
+prompts, tools, commands and process signatures retain their previous inputs. A guard error preserves ordinary
+execution. Outbound reservation errors propagate to `review()`'s existing block-on-error path; a successful
+classifier verdict and successful audit write are both still required to allow an action.
+Enforcement, holds, quota deferrals, alerts, unanswered-push pauses and editable dashboard controls follow the
+[cost guard RFC's PR split](rfcs/cost-guard-v0.zh-CN.md#15-pr-拆分). This stage needs no migration.
+
 ### Why a run failed (failure classes)
 
 While the system setting `engine.failure_typing` is `record` (`off` by default; [engine reliability
@@ -5129,6 +5223,38 @@ bytes and do not query these additional run records. The shared delivery path
 carries the summary to dashboard, Telegram, Lark and CLI task reads; no new
 channel command is added.
 
+### A Worker's explorer tools
+
+With a project's `subagents` set to `on` (unset is off), a Worker's `run.` token
+also has `looper_agent_spawn`, `looper_agent_wait` and `looper_agent_cancel`.
+Reviewers and explorers never receive them; Planner support is a later slice.
+The run's recorded identity, working directory and live spend supply the parent
+authority; model arguments cannot select a different task or parent. Spawn and
+cancel are write tools, wait is read; all three declare the `inside` action level.
+
+The bridge preserves the runtime's tool-call id, generating one per invocation
+when needed, and reuses it over HTTP retries. Spawn's durable per-parent key
+makes a lost response safe to retry. In-process Worker tools forward the same
+identity. Wait accepts up to eight owned ids or lists this run's explorers and
+remaining limits; waits last at most 120 seconds, subject to the runtime cap.
+Completed results returned by spawn or wait get a tool receipt, including a
+zero-wait spawn retry. Unawaited or timed-out results
+go to the Worker's room when enabled: a bounded `spawn_result` message and the
+first-delivery receipt commit together. Without the room, wait remains the
+retrieval path. Delivery failures leave the result available for retry or pull.
+
+The Worker instructions direct read-only research to these tools, file changes
+to Planner steps, and advise against native subagents editing files. This is
+guidance; native subagents keep their existing permissions. When the Worker
+ends, its token is revoked before outstanding admissions drain and its
+queued or running explorers are cancelled with `parent_ended`; explorers already
+`finishing` complete their result and accounting, with live writeback retries even
+after the parent record ends. A kept Worker that
+detaches keeps its children across the planned handover. The serve lifecycle
+recovers existing rows, retries queued work and pending room delivery, and
+cancels or hands over children on shutdown. With the switch off, existing
+prompts, tool listings, run grants and launch parameters retain their bytes.
+
 ### A task's Planner's tools
 
 Each task's Planner has four MCP tools of its own, which act on its task
@@ -5720,6 +5846,33 @@ Manager's `looper_schedules` cannot create or change one.
   file leaves it out), migrating existing digest and daily jobs, and Looper's own
   collection.
 
+### Event triage foundation
+
+The [event triage RFC](rfcs/event-triage-v0.zh-CN.md) has a storage foundation only.
+The migration file `db/migrations/event_triage.py` owns the fresh and upgrade DDL
+for `event_triage`; `event_triage_online` validates its checks on existing tables
+with their migration locks released. It adds `triage_events`, their cascading
+message sources, `subscription_runs.window_seqs`, the `triage` output kind,
+and the Manager event vocabulary (`triage`, `manager_silent`, a task only for
+`task_end`). Deleting any cited message deletes the entire derived event.
+
+`agents.triage_model` holds the typed categories, reasons, events and extraction
+counts, including `uncited`. `db.triage_events` reads events and provenance;
+`db.subscriptions.runs_for_message` uses exact selected seqs rather than the
+window's range, including messages no event cited. Non-triage runs leave the
+array null and retain their existing readback shape.
+
+`subscriptions.triage.enabled` defaults to false, with no startup setting row.
+Only the operator can read or store it through `triage_settings.get/update`;
+it is absent from chat settings and Manager tools. Public subscription creation
+still accepts only push, leads and intents. A stored triage subscription fires
+as `skipped_gate`, leaves its cursor alone and starts no processor: the reason
+is the disabled switch, or unavailable execution when the switch is on.
+Recovered running triage attempts are cancelled before extraction. There is no
+triage preset, renderer, parser, writer, why API/CLI, UI, Manager hand-off or
+briefing reader yet. The dashboard, Lark and Telegram therefore gain no new
+message behavior; CLI configuration can call the operator-only operations.
+
 ### Message leads
 
 Message leads are sourced, unconfirmed notes, stored in PostgreSQL rather than
@@ -6162,7 +6315,8 @@ again keeps its first decision and the channel's receipt lands on the same
 row; decisions on one chat are taken one at a time, so the cap holds across
 send points. After the post the send point records the receipt (`outcome`
 `sent`, `rejected` or `unknown`, `sent_at`, `external_id`) on the same row as
-the metrics. Off, the layer writes nothing. Wired so far: gate
+the metrics. A later try of the same message replaces a `rejected` receipt.
+Off, a send point that switch controls writes nothing. Wired so far: gate
 reminders, task notices to Lark and Telegram, subscription digest pushes, and
 initial and new-evidence intent pushes. A completed or failed task's code notice is `normal`; an opened, updated or resumed gate that needs the
 user is `blocking`, like its reminders. The channel checks a task-end notice
@@ -6182,14 +6336,52 @@ the next poll. Deferred or dropped intents retain their post without claiming
 it or consuming a send attempt, and uncertain sends are never retried. Final
 intent edits and fallback replies, subscription alerts and failure notices,
 task progress, completion turns, the dashboard chat and other senders retain
-their existing paths. Keep the switch off until the briefing can read deferred messages; digest consumption
-and the delivery settings UI are not delivered here.
+their existing paths. The delivery settings UI is not delivered here.
 Design: [proactive delivery RFC](rfcs/proactive-delivery-v0.zh-CN.md).
+A morning brief (`source` `morning_brief`) is sent uncounted and is never
+deferred: it is the digest. The brief has its own switch and still calls `deliver`
+while the delivery switch is off.
+
+### Morning brief
+
+On a workday (Monday to Friday; a weekday holiday still sends), at
+`morning_brief.time` (09:15 by default) in `user.timezone` (else the server's
+zone, `turn_context.zone()`), one brief goes to each enabled bot's operator
+direct chat. It names what waits (the needs-you summary), reminders due that
+local day, and proactive messages deferred into the digest (`decision`
+`digest`). Every brief reads from the first attempt's dates (Monday also
+Saturday and Sunday) through the day being sent, except digest rows already
+recorded by id in `morning_brief_consumed`. The claim stores the ids that
+read returned, in that same write. A sent or uncertain brief records them in
+the same transaction as its row. A refusal records none and clears the stored
+ids, so a rejected Tuesday brief's digest is still in Wednesday's. A sender
+that stops before the record is `uncertain` on restart, and that recovery
+consumes exactly the stored ids: it does not scan by `decided_at`. A row whose
+insert had not committed is therefore still read once, on the next brief.
+`consumed_until` is the check time, not a watermark. Every section empty means
+nothing is sent. The switch, whether the
+channel is enabled and who the operator is are read again after the summary is
+collected and again immediately before the post. The switch is read again after
+the operator
+query returns. A fresh claim that then fails that check is deleted; a claim
+that continued a refusal is put back as that refusal, with the attempt count
+it had. The switch
+`morning_brief.enabled` is off by default and operator-only
+(`morning_brief.get`, `morning_brief.update`); off, a tick reads the in-memory
+switch and does nothing else. One `morning_briefs` row per local date and chat
+makes a restart and a second server send it at most once. A send that stops
+mid-way is `uncertain` and is not sent again. With `delivery.enabled` on, the
+decision and the channel receipt share one `proactive_deliveries` row. A later
+successful try replaces a rejected receipt on that row (`outcome`, `sent_at`,
+`external_id`). A receipt already recorded as `sent` or `unknown` keeps those
+three fields. Design:
+[morning brief RFC](rfcs/morning-brief-v0.zh-CN.md).
 
 ### Card buttons
 
-A Manager's confirmation and a user gate can be answered with one press of a
-card's button ([Card buttons RFC](rfcs/assistant-card-actions-v0.zh-CN.md);
+A Manager's confirmation, a user gate, an intent push and a relayed ledger
+decision can be answered with one press of a card's button
+([Card buttons RFC](rfcs/assistant-card-actions-v0.zh-CN.md);
 `looper/agents/card_actions.py`). It is off until the system setting
 `cards.actions.enabled` is `true`; the dashboard has no switch yet. Off,
 nothing is stored, replies carry no cards, gate messages go as text, a Lark
@@ -6205,7 +6397,7 @@ when the channel has one.
   are answered by typing.
 - **The table** (`card_actions`; migration `card_actions`): one row per card,
   keyed by the opaque token that is all a button carries (`<token>:<choice>`),
-  with its `kind` (`confirmation`, `gate`), `subject`, the `digest` of the
+  with its `kind` (`confirmation`, `gate`, `intent`, `ledger`), `subject`, the `digest` of the
   parameters it is bound to, the `chat` it is in and the channel
   `message_id` it became (both noted from the send's answer: a Lark card sent
   to an open_id gets its direct chat's id), who may press
@@ -6242,6 +6434,21 @@ when the channel has one.
   of its open questions (at most 3 questions, 5 options each) and
   「按现在的结论结束」; a press goes into the gate as the user's message
   (`gate_service.post_message`, `via` `button:<channel>`), like `/gate N`.
+- **Intents.** Operator direct-chat pushes get 建 and 驳回. They run the same
+  build/reject service as `建 I-0042` and `驳回 I-0042`. The intent row lock,
+  card claim and transition share a transaction; typed commands settle the
+  same card records. A changed title, summary, sources or project configuration
+  invalidates the old card. A missing project or directory leaves it retryable
+  and asks for the existing numbered reply or dashboard flow. Final edits keep
+  the original card format and remove its buttons.
+- **Ledger.** In the operator's own direct chat, `looper_ledger_update` get/list
+  adds a 确认 card for each open, relayed decision. The user's own decisions
+  are already confirmed; groups and other senders get no confirmation cards.
+  The button rechecks the current operator and ledger switch, then uses
+  `db.ledger.apply` under the item's lock. Typed confirmation, including CLI,
+  settles those same card rows; changing or cancelling the decision invalidates
+  them. Both new kinds reuse channel/message binding and the authorization
+  deadline. No new model tools, settings or v1 operations are introduced.
 
 ### What needs you
 
@@ -6257,8 +6464,10 @@ list or command line changes either way.
 - **Sections**, in order: `gates` (user gates waiting for the operator,
   `gate_service.list_gates` with `waiting_on=user`), `confirmations` (each
   Manager's operation waiting for the operator's word,
-  `ManagerOps.waiting_confirmations`, read from memory, so a restart drops
-  them), `schedules` (`db.schedules.failing`, the Schedules card's list),
+  `card_actions.pending_confirmations`: durable card rows while cards are on,
+  supplemented only by confirmations that could not be persisted; otherwise
+  `ManagerOps.waiting_confirmations` from memory), `schedules`
+  (`db.schedules.failing`, the Schedules card's list),
   `logins` (the Claude Code CLI or login, or a runtime login an Agent
   Profile uses, failing in the checks `system/status` reads; the HTTP server
   registers that reader with `attention.use_status_checks` while it runs),
@@ -7296,7 +7505,7 @@ PostgreSQL is a hard startup dependency. All data paths:
 | `manager_events` | A task end that has a chat to tell (completion events): `manager_id`, `kind` (`task_end`), `task_id`, `origin` (`chat`, `schedule`), `target_kind` (`web`, `dm`, `group`), `channel_id`, `chat`, `dedupe_key` (unique), `payload` (the facts), `fallback` (the code notice it stands for), `state` (`pending`, `running`, `delivered`, `fallback`, `skipped`) with `reason`, the `batch` and `record_id` of the completion turn that took it, `due_at`, `sent_at`, and the typed delivery of its message: `delivery` (`pending`, `sending`, `sent`, `failed`, `uncertain`), `delivery_attempts`, `delivery_at` (sending since, or tried again from) and `delivery_error`; kept 30 days |
 | `agent_spawns` | A run another run starts ([Consults of the advisor](#consults-of-the-advisor)): `kind` (`advisor`), `task_id` and `step_id`, `parent_record_id` (the asking run) and `child_record_id` (its last round), `brief`, `inputs`, `budget_usd` and `spent_usd`, `state` (`drafting`, `linting`, `asking`, `needs_info`, then `answered`, `blocked`, `failed` or `over_budget`, only along `db.agent_spawns.TRANSITIONS` and from the state its caller expects), `returns` and `rounds`, `result` (typed outcomes only: each round, check hits by category and position, why it failed), `finished_at` exactly when finished; going with its task |
 | `advisor_advice` | A consult of the advisor's question and advice, one per spawn: `task_id`, `step_id`, `attempt` (the step's attempt it is for), `attempt_id` (null, for step attempts to fill), `source` (`ladder`, `checkpoint`, `optional`), `kind` (`diagnose`, `design_choice`, `plan_review`, `unblock`), `question`, `advice`, `adoption` (`adopted`, `partial`, `rejected`) with `adoption_detail` and `adopted_at`, and `unlocked` with `unlocked_at` |
-| `card_actions` | A card's buttons ([Card buttons](#card-buttons)): `token` (all a button carries), `kind` (`confirmation`, `gate`), `subject`, `digest`, `payload` (the card, and what its buttons act on), `manager_id`, `channel_id`, `chat`, `message_id`, `allowed`, `expires_at`, and once handled `handled_at`, `handled_by`, `handled_via` (`button`, `typed`, `lapsed`), `choice`, `outcome`; written only while `cards.actions.enabled` is on |
+| `card_actions` | A card's buttons ([Card buttons](#card-buttons)): `token` (all a button carries), `kind` (`confirmation`, `gate`, `intent`, `ledger`), `subject`, `digest`, `payload` (the card, and what its buttons act on), `manager_id`, `channel_id`, `chat`, `message_id`, `allowed`, `expires_at`, and once handled `handled_at`, `handled_by`, `handled_via` (`button`, `typed`, `lapsed`), `choice`, `outcome`; written only while `cards.actions.enabled` is on |
 | `decision_snapshots` | What a task's dispatch passes and its Planner's step decisions read and decided, while `decision_snapshots.enabled` is on ([Decision snapshots](#decision-snapshots)): `task_id`, `kind` (`dispatch`, `step_decision`), `step_id` (exactly for a step decision), `record_id` (the turn's run record, no foreign key), `inputs` with its `inputs_sha256`, `decision`, `created_at`; no message text; going with its task, kept 30 days while the switch is on |
 | `mcp_tool_levels` | The operator's declarations of an MCP server's tools for the outbound review ([Reviews of outbound actions](#reviews-of-outbound-actions)): `item_id` (going with its server), `tool`, `level` (`inside`: its calls run unreviewed) |
 | `outbound_reviews` | A review of an outbound action ([Reviews of outbound actions](#reviews-of-outbound-actions)): `agent_id` and `parent_record_id` (who asked), `record_id` (the classifier's run; null when code blocked it), `task_id` (going with its task), `manager_action_id`, `channel` and `chat`, `source` (`tool`, `hook`, `post`), `tool`, `action`, `level`, `target_kind` and `target`, a masked `summary` (at most 500 characters), `verdict` (`allow`, `block`), `failure` (`not_operator`, `timeout`, `parse`, `runtime`, `rate_limited`, `unavailable`, `budget`, `too_long`, `refused`, `protected`; only on a block), `reason` (at most 300 characters), `signals`, `profile_id`, `model`, `cost_usd`, `latency_ms` |
@@ -7948,6 +8157,16 @@ separate tokens and is not exported to API clients. No unversioned operator rout
   export and import share their implementation with `looper_config_export` and the dashboard;
   `config.import_preview` stages a document and returns an import id, and `config.import_apply` requires a
   client confirmation before writing it.
+- **Run tree.** The operator-only `runs.tree {task_id}` reads every persisted run of one task, following only
+  that task's `parent_record_id` edges. It returns creator, reason, model, status, summary and failure details,
+  with own and subtree costs split into subscription equivalents and API spend; unknown amounts remain null.
+  Wait intervals pair the spawner's `looper_agent_wait` tool-use and tool-result event timestamps. The task's
+  Run tree tab shows the hierarchy and timeline, replacing the timeline with an ordered list below `sm`.
+  Agents groups explorers by their spawner; Pipeline shows only a count on each step. Project Settings exposes
+  the default-off `subagents` switch and four limits. Unset fields are absent from project reads and config
+  exports; the Manager's compact project hides this group while off, preserving the base view byte for byte.
+  First enablement uses the project-settings form and project administration API. The Manager's project tool
+  and its schema are unchanged; chat configuration is deferred to a follow-up with a Manager dialog comparison.
 - **Client-only tools.** `looper_task_pipeline` (a task's steps in plan order with kind, status, dependencies and role)
   and `looper_gates` (list a task's gates, read their messages, reply, end a gate) exist for clients. A client does not
   get `looper_task_gate_reply`, because a gate reply there is the user's own words in a chat (a client answers with

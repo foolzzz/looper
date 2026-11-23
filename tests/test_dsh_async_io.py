@@ -1,7 +1,7 @@
 """DSH catalog validation must leave unrelated event-loop work responsive."""
 
 import asyncio
-import time
+import threading
 from dataclasses import replace
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -22,12 +22,18 @@ def test_slow_dsh_catalog_validation_keeps_loop_ticking(agent_db, tmp_path, monk
     library = _installed_dsh_skills(tmp_path, monkeypatch)
     launch = _run_launch(tmp_path, role="manager" if entry in {"manager", "new-session", "profile"} else "worker")
     launch = replace(launch, library=replace(library, mcp_config=launch.library.mcp_config))
-    calls = []
+    calls, stalled = [], []
+    ticked = threading.Event()
 
     def slow_node(*args, **kwargs):
         assert args[0][0] == "node"
         calls.append(args)
-        time.sleep(0.5)
+        # Block like a slow provider until the event loop has run since this call began: soon when the validation
+        # is off the loop, never when it runs on it. A bound on the loop's gaps would also count pauses that are not
+        # this call, such as a full garbage collection on a busy runner.
+        ticked.clear()
+        if not ticked.wait(5):
+            stalled.append(args)
         raise OSError("unavailable skill provider")
 
     monkeypatch.setattr(dsh.subprocess, "run", slow_node)
@@ -81,29 +87,20 @@ def test_slow_dsh_catalog_validation_keeps_loop_ticking(agent_db, tmp_path, monk
             assert recorder.record_id is None  # a refused catalog still uses the existing record failure path
 
     async def check():
-        gaps = []
         done = asyncio.Event()
-        warm = asyncio.Event()
 
         async def ticker():
-            previous = time.monotonic()
             while not done.is_set():
                 await asyncio.sleep(0.01)
-                now = time.monotonic()
-                # The first wake-up is task start-up, not the code under test: measure from the second.
-                if warm.is_set():
-                    gaps.append(now - previous)
-                warm.set()
-                previous = now
+                ticked.set()
 
         ticking = asyncio.create_task(ticker())
-        await warm.wait()
         try:
             await exercise()
         finally:
             done.set()
             await ticking
         assert calls, "the asynchronous entry must reach the blocking provider validation"
-        assert max(gaps) < 0.2
+        assert not stalled, "the event loop did not run while the provider validation blocked"
 
     asyncio.run(asyncio.wait_for(check(), 10))
