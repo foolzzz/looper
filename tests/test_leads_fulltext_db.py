@@ -179,7 +179,7 @@ def test_pg_trgm_is_created_in_public_on_upgrade_and_a_database_without_it_still
             await pool.execute("DROP EXTENSION pg_trgm CASCADE")
             await pool.execute("DELETE FROM schema_migrations WHERE name = 'leads_trigram'")
             monkeypatch.setattr(leads_trigram, "DDL",
-                                connection._LEADS_TRIGRAM_DDL.replace("pg_trgm", "pg_trgm_not_available"))
+                                leads_trigram.DDL.replace("pg_trgm", "pg_trgm_not_available"))
             await connection.ensure_schema(pool)
             assert await message_leads.trigram_schema(pool) is None
             assert await pool.fetchval("SELECT to_regclass('idx_message_leads_trigram') IS NULL")
