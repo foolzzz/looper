@@ -208,7 +208,7 @@ class MidTurnInputs:
                         merged_token.request_stop(token.stop.via if token.stop else "chat")
             item = MergedInput(envelope, merged_token, self._chat(envelope)[2] or "", message)
             running.inputs.append(item)
-            # After a successful write, never queue a duplicate because a chat/metrics write failed.
+            # After confirmed consumption, never queue a duplicate because a chat/metrics write failed.
             try:
                 async with asyncio.timeout(10):
                     await self.agent._persist_user(envelope, text)

@@ -15,6 +15,7 @@ from collections import deque
 from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
+from enum import Enum
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol
 from uuid import uuid4
@@ -655,6 +656,12 @@ def _is_init(event: dict[str, Any]) -> bool:
     return event.get("type") == "system" and event.get("subtype") == "init"
 
 
+class _InputPhase(Enum):
+    OPEN = "open"
+    GENERATING = "generating"
+    COMPLETE = "complete"
+
+
 @dataclass(eq=False)
 class _UserTurn:
     """A user message written to Claude, and its turn once Claude starts it."""
@@ -672,6 +679,38 @@ class _UserTurn:
     stopping: bool = False  # the user's stop was asked of Claude; its next result ends the turn
     answered: bool = False  # its result had come when the stop was asked: that result is a whole turn's
     result_received: bool = False  # before on_event awaits: its input window has already closed
+    input_phase: _InputPhase = _InputPhase.OPEN
+    input_receipts: dict[str, asyncio.Future[bool]] = field(default_factory=dict)
+
+    def observe_input(self, event: dict[str, Any]) -> bool:
+        """Observe native input ownership before callbacks; return whether an unconsumed write must be discarded."""
+        if event.get("parent_tool_use_id") is not None:
+            return False
+        kind = event.get("type")
+        if self.input_receipts and _is_replay(event) and (receipt := self.input_receipts.get(event.get("uuid"))) is not None:
+            if not receipt.done():
+                receipt.set_result(True)
+        if kind == "stream_event":
+            inner = event.get("event") if isinstance(event.get("event"), dict) else {}
+            if inner.get("type") in {"message_start", "content_block_start", "content_block_delta"}:
+                self.input_phase = _InputPhase.GENERATING
+        elif kind == "assistant":
+            message = event.get("message") if isinstance(event.get("message"), dict) else {}
+            content = message.get("content") if isinstance(message.get("content"), list) else []
+            self.input_phase = (_InputPhase.OPEN if any(
+                isinstance(block, dict) and block.get("type") == "tool_use" for block in content
+            ) else _InputPhase.GENERATING)
+        elif kind == "result":
+            self.input_phase = _InputPhase.COMPLETE
+            consumed = event.get("user_message_uuids")
+            consumed = {uuid for uuid in consumed if isinstance(uuid, str)} if isinstance(consumed, list) else set()
+            discard = False
+            for uuid, receipt in self.input_receipts.items():
+                if not receipt.done():
+                    receipt.set_result(uuid in consumed)
+                    discard |= uuid not in consumed
+            return discard
+        return False
 
     def starts_with(self, event: dict[str, Any]) -> bool:
         """Claude began this message's turn: its "started" lifecycle event, or its replay."""
@@ -762,6 +801,10 @@ class _Output:
                     await turn.on_event(event)  # "queued", maybe while Claude runs a turn of its own
                 return
         if turn is not None and turn.started:
+            if turn.observe_input(event):
+                # Unconfirmed input may already be queued inside Claude. None of
+                # its subsequent output belongs to an autonomous Manager turn.
+                self.discard = True
             if _is_init(event):
                 turn.session_started = True
             if event.get("type") == "result":
@@ -1161,10 +1204,9 @@ class ResidentClaude:
     async def write_mid_turn(self, text: str) -> bool:
         """Write another input into the current user turn, without starting a new one.
 
-        A prompt queued behind an autonomous turn is not running yet. Give buffered
-        output a chance to close admission before and after writing. If the result races
-        the write, retire this process and let the owner queue the input on a fresh one;
-        the old pipe must never consume it alongside that queued turn.
+        Generation closes admission. A write alone cannot prove ownership: wait
+        for its native replay or its UUID in this turn's result. Otherwise retire
+        the pipe before queue fallback, so it cannot consume a queued retry too.
         """
         process, output, turn, cancel = self._process, self._output, self._user_turn, self._cancel
         def accepting() -> bool:
@@ -1173,30 +1215,48 @@ class ResidentClaude:
                     and output is not None and not output.ended and not output.discard
                     and turn is not None and self._user_turn is turn and output.turn is turn
                     and turn.started and not turn.result_received and not turn.done.done()
+                    and turn.input_phase is _InputPhase.OPEN
                     and not turn.stopping and cancel is not None and cancel.prompt_sent and not cancel.requested)
 
         if not accepting():
             return False
-        # Poll can enqueue a transport callback behind this task's continuation;
-        # that callback in turn wakes the output reader. Let all three stages run.
-        await asyncio.sleep(0)
-        await asyncio.sleep(0)
-        await asyncio.sleep(0)
-        if not accepting():
-            return False
-        async with asyncio.timeout(5):
-            await write_user_turn(process.stdin, text)
-        # A short write's drain() need not suspend. Observe stdout independently.
-        await asyncio.sleep(0)
-        await asyncio.sleep(0)
-        await asyncio.sleep(0)
-        if not accepting():
-            # The write has no acknowledgement tying it to the completed result.
-            # Discard its pipe before the queued owner can send the input again.
-            if self._process is process:
-                await self.stop(kill=True)
-            return False
-        return True
+        uuid = str(uuid4())
+        receipt = asyncio.get_running_loop().create_future()
+        turn.input_receipts[uuid] = receipt
+
+        def stopped() -> None:
+            if not receipt.done():
+                receipt.set_result(False)
+
+        unregister = cancel.on_request(stopped)
+        merged = False
+        try:
+            try:
+                async with asyncio.timeout(5):
+                    await write_user_turn(process.stdin, text, uuid=uuid)
+            except (OSError, TimeoutError):
+                # A native receipt is authoritative even if drain then fails.
+                # Queueing that already-consumed input would duplicate it.
+                if receipt.done() and receipt.result():
+                    merged = True
+                    return True
+                raise
+            # A tool may run for a long time before Claude consumes this input.
+            # Stop and output termination wake this wait without a timing guess.
+            await asyncio.wait({receipt, turn.done}, return_when=asyncio.FIRST_COMPLETED)
+            merged = receipt.done() and receipt.result()
+            if not merged and turn.result_received:
+                # Keep A's result: its observer must finish before stop drops
+                # the turn. Output already discards any queued extra turn.
+                await asyncio.shield(turn.done)
+            return merged
+        finally:
+            unregister()
+            turn.input_receipts.pop(uuid, None)
+            if not merged:
+                output.discard = True
+                if self._process is process:
+                    await self.stop(kill=True)
 
     async def _stopped_by_user(self) -> StopMethod | None:
         """How the user's stop of the running turn ended it, once it has (bounded); None when none was asked."""

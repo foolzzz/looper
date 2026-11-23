@@ -263,6 +263,7 @@ def test_real_manager_resident_path_with_scripted_cli(enabled, tmp_path):
             "print(json.dumps({'type':'system','subtype':'init','session_id':'synthetic-session'}), flush=True)\n"
             "open('ready', 'w').close()\n"
             "second = json.loads(sys.stdin.readline())\n"
+            "print(json.dumps(dict(second, isReplay=True)), flush=True)\n"
             "open('inputs.json', 'w').write(json.dumps([first, second]))\n"
             "print(json.dumps({'type':'result','subtype':'success','is_error':False,'session_id':'synthetic-session',"
             "'result':'handled first and second'}), flush=True)\n"
@@ -289,7 +290,8 @@ def test_real_manager_resident_path_with_scripted_cli(enabled, tmp_path):
     run_db(test, enabled, timeout=45)
 
 
-@pytest.mark.parametrize("timing", ["buffered", "drain", "kernel_before_write", "kernel_after_write"])
+@pytest.mark.parametrize("timing", ["buffered", "drain", "kernel_before_write", "kernel_after_write",
+                                   "generating", "assistant"])
 def test_buffered_result_queues_followup_once_without_merging_or_settling(enabled, tmp_path, timing):
     """Drive the real Manager/read loop while controlling exactly when stdout is consumed."""
     from looper.agents.claude_cli import ResidentClaude
@@ -297,7 +299,7 @@ def test_buffered_result_queues_followup_once_without_merging_or_settling(enable
 
     async def test(pool):
         kernel = timing.startswith("kernel_")
-        result_during_drain = timing in {"drain", "kernel_after_write"}
+        wrote_input = timing not in {"generating", "assistant"}
         read_end, write_end = socket.socketpair()
         loop = asyncio.get_running_loop()
         rig = _Rig(tmp_path)
@@ -364,6 +366,17 @@ def test_buffered_result_queues_followup_once_without_merging_or_settling(enable
             process.stdin = Writer()
             write = resident.write_mid_turn
             async def followup(text):
+                if not wrote_input:
+                    # Model generation has begun, but no result exists yet. The
+                    # events, rather than elapsed time, decide B's next-turn ownership.
+                    event = ({"type": "stream_event", "event": {"type": "message_start"}}
+                             if timing == "generating" else
+                             {"type": "assistant", "message": {"content": [{"type": "text", "text": "A only"}]}})
+                    await dispatch_event(event)
+                    accepted = await write(text)
+                    output._stdout.feed_data(result)
+                    release_result.set()
+                    return accepted
                 # The result is already in stdout before B's admission check. In
                 # the drain case the reader deliberately cannot finish until B writes.
                 if timing == "kernel_before_write":
@@ -408,14 +421,14 @@ def test_buffered_result_queues_followup_once_without_merging_or_settling(enable
             assert second.message_id not in rig.replies
             assert "已并入当前回复" not in statuses
             assert second.message_id in {e.message_id for e in rig.bus.journal.undelivered()}
-            assert len(writes) == int(result_during_drain)
-            if result_during_drain:
+            assert len(writes) == int(wrote_input)
+            if wrote_input:
                 assert process.returncode is not None  # ambiguous pipe is gone before dispatch resumes
             (tmp_path / "read-followup").touch()
             proceed.set()
             assert await rig.reply(second) == "handled queued followup"
             assert queued == [second.message_id]
-            assert (resident.pid != original_pid) is result_during_drain
+            assert (resident.pid != original_pid) is wrote_input
             consumed = [json.loads(line) for line in (tmp_path / "consumed.jsonl").read_text().splitlines()]
             assert len(consumed) == 2 and "race-followup" in consumed[1]["message"]["content"]
             await until(lambda: not [e for e in rig.bus.journal.undelivered() if e.target.agent_id == "manager"])

@@ -349,8 +349,9 @@ class ReportsContext(Protocol):
 class MidTurnInput(Protocol):
     """A verified resident transport that can admit input to its running user turn.
 
-    Check ``Capability.MID_TURN_INPUT`` too. False means no input was written;
-    a write failure propagates so the owner can retain the message for a later turn.
+    Check ``Capability.MID_TURN_INPUT`` too. True confirms consumption by the
+    current turn. False leaves the normal queue in charge; any unconfirmed write
+    must be isolated from that retry before returning. Write failures propagate.
     Keeper- and runner-hosted sessions have not verified this contract.
     """
 

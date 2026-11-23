@@ -94,7 +94,9 @@ def test_a_result_during_drain_retires_the_pipe_before_queue_fallback(monkeypatc
         monkeypatch.setattr(resident, "stop", retire)
         writer.after_write = lambda: turn.done.set_result({"type": "result"})
         assert await resident.write_mid_turn("补充\ntext") is False
-        assert json.loads(writer.lines[0]) == {
+        message = json.loads(writer.lines[0])
+        assert message.pop("uuid")
+        assert message == {
             "type": "user", "message": {"role": "user", "content": "补充\ntext"},
         }
         assert resident._user_turn is turn and turn.tag == "original-tag"
@@ -105,12 +107,85 @@ def test_a_result_during_drain_retires_the_pipe_before_queue_fallback(monkeypatc
     asyncio.run(run())
 
 
-def test_buffered_result_is_checked_again_immediately_before_writing() -> None:
+def test_unconfirmed_write_is_not_merged_when_generation_was_not_yet_observed(monkeypatch) -> None:
     async def run() -> None:
         resident, writer, turn = _running()
-        asyncio.get_running_loop().call_soon(setattr, turn, "result_received", True)
-        assert await resident.write_mid_turn("too late") is False
-        assert writer.lines == []
+        written = asyncio.Event()
+        at_result, release_result = asyncio.Event(), asyncio.Event()
+        retired = []
+
+        async def retire(**kwargs):
+            retired.append(kwargs)
+            resident._process = None
+
+        async def observe(event):
+            at_result.set()
+            await release_result.wait()
+
+        monkeypatch.setattr(resident, "stop", retire)
+        turn.on_event = observe
+        output = resident._output = _Output(resident, asyncio.StreamReader(), None)
+        output.turn = turn
+        writer.after_write = written.set
+        pending = asyncio.create_task(resident.write_mid_turn("B"))
+        await written.wait()
+        assert not pending.done()  # stdin.write/drain is no consumption acknowledgement
+        dispatch = asyncio.create_task(output._dispatch({"type": "result", "result": "A only"}))
+        await at_result.wait()
+        assert output.discard and not pending.done()
+        release_result.set()
+        await dispatch
+        assert await pending is False
+        assert output.discard and retired == [{"kill": True}]
+        assert len(writer.lines) == 1
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("confirmation", ["replay", "result", "other_input", "stop", "eof"])
+def test_only_runtime_consumption_confirms_a_written_input(monkeypatch, confirmation) -> None:
+    async def run() -> None:
+        resident, writer, turn = _running()
+        written = asyncio.Event()
+        retired = []
+
+        async def observe(event):
+            pass
+
+        async def retire(**kwargs):
+            retired.append(kwargs)
+            resident._process = None
+
+        monkeypatch.setattr(resident, "stop", retire)
+        turn.on_event = observe
+        output = resident._output = _Output(resident, asyncio.StreamReader(), None)
+        output.turn = turn
+        # The top-level tool wait is open even while a subagent generates output.
+        await output._dispatch({"type": "stream_event", "event": {"type": "message_start"}})
+        await output._dispatch({"type": "assistant", "message": {"content": [{"type": "tool_use", "id": "tool"}]}})
+        await output._dispatch({"type": "stream_event", "parent_tool_use_id": "tool",
+                                "event": {"type": "message_start"}})
+        writer.after_write = written.set
+        pending = asyncio.create_task(resident.write_mid_turn("B"))
+        await written.wait()
+        assert not pending.done()
+        uuid = json.loads(writer.lines[0])["uuid"]
+        if confirmation == "replay":
+            await output._dispatch({"type": "user", "isReplay": True, "uuid": uuid})
+        elif confirmation == "stop":
+            resident._cancel.request()
+        elif confirmation == "eof":
+            output.drop_turn()
+        else:
+            # Neither a queued lifecycle nor another input's replay is a receipt.
+            await output._dispatch({"type": "command_lifecycle", "command_uuid": uuid, "state": "queued"})
+            await output._dispatch({"type": "user", "isReplay": True, "uuid": "other"})
+            assert not pending.done()
+            await output._dispatch({"type": "result", "user_message_uuids": [
+                uuid if confirmation == "result" else "other"]})
+        accepted = confirmation in {"replay", "result"}
+        assert await pending is accepted
+        assert retired == ([] if accepted else [{"kill": True}])
 
     asyncio.run(run())
 
@@ -167,8 +242,8 @@ def test_kernel_buffered_result_with_immediate_drain_refuses_input(monkeypatch, 
                 peer.sendall(result)  # kernel bytes, no feed_data/call_soon wake-up
             assert await resident.write_mid_turn("B") is False
             assert turn.result_received
-            assert len(writes) == int(result_at == "after_write")
-            assert retired == ([{"kill": True}] if writes else [])
+            assert len(writes) == 1  # unread output is resolved by ownership, not OS scheduling
+            assert retired == [{"kill": True}]
             if writes:
                 assert process.returncode == -9 and writer.is_closing()
         finally:
@@ -180,13 +255,68 @@ def test_kernel_buffered_result_with_immediate_drain_refuses_input(monkeypatch, 
     asyncio.run(run())
 
 
-def test_a_broken_input_pipe_is_reported_to_the_owner() -> None:
+def test_a_broken_input_pipe_is_reported_to_the_owner(monkeypatch) -> None:
     async def run() -> None:
         resident, writer, _ = _running()
+        async def retire(**kwargs):
+            resident._process = None
+        monkeypatch.setattr(resident, "stop", retire)
         writer.error = BrokenPipeError()
         with pytest.raises(BrokenPipeError):
             await resident.write_mid_turn("second")
         assert writer.lines == []
+
+    asyncio.run(run())
+
+
+def test_consumption_receipt_prevents_retry_even_if_drain_then_fails() -> None:
+    async def run() -> None:
+        resident, writer, turn = _running()
+
+        async def observe(event):
+            pass
+
+        turn.on_event = observe
+        output = resident._output = _Output(resident, asyncio.StreamReader(), None)
+        output.turn = turn
+
+        async def drain():
+            uuid = json.loads(writer.lines[0])["uuid"]
+            await output._dispatch({"type": "user", "isReplay": True, "uuid": uuid})
+            raise BrokenPipeError("after consumption")
+
+        writer.drain = drain
+        assert await resident.write_mid_turn("B") is True
+        assert len(writer.lines) == 1 and not output.discard
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("event", [
+    {"type": "stream_event", "event": {"type": "message_start", "message": {"role": "assistant"}}},
+    {"type": "assistant", "message": {"content": [{"type": "text", "text": "A only"}]}},
+])
+def test_final_generation_closes_admission_before_result_or_observer(event) -> None:
+    async def run() -> None:
+        resident, writer, turn = _running()
+        entered, release = asyncio.Event(), asyncio.Event()
+
+        async def observe(event):
+            entered.set()
+            await release.wait()
+
+        turn.on_event = observe
+        output = resident._output = _Output(resident, asyncio.StreamReader(), None)
+        output.turn = turn
+        dispatch = asyncio.create_task(output._dispatch(event))
+        try:
+            await entered.wait()
+            assert not turn.result_received and not turn.done.done()
+            assert await resident.write_mid_turn("B") is False
+            assert writer.lines == []
+        finally:
+            release.set()
+            await dispatch
 
     asyncio.run(run())
 
