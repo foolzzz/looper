@@ -1584,6 +1584,17 @@ class TestWorkerConcurrency:
             await asyncio.sleep(0.02)
         raise AssertionError(f"not all of {worker_ids} started: {pool.status()}")
 
+    @staticmethod
+    async def _until_waiting(pool: WorkerPool, worker_id: str) -> None:
+        """Wait until ``worker_id`` has checked its task's limit and waits for a place (its publish and dispatch take
+        their own time: the run is not there yet when the publish returns)."""
+        for _ in range(500):
+            wp = pool._active.get(worker_id)
+            if wp is not None and wp.status == "pending" and pool._slot_waiters.get((wp.role, wp.parent_task_id)):
+                return
+            await asyncio.sleep(0.02)
+        raise AssertionError(f"{worker_id} never waited for a place: {pool.status()}")
+
     def test_runs_wait_for_room_in_their_task_and_role_only(self, agent_db: Any) -> None:
         self._projects(agent_db, {"t-a": "proj-a", "t-a2": "proj-a", "t-b": "proj-b"})
         self._limits(agent_db, worker=1, reviewer=1)
@@ -1728,10 +1739,7 @@ class TestWorkerConcurrency:
                 for worker_id in ("w1", "w2"):
                     await bus.publish(_run_item(worker_id, "t-a", Path(tmp)))
                 await self._until_running(pool, "w1")
-                # Dispatch is asynchronous: w1 starting does not mean w2 has reached its limit yet.
-                async with asyncio.timeout(10):
-                    while not pool._slot_waiters:
-                        await asyncio.sleep(0.02)
+                await self._until_waiting(pool, "w2")
                 seen = [{w: wp.status for w, wp in pool._active.items()}]
 
                 self._limits(agent_db, worker=2)
@@ -1741,10 +1749,7 @@ class TestWorkerConcurrency:
                 self._limits(agent_db, worker=1)
                 await pool.recheck()
                 await bus.publish(_run_item("w3", "t-a", Path(tmp)))
-                for _ in range(50):  # w3 has checked its limit and waits
-                    if pool._slot_waiters:
-                        break
-                    await asyncio.sleep(0.02)
+                await self._until_waiting(pool, "w3")
                 seen.append({w: wp.status for w, wp in pool._active.items()})
                 # A waiting run can be stopped like a running one, and publishes no result.
                 seen.append({"killed": str(await pool.kill("w3")), "published": str(
