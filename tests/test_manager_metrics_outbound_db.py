@@ -1,5 +1,5 @@
 """Outbound measurements through the operator API on disposable PostgreSQL."""
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
 import pytest
@@ -67,6 +67,41 @@ def test_outbound_sums_window_and_channels(monkeypatch, tmp_path):
             server._started_at -= timedelta(days=2)
             assert (await call("manager_metrics.get"))[1]["result"]["outbound_since_start"] is False
             assert (await call("manager_metrics.get", client=True))[0] == 403
+    run_db(check, monkeypatch)
+
+
+@pytest.mark.parametrize("outcome", ["failed", "uncertain", "recover"])
+def test_old_delivery_becomes_visible_when_it_reaches_a_terminal_state(monkeypatch, tmp_path, outcome):
+    async def check(pool):
+        from looper.db import channel_outbox
+
+        monkeypatch.setattr(chat_settings, "_outbound_enabled", True)
+        now = datetime.now(timezone.utc)
+        old = now - timedelta(hours=48)
+        row = await channel_outbox.insert_or_get(dict(channel_id="channel-lark", idempotency_key="old",
+            kind="send", chat="synthetic", body={"text": "hi"}, source="answer"))
+        await channel_outbox.mark_sending(row["id"])
+        await channel_outbox.mark_attempted(row["id"], old)
+        await pool.execute("UPDATE channel_outbox SET created_at=$1 WHERE id=$2", old, row["id"])
+        if outcome == "failed":
+            await channel_outbox.mark_failed(row["id"], "rejected", "synthetic refusal")
+        elif outcome == "uncertain":
+            await channel_outbox.mark_uncertain(row["id"], "synthetic timeout")
+        else:
+            await channel_outbox.recover("channel-lark", now, 3600)
+        assert (await channel_outbox.get(row["id"]))["state"] == (
+            "failed" if outcome == "failed" else "uncertain")
+        async with v1_api(tmp_path, pool) as call:
+            status, body = await call("manager_metrics.get")
+            assert status == 200
+            channels = body["result"]["outbound"]
+            assert len(channels) == 1
+            assert channels[0]["queued"] == 0
+            assert channels[0]["failed_24h"] == ({"rejected": 1} if outcome == "failed" else {})
+            assert channels[0]["uncertain_24h"] == (0 if outcome == "failed" else 1)
+        terminal_at = (await channel_outbox.get(row["id"]))["terminal_at"]
+        assert "channel-lark" in await channel_outbox.metric_counts(terminal_at)
+        assert "channel-lark" not in await channel_outbox.metric_counts(terminal_at + timedelta(microseconds=1))
     run_db(check, monkeypatch)
 
 

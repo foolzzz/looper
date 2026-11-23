@@ -99,12 +99,12 @@ async def retry_later(id: int, at: datetime, error_class: str, error: str, *, po
 
 async def mark_failed(id: int, error_class: str, error: str, *, pool: asyncpg.Pool | None = None) -> None:
     await (pool or get_pool()).execute("UPDATE channel_outbox SET state='failed', error_class=$2, error=$3, "
-                                      "sent_at=NULL WHERE id=$1", id, error_class, error[:500])
+                                      "sent_at=NULL, terminal_at=now() WHERE id=$1", id, error_class, error[:500])
 
 
 async def mark_uncertain(id: int, error: str, *, pool: asyncpg.Pool | None = None) -> None:
     await (pool or get_pool()).execute("UPDATE channel_outbox SET state='uncertain', error_class='unknown', "
-                                      "error=$2, sent_at=NULL WHERE id=$1", id, error[:500])
+                                      "error=$2, sent_at=NULL, terminal_at=now() WHERE id=$1", id, error[:500])
 
 
 async def mark_attempted(id: int, now: datetime, *, pool: asyncpg.Pool | None = None) -> datetime:
@@ -121,6 +121,8 @@ async def recover(channel_id: str, now: datetime, keyed_window: float, *, pool: 
           state=CASE WHEN first_possible_at IS NULL OR ($4 AND first_possible_at > $3)
                      THEN 'pending' ELSE 'uncertain' END,
           next_attempt_at=$2, claim_token=NULL,
+          terminal_at=CASE WHEN first_possible_at IS NULL OR ($4 AND first_possible_at > $3)
+                           THEN NULL ELSE $2::timestamptz END,
           error_class='unknown', error='interrupted while sending'
         WHERE channel_id=$1 AND (state='sending' OR
             (state='pending' AND first_possible_at IS NOT NULL AND (NOT $4 OR first_possible_at <= $3)))
@@ -170,11 +172,15 @@ async def next_attempt(channel_id: str, *, delivery_deadline: float | None = Non
 
 
 async def metric_counts(since: datetime, *, pool: asyncpg.Pool | None = None) -> dict[str, dict[str, Any]]:
-    """Current backlog (of any age), and terminal outcomes created in the window."""
+    """Current backlog (of any age), and failures/uncertainties reached in the window.
+
+    Legacy rows without a terminal timestamp retain their creation-time window.
+    """
     result: dict[str, dict[str, Any]] = {}
     for row in await (pool or get_pool()).fetch("""
         SELECT channel_id, state, error_class, count(*) AS n FROM channel_outbox
-        WHERE state IN ('pending', 'sending') OR (state IN ('failed', 'uncertain') AND created_at >= $1)
+        WHERE state IN ('pending', 'sending')
+          OR (state IN ('failed', 'uncertain') AND coalesce(terminal_at, created_at) >= $1)
         GROUP BY channel_id, state, error_class
         """, since):
         counts = result.setdefault(row["channel_id"], {"queued": 0, "failed_24h": {}, "uncertain_24h": 0})

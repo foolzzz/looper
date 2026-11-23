@@ -1088,8 +1088,8 @@ CREATE TABLE IF NOT EXISTS subscription_daily_claims (
 
 async def _channel_outbox_pending(conn: asyncpg.Connection) -> bool:
     return not await conn.fetchval("""
-        SELECT EXISTS (SELECT 1 FROM pg_attribute WHERE attrelid=to_regclass('channel_outbox')
-                       AND attname='claim_token' AND NOT attisdropped)
+        SELECT count(*) = 2 FROM pg_attribute WHERE attrelid=to_regclass('channel_outbox')
+          AND attname IN ('claim_token', 'terminal_at') AND NOT attisdropped
         """)
 
 
