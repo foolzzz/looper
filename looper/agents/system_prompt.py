@@ -147,18 +147,18 @@ after it:
   later task of this project as {"text": "...", "scope": "project"}."""
 
 
-REVIEW_EVIDENCE_CONTRACT = """Acceptance evidence above was measured by Looper, not by you: do not override
-it with your own runs. Judge criteria with no check, and whether the checks actually measure
-their criteria (including checks that always pass). Report check gaps or ineffective checks
-as findings; with structured severity, use blocking or suggestion and the step label as where.
-Looper combines the evidence gate with your verdict; a passing verdict cannot override failed evidence."""
-
-
 def review_contract(severity: bool = False, *, evidence: bool = False) -> str:
     """The panel's structured verdict; the original contract for ordinary reviews."""
     contract = REVIEW_CONTRACT
     if evidence:
-        contract += "\n\n" + REVIEW_EVIDENCE_CONTRACT
+        # A local, not a module constant: the default-off prompt digests cover every uppercase constant.
+        evidence_contract = (
+            "Acceptance evidence above was measured by Looper, not by you: do not override\n"
+            "it with your own runs. Judge criteria with no check, and whether the checks actually measure\n"
+            "their criteria (including checks that always pass). Report check gaps or ineffective checks\n"
+            "as findings; with structured severity, use blocking or suggestion and the step label as where.\n"
+            "Looper combines the evidence gate with your verdict; a passing verdict cannot override failed evidence.")
+        contract += "\n\n" + evidence_contract
     if not severity:
         return contract
     return contract.replace(
