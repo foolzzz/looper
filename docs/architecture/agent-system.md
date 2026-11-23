@@ -5620,6 +5620,33 @@ Manager's `looper_schedules` cannot create or change one.
   file leaves it out), migrating existing digest and daily jobs, and Looper's own
   collection.
 
+### Event triage foundation
+
+The [event triage RFC](rfcs/event-triage-v0.zh-CN.md) has a storage foundation only.
+The migration file `db/migrations/event_triage.py` owns the fresh and upgrade DDL
+for `event_triage`; `event_triage_online` validates its checks on existing tables
+with their migration locks released. It adds `triage_events`, their cascading
+message sources, `subscription_runs.window_seqs`, the `triage` output kind,
+and the Manager event vocabulary (`triage`, `manager_silent`, a task only for
+`task_end`). Deleting any cited message deletes the entire derived event.
+
+`agents.triage_model` holds the typed categories, reasons, events and extraction
+counts, including `uncited`. `db.triage_events` reads events and provenance;
+`db.subscriptions.runs_for_message` uses exact selected seqs rather than the
+window's range, including messages no event cited. Non-triage runs leave the
+array null and retain their existing readback shape.
+
+`subscriptions.triage.enabled` defaults to false, with no startup setting row.
+Only the operator can read or store it through `triage_settings.get/update`;
+it is absent from chat settings and Manager tools. Public subscription creation
+still accepts only push, leads and intents. A stored triage subscription fires
+as `skipped_gate`, leaves its cursor alone and starts no processor: the reason
+is the disabled switch, or unavailable execution when the switch is on.
+Recovered running triage attempts are cancelled before extraction. There is no
+triage preset, renderer, parser, writer, why API/CLI, UI, Manager hand-off or
+briefing reader yet. The dashboard, Lark and Telegram therefore gain no new
+message behavior; CLI configuration can call the operator-only operations.
+
 ### Message leads
 
 Message leads are sourced, unconfirmed notes, stored in PostgreSQL rather than

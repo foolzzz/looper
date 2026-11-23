@@ -316,6 +316,8 @@
  "tasks.role_update": "inside",
  "tasks.room": "inside",
  "tasks.room_view": "inside",
+ "triage_settings.get": "inside",
+ "triage_settings.update": "inside",
  "turn_context_settings.get": "inside",
  "turn_context_settings.update": "inside",
  "wait_settings.get": "inside",

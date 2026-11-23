@@ -53,20 +53,20 @@ def test_an_event_is_unique_per_source_and_goes_with_its_source(monkeypatch):
 
 def test_a_database_without_the_tables_gets_them_on_upgrade(monkeypatch):
     # A database older than the stream is older than the leads and intents made from it too, and than the memory
-    # candidates that point at leads.
+    # candidates that point at leads and triage events that point at stream runs.
     leads = ("intent_posts", "intent_sources", "intents", "intent_alert_senders", "message_chat_projects",
              "intent_type_projects", "intent_type_versions", "intent_types", "message_lead_people",
              "message_lead_sources", "message_leads")
-    tables = (*leads, "subscription_deliveries", "subscription_runs", "subscription_daily_claims", "subscriptions",
+    tables = ("triage_event_sources", "triage_events", *leads, "subscription_deliveries", "subscription_runs", "subscription_daily_claims", "subscriptions",
               "source_deletions", "source_events", "source_runs", "source_threads", "source_people", "source_chats",
               "event_sources")
 
     async def check(pool):
         async with pool.acquire() as conn:
             expected = await structure(conn)
-        await pool.execute(memory.DROP_MEMORY + "; ".join(f"DROP TABLE {table}" for table in tables)
+        await pool.execute(memory.DROP_MEMORY + "DROP FUNCTION triage_drop_event() CASCADE; " + "; ".join(f"DROP TABLE {table}" for table in tables)
                            + "; DELETE FROM schema_migrations WHERE name IN ('message_stream', 'subscriptions', "
-                           "'subscription_rules', 'subscription_lookback', 'message_leads')")
+                           "'subscription_rules', 'subscription_lookback', 'message_leads', 'event_triage', 'event_triage_online')")
         async with pool.acquire() as conn:
             assert await connection.schema_change_pending(conn)
         await connection.ensure_schema(pool)
