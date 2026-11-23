@@ -2522,13 +2522,18 @@ CREATE TABLE IF NOT EXISTS morning_briefs (
     status      TEXT NOT NULL CHECK (status IN ('sending', 'sent', 'skipped', 'uncertain', 'failed')),
     attempts    INTEGER NOT NULL DEFAULT 0 CHECK (attempts >= 0),
     detail      TEXT CHECK (detail IS NULL OR char_length(detail) <= 500),
-    consumed_until TIMESTAMPTZ,       -- digests decided at or before this were taken; null while sending or failed
+    consumed_until TIMESTAMPTZ,       -- check time when this brief recorded the rows it read; not a watermark
     created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
     PRIMARY KEY (local_date, channel_id, chat)
 );
 ALTER TABLE morning_briefs ADD COLUMN IF NOT EXISTS consumed_until TIMESTAMPTZ;
+-- Digest rows a brief actually read. The next brief skips these ids. An uncommitted insert is not here.
+CREATE TABLE IF NOT EXISTS morning_brief_consumed (
+    delivery_id BIGINT PRIMARY KEY REFERENCES proactive_deliveries(id) ON DELETE CASCADE
+);
 -- morning briefs end
+
 -- The operator's declarations of an MCP server's tools (the outbound-review RFC, section 6.2): a tool declared
 -- 'inside' acts only inside Looper and this machine, and the review lets its calls run unchecked; every other tool of
 -- a server other than Looper's own is reviewed. Declarations go with their server. connection.py applies this block

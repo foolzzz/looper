@@ -536,6 +536,46 @@ def test_a_rejected_first_brief_keeps_that_days_digest_on_the_next(
     run_with_channel_configs(test, monkeypatch)
 
 
+def test_a_digest_committed_after_the_brief_read_it_is_in_the_next_brief_once(
+        monkeypatch: pytest.MonkeyPatch) -> None:
+    """A digest row inserted in a transaction the brief cannot see is not part of what that brief records.
+    After the producer commits, the next brief includes it, and the one after does not repeat it. The row's
+    ``decided_at`` is before the check time the brief stored."""
+
+    async def test(pool: Any) -> None:
+        await _zone(pool)
+        await _operator(pool)
+        monkeypatch.setattr(attention, "collect", _collect(_summary("error", "db down")))
+        tuesday = datetime(2026, 11, 24, 9, 15, tzinfo=ZONE)
+        await _digest(pool, "seen", tuesday.date(), hour=9, minute=0)
+        late_at = tuesday.replace(minute=14, second=59)
+        channel = _Channel()
+        async with pool.acquire() as producer:
+            async with producer.transaction():
+                await producer.execute(
+                    "INSERT INTO proactive_deliveries (dedupe_key, source, urgency, channel_id, chat, chat_kind, "
+                    "decision, reason, counted, local_date, digest_date, decided_at) "
+                    "VALUES ('late', 'task_notice', 'normal', 'channel-lark', $1, 'direct', 'digest', "
+                    "'quiet_hours', false, $2, $2, $3)",
+                    OP, tuesday.date(), late_at)
+                await _service(channel, tuesday).run_once()
+                assert "11-24 09:00" in channel.posts[0]["text"]
+                assert "11-24 09:14" not in channel.posts[0]["text"]
+                assert await pool.fetchval("SELECT count(*) FROM morning_brief_consumed") == 1
+        assert await pool.fetchval("SELECT consumed_until FROM morning_briefs") > late_at
+        wednesday = datetime(2026, 11, 25, 9, 15, tzinfo=ZONE)
+        await _service(channel, wednesday).run_once()
+        assert "11-24 09:14" in channel.posts[1]["text"]
+        assert "11-24 09:00" not in channel.posts[1]["text"]
+        thursday = datetime(2026, 11, 26, 9, 15, tzinfo=ZONE)
+        await _service(channel, thursday).run_once()
+        assert len(channel.posts) == 3
+        assert "09:14" not in channel.posts[2]["text"] and "09:00" not in channel.posts[2]["text"]
+        assert sum("11-24 09:14" in post["text"] for post in channel.posts) == 1
+
+    run_with_channel_configs(test, monkeypatch)
+
+
 def test_delivery_on_records_the_receipt_on_the_decision_row(monkeypatch: pytest.MonkeyPatch) -> None:
     async def test(pool: Any) -> None:
         await _zone(pool)
@@ -729,6 +769,11 @@ def test_an_old_database_gains_the_table_and_the_kind(monkeypatch: pytest.Monkey
         assert await pool.fetchval(
             "SELECT EXISTS (SELECT 1 FROM pg_attribute WHERE attrelid = 'morning_briefs'::regclass "
             "AND attname = 'consumed_until' AND attnum > 0 AND NOT attisdropped)")
+        await pool.execute("DROP TABLE morning_brief_consumed")
+        async with pool.acquire() as conn:
+            assert await connection.schema_change_pending(conn)
+        await connection.ensure_schema(pool)
+        assert await pool.fetchval("SELECT to_regclass('morning_brief_consumed') IS NOT NULL")
 
     run_db(test, monkeypatch)
 

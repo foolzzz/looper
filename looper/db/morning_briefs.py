@@ -3,11 +3,12 @@
 ``sending`` is claimed and committed before the channel is asked. ``sent`` went out. ``skipped`` had nothing to
 say, or there was no operator chat. ``uncertain`` may have gone out (the sender stopped, or the channel's answer
 was lost) and is never sent again. ``failed`` is a refusal, tried again while ``attempts`` is under the limit.
-The delivery (``agents.morning_brief``) is the only writer. Weekends write nothing. ``consumed_until`` is how far
-that chat's briefs have read: a sent, skipped or uncertain brief sets it to the check's time, and the next brief
-reads digests decided after it. A refusal leaves it unset, so the retry reads the same digests. Until a boundary
-is recorded, a later day still starts from the first attempt's date. Releasing a retry puts that refusal back,
-attempt count included; only a fresh claim is deleted.
+The delivery (``agents.morning_brief``) is the only writer. Weekends write nothing. A sent or uncertain brief
+records the digest rows that read returned, by id, in ``morning_brief_consumed``, in the same transaction as that
+row. The next brief reads the first attempt's dates through its own day, except those ids. A refusal records
+none, so the retry reads the same digests. ``consumed_until`` is that brief's check time, not a watermark: a row
+whose insert had not committed is absent from the ids, and a later brief still reads it. Releasing a retry puts
+that refusal back, attempt count included; only a fresh claim is deleted.
 """
 
 from __future__ import annotations
@@ -26,12 +27,23 @@ async def get(conn: Any, local_date: date, channel_id: str, chat: str) -> dict[s
 
 async def orphans_uncertain(conn: Any, now: datetime) -> int:
     """Settle as ``uncertain`` what a sender claimed and never settled. Under the delivery lock no claim is live,
-    so a ``sending`` row is one whose sender stopped: it may have been sent, and is never sent again."""
-    done = await conn.execute(
-        "UPDATE morning_briefs SET status = 'uncertain', "
-        "detail = 'the sender stopped before recording the answer', "
-        "consumed_until = COALESCE(consumed_until, updated_at), updated_at = $1 WHERE status = 'sending'",
-        now)
+    so a ``sending`` row is one whose sender stopped: it may have been sent, and is never sent again.
+
+    Digest rows visible at that moment and decided at or before the claim are recorded by id with the row. An
+    insert that has not committed is not visible, so it is not recorded and a later brief still reads it."""
+    async with conn.transaction():
+        await conn.execute(
+            "INSERT INTO morning_brief_consumed (delivery_id) "
+            "SELECT p.id FROM proactive_deliveries p "
+            "JOIN morning_briefs b ON b.channel_id = p.channel_id AND b.chat = p.chat "
+            "WHERE b.status = 'sending' AND p.decision = 'digest' AND p.source <> 'morning_brief' "
+            "AND p.decided_at <= b.updated_at "
+            "ON CONFLICT DO NOTHING")
+        done = await conn.execute(
+            "UPDATE morning_briefs SET status = 'uncertain', "
+            "detail = 'the sender stopped before recording the answer', "
+            "consumed_until = COALESCE(consumed_until, updated_at), updated_at = $1 WHERE status = 'sending'",
+            now)
     return int(done.split()[-1])
 
 
@@ -86,15 +98,34 @@ async def release(conn: Any, local_date: date, channel_id: str, chat: str) -> No
         local_date, channel_id, chat)
 
 
+async def _record_read(conn: Any, channel_id: str, chat: str, read_ids: list[int]) -> None:
+    """Record the digest rows a brief actually read. An id that is not this chat's digest is ignored."""
+    if not read_ids:
+        return
+    await conn.execute(
+        "INSERT INTO morning_brief_consumed (delivery_id) "
+        "SELECT id FROM proactive_deliveries "
+        "WHERE id = ANY($1::bigint[]) AND decision = 'digest' AND channel_id = $2 AND chat = $3 "
+        "AND source <> 'morning_brief' "
+        "ON CONFLICT DO NOTHING",
+        read_ids, channel_id, chat)
+
+
 async def settle(conn: Any, local_date: date, channel_id: str, chat: str, status: str, *, now: datetime,
-                 detail: str | None = None, consumed_until: datetime | None = None) -> bool:
-    """Move a claimed brief to ``status``. ``consumed_until`` is the check's time when the digests were taken
-    (unset on a refusal, so the retry reads them again). False when it was no longer ``sending``."""
-    return await conn.fetchval(
-        "UPDATE morning_briefs SET status = $4, detail = $5, updated_at = $6, "
-        "consumed_until = COALESCE($7, consumed_until) "
-        "WHERE local_date = $1 AND channel_id = $2 AND chat = $3 AND status = 'sending' RETURNING true",
-        local_date, channel_id, chat, status, detail, now, consumed_until) is True
+                 detail: str | None = None, consumed_until: datetime | None = None,
+                 read_ids: list[int] | None = None) -> bool:
+    """Move a claimed brief to ``status``. ``consumed_until`` is the check's time when ``read_ids`` were taken
+    (unset on a refusal, so the retry reads them again). Those ids are written in this same transaction. False
+    when it was no longer ``sending``."""
+    async with conn.transaction():
+        applied = await conn.fetchval(
+            "UPDATE morning_briefs SET status = $4, detail = $5, updated_at = $6, "
+            "consumed_until = COALESCE($7, consumed_until) "
+            "WHERE local_date = $1 AND channel_id = $2 AND chat = $3 AND status = 'sending' RETURNING true",
+            local_date, channel_id, chat, status, detail, now, consumed_until)
+        if applied and read_ids is not None:
+            await _record_read(conn, channel_id, chat, read_ids)
+    return applied is True
 
 
 async def reminders_today(conn: Any, *, channel_id: str, chat: str, start: datetime, end: datetime
@@ -108,34 +139,24 @@ async def reminders_today(conn: Any, *, channel_id: str, chat: str, start: datet
     return [dict(row) for row in rows]
 
 
-async def consumption_boundary(conn: Any, channel_id: str, chat: str) -> datetime | None:
-    """How far this chat's briefs have read. None until one has been sent, skipped or left uncertain."""
-    return await conn.fetchval(
-        "SELECT max(consumed_until) FROM morning_briefs WHERE channel_id = $1 AND chat = $2", channel_id, chat)
-
-
 async def first_attempt_date(conn: Any, channel_id: str, chat: str) -> date | None:
     """The local date of this chat's earliest brief, including a refusal. None before the first attempt."""
     return await conn.fetchval(
         "SELECT min(local_date) FROM morning_briefs WHERE channel_id = $1 AND chat = $2", channel_id, chat)
 
 
-async def digests(conn: Any, *, channel_id: str, chat: str, until: datetime, dates: list[date] | None = None,
-                  after: datetime | None = None) -> list[dict[str, Any]]:
-    """Proactive messages deferred for this chat, oldest first, decided at or before ``until``. With ``after``
-    (the previous brief's boundary) that is every one decided since; without it, those whose ``digest_date`` is in
-    ``dates`` (a chat that has not recorded a boundary: its first attempt's dates through the day being sent). A
-    morning brief is not one of them. ``source`` is what the metrics call the send point."""
-    if after is not None:
-        rows = await conn.fetch(
-            "SELECT id, source AS kind, reason, decided_at, task_id, schedule_id FROM proactive_deliveries "
-            "WHERE decision = 'digest' AND channel_id = $1 AND chat = $2 AND source <> 'morning_brief' "
-            "AND decided_at > $3 AND decided_at <= $4 ORDER BY decided_at, id",
-            channel_id, chat, after, until)
-    else:
-        rows = await conn.fetch(
-            "SELECT id, source AS kind, reason, decided_at, task_id, schedule_id FROM proactive_deliveries "
-            "WHERE decision = 'digest' AND channel_id = $1 AND chat = $2 AND digest_date = ANY($3::date[]) "
-            "AND source <> 'morning_brief' AND decided_at <= $4 ORDER BY decided_at, id",
-            channel_id, chat, dates or [], until)
+async def digests(conn: Any, *, channel_id: str, chat: str, until: datetime,
+                  dates: list[date] | None = None) -> list[dict[str, Any]]:
+    """Proactive messages deferred for this chat, oldest first, decided at or before ``until``, whose
+    ``digest_date`` is in ``dates`` (the first attempt's dates through the day being sent). A row already recorded
+    in ``morning_brief_consumed`` is not read again. A morning brief is not one of them. ``source`` is what the
+    metrics call the send point. There is no lower bound on ``decided_at``: a row that commits after this read,
+    with an earlier ``decided_at``, is still here next time."""
+    rows = await conn.fetch(
+        "SELECT id, source AS kind, reason, decided_at, task_id, schedule_id FROM proactive_deliveries "
+        "WHERE decision = 'digest' AND channel_id = $1 AND chat = $2 AND source <> 'morning_brief' "
+        "AND decided_at <= $3 AND digest_date = ANY($4::date[]) "
+        "AND NOT EXISTS (SELECT 1 FROM morning_brief_consumed c WHERE c.delivery_id = proactive_deliveries.id) "
+        "ORDER BY decided_at, id",
+        channel_id, chat, until, dates or [])
     return [dict(row) for row in rows]

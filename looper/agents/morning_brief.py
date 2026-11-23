@@ -2,11 +2,11 @@
 
 On a workday, at ``morning_brief.time`` (09:15 by default) in ``user.timezone`` (else the server's zone), the
 service sends one brief through ``deliver``: what waits for the operator (the needs-you summary), reminders due
-that local day, and proactive messages held for the digest. A chat's first brief reads that day's digest dates
-(Monday also Saturday and Sunday). One that ran records how far it read; the next reads every digest decided
-after that and no later than this check, so a custom time does not drop a message held later that morning.
-A refusal does not record that boundary. Until one is recorded, a later day still reads from the first
-attempt's dates, so a Tuesday brief that was rejected is still in Wednesday's. Nothing in any section means
+that local day, and proactive messages held for the digest. Every brief reads from the first attempt's digest
+dates (Monday also Saturday and Sunday) through the day being sent, except digest rows already recorded by id.
+A sent or uncertain brief records, in the same transaction as its row, only the rows that read returned. A
+refusal records none, so a Tuesday brief that was rejected is still in Wednesday's. A row whose insert had not
+committed is not recorded, and the next brief reads it once. Nothing in any section means
 nothing is sent. The switch, the channel and the operator are read again after the summary and again
 immediately before the post. The switch is read once more after the operator query returns: it can be turned
 off while that query runs. A fresh claim that then fails the check is deleted. A claim that continued a refusal
@@ -259,18 +259,15 @@ class MorningBriefService:
             return
         if not await _pending(conn, day, channel_id, chat):
             return
-        boundary = await store.consumption_boundary(conn, channel_id, chat)
         reminders = await store.reminders_today(conn, channel_id=channel_id, chat=chat, start=start,
                                                 end=start + timedelta(days=1))
-        # No boundary yet: keep the first attempt's window through today. A refusal leaves the boundary unset,
-        # and the next day's own dates would otherwise drop what that attempt read.
-        if boundary is None:
-            origin = await store.first_attempt_date(conn, channel_id, chat) or day
-            dates: list[date] | None = list(digest_dates_through(origin, day))
-        else:
-            dates = None
+        # The window stays the first attempt's dates through today. Rows already read are excluded by id, so a
+        # custom time does not drop a message held later that morning and does not repeat one. A refusal records
+        # no ids. An insert that has not committed is not among them, so the next brief still reads it.
+        origin = await store.first_attempt_date(conn, channel_id, chat) or day
+        dates = list(digest_dates_through(origin, day))
         deferred = await store.digests(
-            conn, channel_id=channel_id, chat=chat, until=now, after=boundary, dates=dates)
+            conn, channel_id=channel_id, chat=chat, until=now, dates=dates)
         text = render(day=day, needs=needs, reminders=reminders, digests=deferred, tz=policy.timezone)
         delivery = Delivery(DeliveryKind.MORNING_BRIEF, Urgency.NORMAL, ChatKind.DIRECT, silent=text is None)
         decision = proactive_delivery.deliver(delivery, policy, DeliveryState(now))
@@ -309,7 +306,8 @@ class MorningBriefService:
         else:
             status = "uncertain"
         await store.settle(conn, day, channel_id, chat, status, now=self._clock(), detail=_detail(error),
-                           consumed_until=None if status == "failed" else now)
+                           consumed_until=None if status == "failed" else now,
+                           read_ids=None if status == "failed" else [row["id"] for row in deferred])
         if decided:
             try:
                 await deliveries.record_receipt(key, outcome.value, external)
