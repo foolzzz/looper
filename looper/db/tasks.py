@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Collection, Mapping, Sequence
+import logging
+from collections.abc import Awaitable, Callable, Collection, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from enum import Enum
@@ -14,6 +15,8 @@ import asyncpg
 
 from . import journal as db_journal
 from .connection import get_pool
+
+logger = logging.getLogger(__name__)
 
 # A ready task: created (from the dashboard or by the Manager) and never started. Only a user starts it
 # (``start_ready_task``); a server start never resumes it.
@@ -318,6 +321,19 @@ async def names_and_projects_of(
                                           requirement=row["requirement"], task_id=row["id"])} for row in rows}
 
 
+# Called with a task's id when it leaves the active statuses or is reset for a restart (the server registers the
+# explorer cascade here); a failing listener never blocks the status change.
+task_ended_listeners: list[Callable[[str], Awaitable[None]]] = []
+
+
+async def _task_ended(task_id: str) -> None:
+    for listener in list(task_ended_listeners):
+        try:
+            await listener(task_id)
+        except Exception:
+            logger.warning("task %s: a task-end listener failed", task_id, exc_info=True)
+
+
 async def update_task_status(
     task_id: str,
     status: str,
@@ -354,6 +370,8 @@ async def update_task_status(
         attempt_ended_at,
         json.dumps(process_record, ensure_ascii=False) if process_record is not None else None,
     )
+    if status in ("completed", "failed", "cancelled", "stopped"):
+        await _task_ended(task_id)
 
 
 async def update_task_phase(
@@ -511,13 +529,14 @@ async def reset_task_for_restart(
     result = await pool.execute(
         """
         UPDATE tasks
-        SET status = 'pending', phase = 'pending',
+        SET status = 'pending', phase = 'pending', run_no = run_no + 1,
             error = NULL, completed_at = NULL, attempt_ended_at = NULL, fail_kind = NULL,
             result_summary = NULL, process_record = NULL, updated_at = now()
         WHERE id = $1
         """,
         task_id,
     )
+    await _task_ended(task_id)  # the previous attempt's explorers end with it, however briefly it is `pending`
     return result == "UPDATE 1"
 
 
@@ -550,16 +569,28 @@ async def mark_orphaned_tasks_stopped(
 ) -> int:
     """Mark the tasks a previous server left running as stopped, except ``keep`` (resumed instead)."""
     pool = pool or get_pool()
-    result = await pool.execute(
+    rows = await pool.fetch(
         """
         UPDATE tasks
         SET status = 'stopped', updated_at = now(), attempt_ended_at = now()
         WHERE status = ANY($1::text[]) AND completed_at IS NULL AND NOT (id = ANY($2::text[]))
+        RETURNING id
         """,
         list(ACTIVE_STATUSES), list(keep or []),
     )
-    count = int(result.split()[-1]) if result else 0
-    return count
+    from . import step_attempts, task_outcomes
+
+    task_ids = [row["id"] for row in rows]
+    if task_ids:
+        try:
+            await step_attempts.close_attempts_batch(task_ids, "task_ended", "stopped", pool=pool)
+        except Exception:
+            logger.exception("Failed to close orphaned task attempts")
+        try:
+            await task_outcomes.record_outcomes(task_ids, "stopped", "restart", pool=pool)
+        except Exception:
+            logger.exception("Failed to record orphaned task outcomes")
+    return len(rows)
 
 
 async def set_task_title(task_id: str, title: Any, *, pool: asyncpg.Pool | asyncpg.Connection | None = None) -> bool:
