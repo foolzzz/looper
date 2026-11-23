@@ -279,6 +279,7 @@ const SKIPPED: { key: keyof OverviewSchedules["skipped_today"]; label: string }[
   { key: "skipped_overlap", label: "previous run still going" },
   { key: "skipped_missed", label: "missed" },
   { key: "skipped_budget", label: "daily budget" },
+  { key: "skipped_busy", label: "Manager busy" },
 ];
 
 const subhead = "text-xs font-medium text-muted-foreground";

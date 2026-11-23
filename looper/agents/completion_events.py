@@ -38,6 +38,7 @@ from .channels.base import PostOutcome
 from .message import (AgentAddress, MessageEnvelope, MessageType, channel_address, manager_address,
                       parse_channel_id)
 from .task_notice import Notice, NotifyChannel, TargetKind, lead, link_line
+from . import task_notice_delivery
 
 logger = logging.getLogger(__name__)
 
@@ -472,7 +473,8 @@ async def _send_notice(bus: Any, row: Mapping[str, Any]) -> tuple[PostOutcome, s
             source=source, target=channel_address(notice["channel"], notice["channel_id"]),
             message_type=MessageType.CHAT_NOTICE, payload=notice, correlation_id=f"completion-{row['id']}",
             metadata={"origin_channel_id": notice["channel_id"],
-                      **_metrics_metadata(ProactiveSource.TASK_NOTICE, row)}))
+                      **_metrics_metadata(ProactiveSource.TASK_NOTICE, row),
+                      **task_notice_delivery.metadata(row["task_id"], row["dedupe_key"])}))
     if item["via"] == "web_thread":
         return await _publish(bus, MessageEnvelope.create(
             source=source, target=channel_address("web"), message_type=MessageType.AGENT_REPLY,

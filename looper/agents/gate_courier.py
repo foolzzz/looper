@@ -18,13 +18,12 @@ With card buttons on (``card_actions``), a message that asks for an answer goes,
 card: its text with a button per option of the gate's open questions and one that ends the discussion
 (``post_card``).
 
-With the system setting ``delivery.enabled`` on, a reminder passes the delivery layer (``proactive_delivery``)
-before it is posted: the decision goes into the message's ``proactive_deliveries`` row, under the key its post and
-its receipt use (``gate-<message id>``), and the receipt follows the post. A reminder is only due for a gate that
-waits for the user in a task still running (``db.user_gates.due_reminders``), and a waiting gate holds back the
-steps after it, so it is ``blocking`` and always sent, at night and over the daily cap too. A decision that cannot be
-made (the database refused it) is logged and the reminder posted as with the layer off: the layer never holds a
-blocking message back.
+With the system setting ``delivery.enabled`` on, notices that a gate needs the user (opened, updated or resumed)
+and its reminders pass the delivery layer (``proactive_delivery``) before posting: the decision goes into the
+message's ``proactive_deliveries`` row, under the key its post and its receipt use (``gate-<message id>``), and the
+receipt follows the post. A waiting gate holds back the steps after it, so these are ``blocking`` and always sent,
+at night and over the daily cap too. A decision that cannot be made (the database refused it) is logged and the
+notice posted as with the layer off: the layer never holds a blocking message back.
 
 A post that sent nothing is tried again, after ``POST_RETRY_SEC``, up to
 ``POST_ATTEMPTS`` in all, and the gate's later messages wait behind it; only
@@ -282,15 +281,16 @@ class GateCourier:
 
     @staticmethod
     async def _decide(row: Mapping[str, Any], chat: GateChat) -> delivery.Decision | None:
-        """The delivery layer's decision on a reminder, when it is on; None for every other message, or when it is
-        off."""
-        if row["kind"] != MessageKind.REMINDER.value or not chat_settings.delivery_enabled():
+        """Decide on a reminder or needs-you notice. User replies and the Planner's answers keep their own path."""
+        message = MessageKind(row["kind"])
+        if message not in WHILE_WAITING or not chat_settings.delivery_enabled():
             return None
         kind = delivery.ChatKind.GROUP if chat.in_group else delivery.ChatKind.DIRECT
+        source = delivery.DeliveryKind.GATE_REMINDER if message is MessageKind.REMINDER else delivery.DeliveryKind.TASK_NOTICE
         try:
             # Blocking: neither the cap nor the grace after the user wrote applies, so no last message is looked up.
             return await delivery.decide(
-                delivery.Delivery(delivery.DeliveryKind.GATE_REMINDER, delivery.Urgency.BLOCKING, kind),
+                delivery.Delivery(source, delivery.Urgency.BLOCKING, kind),
                 dedupe_key=_key(row), channel_id=chat.channel_id, chat=chat.target.id,
                 last_user_message_at=None, source_ref=row["step_id"], manager_id=row.get("manager_id"),
                 task_id=row["task_id"], step_id=row["step_id"], schedule_id=row.get("schedule_id"))
