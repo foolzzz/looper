@@ -56,12 +56,16 @@ async def search(*, words: Sequence[str] = (), chat: str | None = None, person: 
                  since: datetime | None = None, kind: str | None = None, state: str = "active", limit: int = 10,
                  source_id: str | None = None, now: datetime | None = None, db: Any = None) -> dict[str, Any]:
     """``{"notice", "leads": [lead_view, ...], "more"}``: the leads ``db.message_leads.search_rows`` finds, best first,
-    and how many more match than were returned. ``ValueError`` for a ``state`` or ``kind`` it does not know."""
+    and how many more match than were returned, matched as ``leads.search_mode`` says (with pg_trgm when it is
+    installed). ``ValueError`` for a ``state`` or ``kind`` it does not know."""
     if kind is not None and kind not in {k.value for k in leads_model.LeadKind}:
         raise ValueError(f"kind must be one of {', '.join(k.value for k in leads_model.LeadKind)}")
     now = now or datetime.now(timezone.utc)
+    fulltext = await leads_model.search_mode(db) is leads_model.SearchMode.FULLTEXT
+    trigram = await store.trigram_schema(db) if fulltext else None
     rows, total = await store.search_rows(now=now, words=words, chat=chat, person=person, since=since, kind=kind,
-                                          state=state, limit=limit, source_id=source_id, db=db)
+                                          state=state, limit=limit, source_id=source_id, fulltext=fulltext,
+                                          trigram=trigram, db=db)
     sources = await store.source_rows([row["id"] for row in rows], db=db)
     return {"notice": leads_model.NOTICE,
             "leads": [lead_view(row, sources.get(row["id"], []), now=now) for row in rows],

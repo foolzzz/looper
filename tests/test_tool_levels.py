@@ -26,6 +26,7 @@ RFC_TABLE: dict[str, ActionLevel | str] = {
     "looper_projects": "args", "looper_agent_profiles": INSIDE, "looper_models": INSIDE, "looper_providers": MACHINE,
     "looper_catalog": MACHINE, "looper_settings": "args", "looper_schedules": "args", "looper_confirm": INSIDE,
     "looper_ledger_add": INSIDE, "looper_ledger_update": INSIDE, "looper_leads_search": INSIDE,
+    "looper_session_search": INSIDE,  # reads earlier conversations stored by Looper
     "looper_reminder_list": INSIDE, "looper_reminder_create": OPERATOR, "looper_reminder_cancel": OPERATOR,
     "looper_task_pipeline": INSIDE, "looper_gates": "args",
     "looper_task_profiles": INSIDE, "looper_task_roles": INSIDE, "looper_task_profile_set": INSIDE,
@@ -145,6 +146,8 @@ def _operations() -> dict[str, Any]:
 
 # The operations whose level was decided one by one (every other one is inside).
 DECIDED_OPERATIONS: dict[str, ActionLevel] = {
+    # Confirmation, including save-and-confirm, and retry can commit to the operator's vault.
+    **dict.fromkeys(("memory.confirm", "memory.confirm_many", "memory.edit", "memory.retry"), MACHINE),
     "providers.limits": INSIDE,  # reads stored quota windows and usage
     "limit_signals_settings.get": INSIDE,  # reads Looper's collection switch
     "limit_signals_settings.update": INSIDE,  # changes only Looper's collection switch

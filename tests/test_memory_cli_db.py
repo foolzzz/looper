@@ -126,7 +126,8 @@ def test_check_reports_each_condition_and_its_exit_code(database, tmp_path, caps
     assert not result["ok"] and [item["name"] for item in result["checks"] if not item["ok"]] == ["branch"]
 
 
-@pytest.mark.parametrize("argv", [("list",), ("show", "M-1"), ("check",)])
+@pytest.mark.parametrize("argv", [("list",), ("show", "M-1"), ("check",), ("reject", "M-1"),
+                                  ("retry", "M-1"), ("delete", "M-1")])
 def test_every_command_is_refused_inside_an_agent_run(monkeypatch, tmp_path, capsys, argv):
     monkeypatch.setenv("LOOPER_AGENT_RUN", "1")
     assert cli.main(["memory", *argv, "--runtime-root", str(tmp_path)]) == 4
@@ -137,3 +138,41 @@ def test_a_database_without_the_tables_is_unusable(database, tmp_path, capsys):
     db_call(database, lambda conn: conn.execute("DROP TABLE memory_candidates CASCADE"))
     assert run_cli(tmp_path, database, "list") == 6
     assert "looper serve" in capsys.readouterr().err
+
+
+def test_reject_retry_delete_and_state_exit_codes(database, tmp_path, capsys):
+    from looper.db import memory as db_memory
+
+    first, _ = seed(database)
+    assert run_cli(tmp_path, database, "reject", f"M-{first}") == 3
+    capsys.readouterr()
+    repo = _repo(tmp_path)
+    db_call(database, lambda conn: conn.execute(
+        "INSERT INTO system_settings(key,value) VALUES('memory_write',$1)",
+        json.dumps({"enabled": True, "root": "mem"})))
+    assert run_cli(tmp_path, database, "retry", f"M-{first}") == 7
+    capsys.readouterr()
+
+    async def block(conn):
+        found = await db_memory.get(first, db=conn)
+        await sup.move(conn, first, "confirmed", "confirm", actor="user", via="dashboard",
+                       content_hash=found["candidate"]["content_hash"])
+        await sup.move(conn, first, "writing", "claim")
+        await sup.move(conn, first, "blocked", "block", reason="dirty_target")
+
+    db_call(database, block)
+    assert run_cli(tmp_path, database, "retry", f"M-{first}") == 0
+    assert "已确认" in capsys.readouterr().out
+    db_call(database, lambda conn: sup.move(conn, first, "writing", "claim"))
+    db_call(database, lambda conn: sup.move(conn, first, "blocked", "block", reason="dirty_target"))
+    assert run_cli(tmp_path, database, "reject", f"M-{first}", "--reason", "no longer useful") == 0
+    assert "已驳回" in capsys.readouterr().out
+    found = db_call(database, lambda conn: db_memory.get(first, db=conn))
+    assert found["events"][-1]["note"] == "no longer useful"
+    assert run_cli(tmp_path, database, "delete", f"M-{first}") == 0
+    assert "墓碑" in capsys.readouterr().out
+    assert db_call(database, lambda conn: db_memory.get(first, db=conn)) is None
+    assert db_call(database, lambda conn: db_memory.tombstone_count(db=conn)) == 1
+    assert not (repo / "mem/prefs/weekly.md").exists()
+    assert run_cli(tmp_path, database, "delete", "M-999999") == 5
+    capsys.readouterr()

@@ -42,7 +42,8 @@ from typing import Any
 import asyncpg
 
 from ..db import connection as db_connection, schedules as db_schedules, subscriptions as db_subs
-from . import leads_model, processor
+from . import leads_model, model_call, processor
+from .agent_settings import AgentType
 
 logger = logging.getLogger(__name__)
 
@@ -1003,14 +1004,14 @@ async def execute(runs: Any, run_id: str, schedule: Mapping[str, Any], stream: M
     valid_days, enabled = await leads_model.valid_days(pool), {row["key"] for row in types}
 
     async def run(reminder: str, budget_usd: float, timeout_s: float) -> processor.ProcessorRun:
-        done = await processor.run(
+        done = model_call.processor_result(await model_call.call(model_call.ProcessorCall(
             owner=schedule["id"], instructions=instructions(kind, schedule["requirement"], types)
             + (f"\n\n{reminder}" if reminder else ""), input_text=found.text, input_ref=reference,
             quiet_word=QUIET_WORD, budget_usd=budget_usd, timeout_s=timeout_s, runtime_root=runs._runtime_root,
             claude_bin=runs._claude_bin, project_id=schedule["project_id"], schedule_id=schedule["id"],
             contract=CONTRACTS[kind],
             metadata={"subscription": {**reference, "render_sha256": subscriptions.digest(found.text),
-                                       "reminded": bool(reminder)}})
+                                       "reminded": bool(reminder)}}, role=AgentType.PROCESSOR), parse=str))
         await db_subs.update_run(pool, run_id, record_id=done.record_id, events_selected=len(found.rows))
         return done
 
