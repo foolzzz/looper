@@ -16,7 +16,9 @@
 
 关闭路径使用父分支 execution 快照与工具列表指纹对照；项目 API/export 省略 NULL 字段，旧配置导入新项目保持 NULL。成本条目以实际 explorer 运行数为条件，零运行份额与无份额的 HTML 相同；Agents 无 explorer 时 HTML 相同。Manager 工具列表与 schema 直接比较完整指纹，不剔除新增字段；关闭时 compact view 与父分支序列化字节一致。Manager 项目工具拒绝五项子 agent 设置，且不写入数据库。
 
-撤回 Manager 设置入口前，回归测试复现 7 failed、18 passed；撤回后，7 个定向后端测试文件共 455 passed（`-n 2`，包括 `test_api_v1_document.py` 与 `test_tool_levels.py`），无跳过项。使用独立 PostgreSQL，根数据库与 xdist 数据库已删除并验证不存在。Manager 的 `TOOLS`、`_project_action`、`_confirming_project` 源码与父分支逐字节一致，完整工具指纹未更新。此前前端 5 个测试文件共 43 passed，`npm run build` 通过，保留既有的大包体积提示；此次未改前端，未重跑浏览器。新增生产代码 505 行、测试 495 行（不含 fixture），比例 0.98:1。未运行完整测试集，未触发或重跑 CI。
+定向数据库与接口测试覆盖：通过 `link_task` 关联任务的 Manager 回合不进入运行树，兼容缺少 `run_kind` 的旧记录；根节点子树成本之和与 `task_costs` 一致；只接受支持的运行种类；跨任务父节点 id 置空；优先匹配直接派生记录；没有派生时不读取事件，有派生时只读取父运行的等待。数据库连接不可用与意外读取错误分别返回 unavailable 和 internal，后者记录异常堆栈。
+
+组件与无头浏览器检查覆盖刷新保留已有运行树、滚动位置和焦点，切换任务时隔离旧数据，可访问的时间线标签、consult 父运行标签，以及空状态和错误状态。前端构建通过。未调用真实模型或连接外部消息渠道。
 
 ## 入口与验证边界
 
