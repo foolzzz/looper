@@ -2248,6 +2248,55 @@ ALTER TABLE intents ADD CONSTRAINT intents_dropped
     CHECK ((state = 'dropped') = (check_verdict IS NOT DISTINCT FROM 'drop')) NOT VALID;
 -- leads check end
 
+-- One row per proactive message. Metrics write the receipt directly; the delivery
+-- layer will own the single decision point. Its policy fields stay unset until
+-- that layer is connected. Keep this block as the one named migration.
+-- proactive deliveries begin
+CREATE TABLE IF NOT EXISTS proactive_deliveries (
+    id          BIGSERIAL PRIMARY KEY,
+    source      TEXT NOT NULL CHECK (source IN ('task_notice', 'completion', 'progress', 'gate', 'gate_reminder',
+                                                'subscription', 'intent', 'schedule', 'advisor_alert', 'autonomous',
+                                                'user_reminder', 'morning_brief')),
+    source_ref  TEXT,                 -- 任务、关卡、订阅运行、意图或定时任务运行的 id；管家自己说的话为空
+    manager_id  TEXT,
+    channel_id  TEXT NOT NULL,        -- 'web' 或机器人的渠道 id
+    chat        TEXT NOT NULL,        -- 飞书、Telegram 的会话 id；控制台的会话 id
+    external_id TEXT,                 -- 发送方知道时：平台消息 id
+    outcome     TEXT CHECK (outcome IN ('sent', 'rejected', 'unknown')),
+    dedupe_key  TEXT,
+    urgency     TEXT CHECK (urgency IN ('normal', 'blocking', 'user_set')),
+    chat_kind   TEXT NOT NULL CHECK (chat_kind IN ('direct', 'group')),
+    task_id     TEXT REFERENCES tasks(id) ON DELETE CASCADE,
+    step_id     TEXT,
+    schedule_id TEXT REFERENCES schedules(id) ON DELETE SET NULL,
+    decision    TEXT CHECK (decision IN ('send', 'merge', 'defer', 'digest', 'drop')),
+    reason      TEXT CHECK (reason IN ('silent', 'urgent', 'outside_active_hours', 'recent_reply',
+                                      'quiet_hours', 'daily_cap', 'within_limits', 'off')),
+    counted     BOOLEAN,
+    local_date  DATE,
+    digest_date DATE,
+    decided_at  TIMESTAMPTZ,
+    sent_at     TIMESTAMPTZ,
+    replied_at  TIMESTAMPTZ,
+    reply_match TEXT CHECK (reply_match IN ('quoted', 'next_message')),
+    CONSTRAINT proactive_deliveries_receipt CHECK ((sent_at IS NULL) = (outcome IS NULL)),
+    CONSTRAINT proactive_deliveries_reply CHECK ((replied_at IS NULL) = (reply_match IS NULL))
+);
+CREATE INDEX IF NOT EXISTS idx_proactive_deliveries_open
+    ON proactive_deliveries (channel_id, chat, sent_at DESC) WHERE replied_at IS NULL;
+CREATE INDEX IF NOT EXISTS idx_proactive_deliveries_sent ON proactive_deliveries (sent_at);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_proactive_deliveries_dedupe
+    ON proactive_deliveries (dedupe_key) WHERE dedupe_key IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_proactive_deliveries_counted
+    ON proactive_deliveries (channel_id, chat, local_date) WHERE counted;
+CREATE INDEX IF NOT EXISTS idx_proactive_deliveries_digest
+    ON proactive_deliveries (digest_date) WHERE decision = 'digest';
+CREATE INDEX IF NOT EXISTS idx_proactive_deliveries_task ON proactive_deliveries (task_id) WHERE task_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_proactive_deliveries_schedule
+    ON proactive_deliveries (schedule_id) WHERE schedule_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_proactive_deliveries_decided ON proactive_deliveries (decided_at);
+-- proactive deliveries end
+
 -- A window a subscription run did not use: the run is 'skipped' with why (skip_reason: a prompt hook blocked it, or
 -- the processor's reply could not be read when asked twice), and its cursor moves past it, since the same window
 -- would fail again with every run after it. A subscription whose runs keep skipping is alerted once (skip_alert_at,
@@ -2374,47 +2423,6 @@ CREATE INDEX IF NOT EXISTS idx_card_actions_open ON card_actions (kind, manager_
     WHERE handled_at IS NULL;
 -- card actions end
 
--- Proactive deliveries (proactive delivery RFC section 4): one row per proactive message a send point decided on with
--- the delivery layer on (``agents/proactive_delivery.py``): sent, into the digest or dropped, the rule that settled it,
--- whether it counts toward its direct chat's daily cap, and when the channel took it; replied_at is the user's first
--- message in the chat after it went, which the metrics write. dedupe_key names the send point's message, so a message tried again
--- keeps its first decision. connection.py applies this block to databases that predate it, so keep it between the
--- markers and idempotent.
--- proactive deliveries begin
-CREATE TABLE IF NOT EXISTS proactive_deliveries (
-    id          BIGSERIAL PRIMARY KEY,
-    dedupe_key  TEXT NOT NULL UNIQUE,
-    kind        TEXT NOT NULL CHECK (kind IN ('gate_reminder', 'task_notice', 'subscription', 'intent',
-                                              'completion', 'user_reminder', 'morning_brief')),
-    urgency     TEXT NOT NULL CHECK (urgency IN ('normal', 'blocking', 'user_set')),
-    channel_id  TEXT NOT NULL,
-    chat        TEXT NOT NULL,
-    chat_kind   TEXT NOT NULL CHECK (chat_kind IN ('direct', 'group')),
-    task_id     TEXT REFERENCES tasks(id) ON DELETE CASCADE,
-    step_id     TEXT,
-    schedule_id TEXT REFERENCES schedules(id) ON DELETE SET NULL,
-    outcome     TEXT NOT NULL CHECK (outcome IN ('send', 'digest', 'drop')),
-    reason      TEXT NOT NULL CHECK (reason IN ('silent', 'urgent', 'outside_active_hours', 'recent_reply',
-                                                'quiet_hours', 'daily_cap', 'within_limits')),
-    counted     BOOLEAN NOT NULL DEFAULT false,
-    local_date  DATE NOT NULL,  -- the decision's date in the policy's timezone: the cap counts by it
-    digest_date DATE,
-    decided_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
-    sent_at     TIMESTAMPTZ,
-    replied_at  TIMESTAMPTZ,
-    CONSTRAINT proactive_deliveries_digest CHECK ((outcome = 'digest') = (digest_date IS NOT NULL)),
-    CONSTRAINT proactive_deliveries_counted CHECK (NOT counted OR outcome = 'send'),
-    CONSTRAINT proactive_deliveries_sent CHECK (sent_at IS NULL OR outcome = 'send'),
-    CONSTRAINT proactive_deliveries_replied CHECK (replied_at IS NULL OR sent_at IS NOT NULL)
-);
-CREATE INDEX IF NOT EXISTS idx_proactive_deliveries_counted
-    ON proactive_deliveries (channel_id, chat, local_date) WHERE counted;
-CREATE INDEX IF NOT EXISTS idx_proactive_deliveries_digest ON proactive_deliveries (digest_date) WHERE outcome = 'digest';
-CREATE INDEX IF NOT EXISTS idx_proactive_deliveries_task ON proactive_deliveries (task_id) WHERE task_id IS NOT NULL;
-CREATE INDEX IF NOT EXISTS idx_proactive_deliveries_schedule
-    ON proactive_deliveries (schedule_id) WHERE schedule_id IS NOT NULL;
-CREATE INDEX IF NOT EXISTS idx_proactive_deliveries_decided ON proactive_deliveries (decided_at);
--- proactive deliveries end
 -- Morning briefs (morning brief RFC): one row per local date and operator direct chat, or one skip row
 -- (channel_id and chat empty) when no bot names an operator. sending is claimed and committed before the
 -- channel is asked; sent went out; skipped had nothing to say; uncertain may have gone out and is never

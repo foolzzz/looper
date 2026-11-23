@@ -144,6 +144,7 @@ _SUBSCRIPTIONS = "subscriptions"
 _SUBSCRIPTION_RULES = "subscription_rules"
 _SUBSCRIPTION_LOOKBACK = "subscription_lookback"
 _MANAGER_EVENTS = "manager_events"
+_PROACTIVE_DELIVERIES = "proactive_deliveries"
 _SCHEDULE_NOTIFICATION_EVENTS = "schedule_notification_events"
 _MANAGER_EVENT_REASONS_MIGRATION = "manager_event_reasons"
 _MANAGER_EVENT_DELIVERY = "manager_event_delivery"
@@ -163,7 +164,6 @@ _MESSAGE_LEADS = "message_leads"
 _INTENT_MERGES = "intent_merges"
 _LEADS_CHECK = "leads_check"
 _LEADS_CHECK_ONLINE = "leads_check_online"
-_PROACTIVE_DELIVERIES = "proactive_deliveries"
 _RUN_SKIPS = "run_skips"
 _RUN_SKIPS_ONLINE = "run_skips_online"
 _LLM_REQUESTS = "llm_requests"
@@ -184,8 +184,10 @@ _UNCERTAIN_DELIVERY_INDEXES = (
 _REMINDERS = "reminders"
 _MORNING_BRIEFS = "morning_briefs"
 _MORNING_BRIEF_KIND = "morning_brief_kind"
-_MORNING_BRIEF_KINDS = ("gate_reminder", "task_notice", "subscription", "intent", "completion", "user_reminder",
-                        "morning_brief")
+# proactive_deliveries.source, as schema.sql lists it. morning_brief is the digest itself.
+_MORNING_BRIEF_SOURCES = (
+    "task_notice", "completion", "progress", "gate", "gate_reminder", "subscription", "intent", "schedule",
+    "advisor_alert", "autonomous", "user_reminder", "morning_brief")
 
 _LLM_REQUESTS_DDL = """
 CREATE TABLE IF NOT EXISTS llm_request_routes (
@@ -275,6 +277,7 @@ _MANAGER_SCOPE_PROJECTS_DDL: tuple[str, ...] = (
 _MESSAGE_STREAM_BLOCK = re.compile(r"-- message stream begin\n(.*?)-- message stream end", re.S)
 _SOURCE_DELETIONS_BLOCK = re.compile(r"-- source deletions begin\n(.*?)-- source deletions end", re.S)
 _SUBSCRIPTIONS_BLOCK = re.compile(r"-- subscriptions begin\n(.*?)-- subscriptions end", re.S)
+_PROACTIVE_DELIVERIES_BLOCK = re.compile(r"-- proactive deliveries begin\n(.*?)-- proactive deliveries end", re.S)
 _MANAGER_EVENTS_BLOCK = re.compile(r"-- manager events begin\n(.*?)-- manager events end", re.S)
 _AGENT_SPAWNS_BLOCK = re.compile(r"-- agent spawns begin\n(.*?)-- agent spawns end", re.S)
 _DECISION_SNAPSHOTS_BLOCK = re.compile(r"-- decision snapshots begin\n(.*?)-- decision snapshots end", re.S)
@@ -499,7 +502,6 @@ def _subscriptions_ddl() -> str:
 
 
 _LEDGER_BLOCK = re.compile(r"-- ledger begin\n(.*?)-- ledger end", re.S)
-_PROACTIVE_DELIVERIES_BLOCK = re.compile(r"-- proactive deliveries begin\n(.*?)-- proactive deliveries end", re.S)
 _MESSAGE_LEADS_BLOCK = re.compile(r"-- message leads begin\n(.*?)-- message leads end", re.S)
 
 
@@ -567,14 +569,6 @@ def _ledger_ddl() -> str:
     return found.group(1)
 
 
-def _proactive_deliveries_ddl() -> str:
-    """The delivery decisions table as schema.sql defines it, so a database that predates it gets the same text."""
-    found = _PROACTIVE_DELIVERIES_BLOCK.search(SCHEMA_PATH.read_text(encoding="utf-8"))
-    if found is None:
-        raise RuntimeError("schema.sql lost its proactive deliveries block")
-    return found.group(1)
-
-
 def _manager_events_ddl() -> str:
     """The completion event table as schema.sql defines it, so a database that predates it gets the same text."""
     found = _MANAGER_EVENTS_BLOCK.search(SCHEMA_PATH.read_text(encoding="utf-8"))
@@ -602,6 +596,13 @@ def _morning_briefs_ddl() -> str:
     found = _MORNING_BRIEFS_BLOCK.search(SCHEMA_PATH.read_text(encoding="utf-8"))
     if found is None:
         raise RuntimeError("schema.sql lost its morning briefs block")
+    return found.group(1)
+
+
+def _proactive_deliveries_ddl() -> str:
+    found = _PROACTIVE_DELIVERIES_BLOCK.search(SCHEMA_PATH.read_text(encoding="utf-8"))
+    if found is None:
+        raise RuntimeError("schema.sql lost its proactive deliveries block")
     return found.group(1)
 
 
@@ -1046,11 +1047,6 @@ async def _ledger_pending(conn: asyncpg.Connection) -> bool:
     return not await conn.fetchval("SELECT to_regclass('ledger_items') IS NOT NULL")
 
 
-async def _proactive_deliveries_pending(conn: asyncpg.Connection) -> bool:
-    if await conn.fetchval("SELECT EXISTS (SELECT 1 FROM schema_migrations WHERE name = $1)", _PROACTIVE_DELIVERIES):
-        return False
-    return not await conn.fetchval("SELECT to_regclass('proactive_deliveries') IS NOT NULL")
-
 async def _reminders_pending(conn: asyncpg.Connection) -> bool:
     if await conn.fetchval("SELECT EXISTS (SELECT 1 FROM schema_migrations WHERE name = $1)", _REMINDERS):
         return False
@@ -1063,8 +1059,8 @@ async def _morning_briefs_pending(conn: asyncpg.Connection) -> bool:
     return not await conn.fetchval("SELECT to_regclass('morning_briefs') IS NOT NULL")
 
 
-async def _morning_brief_kind_row(conn: asyncpg.Connection):
-    """The ``proactive_deliveries.kind`` check, found by the values it lists (its name is PostgreSQL's)."""
+async def _morning_brief_source_row(conn: asyncpg.Connection):
+    """The ``proactive_deliveries.source`` check, found by the values it lists (its name is PostgreSQL's)."""
     if not await conn.fetchval("SELECT to_regclass('proactive_deliveries') IS NOT NULL"):
         return None
     return await conn.fetchrow(
@@ -1073,12 +1069,12 @@ async def _morning_brief_kind_row(conn: asyncpg.Connection):
         "AND pg_get_constraintdef(oid) LIKE '%gate_reminder%' LIMIT 1")
 
 
-async def _morning_brief_kind_pending(conn: asyncpg.Connection) -> bool:
-    """A database that already applied ``proactive_deliveries`` does not replay its CREATE, so the kind check
+async def _morning_brief_source_pending(conn: asyncpg.Connection) -> bool:
+    """A database that already applied ``proactive_deliveries`` does not replay its CREATE, so the source check
     is widened when it does not yet name ``morning_brief``. No table yet: the CREATE that adds it is enough."""
     if not await conn.fetchval("SELECT to_regclass('proactive_deliveries') IS NOT NULL"):
         return False
-    row = await _morning_brief_kind_row(conn)
+    row = await _morning_brief_source_row(conn)
     return row is None or "morning_brief" not in row["definition"]
 
 
@@ -1171,6 +1167,12 @@ async def _manager_events_pending(conn: asyncpg.Connection) -> bool:
     if await conn.fetchval("SELECT EXISTS (SELECT 1 FROM schema_migrations WHERE name = $1)", _MANAGER_EVENTS):
         return False
     return not await conn.fetchval("SELECT to_regclass('manager_events') IS NOT NULL")
+
+
+async def _proactive_deliveries_pending(conn: asyncpg.Connection) -> bool:
+    if await conn.fetchval("SELECT EXISTS (SELECT 1 FROM schema_migrations WHERE name = $1)", _PROACTIVE_DELIVERIES):
+        return False
+    return not await conn.fetchval("SELECT to_regclass('proactive_deliveries') IS NOT NULL")
 
 
 async def _manager_event_reasons_pending(conn: asyncpg.Connection) -> bool:
@@ -1644,22 +1646,7 @@ async def ensure_schema(pool: asyncpg.Pool | asyncpg.Connection | None = None) -
                 "ADD CONSTRAINT manager_events_delivery_check CHECK (delivery IN ('pending', 'sending', 'sent', "
                 "'failed', 'uncertain')) NOT VALID")
             await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", _MANAGER_EVENT_DELIVERY)
-        if await _proactive_deliveries_pending(conn):
-            await conn.execute(_proactive_deliveries_ddl())
-            await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", _PROACTIVE_DELIVERIES)
-        if await _morning_brief_kind_pending(conn):
-            row = await _morning_brief_kind_row(conn)
-            if row is not None and re.fullmatch(r"[A-Za-z0-9_]+", row["conname"]):
-                await conn.execute(f"ALTER TABLE proactive_deliveries DROP CONSTRAINT {row['conname']}")
-            kinds = ", ".join(f"'{kind}'" for kind in _MORNING_BRIEF_KINDS)
-            await conn.execute(
-                "ALTER TABLE proactive_deliveries ADD CONSTRAINT proactive_deliveries_kind_check "
-                f"CHECK (kind IN ({kinds})) NOT VALID")
-            await conn.execute(
-                "ALTER TABLE proactive_deliveries VALIDATE CONSTRAINT proactive_deliveries_kind_check")
-            if state != "empty":
-                await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1) ON CONFLICT DO NOTHING",
-                                   _MORNING_BRIEF_KIND)
+
         if await _run_tree_pending(conn):
             for ddl in _run_tree_ddl():
                 await conn.execute(ddl)
@@ -1808,6 +1795,22 @@ async def ensure_schema(pool: asyncpg.Pool | asyncpg.Connection | None = None) -
         if await _reminders_pending(conn):
             await conn.execute(_reminders_ddl())
             await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", _REMINDERS)
+        if await _proactive_deliveries_pending(conn):
+            await conn.execute(_proactive_deliveries_ddl())
+            await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", _PROACTIVE_DELIVERIES)
+        if await _morning_brief_source_pending(conn):
+            row = await _morning_brief_source_row(conn)
+            if row is not None and re.fullmatch(r"[A-Za-z0-9_]+", row["conname"]):
+                await conn.execute(f"ALTER TABLE proactive_deliveries DROP CONSTRAINT {row['conname']}")
+            sources = ", ".join(f"'{source}'" for source in _MORNING_BRIEF_SOURCES)
+            await conn.execute(
+                "ALTER TABLE proactive_deliveries ADD CONSTRAINT proactive_deliveries_source_check "
+                f"CHECK (source IN ({sources})) NOT VALID")
+            await conn.execute(
+                "ALTER TABLE proactive_deliveries VALIDATE CONSTRAINT proactive_deliveries_source_check")
+            if state != "empty":
+                await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1) ON CONFLICT DO NOTHING",
+                                   _MORNING_BRIEF_KIND)
         if await _morning_briefs_pending(conn):
             await conn.execute(_morning_briefs_ddl())
             await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", _MORNING_BRIEFS)
@@ -1858,10 +1861,10 @@ async def schema_change_pending(conn: asyncpg.Connection) -> bool:
             or await _subscriptions_pending(conn) or await _message_stream_deletions_pending(conn)
             or await _subscription_rules_pending(conn) or await _subscription_lookback_pending(conn)
             or await _ledger_pending(conn) or await _card_actions_pending(conn)
+            or await _proactive_deliveries_pending(conn)
             or await _manager_events_pending(conn) or await _schedule_notification_events_pending(conn)
             or await _manager_event_reasons_pending(conn) or await _manager_event_delivery_pending(conn)
-            or await _proactive_deliveries_pending(conn)
-            or await _morning_brief_kind_pending(conn)
+            or await _morning_brief_source_pending(conn)
             or await _message_leads_pending(conn)
             or await _intent_merges_pending(conn) or await _leads_check_pending(conn)
             or await _run_skips_pending(conn)

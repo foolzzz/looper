@@ -181,7 +181,7 @@ class MorningBriefService:
 
     async def _tick(self, conn: Any) -> None:
         now = self._clock()
-        policy = await proactive_delivery.load_policy()
+        policy = proactive_delivery.load_policy()
         local = now.astimezone(policy.timezone)
         if not is_due(local, _send_at()):
             return

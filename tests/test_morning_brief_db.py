@@ -65,6 +65,7 @@ def _collect(summary: dict[str, Any], seen: list[Any] | None = None):
 async def _zone(pool: Any) -> None:
     await pool.execute("INSERT INTO system_settings (key, value) VALUES ('user.timezone', 'America/Los_Angeles') "
                        "ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value")
+    await chat_settings.load()  # deliver() reads the zone from turn-context memory, not the row directly
 
 
 async def _operator(pool: Any, channel_id: str = "channel-lark", who: str = OP, *, enabled: bool = True) -> None:
@@ -87,7 +88,7 @@ async def _digest(pool: Any, key: str, day: date, *, channel: str = "channel-lar
                   kind: str = "task_notice", reason: str = "quiet_hours", hour: int = 23) -> None:
     when = datetime(day.year, day.month, day.day, hour, 0, tzinfo=ZONE)
     await pool.execute(
-        "INSERT INTO proactive_deliveries (dedupe_key, kind, urgency, channel_id, chat, chat_kind, outcome, "
+        "INSERT INTO proactive_deliveries (dedupe_key, source, urgency, channel_id, chat, chat_kind, decision, "
         "reason, counted, local_date, digest_date, decided_at) "
         "VALUES ($1, $2, 'normal', $3, $4, 'direct', 'digest', $5, false, $6, $6, $7)",
         key, kind, channel, chat, reason, day, when)
@@ -123,7 +124,7 @@ def test_nothing_to_say_sends_nothing_and_is_not_tried_again(monkeypatch: pytest
         assert [call.silent for call in calls] == [True]
         assert await _rows(pool) == [{"local_date": MONDAY.date(), "channel_id": "channel-lark", "chat": OP,
                                       "status": "skipped", "attempts": 0}]
-        assert await pool.fetchval("SELECT count(*) FROM proactive_deliveries WHERE kind = 'morning_brief'") == 0
+        assert await pool.fetchval("SELECT count(*) FROM proactive_deliveries WHERE source = 'morning_brief'") == 0
 
     run_with_channel_configs(test, monkeypatch)
 
@@ -167,8 +168,8 @@ def test_the_brief_names_what_waits_what_is_due_today_and_what_was_deferred(
             assert absent not in lark["text"]
         assert "没能读取" in telegram["text"] and "看 PR" not in telegram["text"]
         assert "今天的提醒" not in telegram["text"]
-        assert await pool.fetchval("SELECT count(*) FROM proactive_deliveries WHERE kind = 'morning_brief' "
-                                   "AND outcome = 'send'") == 0
+        assert await pool.fetchval("SELECT count(*) FROM proactive_deliveries WHERE source = 'morning_brief' "
+                                   "AND decision = 'send'") == 0
 
     run_with_channel_configs(test, monkeypatch)
 
@@ -301,14 +302,14 @@ def test_delivery_on_records_an_uncounted_send_and_off_records_nothing(monkeypat
         channel = _Channel()
         await _service(channel, MONDAY).run_once()
         assert len(channel.posts) == 1
-        assert await pool.fetchval("SELECT count(*) FROM proactive_deliveries WHERE kind = 'morning_brief'") == 0
+        assert await pool.fetchval("SELECT count(*) FROM proactive_deliveries WHERE source = 'morning_brief'") == 0
         await pool.execute("DELETE FROM morning_briefs")
         chat_settings.set_delivery_enabled(True)
         later = MONDAY + timedelta(days=1)  # Tuesday, its own row
         await _service(channel, later).run_once()
-        row = await pool.fetchrow("SELECT outcome, reason, counted, dedupe_key FROM proactive_deliveries "
-                                  "WHERE kind = 'morning_brief'")
-        assert dict(row) == {"outcome": "send", "reason": "within_limits", "counted": False,
+        row = await pool.fetchrow("SELECT decision, reason, counted, dedupe_key FROM proactive_deliveries "
+                                  "WHERE source = 'morning_brief'")
+        assert dict(row) == {"decision": "send", "reason": "within_limits", "counted": False,
                              "dedupe_key": f"morning_brief:{later.date().isoformat()}:channel-lark:{OP}"}
         assert len(channel.posts) == 2
 
@@ -319,29 +320,29 @@ def test_an_old_database_gains_the_table_and_the_kind(monkeypatch: pytest.Monkey
     async def test(pool: Any) -> None:
         import asyncpg
 
-        await pool.execute("ALTER TABLE proactive_deliveries DROP CONSTRAINT proactive_deliveries_kind_check")
+        await pool.execute("ALTER TABLE proactive_deliveries DROP CONSTRAINT proactive_deliveries_source_check")
         await pool.execute(
-            "ALTER TABLE proactive_deliveries ADD CONSTRAINT proactive_deliveries_kind_check "
-            "CHECK (kind IN ('gate_reminder', 'task_notice', 'subscription', 'intent', 'completion', "
-            "'user_reminder'))")
+            "ALTER TABLE proactive_deliveries ADD CONSTRAINT proactive_deliveries_source_check "
+            "CHECK (source IN ('task_notice', 'completion', 'progress', 'gate', 'gate_reminder', "
+            "'subscription', 'intent', 'schedule', 'advisor_alert', 'autonomous', 'user_reminder'))")
         await pool.execute("DROP TABLE morning_briefs")
         await pool.execute("DELETE FROM schema_migrations WHERE name IN ('morning_briefs', 'morning_brief_kind')")
         async with pool.acquire() as conn:
             assert await connection.schema_change_pending(conn)
         with pytest.raises(asyncpg.CheckViolationError):
             await pool.execute(
-                "INSERT INTO proactive_deliveries (dedupe_key, kind, urgency, channel_id, chat, chat_kind, "
-                "outcome, reason, counted, local_date) VALUES ('brief', 'morning_brief', 'normal', "
+                "INSERT INTO proactive_deliveries (dedupe_key, source, urgency, channel_id, chat, chat_kind, "
+                "decision, reason, counted, local_date) VALUES ('brief', 'morning_brief', 'normal', "
                 "'channel-lark', 'ou_1', 'direct', 'send', 'within_limits', false, '2026-11-23')")
         await connection.ensure_schema(pool)
         async with pool.acquire() as conn:
             assert not await connection.schema_change_pending(conn)
         await pool.execute(
-            "INSERT INTO proactive_deliveries (dedupe_key, kind, urgency, channel_id, chat, chat_kind, "
-            "outcome, reason, counted, local_date) VALUES ('brief', 'morning_brief', 'normal', "
+            "INSERT INTO proactive_deliveries (dedupe_key, source, urgency, channel_id, chat, chat_kind, "
+            "decision, reason, counted, local_date) VALUES ('brief', 'morning_brief', 'normal', "
             "'channel-lark', 'ou_1', 'direct', 'send', 'within_limits', false, '2026-11-23')")
         await connection.ensure_schema(pool)
-        assert await pool.fetchval("SELECT count(*) FROM proactive_deliveries WHERE kind = 'morning_brief'") == 1
+        assert await pool.fetchval("SELECT count(*) FROM proactive_deliveries WHERE source = 'morning_brief'") == 1
         assert await pool.fetchval("SELECT to_regclass('morning_briefs') IS NOT NULL")
 
     run_db(test, monkeypatch)

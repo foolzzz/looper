@@ -83,10 +83,11 @@ async def reminders_today(conn: Any, *, channel_id: str, chat: str, start: datet
 
 
 async def digests(conn: Any, *, channel_id: str, chat: str, dates: list[date]) -> list[dict[str, Any]]:
-    """Proactive messages deferred into ``dates`` for this chat, oldest first. A morning brief is not one of them."""
+    """Proactive messages deferred into ``dates`` for this chat, oldest first. A morning brief is not one of them.
+    The delivery decision is ``decision``; ``source`` is what the metrics call the send point."""
     rows = await conn.fetch(
-        "SELECT id, kind, reason, decided_at, task_id, schedule_id FROM proactive_deliveries "
-        "WHERE outcome = 'digest' AND channel_id = $1 AND chat = $2 AND digest_date = ANY($3::date[]) "
-        "AND kind <> 'morning_brief' ORDER BY decided_at, id",
+        "SELECT id, source AS kind, reason, decided_at, task_id, schedule_id FROM proactive_deliveries "
+        "WHERE decision = 'digest' AND channel_id = $1 AND chat = $2 AND digest_date = ANY($3::date[]) "
+        "AND source <> 'morning_brief' ORDER BY decided_at, id",
         channel_id, chat, dates)
     return [dict(row) for row in rows]

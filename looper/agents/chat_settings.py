@@ -10,6 +10,9 @@ ledger RFC section 3.7).
 ``manager.research_order``: whether the default Manager's contract says where to look things up, and in what order,
 before it asks the user (``research_order``; off by default).
 
+``manager.metrics.enabled``: operator-only observational metrics, off by default; edited through
+``manager_metrics_settings.get`` and ``manager_metrics_settings.update``, separately from client chat settings.
+
 ``manager.delivery_guard.enabled``: operator-only delivery guard configuration, disabled by default.
 The Manager behavior is wired separately; its v1 operations are ``delivery_guard.get`` and ``delivery_guard.update``.
 
@@ -24,29 +27,36 @@ out; off by default (proactive delivery RFC section 2). Operator-only, through `
 ``morning_brief.enabled`` and ``morning_brief.time``: the weekday morning brief (off by default, 09:15).
 Operator-only, through ``morning_brief.get`` and ``morning_brief.update``. Not part of the chat settings clients see.
 
-Stop, completion turns, research order, delivery guard, the delivery layer and the morning brief are kept in
-memory: ``load`` reads them at startup and updates refresh them. Until loaded, the switches are off and the
-brief's time is 09:15.
+Turn context, timezone and reply language have separate operator-only
+``turn_context_settings.get/update`` operations; they are not client chat settings.
+
+Stop, completion turns, research order, metrics, delivery guard, turn context, the delivery layer and the morning
+brief are kept in memory: ``load`` reads them at startup and updates refresh them. Until loaded, the switches are
+off and the brief's time is 09:15.
 """
 
 from __future__ import annotations
 
 import re
 from collections.abc import Mapping
+from dataclasses import asdict
 from enum import Enum
 from typing import Any
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from ..db import ledger as db_ledger
 from ..db import system_settings as db_settings
-from .proactive_delivery import ENABLED_KEY as DELIVERY_ENABLED_KEY
 
 STOP_ENABLED_KEY = "chat.stop_enabled"
 DEFAULT_STOP_ENABLED = False
 COMPLETION_TURNS_KEY = "manager.completion_turns"
 RESEARCH_ORDER_KEY = "manager.research_order"
 DEFAULT_RESEARCH_ORDER = False
+METRICS_ENABLED_KEY = "manager.metrics.enabled"
+DEFAULT_METRICS_ENABLED = False
 DELIVERY_GUARD_KEY = "manager.delivery_guard.enabled"
 DEFAULT_DELIVERY_GUARD_ENABLED = False
+DELIVERY_ENABLED_KEY = "delivery.enabled"
 DEFAULT_DELIVERY_ENABLED = False
 MORNING_BRIEF_ENABLED_KEY = "morning_brief.enabled"
 MORNING_BRIEF_TIME_KEY = "morning_brief.time"
@@ -54,6 +64,26 @@ DEFAULT_MORNING_BRIEF_ENABLED = False
 DEFAULT_MORNING_BRIEF_TIME = "09:15"
 _MORNING_BRIEF_TIME = re.compile(r"^([01][0-9]|2[0-3]):[0-5][0-9]$")
 FIELDS = ("stop_enabled", "completion_turns", "research_order", "ledger_enabled")
+
+TURN_CONTEXT_KEY = "manager.turn_context.enabled"
+TIMEZONE_KEY = "user.timezone"
+REPLY_LANGUAGE_KEY = "user.reply_language"
+_turn_context_enabled = False
+_timezone: str | None = None
+_reply_language = "zh-CN"
+
+
+def turn_context_enabled() -> bool:
+    return _turn_context_enabled
+
+
+def timezone() -> str | None:
+    return _timezone
+
+
+def reply_language() -> str:
+    return _reply_language
+
 
 STOP_DISABLED_REPLY = "停止功能暂未开放"
 
@@ -70,6 +100,7 @@ DEFAULT_COMPLETION_TURNS = CompletionTurns.OFF
 _stop_enabled = DEFAULT_STOP_ENABLED
 _completion_turns = DEFAULT_COMPLETION_TURNS
 _research_order = DEFAULT_RESEARCH_ORDER
+_metrics_enabled = DEFAULT_METRICS_ENABLED
 _delivery_guard_enabled = DEFAULT_DELIVERY_GUARD_ENABLED
 _delivery_enabled = DEFAULT_DELIVERY_ENABLED
 _morning_brief_enabled = DEFAULT_MORNING_BRIEF_ENABLED
@@ -104,6 +135,28 @@ def set_research_order(value: bool) -> None:
     """Apply a value in memory only (``load`` and ``update`` store it; tests use this directly)."""
     global _research_order
     _research_order = value
+
+
+def metrics_enabled() -> bool:
+    return _metrics_enabled
+
+
+def set_metrics_enabled(value: bool) -> None:
+    global _metrics_enabled
+    _metrics_enabled = value
+
+
+def metrics_view() -> dict[str, bool]:
+    return {"enabled": _metrics_enabled}
+
+
+async def update_metrics(value: bool | None) -> dict[str, bool]:
+    """Persist the operator-only metrics switch separately from client chat settings."""
+    if value is not None and not isinstance(value, bool):
+        raise ValueError("enabled must be true, false or null")
+    await db_settings.put_settings({METRICS_ENABLED_KEY: None if value is None else ("true" if value else "false")})
+    set_metrics_enabled(DEFAULT_METRICS_ENABLED if value is None else value)
+    return metrics_view()
 
 
 def delivery_guard_enabled() -> bool:
@@ -209,9 +262,19 @@ async def update_morning_brief(body: Mapping[str, Any]) -> dict[str, Any]:
 async def load() -> bool:
     """Read the stored settings at startup; a missing or unreadable value is the default (off). Answers whether
     stopping a reply is on."""
-    stored = await db_settings.get_settings([STOP_ENABLED_KEY, COMPLETION_TURNS_KEY, RESEARCH_ORDER_KEY, DELIVERY_GUARD_KEY,
-                                             DELIVERY_ENABLED_KEY, MORNING_BRIEF_ENABLED_KEY, MORNING_BRIEF_TIME_KEY])
+    global _turn_context_enabled, _timezone, _reply_language
+    stored = await db_settings.get_settings([
+        STOP_ENABLED_KEY, COMPLETION_TURNS_KEY, RESEARCH_ORDER_KEY, METRICS_ENABLED_KEY, DELIVERY_GUARD_KEY,
+        TURN_CONTEXT_KEY, TIMEZONE_KEY, REPLY_LANGUAGE_KEY, DELIVERY_ENABLED_KEY,
+        MORNING_BRIEF_ENABLED_KEY, MORNING_BRIEF_TIME_KEY,
+    ])
+    _turn_context_enabled = stored.get(TURN_CONTEXT_KEY) == "true"
+    _timezone = stored.get(TIMEZONE_KEY)
+    _reply_language = stored.get(REPLY_LANGUAGE_KEY, "zh-CN")
+    if _reply_language not in ("zh-CN", "en"):
+        _reply_language = "zh-CN"
     set_stop_enabled(stored.get(STOP_ENABLED_KEY) == "true")
+    set_metrics_enabled(stored.get(METRICS_ENABLED_KEY) == "true")
     set_research_order(stored.get(RESEARCH_ORDER_KEY) == "true")
     set_delivery_guard_enabled(stored.get(DELIVERY_GUARD_KEY) == "true")
     set_delivery_enabled(stored.get(DELIVERY_ENABLED_KEY) == "true")
@@ -288,4 +351,69 @@ async def update(body: Mapping[str, Any]) -> dict[str, Any]:
         view["missing_operator_ids"] = [
             {"channel_id": bot.channel_id, "channel_type": bot.channel_type, "name": bot.name}
             for bot in await missing()]
+    return view
+
+
+TURN_CONTEXT_FIELDS = ("turn_context_enabled", "timezone", "reply_language")
+
+
+def turn_context_view() -> dict[str, Any]:
+    """Operator-only settings, kept out of the existing client chat view."""
+    from .turn_context import server_zone
+
+    return {"turn_context_enabled": _turn_context_enabled, "timezone": _timezone,
+            "server_timezone": str(server_zone()), "reply_language": _reply_language}
+
+
+def checked_turn_context(body: Mapping[str, Any]) -> dict[str, Any]:
+    """Validate all named fields before any setting is stored."""
+    if unknown := [key for key in body if key not in TURN_CONTEXT_FIELDS]:
+        raise ValueError(f"unknown turn context setting {unknown[0]!r}")
+    if not body:
+        raise ValueError(f"give at least one of {', '.join(TURN_CONTEXT_FIELDS)} (null: the default)")
+    values: dict[str, Any] = {}
+    if "turn_context_enabled" in body:
+        value = body["turn_context_enabled"]
+        if value is not None and not isinstance(value, bool):
+            raise ValueError("turn_context_enabled must be true, false or null")
+        values["turn_context_enabled"] = value
+    if "timezone" in body:
+        value = body["timezone"]
+        if value is not None:
+            try:
+                if not isinstance(value, str) or not value:
+                    raise ValueError()
+                ZoneInfo(value)
+            except (ValueError, ZoneInfoNotFoundError):
+                raise ValueError("timezone must be a valid IANA timezone name or null") from None
+        values["timezone"] = value
+    if "reply_language" in body:
+        value = body["reply_language"]
+        if value is not None and value not in ("zh-CN", "en"):
+            raise ValueError("reply_language must be zh-CN, en or null")
+        values["reply_language"] = value
+    return values
+
+
+async def update_turn_context(body: Mapping[str, Any]) -> dict[str, Any]:
+    """Store only named fields; null restores the default. A refused body writes nothing."""
+    values = checked_turn_context(body)
+    stored: dict[str, str | None] = {}
+    if "turn_context_enabled" in values:
+        value = values["turn_context_enabled"]
+        stored[TURN_CONTEXT_KEY] = None if value is None else ("true" if value else "false")
+    for field, key in (("timezone", TIMEZONE_KEY), ("reply_language", REPLY_LANGUAGE_KEY)):
+        if field in values:
+            stored[key] = values[field]
+    missing_bots = None
+    if values.get("turn_context_enabled") is True:
+        from .channels.operator_ids import missing
+
+        # A failed lookup must not silently enable the switch.
+        missing_bots = await missing()
+    await db_settings.put_settings(stored)
+    await load()
+    view = turn_context_view()
+    if missing_bots is not None:
+        view["missing_operator_ids"] = [asdict(bot) for bot in missing_bots]
     return view
