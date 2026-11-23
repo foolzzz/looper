@@ -12,10 +12,11 @@ import { cn } from "@/lib/utils";
 
 export type SkillUsageState = { rows: Map<string, SkillUsageRow> | null; error: string };
 
-/** One read of a project's skill usage, keyed by skill id. */
-export function useSkillUsage(projectId: string): SkillUsageState {
+/** One read of a project's skill usage, keyed by skill id; read again when `revision` (the installed content hashes) changes, and not before it is known. */
+export function useSkillUsage(projectId: string, revision: string | null): SkillUsageState {
   const [state, setState] = useState<SkillUsageState>({ rows: null, error: "" });
   useEffect(() => {
+    if (revision == null) return;
     let alive = true;
     fetchSkillUsage(projectId)
       .then((list) => alive && setState({ rows: new Map(list.map((row) => [row.skill_id, row])), error: "" }))
@@ -23,7 +24,7 @@ export function useSkillUsage(projectId: string): SkillUsageState {
     return () => {
       alive = false;
     };
-  }, [projectId]);
+  }, [projectId, revision]);
   return state;
 }
 

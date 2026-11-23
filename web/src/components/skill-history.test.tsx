@@ -16,6 +16,7 @@ import {
   type CatalogItem,
   type ProjectInstall,
   type ProjectInstalls,
+  type SkillUsageRow,
   type SkillVersions,
 } from "@/lib/api";
 
@@ -251,5 +252,30 @@ describe("ProjectSkillsSection history", () => {
     await act(async () => historyButtons[0].click());
     expect(host.textContent).toContain("Operator");
     expect(host.textContent).toContain("Version 1");
+  });
+
+  it("reads usage again after a rollback changes the skill's hash", async () => {
+    const usageRow = (attempts: number): SkillUsageRow => ({
+      skill_id: "skill-1", name: "deploy-check", sha256: "x", lifecycle: "active", versions: [1],
+      loaded_runs: attempts, loaded_attempts: attempts, invoked: { count: 0, n: 0, unknown: attempts, rate: null },
+      effect: null,
+      comparison: { loaded_runs: 0, loaded_attempts: 0, invoked: { count: 0, n: 0, unknown: 0, rate: null }, effect: null },
+      review: [], window: { start: "2026-11-13T00:00:00Z", end: "2026-11-20T00:00:00Z" },
+      comparison_window: { start: "2026-10-16T00:00:00Z", end: "2026-11-13T00:00:00Z" },
+      coverage_since: null, note: "Observational data, not a controlled experiment.",
+    });
+    const after = installs();
+    after.installs[0] = install({ item: item({ sha256: "def", updated_at: "2026-01-03T00:00:00Z" }) });
+    vi.mocked(fetchSkillUsage).mockResolvedValueOnce([usageRow(30)]).mockResolvedValue([usageRow(4)]);
+    vi.mocked(fetchProjectInstalls).mockResolvedValueOnce(installs()).mockResolvedValue(after);
+    await act(async () => {
+      root.render(<ProjectSkillsSection projectId="proj-1" />);
+    });
+    expect(host.textContent).toContain("30 attempts loaded it");
+    await act(async () => buttons().find((button) => labelOf(button) === "History")!.click());
+    await act(async () => buttons().find((button) => button.getAttribute("aria-label") === "Roll back to version 1")!.click());
+    await act(async () => buttons().find((button) => labelOf(button) === "Confirm rollback")!.click());
+    expect(host.textContent).toContain("4 attempts loaded it");
+    expect(host.textContent).not.toContain("30 attempts loaded it");
   });
 });

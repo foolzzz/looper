@@ -593,7 +593,7 @@ export function ProjectSkillsSection({ projectId }: { projectId: string }) {
   const [budget, setBudget] = useState<ContextBudget | null>(null);
   const [budgetError, setBudgetError] = useState("");
   const [budgetGeneration, setBudgetGeneration] = useState(0);
-  const usage = useSkillUsage(projectId);
+  const usage = useSkillUsage(projectId, data ? data.installs.map((entry) => entry.item.sha256).join(",") : null);
   const [catalog, setCatalog] = useState<Catalog | null>(null);
   const [catalogError, setCatalogError] = useState("");
   const [adding, setAdding] = useState(false);
