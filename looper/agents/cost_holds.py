@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 import math
 
-from ..db import cost_holds as store
+from ..db import cost_holds as store, tasks as db_tasks
 from ..db.connection import get_pool
 from .message import AgentAddress, MessageEnvelope, MessageType, TASK_ROUTER_ADDRESS, planner_address
 
@@ -139,10 +139,15 @@ async def decide(hold_id, decision, new_limit_usd=None, *, via, platform=None, p
     return row
 
 
-async def _wake(row, decision, platform):
+async def _wake(row, decision, platform, db):
     if platform is None or platform.bus is None:
         return False
     for task_id in row['task_ids']:
+        persisted = await db_tasks.get_task(task_id, pool=db)
+        if persisted is None or persisted['status'] not in db_tasks.ACTIVE_STATUSES:
+            continue
+        if decision == 'continue' and persisted['status'] == 'awaiting_budget':
+            continue
         task = getattr(getattr(platform, 'task_router', None), '_tasks', {}).get(task_id)
         if task is not None and decision == 'continue':
             task.status = 'running'
@@ -159,13 +164,14 @@ async def _apply(row, decision, platform, pool):
         if decision == 'continue':
             # Commit the status before a fast consumer can read the wakeup.
             await pool.execute("UPDATE tasks SET status='running' WHERE id=ANY($1::text[]) "
-                "AND status='awaiting_budget' AND EXISTS "
+                "AND status='awaiting_budget' AND NOT EXISTS "
+                "(SELECT 1 FROM cost_holds h WHERE h.state='pending' AND tasks.id=ANY(h.task_ids)) AND EXISTS "
                 "(SELECT 1 FROM cost_holds WHERE id=$2 AND applied_at IS NULL)", row['task_ids'], row['id'])
         async with pool.acquire() as conn, conn.transaction():
             pending = await conn.fetchrow('SELECT * FROM cost_holds WHERE id=$1 AND applied_at IS NULL FOR UPDATE',
                                           row['id'])
             if pending is not None:
-                if await _wake(dict(pending), decision, platform):
+                if await _wake(dict(pending), decision, platform, conn):
                     await conn.execute('UPDATE cost_holds SET applied_at=now() WHERE id=$1', row['id'])
     except Exception:
         # The state and the work to wake survive a disconnected bus or a crash before acknowledgement.

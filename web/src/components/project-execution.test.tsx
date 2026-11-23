@@ -43,7 +43,7 @@ it("offers an explicit ask-at-cap action while retaining fail as the inherited a
     await act(async () => root.render(<ProjectExecutionFields idPrefix="budget" draft={executionDraft(project)} onChange={() => {}} />));
     const select = host.querySelector("#budget-task_budget_action") as HTMLSelectElement;
     expect(select.value).toBe("");
-    expect(select.querySelector('option[value="ask"]')?.textContent).toContain("enforce");
+    expect(select.querySelector('option[value="ask"]')?.textContent).toContain("启用限制时生效");
     expect(executionChanges({ ...executionDraft(project), task_budget_action: "ask" }, project))
       .toEqual({ task_budget_action: "ask" });
   } finally { act(() => root.unmount()); }

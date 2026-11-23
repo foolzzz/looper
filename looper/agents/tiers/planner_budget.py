@@ -46,7 +46,10 @@ async def hold(planner, plan, admission):
     _, created = await cost_holds.create_hold(scope.scope, scope.scope_ref, admission.currency,
         scope.limit_usd, admission.spent_usd, task_id=planner._task_id, estimate_usd=admission.estimate_usd)
     # Save results before waiting; existing running Workers keep sending their results normally.
-    await planner._save(plan, *plan.steps, plan_row=True)
+    try:
+        await planner._save(plan, *plan.steps, plan_row=True)
+    except Exception:
+        logger.exception('cannot save the plan of held task %s', planner._task_id)
     if created:
         await planner._activity('phase', 'Task waiting for an operator decision at its spend cap')
 
@@ -82,7 +85,7 @@ async def _enforced(planner, plan, run_kind, step, same_attempt):
     admission = await cost_guard.task_gate(planner._task_id, run_kind, launch, reserve=step is not None,
                                            step_id=step.step_id if step else None)
     if admission.decision is cost_guard.Decision.ADMIT:
-        if guard.problem:
+        if admission.problem:
             return None
         if admission.reservation is not None:
             admission.reservation.dispatch_task_id = planner._task_id
@@ -109,10 +112,14 @@ def event(method):
     @wraps(method)
     async def checked(planner, *args, **kwargs):
         try:
-            if cost_guard.current().config.mode is cost_guard_settings.Mode.ENFORCE and args:
+            if args:
                 envelope = args[0]
                 plan = planner._plan
-                if envelope.message_type is MessageType.TASK_RESUME and plan is not None and plan.status == 'planning':
+                if envelope.message_type is MessageType.SYSTEM_EVENT and envelope.payload.get('type') == 'cost_dispatch_held':
+                    await refused(planner, envelope)
+                    return None
+                if (cost_guard.current().config.mode is cost_guard_settings.Mode.ENFORCE
+                        and envelope.message_type is MessageType.TASK_RESUME and plan is not None and plan.status == 'planning'):
                     row = await db_tasks.get_task(planner._task_id)
                     if row is not None and row['status'] == 'awaiting_budget':
                         return None
@@ -143,3 +150,30 @@ async def resume(planner):
         elif step.status == 'completed' and not step.reviewer_id:
             await planner._spawn_reviewer(plan, step)
     await planner._dispatch_ready(plan)
+
+
+async def refused(planner, envelope):
+    plan, data = planner._plan, envelope.payload
+    if plan is None or plan.status not in ('executing', 'verifying'):
+        return
+    step = plan.step(data['step_id'])
+    if step is None:
+        return
+    review = data['review']
+    current = step.reviewer_id if review else step.worker_id
+    if current != envelope.source.agent_id:
+        return  # a late refusal cannot reset a newer dispatch
+    step.reviewer_id = None
+    if review and not step.reviews:
+        step.status = 'completed'
+    else:
+        step.worker_id, step.status = None, 'pending'
+    await planner._save(plan, step)
+    if cost_guard.current().config.mode is not cost_guard_settings.Mode.ENFORCE:
+        await planner._dispatch_ready(plan)
+        return
+    scope = data['scope']
+    await hold(planner, plan, cost_guard.Admission(
+        cost_guard.Decision.ASK, cost_guard.Decision.ASK,
+        scope=cost_guard.Scope(cost_guard.BudgetScope(scope['scope']), scope['scope_ref'], scope['limit_usd']),
+        currency=cost_guard.Currency(data['currency']), spent_usd=data['spent_usd'], estimate_usd=data['estimate_usd']))

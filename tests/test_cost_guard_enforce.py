@@ -124,3 +124,15 @@ def test_a_profile_change_cannot_reuse_a_smaller_queued_reservation(monkeypatch)
         assert not g._pending
         assert g._reserved[cg.BudgetScope.TASK,'task-a',cg.Currency.PROVIDER]==0
     asyncio.run(check())
+
+
+def test_accounting_failure_falls_back_without_poisoning_the_next_gate(monkeypatch):
+    async def check():
+        setup_guard(monkeypatch)
+        cg.store.context.side_effect = OSError('synthetic read failure')
+        result=await cg.task_gate('task-a',cg.RunKind.WORKER,launch())
+        assert result.problem and result.reservation is None
+        cg.store.context.side_effect = None
+        result=await cg.task_gate('task-a',cg.RunKind.WORKER,launch())
+        assert result.problem is None and result.decision is cg.Decision.ADMIT
+    asyncio.run(check())

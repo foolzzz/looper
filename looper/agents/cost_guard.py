@@ -112,6 +112,7 @@ class Admission:
     currency: Currency | None = None
     spent_usd: float = 0.
     estimate_usd: float = 0.
+    problem: str | None = None
 
 
 class Denied(Exception):
@@ -534,7 +535,7 @@ async def task_gate(task_id, run_kind, launch_estimate, *, reserve=False, step_i
     except Exception:
         guard.problem = 'Task admission failed; existing task limits remain active.'
         logger.exception('cost guard task admission failed for %s', task_id)
-        return Admission()
+        return Admission(problem=guard.problem)
 
 
 async def release_queued(task_id):

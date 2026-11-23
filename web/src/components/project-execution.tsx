@@ -148,7 +148,7 @@ export function ProjectExecutionFields({
             <option value="">Inherit: fail the task at once</option>
             <option value="fail">Fail the task at once</option>
             <option value="wrap_up">Let the Planner wrap up, then fail</option>
-            <option value="ask">先问你继续还是停（花费守卫 enforce）</option>
+            <option value="ask">先问你继续还是停（花费守卫启用限制时生效）</option>
           </select>
         </div>
         <div className="space-y-1">

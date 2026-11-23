@@ -168,3 +168,57 @@ def test_raising_a_hold_limit_requires_operator_confirmation(monkeypatch, tmp_pa
             assert status == 200 and decided['result']['state']=='continued'
             assert await pool.fetchval("SELECT budget_usd FROM tasks WHERE id='t-cost'")==4
     run_db(body,monkeypatch,timeout=30)
+
+
+def test_hold_question_uses_blocking_delivery_and_one_channel_notification(monkeypatch):
+    from looper.agents import chat_settings, gate_service
+
+    async def body(pool):
+        await seed(pool)
+        sender=AsyncMock(return_value=(True,None))
+        monkeypatch.setattr(cost_holds,'_sender',sender)
+        monkeypatch.setattr(cost_holds,'_dashboard_url','https://dashboard.example.test')
+        monkeypatch.setattr(chat_settings,'delivery_enabled',lambda:True)
+        monkeypatch.setattr(gate_service,'dashboard_target',AsyncMock(return_value=SimpleNamespace(
+            channel_id='channel-web',target=SimpleNamespace(id='synthetic-operator',group=False))))
+        first,_=await cost_holds.create_hold('task','t-cost','provider_priced_usd',2,2,task_id='t-cost',pool=pool)
+        await cost_holds.create_hold('task','t-cost','provider_priced_usd',2,2,task_id='t-cost',pool=pool)
+        sender.assert_awaited_once()
+        question=sender.await_args.args[2]
+        assert f"继续 C-{first['id']}" in question and f"停 C-{first['id']}" in question
+        assert 'https://dashboard.example.test/#todo' in question
+        row=await pool.fetchrow('SELECT urgency,decision,reason FROM proactive_deliveries WHERE dedupe_key=$1',
+                                f"cost-hold:{first['id']}")
+        assert dict(row)=={'urgency':'blocking','decision':'send','reason':'urgent'}
+    run_db(body,monkeypatch,timeout=30)
+
+
+def test_expired_hold_cannot_change_an_already_cancelled_task(monkeypatch):
+    async def body(pool):
+        await seed(pool)
+        row,_=await store.create_hold('task','t-cost','provider_priced_usd',2,2,'budget',task_id='t-cost',pool=pool)
+        await pool.execute("UPDATE tasks SET status='cancelled' WHERE id='t-cost'")
+        await pool.execute("UPDATE cost_holds SET created_at=now()-interval '25 hours' WHERE id=$1",row['id'])
+        publish=AsyncMock()
+        await cost_holds.expire(platform=SimpleNamespace(bus=SimpleNamespace(publish=publish)),pool=pool)
+        assert await pool.fetchval("SELECT status FROM tasks WHERE id='t-cost'")=='cancelled'
+        publish.assert_not_awaited()
+        assert (await store.get(row['id'],pool=pool))['state']=='expired'
+    run_db(body,monkeypatch,timeout=30)
+
+
+def test_one_scope_cannot_resume_a_task_still_waiting_on_another_scope(monkeypatch):
+    async def body(pool):
+        await seed(pool)
+        await pool.execute("INSERT INTO system_settings(key,value) VALUES ('cost_guard.daily_usd','2')")
+        first,_=await store.create_hold('task','t-cost','provider_priced_usd',2,2,'budget',task_id='t-cost',pool=pool)
+        second,_=await store.create_hold('global_day','global','provider_priced_usd',2,2,'budget',task_id='t-cost',pool=pool)
+        publish=AsyncMock()
+        platform=SimpleNamespace(bus=SimpleNamespace(publish=publish))
+        await cost_holds.decide(first['id'],'continue',4,via='api',platform=platform,pool=pool)
+        assert await pool.fetchval("SELECT status FROM tasks WHERE id='t-cost'")=='awaiting_budget'
+        publish.assert_not_awaited()
+        await cost_holds.decide(second['id'],'continue',4,via='api',platform=platform,pool=pool)
+        assert await pool.fetchval("SELECT status FROM tasks WHERE id='t-cost'")=='running'
+        publish.assert_awaited_once()
+    run_db(body,monkeypatch,timeout=30)

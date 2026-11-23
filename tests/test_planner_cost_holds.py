@@ -60,3 +60,43 @@ def test_wake_redecides_finished_results_without_restarting_running_workers(monk
         p._dispatch_ready.assert_awaited_once_with(p._plan)
         assert running.worker_id == 'worker-live' and running.status == 'dispatched'
     asyncio.run(check())
+
+
+@pytest.mark.parametrize('review', [False, True])
+def test_late_admission_refusal_is_control_state_without_a_model_report(monkeypatch, tmp_path, review):
+    from looper.agents.bus import MessageBus
+    from looper.agents.message import MessageType, planner_address
+    from looper.agents.tiers.worker import WorkerPool, WorkerConfig, WorkerProcess, RunReply
+    from looper.agents.agent_settings import AgentType
+
+    async def check():
+        monkeypatch.setattr(cg, '_guard', cg.Guard(settings.Config(mode=settings.Mode.ENFORCE)))
+        bus=MessageBus(runtime_root=tmp_path)
+        pool=WorkerPool(config=WorkerConfig(),runtime_root=tmp_path)
+        pool._bus=bus
+        wp=WorkerProcess(worker_id='worker-held',task_id='s',plan_id='p',parent_task_id='t',
+                         role=AgentType.REVIEWER if review else AgentType.WORKER)
+        admission=cg.Admission(cg.Decision.ASK,cg.Decision.ASK,scope=cg.Scope(cg.BudgetScope.TASK,'t',2),
+                               currency=cg.Currency.PROVIDER,spent_usd=2,estimate_usd=1)
+        run=AsyncMock(side_effect=cg.Denied('must never enter model input',admission=admission))
+        await pool._finish_run(wp,None,RunReply(planner_address('t'),'',{}),run)
+        envelope=bus.get_queue('planner-t').get_nowait()
+        assert envelope.message_type is MessageType.SYSTEM_EVENT
+        assert 'must never enter model input' not in str(envelope.payload)
+        p=PlannerAgent(task_id='t',runtime_root=tmp_path)
+        p._plan=TaskPlan(plan_id='p',goal_id='',requirement='Work',work_dir=str(tmp_path))
+        p._plan.status='executing'
+        step=PlanStep(step_id='s',index=0,instruction='Work',status='completed' if review else 'dispatched',
+                      worker_id='finished-worker' if review else 'worker-held',
+                      reviewer_id='worker-held' if review else None,
+                      result={'status':'completed','summary':'Delivered'} if review else None)
+        p._plan.steps=[step]
+        p._save=AsyncMock()
+        held=AsyncMock()
+        monkeypatch.setattr(planner_budget,'hold',held)
+        await p._handle(envelope)
+        held.assert_awaited_once()
+        assert step.status==('completed' if review else 'pending')
+        assert step.reviewer_id is None
+        assert step.result==({'status':'completed','summary':'Delivered'} if review else None)
+    asyncio.run(check())
