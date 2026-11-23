@@ -132,6 +132,8 @@ async def create(conn: asyncpg.Connection, *, kind: model.Kind | str, statement:
             "VALUES ($1, $2, $3, $4, $5, $6)", candidate_id, item.kind.value, item.manager_action_id, item.journal_id,
             item.lead_id, item.quote)
     await _event(conn, candidate_id, Action.PROPOSE, actor, via)
+    # PostgreSQL delivers this after commit, including to another server process.
+    await conn.execute("SELECT pg_notify('looper_memory_draft', '')")
     return candidate_id
 
 

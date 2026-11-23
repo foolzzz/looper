@@ -172,6 +172,7 @@ _MODEL_NAME_PARAMETERS = "model_name_parameters"
 _LLM_REQUESTS_STORED_BYTES = "llm_requests_stored_bytes"
 _OUTBOUND_REVIEWS = "outbound_reviews"
 _MEMORY_CANDIDATES = "memory_candidates"
+_MEMORY_DRAFT = "memory_draft_role"
 _CARD_ACTIONS = "card_actions"
 
 _UNCERTAIN_DELIVERIES = "uncertain_deliveries"
@@ -352,6 +353,28 @@ async def _outbound_reviews_ddl(conn: asyncpg.Connection) -> list[str]:
                                if await _lacks_outbound_check(conn, table, constraint)]
 
 
+async def _memory_draft_ddl(conn: asyncpg.Connection) -> list[str]:
+    """Widen only the role and run-kind checks, without scanning under the schema transaction's locks."""
+    from .llm_records import RUN_KINDS
+    from ..agents.agent_settings import AgentType
+
+    if await conn.fetchval("SELECT EXISTS (SELECT 1 FROM schema_migrations WHERE name = $1)", _MEMORY_DRAFT):
+        return []
+    statements = []
+    for table, constraint, column, values in (
+        ("llm_records", "llm_records_run_kind_check", "run_kind", RUN_KINDS),
+        ("agent_setting_layers", "agent_setting_layers_role_check", "role", tuple(role.value for role in AgentType)),
+    ):
+        lacks = await conn.fetchval(
+            "SELECT EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = to_regclass($1) AND conname = $2 "
+            "AND strpos(pg_get_constraintdef(oid), $3) = 0)", table, constraint, "'memory_draft'")
+        if lacks:
+            choices = ", ".join(f"'{value}'" for value in values)
+            statements.append(f"ALTER TABLE {table} DROP CONSTRAINT {constraint}, ADD CONSTRAINT {constraint} "
+                              f"CHECK ({column} IN ({choices})) NOT VALID")
+    return statements
+
+
 def _run_tree_ddl() -> tuple[str, ...]:
     """The run tree columns of llm_records, as schema.sql defines them, added without a scan or a rewrite: llm_records
     is large, and these statements hold its ACCESS EXCLUSIVE lock until the schema transaction commits. No older row
@@ -418,6 +441,7 @@ _ONLINE_STEPS = (
     _OnlineStep(_HEADLESS_COMPACTION, "headless_compaction_online",
                 validate=(("agent_runtimes", "agent_runtimes_capabilities_check"),)),
     _OnlineStep(_OUTBOUND_REVIEWS, "outbound_reviews_online", validate=_OUTBOUND_CHECKS),
+    _OnlineStep(_MEMORY_DRAFT, "memory_draft_role_online", validate=_OUTBOUND_CHECKS),
     # The delivery tables can be large: their partial indexes are built without blocking writes.
     _OnlineStep(_UNCERTAIN_DELIVERIES, "uncertain_deliveries_online", indexes=_UNCERTAIN_DELIVERY_INDEXES),
 )
@@ -1749,6 +1773,9 @@ async def ensure_schema(pool: asyncpg.Pool | asyncpg.Connection | None = None) -
             for ddl in await _outbound_reviews_ddl(conn):
                 await conn.execute(ddl)
             await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", _OUTBOUND_REVIEWS)
+        for ddl in await _memory_draft_ddl(conn):
+            await conn.execute(ddl)
+        await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1) ON CONFLICT DO NOTHING", _MEMORY_DRAFT)
         # After every table its keys point at (projects, managers, manager_actions, task_journal, message_leads).
         if await _memory_candidates_pending(conn):
             await conn.execute(_memory_candidates_ddl())
@@ -1811,6 +1838,7 @@ async def schema_change_pending(conn: asyncpg.Connection) -> bool:
             or await _intent_merges_pending(conn) or await _leads_check_pending(conn)
             or await _run_skips_pending(conn)
             or await _outbound_reviews_pending(conn) or await _memory_candidates_pending(conn)
+            or bool(await _memory_draft_ddl(conn))
             or await _uncertain_deliveries_pending(conn)
             or await _run_tree_pending(conn) or await _step_difficulty_pending(conn)
             or await _agent_spawns_pending(conn) or await _advisor_roles_pending(conn)

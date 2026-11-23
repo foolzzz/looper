@@ -698,7 +698,7 @@ CREATE INDEX IF NOT EXISTS idx_library_installs_project ON library_installs (pro
 CREATE TABLE IF NOT EXISTS agent_setting_layers (
     scope           TEXT NOT NULL CHECK (scope IN ('system', 'role', 'project', 'role_project')),
     role            TEXT CHECK (role IN ('manager', 'planner', 'worker', 'reviewer', 'processor', 'advisor',
-                                         'advice_check', 'leads_check', 'outbound_check')),
+                                         'advice_check', 'leads_check', 'outbound_check', 'memory_draft')),
     project_id      TEXT REFERENCES projects(id) ON DELETE CASCADE,
     harness_prompt  TEXT,
     profile_id      TEXT REFERENCES agent_profiles(id),
@@ -1266,7 +1266,7 @@ CREATE TABLE IF NOT EXISTS llm_records (
     -- of run it is (llm_records.RUN_KINDS; NULL on rows from before it, whose readers take it from their agent id).
     parent_record_id BIGINT REFERENCES llm_records(id) ON DELETE SET NULL,
     run_kind TEXT CHECK (run_kind IN ('manager', 'planner', 'worker', 'reviewer', 'processor', 'consult', 'advisor',
-                                      'advice_check', 'outbound_check'))
+                                      'advice_check', 'outbound_check', 'memory_draft'))
 );
 
 CREATE INDEX IF NOT EXISTS idx_llm_records_agent ON llm_records(agent_id, created_at DESC);
@@ -2214,7 +2214,7 @@ ALTER TABLE intents ADD COLUMN IF NOT EXISTS check_record_id BIGINT;
 ALTER TABLE agent_setting_layers DROP CONSTRAINT IF EXISTS agent_setting_layers_role_check;
 ALTER TABLE agent_setting_layers ADD CONSTRAINT agent_setting_layers_role_check
     CHECK (role IN ('manager', 'planner', 'worker', 'reviewer', 'processor', 'advisor', 'advice_check', 'leads_check',
-                    'outbound_check')) NOT VALID;
+                    'outbound_check', 'memory_draft')) NOT VALID;
 ALTER TABLE subscription_runs DROP CONSTRAINT IF EXISTS subscription_runs_check_status_check;
 ALTER TABLE subscription_runs ADD CONSTRAINT subscription_runs_check_status_check
     CHECK (check_status IN ('skipped', 'checked', 'failed')) NOT VALID;

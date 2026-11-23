@@ -86,7 +86,7 @@ async def act(action: str, candidate: str, *, content_hash: str | None = None, c
     A refusal uses ``db.memory.MemoryRefused`` (disabled, not_found, state, stale, forbidden or invalid). An edit
     and its optional confirmation share a transaction; neither saves anything when validation fails.
     """
-    if action not in {"confirm", "reject", "edit", "retry", "revive", "delete"}:
+    if action not in {"confirm", "reject", "edit", "retry", "revive", "delete", "redraft"}:
         raise ValueError(f"unknown memory action {action!r}")
     via = model.Via(via)
     if via not in (model.Via.DASHBOARD, model.Via.LARK, model.Via.TELEGRAM, model.Via.CLI):
@@ -107,6 +107,11 @@ async def act(action: str, candidate: str, *, content_hash: str | None = None, c
         row = dict(found)
         if row["destination"] != model.Destination.VAULT:
             _refuse("this action applies to vault candidates only", "state", state=row["state"])
+        if action == "redraft":
+            await db_memory.transition(conn, number, model.State.DRAFTING, action=model.Action.REDRAFT,
+                                       actor=model.Actor.USER, via=via, now=now)
+            await conn.execute("SELECT pg_notify('looper_memory_draft', '')")
+            return {"candidate": memory.detail_view(await db_memory.get(number, db=conn))}
         if action == "delete":
             await db_memory.delete(conn, number, via=via)
             return {"candidate": model.format_id(number), "deleted": True}
