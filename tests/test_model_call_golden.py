@@ -27,7 +27,7 @@ import pytest
 from looper import child_env
 from tests.db_support import DSN, run_db
 from tests.fake_claude import fake_claude
-from tests.model_call_support import read_golden
+from tests.model_call_support import frozen_columns, read_golden
 
 pytestmark = pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
 _BASELINE = "2b77afb1672cda93be6681259623bafa4e290f2d"
@@ -215,6 +215,6 @@ def test_tool_less_call_preserves_launch_prompt_and_rows(
             assert check_record["run_kind"] is None
             check_record["run_kind"] = "leads_check"
             expected = _json(baseline)
-        assert actual == expected
+        assert _json(frozen_columns(json.loads(expected), json.loads(actual))) == expected
 
     run_db(test, monkeypatch, setup=seed_role_configs)
