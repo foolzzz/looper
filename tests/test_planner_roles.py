@@ -18,6 +18,9 @@ import pytest
 from looper.agents.bus import MessageBus
 from looper.agents.message import TASK_ROUTER_ADDRESS, MessageEnvelope, MessageType, RestartMode
 from looper.agents.tiers.planner import PlanStep, PlannerAgent, ReviewStage, StepReviewRole, TaskPlan
+from looper.db.llm_records import start_record as _real_start_record, finish_record as _real_finish_record
+from looper.db.plans import save as _real_save_plan
+from tests.db_support import DSN, run_db
 from tests.test_planner_agent import (
     REVIEW_FAIL,
     REVIEW_PASS,
@@ -79,6 +82,69 @@ def _flow(h: Any) -> list[tuple[str, tuple[str, int] | None]]:
 
 
 ROLE_STEP = {**step("s1", review=True), "role": "tester", "review_roles": ["security"]}
+
+
+@pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
+def test_role_reviews_settle_the_real_attempt_and_link_deciding_turns(
+    planner_claude, agent_db, roles, monkeypatch, tmp_path,
+):
+    from looper.db import llm_records, plans
+    from fake_claude import fake_claude
+    from looper.agents.tiers.worker import WorkerConfig, WorkerPool
+    from tests.test_planner_agent import Harness
+    import json
+
+    monkeypatch.setattr(plans, "save", _real_save_plan)
+    monkeypatch.setattr(llm_records, "start_record", _real_start_record)
+    monkeypatch.setattr(llm_records, "finish_record", _real_finish_record)
+    claude = planner_claude(plan(ROLE_STEP), decide("review"), decide("retry", feedback="Fix the finding"),
+                            decide("review"), decide("accept"))
+    async def scenario(pool):
+        await pool.execute("INSERT INTO projects(id,name) VALUES ('proj-1','Synthetic project')")
+        await pool.execute("INSERT INTO tasks(id,requirement,project_id) VALUES ('t1','Synthetic task','proj-1')")
+        h = Harness(tmp_path, claude, lambda envelope: None)
+        reviews = 0
+        try:
+            await h.start()
+            while h.final() is None:
+                await h.until(lambda: bool(h.held) or h.final() is not None)
+                if not h.held:
+                    break
+                envelope = h.held[0]
+                review = envelope.message_type == MessageType.VERIFY_REQUEST
+                reviews += int(review)
+                report = (REVIEW_FAIL if reviews == 2 else REVIEW_PASS) if review else {
+                    'status': 'completed', 'summary': 'Synthetic work ready', 'changed_files': {}}
+                event = {'type': 'result', 'subtype': 'success', 'result': json.dumps(report)}
+                executable = fake_claude(tmp_path / 'attempt-runtime',
+                    'import sys\nsys.stdin.readline()\n' + f'print({json.dumps(event)!r}, flush=True)\n')
+                workers = WorkerPool(config=WorkerConfig(claude_bin=executable), runtime_root=tmp_path / 'workers')
+                result = await workers._execute(envelope, is_verify=review)
+                assert result.get('passed') == report['passed'] if review else result['status'] == 'completed', result
+                await h.release(result)
+            assert (await h.finished()).payload["status"] == "completed"
+            rows = await pool.fetch("SELECT id,attempt,decision,review_runs,review_outcome,failure_kind "
+                                    "FROM step_attempts WHERE task_id='t1' ORDER BY attempt")
+            assert len(rows) == 2
+            first, second = rows
+            assert (first['decision'], first['review_runs'], first['review_outcome'], first['failure_kind']) == (
+                'retry', 2, 'not_passed', 'review_rejected')
+            assert (second['decision'], second['review_runs'], second['review_outcome']) == ('accept', 2, 'passed')
+            assert [message.payload['attempt_id'] for message in h.dispatched] == [
+                first['id'], first['id'], first['id'], second['id'], second['id'], second['id']]
+            assert await pool.fetchval("SELECT count(*) FROM llm_records WHERE task_id='t1' "
+                                       "AND attempt_id=ANY($1::bigint[]) AND run_kind='planner'",
+                                       [first['id'], second['id']]) == 2
+            assert await pool.fetchval("SELECT count(*) FROM llm_records WHERE task_id='t1' "
+                                       "AND run_kind IN ('worker','reviewer') AND attempt_id IS NOT NULL") == 6
+            assert await pool.fetchval("SELECT count(*) FROM llm_records r JOIN step_attempts a ON a.id=r.attempt_id "
+                                       "WHERE r.task_id='t1' AND r.run_kind='worker' AND a.worker_record_id=r.id") == 2
+            assert await pool.fetchval("SELECT count(*) FROM step_attempts WHERE decision IS NULL") == 0
+        finally:
+            await h.planner.stop()
+            await h.bus.shutdown()
+
+    run_db(scenario, monkeypatch, timeout=30)
 
 
 def test_a_step_runs_as_its_role_and_is_accepted_only_once_both_reviews_pass(
@@ -544,3 +610,39 @@ def test_where_the_project_lets_its_planner_define_no_role_no_turn_lists_its_tem
     drive(claude, lambda e: WORK_OK)
 
     assert "role templates" not in claude.turns()[0]["text"]
+
+
+@pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
+def test_unavailable_review_role_keeps_failure_without_counting_a_run(
+    planner_claude, agent_db, roles, monkeypatch, tmp_path,
+):
+    from looper.db import plans
+    from tests.test_planner_agent import Harness
+
+    monkeypatch.setattr(plans, "save", _real_save_plan)
+    roles.add("gone", "review", "Check the work.")
+    spec = {**step("s1", review=True), "review_roles": ["gone"]}
+    claude = planner_claude(plan(spec), decide("review"), decide("fail", reason="Review unavailable"))
+
+    async def scenario(pool):
+        await pool.execute("INSERT INTO projects(id,name) VALUES ('proj-1','Synthetic project')")
+        await pool.execute("INSERT INTO tasks(id,requirement,project_id) VALUES ('t1','Synthetic task','proj-1')")
+
+        def outcome(envelope):
+            if envelope.message_type == MessageType.WORK_ITEM:
+                roles.rows = [r for r in roles.rows if r["role_key"] != "gone"]
+                return WORK_OK
+            return REVIEW_PASS
+
+        h = Harness(tmp_path, claude, outcome)
+        try:
+            await h.start()
+            assert (await h.finished()).payload["status"] == "failed"
+            row = await pool.fetchrow("SELECT review_runs,review_outcome FROM step_attempts WHERE task_id='t1'")
+            assert tuple(row) == (1, "not_passed")
+            assert len(h.reviews) == 1
+        finally:
+            await h.planner.stop()
+            await h.bus.shutdown()
+
+    run_db(scenario, monkeypatch, timeout=30)

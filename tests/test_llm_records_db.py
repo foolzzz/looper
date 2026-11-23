@@ -500,3 +500,19 @@ def test_a_resident_agents_usage_by_session_day_and_turn() -> None:
         assert nobody["total"]["runs"] == 0 and nobody["turns"] == [] and nobody["latest_context_tokens"] is None
 
     run_db(test, max_size=2)
+
+
+def test_contract_rejections_increment_atomically_per_typed_kind() -> None:
+    from looper.db import llm_records
+
+    async def test(pool: Any) -> None:
+        record_id = await llm_records.start_record(agent_id="planner-contract",
+                                                   metadata={"outcome": "completed"}, pool=pool)
+        await asyncio.gather(*(llm_records.increment_contract_rejections(record_id, "PLAN", pool=pool)
+                               for _ in range(2)))
+        await llm_records.increment_contract_rejections(record_id, "DECISION", pool=pool)
+        record = await llm_records.get_record(record_id, pool=pool)
+        assert record["metadata"]["contract_rejections"] == {"PLAN": 2, "DECISION": 1}
+        assert record["metadata"]["outcome"] == "completed"
+
+    run_db(test, max_size=2)
