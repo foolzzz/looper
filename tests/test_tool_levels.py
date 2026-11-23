@@ -148,6 +148,10 @@ DECIDED_OPERATIONS: dict[str, ActionLevel] = {
     # Stores protocol permission only; no check runs in this stage.
     "acceptance_checks.get": INSIDE, "acceptance_checks.update": INSIDE,
 
+    "manager_persona.get": INSIDE,  # reads Looper's stored persona; sends nothing
+    "manager_persona.update": INSIDE,  # changes Looper's stored persona; sends nothing
+    "manager_sessions.list": INSIDE,  # reads the default Manager's stored sessions; sends nothing
+    "manager_sessions.reset": INSIDE,  # clears one Looper session; sends nothing
     "providers.limits": INSIDE,  # reads stored quota windows and usage
     "limit_signals_settings.get": INSIDE,  # reads Looper's collection switch
     "limit_signals_settings.update": INSIDE,  # changes only Looper's collection switch

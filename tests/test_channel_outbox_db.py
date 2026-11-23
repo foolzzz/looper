@@ -82,6 +82,30 @@ def test_upgrade_adds_outbox_and_marker_once(monkeypatch):
     run_db(check, monkeypatch)
 
 
+def test_upgrade_adds_terminal_time_without_retimestamping_legacy_outcomes(monkeypatch):
+    from looper.db import connection, channel_outbox as db
+
+    async def check(pool):
+        item = await db.insert_or_get(row("legacy-failure"))
+        await db.mark_failed(item["id"], "rejected", "denied")
+        created_at = item["created_at"]
+        await pool.execute("ALTER TABLE channel_outbox DROP COLUMN terminal_at")
+        async with pool.acquire() as conn:
+            assert await connection.schema_change_pending(conn)
+        await connection.ensure_schema(pool)
+        migrated = await db.get(item["id"])
+        assert migrated["terminal_at"] is None
+        assert migrated["created_at"] == created_at
+        assert (await db.metric_counts(created_at))["channel-test"]["failed_24h"] == {"rejected": 1}
+        assert await db.metric_counts(created_at + timedelta(microseconds=1)) == {}
+        await connection.ensure_schema(pool)
+        async with pool.acquire() as conn:
+            assert not await connection.schema_change_pending(conn)
+        assert await pool.fetchval(
+            "SELECT count(*) FROM schema_migrations WHERE name='channel_outbox_terminal_at'") == 1
+    run_db(check, monkeypatch)
+
+
 def test_circuit_deferral_preserves_attempt_budget_and_last_failure(monkeypatch):
     from looper.db import channel_outbox as db
 

@@ -19,6 +19,8 @@ from uuid import uuid4
 from weakref import WeakValueDictionary
 
 from .base import PostOutcome, PostReceipt
+from . import outbound_metrics
+from .outbound_metrics import EventKind
 from .lark_api import LarkApiError, MAX_RETRY_HINT
 from .lark_cli import LarkCliError, MESSAGE_GONE_CODES, TIMEOUT
 
@@ -65,6 +67,10 @@ class OutboundProtocol(StrEnum):
 
 
 def classify(exc: Exception) -> tuple[ErrorClass, float | None]:
+    from .telegram_request import TelegramWriteError
+
+    if isinstance(exc, TelegramWriteError):
+        return exc.error_class, exc.retry_after
     retry_after = getattr(exc, 'retry_after', None)
     if isinstance(exc, LarkApiError) and exc.http_status == 429:
         return ErrorClass.RATE_LIMITED, retry_after
@@ -114,12 +120,30 @@ class TokenBucket:
                 await self.sleep((1 - self.tokens) / self.rate)
 
 
+class BreakerState(StrEnum):
+    CLOSED = 'closed'
+    OPEN = 'open'
+    HALF_OPEN = 'half_open'
+
+
 class Breaker:
-    def __init__(self, clock=time.monotonic):
+    def __init__(self, clock=time.monotonic, *, on_transition: Callable[[BreakerState], None] | None = None):
         self.clock = clock
-        self.state = 'closed'
+        self._state = BreakerState.CLOSED
+        self._on_transition = on_transition
         self.open_until = 0.0
         self._failures = deque()
+
+    @property
+    def state(self) -> BreakerState:
+        return self._state
+
+    @state.setter
+    def state(self, state: BreakerState | str):
+        state = BreakerState(state)
+        previous, self._state = self._state, state
+        if state != previous and self._on_transition is not None:
+            self._on_transition(state)
 
     def allow(self) -> bool:
         if self.state == 'closed':
@@ -181,6 +205,7 @@ class _Edit:
 
 class _AppLimits:
     def __init__(self, settings, clock, sleep):
+        self.loop = asyncio.get_running_loop()
         self.settings, self.clock, self.sleep = settings, clock, sleep
         self._limits = {}
         self._in_flight = 0
@@ -208,8 +233,8 @@ class _AppLimits:
                 self._slots.notify_all()
 
 
-# Weak ownership releases allowances when an application's last gateway is released.
-_APP_LIMITS: WeakValueDictionary[str, _AppLimits] = WeakValueDictionary()
+# Share allowances only within their owning loop; release them with the last gateway.
+_APP_LIMITS: WeakValueDictionary[tuple[asyncio.AbstractEventLoop, str], _AppLimits] = WeakValueDictionary()
 
 
 class Gateway:
@@ -220,14 +245,36 @@ class Gateway:
             settings = outbound_limits
         self.settings = settings
         # Unknown identities remain private; real adapters pass their verified app_id.
-        self._app = _APP_LIMITS.get(app_id) if app_id else None
-        if self._app is None:
-            self._app = _AppLimits(settings, clock, sleep)
-            if app_id:
-                _APP_LIMITS[app_id] = self._app
-        self.breaker = Breaker(clock)
+        self._app_id = app_id
+        self._app_limits: _AppLimits | None = None
         self.counters = Counters()
+        self.breaker = Breaker(clock, on_transition=self._breaker_transition)
         self._edits: dict[str, _Edit] = {}
+
+    @property
+    def _app(self) -> _AppLimits:
+        # Adapters can be constructed before a loop starts or retained after it closes.
+        loop = asyncio.get_running_loop()
+        if self._app_limits is None or self._app_limits.loop is not loop:
+            key = (loop, self._app_id)
+            app = _APP_LIMITS.get(key) if self._app_id else None
+            if app is None:
+                app = _AppLimits(self.settings, self.clock, self.sleep)
+                if self._app_id:
+                    _APP_LIMITS[key] = app
+            self._app_limits = app
+        return self._app_limits
+
+    def _breaker_transition(self, state: BreakerState):
+        kind = {"open": EventKind.BREAKER_OPEN, "half_open": EventKind.BREAKER_HALF_OPEN,
+                "closed": EventKind.BREAKER_RECOVERED}[state]
+        outbound_metrics.events.record(self.channel_id, kind)
+        if state == 'open':
+            self.counters.breaker_opens += 1
+
+    def record_backoff(self):
+        self.counters.backoffs += 1
+        outbound_metrics.events.record(self.channel_id, EventKind.BACKOFF)
 
     @property
     def bucket(self):
@@ -258,15 +305,12 @@ class Gateway:
             except Exception as exc:
                 error_class, retry_after = classify(exc)
                 self.counters.failures[error_class] += 1
-                previous = self.breaker.state
                 self.breaker.record(error_class)
-                if self.breaker.state == 'open' and previous != 'open':
-                    self.counters.breaker_opens += 1
                 retryable = error_class in {ErrorClass.RATE_LIMITED, ErrorClass.TRANSIENT} or (
                     error_class == ErrorClass.UNKNOWN and keyed)
                 if not retry or not retryable or attempt == MAX_RETRIES:
                     raise
-                self.counters.backoffs += 1
+                self.record_backoff()
                 delay = backoff(attempt + 1, retry_after)
                 if self.breaker.state == 'open':
                     delay = max(delay, self.breaker.open_until - self.clock())
@@ -399,10 +443,12 @@ class Outbox:
                            outcome=PostOutcome.REJECTED if row.get('error_class') == ErrorClass.REJECTED
                            else PostOutcome.UNKNOWN)
 
-    async def send(self, kind, chat, body, reply_to, key, source):
+    async def send(self, kind, chat, body, reply_to, key, source, *, replace_rejected: bool = False):
         if WriteKind(kind) not in {WriteKind.SEND, WriteKind.REPLY}:
             raise ValueError('outbox only accepts sends and replies')
         OutboxSource(source)
+        if replace_rejected and self.protocol != OutboundProtocol.TELEGRAM:
+            raise ValueError('rejected body replacement is only supported for Telegram')
         if not isinstance(key, str) or not 1 <= len(key) <= 50:
             raise ValueError('idempotency key must contain 1 to 50 characters')
         row = dict(channel_id=self.channel_id, idempotency_key=key, kind=kind,
@@ -410,6 +456,9 @@ class Outbox:
         try:
             row = await self.db.insert_or_get(row)
         except Exception:
+            if replace_rejected:
+                # A fallback requires proof that this row's preceding payload was refused.
+                return PostReceipt(False, outcome=PostOutcome.UNKNOWN, error='cannot verify rejected delivery')
             self.gateway.counters.db_fallbacks += 1
             logger.warning('outbound outbox insert failed; sending directly through gateway', exc_info=True)
             try:
@@ -421,6 +470,12 @@ class Outbox:
                 return PostReceipt(False, error=str(exc), parent_gone=getattr(exc, 'code', None) in MESSAGE_GONE_CODES,
                                    outcome=PostOutcome.REJECTED if error_class == ErrorClass.REJECTED
                                    else PostOutcome.UNKNOWN)
+        if replace_rejected:
+            try:
+                row = await self.db.replace_rejected_body(row['id'], body)
+            except Exception:
+                logger.warning('outbound rejected body replacement failed; delivery remains unknown', exc_info=True)
+                return PostReceipt(False, outcome=PostOutcome.UNKNOWN, error='cannot verify rejected delivery')
         if row['state'] in {'sent', 'failed', 'uncertain'}:
             return self._receipt(row)
         future = self._waiters.setdefault(row['id'], asyncio.get_running_loop().create_future())
@@ -497,11 +552,12 @@ class Outbox:
         except TimeoutError as exc:
             raise StateWriteUnavailable('outbound state write deadline expired') from exc
 
-    def _expiry(self, row):
+    def _expiry(self, row, *, attempting: bool = False):
         now = self.clock()
         first = row.get('first_possible_at')
-        if first is not None and (self.protocol != OutboundProtocol.LARK or
-                                  (now - first).total_seconds() >= KEYED_DEDUPE_WINDOW):
+        if first is not None and ((self.protocol == OutboundProtocol.TELEGRAM and not attempting) or
+                                  (self.protocol == OutboundProtocol.LARK and
+                                   (now - first).total_seconds() >= KEYED_DEDUPE_WINDOW)):
             return 'platform deduplication window expired'
         created = row.get('created_at', now)
         if (now - created).total_seconds() >= DELIVERY_DEADLINE:
@@ -523,7 +579,7 @@ class Outbox:
                                                       timeout=STATE_WRITE_TIMEOUT)
         if row['first_possible_at'] is None:
             raise DeliveryExpired('delivery claim no longer active')
-        if reason := self._expiry(row):
+        if reason := self._expiry(row, attempting=True):
             raise DeliveryExpired(reason)
         remaining = DELIVERY_DEADLINE - (self.clock() - row.get('created_at', self.clock())).total_seconds()
         async with asyncio.timeout(max(0, remaining)):
@@ -556,13 +612,14 @@ class Outbox:
             elif error_class == ErrorClass.REJECTED or row['attempts'] > MAX_RETRIES:
                 await self._persist(lambda: self.db.mark_failed(row['id'], error_class, error))
             else:
-                self.gateway.counters.backoffs += 1
+                self.gateway.record_backoff()
                 delay = backoff(row['attempts'], retry_after)
                 if breaker.state == 'open':
                     delay = max(delay, breaker.open_until - self.gateway.clock())
                 at = min(self.clock() + timedelta(seconds=delay),
                          row.get('created_at', self.clock()) + timedelta(seconds=DELIVERY_DEADLINE))
-                await self._persist(lambda: self.db.retry_later(row['id'], at, error_class, error))
+                await self._persist(lambda: self.db.retry_later(row['id'], at, error_class, error,
+                    **({'clear_possible': True} if self.protocol == OutboundProtocol.TELEGRAM else {})))
         else:
             await self._persist(lambda: self.db.mark_sent(row['id'], external_id))
         await self._complete(row)
