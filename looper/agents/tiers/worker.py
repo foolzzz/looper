@@ -2205,7 +2205,8 @@ class WorkerPool:
                 step_id=payload.get("task_id") or None,
                 task=self._task_section(payload, work_dir, is_verify=is_verify),
                 contract_name="REVIEW_CONTRACT" if is_verify else "WORK_CONTRACT",
-                contract=review_contract(payload.get("severity") is True) if is_verify else work_contract(runtime),
+                contract=(review_contract(payload.get("severity") is True, evidence=bool(payload.get("evidence")))
+                          if is_verify else work_contract(runtime)),
                 knowledge=knowledge,
                 room=room_text,
                 vault=vault_text,
@@ -2222,7 +2223,8 @@ class WorkerPool:
                 step_id=payload.get("task_id") or None,
                 task=self._task_section(payload, work_dir, is_verify=is_verify),
                 contract_name="REVIEW_CONTRACT" if is_verify else "WORK_CONTRACT",
-                contract=review_contract(payload.get("severity") is True) if is_verify else work_contract(runtime),
+                contract=(review_contract(payload.get("severity") is True, evidence=bool(payload.get("evidence")))
+                          if is_verify else work_contract(runtime)),
                 knowledge=knowledge,
                 room=room_text,
                 vault=vault_text,
@@ -3178,7 +3180,8 @@ class WorkerPool:
             return review_task_section(requirement=requirement, step=step, instruction=instruction,
                                        acceptance_criteria=acceptance, work_dir=work_dir, supplements=supplements,
                                        workspace=workspace, review_role=task_role.key if task_role else "",
-                                       retry_notes=[str(f) for f in payload.get("feedback") or []])
+                                       retry_notes=[str(f) for f in payload.get("feedback") or []],
+                                       evidence=str(payload.get("evidence") or ""))
         return work_task_section(
             requirement=requirement, step=step, instruction=instruction, acceptance_criteria=acceptance,
             supplements=supplements,

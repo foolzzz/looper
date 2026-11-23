@@ -1,4 +1,4 @@
-"""Acceptance collection runs after successful work, without changing Planner decisions."""
+"""Acceptance collection precedes and constrains Planner decisions."""
 from __future__ import annotations
 
 import asyncio
@@ -22,7 +22,7 @@ from tests.db_support import DSN, run_db
     ("local", False, True, False), ("local", True, False, False),
     ("off", True, False, False),
 ])
-def test_worker_result_collects_before_decision_without_changing_allowed_actions(
+def test_worker_result_collects_before_decision_and_blocks_failed_checks(
     planner_claude, agent_db, monkeypatch, mode, succeeded, has_checks, expected,
 ):
     from looper.agents import acceptance_runner
@@ -46,7 +46,7 @@ def test_worker_result_collects_before_decision_without_changing_allowed_actions
     result = WORK_OK if succeeded else WORK_FAILED
     h = drive(claude, lambda _: {**result, "acceptance_baseline": {"head_sha": "forged"}})
     assert bool(observed) is expected
-    assert h.final().payload["status"] == ("completed" if succeeded else "failed")
+    assert h.final().payload["status"] == ("completed" if succeeded and not expected else "failed")
     if expected:
         call = observed[0]
         assert call["task_id"] == "t1" and call["attempt"] == 1
@@ -54,9 +54,10 @@ def test_worker_result_collects_before_decision_without_changing_allowed_actions
         assert call["mode"] is AcceptanceChecksMode(mode)
         assert tuple(call["runtime_paths"]) == (".venv", "node_modules")
         assert call["base_commit"] is None  # report-only directory; the Worker cannot forge a baseline
-        decision = claude.turns()[-1]["text"]
-        assert "Allowed decisions now: accept" in decision
-        assert "Acceptance evidence" not in decision and "recheck" not in decision
+        decision = next(turn["text"] for turn in claude.turns()
+                        if "Allowed decisions now:" in turn["text"])
+        assert "Allowed decisions now: retry" in decision
+        assert "Acceptance evidence" in decision and "recheck" not in decision
 
 
 def test_dispatch_captures_protected_baseline_and_keeps_it_across_same_attempt_restart(
@@ -117,7 +118,8 @@ def test_resumed_success_collects_again_before_asking_the_saved_decision(tmp_pat
         monkeypatch.setattr(acceptance_runner, "run_step_checks", AsyncMock(side_effect=lambda **k:
             events.append(("checks", k["base_commit"]))))
         await agent._decide_again(task, current)
-        assert events == ["saved", ("checks", "abc"), "decision"]
+        assert events[0] == "saved" and events[-1] == "decision"
+        assert ("checks", "abc") in events
 
     asyncio.run(run())
 
@@ -140,7 +142,7 @@ def test_saved_network_checks_can_be_loaded_after_permission_changes(tmp_path, m
         assert agent._plan is not None
         saved = agent._plan.steps[0]
         assert saved.checks[0].network is True
-        baseline = _main_modules("origin/main")
+        baseline = _main_modules("ecc2eedbf2ac4a1b44ff9078e634002c228458c1")
         old = baseline.planner.PlannerAgent(task_id="task-saved", runtime_root=tmp_path)
         context = planner_protocol.DecisionContext("s1", planner_protocol.ResultKind.WORK, True, False, 0)
         messages = [agent._decision_message(agent._plan, saved, context, ["Worker finished."]),
@@ -165,12 +167,13 @@ def test_saved_network_checks_can_be_loaded_after_permission_changes(tmp_path, m
 @pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
 @pytest.mark.parametrize("status", ["pending", "dispatched", "deciding", "completed", "verified"])
 def test_switch_off_stored_rows_and_prompts_match_current_main_bytes(tmp_path, monkeypatch, status):
-    # Compare with the fetched main source, rather than another configuration of this implementation.
-    baseline = _main_modules("origin/main")
+    # Compare with the pinned source, independent of subsequent merges.
+    baseline = _main_modules("ecc2eedbf2ac4a1b44ff9078e634002c228458c1")
     current = SimpleNamespace(planner=planner, protocol=planner_protocol, prompt=system_prompt,
                               tasks=tasks, worker=worker)
-    assert _outputs(current, tmp_path, ProjectExecution.from_row({"acceptance_checks": "off"})) == (
-        _outputs(baseline, tmp_path))
+    for mode in ("off", "network"):
+        execution = ProjectExecution.from_row({"acceptance_checks": mode})
+        assert _outputs(current, tmp_path, execution) == _outputs(baseline, tmp_path, execution)
 
     async def check(pool):
         owner = await projects.create_project(name="Default-off compatibility", pool=pool)

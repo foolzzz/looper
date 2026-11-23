@@ -132,6 +132,34 @@ def test_private_checkout_detects_even_restored_writes(tmp_path, monkeypatch, co
     run_db(run, monkeypatch)
 
 
+@pytest.mark.parametrize("command,state", [
+    ('test "$(cat linked.txt)" = original', "passed"),
+    ("printf changed > linked.txt", "error"),
+])
+def test_internal_absolute_symlink_evidence_identifies_source_version(tmp_path, monkeypatch, command, state):
+    from looper.agents.acceptance_gate import gate
+    from looper.agents.tiers.worker import _verification_snapshot
+
+    work = tmp_path / "repo"
+    repository(work)
+    (work / "linked.txt").symlink_to(work / "code.txt")
+    git(work, "add", "linked.txt")
+    git(work, "-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "-m", "internal link")
+    source = _verification_snapshot(str(work))
+    check = CommandCheck("c1", 1, command, network=True)
+    async def run(pool):
+        await seed(pool, work, [check])
+        row = (await invoke(tmp_path, [check], work=work, base_commit=source["head"]))[-1]
+        assert row["guarded"] and row["state"] == state
+        assert (row["head_sha"], row["content_sha"]) == (source["head"], source["content_sha256"])
+        assert gate([check], [row], (source["head"], source["content_sha256"])).passed is (state == "passed")
+        if state == "error":
+            assert row["error_kind"] == "changed_code"
+        assert _verification_snapshot(str(work)) == source
+        assert (work / "code.txt").read_text() == "original\n"
+    run_db(run, monkeypatch)
+
+
 def test_protected_paths_compare_to_step_start_commit(tmp_path, monkeypatch):
     work = tmp_path / "repo"
     head = repository(work)
@@ -239,6 +267,79 @@ def test_interrupted_restart_retries_only_unfinished_checks(tmp_path, monkeypatc
         assert rows[1]["error_kind"] == "interrupted"
         assert not (tmp_path / "count").exists()
     run_db(run, monkeypatch)
+
+
+def test_recheck_resumes_only_checks_not_yet_rerun(tmp_path, monkeypatch):
+    checks = [CommandCheck("c1", 1, "echo c1 >> count", network=True),
+              CommandCheck("c2", 1, "echo c2 >> count", network=True)]
+    async def run(pool):
+        await seed(pool, tmp_path, checks)
+        await invoke(tmp_path, checks)
+        options = dict(task_id="task-check", step_id="step-1", mode=Mode.NETWORK,
+            work_dir=tmp_path, attempt=1, runtime_root=tmp_path / "runtime", rerun_after={"c1": 1, "c2": 1})
+        # A restart after the first check of this recheck must not execute it twice.
+        await runner.run_step_checks(checks=checks[:1], **options)
+        await runner.run_step_checks(checks=checks, **options)
+        await invoke(tmp_path, checks)
+        rows = await runs.list_runs("task-check")
+        assert [(r["check_id"], r["attempt"], r["run"]) for r in rows] == [
+            ("c1", 1, 1), ("c2", 1, 1), ("c1", 1, 2), ("c2", 1, 2)]
+        assert (tmp_path / "count").read_text() == "c1\nc2\nc1\nc2\n"
+        await runner.run_step_checks(checks=checks, **{**options, "rerun_after": {"c1": 2, "c2": 2}})
+        assert [r["run"] for r in await runs.list_runs("task-check")] == [1, 1, 2, 2, 3, 3]
+    run_db(run, monkeypatch)
+
+
+@pytest.mark.parametrize("attempt", [1, 2])
+def test_step_budget_includes_previous_runs_and_worker_attempts(tmp_path, monkeypatch, attempt):
+    check = CommandCheck("c1", 1, "touch must-not-run", network=True)
+    async def run(pool):
+        await seed(pool, tmp_path, [check])
+        old = await runs.create_run("task-check", "step-1", check.row(), 1)
+        await runs.finish_run(old["id"], runs.CheckState.ERROR, error_kind=runs.ErrorKind.TIMEOUT,
+            duration_ms=runner.STEP_BUDGET_SECONDS * 1000)
+        rows = await runner.run_step_checks(task_id="task-check", step_id="step-1", checks=[check],
+            mode=Mode.NETWORK, work_dir=tmp_path, attempt=attempt, runtime_root=tmp_path / "runtime",
+            rerun_after={"c1": 1} if attempt == 1 else None)
+        assert rows[-1]["state"] == "error" and rows[-1]["error_kind"] == "budget"
+        assert not (tmp_path / "must-not-run").exists()
+    run_db(run, monkeypatch)
+
+
+def test_stale_evidence_is_appended_without_rewriting_measurements(tmp_path, monkeypatch):
+    check = CommandCheck("c1", 1, "true", network=True)
+    async def run(pool):
+        await seed(pool, tmp_path, [check])
+        old = await runs.create_run("task-check", "step-1", check.row(), 1,
+            head_sha="measured-head", content_sha="measured-content", guarded=True)
+        measured = await runs.finish_run(old["id"], runs.CheckState.PASSED, exit_code=0, duration_ms=50,
+            output_tail="measured output", output_bytes=15, output_sha256="output-digest")
+        stale, = await runner.mark_stale(task_id="task-check", step_id="step-1", checks=[check],
+            attempt=1, current=[measured])
+        assert (stale["state"], stale["attempt"], stale["run"]) == ("stale", 1, 2)
+        for name in ("head_sha", "content_sha", "guarded", "exit_code", "output_tail", "output_bytes", "output_sha256"):
+            assert stale[name] == measured[name]
+        assert stale["duration_ms"] == 0  # invalidation consumes no execution budget
+        assert (await runs.list_runs("task-check"))[0] == measured
+        assert await runner.mark_stale(task_id="task-check", step_id="step-1", checks=[check],
+            attempt=1, current=[stale]) == []
+        await runner.run_step_checks(task_id="task-check", step_id="step-1", checks=[check],
+            mode=Mode.NETWORK, work_dir=tmp_path, attempt=1, runtime_root=tmp_path / "runtime",
+            rerun_after={"c1": 2})
+        assert [r["state"] for r in await runs.list_runs("task-check")] == ["passed", "stale", "passed"]
+    run_db(run, monkeypatch)
+
+
+def test_disabled_recheck_returns_before_reading_evidence(tmp_path, monkeypatch):
+    history = AsyncMock(side_effect=AssertionError("disabled runner read evidence"))
+    monkeypatch.setattr(runs, "list_runs", history)
+    async def run():
+        assert await runner.run_step_checks(task_id="task-check", step_id="step-1",
+            checks=[CommandCheck("c1", 1, "touch must-not-run")], mode=Mode.OFF, work_dir=tmp_path,
+            attempt=1, runtime_root=tmp_path / "runtime", rerun_after={"c1": 1}) == []
+        history.assert_not_awaited()
+        assert not (tmp_path / "must-not-run").exists()
+    asyncio.run(run())
 
 
 def test_failed_check_does_not_skip_later_checks(tmp_path, monkeypatch):

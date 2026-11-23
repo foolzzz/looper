@@ -28,6 +28,7 @@ ENABLED_KEY = "untrusted_fence.enabled"
 class Source(StrEnum):
     """Where fenced content came from."""
 
+    ACCEPTANCE_OUTPUT = "acceptance_output"  # output of the code under test, never instructions
     CHAT_HISTORY = "chat_history"  # the user's earlier conversations (looper_session_search)
     GROUP_MESSAGE = "group_message"  # a group chat's message to the Manager
     DIRECT_MESSAGE = "direct_message"  # a direct chat's message from someone other than the operator

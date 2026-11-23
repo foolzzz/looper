@@ -147,11 +147,21 @@ after it:
   later task of this project as {"text": "...", "scope": "project"}."""
 
 
-def review_contract(severity: bool = False) -> str:
+REVIEW_EVIDENCE_CONTRACT = """Acceptance evidence above was measured by Looper, not by you: do not override
+it with your own runs. Judge criteria with no check, and whether the checks actually measure
+their criteria (including checks that always pass). Report check gaps or ineffective checks
+as findings; with structured severity, use blocking or suggestion and the step label as where.
+Looper combines the evidence gate with your verdict; a passing verdict cannot override failed evidence."""
+
+
+def review_contract(severity: bool = False, *, evidence: bool = False) -> str:
     """The panel's structured verdict; the original contract for ordinary reviews."""
+    contract = REVIEW_CONTRACT
+    if evidence:
+        contract += "\n\n" + REVIEW_EVIDENCE_CONTRACT
     if not severity:
-        return REVIEW_CONTRACT
-    return REVIEW_CONTRACT.replace(
+        return contract
+    return contract.replace(
         '"findings": ["..."]',
         '"findings": [{"severity": "blocking", "where": "path:line", "text": "..."}]',
     ).replace(
@@ -337,6 +347,7 @@ def review_task_section(
     workspace: Mapping[str, Any] | None = None,
     review_role: str = "",
     retry_notes: Sequence[str] = (),
+    evidence: str = "",
 ) -> str:
     """A Reviewer's task: the step under review, after the task it belongs to (as context) and its supplements,
     with the notes the Planner retried it with (``retry_notes``, oldest first: the Planner's changes to the step,
@@ -361,6 +372,8 @@ def review_task_section(
         lines += ["", f"This step ran in its own git worktree, on branch {prompt_name(workspace.get('branch'))}; your working "
                       "directory is that checkout. To see the step's changes, including the uncommitted ones: "
                       f"`git diff {workspace.get('base_commit')}`."]
+    if evidence:
+        lines += ["", evidence]
     return "\n".join(lines)
 
 

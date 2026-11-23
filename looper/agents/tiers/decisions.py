@@ -22,6 +22,7 @@ from enum import Enum
 from typing import TYPE_CHECKING, Any
 
 from ...db import decision_snapshots as db_snapshots
+from ..acceptance_gate import Gate
 from ..step_workspaces import Repo, Round, Unusable, plan_round
 from .planner_protocol import Decision, DecisionContext, DecisionReply, ResultKind
 
@@ -179,7 +180,13 @@ def _context(context: DecisionContext) -> dict[str, Any]:
     out: dict[str, Any] = {}
     for item in fields(DecisionContext):
         value = getattr(context, item.name)
-        if isinstance(value, Enum):
+        if item.name == "evidence" and value is None:
+            continue
+        if isinstance(value, Gate):
+            value = {"passed": value.passed, "failed": list(value.failed), "errored": list(value.errored),
+                     "stale": list(value.stale), "rechecks_used": value.rechecks_used,
+                     "stale_reruns_used": value.stale_reruns_used}
+        elif isinstance(value, Enum):
             value = value.value
         elif isinstance(value, frozenset):
             value = sorted(value)
@@ -195,6 +202,9 @@ def _context_of(raw: Mapping[str, Any]) -> DecisionContext:
     if values.get("open_gates") is not None:
         values["open_gates"] = frozenset(values["open_gates"])
     values["adjudication_findings"] = tuple(tuple(entry) for entry in values.get("adjudication_findings") or ())
+    if (evidence := values.get("evidence")) is not None:
+        values["evidence"] = Gate(**{**evidence, "failed": tuple(evidence["failed"]),
+                                    "errored": tuple(evidence["errored"]), "stale": tuple(evidence["stale"])})
     return DecisionContext(**values)
 
 
