@@ -3,7 +3,8 @@ import { AlertTriangle, Loader2 } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
-  fetchAttention, isAttentionOff, type AttentionItem, type AttentionKind, type AttentionSection, type AttentionSummary,
+  attentionSettingsGet, fetchAttention, isAttentionOff, type AttentionItem, type AttentionKind, type AttentionSection,
+  type AttentionSummary,
 } from "@/lib/api-attention";
 import { channelLabel } from "@/lib/chat-channels";
 import { sinceText } from "@/lib/gates";
@@ -139,23 +140,31 @@ function Section({ section }: { section: AttentionSection }) {
   );
 }
 
-/** `#todo`: everything that waits for the operator, from `attention.summary`. Only reachable while it is on. */
+/** `#todo`: everything that waits for the operator, from `attention.summary`, while the setting is on. */
 export function NeedsYouPage() {
   const [summary, setSummary] = useState<AttentionSummary | null>(null);
   const [error, setError] = useState("");
   const [off, setOff] = useState(false);
   const latest = useRef(0);
 
-  const read = useCallback((signal?: AbortSignal) => {
+  const read = useCallback(async (signal?: AbortSignal) => {
     const seq = ++latest.current;
-    return fetchAttention(signal).then(
-      (next) => { if (seq === latest.current) { setSummary(next); setError(""); setOff(false); } },
-      (err) => {
-        if (seq !== latest.current || signal?.aborted) return;
-        if (isAttentionOff(err)) setOff(true);
-        else setError(errorText(err));
-      },
-    );
+    try {
+      const settings = await attentionSettingsGet();
+      if (seq !== latest.current || signal?.aborted) return;
+      if (!settings.enabled) {
+        setSummary(null); setError(""); setOff(true);
+        return;
+      }
+      const next = await fetchAttention(signal);
+      if (seq !== latest.current || signal?.aborted) return;
+      setSummary(next); setError(""); setOff(false);
+    } catch (err) {
+      if (seq !== latest.current || signal?.aborted) return;
+      // The setting can also turn off between these two reads.
+      if (isAttentionOff(err)) { setSummary(null); setError(""); setOff(true); }
+      else setError(errorText(err));
+    }
   }, []);
 
   useEffect(() => startPolling((signal) => read(signal), REFRESH_MS), [read]);
