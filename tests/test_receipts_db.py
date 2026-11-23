@@ -254,7 +254,7 @@ def test_a_cancelled_or_failed_press_is_told_to_the_next_turn_too(monkeypatch: p
         asked, turn = await _ask(ops)
         await pool.execute("DELETE FROM projects WHERE id = $1", project["id"])  # gone before the press
         failed = await (await press(_value(turn))).later
-        assert "❌ 没有执行：" in failed.text
+        assert failed.text.endswith("\n\n❌ 没做成：删除项目「sample」（没找到）") and "没有执行：" not in failed.text
         assert ops.begin_turn(_turn("om_2")) == (
             f"[Looper] After your last reply, the operator answered confirmation {asked['confirmation_id']} with its "
             "card: it failed (没找到).")
@@ -279,11 +279,11 @@ def test_with_the_switch_off_a_press_stores_no_note(monkeypatch: pytest.MonkeyPa
 def test_notes_are_kept_per_chat_at_most_three_and_only_while_on() -> None:
     ops = ManagerOps(Platform(bus=None, task_router=None), url="http://127.0.0.1:9", token="t")
     key = ("lark_bot", BOT, "oc_dm")
-    ops._note_button(key, "c-0", "it ran")
+    ops._note_button(key, ASKER, "c-0", "it ran")
     assert ops._button_notes == {}  # off
     receipts_settings.set_enabled(True)
     for index in range(5):
-        ops._note_button(key, f"c-{index}", "it was cancelled; it did not run")
+        ops._note_button(key, ASKER, f"c-{index}", "it was cancelled; it did not run")
     note = ops.begin_turn(_turn("om_1"))
     assert [line.split()[9] for line in note.splitlines()] == ["c-2", "c-3", "c-4"]
 
@@ -409,3 +409,209 @@ def test_the_metric_counts_writes_by_category_and_status(monkeypatch: pytest.Mon
             "update": {"ok": 1, "error": 1}, "control": {"ok": 1}}
 
     run_db(test, monkeypatch, timeout=30)
+
+
+def test_notes_queued_while_on_are_never_told_once_the_switch_is_off(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def test(pool: Any) -> None:
+        await _sample(pool)
+        await _switch(pool)
+        receipts_settings.set_enabled(True)
+        ops = _ops()
+        press = _presser(monkeypatch, ops)
+        _, turn = await _ask(ops)
+        await (await press(_value(turn))).later
+        assert ops._button_notes
+        receipts_settings.set_enabled(False)
+        assert ops.begin_turn(_turn("om_next")) == "" and ops._button_notes == {}
+        receipts_settings.set_enabled(True)
+        assert ops.begin_turn(_turn("om_later")) == ""  # dropped, not parked
+
+    run_db(test, monkeypatch, timeout=30)
+
+
+def test_notes_go_only_to_the_person_who_pressed_and_not_across_a_session_reset(
+        monkeypatch: pytest.MonkeyPatch) -> None:
+    from looper.agents.turn_context import SpeakerKind
+
+    async def test(pool: Any) -> None:
+        await _sample(pool)
+        await _switch(pool)
+        receipts_settings.set_enabled(True)
+        ops = _ops()
+        press = _presser(monkeypatch, ops)
+        _, turn = await _ask(ops)
+        await (await press(_value(turn))).later
+        stranger = _turn("om_x", sender="ou_stranger")
+        assert ops.begin_turn(stranger) == ""
+        member = _turn("om_m")
+        member.speaker = SpeakerKind.MEMBER
+        assert ops.begin_turn(member) == ""
+        assert ops.begin_turn(_turn("om_mine")).startswith("[Looper] After your last reply")  # still there for them
+        await _sample(pool)
+        _, turn = await _ask(ops)
+        await (await press(_value(turn))).later
+        ops.forget_confirmations()  # the session was reset
+        assert ops._button_notes == {} and ops.begin_turn(_turn("om_new")) == ""
+
+    run_db(test, monkeypatch, timeout=30)
+
+
+def test_a_failed_press_shows_the_generated_failed_receipt_on_the_card(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def test(pool: Any) -> None:
+        project = await _sample(pool)
+        await _switch(pool)
+        receipts_settings.set_enabled(True)
+        ops = _ops()
+        press = _presser(monkeypatch, ops)
+        _, turn = await _ask(ops)
+        await pool.execute("DELETE FROM projects WHERE id = $1", project["id"])
+        failed = await (await press(_value(turn))).later
+        assert failed.text.endswith("\n\n❌ 没做成：删除项目「sample」（没找到）") and "没有执行：" not in failed.text
+        (row,) = [r for r in await _rows(pool) if r["status"] == "error"]
+        assert (row["category"], row["receipt"]) == ("remove", "❌ 没做成：删除项目「sample」（没找到）")
+
+    run_db(test, monkeypatch, timeout=30)
+
+
+def _client_ops(tmp_path: Path, **extra: Any) -> ClientOps:
+    from looper.agents.bus import MessageBus
+
+    return ClientOps(Platform(bus=MessageBus(runtime_root=tmp_path),
+                              task_router=SimpleNamespace(has_planner=lambda task_id: False)), **extra)
+
+
+async def _client(pool: Any) -> Any:
+    from looper.agents.api_v1 import Principal
+    from looper.db import api_clients
+
+    view, _ = await api_clients.create("agent", pool=pool)
+    return Principal("client", view["id"], view["name"])
+
+
+def test_every_client_error_exit_has_the_failed_receipt_notes_and_both_columns(
+        monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    line = "❌ 没做成：删除定时任务「周报」（没找到）"
+
+    async def test(pool: Any) -> None:
+        project = await _sample(pool)
+        client = await _client(pool)
+        now = [0.0]
+        ops = _client_ops(tmp_path, clock=lambda: now[0])
+        gone = {"action": "delete", "schedule": "周报"}
+        off = await ops.call(client, "s1", "looper_schedules", gone)  # off: as before, no notes
+        assert off["status"] == "error" and "notes" not in off
+        receipts_settings.set_enabled(True)
+        # escalate refuses (a schedule that does not exist)
+        direct = await ops.call(client, "s1", "looper_schedules", gone)
+        assert direct["error"]["code"] == "not_found" and direct["notes"] == [line]
+        # a run that fails after the confirmation was asked
+        asked = await ops.call(client, "s2", "looper_projects", DELETE)
+        assert asked["status"] == "needs_confirmation"
+        await pool.execute("DELETE FROM projects WHERE id = $1", project["id"])
+        confirmed = await ops.confirm(client, "s2", asked["confirmation_id"])
+        assert confirmed["error"]["code"] == "not_found"
+        assert confirmed["notes"] == ["❌ 没做成：删除项目「sample」（没找到）"]
+        # a confirmation that lapsed
+        await _sample(pool)
+        asked = await ops.call(client, "s3", "looper_projects", DELETE)
+        now[0] = 10_000
+        lapsed = await ops.confirm(client, "s3", asked["confirmation_id"])
+        assert lapsed["error"]["code"] == "expired"
+        assert lapsed["notes"] == ["❌ 没做成：删除项目「sample」（确认已过期）"]
+        rows = [(r["status"], r["error_code"], r["category"], r["receipt"]) for r in await _rows(pool)]
+        assert rows == [("error", "not_found", None, None), ("error", "not_found", "remove", line),
+                        ("needs_confirmation", None, None, None),
+                        ("error", "not_found", "remove", "❌ 没做成：删除项目「sample」（没找到）"),
+                        ("needs_confirmation", None, None, None),
+                        ("error", "expired", "remove", "❌ 没做成：删除项目「sample」（确认已过期）")]
+
+    run_db(test, monkeypatch, timeout=30)
+
+
+# The Manager swaps these in or out of its scope by their own switches, so a stand-in would not stay.
+_SWITCHED = {"looper_ledger_add", "looper_ledger_update", "looper_reminder_create", "looper_reminder_cancel"}
+
+
+def _fake_tools(client: bool = True) -> list[tuple[Any, Any]]:
+    """One stand-in tool per registered tool, whose run succeeds or fails as its arguments say."""
+    from looper.agents.ops import OpError, Risk, Tool
+    from looper.agents.ops.categories import TOOL_ACTIONS, ActionKind
+
+    async def run(call: Any) -> Any:
+        if call.arguments.get("fail"):
+            raise OpError(ErrorCode.NOT_FOUND, "no such thing")
+        return {"done": True}
+
+    found = []
+    for name, entry in TOOL_ACTIONS.items():
+        if not client and name in _SWITCHED:
+            continue
+        kinds = {None: entry} if isinstance(entry, ActionKind) else dict(entry)
+        subjects = {kind.subject for kind in kinds.values() if kind.subject}
+        schema = {"type": "object", "properties": {"action": {"type": "string"}, "fail": {"type": "boolean"},
+                                                   **{key: {"type": "string"} for key in subjects}}}
+        found.append((Tool(name=name, description="stand-in", schema=schema, risk=Risk.WRITE, run=run), kinds))
+    return found
+
+
+def _matrix_ops(tmp_path: Path, client: bool) -> Any:
+    tools = [tool for tool, _ in _fake_tools(client)]
+    if client:
+        return _client_ops(tmp_path, tools=tools)
+    return ManagerOps(Platform(bus=None, task_router=None), url="http://127.0.0.1:9", token="t", tools=tools)
+
+
+@pytest.mark.parametrize("client", [False, True])
+def test_off_every_write_tool_success_and_failure_are_as_before(monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+                                                                client: bool) -> None:
+    async def test(pool: Any) -> None:
+        ops = _matrix_ops(tmp_path, client)
+        principal = await _client(pool) if client else None
+        turn = _web()
+        if not client:
+            ops.begin_turn(turn)
+        count = 0
+        for tool, kinds in _fake_tools(client):
+            for action, kind in kinds.items():
+                for fail in (False, True):
+                    arguments = {**({"action": action} if action else {}), **({kind.subject: "demo"} if kind.subject else {}),
+                                 **({"fail": True} if fail else {})}
+                    answer = await (ops.call(principal, "s1", tool.name, arguments) if client
+                                    else ops.call(tool.name, arguments))
+                    count += 1
+                    if fail:
+                        assert answer == {"status": "error", "error": {"code": "not_found", "message": "no such thing"}}
+                    else:
+                        assert answer == {"status": "ok", "result": {"done": True}}
+        assert turn.blocks == [] and count == len(await _rows(pool)) and count > 40
+        assert {(r["category"], r["receipt"]) for r in await _rows(pool)} == {(None, None)}
+
+    run_db(test, monkeypatch, timeout=60)
+
+
+@pytest.mark.parametrize("client", [False, True])
+def test_on_every_write_tool_gets_its_receipt_and_category(monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+                                                           client: bool) -> None:
+    async def test(pool: Any) -> None:
+        receipts_settings.set_enabled(True)
+        ops = _matrix_ops(tmp_path, client)
+        principal = await _client(pool) if client else None
+        for tool, kinds in _fake_tools(client):
+            for action, kind in kinds.items():
+                for fail in (False, True):
+                    turn = _web("m")
+                    arguments = {**({"action": action} if action else {}), **({kind.subject: "demo"} if kind.subject else {}),
+                                 **({"fail": True} if fail else {})}
+                    if client:
+                        answer = await ops.call(principal, "s1", tool.name, arguments)
+                        lines = answer.get("notes")
+                    else:
+                        answer = await _call(ops, turn, tool.name, arguments)
+                        lines = turn.blocks
+                    assert lines and len(lines) == 1 and lines[0].startswith("❌ 没做成：" if fail else "✅ "), (tool.name, action)
+                    if not client:
+                        assert answer.get("shown_to_user" if fail else "result") is not None
+        rows = await _rows(pool)
+        assert all(r["category"] and r["receipt"] for r in rows) and len(rows) > 40
+
+    run_db(test, monkeypatch, timeout=60)
