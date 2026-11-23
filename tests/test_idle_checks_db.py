@@ -316,6 +316,7 @@ def test_a_restart_fails_the_checks_the_server_before_left_running(monkeypatch):
         await seed_checks(pool, 2, hours_ago=0.2, state="running")
         await seed_checks(pool, 1, hours_ago=5, state="sent")
         idle = service(Bus(), idle=None, interval=3600)
+        await idle.recover()
         await idle.start()
         await idle.stop()
         assert [(row["state"], row["reason"]) for row in await rows(pool)] == [
@@ -734,3 +735,32 @@ def test_the_table_is_added_to_a_database_that_has_not_got_it():
             assert not await connection.schema_change_pending(conn)
 
     asyncio.run(asyncio.wait_for(check(), 60))
+
+
+@pytest.mark.parametrize("status,age,channel,chat,blocked", [
+    ("sent", timedelta(hours=2) - timedelta(seconds=1), CHANNEL, OP, True),
+    ("sent", timedelta(hours=2), CHANNEL, OP, False),
+    ("failed", timedelta(minutes=30), CHANNEL, OP, False),
+    ("sending", timedelta(minutes=30), CHANNEL, OP, False),
+    ("uncertain", timedelta(minutes=30), CHANNEL, OP, False),
+    ("skipped", timedelta(minutes=30), CHANNEL, OP, False),
+    ("sent", timedelta(minutes=30), "channel-other", OP, False),
+    ("sent", timedelta(minutes=30), CHANNEL, "ou_other_synthetic", False),
+])
+def test_a_sent_morning_brief_suppresses_checks_for_two_hours_only_for_its_chat(
+        monkeypatch, status, age, channel, chat, blocked):
+    async def check(pool):
+        await ready(pool)
+        now = datetime.now(UTC)
+        sent_at = now - age
+        await pool.execute("INSERT INTO morning_briefs (local_date, channel_id, chat, status, updated_at) "
+                           "VALUES ($1, $2, $3, $4, $5)", sent_at.date(), channel, chat, status, sent_at)
+        bus = Bus()
+        idle = service(bus, clock=lambda: now)
+        check_id = await idle.run_once()
+        assert (check_id is None) is blocked
+        assert len(bus.published) == (0 if blocked else 1)
+        if blocked:
+            assert {reason.value: count for reason, count in idle.skips.items()} == {"morning_brief_recent": 1}
+            assert await rows(pool) == []
+    run_with_channel_configs(check, monkeypatch)

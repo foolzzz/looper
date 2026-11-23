@@ -15,7 +15,9 @@ OPERATIONS = (
     Operation("idle_check_settings.update", "POST", "/api/v1/idle_check_settings/update",
               "Set the idle check setting.",
               "Set the idle check setting. Null restores the default, off. Turning it on needs delivery.enabled, "
-              "attention.enabled and manager.lanes.enabled on first, and answers conflict naming those that are off.",
+              "attention.enabled and manager.lanes.enabled on first, and answers conflict naming those that are off. "
+              "When enabled, the running default Manager checks after 30 idle minutes when new items need you; "
+              "checks stop while a prerequisite is off or the server drains.",
               _object({"enabled": {"type": ["boolean", "null"]}}, closed=True), VIEW,
               risk="high", confirms=True, operator_only=True, level=ActionLevel.INSIDE),
 )
