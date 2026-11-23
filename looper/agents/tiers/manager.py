@@ -85,7 +85,7 @@ from ..gate_service import dashboard_target as gate_dashboard_target, gate_chat 
 from ..library import EMPTY_LIBRARY, load_installed
 from ..run_usage import Usage
 from ..reported_files import prompt_name
-from .. import leads_model, manager_turn_context, research_order, session_switch, untrusted as untrusted_text
+from .. import leads_model, manager_persona_context, manager_turn_context, research_order, session_switch, untrusted as untrusted_text
 from ..turn_context import TURN_CONTEXT_CONTRACT, render as render_turn_context
 from ..research_order import ResearchSources
 from ..runtimes import CLAUDE_CODE, ImageInput, InProcessTools, ReportsContext, ResidentSession
@@ -3514,9 +3514,10 @@ class ManagerAgent:
         return "\n".join(parts)
 
     async def _sections(self, envelope: MessageEnvelope | None) -> list[str]:
-        """What every user turn starts with: the projects, task templates, workflows, ready tasks, open gates and
-        active goals, each section ending with a blank line."""
-        parts = await self._projects_section()
+        """What every user turn starts with: persona, projects, task templates, workflows, ready tasks, open gates
+        and active goals, each section ending with a blank line."""
+        parts = manager_persona_context.section(self.agent_id, self._session_now().route)
+        parts += await self._projects_section()
         parts += await self._templates_section()
         parts += await self._workflows_section()
         parts += await self._ready_tasks_section()
