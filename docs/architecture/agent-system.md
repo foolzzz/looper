@@ -6664,8 +6664,11 @@ row is off), set only through the operator-only `idle_check_settings.get` and
   setting and stops. A tick that decides not to check writes nothing (it counts
   the reason and logs it at DEBUG). The advisory lock covers only "decide,
   insert, publish". Before bus replay starts, checks left `running` by an earlier
-  server fail as `restart`; recovery failure blocks startup.
+  server fail as `restart`; checks left `sending` become `uncertain`, count as
+  mentioned and are never sent again. Recovery records an `unknown` receipt;
+  recovery failure blocks startup.
 - Rows: `idle_checks` (kept 90 days; migration `idle_checks`). The migration
+  `idle_check_sending` adds the in-flight `sending` state without rewriting rows;
   `idle_check_source` adds `idle_check` to the source check of
   `proactive_deliveries`, built from the check's current values, so it composes
   with the morning brief's and triage's widenings.
@@ -6676,8 +6679,9 @@ row is off), set only through the operator-only `idle_check_settings.get` and
   if it is replaced. With all prerequisites on, enabling the switch takes effect
   on the next tick.
 - `ManagerAgent.idle_for()` reads only main's lock, running token, worker and
-  resident. Its clock is `ManagerSession.turn_ended_at`, written by that session's
-  worker (or the message loop for its own turns), falling back to service start.
+  resident. Its clock is `ManagerSession.turn_ended_at`, written when that session
+  handles a user message or runs a background turn, falling back to service start.
+  A wake that runs no turn leaves the clock unchanged.
   Group arrivals can update `last_activity` without resetting main's idle clock.
 - `IDLE_CHECK_DUE` runs on main's background lane through `tiers/background_turn.py`,
   sharing completion token registration, preparation, locking and bounded late
@@ -6689,6 +6693,8 @@ row is off), set only through the operator-only `idle_check_settings.get` and
   acknowledging their wakes. An interrupted running check also records `preempted`
   and leaves one stopped note for the next user turn; it sends nothing. Lark
   `/stop` matches the operator's sender id even though its DM has a different id.
+  A user message in the target direct chat after the check started also voids
+  its delivery as `preempted`, checked before the decision and again before sending.
 - A sent morning brief suppresses checks for two hours in that same channel and
   direct chat. Real-model idle and concurrent preemption evals remain pending;
   loopback runtimes cover the service and Manager paths.
