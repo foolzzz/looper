@@ -122,7 +122,10 @@ ITEMS_MAX = 20
 
 
 def role_item_view(row: Mapping[str, Any]) -> dict[str, Any]:
-    """An item a role may name, as the Planner and the dashboard read it (``db.library.list_role_items``)."""
+    """An item a role may name, as the Planner and the dashboard read it (``db.library.list_role_items``).
+
+    ``role_items`` drops a deprecated skill before building this view, so it is not a choice.
+    """
     return {"id": row["id"], "kind": row["kind"], "name": row["name"],
             "description": " ".join(str(row.get("description") or "").split())[:200]}
 
@@ -141,11 +144,13 @@ async def named_items(ids: Sequence[str]) -> list[dict[str, Any]]:
 
 async def role_items(project_id: str | None) -> list[dict[str, Any]]:
     """The catalog items a role of project ``project_id`` may name: those installed for such roles, global or in
-    the project, each once."""
+    the project, each once. A deprecated skill is left out, so a new role cannot name it."""
     from ..db import library as db_library
+    from .skill_lifecycle import Lifecycle
 
     rows = await db_library.list_role_items(project_id) if project_id else []
-    return list({row["id"]: role_item_view(row) for row in rows}.values())
+    choices = [row for row in rows if row["lifecycle"] != Lifecycle.DEPRECATED.value]
+    return list({row["id"]: role_item_view(row) for row in choices}.values())
 
 
 async def check_items(project_id: str | None, raw: Any) -> tuple[str, ...]:

@@ -192,6 +192,17 @@ describe("ProjectSkillsSection lifecycle", () => {
     expect(opener("Restore old-check")).toBeTruthy();
     expect(opener("Restore deploy-check")).toBeUndefined();
     expect(opener("Deprecate tools")).toBeUndefined();
+    const deprecated = [...host.querySelectorAll("li")].find((row) => row.textContent?.includes("project:old-check"));
+    const active = [...host.querySelectorAll("li")].find((row) => row.textContent?.includes("project:deploy-check"));
+    expect(deprecated?.className).toContain("opacity-60");
+    expect(active?.className).not.toContain("opacity-60");
+    expect(host.textContent).toContain("Load: not applicable");
+    expect(host.querySelector("[aria-label='Load project:old-check']")).toBeNull();
+    expect(host.querySelector("[aria-label='Load project:deploy-check']")).toBeTruthy();
+    const status = [...host.querySelectorAll("span")].find((el) => el.textContent === "Deprecated");
+    expect(status?.className).toContain("ring-inset");
+    const kind = [...deprecated!.querySelectorAll("span")].find((el) => el.textContent === "skill");
+    expect(kind?.className).not.toContain("ring-inset");
   });
 
   it("confirms deprecation before it writes, then refetches installs and the budget", async () => {
@@ -266,10 +277,19 @@ describe("ProjectSkillsSection lifecycle", () => {
     expect(host.textContent).not.toContain("over 8000");
   });
 
-  it("flags one role that is over 8000 characters", async () => {
+  it("flags one role that is over the budget limit", async () => {
     vi.mocked(fetchContextBudget).mockResolvedValue(budget({ planner: true }));
     await renderSection();
+    expect(host.textContent).toContain("Over budget");
     expect(host.textContent).toContain("planner is over 8000 characters.");
+    expect(host.querySelector("[role=status]")?.textContent).toContain("Over budget");
+  });
+
+  it("uses the limit from the budget instead of a fixed 8000", async () => {
+    vi.mocked(fetchContextBudget).mockResolvedValue({ ...budget({ worker: true, reviewer: true }), limit: 100 });
+    await renderSection();
+    expect(host.textContent).toContain("worker and reviewer are over 100 characters.");
+    expect(host.textContent).not.toContain("8000");
   });
 
   it("flags every role that is over 8000 characters", async () => {

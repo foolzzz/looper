@@ -222,9 +222,14 @@ def test_a_client_cannot_deprecate_restore_or_read_the_budget(tmp_path, monkeypa
                     "code": "forbidden", "message": "operator identity is required"}, answer
             assert (await library.get_item(skill_id))["sha256"] == before["sha256"]
             assert (await library.get_item(skill_id))["lifecycle"] == "active"
-            status, deprecated = await call("deprecate", body)
+            status, deprecated = await call("deprecate", {**body, "reason": "too broad"})
             assert status == 200, deprecated
             assert deprecated["result"]["skill"]["lifecycle"] == "deprecated"
+            assert "reason" not in deprecated["result"]["skill"]
+            stored = await pool.fetchval(
+                "SELECT arguments FROM manager_actions WHERE tool = 'project_skills.deprecate' AND status = 'ok'")
+            arguments = json.loads(stored) if isinstance(stored, str) else stored
+            assert arguments["reason"] == "too broad"
             assert deprecated["result"]["affected_projects"] == [
                 {"project_id": project["id"], "project_name": "Example"}]
             _, installs = await call("/api/v1/installs/project", {"project_id": project["id"]})

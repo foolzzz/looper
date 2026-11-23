@@ -46,7 +46,7 @@ def partition_deprecated(rows: Sequence[Mapping[str, Any]]) -> tuple[list[dict[s
 
 
 def _reason(reason: str) -> str:
-    """Accept a reason and do not store it. There is no column, and a version row would be a lie."""
+    """Check a reason. It is not stored on the skill. The operator action record keeps the call's arguments."""
     from .project_skills import ProjectSkillError
 
     if not isinstance(reason, str):
@@ -68,7 +68,7 @@ async def _set(project_id: str, skill_id: str, lifecycle: Lifecycle, *, reason: 
         if project is None:
             raise ProjectSkillNotFound(f"project {project_id!r} not found")
         row = _owned(await db_library.get_item(skill_id, pool=conn), project_id, skill_id)
-        if (row.get("lifecycle") or Lifecycle.ACTIVE.value) != lifecycle.value:
+        if row["lifecycle"] != lifecycle.value:
             await conn.execute(
                 "UPDATE library_items SET lifecycle = $2, updated_at = now() WHERE id = $1",
                 skill_id, lifecycle.value,
@@ -92,9 +92,11 @@ async def restore(project_id: str, skill_id: str) -> dict[str, Any]:
 async def context_budget(project_id: str) -> dict[str, Any]:
     """Characters of skill name plus description a new run of each role would list.
 
-    The same rows ``load_installed`` keeps, after ``resolve_installed``, and only
-    catalog skills. Plugin-bundled skills are not counted. ``over`` is strictly
-    above ``LIMIT``; nothing is refused.
+    The same rows ``load_installed`` keeps for planner, worker and reviewer,
+    after ``resolve_installed``, and only catalog skills. Plugin-bundled skills
+    are not counted. A task role's ``items`` are not in this total: D13 counts
+    what every run of that role lists, and those extras are named per task role.
+    ``over`` is strictly above ``LIMIT``; nothing is refused.
     """
     from ..db import library as db_library
     from ..db import projects

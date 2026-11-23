@@ -188,7 +188,7 @@ def skill_view(row: Mapping[str, Any]) -> dict[str, Any]:
         "size_bytes": int(row["size_bytes"]),
         "created_at": row["imported_at"],
         "updated_at": row["updated_at"],
-        "lifecycle": row.get("lifecycle") or "active",
+        "lifecycle": row["lifecycle"],
     }
 
 

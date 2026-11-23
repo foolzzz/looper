@@ -112,8 +112,10 @@ def test_bridge_normalization_preserves_evidence_and_matches_fresh(bridge_source
                 elif table == "agent_runtimes":
                     assert after[table] == [{**r, "launcher": "native"} for r in before[table]]
                 elif table == "library_items":
-                    # Machine imports have no project-skill version and are active; every historical field stays intact.
-                    assert after[table] == [{**r, "skill_version": None, "lifecycle": "active"} for r in before[table]]
+                    # Machine imports have no project-skill version; every historical field stays intact.
+                    # The lifecycle column arrives as active on every existing row.
+                    assert after[table] == [
+                        {**r, "skill_version": None, "lifecycle": "active"} for r in before[table]]
                 elif table == "agent_profiles":
                     # The advisor's, its judge's and the leads check's built-in profiles are added as a fresh
                     # database has them.
