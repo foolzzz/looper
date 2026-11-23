@@ -6553,7 +6553,8 @@ row is off), set only through the operator-only `idle_check_settings.get` and
 - `IdleCheckService` ticks every 5 minutes. With the switch off a tick reads the
   setting and stops. A tick that decides not to check writes nothing (it counts
   the reason and logs it at DEBUG). The advisory lock covers only "decide,
-  insert, publish". Checks left `running` by an earlier server fail as `restart`.
+  insert, publish". Before bus replay starts, checks left `running` by an earlier
+  server fail as `restart`; recovery failure blocks startup.
 - Rows: `idle_checks` (kept 90 days; migration `idle_checks`). The migration
   `idle_check_source` adds `idle_check` to the source check of
   `proactive_deliveries`, built from the check's current values, so it composes
@@ -6578,9 +6579,9 @@ row is off), set only through the operator-only `idle_check_settings.get` and
   acknowledging their wakes. An interrupted running check also records `preempted`
   and leaves one stopped note for the next user turn; it sends nothing. Lark
   `/stop` matches the operator's sender id even though its DM has a different id.
-- Morning-brief suppression (no check within two hours after a sent brief) awaits
-  the morning-brief table. Real-model idle and concurrent preemption evals remain
-  pending; loopback runtimes cover the service and Manager paths.
+- A sent morning brief suppresses checks for two hours in that same channel and
+  direct chat. Real-model idle and concurrent preemption evals remain pending;
+  loopback runtimes cover the service and Manager paths.
 
 ### User gates
 
