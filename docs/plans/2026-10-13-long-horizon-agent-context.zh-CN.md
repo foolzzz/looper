@@ -982,7 +982,7 @@ M7 先让计划状态有唯一来源（M7a），再在其上加任务记忆（M7
 
 ### 5.2 工程待办
 
-- **可执行验收**（[RFC §13](../architecture/rfcs/executable-acceptance-v0.zh-CN.md#13-pr-拆分依赖与并行)）：类型、步骤协议与持久化、默认关闭的项目权限及 Settings 控件已实现，等待评审；关闭状态按 `main` 对照约定、prompt 和步骤行。下一阶段增加执行器、证据表与只读接口、私有检出及写保护、限制和重启恢复；本阶段不执行检查，不改变决策。
+- **可执行验收**（[RFC §13](../architecture/rfcs/executable-acceptance-v0.zh-CN.md#13-pr-拆分依赖与并行)）：类型、步骤协议与持久化、默认关闭的项目权限及 Settings 控件已实现，等待评审。执行器、`step_check_runs` 与 operator-only `task_evidence.get` 已在本分支实现，复用私有检出及写通知，带资源限制、产物保留和重启恢复；Worker 成功后写证据，仍不影响决策。关闭状态按 `main` 对照 prompt 和步骤行。macOS local 使用网络与 job-creation 双重禁止并预检，Linux `unshare -rn` 尚未实测。证据门、Reviewer 证据、任务页展示与结果/渠道输出待后续阶段，真实模型评测未运行。
 
 - **助理每轮上下文接线**：类型化分类、渲染、操作者设置入口和 ops 说话人授权检查已实现；Manager 接线尚未完成，开关默认关，暂不注入上下文或契约。接线后补回合 prompt 关闭基准、渠道真实链路与时间/身份评测（[RFC §5.1](../architecture/rfcs/assistant-layer-v0.zh-CN.md#51-11-每轮上下文)）。
 
