@@ -282,6 +282,8 @@
  "tasks.role_update": "inside",
  "tasks.room": "inside",
  "tasks.room_view": "inside",
+ "turn_context_settings.get": "inside",
+ "turn_context_settings.update": "inside",
  "wait_settings.get": "inside",
  "wait_settings.update": "inside",
  "waits.cancel": "inside",
