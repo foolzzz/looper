@@ -20,7 +20,7 @@ Database readback after the run:
 | Check | Result |
 |---|---|
 | Run | `completed`, `extracted`, processor record linked |
-| Exact selected window | `[2, 3, 4, 5]`; cursor advanced to `5` |
+| Exact selected window | `[1, 2, 3, 4]`; cursor advanced to `4` |
 | Counts, per window message | important `1`, digest `2`, ignore `1`, raised `1`, uncited `0`, dropped `{}` |
 | Events and provenance | `4` events, `4` source links |
 | Injection marker | The event citing the marked message was flagged |
