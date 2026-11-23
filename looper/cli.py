@@ -128,6 +128,14 @@ def _add_msgflow_parser(commands: argparse._SubParsersAction) -> None:
     backfill.add_argument("--budget-usd", type=float, help="With --run: the most the backfill may spend.")
     backfill.add_argument("--claude", help="The Claude Code executable for a profile that names none (default: claude).")
     _add_location_flags(backfill)
+    why = sub.add_parser(
+        "why", allow_abbrev=False, help="Say why a stored message was or was not reported.",
+        description="Answer why one stored message was or was not told to you. The message is a Lark message id, "
+                    "a message link, or its numeric seq. Reads the database directly, so it works with the service "
+                    "stopped. Exit codes: 0 answered, 2 usage, 3 triage is off, 5 no such message, 6 database unusable.")
+    why.add_argument("message", help="A Lark message id, a message link, or a numeric seq.")
+    why.add_argument("--json", action="store_true", help="Print the typed answer as JSON.")
+    _add_location_flags(why)
 
 
 def _add_ledger_parser(commands: argparse._SubParsersAction) -> None:

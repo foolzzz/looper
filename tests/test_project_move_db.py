@@ -11,7 +11,7 @@ import pytest
 
 from looper.agents import operator_notes, project_move, projects as api
 from looper.db import projects, tasks
-from tests.db_support import DSN, run_db
+from tests.db_support import DSN, dropped_tables, run_db
 
 pytestmark = pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
 
@@ -773,15 +773,15 @@ def test_existing_database_adds_project_activity_idempotently(monkeypatch, tmp_p
 
     async def check(pool):
         project = await _project(pool, old)
-        await pool.execute("DROP TABLE project_activity")
-        await pool.execute("DELETE FROM schema_migrations WHERE name='project_activity'")
-        before = dict(await pool.fetchrow("SELECT * FROM projects WHERE id=$1", project["id"]))
-        async with pool.acquire() as conn:
-            assert await connection.schema_change_pending(conn)
-            assert not await conn.fetchval("SELECT EXISTS (SELECT 1 FROM schema_migrations "
-                                           "WHERE name='project_activity')")
-            assert await conn.fetchval("SELECT to_regclass('project_activity')") is None
-        await connection.ensure_schema(pool)
+        async with dropped_tables(pool, "project_activity"):
+            await pool.execute("DELETE FROM schema_migrations WHERE name='project_activity'")
+            before = dict(await pool.fetchrow("SELECT * FROM projects WHERE id=$1", project["id"]))
+            async with pool.acquire() as conn:
+                assert await connection.schema_change_pending(conn)
+                assert not await conn.fetchval("SELECT EXISTS (SELECT 1 FROM schema_migrations "
+                                               "WHERE name='project_activity')")
+                assert await conn.fetchval("SELECT to_regclass('project_activity')") is None
+            await connection.ensure_schema(pool)
         await connection.ensure_schema(pool)
         async with pool.acquire() as conn:
             assert not await connection.schema_change_pending(conn)
