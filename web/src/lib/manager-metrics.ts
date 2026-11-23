@@ -34,6 +34,9 @@ export interface ManagerMetrics {
     /** Messages answered within 30 minutes; null with no message old enough. */
     reply_rate: { all: number | null; by_source: Record<string, number | null> };
   };
+  /** Writes by category (create, update, control, remove, relay) and status (ok, error) over the window; empty while
+   * action receipts are off. Optional while a dashboard connects to a server predating them. */
+  actions?: { by_category: Record<string, Record<string, number>> };
   /** Optional while a dashboard connects to a server predating outbound measurements. */
   outbound?: { enabled: false } | OutboundChannelMetrics[];
   outbound_started_at?: string;

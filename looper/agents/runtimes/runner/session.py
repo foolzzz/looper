@@ -327,6 +327,8 @@ class RunnerSession:
                 await beginning
             except (RpcFailure, ProtocolError):
                 entry = bridge.sessions[sid]
+                if entry.prompt_sent:
+                    self._cancel.sent()  # written, then rejected: the runner may have seen it
                 failed = await failure("runner rejected the prompt")
                 return claude_cli.ResidentTurn(failed.result_event, session_started=entry.session_started,
                     usage_complete=False, prompt_sent=entry.prompt_sent)
@@ -334,6 +336,8 @@ class RunnerSession:
                 entry = bridge.sessions.get(sid)
                 if entry is None or entry.trace_id != trace or entry.settled is None:
                     outcome = "lost"
+                    if entry is not None and entry.trace_id == trace and entry.prompt_sent:
+                        self._cancel.sent()
                     return await failure("runner generation was lost before prompting")
                 # An installed trace owns a single lost settlement, never replay.
             entry = bridge.sessions[sid]

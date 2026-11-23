@@ -143,3 +143,36 @@ def test_room_kind_upgrade_preserves_existing_messages_and_validates_new_kind(mo
         assert await pool.fetchval("SELECT convalidated FROM pg_constraint "
                                    "WHERE conrelid='room_messages'::regclass AND conname='room_messages_kind_check'")
     run_db(check, monkeypatch)
+
+
+def test_planner_result_is_stored_pending_for_the_planner_and_wakes_it_once(monkeypatch):
+    async def check(pool):
+        service, _, _, row = await _scenario(pool)
+        await pool.execute("UPDATE agent_spawns SET spawner='planner' WHERE id=$1", row["id"])
+        bus = SimpleNamespace(publish=AsyncMock())
+        room = RoomService(bus=bus)
+        outcomes = await asyncio.gather(*(deliver_room(service, room, row["id"]) for _ in range(2)))
+        assert sorted(outcomes) == [False, True]
+        message, = await db_room.messages("delivery-task", pool=pool)
+        assert message["audience"] == ["planner"] and message["planner_pending"] is True
+        assert message["kind"] == "spawn_result" and message["refs"] == [{"spawn_id": row["id"]}]
+        assert [m["id"] for m in await db_room.planner_pending("delivery-task", pool=pool)] == [message["id"]]
+        await asyncio.sleep(.05)
+        assert bus.publish.await_count == 1
+    run_db(check, monkeypatch)
+
+
+def test_turn_receipt_and_tool_receipt_share_one_first_delivery(monkeypatch):
+    from looper.agents.subagent_delivery import mark_turn_delivered
+
+    async def check(pool):
+        _, _, _, row = await _scenario(pool)
+        await pool.execute("UPDATE agent_spawns SET spawner='planner',delivery='turn' WHERE id=$1", row["id"])
+        await asyncio.gather(mark_turn_delivered([row["id"]]), mark_tool_delivered(pool, [row["id"]]))
+        first = await agent_spawns.get(row["id"], pool=pool)
+        assert first["delivered_at"] is not None and first["delivery"] in ("turn", "tool")
+        await mark_turn_delivered([row["id"]])
+        await mark_tool_delivered(pool, [row["id"]])
+        again = await agent_spawns.get(row["id"], pool=pool)
+        assert (again["delivered_at"], again["delivery"]) == (first["delivered_at"], first["delivery"])
+    run_db(check, monkeypatch)

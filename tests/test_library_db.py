@@ -193,3 +193,36 @@ def test_agents_load_the_installed_items_from_the_database(
         assert (skills / "skills" / "alpha" / "SKILL.md").read_text().endswith("Reply ALPHA-OK.\n")
 
     run_db(_test, monkeypatch)
+
+
+def test_a_deprecated_skill_is_skipped_until_it_is_restored(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from looper.agents import project_skills
+    from looper.agents.library import load_installed
+    from looper.agents.skill_lifecycle import deprecate, restore
+    from looper.db import projects
+
+    async def _test(pool: Any) -> None:
+        project = await projects.create_project(name="calc", pool=pool)
+        alpha = await project_skills.add_skill(
+            project["id"], {"name": "alpha", "description": "Use for alpha.", "content": "Reply alpha.\n"})
+        zeta = await project_skills.add_skill(
+            project["id"], {"name": "zeta", "description": "Use for zeta.", "content": "Reply zeta.\n"})
+        await deprecate(project["id"], alpha["skill"]["skill_id"])
+        one = await load_installed(tmp_path / "one", "worker", project["id"])
+        assert [item.name for item in one.items] == ["zeta"]
+        assert one.skipped_deprecated == ("alpha",) and one.mcp_config is None and one.error is None
+        record = one.record()
+        assert record is not None and set(record) == {"sha256", "role", "project_id", "items"}
+        assert set(record["items"][0]) == {"kind", "name", "sha256", "plugin", "scope"}
+        assert "lifecycle" not in json.dumps(record)
+        await deprecate(project["id"], zeta["skill"]["skill_id"])
+        none = await load_installed(tmp_path / "none", "worker", project["id"])
+        assert none.record() is None and none.items == () and none.skipped_deprecated == ("alpha", "zeta")
+        await restore(project["id"], alpha["skill"]["skill_id"])
+        await restore(project["id"], zeta["skill"]["skill_id"])
+        both = await load_installed(tmp_path / "both", "reviewer", project["id"])
+        assert [item.name for item in both.items] == ["alpha", "zeta"] and both.skipped_deprecated == ()
+
+    run_db(_test, monkeypatch)
