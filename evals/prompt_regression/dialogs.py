@@ -84,6 +84,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 from looper.agents.ops import API_CHANNEL
+from looper.agents.delivery_guard import FOLLOWUP_MESSAGE
 from looper.agents.tiers.manager import _looper_call
 
 from .compare import outcome
@@ -2494,7 +2495,38 @@ def _created_with_workflow(look: Look, *, expected: str | None) -> str | None:
     return None
 
 
+def _seed_delivery_guard(api: Api, project_id: str) -> None:
+    api.post("/api/v1/delivery_guard/update", {"enabled": True})
+
+
+def _tools_only_replied(look: Look) -> str | None:
+    if not look.reply.strip():
+        return "the Manager delivered no reply"
+    actions = look.actions()
+    if not any(a["tool"] == "looper_projects" and a["status"] == "ok" for a in actions):
+        return "the Manager did not read the projects"
+    if any(a.get("risk") != "read" for a in actions):
+        return "the Manager made a non-read call"
+    if not look.fake:  # Real models may reply at once; the stand-in forces recovery.
+        return None
+    runs = _manager_runs(look)
+    if len(runs) != 2:
+        return f"expected the empty turn and one follow-up record, got {len(runs)}"
+    initial, followup = runs
+    annotation = (followup.get("metadata") or {}).get("delivery_guard") or {}
+    if (initial.get("output_chars") != 0 or not followup.get("output_chars")
+            or annotation.get("followup") != 1 or not annotation.get("for")
+            or _input(followup) != FOLLOWUP_MESSAGE
+            or not initial.get("session_id") or initial["session_id"] != followup.get("session_id")):
+        return "the recovery is not a recorded follow-up in the same session"
+    return None
+
+
 DIALOGS: tuple[Dialog, ...] = (
+    Dialog("tools_only_no_text", (
+        Say("现在有哪些项目？请查一下并给出结果。", _tools_only_replied,
+            (("looper_projects", {"action": "list"}), ("__reply__", {"text": ""}))),
+    ), seed=_seed_delivery_guard, tags=("manager", "tools", "replies", "delivery_guard")),
     Dialog("workflow_named", (
         Say("在 eval-calc 项目里用 Reviewed 做一个计算器，先建任务不要启动。", _restated_and_asked),
         Say("确认", lambda look: _created_with_workflow(look, expected="reviewed"),
@@ -3463,6 +3495,8 @@ def run_dialog(api: Api, dialog: Dialog, *, database_url: str, project_id: str, 
                 data = json.loads(scenarios.read_text(encoding="utf-8"))
                 data.setdefault("manager", {})[text] = [[name, json.loads(json.dumps(arguments).replace(
                     "<task>", task or ""))] for name, arguments in say.fake]
+                if dialog.id == "tools_only_no_text":
+                    data["manager"][FOLLOWUP_MESSAGE] = [["__reply__", {"text": "已查到项目：eval-calc。"}]]
                 scenarios.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
             before = _last_action(database_url, agent)
             expects_api = api_turn and not (say.code_only or say.stop or say.withdraw)
@@ -3610,6 +3644,7 @@ def run(
     pi_runtime: str = "cli",
     dsh_runtime: str = "cli",
     stable_context: bool = False,
+    delivery_guard: bool = False,
 ) -> tuple[dict[str, Any], Path]:
     """Run ``dialogs`` ``reps`` times each in ``mode``, rep-major, ``jobs`` at a time, each (dialog, rep) on a
     database, a server, a working directory and a project of its own (``runner.run``'s setup); the run and the JSON file written to
@@ -3617,7 +3652,8 @@ def run(
     with that model and ``manager_effort``. A failure to set a dialog's server up stops the run, as it would stop
     every dialog after it. ``manager_agent`` registers a spec for the Manager's role layer only. With
     ``stable_context`` every dialog's database has ``manager.stable_context`` on, and each row lists what the
-    Manager's turns started with (``state_views``)."""
+    Manager's turns started with (``state_views``). ``delivery_guard`` enables the operator-only recovery
+    setting in each disposable server and reports how many hidden follow-ups ran."""
     if manager_agent is not None and mode != "real":
         raise EvalError("--manager-agent needs --mode real; the api runtime's fake runs are its own tests")
     if reps < 1:
@@ -3687,10 +3723,17 @@ def run(
                     project_id = api.post("/api/v1/project_admin/create", {"name": PROJECT, "work_dir": str(work_dir)})["result"]["project"]["project_id"]
                     if stable_context:
                         _turn_on(database_url, "manager.stable_context")
+                    if delivery_guard:
+                        _seed_delivery_guard(api, project_id)
                     row = run_dialog(api, dialog, database_url=database_url, project_id=project_id,
                                      scenarios=scenarios, mode=mode, timeout=timeout,
                                      runtime_root=case / "runtime", cap_left=cap_left if jobs > 1 else None,
                                      switch_spec=switch_agent, manager_profile=configs[dialog.id, rep][1])
+                    if delivery_guard or dialog.id == "tools_only_no_text":
+                        manager_id = f"manager-{dialog.manager}" if dialog.manager else "manager"
+                        records = api.post("/api/v1/runs/list", {"agent_id": manager_id, "limit": 500})["result"]["records"]
+                        row["followups"] = sum(bool((r.get("metadata") or {}).get("delivery_guard", {}).get("followup"))
+                                               for r in records)
                     if mode == "real" and register is not None and register.get("runtime", {}).get("type") == "dsh":
                         row["runtime_evidence"] = runtime_evidence(api)
                 cost, models = _usage(database_url)
@@ -3722,6 +3765,7 @@ def run(
             "started_at": stamp, "git": git,
             "caps": {"max_budget_usd": max_budget_usd, "total_cap_usd": total_cap_usd}, "reps": reps,
             "stable_context": stable_context, "stopped_by_cap": stopped, "aborted": aborted,
+            **({"delivery_guard": True} if delivery_guard else {}),
             "total_cost_usd": round(sum(float(r.get("cost_usd") or 0.0) for r in results), 6), "dialogs": results,
         }, path, roots=(root, raw_root), rows="dialogs")
         if aborted:
@@ -3734,7 +3778,8 @@ def markdown(result: dict[str, Any]) -> str:
     lines = [f"Manager dialogs: {result['mode']}/{result.get('manager_agent') or result['agent']} "
              f"(other roles {result.get('model') or result['agent']}) @ "
              f"{(result['git'].get('commit') or '')[:9]}{'+local changes' if result['git'].get('dirty') else ''}"
-             f"{', manager.stable_context on' if result.get('stable_context') else ''}",
+             f"{', manager.stable_context on' if result.get('stable_context') else ''}"
+             f"{', delivery guard on' if result.get('delivery_guard') else ''}",
              "", "| dialog | rep | outcome | turns | tool calls | cost (USD) |", "|---|---|---|---|---|---|"]
     for dialog in result["dialogs"]:
         rep = dialog.get("rep", 1)
@@ -3751,4 +3796,6 @@ def markdown(result: dict[str, Any]) -> str:
                      f"| {dialog['cost_usd']:.4f} |")
     lines.append(f"| **total** | | {sum(outcome(d) == Outcome.PASS for d in result['dialogs'])}/"
                  f"{len(result['dialogs'])} | | | {result['total_cost_usd']:.4f} |")
+    if any("followups" in dialog for dialog in result["dialogs"]):
+        lines.extend(["", f"Delivery guard hidden follow-ups: {sum(d.get('followups', 0) for d in result['dialogs'])}."])
     return "\n".join(lines)
