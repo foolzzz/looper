@@ -5609,9 +5609,24 @@ decision is one row of `proactive_deliveries` (keyed by the send point's
 message, so a message tried again keeps its first decision; decisions on one
 chat are taken one at a time, so the cap holds across send points), with
 `sent_at` once the channel took it (`replied_at`, the user's first message
-after it, is for the proactive-message metrics). Wired so far: gate
-reminders only, which are always `blocking`; a decision that fails is logged
-and the reminder posted as with the switch off. Design: [proactive delivery RFC](rfcs/proactive-delivery-v0.zh-CN.md).
+after it, is for the proactive-message metrics). A morning brief (`kind`
+`morning_brief`) is sent uncounted and is never deferred: it is the digest.
+Wired so far: gate reminders, which are always `blocking`, and the morning
+brief; a decision that fails is logged and the message posted as with the
+delivery switch off. Design: [proactive delivery RFC](rfcs/proactive-delivery-v0.zh-CN.md).
+
+### Morning brief
+
+On a workday, at `morning_brief.time` (09:15 by default) in `user.timezone`
+(else the server's zone), one brief goes to each enabled bot's operator direct
+chat. It names what waits (the needs-you summary), reminders due that local
+day, and proactive messages deferred into that day's digest; Monday also
+includes Saturday and Sunday. Every section empty means nothing is sent. The
+switch `morning_brief.enabled` is off by default and operator-only
+(`morning_brief.get`, `morning_brief.update`); off, a tick reads the in-memory
+switch and does nothing else. One `morning_briefs` row per local date and chat
+makes a restart and a second server send it at most once. A send that stops
+mid-way is `uncertain` and is not sent again. Design: [morning brief RFC](rfcs/morning-brief-v0.zh-CN.md).
 
 ### Card buttons
 
