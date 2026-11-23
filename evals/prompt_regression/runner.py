@@ -646,6 +646,10 @@ def run_task(
             api.post("/api/v1/ops/task_control/start", {"task_id": task_id})
         answered: dict[str, int] = {}  # each gate's script entries posted so far
         resumed: dict[str, float] = {}  # each wait resumed by the runner, and when (database clock)
+        replier = api
+        if task.gate_answers_from_client:
+            created = api.post("/api/v1/clients/create", {"name": f"eval-{uuid.uuid4().hex[:8]}"})["result"]
+            replier = Api(api.base_url, token=created["token"], timeout=api.timeout)
 
         chat_pending = task.chat is not None
         edit_pending = task.edit_requirement is not None
@@ -668,7 +672,8 @@ def run_task(
                 pass  # the next real gh check sees the fix, just as the dependent Worker will
             elif resume_waits(api, task, task_id, detail, resumed, now=time.time() + clock_offset):
                 pass  # the user resumed a wait; read the Planner's progress at the next poll
-            elif answer_gates(api, task, task_id, detail, answered, now=time.time() + clock_offset):
+            elif answer_gates(api, task, task_id, detail, answered, now=time.time() + clock_offset,
+                              replier=replier):
                 pass  # the user answered a gate; look again at the next poll
             elif chat_pending and detail.get("steps") and detail.get("phase") in ("executing", "verifying"):
                 if fake and task.fake.get("wait_for_input"):
@@ -768,12 +773,12 @@ def _script(task: EvalTask) -> tuple[str, ...]:
 
 
 def answer_gates(api: Api, task: EvalTask, task_id: str, detail: dict[str, Any], answered: dict[str, int], *,
-                 now: float) -> bool:
+                 now: float, replier: Api | None = None) -> bool:
     """Play the user: post the next entry of ``task``'s gate script (``_script``) in each of the task's gates that
     waits for the user, once it has waited ``gate_reply_after_s`` since it opened; ``END_DISCUSSION`` ends the
     discussion, and so does a gate that asks again after the script ran out (so the task ends instead of waiting
     for its timeout). When requested, the first answer also waits for a recorded Worker run overlapping the
-    open gate. Whether anything was posted."""
+    open gate. ``replier`` posts the answers (default ``api``, the operator). Whether anything was posted."""
     script = _script(task)
     posted = False
     for gate in detail.get("gates") or []:
@@ -794,9 +799,9 @@ def answer_gates(api: Api, task: EvalTask, task_id: str, detail: dict[str, Any],
         entry = script[done] if done < len(script) else END_DISCUSSION
         try:
             if entry == END_DISCUSSION:
-                api.post("/api/v1/ops/gates/end", {"task_id": task_id, "gate": label})
+                (replier or api).post("/api/v1/ops/gates/end", {"task_id": task_id, "gate": label})
             else:
-                api.post("/api/v1/ops/gates/reply", {"task_id": task_id, "gate": label, "text": entry})
+                (replier or api).post("/api/v1/ops/gates/reply", {"task_id": task_id, "gate": label, "text": entry})
         except EvalError:
             continue  # it stopped waiting meanwhile; look again at the next poll
         answered[label] = done + 1
