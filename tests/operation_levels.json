@@ -1,4 +1,6 @@
 {
+ "acp_reviewer.get": "inside",
+ "acp_reviewer.update": "inside",
  "acceptance_checks.get": "inside",
  "acceptance_checks.update": "inside",
  "action_receipts.get": "inside",

@@ -1150,6 +1150,7 @@ M7 先让计划状态有唯一来源（M7a），再在其上加任务记忆（M7
 
 ### 5.4 验证缺口
 
+- **ACP Reviewer 试点**：首次可启用路径包含独立 v1 channel、命令身份、操作者设置、进程写策略与服务端选择守卫，默认关闭。策略以文件系统身份检查保护集重叠，拒绝 Unix socket/其他回环端口与应用 IPC；配置预算上限时拒绝启动。替身服务闭环与 macOS 写保护测量见 [验证记录](../validation/acp-reviewer-real-path.md)；真实 Grok 握手、文档化计费用量来源和 RFC §8 四任务对照仍待后续验证，尚不具备推广结论。
 - **卡片按钮的意图 / 账本接入**（默认关）：复用 `card_actions` 的记录、会话 / 消息绑定和 1.5 秒授权期限；Needs-you 的操作确认也从共享入口读取。真实飞书 / Telegram 回调尚未验证；真实模型评测尚未获批，只跑 fake-mode。获批后在开关打开时跑 assistant experience 的 identity，以及 Manager 的 `ledger_tools`、`confirm_create_start`、`cancel_confirmation` 对话：Sonnet 两次，Opus xhigh Manager 一次；预计合计 $1–3，属估算，不是实测费用或执行授权。
 
 - **管家中途输入**（本分支实现，默认关闭）：按助理层 RFC §5.3.6 接入 `manager.mid_turn_input.enabled`，只有操作者可用独立的 `mid_turn_input.get/update`。脚本 CLI 与隔离 PostgreSQL 覆盖同聊天/跨聊天并入、队列回退、停止、重启重放和关闭时的主干哈希对照；没有调用真实模型。同聊天、控制台到私聊、等待中停止，以及结果已在内核 stdout 缓冲、读回调尚未执行、短行 drain 不让出时不并入、不提前结算且只排队一次的真实 Claude Code 对照仍待维护者单独批准，不能将替身通过算作模型行为验证；拟验证 4 个场景，sonnet 各 2 次（每进程 $0.25、最多 16 个进程、共 $4），opus xhigh 各 1 次（每进程 $0.50、最多 8 个进程、共 $4），另加 sonnet 身份/隔离回归 $4，整批上限 $12；每场景最多 2 个进程，停止、队列回退及替换均计入，单场景最多 60 秒。Settings 页面开关与配置导入导出尚未接入。

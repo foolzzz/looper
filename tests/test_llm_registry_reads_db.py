@@ -147,7 +147,8 @@ def test_registry_service_lists_models_vendor_types_login_and_masks_keys(monkeyp
         from types import SimpleNamespace
         monkeypatch.setattr(service, '_login_modules', lambda: {'codex': SimpleNamespace(login_view=login_view)})
         view = await service.registry_view()
-        assert {v['vendor_type'] for v in view['vendor_types']} == {v.value for v in VendorType}
+        assert {v['vendor_type'] for v in view['vendor_types']} == {
+            v.value for v in VendorType if v is not VendorType.ACP_COMMAND}
         assert 'provider_presets' not in view
         account = next(p for p in view['providers'] if p['provider_id'] == 'prov-test')
         assert account['api_key'] == service.SECRET_MASK
@@ -233,7 +234,7 @@ def test_profile_view_prices_in_launch_catalog_order_not_selected_model_first():
 def test_vendor_suggestions_are_stable_and_do_not_allocate_public_ids():
     first = service.vendor_types_view()
     assert first == service.vendor_types_view()
-    assert [v['vendor_type'] for v in first] == [v.value for v in VendorType]
+    assert [v['vendor_type'] for v in first] == [v.value for v in VendorType if v is not VendorType.ACP_COMMAND]
     login = next(v for v in first if v['vendor_type'] == 'codex-login')
     assert login['auth'] == 'oauth' and login['oauth_runtime_type'] == 'codex'
     assert login['endpoints'] == [{'protocol': 'openai-responses', 'base_url': '', 'use_runtime_default': False}]
