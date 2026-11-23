@@ -457,6 +457,8 @@ async def test_error_kind_maps_to_safe_user_message(tmp_path, monkeypatch, kind,
         result, _ = await turn(session)
         assert result.result_event['errors'] == [expected]
         assert len(expected) <= 300
+        # The typed kind and status, for the run's failure class (failures.api).
+        assert (result.result_event['error_kind'], result.result_event['error_status']) == (kind.value, status)
     finally:
         await session.stop()
 
