@@ -136,7 +136,7 @@ async def recover(channel_id: str, now: datetime, keyed_window: float, *, pool: 
           state=CASE WHEN $4 AND (first_possible_at IS NULL OR first_possible_at > $3)
                      THEN 'pending' ELSE 'uncertain' END,
           next_attempt_at=$2, claim_token=NULL,
-          terminal_at=CASE WHEN first_possible_at IS NULL OR ($4 AND first_possible_at > $3)
+          terminal_at=CASE WHEN $4 AND (first_possible_at IS NULL OR first_possible_at > $3)
                            THEN NULL ELSE $2::timestamptz END,
           error_class='unknown', error='interrupted while sending'
         WHERE channel_id=$1 AND (state='sending' OR
