@@ -268,3 +268,32 @@ async def check(*, runtime_root: Path | None, db: Any = None) -> dict[str, Any]:
                          settings.push_channel or "not set: candidates show on the memory page only"))
     return {"configured": True, "enabled": settings.enabled, "ok": all(item["ok"] for item in checks),
             "checks": checks}
+
+
+async def confirmation_impact(body: Mapping[str, Any], *, runtime_root: Path | None, db: Any = None) -> str | None:
+    """What the operator confirms before a save takes effect (RFC section 9.1): turning writing on, or pointing the
+    pushes at another bot while it is on. None when the save needs no confirmation, or cannot be saved at all (the
+    save itself then refuses it in words)."""
+    if body.get("enabled") is not True:
+        return None
+    raw = await stored(db)
+    if raw is not None and raw.get("enabled") is True and body.get("push_channel") == raw.get("push_channel"):
+        return None
+    config, _ = await vault.load()
+    if config is None:
+        return None
+    try:
+        settings = model.check_settings(body, config)
+    except (ValueError, OSError):
+        return None
+    facts = await asyncio.to_thread(git_facts, config, settings)
+    worktrees = worktree_root(settings, runtime_root)
+    changing = raw is not None and raw.get("enabled") is True
+    return "\n".join((
+        "Change where memory proposals are pushed." if changing else
+        "Turn on memory writing: memories you confirm are written into your knowledge vault as git commits.",
+        f"Memory folder: {settings.root or '(the whole vault)'}",
+        "Branch: " + (settings.branch or facts.branch or "(the main checkout's current branch)"),
+        f"Worktree folder: {worktrees if worktrees is not None else '(under the runtime folder)'}",
+        f"Push target: {settings.push_channel or 'none (the memory page only)'}",
+        f"Daily drafting budget: ${settings.daily_budget_usd:g}"))
