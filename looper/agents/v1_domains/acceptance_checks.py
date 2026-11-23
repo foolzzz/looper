@@ -20,9 +20,17 @@ OPERATIONS = (
               "Future commands run as the server user and can read its files; local denies network, "
               "network permits it only when a check requests it. A private checkout is not a sandbox.",
               _object({"project_id": _STR, "acceptance_checks": MODE}, closed=True), VIEW,
-              risk="write", operator_only=True,
+              risk="high", confirms=True, operator_only=True,
               level=ActionLevel.INSIDE),  # changes Looper's protocol permission; executes nothing
 )
+
+
+async def impact(server, operation, arguments, principal, headers):
+    if operation.operation_id != "acceptance_checks.update":
+        return None
+    return (f"Set project {arguments['project_id']}'s acceptance_checks to {arguments['acceptance_checks']}? "
+            "This stores the project's check permission; no check is executed yet. Future commands run as the "
+            "server user and can read its files; network mode permits network only when a check requests it.")
 
 
 async def run(server, operation, arguments, principal, headers):

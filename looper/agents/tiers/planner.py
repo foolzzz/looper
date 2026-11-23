@@ -1309,7 +1309,9 @@ class PlannerAgent:
                 by_label[spec.id] = step
             step.instruction = spec.instruction
             step.acceptance_criteria = list(spec.acceptance_criteria)
-            step.checks = spec.checks
+            # Off forbids a checks key, so an omitted key cannot revoke stored definitions.
+            if self._execution.acceptance_checks is not AcceptanceChecksMode.OFF:
+                step.checks = spec.checks
             # A gate or a wait is never reviewed, whatever the project's review policy.
             step.role = (spec.role or (self._workflow or {}).get("work_role")
                          if spec.gate is None and spec.wait is None else None)
@@ -5276,6 +5278,8 @@ class PlannerAgent:
                 f"- {step.label} [{step.status}] {_clip(step.instruction, 200)} "
                 f"(depends on: {deps}; review: {'yes' if step.review else 'no'}; retries: {step.retries}{roles})"
             ]
+            if step.checks:
+                lines.append("  checks: " + json.dumps([check.row() for check in step.checks], ensure_ascii=False))
             summary = _clip((step.result or {}).get("summary"), 200) if step.status == "verified" else ""
             if summary:
                 lines.append(f"  summary: {summary}")
@@ -6320,6 +6324,12 @@ class PlannerAgent:
             if stored is None or stored["plan"]["status"] not in statuses:
                 return
             session = await db_agent_sessions.get_session(self.agent_id) or {}
+            checks = {}
+            if any("checks" in step for step in stored["steps"]):
+                project = await db_projects.get_task_project(self._task_id)
+                mode = ProjectExecution.from_row(project).acceptance_checks
+                checks = {step["id"]: parse_checks(step["checks"], len(step.get("acceptance_criteria") or []), mode)
+                          for step in stored["steps"] if "checks" in step}
         except Exception:
             logger.exception("planner %s cannot read its saved plan", self.agent_id)
             return
@@ -6376,8 +6386,7 @@ class PlannerAgent:
                 wait=wait,
                 started_at=sd.get("started_at"),
                 difficulty=sd.get("difficulty"),
-                checks=parse_checks(sd.get("checks", []), len(sd.get("acceptance_criteria") or []),
-                                    AcceptanceChecksMode.NETWORK),
+                checks=checks.get(sd["id"], ()),
             ))
         plan.journal = [JournalEntry.from_row(row) for row in stored.get("journal") or []]
         try:

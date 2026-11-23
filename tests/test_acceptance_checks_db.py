@@ -52,10 +52,12 @@ def test_operator_switch_roundtrip_and_agent_refusal(tmp_path, monkeypatch):
 def test_definitions_survive_planner_restart_and_replan_without_execution(tmp_path, monkeypatch):
     async def run(pool):
         project = await projects.create_project(name="Example", pool=pool)
+        await projects.set_acceptance_checks(project["id"], "local", pool=pool)
         await tasks.create_task(task_id="task-checks", requirement="Report", goal_id="g", project_id=project["id"],
                                 work_dir=str(tmp_path), correlation_id="corr", status="running", pool=pool)
         agent = PlannerAgent(task_id="task-checks", runtime_root=tmp_path)
         task_plan = TaskPlan(plan_id="p", goal_id="g", requirement="Report", work_dir=str(tmp_path), status="executing")
+        await agent._refresh_project(task_plan)
         raw = {"id": "s1", "instruction": "Report", "acceptance_criteria": ["works"], "depends_on": [], "review": False,
                "checks": [{"id": "c1", "criterion": 1, "type": "command", "command": "touch should-not-exist"}]}
         specs = parse_plan(fenced({"steps": [raw]}), acceptance_checks=Mode.LOCAL).steps
@@ -67,11 +69,71 @@ def test_definitions_survive_planner_restart_and_replan_without_execution(tmp_pa
         detail = await tasks.get_task_with_steps("task-checks", pool=pool)
         assert detail["steps"][0]["checks"][0]["command"] == "touch should-not-exist"
         assert not (tmp_path / "should-not-exist").exists()
+        await projects.set_acceptance_checks(project["id"], None, pool=pool)
+        await restored._refresh_project(restored._plan)
         del raw["checks"]
-        changed = agent._add_steps(task_plan, parse_plan(fenced({"steps": [raw]})).steps)
-        await agent._save(task_plan, *changed)
+        raw["instruction"] = "Report with updated wording"
+        changed = restored._add_steps(restored._plan, restored._plan_parser()(fenced({"steps": [raw]})).steps)
+        await restored._save(restored._plan, *changed)
+        saved = (await plans.load("task-checks", pool=pool))["steps"][0]
+        assert saved["instruction"] == raw["instruction"]
+        assert saved["checks"] == [check.row() for check in specs[0].checks]
+        view = "\n".join(restored._plan_lines(restored._plan))
+        assert json.loads(view.split("  checks: ", 1)[1]) == saved["checks"]
+        assert not (tmp_path / "should-not-exist").exists()
+        # While enabled, omitting checks replaces the definitions with an empty set.
+        await projects.set_acceptance_checks(project["id"], "local", pool=pool)
+        await restored._refresh_project(restored._plan)
+        changed = restored._add_steps(restored._plan, restored._plan_parser()(fenced({"steps": [raw]})).steps)
+        await restored._save(restored._plan, *changed)
         assert "checks" not in (await plans.load("task-checks", pool=pool))["steps"][0]
     run_db(run, monkeypatch)
+
+
+@pytest.mark.parametrize("mode,checks,restores", [
+    ("network", [{"id": "c1", "criterion": 1, "type": "command", "command": "true", "network": True}], True),
+    ("local", [{"id": "c1", "criterion": 1, "type": "command", "command": "true", "network": True}], False),
+    (None, [{"id": "c1", "criterion": 1, "type": "command", "command": "true"}], False),
+    (None, [], True),
+    ("local", {"corrupt": "not a check list"}, False),
+])
+def test_restore_validates_saved_checks_against_current_permission(tmp_path, monkeypatch, caplog,
+                                                                 mode, checks, restores):
+    async def run(pool):
+        project = await projects.create_project(name="Restore example", pool=pool)
+        await projects.set_acceptance_checks(project["id"], mode, pool=pool)
+        await tasks.create_task(task_id="task-restore", requirement="Report", project_id=project["id"], pool=pool)
+        await plans.save("task-restore", plan={"plan_id": "p", "status": "executing"}, steps=[{
+            "id": "step-restore", "index": 0, "key": "s1", "instruction": "Report",
+            "acceptance_criteria": ["works"], "checks": checks}], pool=pool)
+        agent = PlannerAgent(task_id="task-restore", runtime_root=tmp_path)
+        await agent._load_plan()
+        assert (agent._plan is not None) is restores
+        if restores:
+            assert [check.row() for check in agent._plan.steps[0].checks] == (
+                [{**checks[0], "timeout_seconds": 300, "required": True, "protect": []}] if checks else [])
+        else:
+            assert "cannot read its saved plan" in caplog.text
+        # Invalid definitions stay stored for operator recovery; restore never rewrites them.
+        assert json.loads(await pool.fetchval("SELECT checks::text FROM task_steps WHERE id='step-restore'")) == checks
+    run_db(run, monkeypatch)
+
+
+@pytest.mark.parametrize("mode", ["off", "local", "network"])
+def test_update_declares_high_risk_confirmation_without_writing(monkeypatch, mode):
+    import asyncio
+    from unittest.mock import AsyncMock
+    from looper.agents import api_v1
+
+    operation = api_v1.find("POST", "/api/v1/acceptance_checks/update")
+    assert operation.risk == "high" and operation.confirms and operation.operator_only
+    write = AsyncMock()
+    monkeypatch.setattr(projects, "set_acceptance_checks", write)
+    impact = asyncio.run(api_v1.domain_for(operation).impact(
+        None, operation, {"project_id": "project-example", "acceptance_checks": mode}, api_v1.OPERATOR, {}))
+    assert f"project-example's acceptance_checks to {mode}" in impact
+    assert "no check is executed yet" in impact
+    write.assert_not_awaited()
 
 
 def test_additive_migration_preserves_rows_and_reopens_idempotently(monkeypatch):

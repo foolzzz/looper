@@ -135,6 +135,13 @@ def test_default_off_fixture_was_generated_from_main(tmp_path):
         assert _json(baseline.plans._step_args("task-off", baseline.planner._step_row(
             _step(baseline.planner, status)))) == _json(arguments)
 
+    current_agent = planner.PlannerAgent(task_id="task-off", runtime_root=tmp_path)
+    baseline_agent = baseline.planner.PlannerAgent(task_id="task-off", runtime_root=tmp_path)
+    current_plan = planner.TaskPlan("plan-off", "goal-off", "Report", "", steps=[_step(planner)])
+    baseline_plan = baseline.planner.TaskPlan("plan-off", "goal-off", "Report", "", steps=[_step(baseline.planner)])
+    assert "\n".join(current_agent._plan_lines(current_plan)).encode() == (
+        "\n".join(baseline_agent._plan_lines(baseline_plan)).encode())
+
 
 @pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
 @pytest.mark.parametrize("status", ["pending", "dispatched", "completed", "verified"])
