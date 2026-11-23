@@ -47,6 +47,7 @@ class _Resident:
         self.turns: list[str] = []
         self.running, self.release = asyncio.Event(), asyncio.Event()
         self.on_turn: Any = None
+        self.reply_text: str | None = None  # the turn's answer; by default its session id and number
 
     def stale(self, signature: Any) -> bool:
         return False
@@ -70,8 +71,9 @@ class _Resident:
         if self.hold:
             self.running.set()
             await self.release.wait()
-        return ResidentTurn({"type": "result", "subtype": "success", "is_error": False,
-                             "result": f"{self.session_id} 回复 {len(self.turns)}", "session_id": self.session_id})
+        text = self.reply_text or f"{self.session_id} 回复 {len(self.turns)}"
+        return ResidentTurn({"type": "result", "subtype": "success", "is_error": False, "result": text,
+                             "session_id": self.session_id})
 
 
 def _lark(text: str, chat: str, sender: str, *, group: bool) -> MessageEnvelope:

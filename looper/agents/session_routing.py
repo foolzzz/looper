@@ -39,7 +39,6 @@ class GroupIsolation(str, Enum):
     conversation."""
 
     SHARED = "shared"  # they run in the operator's session, with everything it holds
-    ROUTED = "routed"  # they run in a session of their own, which can still start with other chats' messages
     ISOLATED = "isolated"  # they run in a session of their own that holds only their own chat
 
 
@@ -144,6 +143,6 @@ def apply_stored(stored: Mapping[str, str]) -> None:
 
 
 def group_isolation(manager_id: str) -> GroupIsolation:
-    """How the group turns of Manager ``manager_id`` are kept apart now: in their own sessions while it routes
-    (``ROUTED``: a new session's first turn can still carry other chats' messages), else ``SHARED``."""
-    return GroupIsolation.ROUTED if routes(manager_id) else GroupIsolation.SHARED
+    """How the group turns of Manager ``manager_id`` are kept apart now: while it routes, in sessions of their own
+    that start with only their own chat (``tiers.group_session``: ``ISOLATED``), else ``SHARED``."""
+    return GroupIsolation.ISOLATED if routes(manager_id) else GroupIsolation.SHARED
