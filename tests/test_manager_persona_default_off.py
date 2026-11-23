@@ -11,7 +11,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from looper.agents import persona, profile_registry
+from looper.agents import claude_cli, persona, profile_registry
 from looper.agents.agent_settings import Harness, Layer
 from looper.agents.bus import MessageBus
 from looper.agents.knowledge import EMPTY_KNOWLEDGE
@@ -29,18 +29,19 @@ BASELINE = {False: {'sections': '1db4fa7cabcd2bd37cbfc5da7110f1baee4f19644ade5c1
          'turn': '92d3f8208e8edc7e68edfd6aae514b9aab2c0d575d36a1fc00e047f329336211',
          'system': '7d14661d728105ddd57740dc865754ac93a3a509613d185b65ec5a9adea55ebf',
          'tools': 'de8b33d0d94ea993f875cf3c2e54c07afe471aece5825a4e845610404da22ddc',
-         'command': '7525d496fea853ca24a731eff0f7034169a77b754142e1f1815d1398f6a91104',
-         'signature': '9798d547384710e23ae7a6570849030cf25e69e5b4b14c5c3b64867e08ac76c4'},
+         'command': 'e8f4c7aa9c0df509ed6ec960fcb698d7e476c3edbb278821e7601c2034a08740',
+         'signature': '1396add8832134a87b315c2398875f8dc5d02d687dc2f31a80af00eb92d7cdd4'},
  True: {'sections': '1db4fa7cabcd2bd37cbfc5da7110f1baee4f19644ade5c15e852ad21ba7d948d',
         'turn': '45d307a205c1b2e5f448e6147f0db2bc033ac11c9bf1ade140bb7cbdb2e64462',
         'system': '9be99c242f3fa3240f1222686b1001a889941b8123f61cd6684a7559feec6c05',
         'tools': 'de8b33d0d94ea993f875cf3c2e54c07afe471aece5825a4e845610404da22ddc',
-        'command': '7525d496fea853ca24a731eff0f7034169a77b754142e1f1815d1398f6a91104',
-        'signature': '48fe39d201e86c82c6f603bc4226f443b840ba9da25fe7ec7128376b5897871b'}}
+        'command': 'e8f4c7aa9c0df509ed6ec960fcb698d7e476c3edbb278821e7601c2034a08740',
+        'signature': '4c884da72244a15b83eef844f6055b5671c038893347e7ffbd291d953923b522'}}
 
 
 async def observe(root, monkeypatch):
     monkeypatch.setattr(profile_registry, "_login_modules", lambda: {})
+    monkeypatch.setattr(claude_cli, "_outside_memory", lambda *args, **kwargs: ["/synthetic/CLAUDE.md"])
     bus = MessageBus(runtime_root=root)
     manager = ManagerAgent(config=ManagerConfig(claude_bin="claude", work_dir=root), runtime_root=root)
     manager._bus = bus
@@ -67,7 +68,15 @@ async def observe(root, monkeypatch):
         tools = await manager.ops.current_listing(item.turn)
         command = list(item.signature[0])
         command[0] = "<claude>"
-        command[command.index("--settings") + 1] = "<settings>"
+        index = command.index("--settings") + 1
+        raw_settings = command[index]
+        if raw_settings.startswith("{"):
+            command[index] = json.loads(raw_settings)
+        else:
+            settings_file = Path(raw_settings)
+            content = settings_file.read_text()
+            assert settings_file.stem == hashlib.sha256(content.encode()).hexdigest()
+            command[index] = json.loads(content)
         signature = [command, *item.signature[1:]]
         assert signature[1] == hashlib.sha256(item.system_prompt.text.encode()).hexdigest()
         config = json.loads(Path(item.launch.library.mcp_config).read_text())
