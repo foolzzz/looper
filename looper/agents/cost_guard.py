@@ -160,6 +160,7 @@ class Guard:
         self._recent = deque(maxlen=20)
         self._recommendations = dict.fromkeys(Currency)
         self.problem: str | None = None
+        self.holds_need_recovery = False
 
     async def rebuild(self):
         if self.config.mode is settings.Mode.OFF:
@@ -355,8 +356,11 @@ def current() -> Guard:
 
 async def initialize(*, day_start, pool=None):
     global _guard
+    from . import cost_holds
+
     await settings.load(pool=pool)
     _guard = Guard(settings.cached(), day_start=day_start, pool=pool)
+    await cost_holds.initialize(pool=pool)
     await refresh()
 
 
@@ -367,6 +371,7 @@ async def refresh():
     if guard.config.mode is settings.Mode.OFF:
         # Disabling clears guard state, never any stored record.
         replacement = Guard(guard.config, day_start=guard.day_start, clock=guard.clock, pool=guard.pool)
+        replacement.holds_need_recovery = guard.holds_need_recovery
         global _guard
         _guard = replacement
         return
@@ -399,7 +404,7 @@ async def before_run(*, launch, run_kind, task_id=None, schedule_id=None, step_i
                     guard._limits.setdefault(group, {}).update(context[group])
             currency = currency_of(launch)
             # Queued dispatches already reserved before the bus can start their runtime.
-            queue = guard._queued[task_id, kind, step_id]
+            queue = guard._queued.get((task_id, kind, step_id))
             while queue:
                 reservation = queue.popleft()
                 if reservation.token in guard._pending:
@@ -497,12 +502,13 @@ async def observe_schedule(schedule):
 async def refresh_day():
     """Use the scheduler's existing tick for the daily sample/counter rebuild, even on an idle day."""
     guard = current()
-    if guard.config.mode is settings.Mode.OFF:
-        return
     try:
-        if guard.config.mode is settings.Mode.ENFORCE:
-            from . import cost_holds
+        from . import cost_holds
+
+        if guard.config.mode is settings.Mode.ENFORCE or cost_holds.needs_service():
             await cost_holds.expire(pool=guard.pool)
+        if guard.config.mode is settings.Mode.OFF:
+            return
         async with guard._lock:
             if guard.day != guard.day_start(guard.clock()):
                 await guard._rebuild()
@@ -540,8 +546,6 @@ async def task_gate(task_id, run_kind, launch_estimate, *, reserve=False, step_i
 
 async def release_queued(task_id):
     guard = current()
-    if guard.config.mode is not settings.Mode.ENFORCE:
-        return
     async with guard._lock:
         for reservation in list(guard._pending.values()):
             if reservation.dispatch_task_id == task_id:

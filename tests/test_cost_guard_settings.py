@@ -136,6 +136,8 @@ def test_guard_settings_never_expand_chat_settings(stored):
     impact = asyncio.run(api_v1.domain_for(operation).impact(
         None, operation, {"daily_usd": None}, api_v1.OPERATOR, {}))
     assert "Enforce holds task dispatches" in impact and "Off and observe do not" in impact
+    assert 'soft stop' in impact and 'no caps' in impact
+    assert 'fail' in impact and 'reservations' in impact and 'closing turns' in impact
     assert stored == ({}, [])
 
 

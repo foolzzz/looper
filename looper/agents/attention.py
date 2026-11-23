@@ -40,7 +40,7 @@ from urllib.parse import urlencode
 
 from ..db import attention as store, ledger as db_ledger, schedules as db_schedules, tasks as db_tasks
 from ..db import system_settings as db_settings
-from . import card_actions, cost_guard_settings, gate_routing, gate_service, leads_model, operator_identity
+from . import card_actions, gate_routing, gate_service, leads_model, operator_identity
 from .message import MessageEnvelope, is_lark, parse_channel_id
 
 logger = logging.getLogger(__name__)
@@ -238,7 +238,9 @@ def _cost_item(row: Mapping[str, Any]) -> dict[str, Any]:
 
 
 async def _cost(_: Any) -> Read:
-    if cost_guard_settings.cached().mode is not cost_guard_settings.Mode.ENFORCE:
+    from . import cost_holds as service
+
+    if not service.needs_service():
         return NotRead.OFF
     from ..db import cost_holds
 

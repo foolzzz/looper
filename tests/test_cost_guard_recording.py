@@ -223,14 +223,16 @@ def test_review_allows_only_a_successful_classifier_and_a_successful_audit(monke
 
 
 @pytest.mark.parametrize('mode', ['off', 'observe', 'enforce'])
-def test_subscription_reservation_adds_an_in_run_cap_only_when_enforced(monkeypatch, mode):
+@pytest.mark.parametrize('scope_cap', [None, 0, 2])
+def test_subscription_reservation_adds_an_in_run_cap_only_with_an_enforced_scope_cap(monkeypatch, mode, scope_cap):
     from looper.agents.cost_guard_settings import Config, Mode
     from tests.runtime_model_helpers import builtin_launch
     launch = builtin_launch()
     assert cost_guard.currency_of(launch) is cost_guard.Currency.EQUIVALENT
     guard = cost_guard.Guard(Config(mode=Mode(mode)))
     monkeypatch.setattr(cost_guard, '_guard', guard)
-    reservation = cost_guard.Reservation(.25, cost_guard.Currency.EQUIVALENT, (), {},
+    scopes = (cost_guard.Scope(cost_guard.BudgetScope.GLOBAL_DAY, 'global', scope_cap),)
+    reservation = cost_guard.Reservation(.25, cost_guard.Currency.EQUIVALENT, scopes, {},
                                           datetime.now(timezone.utc))
     monkeypatch.setattr(cost_guard, 'before_run', AsyncMock(return_value=reservation if mode!='off' else None))
     monkeypatch.setattr(cost_guard, 'bind', AsyncMock())
@@ -239,7 +241,7 @@ def test_subscription_reservation_adds_an_in_run_cap_only_when_enforced(monkeypa
         cwd='/synthetic',input_text='Synthetic',launch=launch)
     asyncio.run(recorder.start())
     try:
-        if mode=='enforce':
+        if mode=='enforce' and scope_cap is not None:
             assert recorder._spend is not None and recorder._spend.cap==.25
         else:
             assert recorder._spend is None

@@ -55,9 +55,13 @@ async def hold(planner, plan, admission):
 
 
 async def within(planner, plan, run_kind='planner', step=None, same_attempt=False):
-    if cost_guard.current().config.mode is not cost_guard_settings.Mode.ENFORCE:
-        return None
     try:
+        if cost_guard.current().config.mode is not cost_guard_settings.Mode.ENFORCE:
+            if cost_holds.needs_service() and plan.status not in ('stopping', 'completed', 'failed'):
+                row = await db_tasks.get_task(planner._task_id)
+                if row is not None and row['status'] == 'awaiting_budget':
+                    return False
+            return None
         return await _enforced(planner, plan, run_kind, step, same_attempt)
     except Held:
         raise
@@ -68,8 +72,7 @@ async def within(planner, plan, run_kind='planner', step=None, same_attempt=Fals
 
 
 async def _enforced(planner, plan, run_kind, step, same_attempt):
-    if plan.status in ('stopping', 'completed', 'failed'):
-        return False
+    closing = plan.status in ('stopping', 'completed', 'failed')
     # Failed preparation never leaves a phantom reservation for an undispatched step.
     guard = cost_guard.current()
     for reservation in list(guard._pending.values()):
@@ -79,7 +82,7 @@ async def _enforced(planner, plan, run_kind, step, same_attempt):
         if dispatch is None or dispatch.status not in ('dispatched', 'completed'):
             guard.abandon(reservation)
     row = await db_tasks.get_task(planner._task_id)
-    if row is not None and row['status'] == 'awaiting_budget':
+    if not closing and row is not None and row['status'] == 'awaiting_budget':
         return False
     launch = await _launch(planner, plan, run_kind, step, same_attempt)
     admission = await cost_guard.task_gate(planner._task_id, run_kind, launch, reserve=step is not None,
@@ -91,15 +94,16 @@ async def _enforced(planner, plan, run_kind, step, same_attempt):
             admission.reservation.dispatch_task_id = planner._task_id
             admission.reservation.dispatch_step_id = step.step_id
         return True
-    await hold(planner, plan, admission)
+    if not closing:
+        await hold(planner, plan, admission)
     return False
 
 
 def turn(method):
     @wraps(method)
     async def checked(planner, *args, **kwargs):
-        if cost_guard.current().config.mode is cost_guard_settings.Mode.ENFORCE and planner._plan is not None:
-            if not await within(planner, planner._plan):
+        if (cost_guard.current().config.mode is cost_guard_settings.Mode.ENFORCE or cost_holds.needs_service()) and planner._plan is not None:
+            if await within(planner, planner._plan) is False:
                 if planner._plan.status in ('stopping', 'completed', 'failed'):
                     from .planner import PlannerTurnError
                     raise PlannerTurnError('Spend admission refused the closing turn')
@@ -118,7 +122,7 @@ def event(method):
                 if envelope.message_type is MessageType.SYSTEM_EVENT and envelope.payload.get('type') == 'cost_dispatch_held':
                     await refused(planner, envelope)
                     return None
-                if (cost_guard.current().config.mode is cost_guard_settings.Mode.ENFORCE
+                if ((cost_guard.current().config.mode is cost_guard_settings.Mode.ENFORCE or cost_holds.needs_service())
                         and envelope.message_type is MessageType.TASK_RESUME and plan is not None and plan.status == 'planning'):
                     row = await db_tasks.get_task(planner._task_id)
                     if row is not None and row['status'] == 'awaiting_budget':

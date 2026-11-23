@@ -1628,7 +1628,8 @@ class ClaudeRunRecorder:
                                                   **({'step_id': self._step_id} if self._step_id is not None and
                                                      cost_guard.current().config.mode is cost_guard.settings.Mode.ENFORCE else {}))
         if (reservation is not None and cost_guard.current().config.mode is cost_guard.settings.Mode.ENFORCE
-                and reservation.currency is cost_guard.Currency.EQUIVALENT and self._launch is not None):
+                and reservation.currency is cost_guard.Currency.EQUIVALENT and self._launch is not None
+                and any(scope.limit_usd is not None for scope in reservation.scopes)):
             from .runtimes.pricing import RunSpend, pricer
 
             if self._spend is None:

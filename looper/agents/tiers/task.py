@@ -802,6 +802,9 @@ class TaskRouter:
             self._broadcaster.close_task(task_id)
 
     async def _task_ended(self, task_id: str, status: str) -> None:
+        from .. import cost_guard
+
+        await cost_guard.release_queued(task_id)
         if self._on_task_end is None:
             return
         try:

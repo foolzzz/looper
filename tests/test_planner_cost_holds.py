@@ -11,6 +11,34 @@ from looper.agents.tiers import planner_budget
 from looper.agents.tiers.planner import PlannerAgent, TaskPlan, PlanStep
 
 
+@pytest.mark.parametrize('status', ['stopping', 'completed', 'failed'])
+@pytest.mark.parametrize('cap', [None, 0])
+def test_closing_turn_uses_actual_admission(monkeypatch, tmp_path, status, cap):
+    from looper.agents.tiers.planner import PlannerTurnError
+    from tests.runtime_model_helpers import builtin_launch
+
+    async def check():
+        monkeypatch.setattr(cg, '_guard', cg.Guard(settings.Config(mode=settings.Mode.ENFORCE)))
+        monkeypatch.setattr(cg.store, 'history', AsyncMock(return_value=[]))
+        monkeypatch.setattr(cg.store, 'limits', AsyncMock(return_value={}))
+        monkeypatch.setattr(cg.store, 'context', AsyncMock(return_value={
+            'tasks': {'task-a': {'cap': cap, 'schedule_id': None}}, 'schedules': {}}))
+        monkeypatch.setattr(planner_budget, '_launch', AsyncMock(return_value=builtin_launch()))
+        monkeypatch.setattr(planner_budget.db_tasks, 'get_task', AsyncMock(return_value={'status': status}))
+        p = PlannerAgent(task_id='task-a', runtime_root=tmp_path)
+        p._plan = TaskPlan(plan_id='p', goal_id='', requirement='Work', work_dir=str(tmp_path), status=status)
+        p._run_turn = AsyncMock(return_value='Closing summary')
+        if cap is None:
+            assert await p._turn('Close the task') == 'Closing summary'
+            p._run_turn.assert_awaited_once()
+        else:
+            with pytest.raises(PlannerTurnError, match='admission refused'):
+                await p._turn('Close the task')
+            p._run_turn.assert_not_awaited()
+        assert cg.current().snapshot()['recent'][-1]['decision'] == ('admit' if cap is None else 'ask')
+    asyncio.run(check())
+
+
 @pytest.mark.parametrize('action', ['ask', 'fail', 'wrap_up'])
 def test_budget_action_keeps_running_work_or_uses_existing_stop(monkeypatch, tmp_path, action):
     async def check():

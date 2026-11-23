@@ -38,7 +38,6 @@ function HoldDecision({ hold, onDecided }: { hold: Hold; onDecided: () => void }
     try {
       const result = await callV1<Record<string, unknown>>("/api/v1/cost_holds/decide", {
         hold_id: hold.id, decision, ...(decision === "continue" && value !== undefined ? { new_limit_usd: value } : {}),
-        via: "dashboard",
       });
       if (result.status === "needs_confirmation") { setPendingDecision(decision); setPending(result as V1PendingConfirmation); }
       else onDecided();
@@ -99,7 +98,7 @@ export function CostGuardSettingsSection() {
     return () => { alive = false; };
   }, []);
 
-  useEffect(() => { if (view?.mode === "enforce") void readHolds(); }, [view?.mode]);
+  useEffect(() => { if (view) void readHolds(); }, [view?.mode]);
 
   if (error) return <p role="alert" className="text-sm text-destructive">{error}</p>;
   if (!view) return <p role="status" className="text-sm text-muted-foreground">正在读取花费观察…</p>;
@@ -109,7 +108,7 @@ export function CostGuardSettingsSection() {
       <CardHeader><CardTitle className="flex flex-wrap items-center gap-3">花费守卫 <Badge variant="outline">{view.mode === "off" ? "已关闭" : view.mode === "enforce" ? "执行限制" : "仅观察"}</Badge></CardTitle></CardHeader>
       <CardContent className="space-y-4 text-sm">
         <p>{view.mode === "enforce"
-          ? "任务按已花和预留检查上限；选择询问时等待你决定，全局当天上限会暂停新的任务运行。已经在跑的运行继续。后台角色和定时任务的花费上限仍仅观察。"
+          ? "任务按已花和预留检查上限；选择询问时等待你决定，全局当天上限会暂停新的任务运行。范围链设有上限时，订阅运行会按预留金额事中软停；没有上限则不软停。fail 会计入预留，可能提前停止任务及正在运行的 Worker。收尾回合也按实际准入结果决定。后台角色和定时任务的花费上限仍仅观察。"
           : "先观察一周，再根据实际花费决定上限。目前只记录预留和本来会被拦下的运行，不拦截、不提问、不发消息。"}</p>
         <dl className="grid grid-cols-1 gap-4 sm:grid-cols-2">
           <div><dt className="text-muted-foreground">全局每日真钱上限</dt><dd className="mt-1 font-mono">{money(view.daily_usd)}</dd></div>
@@ -126,16 +125,17 @@ export function CostGuardSettingsSection() {
           : <p className="text-muted-foreground">观察满一周后才提供每日上限建议；建议不会自动生效。</p>}
       </CardContent>
     </Card>
-    {view.mode === "enforce" && <Card>
+    <Card>
       <CardHeader><CardTitle>花费等你决定</CardTitle></CardHeader>
       <CardContent>
+        <p className="mb-3 text-sm text-muted-foreground">已有等待在关闭或仅观察模式下仍可处理；24 小时未答复会停下任务。</p>
         {holdsError ? <div role="alert" className="space-y-2 text-sm text-destructive"><p>{holdsError}</p>
           <Button type="button" variant="outline" onClick={() => void readHolds()}>重试</Button></div>
           : holds === null ? <p role="status" className="text-sm text-muted-foreground">正在读取等待决定的花费…</p>
           : holds.length === 0 ? <p className="text-sm text-muted-foreground">没有等待决定的花费。</p>
           : <ul className="divide-y divide-border">{holds.map((hold) => <HoldDecision key={hold.id} hold={hold} onDecided={() => void readHolds()} />)}</ul>}
       </CardContent>
-    </Card>}
+    </Card>
     <Card>
       <CardHeader><CardTitle>今天已花与预留</CardTitle></CardHeader>
       <CardContent>

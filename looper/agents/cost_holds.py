@@ -15,6 +15,21 @@ _sender = None
 _dashboard_url = ''
 
 
+def needs_service():
+    """Keep existing decisions reachable after enforcement is switched off."""
+    from . import cost_guard, cost_guard_settings
+
+    return (cost_guard.current().holds_need_recovery
+            or cost_guard_settings.cached().mode is cost_guard_settings.Mode.ENFORCE)
+
+
+async def initialize(*, pool=None):
+    from . import cost_guard
+
+    cost_guard.current().holds_need_recovery = await (pool or get_pool()).fetchval(
+        "SELECT EXISTS (SELECT 1 FROM cost_holds WHERE state='pending' OR applied_at IS NULL)")
+
+
 def configure(platform=None, *, sender=None, dashboard_url=''):
     global _platform, _sender, _dashboard_url
     _platform, _sender, _dashboard_url = platform, sender, dashboard_url
@@ -26,9 +41,13 @@ def _value(value):
 
 async def create_hold(scope, ref, currency, limit, spent, reason='budget', *, task_id=None, estimate_usd=0,
                       platform=None, pool=None):
+    from . import cost_guard
+
     task_id = task_id or (ref if _value(scope) == 'task' else None)
     row, created = await store.create_hold(_value(scope), ref, _value(currency), limit, spent, reason,
                                             task_id=task_id, estimate_usd=estimate_usd, pool=pool)
+    # Keep recovery enabled until restart: clearing a cached flag on a tick can race a new hold commit.
+    cost_guard.current().holds_need_recovery = True
     runtime = platform or _platform
     if runtime is not None and task_id:
         task = getattr(getattr(runtime, 'task_router', None), '_tasks', {}).get(task_id)

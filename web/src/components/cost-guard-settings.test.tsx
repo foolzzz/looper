@@ -102,15 +102,15 @@ describe("花费观察", () => {
       (Array.from(container.querySelectorAll("button")).find((button) => button.textContent === label) as HTMLButtonElement).click();
     });
     await click("继续");
-    expect(decisions).toEqual([{ hold_id: 1, decision: "continue", new_limit_usd: 4, via: "dashboard" }]);
+    expect(decisions).toEqual([{ hold_id: 1, decision: "continue", new_limit_usd: 4 }]);
     expect(container.textContent).toContain("Raise the task cap to $4.00?");
     expect(container.textContent).toContain("C-1");
     await click("确认提高上限");
     expect(container.textContent).toContain("没有等待决定的花费");
   });
 
-  it("can stop a pending hold without silently raising its cap", async () => {
-    result = { ...result, mode: "enforce" };
+  it.each(["enforce", "observe", "off"])("can stop a pending hold in %s without raising its cap", async (mode) => {
+    result = { ...result, mode };
     holds = [{ id: 2, scope: "global_day", scope_ref: "today", currency: "equivalent_usd", limit_usd: 1,
       spent_usd: 1.5, state: "pending", created_at: "2026-11-20T08:00:00Z" }];
     needsConfirmation = true;
@@ -118,7 +118,7 @@ describe("花费观察", () => {
     await act(async () => (Array.from(container.querySelectorAll("button")).find((button) => button.textContent === "停") as HTMLButtonElement).click());
     expect(container.textContent).toContain("确认停下");
     await act(async () => (Array.from(container.querySelectorAll("button")).find((button) => button.textContent === "确认停下") as HTMLButtonElement).click());
-    expect(decisions).toEqual([{ hold_id: 2, decision: "stop", via: "dashboard" }]);
+    expect(decisions).toEqual([{ hold_id: 2, decision: "stop" }]);
     expect(container.textContent).toContain("没有等待决定的花费");
   });
 

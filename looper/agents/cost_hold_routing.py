@@ -5,7 +5,7 @@ from __future__ import annotations
 import re
 
 from ..db import cost_holds as store
-from . import cost_guard_settings as settings, cost_holds, gate_routing, operator_identity
+from . import cost_holds, gate_routing, operator_identity
 from .intent_routing import RouteResult
 from .message import is_lark
 
@@ -14,7 +14,7 @@ _STOP = re.compile(r"停(?: C-([1-9][0-9]{0,18}))?")
 
 
 async def route(envelope, *, platform):
-    if settings.cached().mode is not settings.Mode.ENFORCE:
+    if not cost_holds.needs_service():
         return None
     text = " ".join(str(envelope.payload.get('text') or '').split())
     continuing = _CONTINUE.fullmatch(text)
@@ -57,7 +57,7 @@ async def route(envelope, *, platform):
 
 async def before_intent(manager, envelope):
     """Keep both exact-reply routers inside the Manager's existing cancellable preparation step."""
-    if settings.cached().mode is settings.Mode.ENFORCE and manager.ops is not None:
+    if cost_holds.needs_service() and manager.ops is not None:
         result = await route(envelope, platform=manager.ops.platform)
         if result is not None:
             return result

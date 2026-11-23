@@ -75,6 +75,30 @@ def test_background_caps_remain_observation_only(monkeypatch):
     asyncio.run(check())
 
 
+def test_observe_does_not_create_empty_dispatch_queues(monkeypatch):
+    async def check():
+        g = setup_guard(monkeypatch)
+        g.config = Config(mode=Mode.OBSERVE)
+        assert await cg.before_run(launch=launch(), run_kind='worker', task_id='task-a') is not None
+        assert not g._queued
+    asyncio.run(check())
+
+
+@pytest.mark.parametrize('mode', [Mode.ENFORCE, Mode.OBSERVE])
+def test_task_end_releases_undelivered_dispatch_even_without_a_listener(monkeypatch, tmp_path, mode):
+    from looper.agents.tiers.task import TaskRouter
+
+    async def check():
+        g = setup_guard(monkeypatch)
+        result = await cg.task_gate('task-a', cg.RunKind.WORKER, launch(), reserve=True, step_id='one')
+        result.reservation.dispatch_task_id = 'task-a'
+        g.config = Config(mode=mode)
+        await TaskRouter(runtime_root=tmp_path)._task_ended('task-a', 'completed')
+        assert not g._pending
+        assert g._reserved[cg.BudgetScope.TASK, 'task-a', cg.Currency.PROVIDER] == 0
+    asyncio.run(check())
+
+
 @pytest.mark.provenance
 @pytest.mark.parametrize('mode', [Mode.OFF, Mode.OBSERVE])
 @pytest.mark.parametrize('cap,spent', [(None,0), (2,1), (2,2)])

@@ -29,7 +29,7 @@ HOLD = _object({"id": _INT, "scope": _STR, "scope_ref": _STR, "currency": _STR,
 _DECIDE = _object({"hold_id": {"type": "integer", "minimum": 1},
                    "decision": {"type": "string", "enum": ["continue", "stop"]},
                    "new_limit_usd": {"type": "number", "minimum": 0},
-                   "via": {"type": "string", "enum": ["dashboard", "api"]}},
+                   "via": {"type": "string", "enum": ["api"]}},
                   ["hold_id", "decision"], closed=True)
 RESULTS = {}
 OPERATIONS = (
@@ -40,6 +40,9 @@ OPERATIONS = (
     Operation("cost_guard.update", "POST", "/api/v1/cost_guard/update", "Configure cost guard admission.",
               "Configure cost guard admission. Off and observe preserve execution. Enforce holds task dispatches "
               "at task and global daily caps and refuses other senders' Manager turns; operator turns still pass. "
+              "Existing holds remain actionable in every mode. With a scope cap, subscription runs soft stop at "
+              "their reservation; no scope caps means no reservation soft stop. Fail counts reservations and "
+              "stops running Workers. Planner closing turns use actual admission. "
               "Background-role and schedule budget enforcement is not enabled. Null restores the default.",
               PATCH, VIEW, risk="high", confirms=True, operator_only=True,
               level=ActionLevel.INSIDE),  # changes only Looper's own admission settings
@@ -76,7 +79,13 @@ async def impact(server, operation, arguments, principal, headers):
         raise OpError(ErrorCode.INVALID, str(exc)) from None
     return ("Update cost guard settings? Enforce holds task dispatches at task and global daily caps and refuses "
             "other senders' Manager turns. Operator turns still pass with a daily notice. Off and observe do not "
-            "block runs or send hold questions; background-role and schedule budget enforcement remains inactive.")
+            "block new runs or send new hold questions; existing holds remain available for decisions and expire "
+            "after 24 hours in every mode. Subscription-priced runs soft stop at their reservation only when a cap "
+            "is set on their scope chain; no caps means no reservation soft stop. Reservations use a configured "
+            "run cap, or the 30-day role P95 with a floor ($0.50 for task/Manager roles, $0.05 for small background "
+            "roles); no samples use that floor. The task fail action counts spend and reservations and can fail earlier, "
+            "stopping running Workers. Planner closing turns (stopping, completed, failed) also check admission "
+            "and are refused only when admission refuses. Background-role and schedule budget enforcement remains inactive.")
 
 
 def _hold(row):
@@ -91,7 +100,7 @@ async def run(server, operation, arguments, principal, headers):
 
         try:
             row = await cost_holds.decide(arguments['hold_id'], arguments['decision'], arguments.get('new_limit_usd'),
-                via=arguments.get('via', 'api'), platform=Platform(bus=server._supervisor.bus,
+                via='api', platform=Platform(bus=server._supervisor.bus,
                                                                  task_router=server._task_router))
         except ValueError as exc:
             raise OpError(ErrorCode.INVALID, str(exc)) from None

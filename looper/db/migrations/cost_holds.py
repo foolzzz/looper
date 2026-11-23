@@ -3,8 +3,8 @@
 from . import OnlineStep
 
 name = "cost_holds"
-order = 1400
-pending_order = 1400
+order = 1430
+pending_order = 1430
 _TABLE_DDL = """
 CREATE TABLE IF NOT EXISTS cost_holds (
     id BIGSERIAL PRIMARY KEY,
@@ -29,7 +29,7 @@ _ASK_DDL = ("ALTER TABLE projects DROP CONSTRAINT IF EXISTS projects_task_budget
             "ADD CONSTRAINT projects_task_budget_action_check "
             "CHECK (task_budget_action IN ('wrap_up','fail','ask'))")
 fresh_ddl = _TABLE_DDL + _ASK_DDL + ';'
-online_order = 1400
+online_order = 1430
 online = (OnlineStep(name, 'cost_holds_online', validate=(('projects', 'projects_task_budget_action_check'),)),)
 
 

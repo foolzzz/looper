@@ -12,6 +12,13 @@ from tests.db_support import DSN, run_db, v1_api
 pytestmark = pytest.mark.skipif(not DSN, reason='LOOPER_TEST_DATABASE_URL is not set')
 
 
+@pytest.fixture(autouse=True)
+def isolated_guard(monkeypatch):
+    from looper.agents import cost_guard, cost_guard_settings
+
+    monkeypatch.setattr(cost_guard, '_guard', cost_guard.Guard(cost_guard_settings.Config()))
+
+
 async def seed(pool):
     await pool.execute("INSERT INTO projects(id,name,task_budget_usd) VALUES ('p-cost','Cost',2)")
     await pool.execute("INSERT INTO tasks(id,project_id,requirement,status) VALUES "
