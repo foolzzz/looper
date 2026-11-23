@@ -1013,6 +1013,10 @@ class ManagerOps:
             del self._pending[turn.chat_key]
             self._lapse(pending)
 
+    def has_confirmation(self, chat_key: tuple[str | None, str | None, str | None]) -> bool:
+        """A chat with pending confirmation needs its own user turn, including while it answers one."""
+        return chat_key in self._pending
+
     def asks_in(self, message_id: str) -> bool:
         """Whether a confirmation asked in the turn of ``message_id`` waits."""
         return any(pending.asked_in == message_id for pending in self._pending.values())

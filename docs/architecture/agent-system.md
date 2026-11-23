@@ -219,6 +219,30 @@ control because configuration is operator-only. Dashboard metric widgets are sep
 
   A scenario Manager never gets the section. Off, the prompt, the tool list and the process signature are what they
   were before. The section is composed per turn, so the prompt preview only notes it
+- **Mid-turn operator input** (`mid_turn_input.py`, `manager.mid_turn_input.enabled`, default off):
+  operator-only `mid_turn_input.get/update` operations control the switch (`enabled`; null restores off),
+  independently of delivery guard and `chat_settings`. The generated CLI exposes these operations; no chat
+  command or Manager tool changes the switch. On, the default Manager dispatches user messages even without
+  session routing. At most three plain-text operator messages join an operator's running user turn, only on a
+  runtime declaring `MID_TURN_INPUT` and a resident implementing the native input interface (currently the
+  non-hosted Claude Code resident). Both inputs must resolve to the operator; other sessions, API clients,
+  commands, gate/intent replies, attachments, quotes and chats with pending confirmations retain their queue
+  path. With routing off, merging also requires the same chat. Earlier queued messages keep their order.
+  Admission lets OS read callbacks and the output reader run, then rechecks before and after writing,
+  even when a short line's drain returns immediately. A failed or late write queues the message.
+  If a result arrives after the write, the resident process is retired before queue
+  fallback, so the old pipe cannot consume the addition beside its queued turn. It is neither reported as
+  merged nor settled with the original result. Unexpected admission failures are logged and retain the queue
+  path. The original tool binding stays in place. The final reply goes to
+  the original chat and each addition from another chat; same-chat web additions get a terminal acknowledgement,
+  while same-chat Lark/Telegram additions need no duplicate reply. Any participating chat can stop the turn.
+  Additions settle only after reply handoff; shutdown before handoff leaves them replayable. Explicit stop
+  follows the existing withdrawal rule and settles all associated messages immediately, preventing replay of
+  stopped work. Typed additions record `metadata.merged` (kind, message id, chat, receipt time), plus each
+  addition's ack and first-reply metrics when metrics are on. A failed resume carries accepted additions into
+  its retry even if the switch has since been turned off. Off, prompt/system text, tools, command and process
+  signature retain their main-baseline bytes, and later messages remain separate turns. Dashboard controls and
+  config-transfer support are not part of this change; operator API/CLI configuration is available now.
 - **Delivery guard policy** (`delivery_guard.py`, `manager.delivery_guard.enabled`, default off):
   the pure policy defines a user's delivery debt (`owed`, then `paid` on non-empty top-level text),
   exempts completion and autonomous turns, and permits at most two hidden follow-ups after a successful
