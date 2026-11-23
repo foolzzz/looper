@@ -1556,7 +1556,7 @@ class ManagerAgent:
                         token.phase = TurnPhase.PREPARING
                         token.failed_step = None
                         if prepared is not None:
-                            prepared = replace(prepared, run=RunState())
+                            prepared = replace(prepared, run=RunState(persona_scope=prepared.run.persona_scope))
             finally:
                 self._running_token = None
                 if self._lock_owner is token and not manager_budget.holds_lock(self._session_now(), token):
@@ -1819,16 +1819,16 @@ class ManagerAgent:
             turn_text = ask.message  # Looper's own message, without the sections before a user's
         else:
             attachments = chat_attachments.from_payload(envelope.payload.get("attachments"), self._runtime_root)
+            persona_scope = await token.step("build_user_message", manager_persona_context.scope(
+                self.agent_id, self._session_now().route, envelope,
+                shown=self._state_shown.lines if self._state_shown else ()))
             if self._stable_context:  # the sections go in the turn's state block (``_start_turn``)
-                persona_scope = await token.step("build_user_message", manager_persona_context.scope(
-                    self.agent_id, self._session_now().route, envelope,
-                    shown=self._state_shown.lines if self._state_shown else ()))
                 state = await token.step("build_user_message", self._sections(envelope, persona_scope=persona_scope))
             turn_text = await token.step("build_user_message", self._build_user_message(
                 ask.message, ask.note, channel=channel_line(envelope), envelope=envelope,
                 attachments=[*attachments, *(ask.quoted.attachments if ask.quoted else ())],
                 quoted=ask.quoted.quotes if ask.quoted else (), image_input=launch.runtime.image_input,
-                sections=state is None, turn=ask.turn))
+                sections=state is None, turn=ask.turn, persona_scope=persona_scope))
         return Prepared(
             envelope=envelope, turn=ask.turn, message=ask.message, note=ask.note, retried=ask.retried, system_prompt=system_prompt,
             launch=launch, prompt_file=prompt_file, signature=signature, switch=switch, turn_text=turn_text,
@@ -3525,8 +3525,9 @@ class ManagerAgent:
                                   envelope: MessageEnvelope | None = None, attachments: Sequence[Attachment] = (),
                                   quoted: Sequence[lark_quote.Quote] = (),
                                   image_input: ImageInput = ImageInput.NONE, sections: bool = True,
-                                  turn: Turn | None = None) -> str:
-        parts = await self._sections(envelope) if sections else []
+                                  turn: Turn | None = None,
+                                  persona_scope: manager_persona_context.Scope | None = None) -> str:
+        parts = await self._sections(envelope, persona_scope=persona_scope) if sections else []
         if note:
             parts += [note, ""]
         # The untrusted fence (``untrusted``): a chat message from someone other than the operator, its quotes and

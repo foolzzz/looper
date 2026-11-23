@@ -8,15 +8,106 @@ from types import SimpleNamespace
 import pytest
 
 from manager_mcp_stand_in import manager_endpoint, mcp_manager_claude
-from looper.agents import operator_identity, persona, session_routing
+from looper.agents import chat_settings, manager_persona_context, operator_identity, persona, session_routing
 from looper.agents.bus import MessageBus
 from looper.agents.managers_api import ManagerDefinition
 from looper.agents.message import MessageEnvelope, MessageType, channel_address
 from looper.agents.session_routing import SessionKind
 from looper.agents.tiers.manager import ManagerAgent, ManagerConfig
 from tests.db_support import DSN, run_db, v1_api
+from tests.test_manager_session_routing_db import _Resident
 
 pytestmark = pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
+
+
+@pytest.mark.parametrize("recovery", ["claude_start", "claude_stop", "switch_session", "empty_reply"])
+@pytest.mark.parametrize("stable", [False, True])
+@pytest.mark.parametrize("group", [True, False], ids=["group", "other-dm"])
+def test_shared_main_recovery_keeps_the_turn_persona_scope(monkeypatch, tmp_path, recovery, stable, group):
+    async def check(pool):
+        monkeypatch.setattr(session_routing, "_routing_enabled", False)
+        monkeypatch.setattr(chat_settings, "_delivery_guard_enabled", recovery == "empty_reply")
+        if stable:
+            await pool.execute("INSERT INTO system_settings (key,value) VALUES ('manager.stable_context','true')")
+        await persona.update({"name": "管家", "tone": "private-tone", "notes": "private-notes"})
+        await pool.executemany("INSERT INTO projects (id,name) VALUES ($1,$2)",
+                              [(f"p-{i}", f"project-{i}") for i in range(30)])
+        async def operator(_):
+            return "operator-test"
+        monkeypatch.setattr(operator_identity, "operator_sender_id", operator)
+        bus = MessageBus(runtime_root=tmp_path)
+        manager = ManagerAgent(config=ManagerConfig(work_dir=tmp_path), runtime_root=tmp_path)
+        manager._bus = bus
+        resident = _Resident("sess-main")
+        manager._claude = resident
+        own = MessageEnvelope.create(source=channel_address("web"), target=manager.agent_address,
+            message_type=MessageType.USER_MESSAGE,
+            payload={"text": "hello", "channel_context": {"session_id": "persona-chat"}})
+        outsider = MessageEnvelope.create(source=channel_address("lark"), target=manager.agent_address,
+            message_type=MessageType.USER_MESSAGE, payload={"text": "hello", "channel_context": {
+                "chat_id": "synthetic-group" if group else "synthetic-dm",
+                "chat_type": "group" if group else "p2p", "sender_id": "other-test"}})
+        try:
+            async with manager_endpoint(manager, bus, SimpleNamespace(has_planner=lambda _: False), tmp_path):
+                await manager._handle(own)
+                assert "  Notes: private-notes" in resident.turns[-1]
+                shown = manager._state_shown
+                scopes = []
+                start_turn = manager._start_turn
+                async def observe_scope(token, prepared):
+                    scopes.append(prepared.run.persona_scope)
+                    await start_turn(token, prepared)
+                monkeypatch.setattr(manager, "_start_turn", observe_scope)
+                attempts = 0
+                if recovery == "empty_reply":
+                    run_turn = resident.run_turn
+                    async def empty_then_reply(*args, **kwargs):
+                        nonlocal attempts
+                        attempts += 1
+                        turn = await run_turn(*args, **kwargs)
+                        if attempts < 3:
+                            turn.result_event["result"] = ""
+                        return turn
+                    monkeypatch.setattr(resident, "run_turn", empty_then_reply)
+                else:
+                    if recovery == "claude_start":
+                        await resident.stop()
+                        owner, method = resident, "start"
+                    elif recovery == "claude_stop":
+                        monkeypatch.setattr(resident, "stale", lambda _: resident.started)
+                        owner, method = manager, "_stop_replaced_session"
+                    else:
+                        manager._sessions["main"].session_runtime = "omp"
+                        manager._process = None  # no running predecessor needs a handoff
+                        owner, method = manager, "_switch_session"
+                    operation = getattr(owner, method)
+                    async def fail_once(*args, **kwargs):
+                        nonlocal attempts
+                        attempts += 1
+                        if attempts == 1:
+                            raise TimeoutError("synthetic startup failure")
+                        return await operation(*args, **kwargs)
+                    monkeypatch.setattr(owner, method, fail_once)
+                await manager._handle(outsider)
+                queue = bus.get_queue(outsider.source.agent_id)
+                sent = [queue.get_nowait() for _ in range(queue.qsize())]
+                replies = [item for item in sent if item.message_type is MessageType.AGENT_REPLY]
+                assert len(replies) == 1 and "error" not in replies[0].payload
+                assert attempts == (3 if recovery == "empty_reply" else 2)
+                assert len(resident.turns) == (4 if recovery == "empty_reply" else 2)
+                assert all(text not in "".join(resident.turns[1:])
+                           for text in ("Persona", "管家", "private-tone", "private-notes"))
+                assert "Projects:" in resident.turns[1]
+                assert manager._state_shown is shown
+                if stable:
+                    assert shown is not None
+                    assert any(line.startswith("Looper state (rev ") for line in resident.turns[1].splitlines())
+                assert scopes == [manager_persona_context.Scope.OMIT] * (3 if recovery == "empty_reply" else 2)
+        finally:
+            await manager.stop()
+            await bus.shutdown()
+
+    run_db(check, monkeypatch, timeout=40)
 
 
 @pytest.mark.parametrize("stable,cleared", [(False, False), (True, False), (True, True)])
