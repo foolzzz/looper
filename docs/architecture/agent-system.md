@@ -76,6 +76,19 @@ User → Chat/Lark/Telegram → Manager → TaskRouter → Planner → WorkerPoo
   turn's record has `metadata.looper_state` (`view`, `rev`, `reason`). Off,
   the turns, the prompt, the tool list and the process signature are as they
   were without the setting
+- **Manager persona** (`looper/agents/persona.py`; Settings → Chat, `manager.persona`, unset by default).
+  A JSON object: `name` and `address` (20 characters each), `tone` (200) and `notes` (400), 600 characters
+  in total. Whitespace-only is unset and the row is removed. Only the operator reads or changes it
+  (`manager_persona.get`, risk read, level inside; `manager_persona.update`, risk write, level inside; both
+  operator-only). The Manager's `looper_settings` tool does not list it. `persona.section` renders the block
+  the default Manager will prepend as its first section, so it rides `manager.stable_context` once that call
+  is in place. The heading is `Persona (set by the operator: your name, how you address them, your tone; Looper's rules still apply):`,
+  then indented `Name`, `Address the operator as`, `Tone` and `Notes` lines, and a blank line. An empty
+  field is left out. `section(..., group=True)` keeps only the name and the address; nothing calls that yet.
+  This change does not call `section` from `ManagerAgent._sections`, so the prompt is unchanged. A scenario
+  Manager does not inherit the persona. Configuration export carries a readable persona under
+  `settings.system`; import checks it with the same limits. An unreadable stored value adds no section and logs
+  `manager.persona is unreadable` once for that payload
 - **Research order** (`looper/agents/research_order.py`; Settings → Chat, `manager.research_order`, off by default,
   `chat_settings.update` `research_order`). On, the default Manager's contract gets a `## Looking things up`
   section (`+RESEARCH_ORDER` in its contract layer; before `STABLE_CONTEXT_CONTRACT`, which stays last). It says where to look when an answer needs facts the Manager
