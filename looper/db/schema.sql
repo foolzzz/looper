@@ -1266,12 +1266,41 @@ CREATE TABLE IF NOT EXISTS llm_records (
     -- of run it is (llm_records.RUN_KINDS; NULL on rows from before it, whose readers take it from their agent id).
     parent_record_id BIGINT REFERENCES llm_records(id) ON DELETE SET NULL,
     run_kind TEXT CHECK (run_kind IN ('manager', 'planner', 'worker', 'reviewer', 'processor', 'consult', 'advisor',
-                                      'advice_check', 'outbound_check'))
+                                      'advice_check', 'outbound_check')),
+    -- Why a failed run failed (failures.FailureClass and FailureCause, each cause with its own class), recorded while
+    -- engine.failure_typing is on; NULL for every other run.
+    failure_class TEXT,
+    failure_cause TEXT,
+    CONSTRAINT llm_records_failure_check CHECK ((failure_class IS NULL AND failure_cause IS NULL) OR
+        (failure_class IS NOT NULL AND failure_cause IS NOT NULL AND
+        (failure_class, failure_cause) IN (('quota', 'usage_limit'), ('quota', 'rate_limit'),
+            ('transient', 'connection_failed'), ('transient', 'provider_overloaded'), ('transient', 'start_timeout'),
+            ('environment', 'runtime_missing'), ('environment', 'login'), ('environment', 'tls'),
+            ('environment', 'profile'), ('judgment', 'timeout'), ('judgment', 'context'), ('judgment', 'budget'),
+            ('judgment', 'report'), ('judgment', 'unknown'))))
 );
 
 CREATE INDEX IF NOT EXISTS idx_llm_records_agent ON llm_records(agent_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_llm_records_task ON llm_records(task_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_llm_records_parent ON llm_records(parent_record_id) WHERE parent_record_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_llm_records_failures ON llm_records (created_at) WHERE failure_class IS NOT NULL;
+
+-- provider limit windows begin
+CREATE TABLE IF NOT EXISTS provider_limit_windows (
+    provider_id TEXT NOT NULL REFERENCES llm_providers(id) ON DELETE CASCADE,
+    window_name TEXT NOT NULL CHECK (window_name ~ '^[a-z0-9_]{1,40}$'),
+    status TEXT NOT NULL CHECK (status IN ('allowed', 'warning', 'rejected')),
+    utilization DOUBLE PRECISION CHECK (utilization BETWEEN 0 AND 1),
+    resets_at TIMESTAMPTZ,
+    window_minutes INTEGER CHECK (window_minutes > 0),
+    source TEXT NOT NULL CHECK (source IN ('claude_stream', 'codex_app_server', 'api_headers', 'proxy')),
+    record_id BIGINT REFERENCES llm_records(id) ON DELETE SET NULL,
+    observed_at TIMESTAMPTZ NOT NULL,
+    PRIMARY KEY (provider_id, window_name)
+);
+-- provider limit windows end
+CREATE INDEX IF NOT EXISTS idx_llm_records_provider_day
+    ON llm_records ((metadata->'profile'->'provider'->>'id'), created_at);
 
 -- The run's stream-json events, appended as they arrive.
 CREATE TABLE IF NOT EXISTS llm_record_events (
@@ -1873,6 +1902,30 @@ ALTER TABLE manager_events ADD COLUMN IF NOT EXISTS delivery_claim UUID;
 ALTER TABLE schedule_notifications ADD COLUMN IF NOT EXISTS manager_event_id BIGINT
     REFERENCES manager_events(id) ON DELETE SET NULL;
 -- manager events end
+-- The default Manager's group and other-sender direct-chat sessions (the main one stays in agent_sessions).
+-- manager sessions begin
+CREATE TABLE IF NOT EXISTS manager_sessions (
+    manager_id      TEXT NOT NULL REFERENCES managers(id) ON DELETE CASCADE,
+    session_key     TEXT NOT NULL,
+    kind            TEXT NOT NULL CHECK (kind IN ('group', 'dm')),
+    channel_id      TEXT NOT NULL,
+    chat            TEXT NOT NULL,
+    session_id      TEXT,
+    session_totals  JSONB NOT NULL DEFAULT '{}',
+    runtime_type    TEXT,
+    profile_id      TEXT,
+    provider_id     TEXT,
+    clean_start     BOOLEAN NOT NULL DEFAULT false,
+    pending_handoff TEXT,
+    context_tokens  INTEGER,
+    last_turn_cost_usd DOUBLE PRECISION,
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+    last_active_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (manager_id, session_key),
+    CONSTRAINT manager_sessions_key CHECK (session_key = kind || ':' || channel_id || ':' || chat)
+);
+CREATE INDEX IF NOT EXISTS idx_manager_sessions_active ON manager_sessions (manager_id, last_active_at DESC);
+-- manager sessions end
 -- A database that gets the column above later builds this index online (connection.py ``_ONLINE_STEPS``).
 CREATE INDEX IF NOT EXISTS idx_schedule_notifications_manager_event ON schedule_notifications (manager_event_id)
     WHERE manager_event_id IS NOT NULL;
@@ -2248,6 +2301,88 @@ ALTER TABLE intents ADD CONSTRAINT intents_dropped
     CHECK ((state = 'dropped') = (check_verdict IS NOT DISTINCT FROM 'drop')) NOT VALID;
 -- leads check end
 
+-- One row per proactive message. Metrics write the receipt directly; the delivery
+-- layer will own the single decision point. Its policy fields stay unset until
+-- that layer is connected. Keep this block as the one named migration.
+-- proactive deliveries begin
+CREATE TABLE IF NOT EXISTS proactive_deliveries (
+    id          BIGSERIAL PRIMARY KEY,
+    source      TEXT NOT NULL CHECK (source IN ('task_notice', 'completion', 'progress', 'gate', 'gate_reminder',
+                                                'subscription', 'intent', 'schedule', 'advisor_alert', 'autonomous',
+                                                'user_reminder')),
+    source_ref  TEXT,                 -- 任务、关卡、订阅运行、意图或定时任务运行的 id；管家自己说的话为空
+    manager_id  TEXT,
+    channel_id  TEXT NOT NULL,        -- 'web' 或机器人的渠道 id
+    chat        TEXT NOT NULL,        -- 飞书、Telegram 的会话 id；控制台的会话 id
+    external_id TEXT,                 -- 发送方知道时：平台消息 id
+    outcome     TEXT CHECK (outcome IN ('sent', 'rejected', 'unknown')),
+    dedupe_key  TEXT,
+    urgency     TEXT CHECK (urgency IN ('normal', 'blocking', 'user_set')),
+    chat_kind   TEXT NOT NULL CHECK (chat_kind IN ('direct', 'group')),
+    task_id     TEXT REFERENCES tasks(id) ON DELETE CASCADE,
+    step_id     TEXT,
+    schedule_id TEXT REFERENCES schedules(id) ON DELETE SET NULL,
+    decision    TEXT CHECK (decision IN ('send', 'merge', 'defer', 'digest', 'drop')),
+    reason      TEXT CHECK (reason IN ('silent', 'urgent', 'outside_active_hours', 'recent_reply',
+                                      'quiet_hours', 'daily_cap', 'within_limits', 'off')),
+    counted     BOOLEAN,
+    local_date  DATE,
+    digest_date DATE,
+    decided_at  TIMESTAMPTZ,
+    sent_at     TIMESTAMPTZ,
+    replied_at  TIMESTAMPTZ,
+    reply_match TEXT CHECK (reply_match IN ('quoted', 'next_message')),
+    CONSTRAINT proactive_deliveries_receipt CHECK ((sent_at IS NULL) = (outcome IS NULL)),
+    CONSTRAINT proactive_deliveries_reply CHECK ((replied_at IS NULL) = (reply_match IS NULL))
+);
+CREATE INDEX IF NOT EXISTS idx_proactive_deliveries_open
+    ON proactive_deliveries (channel_id, chat, sent_at DESC) WHERE replied_at IS NULL;
+CREATE INDEX IF NOT EXISTS idx_proactive_deliveries_sent ON proactive_deliveries (sent_at);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_proactive_deliveries_dedupe
+    ON proactive_deliveries (dedupe_key) WHERE dedupe_key IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_proactive_deliveries_counted
+    ON proactive_deliveries (channel_id, chat, local_date) WHERE counted;
+CREATE INDEX IF NOT EXISTS idx_proactive_deliveries_digest
+    ON proactive_deliveries (digest_date) WHERE decision = 'digest';
+CREATE INDEX IF NOT EXISTS idx_proactive_deliveries_task ON proactive_deliveries (task_id) WHERE task_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_proactive_deliveries_schedule
+    ON proactive_deliveries (schedule_id) WHERE schedule_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_proactive_deliveries_decided ON proactive_deliveries (decided_at);
+-- proactive deliveries end
+
+-- channel outbox begin
+CREATE TABLE IF NOT EXISTS channel_outbox (
+    id              BIGSERIAL PRIMARY KEY,
+    channel_id      TEXT NOT NULL,
+    idempotency_key TEXT NOT NULL CHECK (char_length(idempotency_key) BETWEEN 1 AND 50),
+    kind            TEXT NOT NULL CHECK (kind IN ('send', 'reply')),
+    chat            TEXT NOT NULL,
+    reply_to        TEXT,
+    body            JSONB NOT NULL CHECK (jsonb_typeof(body) = 'object'),  -- {"text": ...} or {"markdown": ...}
+    source          TEXT NOT NULL CHECK (source IN ('answer', 'notice', 'progress', 'post', 'notify')),
+    state           TEXT NOT NULL DEFAULT 'pending'
+                    CHECK (state IN ('pending', 'sending', 'sent', 'failed', 'uncertain')),
+    attempts        INTEGER NOT NULL DEFAULT 0,
+    next_attempt_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    error_class     TEXT CHECK (error_class IN ('rate_limited', 'rejected', 'transient', 'unknown')),
+    error           TEXT CHECK (char_length(error) <= 500),
+    external_id     TEXT,
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+    sent_at         TIMESTAMPTZ,
+    first_possible_at TIMESTAMPTZ,
+    claim_token     UUID,
+    UNIQUE (channel_id, idempotency_key),
+    CONSTRAINT channel_outbox_sent CHECK ((state = 'sent') = (sent_at IS NOT NULL))
+);
+CREATE INDEX IF NOT EXISTS idx_channel_outbox_due
+    ON channel_outbox (channel_id, chat, id) WHERE state IN ('pending', 'sending');
+CREATE INDEX IF NOT EXISTS idx_channel_outbox_created ON channel_outbox (created_at);
+ALTER TABLE channel_outbox ADD COLUMN IF NOT EXISTS first_possible_at TIMESTAMPTZ;
+ALTER TABLE channel_outbox ADD COLUMN IF NOT EXISTS claim_token UUID;
+-- Earlier versions did not record attempts separately from claims. Be conservative.
+UPDATE channel_outbox SET first_possible_at=created_at WHERE attempts>0 AND first_possible_at IS NULL;
+-- channel outbox end
+
 -- A window a subscription run did not use: the run is 'skipped' with why (skip_reason: a prompt hook blocked it, or
 -- the processor's reply could not be read when asked twice), and its cursor moves past it, since the same window
 -- would fail again with every run after it. A subscription whose runs keep skipping is alerted once (skip_alert_at,
@@ -2373,6 +2508,20 @@ CREATE TABLE IF NOT EXISTS card_actions (
 CREATE INDEX IF NOT EXISTS idx_card_actions_open ON card_actions (kind, manager_id, created_at)
     WHERE handled_at IS NULL;
 -- card actions end
+
+-- The operator's declarations of an MCP server's tools (the outbound-review RFC, section 6.2): a tool declared
+-- 'inside' acts only inside Looper and this machine, and the review lets its calls run unchecked; every other tool of
+-- a server other than Looper's own is reviewed. Declarations go with their server. connection.py applies this block
+-- to databases that predate it, so keep it between the markers and idempotent.
+-- mcp tool levels begin
+CREATE TABLE IF NOT EXISTS mcp_tool_levels (
+    item_id    TEXT NOT NULL REFERENCES library_items(id) ON DELETE CASCADE,
+    tool       TEXT NOT NULL CHECK (tool ~ '^[A-Za-z0-9_.-]{1,128}$'),
+    level      TEXT NOT NULL CHECK (level IN ('inside')),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (item_id, tool)
+);
+-- mcp tool levels end
 
 -- memory candidates begin
 -- What Looper may remember (memory-write-path RFC, section 4; memory-tiers RFC, section 4.1). A 'vault' row is staged

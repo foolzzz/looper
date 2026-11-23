@@ -7,6 +7,7 @@ import json
 import logging
 import re
 from collections.abc import AsyncIterator, Mapping
+from time import monotonic
 from typing import Any
 
 from ..claude_cli import iter_lines
@@ -71,12 +72,17 @@ def exec_events(method: str, params: Mapping[str, Any], usage: Mapping[str, Any]
                 "cache_write_input_tokens": totals.get("cacheWriteInputTokens", 0),
                 "output_tokens": totals.get("outputTokens", 0),
             }}]
+        error = turn.get("error") if isinstance(turn.get("error"), Mapping) else {}
         message = "the turn was interrupted" if turn.get("status") == "interrupted" \
-            else (turn["error"].get("message") if isinstance(turn.get("error"), Mapping) else None) or "the turn failed"
-        return [{"type": "turn.failed", "error": {"message": message}}]
+            else error.get("message") or "the turn failed"
+        # codexErrorInfo, when Codex gives one, types the failure (``failures.codex``).
+        info = {"codex_error_info": error["codexErrorInfo"]} if error.get("codexErrorInfo") is not None else {}
+        return [{"type": "turn.failed", "error": {"message": message, **info}}]
     if method == "error":
-        error = params.get("error")
-        return [{"type": "error", "message": error.get("message") if isinstance(error, Mapping) else None}]
+        error = params.get("error") if isinstance(params.get("error"), Mapping) else {}
+        info = {"codex_error_info": error["codexErrorInfo"], "will_retry": params.get("willRetry") is True} \
+            if error.get("codexErrorInfo") is not None else {}
+        return [{"type": "error", "message": error.get("message"), **info}]
     return []
 
 
@@ -152,6 +158,7 @@ class CodexChannel:
     async def _read_events(self, events: asyncio.Queue[dict[str, Any] | None]) -> None:
         assert self._process.stdout is not None
         usage: Mapping[str, Any] = {}
+        collect_limits, next_limit_check = False, 0.
         try:
             async for line in iter_lines(self._process.stdout):
                 try:
@@ -185,6 +192,19 @@ class CodexChannel:
                         events.put_nowait({"type": "system", "subtype": "codex_server_request", "method": method})
                         continue
                     params = params or {}
+                    if method == "account/rateLimits/updated":
+                        from .. import limit_signals
+
+                        now = monotonic()
+                        if now >= next_limit_check:
+                            try:
+                                collect_limits = await limit_signals.enabled()
+                            except Exception:
+                                collect_limits = False
+                                limit_signals._warn("setting", "could not read provider limit setting")
+                            next_limit_check = now + 5.
+                        if collect_limits:
+                            events.put_nowait({"type": limit_signals.CODEX_EVENT, "rateLimits": params.get("rateLimits")})
                     if method == "thread/tokenUsage/updated":
                         token_usage = params.get("tokenUsage")
                         total = token_usage.get("total") if isinstance(token_usage, dict) else None

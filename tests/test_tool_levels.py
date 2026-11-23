@@ -147,6 +147,22 @@ def _operations() -> dict[str, Any]:
 DECIDED_OPERATIONS: dict[str, ActionLevel] = {
     # Confirmation, including save-and-confirm, and retry can commit to the operator's vault.
     **dict.fromkeys(("memory.confirm", "memory.confirm_many", "memory.edit", "memory.retry"), MACHINE),
+    "providers.limits": INSIDE,  # reads stored quota windows and usage
+    "limit_signals_settings.get": INSIDE,  # reads Looper's collection switch
+    "limit_signals_settings.update": INSIDE,  # changes only Looper's collection switch
+    "session_routing.get": INSIDE,  # reads Looper's own session routing controls
+    "session_routing.update": INSIDE,  # stores session routing settings; sends no message
+    "outbound_gateway.get": INSIDE,  # reads Looper's own gateway settings
+    "outbound_gateway.update": INSIDE,  # stores gateway settings; sends no message
+    "memory.list": INSIDE,  # reads stored candidates
+    "memory.get": INSIDE,  # reads one stored candidate
+    "memory.settings_get": INSIDE,  # reads and validates Looper's memory settings
+    "memory.settings_put": INSIDE,  # stores settings; writes no vault files and sends nothing
+    "memory.check": INSIDE,  # checks prerequisites without changing files or sending messages
+    "outbound_review.get": INSIDE,  # reads Looper's own review setting
+    "outbound_review.update": INSIDE,  # changes Looper's own review setting
+    "mcp_tool_levels.get": INSIDE,  # reads stored MCP trust declarations
+    "mcp_tool_levels.put": INSIDE,  # stores MCP trust declarations; runs no MCP call
     "manager_chat_bindings.put": EXTERNAL,  # a bound chat's people talk to a Manager, which answers them there
     "intent_bindings.put": INSIDE,  # maps a chat to a project; sends nothing anywhere
     # toggles bound_chats_only; the admission it widens is chat_routing's operator-only refusal to guard
