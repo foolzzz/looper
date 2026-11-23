@@ -2584,6 +2584,13 @@ class PlannerAgent:
             await self._save(plan, step)
             await self._workspace_failed(plan, step, str(exc))
             return
+        if step.checks and self._execution.acceptance_checks is not AcceptanceChecksMode.OFF:
+            from ..acceptance_context import capture_baseline
+
+            baseline = await capture_baseline(
+                step.workspace.work_dir if step.isolated else plan.work_dir, step.retries + 1, step.result,
+                same_attempt=same_attempt, workspace_base=step.workspace.base_commit if step.isolated else None)
+            step.result = {**(step.result or {}), "acceptance_baseline": baseline.row()}
         await self._save(plan, step)
         await self._activity("phase", f"Worker dispatched{f' as {task_role.label}' if task_role else ''}: "
                                       f"{step.instruction[:80]}", worker=worker_id)
@@ -2889,6 +2896,10 @@ class PlannerAgent:
             return
 
         await self._record_profile_fallbacks(plan, step.role or "worker", result.get("fallback") or [], step)
+        if step.checks and self._execution.acceptance_checks is not AcceptanceChecksMode.OFF:
+            from ..acceptance_context import worker_result
+
+            result = worker_result(result, step.result, step.retries + 1)
         step.result = result
         if blocked := result.get("prompt_blocked"):
             step.status = "failed"
@@ -3264,6 +3275,21 @@ class PlannerAgent:
         report = [*report, *await self._room_lines(step)]
         # Saved with its result and the late messages, so a restart can take the decision again.
         await self._save(plan, step, entries=entries)
+        if (context.result is ResultKind.WORK and context.succeeded and step.checks
+                and self._execution.acceptance_checks is not AcceptanceChecksMode.OFF):
+            from ..acceptance_runner import run_step_checks
+            from ..acceptance_context import AcceptanceBaseline
+
+            baseline = AcceptanceBaseline.from_result(step.result, step.retries + 1)
+            try:
+                await run_step_checks(task_id=self._task_id, step_id=step.step_id, checks=step.checks,
+                    mode=self._execution.acceptance_checks, attempt=step.retries + 1, runtime_root=self._runtime_root,
+                    work_dir=Path(step.workspace.work_dir if step.isolated else plan.work_dir),
+                    base_commit=baseline.head_sha if baseline else None,
+                    runtime_paths=(*self._execution.link_paths, *(self._execution.verification_paths or ())))
+            except Exception:
+                logger.warning("planner %s could not collect acceptance evidence for %s", self._task_id, step.step_id)
+                await self._activity("error", f"Acceptance evidence unavailable for step {step.label}")
         for entry in entries:
             if entry.kind is JournalKind.VERIFICATION_ROUND:
                 await self._report_progress(plan, phase=Phase.VERIFICATION_ROUND,
@@ -5318,7 +5344,7 @@ class PlannerAgent:
                 f"- {step.label} [{step.status}] {_clip(step.instruction, 200)} "
                 f"(depends on: {deps}; review: {'yes' if step.review else 'no'}; retries: {step.retries}{roles})"
             ]
-            if step.checks:
+            if step.checks and self._execution.acceptance_checks is not AcceptanceChecksMode.OFF:
                 lines.append("  checks: " + json.dumps([check.row() for check in step.checks], ensure_ascii=False))
             summary = _clip((step.result or {}).get("summary"), 200) if step.status == "verified" else ""
             if summary:
@@ -6376,9 +6402,10 @@ class PlannerAgent:
             session = await db_agent_sessions.get_session(self.agent_id) or {}
             checks = {}
             if any("checks" in step for step in stored["steps"]):
-                project = await db_projects.get_task_project(self._task_id)
-                mode = ProjectExecution.from_row(project).acceptance_checks
-                checks = {step["id"]: parse_checks(step["checks"], len(step.get("acceptance_criteria") or []), mode)
+                # Existing definitions survive an operator disabling or restricting execution; the runner
+                # checks the current permission before starting anything.
+                checks = {step["id"]: parse_checks(step["checks"], len(step.get("acceptance_criteria") or []),
+                                                  AcceptanceChecksMode.NETWORK)
                           for step in stored["steps"] if "checks" in step}
         except Exception:
             logger.exception("planner %s cannot read its saved plan", self.agent_id)
