@@ -4,10 +4,10 @@ This stage implements the cost guard RFC's first PR: estimates, reservations,
 shared day boundaries, observation at every model-run entry point and a read-only
 operator view. Enforcement and notifications remain separate work.
 
-- The single targeted Python run passed **421 tests** with two xdist workers on
+- The review-fix targeted Python run passed **433 tests** with two xdist workers on
   a disposable PostgreSQL database. It included all four new cost guard test
   files, `test_api_v1_document.py` and `test_tool_levels.py`; no full suite or CI
-  rerun was requested. The database was dropped after validation.
+  run was triggered. The database was dropped after validation.
 - Three frontend tests passed; the frontend production build passed. Vite emitted
   its bundle-size advisory.
 - `looper serve` ran with a fresh database, a temporary runtime root, a separate
@@ -28,8 +28,22 @@ operator view. Enforcement and notifications remain separate work.
   for Manager, Planner and processor launches, including command and system
   prompt metadata. Those production files are unchanged in the later main
   revision `b773ef7bd` integrated before opening this PR.
-- This stage requires no migration. At implementation and final integration,
-  migration-registry PR #1527 was still open and main used inline migrations.
+- This stage requires no migration. The branch includes main's per-file
+  migration registry from #1527; it adds no schema or migration changes.
+
+Accounting failures in observe mode log a problem and let the outbound
+classifier run, including when the first rebuild fails repeatedly. Only an
+allow verdict with a successful audit permits the action; failure to persist
+an existing review reservation still blocks classification. Schedule daily-cap
+observations combine both currencies to match the existing scheduler cap;
+global daily caps remain separate. Schedule profile loading runs outside the
+admission lock.
+
+Remaining observation limitations: finishing an unreserved run updates counters
+on the next rebuild; schedule-only observations without a model record survive
+only in logs across restart; Manager ASK observations do not implement the
+operator-turn exception planned for enforcement. History rebuilds still hold
+the admission lock.
 
 The page shows mode and explicit caps first, separates real spend from
 subscription equivalents, and keeps running reservations beside actual spend.
