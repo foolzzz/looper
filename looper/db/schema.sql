@@ -2309,7 +2309,7 @@ CREATE TABLE IF NOT EXISTS proactive_deliveries (
     id          BIGSERIAL PRIMARY KEY,
     source      TEXT NOT NULL CHECK (source IN ('task_notice', 'completion', 'progress', 'gate', 'gate_reminder',
                                                 'subscription', 'intent', 'schedule', 'advisor_alert', 'autonomous',
-                                                'user_reminder', 'morning_brief')),
+                                                'user_reminder')),
     source_ref  TEXT,                 -- 任务、关卡、订阅运行、意图或定时任务运行的 id；管家自己说的话为空
     manager_id  TEXT,
     channel_id  TEXT NOT NULL,        -- 'web' 或机器人的渠道 id
@@ -2508,33 +2508,6 @@ CREATE TABLE IF NOT EXISTS card_actions (
 CREATE INDEX IF NOT EXISTS idx_card_actions_open ON card_actions (kind, manager_id, created_at)
     WHERE handled_at IS NULL;
 -- card actions end
-
--- Morning briefs (morning brief RFC): one row per local date and operator direct chat, or one skip row
--- (channel_id and chat empty) when no bot names an operator. sending is claimed and committed before the
--- channel is asked; sent went out; skipped had nothing to say; uncertain may have gone out and is never
--- sent again; failed is a refusal, retried while attempts is under the limit. Weekends write nothing.
--- connection.py applies this block to databases that predate it, so keep it between the markers and idempotent.
--- morning briefs begin
-CREATE TABLE IF NOT EXISTS morning_briefs (
-    local_date  DATE NOT NULL,
-    channel_id  TEXT NOT NULL DEFAULT '',
-    chat        TEXT NOT NULL DEFAULT '',
-    status      TEXT NOT NULL CHECK (status IN ('sending', 'sent', 'skipped', 'uncertain', 'failed')),
-    attempts    INTEGER NOT NULL DEFAULT 0 CHECK (attempts >= 0),
-    detail      TEXT CHECK (detail IS NULL OR char_length(detail) <= 500),
-    consumed_until TIMESTAMPTZ,       -- check time when this brief recorded the rows it read; not a watermark
-    read_ids    BIGINT[] NOT NULL DEFAULT '{}',  -- digest ids this claim's read returned; recovery consumes these
-    created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
-    updated_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
-    PRIMARY KEY (local_date, channel_id, chat)
-);
-ALTER TABLE morning_briefs ADD COLUMN IF NOT EXISTS consumed_until TIMESTAMPTZ;
-ALTER TABLE morning_briefs ADD COLUMN IF NOT EXISTS read_ids BIGINT[] NOT NULL DEFAULT '{}';
--- Digest rows a brief actually read. The next brief skips these ids. An uncommitted insert is not here.
-CREATE TABLE IF NOT EXISTS morning_brief_consumed (
-    delivery_id BIGINT PRIMARY KEY REFERENCES proactive_deliveries(id) ON DELETE CASCADE
-);
--- morning briefs end
 
 -- The operator's declarations of an MCP server's tools (the outbound-review RFC, section 6.2): a tool declared
 -- 'inside' acts only inside Looper and this machine, and the review lets its calls run unchecked; every other tool of
