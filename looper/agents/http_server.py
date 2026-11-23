@@ -153,7 +153,7 @@ V1_HEADERS = {"Cache-Control": "no-store"}
 # The Manager's tools (``ops.service``).
 AGENT_API = "/api/agent/v1/"
 _RE_AGENT_OP = re.compile(r"^/api/agent/v1/ops/([a-z_]{1,64})$")
-_RE_EVIDENCE = re.compile(r"^/api/evidence/([^/]+)/([^/]+)/([^/]+)$")
+_RE_EVIDENCE = re.compile(r"^/api/v1/evidence/([^/]+)/([^/]+)/([^/]+)$")
 # asyncpg rejects a run id outside signed 64-bit as a database error. Refuse it before querying.
 _INT64_MAX = 2**63 - 1
 
@@ -1038,7 +1038,7 @@ class AgentHTTPServer:
                               writer: asyncio.StreamWriter, headers: Mapping[str, str]) -> None:
         """Bytes of one stored artifact. The path is rebuilt from the run row, never from the URL.
 
-        The `/api/` gate accepts an operator bearer. Bytes need a browser session (`browser=True`),
+        The operator gate accepts an operator bearer. Bytes need a browser session (`browser=True`),
         so a token and an API client never receive them.
         """
         from . import acceptance_artifacts

@@ -115,8 +115,8 @@ describe("step evidence", () => {
     expect(html).toContain("…");
     expect(html).toContain("&lt;script&gt;alert(1)&lt;/script&gt;");
     expect(html).not.toContain("<script>");
-    expect(html).toContain('src="/api/evidence/t1/1/0"');
-    expect(html).toContain('href="/api/evidence/t1/2/0"');
+    expect(html).toContain('src="/api/v1/evidence/t1/1/0"');
+    expect(html).toContain('href="/api/v1/evidence/t1/2/0"');
     expect(html).toContain(">2.txt<");
     expect(html).toContain("Protected paths changed");
     expect(html).toContain("secrets.env");
@@ -235,7 +235,7 @@ describe("evidence targets", () => {
     const download = [...host.querySelectorAll("a")].find((link) => link.textContent === "2.txt");
     expect(download?.className).toContain("pointer-coarse:min-h-11");
     const image = host.querySelector("img");
-    expect(image?.closest("a")?.getAttribute("href")).toBe("/api/evidence/t1/1/0");
+    expect(image?.closest("a")?.getAttribute("href")).toBe("/api/v1/evidence/t1/1/0");
     expect(image?.closest("a")?.getAttribute("target")).toBe("_blank");
     const line = document.createElement("div");
     line.innerHTML = renderToStaticMarkup(<FailedChecksLine taskId="t1" checks={["c1"]} stepId="step-a" />);

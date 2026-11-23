@@ -129,7 +129,7 @@ export function stepsNeedEvidence(steps: readonly { checks?: readonly unknown[] 
 }
 
 export function artifactHref(taskId: string, runId: number, index: number): string {
-  return `/api/evidence/${encodeURIComponent(taskId)}/${runId}/${index}`;
+  return `/api/v1/evidence/${encodeURIComponent(taskId)}/${runId}/${index}`;
 }
 
 function runView(run: EvidenceRun, taskId: string): EvidenceRunView {

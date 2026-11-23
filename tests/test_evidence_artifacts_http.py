@@ -99,8 +99,8 @@ def _headers(status: int, fields: dict[str, str], body: bytes, *, mime: str, dis
 def test_operator_session_serves_bytes_and_other_callers_get_none(tmp_path: Path, monkeypatch) -> None:
     async def test(pool) -> None:
         server, run_id = await _stored(pool, tmp_path)
-        image = f"GET /api/evidence/task-art/{run_id}/0"
-        note = f"GET /api/evidence/task-art/{run_id}/1"
+        image = f"GET /api/v1/evidence/task-art/{run_id}/0"
+        note = f"GET /api/v1/evidence/task-art/{run_id}/1"
 
         status, fields, body = await _exchange(server, image, _cookie(server))
         _headers(status, fields, body, mime="image/png", disposition="inline")
@@ -131,33 +131,33 @@ def test_traversal_symlink_and_a_missing_file_return_no_bytes(tmp_path: Path, mo
         png = next((tmp_path / "evidence").rglob("1.png"))
         note = next((tmp_path / "evidence").rglob("2.txt"))
         png.unlink()
-        status, _, body = await _exchange(server, f"GET /api/evidence/task-art/{run_id}/0", cookie)
+        status, _, body = await _exchange(server, f"GET /api/v1/evidence/task-art/{run_id}/0", cookie)
         assert status == 404 and json.loads(body) == {"error": "file missing"}
 
         note.unlink()
         note.symlink_to(tmp_path / "secret.txt")
-        status, _, body = await _exchange(server, f"GET /api/evidence/task-art/{run_id}/1", cookie)
+        status, _, body = await _exchange(server, f"GET /api/v1/evidence/task-art/{run_id}/1", cookie)
         assert status == 404 and json.loads(body) == {"error": "not found"} and SECRET not in body
 
         await pool.execute(
             "UPDATE step_check_runs SET artifacts = $2::jsonb WHERE id = $1", run_id,
             json.dumps([{"name": "../secret.txt", "mime": "text/plain", "bytes": 3, "sha256": "aa"}]))
-        status, fields, body = await _exchange(server, f"GET /api/evidence/task-art/{run_id}/0", cookie)
+        status, fields, body = await _exchange(server, f"GET /api/v1/evidence/task-art/{run_id}/0", cookie)
         assert status == 404 and json.loads(body) == {"error": "not found"} and SECRET not in body
         assert "x-injected" not in fields
 
         await pool.execute(
             "UPDATE step_check_runs SET artifacts = $2::jsonb WHERE id = $1", run_id,
             json.dumps([{"name": "1.txt", "mime": "text/plain\r\nX-Injected: yes", "bytes": 3, "sha256": "aa"}]))
-        status, fields, body = await _exchange(server, f"GET /api/evidence/task-art/{run_id}/0", cookie)
+        status, fields, body = await _exchange(server, f"GET /api/v1/evidence/task-art/{run_id}/0", cookie)
         assert status == 404 and json.loads(body) == {"error": "file missing"}
         assert "x-injected" not in fields and b"X-Injected" not in body and SECRET not in body
 
         for line in (
-            "GET /api/evidence/../secret.txt/1/0",
-            "GET /api/evidence/%2e%2e/1/0",
-            f"GET /api/evidence/task-art/{run_id}/..",
-            "GET /api/evidence/task-art/not-a-run/0",
+            "GET /api/v1/evidence/../secret.txt/1/0",
+            "GET /api/v1/evidence/%2e%2e/1/0",
+            f"GET /api/v1/evidence/task-art/{run_id}/..",
+            "GET /api/v1/evidence/task-art/not-a-run/0",
         ):
             status, _, body = await _exchange(server, line, cookie)
             assert status == 404 and json.loads(body) == {"error": "not found"} and SECRET not in body
@@ -177,10 +177,10 @@ def test_a_run_id_past_int64_is_not_found_before_the_query(tmp_path: Path, monke
             return await original(run_key, task_id, **kwargs)
 
         monkeypatch.setattr(runs, "get_run", spy)
-        status, _, body = await _exchange(server, "GET /api/evidence/task-art/9223372036854775808/0", cookie)
+        status, _, body = await _exchange(server, "GET /api/v1/evidence/task-art/9223372036854775808/0", cookie)
         assert status == 404 and json.loads(body) == {"error": "not found"} and seen == []
 
-        status, _, body = await _exchange(server, f"GET /api/evidence/task-art/{2**63 - 1}/0", cookie)
+        status, _, body = await _exchange(server, f"GET /api/v1/evidence/task-art/{2**63 - 1}/0", cookie)
         assert status == 404 and json.loads(body) == {"error": "not found"} and seen == [2**63 - 1]
         assert run_id != 2**63 - 1
 
@@ -197,11 +197,11 @@ def test_a_row_claiming_html_or_svg_is_served_as_its_stored_name(tmp_path: Path,
                 {"name": "1.png", "mime": "text/html", "bytes": 3, "sha256": "aa"},
                 {"name": "2.txt", "mime": "image/svg+xml", "bytes": 3, "sha256": "bb"},
             ]))
-        status, fields, body = await _exchange(server, f"GET /api/evidence/task-art/{run_id}/0", cookie)
+        status, fields, body = await _exchange(server, f"GET /api/v1/evidence/task-art/{run_id}/0", cookie)
         _headers(status, fields, body, mime="image/png", disposition="inline")
         assert body == PNG and "text/html" not in fields["content-type"]
 
-        status, fields, body = await _exchange(server, f"GET /api/evidence/task-art/{run_id}/1", cookie)
+        status, fields, body = await _exchange(server, f"GET /api/v1/evidence/task-art/{run_id}/1", cookie)
         _headers(status, fields, body, mime="text/plain", disposition='attachment; filename="2.txt"')
         assert body == TEXT and fields["content-type"] != "image/svg+xml"
         assert "svg" not in fields["content-type"]

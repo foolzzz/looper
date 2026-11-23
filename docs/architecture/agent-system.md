@@ -3254,9 +3254,10 @@ accepts `task` and optional `step`, returning definitions and all evidence attem
 including history retained after disabling checks. It returns no artifact bytes and
 no storage path. No evidence tool is added to the Manager or Planner.
 
-`GET /api/evidence/<task_id>/<run_id>/<index>` returns one artifact's bytes. The
-`/api/` operator gate runs first; the handler then requires an operator browser
-session, so a bearer token and an API client are refused. The file path is rebuilt
+`GET /api/v1/evidence/<task_id>/<run_id>/<index>` returns one artifact's bytes.
+This prefix uses the operator gate, ahead of the `/api/v1/` client API. The handler
+then requires an operator browser session, so a bearer token and an API client are
+refused. The file path is rebuilt
 from the run row that belongs to that task. The URL supplies the task, the run id
 and the artifact index, not a path. The content type is the extension of the stored
 name: `image/png`, `image/jpeg`, `image/webp`, `image/gif`, `text/plain` or
