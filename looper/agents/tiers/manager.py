@@ -1596,6 +1596,7 @@ class ManagerAgent:
                             prepared = replace(prepared, run=RunState(persona_scope=prepared.run.persona_scope))
             finally:
                 self._running_token = None
+                turn_metrics.note_lock_end(self._session_now(), token, TurnOrigin.USER)
                 if self._lock_owner is token and not manager_budget.holds_lock(self._session_now(), token):
                     self._lock_owner = None
                     self._turn_lock.release()
@@ -1746,6 +1747,9 @@ class ManagerAgent:
             stopped_note, self._stopped_notes = "\n".join(self._stopped_notes), []
             # Turns run one at a time; a stop while this one waits for its turn ends it.
             await token.step("turn_lock", self._turn_lock.acquire())
+            if token.times is not None:
+                token.times.queued_behind = turn_metrics.queued_behind(
+                    self._session_now(), token.times.received_at)
             self._lock_owner = token
             waiting = (self.ops.begin_turn(turn, binding=token.binding, session_key=self._session_now().key)
                        if self.ops is not None else "")
@@ -2481,6 +2485,7 @@ class ManagerAgent:
         self._late_turns.add(run)
         run.add_done_callback(self._late_turns.discard)
         if self._lock_owner is token:
+            turn_metrics.note_lock_end(self._session_now(), token, TurnOrigin.COMPLETION)
             self._lock_owner = None
             self._turn_lock.release()
         if self._running_token is token:
@@ -2538,6 +2543,7 @@ class ManagerAgent:
         finally:
             if self._running_token is token:  # (a turn let go of past its deadline: another may run by now)
                 self._running_token = None
+            turn_metrics.note_lock_end(self._session_now(), token, TurnOrigin.COMPLETION)
             if self._lock_owner is token and not manager_budget.holds_lock(self._session_now(), token):
                 self._lock_owner = None
                 self._turn_lock.release()

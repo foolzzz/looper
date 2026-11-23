@@ -9,6 +9,7 @@ from .agent_settings import (
     SPAWN_ROLES, AgentType, Launch, index_layers, profile_problem, resolve, system_prompt_mode_choice,
 )
 from .knowledge import AgentKnowledge, SourceKind, StoredSet, _entry, clipped_index
+from .project_execution import ProjectExecution
 from .profile_registry import AgentProfile, ResolvedAgentProfile, RegistryError, RegistryNotFound
 from .system_prompt import work_contract, REVIEW_CONTRACT, build_system_prompt, is_recommended
 
@@ -118,8 +119,13 @@ async def preview(profile_id: str, role: str, project_id: str | None = None) -> 
     elif agent is AgentType.PLANNER:
         from .tiers.planner_protocol import reply_contract
 
-        contract_name, contract = "REPLY_CONTRACT", reply_contract()
-        notes.append("Planner contract uses default arguments; task-specific tools and options are added at launch.")
+        mode = ProjectExecution.from_row(project).acceptance_checks
+        contract_name, contract = "REPLY_CONTRACT", reply_contract(acceptance_checks=mode)
+        if project and mode.value != "off":
+            notes.append("Planner contract uses the project's acceptance check permission; other task-specific "
+                         "tools and options are added at launch.")
+        else:
+            notes.append("Planner contract uses default arguments; task-specific tools and options are added at launch.")
     elif agent is AgentType.REVIEWER:
         contract_name, contract = "REVIEW_CONTRACT", REVIEW_CONTRACT
     else:

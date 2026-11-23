@@ -1516,12 +1516,14 @@ class ClaudeRunRecorder:
         run_kind: str | None = None,
         parent_record_id: int | None = None,
         keep_output: bool = True,
+        schedule_id: str | None = None,
         spend: RunSpend | None = None,
     ) -> None:
         self._agent_id = agent_id
         # What kind of run it is (None: what its agent id says) and the run that started it (``llm_records``).
         self._run_kind = run_kind
         self._parent_record_id = parent_record_id
+        self._schedule_id = schedule_id
         # What the record keeps of each event: the event to store, or None for nothing (None: each one but usage
         # and partial deltas, whole); every event is still counted.
         self._keep = keep
@@ -1614,8 +1616,15 @@ class ClaudeRunRecorder:
 
     async def start(self) -> None:
         from ..db import llm_records
+        from . import cost_guard
         from .runtimes.instructions import record as instructions_record
 
+        role = getattr(self._launch, "role", None)
+        kind = self._run_kind or ("consult" if getattr(self._launch, "consult", False) else
+                                 role.value if role is not None else llm_records.run_kind_of(self._agent_id))
+        # Review reservations must persist before classification; recorder errors must not swallow this boundary.
+        reservation = await cost_guard.before_run(launch=self._launch, run_kind=kind, task_id=self._task_id,
+                                                  schedule_id=self._schedule_id)
         self._track(datetime.now(timezone.utc))
         try:
             self._record_id = await llm_records.start_record(
@@ -1642,6 +1651,7 @@ class ClaudeRunRecorder:
                     **({"pid": self._pid} if self._pid is not None else {}),
                     # A turn Claude ran on its own, answering no user message (input_text says so too).
                     **({"autonomous": True} if self._autonomous else {}),
+                    **(reservation.metadata() if reservation is not None else {}),
                 },
             )
             from .llmrec import LlmrecRoute
@@ -1651,6 +1661,17 @@ class ClaudeRunRecorder:
                 bind(self._launch.llmrec.id, self._record_id)
         except Exception:
             logger.warning("could not open llm record for %s", self._agent_id, exc_info=True)
+            if reservation is not None:
+                await cost_guard.abandon(reservation)
+                if kind == "outbound_check":
+                    raise RuntimeError("the review reservation could not be recorded") from None
+        except BaseException:
+            if reservation is not None:
+                await cost_guard.abandon(reservation)
+            raise
+        else:
+            if reservation is not None:
+                await cost_guard.bind(reservation, self._record_id)
 
     async def __aenter__(self) -> ClaudeRunRecorder:
         if not self._resumed:
@@ -2026,6 +2047,10 @@ class ClaudeRunRecorder:
             logger.warning("could not close llm record for %s; trying again", self._agent_id, exc_info=True)
             await asyncio.sleep(_CLOSE_RETRY_SEC)
             await llm_records.finish_record(self._record_id, **fields)
+        from . import cost_guard
+
+        await cost_guard.finish(self._record_id, cost_usd=fields.get("cost_usd"),
+                                cost_source=fields.get("cost_source"))
 
     def _closed_write(self, write: asyncio.Task[None]) -> None:
         _closing.discard(write)

@@ -29,6 +29,7 @@ class OutputKind(StrEnum):
     PUSH = "push"
     LEADS = "leads"
     INTENTS = "intents"
+    TRIAGE = "triage"
 
 
 class SearchMode(StrEnum):

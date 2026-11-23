@@ -30,10 +30,12 @@ EXECUTION = {
     "distill_lessons": {"type": "string", "enum": ["off", "draft", "write"]},
 }
 assert set(EXECUTION) == set(FIELDS)
+ACCEPTANCE_CHECKS = {"type": "string", "enum": ["local", "network"]}
 PROJECT = _object({"project_id": _STR, "name": _STR, "description": _STR, "work_dir": _STR,
     "default_workflow": _NULL_STR,
     "background": _STR, "created_at": _STR, "updated_at": _STR,
     "task_count": _INT, "active_count": _INT, "schedule_count": _INT, **EXECUTION})
+PROJECT["properties"]["acceptance_checks"] = ACCEPTANCE_CHECKS
 INPUT_EXECUTION = {}
 for field, schema in EXECUTION.items():
     if field in ("task_budget_usd", "room_consult_budget_usd"):
@@ -55,7 +57,7 @@ MOVED = _object({"project": PROJECT, "old_dir": _STR, "new_dir": _STR, "link_old
     "notes": _object({"moved": _BOOL, "from": _STR, "to": _STR, "reason": _STR}, required=("moved",))})
 # The Manager's compact project leaves out the advisor's settings while the project's advisor is off (the advisor
 # RFC, section 13: what the model sees stays as it was).
-COMPACT_PROJECT = _object(PROJECT["properties"], [name for name in PROJECT["properties"] if name not in ADVISOR_FIELDS])
+COMPACT_PROJECT = _object(PROJECT["properties"], [name for name in PROJECT["properties"] if name not in (*ADVISOR_FIELDS, "acceptance_checks")])
 COMPACT_PROJECT_RESULT = _object({"project": COMPACT_PROJECT})
 COMPACT_MOVED = {**MOVED, "properties": {**MOVED["properties"], "project": COMPACT_PROJECT}}
 MOVE_PREVIEW = _object({"old_dir": _STR, "new_dir": _STR, "impact": _STR, "move_version": _STR})
