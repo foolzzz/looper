@@ -67,9 +67,14 @@ class _Stale(_Session):
         return self.started
 
 
-def _setup(name: str, manager: ManagerAgent, session: _Session, agent_db: Any) -> _Session:
+def _setup(name: str, manager: ManagerAgent, session: _Session, agent_db: Any,
+           monkeypatch: pytest.MonkeyPatch) -> _Session:
     """The state in which a turn reaches the step ``name``."""
     match name:
+        case "resident_admission":  # only with session routing on
+            from looper.agents import session_routing
+
+            monkeypatch.setattr(session_routing, "_routing_enabled", True)
         case "tool_listing" | "outbound_review":  # a Manager without ops reads neither
             _with_ops(manager)
         case "switch_session":
@@ -95,7 +100,7 @@ def test_a_stop_at_each_preparation_step(name: str, agent_db: Any, monkeypatch: 
         with tempfile.TemporaryDirectory() as tmp:
             session = _Session(hold=False)
             manager, bus, queue = _manager(Path(tmp), session)
-            _setup(name, manager, session, agent_db)
+            _setup(name, manager, session, agent_db, monkeypatch)
             hold = hold_at(monkeypatch, name)
             envelope = _web("/todo" if name == "attention_enabled" else "你好")  # only /todo reads that setting
             if name == "read_quote":  # only a message that quotes another reads it

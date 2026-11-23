@@ -18,12 +18,37 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.15.25] - 2026-11-22
+
+### Added
+
+- **Failed channel starts are retried, and a sustained outage is reported. On by default.** ([#1550](https://github.com/foolzzz/looper/pull/1550)) A failed startup probe used to leave the channel down until the next service restart. Transport failures wait 30 seconds, doubling up to 10 minutes; a credential or configuration failure waits 10 minutes. After more than `channels.down_alert_minutes` (default 10), a bot that is not running, or whose deliveries have all failed, raises `channel_down:<channel_id>` and one alert through another healthy bot that has an operator id, then one recovery notice. Only the operator can call `channel_down_alert.get` and `channel_down_alert.update`. A positive whole number of minutes sets the threshold; `null` restores 10. There is no switch that turns the retry or the alert off.
+- **Proactive delivery, off by default.** ([#1486](https://github.com/foolzzz/looper/pull/1486)) `delivery.enabled` must be the string `true`. Only the operator can call `proactive_delivery.get` and `proactive_delivery.update`. While it is on, a gate reminder is decided and still sent: a reminder is `blocking`, so quiet hours and the daily cap do not hold it. No other send point asks. The decision is written on the message's `proactive_deliveries` row. This pull request adds no table.
+- **Manager metrics, off by default.** ([#1488](https://github.com/foolzzz/looper/pull/1488), [#1509](https://github.com/foolzzz/looper/pull/1509)) `manager.metrics.enabled` must be the string `true`. Only the operator can call `manager_metrics_settings.get`, `manager_metrics_settings.update` and `manager_metrics.get`. While it is on, a user turn records `metadata.turn_metrics` and a proactive send records a receipt. Settings → Chat saves the checkbox 「记录管家体验指标」 through that update. The dashboard home reads the summary every 60 seconds and, while the switch is off, shows only that metrics are off.
+- **Turn context, off by default.** ([#1497](https://github.com/foolzzz/looper/pull/1497)) `manager.turn_context.enabled` must be the string `true`. Only the operator can call `turn_context_settings.get` and `turn_context_settings.update`, which also store `user.timezone` and `user.reply_language`. Saving them changes no prompt, tool list or authorization: the Manager does not inject the block or set `Turn.speaker`.
+- **One-time reminders, off by default.** ([#1505](https://github.com/foolzzz/looper/pull/1505)) `reminders.enabled` must be the string `true`. There is no dashboard switch and no HTTP write of that setting. While it is on, the default Manager lists `looper_reminder_create`, `looper_reminder_list` and `looper_reminder_cancel` on the operator's own turns, and code sends the user's words back to that direct chat. The system prompt is unchanged.
+- **Card buttons, off by default.** ([#1489](https://github.com/foolzzz/looper/pull/1489)) `cards.actions.enabled` must be the string `true`. There is no dashboard switch and no HTTP write of that setting. While it is on, a high-risk confirmation is stored and, on `lark_bot` and Telegram, the reply carries 确认 / 取消; a gate that asks for an answer is a card. The web chat and the lark-cli channel stay text.
+
+### Changed
+
+- **Each session keeps its own lifecycle lock, research sources and last settings.** ([#1516](https://github.com/foolzzz/looper/pull/1516)) With only `main`, prompts, tool lists, command lines and channel behavior are unchanged. `group_isolation` reports the shared session.
+- **Pull-request tests run in six shards.** ([#1536](https://github.com/foolzzz/looper/pull/1536)) The per-shard limit stays 20 minutes. A pull request whose diff is only documentation skips the test steps and still reports the required checks successful. Installed Looper is unchanged.
+
+### Fixed
+
+- **The reminder dialog no longer depends on the clock.** ([#1534](https://github.com/foolzzz/looper/pull/1534)) The eval freezes its fake tools at 2026-11-22 12:00 UTC. Production prompts, tools and reminder delivery are unchanged.
+
+### Documentation
+
+- Event triage ([#1511](https://github.com/foolzzz/looper/pull/1511)), executable acceptance ([#1520](https://github.com/foolzzz/looper/pull/1520)), task metrics and evaluation ([#1523](https://github.com/foolzzz/looper/pull/1523)), platform sub-agents ([#1522](https://github.com/foolzzz/looper/pull/1522)) and browser and computer use ([#1525](https://github.com/foolzzz/looper/pull/1525)). None of these is implemented. The v2.15.24 addendum ([#1524](https://github.com/foolzzz/looper/pull/1524)) only records pulls already on that tag.
+
 ## [2.15.24] - 2026-11-20
 
 ### Added
 
 - **Needs you, off by default.** ([#1485](https://github.com/foolzzz/looper/pull/1485)) `attention.enabled` must be `true`. No row, or any other value, leaves it off. While it is on, one read-only summary lists user gates, in-memory confirmations, failing schedules, failing logins, pending intents, ledger items that wait for the user, and `uncertain` deliveries of the last 72 hours. The dashboard page is `#todo`. `/todo` is answered by code, only in the operator's own turns. There is no dashboard switch.
 - **Delivery guard setting, off by default.** ([#1496](https://github.com/foolzzz/looper/pull/1496)) `manager.delivery_guard.enabled` must be the string `true`. Only the operator can call `delivery_guard.get` and `delivery_guard.update`. Storing `true` changes no Manager prompt, tool list, reply, record or channel call: the guard is not wired into a turn. Claude Code declares `mid_turn_input`; nothing in this release injects mid-turn input.
+- **Session budget, off by default.** ([#1506](https://github.com/foolzzz/looper/pull/1506)) `manager.turn_budget_usd` must be a positive finite number of US dollars. No row, or a stored value that is not one, leaves it off. Only the operator can call `session_budget.get` and `session_budget.update`. The update is high risk and the operator's call applies at once. `null` deletes the row. Storing a budget changes no Manager prompt, tool list, reply, record or command line: `decide`, `turn_cap` and `over_cap_reply` are not called from a turn. `recommended_usd` is 4.00. There is no dashboard switch.
 
 ### Changed
 
@@ -31,6 +56,10 @@ How the agent system works today is described in
 - **Each operator-only Manager tool refuses in its own words.** ([#1507](https://github.com/foolzzz/looper/pull/1507)) `looper_leads_search` keeps `message leads are searched only in the user's own direct chat or on the dashboard`. `looper_vault_search` and `looper_vault_read` used that same sentence. They now answer `the user's knowledge vault is searched and read only in their own direct chat or on the dashboard`.
 - **An unfinished online index step keeps an index only when it is valid and has the same definition.** ([#1485](https://github.com/foolzzz/looper/pull/1485)) An INVALID index, or a valid index whose definition differs, is dropped and built again. The new partial indexes of `uncertain` deliveries are built by `uncertain_deliveries_online`.
 - **The Manager's session state lives in one `ManagerSession`.** ([#1495](https://github.com/foolzzz/looper/pull/1495)) The only session is `main`. Prompts, tool lists, command lines and channel behavior are unchanged.
+- **Outbound reviews, advisor rounds and leads checks share one tool-less typed call.** ([#1503](https://github.com/foolzzz/looper/pull/1503)) `model_call.call` returns `CallOk` or `CallFailed` and keeps the run's record, cost, latency and model. The only backend is the existing Agent Profile CLI path. Prompts, launch flags, decisions, counts, retries and cost booking are unchanged. There is no new setting. Subscription and extraction processor runs do not use it.
+- **The Manager reads the session id and the binding file from the session.** ([#1512](https://github.com/foolzzz/looper/pull/1512)) `_prepare_turn` passes that session on `Prepared.session`. `turn_file_for` returns main's existing turn file; any other key is refused. With only `main`, prompts, tool lists, command lines, the binding file's bytes and channel behavior are unchanged.
+- **Every Looper tool and v1 operation declares where it reaches.** ([#1498](https://github.com/foolzzz/looper/pull/1498)) Levels live in `ops/levels.py` and on `Operation` (`manager_chat_bindings.put` is `external`; `schedule_admin.create`, `update`, `run` and `confirm_target` follow the schedule). They are not in the OpenAPI document. Nothing in a turn or an HTTP handler reads them.
+- **Approved assistant-experience baselines.** ([#1510](https://github.com/foolzzz/looper/pull/1510)) Data only: `assistant-real-sonnet.json` (sonnet, three repetitions) and `assistant-real-opus.json` (opus xhigh, two repetitions), schema `looper-assistant-experience/v1`. No prompt, tool or channel change.
 
 ## [2.15.23] - 2026-11-20
 

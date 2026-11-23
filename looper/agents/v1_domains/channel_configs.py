@@ -28,7 +28,13 @@ _VIEW_FIELDS = {
     "config": CHANNEL_CONFIG_VALUES, "manager_id": _STR, "manager_name": _NULL_STR,
     "builtin": _BOOL, "start_problem": _NULL_STR, "created_at": _STR, "updated_at": _STR,
 }
-CHANNEL_CONFIG = {**_object({**_VIEW_FIELDS, "has_bot_token": _BOOL}, list(_VIEW_FIELDS), closed=True),
+CHANNEL_CONFIG = {**_object({**_VIEW_FIELDS, "has_bot_token": _BOOL,
+    "runtime": {"type": ["object", "null"], "readOnly": True,
+                "description": "Read channel startup state. Includes the last error and next attempt; null when disabled or not started here.",
+                "properties": {"state": {"enum": ["starting", "running", "retrying", "failed"]},
+                               "last_error": _NULL_STR, "next_attempt_at": _NULL_STR},
+                "required": ["state", "last_error", "next_attempt_at"], "additionalProperties": False},
+    }, list(_VIEW_FIELDS), closed=True),
     "anyOf": [_object({"channel_type": {"const": kind}, "config": config})
               for kind, config in CONFIGS.items()]}
 SCHEMAS = {"ChannelConfigValues": CHANNEL_CONFIG_VALUES, "ChannelConfig": CHANNEL_CONFIG}
@@ -65,11 +71,17 @@ OPERATIONS = (
 RESULTS = {}
 
 
-async def _get(channel_id):
+def _view(server, row):
+    registry = getattr(server, "_channels", None)
+    return {**channel_view(row), "runtime": registry.start_state(row["channel_id"])
+            if registry is not None and row["enabled"] else None}
+
+
+async def _get(channel_id, server=None):
     row = await db_configs.get_config(channel_id)
     if row is None:
         raise RequestError(HTTP_404, "channel not found")
-    return channel_view(row)
+    return _view(server, row)
 
 
 async def impact(server, operation, arguments, principal, headers):
@@ -128,12 +140,12 @@ async def _save(request, *, creating=False):
 async def run(server, operation, arguments, principal, headers):
     action = operation.operation_id.rsplit(".", 1)[1]
     if action == "list":
-        return {"configs": [channel_view(row) for row in await db_configs.list_configs()]}
+        return {"configs": [_view(server, row) for row in await db_configs.list_configs()]}
     if action == "get":
-        return await _get(arguments["channel_id"])
+        return await _get(arguments["channel_id"], server)
     if action == "create":
         _check_allowlist(arguments["channel_type"], arguments.get("config", {}))
-        return await _save(bot_api.add_bot(arguments), creating=True)
+        return _view(server, await _save(bot_api.add_bot(arguments), creating=True))
     if action == "update":
         fields = dict(arguments["fields"])
         if "config" in fields:
@@ -142,7 +154,10 @@ async def run(server, operation, arguments, principal, headers):
             validate_arguments(_object({"config": CONFIGS[row["channel_type"]]}, closed=True),
                                {"config": fields["config"]})
             _check_allowlist(row["channel_type"], fields["config"])
-        return await _save(bot_api.update_bot(arguments["channel_id"], fields))
+        row = await _save(bot_api.update_bot(arguments["channel_id"], fields))
+        if server._channels is not None and not row["enabled"]:
+            await server._channels.cancel_start(row["channel_id"])
+        return _view(server, row)
     # A pending confirmation reserves nothing: re-read the target immediately before deletion.
     await impact(server, operation, arguments, principal, headers)
     result = await chat_routing.remove_bot_with_routing(arguments["channel_id"],
@@ -153,4 +168,6 @@ async def run(server, operation, arguments, principal, headers):
         raise OpError(ErrorCode.NOT_FOUND, "channel not found")
     if result == "builtin":
         raise OpError(ErrorCode.INVALID, "a built-in channel cannot be removed; turn it off instead")
+    if server._channels is not None:
+        await server._channels.cancel_start(arguments["channel_id"])
     return {"deleted": arguments["channel_id"], "restart": True}
