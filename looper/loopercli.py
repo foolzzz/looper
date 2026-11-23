@@ -3,7 +3,8 @@
 
 It imports the standard library and the version only, so it starts fast and works where Looper's own dependencies are
 not installed. Its commands are not written here: ``GET /api/v1/openapi.json`` lists the operations and each becomes a
-command, except the few the document marks ``x-looper-cli-hand``, which are written below. The token is read from a
+command, except dashboard-only operations (``x-looper-cli: false``) and those marked ``x-looper-cli-hand``, whose
+commands are written below. The token is read from a
 private file on every call, goes only to a loopback address and never follows a redirect.
 """
 
@@ -1173,7 +1174,8 @@ def generated_operations(document: Mapping[str, Any]) -> list[tuple[str, str, st
     found = []
     for path, item in (document.get("paths") or {}).items():
         for method, operation in item.items():
-            if not isinstance(operation, dict) or operation.get("x-looper-cli-hand") or "operationId" not in operation:
+            if (not isinstance(operation, dict) or operation.get("x-looper-cli-hand")
+                    or operation.get("x-looper-cli") is False or "operationId" not in operation):
                 continue
             head, _, tail = str(operation["operationId"]).partition(".")
             schema = (((operation.get("requestBody") or {}).get("content") or {}).get("application/json") or {}

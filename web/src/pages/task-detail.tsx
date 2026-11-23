@@ -13,6 +13,7 @@ import {
   Bot,
   User,
   GitBranch,
+  Network,
   Play,
   Pause,
   Settings2,
@@ -35,6 +36,7 @@ import { ClampedText } from "@/components/clamped-text";
 import { Markdown } from "@/components/markdown";
 import { ScheduledBadge } from "@/components/scheduled-badge";
 import { historyHref, runRoleLabel } from "@/pages/agent-history";
+import { RunTree } from "@/components/run-tree";
 import { TaskCostBreakdown } from "@/components/task-cost";
 import { CheckpointUnfinished, StepConsults } from "@/components/task-advice";
 import { CHECKPOINT_UNFINISHED, type ConsultTone, consultCard, consultLabel, consultPlaces, consultResult, consultTone,
@@ -112,8 +114,8 @@ import {
   type AdvisorConsult,
 } from "@/lib/api";
 
-export type Tab = "overview" | "pipeline" | "room" | "agents" | "sessions" | "conversation";
-export const TASK_TABS: readonly Tab[] = ["overview", "pipeline", "room", "agents", "sessions", "conversation"];
+export type Tab = "overview" | "pipeline" | "room" | "agents" | "run-tree" | "sessions" | "conversation";
+export const TASK_TABS: readonly Tab[] = ["overview", "pipeline", "room", "agents", "run-tree", "sessions", "conversation"];
 
 /** The tab an address names; an unknown or missing one is the Overview. */
 export function parseTab(value: string | null | undefined): Tab {
@@ -2073,7 +2075,9 @@ function PipelineTab({ task, runs, onOpenGate, pinned }: {
       // Its seats' messages in the task's room (keyed as the room keys its seats).
       const room = task.room?.by_step[step.step_key || step.id];
       const note = [unfinished.has(step.id) ? CHECKPOINT_UNFINISHED : "", advisory ? "建议" : "",
-                    step.retries ? `retry ${step.retries}` : "", roomNote(room)].filter(Boolean).join(" · ");
+                    step.retries ? `retry ${step.retries}` : "", roomNote(room),
+                    runs?.explorers?.filter((run) => run.record.metadata?.step_id === step.id).length
+                      ? `${runs.explorers.filter((run) => run.record.metadata?.step_id === step.id).length} explorers` : ""].filter(Boolean).join(" · ");
       ns.push({
         id: step.id,
         position,
@@ -2371,6 +2375,7 @@ function TaskDetailPage({ taskId, gateStep, tab: tabParam, focusStep, onTab, roo
     { id: "pipeline", label: "Pipeline", icon: GitBranch },
     { id: "room", label: "Room", icon: MessagesSquare },
     { id: "agents", label: "Agents", icon: Bot },
+    { id: "run-tree", label: "Run tree", icon: Network },
     { id: "sessions", label: "Sessions", icon: Terminal },
     { id: "conversation", label: "Conversation", icon: MessageSquare },
   ];
@@ -2504,6 +2509,7 @@ function TaskDetailPage({ taskId, gateStep, tab: tabParam, focusStep, onTab, roo
               onClick={() => setTab(id)}
               className={cn(
                 "flex items-center gap-1.5 rounded-md px-3 py-1.5 text-sm font-medium transition-colors pointer-coarse:min-h-11",
+                id === "run-tree" && "shrink-0 whitespace-nowrap",
                 tab === id
                   ? "bg-primary/10 text-primary"
                   : "text-muted-foreground hover:bg-accent hover:text-foreground",
@@ -2545,6 +2551,7 @@ function TaskDetailPage({ taskId, gateStep, tab: tabParam, focusStep, onTab, roo
             onGateShown={gateShown}
           />
         )}
+        {task && tab === "run-tree" && <RunTree taskId={taskId} refreshKey={`${task.status}:${task.cost?.runs}:${task.cost?.running}`} />}
         {task && tab === "pipeline" && (
           <PipelineTab task={task} runs={taskRuns.runs} onOpenGate={openGate} pinned={focusStep} />
         )}
