@@ -14,17 +14,17 @@ from dataclasses import replace
 from looper.agents.library import library_sha256
 from looper.agents.ops.service import ManagerOps, Platform
 from tests.db_support import DSN, run_db
+from tests.manager_surface_support import assert_main_surfaces
 from tests.test_manager_session_routing_db import _Rig, _web
 
 pytestmark = pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
 
-# Captured before the Manager wiring change from origin/main with this test's deterministic state.
+# Captured before the Manager wiring change from origin/main with this test's deterministic state. The system
+# prompt and the tools are checked per section and per tool against tests/fixtures/manager_surfaces_off.json.
 BASELINE = {
     "command": "5e061eeb979d5c7fe9a14e358758921fd245a8d209a6da69c3185cb50f319234",
     "prompt": "02bb63fba8b06401b47768209b31db99af74b73feb44eaecdcb8d7659874d407",
-    "signature": "b90d31b397c6bdd8e9ab20f0f0724d21967cbc36d78096fca4ccb7817b957442",
-    "system": "7d14661d728105ddd57740dc865754ac93a3a509613d185b65ec5a9adea55ebf",
-    "tools": "de8b33d0d94ea993f875cf3c2e54c07afe471aece5825a4e845610404da22ddc",
+    "signature": "8a41bb94febb3ebc935b28aa152341b88f1752ae7e05b055e4ce624eb78c4be1",
 }
 
 
@@ -83,13 +83,14 @@ def test_disabled_wire_contract_matches_main(monkeypatch, tmp_path):
             signature = list(process.signature)
             assert signature[1] == process.system_prompt.sha256
             assert signature[3] == process.launch.library.sha256
-            signature[1] = hashlib.sha256(normalize(process.system_prompt.text).encode()).hexdigest()
+            signature[1] = "<system prompt, checked per section>"
             signature[3] = normalized_library
             def digest(value):
                 return hashlib.sha256(json.dumps(normalize(value), sort_keys=True, ensure_ascii=False).encode()).hexdigest()
-            observed = {"prompt": digest(rig.main.turns), "system": digest(process.system_prompt.text),
-                        "tools": digest(tools), "command": digest(process.command), "signature": digest(signature)}
+            observed = {"prompt": digest(rig.main.turns), "command": digest(process.command),
+                        "signature": digest(signature)}
             assert observed == BASELINE, observed
+            assert_main_surfaces(tools, process.system_prompt.text, tmp_path)
         finally:
             await rig.close()
     run_db(body, monkeypatch, timeout=45)

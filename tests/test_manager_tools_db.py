@@ -19,6 +19,7 @@ import pytest
 from manager_mcp_stand_in import manager_endpoint, mcp_manager_claude
 from looper.agents.bus import MessageBus
 from looper.agents.message import MANAGER_ADDRESS, MessageEnvelope, MessageType, channel_address
+from looper.agents.ops.service import MANAGER_TOOLS
 from tests.db_support import DSN, run_db
 
 pytestmark = pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
@@ -71,12 +72,8 @@ def test_the_managers_calls_create_a_new_project_only_after_the_next_message_con
         chat = await _converse(tmp_path, [[("looper_task_create", create)],
                                           [("looper_confirm", {"confirmation_id": "<confirmation>"})]],
                                ["建一个俄罗斯方块任务，放在新项目 Tetris 里，目录 /srv/tetris，确认", "确认"])
-        assert chat.tools == ["looper_overview", "looper_tasks", "looper_task_create", "looper_task_control",
-                              "looper_task_instruct", "looper_task_gate_reply", "looper_task_update",
-                              "looper_concurrency", "looper_projects",
-                              "looper_agent_profiles", "looper_providers", "looper_models", "looper_catalog",
-                              "looper_config_export", "looper_costs",
-                              "looper_settings", "looper_schedules", "looper_confirm"]
+        # Offered exactly the default Manager's tools, in their order: none only an operator's turn has.
+        assert chat.tools == [tool.name for tool in MANAGER_TOOLS]
         assert "--strict-mcp-config" in chat.argv and "--mcp-config" in chat.argv
         asked, created = chat.replies
         # Claude's words come first, then what Looper writes itself.
