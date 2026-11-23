@@ -1,4 +1,5 @@
 import { memo, useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
+import { AlertTriangle, CheckCircle2, ChevronDown, Circle, History, Loader2, XCircle } from "lucide-react";
 import { useStore } from "@xyflow/react";
 import {
   type Box,
@@ -17,7 +18,8 @@ import {
   tapOn,
 } from "@/lib/hover-card";
 import { Markdown } from "@/components/markdown";
-import { type CardLook, type CardSection, type NodeCard, nodeCardId } from "@/lib/node-cards";
+import { type CardLook, type CardSection, type NodeCard, formatSeconds, nodeCardId } from "@/lib/node-cards";
+import type { EvidenceArtifactView, EvidenceCheckView, EvidenceRunView, EvidenceView } from "@/lib/evidence";
 import { cn } from "@/lib/utils";
 
 function StatusPill({ look }: { look: CardLook }) {
@@ -58,6 +60,161 @@ function CardText({ section }: { section: Extract<CardSection, { kind: "text" }>
   );
 }
 
+const STATE_ICON = {
+  passed: CheckCircle2,
+  failed: XCircle,
+  error: AlertTriangle,
+  stale: History,
+  running: Loader2,
+} as const;
+
+function StateMark({ state, words }: { state: string; words: string }) {
+  const Icon = STATE_ICON[state as keyof typeof STATE_ICON] ?? Circle;
+  const color = state === "passed" ? "text-success"
+    : state === "failed" ? "text-destructive"
+    : state === "error" ? "text-warning"
+    : "text-muted-foreground";
+  return (
+    <span className={cn("inline-flex items-center gap-1", color)}>
+      <Icon className="h-3.5 w-3.5 shrink-0" aria-hidden />
+      {words}
+    </span>
+  );
+}
+
+function ArtifactThumb({ artifact }: { artifact: EvidenceArtifactView }) {
+  const [problem, setProblem] = useState<string | null>(null);
+  if (problem) return <span className="text-xs text-destructive">{problem}</span>;
+  return (
+    <a
+      href={artifact.href}
+      target="_blank"
+      rel="noopener"
+      className="mt-1 inline-block max-w-full pointer-coarse:inline-flex pointer-coarse:min-h-11 pointer-coarse:items-center"
+    >
+      <img
+        src={artifact.href}
+        alt={artifact.name}
+        className="max-h-24 max-w-full rounded border border-border"
+        onError={() => {
+          void fetch(artifact.href).then(
+            (response) => setProblem(response.status === 401 || response.status === 403 ? "operator session required" : "file missing"),
+            () => setProblem("file missing"),
+          );
+        }}
+      />
+    </a>
+  );
+}
+
+function ExpandMark({ variant }: { variant: "run" | "output" | "earlier" }) {
+  return (
+    <ChevronDown
+      aria-hidden="true"
+      className={cn(
+        "h-3.5 w-3.5 shrink-0 -rotate-90 text-muted-foreground transition-transform duration-150 motion-reduce:transition-none",
+        variant === "run" && "group-open:rotate-0",
+        variant === "output" && "group-open/output:rotate-0",
+        variant === "earlier" && "group-open/earlier:rotate-0",
+      )}
+    />
+  );
+}
+
+function RunDetails({ view, preview, command }: { view: EvidenceRunView; preview: string; command: string }) {
+  return (
+    <details className="group text-xs">
+      <summary className="flex cursor-pointer list-none flex-wrap items-center gap-x-2 gap-y-1 pointer-coarse:min-h-11 [&::-webkit-details-marker]:hidden">
+        <ExpandMark variant="run" />
+        <span className="font-mono break-all">{preview}</span>
+        <StateMark state={view.state} words={view.words} />
+        {view.exitCode !== null && <span className="font-mono">exit {view.exitCode}</span>}
+        {view.durationMs !== null && <span>{formatSeconds(view.durationMs / 1000)}</span>}
+        {view.head && <span className="font-mono">{view.head}</span>}
+        {view.unguarded && <span>unguarded</span>}
+        {view.advisory && <span>advisory</span>}
+      </summary>
+      <p className="mt-1 whitespace-pre-wrap break-all font-mono">{command}</p>
+      <details className="group/output mt-1">
+        <summary className="flex cursor-pointer list-none items-center gap-1 text-muted-foreground pointer-coarse:min-h-11 [&::-webkit-details-marker]:hidden">
+          <ExpandMark variant="output" />
+          Output
+        </summary>
+        <pre className="mt-1 whitespace-pre-wrap break-words font-mono text-xs">{view.outputTail || "No output"}</pre>
+      </details>
+      {view.artifacts.length > 0 && (
+        <ul className="mt-1 space-y-1">
+          {view.artifacts.map((artifact) => (
+            <li key={artifact.href}>
+              {artifact.image ? <ArtifactThumb artifact={artifact} /> : (
+                <a href={artifact.href} className="inline-flex items-center font-mono underline decoration-dotted underline-offset-2 pointer-coarse:min-h-11">{artifact.name}</a>
+              )}
+            </li>
+          ))}
+        </ul>
+      )}
+      {view.protectedChanged.length > 0 && (
+        <div className="mt-1">
+          <p>Protected paths changed</p>
+          <ul className="list-disc pl-4 font-mono">
+            {view.protectedChanged.map((path) => <li key={path} className="break-all">{path}</li>)}
+          </ul>
+        </div>
+      )}
+    </details>
+  );
+}
+
+function CheckBlock({ check }: { check: EvidenceCheckView }) {
+  if (!check.current) {
+    return (
+      <div className="text-xs">
+        <p className="break-all font-mono">{check.preview}</p>
+        <p>No run recorded</p>
+      </div>
+    );
+  }
+  return (
+    <div className="space-y-1">
+      <RunDetails view={check.current} preview={check.preview} command={check.command} />
+      {check.earlier.length > 0 && (
+        <details className="group/earlier text-xs">
+          <summary className="flex cursor-pointer list-none items-center gap-1 text-muted-foreground pointer-coarse:min-h-11 [&::-webkit-details-marker]:hidden">
+            <ExpandMark variant="earlier" />
+            Earlier attempts
+          </summary>
+          <div className="mt-1 space-y-2">
+            {check.earlier.map((run) => (
+              <RunDetails key={`${run.attempt}-${run.run}`} view={run} preview={check.preview} command={check.command} />
+            ))}
+          </div>
+        </details>
+      )}
+    </div>
+  );
+}
+
+function EvidenceBody({ view }: { view: EvidenceView }) {
+  if (view.status === "loading") return <p className="text-xs text-muted-foreground">Loading evidence…</p>;
+  if (view.status === "error") return <p role="alert" className="text-xs text-destructive">{view.error}</p>;
+  return (
+    <div className="space-y-3">
+      {view.criteria.map((criterion, index) => (
+        <div key={`${index}:${criterion.text}`} className="space-y-1">
+          <p className="text-xs">{criterion.text}</p>
+          {criterion.noCheck && (
+            <p className="flex items-center gap-1 text-xs text-muted-foreground">
+              <Circle className="h-3.5 w-3.5 shrink-0" aria-hidden />
+              No check — judged by the Reviewer
+            </p>
+          )}
+          {criterion.checks.map((check) => <CheckBlock key={check.id} check={check} />)}
+        </div>
+      ))}
+    </div>
+  );
+}
+
 function CardBody({ section }: { section: CardSection }) {
   switch (section.kind) {
     case "text":
@@ -81,6 +238,8 @@ function CardBody({ section }: { section: CardSection }) {
           ))}
         </ul>
       );
+    case "evidence":
+      return <EvidenceBody view={section.view} />;
     case "facts":
       return (
         <dl className="grid grid-cols-[auto_minmax(0,1fr)] gap-x-3 gap-y-0.5 text-xs pointer-coarse:items-center">
@@ -136,7 +295,7 @@ export const NodeCardView = memo(function NodeCardView({ card }: { card: NodeCar
 /** The cards of a React Flow graph's nodes (a child of `ReactFlow`), by node id. A card shows beside its node when
  * the mouse rests on the node or the node has keyboard focus, and a tap toggles it; Enter takes focus into it and
  * Esc closes it. It stays inside the graph's visible part and follows the node as the graph pans and zooms. */
-export function NodeCards({ cards }: { cards: Record<string, NodeCard> }) {
+export function NodeCards({ cards, pinned }: { cards: Record<string, NodeCard>; pinned?: string | null }) {
   const root = useStore((s) => s.domNode);
   const transform = useStore((s) => s.transform);
   const [shown, setShown] = useState<string | null>(null);
@@ -144,9 +303,17 @@ export function NodeCards({ cards }: { cards: Record<string, NodeCard> }) {
   const cardRef = useRef<HTMLDivElement>(null);
   // Enter on a node opened its card: focus goes into the card once it has a place.
   const focusCard = useRef(false);
+  const openedPin = useRef<string | null>(null);
   const card = shown ? cards[shown] : undefined;
 
   useEffect(() => () => control.dispose(), [control]);
+
+  // A Needs-attention link names the step. Open its card once; closing it stays closed.
+  useEffect(() => {
+    if (!pinned || !cards[pinned] || openedPin.current === pinned) return;
+    openedPin.current = pinned;
+    control.focus(pinned);
+  }, [pinned, cards, control]);
 
   // The node of the card shown went away (its step was hidden, or the plan came): no card is shown any more, so
   // the next Esc is not taken for it.

@@ -1994,7 +1994,7 @@ class ManagerAgent:
             run.state, run.state_generation = (self._render_state(
                 prepared.state, launch, prepared.switch, persona_scope=run.persona_scope),
                                                self._state_generation)
-        asked = f"{prepared.note}\n\n{prepared.message}" if prepared.note else prepared.message
+        asked = f"{note}\n\n{prepared.message}" if (note := self.ops.live_note(prepared.turn, prepared.note) if self.ops is not None else prepared.note) else prepared.message
         run.recorder = recorder = ClaudeRunRecorder(
             agent_id=self.agent_id,
             task_id=envelope.metadata.get("task_id"),
@@ -2841,6 +2841,7 @@ class ManagerAgent:
             # (Nothing is awaited from here until the message is written: a later change shows in the generation.)
             text = prepared.turn_text if run.state is None else "\n".join([*run.state.lines, prepared.turn_text])
             turn_text = f"{brief}\n\n{text}" if brief else text
+            turn_text = self.ops.live_note(prepared.turn, turn_text) if self.ops is not None else turn_text
             if token.cancel.requested:
                 await self._finish_stopped_early(token, recorder, ops_turn)
                 raise TurnStopped()

@@ -480,7 +480,7 @@ def test_unusual_rows_warn_and_keep_bridge_reading(bridge_source, caplog, damage
                 # The run tree's and the failure classes' columns are added and no row is rewritten: older rows have
                 # no kind, no parent and no failure class.
                 assert after == [{**r, "parent_record_id": None, "run_kind": None, "failure_class": None,
-                                  "failure_cause": None} for r in before]
+                                  "failure_cause": None, "attempt_id": None} for r in before]
             else:
                 assert after == before
             assert any(r.levelname == "WARNING" and identity in r.message for r in caplog.records)

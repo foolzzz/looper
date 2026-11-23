@@ -177,3 +177,21 @@ def test_gateway_and_outbox_emit_bounded_rolling_events(monkeypatch):
         now[0] += 86401
         assert sum(events.counts("channel-lark").values()) == 0
     run_db(check, monkeypatch)
+
+
+def test_actions_by_category_counts_the_window_through_the_api(monkeypatch, tmp_path):
+    async def check(pool):
+        await pool.execute("INSERT INTO manager_actions (tool, risk, status, category, receipt, created_at) VALUES "
+                           "('looper_projects', 'write', 'ok', 'update', 'a', now()), "
+                           "('looper_projects', 'write', 'error', 'update', 'b', now()), "
+                           "('looper_schedules', 'write', 'ok', 'control', 'c', now() - interval '3 days'), "
+                           "('looper_projects', 'write', 'ok', 'remove', 'd', now() - interval '9 days'), "
+                           "('looper_projects', 'write', 'ok', NULL, NULL, now())")  # no category: not counted
+        async with v1_api(tmp_path, pool) as call:
+            expected = {1: {"update": {"ok": 1, "error": 1}},
+                        7: {"update": {"ok": 1, "error": 1}, "control": {"ok": 1}},
+                        30: {"update": {"ok": 1, "error": 1}, "control": {"ok": 1}, "remove": {"ok": 1}}}
+            for days, by_category in expected.items():
+                status, body = await call("manager_metrics.get", {"days": days})
+                assert status == 200 and body["result"]["actions"] == {"by_category": by_category}
+    run_db(check, monkeypatch)
