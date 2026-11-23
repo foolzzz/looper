@@ -102,6 +102,50 @@ def test_only_structured_read_only_tool_kinds_can_be_allowed(tmp_path, scenario,
     asyncio.run(run())
 
 
+@pytest.mark.parametrize("method", [
+    "fs/write_text_file", "terminal/create", "terminal/output", "terminal/wait_for_exit",
+    "terminal/kill", "terminal/release",
+])
+def test_filesystem_writes_and_terminal_requests_are_denied(tmp_path, method):
+    async def run():
+        contract = tmp_path / "contract.md"
+        contract.write_text("contract")
+        target = tmp_path / "protected.txt"
+        target.write_text("unchanged")
+        reply_file = tmp_path / "reply.json"
+        program = r'''
+import json, sys
+from pathlib import Path
+def receive(): return json.loads(sys.stdin.readline())
+def send(**value): print(json.dumps({"jsonrpc": "2.0", **value}), flush=True)
+send(id=receive()["id"], result={"protocolVersion": 1})
+send(id=receive()["id"], result={"sessionId": "review-session"})
+prompt = receive()
+send(id="client-write", method=sys.argv[1], params={"sessionId": "review-session",
+     "path": sys.argv[2], "content": "overwritten", "command": "touch", "args": [sys.argv[2]],
+     "terminalId": "uncreated-terminal"})
+Path(sys.argv[3]).write_text(json.dumps(receive()))
+send(method="session/update", params={"sessionId": "review-session", "update": {
+     "sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "review complete"}}})
+send(id=prompt["id"], result={"stopReason": "end_turn"})
+'''
+        process = await proc_tree.spawn(sys.executable, "-c", program, method, str(target), str(reply_file),
+            cwd=tmp_path, stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+        channel = AcpChannel(process, cwd=str(tmp_path), prompt_file=contract, model="declared-model")
+        try:
+            await channel.start("verify")
+            async with asyncio.timeout(3):
+                events = [event async for event in channel.events()]
+            reply = json.loads(reply_file.read_text())
+            assert reply == {"jsonrpc": "2.0", "id": "client-write", "error": {
+                "code": -32000, "message": "ACP Reviewer client request denied"}}
+            assert events[-1]["permission_denials"] == [{"tool": method, "input": "unsupported client request"}]
+            assert target.read_text() == "unchanged"
+        finally:
+            await proc_tree.end(process, label="denied fake ACP client request")
+    asyncio.run(run())
+
+
 @pytest.mark.parametrize("scenario", ["success", "vendor_usage"])
 def test_unreported_usage_and_vendor_extensions_never_become_zero_cost(tmp_path, scenario):
     async def run():

@@ -479,7 +479,8 @@ def test_acp_fallback_hop_is_refused_when_loading_stored_profiles(agent_db, monk
     asyncio.run(run())
 
 
-@pytest.mark.parametrize("case", ["success_stays_alive", "disabled", "unreadable_settings", "timeout"])
+@pytest.mark.parametrize("case", ["success_stays_alive", "disabled", "unreadable_settings", "timeout",
+                                  "run_budget", "task_budget", "vault_unavailable"])
 def test_acp_worker_records_refusals_and_ends_the_process_after_a_verdict(agent_db, monkeypatch, tmp_path, case):
     async def run():
         from looper.agents import acp_reviewer_settings
@@ -489,6 +490,10 @@ def test_acp_worker_records_refusals_and_ends_the_process_after_a_verdict(agent_
         if case == "timeout":
             monkeypatch.setattr(worker, "_load_settings", AsyncMock(return_value=worker.WorkerSettings(0.2, 0, "ROLE")))
         settings = _settings("acp", "", fallback="backup")
+        if case == "run_budget":
+            settings = replace(settings, max_budget_usd=0.10)
+        if case == "task_budget":
+            agent_db.get_task_project.return_value = {"task_budget_usd": 1.0}
         monkeypatch.setattr(worker, "load_agent_settings", AsyncMock(return_value=settings))
         config = acp_reviewer_settings.AcpReviewerSettings(
             enabled=case != "disabled", command=(sys.executable, str(Path(__file__).with_name("fake_acp.py")),
@@ -499,7 +504,11 @@ def test_acp_worker_records_refusals_and_ends_the_process_after_a_verdict(agent_
         monkeypatch.setattr(acp_reviewer_settings, "read", read)
         policy = SimpleNamespace(wrap=lambda: list(config.command), environment=lambda env: env,
                                  record={"reason": "ok"}, cleanup=Mock())
-        monkeypatch.setattr(acp_policy, "prepare_policy", AsyncMock(return_value=policy))
+        prepare = AsyncMock(return_value=policy)
+        monkeypatch.setattr(acp_policy, "prepare_policy", prepare)
+        vault_root = tmp_path / "knowledge"
+        monkeypatch.setattr(worker.vault, "load", AsyncMock(return_value=(None, "unreadable vault")
+            if case == "vault_unavailable" else (SimpleNamespace(path=vault_root), None)))
         spawn = worker.proc_tree.spawn
         processes = []
         async def tracked_spawn(*args, **kwargs):
@@ -524,7 +533,13 @@ def test_acp_worker_records_refusals_and_ends_the_process_after_a_verdict(agent_
             assert len(processes) == 1 and processes[0].returncode is not None
             assert agent_db.finish_record.await_args.kwargs["cost_usd"] is None
             policy.cleanup.assert_called_once()
+            assert prepare.await_args.kwargs["runtime_root"] == tmp_path / "runtime"
+            assert prepare.await_args.kwargs["vault"] == vault_root
         else:
             assert not processes
             assert "acp_reviewer" in result["summary"]
+            if case in {"run_budget", "task_budget"}:
+                assert "budget" in result["summary"]
+                prepare.assert_not_awaited()
+                assert agent_db.add_metadata.await_args.args[1]["acp_write_policy"]["reason"] == "budget_cap_unsupported"
     asyncio.run(run())

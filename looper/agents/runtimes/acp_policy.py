@@ -14,12 +14,14 @@ from enum import Enum
 import json
 import os
 from pathlib import Path
-import shutil
+import socket
 import subprocess
 import sys
 import tempfile
 import tomllib
 from typing import Any
+from urllib.parse import urlsplit
+import ipaddress
 
 from .channel import RunStartError
 
@@ -56,8 +58,20 @@ class PolicyError(RunStartError):
         self.record = check.record
 
 
+def _identity(path: Path) -> tuple[int, int]:
+    info = path.stat()
+    return info.st_dev, info.st_ino
+
+
+def _ancestor(first: Path, second: Path) -> bool:
+    """Filesystem identities handle case aliases, symlinks and hard links."""
+    first, second = first.resolve(strict=True), second.resolve(strict=True)
+    identity = _identity(first)
+    return any(_identity(path) == identity for path in (second, *second.parents))
+
+
 def _overlaps(first: Path, second: Path) -> bool:
-    return first.is_relative_to(second) or second.is_relative_to(first)
+    return _ancestor(first, second) or _ancestor(second, first)
 
 
 def report_inspect_roots(work_result: Any, cwd: str | Path) -> tuple[str, ...]:
@@ -125,7 +139,9 @@ def _command_check(command: Sequence[str]) -> ConfigCheck:
         option = command[index]
         if option == "--no-leader":
             index += 1
-        elif option in {"--model", "-m", "--reasoning-effort", "--effort"} and index + 1 < len(command) - 1:
+        elif (option in {"--model", "-m", "--reasoning-effort", "--effort"}
+              and index + 1 < len(command) - 1 and command[index + 1]
+              and not command[index + 1].startswith("-")):
             index += 2
         else:
             return ConfigCheck(PolicyReason.UNKNOWN_CLI_CONFIG,
@@ -170,10 +186,10 @@ def config_check(command: Sequence[str], config_dir: str | Path, *, protected: S
                                        f"unknown CLI configuration source outside config dir: {source}")
                 if ancestor == root:
                     break
-        # These can introduce additional MCP/plugin/profile configuration.
-        for name in (".mcp.json", "plugins", "agents", "agent.md", "settings.json"):
-            if (directory / name).exists():
-                return ConfigCheck(PolicyReason.UNKNOWN_CLI_CONFIG, f"unknown CLI configuration source: {directory / name}")
+        # Only these independently verified configuration/authentication files.
+        for entry in directory.iterdir():
+            if entry.name not in {"config.toml", "auth.json"} or not entry.is_file() or entry.is_symlink():
+                return ConfigCheck(PolicyReason.UNKNOWN_CLI_CONFIG, f"unknown CLI configuration source: {entry}")
         config = tomllib.loads((directory / "config.toml").read_text(encoding="utf-8"))
     except (OSError, RuntimeError, ValueError, subprocess.SubprocessError) as exc:
         return ConfigCheck(PolicyReason.UNREADABLE_CONFIG, f"unreadable CLI config in {config_dir}: {type(exc).__name__}")
@@ -227,9 +243,33 @@ def _protected_paths(cwd: str | Path, inspect_roots: Sequence[str | Path]) -> tu
     return tuple(dict.fromkeys(paths))
 
 
-def _profile(scratch: Path, config_dir: Path) -> str:
+def _proxy_ports(environment: Mapping[str, str]) -> tuple[int, ...]:
+    ports = set()
+    for name in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy"):
+        if not (value := environment.get(name)):
+            continue
+        proxy = urlsplit(value)
+        host = proxy.hostname
+        try:
+            local = host == "localhost" or (host is not None and ipaddress.ip_address(host).is_loopback)
+        except ValueError:
+            local = False
+        if local:
+            port = proxy.port or {"http": 80, "https": 443}.get(proxy.scheme)
+            if port is None:
+                raise ValueError("local proxy requires an explicit port")
+            ports.add(port)
+    return tuple(sorted(ports))
+
+
+def _profile(scratch: Path, config_dir: Path, proxy_ports: Sequence[int] = ()) -> str:
     writable = tuple(dict.fromkeys((scratch, config_dir)))
     return "\n".join(("(version 1)", "(allow default)", "(deny file-write*)", "(deny job-creation)",
+                      '(deny network-outbound (remote unix-socket))',
+                      '(allow network-outbound (remote unix-socket (path "/private/var/run/mDNSResponder")))',
+                      '(deny network-outbound (remote ip "localhost:*"))',
+                      *(f'(allow network-outbound (remote ip "localhost:{port}"))' for port in proxy_ports),
+                      '(deny lsopen)', '(deny appleevent-send)',
                       *(f"(allow file-write* (subpath {json.dumps(str(path))}))" for path in writable),
                       '(allow file-write* (literal "/dev/null"))'))
 
@@ -269,53 +309,70 @@ class WritePolicy:
 
 
 def _preflight(policy: WritePolicy) -> bool:
-    """Positive writable control, inherited EPERM controls, and a scratch write.
+    """Prove writable scratch, denied outside writes and denied local IPC.
 
-    Protected probes only open for append, writing zero bytes. Even if the
-    host stops enforcing the sandbox, existing content cannot be changed.
-    Looper creates and removes an empty canary in each protected directory.
+    All probes belong to Looper; reported paths are never opened for writing.
+    Nonblocking, no-follow opens and inode checks prevent a swapped FIFO or
+    symlink from blocking or redirecting the fixed probe.
     """
-    created: list[Path] = []
-    probes: list[str] = []
     try:
-        for protected in policy.protected:
-            if protected.is_dir():
-                descriptor, name = tempfile.mkstemp(prefix=".looper-acp-policy-", dir=protected)
+        with tempfile.TemporaryDirectory(prefix="acp-probe-", dir="/private/tmp" if sys.platform == "darwin" else None) as base:
+            root = Path(base)
+            probe = root / "write-probe"
+            descriptor = os.open(probe, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NONBLOCK, 0o600)
+            try:
+                info = os.fstat(descriptor)
+                identity = [info.st_dev, info.st_ino]
+            finally:
                 os.close(descriptor)
-                path = Path(name)
-                created.append(path)
-            else:
-                path = protected
-            descriptor = os.open(path, os.O_WRONLY | os.O_APPEND)
-            os.close(descriptor)
-            probes.append(str(path))
-        code = """import errno,json,os,sys
-for path in json.loads(sys.argv[1]):
- try:
-  descriptor=os.open(path,os.O_WRONLY|os.O_APPEND)
- except OSError as error:
-  if error.errno != errno.EPERM: sys.exit(2)
- else:
-  os.close(descriptor);sys.exit(3)
-with open(sys.argv[2], 'w') as output: output.write('scratch-ok')
+            with socket.socket(socket.AF_UNIX) as unix, socket.socket(socket.AF_INET) as loopback:
+                unix_path = str(root / "socket")
+                unix.bind(unix_path)
+                unix.listen(2)
+                loopback.bind(("127.0.0.1", 0))
+                loopback.listen(2)
+                port = loopback.getsockname()[1]
+                # Positive controls establish that both owned listeners accept connections.
+                for family, endpoint in ((socket.AF_UNIX, unix_path), (socket.AF_INET, ("127.0.0.1", port))):
+                    with socket.socket(family) as client:
+                        client.settimeout(1)
+                        client.connect(endpoint)
+                code = """import errno,json,os,socket,stat,sys
+path,identity,unix_path,port,target=json.loads(sys.argv[1])
+info=os.stat(path,follow_symlinks=False)
+if [info.st_dev,info.st_ino] != identity or not stat.S_ISREG(info.st_mode): sys.exit(2)
+try:
+ descriptor=os.open(path,os.O_WRONLY|os.O_APPEND|os.O_NONBLOCK|os.O_NOFOLLOW)
+except OSError as error:
+ if error.errno != errno.EPERM: sys.exit(3)
+else:
+ os.close(descriptor);sys.exit(4)
+for family,endpoint in ((socket.AF_UNIX,unix_path),(socket.AF_INET,("127.0.0.1",port))):
+ with socket.socket(family) as client:
+  client.settimeout(1)
+  try: client.connect(endpoint)
+  except OSError as error:
+   if error.errno != errno.EPERM: sys.exit(5)
+  else: sys.exit(6)
+with open(target, 'w') as output: output.write('scratch-ok')
 """
-        target = policy.scratch / "preflight"
-        result = subprocess.run(policy.wrap([sys.executable, "-c", code, json.dumps(probes), str(target)]),
-                                env=policy.environment(os.environ), capture_output=True, timeout=5)
-        success = result.returncode == 0 and target.read_text() == "scratch-ok"
-        target.unlink(missing_ok=True)
-        return success
+                target = policy.scratch / "preflight"
+                arguments = json.dumps([str(probe), identity, unix_path, port, str(target)])
+                result = subprocess.run(policy.wrap([sys.executable, "-c", code, arguments]),
+                                        env=policy.environment(os.environ), capture_output=True, timeout=5)
+                success = result.returncode == 0 and target.read_text() == "scratch-ok"
+                target.unlink(missing_ok=True)
+                return success
     except (OSError, ValueError, subprocess.SubprocessError):
         return False
-    finally:
-        for path in created:
-            path.unlink(missing_ok=True)
 
 
 async def prepare_policy(command: Sequence[str], *, cwd: str | Path, inspect_roots: Sequence[str | Path] = (),
-                         config_dir: str | Path = "") -> WritePolicy:
+                         config_dir: str | Path = "", runtime_root: str | Path | None = None,
+                         vault: str | Path | None = None, environment: Mapping[str, str] | None = None) -> WritePolicy:
     """Resolve, check and prove enforcement before the caller can spawn an agent."""
-    protected = await asyncio.to_thread(_protected_paths, cwd, inspect_roots)
+    protected = await asyncio.to_thread(_protected_paths, cwd,
+        (*inspect_roots, *(path for path in (runtime_root, vault) if path is not None)))
     temporary = tempfile.TemporaryDirectory(prefix="looper-acp-review-")
     scratch = Path(temporary.name).resolve(strict=True)
     try:
@@ -323,16 +380,22 @@ async def prepare_policy(command: Sequence[str], *, cwd: str | Path, inspect_roo
             config = Path(config_dir).expanduser().resolve(strict=True) if str(config_dir) else scratch
         except (OSError, RuntimeError, ValueError) as exc:
             raise PolicyError(ConfigCheck(PolicyReason.UNREADABLE_CONFIG, f"unreadable CLI config dir: {config_dir}")) from exc
+        if any(_ancestor(path, Path.home()) for path in (scratch, config)):
+            raise PolicyError(ConfigCheck(PolicyReason.CONFIG_DIR_OVERLAPS, "writable directory contains operator HOME"))
         if any(_overlaps(scratch, path) for path in protected):
             raise PolicyError(ConfigCheck(PolicyReason.CONFIG_DIR_OVERLAPS, "scratch directory overlaps a protected path"))
         check = await asyncio.to_thread(config_check, command, config, protected=protected, cwd=cwd)
         if not check.ok:
             raise PolicyError(check)
-        sandbox = shutil.which("sandbox-exec") if sys.platform == "darwin" else None
+        sandbox = "/usr/bin/sandbox-exec" if sys.platform == "darwin" and os.access("/usr/bin/sandbox-exec", os.X_OK) else None
         if not sandbox:
             raise PolicyError(ConfigCheck(PolicyReason.WRITE_POLICY_UNAVAILABLE,
                                          "write policy unavailable: no verified write policy on this host"))
-        policy = WritePolicy(list(command), scratch, config, protected, _profile(scratch, config), sandbox, temporary)
+        try:
+            ports = _proxy_ports(environment if environment is not None else os.environ)
+        except ValueError as exc:
+            raise PolicyError(ConfigCheck(PolicyReason.UNKNOWN_CLI_CONFIG, "invalid local proxy configuration")) from exc
+        policy = WritePolicy(list(command), scratch, config, protected, _profile(scratch, config, ports), sandbox, temporary)
         if not await asyncio.to_thread(_preflight, policy):
             raise PolicyError(ConfigCheck(PolicyReason.WRITE_POLICY_UNAVAILABLE,
                                          "write policy unavailable: enforcement preflight failed"))

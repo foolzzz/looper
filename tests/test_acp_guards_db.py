@@ -146,6 +146,53 @@ def test_project_allowlist_cannot_reintroduce_acp(monkeypatch):
     run_db(test, monkeypatch)
 
 
+@pytest.mark.parametrize("entry", ["manager_create", "manager_update", "agents_api", "create_api"])
+@pytest.mark.parametrize("wanted", ["profile-acp", "aCp ReViEw"])
+def test_task_profile_entry_points_refuse_acp_without_writing(monkeypatch, tmp_path, entry, wanted):
+    from looper.agents import profile_registry
+    from looper.agents.bus import MessageBus
+    from looper.agents.ops import Turn
+    from looper.agents.ops.service import ManagerOps, Platform
+    from looper.db import projects, tasks
+    from tests.db_support import v1_api
+
+    async def test(pool):
+        await _seed(pool)
+        monkeypatch.setattr(profile_registry, "_login_modules", lambda: {})
+        project = await projects.create_project(name="Review project", work_dir=str(tmp_path), pool=pool)
+        await tasks.create_task(task_id="task-review", requirement="Inspect changes", project_id=project["id"],
+                                work_dir=str(tmp_path), status="init", pool=pool)
+        profiles = {"reviewer": wanted}
+        if entry.startswith("manager_"):
+            platform = Platform(bus=MessageBus(runtime_root=tmp_path),
+                                task_router=SimpleNamespace(has_planner=lambda _: False))
+            ops = ManagerOps(platform, url="http://127.0.0.1:9", token="synthetic-token")
+            turn = Turn(channel="web", chat="synthetic-review", message_id="synthetic-message")
+            ops.begin_turn(turn)
+            try:
+                if entry == "manager_create":
+                    answer = await ops.call("looper_task_create", {"requirement": "Inspect changes",
+                        "title": "Review", "project": project["name"], "profiles": profiles})
+                else:
+                    answer = await ops.call("looper_task_update", {"task_id": "task-review", "profiles": profiles})
+            finally:
+                ops.end_turn(turn)
+            assert answer["status"] == "error", answer
+            assert answer["error"]["code"] == "invalid", answer
+        else:
+            async with v1_api(tmp_path, pool) as call:
+                if entry == "agents_api":
+                    status, answer = await call("tasks.agents", {"task_id": "task-review", "profiles": profiles})
+                else:
+                    status, answer = await call("tasks.create", {"requirement": "Inspect changes",
+                        "project_id": project["id"], "profile_overrides": profiles})
+            assert status == 400, answer
+        assert "ACP Reviewer pilot cannot be selected" in answer["error"]["message"], answer
+        assert await pool.fetchval("SELECT count(*) FROM task_profile_overrides") == 0
+        assert await pool.fetchval("SELECT count(*) FROM tasks") == 1
+    run_db(test, monkeypatch)
+
+
 def test_interactive_template_never_drops_acp_to_builtin(monkeypatch):
     from looper.agents import task_template_execution as execution
     from looper.agents.task_templates import TaskTemplate, TemplateError
@@ -193,6 +240,7 @@ def test_launch_refusals_record_reason_and_never_spawn(monkeypatch, tmp_path, re
     current = replace(snapshot, enabled=False) if reason == "disabled" else replace(
         snapshot, model="different-model") if reason == "pairing" else snapshot
     monkeypatch.setattr(settings, "read", AsyncMock(return_value=current))
+    monkeypatch.setattr(worker.vault, "load", AsyncMock(return_value=(None, None)))
     if reason == "unavailable":
         monkeypatch.setattr(acp_policy, "_preflight", lambda _: False)
     spawn = AsyncMock(side_effect=AssertionError("a refused agent must not spawn"))

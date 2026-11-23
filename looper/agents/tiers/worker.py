@@ -525,7 +525,8 @@ class ProcessRun:
 
     def __init__(self, runtime: RuntimeAdapter, command: list[str], *, launch: Launch,
                  cwd: str | Path, session_dir: Path | None, label: str, prompt_file: Path | None = None,
-                 max_turns: int = 0) -> None:
+                 max_turns: int = 0, runtime_root: Path | None = None, task_budget_usd: float | None = None) -> None:
+        self._runtime_root, self._task_budget_usd = runtime_root, task_budget_usd
         self._runtime, self._command, self._launch = runtime, command, launch
         self._cwd, self._session_dir, self._label = cwd, session_dir, label
         self._prompt_file, self._max_turns = prompt_file, max_turns
@@ -558,6 +559,10 @@ class ProcessRun:
             from ..acp_reviewer_settings import read, check_pairing
             from ..runtimes.acp_policy import prepare_policy, PolicyError
 
+            if self._launch.max_budget_usd is not None or self._task_budget_usd is not None:
+                detail = "acp_reviewer cannot enforce run or task budget caps; remove the cap or choose another runtime"
+                self.launch_record = {"acp_write_policy": {"reason": "budget_cap_unsupported", "detail": detail}}
+                raise RunStartError(detail)
             try:
                 config = await read()
                 check_pairing(config, self._launch.profile.provider, self._launch.model, self._launch.effort,
@@ -565,11 +570,17 @@ class ProcessRun:
                 if config != self._launch.acp_reviewer:
                     raise ValueError("acp_reviewer settings changed before launch; retry the review")
                 self._launch._check_binding()
+                vault_config, vault_problem = await vault.load()
+                if vault_problem:
+                    raise ValueError(f"acp_reviewer cannot protect the knowledge vault: {vault_problem}")
+                inherited = self._launch.environment()
                 self._acp_policy = await prepare_policy(config.command, cwd=self._cwd,
-                    inspect_roots=(*self._launch.read_dirs, *config.inspect_roots), config_dir=config.config_dir)
+                    inspect_roots=(*self._launch.read_dirs, *config.inspect_roots), config_dir=config.config_dir,
+                    runtime_root=self._runtime_root, vault=vault_config.path if vault_config else None,
+                    environment=inherited)
                 self.launch_record = {"acp_write_policy": self._acp_policy.record}
                 command = self._acp_policy.wrap()
-                environment = self._acp_policy.environment(self._launch.environment())
+                environment = self._acp_policy.environment(inherited)
             except PolicyError as exc:
                 self.launch_record = {"acp_write_policy": exc.record}
                 raise
@@ -2356,6 +2367,8 @@ class WorkerPool:
                 else:
                     handle = ProcessRun(runtime, command, launch=launch, cwd=work_dir, session_dir=session_dir,
                                         prompt_file=prompt_file, max_turns=max_turns,
+                                        runtime_root=self._runtime_root,
+                                        task_budget_usd=execution.task_budget_usd if parent_task_id else None,
                                         label=f"worker {worker_id}")
         except (RuntimeUnsupported, OSError) as exc:
             problem = f"Cannot prepare {runtime.label}: {exc}"

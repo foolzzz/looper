@@ -169,7 +169,6 @@ def test_unverified_host_refused(configured, repository, monkeypatch):
 
 def test_failed_preflight_refused(configured, repository, monkeypatch):
     monkeypatch.setattr(acp_policy.sys, "platform", "darwin")
-    monkeypatch.setattr(acp_policy.shutil, "which", lambda name: "/usr/bin/sandbox-exec")
     monkeypatch.setattr(acp_policy, "_preflight", lambda *args: False)
     with pytest.raises(acp_policy.PolicyError, match="write policy unavailable") as error:
         asyncio.run(acp_policy.prepare_policy(["grok", "agent", "stdio"], cwd=repository, config_dir=configured))
@@ -213,3 +212,171 @@ if depth: subprocess.run([sys.executable,__file__,sys.argv[1],str(depth-1)],chec
         assert subprocess.check_output(["git", "-C", str(repository), "status", "--porcelain"]) == before
     finally:
         policy.cleanup()
+
+
+@pytest.mark.parametrize("option", ["-m", "--model", "--effort", "--reasoning-effort"])
+def test_option_values_cannot_hide_flags(configured, option):
+    assert not acp_policy.config_check(["grok", "agent", option, "--leader-socket", "stdio"], configured).ok
+
+
+@pytest.mark.parametrize("entry", [".grok", ".claude.json", "unexpected", "auth.json"])
+def test_config_directory_is_allowlisted(configured, entry):
+    (configured / entry).write_text("{}")
+    check = acp_policy.config_check(["grok", "agent", "stdio"], configured)
+    assert check.ok is (entry == "auth.json")
+
+
+@pytest.mark.parametrize("reverse", [False, True])
+def test_overlap_checks_filesystem_identity_with_case_variants(repository, reverse):
+    nested = repository / "Config"
+    nested.mkdir()
+    alias = repository.parent / repository.name.swapcase()
+    if not alias.exists():
+        pytest.skip("requires case-insensitive filesystem")
+    first, second = (alias, nested) if reverse else (nested, alias)
+    assert acp_policy._overlaps(first, second)
+
+
+@pytest.mark.parametrize("protected_name", ["runtime_root", "vault"])
+@pytest.mark.parametrize("ancestor", [False, True])
+def test_launch_protects_runtime_and_vault(configured, repository, tmp_path, protected_name, ancestor):
+    protected = configured / "protected" if ancestor else tmp_path / "protected"
+    protected.mkdir()
+    config = configured if ancestor else protected / "config"
+    if not ancestor:
+        config.mkdir()
+        (config / "config.toml").write_text("[cli]\nuse_leader=false\n")
+    with pytest.raises(acp_policy.PolicyError) as error:
+        asyncio.run(acp_policy.prepare_policy(["grok", "agent", "stdio"], cwd=repository,
+                    config_dir=config, **{protected_name: protected}))
+    assert error.value.reason.value == "config_dir_overlaps"
+
+
+@pytest.mark.parametrize("ancestor", [False, True])
+def test_home_or_its_ancestor_cannot_be_writable(configured, repository, monkeypatch, ancestor):
+    home = configured / "home" if ancestor else configured
+    home.mkdir(exist_ok=True)
+    monkeypatch.setenv("HOME", str(home))
+    with pytest.raises(acp_policy.PolicyError) as error:
+        asyncio.run(acp_policy.prepare_policy(["grok", "agent", "stdio"], cwd=repository, config_dir=configured))
+    assert error.value.reason.value == "config_dir_overlaps"
+
+
+@pytest.mark.installed
+@pytest.mark.skipif(sys.platform != "darwin", reason="macOS seatbelt required")
+@pytest.mark.parametrize("missing_rule", ["unix-socket", "loopback"])
+def test_preflight_refuses_missing_ipc_enforcement(configured, repository, monkeypatch, missing_rule):
+    original = acp_policy._profile
+
+    def weakened(*args, **kwargs):
+        profile = original(*args, **kwargs)
+        rule = ('(deny network-outbound (remote unix-socket))' if missing_rule == "unix-socket" else
+                '(deny network-outbound (remote ip "localhost:*"))')
+        return profile.replace(rule, "")
+
+    monkeypatch.setattr(acp_policy, "_profile", weakened)
+    with pytest.raises(acp_policy.PolicyError, match="enforcement preflight failed"):
+        asyncio.run(acp_policy.prepare_policy(["grok", "agent", "stdio"], cwd=repository, config_dir=configured))
+
+
+@pytest.mark.installed
+@pytest.mark.skipif(sys.platform != "darwin", reason="macOS seatbelt required")
+def test_readonly_and_fifo_inspect_roots_need_no_write_probe(configured, repository, tmp_path, monkeypatch):
+    readonly = tmp_path / "readonly"
+    readonly.mkdir(mode=0o555)
+    fifo = tmp_path / "fifo"
+    os.mkfifo(fifo)
+    original = acp_policy.tempfile.mkstemp
+
+    def owned_only(*args, **kwargs):
+        assert kwargs.get("dir") != readonly, "never write into a reported protected directory"
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(acp_policy.tempfile, "mkstemp", owned_only)
+    try:
+        policy = asyncio.run(acp_policy.prepare_policy(["grok", "agent", "stdio"], cwd=repository,
+                    config_dir=configured, inspect_roots=[readonly, fifo]))
+        policy.cleanup()
+    finally:
+        readonly.chmod(0o755)
+
+
+@pytest.mark.installed
+@pytest.mark.skipif(sys.platform != "darwin", reason="macOS seatbelt required")
+@pytest.mark.parametrize("host", ["127.0.0.1", "::1"])
+def test_only_configured_loopback_proxy_port_is_allowed(configured, repository, host):
+    import socket
+
+    family = socket.AF_INET6 if ":" in host else socket.AF_INET
+    with socket.socket(family) as proxy, socket.socket(family) as denied:
+        proxy.bind((host, 0))
+        proxy.listen(2)
+        denied.bind((host, 0))
+        denied.listen(2)
+        proxy_port, denied_port = proxy.getsockname()[1], denied.getsockname()[1]
+        # Both endpoints are listening before the sandbox is installed.
+        for port in (proxy_port, denied_port):
+            with socket.socket(family) as client:
+                client.connect((host, port))
+        address = f"[{host}]" if family == socket.AF_INET6 else host
+        policy = asyncio.run(acp_policy.prepare_policy(["grok", "agent", "stdio"], cwd=repository,
+            config_dir=configured, environment={"HTTPS_PROXY": f"http://{address}:{proxy_port}"}))
+        try:
+            assert policy.wrap()[0] == "/usr/bin/sandbox-exec"
+            code = '''import errno,json,socket,sys
+host=sys.argv[1]; results=[]
+for port in map(int,sys.argv[2:]):
+ with socket.socket(socket.AF_INET6 if ':' in host else socket.AF_INET) as client:
+  client.settimeout(1)
+  try: client.connect((host,port)); results.append('connected')
+  except OSError as error: results.append(error.errno)
+print(json.dumps(results))
+'''
+            result = subprocess.run(policy.wrap([sys.executable, "-c", code, host, str(proxy_port), str(denied_port)]),
+                                    capture_output=True, text=True, timeout=5)
+            assert result.returncode == 0, result.stderr
+            assert json.loads(result.stdout) == ["connected", errno.EPERM]
+        finally:
+            policy.cleanup()
+
+
+@pytest.mark.installed
+@pytest.mark.skipif(sys.platform != "darwin", reason="macOS seatbelt required")
+@pytest.mark.parametrize("replacement", ["regular", "fifo"])
+def test_preflight_rejects_replaced_probe_inode(configured, repository, monkeypatch, replacement):
+    original = acp_policy.subprocess.run
+
+    def replace_before_probe(command, **kwargs):
+        if command[0] == "/usr/bin/sandbox-exec":
+            probe = Path(json.loads(command[-1])[0])
+            swapped = probe.with_suffix(".replacement")
+            if replacement == "fifo":
+                os.mkfifo(swapped)
+            else:
+                swapped.write_text("replacement must not be opened")
+            swapped.replace(probe)
+        return original(command, **kwargs)
+
+    monkeypatch.setattr(acp_policy.subprocess, "run", replace_before_probe)
+    with pytest.raises(acp_policy.PolicyError, match="enforcement preflight failed"):
+        asyncio.run(acp_policy.prepare_policy(["grok", "agent", "stdio"], cwd=repository, config_dir=configured))
+
+
+@pytest.mark.parametrize("ancestor", [False, True])
+def test_case_variant_config_refused_before_launch(repository, ancestor):
+    config = repository.parent if ancestor else repository / "config"
+    config.mkdir(exist_ok=True)
+    (config / "config.toml").write_text("[cli]\nuse_leader=false\n")
+    alias = config.parent / config.name.swapcase()
+    if not alias.exists():
+        pytest.skip("requires case-insensitive filesystem")
+    with pytest.raises(acp_policy.PolicyError) as error:
+        asyncio.run(acp_policy.prepare_policy(["grok", "agent", "stdio"], cwd=repository, config_dir=alias))
+    assert error.value.reason.value == "config_dir_overlaps"
+
+
+def test_profile_denies_application_ipc(configured, tmp_path):
+    profile = acp_policy._profile(tmp_path, configured)
+    assert '(deny lsopen)' in profile
+    assert '(deny appleevent-send)' in profile
+    assert '(allow network-outbound (remote unix-socket (path "/private/var/run/mDNSResponder")))' in profile
