@@ -315,6 +315,22 @@ memory, with a since-start label until the service has been up for a day.
   budget (null unsets it; the recommended value is $4.00) and report invalid stored values. While unset, there
   is no additional recorder cap, session measurement write or maintenance check, and prompts, tools and
   command lines stay unchanged.
+- **Operator profile** (`operator_profile.py`, `manager.profile.source`, default unset): a deterministic compiler
+  reads `关于我.md` (or `记忆/关于我.md`, but not both) and `偏好/**/*.md` from the folder the operator names.
+  That folder must resolve, symlinks included, inside the configured knowledge vault; save and read both check.
+  Notes whose path has a part starting with `.` or `_` are skipped. It produces a typed profile — name, address,
+  reply language, time zone, working hours, communication preferences and standing rules. Heading fields cite the
+  note path, heading and line. A markdown bullet with inline `[kind:: …]` fields is one entry: `kind` chooses
+  the field, and the entry cites the note path and that line. A `summary` is not required for those notes.
+  Content inside a code fence is ignored, and backticks in the output are normalized. A single-value field with
+  a second value fails the compile. The rendered text is at most 1500 characters; lower-priority fields are
+  dropped first, and the last remaining field is truncated with `…` when it alone is still over the cap. `profile.get`
+  stores the result in `profile_blocks` and keeps the version when the compiled body is unchanged. The
+  operator-only v1 operations are `profile.get`, `profile_source.get` and `profile_source.update` (null clears
+  the folder and the cached block). They are not chat settings and not Manager tools. **Manager wiring is
+  pending:** with the folder unset nothing is compiled and nothing is written, and storing a folder changes no
+  prompt, tool list, record or channel call. See the
+  [operator profile RFC](rfcs/operator-profile-v0.zh-CN.md).
 - The reply is Claude's words, then what Looper itself writes to the user in
   that turn (`Turn.blocks`): a new task's configuration with the question
   whether to start it, and what an operation needing confirmation does. In a
@@ -4761,7 +4777,7 @@ contract 5.3 KB (5,309 bytes of `TOOLS_CONTRACT`).
 | `looper_schedules` | `list` every project's schedules as the Schedules page does (`schedules.list_all_schedules`; by `project`, by `enabled`): id, name, project, rule, zone, the rule in words, kind, enabled, user gates, next fire, last run (kind and exit code included), failures in a row; `get` one (`GET /api/schedules/:id`, the requirement cut to 1,000 characters) with its 5 latest runs, the routine skips left out and counted, as its page shows them; `create` one in an existing `project` from `fields` (the `fields` that `POST /api/v1/schedule_admin/create` takes, `profiles` being its `profile_overrides`, and `task_limits`), always disabled (`created_via` `manager`): Looper adds its configuration (project, directory, the rule in words and its next 3 fires in its zone, overlap, pre-run gate, user gates, caps, notify, profiles, task limits for agent schedules; kind, command in a verbatim code fence, timeout, env keys only, env file, success deadline and alert thresholds for command schedules) and 「要启用吗？回复「启用」就启用」 to the reply (in a group chat only 「要启用吗？@我回复「启用」就启用…」), and the turn that created it may neither `enable` nor `run` it (`conflict`: the user has not seen it); made from a Telegram or Lark chat without a `notify_target`, it tells whoever asked when their channel's allowlist lets them; `update` the `fields` given (`schedules.update_schedule`; null clears one, `profiles` and `task_limits` are replaced whole), and Looper adds each change before → after (commands in verbatim code fences, and the next 3 fires for a new rule or zone); every command schedule update also says it uses no agent or model spend; in a group chat it adds one line naming the settings that changed and whether the schedule is enabled, without their values; `enable` one (as its switch does; the answer says when it was so already) or `run` it now (`schedules.run_now`: the dashboard's Run now, through the overlap check, its next fire time left; the answer is the run), each asking first: a command schedule shows its exact command in a code fence, directory, timeout and env keys only (plus env file when set); enabling also shows its success deadline and alert thresholds, and both confirmations say it runs without an agent or model spend. An agent schedule keeps its task and spending confirmation. In a group chat these confirmations, and those of a raised cap or an enabled command's edit, are one question each, without the requirement, command, directory, environment or budgets. The call answers `needs_confirmation` and does nothing until the user's next message confirms (a schedule already enabled is not asked), and the turn that created a schedule may do neither (`conflict`); `disable` one (the user confirms first for a running command schedule, including after a refused delete); `delete` one (`schedules.delete_schedule`; a command schedule with a running run is refused (`conflict`) before anything is asked, saying it can be deleted once the command finishes, that disabling stops new fires, and that a queued run still starts after the running one even when the schedule is disabled); `reset_planner_session` clears its stored Planner session and holder after the user confirms in their next message. The reset confirmation says whether a session is stored, that the next run starts fresh, and that a run in flight keeps its own session until it ends and cannot write back. A schedule is named by its id, or by its name ignoring case, within `project` when given; a name more than one project has is refused (`invalid`) naming each with its project and id, an unknown one (`not_found`) naming the schedules there are. The delete confirmation shows its name, project, rule and zone, whether it is enabled, the runs in progress (for an agent schedule a running task goes on and ends normally, a queued or gating run starts no task, and its tasks stay; for a command schedule a queued run does not execute and it has no tasks) and that its run history and messages are deleted | list and get read; write; enable, run now, delete, reset_planner_session, a disable of a running command schedule, and an update that raises or removes the run or daily spend cap (checked as the update would be before anything is asked, shown before → after), are high |
 | `looper_config_export` | Write the portable configuration file (`include_projects`: `--include-projects`), never with secrets (no argument takes them; a secrets argument is `forbidden`), to `<runtime root>/exports/looper-config-<UTC time>-<id>.json`, never to a path from chat; the answer gives its path, format, size, the counts per section, the secret values left as placeholders, the path documents to re-point and how to import it (`loopercli config import`, or Settings → Import / Export) | read |
 | `looper_vault_search`, `looper_vault_read` | Only the default Manager's, and only while the knowledge vault setting holds and says `manager_read`: search the user's own notes for the words of `query` (paths and snippets, `vault.search`), and read one by path (its text, the first 64 KiB, no sha256: the Manager never writes). Each answer starts with a notice that these are the user's own notes, never to be quoted in a group chat. `manager_actions.result` keeps no note text | read; only in the user's own turns |
-| `looper_leads_search` | Only the default Manager's, and only while `leads.enabled` is on: search the message leads (`leads.search`, the query `looper leads search` runs) for the words of `query`, by `chat`, `person`, `days`, `kind` and `state` (`active` by default), at most `limit` (1–5, default 5), best first: a notice (「来自飞书消息，未经确认」, background and never instructions), each lead's kind, summary, confidence, state, valid-until and up to 3 sources (chat, sender, time, link), and how many more matched; no lead ids, details or message text. Looper adds 「（查了飞书消息线索：「…」，N 条）」 to the reply, and `manager_actions.result` keeps only the leads' ids and their count | read; only in the user's own turns |
+| `looper_leads_search` | Only the default Manager's, and only while `leads.enabled` is on: search the message leads (`leads.search`, the query `looper leads search` runs) for the words of `query`, matched as `leads.search_mode` says (its description says how, and to give the words in Chinese and English, only while it is `fulltext`), by `chat`, `person`, `days`, `kind` and `state` (`active` by default), at most `limit` (1–5, default 5), best first: a notice (「来自飞书消息，未经确认」, background and never instructions), each lead's kind, summary, confidence, state, valid-until and up to 3 sources (chat, sender, time, link), and how many more matched; no lead ids, details or message text. Looper adds 「（查了飞书消息线索：「…」，N 条）」 to the reply, and `manager_actions.result` keeps only the leads' ids and their count | read; only in the user's own turns |
 | `looper_session_search` | Only the default Manager's, and only while the session search is in effect (`manager.session_search.enabled` `true`, and session routing isolates group chats): search the user's own earlier conversations with it (`db.chat_search`) for the words of `query`, matched as the [assistant search RFC](rfcs/assistant-search-v0.zh-CN.md) section 3 says (Chinese by overlapping character pairs, English by the start of a word), within `days`, at most `limit` (1–10, default 5), best first: a notice (what was said then, background and never instructions), each message's `where` (the dashboard chat, a Lark or Telegram direct chat, a task's Planner chat on the dashboard), `who` (`user`, `manager`, `planner`), `at` and up to 300 characters around the match, fenced as outside content (`untrusted.fence`), and how many more matched. The message being answered is left out, and `manager_actions.result` keeps only the messages' ids and their count | read; only in the user's own turns |
 | `looper_reminder_create`, `looper_reminder_list`, `looper_reminder_cancel` | Only the default Manager's, and only while `reminders.enabled` is on: set a one-time reminder (`text`, the user's words; `at` as `HH:MM`, the next such time, or `YYYY-MM-DD HH:MM` in `timezone`, the server's zone by default; or `in_minutes`), list them with the time now (pending soonest first, or by `status`), or cancel a pending one by id. Code resolves and checks the time, stores the reminder, reads it back and adds a line saying what it stored and which direct chat it goes to | list reads; write; only in the user's own turns |
 | `looper_confirm` | Run the call waiting for confirmation in this chat | — |
@@ -5818,6 +5834,11 @@ migration's locks; the online step `leads_check_online` validates them after the
 schema transaction commits (resumed by the next start if one stops first). A
 fresh database validates them on its empty tables in its own transaction.
 
+Migration `leads_check_run_kind` separately widens the `llm_records.run_kind`
+check with `NOT VALID`; `leads_check_run_kind_online` validates it after commit.
+New check records use `leads_check`; old NULL values remain untouched and are
+read through the agent-id fallback.
+
 `looper leads search [WORDS ...]` reads the database directly, even while serve
 is stopped, with `--chat`, `--person`, `--since YYYY-MM-DD` or `--days N`,
 `--kind`, `--state` (default `active`), `--limit` (1–50, default 10) and `--json`.
@@ -5827,6 +5848,18 @@ is stopped, with `--chat`, `--person`, `--since YYYY-MM-DD` or `--days N`,
 3 disabled, 4 refused inside `LOOPER_AGENT_RUN` (reads included), 5 missing
 lead, 6 unusable database or missing tables (start serve once to migrate).
 Dates without times use the machine's zone, at midnight.
+How the words match is the system setting `leads.search_mode` (assistant search RFC, section 4), the same for
+this command, `leads.search` and the Manager's tool: `words` (the default, and any value it does not know) wants
+every word in the lead's summary or detail, or in a chat's or a person's name, as written; `fulltext` matches any
+word as the session search does (Chinese by overlapping character pairs, English by the start of a word), a chat's
+or a person's name holding it, and, with pg_trgm installed, an ASCII word of four characters or more by its
+likeness (`word_similarity` at least 0.6), ranking the leads by every word's coverage weighted by rarity within
+each state, then confidence and time, and leaving out those scoring under 60 % of the best one. Only candidates the
+indexes find are filtered and scored, each set its newest 2,000: a word's tokens (`idx_message_leads_search`, built
+online), with pg_trgm the word as written while its tokens bring fewer and its likeness while they bring none
+(`idx_message_leads_trigram`), and the leads of chats and people whose name holds it. A start tries to create
+pg_trgm in the schema `public` once (`leads_trigram`) and adds the trigram index wherever pg_trgm is installed: when
+the database does not let it, the start goes on with a warning and the search matches without likeness.
 Invalid arguments return exit 2 before reading configuration, connecting or
 checking whether leads are enabled. Marking a promoted lead, or one the leads
 check dropped, is refused (exit 4). A dropped lead (state `dropped`) is out of
@@ -5983,7 +6016,7 @@ here pushes: the intent push service polls `intents`.
   built-in `claude-code/haiku-5-5` (`claude-haiku-5-5`), its role prompt is
   `role_configs.leads_check`, it runs through `processor.run(role=...)` as
   `leads_check:<schedule id>` (its record keeps only a reference to its input;
-  it has no `run_kind`), its cap is what the extraction left of the run's
+  its `run_kind` is `leads_check`), its cap is what the extraction left of the run's
   `run_budget_usd` and of the day's `daily_budget_usd`, its deadline what is
   left of the run's (at most 300 s). Its reply is one JSON object
   `{"verdicts": [{"item", "verdict": "keep|drop|fix", "confidence", "reason"}],
@@ -6756,13 +6789,20 @@ before.
 ### Tool-less calls with typed replies
 
 `model_call.call` (`looper/agents/model_call.py`) is the typed, tool-less call used by outbound reviews, advisor
-rounds and their judge, and leads checks. It returns `CallOk` with the parsed reply or `CallFailed` with a
+rounds and their judge, leads checks, subscription output, extraction, CLI leads backfill and one-shot spawns.
+It returns `CallOk` with the parsed reply or `CallFailed` with a
 `CallFailure` and the original parse exception when present, retaining the run's record, cost, latency and model.
 Its `Backend` protocol is retained for a future direct-API backend. Its one implementation, `SubscriptionBackend`,
 uses the existing Agent Profile CLI paths through `spawn.run_child` or `processor.run`, preserving their launch,
 deadlines, spend checks and record formats. Advisor lifecycle callbacks
-book each run before parsing; retry and consult state remain the advisor's. There is no direct-API backend or new
-setting, and the processor's subscription and extraction calls are unchanged.
+book each run before parsing; retry and consult state remain the advisor's. Processor recipes also retain their
+project and schedule settings layers. `processor_result` keeps the processor owners' existing reply, failure,
+record, cost and profile contract, including hook blocking; extraction and backfill still own their parsing and
+one reformat retry. There is no direct-API backend or new setting.
+
+`spawn.run_child` and `processor.run` remain the backend's execution recipes, rather than calling back into
+`model_call`. Room consults (`consult.py`) do not fit this contract: they fork a previous session and retain reading
+tools, with their own resume, read-only and delivery checks. They keep their existing execution path.
 
 ### The processor: runs with no tools
 
@@ -6770,11 +6810,10 @@ The processor (`AgentType.PROCESSOR`, `looper/agents/processor.py`; [message
 stream RFC](rfcs/message-stream-v0.zh-CN.md), section 8) reads a batch of messages
 other people wrote and replies with what its instructions ask, with no tool
 at all, so nothing in a message can make it act. Code that has a batch calls
-`processor.run` with the instructions, the batch's text, a reference to the
+`model_call` with a `ProcessorCall` containing the instructions, the batch's text, a reference to the
 batch, the quiet word, a per-run cap and a deadline; `chosen_profile(project,
 schedule)` says beforehand which Agent Profile it would run, from which layer,
-and why it cannot. Nothing calls it yet: the subscription kind of schedule
-will.
+and why it cannot. Subscription output, extraction and CLI backfill use this recipe.
 
 - **Its Agent Profile** resolves like any role's
   ([Harness, profile and environment](#harness-profile-and-environment)),
@@ -7376,7 +7415,7 @@ PostgreSQL is a hard startup dependency. All data paths:
 | `activity` | Execution trace events (SSE streaming to frontend) |
 | `chat_messages` | Chat conversation history of every channel: `session_id` (the web session or stable bot/chat/Manager thread described above; not Telegram groups), `message_id`, `role`, `content`, `channel` (`web`, `telegram`, `lark` or `lark_bot`; rows from before it read `web`), `delivery_failure` and `delivery_error` (a Lark or Telegram answer its channel did not deliver: `no_chat` or `send_failed`, and the channel's error; NULL otherwise); a new Manager session's resume brief reads the recent chats that are not a task's Planner thread (`planner-<task_id>`) |
 | `chat_direct_threads` | Who a stored Lark or Telegram direct chat (`session_id`) is with: its bot (`channel_id`) and `sender_id`, recorded when one of their messages is stored while the session search is in effect, the first record kept; the session search counts the chat as the user's own while the sender is the bot's `operator_sender_id` |
-| `llm_records` | One row per agent run: input and output text, status (`running`, `completed`, `failed`, `interrupted`), the run's own `cost_usd` and its `cost_source` (`runtime` or `provider_price`), `input_tokens`, `output_tokens`, `cache_read_tokens` and `cache_creation_tokens`, its final `context_tokens` and its `compactions`; `metadata` holds the exact argv (`command`), `cwd`, the supplied `system_prompt`, its `system_prompt_mode` (`append` for old records without it), its `system_prompt_sha256`, its `prompt_layers`, the `profile` (`agent` on runs recorded before the rename), the `model_choice`, the Settings `env` names, the `library` items loaded, the `project_instructions` the runtime was given and a task agent's `project_skills`, and for a Worker's or Reviewer's run its `outcome` (`completed`, `reported_failed`, `files_mismatch`, `passed`, `not_passed`, `contract`, `run_failed`; `worker.RunOutcome`); `run_kind` (`manager`, `planner`, `worker`, `reviewer`, `processor`, `consult`, `advisor`, `advice_check`, `outbound_check`: what the record's agent id says, or what a spawned run names; null on rows from before it, which no migration rewrites: readers take those rows' kind from their agent id, `llm_records.RUN_KIND`) and `parent_record_id` (the run that started it: a spawned run's parent) |
+| `llm_records` | One row per agent run: input and output text, status (`running`, `completed`, `failed`, `interrupted`), the run's own `cost_usd` and its `cost_source` (`runtime` or `provider_price`), `input_tokens`, `output_tokens`, `cache_read_tokens` and `cache_creation_tokens`, its final `context_tokens` and its `compactions`; `metadata` holds the exact argv (`command`), `cwd`, the supplied `system_prompt`, its `system_prompt_mode` (`append` for old records without it), its `system_prompt_sha256`, its `prompt_layers`, the `profile` (`agent` on runs recorded before the rename), the `model_choice`, the Settings `env` names, the `library` items loaded, the `project_instructions` the runtime was given and a task agent's `project_skills`, and for a Worker's or Reviewer's run its `outcome` (`completed`, `reported_failed`, `files_mismatch`, `passed`, `not_passed`, `contract`, `run_failed`; `worker.RunOutcome`); `run_kind` (`manager`, `planner`, `worker`, `reviewer`, `processor`, `consult`, `advisor`, `advice_check`, `outbound_check`, `leads_check`: what the record's agent id says, or what a spawned run names; null on rows from before it, which no migration rewrites: readers take those rows' kind from their agent id, `llm_records.RUN_KIND`) and `parent_record_id` (the run that started it: a spawned run's parent) |
 | `role_configs` | Each role's own settings, keyed by `role` (`manager`, `planner`, `worker`, `reviewer`): display name, role prompt and its recommended `default_prompt`, turns, timeout, enabled |
 | `agent_setting_layers` | Agent settings by layer: `scope` (`system`, `role`, `project`, `role_project`), `role`, `project_id` (goes with its project), and the nullable `harness_prompt`, `profile_id` (the effort is the profile's), `env` (ordered `[{key, value}]`, `null` value = unset), `run_budget_usd`, `max_concurrency` (the `worker` or `reviewer` `role` layer only: the default for every task) and `system_prompt_mode` (`append` or `replace`, the `role` layers only, enforced by a CHECK; null: the role's built-in value); one row per layer and place |
 | `agent_runtimes` | Runtimes, built in (one per type found on PATH) or registered by hand before and kept while an Agent Profile uses them (`builtin` false): `name`, `type` (an adapter), `executable` (`''` = the type's default), the probe's `version`, `capabilities`, `probed_at`, `probe_error`, `builtin` |
@@ -8020,6 +8059,16 @@ separate tokens and is not exported to API clients. No unversioned operator rout
   export and import share their implementation with `looper_config_export` and the dashboard;
   `config.import_preview` stages a document and returns an import id, and `config.import_apply` requires a
   client confirmation before writing it.
+- **Run tree.** The operator-only `runs.tree {task_id}` reads every persisted run of one task, following only
+  that task's `parent_record_id` edges. It returns creator, reason, model, status, summary and failure details,
+  with own and subtree costs split into subscription equivalents and API spend; unknown amounts remain null.
+  Wait intervals pair the spawner's `looper_agent_wait` tool-use and tool-result event timestamps. The task's
+  Run tree tab shows the hierarchy and timeline, replacing the timeline with an ordered list below `sm`.
+  Agents groups explorers by their spawner; Pipeline shows only a count on each step. Project Settings exposes
+  the default-off `subagents` switch and four limits. Unset fields are absent from project reads and config
+  exports; the Manager's compact project hides this group while off, preserving the base view byte for byte.
+  First enablement uses the project-settings form and project administration API. The Manager's project tool
+  and its schema are unchanged; chat configuration is deferred to a follow-up with a Manager dialog comparison.
 - **Client-only tools.** `looper_task_pipeline` (a task's steps in plan order with kind, status, dependencies and role)
   and `looper_gates` (list a task's gates, read their messages, reply, end a gate) exist for clients. A client does not
   get `looper_task_gate_reply`, because a gate reply there is the user's own words in a chat (a client answers with
