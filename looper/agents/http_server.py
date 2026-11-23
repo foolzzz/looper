@@ -153,6 +153,9 @@ V1_HEADERS = {"Cache-Control": "no-store"}
 # The Manager's tools (``ops.service``).
 AGENT_API = "/api/agent/v1/"
 _RE_AGENT_OP = re.compile(r"^/api/agent/v1/ops/([a-z_]{1,64})$")
+_RE_EVIDENCE = re.compile(r"^/api/evidence/([^/]+)/([^/]+)/([^/]+)$")
+# A stored mime may be a header value and nothing else. No parameters, no CR/LF.
+_MIME = re.compile(r"^[\w.+-]+/[\w.+-]+$")
 
 
 # The largest request body the server reads. The largest legitimate one is a
@@ -1031,6 +1034,66 @@ class AgentHTTPServer:
 
     # --- API routing ---
 
+    async def _serve_evidence(self, method: str, task_id: str, run_id: str, index: str,
+                              writer: asyncio.StreamWriter, headers: Mapping[str, str]) -> None:
+        """Bytes of one stored artifact. The path is rebuilt from the run row, never from the URL.
+
+        The `/api/` gate accepts an operator bearer. Bytes need a browser session (`browser=True`),
+        so a token and an API client never receive them.
+        """
+        from . import acceptance_artifacts
+        from ..db import step_check_runs
+
+        if method != "GET":
+            writer.write(_json_response(HTTP_405, {"error": "method not allowed"}))
+            await writer.drain()
+            return
+        if not self._is_operator(headers, browser=True):
+            writer.write(_json_response(HTTP_403, {"error": "operator session required"}))
+            await writer.drain()
+            return
+        try:
+            run_key, artifact_index = int(run_id), int(index)
+        except ValueError:
+            run_key, artifact_index = 0, -1
+        if self._runtime_root is None or run_key < 1 or artifact_index < 0:
+            writer.write(_json_response(HTTP_404, {"error": "not found"}))
+            await writer.drain()
+            return
+        row = await step_check_runs.get_run(run_key, task_id)
+        artifacts = row.get("artifacts") if row else None
+        artifact = artifacts[artifact_index] if isinstance(artifacts, list) and artifact_index < len(artifacts) else None
+        name = artifact.get("name") if isinstance(artifact, dict) else None
+        mime = artifact.get("mime") if isinstance(artifact, dict) else None
+        if not isinstance(name, str) or not isinstance(mime, str) or _MIME.fullmatch(mime) is None or row is None:
+            writer.write(_json_response(HTTP_404, {"error": "not found"}))
+            await writer.drain()
+            return
+        try:
+            data = acceptance_artifacts.read_artifact(
+                self._runtime_root, task_id=row["task_id"], step_id=row["step_id"], attempt=row["attempt"],
+                check_id=row["check_id"], run=row["run"], name=name)
+        except acceptance_artifacts.ArtifactMissing:
+            writer.write(_json_response(HTTP_404, {"error": "file missing"}))
+            await writer.drain()
+            return
+        except (acceptance_artifacts.ArtifactRefused, acceptance_artifacts.ArtifactInvalid, OSError):
+            writer.write(_json_response(HTTP_404, {"error": "not found"}))
+            await writer.drain()
+            return
+        disposition = acceptance_artifacts.content_disposition(mime)
+        head = (
+            f"HTTP/1.1 {HTTP_200}\r\n"
+            f"Content-Type: {mime}\r\n"
+            f"Content-Length: {len(data)}\r\n"
+            f"X-Content-Type-Options: nosniff\r\n"
+            f"Content-Disposition: {disposition}\r\n"
+            f"Cache-Control: no-store\r\n"
+            f"\r\n"
+        )
+        writer.write(head.encode("utf-8") + data)
+        await writer.drain()
+
     async def _route_api(
         self,
         method: str,
@@ -1040,6 +1103,10 @@ class AgentHTTPServer:
         writer: asyncio.StreamWriter,
         headers: Mapping[str, str] | None = None,
     ) -> None:
+        match = _RE_EVIDENCE.fullmatch(path)
+        if match:
+            await self._serve_evidence(method, *match.groups(), writer, headers or {})
+            return
         writer.write(_json_response(HTTP_404, {"error": "not found"}))
         await writer.drain()
 
