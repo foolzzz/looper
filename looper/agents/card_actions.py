@@ -122,12 +122,18 @@ class Answer:
 
 
 Handler = Callable[[dict[str, Any], Press, str], Awaitable[Answer]]
+Authorizer = Callable[[dict[str, Any], Press, str], Awaitable[Answer | None]]
 _handlers: dict[str, Handler] = {}
+_authorizers: dict[str, Authorizer] = {}
 
 
-def install(kind: str, handler: Handler) -> None:
+def install(kind: str, handler: Handler, *, authorize: Authorizer | None = None) -> None:
     """Who acts on a press of a ``kind`` card (``serve`` installs them through the Manager fleet)."""
     _handlers[kind] = handler
+    if authorize is None:
+        _authorizers.pop(kind, None)
+    else:
+        _authorizers[kind] = authorize
 
 
 def value(token: str, choice: str) -> str:
@@ -145,6 +151,31 @@ def digest(value: Any) -> str:
 async def enabled(db: Any = None) -> bool:
     """Whether card buttons are on (``cards.actions.enabled`` is ``true``; no row is off)."""
     return (await system_settings.get_settings([ENABLED_KEY], pool=db)).get(ENABLED_KEY) == "true"
+
+
+async def pending_confirmations(managers: Any = None) -> list[dict[str, Any]] | None:
+    """Pending Manager operations for readers such as Needs-you. With cards on, their durable rows are the
+    source; memory supplements only confirmations that could not be persisted. With cards off, read memory as
+    before. None means neither a durable source nor a running fleet is available."""
+    durable = await enabled()
+    if not durable and managers is None:
+        return None
+    waiting = []
+    if durable:
+        for row in await db_cards.open_confirmations():
+            payload = row["payload"]
+            turn = payload.get("turn") or {}
+            waiting.append({"manager_id": row["manager_id"] or "manager", "confirmation_id": row["subject"],
+                            "tool": payload["tool"], "impact": payload.get("impact", ""),
+                            "channel": turn.get("channel"), "channel_id": row["channel_id"], "chat": row["chat"],
+                            "waited_seconds": int(row["age"]), "expires_in_seconds": max(0, int(row["remaining"]))})
+    if managers is not None:
+        for agent in managers.agents():
+            ops = managers.ops(agent.agent_id)
+            if ops is not None:
+                rows = (ops.waiting_confirmations(unpersisted_only=True) if durable else ops.waiting_confirmations())
+                waiting.extend({**row, "manager_id": agent.agent_id} for row in rows)
+    return waiting
 
 
 def has_buttons(channel_id: str | None) -> bool:
@@ -195,6 +226,10 @@ async def _authorize(event: Press) -> Answer | tuple[Handler, dict[str, Any], st
     if handler is None:
         logger.warning("no handler for a %s card's press", row["kind"])
         return Answer(HANDLED)
+    if authorize := _authorizers.get(row["kind"]):
+        refused = await authorize(row, event, choice)
+        if refused is not None:
+            return refused
     return handler, row, choice
 
 

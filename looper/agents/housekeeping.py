@@ -50,6 +50,7 @@ class Report:
     llm_routes: int = 0
     llm_route_files: int = 0
     chat_attachments: int = 0
+    skill_tombstones: int = 0
     rotated: list[str] = field(default_factory=list)
     failed_steps: dict[str, str] = field(default_factory=dict)
 
@@ -272,6 +273,11 @@ async def run_once(runtime_root: Path, now: datetime, *, current_runner: Path | 
 
     with _step(report, "channel outbox"):
         report.channel_outbox = await channel_outbox.purge(now)
+    with _step(report, "skill tombstones"):
+        async with db_connection.transaction() as conn:
+            from .skill_versions import purge_tombstones
+
+            report.skill_tombstones = await purge_tombstones(conn, now=now)
     with _step(report, "decision snapshots"):
         # Off, nothing writes the table, this cleanup included: rows of an earlier window stay with their task.
         async with db_connection.transaction() as conn:
@@ -283,15 +289,13 @@ async def run_once(runtime_root: Path, now: datetime, *, current_runner: Path | 
             if count == 0:
                 break
 
-    from . import chat_settings
-
-    if chat_settings.metrics_enabled():
-        with _step(report, "proactive deliveries"):
-            while True:
-                count = await proactive_deliveries.purge(now - timedelta(days=proactive_deliveries.RETENTION_DAYS))
-                report.proactive_deliveries += count
-                if count == 0:
-                    break
+    # Delivery writes this table while metrics are off, so the 90-day cleanup follows the rows.
+    with _step(report, "proactive deliveries"):
+        while True:
+            count = await proactive_deliveries.purge(now - timedelta(days=proactive_deliveries.RETENTION_DAYS))
+            report.proactive_deliveries += count
+            if count == 0:
+                break
 
     with _step(report, "llm requests"):
         await _prune_llm_requests(report, now)
@@ -326,8 +330,10 @@ async def run_once(runtime_root: Path, now: datetime, *, current_runner: Path | 
                 report.rotated.append(name)
     logger.info("housekeeping runs_deleted=%d notifications_deleted=%d manager_events_deleted=%d "
                 "decision_snapshots_deleted=%d logs_deleted=%d log_bytes=%d "
-                "run_dirs=%d runner_files=%d llm_requests=%d llm_routes=%d llm_route_files=%d chat_attachments=%d rotated=%s failed_steps=%s",
+                "run_dirs=%d runner_files=%d llm_requests=%d llm_routes=%d llm_route_files=%d chat_attachments=%d "
+                "skill_tombstones=%d rotated=%s failed_steps=%s",
                 report.runs, report.notifications, report.manager_events, report.decision_snapshots, report.logs,
                 report.log_bytes, report.run_dirs, report.runner_files,
-                report.llm_requests, report.llm_routes, report.llm_route_files, report.chat_attachments, ",".join(report.rotated), report.failed_steps)
+                report.llm_requests, report.llm_routes, report.llm_route_files, report.chat_attachments,
+                report.skill_tombstones, ",".join(report.rotated), report.failed_steps)
     return report

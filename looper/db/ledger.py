@@ -10,6 +10,7 @@ An own item keeps its status. A sourced item (a gate, a confirmation, a task) ha
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import re
@@ -384,7 +385,8 @@ def _check_new(new: NewItem, actor: Actor) -> None:
 
 async def apply(action: str, actor: Actor, *, item_id: int | None = None, new: NewItem | None = None,
                 note: str | None = None, quote: str | None = None, fields: Mapping[str, Any] | None = None,
-                superseded_by: int | None = None, db: Db | None = None) -> dict[str, Any]:
+                superseded_by: int | None = None, card_token: str | None = None,
+                db: Db | None = None) -> dict[str, Any]:
     """Do ``action`` as ``actor`` and return the item. ``add`` takes ``new``; every other action takes ``item_id``
     (``supersede`` also the deciding item, ``amend`` the ``fields``). Raises ``LedgerRefused``."""
     if action not in ACTIONS:
@@ -420,6 +422,8 @@ async def apply(action: str, actor: Actor, *, item_id: int | None = None, new: N
             if item["confirmed_event_id"] is not None:
                 raise LedgerRefused("conflict", f"{format_id(item_id)} is already confirmed")
             _open(item, "confirm")
+            if card_token is not None:
+                await _check_card(conn, item, card_token)
         elif action == "close":
             _own(item, "close")
             if item["kind"] == "decision":
@@ -456,7 +460,38 @@ async def apply(action: str, actor: Actor, *, item_id: int | None = None, new: N
         elif action == "reopen":
             sets |= {"closed_event_id": None, "closed_actor": None, "closed_at": None}
         await _update(conn, item_id, sets)
+        if action in ("confirm", "amend", "close", "cancel", "supersede", "reopen"):
+            from . import card_actions
+
+            if await conn.fetchval("SELECT value = 'true' FROM system_settings WHERE key = 'cards.actions.enabled'"):
+                await card_actions.resolve_subject(
+                    "ledger", format_id(item_id), by=actor.actor_id, via="button" if card_token else "typed",
+                    choice="confirm" if action == "confirm" else action,
+                    outcome="ok" if action == "confirm" else "stale", pool=conn)
         return item_view(await conn.fetchrow(_SELECT + " WHERE i.id = $1", item_id))
+
+
+def confirmation_digest(item: Mapping[str, Any]) -> str:
+    """The decision's confirmed content, independent of notes and the time they were added."""
+    fields = ("id", "kind", "title", "detail", "source_kind", "status", "confirmed_event_id", "owner_kind",
+              "owner_ref", "project_id", "due_at", "refs")
+    data = {key: item[key] for key in fields}
+    if isinstance(data["refs"], str):
+        data["refs"] = json.loads(data["refs"])
+    return hashlib.sha256(json.dumps(data, sort_keys=True, ensure_ascii=False, default=str).encode()).hexdigest()
+
+
+async def _check_card(conn: asyncpg.Connection, item: Mapping[str, Any], token: str) -> None:
+    """Check the button under the decision's lock; a concurrent amendment cannot change what is confirmed."""
+    card = await conn.fetchrow("SELECT * FROM card_actions WHERE token = $1 FOR UPDATE", token)
+    if (card is None or card["kind"] != "ledger" or card["subject"] != format_id(item["id"])
+            or card["handled_at"] is not None
+            or not await conn.fetchval("SELECT $1::timestamptz > clock_timestamp()", card["expires_at"])):
+        raise LedgerRefused("conflict", "这张卡片已经处理或过期")
+    if card["digest"] != confirmation_digest(item):
+        raise LedgerRefused("conflict", "决定已经更新，请看最新的消息")
+    if not await enabled(db=conn):
+        raise LedgerRefused("conflict", "账本已关闭")
 
 
 _NOW = object()  # a column set to now() in the same statement

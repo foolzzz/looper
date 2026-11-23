@@ -237,7 +237,8 @@ class TestWorkerPool:
                     if offline_fails:
                         raise RuntimeError("room storage unavailable")
 
-            pool.room_ops = SimpleNamespace(revoke_run=revoke, room=SimpleNamespace(presence_changed=presence_changed))
+            pool.room_ops = SimpleNamespace(revoke_run=revoke, end_subagents=AsyncMock(),
+                                            room=SimpleNamespace(presence_changed=presence_changed))
 
             async def execute(*_args: Any, **_kwargs: Any) -> None:
                 started.set()

@@ -27,6 +27,15 @@ The later schedule-throttling migration adds `active_hours` (NULL) and
 `idle_only` (false) to schedule rows. The snapshots pin those additive defaults;
 launches, prompts, outcomes and all existing fields stay unchanged.
 
+The platform sub-agent migration (#1554) adds eleven `agent_spawns` columns.
+The spawn snapshots pin `attempt` to 1 and the ten nullable columns
+(`idempotency_key`, `spawner`, `profile_id`, `delivery`, `delivered_at`,
+`cancel_reason`, `failure_class`, `failure_cause`, `child_process`, and
+`parent_spend_known`) to NULL, in both the returned outcome and persisted row.
+The event-triage migration (#1538) adds `subscription_runs.window_seqs`; the
+subscription and extraction snapshots pin it to NULL for cursor windows.
+These additions retain every original launch, prompt, outcome and record field.
+
 To regenerate the newer fixtures, use a separate checkout of the recorded
 baseline with the golden test modules and `tests/model_call_support.py` copied
 in. Set `UPDATE_MODEL_CALL_GOLDENS=1` and run only those test modules against a

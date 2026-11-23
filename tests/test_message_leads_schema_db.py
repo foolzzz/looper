@@ -122,6 +122,7 @@ def test_a_database_without_the_tables_gets_them_on_upgrade(monkeypatch):
     async def check(pool):
         await pool.execute(
             memory.DROP_MEMORY +  # memory candidates point at leads: a database without leads predates them too
+            "DROP TABLE intent_final_notices; DELETE FROM schema_migrations WHERE name = 'intent_final_notices'; "
             "DROP TABLE intent_posts, intent_sources, intents, intent_alert_senders, message_chat_projects, "
             "intent_type_projects, intent_type_versions, intent_types, message_lead_people, message_lead_sources, "
             "message_leads; ALTER TABLE source_chats DROP CONSTRAINT source_chats_extraction_check, "
@@ -193,6 +194,14 @@ def test_a_fresh_database_ends_with_the_leads_check_constraints_validated(monkey
 
 
 def test_a_database_without_the_leads_check_gets_it_unvalidated_then_validated_online_once(monkeypatch):
+    # Replay the released leads-check migration before explorer widened the role catalog.
+    # Rolling back only that shared constraint does not recreate explorer's historical predecessor.
+    for name in ("_MIGRATIONS", "_PENDING_MIGRATIONS"):
+        monkeypatch.setattr(connection, name, tuple(m for m in getattr(connection, name)
+                                                   if m.name != "platform_subagents"))
+    monkeypatch.setattr(connection, "_ONLINE_STEPS", tuple(step for step in connection._ONLINE_STEPS
+                                                         if step.migration != "platform_subagents"))
+
     async def stopped(conn):
         return None
 
