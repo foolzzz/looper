@@ -20,8 +20,12 @@ def record_delivery(channel_id: str, envelope: MessageEnvelope, receipt: Deliver
     except (KeyError, TypeError, ValueError):
         return
     notice = Notice.from_payload(envelope.payload)
+    dedupe_key = envelope.message_id
     if notice is not None:
         chat, group = notice.target.id, notice.target.group
+        marked = envelope.metadata.get("task_notice")
+        if isinstance(marked, dict):
+            dedupe_key = marked.get("dedupe_key") or dedupe_key
     turn_metrics.record_proactive(ref, channel_id=channel_id, chat=chat, group=group,
                                   external_id=receipt.external_id, outcome=receipt.result.value,
-                                  dedupe_key=envelope.message_id)
+                                  dedupe_key=dedupe_key)
