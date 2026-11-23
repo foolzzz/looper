@@ -40,12 +40,13 @@ from ..message import (
     manager_address,
     parse_channel_id,
 )
-from ..task_notice import Notice, NotifyTarget, split_message
+from ..task_notice import Notice, NotifyTarget, TargetKind, split_message
 from ..ops.leads import for_group
 from .allowlist import SenderAllowlist
-from .. import chat_attachments, chat_commands
+from .. import card_actions, chat_attachments, chat_commands, chat_settings
 from .base import ChannelAdapter, DeliveryFailure, DeliveryReceipt, PostOutcome, PostReceipt
 from .chat_history import record_reply
+from .proactive import record_delivery
 from .chat_routing import ChatResolver, RouteAction, RouteDecision, observe_chat, log_route
 from .status_line import Reactions, StatusKind, StatusLines, status_kind
 from .telegram_inbox import TelegramInbox
@@ -157,6 +158,7 @@ class TelegramChannelAdapter(ChannelAdapter):
 
         from telegram.ext import (
             Application,
+            CallbackQueryHandler,
             CommandHandler,
             MessageHandler,
             TypeHandler,
@@ -209,6 +211,7 @@ class TelegramChannelAdapter(ChannelAdapter):
             self._app.add_handler(
                 MessageHandler(filters.TEXT & ~filters.COMMAND, self._durable(self._on_message))
             )
+            self._app.add_handler(CallbackQueryHandler(self._durable(self._on_button)))
             # The first matching handler wins in this group. Unhandled updates still
             # need retiring from the durable inbox (photos, unknown commands, etc.).
             self._app.add_handler(TypeHandler(Update, self._durable(self._ignore_update)))
@@ -303,7 +306,7 @@ class TelegramChannelAdapter(ChannelAdapter):
             return DeliveryReceipt(channel="telegram", success=True, external_id=str(msg.message_id))
         except Exception as exc:
             logger.warning("telegram notification to %s failed: %s", chat, exc)
-            return DeliveryReceipt(channel="telegram", success=False, error=redact(str(exc)))
+            return DeliveryReceipt(channel="telegram", success=False, error=redact(str(exc)), outcome=_post_outcome(exc))
 
     async def post(self, target: NotifyTarget, text: str, *, reply_to: str | None = None,
                    idempotency_key: str | None = None) -> PostReceipt:
@@ -335,6 +338,26 @@ class TelegramChannelAdapter(ChannelAdapter):
                            type(exc).__name__)
             return PostReceipt(False, external_ids=tuple(sent), error=error, outcome=_post_outcome(exc))
         return PostReceipt(True, external_ids=tuple(sent))
+
+    async def post_card(self, target: NotifyTarget, card: Any, *, reply_to: str | None = None,
+                        idempotency_key: str | None = None) -> PostReceipt:
+        """Send ``card`` as one plain-text message with its buttons as an inline keyboard, else like ``post``."""
+        if self._app is None:
+            return PostReceipt(False, error="the Telegram bot is not started", outcome=PostOutcome.REJECTED)
+        try:
+            chat, reply = int(target.id), int(reply_to) if reply_to else None
+        except ValueError:
+            return PostReceipt(False, error="invalid Telegram chat or message id", outcome=PostOutcome.REJECTED)
+        extra = {"reply_to_message_id": reply, "allow_sending_without_reply": True} if reply is not None else {}
+        try:
+            message = await self._app.bot.send_message(chat_id=chat, text=self._redact(card.text)[:4000],
+                                                       reply_markup=card_actions.telegram_markup(card), **extra)
+        except Exception as exc:
+            logger.warning("telegram: a card post to %s failed: %s", target.id, type(exc).__name__)
+            return PostReceipt(False, error=redact(str(exc)), outcome=_post_outcome(exc))
+        # The chat as the platform answered it, like the message id.
+        await card_actions.bind(card, str(message.message_id), str(getattr(message, "chat_id", None) or chat))
+        return PostReceipt(True, external_ids=(str(message.message_id),))
 
     async def edit(self, target: NotifyTarget, external_id: str, text: str) -> PostReceipt:
         if self._app is None:
@@ -411,7 +434,15 @@ class TelegramChannelAdapter(ChannelAdapter):
         if not text:
             return DeliveryReceipt(channel="telegram", success=True)
 
-        receipt = await self._send_answer(chat_id, text)
+        text, cards = card_actions.shown(text, envelope.metadata.get("cards"))
+        receipt = await self._send_answer(chat_id, text) if text else DeliveryReceipt(channel="telegram", success=True)
+        for card in cards:
+            sent = await self.post_card(NotifyTarget(TargetKind.CHAT, str(chat_id)), card)
+            if not sent.success:
+                await self._send_answer(chat_id, card.text)  # the user can still answer it by typing
+            if not text:
+                receipt = DeliveryReceipt(channel="telegram", success=sent.success, error=sent.error,
+                                          external_id=sent.external_ids[0] if sent.external_ids else None)
         if not envelope.payload.get("autonomous"):
             await self._status.finish(corr_id, error=envelope.payload.get("error"))
         return receipt
@@ -530,7 +561,8 @@ class TelegramChannelAdapter(ChannelAdapter):
                     logger.info("%s: duplicate Telegram update_id=%s ignored", self.channel_id, update.update_id)
                     return
                 message = update.effective_message
-                date = getattr(message, "date", None)
+                # A button's press is as old as the card it is on; the card's own expiry bounds it.
+                date = getattr(message, "date", None) if getattr(update, "callback_query", None) is None else None
                 age = (datetime.now(timezone.utc) - date).total_seconds() if date is not None else 0
                 age_at_stop = await self._inbox.age_at_stop(update.update_id)
                 if age_at_stop is not None:
@@ -618,6 +650,54 @@ class TelegramChannelAdapter(ChannelAdapter):
         args = getattr(context, "args", None) or []
         await self._forward(update, "/profile" + (" " + " ".join(args) if args else ""))
 
+    async def _on_button(self, update: Any, context: Any) -> None:
+        """A press of a card's button (``card_actions.respond``): a toast, and the card as it is now; a card whose
+        action ends later is edited then. Only a sender this bot admits in that chat may press. While card buttons
+        are off the press is left unanswered, as before cards."""
+        started = asyncio.get_running_loop().time()
+        try:
+            if not await asyncio.wait_for(card_actions.enabled(), card_actions.AUTHORIZE_SECONDS):
+                return
+        except Exception:
+            logger.warning("%s: cannot tell whether card buttons are on; a press is not answered", self.channel_id,
+                           exc_info=True)
+            return
+        query = update.callback_query
+        chat = getattr(update.effective_chat, "id", None)
+        route = (self._resolve_chat(self.channel_id, str(chat)) if self._resolve_chat is not None and chat is not None
+                 else None)
+        if not self._admits(update, route.senders if route is not None else frozenset()):
+            logger.info("%s: a card press by an unlisted sender was refused", self.channel_id)
+            await self._answer_press(query, card_actions.Answer(card_actions.NOT_ALLOWED["confirmation"], "error"))
+            return
+        message = getattr(query, "message", None)
+
+        async def update_card(card: card_actions.Card) -> None:
+            if message is not None and chat is not None:
+                await self._app.bot.edit_message_text(chat_id=chat, message_id=message.message_id,
+                                                      text=self._redact(card.text)[:4000],
+                                                      reply_markup=card_actions.telegram_markup(card))
+
+        answer = await card_actions.respond(
+            card_actions.Press(self.channel_id, str(update.effective_user.id), str(query.data or ""),
+                               chat="" if chat is None else str(chat),
+                               message_id=str(message.message_id) if message is not None else ""), update_card,
+            started=started)
+        await self._answer_press(query, answer)
+        if answer.card is not None:
+            try:
+                await update_card(answer.card)
+            except Exception as exc:
+                logger.warning("%s: could not edit a card after its press: %s", self.channel_id, type(exc).__name__)
+        card_actions.follow(answer, update_card)
+
+    @staticmethod
+    async def _answer_press(query: Any, answer: card_actions.Answer) -> None:
+        try:
+            await query.answer(text=answer.toast[:200])
+        except Exception as exc:
+            logger.info("telegram: a card press's answer failed: %s", type(exc).__name__)
+
     async def _cmd_todo(self, update: Any, context: Any) -> None:
         """/todo goes to the Manager as typed while the "needs you" summary is on (``attention``); off, it is dropped
         like any other unknown command."""
@@ -685,7 +765,13 @@ class TelegramChannelAdapter(ChannelAdapter):
                 if not self._running:
                     break
                 # An answer is stored once it was sent, or as not delivered (the Manager names its record).
-                await record_reply(self.channel_type, envelope, await self.deliver(envelope),
+                receipt = await self.deliver(envelope)
+                if chat_settings.metrics_enabled() and envelope.metadata.get("proactive"):
+                    route = envelope.metadata.get("reply_route")
+                    route = route if isinstance(route, dict) else {}
+                    chat = str(route.get("chat_id") or self._correlation_chat.get(envelope.correlation_id) or "")
+                    record_delivery(self.channel_id, envelope, receipt, chat=chat, group=chat.startswith("-"))
+                await record_reply(self.channel_type, envelope, receipt,
                                    runtime_root=self._bus.runtime_root)
         except asyncio.CancelledError:
             pass
