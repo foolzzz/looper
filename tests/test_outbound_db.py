@@ -16,6 +16,7 @@ import asyncpg
 import pytest
 
 from looper import child_env
+from looper.db.llm_records import RUN_KINDS
 from tests.db_support import DSN, fresh_connection, run_db
 from tests.fake_claude import fake_claude
 
@@ -422,7 +423,9 @@ def test_a_database_from_before_the_reviews_gets_them_without_a_row_rewritten_an
         return None
 
     async def main() -> None:
-        async with fresh_connection(command_timeout=60) as conn:
+        async with fresh_connection(command_timeout=60) as other, fresh_connection(command_timeout=60) as conn:
+            # Another schema has the same constraint names, already validated.
+            await connection.ensure_schema(other)
             await connection.ensure_schema(conn)
             fresh = await _shape(conn)
             await _before_outbound_reviews(conn)
@@ -439,7 +442,8 @@ def test_a_database_from_before_the_reviews_gets_them_without_a_row_rewritten_an
             assert not await connection.schema_change_pending(conn)
             for constraint in ("llm_records_run_kind_check", "agent_setting_layers_role_check"):
                 # validated after the schema transaction, not under its locks
-                assert not await conn.fetchval("SELECT convalidated FROM pg_constraint WHERE conname = $1",
+                assert not await conn.fetchval("SELECT convalidated FROM pg_constraint WHERE conname = $1 "
+                                               "AND connamespace = current_schema()::regnamespace",
                                                constraint), constraint
             markers = {r["name"] for r in await conn.fetch("SELECT name FROM schema_migrations")}
             assert "outbound_reviews" in markers and "outbound_reviews_online" not in markers
@@ -448,8 +452,8 @@ def test_a_database_from_before_the_reviews_gets_them_without_a_row_rewritten_an
             assert await _shape(conn) == fresh
             assert "outbound_reviews_online" in {r["name"] for r in await conn.fetch("SELECT name FROM "
                                                                                       "schema_migrations")}
-            await conn.execute("INSERT INTO llm_records (agent_id, run_kind) VALUES ('outbound_check-0a1b', "
-                               "'outbound_check')")
+            for kind in RUN_KINDS:
+                await conn.execute("INSERT INTO llm_records (agent_id, run_kind) VALUES ($1, $2)", kind, kind)
             await conn.execute("INSERT INTO agent_setting_layers (scope, role) VALUES ('role', 'outbound_check')")
 
     asyncio.run(main())
@@ -464,6 +468,8 @@ def test_a_fresh_database_has_the_reviews_without_recording_the_upgrade() -> Non
             assert await conn.fetchval("SELECT to_regclass('outbound_reviews') IS NOT NULL")
             markers = {r["name"] for r in await conn.fetch("SELECT name FROM schema_migrations")}
             assert not {"outbound_reviews", "outbound_reviews_online"} & markers
+            for kind in RUN_KINDS:
+                await conn.execute("INSERT INTO llm_records (agent_id, run_kind) VALUES ($1, $2)", kind, kind)
             with pytest.raises(asyncpg.CheckViolationError):
                 await conn.execute("INSERT INTO outbound_reviews (agent_id, source, tool, level, target_kind, target, "
                                    "summary, verdict, failure, reason) VALUES ('manager', 'tool', 'Bash', 'unknown', "
