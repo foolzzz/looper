@@ -138,6 +138,8 @@ def _parser() -> argparse.ArgumentParser:
     talk.add_argument("--dialogs", help="comma-separated dialog ids (default: all)")
     talk.add_argument("--stable-context", action="store_true",
                       help="turn manager.stable_context on in every dialog's database (the Manager's state block)")
+    talk.add_argument("--delivery-guard", action="store_true",
+                      help="enable delivery recovery in every disposable Manager dialog")
     talk.add_argument("--untrusted-fence", action="store_true",
                       help="turn untrusted_fence.enabled on in every dialog's database (outside content fenced)")
     talk.add_argument("--reps", type=_reps, default=1, help=_REPS_HELP)
@@ -273,6 +275,7 @@ def _dialogs(args: argparse.Namespace) -> int:
             pi_runtime=_selected_runtime(args, "pi"),
             dsh_runtime=_selected_runtime(args, "dsh"),
             stable_context=args.stable_context,
+            delivery_guard=args.delivery_guard,
             untrusted_fence=args.untrusted_fence,
             claude_bin=args.claude,
         )

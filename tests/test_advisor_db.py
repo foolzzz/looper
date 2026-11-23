@@ -493,7 +493,8 @@ def test_a_database_from_before_the_advisor_roles_admits_their_layers() -> None:
         async with fresh_connection(command_timeout=60) as conn:
             await connection.ensure_schema(conn)
             fresh = await conn.fetchval("SELECT pg_get_constraintdef(oid) FROM pg_constraint "
-                                        "WHERE conname = 'agent_setting_layers_role_check'")
+                                        "WHERE conname = 'agent_setting_layers_role_check' "
+                                        "AND connamespace = current_schema()::regnamespace")
             await conn.execute(
                 "ALTER TABLE agent_setting_layers DROP CONSTRAINT agent_setting_layers_role_check, "
                 "ADD CONSTRAINT agent_setting_layers_role_check CHECK (role IN ('manager', 'planner', 'worker', "
@@ -501,7 +502,8 @@ def test_a_database_from_before_the_advisor_roles_admits_their_layers() -> None:
             assert await connection.schema_change_pending(conn)
             await connection.ensure_schema(conn)
             assert await conn.fetchval("SELECT pg_get_constraintdef(oid) FROM pg_constraint "
-                                       "WHERE conname = 'agent_setting_layers_role_check'") == fresh
+                                       "WHERE conname = 'agent_setting_layers_role_check' "
+                                       "AND connamespace = current_schema()::regnamespace") == fresh
             await conn.execute("INSERT INTO agent_setting_layers (scope, role, profile_id) "
                                "VALUES ('role', 'advisor', 'agent-claude-code-fable-5-2')")
 
