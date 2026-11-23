@@ -179,17 +179,17 @@ class Workflow:
 async def check_profiles(workflow: Workflow, *, pool: Any = None) -> None:
     from .profile_registry import RegistryError, check_selection
 
-    from .acp_guards import refuse_profile
+    from .acp_guards import refuse_type
 
     selected = {}
     try:
         for agent, profile_id in workflow.profiles.items():
-            await refuse_profile(profile_id, "workflows", pool=pool)
             selected[agent] = await check_selection(profile_id, [agent], pool=pool)
+            refuse_type(selected[agent].runtime.type, "workflows")
         for role in workflow.roles:
             if role.profile_id:
-                await refuse_profile(role.profile_id, "workflows", pool=pool)
                 selected[role.key] = await check_selection(role.profile_id, [role.kind.agent.value], pool=pool)
+                refuse_type(selected[role.key].runtime.type, "workflows")
     except RegistryError as exc:
         raise WorkflowError(str(exc)) from None
     if workflow.distinct_reviewer_runtime:

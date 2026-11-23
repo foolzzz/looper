@@ -530,7 +530,11 @@ def test_role_layer_proxy_cannot_open_loopback_port(configured, repository, monk
 
 
 @pytest.mark.parametrize("url", ["socks5://127.0.0.1:1080", "http://127.0.0.1:bad", "http://127.0.0.1/path"])
-def test_unverifiable_operator_proxy_refused(configured, repository, monkeypatch, url):
+@pytest.mark.parametrize("platform", ["darwin", "linux"])
+def test_unverifiable_operator_proxy_refused(configured, repository, monkeypatch, url, platform):
+    from types import SimpleNamespace
+
+    monkeypatch.setattr(acp_policy, "sys", SimpleNamespace(platform=platform))
     monkeypatch.setenv("HTTPS_PROXY", url)
     with pytest.raises(acp_policy.PolicyError) as error:
         asyncio.run(acp_policy.prepare_policy(["grok", "agent", "stdio"], cwd=repository, config_dir=configured))

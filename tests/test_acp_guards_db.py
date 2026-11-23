@@ -4,7 +4,11 @@ from __future__ import annotations
 import ast
 import hashlib
 import inspect
+import io
 import json
+import subprocess
+import sys
+import tarfile
 import textwrap
 from dataclasses import replace
 from pathlib import Path
@@ -52,9 +56,26 @@ def off_snapshot():
             for name, value in values.items()}
 
 
-def test_off_prompts_tools_commands_and_signatures_match_main():
+@pytest.mark.parametrize("home", [None, "/home/runner"], ids=["host-home", "ci-home"])
+def test_off_prompts_tools_commands_and_signatures_match_main(tmp_path, monkeypatch, home):
+    if home is not None:
+        monkeypatch.setenv("HOME", home)
     expected = json.loads((Path(__file__).parent / "fixtures/acp/default_off.json").read_text())
-    assert off_snapshot() == expected["sha256"]
+    snapshot = off_snapshot()
+    assert {key: value for key, value in snapshot.items() if key != "commands"} == {
+        key: value for key, value in expected["sha256"].items() if key != "commands"}
+    # The frozen command digest contains the capturing host's HOME. Compare
+    # command bytes with that same pinned revision under the current environment.
+    # Keep the fixture intact: no new command or prompt is blessed here.
+    archive = subprocess.check_output(["git", "archive", expected["base"], "looper", "tests/runtime_model_helpers.py"])
+    with tarfile.open(fileobj=io.BytesIO(archive)) as source:
+        source.extractall(tmp_path, filter="data")
+    # A regular package keeps unrelated installed test packages out of this readback.
+    (tmp_path / "tests/__init__.py").touch()
+    script = ("import ast, hashlib, inspect, json, textwrap\nfrom pathlib import Path\n"
+              + inspect.getsource(off_snapshot) + '\nprint(off_snapshot()["commands"])\n')
+    baseline = subprocess.check_output([sys.executable, "-c", script], cwd=tmp_path, text=True).strip()
+    assert snapshot["commands"] == baseline
 
 
 async def _seed(pool):

@@ -99,7 +99,7 @@ def test_profiles_are_checked_for_the_agent_that_runs_them(monkeypatch):
         expected = {"p": "planner", "w": "worker", "r": "reviewer"}
         if roles != [expected[profile_id]]:
             raise AssertionError((profile_id, roles))
-        return SimpleNamespace(runtime=SimpleNamespace(id=profile_id))
+        return SimpleNamespace(runtime=SimpleNamespace(id=profile_id, type="claude-code"))
 
     monkeypatch.setattr(profile_registry, "check_selection", selection)
     workflow = Workflow.from_dict(definition(profiles={"planner": "p", "worker": "w", "reviewer": "r"}))
@@ -123,7 +123,7 @@ def test_incompatible_profile_errors_are_workflow_errors(monkeypatch):
 ])
 def test_distinct_runtime_checks_only_both_fixed_profiles(monkeypatch, worker, reviewer, distinct, rejected):
     async def selection(profile_id, roles, **kwargs):
-        return SimpleNamespace(runtime=SimpleNamespace(id=profile_id))
+        return SimpleNamespace(runtime=SimpleNamespace(id=profile_id, type="claude-code"))
 
     monkeypatch.setattr(profile_registry, "check_selection", selection)
     profiles = {key: value for key, value in (("worker", worker), ("reviewer", reviewer)) if value}
@@ -138,7 +138,7 @@ def test_distinct_runtime_checks_only_both_fixed_profiles(monkeypatch, worker, r
 
 def test_fixed_task_profiles_win_over_role_profiles_for_distinct_runtime(monkeypatch):
     async def selection(profile_id, roles, **kwargs):
-        return SimpleNamespace(runtime=SimpleNamespace(id=profile_id))
+        return SimpleNamespace(runtime=SimpleNamespace(id=profile_id, type="claude-code"))
 
     monkeypatch.setattr(profile_registry, "check_selection", selection)
     raw = definition(profiles={"worker": "same", "reviewer": "same"}, distinct_reviewer_runtime=True,

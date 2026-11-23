@@ -447,10 +447,6 @@ async def prepare_policy(command: Sequence[str], *, cwd: str | Path, inspect_roo
         check = await asyncio.to_thread(config_check, command, config, protected=protected, cwd=cwd)
         if not check.ok:
             raise PolicyError(check)
-        sandbox = "/usr/bin/sandbox-exec" if sys.platform == "darwin" and os.access("/usr/bin/sandbox-exec", os.X_OK) else None
-        if not sandbox:
-            raise PolicyError(ConfigCheck(PolicyReason.WRITE_POLICY_UNAVAILABLE,
-                                         "write policy unavailable: no verified write policy on this host"))
         # Never accept Launch.environment(): role/project/task layers are writable
         # by the Manager and API clients, unlike the serving process environment.
         proxy_environment = {key: os.environ[key] for key in (*_PROXY_KEYS, "NO_PROXY", "no_proxy") if key in os.environ}
@@ -458,6 +454,10 @@ async def prepare_policy(command: Sequence[str], *, cwd: str | Path, inspect_roo
             ports = _proxy_ports(proxy_environment)
         except ValueError as exc:
             raise PolicyError(ConfigCheck(PolicyReason.UNKNOWN_CLI_CONFIG, "invalid or unsupported proxy configuration")) from exc
+        sandbox = "/usr/bin/sandbox-exec" if sys.platform == "darwin" and os.access("/usr/bin/sandbox-exec", os.X_OK) else None
+        if not sandbox:
+            raise PolicyError(ConfigCheck(PolicyReason.WRITE_POLICY_UNAVAILABLE,
+                                         "write policy unavailable: no verified write policy on this host"))
         await asyncio.to_thread(_proxy_preflight, proxy_environment)
         policy = WritePolicy(list(command), scratch, config, protected, _profile(scratch, config, ports), sandbox, temporary,
                              proxy_environment)

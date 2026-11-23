@@ -372,11 +372,11 @@ async def _profiles(call: Call) -> dict[str, Any]:
         _required(arguments, action, "profile")
         profile = _profile(registry, arguments["profile"])
     if action in ("create", "update"):
-        from ..acp_guards import AcpSelectionError, refuse_profile, refuse_type
+        from ..acp_guards import AcpSelectionError, refuse_type
 
         try:
             if action == "update":
-                await refuse_profile(profile["profile_id"], "looper_agent_profiles")
+                refuse_type(profile["runtime_type"], "looper_agent_profiles")
             if arguments.get("runtime"):
                 runtime = by_id_or_name(registry["runtimes"], arguments["runtime"], id_key="runtime_id",
                                         what="runtime", keys=("name", "type"))
