@@ -19,6 +19,7 @@ from looper.agents import api_v1, attention, idle_check_settings, idle_checks as
 from looper.agents.action_levels import ActionLevel
 from looper.agents.channels.base import PostOutcome, PostReceipt
 from looper.agents.message import MessageType
+from looper.agents.turn_metrics import ProactiveSource
 from looper.agents.operator_identity import operator_dm_target
 from looper.db import connection, idle_checks as store, schedules as db_schedules
 from tests.db_support import DSN, fresh_connection, run_db, run_with_channel_configs, v1_api
@@ -618,6 +619,8 @@ def test_the_schedules_section_carries_last_ok_at_and_the_todo_text_does_not_cha
 _BASE_SOURCES = ("task_notice", "completion", "progress", "gate", "gate_reminder", "subscription", "intent",
                  "schedule", "advisor_alert", "autonomous", "user_reminder", "morning_brief")
 
+_CURRENT_SOURCES = {source.value for source in ProactiveSource}  # every source the schema admits now
+
 
 async def source_check(conn) -> tuple[str, str, bool]:
     row = await conn.fetchrow(
@@ -655,7 +658,7 @@ def test_a_new_database_has_the_table_and_the_widened_check_and_records_only_the
             await connection.ensure_schema(conn)
             assert await conn.fetchval("SELECT to_regclass('idle_checks') IS NOT NULL")
             _, definition, validated = await source_check(conn)
-            assert values_of(definition) == {*_BASE_SOURCES, "idle_check"} and validated
+            assert values_of(definition) == _CURRENT_SOURCES and validated
             await deliver_row(conn, "idle_check", "k1")
             with pytest.raises(Exception):
                 await deliver_row(conn, "no_such_source", "k2")
@@ -683,16 +686,20 @@ def test_the_source_check_keeps_the_values_other_migrations_added(others):
 
             assert await idle_check_source.pending(conn)  # the object, not the marker, says so
             assert await connection.schema_change_pending(conn)
-            await connection.ensure_schema(conn)
+            # Exercise this widening alone: the simulated pre-upgrade check may intentionally omit
+            # morning_brief, whose own released migration has separate admission rules.
+            await idle_check_source.apply(conn, sql="", state="current")
+            await connection._finish_online(conn)
             _, definition, validated = await source_check(conn)
             assert values_of(definition) == {*_BASE_SOURCES, *others, "idle_check"} and validated
-            assert not await idle_check_source.pending(conn) and not await connection.schema_change_pending(conn)
+            assert not await idle_check_source.pending(conn)
             assert await conn.fetchval("SELECT count(*) FROM proactive_deliveries") == 3 + len(others)
             for source in (*others, "idle_check"):
                 await deliver_row(conn, source, f"after-{source}")  # still accepted
             with pytest.raises(Exception):
                 await deliver_row(conn, "no_such_source", "bad")
-            await connection.ensure_schema(conn)  # idempotent
+            await idle_check_source.apply(conn, sql="", state="current")  # idempotent
+            await connection._finish_online(conn)
             assert values_of((await source_check(conn))[1]) == {*_BASE_SOURCES, *others, "idle_check"}
 
     asyncio.run(asyncio.wait_for(check(), 60))
@@ -708,7 +715,7 @@ def test_a_check_rebuilt_later_without_idle_check_is_widened_again():
             await widen_like_another_migration(conn, (*_BASE_SOURCES, "morning_brief"))
             assert await connection.schema_change_pending(conn)
             await connection.ensure_schema(conn)
-            assert values_of((await source_check(conn))[1]) == {*_BASE_SOURCES, "morning_brief", "idle_check"}
+            assert values_of((await source_check(conn))[1]) == _CURRENT_SOURCES
 
     asyncio.run(asyncio.wait_for(check(), 60))
 
