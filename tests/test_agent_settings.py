@@ -142,9 +142,10 @@ class TestPrecedence:
 
     def test_nothing_set_is_the_builtin_default(self) -> None:
         for role in AgentType:
-            # The advisor and its judge have built-in profiles of their own.
+            # Spawned roles have their own profiles; explorers also have a built-in budget.
             assert resolve(role, {}, "proj-a") == replace(BUILTIN_SETTINGS, profile=builtin_profile(role.value),
-                                                         system_prompt_mode=BUILTIN_SYSTEM_PROMPT_MODE[role])
+                                                         system_prompt_mode=BUILTIN_SYSTEM_PROMPT_MODE[role],
+                                                         max_budget_usd=.5 if role is AgentType.EXPLORER else None)
         assert (BUILTIN_SETTINGS.harness.text, BUILTIN_SETTINGS.profile, BUILTIN_SETTINGS.model,
                 BUILTIN_SETTINGS.effort) == (DEFAULT_HARNESS_PROMPT, BUILTIN_PROFILE, "opus", "")
         assert (BUILTIN_SETTINGS.env, BUILTIN_SETTINGS.max_budget_usd) == ((), None)
