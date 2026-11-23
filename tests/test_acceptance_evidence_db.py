@@ -7,7 +7,7 @@ import pytest
 from looper.agents import api_v1
 from looper.agents.action_levels import ActionLevel
 from looper.db import connection, plans, projects, step_check_runs as evidence, tasks
-from tests.db_support import DSN, drop_tables, run_db, v1_api
+from tests.db_support import DSN, dropped_tables, run_db, v1_api
 
 pytestmark = pytest.mark.skipif(not DSN, reason="requires disposable LOOPER_TEST_DATABASE_URL")
 CHECK = {"id": "c1", "criterion": 1, "type": "command", "command": "printf measured", "required": True}
@@ -113,13 +113,13 @@ def test_operator_http_readback_includes_definitions_and_metadata_only(tmp_path,
 def test_evidence_migration_is_additive_and_idempotent(monkeypatch):
     async def run(pool):
         await seed(pool)
-        restore = await drop_tables(pool, "step_check_runs")
-        await pool.execute("DELETE FROM schema_migrations WHERE name = 'step_check_runs'")
-        before = await pool.fetchval("SELECT to_jsonb(s)::text FROM task_steps s WHERE id='step-evidence'")
+        async with dropped_tables(pool, "step_check_runs"):
+            await pool.execute("DELETE FROM schema_migrations WHERE name = 'step_check_runs'")
+            before = await pool.fetchval("SELECT to_jsonb(s)::text FROM task_steps s WHERE id='step-evidence'")
+            async with pool.acquire() as conn:
+                assert await connection.schema_change_pending(conn)
+                await connection.ensure_schema(conn)
         async with pool.acquire() as conn:
-            assert await connection.schema_change_pending(conn)
-            await connection.ensure_schema(conn)
-            await restore()
             assert not await connection.schema_change_pending(conn)
             await connection.ensure_schema(conn)
         assert await pool.fetchval("SELECT to_jsonb(s)::text FROM task_steps s WHERE id='step-evidence'") == before

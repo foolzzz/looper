@@ -11,7 +11,7 @@ from looper.db import connection
 from tests import leads_support as sup
 from tests import memory_support as memory
 from tests import subscription_support as stream
-from tests.db_support import DSN, drop_tables, run_db
+from tests.db_support import DSN, dropped_tables, run_db
 
 pytestmark = pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
 
@@ -122,21 +122,24 @@ def test_a_database_without_the_tables_gets_them_on_upgrade(monkeypatch):
     async def check(pool):
         # Memory candidates point at leads: a database without leads predates them too.
         await pool.execute(memory.DROP_MEMORY)
-        restore = await drop_tables(
-            pool, "intent_posts", "intent_sources", "intents", "intent_alert_senders", "message_chat_projects",
-            "intent_type_projects", "intent_type_versions", "intent_types", "message_lead_people",
-            "message_lead_sources", "message_leads")
-        await pool.execute(
-            "ALTER TABLE source_chats DROP CONSTRAINT source_chats_extraction_check, "
-            "DROP COLUMN extraction, DROP COLUMN extraction_excluded_at; "
-            "ALTER TABLE subscription_runs DROP CONSTRAINT subscription_runs_extract_counts_check, "
-            "DROP COLUMN extract_counts; DELETE FROM schema_migrations WHERE name = 'message_leads'")
-        async with pool.acquire() as conn:
-            assert await connection.schema_change_pending(conn)
-        await connection.ensure_schema(pool)
-        await restore()
+        async with dropped_tables(
+                pool, "intent_posts", "intent_sources", "intents", "intent_alert_senders", "message_chat_projects",
+                "intent_type_projects", "intent_type_versions", "intent_types", "message_lead_people",
+                "message_lead_sources", "message_leads"):
+            await pool.execute(
+                "ALTER TABLE source_chats DROP CONSTRAINT source_chats_extraction_check, "
+                "DROP COLUMN extraction, DROP COLUMN extraction_excluded_at; "
+                "ALTER TABLE subscription_runs DROP CONSTRAINT subscription_runs_extract_counts_check, "
+                "DROP COLUMN extract_counts; DELETE FROM schema_migrations WHERE name = 'message_leads'")
+            async with pool.acquire() as conn:
+                assert await connection.schema_change_pending(conn)
+            await connection.ensure_schema(pool)
         async with pool.acquire() as conn:
             assert not await connection.schema_change_pending(conn)
+        # The later final-notice table stayed and has both its keys into the recreated intent posts back.
+        assert await pool.fetchval("SELECT count(*) FROM pg_constraint WHERE contype = 'f' "
+                                   "AND conrelid = 'intent_final_notices'::regclass "
+                                   "AND confrelid = 'intent_posts'::regclass") == 2
         (seq,) = await _events(pool, "ship friday")
         await sup.lead(pool, [seq])
         await connection.ensure_schema(pool)  # and a second upgrade changes nothing

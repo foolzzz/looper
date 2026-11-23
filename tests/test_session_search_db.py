@@ -24,7 +24,7 @@ from looper.agents.ops import leads as ops_leads
 from looper.agents.ops import session_search
 from looper.agents.ops.service import MANAGER_TOOLS, ManagerOps, Platform, scope_for
 from looper.db import connection, managers, projects, tasks
-from tests.db_support import DSN, drop_tables, run_with_channel_configs
+from tests.db_support import DSN, dropped_tables, run_with_channel_configs
 from tests.test_leads_manager_default_off import _prepared
 from tests.test_manager_tools_db import _converse
 
@@ -351,11 +351,10 @@ def test_a_direct_chat_is_recorded_when_its_message_is_stored_only_while_the_swi
 
 def test_a_database_without_the_table_gets_it_on_upgrade(monkeypatch: pytest.MonkeyPatch) -> None:
     async def test(pool: Any) -> None:
-        restore = await drop_tables(pool, "chat_direct_threads")
-        async with pool.acquire() as conn:
-            assert await connection.schema_change_pending(conn)
-        await connection.ensure_schema(pool)
-        await restore()
+        async with dropped_tables(pool, "chat_direct_threads"):
+            async with pool.acquire() as conn:
+                assert await connection.schema_change_pending(conn)
+            await connection.ensure_schema(pool)
         async with pool.acquire() as conn:
             assert not await connection.schema_change_pending(conn)
         assert await pool.fetchval("SELECT count(*) FROM schema_migrations WHERE name = 'chat_direct_threads'") == 1

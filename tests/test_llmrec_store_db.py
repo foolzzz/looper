@@ -10,7 +10,7 @@ import asyncpg
 import pytest
 
 from looper.db import connection, llm_records, llm_requests
-from tests.db_support import DSN, drop_tables, fresh_connection, run_db
+from tests.db_support import DSN, dropped_tables, fresh_connection, run_db
 
 pytestmark = pytest.mark.skipif(not DSN, reason="requires disposable LOOPER_TEST_DATABASE_URL")
 
@@ -142,12 +142,11 @@ def test_upgrade_once_and_fresh_schema_parity():
     async def body():
         async with fresh_connection() as old, fresh_connection() as fresh:
             await connection.ensure_schema(old)
-            restore = await drop_tables(old, "llm_requests", "llm_request_parts", "llm_request_routes")
-            before, shape = await witness(old), await structure(old)
-            assert await connection.schema_change_pending(old)
-            assert await witness(old) == before and await structure(old) == shape
-            await connection.ensure_schema(old)
-            await restore()
+            async with dropped_tables(old, "llm_requests", "llm_request_parts", "llm_request_routes"):
+                before, shape = await witness(old), await structure(old)
+                assert await connection.schema_change_pending(old)
+                assert await witness(old) == before and await structure(old) == shape
+                await connection.ensure_schema(old)
             await connection.ensure_schema(fresh)
             assert await structure(old) == await structure(fresh)
             after, shape = await witness(old), await structure(old)
@@ -157,8 +156,8 @@ def test_upgrade_once_and_fresh_schema_parity():
             assert await old.fetchval("SELECT count(*) FROM schema_migrations WHERE name='llm_requests'") == 1
             assert not await fresh.fetchval("SELECT EXISTS (SELECT 1 FROM schema_migrations WHERE name='llm_requests')")
             # A recorded migration is never replayed as a DDL repair.
-            await drop_tables(old, "llm_requests")
-            assert not await connection.schema_change_pending(old)
+            async with dropped_tables(old, "llm_requests"):
+                assert not await connection.schema_change_pending(old)
     asyncio.run(asyncio.wait_for(body(), 30))
 
 

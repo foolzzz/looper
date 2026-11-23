@@ -23,7 +23,7 @@ from looper.agents.ops import Turn
 from looper.agents.ops import reminders as ops_reminders
 from looper.agents.ops.service import MANAGER_TOOLS, ManagerOps, Platform, scope_for
 from looper.db import connection, reminders as store
-from tests.db_support import DSN, drop_tables, run_db, run_with_channel_configs
+from tests.db_support import DSN, dropped_tables, run_db, run_with_channel_configs
 from tests.test_manager_tools_db import _converse
 
 pytestmark = pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
@@ -590,12 +590,11 @@ def test_remind_me_at_three_reaches_the_users_chat_at_three(monkeypatch: pytest.
 
 def test_a_database_without_the_table_gets_it_on_upgrade(monkeypatch: pytest.MonkeyPatch) -> None:
     async def test(pool: Any) -> None:
-        restore = await drop_tables(pool, "reminders")
-        await pool.execute("DELETE FROM schema_migrations WHERE name = 'reminders'")
-        async with pool.acquire() as conn:
-            assert await connection.schema_change_pending(conn)
-        await connection.ensure_schema(pool)
-        await restore()
+        async with dropped_tables(pool, "reminders"):
+            await pool.execute("DELETE FROM schema_migrations WHERE name = 'reminders'")
+            async with pool.acquire() as conn:
+                assert await connection.schema_change_pending(conn)
+            await connection.ensure_schema(pool)
         async with pool.acquire() as conn:
             assert not await connection.schema_change_pending(conn)
         assert await pool.fetchval("SELECT count(*) FROM schema_migrations WHERE name = 'reminders'") == 1
