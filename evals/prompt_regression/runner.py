@@ -281,8 +281,10 @@ def install_claude(bin_dir: Path, *, mode: str, scenarios: Path | None = None,
     return script
 
 
-def install_gh(bin_dir: Path, *, diffs: dict[str, str] | None = None) -> Path:
-    """Shadow gh: simulated PRs read their git refs; other PRs use fixed metadata and diffs."""
+def install_gh(bin_dir: Path, *, diffs: dict[str, str] | None = None,
+               views: dict[str, dict[str, Any]] | None = None) -> Path:
+    """Shadow gh: simulated PRs read their git refs; other PRs use fixed metadata and diffs, and ``views``' fields
+    (such as comments) on top of the fixed metadata."""
     bin_dir.mkdir(parents=True, exist_ok=True)
     script = bin_dir / "gh"
     script.write_text(f"""#!{sys.executable}
@@ -292,6 +294,7 @@ import subprocess
 import sys
 
 diffs = {diffs or {}!r}
+views = json.loads({json.dumps(views or {})!r})
 
 def git(*args):
     return subprocess.check_output(["git", *args], text=True, stderr=subprocess.DEVNULL).strip()
@@ -314,7 +317,7 @@ if (len(args) in (5, 7) and args[0] == "pr" and args[2].isdigit()
     pr = fixture(key)
     if len(args) == 7 and args[1] == "view" and args[5] == "--json" and args[6]:
         view = {{"headRefOid": "1" * 40, "state": "OPEN", "comments": [], "reviews": [],
-                 "statusCheckRollup": []}}
+                 "statusCheckRollup": [], **views.get(key, {{}})}}
         if pr:
             head = git("rev-parse", pr["head_ref"])
             view.update(headRefOid=head, baseRefOid=pr["base"],
@@ -331,11 +334,28 @@ sys.exit(1)
     return script
 
 
+def _set_true(database_url: str, key: str) -> None:
+    """The system setting ``key`` is ``true`` in the run's database (read by the server where it is used)."""
+    import asyncio
+
+    import asyncpg
+
+    async def write() -> None:
+        conn = await asyncpg.connect(database_url, timeout=10)
+        try:
+            await conn.execute("INSERT INTO system_settings (key, value) VALUES ($1, 'true') "
+                               "ON CONFLICT (key) DO UPDATE SET value = 'true'", key)
+        finally:
+            await conn.close()
+
+    asyncio.run(write())
+
+
 @contextmanager
 def running_server(*, database_url: str, runtime_root: Path, bin_dir: Path, log_path: Path,
                    home: Path | None = None, notes_root: Path | None = None,
                    projects_root: Path | None = None,
-                   gh_diffs: dict[str, str] | None = None,
+                   gh_diffs: dict[str, str] | None = None, gh_views: dict[str, dict[str, Any]] | None = None,
                    startup_timeout: float = 90.0, env: dict[str, str] | None = None,
                    pi_runtime: str = "cli", dsh_runtime: str = "cli",
                    keeper_mode: str = "off", port: int | None = None,
@@ -346,7 +366,7 @@ def running_server(*, database_url: str, runtime_root: Path, bin_dir: Path, log_
     ``reminder_now`` freezes only the reminder tools and delivery clock for a fake reminder dialog."""
     if port == RESERVED_PORT:
         raise EvalError(f"port {RESERVED_PORT} is the operator's own server")
-    install_gh(bin_dir, diffs=gh_diffs)
+    install_gh(bin_dir, diffs=gh_diffs, views=gh_views)
     port = port or free_port()
     manager_dir = runtime_root / "manager"
     manager_dir.mkdir(parents=True, exist_ok=True)
@@ -1029,6 +1049,7 @@ def run(
     case_budget_usd: float | None = None,
     pi_runtime: str = "cli",
     dsh_runtime: str = "cli",
+    untrusted_fence: bool = False,
 ) -> tuple[dict[str, Any], Path]:
     """Run ``tasks`` ``reps`` times each in ``mode`` (``fake`` or ``real``), ``jobs`` at a time on the one server
     (each in a project, a working directory and a task of its own); returns the run and the JSON file
@@ -1094,9 +1115,12 @@ def run(
             database_url=database_url, runtime_root=root / "runtime", bin_dir=root / "bin", log_path=log_path,
             home=home, notes_root=notes_root, pi_runtime=pi_runtime, dsh_runtime=dsh_runtime,
             gh_diffs={pr: diff for task in tasks for pr, diff in task.gh_pr_diffs.items()},
+            gh_views={pr: view for task in tasks for pr, view in task.gh_pr_views.items()},
         ) as api:
-            if any(task.gh_pr_fix_files for task in tasks):
+            if any(task.gh_pr_fix_files or task.gh_pr_views for task in tasks):
                 api.post("/api/v1/wait_settings/update", {"min_check_seconds": 10})
+            if untrusted_fence:
+                _set_true(database_url, "untrusted_fence.enabled")
             if vault_dir is not None:
                 api.post("/api/v1/knowledge_vault/update", {"path": str(vault_dir), "writable": ["codex-mem"],
                                                   "rules_file": "codex-mem/AGENTS.md"})
@@ -1166,6 +1190,7 @@ def run(
             "caps": {"max_budget_usd": max_budget_usd, "total_cap_usd": total_cap_usd},
             "step_workspaces": step_workspaces,
             "user_gates": user_gates,
+            "untrusted_fence": untrusted_fence,
             "reps": reps,
             "stopped_by_cap": stopped,
             "aborted": aborted,

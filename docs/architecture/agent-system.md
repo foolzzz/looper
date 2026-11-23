@@ -6861,6 +6861,12 @@ writes what it wrote before, byte for byte.
   (`message_stream` source, because a batch can mix chat types) instead of a separate `<messages>` block.
   Each input or tool answer with fenced content carries the lead line once. Off, the original processor and
   vault output is byte-identical.
+- **A task's entries:** the task an intent builds (`intents.build`) carries its background and sources in one
+  `intent` block after the notes that say what they are (the switch is read before the build takes its
+  connection). In the Planner's [WAIT] turn a GitHub check's output (`gh pr view`: other people's comments and
+  reviews) is a `github` block naming the pull request; a command check's output, the operator's own command,
+  is not fenced.
+- **Not yet fenced** (the RFC's other entries): gate messages and supplements.
 
 ### Turns Claude runs on its own
 
