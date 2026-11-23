@@ -447,10 +447,7 @@ CREATE TABLE IF NOT EXISTS task_journal (
     learnings   TEXT[] NOT NULL DEFAULT '{}',
     created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
     via TEXT NOT NULL DEFAULT '',
-    delivered_at TIMESTAMPTZ,
-    -- A supplement: whether the operator gave it in their own turn (code decides as it is stored; NULL: not known,
-    -- or Looper's own note). The untrusted fence takes any but TRUE as outside content.
-    from_operator BOOLEAN
+    delivered_at TIMESTAMPTZ
 );
 CREATE INDEX IF NOT EXISTS idx_task_journal_task ON task_journal (task_id, id);
 -- A step is accepted once.
@@ -941,10 +938,7 @@ CREATE TABLE IF NOT EXISTS task_user_gate_messages (
     post_error TEXT,
     post_attempts INT NOT NULL DEFAULT 0,
     post_retry_at TIMESTAMPTZ,
-    channel_id TEXT,
-    -- A user's message: whether the operator wrote it in their own turn (code decides as it is stored; NULL: not
-    -- known, a message from before the column). The untrusted fence takes any but TRUE as outside content.
-    from_operator BOOLEAN
+    channel_id TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_task_user_gate_messages_step ON task_user_gate_messages (step_id, id);
 CREATE INDEX IF NOT EXISTS idx_task_user_gate_messages_unposted ON task_user_gate_messages (id)
@@ -2319,6 +2313,35 @@ CREATE INDEX IF NOT EXISTS idx_outbound_reviews_created ON outbound_reviews (cre
 CREATE INDEX IF NOT EXISTS idx_outbound_reviews_task ON outbound_reviews (task_id) WHERE task_id IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_outbound_reviews_blocked ON outbound_reviews (created_at DESC) WHERE verdict = 'block';
 -- outbound reviews end
+-- One-time reminders (reminders RFC): set by the user in their own turns, delivered at due_at by code (no model
+-- call) to the user's direct chat with the bot channel_id (chat: their sender id there). pending → sending (claimed,
+-- committed before the channel is asked) → delivered, failed (the channel refused it three times, or the bot's
+-- operator changed) or uncertain (it may have been sent: never again); pending → missed (Looper was not delivering
+-- when it was due, and it is not the latest such one within 36 hours) or cancelled (by the user).
+-- connection.py applies this block to databases that predate it, so keep it between the markers and idempotent.
+-- reminders begin
+CREATE TABLE IF NOT EXISTS reminders (
+    id                 BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    text               TEXT NOT NULL CHECK (btrim(text) <> '' AND char_length(text) <= 500),
+    due_at             TIMESTAMPTZ NOT NULL,
+    timezone           TEXT NOT NULL CHECK (btrim(timezone) <> ''),
+    channel_id         TEXT NOT NULL CHECK (channel_id ~ '^channel-(telegram|lark_bot|lark)(-[1-9][0-9]*)?$'),
+    chat               TEXT NOT NULL CHECK (btrim(chat) <> ''),
+    status             TEXT NOT NULL DEFAULT 'pending'
+                       CHECK (status IN ('pending', 'sending', 'delivered', 'failed', 'uncertain', 'missed',
+                                         'cancelled')),
+    attempts           INTEGER NOT NULL DEFAULT 0 CHECK (attempts >= 0),
+    detail             TEXT CHECK (char_length(detail) <= 500),
+    external_id        TEXT,
+    created_channel    TEXT NOT NULL CHECK (created_channel IN ('web', 'telegram', 'lark', 'lark_bot')),
+    created_message_id TEXT,
+    created_at         TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at         TIMESTAMPTZ NOT NULL DEFAULT now(),
+    settled_at         TIMESTAMPTZ,
+    CONSTRAINT reminders_settled CHECK ((status IN ('pending', 'sending')) = (settled_at IS NULL))
+);
+CREATE INDEX IF NOT EXISTS idx_reminders_due ON reminders (due_at) WHERE status IN ('pending', 'sending');
+-- reminders end
 
 -- The buttons of a card a chat got (assistant card actions RFC): one row per card, keyed by the opaque token that is
 -- all its buttons carry; what they act on (a Manager's confirmation, a user gate), a digest of the parameters they are

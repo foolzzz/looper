@@ -1,0 +1,330 @@
+{
+  "apply": [
+    "model_name_parameters",
+    "schedule_user_gates",
+    "profile_fallback",
+    "profile_web_search",
+    "cursor_login",
+    "coco_login",
+    "runtime_launcher",
+    "command_schedules",
+    "schedule_notify_format",
+    "task_process_record",
+    "task_reply_route",
+    "manager_scope_projects",
+    "schedule_missed_since",
+    "schedule_deferred_by_drain",
+    "task_chat_group",
+    "processor_role",
+    "headless_compaction",
+    "mid_turn_input",
+    "advisor_roles",
+    "project_advisor",
+    "llm_requests",
+    "llm_requests_translation",
+    "llm_models_chat_dialect",
+    "llm_requests_stored_bytes",
+    "gateway_aliases",
+    "message_stream",
+    "message_stream_deletions",
+    "subscriptions",
+    "subscription_rules",
+    "subscription_lookback",
+    "ledger",
+    "card_actions",
+    "manager_events",
+    "schedule_notification_events",
+    "manager_event_reasons",
+    "manager_event_delivery",
+    "run_tree",
+    "step_difficulty",
+    "agent_spawns",
+    "decision_snapshots",
+    "project_activity",
+    "chat_binding_senders",
+    "chat_binding_sender_policy",
+    "provider_enabled",
+    "dependency_conditions",
+    "workflows",
+    "review_panel",
+    "workflow_rules",
+    "gate_purpose",
+    "verification_paths",
+    "message_leads",
+    "intent_merges",
+    "leads_check",
+    "run_skips",
+    "schedule_session_bounds",
+    "outbound_reviews",
+    "uncertain_deliveries",
+    "reminders"
+  ],
+  "pending": [
+    "schedule_user_gates",
+    "schedule_notify_format",
+    "schedule_session_bounds",
+    "cursor_login",
+    "model_name_parameters",
+    "coco_login",
+    "runtime_launcher",
+    "profile_fallback",
+    "profile_web_search",
+    "command_schedules",
+    "task_reply_route",
+    "task_process_record",
+    "schedule_missed_since",
+    "schedule_deferred_by_drain",
+    "project_activity",
+    "message_stream",
+    "subscriptions",
+    "message_stream_deletions",
+    "subscription_rules",
+    "subscription_lookback",
+    "ledger",
+    "card_actions",
+    "manager_events",
+    "schedule_notification_events",
+    "manager_event_reasons",
+    "manager_event_delivery",
+    "message_leads",
+    "intent_merges",
+    "leads_check",
+    "run_skips",
+    "outbound_reviews",
+    "uncertain_deliveries",
+    "run_tree",
+    "step_difficulty",
+    "agent_spawns",
+    "advisor_roles",
+    "decision_snapshots",
+    "project_advisor",
+    "llm_requests",
+    "llm_requests_translation",
+    "llm_models_chat_dialect",
+    "llm_requests_stored_bytes",
+    "chat_binding_senders",
+    "chat_binding_sender_policy",
+    "manager_scope_projects",
+    "provider_enabled",
+    "dependency_conditions",
+    "workflows",
+    "review_panel",
+    "workflow_rules",
+    "gate_purpose",
+    "verification_paths",
+    "task_chat_group",
+    "processor_role",
+    "headless_compaction",
+    "mid_turn_input",
+    "reminders"
+  ],
+  "online": [
+    {
+      "migration": "run_tree",
+      "marker": "run_tree_online",
+      "validate": [
+        [
+          "llm_records",
+          "llm_records_run_kind_check"
+        ],
+        [
+          "llm_records",
+          "llm_records_parent_record_id_fkey"
+        ]
+      ],
+      "indexes": [
+        [
+          "idx_llm_records_parent",
+          "ON llm_records(parent_record_id) WHERE parent_record_id IS NOT NULL"
+        ]
+      ]
+    },
+    {
+      "migration": "step_difficulty",
+      "marker": "step_difficulty_online",
+      "validate": [
+        [
+          "task_steps",
+          "task_steps_difficulty_check"
+        ]
+      ],
+      "indexes": []
+    },
+    {
+      "migration": "schedule_notification_events",
+      "marker": "schedule_notification_events_online",
+      "validate": [
+        [
+          "schedule_notifications",
+          "schedule_notifications_manager_event_id_fkey"
+        ]
+      ],
+      "indexes": [
+        [
+          "idx_schedule_notifications_manager_event",
+          "ON schedule_notifications (manager_event_id) WHERE manager_event_id IS NOT NULL"
+        ]
+      ]
+    },
+    {
+      "migration": "manager_event_reasons",
+      "marker": "manager_event_reasons_online",
+      "validate": [
+        [
+          "manager_events",
+          "manager_events_reason_check"
+        ]
+      ],
+      "indexes": []
+    },
+    {
+      "migration": "manager_event_delivery",
+      "marker": "manager_event_delivery_online",
+      "validate": [
+        [
+          "manager_events",
+          "manager_events_delivery_check"
+        ]
+      ],
+      "indexes": []
+    },
+    {
+      "migration": "leads_check",
+      "marker": "leads_check_online",
+      "validate": [
+        [
+          "agent_setting_layers",
+          "agent_setting_layers_role_check"
+        ],
+        [
+          "subscription_runs",
+          "subscription_runs_check_status_check"
+        ],
+        [
+          "schedule_notifications",
+          "schedule_notifications_kind_check"
+        ],
+        [
+          "message_leads",
+          "message_leads_state_check"
+        ],
+        [
+          "message_leads",
+          "message_leads_check_verdict_check"
+        ],
+        [
+          "message_leads",
+          "message_leads_check_reason_check"
+        ],
+        [
+          "message_leads",
+          "message_leads_check_record_id_fkey"
+        ],
+        [
+          "message_leads",
+          "message_leads_dropped"
+        ],
+        [
+          "intents",
+          "intents_state_check"
+        ],
+        [
+          "intents",
+          "intents_check_verdict_check"
+        ],
+        [
+          "intents",
+          "intents_check_reason_check"
+        ],
+        [
+          "intents",
+          "intents_check_record_id_fkey"
+        ],
+        [
+          "intents",
+          "intents_dropped"
+        ]
+      ],
+      "indexes": []
+    },
+    {
+      "migration": "run_skips",
+      "marker": "run_skips_online",
+      "validate": [
+        [
+          "subscription_runs",
+          "subscription_runs_outcome_check"
+        ],
+        [
+          "subscription_runs",
+          "subscription_runs_skip_reason_check"
+        ],
+        [
+          "subscription_runs",
+          "subscription_runs_skipped"
+        ],
+        [
+          "schedule_notifications",
+          "schedule_notifications_kind_check"
+        ]
+      ],
+      "indexes": []
+    },
+    {
+      "migration": "mid_turn_input",
+      "marker": "mid_turn_input_online",
+      "validate": [
+        [
+          "agent_runtimes",
+          "agent_runtimes_capabilities_check"
+        ]
+      ],
+      "indexes": []
+    },
+    {
+      "migration": "headless_compaction",
+      "marker": "headless_compaction_online",
+      "validate": [
+        [
+          "agent_runtimes",
+          "agent_runtimes_capabilities_check"
+        ]
+      ],
+      "indexes": []
+    },
+    {
+      "migration": "outbound_reviews",
+      "marker": "outbound_reviews_online",
+      "validate": [
+        [
+          "llm_records",
+          "llm_records_run_kind_check"
+        ],
+        [
+          "agent_setting_layers",
+          "agent_setting_layers_role_check"
+        ]
+      ],
+      "indexes": []
+    },
+    {
+      "migration": "uncertain_deliveries",
+      "marker": "uncertain_deliveries_online",
+      "validate": [],
+      "indexes": [
+        [
+          "idx_subscription_deliveries_uncertain",
+          "ON subscription_deliveries (updated_at) WHERE state = 'uncertain'"
+        ],
+        [
+          "idx_intent_posts_uncertain",
+          "ON intent_posts (updated_at) WHERE state = 'uncertain'"
+        ],
+        [
+          "idx_manager_events_uncertain",
+          "ON manager_events (created_at) WHERE delivery = 'uncertain'"
+        ]
+      ]
+    }
+  ]
+}
