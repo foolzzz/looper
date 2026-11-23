@@ -394,16 +394,15 @@ def test_saved_schedule_sessions_keep_their_runtime_directories(tmp_path: Path, 
     assert all((directory / "state").read_text() == "saved conversation" for directory in kept)
 
 
-@pytest.mark.parametrize("routing", [False, True])
-def test_saved_manager_chat_histories_survive_restart_with_routing_on_or_off(
-    tmp_path: Path, content: _Content, monkeypatch, routing: bool,
+def test_saved_manager_chat_histories_keep_matching_runtime_directories(
+    tmp_path: Path, content: _Content, monkeypatch,
 ) -> None:
     from looper.agents import session_routing
     from looper.agents.runtimes.per_turn import session_dir_name
     from looper.agents.session_routing import SessionKey, SessionKind, resident_label
     from looper.db import manager_sessions
 
-    monkeypatch.setattr(session_routing, "_routing_enabled", routing)
+    monkeypatch.setattr(session_routing, "_routing_enabled", True)
     rows = [{"kind": "group", "channel_id": "bot-test", "chat": "group-test", "runtime_type": "codex",
              "session_id": "saved-group"},
             {"kind": "dm", "channel_id": "bot-test", "chat": "person-test", "runtime_type": "pi",
@@ -425,13 +424,13 @@ def test_saved_manager_chat_histories_survive_restart_with_routing_on_or_off(
     assert all((directory / "state").read_text() == "saved conversation" for directory in kept)
 
 
-def test_unreadable_saved_manager_chats_prevent_history_reclamation_when_routing_is_off(
+def test_unreadable_saved_manager_chats_prevent_history_reclamation_with_routing_on(
     tmp_path: Path, content: _Content, monkeypatch,
 ) -> None:
     from looper.agents import session_routing
     from looper.db import manager_sessions
 
-    monkeypatch.setattr(session_routing, "_routing_enabled", False)
+    monkeypatch.setattr(session_routing, "_routing_enabled", True)
     monkeypatch.setattr(manager_sessions, "list", AsyncMock(side_effect=ConnectionError("database is down")))
     monkeypatch.setattr(read_only_copies, "command_lines", lambda: [])
     history = tmp_path / ".local" / "codex" / "sessions" / "manager.group.saved"
@@ -440,6 +439,38 @@ def test_unreadable_saved_manager_chats_prevent_history_reclamation_when_routing
 
     assert asyncio.run(reclaim_unused(tmp_path)) == []
     assert (history / "state").read_text() == "saved conversation"
+
+
+@pytest.mark.parametrize("routing", [False, True])
+def test_isolated_manager_histories_survive_reclamation_without_changing_the_off_path(
+    tmp_path: Path, content: _Content, monkeypatch, routing: bool,
+) -> None:
+    from looper.agents import session_routing
+    from looper.agents.session_routing import SessionKey, SessionKind, key_digest
+    from looper.db import manager_sessions
+
+    monkeypatch.setattr(session_routing, "_routing_enabled", routing)
+    listed = AsyncMock(return_value=[])
+    monkeypatch.setattr(manager_sessions, "list", listed)
+    monkeypatch.setattr(read_only_copies, "command_lines", lambda: [])
+    histories = []
+    for kind in (SessionKind.GROUP, SessionKind.DM):
+        key = SessionKey(kind, "bot-test", "chat-test").text
+        history = (tmp_path / ".local" / "manager-sessions" / key_digest(key) /
+                   "claude" / "projects" / "workspace" / "saved.jsonl")
+        history.parent.mkdir(parents=True)
+        history.write_text("saved conversation")
+        histories.append(history)
+    unused = tmp_path / ".local" / "codex" / "sessions" / "planner-gone"
+    unused.mkdir(parents=True)
+    (unused / "state").write_text("retired conversation")
+
+    assert asyncio.run(reclaim_unused(tmp_path)) == [unused]
+    assert all(history.read_text() == "saved conversation" for history in histories)
+    if routing:
+        listed.assert_awaited_once_with("manager")
+    else:
+        listed.assert_not_awaited()
 
 
 def test_removing_a_session_directory_unlinks_its_login_link_and_leaves_the_login_file(
