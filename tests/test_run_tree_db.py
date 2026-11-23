@@ -1,6 +1,8 @@
 """Task-scoped run trees, truthful costs, waits and operator-only access."""
 
+import asyncio
 import json
+from decimal import Decimal
 from datetime import datetime, timezone
 from types import SimpleNamespace
 
@@ -39,6 +41,7 @@ async def _spawn(pool, parent, child, *, cancelled=False):
         cancel_reason=$4,result=$5::jsonb,spent_usd=.07 WHERE id=$1""", row["id"], child,
         "cancelled" if cancelled else "answered", "parent_ended" if cancelled else None,
         json.dumps({"summary": "s" * 350, "verified": not cancelled}))
+    return row["id"]
 
 
 def test_tree_includes_every_run_and_sums_descendants_without_double_counting(monkeypatch):
@@ -99,6 +102,12 @@ def test_waits_pair_tool_ids_and_keep_an_unfinished_wait_open():
     async def check(pool):
         await _task(pool)
         parent = await _record(pool, "worker")
+        child = await _record(pool, "explorer", parent=parent)
+        await _spawn(pool, parent, child)
+        unrelated = await _record(pool, "worker")
+        await pool.execute("INSERT INTO llm_record_events(record_id,seq,event) VALUES ($1,0,$2::jsonb)",
+            unrelated, json.dumps({"message": {"content": [{"type": "tool_use", "id": "no-spawn",
+                "name": "looper_agent_wait"}]}}))
         blocks = [
             ("assistant", {"type": "tool_use", "id": "wait-one", "name": "mcp__looper__looper_agent_wait"}),
             ("assistant", {"type": "tool_use", "id": "read-one", "name": "Read"}),
@@ -113,7 +122,9 @@ def test_waits_pair_tool_ids_and_keep_an_unfinished_wait_open():
         await pool.execute("INSERT INTO llm_record_events(record_id,seq,event) VALUES ($1,9,$2::jsonb)",
             parent, json.dumps({"type": "assistant", "parent_tool_use_id": "native-child",
                 "message": {"content": [{"type": "tool_use", "id": "native-wait", "name": "looper_agent_wait"}]}}))
-        waits = (await run_tree.read("tree-task", pool=pool))["nodes"][0]["wait_intervals"]
+        nodes = {node["id"]: node for node in (await run_tree.read("tree-task", pool=pool))["nodes"]}
+        assert nodes[unrelated]["wait_intervals"] == []
+        waits = nodes[parent]["wait_intervals"]
         assert waits == [{"started_at": "2026-11-22T12:00:00+00:00", "ended_at": "2026-11-22T12:00:03+00:00"},
                          {"started_at": "2026-11-22T12:00:04+00:00", "ended_at": None}]
     run_db(check)
@@ -169,3 +180,99 @@ def test_empty_tree_and_cross_task_cycles_are_bounded():
         assert len(nodes) == 2
         assert all(node["subtree_cost"]["api_usd"] == .3 for node in nodes)
     run_db(check)
+
+
+@pytest.mark.parametrize("legacy_manager", [False, True])
+def test_manager_turn_linked_to_task_is_excluded_and_tree_cost_matches_task_costs(legacy_manager):
+    async def check(pool):
+        await _task(pool)
+        planner = await _record(pool, "planner", cost=.3, equivalent=True)
+        worker = await _record(pool, "worker", cost=.2)
+        child = await _record(pool, "explorer", parent=worker, cost=.04)
+        manager = await llm_records.start_record(agent_id="manager", pool=pool)
+        await pool.execute("UPDATE llm_records SET cost_usd=.5,output_summary='Chat reply',run_kind=$2 WHERE id=$1",
+                           manager, None if legacy_manager else "manager")
+        await llm_records.link_task(manager, "tree-task", pool=pool)
+        assert await pool.fetchval("SELECT task_id FROM llm_records WHERE id=$1", manager) == "tree-task"
+        nodes = (await run_tree.read("tree-task", pool=pool))["nodes"]
+        assert {node["id"] for node in nodes} == {planner, worker, child}
+        tree_cost = sum(Decimal(str(value)) for node in nodes if node["parent_record_id"] is None
+                        for value in node["subtree_cost"].values())
+        costs = await llm_records.task_costs(["tree-task"], pool=pool)
+        assert tree_cost == Decimal(str(costs["tree-task"]["cost_usd"])) == Decimal(".54")
+    run_db(check)
+
+
+def test_tree_includes_only_supported_typed_kinds_even_when_agent_ids_disagree():
+    async def check(pool):
+        await _task(pool)
+        allowed = {await _record(pool, kind) for kind in
+                   ("planner", "worker", "reviewer", "advisor", "advice_check", "outbound_check", "consult", "explorer")}
+        excluded = await _record(pool, "processor")
+        await pool.execute("UPDATE llm_records SET agent_id='worker-typed-processor' WHERE id=$1", excluded)
+        await pool.execute("UPDATE llm_records SET agent_id='manager-typed-worker' WHERE id=ANY($1::bigint[])", list(allowed))
+        await pool.execute("INSERT INTO llm_records(agent_id,task_id,status) VALUES ('unknown','tree-task','completed')")
+        assert {node["id"] for node in (await run_tree.read("tree-task", pool=pool))["nodes"]} == allowed
+    run_db(check)
+
+
+def test_cross_task_parent_is_not_exposed():
+    async def check(pool):
+        await _task(pool)
+        await _task(pool, "other-task")
+        outsider = await _record(pool, "worker", task="other-task")
+        child = await _record(pool, "explorer", parent=outsider)
+        node, = (await run_tree.read("tree-task", pool=pool))["nodes"]
+        assert node["id"] == child and node["parent_record_id"] is None
+        assert node["spawner"] == {"role": None, "seat": None}
+    run_db(check)
+
+
+def test_direct_spawn_match_takes_precedence_over_newer_historical_match():
+    async def check(pool):
+        await _task(pool)
+        parent = await _record(pool, "worker")
+        child = await _record(pool, "explorer", parent=parent)
+        direct = await _spawn(pool, parent, child)
+        historical = await _spawn(pool, parent, None)
+        await pool.execute("UPDATE agent_spawns SET result=$2::jsonb WHERE id=$1", direct,
+                           json.dumps({"summary": "Direct child", "verified": True}))
+        await pool.execute("UPDATE agent_spawns SET result=$2::jsonb WHERE id=$1", historical,
+                           json.dumps({"summary": "Historical run", "runs": [child]}))
+        nodes = {node["id"]: node for node in (await run_tree.read("tree-task", pool=pool))["nodes"]}
+        assert nodes[child]["result_summary"] == "Direct child"
+        assert nodes[child]["result_verified"] is True
+    run_db(check)
+
+
+def test_no_spawn_skips_event_read():
+    async def check(pool):
+        await _task(pool)
+        await _record(pool, "worker")
+        queries = []
+
+        async def fetch(query, *args):
+            queries.append(query)
+            return await pool.fetch(query, *args)
+
+        assert len((await run_tree.read("tree-task", pool=SimpleNamespace(fetch=fetch)))["nodes"]) == 1
+        assert len(queries) == 1
+    run_db(check)
+
+
+@pytest.mark.parametrize("unexpected", [False, True])
+def test_run_tree_errors_distinguish_unavailability_from_unexpected_failures(monkeypatch, caplog, unexpected):
+    from looper.agents.v1_domains import run_tree as domain
+    from looper.agents.ops import ErrorCode, OpError
+    from looper.db.connection import PoolNotInitializedError
+
+    async def fail(task_id):
+        raise ValueError("Invalid stored value") if unexpected else PoolNotInitializedError("Not initialized")
+
+    monkeypatch.setattr(run_tree, "read", fail)
+    with pytest.raises(OpError) as error:
+        asyncio.run(domain.run(None, None, {"task_id": "tree-task"}, None, {}))
+    assert error.value.code == (ErrorCode.INTERNAL if unexpected else ErrorCode.UNAVAILABLE)
+    if unexpected:
+        assert "database unavailable" not in str(error.value)
+        assert any(record.exc_info and record.exc_info[0] is ValueError for record in caplog.records)

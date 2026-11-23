@@ -76,6 +76,8 @@ async def read(task_id: str, *, pool=None) -> dict[str, Any]:
                    jsonb_build_object('seat',metadata->'seat','step_key',metadata->'step_key',
                        'step_id',metadata->'step_id') AS metadata
             FROM llm_records WHERE task_id=$1
+                AND COALESCE(run_kind, {run_kind_case('agent_id')}) IN
+                    ('planner','worker','reviewer','advisor','advice_check','outbound_check','consult','explorer')
         ), descendants(root_id, member_id) AS (
             SELECT id, id FROM task_runs
             UNION
@@ -83,6 +85,7 @@ async def read(task_id: str, *, pool=None) -> dict[str, Any]:
             JOIN task_runs child ON child.parent_record_id=d.member_id
         )
         SELECT r.*, spawn.row AS spawn,
+               EXISTS(SELECT 1 FROM agent_spawns s WHERE s.task_id=$1 AND s.parent_record_id=r.id) AS spawn_parent,
                ARRAY(SELECT member_id FROM descendants WHERE root_id=r.id) AS descendants
         FROM task_runs r
         LEFT JOIN LATERAL (
@@ -95,7 +98,7 @@ async def read(task_id: str, *, pool=None) -> dict[str, Any]:
                 'failure_class',s.failure_class,'failure_cause',s.failure_cause) AS row
             FROM agent_spawns s
             WHERE s.task_id=$1 AND (s.child_record_id=r.id OR s.result->'runs' @> to_jsonb(r.id))
-            ORDER BY (s.child_record_id=r.id) DESC, s.id DESC LIMIT 1
+            ORDER BY (s.child_record_id=r.id) DESC NULLS LAST, s.id DESC LIMIT 1
         ) spawn ON true
         ORDER BY r.created_at, r.id
         """, task_id)
@@ -103,16 +106,17 @@ async def read(task_id: str, *, pool=None) -> dict[str, Any]:
         return {"task_id": task_id, "nodes": []}
     # Project only tool identity and timing; wait reads never load result
     # contents, prompts or ordinary tool arguments into the run-tree response.
+    parent_ids = [row["id"] for row in rows if row["spawn_parent"]]
     events = await pool.fetch("""
         WITH blocks AS MATERIALIZED (
             SELECT e.record_id,e.seq,e.created_at,b->>'type' AS block_type,
                    b->>'name' AS name,
                    CASE WHEN b->>'type'='tool_use' THEN b->>'id' ELSE b->>'tool_use_id' END AS call_id
-            FROM llm_record_events e JOIN llm_records r ON r.id=e.record_id
+            FROM llm_record_events e
             CROSS JOIN LATERAL jsonb_array_elements(CASE
                 WHEN jsonb_typeof(e.event->'message'->'content')='array'
                 THEN e.event->'message'->'content' ELSE '[]'::jsonb END) b
-            WHERE r.task_id=$1 AND COALESCE(e.event->>'parent_tool_use_id','')=''
+            WHERE e.record_id=ANY($1::bigint[]) AND COALESCE(e.event->>'parent_tool_use_id','')=''
                   AND b->>'type' IN ('tool_use','tool_result')
         ), waits AS (
             SELECT DISTINCT record_id,call_id FROM blocks
@@ -121,7 +125,7 @@ async def read(task_id: str, *, pool=None) -> dict[str, Any]:
         SELECT b.* FROM blocks b JOIN waits w USING(record_id,call_id)
         WHERE b.block_type='tool_result' OR b.name=ANY($2::text[])
         ORDER BY b.record_id,b.seq
-        """, task_id, list(_WAIT_TOOLS))
+        """, parent_ids, list(_WAIT_TOOLS)) if parent_ids else []
     waits = _waits(events)
     records = {row["id"]: row for row in rows}
     own = {row["id"]: _own_cost(row) for row in rows}
@@ -142,7 +146,7 @@ async def read(task_id: str, *, pool=None) -> dict[str, Any]:
         if not isinstance(summary, str):
             summary = row["output_summary"]
         nodes.append({
-            "id": row["id"], "kind": row["kind"] or "unknown", "parent_record_id": row["parent_record_id"],
+            "id": row["id"], "kind": row["kind"] or "unknown", "parent_record_id": parent["id"] if parent else None,
             "spawner": {"role": role, "seat": seat}, "reason": brief.get("goal") or row["kind"] or "unknown",
             "model": row["model"],
             "status": row["status"], "started_at": _time(row["created_at"]), "ended_at": _time(row["finished_at"]),

@@ -1,9 +1,16 @@
 """The operator's persisted task run tree."""
 
+import logging
+
+import asyncpg
+
+from ...db.connection import PoolNotInitializedError
 from .. import run_tree
 from ..action_levels import ActionLevel
 from ..api_v1 import Operation, _array, _object, _STR, _NULL_STR, _INT
 from ..ops import ErrorCode, OpError
+
+logger = logging.getLogger(__name__)
 
 _NULL_NUMBER = {"type": ["number", "null"]}
 _NULL_BOOL = {"type": ["boolean", "null"]}
@@ -34,5 +41,8 @@ OPERATIONS = (
 async def run(server, operation, arguments, principal, headers):
     try:
         return await run_tree.read(arguments["task_id"])
-    except Exception:
+    except (PoolNotInitializedError, asyncpg.PostgresConnectionError, asyncpg.InterfaceError, OSError, TimeoutError):
         raise OpError(ErrorCode.UNAVAILABLE, "run tree database unavailable") from None
+    except Exception:
+        logger.exception("Failed to read run tree for task %s", arguments["task_id"])
+        raise OpError(ErrorCode.INTERNAL, "run tree read failed") from None

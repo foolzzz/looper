@@ -13,6 +13,7 @@ import {
   Bot,
   User,
   GitBranch,
+  Network,
   Play,
   Pause,
   Settings2,
@@ -2368,7 +2369,7 @@ function TaskDetailPage({ taskId, gateStep, tab: tabParam, onTab, roomFilter, ro
     { id: "pipeline", label: "Pipeline", icon: GitBranch },
     { id: "room", label: "Room", icon: MessagesSquare },
     { id: "agents", label: "Agents", icon: Bot },
-    { id: "run-tree", label: "Run tree", icon: GitBranch },
+    { id: "run-tree", label: "Run tree", icon: Network },
     { id: "sessions", label: "Sessions", icon: Terminal },
     { id: "conversation", label: "Conversation", icon: MessageSquare },
   ];

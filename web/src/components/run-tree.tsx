@@ -72,9 +72,9 @@ export function RunTreeContent({ nodes }: { nodes: RunTreeNode[] }) {
         {sorted.map((node) => <li key={node.id} className="grid grid-cols-[10rem_1fr] items-center gap-3 text-xs">
           <span>{title(node)}</span>
           <div className="relative h-6 rounded bg-muted">
-            <span data-run-bar={node.id} aria-label={`${title(node)}: ${STATES[node.state ?? node.status] ?? node.status}`} className="absolute inset-y-1 min-w-0.5 rounded bg-primary/60"
+            <span data-run-bar={node.id} role="img" aria-label={`${title(node)}: ${STATES[node.state ?? node.status] ?? node.status}`} className="absolute inset-y-1 min-w-0.5 rounded bg-primary/60"
               style={{ left: percent(time(node.started_at)), width: percent((node.ended_at ? time(node.ended_at) : end) - time(node.started_at) + start) }} />
-            {node.wait_intervals.map((wait, i) => <span key={i} aria-label="Waiting for sub-agents" className="absolute inset-y-1 min-w-0.5 rounded border-2 border-dashed border-foreground bg-card"
+            {node.wait_intervals.map((wait, i) => <span key={i} role="img" aria-label="Waiting for sub-agents" className="absolute inset-y-1 min-w-0.5 rounded border-2 border-dashed border-foreground bg-card"
               title={`${formatWhen(wait.started_at)} – ${wait.ended_at ? formatWhen(wait.ended_at) : "still waiting"}`}
               style={{ left: percent(time(wait.started_at)), width: percent((wait.ended_at ? time(wait.ended_at) : end) - time(wait.started_at) + start) }} />)}
           </div>
@@ -92,17 +92,19 @@ export function RunTreeContent({ nodes }: { nodes: RunTreeNode[] }) {
 }
 
 export function RunTree({ taskId, refreshKey = "" }: { taskId: string; refreshKey?: string }) {
-  const [nodes, setNodes] = useState<RunTreeNode[] | null>(null);
+  const [data, setData] = useState<{ taskId: string; nodes: RunTreeNode[] } | null>(null);
+  const nodes = data?.taskId === taskId ? data.nodes : null;
   const [error, setError] = useState("");
   useEffect(() => {
     const abort = new AbortController();
-    setNodes(null);
     setError("");
-    fetchRunTree(taskId, abort.signal).then((result) => { if (!abort.signal.aborted) setNodes(result.nodes); },
+    fetchRunTree(taskId, abort.signal).then((result) => { if (!abort.signal.aborted) setData({ taskId, nodes: result.nodes }); },
       (err) => { if (!abort.signal.aborted) setError(err instanceof Error ? err.message : String(err)); });
     return () => abort.abort();
   }, [taskId, refreshKey]);
-  if (error) return <p role="alert" className="p-5 text-sm text-destructive">Could not read the run tree: {error}</p>;
-  if (nodes === null) return <p role="status" className="flex items-center gap-2 p-5 text-sm text-muted-foreground"><Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" />Loading run tree…</p>;
-  return <RunTreeContent nodes={nodes} />;
+  return <>
+    {error && <p role="alert" className="p-5 text-sm text-destructive">Could not read the run tree: {error}</p>}
+    {nodes === null && !error && <p role="status" className="flex items-center gap-2 p-5 text-sm text-muted-foreground"><Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" />Loading run tree…</p>}
+    {nodes !== null && <RunTreeContent nodes={nodes} />}
+  </>;
 }

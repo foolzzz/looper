@@ -32,7 +32,8 @@ describe("Run tree", () => {
     const host = document.createElement("div"); host.innerHTML = renderToStaticMarkup(<RunTreeContent nodes={[...nodes].reverse()} />);
     const timeline = host.querySelector('[aria-label="Run timeline"]')!;
     expect(timeline.className).toContain("hidden sm:block");
-    expect(timeline.querySelectorAll('[data-run-bar]')).toHaveLength(3);
+    expect(timeline.querySelectorAll('[data-run-bar][role="img"]')).toHaveLength(3);
+    expect(timeline.querySelector('[aria-label="Waiting for sub-agents"]')?.getAttribute("role")).toBe("img");
     expect(timeline.querySelector('[aria-label="Waiting for sub-agents"]')?.className).toContain("border-dashed");
     const list = host.querySelector('[aria-label="Runs in time order"]')!;
     expect(list.className).toContain("sm:hidden");
@@ -58,4 +59,28 @@ it("reads the task tree and exposes loading and a failed read's reason", async (
   expect(host.textContent).toContain("Loading run tree");
   await act(async () => fail(new Error("Database unavailable")));
   expect(host.querySelector('[role="alert"]')?.textContent).toContain("Database unavailable");
+});
+
+it("keeps the tree mounted while refreshing and on a failed refresh, then clears it for another task", async () => {
+  const host = document.createElement("div"); root = createRoot(host);
+  let finish!: (value: Response) => void;
+  let fail!: (reason: Error) => void;
+  vi.stubGlobal("fetch", vi.fn(() => new Promise<Response>((resolve, reject) => { finish = resolve; fail = reject; })));
+  await act(async () => root!.render(<RunTree taskId="task-tree" refreshKey="initial" />));
+  await act(async () => finish(Response.json({ status: "ok", result: { task_id: "task-tree", nodes } })));
+  const hierarchy = host.querySelector('[aria-label="Run hierarchy"]')!;
+  expect(hierarchy).not.toBeNull();
+  host.scrollTop = 120;
+  await act(async () => root!.render(<RunTree taskId="task-tree" refreshKey="refresh" />));
+  expect(host.querySelector('[aria-label="Run hierarchy"]')).toBe(hierarchy);
+  expect(host.textContent).not.toContain("Loading run tree");
+  expect(host.scrollTop).toBe(120);
+  await act(async () => fail(new Error("Read failed")));
+  expect(host.querySelector('[role="alert"]')?.textContent).toContain("Read failed");
+  expect(host.querySelector('[aria-label="Run hierarchy"]')).toBe(hierarchy);
+  await act(async () => root!.render(<RunTree taskId="another-task" />));
+  expect(host.querySelector('[aria-label="Run hierarchy"]')).toBeNull();
+  expect(host.textContent).toContain("Loading run tree");
+  await act(async () => finish(Response.json({ status: "ok", result: { task_id: "another-task", nodes: [] } })));
+  expect(host.textContent).toContain("No runs yet");
 });

@@ -261,7 +261,8 @@ function ExplorerRuns({ task, records }: { task: TaskDetail; records: TaskRuns |
     <ul className="divide-y divide-border rounded-lg border border-border bg-card">
       {parentIds.map((id) => {
         const parent = parents.find((record) => record.id === id);
-        const role = parent && (records!.planner.includes(parent) ? "Planner" : records!.worker.includes(parent) ? "Worker" : "Reviewer");
+        const consult = records!.consults?.find((run) => run.record === parent);
+        const role = parent && (consult ? roleLabel(consult.kind) : records!.planner.includes(parent) ? "Planner" : records!.worker.includes(parent) ? "Worker" : "Reviewer");
         return <li key={id ?? "none"} className="space-y-2 px-4 py-3">
           {parent ? <RunLine record={parent} label={role!} taskId={task.task_id} /> : <p className="text-xs text-muted-foreground">Spawner run not listed</p>}
           <ul aria-label={`Runs run ${id ?? "unknown"} started`} className="ml-1.5 space-y-2 border-l border-border pl-3">

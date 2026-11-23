@@ -185,3 +185,15 @@ it("groups explorer runs under the run that spawned them and leaves the off path
   expect(html).toContain('aria-label="Runs run 1 started"');
   expect(html).toContain("explorer-child");
 });
+
+it.each(["advisor", "advice_check"] as const)("labels an explorer's %s parent with its recorded kind", (kind) => {
+  const task = { task_id: "tree-task", steps: STEPS } as TaskDetail;
+  const parent = record(1, "consult-parent", "s1", "role");
+  const runs = { planner: [], worker: [], reviewer: [], consults: [{ record: parent, kind, parentId: null }],
+    explorers: [{ record: record(2, "explorer-child", "s1", "role"), parentId: 1 }] };
+  const html = renderToStaticMarkup(<TaskAgentsTab task={task} runs={runs} onAgents={() => {}} />);
+  const explorerSection = html.split('aria-labelledby="task-explorer-runs-title"')[1];
+  const expected = { advisor: "Advisor", advice_check: "Advice check" }[kind];
+  expect(explorerSection).toContain(`>${expected}</span>`);
+  expect(explorerSection).not.toContain(">Reviewer</span>");
+});
