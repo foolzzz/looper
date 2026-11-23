@@ -202,3 +202,13 @@ def test_error_details_are_optional_and_typed():
     assert details["additionalProperties"] is False and "required" not in details
     assert details["properties"] == {"manager_id": {"type": "string"}, "state": {"type": "string"},
         "phase": {"type": ["string", "null"]}, "method": {"type": ["string", "null"]}}
+
+
+def test_acceptance_permission_has_only_operator_operations():
+    for action in ("get", "update"):
+        operation = api_v1.find("POST", f"/api/v1/acceptance_checks/{action}")
+        assert operation.operator_only and operation.tool is None
+        assert operation.description.startswith(operation.summary)
+    # Permission cannot be smuggled through the agent-writable project patch.
+    patch = api_v1.document()["components"]["schemas"]["ProjectPatch"]
+    assert "acceptance_checks" not in patch["properties"]

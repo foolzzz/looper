@@ -1,0 +1,177 @@
+{
+  "main_revision": "bc0e118d404b464bf7dcf6fbfbb42c2f031864a3",
+  "sha256": {
+    "planner_contract": "2f72cd02be65030f0d1635b2c276dc6debac28eac9d378040c3aa3d5ef6ddc42",
+    "planner_system_prompt": "09b66d2425267899c5c99fed1b9f43e8f7536f7ac1d439262c4d9d29687ca4ea",
+    "planner_plan_turn": "e318c780e153b167d9d8ef47f59cef44ffe7b1d4a22fdd9e981a070fe6a3b6f3",
+    "planner_step_row": "14964c7e175c4ec9aaaba1acc59839a43a91ebdee7e414181385a52111c899f7",
+    "planner_decision_work_False": "680be50a9cfa4c5aad37332d79c406ecd5cb10a50554fe7aefd6a51c44d601c8",
+    "planner_decision_work_True": "06e40082db14eab5bf99c4638d3dff7b5795834b4d9cd7b177072f0eed23ffc1",
+    "planner_decision_review_False": "e398a7893d397c7c19009df8230563d224099a9b89422af9f060fcf27be01c21",
+    "planner_decision_review_True": "86228705edcefe2d320b0403a5b221b19d392a6436a4117d50d25c74a11ea4d0",
+    "worker_first_turn": "ed77144eca9c39de04bda5fb17f83b46c523987a4b221fe05c56a6a4d3e1a98f",
+    "worker_system_prompt": "25f17343260bb00c4e1b6e1d661eff4f22871cafd3df7138e3bf3541ad6e858b",
+    "reviewer_first_turn": "d8ae1d06d77a896be39edff07755b1880482735a4df8ae83128ca8a3c34c3315",
+    "reviewer_system_prompt": "ae1cdb32cc420b1391cc485f33974e800d5df0ead4d5e8b3899dc458df8ee5df",
+    "public_step_row": "9eb0fb50d0e114728cb5ebf5ab79e6d006f70431f8781aaeb5d6ab3cdeb0f089"
+  },
+  "step_insert_sql": "\nINSERT INTO task_steps (id, task_id, step_index, step_key, instruction, target_files, validation_commands,\n                        acceptance_criteria, depends_on, review, status, result, worker_id, reviewer_id,\n                        retries, feedback, missed_messages, role_key, role_version, review_stage, review_roles,\n                        review_position, kind, created_at, updated_at, completed_at, started_at, ready_when, accept_when, reviews,\n                        difficulty)\nVALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12::jsonb, $13, $14, $15, $16, $17, $18, $19, $20, $21::jsonb,\n        $22, $23, now(), now(), CASE WHEN $11::text IN ('completed', 'verified', 'failed', 'skipped') THEN now() END, $24, $25::jsonb, $26::jsonb, $27,\n        $28)\nON CONFLICT (id) DO UPDATE\nSET step_index = EXCLUDED.step_index, step_key = EXCLUDED.step_key, instruction = EXCLUDED.instruction,\n    target_files = EXCLUDED.target_files, validation_commands = EXCLUDED.validation_commands,\n    acceptance_criteria = EXCLUDED.acceptance_criteria, depends_on = EXCLUDED.depends_on,\n    ready_when = EXCLUDED.ready_when, accept_when = EXCLUDED.accept_when, reviews = EXCLUDED.reviews,\n    review = EXCLUDED.review, status = EXCLUDED.status, result = EXCLUDED.result,\n    worker_id = EXCLUDED.worker_id, reviewer_id = EXCLUDED.reviewer_id, retries = EXCLUDED.retries,\n    feedback = EXCLUDED.feedback, missed_messages = EXCLUDED.missed_messages, role_key = EXCLUDED.role_key,\n    role_version = EXCLUDED.role_version, review_stage = EXCLUDED.review_stage, review_roles = EXCLUDED.review_roles,\n    review_position = EXCLUDED.review_position, kind = EXCLUDED.kind, difficulty = EXCLUDED.difficulty, updated_at = now(),\n    completed_at = COALESCE(EXCLUDED.completed_at, task_steps.completed_at),\n    started_at = CASE WHEN EXCLUDED.status = 'pending' THEN NULL\n                      ELSE COALESCE(task_steps.started_at, EXCLUDED.started_at) END\n",
+  "step_arguments": {
+    "pending": [
+      "step-off",
+      "task-off",
+      0,
+      "s1",
+      "Implement the report endpoint.",
+      [
+        "report.py"
+      ],
+      [
+        "python -m pytest tests/test_report.py"
+      ],
+      [
+        "A valid report returns 200.",
+        "Missing reports return 404."
+      ],
+      [],
+      true,
+      "pending",
+      "{\"status\": \"completed\", \"summary\": \"Implemented report lookup.\"}",
+      "worker-off",
+      null,
+      1,
+      [
+        "Keep the missing report case."
+      ],
+      [],
+      null,
+      null,
+      null,
+      "[]",
+      null,
+      "work",
+      null,
+      null,
+      null,
+      null,
+      null
+    ],
+    "dispatched": [
+      "step-off",
+      "task-off",
+      0,
+      "s1",
+      "Implement the report endpoint.",
+      [
+        "report.py"
+      ],
+      [
+        "python -m pytest tests/test_report.py"
+      ],
+      [
+        "A valid report returns 200.",
+        "Missing reports return 404."
+      ],
+      [],
+      true,
+      "dispatched",
+      "{\"status\": \"completed\", \"summary\": \"Implemented report lookup.\"}",
+      "worker-off",
+      null,
+      1,
+      [
+        "Keep the missing report case."
+      ],
+      [],
+      null,
+      null,
+      null,
+      "[]",
+      null,
+      "work",
+      "2026-11-22T12:00:00+00:00",
+      null,
+      null,
+      null,
+      null
+    ],
+    "completed": [
+      "step-off",
+      "task-off",
+      0,
+      "s1",
+      "Implement the report endpoint.",
+      [
+        "report.py"
+      ],
+      [
+        "python -m pytest tests/test_report.py"
+      ],
+      [
+        "A valid report returns 200.",
+        "Missing reports return 404."
+      ],
+      [],
+      true,
+      "completed",
+      "{\"status\": \"completed\", \"summary\": \"Implemented report lookup.\"}",
+      "worker-off",
+      null,
+      1,
+      [
+        "Keep the missing report case."
+      ],
+      [],
+      null,
+      null,
+      null,
+      "[]",
+      null,
+      "work",
+      "2026-11-22T12:00:00+00:00",
+      null,
+      null,
+      null,
+      null
+    ],
+    "verified": [
+      "step-off",
+      "task-off",
+      0,
+      "s1",
+      "Implement the report endpoint.",
+      [
+        "report.py"
+      ],
+      [
+        "python -m pytest tests/test_report.py"
+      ],
+      [
+        "A valid report returns 200.",
+        "Missing reports return 404."
+      ],
+      [],
+      true,
+      "verified",
+      "{\"status\": \"completed\", \"summary\": \"Implemented report lookup.\"}",
+      "worker-off",
+      null,
+      1,
+      [
+        "Keep the missing report case."
+      ],
+      [],
+      null,
+      null,
+      null,
+      "[]",
+      null,
+      "work",
+      "2026-11-22T12:00:00+00:00",
+      null,
+      null,
+      null,
+      null
+    ]
+  }
+}

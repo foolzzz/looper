@@ -38,6 +38,13 @@ _STEP = _object({
     "role_version": _NULL_INT, "review_position": _NULL_INT, "result": _nullable(_OBJ),
     **{key: _array(_STR) for key in ("acceptance_criteria", "target_files", "depends_on")},
     "review_roles": _array(_object({"role": _STR, "required": _BOOL, "version": _NULL_INT}))})
+# Empty definitions are omitted, preserving every default-off task response.
+_STEP["properties"]["checks"] = _array(_object({
+    "id": _STR, "criterion": {"type": "integer", "minimum": 1},
+    "type": {"type": "string", "enum": ["command", "artifact"]}, "command": _STR,
+    "timeout_seconds": _INT, "required": _BOOL, "network": _BOOL,
+    "protect": _array(_STR), "artifact": _array(_STR)},
+    ["id", "criterion", "type", "command", "timeout_seconds", "required", "network", "protect"]))
 _STATS = _object({
     **dict.fromkeys(("runs", "running", "contract_violations", "steps", "accepted", "failed", "retries"), _INT),
     "cost_usd": _NUMBER, "contract_violation_rate": _NULL_NUMBER, "review_pass_rate": _NULL_NUMBER,

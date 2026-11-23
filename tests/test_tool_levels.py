@@ -145,6 +145,8 @@ def _operations() -> dict[str, Any]:
 
 # The operations whose level was decided one by one (every other one is inside).
 DECIDED_OPERATIONS: dict[str, ActionLevel] = {
+    # Stores protocol permission only; no check runs in this stage.
+    "acceptance_checks.get": INSIDE, "acceptance_checks.update": INSIDE,
     "manager_chat_bindings.put": EXTERNAL,  # a bound chat's people talk to a Manager, which answers them there
     "intent_bindings.put": INSIDE,  # maps a chat to a project; sends nothing anywhere
     # toggles bound_chats_only; the admission it widens is chat_routing's operator-only refusal to guard

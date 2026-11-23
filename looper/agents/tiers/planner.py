@@ -118,6 +118,8 @@ from enum import Enum
 from pathlib import Path
 from typing import Any, TypeVar
 
+from ..acceptance_checks import Check, parse_checks
+from ..project_execution import AcceptanceChecksMode
 from ..bus import MessageBus
 from ..supervisor import cancel_and_wait
 from ..kept_run import AdoptOutcome, AdoptResult, RunHold
@@ -486,6 +488,7 @@ class PlanStep:
     # The consult of the advisor whose answer its next attempt follows (the Planner wrote what it took into that
     # attempt's feedback); its Worker's record names it. Not kept over a restart.
     consult: int | None = None
+    checks: tuple[Check, ...] = ()
 
     @property
     def kind(self) -> str:
@@ -676,6 +679,7 @@ def _step_row(step: PlanStep) -> dict[str, Any]:
         "kind": step.kind,
         "started_at": step.started_at,
         "difficulty": step.difficulty,
+        **({"checks": [check.row() for check in step.checks]} if step.checks else {}),
     }
 
 
@@ -1253,7 +1257,7 @@ class PlannerAgent:
             review_panel=self._panel_on,
             verification_role=((self._workflow or {}).get("verification") or {}).get("role"),
             work_role=(self._workflow or {}).get("work_role"), advisor=self._execution.advisor_on, advise=advise,
-            answered=answered)
+            answered=answered, acceptance_checks=self._execution.acceptance_checks)
 
     async def _planned(self, plan: TaskPlan, reply: Any, changes: Any, envelope: MessageEnvelope) -> None:
         """Start executing the plan of a PLAN reply."""
@@ -1305,6 +1309,7 @@ class PlannerAgent:
                 by_label[spec.id] = step
             step.instruction = spec.instruction
             step.acceptance_criteria = list(spec.acceptance_criteria)
+            step.checks = spec.checks
             # A gate or a wait is never reviewed, whatever the project's review policy.
             step.role = (spec.role or (self._workflow or {}).get("work_role")
                          if spec.gate is None and spec.wait is None else None)
@@ -4536,7 +4541,7 @@ class PlannerAgent:
                        work_role=(self._workflow or {}).get("work_role"),
                        verification_exhausted=bool(self._plan and self._verification_exhausted(self._plan)),
                        verification_repair_required=bool(self._plan and self._verification_repair_required(self._plan)),
-                       advisor=self._execution.advisor_on)
+                       advisor=self._execution.advisor_on, acceptance_checks=self._execution.acceptance_checks)
 
     def _wait_policy(self) -> WaitPolicy:
         """System limits, command permission, and this event's scheduled-run stop time."""
@@ -5236,7 +5241,7 @@ class PlannerAgent:
                                     room=self._room is not None, wait_commands=self._execution.wait_commands_on,
                                     wait_limits=waits.limits(), conditions=self._execution.conditions_on, review_panel=self._panel_on,
                                     adjudication=self._panel_on and bool((self._workflow or {}).get("adjudication")),
-                                    advisor=self._execution.advisor_on)
+                                    advisor=self._execution.advisor_on, acceptance_checks=self._execution.acceptance_checks)
             + ("\n" + self._ops.guide_for(roles=self._execution.roles_on, room=self._room is not None,
                                          vault=planner_guide(self._vault) if self._vault else "")
                if self._ops else ""),
@@ -6369,6 +6374,8 @@ class PlannerAgent:
                 wait=wait,
                 started_at=sd.get("started_at"),
                 difficulty=sd.get("difficulty"),
+                checks=parse_checks(sd.get("checks", []), len(sd.get("acceptance_criteria") or []),
+                                    AcceptanceChecksMode.NETWORK),
             ))
         plan.journal = [JournalEntry.from_row(row) for row in stored.get("journal") or []]
         try:

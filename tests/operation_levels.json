@@ -1,4 +1,6 @@
 {
+ "acceptance_checks.get": "inside",
+ "acceptance_checks.update": "inside",
  "agent_profiles.create": "inside",
  "agent_profiles.delete": "inside",
  "agent_profiles.list": "inside",
