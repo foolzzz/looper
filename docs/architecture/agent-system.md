@@ -8020,6 +8020,16 @@ separate tokens and is not exported to API clients. No unversioned operator rout
   export and import share their implementation with `looper_config_export` and the dashboard;
   `config.import_preview` stages a document and returns an import id, and `config.import_apply` requires a
   client confirmation before writing it.
+- **Run tree.** The operator-only `runs.tree {task_id}` reads every persisted run of one task, following only
+  that task's `parent_record_id` edges. It returns creator, reason, model, status, summary and failure details,
+  with own and subtree costs split into subscription equivalents and API spend; unknown amounts remain null.
+  Wait intervals pair the spawner's `looper_agent_wait` tool-use and tool-result event timestamps. The task's
+  Run tree tab shows the hierarchy and timeline, replacing the timeline with an ordered list below `sm`.
+  Agents groups explorers by their spawner; Pipeline shows only a count on each step. Project Settings exposes
+  the default-off `subagents` switch and four limits. Unset fields are absent from project reads and config
+  exports; the Manager's compact project hides this group while off, preserving the base view byte for byte.
+  First enablement uses the project-settings form and project administration API. The Manager's project tool
+  and its schema are unchanged; chat configuration is deferred to a follow-up with a Manager dialog comparison.
 - **Client-only tools.** `looper_task_pipeline` (a task's steps in plan order with kind, status, dependencies and role)
   and `looper_gates` (list a task's gates, read their messages, reply, end a gate) exist for clients. A client does not
   get `looper_task_gate_reply`, because a gate reply there is the user's own words in a chat (a client answers with
