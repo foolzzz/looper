@@ -265,6 +265,7 @@ class ManagerOps:
                                         list[tuple[str | None, str, int, int, str]]] = OrderedDict()
         on_session_replaced(self.forget_session)  # every reset path clears a session's id (``ManagerSession``)
         self._session_gen: dict[str, int] = {}  # bumped when a session is reset: its older notes are never told
+        self._told: dict[int, tuple[str, int, int, list[str]]] = {}  # per turn: the notes its input carries
         self._chat_sessions: dict[tuple[str | None, str | None, str | None], str] = {}  # the session a chat runs in
         # The outbound review's hook (``outbound_hook``): where its reviews run, the files the session wrote last (a
         # later shell command may run one), and the turns already told the operator of a block.
@@ -1029,7 +1030,23 @@ class ManagerOps:
             self._button_notes[turn.chat_key] = rest
         else:
             self._button_notes.pop(turn.chat_key, None)
+        if mine:  # what this turn was told, to take back if its session is reset before the input is sent
+            self._told[id(turn)] = (session_key, self._session_gen.get(session_key, 0), receipts_settings.generation(),
+                                    [entry[4] for entry in mine])
         return [entry[4] for entry in mine]
+
+    def live_note(self, turn: Turn, note: str) -> str:
+        """``note`` (``begin_turn``'s) as it should be sent now: the card-button notes it carries are taken out when
+        their session was reset, or the switch turned off, since the turn was prepared. Only the one
+        ``begin_turn`` that put them there is looked at; any other text is as it was."""
+        told = self._told.get(id(turn))
+        if told is None:
+            return note
+        session_key, session_gen, switch_gen, texts = told
+        if session_gen == self._session_gen.get(session_key, 0) and switch_gen == receipts_settings.generation() \
+                and receipts_settings.enabled():
+            return note
+        return "\n".join(line for line in note.split("\n") if line not in texts)
 
     def forget_session(self, session_key: str) -> None:
         """The Manager session ``session_key`` was reset: the card-button notes left in it are never told."""
@@ -1102,6 +1119,7 @@ class ManagerOps:
         if self._turn is turn:
             self._turn = None
         self._routed_turns.pop(id(turn), None)
+        self._told.pop(id(turn), None)
         for key, active in list(self._session_turns.items()):
             if active is turn:
                 del self._session_turns[key]

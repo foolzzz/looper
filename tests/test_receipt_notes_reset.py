@@ -62,3 +62,135 @@ def test_a_switch_of_agent_drops_the_note(tmp_path, agent_db: Any, notes: Manage
 
     asyncio.run(run())
     assert notes._button_notes == {}
+
+
+# --- The input actually sent, with the real Ops attached to the Manager ---
+
+NOTE = "[Looper] After your last reply"
+
+
+def _attach_ops(monkeypatch: pytest.MonkeyPatch, plant: bool = True) -> list[ManagerOps]:
+    """Every ManagerAgent built from now on has a real ManagerOps, and a card button's note is left for each turn
+    as a press would leave it just before the turn begins."""
+    from looper.agents.tiers.manager import ManagerAgent
+
+    made: list[ManagerOps] = []
+    init = ManagerAgent.__init__
+
+    def patched(self: Any, *args: Any, **kwargs: Any) -> None:
+        init(self, *args, **kwargs)
+        ops = ManagerOps(Platform(bus=None, task_router=None), url="http://127.0.0.1:9", token="t")
+        ops._working_at = ops._clock()
+        begin = ops._begin_turn
+
+        def planted(turn: Any, binding: Any = None, *, session_key: str = "main") -> str:
+            if plant and not turn.autonomous:
+                ops._chat_sessions[turn.chat_key] = session_key
+                ops._note_button(turn.chat_key, turn.sender, "c-1", "it was cancelled; it did not run")
+            return begin(turn, binding, session_key=session_key)
+
+        monkeypatch.setattr(ops, "_begin_turn", planted)
+        self.ops = ops
+        made.append(ops)
+
+    monkeypatch.setattr(ManagerAgent, "__init__", patched)
+    return made
+
+
+def _sent_by_switch(tmp_path: Any, switch: bool) -> str:
+    async def run() -> str:
+        session = _Session(hold=False)
+        manager, bus, queue = _manager(tmp_path, session)
+        manager._session_loaded = True
+        if switch:
+            main = manager._sessions["main"]
+            main.session_id, main.session_runtime = "old-session", "omp"
+        try:
+            await asyncio.wait_for(manager._handle(_web("hello")), 5)
+            assert _replies(queue)[0]["outcome"] == "answered"
+        finally:
+            await bus.shutdown()
+        return session.turns[-1]
+
+    return asyncio.run(run())
+
+
+def test_the_input_after_a_switch_of_agent_carries_no_old_note(monkeypatch: pytest.MonkeyPatch, tmp_path: Any,
+                                                              agent_db: Any) -> None:
+    monkeypatch.setattr(receipts_settings, "_enabled", True)
+    _attach_ops(monkeypatch)
+    assert NOTE in _sent_by_switch(tmp_path / "a", switch=False)  # the note does reach a turn that keeps its session
+    (tmp_path / "b").mkdir()
+    assert NOTE not in _sent_by_switch(tmp_path / "b", switch=True)
+
+
+def test_the_input_after_a_resume_rebuild_carries_no_old_note(monkeypatch: pytest.MonkeyPatch,
+                                                              agent_db: Any) -> None:
+    from tests.test_manager_new_session import _LOG_TURNS
+
+    seen: list[str] = []
+    managers: list[Any] = []
+    monkeypatch.setattr(receipts_settings, "_enabled", True)
+    _attach_ops(monkeypatch)
+    from looper.agents.tiers.manager import ManagerAgent
+
+    wrapped = ManagerAgent.__init__
+
+    def keep(self: Any, *args: Any, **kwargs: Any) -> None:
+        wrapped(self, *args, **kwargs)
+        managers.append(self)
+
+    monkeypatch.setattr(ManagerAgent, "__init__", keep)
+    forgetting = _forgetting()
+    resident = _resident()
+    body = forgetting[:-len(resident)] + _LOG_TURNS + resident
+
+    async def between(_spawned: Any) -> None:  # after message one: what the process that answered it read
+        seen.append((managers[-1]._config.work_dir / "turns.jsonl").read_text())
+
+    for saved, expected in (("sess-1", True), ("gone", False)):
+        seen.clear()
+        _converse(monkeypatch, _LOG_TURNS + resident if expected else body, ["hello", "again"], saved_session=saved,
+                  saved_totals={"cost_usd": 0.1}, between=between)
+        assert (NOTE in seen[0]) is expected, (saved, seen[0][:300])
+
+
+def test_a_failing_listener_does_not_abort_the_reset_or_silence_the_others(monkeypatch: pytest.MonkeyPatch,
+                                                                           tmp_path: Any, agent_db: Any,
+                                                                           caplog: Any, notes: ManagerOps) -> None:
+    from looper.agents.tiers import manager_session
+
+    class Bomb:
+        calls = 0
+
+        def hear(self, key: str) -> None:
+            Bomb.calls += 1
+            raise RuntimeError("listener broke")
+
+    class Recorder:
+        keys: list[str] = []
+
+        def hear(self, key: str) -> None:
+            self.keys.append(key)
+
+    bomb, recorder = Bomb(), Recorder()
+    manager_session.on_session_replaced(bomb.hear)  # after the notes' ops, before the recorder
+    manager_session.on_session_replaced(recorder.hear)
+
+    async def run() -> None:
+        session = _Session(hold=False)
+        manager, bus, queue = _manager(tmp_path, session)
+        manager._session_loaded = True
+        main = manager._sessions["main"]
+        main.session_id, main.session_runtime = "old-session", "omp"
+        try:
+            await asyncio.wait_for(manager._handle(_web("hello")), 5)
+            assert _replies(queue)[0]["outcome"] == "answered"  # the switch completed
+            assert main.session_id != "old-session"
+        finally:
+            await bus.shutdown()
+
+    asyncio.run(run())
+    assert Bomb.calls >= 1 and recorder.keys[0] == "main"
+    assert notes._button_notes == {}
+    assert "listener broke" in caplog.text

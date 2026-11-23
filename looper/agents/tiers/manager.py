@@ -2829,6 +2829,7 @@ class ManagerAgent:
             # (Nothing is awaited from here until the message is written: a later change shows in the generation.)
             text = prepared.turn_text if run.state is None else "\n".join([*run.state.lines, prepared.turn_text])
             turn_text = f"{brief}\n\n{text}" if brief else text
+            turn_text = self.ops.live_note(prepared.turn, turn_text) if self.ops is not None else turn_text
             if token.cancel.requested:
                 await self._finish_stopped_early(token, recorder, ops_turn)
                 raise TurnStopped()

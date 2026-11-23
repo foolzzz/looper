@@ -8,6 +8,7 @@ sets (``ManagerAgent._current``), else main.
 from __future__ import annotations
 
 import asyncio
+import logging
 import weakref
 from collections.abc import Callable
 from dataclasses import dataclass, field, fields
@@ -25,6 +26,8 @@ if TYPE_CHECKING:
     from .state_view import StateShown
     from .turn_token import TurnToken
     from .manager_budget import BudgetTurn
+
+logger = logging.getLogger(__name__)
 
 MAIN_SESSION = "main"
 
@@ -44,8 +47,11 @@ def _session_replaced(key: str) -> None:
         listener = ref()
         if listener is None:
             _REPLACED.remove(ref)
-        else:
+            continue
+        try:
             listener(key)
+        except Exception:  # a listener must never abort the reset that called it
+            logger.exception("a listener of the reset of Manager session %s failed", key)
 
 
 @dataclass(frozen=True)
