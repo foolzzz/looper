@@ -1,10 +1,11 @@
 """Delivery rows, reply matching, retention and upgrading an older schema."""
+import contextlib
 from datetime import datetime, timedelta, timezone
 
 import asyncpg
 import pytest
 
-from tests.db_support import DSN, run_db
+from tests.db_support import DSN, dropped_tables, run_db
 
 pytestmark = pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
 
@@ -37,13 +38,12 @@ def test_reply_window_and_first_reply_are_preserved(monkeypatch):
 def test_delivery_table_has_nullable_decision_columns_and_one_migration(upgrade, monkeypatch):
     async def check(pool):
         from looper.db import connection
-        if upgrade:
-            # morning_brief_consumed references the table; the morning briefs migration recreates it.
-            await pool.execute("DROP TABLE morning_brief_consumed; DROP TABLE proactive_deliveries; "
-                               "DELETE FROM schema_migrations WHERE name='proactive_deliveries'")
-        async with pool.acquire() as conn:
-            await connection.ensure_schema(conn)
-            await connection.ensure_schema(conn)
+        async with dropped_tables(pool, "proactive_deliveries") if upgrade else contextlib.nullcontext():
+            if upgrade:
+                await pool.execute("DELETE FROM schema_migrations WHERE name='proactive_deliveries'")
+            async with pool.acquire() as conn:
+                await connection.ensure_schema(conn)
+                await connection.ensure_schema(conn)
         assert await pool.fetchval("SELECT count(*) FROM proactive_deliveries") == 0
         assert await pool.fetchval("SELECT count(*) FROM pg_constraint WHERE contype = 'f' "
                                    "AND conrelid = 'morning_brief_consumed'::regclass "

@@ -3,7 +3,7 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from tests.db_support import DSN, run_db
+from tests.db_support import DSN, dropped_tables, run_db
 
 pytestmark = pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
 
@@ -70,10 +70,11 @@ def test_upgrade_adds_outbox_and_marker_once(monkeypatch):
     from looper.db import connection
 
     async def check(pool):
-        await pool.execute("DROP TABLE channel_outbox; DELETE FROM schema_migrations WHERE name='channel_outbox'")
-        async with pool.acquire() as conn:
-            assert await connection.schema_change_pending(conn)
-        await connection.ensure_schema(pool)
+        async with dropped_tables(pool, "channel_outbox"):
+            await pool.execute("DELETE FROM schema_migrations WHERE name='channel_outbox'")
+            async with pool.acquire() as conn:
+                assert await connection.schema_change_pending(conn)
+            await connection.ensure_schema(pool)
         assert await pool.fetchval("SELECT to_regclass('channel_outbox') IS NOT NULL")
         assert await pool.fetchval("SELECT count(*) FROM schema_migrations WHERE name='channel_outbox'") == 1
         await connection.ensure_schema(pool)
