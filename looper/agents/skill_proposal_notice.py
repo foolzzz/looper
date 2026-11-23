@@ -3,13 +3,15 @@
 It names each pending proposal's project, skill, action and reason (clipped) and links the project's Skills tab.
 It never carries a skill's description or content, and nothing in the channel confirms: a reply is an ordinary
 message. The day is claimed first (``system_settings``), so a restart or a second process does not send twice.
-It goes to the chat the user gates use (``gate_service.dashboard_target``) through the sender ``configure`` gave;
-with neither, nothing is sent and nothing is claimed.
+It goes only to the operator's own direct chat: the chat the user gates use (``gate_service.dashboard_target``),
+when it is not a group and its id is the ``operator_sender_id`` of that bot. Anything else is refused with a typed
+reason, sends nothing and claims nothing (a group, or another admitted user, would learn project and skill names).
 """
 
 from __future__ import annotations
 
 import logging
+from enum import StrEnum
 from collections.abc import Awaitable, Callable
 from datetime import datetime
 
@@ -23,6 +25,17 @@ logger = logging.getLogger(__name__)
 SENT_KEY = "skill_proposal_notice_sent"
 WHY_CHARS = 80
 LISTED = 10
+
+class Notice(StrEnum):
+    SENT = "sent"
+    SEND_FAILED = "send_failed"
+    NOTHING_PENDING = "nothing_pending"
+    ALREADY_SENT = "already_sent"
+    NO_SENDER = "no_sender"
+    NO_TARGET = "no_target"
+    GROUP = "group"
+    NOT_OPERATOR = "not_operator"
+
 
 Sender = Callable[..., Awaitable[tuple[bool, str | None]]]
 _sender: Sender | None = None
@@ -51,22 +64,32 @@ def message(rows: list[dict[str, str]], base: str) -> str:
     return "\n".join(lines)
 
 
-async def notify_pending(*, now: datetime | None = None) -> bool:
-    """Send today's notice if proposals are pending and today's has not gone out; True when one was sent."""
+async def notify_pending(*, now: datetime | None = None) -> Notice:
+    """Send today's notice if proposals are pending and today's has not gone out; ``Notice.SENT`` when one was."""
     from .gate_service import dashboard_target
+    from .operator_identity import operator_sender_id
 
     if _sender is None:
-        return False
+        return Notice.NO_SENDER
     async with get_pool().acquire() as conn:
         rows = await store.pending_summary(conn)
     if not rows:
-        return False
+        return Notice.NOTHING_PENDING
     chat = await dashboard_target()
     if chat is None:
-        return False
+        return Notice.NO_TARGET
+    if chat.in_group:
+        return Notice.GROUP
+    try:
+        operator = await operator_sender_id(chat.channel_id)
+    except Exception:
+        logger.warning("cannot read the operator's id of %s", chat.channel_id, exc_info=True)
+        return Notice.NOT_OPERATOR
+    if operator is None or operator != chat.target.id:
+        return Notice.NOT_OPERATOR
     today = (now or datetime.now()).astimezone().date().isoformat()
     if not await system_settings.claim(SENT_KEY, today):
-        return False
+        return Notice.ALREADY_SENT
     # Counted with the advisor's alerts: a new source needs a schema change this note does not justify.
     proactive = turn_metrics.proactive_kwargs(turn_metrics.ProactiveSource.ADVISOR_ALERT, None)
     sent, error = await _sender(
@@ -74,4 +97,5 @@ async def notify_pending(*, now: datetime | None = None) -> bool:
         **({**proactive, "group": chat.target.group} if proactive else {}))
     if not sent:
         logger.warning("cannot send the skill proposal notice to %s: %s", chat.channel_id, error)
-    return bool(sent)
+        return Notice.SEND_FAILED
+    return Notice.SENT

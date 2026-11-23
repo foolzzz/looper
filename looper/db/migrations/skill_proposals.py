@@ -2,7 +2,7 @@
 
 A confirmation is a row of ``skill_proposal_events`` that a database check ties
 to the operator's dashboard, and a confirmed proposal points at it with a
-composite foreign key on the event id, the actor and the hash. So "confirmed"
+composite foreign key on the event id, this proposal, the action `confirm`, the dashboard, the user and the hash. So "confirmed"
 is provably the operator confirming the proposal's current content hash,
 whatever code wrote the row (the same shape as the memory candidates').
 """
@@ -34,6 +34,9 @@ _STATEMENTS = (
     confirmed_event_id BIGINT,
     confirmed_actor TEXT CHECK (confirmed_actor = 'user'),
     confirmed_sha256 TEXT,
+    -- Constants, set only with a confirmation: the event must be a confirm, through the dashboard.
+    confirmed_action TEXT GENERATED ALWAYS AS (CASE WHEN confirmed_event_id IS NOT NULL THEN 'confirm' END) STORED,
+    confirmed_via TEXT GENERATED ALWAYS AS (CASE WHEN confirmed_event_id IS NOT NULL THEN 'dashboard' END) STORED,
     CONSTRAINT skill_proposals_target CHECK (
         (action = 'create' AND item_id IS NULL AND base_sha256 IS NULL)
         OR (action = 'update' AND item_id IS NOT NULL AND base_sha256 IS NOT NULL)),
@@ -53,7 +56,7 @@ _STATEMENTS = (
     content_sha256 TEXT,
     note TEXT CHECK (char_length(note) <= 500),
     at TIMESTAMPTZ NOT NULL DEFAULT now(),
-    UNIQUE (id, actor_kind, content_sha256),
+    UNIQUE (id, proposal_id, action, via, actor_kind, content_sha256),
     CONSTRAINT skill_proposal_events_user CHECK (
         action NOT IN ('confirm', 'reject', 'edit', 'restore') OR actor_kind = 'user'),
     CONSTRAINT skill_proposal_events_confirm CHECK (
@@ -69,8 +72,8 @@ BEGIN
     ) THEN
         ALTER TABLE skill_proposals
             ADD CONSTRAINT skill_proposals_confirmed_event_fk
-            FOREIGN KEY (confirmed_event_id, confirmed_actor, confirmed_sha256)
-            REFERENCES skill_proposal_events (id, actor_kind, content_sha256);
+            FOREIGN KEY (confirmed_event_id, id, confirmed_action, confirmed_via, confirmed_actor, confirmed_sha256)
+            REFERENCES skill_proposal_events (id, proposal_id, action, via, actor_kind, content_sha256);
     END IF;
 END $$""",
     """CREATE UNIQUE INDEX IF NOT EXISTS uq_skill_proposals_pending

@@ -305,17 +305,27 @@ async def _stale(conn: Any, project_id: str, row: Mapping[str, Any]) -> str | No
 
 async def _decide_pending(
     conn: Any, project_id: str, proposal_id: int, content_sha256: str, *, at: datetime,
-) -> tuple[dict[str, Any], str | None]:
-    """The locked pending proposal whose hash is the displayed one, and why it went stale (then it is superseded)."""
+) -> tuple[dict[str, Any], ProposalConflict | None]:
+    """The locked pending proposal whose hash is the displayed one, and a conflict to raise once this commits.
+
+    A proposal past its expiry is expired here, in the same transaction, and not confirmed. An update whose
+    skill moved on is superseded.
+    """
     row = await _locked(conn, project_id, proposal_id)
     if row["status"] != Status.PENDING:
         raise ProposalConflict(f"the proposal is {row['status']}, not pending")
+    if row["expires_at"] <= at:
+        await store.set_status(conn, row["id"], Status.EXPIRED, at=at)
+        await store.add_event(conn, row["id"], action="expire", actor_kind="system", via="system",
+                              content_sha256=row["content_sha256"])
+        return row, ProposalConflict("the proposal expired before it was confirmed; restore it to review it again")
     if row["content_sha256"] != content_sha256:
         raise ProposalConflict("the proposal changed after it was displayed; reload it and read it again")
     if reason := await _stale(conn, project_id, row):
         await _supersede(conn, row, at=at, note=reason)
         await _note(conn, row, f"for {row['name']!r} was superseded: {reason}")
-    return row, reason
+        return row, _superseded_conflict(reason)
+    return row, None
 
 
 def _superseded_conflict(reason: str) -> ProposalConflict:
@@ -363,7 +373,7 @@ async def confirm(
 
     _require_operator(principal)
     now = now or _now()
-    stale: str | None = None
+    stale: ProposalConflict | None = None
     async with locked_project(project_id) as (conn, project):
         if project is None:
             raise ProjectSkillNotFound(f"project {project_id!r} not found")
@@ -374,7 +384,7 @@ async def confirm(
                 ref=str(proposal_id), sha256=row["content_sha256"])
             result["proposal"] = await view(await store.get(conn, proposal_id) or row, conn=conn)
     if stale is not None:
-        raise _superseded_conflict(stale)
+        raise stale
     return result
 
 
@@ -396,7 +406,7 @@ async def edit_and_confirm(
     now = now or _now()
     if not isinstance(fields, Mapping) or not fields or set(fields) - {"name", "description", "content"}:
         raise ProjectSkillError("give at least one of name, description and content")
-    stale: str | None = None
+    stale: ProposalConflict | None = None
     async with locked_project(project_id) as (conn, project):
         if project is None:
             raise ProjectSkillNotFound(f"project {project_id!r} not found")
@@ -424,7 +434,7 @@ async def edit_and_confirm(
                 sha256=new_sha)
             result["proposal"] = await view(await store.get(conn, proposal_id) or row, conn=conn)
     if stale is not None:
-        raise _superseded_conflict(stale)
+        raise stale
     return result
 
 

@@ -25,9 +25,10 @@ pytestmark = pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not
 OPERATOR = api_v1.OPERATOR
 CLIENT = api_v1.Principal("client", "client-1", "reader")
 T0 = datetime(2026, 11, 20, 12, 0, tzinfo=timezone.utc)
-# The project view and the config export of a project that never used proposals, as the commit this branch
-# started from (dbc14152b) writes them.
-OFF_BASELINE = json.loads((Path(__file__).parent / "fixtures" / "skill_proposals_off.json").read_text())
+# The exact text of a project's view and of its config export chunk for a project that never used proposals, as
+# the commit this branch started from (dbc14152b) writes them for fixed input.
+OFF_BASELINE = json.loads((Path(__file__).parent / "fixtures" / "skill_proposals_off_bytes.json").read_text())
+FIXED_ROW = {"id": "proj-fixed", "created_at": "2026-11-20T12:00:00+00:00", "updated_at": "2026-11-20T12:00:00+00:00"}
 
 
 def _item(**over: Any) -> dict[str, Any]:
@@ -429,6 +430,63 @@ def test_the_database_allows_one_pending_proposal_per_name_and_checks_the_target
     run_db(test, monkeypatch)
 
 
+def test_a_confirmed_status_must_point_at_this_proposals_dashboard_confirm_event(monkeypatch):
+    async def test(pool):
+        project_id = await _project(pool)
+        first = await _accepted(pool, project_id)
+        second = await _accepted(pool, project_id, name="other-skill")
+        sha = first["content_sha256"]
+
+        async def event(proposal, action, actor, via, content):
+            return await pool.fetchval(
+                "INSERT INTO skill_proposal_events (proposal_id, action, actor_kind, via, content_sha256) "
+                "VALUES ($1, $2, $3, $4, $5) RETURNING id", proposal, action, actor, via, content)
+
+        async def mark(proposal, event_id, content):
+            await pool.execute(
+                "UPDATE skill_proposals SET status = 'confirmed', confirmed_event_id = $2, confirmed_actor = 'user', "
+                "confirmed_sha256 = $3 WHERE id = $1", proposal, event_id, content)
+
+        # A user's reject, a user's edit and a user's restore are not confirmations, even with the right hash.
+        for action in ("reject", "edit", "restore"):
+            other = await event(first["proposal_id"], action, "user", "dashboard", sha)
+            with pytest.raises(asyncpg.ForeignKeyViolationError):
+                await mark(first["proposal_id"], other, sha)
+        # A confirmation of another proposal cannot be reused, even when the hash matches.
+        foreign = await event(second["proposal_id"], "confirm", "user", "dashboard", sha)
+        with pytest.raises(asyncpg.ForeignKeyViolationError):
+            await mark(first["proposal_id"], foreign, sha)
+        assert await pool.fetchval("SELECT status FROM skill_proposals WHERE id = $1", first["proposal_id"]) == "pending"
+        own = await event(first["proposal_id"], "confirm", "user", "dashboard", sha)
+        await mark(first["proposal_id"], own, sha)
+        assert await pool.fetchval("SELECT status FROM skill_proposals WHERE id = $1", first["proposal_id"]) == "confirmed"
+        with pytest.raises(asyncpg.ForeignKeyViolationError):  # nor may the first's confirmation move to the second
+            await pool.execute(
+                "UPDATE skill_proposals SET status = 'confirmed', confirmed_event_id = $2, confirmed_actor = 'user', "
+                "confirmed_sha256 = $3 WHERE id = $1", second["proposal_id"], own, second["content_sha256"])
+
+    run_db(test, monkeypatch)
+
+
+def test_confirming_after_the_expiry_expires_the_proposal_and_writes_nothing(monkeypatch):
+    async def test(pool):
+        project_id = await _project(pool)
+        proposal = await _accepted(pool, project_id)
+        with pytest.raises(sp.ProposalConflict, match="expired"):
+            await sp.confirm(project_id, proposal["proposal_id"], proposal["content_sha256"],
+                             principal=OPERATOR, now=T0 + sp.EXPIRY)
+        row = await pool.fetchrow("SELECT status, confirmed_event_id FROM skill_proposals")
+        assert (row["status"], row["confirmed_event_id"]) == ("expired", None)
+        assert await _count(pool, "library_items") == 0
+        assert [e["action"] for e in await pool.fetch(
+            "SELECT action FROM skill_proposal_events ORDER BY id")] == ["propose", "expire"]
+        with pytest.raises(sp.ProposalConflict, match="expired"):
+            await sp.edit_and_confirm(project_id, proposal["proposal_id"], proposal["content_sha256"],
+                                      {"content": "x\n"}, principal=OPERATOR, now=T0 + sp.EXPIRY)
+
+    run_db(test, monkeypatch)
+
+
 # --- Expiry and restore ---
 
 
@@ -504,37 +562,72 @@ def test_housekeeping_expires_overdue_proposals(monkeypatch, tmp_path):
 # --- The daily note (RFC D21) ---
 
 
+def _notice_env(monkeypatch, *, chat_id="ou_operator", group=False, operator="ou_operator"):
+    from looper.agents import gate_service, operator_identity
+
+    sent: list[tuple] = []
+
+    async def sender(channel_id, chat, text, **kw):
+        sent.append((channel_id, chat, text))
+        return True, None
+
+    async def target():
+        return SimpleNamespace(channel_id="lark-test", in_group=group,
+                               target=SimpleNamespace(id=chat_id, group=group))
+
+    async def operator_id(channel_id):
+        return operator
+
+    monkeypatch.setattr(gate_service, "dashboard_target", target)
+    monkeypatch.setattr(operator_identity, "operator_sender_id", operator_id)
+    return sent, sender
+
+
 def test_the_operator_gets_one_note_a_day_with_names_and_reasons_and_no_content(monkeypatch):
-    from looper.agents import gate_service, skill_proposal_notice as notice
+    from looper.agents import skill_proposal_notice as notice
+    from looper.agents.skill_proposal_notice import Notice
 
     async def test(pool):
         project_id = await _project(pool)
         secretish = "PRIVATE-BODY-MARKER"
         await _accepted(pool, project_id, description="Describes a thing.",
                         content=f"# Title\n{secretish}\n", why="Same release steps came up three times.")
-        sent: list[tuple] = []
-
-        async def sender(channel_id, chat, text, **kw):
-            sent.append((channel_id, chat, text))
-            return True, None
-
-        async def target():
-            return SimpleNamespace(channel_id="lark-test", target=SimpleNamespace(id="chat-1", group=False))
-
-        monkeypatch.setattr(gate_service, "dashboard_target", target)
+        sent, sender = _notice_env(monkeypatch)
         notice.configure(None)
-        assert await notice.notify_pending() is False and not sent  # no channel: nothing sent, nothing claimed
+        assert await notice.notify_pending() is Notice.NO_SENDER and not sent
         notice.configure(sender, dashboard_url="https://looper.example")
         day = datetime(2026, 11, 21, 9, 0, tzinfo=timezone.utc)
-        assert await notice.notify_pending(now=day) is True
-        assert await notice.notify_pending(now=day + timedelta(hours=3)) is False
-        assert len(sent) == 1
+        assert await notice.notify_pending(now=day) is Notice.SENT
+        assert await notice.notify_pending(now=day + timedelta(hours=3)) is Notice.ALREADY_SENT
+        assert len(sent) == 1 and sent[0][1] == "ou_operator"
         text = sent[0][2]
         assert "release-check" in text and "Same release steps" in text and f"/#projects/{project_id}/skills" in text
         assert secretish not in text and "Describes a thing" not in text and "Run the tests" not in text
-        assert await notice.notify_pending(now=day + timedelta(days=1)) is True and len(sent) == 2
+        assert await notice.notify_pending(now=day + timedelta(days=1)) is Notice.SENT and len(sent) == 2
         await pool.execute("UPDATE skill_proposals SET status = 'rejected'")
-        assert await notice.notify_pending(now=day + timedelta(days=2)) is False and len(sent) == 2
+        assert await notice.notify_pending(now=day + timedelta(days=2)) is Notice.NOTHING_PENDING and len(sent) == 2
+        notice.configure(None)
+
+    run_db(test, monkeypatch)
+
+
+@pytest.mark.parametrize("env,expected", [
+    ({"group": True, "chat_id": "oc_group"}, "GROUP"),
+    ({"chat_id": "ou_someone_else"}, "NOT_OPERATOR"),
+    ({"operator": None}, "NOT_OPERATOR"),
+], ids=["group-chat", "another-users-dm", "operator-unknown"])
+def test_the_note_never_goes_to_a_group_or_to_anyone_but_the_operators_dm(monkeypatch, env, expected):
+    from looper.agents import skill_proposal_notice as notice
+    from looper.agents.skill_proposal_notice import Notice
+
+    async def test(pool):
+        project_id = await _project(pool)
+        await _accepted(pool, project_id)
+        sent, sender = _notice_env(monkeypatch, **env)
+        notice.configure(sender, dashboard_url="https://looper.example")
+        day = datetime(2026, 11, 21, 9, 0, tzinfo=timezone.utc)
+        assert await notice.notify_pending(now=day) is Notice[expected] and not sent
+        assert await pool.fetchval("SELECT count(*) FROM system_settings WHERE key = $1", notice.SENT_KEY) == 0
         notice.configure(None)
 
     run_db(test, monkeypatch)
@@ -546,27 +639,29 @@ def test_the_operator_gets_one_note_a_day_with_names_and_reasons_and_no_content(
 def test_a_project_that_never_enabled_proposals_reads_and_exports_as_before(monkeypatch):
     from looper.agents import config_transfer, projects as agent_projects
 
-    async def export(pool):
+    async def exported(pool):
         async with pool.acquire() as conn:
-            text = "".join([c async for c in config_transfer.export_chunks(
-                conn, include_projects=True, include_secrets=False)])
-        return json.loads(text)["projects"][0]
+            chunks = [c async for c in config_transfer.export_chunks(
+                conn, include_projects=True, include_secrets=False)]
+        return [c for c in chunks if '"Baseline"' in c]
+
+    async def view(pool, project_id):
+        row = {**await projects.get_project(project_id, pool=pool), **FIXED_ROW}
+        return json.dumps(agent_projects.project_view(row), sort_keys=True, default=str)
 
     async def test(pool):
         project_id = await _project(pool, mode=None, name="Baseline")
         await pool.execute("UPDATE projects SET description = 'd', background = 'b' WHERE id = $1", project_id)
-        view = agent_projects.project_view(await projects.get_project(project_id, pool=pool))
-        assert sorted(view) == OFF_BASELINE["project_view_keys"]
-        assert await export(pool) == OFF_BASELINE["export_project"]
-        # On: the key appears. Off again: NULL, and the views are the baseline's once more.
+        assert await view(pool, project_id) == OFF_BASELINE["project_view"]
+        assert await exported(pool) == OFF_BASELINE["export_chunks"]
+        # On: the key appears. Off again: NULL, and both texts are the baseline's once more.
         await sp.set_mode(project_id, "on")
-        assert agent_projects.project_view(await projects.get_project(project_id, pool=pool))["skill_proposals"] == "on"
-        assert (await export(pool))["skill_proposals"] == "on"
+        assert '"skill_proposals": "on"' in await view(pool, project_id)
+        assert '"skill_proposals":"on"' in "".join(await exported(pool))
         await sp.set_mode(project_id, "off")
         assert await pool.fetchval("SELECT skill_proposals FROM projects") is None
-        assert sorted(agent_projects.project_view(await projects.get_project(project_id, pool=pool))) == (
-            OFF_BASELINE["project_view_keys"])
-        assert await export(pool) == OFF_BASELINE["export_project"]
+        assert await view(pool, project_id) == OFF_BASELINE["project_view"]
+        assert await exported(pool) == OFF_BASELINE["export_chunks"]
         with pytest.raises(asyncpg.CheckViolationError):
             await pool.execute("UPDATE projects SET skill_proposals = 'maybe'")
 
