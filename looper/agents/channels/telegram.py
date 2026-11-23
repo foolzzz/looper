@@ -766,6 +766,7 @@ class TelegramChannelAdapter(ChannelAdapter):
                     break
                 # An answer is stored once it was sent, or as not delivered (the Manager names its record).
                 receipt = await self.deliver(envelope)
+                self.record_envelope_delivery(envelope, receipt)
                 if chat_settings.metrics_enabled() and envelope.metadata.get("proactive"):
                     route = envelope.metadata.get("reply_route")
                     route = route if isinstance(route, dict) else {}

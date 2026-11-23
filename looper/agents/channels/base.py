@@ -7,12 +7,13 @@ to bridge between channel-native events and the internal MessageEnvelope format.
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from collections.abc import Callable
 from dataclasses import dataclass
 from enum import StrEnum
 from typing import Any
 
 from ..bus import MessageBus
-from ..message import MessageEnvelope
+from ..message import MessageEnvelope, MessageType
 from ..task_notice import NotifyTarget
 
 
@@ -74,6 +75,25 @@ class ChannelAdapter(ABC):
     outbound messages in the channel's native format. They contain no business
     logic — only protocol translation.
     """
+
+    delivery_observer: Callable[[bool], None] | None = None
+
+    def record_delivery(self, success: bool) -> None:
+        if self.delivery_observer is not None:
+            self.delivery_observer(success)
+
+    def record_envelope_delivery(self, envelope: MessageEnvelope, receipt: DeliveryReceipt) -> None:
+        from .status_line import StatusKind, status_kind
+
+        # Phase updates and empty replies can succeed without sending anything. They cannot prove recovery.
+        if receipt.failure is DeliveryFailure.NO_CHAT:
+            return
+        if envelope.message_type is MessageType.STATUS_UPDATE:
+            if status_kind(envelope.payload) is not StatusKind.PROGRESS:
+                return
+        elif envelope.message_type is not MessageType.CHAT_NOTICE and not envelope.payload.get('text'):
+            return
+        self.record_delivery(receipt.success)
 
     @property
     @abstractmethod
