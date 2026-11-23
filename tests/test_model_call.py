@@ -67,15 +67,17 @@ def test_every_caller_handles_every_call_failure(
                                 "Send build status", action="send", content="The build is green."),
                 outbound.Asker(outbound.Who.OPERATOR, "lark", "Post the build status."),
                 outbound.Origin("manager", outbound.Source.TOOL), **runtime)
-            assert result.decision is outbound.Decision.BLOCK and result.failure.value == failure.value
+            expected = "runtime" if failure is model_call.CallFailure.BLOCKED else failure.value
+            assert result.decision is outbound.Decision.BLOCK and result.failure.value == expected
             row = await pool.fetchrow("SELECT failure FROM outbound_reviews WHERE id = $1", result.review_id)
-            assert row["failure"] == failure.value
+            assert row["failure"] == expected
         elif caller == "leads_check":
             result = await leads_check.check(
                 "leads", [], messages={}, participants=extraction.Participants({}, "ou_synthetic"),
                 zone_name="UTC", text_max_chars=500, types={}, owner="failure-check", reference={},
                 budget_usd=0.5, timeout_s=20, **runtime)
-            expected = {"unavailable": "refused", "refused": "refused", "timeout": "timeout", "budget": "budget"}
+            expected = {"unavailable": "refused", "refused": "refused", "timeout": "timeout", "budget": "budget",
+                        "blocked": "blocked"}
             assert result.checked is None and result.counts["check_failed"] == 1
             assert result.detail == f"{expected.get(failure.value, 'failed')}: recorded reason"
         else:
@@ -189,7 +191,7 @@ def test_cancellation_is_never_a_failed_verdict(tmp_path: Path, stage: str) -> N
 
 @pytest.mark.parametrize(("failure", "expected"), [
     (None, None), ("refused", "unavailable"), ("timeout", "timeout"),
-    ("budget", "budget"), ("failed", "runtime"),
+    ("budget", "budget"), ("failed", "runtime"), ("blocked", "blocked"),
 ])
 def test_a_processor_recipe_keeps_its_private_record_inputs_and_maps_only_its_failure(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, failure: str | None, expected: str | None,
@@ -209,7 +211,8 @@ def test_a_processor_recipe_keeps_its_private_record_inputs_and_maps_only_its_fa
     kwargs = dict(owner="check-owner", instructions="Check the item.", input_text="private input",
                   input_ref={"window": 1}, quiet_word="NONE", budget_usd=0.03, timeout_s=12,
                   runtime_root=tmp_path, claude_bin="chosen-claude", metadata={"check": {"items": 1}},
-                  contract="JSON only", role=AgentType.LEADS_CHECK)
+                  contract="JSON only", role=AgentType.LEADS_CHECK,
+                  project_id="project-synthetic", schedule_id="schedule-synthetic")
     done = asyncio.run(model_call.call(model_call.ProcessorCall(**kwargs), parse=int))
     assert seen == [kwargs] and done.execution.profile is profile
     assert (done.failure.value if isinstance(done, model_call.CallFailed) else None) == expected
@@ -218,6 +221,21 @@ def test_a_processor_recipe_keeps_its_private_record_inputs_and_maps_only_its_fa
         assert isinstance(done, model_call.CallOk) and done.value == 42
     else:
         assert isinstance(done, model_call.CallFailed) and done.reason == "original reason"
+
+
+@pytest.mark.parametrize("failure", [None, "refused", "timeout", "budget", "failed", "blocked"])
+def test_processor_call_retains_the_processors_result_contract(tmp_path: Path, failure: str | None) -> None:
+    from looper.agents import processor
+
+    original = processor.ProcessorRun("" if failure is None else None, 13, 0.04,
+        failure=processor.ProcessorFailure(failure) if failure else None, detail="original detail",
+        profile={"profile_id": "chosen"})
+    mapped = {"refused": "unavailable", "failed": "runtime"}
+    execution = model_call.Execution(original.reply, original.record_id, original.cost_usd,
+        model_call.CallFailure(mapped.get(failure, failure)) if failure else None,
+        original.detail, profile=original.profile)
+    result = asyncio.run(model_call.call(_request(tmp_path), parse=str, backend=_Backend(execution)))
+    assert model_call.processor_result(result) == original
 
 
 _CLAUDE = r'''

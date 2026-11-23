@@ -33,6 +33,7 @@ EXECUTION_COLUMNS = (
     "task_workspaces", "operator_notes", "vault", "dependency_conditions",
     "advisor", "advisor_consult_budget_usd", "advisor_budget_usd", "advisor_consults_per_task",
     "advisor_consults_per_step", "advisor_fallback_profile", "advisor_internal_domains",
+    "subagents", "subagent_budget_usd", "subagent_task_budget_usd", "subagents_per_run", "subagents_per_task",
 )
 
 

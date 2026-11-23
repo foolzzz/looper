@@ -331,6 +331,7 @@ _FAILURES: Mapping[CallFailure, Failure] = {
     CallFailure.TIMEOUT: Failure.TIMEOUT, CallFailure.RATE_LIMITED: Failure.RATE_LIMITED,
     CallFailure.BUDGET: Failure.BUDGET, CallFailure.UNAVAILABLE: Failure.UNAVAILABLE,
     CallFailure.REFUSED: Failure.REFUSED, CallFailure.RUNTIME: Failure.RUNTIME, CallFailure.PARSE: Failure.PARSE,
+    CallFailure.BLOCKED: Failure.RUNTIME,
 }
 _FAILURE_REASONS: Mapping[Failure, str] = {
     Failure.NOT_OPERATOR: "Looper does outbound actions only in the operator's own turn",

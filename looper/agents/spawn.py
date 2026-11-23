@@ -328,6 +328,8 @@ async def spawn(kind: SpawnKind, parent: SpawnParent, brief: Mapping[str, Any], 
     """Open a spawn of ``kind`` for ``parent`` (``brief``: why and what for; ``inputs``: what it is given), run
     ``child`` once with ``profile`` within ``budget`` and finish the spawn: ``answered`` with its output, else
     ``over_budget`` or ``failed`` with why."""
+    from .model_call import CallFailed, ChildCall, call
+
     if child.kind is not kind:
         raise ValueError(f"a {kind.value} spawn cannot run a {child.kind.value} run")
     row = await agent_spawns.create(kind=kind.value, task_id=parent.task_id, step_id=parent.step_id,
@@ -335,8 +337,10 @@ async def spawn(kind: SpawnKind, parent: SpawnParent, brief: Mapping[str, Any], 
                                     budget_usd=budget, state=SpawnState.ASKING)
     result = ChildResult(None, failure=ChildFailure.RUNTIME, detail="its run was stopped")
     try:
-        result = await run_child(child, parent=parent, settings=profile, cap_usd=budget, runtime_root=runtime_root,
-                                 claude_bin=claude_bin)
+        done = await call(ChildCall(child, parent, profile, budget, runtime_root, claude_bin), parse=str)
+        result = ChildResult(done.execution.output, done.record_id, done.cost_usd,
+                             ChildFailure(done.failure.value) if isinstance(done, CallFailed) else None,
+                             done.execution.reason, done.execution.models)
     finally:
         state = (SpawnState.ANSWERED if result.failure is None else
                  SpawnState.OVER_BUDGET if result.failure is ChildFailure.BUDGET else SpawnState.FAILED)
