@@ -1988,7 +1988,7 @@ class ManagerAgent:
             run.state, run.state_generation = (self._render_state(
                 prepared.state, launch, prepared.switch, persona_scope=run.persona_scope),
                                                self._state_generation)
-        asked = f"{prepared.note}\n\n{prepared.message}" if prepared.note else prepared.message
+        asked = f"{note}\n\n{prepared.message}" if (note := self.ops.live_note(prepared.turn, prepared.note) if self.ops is not None else prepared.note) else prepared.message
         run.recorder = recorder = ClaudeRunRecorder(
             agent_id=self.agent_id,
             task_id=envelope.metadata.get("task_id"),

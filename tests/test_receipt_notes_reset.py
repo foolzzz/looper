@@ -235,3 +235,62 @@ def test_a_note_for_a_switch_that_was_turned_off_before_the_send_is_not_sent(
     sent = _sent_by_switch(tmp_path, switch=False, text=NOTE_LINE)
     assert sent.count(NOTE_LINE) == 1 and sent.endswith(NOTE_LINE) and "looper-button-notes" not in sent
     assert made
+
+
+def _recorded(agent_db: Any) -> list[str]:
+    """The input_text of each run recorded for a user turn (a reset or handoff is not one of these)."""
+    return [call.kwargs["input_text"] for call in agent_db.start_record.await_args_list
+            if "session_reset" not in (call.kwargs["metadata"] or {})]
+
+
+def _no_token(agent_db: Any) -> None:
+    for call in agent_db.start_record.await_args_list:
+        assert "looper-button-notes" not in str(call.kwargs.get("input_text")), call.kwargs["input_text"]
+        assert "looper-button-notes" not in str(call.kwargs.get("metadata"))
+
+
+@pytest.mark.parametrize("case", ["keep", "switch", "off"])
+def test_the_recorded_input_is_the_note_actually_sent_never_the_token(
+        monkeypatch: pytest.MonkeyPatch, tmp_path: Any, agent_db: Any, case: str) -> None:
+    from looper.agents.tiers.manager import ManagerAgent
+
+    monkeypatch.setattr(receipts_settings, "_enabled", True)
+    _attach_ops(monkeypatch)
+    if case == "off":
+        init = ManagerAgent.__init__
+
+        def off_after_begin(self: Any, *args: Any, **kwargs: Any) -> None:
+            init(self, *args, **kwargs)
+            begin = self.ops.begin_turn
+
+            def begin_then_off(*a: Any, **k: Any) -> str:
+                note = begin(*a, **k)
+                receipts_settings.set_enabled(False)  # between preparing the turn and sending it
+                return note
+
+            monkeypatch.setattr(self.ops, "begin_turn", begin_then_off)
+
+        monkeypatch.setattr(ManagerAgent, "__init__", off_after_begin)
+    sent = _sent_by_switch(tmp_path, switch=case == "switch", text=NOTE_LINE)
+    (recorded,) = _recorded(agent_db)
+    _no_token(agent_db)
+    if case == "keep":
+        assert recorded.endswith(f"{NOTE_LINE}\n\n{NOTE_LINE}") and sent.count(NOTE_LINE) == 2
+    else:  # the note was taken back: the record ends with the user's message alone, as it would without a note
+        assert recorded.endswith(NOTE_LINE) and recorded.count(NOTE_LINE) == 1 and sent.count(NOTE_LINE) == 1
+        assert not recorded.endswith(f"{NOTE_LINE}\n\n{NOTE_LINE}")
+
+
+def test_the_record_after_a_resume_rebuild_has_no_old_note_and_no_token(monkeypatch: pytest.MonkeyPatch,
+                                                                         agent_db: Any) -> None:
+    from tests.test_manager_new_session import _LOG_TURNS
+
+    monkeypatch.setattr(receipts_settings, "_enabled", True)
+    _attach_ops(monkeypatch)
+    resident = _resident()
+    body = _forgetting()[:-len(resident)] + _LOG_TURNS + resident
+    _converse(monkeypatch, body, ["hello", "again"], saved_session="gone", saved_totals={"cost_usd": 0.1})
+    _no_token(agent_db)
+    first = [text for text in _recorded(agent_db) if text.endswith("hello")]
+    assert len(first) == 2 and NOTE in first[0]  # the attempt that could not resume, then the rebuilt one
+    assert NOTE not in first[-1]
