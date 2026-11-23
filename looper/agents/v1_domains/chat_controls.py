@@ -1,6 +1,7 @@
 """Manager session profiles and operator chat controls, backed by the existing services."""
 
-from .. import chat_settings, profile_registry
+from .. import api_v1, chat_settings, profile_registry
+from ..action_levels import ActionLevel
 from ..api_v1 import Operation, _array, _object, _STR, _NULL_STR, _INT, _BOOL
 from ..ops import ErrorCode, OpError
 
@@ -34,9 +35,18 @@ _MISSING_BOT = _object({"channel_id": _STR, "channel_type": _STR, "name": _STR},
 _MAX_RESIDENT = {"type": "integer", "minimum": chat_settings.session_routing.MAX_RESIDENT_RANGE[0],
                  "maximum": chat_settings.session_routing.MAX_RESIDENT_RANGE[1]}
 CHAT_SETTINGS = _object({"stop_enabled": _BOOL, "completion_turns": COMPLETION_TURNS, "research_order": _BOOL,
-                         "ledger_enabled": _BOOL, "session_routing_enabled": _BOOL, "max_resident": _MAX_RESIDENT})
+                         "ledger_enabled": _BOOL})
+SESSION_ROUTING = _object({"session_routing_enabled": _BOOL, "max_resident": _MAX_RESIDENT})
+SESSION_ROUTING_UPDATED = _object({**SESSION_ROUTING["properties"], "missing_operator_ids": _array(_MISSING_BOT)},
+                                  required=SESSION_ROUTING["required"])
 CHAT_SETTINGS_UPDATED = _object({**CHAT_SETTINGS["properties"], "missing_operator_ids": _array(_MISSING_BOT)},
                                 required=CHAT_SETTINGS["required"])
+CHAT_SETTINGS_UPDATE = _object({
+    "stop_enabled": {"type": ["boolean", "null"]},
+    "completion_turns": {"type": ["string", "null"], "enum": [*COMPLETION_TURNS["enum"], None]},
+    "research_order": {"type": ["boolean", "null"]},
+    "ledger_enabled": {"type": ["boolean", "null"]},
+}, [], closed=True)
 SCHEMAS = {"ManagerSessionEffect": EFFECT, "SettingSource": SOURCE,
            "ManagerSessionProfileSummary": PROFILE_SUMMARY, "ManagerProfileChoice": PROFILE_CHOICE,
            "ManagerSessionView": SESSION_VIEW, "ChatTurn": CHAT_TURN, "ChatSettings": CHAT_SETTINGS}
@@ -46,7 +56,8 @@ _ID = {"type": "string", "minLength": 1}
 
 def _op(name, description, request, result, risk="read", *, operator_only=False):
     return Operation(name, "POST", "/api/v1/" + name.replace(".", "/"), description, description,
-                     request, result, risk=risk, confirms=risk == "high", operator_only=operator_only)
+                     request, result, risk=risk, confirms=risk == "high", operator_only=operator_only,
+                     level=ActionLevel.INSIDE)  # reads or changes only Looper's own session and chat controls
 
 
 OPERATIONS = (
@@ -61,26 +72,35 @@ OPERATIONS = (
         _object({"message_id": _ID}, closed=True),
         _object({"state": {"type": "string", "enum": ["stopping", "already_stopping"]},
                  "phase": _NULL_STR, "method": _NULL_STR}), "write", operator_only=True),
-    _op("chat_settings.get", "Read the chat settings: reply stopping, completion turns, research order, the ledger "
-        "and session routing.",
+    _op("chat_settings.get", "Read chat settings: reply stopping, completion turns, research order and the ledger.",
         _object({}, closed=True), CHAT_SETTINGS),
-    _op("chat_settings.update", "Change chat settings; null restores a default. Turning the ledger or session "
-        "routing on lists bots with no operator id.",
-        _object({"stop_enabled": {"type": ["boolean", "null"]},
-                 "completion_turns": {"type": ["string", "null"], "enum": [*COMPLETION_TURNS["enum"], None]},
-                 "research_order": {"type": ["boolean", "null"]},
-                 "ledger_enabled": {"type": ["boolean", "null"]},
-                 "session_routing_enabled": {"type": ["boolean", "null"]},
+    _op("chat_settings.update", "Change chat settings; null restores a default. Turning the ledger on lists bots with no operator id.",
+        CHAT_SETTINGS_UPDATE, CHAT_SETTINGS_UPDATED, "high"),
+    _op("session_routing.get", "Read the session routing controls.",
+        _object({}, closed=True), SESSION_ROUTING, operator_only=True),
+    _op("session_routing.update", "Change session routing; null restores a default. Enabling it lists bots with no operator id.",
+        _object({"session_routing_enabled": {"type": ["boolean", "null"]},
                  "max_resident": {**_MAX_RESIDENT, "type": ["integer", "null"]}},
-                [], closed=True), CHAT_SETTINGS_UPDATED, "high"),
+                [], closed=True), SESSION_ROUTING_UPDATED, "high", operator_only=True),
 )
 
 
+def validate_arguments(schema, arguments):
+    # Explain unknown chat settings before closed-schema validation obscures the setting name.
+    if schema is CHAT_SETTINGS_UPDATE and isinstance(arguments, dict):
+        try:
+            chat_settings.checked(arguments)
+        except ValueError as exc:
+            raise OpError(ErrorCode.INVALID, str(exc)) from None
+    return api_v1.validate_arguments(schema, arguments)
+
+
 async def impact(server, operation, arguments, principal, headers):
-    if operation.operation_id != "chat_settings.update":
+    if operation.operation_id not in ("chat_settings.update", "session_routing.update"):
         return None
     try:
-        values = chat_settings.checked(arguments)
+        values = (chat_settings.checked_session_routing(arguments) if operation.operation_id == "session_routing.update"
+                  else chat_settings.checked(arguments))
     except ValueError as exc:
         raise OpError(ErrorCode.INVALID, str(exc)) from None
     _check_operator(values, principal)
@@ -150,7 +170,7 @@ async def impact(server, operation, arguments, principal, headers):
 
 
 def _check_operator(values, principal):
-    """The ledger and session routing settings are the operator's: a client that names one is refused whole."""
+    """The ledger is the operator's: a client that names it is refused whole."""
     for field in chat_settings.OPERATOR_FIELDS:
         if field in values and principal.kind != "operator":
             raise OpError(ErrorCode.FORBIDDEN, f"{field} requires operator identity")
@@ -177,6 +197,13 @@ def _stop_state(agent, message_id):
 
 async def run(server, operation, arguments, principal, headers):
     name = operation.operation_id
+    if name == "session_routing.get":
+        return chat_settings.session_routing_view()
+    if name == "session_routing.update":
+        try:
+            return await chat_settings.update_session_routing(arguments)
+        except ValueError as exc:
+            raise OpError(ErrorCode.INVALID, str(exc)) from None
     if name == "chat_settings.get":
         return await chat_settings.settings_view()
     if name == "chat_settings.update":

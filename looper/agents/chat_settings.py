@@ -27,7 +27,7 @@ second copy. Turning it on names the enabled bots that have no operator id.
 ``manager.session_routing.enabled`` and ``manager.sessions.max_resident``: whether the default Manager gives each
 group and each other sender's direct chat a session of its own, and how many sessions keep a process resident
 (``session_routing``; off, and 2). Operator-only. Turning routing on names the enabled bots that have no operator
-id: their direct chats stay in the main session.
+id: their direct chats stay in the main session. Configured through ``session_routing.get/update``.
 
 Turn context, timezone and reply language have separate operator-only
 ``turn_context_settings.get/update`` operations; they are not client chat settings.
@@ -63,9 +63,9 @@ DEFAULT_OUTBOUND_ENABLED = False
 OUTBOUND_DEFAULTS = dict(send_qps=5, write_qps=15, edit_interval_seconds=1, max_in_flight=4)
 # Rate and edit defaults are conservative platform assumptions, to verify (RFC section 7).
 OUTBOUND_FIELDS = ("outbound_enabled", *OUTBOUND_DEFAULTS)
-FIELDS = ("stop_enabled", "completion_turns", "research_order", "ledger_enabled", "session_routing_enabled",
-          "max_resident")
-OPERATOR_FIELDS = ("ledger_enabled", "session_routing_enabled", "max_resident")  # only the operator sets them
+FIELDS = ("stop_enabled", "completion_turns", "research_order", "ledger_enabled")
+OPERATOR_FIELDS = ("ledger_enabled",)  # only the operator sets the ledger
+SESSION_ROUTING_FIELDS = ("session_routing_enabled", "max_resident")
 
 TURN_CONTEXT_KEY = "manager.turn_context.enabled"
 TIMEZONE_KEY = "user.timezone"
@@ -249,9 +249,7 @@ async def load() -> bool:
 async def settings_view() -> dict[str, Any]:
     """The settings in effect. ``ledger_enabled`` is the stored row (``db.ledger.enabled``), not a copy in memory."""
     return {"stop_enabled": _stop_enabled, "completion_turns": _completion_turns.value,
-            "research_order": _research_order, "ledger_enabled": await db_ledger.enabled(),
-            "session_routing_enabled": session_routing.routing_enabled(),
-            "max_resident": session_routing.max_resident()}
+            "research_order": _research_order, "ledger_enabled": await db_ledger.enabled()}
 
 
 def checked(body: Mapping[str, Any]) -> dict[str, Any]:
@@ -281,14 +279,6 @@ def checked(body: Mapping[str, Any]) -> dict[str, Any]:
         if value is not None and not isinstance(value, bool):
             raise ValueError("ledger_enabled must be true, false or null")
         values["ledger_enabled"] = value
-    if "session_routing_enabled" in body:
-        value = body["session_routing_enabled"]
-        if value is not None and not isinstance(value, bool):
-            raise ValueError("session_routing_enabled must be true, false or null")
-        values["session_routing_enabled"] = value
-    if "max_resident" in body:
-        value = body["max_resident"]
-        values["max_resident"] = None if value is None else session_routing.checked_max_resident(value)
     return values
 
 
@@ -308,6 +298,43 @@ async def update(body: Mapping[str, Any]) -> dict[str, Any]:
     if "ledger_enabled" in values:
         value = values["ledger_enabled"]
         stored[db_ledger.ENABLED_KEY] = None if value is None else ("true" if value else "false")
+    await db_settings.put_settings(stored)
+    await load()
+    view = await settings_view()
+    if values.get("ledger_enabled") is True:
+        from .channels.operator_ids import missing
+
+        view["missing_operator_ids"] = [
+            {"channel_id": bot.channel_id, "channel_type": bot.channel_type, "name": bot.name}
+            for bot in await missing()]
+    return view
+
+
+def session_routing_view() -> dict[str, Any]:
+    return {"session_routing_enabled": session_routing.routing_enabled(),
+            "max_resident": session_routing.max_resident()}
+
+
+def checked_session_routing(body: Mapping[str, Any]) -> dict[str, Any]:
+    if unknown := [key for key in body if key not in SESSION_ROUTING_FIELDS]:
+        raise ValueError(f"unknown session routing setting {unknown[0]!r}")
+    if not body:
+        raise ValueError(f"give at least one of {', '.join(SESSION_ROUTING_FIELDS)} (null: the default)")
+    values: dict[str, Any] = {}
+    if "session_routing_enabled" in body:
+        value = body["session_routing_enabled"]
+        if value is not None and not isinstance(value, bool):
+            raise ValueError("session_routing_enabled must be true, false or null")
+        values["session_routing_enabled"] = value
+    if "max_resident" in body:
+        value = body["max_resident"]
+        values["max_resident"] = None if value is None else session_routing.checked_max_resident(value)
+    return values
+
+
+async def update_session_routing(body: Mapping[str, Any]) -> dict[str, Any]:
+    values = checked_session_routing(body)
+    stored: dict[str, str | None] = {}
     if "session_routing_enabled" in values:
         value = values["session_routing_enabled"]
         stored[session_routing.ROUTING_KEY] = None if value is None else ("true" if value else "false")
@@ -316,8 +343,8 @@ async def update(body: Mapping[str, Any]) -> dict[str, Any]:
         stored[session_routing.MAX_RESIDENT_KEY] = None if value is None else str(value)
     await db_settings.put_settings(stored)
     await load()
-    view = await settings_view()
-    if values.get("ledger_enabled") is True or values.get("session_routing_enabled") is True:
+    view = session_routing_view()
+    if values.get("session_routing_enabled") is True:
         from .channels.operator_ids import missing
 
         view["missing_operator_ids"] = [
