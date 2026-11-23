@@ -766,8 +766,9 @@ def _message_line(message: Mapping[str, Any], *, fenced: bool = False) -> str:
 def _message_lines(messages: Sequence[Mapping[str, Any]], *, fence: bool) -> list[str]:
     """A gate turn's new messages (``_message_line``); with ``fence`` (the untrusted fence is on), a user's message
     the operator did not write in their own turn has its text in a ``gate_message`` block, after one lead line."""
+    # An empty one (an end of the discussion) too: its author is outside content as well, named inside the block.
     outside = [m for m in messages if fence and str(m.get("role") or MessageRole.USER.value) == MessageRole.USER.value
-               and m.get("from_operator") is not True and m.get("text")]
+               and m.get("from_operator") is not True]
     lead = [untrusted.LEAD_LINE] if outside else []
     return [*lead, *(_message_line(message, fenced=any(message is m for m in outside)) for message in messages)]
 
@@ -966,6 +967,8 @@ class PlannerAgent:
         self._token_files: set[str] = set()
         self._bus: MessageBus | None = None
         self._plan: TaskPlan | None = None
+        # Whether the untrusted fence is on, as last read (each event, and each turn's plan view).
+        self._fence = False
         self._plan_shown: PlanShown | None = None
         self._plan_staged: PlanShown | None = None
         self._plan_compacted = False
@@ -2067,7 +2070,8 @@ class PlannerAgent:
             f"gate passed ({how}): {len(summary.decisions)} decision(s), {len(summary.assumptions)} assumption(s), "
             f"{len(summary.open)} open; plan: {change or 'unchanged'}", journal.SUMMARY_MAX_CHARS),
             kind=JournalKind.GATE_CLOSED)
-        supplement = JournalEntry(step.step_id, step.label, conclusion, kind=JournalKind.SUPPLEMENT, via="gate")
+        supplement = JournalEntry(step.step_id, step.label, conclusion, kind=JournalKind.SUPPLEMENT,
+                                  via=journal.GATE_VIA)
         at = f"gate {step.label}"
         entries = [supplement, closed]
         added: list[PlanStep] = []
@@ -2591,7 +2595,7 @@ class PlannerAgent:
                 "step_index": step.index,
                 # The Worker's task section: the task and its supplements, then this step and its retry feedback.
                 "requirement": plan.requirement,
-                "supplements": journal.supplement_texts(plan.journal),
+                "supplements": journal.supplement_texts(plan.journal, fence=self._fence),
                 "step_key": step.label,
                 "instruction": step.instruction,
                 "target_files": step.target_files,
@@ -2931,7 +2935,7 @@ class PlannerAgent:
                 "parent_task_id": self._task_id,
                 "plan_id": plan.plan_id,
                 "requirement": plan.requirement,
-                "supplements": journal.supplement_texts(plan.journal),
+                "supplements": journal.supplement_texts(plan.journal, fence=self._fence),
                 "step_key": step.label,
                 "instruction": step.instruction,
                 "work_result": step.result or {},
@@ -3010,7 +3014,7 @@ class PlannerAgent:
         await self._bus.publish(MessageEnvelope.create(
             source=self.agent_address, target=worker_address(step.reviewer_id), message_type=MessageType.VERIFY_REQUEST,
             payload={"task_id": step.step_id, "parent_task_id": self._task_id, "plan_id": plan.plan_id,
-                     "requirement": plan.requirement, "supplements": journal.supplement_texts(plan.journal),
+                     "requirement": plan.requirement, "supplements": journal.supplement_texts(plan.journal, fence=self._fence),
                      "step_key": target.label, "instruction": target.instruction,
                      "work_result": target.result or {}, "acceptance_criteria": target.acceptance_criteria,
                      **({"feedback": list(target.feedback)} if target.feedback else {}), "context": context,
@@ -4820,6 +4824,7 @@ class PlannerAgent:
         full_reason = ("new session" if brief else "new process" if started_process else
                        "no compaction events" if process.launch.runtime.type == "grok" or
                        Capability.COMPACTION_EVENTS not in process.launch.runtime.capabilities else None)
+        self._fence = await untrusted.enabled()
         text, annotation = self._render_plan_message(plan, message, full_reason=full_reason)
         try:
             return await self._exchange(f"{brief}\n\n{text}" if brief else text, process,
@@ -5334,16 +5339,15 @@ class PlannerAgent:
         when = f", deadline {deadline}" if deadline else ""
         return f"- {step.label} [wait {wait.state.value}: {shown}{when}]"
 
-    @staticmethod
-    def _progress_lines(plan: TaskPlan) -> list[str]:
+    def _progress_lines(self, plan: TaskPlan) -> list[str]:
         """The task journal's "Progress and findings" section, after a blank line; nothing before an entry."""
-        section = journal.planner_section(plan.journal)
+        section = journal.planner_section(plan.journal, fence=self._fence)
         return ["", *section] if section else []
 
     def _plan_message(self, plan: TaskPlan, templates: Sequence[str] = ()) -> str:
         added = journal.supplements(
             plan.journal, title="Supplements (what the user added to the task, oldest first; each stands unless a "
-                                "later one changes it)")
+                                "later one changes it)", fence=self._fence)
         # Continuing a stored session, or holding one this run claimed (the first run, or a replacement it
         # still writes). Parallel runs and runs that did not claim leave the message as it was.
         continuing = bool(self._schedule_session_id) and self._schedule_session_id == plan.session_id
@@ -5614,7 +5618,7 @@ class PlannerAgent:
             lines += ["", f"The requirement was edited (version {edit.before_version} -> {edit.version}); the Task "
                           "section of your instructions has the new text. What changed:", _requirement_diff(edit)]
         earlier = [entry for entry in plan.journal if entry.id is None or entry.id not in new]
-        return lines, journal.planner_section(earlier)
+        return lines, journal.planner_section(earlier, fence=fence)
 
     # --- Endings ---
 
@@ -5916,6 +5920,7 @@ class PlannerAgent:
         A failed read keeps what the plan last saw: the background is
         guidance, so the task goes on without the newest one.
         """
+        self._fence = await untrusted.enabled()  # what the turns and the Workers' instructions this event fence
         try:
             project = await db_projects.get_task_project(self._task_id)
         except Exception:
