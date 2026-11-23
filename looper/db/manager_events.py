@@ -117,6 +117,14 @@ async def mark_sent(event_id: int, *, pool: Db | None = None) -> None:
         "WHERE id = $1 AND sent_at IS NULL", event_id)
 
 
+async def pending_one(manager_id: str, channel_id: str, chat: str, *, pool: Db | None = None) -> dict[str, Any] | None:
+    """The chat's oldest pending event, unclaimed (what the next completion turn would tell first); None when none."""
+    row = await (pool or get_pool()).fetchrow(
+        "SELECT * FROM manager_events WHERE manager_id = $1 AND channel_id = $2 AND chat = $3 AND state = 'pending' "
+        "ORDER BY id LIMIT 1", manager_id, channel_id, chat)
+    return dict(row) if row is not None else None
+
+
 async def claim(manager_id: str, channel_id: str, chat: str, batch: UUID, *, limit: int = CLAIM_LIMIT,
                 pool: Db | None = None) -> list[dict[str, Any]]:
     """Take the chat's pending events (the oldest ``limit``) into the completion turn ``batch``; [] when there are

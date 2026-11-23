@@ -152,7 +152,7 @@ def test_bound_notice_uses_exact_bot_and_chat_then_stops_after_unbinding(
         assert sends[0][:8] == ["--profile", "other", "im", "+messages-send", "--as", "bot", "--chat-id", "oc_x"]
         notices = await env.pool.fetch("SELECT status, error FROM schedule_notifications WHERE schedule_id = $1 "
                                        "ORDER BY created_at", sid)
-        assert [n["status"] for n in notices] == ["sent", "failed"]
+        assert [n["status"] for n in notices] == ["sent", "dashboard"]
         assert "unavailable" in notices[-1]["error"]
         assert any(r.levelname == "WARNING" and sid in r.getMessage() for r in caplog.records)
         page = await env.ok("POST", "/api/v1/schedule_admin/project_list", {"project_id": env.project_id})

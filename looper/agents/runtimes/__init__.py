@@ -75,6 +75,7 @@ if TYPE_CHECKING:
     from ..profile_registry import LegacyProviderSpec as ProviderSpec
     from ..agent_settings import Launch
     from ..claude_cli import CapStop, ResidentTurn
+    from ..failures import Evidence, Failure
     from ..run_usage import Price, Usage
     from .cancel import TurnCancel
     from .instructions import InstructionFile
@@ -455,6 +456,8 @@ class RuntimeAdapter(ABC):
     # Runs and calls tools inside looper serve, with no executable to find or probe.
     in_process: ClassVar[bool] = False
     platform_tools_in_process: ClassVar[bool] = False
+    # Verified to expose only the session's server tools, without file, shell, plugin or subagent access.
+    supports_platform_tools_only: ClassVar[bool] = False
     # Worker, Reviewer and consult runs use hosted_run instead of their own process. Their platform tools
     # are passed in process by the caller, without an MCP entry.
     hosts_runs: ClassVar[bool] = False
@@ -469,6 +472,9 @@ class RuntimeAdapter(ABC):
     # ``Capability``: those are stored with each runtime row (``agent_runtimes.capabilities``, whose CHECK lists them)
     # and stand for a run's stream, as Grok's COMPACTION_EVENTS does while its ACP resident session reports none.
     resident_compaction_events: ClassVar[bool] = False
+    # It runs a hook Looper gives it before each tool call and does not run a call the hook denies
+    # (``Launch.tool_hook``, the outbound review). Not a ``Capability``, like the flag above.
+    tool_hook: ClassVar[bool] = False
     protocols: ClassVar[frozenset[ApiProtocol]]
     # Reachable only through Looper's local translating gateway.
     translated_protocols: ClassVar[frozenset[ApiProtocol]] = frozenset()
@@ -716,6 +722,10 @@ class RuntimeAdapter(ABC):
     def failure_detail(self, result_event: dict[str, Any] | None, *, launch: Launch,
                        command: list[str], pid: int | None = None) -> str | None:
         """A safe, bounded explanation of a failed run, when the runtime provides one."""
+        return None
+
+    def failure_signal(self, result_event: dict[str, Any] | None, evidence: Evidence) -> Failure | None:
+        """Why a run failed, from what its runtime reported (``failures``); None when it does not say."""
         return None
 
     # --- Its own login ---

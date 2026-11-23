@@ -7,12 +7,13 @@ to bridge between channel-native events and the internal MessageEnvelope format.
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from collections.abc import Callable
 from dataclasses import dataclass
 from enum import StrEnum
 from typing import Any
 
 from ..bus import MessageBus
-from ..message import MessageEnvelope
+from ..message import MessageEnvelope, MessageType
 from ..task_notice import NotifyTarget
 
 
@@ -32,6 +33,11 @@ class DeliveryReceipt:
     external_id: str | None = None
     error: str | None = None
     failure: DeliveryFailure | None = None  # when not ``success``: why, if not SEND_FAILED
+    outcome: PostOutcome | None = None
+
+    @property
+    def result(self) -> PostOutcome:
+        return PostOutcome.SENT if self.success else (self.outcome or PostOutcome.UNKNOWN)
 
 
 class PostOutcome(StrEnum):
@@ -70,6 +76,25 @@ class ChannelAdapter(ABC):
     logic — only protocol translation.
     """
 
+    delivery_observer: Callable[[bool], None] | None = None
+
+    def record_delivery(self, success: bool) -> None:
+        if self.delivery_observer is not None:
+            self.delivery_observer(success)
+
+    def record_envelope_delivery(self, envelope: MessageEnvelope, receipt: DeliveryReceipt) -> None:
+        from .status_line import StatusKind, status_kind
+
+        # Phase updates and empty replies can succeed without sending anything. They cannot prove recovery.
+        if receipt.failure is DeliveryFailure.NO_CHAT:
+            return
+        if envelope.message_type is MessageType.STATUS_UPDATE:
+            if status_kind(envelope.payload) is not StatusKind.PROGRESS:
+                return
+        elif envelope.message_type is not MessageType.CHAT_NOTICE and not envelope.payload.get('text'):
+            return
+        self.record_delivery(receipt.success)
+
     @property
     @abstractmethod
     def channel_type(self) -> str:
@@ -100,8 +125,8 @@ class ChannelAdapter(ABC):
         """Send a message from the system to the user through this channel."""
         ...
 
-    async def notify(self, chat: str, text: str) -> DeliveryReceipt:
-        """Send ``text``, unprompted, to ``chat``: a schedule's message, or a task's end (``task_notice``)."""
+    async def notify(self, chat: str, text: str, *, idempotency_key: str | None = None) -> DeliveryReceipt:
+        """Send ``text`` unprompted. A capable channel deduplicates caller retries by ``idempotency_key``."""
         return DeliveryReceipt(channel=self.channel_type, success=False,
                                error=f"the {self.channel_type} channel cannot send notifications")
 
