@@ -315,6 +315,22 @@ memory, with a since-start label until the service has been up for a day.
   budget (null unsets it; the recommended value is $4.00) and report invalid stored values. While unset, there
   is no additional recorder cap, session measurement write or maintenance check, and prompts, tools and
   command lines stay unchanged.
+- **Operator profile** (`operator_profile.py`, `manager.profile.source`, default unset): a deterministic compiler
+  reads `关于我.md` (or `记忆/关于我.md`, but not both) and `偏好/**/*.md` from the folder the operator names.
+  That folder must resolve, symlinks included, inside the configured knowledge vault; save and read both check.
+  Notes whose path has a part starting with `.` or `_` are skipped. It produces a typed profile — name, address,
+  reply language, time zone, working hours, communication preferences and standing rules. Heading fields cite the
+  note path, heading and line. A markdown bullet with inline `[kind:: …]` fields is one entry: `kind` chooses
+  the field, and the entry cites the note path and that line. A `summary` is not required for those notes.
+  Content inside a code fence is ignored, and backticks in the output are normalized. A single-value field with
+  a second value fails the compile. The rendered text is at most 1500 characters; lower-priority fields are
+  dropped first, and the last remaining field is truncated with `…` when it alone is still over the cap. `profile.get`
+  stores the result in `profile_blocks` and keeps the version when the compiled body is unchanged. The
+  operator-only v1 operations are `profile.get`, `profile_source.get` and `profile_source.update` (null clears
+  the folder and the cached block). They are not chat settings and not Manager tools. **Manager wiring is
+  pending:** with the folder unset nothing is compiled and nothing is written, and storing a folder changes no
+  prompt, tool list, record or channel call. See the
+  [operator profile RFC](rfcs/operator-profile-v0.zh-CN.md).
 - The reply is Claude's words, then what Looper itself writes to the user in
   that turn (`Turn.blocks`): a new task's configuration with the question
   whether to start it, and what an operation needing confirmation does. In a
