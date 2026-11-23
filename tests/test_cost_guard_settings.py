@@ -60,6 +60,9 @@ def test_no_default_daily_caps_and_observe_survives_reload(stored):
     {"mode": "invalid"}, {"mode": True}, {"daily_usd": True}, {"daily_usd": -1},
     {"daily_usd": float("nan")}, {"daily_usd": float("inf")}, {"unknown": 1}, {},
     {"roles": {"worker": {"daily_usd": 1}}}, {"roles": {"advisor": {"fallback": "cheap"}}},
+    {"unanswered_pushes": {}}, {"unanswered_pushes": {"window_days": True}},
+    {"unanswered_pushes": {"min_pushes": 0}}, {"unanswered_pushes": {"snooze_days": 366}},
+    {"unanswered_pushes": {"pause_after_days": 31}}, {"unanswered_pushes": {"extra": 1}},
 ])
 def test_invalid_update_is_atomic(stored, body):
     async def check():
@@ -142,7 +145,37 @@ def test_guard_settings_never_expand_chat_settings(stored):
     assert "Rejected windows and quota failures hold all runs" in impact
     assert "95% utilization holds only schedule firings and background roles" in impact
     assert "quota-failure" in impact and "recorded only" not in impact
+    assert "Needs you" in impact
     assert stored == ({}, [])
+
+
+def test_unanswered_rule_stays_off_until_reply_metrics_are_on(stored):
+    from looper.agents import chat_settings
+
+    assert settings.view()["unanswered_pushes"] == {
+        "enabled": False, "window_days": 3, "min_pushes": 15, "pause_after_days": 3, "snooze_days": 30}
+    assert settings.cached() == settings.Config()
+
+    async def check():
+        with pytest.raises(ValueError, match="先打开 manager.metrics.enabled：没有推送和回复记录就无法判断没人回"):
+            await settings.update({"unanswered_pushes": {"enabled": True}})
+        assert stored == ({}, [])
+        chat_settings.set_metrics_enabled(True)
+        try:
+            await settings.update({"unanswered_pushes": {"enabled": True, "min_pushes": 15}})
+        finally:
+            chat_settings.set_metrics_enabled(False)
+        assert settings.cached().unanswered == settings.UnansweredRule(enabled=True, min_pushes=15)
+        assert stored[0]["cost_guard.unanswered_pushes.enabled"] == "true"
+        assert stored[0]["cost_guard.unanswered_pushes.min_pushes"] == "15"
+        assert "cost_guard.unanswered_pushes.window_days" not in stored[0]
+
+    asyncio.run(check())
+    operation = api_v1.find("POST", "/api/v1/cost_guard/update")
+    assert operation.summary == "Configure cost guard admission."
+    assert api_v1.find("POST", "/api/v1/cost_guard/get").summary == "Read cost guard observations."
+    assert operation.description.startswith(operation.summary)
+    assert "Needs you" in operation.description and "recorded only" not in operation.description
 
 
 def test_client_cannot_import_cost_guard_even_as_an_empty_section():

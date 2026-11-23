@@ -1,0 +1,440 @@
+"""Unanswered direct pushes ask once, then pause; resume clears the reason and snoozes."""
+
+import asyncio
+import json
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
+
+import pytest
+
+from looper.agents import attention, cost_guard, cost_guard_settings as settings, cost_holds, unanswered_pushes
+from looper.agents.message import MANAGER_ADDRESS, MessageEnvelope, MessageType, channel_address
+from looper.db import connection, cost_holds as store, schedules as db_schedules
+from looper.db.migrations import cost_holds_unanswered, schedule_pause_reasons
+from tests.db_support import DSN, run_db
+
+pytestmark = pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
+_FIXTURE = json.loads((Path(__file__).parent / "fixtures" / "unanswered_pushes_off.json").read_text())
+_MOMENT = datetime(2026, 11, 20, 12, tzinfo=timezone.utc)
+
+
+@pytest.fixture(autouse=True)
+def isolated_unanswered(monkeypatch):
+    from looper.agents import chat_settings
+
+    monkeypatch.setattr(cost_guard, "_guard", cost_guard.Guard(settings.Config()))
+    monkeypatch.setattr(settings, "_config", settings.Config())
+    monkeypatch.setattr(settings, "_problem", None)
+    monkeypatch.setattr(unanswered_pushes, "_last_checked", None)
+    monkeypatch.setattr(unanswered_pushes, "_warned_day", None)
+    chat_settings.set_metrics_enabled(False)
+    cost_holds.configure(sender=None, dashboard_url="")
+    yield
+    chat_settings.set_metrics_enabled(False)
+    cost_holds.configure(sender=None, dashboard_url="")
+
+
+def _project(value, template):
+    if isinstance(template, dict):
+        return {key: _project(value[key], child) for key, child in template.items()}
+    if isinstance(template, list):
+        assert len(value) == len(template)
+        return [_project(item, template[index]) for index, item in enumerate(value)]
+    if isinstance(value, datetime):
+        return value.isoformat()
+    return value
+
+
+def _section(summary, kind):
+    return next((section for section in summary["sections"] if section["kind"] == kind), None)
+
+
+async def _schedule(pool, schedule_id, name="Morning brief"):
+    await pool.execute(
+        "INSERT INTO schedules(id,project_id,name,cron,timezone,requirement,enabled) "
+        "VALUES ($1,'p-ask',$2,'0 9 * * *','UTC','Post the brief',true)", schedule_id, name)
+
+
+async def _pushes(pool, schedule_id, count, sent_at, *, kind="direct", replied=0, source="schedule"):
+    for index in range(count):
+        run_id = f"{schedule_id}-{index}"
+        await pool.execute(
+            "INSERT INTO schedule_runs(id,schedule_id,scheduled_for,trigger,status) "
+            "VALUES ($1,$2,$3,'scheduled','completed')", run_id, schedule_id, sent_at)
+        replied_at = sent_at if index < replied else None
+        await pool.execute(
+            "INSERT INTO proactive_deliveries(source,source_ref,channel_id,chat,chat_kind,outcome,sent_at,"
+            "replied_at,reply_match) VALUES ($1,$2,'web','direct-chat',$3,'sent',$4,$5,$6)",
+            source, run_id, kind, sent_at, replied_at, "next_message" if replied_at else None)
+
+
+async def _enable(**rule):
+    from looper.agents import chat_settings
+
+    chat_settings.set_metrics_enabled(True)
+    await settings.update({"unanswered_pushes": {"enabled": True, "window_days": 3, "min_pushes": 15,
+                                                 "pause_after_days": 3, "snooze_days": 30, **rule}})
+    unanswered_pushes._last_checked = None
+
+
+def _capture(monkeypatch):
+    sent = []
+
+    async def sender(channel_id, chat, text, **kwargs):
+        sent.append({"channel_id": channel_id, "chat": chat, "text": text, **kwargs})
+        return True, None
+
+    cost_holds.configure(sender=sender, dashboard_url="https://console.example")
+    monkeypatch.setattr("looper.agents.gate_service.dashboard_target", AsyncMock(return_value=SimpleNamespace(
+        channel_id="web", target=SimpleNamespace(id="direct-chat", group=False))))
+    return sent
+
+
+def _envelope(text):
+    return MessageEnvelope.create(source=channel_address("lark", "lark-bot"), target=MANAGER_ADDRESS,
+        message_type=MessageType.USER_MESSAGE, payload={"text": text, "channel_context": {
+            "sender_id": "operator", "chat_id": "synthetic-chat", "chat_type": "p2p"}})
+
+
+def test_switch_off_matches_the_recorded_fixture(monkeypatch):
+    async def body(pool):
+        await pool.execute("INSERT INTO projects(id,name) VALUES ('p-off','Off')")
+        await pool.execute(
+            "INSERT INTO schedules(id,project_id,name,cron,timezone,requirement,enabled) VALUES "
+            "('sched-pushed','p-off','Morning brief','0 9 * * *','UTC','Post the brief',true),"
+            "('sched-disabled','p-off','Disabled brief','0 10 * * *','UTC','Stay off',false),"
+            "('sched-failing','p-off','Failing brief','0 11 * * *','UTC','Has failed',true)")
+        await pool.execute(
+            "UPDATE schedules SET consecutive_failures=2, failures_alert_at=$2 WHERE id=$1",
+            "sched-failing", datetime(2026, 11, 1, 12, tzinfo=timezone.utc))
+        sent = _MOMENT - timedelta(hours=2)
+        for index in range(20):
+            run_id = f"run-{index}"
+            await pool.execute(
+                "INSERT INTO schedule_runs(id,schedule_id,scheduled_for,trigger,status) "
+                "VALUES ($1,'sched-pushed',$2,'scheduled','completed')", run_id, sent)
+            await pool.execute(
+                "INSERT INTO proactive_deliveries(source,source_ref,channel_id,chat,chat_kind,outcome,sent_at) "
+                "VALUES ('schedule',$1,'web','direct-chat','direct','sent',$2)", run_id, sent)
+        await pool.execute(
+            "INSERT INTO cost_holds(scope,scope_ref,currency,limit_usd,spent_usd,reason) "
+            "VALUES ('task','task-off','provider_priced_usd',2,1,'budget')")
+        assert await pool.fetchval("SELECT id FROM cost_holds") == 1
+        cost_guard.current().holds_need_recovery = False
+        calls = {"n": 0}
+
+        def queried():
+            calls["n"] += 1
+            raise AssertionError("check queried the database")
+
+        monkeypatch.setattr(connection, "get_pool", queried)
+        await unanswered_pushes.check(_MOMENT)
+        assert calls["n"] == _FIXTURE["queries_on_check"] == 0
+        assert unanswered_pushes._last_checked is None
+        monkeypatch.setattr(connection, "get_pool", lambda: pool)
+
+        failing = await db_schedules.failing()
+        assert _project(failing, _FIXTURE["failing"]) == _FIXTURE["failing"]
+        summary = await attention.collect()
+        schedules = _section(summary, "schedules")
+        assert _project(schedules, _FIXTURE["attention"]["schedules"]) == _FIXTURE["attention"]["schedules"]
+        assert _section(summary, "cost") is _FIXTURE["attention"]["cost"]
+        async with pool.acquire() as conn:
+            await db_schedules.update_schedule(conn, "sched-disabled", {"enabled": True})
+            resumed = dict(await conn.fetchrow(
+                "SELECT id, name, enabled, pause_reason, paused_at, unanswered_snooze_until "
+                "FROM schedules WHERE id='sched-disabled'"))
+        assert _project(resumed, _FIXTURE["resume"]) == _FIXTURE["resume"]
+        from looper.agents import cost_hold_routing as routing
+        routes = {}
+        for text in _FIXTURE["routes"]:
+            result = await routing.route(_envelope(text), platform=None)
+            routes[text] = None if result is None else {"reply": getattr(result, "reply", None)}
+        assert routes == _FIXTURE["routes"]
+        assert await pool.fetchval("SELECT count(*) FROM cost_holds WHERE reason='unanswered'") == 0
+        assert cost_guard.current().holds_need_recovery is False
+
+    run_db(body, monkeypatch, timeout=60)
+    from looper.agents.ops.schedules import TOOLS as SCHEDULE_TOOLS
+    from looper.agents.ops.service import MANAGER_TOOLS
+    assert [tool.name for tool in MANAGER_TOOLS] == _FIXTURE["manager_tool_names"]
+    assert {tool.name: tool.listing()["inputSchema"] for tool in SCHEDULE_TOOLS} == _FIXTURE["schedule_tool_schemas"]
+    assert _FIXTURE["sha"] == "3c718301c47d3e246ffb3342d7c2bb0f47d6daed"
+
+
+def test_fifteen_unanswered_direct_pushes_ask_once(monkeypatch):
+    async def body(pool):
+        await pool.execute("INSERT INTO projects(id,name) VALUES ('p-ask','Ask')")
+        sent = _MOMENT - timedelta(hours=2)
+        recent = _MOMENT - timedelta(minutes=10)
+        await _schedule(pool, "sched-15")
+        await _schedule(pool, "sched-14", "Fourteen")
+        await _schedule(pool, "sched-replied", "Replied")
+        await _schedule(pool, "sched-group", "Group")
+        await _schedule(pool, "sched-recent", "Recent")
+        await _pushes(pool, "sched-15", 15, sent)
+        await _pushes(pool, "sched-14", 14, sent)
+        await _pushes(pool, "sched-replied", 15, sent, replied=1)
+        await _pushes(pool, "sched-group", 15, sent, kind="group")
+        await _pushes(pool, "sched-recent", 15, recent)
+        await _enable()
+        sent_messages = _capture(monkeypatch)
+        await unanswered_pushes.check(_MOMENT)
+        await unanswered_pushes.check(_MOMENT)
+        holds = await store.list_pending(pool=pool)
+        assert [row["scope_ref"] for row in holds] == ["sched-15"]
+        assert holds[0]["reason"] == "unanswered" and holds[0]["pushes"] == 15
+        assert holds[0]["currency"] is None and holds[0]["limit_usd"] is None and holds[0]["spent_usd"] is None
+        assert len(sent_messages) == 1
+        label = f"C-{holds[0]['id']}"
+        assert sent_messages[0]["text"] == (
+            f"{label}：『Morning brief』3 天推了 15 条，你都没回。"
+            f"还要继续推吗？回复「继续 {label}」（30 天内不再问）或「停 {label}」（暂停这个定时任务）。"
+            "3 天内不回答、也没回过它的推送，会自动暂停。控制台：https://console.example/#todo")
+        assert sent_messages[0]["idempotency_key"] == f"cost-hold:{holds[0]['id']}"
+        # Keep the recent batch inside the later check's last 30 minutes, or it becomes eligible.
+        await pool.execute(
+            "UPDATE proactive_deliveries SET sent_at=$1 WHERE source_ref LIKE 'sched-recent-%'",
+            _MOMENT + timedelta(minutes=50))
+        await unanswered_pushes.check(_MOMENT + timedelta(hours=1))
+        assert len(sent_messages) == 1
+        assert len(await store.list_pending(pool=pool)) == 1
+
+    run_db(body, monkeypatch, timeout=60)
+
+
+def test_pause_expires_on_a_reply_and_resume_snoozes(monkeypatch):
+    async def body(pool):
+        await pool.execute("INSERT INTO projects(id,name) VALUES ('p-ask','Ask')")
+        sent_at = _MOMENT - timedelta(hours=2)
+        await _schedule(pool, "sched-pause")
+        await _schedule(pool, "sched-answered", "Answered")
+        await _pushes(pool, "sched-pause", 15, sent_at)
+        await _pushes(pool, "sched-answered", 15, sent_at)
+        await pool.execute("INSERT INTO projects(id,name,task_budget_usd) VALUES ('p-budget','Budget',2)")
+        await pool.execute("INSERT INTO tasks(id,project_id,requirement,status) VALUES "
+                           "('t-budget','p-budget','Synthetic task','running')")
+        await _enable()
+        sent_messages = _capture(monkeypatch)
+        await unanswered_pushes.check(_MOMENT)
+        pause_id = await pool.fetchval("SELECT id FROM cost_holds WHERE scope_ref='sched-pause'")
+        answered_id = await pool.fetchval("SELECT id FROM cost_holds WHERE scope_ref='sched-answered'")
+        budget, _ = await store.create_hold("task", "t-budget", "provider_priced_usd", 2, 1, "budget",
+                                            task_id="t-budget", pool=pool)
+        aged = _MOMENT - timedelta(hours=25)
+        await pool.execute("UPDATE cost_holds SET created_at=$2 WHERE id=ANY($1::bigint[])",
+                           [pause_id, answered_id, budget["id"]], aged)
+        expired = await cost_holds.expire(pool=pool)
+        assert [row["id"] for row in expired] == [budget["id"]]
+        assert await pool.fetchval("SELECT state FROM cost_holds WHERE id=$1", pause_id) == "pending"
+        await pool.execute(
+            "UPDATE proactive_deliveries SET replied_at=$1, reply_match='next_message' "
+            "WHERE source_ref='sched-answered-0'", aged)
+        await pool.execute("UPDATE cost_holds SET created_at=$2 WHERE id=ANY($1::bigint[])",
+                           [pause_id, answered_id], _MOMENT - timedelta(days=3, minutes=1))
+        await unanswered_pushes.check(_MOMENT + timedelta(hours=2))
+        assert await pool.fetchval("SELECT state FROM cost_holds WHERE id=$1", answered_id) == "expired"
+        assert await pool.fetchval("SELECT enabled FROM schedules WHERE id='sched-answered'") is True
+        assert await pool.fetchval("SELECT pause_reason FROM schedules WHERE id='sched-answered'") is None
+        pause = await pool.fetchrow("SELECT state, decided_via FROM cost_holds WHERE id=$1", pause_id)
+        assert pause["state"] == "stopped" and pause["decided_via"] is None
+        row = await pool.fetchrow(
+            "SELECT enabled, pause_reason, paused_at, next_fire_at FROM schedules WHERE id='sched-pause'")
+        assert row["enabled"] is False and row["pause_reason"] == "unanswered"
+        assert row["paused_at"] == _MOMENT + timedelta(hours=2) and row["next_fire_at"] is None
+        assert len(sent_messages) == 3
+        assert sent_messages[-1]["text"] == (
+            "『Morning brief』已自动暂停：3 天没有回答，也没回过它的推送。"
+            "在控制台的「需要你处理」里点「恢复」，或让管家恢复它。")
+        assert sent_messages[-1]["idempotency_key"] == f"unanswered-pause:{pause_id}"
+        summary = await attention.collect()
+        schedules = _section(summary, "schedules")
+        paused = next(item for item in schedules["items"] if item["key"] == "schedule:sched-pause")
+        assert paused["facts"]["alerts"] == ["unanswered"]
+        assert all(item["key"] != "schedule:sched-answered" for item in schedules["items"])
+        async with pool.acquire() as conn:
+            await db_schedules.update_schedule(conn, "sched-pause", {"enabled": True}, snooze_days=30)
+        resumed = await pool.fetchrow(
+            "SELECT enabled, pause_reason, paused_at, unanswered_snooze_until FROM schedules WHERE id='sched-pause'")
+        assert resumed["enabled"] is True and resumed["pause_reason"] is None and resumed["paused_at"] is None
+        until = resumed["unanswered_snooze_until"]
+        assert until > datetime.now(timezone.utc) + timedelta(days=29)
+        # The new hold's created_at is the database clock. Stay near that clock so the new question is not
+        # already older than pause_after_days.
+        wall = datetime.now(timezone.utc)
+        await pool.execute("UPDATE schedules SET unanswered_snooze_until=$1 WHERE id='sched-pause'",
+                           wall + timedelta(hours=2))
+        await pool.execute("UPDATE proactive_deliveries SET sent_at=$1 WHERE source_ref LIKE 'sched-pause-%'",
+                           wall - timedelta(hours=2))
+        await unanswered_pushes.check(wall)
+        assert await pool.fetchval("SELECT count(*) FROM cost_holds WHERE scope_ref='sched-pause' "
+                                   "AND state='pending'") == 0
+        await pool.execute("UPDATE schedules SET unanswered_snooze_until=$1 WHERE id='sched-pause'",
+                           wall - timedelta(minutes=1))
+        await unanswered_pushes.check(wall + timedelta(hours=1))
+        assert await pool.fetchval("SELECT count(*) FROM cost_holds WHERE scope_ref='sched-pause' "
+                                   "AND state='pending'") == 1
+
+    run_db(body, monkeypatch, timeout=90)
+
+
+def test_operator_replies_and_metrics_off_leave_budget_holds_alone(monkeypatch):
+    async def body(pool):
+        from looper.agents import chat_settings, cost_hold_routing as routing
+
+        await pool.execute("INSERT INTO projects(id,name) VALUES ('p-ask','Ask')")
+        await _schedule(pool, "sched-go", "Keep going")
+        await _schedule(pool, "sched-stop", "Stop me")
+        sent_at = _MOMENT - timedelta(hours=2)
+        await _pushes(pool, "sched-go", 15, sent_at)
+        await _pushes(pool, "sched-stop", 15, sent_at)
+        await _enable()
+        _capture(monkeypatch)
+        monkeypatch.setattr(routing.operator_identity, "operator_sender_id", AsyncMock(return_value="operator"))
+        await unanswered_pushes.check(_MOMENT)
+        go = await pool.fetchval("SELECT id FROM cost_holds WHERE scope_ref='sched-go'")
+        stop = await pool.fetchval("SELECT id FROM cost_holds WHERE scope_ref='sched-stop'")
+        budget, _ = await store.create_hold("global_day", "global", "provider_priced_usd", 2, 2, "budget", pool=pool)
+        refused = await routing.route(_envelope(f"继续 C-{go} 5"), platform=SimpleNamespace())
+        assert "不需要上限" in await refused.action()
+        assert await pool.fetchval("SELECT state FROM cost_holds WHERE id=$1", go) == "pending"
+        bare_budget = await routing.route(_envelope(f"继续 C-{budget['id']}"), platform=SimpleNamespace())
+        assert bare_budget is None
+        continued = await routing.route(_envelope(f"继续 C-{go}"), platform=SimpleNamespace())
+        assert "继续" in await continued.action()
+        assert await pool.fetchval("SELECT state FROM cost_holds WHERE id=$1", go) == "continued"
+        assert await pool.fetchval("SELECT unanswered_snooze_until FROM schedules WHERE id='sched-go'") is not None
+        stopped = await routing.route(_envelope(f"停 C-{stop}"), platform=SimpleNamespace())
+        assert "停下" in await stopped.action()
+        stopped_row = await pool.fetchrow(
+            "SELECT enabled, pause_reason, next_fire_at FROM schedules WHERE id='sched-stop'")
+        assert stopped_row["enabled"] is False and stopped_row["pause_reason"] == "operator"
+        assert stopped_row["next_fire_at"] is None
+        failing = await db_schedules.failing()
+        assert all(row["id"] != "sched-stop" for row in failing)
+        chat_settings.set_metrics_enabled(False)
+        unanswered_pushes._last_checked = None
+        quiet, _ = await store.create_hold("schedule", "sched-go", None, None, None, "unanswered", pushes=15,
+                                           pool=pool)
+        await pool.execute("UPDATE cost_holds SET created_at=$2 WHERE id=$1",
+                           quiet["id"], _MOMENT - timedelta(days=4))
+        before = await pool.fetchval("SELECT count(*) FROM cost_holds WHERE state='pending'")
+        await unanswered_pushes.check(_MOMENT + timedelta(days=4))
+        assert await pool.fetchval("SELECT count(*) FROM cost_holds WHERE state='pending'") == before
+        assert await pool.fetchval("SELECT enabled FROM schedules WHERE id='sched-go'") is True
+
+    run_db(body, monkeypatch, timeout=60)
+
+
+def test_decide_and_pause_claim_the_pending_hold_exactly_once(monkeypatch):
+    async def body(pool):
+        await pool.execute("INSERT INTO projects(id,name) VALUES ('p-ask','Ask')")
+        await _schedule(pool, "sched-race")
+        await _enable()
+        row, _ = await store.create_hold("schedule", "sched-race", None, None, None, "unanswered", pushes=15,
+                                         pool=pool)
+        await pool.execute("UPDATE cost_holds SET created_at=$2 WHERE id=$1",
+                           row["id"], _MOMENT - timedelta(days=4))
+
+        async def wait_lock(holder_pid):
+            # A row-lock waiter shows up as an ungranted transactionid lock, not an ungranted relation lock.
+            for _ in range(100):
+                waiting = await pool.fetchval(
+                    "SELECT EXISTS (SELECT 1 FROM pg_locks me JOIN pg_locks other "
+                    "ON other.locktype = 'transactionid' AND other.transactionid = me.transactionid "
+                    "AND NOT other.granted WHERE me.pid = $1 AND me.locktype = 'transactionid' "
+                    "AND me.granted AND me.mode = 'ExclusiveLock')", holder_pid)
+                if waiting:
+                    return
+                await asyncio.sleep(0.05)
+            raise AssertionError("expected an ungranted lock on cost_holds")
+
+        async with pool.acquire() as blocker:
+            holder_pid = await blocker.fetchval("SELECT pg_backend_pid()")
+            async with blocker.transaction():
+                await blocker.fetchrow("SELECT * FROM cost_holds WHERE id=$1 FOR UPDATE", row["id"])
+                paused = asyncio.create_task(unanswered_pushes.check(_MOMENT))
+                await wait_lock(holder_pid)
+                await blocker.execute("UPDATE cost_holds SET state='continued', decided_via='api', decided_at=now(), "
+                                      "applied_at=now() WHERE id=$1", row["id"])
+            await paused
+        assert await pool.fetchval("SELECT state FROM cost_holds WHERE id=$1", row["id"]) == "continued"
+        assert await pool.fetchval("SELECT enabled FROM schedules WHERE id='sched-race'") is True
+
+        await pool.execute("UPDATE cost_holds SET state='pending', decided_via=NULL, decided_at=NULL, applied_at=NULL "
+                           "WHERE id=$1", row["id"])
+
+        async def lose():
+            with pytest.raises(ValueError, match="已处理"):
+                await cost_holds.decide(row["id"], "stop", via="api", pool=pool)
+
+        async with pool.acquire() as blocker:
+            holder_pid = await blocker.fetchval("SELECT pg_backend_pid()")
+            async with blocker.transaction():
+                await blocker.fetchrow("SELECT * FROM cost_holds WHERE id=$1 FOR UPDATE", row["id"])
+                decision = asyncio.create_task(lose())
+                await wait_lock(holder_pid)
+                await blocker.execute("UPDATE cost_holds SET state='stopped', decided_at=$2, applied_at=$2 "
+                                      "WHERE id=$1 AND state='pending'", row["id"], _MOMENT)
+                await blocker.execute(
+                    "UPDATE schedules SET enabled=false, pause_reason='unanswered', paused_at=$2, next_fire_at=NULL "
+                    "WHERE id=$1", "sched-race", _MOMENT)
+            await decision
+        assert await pool.fetchval("SELECT state FROM cost_holds WHERE id=$1", row["id"]) == "stopped"
+        assert await pool.fetchval("SELECT pause_reason FROM schedules WHERE id='sched-race'") == "unanswered"
+
+    run_db(body, monkeypatch, timeout=60, max_size=6)
+
+
+def test_fresh_and_upgraded_holds_keep_budget_rows_valid(monkeypatch):
+    async def body(pool):
+        async with pool.acquire() as conn:
+            assert not await schedule_pause_reasons.pending(conn)
+            assert not await cost_holds_unanswered.pending(conn)
+            names = {row["name"] for row in await conn.fetch("SELECT name FROM schema_migrations")}
+        assert "schedule_pause_reasons" not in names and "cost_holds_unanswered" not in names
+        for constraint in ("schedules_pause_reason_check", "schedules_pause_pair_check",
+                           "cost_holds_scope_check", "cost_holds_reason_shape"):
+            assert await pool.fetchval("SELECT convalidated FROM pg_constraint WHERE conname=$1", constraint)
+        await pool.execute("INSERT INTO projects(id,name) VALUES ('p-ask','Ask')")
+        await _schedule(pool, "sched-old", "Old")
+        await pool.execute(
+            "INSERT INTO cost_holds(scope,scope_ref,currency,limit_usd,spent_usd,reason) "
+            "VALUES ('task','task-old','provider_priced_usd',2,1,'budget')")
+        definition = await pool.fetchval(
+            "SELECT pg_get_constraintdef(oid) FROM pg_constraint WHERE conname='cost_holds_scope_check'")
+        for value in ("task", "schedule_day", "role_day", "global_day", "schedule"):
+            assert f"'{value}'" in definition
+        await pool.execute("ALTER TABLE cost_holds DROP CONSTRAINT cost_holds_reason_shape")
+        await pool.execute("ALTER TABLE cost_holds DROP COLUMN pushes")
+        await pool.execute("ALTER TABLE cost_holds ALTER COLUMN currency SET NOT NULL, "
+                           "ALTER COLUMN limit_usd SET NOT NULL, ALTER COLUMN spent_usd SET NOT NULL")
+        await pool.execute("ALTER TABLE cost_holds DROP CONSTRAINT cost_holds_scope_check")
+        await pool.execute("ALTER TABLE cost_holds ADD CONSTRAINT cost_holds_scope_check "
+                           "CHECK (scope IN ('task', 'schedule_day', 'role_day', 'global_day')) NOT VALID")
+        await pool.execute("ALTER TABLE schedules DROP CONSTRAINT schedules_pause_reason_check")
+        await pool.execute("ALTER TABLE schedules DROP CONSTRAINT schedules_pause_pair_check")
+        await pool.execute("ALTER TABLE schedules DROP COLUMN pause_reason, DROP COLUMN paused_at, "
+                           "DROP COLUMN unanswered_snooze_until")
+        async with pool.acquire() as conn:
+            assert await schedule_pause_reasons.pending(conn)
+            assert await cost_holds_unanswered.pending(conn)
+            await schedule_pause_reasons.apply(conn, sql=None, state=None)
+            await cost_holds_unanswered.apply(conn, sql=None, state=None)
+            assert not await schedule_pause_reasons.pending(conn)
+            assert not await cost_holds_unanswered.pending(conn)
+        await pool.execute("ALTER TABLE cost_holds VALIDATE CONSTRAINT cost_holds_scope_check")
+        await pool.execute("ALTER TABLE cost_holds VALIDATE CONSTRAINT cost_holds_reason_shape")
+        await pool.execute("ALTER TABLE schedules VALIDATE CONSTRAINT schedules_pause_reason_check")
+        await pool.execute("ALTER TABLE schedules VALIDATE CONSTRAINT schedules_pause_pair_check")
+        assert await pool.fetchval("SELECT reason FROM cost_holds") == "budget"
+        await pool.execute(
+            "INSERT INTO cost_holds(scope,scope_ref,reason,pushes) VALUES ('schedule','sched-old','unanswered',15)")
+        with pytest.raises(Exception, match="cost_holds_reason_shape"):
+            await pool.execute(
+                "INSERT INTO cost_holds(scope,scope_ref,currency,limit_usd,spent_usd,reason,pushes) "
+                "VALUES ('schedule','sched-bad','provider_priced_usd',1,1,'unanswered',15)")
+
+    run_db(body, monkeypatch, timeout=60)
