@@ -31,6 +31,13 @@ logger = logging.getLogger(__name__)
 TICK_SECONDS = 10
 _ATTEMPT = re.compile(r"M-[0-9]{4,18}-a[1-9][0-9]*")
 _BRANCH_PREFIX = "looper/memory/"
+_active: MemoryWriteService | None = None
+
+
+def wake() -> None:
+    """Wake the local writer after a committed DM confirmation or retry."""
+    if _active is not None:
+        _active.wake()
 
 
 class WriteFailure(Exception):
@@ -423,11 +430,16 @@ class MemoryWriteService:
         return int(self._busy)
 
     async def start(self) -> None:
+        global _active
         if self._task is None:
+            _active = self
             self._stopping = False
             self._task = asyncio.create_task(self._loop())
 
     async def stop(self) -> None:
+        global _active
+        if _active is self:
+            _active = None
         self._stopping = True
         self.wake()
         if self._task is not None:

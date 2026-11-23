@@ -562,7 +562,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_memory_posts_external ON memory_posts (cha
 回复「记」或「记 M-0042」写入；「驳回 M-0042 [理由]」驳回。7 天没处理会过期。
 ```
 
-- 改动行（`+`、`-`，`replace_note` 只列有变化的行，各带一行上下文）合计不超过 1,500 字时全部列出，`complete = true`；超过时只列前几行和「内容较长，请到记忆页确认」加链接，`complete = false`，回复说明里没有「记」（D6）。
+- 改动行（`+`、`-`，`replace_note` 只列有变化的行，各带一行上下文）合计不超过 1,500 字时全部列出，`complete = true`；超过时只列前几行和「内容较长，请到记忆页确认」加链接，`complete = false`，回复说明里没有「记」（D6）。飞书的完整改动和预览都转义 Markdown，链接文字不能遮住实际 URL；Telegram 保持纯文本。
 - 标记各加一行：`untrusted`（「来自飞书消息，未经确认」和线索出处）、`flagged`（「来源里有要求助手做事的话」）、`large_removal`（「会删掉这篇笔记 N 行」）、`hard_rule`（第 3.6 节）。
 - 新修订另发一条（引用上一条），上一条改成「🔄 M-0042 已更新，请看新消息」。
 
@@ -575,7 +575,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_memory_posts_external ON memory_posts (cha
 | 引用推送回「驳回 [理由]」，或「驳回 M-0042 [理由]」 | 驳回 |
 | 「重试 M-0042」 | `blocked` → `confirmed` |
 
-- 整条消息必须是上面的一种（`fullmatch`）；只有操作者本人（`operator_identity.is_operator`）在私聊里能用，群聊和别人的私聊回代码写的一句「记忆候选只能由你本人在私聊或记忆页处理」；其他文字照旧交给 Manager。`memory_write.enabled` 关闭时不拦截。
+- 整条消息必须是上面的一种（`fullmatch`）；只有操作者本人（`operator_identity.is_operator`）在私聊里能用，群聊和别人的私聊回代码写的一句「记忆候选只能由你本人在私聊或记忆页处理」；其他文字照旧交给 Manager。`memory_write.enabled` 关闭时不拦截；`push_channel` 未设置时，也不运行推送、过期轮询或回复路由，候选只进记忆页。
 - 不满足条件时回代码写的原因：「M-0042 在推送后改过，请看最新的推送」「M-0042 内容较长，请到记忆页确认：<链接>」「M-0042 已写入 / 已驳回」。
 - **顺序：** 记忆的路由放在意图的路由**之前**。实测意图的 `_REJECT` 正则对「驳回 M-0042」也整条匹配（把 `M-0042` 当成驳回理由）；不引用推送时它会落空，但引用一条意图推送时会驳回那条意图。所以记忆路由先认领所有「记 / 驳回 / 重试 + M 编号」和引用记忆推送的回复，并有测试守住。
 - 用「记」而不用「确认」：整条「确认」是 Manager 高影响操作的确认，「确认 L-0012」是账本的；换一个词就不会互相误认。
@@ -750,7 +750,7 @@ looper memory eval-export --out FILE      # 驳回的候选和理由，只能写
 
 ### 9.5 关闭时逐字节不变
 
-用测试守住：`enabled` 关、或 `sources.manager` 关时，默认 Manager 的工具列表、`TOOLS_CONTRACT` 和每类回合的消息不变；项目 `memory_closeout` 关、或 `sources.tasks` 关时，Planner 的收尾仍是 `[VAULT]`，消息不变；`enabled` 关时，Manager 的回复路由不认领任何记忆写法，意图的路由行为不变。
+用测试守住：`enabled` 关、或 `sources.manager` 关时，默认 Manager 的工具列表、`TOOLS_CONTRACT` 和每类回合的消息不变；项目 `memory_closeout` 关、或 `sources.tasks` 关时，Planner 的收尾仍是 `[VAULT]`，消息不变；`enabled` 关或 `push_channel` 未设置时，推送、过期轮询和回复路由都不运行，Manager 不认领任何记忆写法，意图的路由行为不变。
 
 ### 9.6 界面（最小可用）
 
