@@ -33,7 +33,8 @@ it("shows frozen state, local reset, waiting runs and cap directly on the accoun
   expect(container.textContent).toContain("6 waiting");
   expect(container.textContent).toContain("1 running");
   expect(container.textContent).toContain("limit 2");
-  expect(container.querySelector("time")?.dateTime).toBe("2030-01-07T00:00:00Z");
+  expect(container.querySelector("time")?.dateTime).toBe("2030-01-06T23:59:00.000Z");
+  expect(container.querySelector("time")?.textContent).toBe(new Date("2030-01-06T23:59:00Z").toLocaleString());
 });
 
 it("waits for the clear confirmation and refreshes only after it succeeds", async () => {

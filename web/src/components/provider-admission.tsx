@@ -80,6 +80,9 @@ export function ProviderAdmission({ providerId, enabled }: { providerId: string;
     finally { setBusy(false); }
   };
   if (!enabled) return null;
+  // Admission waits an extra minute after the provider resets. Show the provider's reset time.
+  const resetsAt = status?.until_known && status.until
+    ? new Date(new Date(status.until).getTime() - 60_000).toISOString() : null;
   return <div className="min-w-0 space-y-2 pt-2 text-xs">
     {status && <>
       <div className="flex flex-wrap items-center gap-2">
@@ -90,8 +93,8 @@ export function ProviderAdmission({ providerId, enabled }: { providerId: string;
         <span>{Object.values(status.waiting).reduce((total, count) => total + count, 0)} waiting · {status.running} running · {status.limit === null ? "no concurrency limit" : `limit ${status.limit}`}</span>
         <Button size="sm" variant="outline" disabled={busy || !!pending} onClick={() => void clear()}>Check now</Button>
       </div>
-      {status.state !== "open" && <p className="text-muted-foreground">{status.until_known && status.until
-        ? <>Resets <time dateTime={status.until}>{new Date(status.until).toLocaleString()}</time></> : "Reset time unknown"}</p>}
+      {status.state !== "open" && <p className="text-muted-foreground">{resetsAt
+        ? <>Resets <time dateTime={resetsAt}>{new Date(resetsAt).toLocaleString()}</time></> : "Reset time unknown"}</p>}
     </>}
     {pending && <Confirmation label="Confirm account check" pending={pending} busy={busy}
       confirm={() => void clear(pending)} cancel={() => setPending(null)} />}
