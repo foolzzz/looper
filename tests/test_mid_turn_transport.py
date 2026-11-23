@@ -83,17 +83,33 @@ def test_input_is_refused_unless_the_original_turn_can_still_take_it(state: str)
     asyncio.run(run())
 
 
-def test_a_result_during_drain_does_not_requeue_an_input_already_written() -> None:
+def test_a_result_during_drain_retires_the_pipe_before_queue_fallback(monkeypatch) -> None:
     async def run() -> None:
         resident, writer, turn = _running()
+        retired = []
+        async def retire(**kwargs):
+            retired.append(kwargs)
+            resident._process = None
+        monkeypatch.setattr(resident, "stop", retire)
         writer.after_write = lambda: turn.done.set_result({"type": "result"})
-        assert await resident.write_mid_turn("补充\ntext") is True
+        assert await resident.write_mid_turn("补充\ntext") is False
         assert json.loads(writer.lines[0]) == {
             "type": "user", "message": {"role": "user", "content": "补充\ntext"},
         }
         assert resident._user_turn is turn and turn.tag == "original-tag"
+        assert retired == [{"kill": True}]
         assert await resident.write_mid_turn("too late") is False
         assert len(writer.lines) == 1
+
+    asyncio.run(run())
+
+
+def test_buffered_result_is_checked_again_immediately_before_writing() -> None:
+    async def run() -> None:
+        resident, writer, turn = _running()
+        asyncio.get_running_loop().call_soon(setattr, turn, "result_received", True)
+        assert await resident.write_mid_turn("too late") is False
+        assert writer.lines == []
 
     asyncio.run(run())
 

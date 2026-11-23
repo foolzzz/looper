@@ -12,7 +12,10 @@ from datetime import datetime, timezone
 from enum import Enum
 from typing import TYPE_CHECKING, Any
 
-from . import chat_attachments, chat_settings, gate_routing, intent_routing, operator_identity, session_routing, turn_metrics
+from . import (
+    attention, chat_attachments, chat_commands, chat_settings, gate_commands, gate_routing, intent_routing,
+    operator_identity, session_routing, turn_metrics,
+)
 from .message import MessageEnvelope, MessageType, is_lark
 from .ops import TurnOrigin
 from .runtimes import Capability, MidTurnInput
@@ -135,6 +138,13 @@ class MidTurnInputs:
         return self.agent.ops is not None and self.agent.ops.has_confirmation(self._chat(envelope))
 
     async def merge(self, session: ManagerSession, envelope: MessageEnvelope) -> bool:
+        try:
+            return await self._merge(session, envelope)
+        except Exception:
+            logger.exception("mid-turn admission failed for %s; keeping message queued", envelope.message_id)
+            return False
+
+    async def _merge(self, session: ManagerSession, envelope: MessageEnvelope) -> bool:
         if not enabled(self.agent.agent_id) or envelope.message_type is not MessageType.USER_MESSAGE:
             return False
         token = session.running_token
@@ -145,9 +155,14 @@ class MidTurnInputs:
         if merged_token is not None and merged_token.cancel.requested:
             return False
         text = envelope.payload.get("text")
-        # Slash commands use the command boundary, and intent replies use their exact parser.
+        from .tiers.manager import is_new_session_command, is_stop_command, parse_profile_command
+
+        # Use the same exact command boundaries as normal message handling.
         # References are queued even when the quoted gate/intent has since closed.
-        if (not isinstance(text, str) or not text.strip() or text.lstrip().startswith("/")
+        if (not isinstance(text, str) or not text.strip()
+                or is_new_session_command(text) or is_stop_command(text) or chat_commands.is_help(text)
+                or parse_profile_command(text) is not None or gate_commands.is_command(text)
+                or attention.is_command(text)
                 or envelope.payload.get("attachments") or envelope.payload.get("quote_ref")
                 or gate_routing.references(envelope) is not None or intent_routing.is_reply(text)):
             return False

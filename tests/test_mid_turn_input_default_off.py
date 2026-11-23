@@ -62,6 +62,7 @@ def test_disabled_wire_contract_matches_main(monkeypatch, tmp_path):
             rig.main.release.set()
             await rig.reply(second)
             assert len(rig.main.turns) == 2
+            assert not rig.manager._mid_turn._turns and not rig.manager._mid_turn._parents
             assert await pool.fetchval("SELECT count(*) FROM llm_records WHERE agent_id='manager'") == 2
             def normalize(value):
                 if isinstance(value, str):

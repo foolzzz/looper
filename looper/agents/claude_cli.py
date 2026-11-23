@@ -1143,18 +1143,33 @@ class ResidentClaude:
     async def write_mid_turn(self, text: str) -> bool:
         """Write another input into the current user turn, without starting a new one.
 
-        A prompt queued behind an autonomous turn is not running yet. Admission
-        checks and stdin.write have no await between them; a result arriving during
-        drain must not turn an already-written input into a queued duplicate.
+        A prompt queued behind an autonomous turn is not running yet. Give buffered
+        output a chance to close admission before writing. If the result races the
+        drain, retire this process and let the owner queue the input on a fresh one;
+        the old pipe must never consume it alongside that queued turn.
         """
         process, output, turn, cancel = self._process, self._output, self._user_turn, self._cancel
-        if (process is None or process.returncode is not None or process.stdin is None or process.stdin.is_closing()
-                or output is None or output.ended or output.discard or turn is None or output.turn is not turn
-                or not turn.started or turn.result_received or turn.done.done() or turn.stopping or cancel is None
-                or not cancel.prompt_sent or cancel.requested):
+        def accepting() -> bool:
+            return (process is not None and self._process is process and process.returncode is None
+                    and process.stdin is not None and not process.stdin.is_closing()
+                    and output is not None and not output.ended and not output.discard
+                    and turn is not None and self._user_turn is turn and output.turn is turn
+                    and turn.started and not turn.result_received and not turn.done.done()
+                    and not turn.stopping and cancel is not None and cancel.prompt_sent and not cancel.requested)
+
+        if not accepting():
+            return False
+        await asyncio.sleep(0)
+        if not accepting():
             return False
         async with asyncio.timeout(5):
             await write_user_turn(process.stdin, text)
+        if not accepting():
+            # The write has no acknowledgement tying it to the completed result.
+            # Discard its pipe before the queued owner can send the input again.
+            if self._process is process:
+                await self.stop(kill=True)
+            return False
         return True
 
     async def _stopped_by_user(self) -> StopMethod | None:

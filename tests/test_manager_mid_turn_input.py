@@ -107,7 +107,8 @@ def test_merge_one_record_reply_destinations_and_settle_after_delivery(enabled, 
 
 @pytest.mark.parametrize("case", ["command", "gate_reply", "intent", "attachment", "quote", "other_sender",
                                   "other_session", "client", "confirmation", "no_capability", "no_interface",
-                                  "write_false", "write_error", "routing_off_other_chat", "background"])
+                                  "write_false", "write_error", "write_unexpected", "admission_error",
+                                  "routing_off_other_chat", "background"])
 def test_ineligible_messages_stay_queued(enabled, tmp_path, case):
     async def test(rig, pool):
         if case == "routing_off_other_chat":
@@ -146,6 +147,12 @@ def test_ineligible_messages_stay_queued(enabled, tmp_path, case):
             rig.main.accept = False
         if case == "write_error":
             rig.main.failure = BrokenPipeError("synthetic")
+        if case == "write_unexpected":
+            rig.main.failure = ValueError("synthetic")
+        if case == "admission_error":
+            def failure(_):
+                raise ValueError("synthetic")
+            enabled.setattr(rig.manager._mid_turn, "_pending", failure)
         if case == "routing_off_other_chat":
             second = _lark("second", "oc_synthetic_operator", OPEN_ID, group=False)
         if case == "background":
@@ -158,6 +165,29 @@ def test_ineligible_messages_stay_queued(enabled, tmp_path, case):
             assert second.message_id not in rig.replies
         rig.main.release.set()
         await rig.reply(first)
+        if case in {"write_unexpected", "admission_error"}:
+            await rig.reply(second)
+            assert rig.manager.is_healthy()
+            third = _web("after failure")
+            await rig.bus.publish(third)
+            await rig.reply(third)
+    run_case(test, enabled, tmp_path)
+
+
+@pytest.mark.parametrize("text,command", [
+    (" /NEW ", True), ("/help@synthetic_bot", True), ("/profile 1", True),
+    ("/gate 2 answer", True), ("/todo", True), ("/stop", True),
+    ("/tmp/report.txt", False), ("/help with this", False), ("/new project", False),
+])
+def test_merge_uses_exact_command_boundaries(enabled, tmp_path, text, command):
+    async def test(rig, pool):
+        await start_turn(rig)
+        second = _web(text)
+        await rig.bus.publish(second)
+        await drained(rig)
+        assert bool(rig.main.inputs) is not command
+        rig.main.release.set()
+        await rig.reply(second)
     run_case(test, enabled, tmp_path)
 
 
@@ -253,6 +283,124 @@ def test_real_manager_resident_path_with_scripted_cli(enabled, tmp_path):
             await until(lambda: not [e for e in rig.bus.journal.undelivered() if e.target.agent_id == "manager"])
             metadata = json.loads(await pool.fetchval("SELECT metadata FROM llm_records WHERE agent_id='manager'"))
             assert metadata["merged"][0]["message_id"] == second.message_id
+        finally:
+            await rig.close()
+    run_db(test, enabled, timeout=45)
+
+
+@pytest.mark.parametrize("result_during_drain", [False, True])
+def test_buffered_result_queues_followup_once_without_merging_or_settling(enabled, tmp_path, result_during_drain):
+    """Drive the real Manager/read loop while controlling exactly when stdout is consumed."""
+    from looper.agents.claude_cli import ResidentClaude
+    from tests.test_manager_reply import _fake_claude
+
+    async def test(pool):
+        rig = _Rig(tmp_path)
+        resident = ResidentClaude(label="synthetic-manager-race")
+        rig.manager._sessions["main"].claude = resident
+        rig.manager._config.claude_bin = _fake_claude(tmp_path, (
+            "import pathlib, time\n"
+            "def read_input():\n"
+            "    message = json.loads(sys.stdin.readline())\n"
+            "    with open('consumed.jsonl', 'a') as log: log.write(json.dumps(message) + '\\n')\n"
+            "    print(json.dumps(dict(message, isReplay=True)), flush=True)\n"
+            "    print(json.dumps({'type':'system','subtype':'init','session_id':'synthetic-race'}), flush=True)\n"
+            "read_input()\n"
+            "if not pathlib.Path('ready').exists():\n"
+            "    pathlib.Path('ready').touch()\n"
+            "    while not pathlib.Path('read-followup').exists(): time.sleep(0.01)\n"
+            "    read_input()\n"
+            "print(json.dumps({'type':'result','subtype':'success','is_error':False,"
+            "'session_id':'synthetic-race','result':'handled queued followup'}), flush=True)\n"
+            "sys.stdin.read()\n"
+        ))
+        await rig.start()
+        try:
+            first, second = _web("race-original"), _web("race-followup")
+            await rig.bus.publish(first)
+            await until(lambda: (tmp_path / "ready").exists() and resident._user_turn.started)
+            running = rig.manager._mid_turn._turns[first.message_id]
+            process, output = resident._process, resident._output
+            original_pid = resident.pid
+            release_result = asyncio.Event()
+            dispatch_event = output._dispatch
+            async def dispatch(event):
+                if event["type"] == "result":
+                    await release_result.wait()
+                await dispatch_event(event)
+            enabled.setattr(output, "_dispatch", dispatch)
+            writer = process.stdin
+            writes = []
+            class Writer:
+                def __getattr__(self, name):
+                    return getattr(writer, name)
+
+                def write(self, line):
+                    writes.append(json.loads(line))
+                    writer.write(line)
+
+                async def drain(self):
+                    if result_during_drain:
+                        release_result.set()
+                        await until(lambda: not running.accepting)
+                    await writer.drain()
+            process.stdin = Writer()
+            write = resident.write_mid_turn
+            async def followup(text):
+                # The result is already in stdout before B's admission check. In
+                # the drain case the reader deliberately cannot finish until B writes.
+                output._stdout.feed_data(json.dumps({"type": "result", "subtype": "success",
+                    "is_error": False, "session_id": "synthetic-race", "result": "original only"}).encode() + b"\n")
+                if not result_during_drain:
+                    release_result.set()
+                return await write(text)
+            enabled.setattr(resident, "write_mid_turn", followup)
+            queued = []
+            dispatch_message = rig.manager._router.dispatch
+            def queue(session, envelope):
+                if envelope.message_id == second.message_id:
+                    queued.append(envelope.message_id)
+                dispatch_message(session, envelope)
+            enabled.setattr(rig.manager._router, "dispatch", queue)
+            # Hold the queued turn before it sends or settles anything.
+            queued_turn, proceed = asyncio.Event(), asyncio.Event()
+            handle = rig.manager._handle
+            async def held_handle(envelope):
+                if envelope.message_id == second.message_id:
+                    queued_turn.set()
+                    await proceed.wait()
+                return await handle(envelope)
+            enabled.setattr(rig.manager, "_handle", held_handle)
+            statuses = []
+            send_status = rig.manager._send_status
+            async def status(envelope, text, **kwargs):
+                if envelope.message_id == second.message_id:
+                    statuses.append(text)
+                await send_status(envelope, text, **kwargs)
+            enabled.setattr(rig.manager, "_send_status", status)
+            await rig.bus.publish(second)
+            assert await rig.reply(first) == "original only"
+            assert running.inputs == []  # the already-produced answer cannot cover B
+            await asyncio.wait_for(queued_turn.wait(), 5)
+            rig.collect()
+            assert queued == [second.message_id]
+            assert rig.manager._mid_turn.parent(second.message_id) == second.message_id
+            assert second.message_id not in rig.replies
+            assert "已并入当前回复" not in statuses
+            assert second.message_id in {e.message_id for e in rig.bus.journal.undelivered()}
+            assert len(writes) == int(result_during_drain)
+            if result_during_drain:
+                assert process.returncode is not None  # ambiguous pipe is gone before dispatch resumes
+            (tmp_path / "read-followup").touch()
+            proceed.set()
+            assert await rig.reply(second) == "handled queued followup"
+            assert queued == [second.message_id]
+            assert (resident.pid != original_pid) is result_during_drain
+            consumed = [json.loads(line) for line in (tmp_path / "consumed.jsonl").read_text().splitlines()]
+            assert len(consumed) == 2 and "race-followup" in consumed[1]["message"]["content"]
+            await until(lambda: not [e for e in rig.bus.journal.undelivered() if e.target.agent_id == "manager"])
+            rows = await pool.fetch("SELECT metadata FROM llm_records WHERE agent_id='manager'")
+            assert len(rows) == 2 and all(not json.loads(row["metadata"]).get("merged") for row in rows)
         finally:
             await rig.close()
     run_db(test, enabled, timeout=45)
