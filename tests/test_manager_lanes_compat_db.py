@@ -1,5 +1,4 @@
-"""The disabled switch preserves the recorded pre-lanes contract."""
-import hashlib
+"""The disabled switch preserves the recorded main contract with lanes disabled."""
 import json
 from pathlib import Path
 
@@ -15,14 +14,11 @@ BASELINE = Path(__file__).parent / "fixtures" / "manager_lanes_off.json"
 @pytest.mark.parametrize("routing", [False, True])
 def test_disabled_lanes_match_recorded_inputs_records_replies_and_settles(monkeypatch, tmp_path, routing):
     baseline = json.loads(BASELINE.read_text())
-    assert baseline["commit"] == "ecc2eedbf2ac4a1b44ff9078e634002c228458c1"
+    # Re-recorded from plain main after #1574 added nullable llm_records.attempt_id.
+    assert baseline["commit"] == "335689f374f2200094c7063ef3a732ee56660182"
 
     async def run(pool):
         actual, _ = await capture(pool, tmp_path, monkeypatch, routing=routing)
-        expected = baseline["routing_on" if routing else "routing_off"]
-        # The attempts migration adds a nullable link; these Manager-only runs have no attempt.
-        for record in expected["records"]:
-            record["attempt_id"] = hashlib.sha256(b"null").hexdigest()
-        assert actual == expected
+        assert actual == baseline["routing_on" if routing else "routing_off"]
 
     run_db(run, monkeypatch, timeout=60)
