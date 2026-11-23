@@ -1958,6 +1958,9 @@ class WorkerPool:
                 wp.status = "failed"
                 wp.result = {"status": "failed", "error": str(exc) or "worker timeout"}
                 logger.warning("worker %s timed out on task %s: %s", worker_id, task_id, exc)
+            except cost_guard.Held as exc:
+                await cost_dispatch.window_held(self, wp, reply, exc)
+                return
             except cost_guard.Denied as exc:
                 await cost_dispatch.refused(self, wp, reply, exc.admission)
                 return
@@ -2376,12 +2379,14 @@ class WorkerPool:
                 if isinstance(ctx.handle, KeptRun):
                     ctx.handle.manifest["verification"] = verification
             timeout = None
+            admission_refused = False
             try:
                 result = await self._execute_once(ctx, fallbacks)
             except asyncio.TimeoutError as exc:
                 ctx.run_failure = attempts.RunFailure.TIMEOUT
                 timeout = exc
-            except cost_guard.Denied:
+            except (cost_guard.Denied, cost_guard.Held):
+                admission_refused = True
                 raise
             except Exception as exc:
                 if not fallbacks:
@@ -2389,7 +2394,7 @@ class WorkerPool:
                 result = _verify_failed(str(exc)) if is_verify else _work_failed(str(exc))
                 break
             finally:
-                if not is_verify and not (isinstance(ctx.handle, KeptRun)
+                if not admission_refused and not is_verify and not (isinstance(ctx.handle, KeptRun)
                                           and ctx.handle.state is KeptRunState.DETACHED):
                     await attempts.worker_finished(ctx.attempt_id, ctx.outcome, ctx.run_failure)
                 if ctx.verification_writes is not None:

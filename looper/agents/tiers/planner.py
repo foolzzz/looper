@@ -1209,7 +1209,8 @@ class PlannerAgent:
                 await self._handle_user_message(envelope)
             case MessageType.TASK_CHANGE | MessageType.GATE_MESSAGE | MessageType.ROOM_MESSAGE | MessageType.WAIT_EVENT:
                 pass  # delivered below, with any other change or message waiting
-            case MessageType.SYSTEM_EVENT if envelope.payload.get("type") == "cost_hold_continue":
+            case MessageType.SYSTEM_EVENT if envelope.payload.get("type") in (
+                    "cost_hold_continue", "usage_window_resume"):
                 await planner_budget.resume(self)
             case MessageType.SYSTEM_EVENT:
                 await self._handle_system_event(envelope)
@@ -2525,6 +2526,7 @@ class PlannerAgent:
                 # The loop drives the gates' and the waits' automatic retries: it keeps going.
                 logger.warning("planner %s: the idle check failed", self.agent_id, exc_info=True)
 
+    @planner_budget.usage_tick
     async def _idle_tick(self) -> None:
         """Post a ``gate_retry`` tick when a gate's or a wait's failed turn is due for its retry, else an ``idle`` one
         when the task has only waited for ``GATE_IDLE_STOP_SEC`` with Claude resident. The tick keeps its name: the

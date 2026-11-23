@@ -94,6 +94,10 @@ async def _enforced(planner, plan, run_kind, step, same_attempt):
             admission.reservation.dispatch_task_id = planner._task_id
             admission.reservation.dispatch_step_id = step.step_id
         return True
+    if admission.decision is cost_guard.Decision.HOLD:
+        if not closing:
+            await usage_hold(planner, plan, admission)
+        return False
     if not closing:
         await hold(planner, plan, admission)
     return False
@@ -119,21 +123,60 @@ def event(method):
             if args:
                 envelope = args[0]
                 plan = planner._plan
-                if envelope.message_type is MessageType.SYSTEM_EVENT and envelope.payload.get('type') == 'cost_dispatch_held':
-                    await refused(planner, envelope)
-                    return None
+                if envelope.message_type is MessageType.SYSTEM_EVENT:
+                    if envelope.payload.get('type') in ('cost_dispatch_held', 'usage_dispatch_held'):
+                        await refused(planner, envelope)
+                        return None
+                    if envelope.payload.get('type') == 'usage_window_resume':
+                        if plan is None or plan.status not in ('planning', 'executing', 'verifying'):
+                            return None
                 if ((cost_guard.current().config.mode is cost_guard_settings.Mode.ENFORCE or cost_holds.needs_service())
                         and envelope.message_type is MessageType.TASK_RESUME and plan is not None and plan.status == 'planning'):
                     row = await db_tasks.get_task(planner._task_id)
                     if row is not None and row['status'] == 'awaiting_budget':
                         return None
+                    if (cost_guard.current().config.mode is cost_guard_settings.Mode.ENFORCE and not plan.steps
+                            and not await planner._plan_consulted()):
+                        await resume(planner)
+                        return None
             return await method(planner, *args, **kwargs)
         except Held:
             return None
+        except cost_guard.Held as exc:
+            if planner._plan is None:
+                raise
+            await usage_hold(planner, planner._plan, exc)
         except cost_guard.Denied as exc:
             if exc.admission is None or planner._plan is None:
                 raise
             await hold(planner, planner._plan, exc.admission)
+    return checked
+
+
+async def usage_hold(planner, plan, admission):
+    """Keep a window wait out of the plan's model-visible journal and the spend-question lifecycle."""
+    previous = getattr(planner, '_usage_wait', None)
+    planner._usage_wait = cost_guard.Held(admission.until, admission.reason)
+    await planner._save(plan, *plan.steps, plan_row=True)
+    if previous is None or (previous.until, previous.reason) != (admission.until, admission.reason):
+        when = admission.until.astimezone().strftime('%H:%M')
+        await planner._activity('phase', f'等待用量窗口重置（约 {when}），到期后重新检查用量窗口和花费上限。')
+
+
+def usage_tick(method):
+    """Use the Planner's existing idle loop, which stops with the Planner, to recheck deferred starts."""
+    @wraps(method)
+    async def checked(planner, *args, **kwargs):
+        waiting = getattr(planner, '_usage_wait', None)
+        guard = cost_guard.current()
+        if waiting is not None and (guard.config.mode is not cost_guard_settings.Mode.ENFORCE
+                                    or waiting.until <= guard.clock()):
+            await planner._bus.publish(MessageEnvelope.create(source=planner.agent_address,
+                target=planner.agent_address, message_type=MessageType.SYSTEM_EVENT,
+                payload={'type': 'usage_window_resume'}))
+            planner._usage_wait = None
+            return
+        return await method(planner, *args, **kwargs)
     return checked
 
 
@@ -175,6 +218,11 @@ async def refused(planner, envelope):
     await planner._save(plan, step)
     if cost_guard.current().config.mode is not cost_guard_settings.Mode.ENFORCE:
         await planner._dispatch_ready(plan)
+        return
+    if data['type'] == 'usage_dispatch_held':
+        from datetime import datetime
+
+        await usage_hold(planner, plan, cost_guard.Held(datetime.fromisoformat(data['until']), data['reason']))
         return
     scope = data['scope']
     await hold(planner, plan, cost_guard.Admission(

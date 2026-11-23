@@ -22,6 +22,11 @@ _AUTOMATIC = (SwitchReason.SESSION_BOUND, SwitchReason.CONTEXT_FULL)
 logger = logging.getLogger(__name__)
 
 
+def usage_reply(held):
+    when = held.until.astimezone().strftime('%H:%M')
+    return f'等待用量窗口重置（约 {when}），这次没有启动管家回合。到期后请重新发送消息。'
+
+
 class _MaintenanceDenied(cost_guard.Denied):
     """A handoff was refused before it could replace the retained session."""
 
@@ -90,6 +95,10 @@ def maintenance(method):
         token = _turn.set(None)
         try:
             return await method(manager, switch, *args, **kwargs)
+        except cost_guard.Held:
+            if switch.reason in _AUTOMATIC and _defer_rotation.get():
+                raise
+            return None
         except cost_guard.Denied as exc:
             if switch.reason in _AUTOMATIC and _defer_rotation.get():
                 raise _MaintenanceDenied(exc.reply) from exc

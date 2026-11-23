@@ -176,3 +176,41 @@ def test_automatic_rotation_defers_the_whole_run_and_keeps_its_pending_switch(mo
         assert await run(manager, None, prepared) == "answer"
         assert seen[1] is prepared  # the next turn retries automatic maintenance after room is available
     asyncio.run(check())
+
+
+@pytest.mark.parametrize('reason', [SwitchReason.SESSION_BOUND, SwitchReason.CONTEXT_FULL, SwitchReason.PROFILE_CHANGED])
+def test_window_held_handoff_preserves_automatic_sessions_and_allows_explicit_switches(monkeypatch, reason):
+    from looper.agents.tiers.manager import ManagerAgent, TurnCancel
+
+    async def check():
+        setup(monkeypatch)
+        session = SimpleNamespace(session_runtime='claude_code', session_id='retained')
+        process = SimpleNamespace(signature='retained', launch=SimpleNamespace(tool_hook=None))
+        resident = SimpleNamespace(started=True, stale=lambda signature: False, stop=AsyncMock())
+        manager = SimpleNamespace(_session_now=lambda: session, _claude=resident, _process=process,
+                                  _log='synthetic', _session_totals=None, _pending_switch=None, _pending_handoff=None,
+                                  _write_session_state=AsyncMock())
+        held = cg.Held(NOW + timedelta(minutes=5), 'rejected')
+
+        @cost_manager.maintenance
+        async def handoff(instance, *args):
+            raise held
+
+        manager._handoff = lambda *args: handoff(manager, *args)
+        token = cost_manager._defer_rotation.set(True)
+        try:
+            if reason is SwitchReason.PROFILE_CHANGED:
+                await ManagerAgent._switch_session(manager, SimpleNamespace(reason=reason, describe=lambda: 'profile'),
+                                                  TurnCancel())
+                assert session.session_id is None
+                resident.stop.assert_awaited_once()
+            else:
+                with pytest.raises(cg.Held) as raised:
+                    await ManagerAgent._switch_session(manager, SimpleNamespace(reason=reason, describe=lambda: 'automatic'),
+                                                      TurnCancel())
+                assert raised.value is held and session.session_id == 'retained'
+                resident.stop.assert_not_awaited()
+                manager._write_session_state.assert_not_awaited()
+        finally:
+            cost_manager._defer_rotation.reset(token)
+    asyncio.run(check())

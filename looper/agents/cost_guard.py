@@ -1,4 +1,4 @@
-"""Run admission accounting with operator-owned task and global spend holds."""
+"""Run admission accounting: spend refusals precede usage-window holds."""
 from __future__ import annotations
 
 import asyncio
@@ -6,7 +6,7 @@ import logging
 import math
 import uuid
 from collections import defaultdict, deque
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta, timezone
 from enum import Enum
 from typing import Callable
@@ -54,6 +54,16 @@ class Decision(str, Enum):
     ADMIT = 'admit'
     DENY = 'deny'
     ASK = 'ask'
+    HOLD = 'hold'
+
+
+class Held(Exception):
+    """A run waits for a usage window; this is control state, not a runtime failure."""
+
+    def __init__(self, until: datetime, reason: str):
+        self.until = until
+        self.reason = reason
+        super().__init__(f"usage window on hold until {until.astimezone().strftime('%H:%M')}")
 
 
 class EstimateSource(str, Enum):
@@ -113,6 +123,11 @@ class Admission:
     spent_usd: float = 0.
     estimate_usd: float = 0.
     problem: str | None = None
+    until: datetime | None = None
+    reason: str | None = None
+    provider_id: str | None = None
+    reset_known: bool = True
+    window: str | None = None
 
 
 class Denied(Exception):
@@ -310,6 +325,43 @@ class Guard:
         return Admission(would if enforcing else Decision.ADMIT, would, reservation, hit, currency,
                          used if hit else 0., estimate)
 
+    def _apply_hold(self, kind, admission, hold, provider_id, *, operator=False):
+        """Spend refusals win; rejected/quota windows hold all runs, high utilization only background work."""
+        if hold is None:
+            return admission
+        observation = admission.reservation.observation if admission.reservation is not None else self._recent[-1]
+        from .usage_windows import HoldReason
+
+        enforced = (self.config.mode is settings.Mode.ENFORCE and admission.decision is Decision.ADMIT
+                    and (hold.reason is not HoldReason.HIGH_UTILIZATION
+                         or (not operator and (kind in BACKGROUND or kind is RunKind.SCHEDULE))))
+        observation['would_hold_until'] = hold.until.isoformat()
+        observation['would_hold_reason'] = hold.reason.value
+        observation['note'] = ('hold until ' if enforced else 'would hold until ') + hold.until.isoformat()
+        if not enforced:
+            return replace(admission, until=hold.until, reason=hold.reason.value, provider_id=provider_id,
+                           reset_known=hold.reset_known, window=hold.window)
+        observation['decision'] = Decision.HOLD.value
+        if admission.reservation is not None:
+            self.abandon(admission.reservation)
+        return replace(admission, decision=Decision.HOLD, reservation=None, until=hold.until,
+                       reason=hold.reason.value, provider_id=provider_id, reset_known=hold.reset_known,
+                       window=hold.window)
+
+    async def _usage_hold(self, launch, now, *, background=True):
+        provider = getattr(getattr(launch, 'profile', None), 'provider', None)
+        provider_id = getattr(provider, 'id', None)
+        if not isinstance(provider_id, str) or not provider_id:
+            return None, None
+        from . import usage_windows
+
+        try:
+            hold = await usage_windows.hold_for(provider_id, background=background, now=now, pool=self.pool)
+        except Exception:
+            logger.exception('usage window lookup failed')
+            return None, provider_id
+        return hold, provider_id
+
     def bind(self, reservation, record_id):
         self._pending.pop(reservation.token, None)
         reservation.record_id = record_id
@@ -395,6 +447,8 @@ async def before_run(*, launch, run_kind, task_id=None, schedule_id=None, step_i
     if kind is None or launch is None:
         return None
     try:
+        # Window and failure reads stay outside the admission lock.
+        hold, provider_id = await guard._usage_hold(launch, guard.clock(), background=kind in BACKGROUND)
         async with guard._lock:
             if guard.day != guard.day_start(guard.clock()):
                 await guard._rebuild()
@@ -405,13 +459,15 @@ async def before_run(*, launch, run_kind, task_id=None, schedule_id=None, step_i
             currency = currency_of(launch)
             # Queued dispatches already reserved before the bus can start their runtime.
             queue = guard._queued.get((task_id, kind, step_id))
+            queued = None
             while queue:
                 reservation = queue.popleft()
                 if reservation.token in guard._pending:
                     estimate, _ = guard.estimate(kind, currency, launch.max_budget_usd)
                     if (reservation.currency is currency and reservation.usd == estimate
                             and reservation.profile_id == getattr(launch.profile, 'id', None)):
-                        return reservation
+                        queued = reservation
+                        break
                     guard.abandon(reservation)
             operator_override = False
             if kind is RunKind.MANAGER and guard.config.mode is settings.Mode.ENFORCE:
@@ -430,7 +486,8 @@ async def before_run(*, launch, run_kind, task_id=None, schedule_id=None, step_i
                     RunKind.PLANNER, RunKind.WORKER, RunKind.REVIEWER, RunKind.EXPLORER, RunKind.CONSULT,
                     RunKind.MANAGER):
                 scopes = tuple(s for s in scopes if s.scope in (BudgetScope.TASK, BudgetScope.GLOBAL_DAY))
-            result = guard._admit(kind, scopes, currency, estimate, source, True, schedule_id)
+            result = (Admission(reservation=queued) if queued is not None else
+                      guard._admit(kind, scopes, currency, estimate, source, True, schedule_id))
             if result.decision is not Decision.ADMIT:
                 if not operator_override:
                     raise Denied('今天的花费已到上限，后台任务已暂停。请由操作者提高上限后继续。', admission=result)
@@ -439,15 +496,21 @@ async def before_run(*, launch, run_kind, task_id=None, schedule_id=None, step_i
                 guard._pending[reservation.token] = reservation
                 for scope in scopes:
                     guard._reserved[*scope.key, currency] += estimate
-                return reservation
-            return result.reservation
-    except Denied:
+                result = replace(result, decision=Decision.ADMIT, reservation=reservation)
+            admission = guard._apply_hold(kind, result, hold, provider_id)
+    except (Denied, Held):
         raise
     except Exception:
         guard.problem = 'Run accounting failed; inspect the server log.'
         logger.exception('cost guard admission failed for %s', kind.value)
         # Accounting errors leave classification active; only its verdict and persisted audit can allow a send.
         return None
+    if admission.decision is Decision.HOLD:
+        from . import usage_windows
+
+        await usage_windows.notify_hold(admission.provider_id, hold)
+        raise Held(admission.until, admission.reason or '')
+    return admission.reservation
 
 
 async def bind(reservation, record_id):
@@ -476,16 +539,39 @@ async def finish(record_id, *, cost_usd=None, cost_source=None):
         guard.finish(record_id, cost_usd)
 
 
-async def observe_schedule(schedule):
+async def _schedule_launch(schedule):
+    from .agent_settings import AgentType, load_agent_settings, Launch
+
+    role = AgentType.PROCESSOR if schedule['kind'] == 'subscription' else AgentType.PLANNER
+    settings = await load_agent_settings(role, schedule.get('project_id'), schedule_id=schedule['id'], wait=False)
+    return Launch(settings, role=role), role
+
+
+async def schedule_enforced_hold(schedule):
+    """The enforced hold for a schedule firing, without recording an observation.
+
+    ``None`` when the guard is not enforcing or the lookup failed. ``(None, provider)`` when nothing holds.
+    Window and failure reads stay outside the admission lock.
+    """
+    guard = current()
+    if guard.config.mode is not settings.Mode.ENFORCE:
+        return None
+    try:
+        launch, _role = await _schedule_launch(schedule)
+        return await guard._usage_hold(launch, guard.clock())
+    except Exception:
+        logger.exception('cost guard schedule hold lookup failed')
+        return None
+
+
+async def observe_schedule(schedule, *, operator=False):
     guard = current()
     if guard.config.mode is settings.Mode.OFF:
         return
     try:
-        from .agent_settings import AgentType, load_agent_settings, Launch
-
-        role = AgentType.PROCESSOR if schedule['kind'] == 'subscription' else AgentType.PLANNER
-        launch = Launch(await load_agent_settings(role, schedule.get('project_id'),
-                                                  schedule_id=schedule['id'], wait=False), role=role)
+        launch, role = await _schedule_launch(schedule)
+        # Window and failure reads stay outside the admission lock.
+        hold, provider_id = await guard._usage_hold(launch, guard.clock())
         async with guard._lock:
             if guard.day != guard.day_start(guard.clock()):
                 await guard._rebuild()
@@ -493,10 +579,12 @@ async def observe_schedule(schedule):
             currency = currency_of(launch)
             estimate, source = guard.estimate(RunKind(role.value), currency, schedule.get('run_budget_usd'))
             scopes = guard.scopes(RunKind.SCHEDULE, None, schedule['id'], currency)
-            guard._admit(RunKind.SCHEDULE, scopes, currency, estimate, source, False, schedule['id'])
+            admission = guard._admit(RunKind.SCHEDULE, scopes, currency, estimate, source, False, schedule['id'])
+            return guard._apply_hold(RunKind.SCHEDULE, admission, hold, provider_id, operator=operator)
     except Exception:
         guard.problem = 'Schedule accounting failed; inspect the server log.'
         logger.exception('cost guard schedule observation failed')
+    return None
 
 
 async def refresh_day():
@@ -523,6 +611,8 @@ async def task_gate(task_id, run_kind, launch_estimate, *, reserve=False, step_i
     if guard.config.mode is not settings.Mode.ENFORCE:
         return Admission()
     try:
+        kind = RunKind(run_kind)
+        hold, provider_id = await guard._usage_hold(launch_estimate, guard.clock(), background=kind in BACKGROUND)
         async with guard._lock:
             if guard.day != guard.day_start(guard.clock()):
                 await guard._rebuild()
@@ -534,6 +624,7 @@ async def task_gate(task_id, run_kind, launch_estimate, *, reserve=False, step_i
             scopes = tuple(s for s in guard.scopes(kind, task_id, None, currency)
                            if s.scope in (BudgetScope.TASK, BudgetScope.GLOBAL_DAY))
             result = guard._admit(kind, scopes, currency, estimate, source, reserve, None)
+            result = guard._apply_hold(kind, result, hold, provider_id)
             if result.reservation is not None:
                 result.reservation.profile_id = getattr(launch_estimate.profile, 'id', None)
                 guard._queued[task_id, kind, step_id].append(result.reservation)

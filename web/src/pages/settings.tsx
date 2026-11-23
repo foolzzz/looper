@@ -44,7 +44,7 @@ const DESCRIPTIONS: Record<Exclude<SettingsPageId, "roles">, React.ReactNode> = 
     "Connect external messaging platforms. Each channel's card says where its credential comes from; saved " +
     "bot connection, credential and allowlist changes take effect after the server restarts. Chat bindings and Only bound chats apply immediately. Channels admit listed senders by default; a Lark chat binding can admit everyone in that chat. Each Manager can have its own bots; a bot's Manager is set when it is added.",
   chat: "How the chat with the Manager behaves, on the dashboard and on the channels.",
-  cost: "真钱、订阅等价花费和在跑运行的预留分开观察。默认关闭；这里仅展示，尚不执行限额。",
+  cost: "真钱、订阅等价花费和在跑运行的预留分开观察。默认关闭；执行模式按金额上限和用量窗口决定是否暂缓。",
   scheduler:
     "System-wide limits of schedules: how close two fires may be, and the run timeout of schedules that follow the default.",
   vault:

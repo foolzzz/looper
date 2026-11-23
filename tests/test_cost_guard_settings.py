@@ -138,6 +138,10 @@ def test_guard_settings_never_expand_chat_settings(stored):
     assert "Enforce holds task dispatches" in impact and "Off and observe do not" in impact
     assert 'soft stop' in impact and 'no caps' in impact
     assert 'fail' in impact and 'reservations' in impact and 'closing turns' in impact
+    assert "Spend refusals take precedence" in impact
+    assert "Rejected windows and quota failures hold all runs" in impact
+    assert "95% utilization holds only schedule firings and background roles" in impact
+    assert "quota-failure" in impact and "recorded only" not in impact
     assert stored == ({}, [])
 
 

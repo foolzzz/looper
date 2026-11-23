@@ -160,3 +160,51 @@ def test_accounting_failure_falls_back_without_poisoning_the_next_gate(monkeypat
         result=await cg.task_gate('task-a',cg.RunKind.WORKER,launch())
         assert result.problem is None and result.decision is cg.Decision.ADMIT
     asyncio.run(check())
+
+
+@pytest.mark.parametrize('entry', ['before_run', 'task_gate'])
+def test_task_cap_refusal_precedes_a_rejected_usage_window(monkeypatch, entry):
+    from datetime import timedelta
+    from looper.agents import usage_windows
+
+    async def check():
+        g = setup_guard(monkeypatch, cap=1)
+        g.day = g.day_start(NOW)
+        g._spent[cg.BudgetScope.TASK, 'task-a', cg.Currency.PROVIDER] = 1
+        held = usage_windows.Hold(NOW + timedelta(hours=1), usage_windows.HoldReason.REJECTED, True, 'five_hour')
+        monkeypatch.setattr(usage_windows, 'hold_for', AsyncMock(return_value=held))
+        notified = AsyncMock()
+        monkeypatch.setattr(usage_windows, 'notify_hold', notified)
+        configured = launch()
+        configured.profile.provider.id = 'provider-synthetic'
+        if entry == 'before_run':
+            with pytest.raises(cg.Denied) as refused:
+                await cg.before_run(launch=configured, run_kind='worker', task_id='task-a')
+            admission = refused.value.admission
+        else:
+            admission = await cg.task_gate('task-a', cg.RunKind.WORKER, configured, reserve=True)
+        assert admission.decision is cg.Decision.ASK
+        assert admission.scope == cg.Scope(cg.BudgetScope.TASK, 'task-a', 1)
+        assert admission.spent_usd == 1 and admission.currency is cg.Currency.PROVIDER
+        assert not g._pending and all(value == 0 for value in g._reserved.values())
+        notified.assert_not_awaited()
+    asyncio.run(check())
+
+
+def test_a_queued_reservation_is_released_when_a_usage_window_becomes_rejected(monkeypatch):
+    from datetime import timedelta
+    from looper.agents import usage_windows
+
+    async def check():
+        g = setup_guard(monkeypatch)
+        configured = launch()
+        configured.profile.provider.id = 'provider-synthetic'
+        queued = await cg.task_gate('task-a', cg.RunKind.WORKER, configured, reserve=True, step_id='step-a')
+        monkeypatch.setattr(usage_windows, 'hold_for', AsyncMock(return_value=usage_windows.Hold(
+            NOW + timedelta(hours=1), usage_windows.HoldReason.REJECTED, True, 'five_hour')))
+        monkeypatch.setattr(usage_windows, 'notify_hold', AsyncMock())
+        with pytest.raises(cg.Held):
+            await cg.before_run(launch=configured, run_kind='worker', task_id='task-a', step_id='step-a')
+        assert queued.reservation.token not in g._pending
+        assert all(value == 0 for value in g._reserved.values())
+    asyncio.run(check())

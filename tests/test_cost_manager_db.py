@@ -60,6 +60,24 @@ def test_api_client_turn_is_denied_without_starting_a_model(monkeypatch, tmp_pat
     run_db(check, monkeypatch, timeout=45)
 
 
+def test_operator_window_hold_replies_without_starting_or_retrying_a_model(monkeypatch, tmp_path):
+    from looper.agents import usage_windows
+
+    async def check(pool):
+        async with manager(pool, tmp_path, monkeypatch, context=20_000) as chat:
+            configure(chat, pool, monkeypatch)
+            until = datetime.now(timezone.utc) + timedelta(hours=1)
+            monkeypatch.setattr(usage_windows, 'hold_for', AsyncMock(return_value=usage_windows.Hold(
+                until, usage_windows.HoldReason.REJECTED, True, 'five_hour')))
+            monkeypatch.setattr(usage_windows, 'notify_hold', AsyncMock())
+            replies = await chat.ask('synthetic window hold')
+            assert len(replies) == 1 and '等待用量窗口重置' in replies[0]
+            assert until.astimezone().strftime('%H:%M') in replies[0]
+            assert await pool.fetchval('SELECT count(*) FROM llm_records') == 0
+            assert not (tmp_path / 'inputs.jsonl').exists()
+    run_db(check, monkeypatch, timeout=45)
+
+
 def test_completion_over_global_cap_uses_existing_code_fallback(monkeypatch, tmp_path):
     monkeypatch.setattr(chat_settings, "_completion_turns", chat_settings.CompletionTurns.DM_ONLY)
 

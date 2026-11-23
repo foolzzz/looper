@@ -1625,6 +1625,9 @@ class ManagerAgent:
             elif (reply := manager_budget.cap_reply(self._session_now(), exc)) is not None:
                 await self._send_reply(envelope, _with_blocks(reply, turn.blocks), error=str(exc))
                 return
+            elif isinstance(exc, cost_guard.Held):
+                await self._send_reply(envelope, cost_manager.usage_reply(exc))
+                return
             elif isinstance(exc, (TurnFailed, cost_guard.Denied)):
                 logger.error("%s failed to answer %s: %s", self._log, envelope.message_id, exc.error)
                 await self._send_reply(envelope, _with_blocks(exc.reply, turn.blocks), error=exc.error)

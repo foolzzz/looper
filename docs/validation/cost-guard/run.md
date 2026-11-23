@@ -92,5 +92,39 @@ cap. Failed wakeups remain pending for the guard's refresh tick.
 
 No real-model validation is needed for this change: prompts, contracts and tool
 lists are unchanged. Background-role daily caps, schedule budget enforcement,
-review-budget holds, alerts, unanswered pushes and usage windows are outside
-this change.
+review-budget holds, alerts and unanswered pushes remain outside this change. Usage-window holds are
+integrated below.
+
+
+## Spend and usage-window integration
+
+Spend admission takes precedence: an exhausted task or global cap keeps its typed
+refusal and never becomes a usage-window hold. After spend admission, rejected
+windows and quota failures hold operator-started runs too; 95% utilization holds
+only background roles and schedule firings. The operator Manager exception is
+for spend only. The operation description and confirmation share the same enforce
+explanation, and the dashboard states both controls.
+
+Window waits preserve plan state and running work without a spend question,
+ordinary failure report or model-visible hold text. Unstarted task runs recheck
+admission on the existing idle loop (within 60 seconds after reset); the Manager
+asks the operator to resend after reset. A queued dispatch rechecks the window
+and releases its reservation if held. Automatic Manager session rotation retains
+the current session when the window refuses maintenance.
+
+A fresh isolated service with a stand-in executable served the production build.
+Headless Chromium checked the real cost settings read path at 1280, 768, 390 and
+844 pixels, without horizontal overflow. Only the unrelated live chat event
+stream was replaced with an empty response. Database readback found zero model
+records; no real model or external channel was called. The service and temporary
+runtime were removed. The [integrated settings screenshot](cap-and-window-settings-1280.png)
+shows the combined explanation.
+
+Python 3.11 with two workers and the CI selection
+`-m "not installed and not provenance"`: **831 passed**, no skipped tests.
+This includes every cost-guard, usage-window and cost-hold test file, both
+Manager files, Worker fallback/handle regressions, the bridge and migration
+registry, the API document and tool levels. Recorder/enforce comparisons ran
+under that selection. Fresh and bridge schemas passed; order, pending order and
+online order 1430 belong only to `cost_holds`. Frontend: **23 passed** across cost
+settings and settings-page API contracts; the production build passed.
