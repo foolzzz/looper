@@ -68,22 +68,20 @@
 
 ## 4. 记录
 
-`proactive_deliveries`，一条主动消息一行（命名迁移 `proactive_deliveries`，新表，在线安全）：
+判断写进度量埋点的表 `proactive_deliveries`（表和命名迁移归度量的 PR 所有，送达层不另建表）。一条主动消息一行，判断和渠道回执在同一行：
 
-| 列 | 说明 |
-|---|---|
-| `dedupe_key` | 唯一：发送点和它的消息（关卡提醒是 `gate_message:<消息 ID>`）。同一条消息重试时沿用第一次的判断，不再记一行 |
-| `kind`、`urgency`、`chat_kind` | 第 1.1 节的输入 |
-| `channel_id`、`chat` | 目标会话 |
-| `task_id`、`step_id`、`schedule_id` | 关联的任务、关卡和定时任务（任务删除时一起删） |
-| `outcome`、`reason`、`counted`、`digest_date` | 判断结果；约束保证只有 `digest` 有 `digest_date`、只有 `send` 能计数 |
-| `local_date` | 判断时在 `policy.timezone` 的本地日期，每日上限按它计 |
-| `decided_at`、`sent_at` | 判断（或只记）的时间；渠道接收的时间（发送失败则为空） |
-| `replied_at` | 发出后用户在这个会话里的第一条消息的时间，由度量埋点回填（「30 分钟内有没有回复」由它算）；没发出的不能有 |
+| 列 | 谁写 | 说明 |
+|---|---|---|
+| `dedupe_key` | 送达层、度量 | 发送点给这条消息的键，非空时唯一。关卡提醒用它发帖时的幂等键 `gate-<消息 ID>`，度量记回执也用这个键，所以落在同一行 |
+| `source`、`source_ref`、`manager_id`、`channel_id`、`chat`、`chat_kind` | 先写的一方 | `source` 是度量的来源枚举（`ProactiveSource`，送达层的 `DeliveryKind` 就是它） |
+| `urgency`、`task_id`、`step_id`、`schedule_id` | 送达层 | 第 1.1 节的输入和关联对象 |
+| `decision`、`reason`、`counted`、`local_date`、`digest_date`、`decided_at` | 送达层 | 判断结果；`local_date` 是判断时在 `policy.timezone` 的本地日期，每日上限按它计；`decided_at` 由送达层填（清理按 `COALESCE(sent_at, decided_at)`，进摘要和不发的行也能删） |
+| `outcome`（`sent`、`rejected`、`unknown`）、`sent_at`、`external_id` | 度量或发送点 | 渠道回执；两者成对。度量开着时它在发送后按 `dedupe_key` 只更新这三列，不碰判断；度量关着时发送点自己记 |
+| `replied_at`、`reply_match` | 度量 | 发出后用户的回复 |
 
 - **一次一个：** `decide` 在一个事务里对这个会话加咨询锁，读当天计数、判断、写入，所以两个发送点不会同时拿到当天最后一个额度。
-- **和第 0 期度量的关系：** 这张表由本 PR 建，第 0 期的度量埋点复用它，不另建表、不改列：它在发送后记回执、回填 `replied_at`，再加指标页；开关关闭时送达层一行都不写。
-- **保留：** v0 只有关卡提醒写入，量很小；接入任务通知时按 30 天加入清理（同 `manager_events`）。
+- **只判断一次：** 写判断用 `ON CONFLICT (dedupe_key) WHERE dedupe_key IS NOT NULL`：已有判断的行原样返回（重试沿用第一次的判断）；度量在送达层打开之前记下、还没有判断的行补上判断。
+- **关闭时：** 送达层一行都不写；度量是否写回执由它自己的开关决定。
 
 ## 5. 定时任务和订阅的节制字段（第二个 PR）
 
