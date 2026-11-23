@@ -318,8 +318,9 @@ def test_agent_profiles_are_created_changed_and_read_back(monkeypatch: pytest.Mo
         assert all("prices" not in m for m in listed["models"])
         (unknown,) = await chat.say("改 slow", ("looper_agent_profiles", {
             "action": "update", "profile": "slow", "effort": "high"}))
-        assert _error(unknown) == "not_found" and "claude-code/opus, claude-code/sonnet-5-5, fast" in unknown["error"][
-            "message"]
+        # The refusal names every profile there is, as the listing above orders them.
+        assert _error(unknown) == "not_found" and unknown["error"]["message"].endswith(
+            "there are: " + ", ".join([*BUILTIN_PROFILE_NAMES, "fast"]))
         (taken,) = await chat.say("再加一个", ("looper_agent_profiles", {
             "action": "create", "name": "fast", "runtime": "rt-claude-code", "model": opus["model_id"]}))
         assert _error(taken) == "conflict" and "already exists" in taken["error"]["message"]
