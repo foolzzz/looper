@@ -91,6 +91,11 @@ def test_hourly_housekeeping_prunes_expired_chat_attachments_and_reports_count(t
 
     tombstones = AsyncMock(return_value=0)
     monkeypatch.setattr(skill_versions, "purge_tombstones", tombstones)
+    from looper.agents import skill_proposal_notice, skill_proposals
+
+    expiry = AsyncMock(return_value=0)
+    monkeypatch.setattr(skill_proposals, "expire_due", expiry)
+    monkeypatch.setattr(skill_proposal_notice, "notify_pending", AsyncMock(return_value=False))
     outbox_purge = AsyncMock(return_value=2)
     monkeypatch.setattr(housekeeping.channel_outbox, "purge", outbox_purge)
     old = chat_attachments.message_dir(tmp_path, "web", "expired")
@@ -106,6 +111,7 @@ def test_hourly_housekeeping_prunes_expired_chat_attachments_and_reports_count(t
     assert report.channel_outbox == 2
     outbox_purge.assert_awaited_once_with(NOW)
     tombstones.assert_awaited_once()
+    expiry.assert_awaited_once_with(None, NOW)
     assert tombstones.await_args.kwargs["now"] == NOW
     assert not old.exists() and (fresh / "note.txt").read_text() == "recent"
     assert "chat_attachments=1" in caplog.text

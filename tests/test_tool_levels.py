@@ -168,6 +168,12 @@ DECIDED_OPERATIONS: dict[str, ActionLevel] = {
     "project_skills.restore": INSIDE,  # marks a catalog skill active inside Looper; sends nothing and does not touch installs or files
     "project_skills.rollback": INSIDE,  # writes a new stored skill version inside Looper; sends nothing and does not touch the machine outside the catalog
     "project_skills.versions": INSIDE,  # reads stored skill versions; sends nothing
+    "project_skills.proposals.list": INSIDE,  # reads stored skill proposals; sends nothing
+    "project_skills.proposals.get": INSIDE,  # reads one stored skill proposal and its events; sends nothing
+    "project_skills.proposals.confirm": INSIDE,  # writes a catalog skill version inside Looper from a stored proposal; sends nothing
+    "project_skills.proposals.reject": INSIDE,  # marks a stored proposal rejected; sends nothing
+    "project_skills.proposals.restore": INSIDE,  # marks an expired stored proposal pending; sends nothing
+    "project_skills.proposals.set_mode": INSIDE,  # stores a project's proposal switch; sends nothing
     "mcp_tool_levels.get": INSIDE,  # reads stored MCP trust declarations
     "mcp_tool_levels.put": INSIDE,  # stores MCP trust declarations; runs no MCP call
     "manager_chat_bindings.put": EXTERNAL,  # a bound chat's people talk to a Manager, which answers them there

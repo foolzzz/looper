@@ -258,6 +258,8 @@ export interface Project extends ProjectExecution {
   active_count: number;
   /** Its schedules; a project with any cannot be deleted. */
   schedule_count: number;
+  /** Present only while agents may propose skills for the operator to confirm; absent means off. */
+  skill_proposals?: "on";
 }
 
 export interface ChatSendResponse {
@@ -2203,6 +2205,84 @@ export async function fetchContextBudget(projectId: string): Promise<ContextBudg
   const result = await callV1<ContextBudget>("/api/v1/project_skills/context_budget", { project_id: projectId });
   if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
   return result;
+}
+
+export type SkillProposalStatus = "pending" | "confirmed" | "confirmed_edited" | "rejected" | "expired" | "superseded";
+
+/** A drafted skill that changes nothing until the operator confirms it. `diff` is the server's comparison with
+ * the skill's current version (an update only). */
+export interface SkillProposal {
+  proposal_id: number;
+  project_id: string;
+  action: "create" | "update";
+  skill_id: string | null;
+  name: string;
+  description: string;
+  why: string;
+  evidence: { task: string; step?: string }[];
+  proposer: string;
+  status: SkillProposalStatus;
+  /** The hash of what is shown; Confirm names it, and the server refuses another. */
+  content_sha256: string;
+  base_sha256: string | null;
+  content: string;
+  created_at: string;
+  expires_at: string;
+  decided_at: string | null;
+  decision_note: string | null;
+  current: { name: string; description: string; sha256: string } | null;
+  diff: { name: { from: string; to: string }; description: { from: string; to: string }; content: string } | null;
+  /** An update whose skill changed since it was drafted: confirming supersedes it and writes nothing. */
+  stale: boolean;
+  affected_projects: { project_id: string; project_name: string }[];
+}
+
+export interface SkillProposalList {
+  mode: "off" | "on";
+  proposals: SkillProposal[];
+}
+
+export async function fetchSkillProposals(projectId: string): Promise<SkillProposalList> {
+  const result = await callV1<SkillProposalList>("/api/v1/project_skills/proposals/list", { project_id: projectId });
+  if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
+  return result;
+}
+
+/** Confirm the proposal whose content hash the operator saw. With `fields`, the operator's edit is what is written. */
+export async function confirmSkillProposal(
+  projectId: string,
+  proposalId: number,
+  contentSha256: string,
+  fields?: { name?: string; description?: string; content?: string },
+): Promise<{ proposal: SkillProposal; version: number | null }> {
+  const result = await callV1<{ proposal: SkillProposal; version: number | null }>(
+    "/api/v1/project_skills/proposals/confirm",
+    { project_id: projectId, proposal_id: proposalId, content_sha256: contentSha256, ...(fields ? { fields } : {}) });
+  if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
+  return result;
+}
+
+export async function rejectSkillProposal(projectId: string, proposalId: number, reason?: string): Promise<SkillProposal> {
+  const result = await callV1<{ proposal: SkillProposal }>("/api/v1/project_skills/proposals/reject", {
+    project_id: projectId, proposal_id: proposalId, ...(reason ? { reason } : {}),
+  });
+  if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
+  return result.proposal;
+}
+
+export async function restoreSkillProposal(projectId: string, proposalId: number): Promise<SkillProposal> {
+  const result = await callV1<{ proposal: SkillProposal }>("/api/v1/project_skills/proposals/restore", {
+    project_id: projectId, proposal_id: proposalId,
+  });
+  if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
+  return result.proposal;
+}
+
+export async function setSkillProposalMode(projectId: string, mode: "off" | "on"): Promise<"off" | "on"> {
+  const result = await callV1<{ project_id: string; mode: "off" | "on" }>(
+    "/api/v1/project_skills/proposals/set_mode", { project_id: projectId, mode });
+  if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
+  return result.mode;
 }
 
 export async function updateTaskConfig(

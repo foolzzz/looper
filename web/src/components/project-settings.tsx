@@ -7,6 +7,7 @@ import {
   deleteProject, moveProjectDirectory, previewProjectDelete, previewProjectMove, updateProject,
   type Project, type ProjectMovePreview, type ProjectMoveResult, type ProjectUpdate,
 } from "@/lib/api";
+import { SkillProposalsSetting } from "@/components/skill-proposals";
 import { ProjectBackgroundField, backgroundTooLong } from "@/components/project-background-field";
 import type { V1PendingConfirmation } from "@/lib/v1";
 import {
@@ -254,6 +255,8 @@ export function ProjectSettingsForm({ project, projectsRoot = "", onDeleted }: {
           </Button>
         </div>
       </form>
+
+      <SkillProposalsSetting key={project.project_id} projectId={project.project_id} initial={project.skill_proposals} />
 
       <ProjectDirectoryMove project={project} projectsRoot={projectsRoot} disabled={busy || dirty} unsaved={dirty} onBusy={setBusy}
         onMoved={(moved) => { setDraft(draftOf(moved)); setSaved(false); }} />

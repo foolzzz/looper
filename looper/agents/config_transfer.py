@@ -602,6 +602,7 @@ async def export_chunks(
                 "name": project["name"], "description": project["description"], "background": project["background"],
                 "default_workflow": project["default_workflow"],
                 "execution": {column: project[column] for column in EXECUTION_COLUMNS},
+                **({"skill_proposals": project["skill_proposals"]} if project.get("skill_proposals") else {}),
                 "layers": [layer_entry(r) for r in layers if r["project_id"] == project["id"]],
                 "knowledge": [document_entry(r) for r in documents[project["id"]]],
                 "items": owned,
