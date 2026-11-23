@@ -274,6 +274,8 @@
  "schedules.update": "inside",
  "session_budget.get": "inside",
  "session_budget.update": "inside",
+ "session_search.get": "inside",
+ "session_search.update": "inside",
  "session_routing.get": "inside",
  "session_routing.update": "inside",
  "settings.allowed_profiles": "inside",
