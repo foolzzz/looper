@@ -395,8 +395,10 @@ async def _shape(conn: Any) -> dict[str, Any]:
     indexes = await conn.fetch(
         "SELECT tablename, indexname, indexdef FROM pg_indexes WHERE schemaname = current_schema() "
         "AND tablename = ANY($1) ORDER BY 1, 2", list(_TABLES))
+    schema = await conn.fetchval("SELECT current_schema()")
     return {"columns": [dict(r) for r in columns], "constraints": [dict(r) for r in constraints],
-            "indexes": [dict(r) for r in indexes]}
+            "indexes": [{**dict(r), "indexdef": r["indexdef"].replace(f" ON {schema}.", " ON ")}
+                        for r in indexes]}
 
 
 async def _before_outbound_reviews(conn: Any) -> None:
@@ -423,11 +425,13 @@ def test_a_database_from_before_the_reviews_gets_them_without_a_row_rewritten_an
         return None
 
     async def main() -> None:
+        from tests.subagents_schema_support import ensure_before_platform_subagents
+
         async with fresh_connection(command_timeout=60) as other, fresh_connection(command_timeout=60) as conn:
             # Another schema has the same constraint names, already validated.
             await connection.ensure_schema(other)
-            await connection.ensure_schema(conn)
-            fresh = await _shape(conn)
+            fresh = await _shape(other)
+            await ensure_before_platform_subagents(conn)
             await _before_outbound_reviews(conn)
             with pytest.raises(asyncpg.CheckViolationError):
                 await conn.execute("INSERT INTO llm_records (agent_id, run_kind) VALUES ('x', 'outbound_check')")
