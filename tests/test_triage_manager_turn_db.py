@@ -9,7 +9,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from looper.agents import chat_settings, completion_events, lanes_settings, proactive_delivery, triage_settings
+from looper.agents import chat_settings, completion_events, lanes_settings, proactive_delivery, triage_settings, turn_metrics
 from looper.agents.channels.base import PostReceipt
 from looper.agents.message import MANAGER_ADDRESS, MessageEnvelope, MessageType, channel_address
 from looper.agents.runtimes.api.session import ApiSession
@@ -82,6 +82,7 @@ def test_a_triage_batch_runs_as_a_background_turn_and_settles_by_the_reply(monke
             await chat.manager._handle(_wake())
             assert await _states(pool) == [state, state]
             record_id = await pool.fetchval("SELECT record_id FROM manager_events ORDER BY id LIMIT 1")
+            await asyncio.gather(*turn_metrics._pending)  # metrics are written after the batch settles
             metadata = json.loads(await pool.fetchval("SELECT metadata FROM llm_records WHERE id=$1", record_id))
             assert metadata["triage"]["event_ids"] and metadata["turn_metrics"]["origin"] == "triage"
             prompt = json.dumps(chat.model.requests[0].body["input"])
