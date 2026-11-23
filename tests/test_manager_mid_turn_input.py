@@ -577,3 +577,33 @@ def test_cross_chat_reply_redacts_original_attachment_paths(enabled, tmp_path):
         await rig.reply(first)
         assert attachment not in await rig.reply(second)
     run_case(test, enabled, tmp_path)
+
+
+def test_hidden_delivery_followup_does_not_replay_consumed_additions(enabled, tmp_path):
+    from dataclasses import replace
+
+    from looper.agents.delivery_guard import FOLLOWUP_MESSAGE
+
+    enabled.setattr(chat_settings, "_delivery_guard_enabled", True)
+
+    async def test(rig, pool):
+        run_turn = rig.main.run_turn
+
+        async def empty_first(text, on_event, **kwargs):
+            result = await run_turn(text, on_event, **kwargs)
+            if len(rig.main.turns) == 1:
+                return replace(result, result_event={**result.result_event, "result": ""})
+            return result
+
+        enabled.setattr(rig.main, "run_turn", empty_first)
+        first = await start_turn(rig)
+        second = _web("already consumed addition")
+        await rig.bus.publish(second)
+        await until(lambda: bool(rig.main.inputs))
+        rig.main.release.set()
+        assert await rig.reply(first) == "sess-main 回复 2"
+        assert await rig.reply(second) == "（已并入上一条的回复）"
+        assert rig.main.turns[1:] == [FOLLOWUP_MESSAGE]
+        await until(lambda: not rig.manager._mid_turn._turns)
+
+    run_case(test, enabled, tmp_path)

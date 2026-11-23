@@ -92,7 +92,7 @@ class MidTurnInputs:
         previous = self._turns.get(token.message_id)
         if previous is not None:  # a failed resume retries inputs already accepted, even after switching off
             previous.prepared, previous.session, previous.accepting = prepared, prepared.session, accepts
-            if previous.inputs:
+            if previous.inputs and not prepared.delivery_followup:
                 text += "\n\n" + "\n\n".join(item.input_text for item in previous.inputs)
         elif accepts:
             self._turns[token.message_id] = RunningInput(token, prepared, prepared.session)
