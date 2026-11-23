@@ -162,6 +162,8 @@
  "operator_chat.targets": "inside",
  "operator_chat.thread_events": "inside",
  "operator_chat.turn": "inside",
+ "outbound_gateway.get": "inside",
+ "outbound_gateway.update": "inside",
  "outbound_review.get": "inside",
  "outbound_review.update": "inside",
  "overview": "inside",

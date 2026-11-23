@@ -70,11 +70,15 @@ def fence() -> None:
         _pool.terminate()
 
 
+class PoolNotInitializedError(RuntimeError):
+    """No database pool has been opened in this process."""
+
+
 def get_pool() -> asyncpg.Pool:
     if _fenced:
         raise RuntimeError(_FENCED_MESSAGE)
     if _pool is None:
-        raise RuntimeError("database pool not initialised — call init_pool() first")
+        raise PoolNotInitializedError("database pool not initialised — call init_pool() first")
     return _pool
 
 
@@ -159,6 +163,7 @@ _STEP_DIFFICULTY = "step_difficulty"
 _ADVISOR_ROLES = "advisor_roles"
 _PROJECT_ADVISOR = "project_advisor"
 _PROJECT_ACTIVITY = "project_activity"
+_CHANNEL_OUTBOX = "channel_outbox"
 _LEDGER = "ledger"
 _MESSAGE_LEADS = "message_leads"
 _INTENT_MERGES = "intent_merges"
@@ -1081,6 +1086,21 @@ CREATE TABLE IF NOT EXISTS subscription_daily_claims (
 """
 
 
+async def _channel_outbox_pending(conn: asyncpg.Connection) -> bool:
+    return not await conn.fetchval("""
+        SELECT EXISTS (SELECT 1 FROM pg_attribute WHERE attrelid=to_regclass('channel_outbox')
+                       AND attname='claim_token' AND NOT attisdropped)
+        """)
+
+
+def _channel_outbox_ddl() -> str:
+    found = re.search(r"-- channel outbox begin\n(.*?)-- channel outbox end",
+                      SCHEMA_PATH.read_text(encoding="utf-8"), re.S)
+    if found is None:
+        raise RuntimeError("schema.sql lost its channel outbox block")
+    return found.group(1)
+
+
 async def _ledger_pending(conn: asyncpg.Connection) -> bool:
     if await conn.fetchval("SELECT EXISTS (SELECT 1 FROM schema_migrations WHERE name = $1)", _LEDGER):
         return False
@@ -1823,6 +1843,9 @@ async def ensure_schema(pool: asyncpg.Pool | asyncpg.Connection | None = None) -
         if await _memory_candidates_pending(conn):
             await conn.execute(_memory_candidates_ddl())
             await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", _MEMORY_CANDIDATES)
+        if await _channel_outbox_pending(conn):
+            await conn.execute(_channel_outbox_ddl())
+            await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1) ON CONFLICT DO NOTHING", _CHANNEL_OUTBOX)
         # Current databases never replay initialization DDL. Missing builtins
         # are inserted without changing any saved choice or creation time.
         await conn.execute(SEEDS_PATH.read_text(encoding="utf-8"))
@@ -1871,6 +1894,7 @@ async def schema_change_pending(conn: asyncpg.Connection) -> bool:
             or await _subscription_rules_pending(conn) or await _subscription_lookback_pending(conn)
             or await _ledger_pending(conn) or await _card_actions_pending(conn)
             or await _proactive_deliveries_pending(conn)
+            or await _channel_outbox_pending(conn)
             or await _manager_events_pending(conn) or await _schedule_notification_events_pending(conn)
             or await _manager_event_reasons_pending(conn) or await _manager_event_delivery_pending(conn)
             or await _message_leads_pending(conn)

@@ -295,7 +295,7 @@ class TelegramChannelAdapter(ChannelAdapter):
         self._bus = None
         logger.info("telegram channel adapter stopped")
 
-    async def notify(self, chat: str, text: str) -> DeliveryReceipt:
+    async def notify(self, chat: str, text: str, *, idempotency_key: str | None = None) -> DeliveryReceipt:
         """Send ``text`` as plain text to Telegram chat ``chat`` (a user's private chat has the user's id)."""
         if self._app is None:
             return DeliveryReceipt(channel="telegram", success=False, error="the Telegram bot is not started")

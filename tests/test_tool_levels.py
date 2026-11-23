@@ -145,6 +145,8 @@ def _operations() -> dict[str, Any]:
 
 # The operations whose level was decided one by one (every other one is inside).
 DECIDED_OPERATIONS: dict[str, ActionLevel] = {
+    "outbound_gateway.get": INSIDE,  # reads Looper's own gateway settings
+    "outbound_gateway.update": INSIDE,  # stores gateway settings; sends no message
     "memory.list": INSIDE,  # reads stored candidates
     "memory.get": INSIDE,  # reads one stored candidate
     "memory.settings_get": INSIDE,  # reads and validates Looper's memory settings

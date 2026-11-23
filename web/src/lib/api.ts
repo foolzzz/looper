@@ -650,6 +650,29 @@ export async function updateManagerMetricsSettings(body: { enabled: boolean | nu
   return result;
 }
 
+/** Operator-only shared outbound gateway controls; separate from chat settings. */
+export interface OutboundGatewaySettings {
+  outbound_enabled: boolean;
+  send_qps: number;
+  write_qps: number;
+  edit_interval_seconds: number;
+  max_in_flight: number;
+}
+
+export async function fetchOutboundGateway(): Promise<OutboundGatewaySettings> {
+  const result = await callV1<OutboundGatewaySettings>("/api/v1/outbound_gateway/get", {});
+  if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
+  return result;
+}
+
+export async function updateOutboundGateway(
+  body: { [K in keyof OutboundGatewaySettings]?: OutboundGatewaySettings[K] | null },
+): Promise<OutboundGatewaySettings> {
+  const result = await callV1<OutboundGatewaySettings>("/api/v1/outbound_gateway/update", body);
+  if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
+  return result;
+}
+
 /** The processor's system setting, and the hooks the machine's administrator set for its runtime (they run in every
  * processor run and see the messages it processes; null for none). */
 export interface ProcessorSettings {
