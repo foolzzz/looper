@@ -342,7 +342,7 @@ def test_a_database_without_the_table_or_the_outbox_column_gets_them_on_upgrade(
                            "'schedule_notification_events_online')")
         if before == "no_table":  # older than completion events
             # Later derived tables must go too when reconstructing a database from before completion events.
-            await pool.execute("DROP TABLE triage_event_sources, triage_events, manager_events; "
+            await pool.execute("DROP TABLE morning_brief_triage, triage_event_sources, triage_events, manager_events; "
                                "DELETE FROM schema_migrations WHERE name IN "
                                "('manager_events', 'event_triage', 'event_triage_online')")
         async with pool.acquire() as conn:

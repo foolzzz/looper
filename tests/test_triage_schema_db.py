@@ -19,7 +19,7 @@ def test_triage_upgrade_matches_fresh_and_reopen_does_not_replay():
         async with fresh_schema() as pool, fresh_schema() as fresh:
             await connection.ensure_schema(pool)
             await pool.execute("""
-                DROP TABLE triage_event_sources, triage_events;
+                DROP TABLE morning_brief_triage, triage_event_sources, triage_events;
                 DROP FUNCTION triage_drop_event();
                 ALTER TABLE subscription_runs DROP COLUMN window_seqs;
                 ALTER TABLE subscriptions DROP CONSTRAINT subscriptions_output_kind_check;
