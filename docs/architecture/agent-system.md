@@ -5671,17 +5671,23 @@ that fails is logged and the message posted as with the switch off. Design:
 
 ### Morning brief
 
-On a workday, at `morning_brief.time` (09:15 by default) in `user.timezone`
-(else the server's zone, `turn_context.zone()`), one brief goes to each
-enabled bot's operator direct chat. It names what waits (the needs-you
-summary), reminders due that local day, and proactive messages deferred into
-that day's digest (`decision` `digest`); Monday also includes Saturday and
-Sunday. Every section empty means nothing is sent. The switch
-`morning_brief.enabled` is off by default and operator-only
+On a workday (Monday to Friday; a weekday holiday still sends), at
+`morning_brief.time` (09:15 by default) in `user.timezone` (else the server's
+zone, `turn_context.zone()`), one brief goes to each enabled bot's operator
+direct chat. It names what waits (the needs-you summary), reminders due that
+local day, and proactive messages deferred into the digest (`decision`
+`digest`). A chat's first brief takes that day's digest, and Monday also
+Saturday and Sunday; a brief that ran records `consumed_until`, and the next
+takes every digest decided after that. Every section empty means nothing is
+sent. The switch, whether the channel is enabled and who the operator is are
+read again after the summary is collected and again immediately before the
+post. The switch `morning_brief.enabled` is off by default and operator-only
 (`morning_brief.get`, `morning_brief.update`); off, a tick reads the in-memory
 switch and does nothing else. One `morning_briefs` row per local date and chat
 makes a restart and a second server send it at most once. A send that stops
-mid-way is `uncertain` and is not sent again. Design: [morning brief RFC](rfcs/morning-brief-v0.zh-CN.md).
+mid-way is `uncertain` and is not sent again. With `delivery.enabled` on, the
+decision and the channel receipt share one `proactive_deliveries` row. Design:
+[morning brief RFC](rfcs/morning-brief-v0.zh-CN.md).
 
 ### Card buttons
 
