@@ -42,7 +42,7 @@ TODAY, TOMORROW = date(2026, 11, 20), date(2026, 11, 21)
     # 1. A source with nothing to tell is dropped, before anything else.
     (notice(silent=True), DeliveryState(DAY), Decision(Outcome.DROP, Reason.SILENT)),
     (replace(GATE, silent=True), DeliveryState(NIGHT, 9), Decision(Outcome.DROP, Reason.SILENT)),
-    # 2. A gate holding back a task and the user's own reminder: never throttled, never counted.
+    # 3. A gate holding back a task and the user's own reminder: never throttled, never counted.
     (GATE, DeliveryState(NIGHT, sent_today=9), Decision(Outcome.SEND, Reason.URGENT)),
     (GATE, DeliveryState(EARLY), Decision(Outcome.SEND, Reason.URGENT)),
     (USER_REMINDER, DeliveryState(NIGHT), Decision(Outcome.SEND, Reason.URGENT)),
@@ -50,7 +50,7 @@ TODAY, TOMORROW = date(2026, 11, 20), date(2026, 11, 21)
     # A gate reminder that does not block is a normal message.
     (replace(GATE, urgency=Urgency.NORMAL), DeliveryState(NIGHT),
      Decision(Outcome.DIGEST, Reason.QUIET_HOURS, digest_date=TOMORROW)),
-    # 3. Outside the source's own hours (its timezone, not the policy's): the digest, even right after the user wrote.
+    # 4. Outside the source's own hours (its timezone, not the policy's): the digest, even right after the user wrote.
     (notice(source=SOURCE_9_TO_18), DeliveryState(at(20, 8, 59)),
      Decision(Outcome.DIGEST, Reason.OUTSIDE_ACTIVE_HOURS, digest_date=TOMORROW)),
     (notice(source=SOURCE_9_TO_18), DeliveryState(at(20, 18), last_user_message_at=at(20, 17, 59)),
@@ -61,7 +61,7 @@ TODAY, TOMORROW = date(2026, 11, 20), date(2026, 11, 21)
     (notice(source=SOURCE_UTC_9_TO_18), DeliveryState(at(20, 18, 30)),  # 17:30 UTC
      Decision(Outcome.SEND, Reason.WITHIN_LIMITS, True)),
     (notice(source=SourceThrottle(None, ZONE)), DeliveryState(DAY), Decision(Outcome.SEND, Reason.WITHIN_LIMITS, True)),
-    # 4. The user wrote here in the last 5 minutes: it passes the quiet hours and the cap, uncounted.
+    # 5. The user wrote here in the last 5 minutes: it passes the quiet hours and the cap, uncounted.
     (notice(), DeliveryState(NIGHT, last_user_message_at=NIGHT - timedelta(minutes=5)),
      Decision(Outcome.SEND, Reason.RECENT_REPLY)),
     (notice(), DeliveryState(DAY, sent_today=5, last_user_message_at=DAY - timedelta(minutes=1)),
@@ -70,7 +70,7 @@ TODAY, TOMORROW = date(2026, 11, 20), date(2026, 11, 21)
      Decision(Outcome.SEND, Reason.RECENT_REPLY)),
     (notice(), DeliveryState(NIGHT, last_user_message_at=NIGHT - timedelta(minutes=5, seconds=1)),
      Decision(Outcome.DIGEST, Reason.QUIET_HOURS, digest_date=TOMORROW)),
-    # 5. Quiet hours, 22:00 included, 08:00 not: the digest of the morning the quiet hours end.
+    # 6. Quiet hours, 22:00 included, 08:00 not: the digest of the morning the quiet hours end.
     (notice(), DeliveryState(at(20, 22)), Decision(Outcome.DIGEST, Reason.QUIET_HOURS, digest_date=TOMORROW)),
     (notice(), DeliveryState(at(20, 21, 59)), Decision(Outcome.SEND, Reason.WITHIN_LIMITS, True)),
     (notice(), DeliveryState(EARLY), Decision(Outcome.DIGEST, Reason.QUIET_HOURS, digest_date=TODAY)),
@@ -81,11 +81,11 @@ TODAY, TOMORROW = date(2026, 11, 20), date(2026, 11, 21)
      Decision(Outcome.DIGEST, Reason.QUIET_HOURS, digest_date=TOMORROW)),
     (notice(), DeliveryState(datetime(2026, 11, 20, 7, 30, tzinfo=timezone.utc)),
      Decision(Outcome.SEND, Reason.WITHIN_LIMITS, True)),
-    # 6. A direct chat's sixth counted message of the day: tomorrow's digest. A group has no cap.
+    # 7. A direct chat's sixth counted message of the day: tomorrow's digest. A group has no cap.
     (notice(), DeliveryState(DAY, sent_today=4), Decision(Outcome.SEND, Reason.WITHIN_LIMITS, True)),
     (notice(), DeliveryState(DAY, sent_today=5), Decision(Outcome.DIGEST, Reason.DAILY_CAP, digest_date=TOMORROW)),
     (notice(ChatKind.GROUP), DeliveryState(DAY, sent_today=50), Decision(Outcome.SEND, Reason.WITHIN_LIMITS)),
-    # 7. Otherwise sent; counted only in a direct chat.
+    # 8. Otherwise sent; counted only in a direct chat.
     (notice(), DeliveryState(DAY), Decision(Outcome.SEND, Reason.WITHIN_LIMITS, counted=True)),
     (notice(ChatKind.GROUP), DeliveryState(DAY), Decision(Outcome.SEND, Reason.WITHIN_LIMITS, counted=False)),
 ])
@@ -174,3 +174,26 @@ def test_a_bad_daily_window_is_refused(text: str) -> None:
 def test_inputs_that_cannot_be_decided_on_are_refused(build) -> None:
     with pytest.raises(ValueError):
         build()
+
+
+BRIEF = Delivery(DeliveryKind.MORNING_BRIEF, Urgency.NORMAL, ChatKind.DIRECT)
+
+
+@pytest.mark.parametrize(("delivery", "state", "expected"), [
+    # 2. Nothing to say is still dropped, ahead of the morning brief's exemption.
+    (replace(BRIEF, silent=True), DeliveryState(NIGHT, sent_today=9), Decision(Outcome.DROP, Reason.SILENT)),
+    # A morning brief is the digest: sent, uncounted, at night, over the cap, and outside a source's hours.
+    (BRIEF, DeliveryState(NIGHT, sent_today=9), Decision(Outcome.SEND, Reason.WITHIN_LIMITS, counted=False)),
+    (BRIEF, DeliveryState(EARLY, sent_today=9), Decision(Outcome.SEND, Reason.WITHIN_LIMITS, counted=False)),
+    (BRIEF, DeliveryState(DAY, sent_today=9), Decision(Outcome.SEND, Reason.WITHIN_LIMITS, counted=False)),
+    (BRIEF, DeliveryState(DAY, last_user_message_at=DAY), Decision(Outcome.SEND, Reason.WITHIN_LIMITS, counted=False)),
+    (replace(BRIEF, chat=ChatKind.GROUP), DeliveryState(NIGHT, sent_today=9),
+     Decision(Outcome.SEND, Reason.WITHIN_LIMITS, counted=False)),
+    (replace(BRIEF, source=SOURCE_9_TO_18), DeliveryState(at(20, 3)),
+     Decision(Outcome.SEND, Reason.WITHIN_LIMITS, counted=False)),
+    # A normal notice at the same moment still waits for the digest.
+    (notice(), DeliveryState(NIGHT), Decision(Outcome.DIGEST, Reason.QUIET_HOURS, digest_date=TOMORROW)),
+])
+def test_a_morning_brief_is_sent_uncounted_unless_it_has_nothing_to_say(delivery: Delivery, state: DeliveryState,
+                                                                        expected: Decision) -> None:
+    assert deliver(delivery, POLICY, state) == expected

@@ -182,6 +182,10 @@ _UNCERTAIN_DELIVERY_INDEXES = (
     ("idx_manager_events_uncertain", "ON manager_events (created_at) WHERE delivery = 'uncertain'"),
 )
 _REMINDERS = "reminders"
+_MORNING_BRIEFS = "morning_briefs"
+_MORNING_BRIEF_KIND = "morning_brief_kind"
+_MORNING_BRIEF_KINDS = ("gate_reminder", "task_notice", "subscription", "intent", "completion", "user_reminder",
+                        "morning_brief")
 
 _LLM_REQUESTS_DDL = """
 CREATE TABLE IF NOT EXISTS llm_request_routes (
@@ -587,6 +591,17 @@ def _reminders_ddl() -> str:
     found = _REMINDERS_BLOCK.search(SCHEMA_PATH.read_text(encoding="utf-8"))
     if found is None:
         raise RuntimeError("schema.sql lost its reminders block")
+    return found.group(1)
+
+
+_MORNING_BRIEFS_BLOCK = re.compile(r"-- morning briefs begin\n(.*?)-- morning briefs end", re.S)
+
+
+def _morning_briefs_ddl() -> str:
+    """The morning briefs table as schema.sql defines it, so a database that predates it gets the same text."""
+    found = _MORNING_BRIEFS_BLOCK.search(SCHEMA_PATH.read_text(encoding="utf-8"))
+    if found is None:
+        raise RuntimeError("schema.sql lost its morning briefs block")
     return found.group(1)
 
 
@@ -1040,6 +1055,31 @@ async def _reminders_pending(conn: asyncpg.Connection) -> bool:
     if await conn.fetchval("SELECT EXISTS (SELECT 1 FROM schema_migrations WHERE name = $1)", _REMINDERS):
         return False
     return not await conn.fetchval("SELECT to_regclass('reminders') IS NOT NULL")
+
+
+async def _morning_briefs_pending(conn: asyncpg.Connection) -> bool:
+    if await conn.fetchval("SELECT EXISTS (SELECT 1 FROM schema_migrations WHERE name = $1)", _MORNING_BRIEFS):
+        return False
+    return not await conn.fetchval("SELECT to_regclass('morning_briefs') IS NOT NULL")
+
+
+async def _morning_brief_kind_row(conn: asyncpg.Connection):
+    """The ``proactive_deliveries.kind`` check, found by the values it lists (its name is PostgreSQL's)."""
+    if not await conn.fetchval("SELECT to_regclass('proactive_deliveries') IS NOT NULL"):
+        return None
+    return await conn.fetchrow(
+        "SELECT conname, pg_get_constraintdef(oid) AS definition FROM pg_constraint "
+        "WHERE conrelid = 'proactive_deliveries'::regclass AND contype = 'c' "
+        "AND pg_get_constraintdef(oid) LIKE '%gate_reminder%' LIMIT 1")
+
+
+async def _morning_brief_kind_pending(conn: asyncpg.Connection) -> bool:
+    """A database that already applied ``proactive_deliveries`` does not replay its CREATE, so the kind check
+    is widened when it does not yet name ``morning_brief``. No table yet: the CREATE that adds it is enough."""
+    if not await conn.fetchval("SELECT to_regclass('proactive_deliveries') IS NOT NULL"):
+        return False
+    row = await _morning_brief_kind_row(conn)
+    return row is None or "morning_brief" not in row["definition"]
 
 
 async def _intent_merges_pending(conn: asyncpg.Connection) -> bool:
@@ -1607,6 +1647,19 @@ async def ensure_schema(pool: asyncpg.Pool | asyncpg.Connection | None = None) -
         if await _proactive_deliveries_pending(conn):
             await conn.execute(_proactive_deliveries_ddl())
             await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", _PROACTIVE_DELIVERIES)
+        if await _morning_brief_kind_pending(conn):
+            row = await _morning_brief_kind_row(conn)
+            if row is not None and re.fullmatch(r"[A-Za-z0-9_]+", row["conname"]):
+                await conn.execute(f"ALTER TABLE proactive_deliveries DROP CONSTRAINT {row['conname']}")
+            kinds = ", ".join(f"'{kind}'" for kind in _MORNING_BRIEF_KINDS)
+            await conn.execute(
+                "ALTER TABLE proactive_deliveries ADD CONSTRAINT proactive_deliveries_kind_check "
+                f"CHECK (kind IN ({kinds})) NOT VALID")
+            await conn.execute(
+                "ALTER TABLE proactive_deliveries VALIDATE CONSTRAINT proactive_deliveries_kind_check")
+            if state != "empty":
+                await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1) ON CONFLICT DO NOTHING",
+                                   _MORNING_BRIEF_KIND)
         if await _run_tree_pending(conn):
             for ddl in _run_tree_ddl():
                 await conn.execute(ddl)
@@ -1755,6 +1808,9 @@ async def ensure_schema(pool: asyncpg.Pool | asyncpg.Connection | None = None) -
         if await _reminders_pending(conn):
             await conn.execute(_reminders_ddl())
             await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", _REMINDERS)
+        if await _morning_briefs_pending(conn):
+            await conn.execute(_morning_briefs_ddl())
+            await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", _MORNING_BRIEFS)
         # Current databases never replay initialization DDL. Missing builtins
         # are inserted without changing any saved choice or creation time.
         await conn.execute(SEEDS_PATH.read_text(encoding="utf-8"))
@@ -1805,6 +1861,7 @@ async def schema_change_pending(conn: asyncpg.Connection) -> bool:
             or await _manager_events_pending(conn) or await _schedule_notification_events_pending(conn)
             or await _manager_event_reasons_pending(conn) or await _manager_event_delivery_pending(conn)
             or await _proactive_deliveries_pending(conn)
+            or await _morning_brief_kind_pending(conn)
             or await _message_leads_pending(conn)
             or await _intent_merges_pending(conn) or await _leads_check_pending(conn)
             or await _run_skips_pending(conn)
@@ -1825,4 +1882,5 @@ async def schema_change_pending(conn: asyncpg.Connection) -> bool:
             or await _verification_paths_pending(conn) or await _task_chat_group_pending(conn)
             or await _processor_role_pending(conn) or await _headless_compaction_pending(conn)
             or await _mid_turn_input_pending(conn)
-            or await _reminders_pending(conn)))
+            or await _reminders_pending(conn)
+            or await _morning_briefs_pending(conn)))

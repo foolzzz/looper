@@ -2385,7 +2385,7 @@ CREATE TABLE IF NOT EXISTS proactive_deliveries (
     id          BIGSERIAL PRIMARY KEY,
     dedupe_key  TEXT NOT NULL UNIQUE,
     kind        TEXT NOT NULL CHECK (kind IN ('gate_reminder', 'task_notice', 'subscription', 'intent',
-                                              'completion', 'user_reminder')),
+                                              'completion', 'user_reminder', 'morning_brief')),
     urgency     TEXT NOT NULL CHECK (urgency IN ('normal', 'blocking', 'user_set')),
     channel_id  TEXT NOT NULL,
     chat        TEXT NOT NULL,
@@ -2415,6 +2415,24 @@ CREATE INDEX IF NOT EXISTS idx_proactive_deliveries_schedule
     ON proactive_deliveries (schedule_id) WHERE schedule_id IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_proactive_deliveries_decided ON proactive_deliveries (decided_at);
 -- proactive deliveries end
+-- Morning briefs (morning brief RFC): one row per local date and operator direct chat, or one skip row
+-- (channel_id and chat empty) when no bot names an operator. sending is claimed and committed before the
+-- channel is asked; sent went out; skipped had nothing to say; uncertain may have gone out and is never
+-- sent again; failed is a refusal, retried while attempts is under the limit. Weekends write nothing.
+-- connection.py applies this block to databases that predate it, so keep it between the markers and idempotent.
+-- morning briefs begin
+CREATE TABLE IF NOT EXISTS morning_briefs (
+    local_date  DATE NOT NULL,
+    channel_id  TEXT NOT NULL DEFAULT '',
+    chat        TEXT NOT NULL DEFAULT '',
+    status      TEXT NOT NULL CHECK (status IN ('sending', 'sent', 'skipped', 'uncertain', 'failed')),
+    attempts    INTEGER NOT NULL DEFAULT 0 CHECK (attempts >= 0),
+    detail      TEXT CHECK (detail IS NULL OR char_length(detail) <= 500),
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (local_date, channel_id, chat)
+);
+-- morning briefs end
 -- The uncertain deliveries the "needs you" summary lists (agents/attention.py): a partial index each, so it reads
 -- only those rows, never the tables' history. A database that predates them builds them online
 -- (connection.py ``_ONLINE_STEPS``).
