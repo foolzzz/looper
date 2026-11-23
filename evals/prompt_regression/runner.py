@@ -681,6 +681,9 @@ def run_task(
         gates = _project_user_gates(task, user_gates)
         if gates is not None:
             api.post("/api/v1/project_admin/update", {"project_id": created['project_id'], "fields": {"user_gates": gates}})["result"]["project"]
+        if task.acceptance_checks:
+            _confirmed(api, "/api/v1/acceptance_checks/update",
+                       {"project_id": created["project_id"], "acceptance_checks": task.acceptance_checks})
         if task.schedule_template:
             owner_key = "eval-" + uuid.uuid4().hex[:8]
             api.post("/api/v1/managers/create", {"key": owner_key, "name": "Public reports " + owner_key,
@@ -772,6 +775,10 @@ def run_task(
         if task.skill_proposals:
             detail = {**detail, "skill_proposals": api.post("/api/v1/project_skills/proposals/list",
                       {"project_id": created["project_id"]})["result"]["proposals"]}
+        acceptance = None
+        if any(step.get("checks") for step in (detail.get("steps") or [])):
+            evidence = api.post("/api/v1/task_evidence/get", {"task": task_id})["result"]
+            acceptance = metrics.acceptance_metrics(detail, evidence, records)
         result = metrics.task_metrics(
             detail=detail,
             activity=_all_activity(api, task_id),
@@ -792,6 +799,7 @@ def run_task(
             vault_log=_git_in(vault_dir, "log", "--format=%H%x00%s", "--name-only") if vault_dir else "",
             vault_check=task.vault_check,
             attempts_view=attempts_view,
+            acceptance=acceptance,
         )
         result.update(metrics.attempt_fields(attempts_view))
         if step_workspaces:
@@ -804,6 +812,8 @@ def run_task(
         result["problems"].append(f"cancelled after {timeout:g} s")
     row = {"id": task.id, **result, "duration_s": round(duration, 1), "stopped_by_cap": stopped_by_cap,
            "timed_out": timed_out, "work_dir": str(work_dir), "wait_resumes": resumed}
+    if task.acceptance_checks:
+        row["acceptance_checks"] = task.acceptance_checks
     # A task cancelled at the cap or after its timeout is not scored: what it delivered says nothing of the model.
     if stopped_by_cap:
         return {**row, **error_row(ErrorClass.SPENDING_CAP, "cancelled at the spending cap")}
@@ -904,9 +914,26 @@ def effective_user_gates(task: EvalTask, user_gates: str | None) -> str:
     return "on" if ProjectExecution.from_row({"user_gates": gates}).gates_on else "off"
 
 
+def _confirmed(api: Api, path: str, body: Mapping[str, Any]) -> dict[str, Any]:
+    """POST ``path``, and confirm when the server asks. Anything else is an eval error."""
+    answer = api.post(path, body)
+    status = answer.get("status") if isinstance(answer, dict) else None
+    if status == "ok":
+        return answer
+    if status == "needs_confirmation":
+        confirmed = api.post("/api/v1/confirm", {"confirmation_id": answer["confirmation_id"]})
+        if not isinstance(confirmed, dict) or confirmed.get("status") != "ok":
+            answered = confirmed.get("status") if isinstance(confirmed, dict) else confirmed
+            raise EvalError(f"{path} confirmation answered {answered}")
+        return confirmed
+    raise EvalError(f"{path} answered {status}")
+
+
 TASK_SETS: dict[str, tuple[str, ...]] = {
     # Cases that are likely to fail on the first attempt (task-metrics RFC, section 9.4).
     "hard": ("hidden_precondition", "rethink_bug", "misleading_error"),
+    # Executable acceptance (RFC section 12): checks on, checks off, a trivial check, a rewritten test, a recheck.
+    "acceptance": ("checks_per_criterion", "checks_off", "weak_check", "edited_test", "check_error_recheck"),
     # The tasks whose pass or fail turns on the Planner's judgment: the opus tier (evals/README.md).
     "planner": ("dependent_steps", "parallel_parts", "interface_first", "supplement_replan", "supplement_no_change",
                 "requirement_edit", "roles_tester_docs", "roles_not_needed", "roles_multi_platform",
