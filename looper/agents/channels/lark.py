@@ -928,18 +928,17 @@ class LarkChannelAdapter(ChannelAdapter):
         waiting_for_consumer = False
         try:
             assert self._inbox is not None
+            if boundary is not None:
+                await self._inbox.defer_discovery(boundary - _CATCHUP_OVERLAP, time())
+            await self._inbox.clamp_catchup(time() - _CATCHUP_MAX_AGE,
+                CatchupDropReason.BOUNDARY_EXPIRED if expired else CatchupDropReason.STALE)
             debts = await self._inbox.debts()
             discovery = await self._inbox.discovery()
-            live_start = boundary - _CATCHUP_OVERLAP if boundary is not None else None
+            live_start = None
             live_end = time()
             if discovery is not None:
-                live_start = min(live_start, discovery[0]) if live_start is not None else discovery[0]
+                live_start = discovery[0]
                 live_end = max(live_end, discovery[1]) if boundary is not None else discovery[1]
-            if live_start is not None and live_start < time() - _CATCHUP_MAX_AGE:
-                cutoff = time() - _CATCHUP_MAX_AGE
-                await self._inbox.drop_window("", live_start, cutoff,
-                    CatchupDropReason.BOUNDARY_EXPIRED if expired else CatchupDropReason.STALE)
-                live_start = cutoff
             thread_debts = await self._inbox.thread_debts()
             if (live_start is None and not debts and not thread_debts) or not hasattr(self._transport, "list_messages"):
                 return
@@ -1143,19 +1142,18 @@ class LarkChannelAdapter(ChannelAdapter):
             if self._inbox is not None and message_id and await self._inbox.processed(message_id):
                 return "duplicate"
             created = event.get("_catchup_created_at")
-            if created is not None and created.before(time() - _CATCHUP_MAX_AGE):
-                if self._inbox is not None:
-                    await self._inbox.drop_window(event.get("chat_id") or "", created.at, created.at,
-                                                  CatchupDropReason.STALE)
-                    if message_id:
-                        await self._inbox.finish(message_id)
-                return "too_old"
             if (self._inbox is not None and event.get("type") == RECEIVE_EVENT
                     and created is None and event.get("sender_type") in {"app", "bot"} and event.get("chat_id")):
                 await self._inbox.remember_bot(event["chat_id"], time())
             if self._own_message(event):
                 event["_bot_outcome"] = "own_message"
                 handled = False
+            elif event.get("chat_type") == "group" and not self._bot_mentions(event):
+                handled = False
+            elif created is not None and created.before(time() - _CATCHUP_MAX_AGE):
+                if self._inbox is not None and message_id:
+                    await self._inbox.finish(message_id)
+                return "too_old"
             else:
                 handled = await self._process_lark_event(event)
             if event.get("sender_type") in {"app", "bot"}:

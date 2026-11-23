@@ -91,6 +91,28 @@ class LarkInbox(SQLiteInbox):
             self._db.execute("DELETE FROM discovery")
 
     @serialized
+    def clamp_catchup(self, cutoff: float, discovery_reason: CatchupDropReason) -> None:
+        """Expire owed prefixes and advance their cursors in the same transaction."""
+        stale: dict[tuple[str, CatchupDropReason], tuple[float, float]] = {}
+        with self._db:
+            for table, key, chat_column in (("discovery", "id", "''"),
+                                           ("catchup_debt", "chat_id", "chat_id"),
+                                           ("catchup_thread_debt", "thread_id", "chat_id")):
+                rows = self._db.execute(
+                    f"SELECT {key}, {chat_column}, start, end FROM {table} WHERE start < ?", (cutoff,)).fetchall()
+                for identity, chat, start, end in rows:
+                    clamped = min(cutoff, end)
+                    reason = discovery_reason if table == "discovery" else CatchupDropReason.STALE
+                    previous = stale.get((chat, reason), (start, clamped))
+                    stale[chat, reason] = (min(start, previous[0]), max(clamped, previous[1]))
+                    if clamped == end:
+                        self._db.execute(f"DELETE FROM {table} WHERE {key} = ?", (identity,))
+                    else:
+                        self._db.execute(f"UPDATE {table} SET start = ? WHERE {key} = ?", (clamped, identity))
+            for (chat, reason), (start, end) in stale.items():
+                self._drop(chat, start, end, 0, reason)
+
+    @serialized
     def debts(self) -> dict[str, tuple[float, float]]:
         return {chat: (start, end) for chat, start, end in
                 self._db.execute("SELECT chat_id, start, end FROM catchup_debt ORDER BY start, end, chat_id")}
