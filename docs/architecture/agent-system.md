@@ -67,6 +67,13 @@ control because configuration is operator-only. Dashboard metric widgets are sep
   another allowed sender's direct chat is `dm:<channel id>:<chat>`. A bot
   with no operator id cannot tell its operator apart, so its direct chats stay
   in `main`; turning routing on lists such bots.
+  - The operator-only `session_routing.get/update` operations read and store
+    `session_routing_enabled` and `max_resident`; null restores off and 2.
+    Update is high risk and declares confirmation. Turning routing on returns
+    `missing_operator_ids` for bots whose direct chats stay in main. The
+    dashboard and generated CLI use these operations; `chat_settings` keeps
+    only reply stopping, completion turns, research order and the ledger.
+    Lark and Telegram need no new configuration command.
   - Sessions run in parallel; inside one, messages run in order. The message
     loop hands each user message to its session's worker. Completion wake-ups
     resolve the bot's identity before claiming events, then use the event
@@ -5808,6 +5815,36 @@ writes nothing.
 - **Not yet:** the To-do page, the ledger contract in the Manager's system
   prompt (the tool descriptions are all it has), HTTP writes.
 
+### Proactive messages: the delivery layer
+
+A proactive message is one Looper sends without being asked in that moment (a
+gate reminder; later a task notice, a subscription's push, an intent, a
+completion turn, a reminder the user set). With the system setting
+`delivery.enabled` on (operator-only `proactive_delivery.update`; off by
+default, and then no send point asks), a send point asks
+`proactive_delivery.decide` before the message goes out. The decision is the
+pure function `deliver`'s, first match wins: a source that said it has nothing
+to tell is dropped (`silent`); a gate that holds back a task (`blocking`) or a
+reminder the user set (`user_set`) is sent, never throttled or counted
+(`urgent`); outside its schedule's or subscription's own active hours it goes
+into the digest; within 5 minutes of the user writing in that chat it is sent
+uncounted (`recent_reply`); between 22:00 and 08:00 in `user.timezone` (else
+the server's own zone) it goes into the digest (`quiet_hours`); a direct chat
+that already had 5 counted messages that local day sends it into the digest
+(`daily_cap`); otherwise it is sent, counted in a direct chat. A deferred
+message's `digest_date` is the local date the next quiet hours end on. The
+decision goes into the message's row of `proactive_deliveries`, the table the
+proactive-message metrics keep (`decision`, `reason`, `counted`, `local_date`,
+`digest_date`, `decided_at`), under the send point's key for the message (a
+gate's `gate-<message id>`, its posts' idempotency key), so a message tried
+again keeps its first decision and the channel's receipt lands on the same
+row; decisions on one chat are taken one at a time, so the cap holds across
+send points. After the post the send point records the receipt (`outcome`
+`sent` or `rejected`, `sent_at`, `external_id`) unless the metrics already
+did. Off, the layer writes nothing. Wired so far: gate
+reminders only, which are always `blocking`; a decision that fails is logged
+and the reminder posted as with the switch off. Design: [proactive delivery RFC](rfcs/proactive-delivery-v0.zh-CN.md).
+
 ### Card buttons
 
 A Manager's confirmation and a user gate can be answered with one press of a
@@ -6005,7 +6042,9 @@ and `gate_timeout_seconds`, which check a schedule before a run starts.
   waited for the user for its project's `gate_reminder_hours` since its
   opening, the last message the user or the Planner wrote in it and its last
   reminder: a `reminder` note in its discussion, which the courier posts to
-  the gate's chat, and a line in the task's activity.
+  the gate's chat, and a line in the task's activity. With `delivery.enabled`
+  on, the courier first takes the delivery layer's decision on it (see
+  "Proactive messages: the delivery layer"): blocking, so always sent.
 - **The chat.** A gate's messages also go to a chat (`gate_service.gate_chat`):
   the Lark direct message or group (the requester @-mentioned) or the
   Telegram chat its task came from, else, for a task asked for on the
@@ -7327,6 +7366,7 @@ The OpenAPI document is authoritative for fields, authentication and errors. Pro
 | `/api/v1/manager_session/{get,select_profile}` | POST | `manager_session.{get,select_profile}` |
 | `/api/v1/operator_chat/{turn,stop,targets,sessions,messages,save_message,send,reply_events,thread_events}` | POST | `operator_chat.{turn,stop,targets,sessions,messages,save_message,send,reply_events,thread_events}` |
 | `/api/v1/chat_settings/{get,update}` | POST | `chat_settings.{get,update}` |
+| `/api/v1/session_routing/{get,update}` | POST | `session_routing.{get,update}` |
 | `/api/v1/clients/{list,create,revoke}` | POST | `clients.{list,create,revoke}` |
 | `/api/v1/roles/{list,get,update,reset_prompt}` | POST | `roles.{list,get,update,reset_prompt}` |
 | `/api/v1/agent_settings/{get,update_system,update_role}` | POST | `agent_settings.{get,update_system,update_role}` |

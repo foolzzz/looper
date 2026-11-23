@@ -6,6 +6,7 @@ import { Card } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import {
   fetchChatSettings, fetchCompletionSummary, updateChatSettings, type ChatSettings, type CompletionSummary,
+  fetchSessionRoutingSettings, updateSessionRoutingSettings, type SessionRoutingSettings, type SessionRoutingSettingsUpdate,
   fetchOutboundGateway, updateOutboundGateway, type OutboundGatewaySettings,
   type CompletionTurns, type ChatSettingsUpdate, type MissingOperatorBot,
   fetchTurnContextSettings, updateTurnContextSettings, type TurnContextSettings, type TurnContextSettingsUpdate,
@@ -56,6 +57,8 @@ export function ChatSettingsSection() {
   const [metricsError, setMetricsError] = useState("");
   const [metricsSaving, setMetricsSaving] = useState(false);
   const [missingBots, setMissingBots] = useState<MissingOperatorBot[]>([]);
+  const [routing, setRouting] = useState<SessionRoutingSettings | null>(null);
+  const [routingError, setRoutingError] = useState("");
   const [routingBots, setRoutingBots] = useState<MissingOperatorBot[]>([]);
   const [residentDraft, setResidentDraft] = useState<string | null>(null);
   const [residentError, setResidentError] = useState("");
@@ -68,6 +71,11 @@ export function ChatSettingsSection() {
       }
     }).catch((err: unknown) => {
       if (alive) setError(errorText(err));
+    });
+    fetchSessionRoutingSettings().then((value) => {
+      if (alive) { setRouting(value); setRoutingError(""); }
+    }).catch((err: unknown) => {
+      if (alive) setRoutingError(errorText(err));
     });
     fetchTurnContextSettings().then((value) => {
       if (alive) {
@@ -107,15 +115,28 @@ export function ChatSettingsSection() {
     try {
       const next = await updateChatSettings(body);
       setSettings(next);
-      if ("max_resident" in body) setResidentDraft(null);
-      if ("session_routing_enabled" in body) {
-        setRoutingBots(body.session_routing_enabled && next.missing_operator_ids?.length ? next.missing_operator_ids : []);
-      }
       if ("ledger_enabled" in body) {
         setMissingBots(body.ledger_enabled && next.missing_operator_ids?.length ? next.missing_operator_ids : []);
       }
     } catch (err) {
       setError(errorText(err));
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const saveRouting = async (body: SessionRoutingSettingsUpdate) => {
+    setSaving(true);
+    setRoutingError("");
+    try {
+      const next = await updateSessionRoutingSettings(body);
+      setRouting(next);
+      if ("max_resident" in body) setResidentDraft(null);
+      if ("session_routing_enabled" in body) {
+        setRoutingBots(body.session_routing_enabled && next.missing_operator_ids?.length ? next.missing_operator_ids : []);
+      }
+    } catch (err) {
+      setRoutingError(errorText(err));
     } finally {
       setSaving(false);
     }
@@ -129,7 +150,7 @@ export function ChatSettingsSection() {
       return;
     }
     setResidentError("");
-    void save({ max_resident: value });
+    void saveRouting({ max_resident: value });
   };
 
   const saveOutbound = async (enabled: boolean) => {
@@ -228,27 +249,28 @@ export function ChatSettingsSection() {
           </div>
           <div className="space-y-1.5">
             <label htmlFor={`${id}-routing`} className="flex items-center gap-2 text-sm font-medium">
-              <input id={`${id}-routing`} type="checkbox" checked={settings.session_routing_enabled} disabled={saving}
+              <input id={`${id}-routing`} type="checkbox" checked={routing?.session_routing_enabled ?? false} disabled={saving || !routing}
                      aria-describedby={`${id}-routing-help`}
-                     onChange={(event) => void save({ session_routing_enabled: event.target.checked })} />
+                     onChange={(event) => void saveRouting({ session_routing_enabled: event.target.checked })} />
               分会话：群和其他人的私聊各用一个会话
             </label>
             <p id={`${id}-routing-help`} className="text-xs text-muted-foreground">
               默认关闭。只对默认管家生效：打开后每个飞书/Telegram 群和每个其他允许发送者的私聊有自己的会话，与主会话并行运行；关掉后全部回到主会话。
             </p>
+            {routingError && <p role="alert" className="break-words text-sm text-destructive">{routingError}</p>}
             {routingBots.length > 0 && <BotsNotice text={ROUTING_NOTICE} bots={routingBots} />}
-            {settings.session_routing_enabled && (
+            {routing?.session_routing_enabled && (
               <div className="space-y-1 pt-1">
                 <label htmlFor={`${id}-resident`} className="block text-sm font-medium">常驻会话数</label>
                 <div className="flex flex-wrap items-center gap-2">
                   <input id={`${id}-resident`} type="number" inputMode="numeric" min={1} max={16} step={1}
-                         value={residentDraft ?? String(settings.max_resident)} disabled={saving}
+                         value={residentDraft ?? String(routing.max_resident)} disabled={saving}
                          aria-describedby={`${id}-resident-help`} aria-invalid={residentError ? true : undefined}
                          className={SELECT.replace("mt-1 w-full max-w-sm", "w-24") + " tabular-nums"}
                          onChange={(event) => { setResidentDraft(event.target.value); setResidentError(""); }} />
                   <Button variant="outline" disabled={saving || residentDraft === null} onClick={saveResident}>Save</Button>
                   <Button variant="outline" disabled={saving}
-                          onClick={() => { setResidentError(""); void save({ max_resident: null }); }}>
+                          onClick={() => { setResidentError(""); void saveRouting({ max_resident: null }); }}>
                     Restore default
                   </Button>
                 </div>
