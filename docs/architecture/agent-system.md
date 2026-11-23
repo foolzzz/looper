@@ -8113,11 +8113,11 @@ implementation supplies it and is retested.
   attachment paths, including filenames with spaces and Unicode. Dashboard
   turns with attachments show the final answer without streaming text deltas,
   so a path split across chunks cannot escape redaction. With `channels.outbound.enabled` off (the default),
-  both Lark transports retain their original calls and write no outbox rows. Settings → Chat reads and updates
+  Lark and Telegram retain their original calls and write no new outbox rows. Settings → Chat reads and updates
   `outbound_enabled` through the separate operator-only `outbound_gateway.get/update` operations; the existing
   `chat_settings` response fields, accepted writes and Manager tools remain unchanged. Gateway updates are
   high-risk operations with confirmation for callers that require it; null restores each field's default.
-  On, `GatedLarkTransport` routes every write through
+  On, `GatedLarkTransport` routes every Lark write through
   one gateway per channel, sharing its in-flight cap and both send/reply and total-write token buckets
   by the verified app id across CLI/Bot channels (defaults 5/s and 15/s),
   at most four platform calls in flight, classified errors, up to five retries with jitter and
@@ -8131,7 +8131,7 @@ implementation supplies it and is retested.
   the gateway. Answers, progress, notices, notifications and posts first enter
   `channel_outbox`, ordered per chat and concurrent across chats. Caller keys win; otherwise envelope ids
   and part numbers derive stable keys. The first possibly delivered attempt is saved before platform I/O.
-  Every retry checks the one-hour dedupe window, including pending/unknown rows and waits for capacity or
+  Every Lark retry checks the one-hour dedupe window, including pending/unknown rows and waits for capacity or
   persistence; expired possibly delivered rows become `uncertain` and are never resent. Older rows without
   an attempt timestamp conservatively use their creation time on upgrade. A delivery past its total deadline
   becomes `uncertain` if attempted, otherwise `failed`, releasing the chat head even if a saved retry is far
@@ -8145,9 +8145,23 @@ implementation supplies it and is retested.
   and cannot block legacy startup, receiving or catch-up. An empty disabled outbox performs no recovery writes. Waiters share in-process
   completion futures; the scanner sleeps until the earliest unblocked retry or new work. Notifications can
   carry a caller-supplied event key to deduplicate retries. An insert failure logs a warning and falls back to the gateway. Status
-  lines and reactions use the gateway alone. Housekeeping retains sent rows for seven days and other rows
-  for thirty. The CLI mapping for real HTTP 429 remains unverified on the real platform. Telegram wiring
-  and dashboard metrics follow separately; the standalone probe remains independent.
+  edits and reactions use the gateway alone; Telegram's first status message uses the outbox.
+  Housekeeping retains sent rows for seven days and other rows
+  for thirty. The CLI mapping for real HTTP 429 remains unverified on the real platform. Dashboard metrics
+  follow separately; the standalone probe remains independent.
+
+  | Telegram path | With `channels.outbound.enabled` on |
+  | --- | --- |
+  | Non-polling `GatedRequest(HTTPXRequest)` | `sendMessage`, `editMessageText`, `setMessageReaction`, `sendDocument`, `sendPhoto`, `sendChatAction`, `setMyCommands` and `answerCallbackQuery` use the gateway, with limits shared by bot identity. Edits use `chat_id:message_id`. Reads and durable `PollingRequest` bypass it. |
+  | Answers, notices, progress, command replies, posts, cards and notifications | Each chunk enters the outbox. Envelope ids derive stable per-chunk keys; caller keys win for posts and notifications. A rejected formatted chunk or card can replace only its own row's body with plain text. Earlier chunks are retained. The existing MarkdownV2 format stays in use; the same outbox rule covers HTML bodies. |
+  | Lost responses and restart | Telegram has no platform idempotency key: unknown attempts become `uncertain`, and every row left `sending` after a crash becomes `uncertain`, without resending. Its platform dedupe window is zero. Explicit 429s (including JSON `parameters.retry_after`) and pre-send connection failures can retry; other 4xx responses are rejected. |
+
+  Telegram uses the same configurable per-bot limits; there are no hardcoded per-chat caps.
+  The [official FAQ](https://core.telegram.org/bots/faq#my-bot-is-hitting-limits-how-do-i-avoid-this)
+  advises roughly 30 bulk messages per second per bot, one per second per chat and 20 per minute per group
+  (paid broadcasts can differ). These are guidance, not guaranteed capacity; tune the operator controls
+  and honor runtime 429 responses. Telegram has no stand-in serve: validation uses real PTB adapters
+  with fake HTTP responses, and never calls the real Bot API.
   The CLI transport sends with `lark-cli im
   +messages-send --as bot`: a reply as Markdown (`--markdown`, a rich-text
   post) to the chat its message came from, a schedule's message as text to a
