@@ -3009,6 +3009,28 @@ memory, and the spend at once. The knobs that bound it: a schedule's
 `max_parallel_runs` and `task_limits`, the role defaults in Settings → Roles,
 and a task's own limits.
 
+### Project lessons: bounded hints with frozen task snapshots
+
+Project lessons are a separate, default-off source of bounded hints. When the
+system `memory_lessons.enabled` setting and the project's `memory_lessons = on`
+are both enabled, the first PLAN freezes a task's selection, rendered lines,
+activation dates and limits in PostgreSQL, including an empty selection.
+Planner PLAN/new-session RESUME messages and Worker prompts share those bytes;
+the Worker's `lessons` layer follows the vault. Reviewer injection requires its
+own opt-in, and Managers never receive lessons. Later runs filter stopped or
+expired candidates without replacement. Planner system prompts stay unchanged.
+
+`memory.task_lessons` reads a task's frozen lines and paginated delivery history.
+`memory.revoke` and `memory.renew`, also available as `looper memory revoke/renew`,
+are operator-only controls; `looper memory lessons` lists lessons and counters.
+Revocation atomically records an event and fingerprint tombstone. Only accepted
+runtime input increments injection counters. Typed `lessons_used/lessons_wrong`
+references apply to that run's delivered items; two distinct tasks reporting a
+lesson wrong hold it automatically. An interrupted, unconfirmed delivery is
+`uncertain` and must be reconciled against the original session or record.
+See [the lesson RFC](rfcs/memory-tiers-v0.zh-CN.md) for compatibility exceptions
+for previously enabled sessions, retention and the pending real-model evals.
+
 ### Project knowledge: documents read on demand
 
 A project can carry reference material too large for a prompt
