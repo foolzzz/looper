@@ -36,7 +36,7 @@ _ROLES = (*_RESIDENT_ROLES, AgentType.WORKER, AgentType.REVIEWER)
 READ_ONLY_TOOLS = ("read", "glob", "grep")
 RUN_TOOLS = (*READ_ONLY_TOOLS, "write", "edit", "bash")
 RUN_MAX_REQUESTS = 1000
-RUN_TOOL_TIMEOUT_SEC = 86400
+TOOL_DEADLINES = json.loads(dsh_command.entry().with_name("tool-deadlines.json").read_text(encoding="utf-8"))
 _NO_CLI = ('the DSH runner hosts this run; there is no DSH CLI command under [runtimes] dsh = "runner"')
 _PROVIDER_ENV = ("the DSH runner cannot apply a provider's environment variables; clear them or use "
                  'the CLI path ([runtimes] dsh = "cli")')
@@ -153,7 +153,7 @@ class DshRunnerRuntime(DshRuntime):
                 state_dir, fork_from = fork.fork_dir, fork.session_id
             descriptor = self._descriptor(launch, prompt,
                 max_requests=max_turns if max_turns > 0 else RUN_MAX_REQUESTS,
-                tool_timeout_s=timeout_s if timeout_s > 0 else RUN_TOOL_TIMEOUT_SEC, fork_from=fork_from)
+                tool_timeout_s=TOOL_DEADLINES["default_s"], fork_from=fork_from)
             return RunnerChannel(
                 RunnerSession(f"{launch.role.value}-run", self.supervisor, "dsh", owned=False, state_dir=state_dir),
                 descriptor, cwd=str(cwd), env=env, tools=tools, provider_id=launch.profile.provider.id,

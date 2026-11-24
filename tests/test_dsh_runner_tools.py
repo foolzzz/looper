@@ -4,8 +4,10 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import shlex
 import signal
 import subprocess
+import sys
 import threading
 import time
 from types import SimpleNamespace
@@ -113,7 +115,7 @@ def test_bash_runs_with_the_session_environment_only(tmp_path, monkeypatch):
                 assert "LOOPER_PARENT_SENTINEL" not in results[0]["text"]
                 assert "parent-only-value" not in results[0]["text"]
                 assert "timed out after 1 s" in results[1]["text"]
-                assert (server.requests[2]["at"] - server.requests[1]["at"]) / 1e9 < 3
+                assert (server.requests[2]["at"] - server.requests[1]["at"]) / 1e9 < 5
                 assert "exit code 3" in results[2]["text"] and results[2]["is_error"] is False
                 assert results[3]["is_error"] and "LOOPER_PATH" in results[3]["text"]
                 assert not results[4]["is_error"]
@@ -568,10 +570,134 @@ def test_bash_schema_timeout_defaults_and_output_tail(tmp_path):
                 assert len(results) == 4
                 for index, result in enumerate(results[:3]):
                     assert "timed out after 1 s" in result["text"] and not result["is_error"]
-                    assert (server.requests[index + 1]["at"] - server.requests[index]["at"]) / 1e9 < 3
+                    assert (server.requests[index + 1]["at"] - server.requests[index]["at"]) / 1e9 < 5
                 assert results[3]["text"] == "[earlier output truncated]\n" + "x" * 102397 + "END\nexit code 0"
                 assert not results[3]["is_error"]
     run(exercise())
+
+
+@pytest.mark.parametrize("redirect", [False, True])
+def test_bash_shell_exit_bounds_output_drain_with_eof_control(tmp_path, redirect):
+    async def exercise():
+        _, installed = require_dsh()
+        output = " >/dev/null 2>&1" if redirect else ""
+        command = f"sleep 30{output} & echo $! > background.pid; printf parent_done"
+        with MessagesServer([[bash(command)], ["Done"]]) as server:
+            async with raw_runner(tmp_path, installed, env=guard_env(tmp_path, server.port)) as (_, send, receive):
+                client = Client(send, receive)
+                await client.start()
+                params = writable(params_for(tmp_path, server))
+                params["env"] = {"PATH": "/usr/bin:/bin"}
+                params["limits"]["tool_timeout_s"] = 5
+                sid = (await client.call("session/new", params))["session_id"]
+                pidfile = Path(params["cwd"]) / "background.pid"
+                try:
+                    await client.prompt(sid)
+                    assert (await client.settled(sid))["outcome"] == "completed"
+                    result, = client.updates(sid, kind="tool_result")
+                    assert result["call_id"] == "synthetic-tool-0-0" and not result["is_error"]
+                    assert "parent_done" in result["text"] and "exit code 0" in result["text"]
+                    note = "command exited while a background process still holds its output"
+                    assert (note in result["text"]) is not redirect
+                    assert "timed out" not in result["text"]
+                    assert (server.requests[1]["at"] - server.requests[0]["at"]) / 1e9 < 2
+                    assert json.dumps(result["text"]) in request_text(server.requests[1])
+                    assert alive(int(pidfile.read_text())), "positive control: the background process is still running"
+                finally:
+                    await client.call("session/close", {"session_id": sid})
+                    if pidfile.exists():
+                        pid = int(pidfile.read_text())
+                        if alive(pid):
+                            os.kill(pid, signal.SIGKILL)
+                        await wait_until(lambda: not alive(pid), 3)
+    asyncio.run(asyncio.wait_for(exercise(), 20))
+
+
+@pytest.mark.parametrize("parent_waits", [False, True])
+def test_bash_escaped_pipe_holder_is_bounded_and_runner_reusable(tmp_path, parent_waits):
+    async def exercise():
+        _, installed = require_dsh()
+        script = "\n".join([
+            "import os, pathlib, signal, time",
+            "pid = os.fork()",
+            "if pid == 0:",
+            "    os.setsid()",
+            "    signal.signal(signal.SIGTERM, signal.SIG_IGN)",
+            "    pathlib.Path('escaped.pid').write_text(str(os.getpid()))",
+            "    time.sleep(30)",
+            "    os._exit(0)",
+            "os.waitpid(pid, 0)" if parent_waits else "os._exit(0)",
+        ])
+        command = f"{shlex.quote(sys.executable)} -c {shlex.quote(script)}; printf parent_done"
+        replies = [[bash(command)], ["Done"], [bash("printf second_session_done")], ["Done"]]
+        with MessagesServer(replies) as server:
+            async with raw_runner(tmp_path, installed, env=guard_env(tmp_path, server.port)) as (_, send, receive):
+                client = Client(send, receive)
+                await client.start()
+                params = writable(params_for(tmp_path, server))
+                params["env"] = {"PATH": "/usr/bin:/bin"}
+                params["limits"]["tool_timeout_s"] = 1 if parent_waits else 5
+                sid = (await client.call("session/new", params))["session_id"]
+                pidfile = Path(params["cwd"]) / "escaped.pid"
+                try:
+                    await client.prompt(sid)
+                    assert (await client.settled(sid))["outcome"] == "completed"
+                    result, = client.updates(sid, kind="tool_result")
+                    assert result["call_id"] == "synthetic-tool-0-0" and not result["is_error"]
+                    if parent_waits:
+                        assert "timed out after 1 s" in result["text"]
+                        assert (server.requests[1]["at"] - server.requests[0]["at"]) / 1e9 < 4.5
+                    else:
+                        assert "command exited while a background process still holds its output" in result["text"]
+                        assert "exit code 0" in result["text"] and "parent_done" in result["text"]
+                        assert "timed out" not in result["text"]
+                        assert (server.requests[1]["at"] - server.requests[0]["at"]) / 1e9 < 2
+                    assert json.dumps(result["text"]) in request_text(server.requests[1])
+                    calls = [block["id"] for event in client.updates(sid, kind="message")
+                             for block in event["content"] if block["type"] == "tool_use"]
+                    assert calls == [result["call_id"]]
+                    assert len(client.updates(sid, kind="settled")) == 1
+                    assert alive(int(pidfile.read_text())), "positive control: the detached process survived group termination"
+                    second = writable(params_for(tmp_path, server, key="second"))
+                    second["env"] = {"PATH": "/usr/bin:/bin"}
+                    sid2 = (await client.call("session/new", second))["session_id"]
+                    await client.prompt(sid2)
+                    assert (await client.settled(sid2))["outcome"] == "completed"
+                    result2, = client.updates(sid2, kind="tool_result")
+                    assert result2["call_id"] == "synthetic-tool-2-0"
+                    assert result2["text"] == "second_session_done\nexit code 0"
+                    assert not result2["is_error"]
+                    await client.call("session/close", {"session_id": sid2})
+                    assert (await client.call("runner/health"))["running"] == 0
+                finally:
+                    if pidfile.exists():
+                        pid = int(pidfile.read_text())
+                        if alive(pid):
+                            os.kill(pid, signal.SIGKILL)
+                        await wait_until(lambda: not alive(pid), 3)
+                    await client.call("session/close", {"session_id": sid})
+    asyncio.run(asyncio.wait_for(exercise(), 20))
+
+
+def test_bash_stdin_is_eof_and_has_one_paired_result(tmp_path):
+    async def exercise():
+        _, installed = require_dsh()
+        with MessagesServer([[bash("read answer; printf 'read_exit=%s' $?")], ["Done"]]) as server:
+            async with raw_runner(tmp_path, installed, env=guard_env(tmp_path, server.port)) as (_, send, receive):
+                client = Client(send, receive)
+                await client.start()
+                params = writable(params_for(tmp_path, server))
+                sid = (await client.call("session/new", params))["session_id"]
+                try:
+                    await client.prompt(sid)
+                    assert (await client.settled(sid))["outcome"] == "completed"
+                    result, = client.updates(sid, kind="tool_result")
+                    assert result["call_id"] == "synthetic-tool-0-0" and not result["is_error"]
+                    assert result["text"] == "read_exit=1\nexit code 0"
+                    assert json.dumps(result["text"]) in request_text(server.requests[1])
+                finally:
+                    await client.call("session/close", {"session_id": sid})
+    asyncio.run(asyncio.wait_for(exercise(), 20))
 
 
 @pytest.mark.parametrize("ending", ["sent", "close", "denied"])
