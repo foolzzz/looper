@@ -28,18 +28,29 @@ for _name in ("would_hold_until", "would_hold_reason", "note"):
     _RECENT["required"].remove(_name)
 _HOLD = _object({"provider": _STR, "reason": _STR, "until": _STR, "window": _NULL_STR, "reset_known": _BOOL},
                 ["provider", "reason", "until"], closed=True)
+_UNANSWERED_FIELDS = {"enabled": _BOOL,
+                      "window_days": {"type": "integer", "minimum": 1, "maximum": 30},
+                      "min_pushes": {"type": "integer", "minimum": 1, "maximum": 1000},
+                      "pause_after_days": {"type": "integer", "minimum": 1, "maximum": 30},
+                      "snooze_days": {"type": "integer", "minimum": 1, "maximum": 365}}
+_UNANSWERED = _object(_UNANSWERED_FIELDS, closed=True)
 VIEW = _object({"mode": _MODE, **dict.fromkeys(settings.CAPS, _CAP), "roles": _ROLES,
+                "unanswered_pushes": _UNANSWERED,
                 "counters": _array(_COUNTER), "recent": _array(_RECENT),
                 "recommended_daily_usd": _CAP, "recommended_daily_equivalent_usd": _CAP,
                 "problem": _NULL_STR, "holds": _array(_HOLD)}, closed=True)
-VIEW["required"] = [name for name in VIEW["required"] if name != "holds"]
+VIEW["required"] = [name for name in VIEW["required"] if name not in ("holds", "unanswered_pushes")]
 _PATCH_ROLES = _object({role: _object(dict.fromkeys(settings.CAPS, _CAP), [], closed=True)
                         for role in settings.ROLES}, [], closed=True)
 PATCH = _object({"mode": {"type": ["string", "null"], "enum": ["off", "observe", "enforce", None]},
-                 **dict.fromkeys(settings.CAPS, _CAP), "roles": _PATCH_ROLES}, [], closed=True)
-HOLD = _object({"id": _INT, "scope": _STR, "scope_ref": _STR, "currency": _STR,
-                "limit_usd": {"type": "number"}, "spent_usd": {"type": "number"}, "reason": _STR,
+                 **dict.fromkeys(settings.CAPS, _CAP), "roles": _PATCH_ROLES,
+                 "unanswered_pushes": _object(_UNANSWERED_FIELDS, [], closed=True)}, [], closed=True)
+_NULL_NUMBER = {"type": ["number", "null"]}
+HOLD = _object({"id": _INT, "scope": _STR, "scope_ref": _STR, "currency": _NULL_STR,
+                "limit_usd": _NULL_NUMBER, "spent_usd": _NULL_NUMBER,
+                "pushes": {"type": ["integer", "null"]}, "reason": _STR,
                 "state": _STR, "created_at": _STR, "decided_at": _NULL_STR, "decided_via": _NULL_STR}, closed=True)
+HOLD["required"] = [name for name in HOLD["required"] if name != "pushes"]
 _DECIDE = _object({"hold_id": {"type": "integer", "minimum": 1},
                    "decision": {"type": "string", "enum": ["continue", "stop"]},
                    "new_limit_usd": {"type": "number", "minimum": 0},
@@ -55,10 +66,14 @@ _ENFORCE = ("Enforce holds task dispatches at task and global daily caps and ref
             "or at most five minutes when reset time is unknown. Window rows apply when "
             "engine.limit_signals.enabled is on; otherwise only quota-failure rules apply. No account is switched. "
             "Background-role and schedule budget enforcement remains inactive.")
+_UNANSWERED_IMPACT = (
+    " Turning on unanswered pushes asks once after that many direct pushes in the window go without a reply, "
+    "pauses the schedule after more days with no answer and no reply, and resumes it from Needs you.")
 _UPDATE = ("Configure cost guard admission. Off and observe preserve execution. " + _ENFORCE +
            " Existing spend holds remain actionable in every mode. With a scope cap, subscription runs soft stop "
            "at their reservation; no scope caps means no reservation soft stop. Fail counts reservations and "
-           "stops running Workers. Planner closing turns use actual admission. Null restores the default.")
+           "stops running Workers. Planner closing turns use actual admission. Null restores the default."
+           + _UNANSWERED_IMPACT)
 OPERATIONS = (
     Operation("cost_guard.get", "POST", "/api/v1/cost_guard/get", "Read cost guard observations.",
               _GET, _object({}, closed=True), VIEW,
@@ -105,11 +120,15 @@ async def impact(server, operation, arguments, principal, headers):
             "Reservations use a configured run cap, or the 30-day role P95 with a floor ($0.50 for task/Manager "
             "roles, $0.05 for small background roles); no samples use that floor. The task fail action counts "
             "spend and reservations and can fail earlier, stopping running Workers. Planner closing turns "
-            "(stopping, completed, failed) also check admission and are refused only when admission refuses.")
+            "(stopping, completed, failed) also check admission and are refused only when admission refuses."
+            + _UNANSWERED_IMPACT)
 
 
 def _hold(row):
-    return {key: row[key].isoformat() if hasattr(row[key], 'isoformat') else row[key] for key in HOLD['properties']}
+    body = {key: row[key].isoformat() if hasattr(row[key], 'isoformat') else row[key] for key in HOLD['properties']}
+    if body.get("pushes") is None:
+        del body["pushes"]
+    return body
 
 
 async def run(server, operation, arguments, principal, headers):

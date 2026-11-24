@@ -238,18 +238,28 @@ async def create_schedule(conn: asyncpg.Connection, *, project_id: str, fields: 
 
 async def update_schedule(conn: asyncpg.Connection, schedule_id: str, fields: Mapping[str, Any], *,
                           profiles: Mapping[str, str] | None = None,
-                          task_limits: Mapping[str, int] | None = None) -> None:
+                          task_limits: Mapping[str, int] | None = None, snooze_days: int = 30) -> None:
     """Set ``fields`` (any of ``FIELDS``, ``enabled``, ``enabled_at``, ``rule_changed_at`` and ``next_fire_at``),
-    and the profile overrides and the task limits when given (each replaces what the schedule had)."""
+    and the profile overrides and the task limits when given (each replaces what the schedule had).
+
+    Enabling clears a pause. An unanswered pause also snoozes further questions for ``snooze_days``.
+    """
     if "manager_id" in fields:
         raise ValueError("a schedule's owner cannot change")
     if "kind" in fields:
         raise ValueError("a schedule's kind cannot change")
     columns = [name for name in (*FIELDS, "enabled", "enabled_at", "rule_changed_at", "next_fire_at") if name in fields]
     sets = [f"{name} = ${i}" for i, name in enumerate(columns, start=2)]
+    values = [json.dumps(fields[name]) if name in _JSON_FIELDS else fields[name] for name in columns]
+    if fields.get("enabled") is True:
+        sets.append("unanswered_snooze_until = CASE WHEN pause_reason = 'unanswered' "
+                    f"THEN now() + make_interval(days => ${len(values) + 2}) ELSE unanswered_snooze_until END")
+        sets.append("pause_reason = NULL")
+        sets.append("paused_at = NULL")
+        values.append(snooze_days)
     await conn.execute(
         f"UPDATE schedules SET {', '.join([*sets, 'updated_at = now()'])} WHERE id = $1",
-        schedule_id, *[json.dumps(fields[name]) if name in _JSON_FIELDS else fields[name] for name in columns],
+        schedule_id, *values,
     )
     if profiles is not None:
         await _set_overrides(conn, schedule_id, profiles)
@@ -961,11 +971,13 @@ async def failing(*, db: Db | None = None) -> list[dict[str, Any]]:
         """
         SELECT s.id, s.name, s.project_id, p.name AS project_name, s.timezone, s.consecutive_failures,
                s.failures_alert_at, s.stale_alert_at, s.deadline_alert_at, s.overlap_alert_at, s.last_success_at, s.last_ok_at,
+               s.pause_reason, s.paused_at,
                (SELECT r.status FROM schedule_runs r WHERE r.schedule_id = s.id AND NOT (r.status = ANY($1::text[]))
                 ORDER BY r.created_at DESC, r.id DESC LIMIT 1) AS last_status
         FROM schedules s JOIN projects p ON p.id = s.project_id
         WHERE s.consecutive_failures > 0 OR s.failures_alert_at IS NOT NULL OR s.stale_alert_at IS NOT NULL
               OR s.deadline_alert_at IS NOT NULL OR s.overlap_alert_at IS NOT NULL
+              OR (NOT s.enabled AND s.pause_reason = 'unanswered')
         ORDER BY (s.failures_alert_at IS NULL AND s.stale_alert_at IS NULL
                   AND s.deadline_alert_at IS NULL AND s.overlap_alert_at IS NULL),
                  s.consecutive_failures DESC, lower(s.name)
