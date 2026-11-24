@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import fields, replace
+from datetime import datetime, timedelta, timezone
 from types import MappingProxyType
 from pathlib import Path
 from typing import Any
@@ -18,6 +19,9 @@ from looper.agents.ops import service
 from looper.agents.ops.service import ManagerOps, Platform
 from looper.agents.session_routing import SessionKey, SessionKind
 from looper.agents.tiers.manager import GoalSnapshot, ManagerAgent
+from looper.agents import api_v1, intent_rules, message_stream_parity
+from looper.db import message_collection, message_parity, message_stream_alerts
+from tests import subscription_support
 from tests.db_support import DSN
 from tests.lark_cli_stand_in import OPEN_ID, OTHER
 from tests.test_manager_session_routing_db import (  # noqa: F401
@@ -32,6 +36,8 @@ SENTINELS = {name: f"PRIVATE_{name.upper()}_SENTINEL" for name in (
     "reminder", "ledger", "confirmation", "needs_you", "other_gate", "vault_note", "lead",
     "harness", "role_prompt", "custom_prompt", "template", "workflow", "goal", "persona_tone", "persona_notes",
     "other_session_task", "own_requirement", "own_progress", "own_task_cost",
+    "intent_type", "intent_rule", "intent_rule_hit", "collection_config", "collected_message",
+    "collection_parity", "collection_alert",
 )}
 MAIN_CHAT = "oc_allowlist_main"
 
@@ -98,6 +104,50 @@ async def _operator(channel_id: str) -> str:
     return OPEN_ID
 
 
+async def _seed_operator_extensions(pool: Any) -> None:
+    """Exercise new operator sources without changing the compatibility baseline's inputs."""
+    await pool.execute("UPDATE intent_type_versions SET guidance=$1 WHERE type_key='synthetic_type'",
+                       SENTINELS["intent_type"])
+    rule_id = "11111111-1111-4111-8111-111111111111"
+    await pool.execute("INSERT INTO intent_rules(id,version,position) VALUES($1::text::uuid,1,1)", rule_id)
+    await pool.execute("INSERT INTO intent_rule_versions(rule_id,version,enabled,position,intent_type,scope,"
+                       "conditions,action,edited_by) VALUES($1::text::uuid,1,true,1,'any','{\"kind\":\"all\"}',"
+                       "$2::jsonb,'push_for_confirmation','synthetic')", rule_id,
+                       _encoded([{"kind": "sender_in_allowlist", "sender_ids": [SENTINELS["intent_rule"]]}]))
+    hit_id = await pool.fetchval("INSERT INTO intent_rule_hits(evaluation_key,intent_id,generation,rule_id,"
+                                "rule_version,selection,action,reason) SELECT 'synthetic-evaluation',id,0,"
+                                "$1::text::uuid,1,'matched','push_for_confirmation',$2 FROM intents "
+                                "WHERE source_id='private-source' RETURNING id", rule_id, SENTINELS["intent_rule_hit"])
+    await pool.execute("UPDATE event_sources SET lark_profile=$1 WHERE id='private-source'",
+                       SENTINELS["collection_config"])
+    await pool.execute("INSERT INTO source_collection_settings(source_id) VALUES('private-source')")
+    now = datetime.now(timezone.utc)
+    seq = await subscription_support.add(pool, SENTINELS["collected_message"], source_id="private-source",
+                                         chat_id="oc_synthetic_collected", sent_at=now - timedelta(minutes=1))
+    await pool.execute("UPDATE source_events SET body=jsonb_build_object('text',text) WHERE seq=$1", seq)
+    async with pool.acquire() as conn:
+        parity_id = await message_parity.create_session(conn, "private-source", 0, now - timedelta(hours=1), now, 0,
+                                                        policy_digest="synthetic", reference_digest="synthetic")
+        await message_parity.put_members(conn, parity_id, "collect", [{
+            "external_id": SENTINELS["collection_parity"], "chat_id": "oc_synthetic_collected",
+            "sent_at": now - timedelta(minutes=1),
+        }])
+        alert = await message_stream_alerts.open_episode(conn, "private-source", "collector_failure",
+                                                         target_chat=SENTINELS["collection_alert"])
+    # Positive readbacks prove each sentinel is present in a real source before testing its exclusion.
+    sources = {
+        "intent_type": await pool.fetchval("SELECT guidance FROM intent_type_versions WHERE type_key='synthetic_type'"),
+        "intent_rule": await intent_rules.list_rules(principal=api_v1.OPERATOR, db=pool),
+        "intent_rule_hit": await intent_rules.get_hit(hit_id, principal=api_v1.OPERATOR, db=pool),
+        "collection_config": await message_collection.collector_source("private-source", db=pool),
+        "collected_message": dict(await pool.fetchrow("SELECT text,body FROM source_events WHERE seq=$1", seq)),
+        "collection_parity": await message_stream_parity.read_report("private-source", parity_id, db=pool),
+        "collection_alert": alert,
+    }
+    for name, source in sources.items():
+        assert SENTINELS[name] in _encoded(source), (name, source)
+
+
 def _arguments(schema: dict[str, Any]) -> dict[str, Any]:
     """Plausible required arguments; actions use their listed first option (normally list/get)."""
     def value(item: dict[str, Any]) -> Any:
@@ -120,6 +170,7 @@ def _arguments(schema: dict[str, Any]) -> dict[str, Any]:
 def test_operator_data_never_reaches_a_routed_session(routed: Any, tmp_path: Path, kind: SessionKind) -> None:
     async def test(rig: _Rig, pool: Any) -> None:
         await _seed(pool, tmp_path)
+        await _seed_operator_extensions(pool)
         rig.manager._goal_snapshots["synthetic-goal"] = GoalSnapshot("synthetic-goal", title=SENTINELS["goal"])
         routed.setattr(persona, "_current", persona.Persona(name="Synthetic Manager", tone=SENTINELS["persona_tone"], notes=SENTINELS["persona_notes"]))
         routed.setattr(lanes_settings, "_enabled", True)

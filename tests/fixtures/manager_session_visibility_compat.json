@@ -1,5 +1,5 @@
 {
-  "baseline": "07faa17d4",
+  "baseline": "ec373aa0c",
   "description": "Per-input and per-tool baseline captured from the implementation before routed-session allowlists. All seeded data is synthetic.",
   "cases": {
     "true:operator": {
