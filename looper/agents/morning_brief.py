@@ -6,10 +6,11 @@ that local day, and proactive messages held for the digest. Every brief reads fr
 dates (Monday also Saturday and Sunday) through the day being sent, except digest rows already recorded by id.
 The claim stores the ids that read returned, in that same write. A sent or uncertain brief records those ids,
 in the same transaction as its row. A refusal records none and clears the stored ids, so a Tuesday brief that
-was rejected is still in Wednesday's. If the sender stops before that record, recovery consumes exactly the
-stored ids and does not scan by time: a row whose insert had not committed is still read once, on the next
-brief. With triage enabled, the operator DM also gets owned digest and important fallback events, using
-the same window and exact-id claim/settlement/recovery policy. No model sees those rendered fields.
+was rejected is still in Wednesday's. Immediately before the channel call, the sender commits ``send_started_at``.
+If it stops before that boundary, recovery refunds the attempt and consumes nothing. After that boundary,
+recovery consumes exactly the stored ids and does not scan by time: a row whose insert had not committed is
+still read once, on the next brief. With triage enabled, the operator DM also gets owned digest and important
+fallback events, using the same window and exact-id claim/settlement/recovery policy. No model sees those rendered fields.
 Nothing in any section means
 nothing is sent. The switch, the channel and the operator are read again after the summary and again
 immediately before the post. The switch is read once more after the operator query returns: it can be turned
@@ -328,6 +329,8 @@ class MorningBriefService:
                 logger.warning("morning brief delivery decision failed; sending anyway", exc_info=True)
         if not await self._accepts(channel_id, chat):
             await store.release(conn, day, channel_id, chat)
+            return
+        if not await store.mark_send_started(conn, day, channel_id, chat, self._clock()):
             return
         external: str | None = None
         try:

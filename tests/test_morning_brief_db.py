@@ -9,6 +9,8 @@ from __future__ import annotations
 import asyncio
 import json
 from datetime import date, datetime, timedelta, timezone
+from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 from zoneinfo import ZoneInfo
 
@@ -249,19 +251,155 @@ def test_the_second_server_waits_and_neither_sends_twice(monkeypatch: pytest.Mon
     run_with_channel_configs(test, monkeypatch, )
 
 
-def test_a_restart_mid_send_does_not_send_again(monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize("after_send", [False, True], ids=["claimed", "send-started"])
+@pytest.mark.parametrize("previous_attempts", [0, 2], ids=["first-attempt", "last-retry"])
+def test_restart_retries_only_a_claim_whose_send_never_started(
+        monkeypatch: pytest.MonkeyPatch, tmp_path: Path, lark_cli_stand_in: Path,
+        after_send: bool, previous_attempts: int) -> None:
+    from looper.agents.channels.allowlist import SenderAllowlist
+    from looper.agents.channels.lark import LarkChannelAdapter
+    from looper.agents.channels.registry import ChannelRegistry
+
+    def sends() -> list[Any]:
+        calls = ([json.loads(line) for line in lark_cli_stand_in.read_text().splitlines()]
+                 if lark_cli_stand_in.exists() else [])
+        return [call for call in calls if "+messages-send" in call]
+
     async def test(pool: Any) -> None:
         await _zone(pool)
+        who = "ou_x"  # Keep this transport test independent of long-key normalization.
+        await _operator(pool, who=who)
+        monkeypatch.setattr(attention, "collect", _collect(_summary("ok")))
+        await _digest(pool, "restart-digest", MONDAY.date(), chat=who, hour=7)
+        digest_id = await pool.fetchval("SELECT id FROM proactive_deliveries")
+        if previous_attempts:
+            await pool.execute("INSERT INTO morning_briefs (local_date, channel_id, chat, status, attempts, detail) "
+                               "VALUES ($1, 'channel-lark', $2, 'failed', $3, 'refused')",
+                               MONDAY.date(), who, previous_attempts)
+        adapter = LarkChannelAdapter(runtime_root=tmp_path,
+                                     allowlist=SenderAllowlist("channel-lark", frozenset({who})))
+        registry = ChannelRegistry(SimpleNamespace())
+        registry._channels[adapter.channel_id] = adapter
+        real_post = registry.post
+
+        async def post(*args: Any, **kwargs: Any) -> PostReceipt:
+            # Read on another connection: the marker must be committed before even entering the channel call.
+            assert await pool.fetchval("SELECT send_started_at FROM morning_briefs") == MONDAY
+            return await real_post(*args, **kwargs)
+
+        monkeypatch.setattr(registry, "post", post)
+        real_claim = morning_brief.store.claim
+
+        async def stop_after_claim(*args: Any, **kwargs: Any) -> bool:
+            assert await real_claim(*args, **kwargs)
+            raise RuntimeError("sender stopped after claim")
+
+        async def stop_before_settle(*args: Any, **kwargs: Any) -> bool:
+            raise RuntimeError("sender stopped after send")
+
+        with monkeypatch.context() as crash:
+            crash.setattr(morning_brief.store, "settle" if after_send else "claim",
+                          stop_before_settle if after_send else stop_after_claim)
+            with pytest.raises(RuntimeError, match="sender stopped"):
+                await _service(registry, MONDAY).run_once()
+        assert len(sends()) == int(after_send)
+        claimed = dict(await pool.fetchrow("SELECT * FROM morning_briefs"))
+        assert claimed["status"] == "sending" and claimed["attempts"] == previous_attempts + 1
+        assert claimed["send_started_at"] == (MONDAY if after_send else None)
+        assert claimed["read_ids"] == [digest_id]
+        assert await pool.fetchval("SELECT count(*) FROM morning_brief_consumed") == 0
+
+        # Off remains a no-op even with a stranded claim; turning it on recovers on the next tick.
+        chat_settings.set_morning_brief_enabled(False)
+        restarted = morning_brief.MorningBriefService(registry, clock=lambda: MONDAY)
+        await restarted.run_once()
+        assert dict(await pool.fetchrow("SELECT * FROM morning_briefs")) == claimed
+        assert len(sends()) == int(after_send)
+        chat_settings.set_morning_brief_enabled(True)
+        await restarted.run_once()
+        assert len(sends()) == 1
+        assert await pool.fetchval("SELECT status FROM morning_briefs") == ("uncertain" if after_send else "sent")
+        assert await pool.fetchval("SELECT attempts FROM morning_briefs") == previous_attempts + 1
+        for _ in range(3):
+            await morning_brief.MorningBriefService(registry, clock=lambda: MONDAY).run_once()
+        assert len(sends()) == 1
+        assert [row["delivery_id"] for row in await pool.fetch("SELECT * FROM morning_brief_consumed")] == [digest_id]
+        delivered = Path(str(lark_cli_stand_in) + ".delivered.jsonl")
+        assert len(delivered.read_text().splitlines()) == 1
+
+    run_with_channel_configs(test, monkeypatch)
+
+
+@pytest.mark.parametrize("marked", [False, True])
+def test_upgrade_preserves_ambiguous_sends_and_repairs_a_missing_send_marker(monkeypatch, marked):
+    from looper.db.migrations import morning_brief_send_started as migration
+
+    async def test(pool):
+        await pool.execute("ALTER TABLE morning_briefs DROP COLUMN send_started_at")
+        if marked:
+            await pool.execute("INSERT INTO schema_migrations (name) VALUES ($1)", migration.name)
+        await pool.execute("INSERT INTO morning_briefs (local_date, channel_id, chat, status, attempts, updated_at) "
+                           "VALUES ($1, 'channel-lark', $2, 'sending', 1, $3)", MONDAY.date(), OP, MONDAY)
+        assert await migration.pending(pool)
+        async with pool.acquire() as conn:
+            assert await connection.schema_change_pending(conn)
+        await connection.ensure_schema(pool)
+        assert not await migration.pending(pool)
+        assert await pool.fetchval("SELECT send_started_at FROM morning_briefs") == MONDAY
+        async with pool.acquire() as conn:
+            assert await morning_brief.store.orphans_uncertain(conn, MONDAY) == 1
+        before = dict(await pool.fetchrow("SELECT * FROM morning_briefs"))
+        assert before["status"] == "uncertain"
+        assert await morning_brief.store.claim(pool, MONDAY.date(), "channel-lark", "ou_new", MONDAY,
+                                               attempts_limit=3)
+        await connection.ensure_schema(pool)
+        # Repeated schema checks must not turn a new, unsent claim into an ambiguous send.
+        assert await pool.fetchval("SELECT send_started_at FROM morning_briefs WHERE chat = 'ou_new'") is None
+        assert dict(await pool.fetchrow("SELECT * FROM morning_briefs WHERE chat = $1", OP)) == before
+
+    run_db(test, monkeypatch)
+
+
+def test_an_unsent_first_brief_keeps_its_digest_window_after_a_later_day_restart(monkeypatch):
+    async def test(pool):
+        await _zone(pool)
         await _operator(pool)
-        monkeypatch.setattr(attention, "collect", _collect(_summary("error", "db down")))
-        await pool.execute("INSERT INTO morning_briefs (local_date, channel_id, chat, status, attempts) "
-                           "VALUES ($1, 'channel-lark', $2, 'sending', 1)", MONDAY.date(), OP)
+        monkeypatch.setattr(attention, "collect", _collect(_summary("ok")))
+        await _digest(pool, "before-restart", MONDAY.date(), hour=7)
+        digest_id = await pool.fetchval("SELECT id FROM proactive_deliveries")
+        assert await morning_brief.store.claim(pool, MONDAY.date(), "channel-lark", OP, MONDAY,
+                                               attempts_limit=3, read_ids=[digest_id])
         channel = _Channel()
-        await _service(channel, MONDAY).run_once()
-        await _service(channel, MONDAY).run_once()
+        await _service(channel, MONDAY + timedelta(days=1)).run_once()
+        assert len(channel.posts) == 1 and "11-23 07:00" in channel.posts[0]["text"]
+        row = await pool.fetchrow("SELECT status, attempts FROM morning_briefs WHERE local_date = $1", MONDAY.date())
+        assert dict(row) == {"status": "failed", "attempts": 0}
+        assert await pool.fetchval("SELECT count(*) FROM morning_brief_consumed") == 1
+
+    run_with_channel_configs(test, monkeypatch)
+
+
+def test_a_send_marker_write_failure_never_calls_the_channel_or_consumes_digests(monkeypatch):
+    async def test(pool):
+        await _zone(pool)
+        await _operator(pool)
+        monkeypatch.setattr(attention, "collect", _collect(_summary("ok")))
+        await _digest(pool, "marker-failure", MONDAY.date(), hour=7)
+
+        async def fail(*args):
+            raise RuntimeError("send marker write failed")
+
+        channel = _Channel()
+        with monkeypatch.context() as failed_write:
+            failed_write.setattr(morning_brief.store, "mark_send_started", fail)
+            with pytest.raises(RuntimeError, match="send marker write failed"):
+                await _service(channel, MONDAY).run_once()
         assert channel.posts == []
-        assert await _rows(pool) == [{"local_date": MONDAY.date(), "channel_id": "channel-lark", "chat": OP,
-                                      "status": "uncertain", "attempts": 1}]
+        assert await pool.fetchval("SELECT send_started_at FROM morning_briefs") is None
+        assert await pool.fetchval("SELECT count(*) FROM morning_brief_consumed") == 0
+        await _service(channel, MONDAY).run_once()
+        assert len(channel.posts) == 1
+        assert await pool.fetchval("SELECT count(*) FROM morning_brief_consumed") == 1
 
     run_with_channel_configs(test, monkeypatch)
 
