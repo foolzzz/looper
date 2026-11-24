@@ -23,6 +23,7 @@ import json
 import os
 import re
 import shlex
+import signal
 import subprocess
 import sys
 import tomllib
@@ -2226,12 +2227,59 @@ def _slug_files() -> dict[str, str]:
     return {"slug.py": _SLUG_SEED, "test_slug.py": _TEST_SLUG, "make_shot.py": _MAKE_SHOT}
 
 
+# Scoring calls these after the task-timeout poll has stopped, so a candidate that waits forever has to fail here.
+_CHECKER_TIMEOUT_S = 20.0
+
+
+def _kill_checker_group(process: subprocess.Popen[str]) -> None:
+    """SIGKILL the child's process group, then reap the child so it cannot stay a zombie."""
+    if process.poll() is None:
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        except PermissionError:
+            try:
+                process.kill()
+            except ProcessLookupError:
+                pass
+    try:
+        process.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        try:
+            process.kill()
+        except ProcessLookupError:
+            pass
+        try:
+            process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            pass
+    for pipe in (process.stdout, process.stderr):
+        if pipe is not None:
+            pipe.close()
+
+
+def _run_checker(argv: list[str], work_dir: Path) -> subprocess.CompletedProcess[str] | None:
+    """Run ``argv`` in its own process group. ``None`` means it timed out and the group was killed and reaped."""
+    process = subprocess.Popen(argv, cwd=work_dir, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                               start_new_session=True)
+    try:
+        stdout, stderr = process.communicate(timeout=_CHECKER_TIMEOUT_S)
+    except subprocess.TimeoutExpired:
+        _kill_checker_group(process)
+        return None
+    code = process.returncode
+    return subprocess.CompletedProcess(argv, 1 if code is None else code, stdout, stderr)
+
+
 def _check_slug(work_dir: Path) -> str | None:
     test = work_dir / "test_slug.py"
     if not test.is_file() or test.read_text(encoding="utf-8") != _TEST_SLUG:
         return "test_slug.py does not equal its seed"
     for mode in ("lower", "spaces", "strip"):
-        result = subprocess.run([sys.executable, "test_slug.py", mode], cwd=work_dir, capture_output=True, text=True)
+        result = _run_checker([sys.executable, "test_slug.py", mode], work_dir)
+        if result is None:
+            return f"slug.py timed out on {mode} after {_CHECKER_TIMEOUT_S:g} s"
         if result.returncode != 0:
             return f"slug.py failed {mode}: {(result.stderr or result.stdout)[:200]}"
     return None
@@ -2265,7 +2313,9 @@ def _check_calc(work_dir: Path) -> str | None:
     if not (work_dir / "calc.py").is_file():
         return "calc.py is missing"
     # -B: a same-second rewrite must not keep the previous bytecode.
-    result = subprocess.run([sys.executable, "-B", "test_calc.py"], cwd=work_dir, capture_output=True, text=True)
+    result = _run_checker([sys.executable, "-B", "test_calc.py"], work_dir)
+    if result is None:
+        return f"calc.py timed out after {_CHECKER_TIMEOUT_S:g} s"
     return None if result.returncode == 0 else "calc.py is not fixed"
 
 

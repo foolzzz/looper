@@ -10,8 +10,10 @@ import inspect
 import json
 import os
 import shlex
+import signal
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -21,8 +23,9 @@ from evals.prompt_regression.fake_claude import _decide, scripted_run
 from evals.prompt_regression.runner import (
     FAKE_CLAUDE, TASK_SETS, EvalError, _confirmed, scored_expect, select_tasks, uses_role_shim,
 )
+from evals.prompt_regression import tasks as eval_tasks
 from evals.prompt_regression.tasks import (
-    ACCEPTANCE_TASKS, TASKS, _CALC_OK, _CALC_SEED, _TEST_CALC, _TEST_CALC_WEAK, _check_calc, _equals,
+    ACCEPTANCE_TASKS, TASKS, _CALC_OK, _CALC_SEED, _TEST_CALC, _TEST_CALC_WEAK, _check_calc, _check_slug, _equals,
 )
 from looper.agents.acceptance_evidence import EVIDENCE_HEADING
 from looper.agents.project_execution import AcceptanceChecksMode
@@ -322,6 +325,80 @@ def test_calc_checker_runs_the_seeded_test(tmp_path: Path):
     test.write_text(_TEST_CALC_WEAK, encoding="utf-8")
     calc.write_text(_CALC_OK, encoding="utf-8")
     assert _check_calc(tmp_path) == "test_calc.py does not equal its seed"
+
+
+def _dead(pid: int) -> bool:
+    """Whether ``pid`` is gone. A zombie still answers ``kill(pid, 0)``, so an unreaped child fails this."""
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return True
+    return False
+
+
+def _recorded_pids(work_dir: Path) -> list[int]:
+    found = []
+    for name in ("parent.pid", "child.pid"):
+        path = work_dir / name
+        if path.is_file():
+            found.append(int(path.read_text(encoding="utf-8")))
+    return found
+
+
+def test_calc_checker_fails_a_hanging_candidate(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """``add`` waits forever and forks a grandchild. The checker fails quickly and both processes are gone."""
+    limit = 0.5
+    monkeypatch.setattr(eval_tasks, "_CHECKER_TIMEOUT_S", limit)
+    (tmp_path / "test_calc.py").write_text(_TEST_CALC, encoding="utf-8")
+    # The parent records both pids before it waits, so the assertion does not race the grandchild.
+    (tmp_path / "calc.py").write_text(
+        "import os, time\n"
+        "from pathlib import Path\n"
+        "child = os.fork()\n"
+        "if child == 0:\n"
+        "    time.sleep(30)\n"
+        "    raise SystemExit(0)\n"
+        "Path('parent.pid').write_text(str(os.getpid()))\n"
+        "Path('child.pid').write_text(str(child))\n"
+        "def add(a, b):\n"
+        "    time.sleep(30)\n",
+        encoding="utf-8")
+    pids: list[int] = []
+    started = time.monotonic()
+    try:
+        reason = _check_calc(tmp_path)
+        elapsed = time.monotonic() - started
+        pids = _recorded_pids(tmp_path)
+        assert reason == f"calc.py timed out after {limit:g} s"
+        assert elapsed < 5
+        assert len(pids) == 2
+        deadline = time.monotonic() + 2
+        while time.monotonic() < deadline and not all(_dead(pid) for pid in pids):
+            time.sleep(0.05)
+        assert all(_dead(pid) for pid in pids)
+    finally:
+        for pid in pids or _recorded_pids(tmp_path):
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            try:
+                os.waitpid(pid, os.WNOHANG)
+            except ChildProcessError:
+                pass
+
+
+def test_slug_checker_fails_a_hanging_candidate(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    limit = 0.5
+    monkeypatch.setattr(eval_tasks, "_CHECKER_TIMEOUT_S", limit)
+    task = _acceptance("checks_per_criterion")
+    for name, text in task.files.items():
+        (tmp_path / name).write_text(text, encoding="utf-8")
+    (tmp_path / "slug.py").write_text("import time\n\ndef slugify(text):\n    time.sleep(30)\n", encoding="utf-8")
+    started = time.monotonic()
+    reason = _check_slug(tmp_path)
+    assert reason == f"slug.py timed out on lower after {limit:g} s"
+    assert time.monotonic() - started < 5
 
 
 def test_the_weakened_calc_test_prints_a_wrong_sum(tmp_path: Path):
