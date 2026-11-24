@@ -248,6 +248,7 @@ class ManagerOps:
         self._epoch = 0
         self._bindings: OrderedDict[str, Turn] = OrderedDict()  # the last BINDINGS_KEPT turns, ended ones too
         self._binding_sessions: dict[str, str] = {}
+        self._published_bindings: dict[str, str | None] = {}
         self._session_turns: dict[str, Turn] = {}
         self._routed_turns: dict[int, Turn] = {}  # enforcement survives a switch-off until end_turn
         self._pending: dict[tuple[str | None, str | None, str | None], _Pending] = {}
@@ -1042,6 +1043,7 @@ class ManagerOps:
                 self._routed_turns[id(turn)] = turn
         path = self.turn_file_for(session_key)
         if path is None:
+            self._published_bindings[session_key] = binding
             return
         self._epoch += 1
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -1051,9 +1053,15 @@ class ManagerOps:
             with os.fdopen(fd, "w", encoding="utf-8") as handle:
                 handle.write(json.dumps({"epoch": self._epoch, "turn": binding}))
             os.replace(tmp, path)
+            self._published_bindings[session_key] = binding
         except BaseException:
             tmp.unlink(missing_ok=True)
             raise
+
+    def clear_binding(self, binding: str, *, session_key: str = MAIN_SESSION) -> None:
+        """Clear only this turn's published binding; a later turn may already own the bridge."""
+        if self._published_bindings.get(session_key) == binding:
+            self.publish_binding(None, session_key=session_key)
 
     def begin_turn(self, turn: Turn, binding: str | None = None, *, session_key: str = MAIN_SESSION) -> str:
         """``turn`` runs now; the note its message starts with (``_begin_turn``), then, in a user turn, what the

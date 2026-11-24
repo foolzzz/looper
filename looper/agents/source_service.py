@@ -440,12 +440,22 @@ class SourceService:
         self._busy: set[str] = set()
         self._collector_backend = collector_backend
         self._alerts = alerts
+        self._alerts_enabled = False
         self._collect_tasks: dict[str, asyncio.Task[Any]] = {}
         self._alert_task: asyncio.Task[Any] | None = None
 
     async def start(self) -> None:
         if self._task is None:
+            await self.refresh_alerts()
             self._task = asyncio.create_task(self._loop(), name="source-service")
+
+    async def refresh_alerts(self) -> None:
+        """Read the switch at startup and after settings changes, never on an idle tick."""
+        if self._alerts is not None:
+            from ..db import message_stream_alerts
+            from ..db.connection import get_pool
+
+            self._alerts_enabled = await message_stream_alerts.configured(get_pool())
 
     async def stop(self) -> None:
         task, self._task = self._task, None
@@ -488,7 +498,7 @@ class SourceService:
     async def run_once(self, *, clock: Callable[[], datetime] | None = None) -> int:
         """Run each due bridged source; how many ran."""
         now = (clock or (lambda: datetime.now(timezone.utc)))()
-        if self._alerts is not None and (self._alert_task is None or self._alert_task.done()):
+        if self._alerts_enabled and (self._alert_task is None or self._alert_task.done()):
             self._alert_task = asyncio.create_task(self._alert_tick(now), name="source-alerts")
         if self._drain is not None and self._drain.draining:
             return 0
@@ -552,6 +562,8 @@ class SourceService:
                 await store.unlock(conn, source_id)
 
     async def _alert_tick(self, now: datetime) -> None:
+        if not self._alerts_enabled:
+            return
         try:
             await self._alerts.evaluate(now=now)
             await self._alerts.flush()
@@ -606,7 +618,7 @@ class SourceService:
                 logger.warning("source %s collection failed: %s", source_id, type(exc).__name__)
             finally:
                 try:
-                    if self._alerts is not None and not asyncio.current_task().cancelling():
+                    if self._alerts_enabled and not asyncio.current_task().cancelling():
                         try:
                             await asyncio.wait_for(self._alerts.evaluate(source_id), 5)
                         except Exception:

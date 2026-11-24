@@ -541,6 +541,8 @@ def write_control(stdin: asyncio.StreamWriter, request: dict[str, Any]) -> str:
 
 # How long a resident Claude may take to end its turn after an interrupt request before it is killed.
 INTERRUPT_GRACE_SEC = 5.0
+# Stay below the Manager's 60-second preparation settlement deadline.
+RESERVED_INPUT_WAIT_SEC = 30.0
 # How long a stopping resident Claude may take to exit after its stdin closes before it is ended.
 STOP_GRACE_SEC = 5.0
 # How long the rest of an exited Claude's output may take to be read.
@@ -660,6 +662,10 @@ class _InputPhase(Enum):
     OPEN = "open"
     GENERATING = "generating"
     COMPLETE = "complete"
+
+
+class ReservedInputTimeout(RuntimeError):
+    """A preceding native input did not finish; admitting another prompt could repeat its effects."""
 
 
 @dataclass
@@ -1278,7 +1284,13 @@ class ResidentClaude:
             # later claim rather than writing that message into the transcript twice.
             if (message_id != keep_message_id and (owner := output.queued.get(message_id)) is not None
                     and not owner.completed.is_set()):
-                await self.discard_reserved_input(message_id)
+                try:
+                    async with asyncio.timeout(RESERVED_INPUT_WAIT_SEC):
+                        await owner.completed.wait()
+                except TimeoutError as exc:
+                    error = f"native input {message_id} did not complete within {RESERVED_INPUT_WAIT_SEC:g}s"
+                    logger.error("%s: %s; refusing to interrupt or rewrite it", self._label, error)
+                    raise ReservedInputTimeout(error) from exc
 
     async def discard_reserved_input(self, message_id: str | None) -> None:
         """A token ended without claiming: bounded withdrawal before this resident is reused."""
