@@ -188,7 +188,7 @@ function App() {
             </div>
           )}
           {route.page === "messages" && (
-            <div className="h-full overflow-y-auto p-6"><MessageStreamPage /></div>
+            <div className="h-full overflow-y-auto p-6"><MessageStreamPage query={route.query} /></div>
           )}
           {route.page === "todo" && (
             <div className="h-full overflow-y-auto p-6"><NeedsYouPage /></div>

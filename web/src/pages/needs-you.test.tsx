@@ -51,6 +51,24 @@ afterEach(() => {
 });
 
 describe("Needs you page", () => {
+  it("keeps catchup items alongside message-stream alerts", async () => {
+    vi.mocked(fetchAttention).mockResolvedValue({ read_at: "2026-11-22T12:00:00Z", total: 2, sections: [
+      { kind: "deliveries", state: "ok", count: 2, error: null, items: [
+        { key: "lark_catchup:synthetic", title: "Synthetic dropped window", context: "Lark", since: null,
+          href: "#settings/channels", ref: null, facts: { source: "catchup", channel: "lark", fix: "Check catch-up" } },
+        { key: "message-stream:1", title: "登录需处理", context: "synthetic-source", since: null,
+          href: "#messages?collection=synthetic-source", ref: null,
+          facts: { source: "message_stream", kind: "auth", fix: "核对绑定身份和登录" } },
+      ] },
+    ] });
+    await render();
+    expect(host.textContent).toContain("Lark catch-up dropped");
+    expect(host.textContent).toContain("Check catch-up");
+    expect(host.textContent).toContain("消息流采集/对账需处理");
+    expect(host.textContent).toContain("核对绑定身份和登录");
+    expect(host.textContent).toContain("投递结果未知的通知不会自动重发");
+    expect(host.querySelector('a[href="#messages?collection=synthetic-source"]')).not.toBeNull();
+  });
   it("lists spend holds with their cap and a direct link to continue or stop", async () => {
     vi.mocked(fetchAttention).mockResolvedValue({ read_at: "2026-11-20T08:00:00Z", total: 1, sections: [
       { kind: "cost", state: "ok", count: 1, error: null, items: [

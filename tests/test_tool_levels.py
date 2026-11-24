@@ -197,6 +197,10 @@ DECIDED_OPERATIONS: dict[str, ActionLevel] = {
     "intent_bindings.put": INSIDE,  # maps a chat to a project; sends nothing anywhere
     # toggles bound_chats_only; the admission it widens is chat_routing's operator-only refusal to guard
     "channel_chats.set_policy": INSIDE,
+    "message_collection.get": INSIDE,  # reads source-local collection state
+    "message_collection.update": INSIDE,  # stores configuration without reading an account
+    "message_collection.mode_update": INSIDE,  # changes Looper's ingestion state
+    "message_collection.run_now": MACHINE,  # starts a local read-only collector CLI
 }
 
 

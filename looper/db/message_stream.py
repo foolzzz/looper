@@ -53,9 +53,28 @@ async def list_sources(*, db: Db | None = None) -> list[dict[str, Any]]:
 async def save_source(source_id: str, fields: Mapping[str, Any], *, db: Db | None = None) -> dict[str, Any]:
     """Create the source with its defaults, or change the fields given. The caller validated them."""
     names = list(fields)
-    async with _transaction(db) as conn:
+    # The same session lock serializes old configuration with collect and import.
+    from contextlib import asynccontextmanager
+    from .message_collection import CollectionConflict, writer
+
+    @asynccontextmanager
+    async def connection():
+        if any(field in fields for field in ("ingest_mode", "lark_profile", "user_open_id")):
+            async with writer(db, source_id) as conn:
+                yield conn
+        else:
+            async with _transaction(db) as conn:
+                yield conn
+
+    async with connection() as conn, conn.transaction():
         await conn.execute("INSERT INTO event_sources (id, kind, name) VALUES ($1, 'lark_user', $2) "
                            "ON CONFLICT (id) DO NOTHING", source_id, fields.get("name") or source_id)
+        current = await conn.fetchrow("SELECT ingest_mode,lark_profile,user_open_id FROM event_sources WHERE id=$1", source_id)
+        if current["ingest_mode"] == "collect" and any(
+                field in fields and fields[field] != current[field] for field in ("lark_profile", "user_open_id")):
+            raise CollectionConflict("switch to bridge before changing profile or identity")
+        if "ingest_mode" in fields and fields["ingest_mode"] != current["ingest_mode"]:
+            await conn.execute("UPDATE source_collection_settings SET generation=generation+1,mode_changed_at=now() WHERE source_id=$1", source_id)
         if names:
             sets = ", ".join(f"{name} = ${index}" for index, name in enumerate(names, 2))
             await conn.execute(f"UPDATE event_sources SET {sets}, updated_at = now() WHERE id = $1",
@@ -363,6 +382,8 @@ async def delete_events(source_id: str, scope: str, *, message_id: str | None = 
         deletion_id = await conn.fetchval(
             "INSERT INTO source_deletions (source_id, scope, message_id, chat_id, start_at, end_at) "
             "VALUES ($1, $2, $3, $4, $5, $6) RETURNING id", source_id, scope, message_id, chat_id, start, end)
+        from .message_parity import delete_evidence
+        await delete_evidence(conn, source_id, scope, message_id=message_id, chat_id=chat_id, start=start, end=end)
         result = await conn.execute(f"DELETE FROM source_events WHERE source_id = $1 AND ({where})", source_id, *args)
         if scope == "chat":
             await conn.execute(
