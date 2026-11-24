@@ -175,6 +175,31 @@ def test_config_import_actions_are_exclusive(config_cli, arguments):
     assert not server.requests
 
 
+@pytest.mark.parametrize("command,flags,body", [
+    ("get", [], {}), ("update", ["--enabled", "true"], {"enabled": True}),
+    ("update", ["--enabled", "false"], {"enabled": False}),
+    ("update", ["--enabled", "null"], {"enabled": None}),
+])
+def test_generated_card_actions_commands_use_operator_credentials(tmp_path, capsys, command, flags, body):
+    token_file = tmp_path / "operator-token"
+    token_file.write_text("card-actions-test-operator\n")
+    token_file.chmod(0o600)
+
+    def respond(handler, request):
+        assert request[2]["authorization"] == "Bearer card-actions-test-operator"
+        _send(handler, 200, api_v1.document() if request[1].endswith("openapi.json") else
+              {"status": "ok", "result": {"enabled": body.get("enabled") is True}})
+
+    server = Server(respond)
+    try:
+        assert loopercli.main(["--client-file", str(tmp_path / "unused.json"), "--json", "card-actions", command,
+            "--url", server.url, "--operator-token-file", str(token_file), *flags]) == 0
+        assert server.requests[-1][0:2] == ("POST", "/api/v1/card_actions/" + command)
+        assert server.requests[-1][3] == body
+    finally:
+        server.close()
+
+
 @pytest.mark.parametrize("action", ["preview", "apply", "confirm"])
 @pytest.mark.parametrize("as_json", [False, True])
 def test_config_import_prints_the_complete_plan(config_cli, tmp_path, capsys, action, as_json):

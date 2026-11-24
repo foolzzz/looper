@@ -153,6 +153,8 @@ DECIDED_OPERATIONS: dict[str, ActionLevel] = {
     **dict.fromkeys(("memory.confirm", "memory.confirm_many", "memory.edit", "memory.retry"), MACHINE),
     "cost_guard.get": INSIDE,  # reads Looper's own observation settings and counters
     "cost_guard.update": INSIDE,  # changes only Looper's observation configuration
+    "card_actions.get": INSIDE,  # reads Looper's stored card-button switch
+    "card_actions.update": INSIDE,  # stores permission; sends no cards and runs no click
     # Stores permission only; the runner executes checks separately after Worker success.
     "acceptance_checks.get": INSIDE, "acceptance_checks.update": INSIDE,
     "task_evidence.get": INSIDE,  # reads only stored check definitions and measured evidence
