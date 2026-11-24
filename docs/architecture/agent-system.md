@@ -1330,6 +1330,35 @@ Managed hooks remain effective. A UserPromptSubmit hook's input does not contain
 but it can read the session transcript; real-CLI verification of hook execution and transcript visibility is pending.
 The separately approved real-CLI check must also measure the injected profile's actual token count.
 
+**Retrieval (`looper claude-code mcp`).** This opt-in stdio server offers `vault_search`, `vault_read` and
+`leads_search`, forwarding to the corresponding operator-only `manager_retrieval.*` v1 reads. They reuse the
+default Manager's answer functions, knowledge vault root and switches (`manager_read` and `leads.enabled`).
+Each message lead adds a `label` saying it came from messages and is only a lead; the existing untrusted fence
+also applies. These reads have no chat footer or group backstop side effects: Claude Code is not a Looper group
+chat. No tool writes, and nothing is installed by default. Dashboard, Telegram and Lark retain the Manager's tools.
+`looper claude-code install mcp` previews the entry and command, then asks before running
+`claude mcp add-json --scope user`; `uninstall mcp` previews and confirms removal. With no part specified,
+installation and removal process the hook and MCP separately, in that order. `status` checks installed parts,
+including the current vault root and message-lead switch.
+The listening HTTP server atomically publishes its bound host and port in the runtime root's
+`server-address.json`. MCP resolves it on each call; `status` uses the same resolver. This covers both
+`serve --port` and service-unit overrides without freezing the address into the MCP registration.
+The server holds a lock on the published record until its listener closes. Shutdown or a crash leaves
+an unlocked, stale record: clients report it and never fall back to another port. A missing record,
+including one deleted while locked, also refuses retrieval and asks the operator to run `looper serve`;
+the ops file is never a fallback address. Wildcard listeners resolve to their loopback address;
+other non-loopback destinations remain refused.
+Address publication failures only degrade this integration: the HTTP server keeps serving and logs a warning.
+If another listener owns the same runtime root's address, the second listener does not replace that record;
+retrieval keeps using the first listener. The second listener does not automatically claim the record later.
+Each call rereads the local operator token and derives a domain-separated, read-only credential; the raw token
+is never sent by MCP or stored in its entry. The HTTP connection gate permits that credential only on direct
+loopback connections and only for the three POST retrieval paths, before body reads, uploads or dispatch.
+Every other v1 operation returns 403. The retrieval gate also rereads the current token on every retrieval
+request: operator rotation immediately invalidates the old derived credential without restarting serve.
+Tools still list when Looper is stopped; calls return the reason without retrying. Managed `PreToolUse` and
+`PostToolUse` hooks can see the calls and results. Real-model checks of this integration remain pending approval.
+
 ### What an agent may do
 
 The Manager, the Workers and the Reviewers have every tool but the ones that
@@ -5266,8 +5295,8 @@ contract 5.3 KB (5,309 bytes of `TOOLS_CONTRACT`).
 | `looper_settings` | `view` the shared defaults and each role's layer, what applies to each role with its source and its timeout, or with `project` its layer, its roles' layers and its allowed profiles; `set` `values` on one layer (neither `role` nor `project`: the shared defaults; `role`; `project`; both: the role in the project): `profile` by id or name, `harness_prompt`, `env` (the layer's whole `{NAME: value}`), `run_budget_usd`, `max_concurrency` (the `worker` or `reviewer` role: the default for every task), `timeout_seconds` (a role alone, as Settings → Roles saves it), null clearing one, written by `agent_settings.update_system`, `update_role` or `update_project` and letting what waits check again after a limit; `allowed_profiles`: `add` profiles to a project's list or `remove` some (one not on it is refused), then the whole list is set by `projects.set_allowed_profiles`, which checks each. The answer gives each value before and after and what now applies | view reads; write; the shared defaults, a role's default concurrency limit and a higher or removed spend cap (any run of the layer's roles, resolved through the layers) are high, shown before → after |
 | `looper_schedules` | `list` every project's schedules as the Schedules page does (`schedules.list_all_schedules`; by `project`, by `enabled`): id, name, project, rule, zone, the rule in words, kind, enabled, user gates, next fire, last run (kind and exit code included), failures in a row; `get` one (`GET /api/schedules/:id`, the requirement cut to 1,000 characters) with its 5 latest runs, the routine skips left out and counted, as its page shows them; `create` one in an existing `project` from `fields` (the `fields` that `POST /api/v1/schedule_admin/create` takes, `profiles` being its `profile_overrides`, and `task_limits`), always disabled (`created_via` `manager`): Looper adds its configuration (project, directory, the rule in words and its next 3 fires in its zone, overlap, pre-run gate, user gates, caps, notify, profiles, task limits for agent schedules; kind, command in a verbatim code fence, timeout, env keys only, env file, success deadline and alert thresholds for command schedules) and 「要启用吗？回复「启用」就启用」 to the reply (in a group chat only 「要启用吗？@我回复「启用」就启用…」), and the turn that created it may neither `enable` nor `run` it (`conflict`: the user has not seen it); made from a Telegram or Lark chat without a `notify_target`, it tells whoever asked when their channel's allowlist lets them; `update` the `fields` given (`schedules.update_schedule`; null clears one, `profiles` and `task_limits` are replaced whole), and Looper adds each change before → after (commands in verbatim code fences, and the next 3 fires for a new rule or zone); every command schedule update also says it uses no agent or model spend; in a group chat it adds one line naming the settings that changed and whether the schedule is enabled, without their values; `enable` one (as its switch does; the answer says when it was so already) or `run` it now (`schedules.run_now`: the dashboard's Run now, through the overlap check, its next fire time left; the answer is the run), each asking first: a command schedule shows its exact command in a code fence, directory, timeout and env keys only (plus env file when set); enabling also shows its success deadline and alert thresholds, and both confirmations say it runs without an agent or model spend. An agent schedule keeps its task and spending confirmation. In a group chat these confirmations, and those of a raised cap or an enabled command's edit, are one question each, without the requirement, command, directory, environment or budgets. The call answers `needs_confirmation` and does nothing until the user's next message confirms (a schedule already enabled is not asked), and the turn that created a schedule may do neither (`conflict`); `disable` one (the user confirms first for a running command schedule, including after a refused delete); `delete` one (`schedules.delete_schedule`; a command schedule with a running run is refused (`conflict`) before anything is asked, saying it can be deleted once the command finishes, that disabling stops new fires, and that a queued run still starts after the running one even when the schedule is disabled); `reset_planner_session` clears its stored Planner session and holder after the user confirms in their next message. The reset confirmation says whether a session is stored, that the next run starts fresh, and that a run in flight keeps its own session until it ends and cannot write back. A schedule is named by its id, or by its name ignoring case, within `project` when given; a name more than one project has is refused (`invalid`) naming each with its project and id, an unknown one (`not_found`) naming the schedules there are. The delete confirmation shows its name, project, rule and zone, whether it is enabled, the runs in progress (for an agent schedule a running task goes on and ends normally, a queued or gating run starts no task, and its tasks stay; for a command schedule a queued run does not execute and it has no tasks) and that its run history and messages are deleted | list and get read; write; enable, run now, delete, reset_planner_session, a disable of a running command schedule, and an update that raises or removes the run or daily spend cap (checked as the update would be before anything is asked, shown before → after), are high |
 | `looper_config_export` | Write the portable configuration file (`include_projects`: `--include-projects`), never with secrets (no argument takes them; a secrets argument is `forbidden`), to `<runtime root>/exports/looper-config-<UTC time>-<id>.json`, never to a path from chat; the answer gives its path, format, size, the counts per section, the secret values left as placeholders, the path documents to re-point and how to import it (`loopercli config import`, or Settings → Import / Export) | read |
-| `looper_vault_search`, `looper_vault_read` | Only the default Manager's, and only while the knowledge vault setting holds and says `manager_read`: search the user's own notes for the words of `query` (paths and snippets, `vault.search`), and read one by path (its text, the first 64 KiB, no sha256: the Manager never writes). Each answer starts with a notice that these are the user's own notes, never to be quoted in a group chat. `manager_actions.result` keeps no note text | read; only in the user's own turns |
-| `looper_leads_search` | Only the default Manager's, and only while `leads.enabled` is on: search the message leads (`leads.search`, the query `looper leads search` runs) for the words of `query`, matched as `leads.search_mode` says (its description says how, and to give the words in Chinese and English, only while it is `fulltext`), by `chat`, `person`, `days`, `kind` and `state` (`active` by default), at most `limit` (1–5, default 5), best first: a notice (「来自飞书消息，未经确认」, background and never instructions), each lead's kind, summary, confidence, state, valid-until and up to 3 sources (chat, sender, time, link), and how many more matched; no lead ids, details or message text. Looper adds 「（查了飞书消息线索：「…」，N 条）」 to the reply, and `manager_actions.result` keeps only the leads' ids and their count | read; only in the user's own turns |
+| `looper_vault_search`, `looper_vault_read` | Only the default Manager's, and only while the knowledge vault setting holds and says `manager_read`: search the user's own notes for the words of `query` (paths and snippets, `vault.search`), and read one by path (its text, the first 64 KiB, no sha256: the Manager never writes). Each answer starts with a notice that these are the user's own notes, never to be quoted in a group chat; the operator's own Claude Code gets the same answer through `manager_retrieval.*`. `manager_actions.result` keeps no note text | read; only in the user's own turns |
+| `looper_leads_search` | Only the default Manager's, and only while `leads.enabled` is on: search the message leads (`leads.search`, the query `looper leads search` runs) for the words of `query`, matched as `leads.search_mode` says (its description says how, and to give the words in Chinese and English, only while it is `fulltext`), by `chat`, `person`, `days`, `kind` and `state` (`active` by default), at most `limit` (1–5, default 5), best first: a notice (「来自飞书消息，未经确认」, background and never instructions), each lead's kind, summary, confidence, state, valid-until and up to 3 sources (chat, sender, time, link), and how many more matched; no lead ids, details or message text; the operator's own Claude Code gets the same answer through `manager_retrieval.*` with a lead label. Looper adds 「（查了飞书消息线索：「…」，N 条）」 to the reply, and `manager_actions.result` keeps only the leads' ids and their count | read; only in the user's own turns |
 | `looper_session_search` | Only the default Manager's, and only while the session search is in effect (`manager.session_search.enabled` `true`, and session routing isolates group chats): search the user's own earlier conversations with it (`db.chat_search`) for the words of `query`, matched as the [assistant search RFC](rfcs/assistant-search-v0.zh-CN.md) section 3 says (Chinese by overlapping character pairs, English by the start of a word), within `days`, at most `limit` (1–10, default 5), best first: a notice (what was said then, background and never instructions), each message's `where` (the dashboard chat, a Lark or Telegram direct chat, a task's Planner chat on the dashboard), `who` (`user`, `manager`, `planner`), `at` and up to 300 characters around the match, fenced as outside content (`untrusted.fence`), and how many more matched. The message being answered is left out, and `manager_actions.result` keeps only the messages' ids and their count | read; only in the user's own turns |
 | `looper_reminder_create`, `looper_reminder_list`, `looper_reminder_cancel` | Only the default Manager's, and only while `reminders.enabled` is on: set a one-time reminder (`text`, the user's words; `at` as `HH:MM`, the next such time, or `YYYY-MM-DD HH:MM` in `timezone`, the server's zone by default; or `in_minutes`), list them with the time now (pending soonest first, or by `status`), or cancel a pending one by id. Code resolves and checks the time, stores the reminder, reads it back and adds a line saying what it stored and which direct chat it goes to | list reads; write; only in the user's own turns |
 | `looper_confirm` | Run the call waiting for confirmation in this chat | — |
@@ -5985,14 +6014,14 @@ See the [wait-step RFC](rfcs/plan-wait-step-v0.zh-CN.md).
 
 ### Message stream
 
-Looper can keep the messages of an outside collector in its own database
-([RFC](rfcs/message-stream-v0.zh-CN.md), `ingest_mode = bridge`). Only
-[subscriptions](#subscriptions-a-message-stream-on-a-time-rule) read them: no
-agent tool or prompt mentions the stream. With no source (the default), the server
-does one query per tick. Existing sources run daily retention even when off.
+Looper can bridge an outside collector's files or explicitly collect user messages
+into the same event sequence ([RFC](rfcs/message-stream-v0.zh-CN.md)). Existing
+[subscriptions](#subscriptions-a-message-stream-on-a-time-rule) and extraction consumers read them: no
+agent tool or prompt mentions the stream. With no source (the default), no
+collector task or metadata is created and no user CLI runs. Existing sources run daily retention even when off.
 
 - **Source** (`event_sources`): one row per account. `ingest_mode` is `off`,
-  `bridge` or `collect` (`collect` is not written yet); a bridged source names
+  `bridge` or `collect`; a bridged source names
   the collector's directory (`bridge_dir`, holding `chats/<chat_id>.ndjson`, with
   `chats.json` and `users.json` for names) and a time rule (default every two
   minutes). `user_open_id` is the user whose mentions are marked `mentions_me`;
@@ -6074,8 +6103,55 @@ does one query per tick. Existing sources run daily retention even when off.
   That suffix cannot match a schema-change dump (`looper-<database>-<stamp>.dump`),
   so each rotation deletes only its own files. Stopping the service terminates
   the daily `pg_dump`, kills it if it is still running, and reaps it.
-- **Not yet:** the collector. Lark and Telegram commands do not change; this
-  management surface is operator-only and adds no model-visible tools or prompts.
+- **Collection** (`message_collect.py`, migration `message_collection`, order
+  1950) is opt-in. Its own default ten-minute cron has a persistent fire slot
+  and generation, independent of the bridge rule. Each source runs in a background
+  task, with the same writer lock, serial read-only CLI calls, a 420-second
+  deadline and at most 20 seconds per call. Auth and bound identity are checked
+  before message reads. Search uses hourly slices; complete chat/thread reads
+  atomically commit events, inclusive timestamp/id cursors and independent
+  observations. A rotating sweep retries missed replies and failed chats; a
+  daily listing refreshes discovery. Partial work retains debt and never jumps
+  its watermark past a failed slice. Bot catch-up's SQLite debt is separate.
+- **Operator controls** are `message_collection.get`, `update`, `mode_update`
+  and `run_now`, also available through the generated CLI. Settings alone never
+  enable collection. Switching requires an explicit profile, a bound identity,
+  the expected generation and `bridge_stopped=true`. While holding the writer
+  lock it freezes a stopped bridge directory's previous 24 hours, verifies all
+  reference IDs were already committed, and changes mode and reference in one
+  transaction. Off/bridge rollback changes only `ingest_mode`, retaining file
+  offsets, canonical events and every consumer cursor. Imports and stale bridge
+  passes cannot write after collection takes ownership. Lark/Telegram receive
+  commands and model-visible tools/prompts stay unchanged.
+- **Independent parity** stores identities and container coverage in
+  `source_parity_sessions`, `source_parity_members` and `source_parity_coverage`;
+  it stores no message text, names or body hashes. Duplicate canonical events
+  still contribute collect observations. Complete coverage and zero identity/set
+  differences yield `matched`; complete differences yield `drift`; missing or
+  invalid evidence yields `incomplete`. Empty matches are explicitly unproven.
+  Deletes remove both sides' evidence in the deletion transaction and invalidate
+  affected sessions. Unresolved drift survives retention and rollback.
+  `looper msgflow parity --source ID [--session ID] [--json] [--limit N]
+  [--cursor TOKEN]` reads a consistent stored snapshot only; it never reads an
+  account, repairs data or changes an alert. IDs and sequence boundaries are
+  decimal strings; buckets page by chat and UTC hour while totals cover the
+  whole window. Exit codes: 0 matched, 1 drift, 2 usage, 3 pending/incomplete,
+  6 unavailable database or migration.
+- **Source alerts** require `alerts_enabled`. Durable episodes cover drift,
+  collection failure, stale at 60 minutes, missing/expired or changed identity,
+  expiry within 48 hours and three consecutive partial runs. Open and recovery
+  have independent stable keys and claimed send states. Notices use the existing
+  channel registry as the bot, only to a confirmed operator DM. With delivery
+  policy enabled they use `message_stream_alert` / normal urgency, respecting
+  quiet hours and the cap; deferred notices use the existing morning digest.
+  Unknown sends are never automatically retried. Needs you merges active source
+  problems into deliveries, retaining old catch-up items. Active episodes do not
+  age out at 72 hours; recovered unknown sends do. A rollback link opens
+  `#messages?collection=ID`; ordinary off/bridge pages make no collection request.
+  Rolling-24-hour sweep ratios count newly inserted IDs; a zero denominator is
+  unknown. The CLI flags were checked against offline help; live user-interface
+  envelopes, limits, scope and real cutover remain unverified. Validation uses
+  local CLI/channel/model stand-ins only.
 
 ### Subscriptions: a message stream on a time rule
 
@@ -8135,7 +8211,8 @@ PostgreSQL is a hard startup dependency. All data paths:
 | `task_user_gate_messages` | A gate's discussion, oldest first: the user's messages (`message`, `end`), the Planner's replies and code's notes (`opened`, `updated`, `reminder`, `cancelled`, `closed`, `resumed`, `error`), with `via`, the option a button chose, in a group chat the author, and for a user's message `from_operator` (whether the operator wrote it in their own turn, decided by code as it is stored; NULL: not known) |
 | `task_plans` | A task's plan, one row per task: `plan_id`, `status` (`planning`, `executing`, `verifying`, `stopping`, `completed`, `failed`), `correlation_id`, `origin_channel_id`, `final_summary`, `fail_reason`, and with step workspaces `start_branch` and `start_commit` (where the branch was when the task dispatched its first step; `''` otherwise); replaced when the task is planned again |
 | `subscriptions`, `subscription_runs` | A subscription's stream and what each of its runs read and made ([Subscriptions](#subscriptions-a-message-stream-on-a-time-rule)): the schedule's source, filter, window limits, rendering, quiet word, header, `cursor_seq` and `target_confirmed_at`; per run, the window (`from_seq`, `to_seq`), the counts, the processor's record, the `outcome`, the output and its notification |
-| `event_sources`, `source_chats`, `source_threads`, `source_people`, `source_runs`, `source_events`, `source_deletions` | The message stream ([Message stream](#message-stream)): a source and its ingest mode, directory, rule and `committed_seq`; its chats (kind, name, inclusion, `bridge_*` file state); thread cursors and people names (not used yet); one row per ingest run with its counts; and the events, each unique per source by `external_id`, with its `seq`, send time, `text`, raw `body` and `origin` |
+| `event_sources`, `source_chats`, `source_threads`, `source_people`, `source_runs`, `source_events`, `source_deletions` | The message stream ([Message stream](#message-stream)): a source and its ingest mode, directory, rule and `committed_seq`; chats, bridge offsets, chat/thread cursors, people names and ingest-run counts; unique events per source and `external_id`, with their `seq`, send time, `text`, raw `body` and `origin` |
+| `source_collection_settings`, `source_parity_sessions`, `source_parity_members`, `source_parity_coverage`, `source_stream_alerts` | Opt-in collector settings/fire slots, frozen reference windows and independent identity/coverage evidence, and durable alert episodes with separate open/recovery delivery claims |
 | `step_workspaces` | A step's git worktree ([Step workspaces](#step-workspaces)): `task_id`, `step_id` (both going with the task or step), `repo_dir` and `subdir` (the task directory in it), `target_branch`, `path`, `branch`, `base_commit`, `checkpoint`, `result_commit`, `merge_commit`, `state` (`active`, `merging`, `merged`, `unmerged`, `discarded`), `merge_error` (required when `unmerged`) with `merge_files`, `detail`, `links` (the paths linked back to the task directory's), `removed_at` (its directory and branch are gone); one in use (`active` or `merging`) per step |
 | `agent_sessions` | The session each resident agent resumes: `manager` or `planner-<task_id>`, its `session_id`, `session_totals`, the `runtime_type` and `provider_id` it belongs to and the `profile_id` that ran it last (`NULL` runtime: before Agent Profiles, Claude Code; `NULL` provider: before providers were recorded, Claude Code's own login), and `clean_start` (the user dropped the session with `/new`: the next one starts without a resume brief) |
 | `manager_sessions` | The default Manager's group (`group:`) and other-sender direct-chat (`dm:`) sessions with [session routing](#manager-session-routing) on, keyed by `(manager_id, session_key)` (`session_key` = `kind:channel_id:chat`): the same session fields as `agent_sessions`, `context_tokens` and `last_turn_cost_usd` (for session budgets), and `last_active_at`. `main` stays in `agent_sessions` |

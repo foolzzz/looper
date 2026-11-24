@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import shutil
 import sys
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -100,7 +101,7 @@ def build_parser() -> argparse.ArgumentParser:
 def _add_claude_code_parser(commands: argparse._SubParsersAction) -> None:
     cc = commands.add_parser(
         "claude-code", allow_abbrev=False,
-        help="Give your own Claude Code the Manager's operator profile (opt-in).",
+        help="Give your own Claude Code the Manager's profile and read-only retrieval (opt-in).",
         description="Reuse looper profile show for your own Claude Code. Nothing is installed until install "
                     "shows the change and you confirm it.")
     sub = cc.add_subparsers(dest="claude_code_command", required=True)
@@ -110,15 +111,20 @@ def _add_claude_code_parser(commands: argparse._SubParsersAction) -> None:
                     "0 printed, 1 unavailable or empty, 2 usage, 4 inside an agent run. "
                     "With --hook: print SessionStart JSON or nothing, never write stderr, always exit 0.")
     profile.add_argument("--hook", action="store_true", help="Claude Code SessionStart hook mode.")
-    for name, help_text in (("install", "Add the SessionStart hook after showing the change."),
-                            ("uninstall", "Remove the SessionStart hook after showing the change.")):
+    for name, help_text in (("install", "Add the SessionStart hook and retrieval MCP server after confirmation."),
+                            ("uninstall", "Remove the SessionStart hook and retrieval MCP server after confirmation.")):
         command = sub.add_parser(name, allow_abbrev=False, help=help_text)
-        # Python 3.11 argparse rejects [] with nargs="*", choices=["hook"]. Validate in run instead.
-        command.add_argument("parts", nargs="*", help="What to change: hook (default: every part).")
+        # Python 3.11 argparse rejects [] with nargs="*", choices=["hook", "mcp"]. Validate in run instead.
+        command.add_argument("parts", nargs="*", help="What to change: hook, mcp (default: every part).")
         command.add_argument("--yes", action="store_true", help="Write without asking (review --dry-run first).")
         command.add_argument("--dry-run", action="store_true", help="Show the change; write nothing.")
+        command.add_argument("--claude", default=shutil.which("claude"), help="Claude Code executable path.")
         _add_location_flags(command)
+    mcp = sub.add_parser("mcp", allow_abbrev=False,
+        help="Serve read-only retrieval tools over MCP on stdin/stdout (install mcp registers it).")
+    _add_location_flags(mcp)
     status = sub.add_parser("status", allow_abbrev=False, help="Show what is installed and whether it works.")
+    status.add_argument("--claude", default=shutil.which("claude"), help="Claude Code executable path.")
     for command in (profile, status):
         _add_location_flags(command)
 
@@ -139,6 +145,14 @@ def _add_msgflow_parser(commands: argparse._SubParsersAction) -> None:
     imp.add_argument("--per-file", action="store_true", help="Also print one reconciliation line per file.")
     imp.add_argument("--source", help="The source id (default: the only one).")
     _add_location_flags(imp)
+    parity = sub.add_parser("parity", allow_abbrev=False, help="Read an independent frozen-window parity report.",
+        description="Read local bridge-reference and collection identities without calling the platform or changing state.")
+    parity.add_argument("--source", help="The source id (default: the only one).")
+    parity.add_argument("--session", help="A positive decimal parity session id (default: latest).")
+    parity.add_argument("--json", action="store_true", help="Print the closed versioned JSON report.")
+    parity.add_argument("--limit", type=int, default=100, help="Bucket page size (1 to 200).")
+    parity.add_argument("--cursor", help="A cursor from the preceding report page.")
+    _add_location_flags(parity)
     delete = sub.add_parser("delete", allow_abbrev=False, help="Delete one message after reviewing its limits.",
         description="Preview a message deletion, list copies it cannot reach, then type delete to confirm. "
                     "A tombstone prevents a later import from restoring the message.")

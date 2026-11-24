@@ -173,9 +173,11 @@ def test_operator_edits_reach_the_next_turn_and_clear_without_restarting(monkeyp
         manager = ManagerAgent(config=ManagerConfig(
             claude_bin=mcp_manager_claude(tmp_path, [[], [], [], []]), work_dir=tmp_path), runtime_root=tmp_path)
         manager._bus = bus
+        api_root = tmp_path / "operator-api"
+        api_root.mkdir()
         try:
             async with manager_endpoint(manager, bus, SimpleNamespace(has_planner=lambda _: False), tmp_path), \
-                    v1_api(tmp_path, pool) as call:
+                    v1_api(api_root, pool) as call:
                 async def save(body):
                     status, response = await call("manager_persona.update", body)
                     assert status == 200, response

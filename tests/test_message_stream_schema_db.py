@@ -61,7 +61,8 @@ def test_a_database_without_the_tables_gets_them_on_upgrade(monkeypatch):
     leads = ("intent_posts", "intent_sources", "intents", "intent_alert_senders", "message_chat_projects",
              "intent_type_projects", "intent_type_versions", "intent_types", "message_lead_people",
              "message_lead_sources", "message_leads")
-    tables = ("morning_brief_triage", "triage_event_sources", "triage_events", *leads, "subscription_deliveries", "subscription_runs", "subscription_daily_claims", "subscriptions",
+    tables = ("source_stream_alerts", "source_parity_coverage", "source_parity_members",
+              "source_parity_sessions", "source_collection_settings", "morning_brief_triage", "triage_event_sources", "triage_events", *leads, "subscription_deliveries", "subscription_runs", "subscription_daily_claims", "subscriptions",
               "source_deletions", "source_events", "source_runs", "source_threads", "source_people", "source_chats",
               "event_sources")
 

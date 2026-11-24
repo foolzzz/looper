@@ -368,3 +368,22 @@ def test_a_group_row_intent_must_be_a_dev_task_or_a_bug(kind, sources, dropped):
                   now=NOW, valid_days=90, enabled_types=TYPES | {"custom"}, app_seqs=(), group_seqs={101})
     assert len(found.items) == (0 if dropped else 1)
     assert dict(found.dropped) == ({"group_type": 1} if dropped else {})
+
+
+def test_mr_review_joins_group_types_only_when_rules_widen_them():
+    from looper.agents import leads_model
+
+    reply = json.dumps({"intents": [intent(type="mr_review", sources=["m1"]),
+                                    intent(type="alert_triage", sources=["m2"])]})
+    blocked = parse("intents", reply, REFS, now=NOW, valid_days=90, enabled_types=TYPES | {"mr_review"},
+                    app_seqs=(), group_seqs={101})
+    assert [item["type"] for item in blocked.items] == ["alert_triage"]
+    assert dict(blocked.dropped) == {"group_type": 1}
+    widened = parse("intents", reply, REFS, now=NOW, valid_days=90, enabled_types=TYPES | {"mr_review"},
+                    app_seqs=(), group_seqs={101}, group_types=leads_model.RULE_GROUP_INTENT_TYPES)
+    assert [item["type"] for item in widened.items] == ["mr_review", "alert_triage"]
+    assert not widened.dropped
+    direct = extraction.instructions("intents", "request", [], group=False, rules=True)
+    assert "MR review requests" not in direct
+    assert extraction.instructions("intents", "request", [], group=True) == (
+        extraction.instructions("intents", "request", []) + "\n\n" + extraction.GROUP_REQUESTS_NOTE)

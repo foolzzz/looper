@@ -365,6 +365,8 @@ async def type_create(key: str, *, name: str, guidance: str, priority: str, defa
                       edited_via: str = "dashboard", db: Any = None) -> dict:
     if not isinstance(key, str) or not re.fullmatch(r"[a-z][a-z0-9_]{0,31}", key):
         raise ValueError("key must match [a-z][a-z0-9_]{0,31}")
+    if key == leads_model.RULE_INTENT_TYPE:
+        raise IntentRefused("intent type key is reserved")
     async with _db(db).acquire() as conn, conn.transaction():
         await conn.execute("LOCK TABLE intent_types IN SHARE ROW EXCLUSIVE MODE")
         if await conn.fetchval("SELECT EXISTS(SELECT 1 FROM intent_types WHERE key=$1)", key):
@@ -634,7 +636,7 @@ async def stats(days: int = 30, *, now: datetime | None = None, db: Any = None) 
         "count(i.id) FILTER(WHERE i.state='expired') AS expired,count(i.id) FILTER(WHERE i.state='merged') AS merged, "
         "count(i.id) FILTER(WHERE i.state='dropped') AS dropped "
         "FROM intent_types t JOIN intent_type_versions v ON v.type_key=t.key AND v.version=t.version "
-        "LEFT JOIN intents i ON i.type_key=t.key AND i.created_at >= $1 GROUP BY t.key,v.name ORDER BY t.key",
+        "LEFT JOIN intents i ON i.type_key=t.key AND i.created_at >= $1 GROUP BY t.key,t.builtin,v.name ORDER BY t.key",
         (now or _now()) - timedelta(days=days))
     result = []
     rules_on = await leads_model.rule_types_enabled(_db(db))
