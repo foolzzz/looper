@@ -201,7 +201,7 @@ export function LayerSettingsForm({
   const [only] = roles;
   // The processor's, the advisor's, the advice check's and the leads check's own layers have no harness (their prompt
   // is their role prompt and what they are given) and no prompt mode: they always replace the runtime's prompt.
-  const processor = roles.length === 1 && ["processor", "advisor", "advice_check", "leads_check"].includes(only ?? "");
+  const processor = roles.length === 1 && ["processor", "advisor", "advice_check", "leads_check", "outbound_check"].includes(only ?? "");
   const concurrencyRole: TaskLimitRole | null =
     layer === "role" && roles.length === 1 && (only === "worker" || only === "reviewer") ? only : null;
 
@@ -253,7 +253,7 @@ export function LayerSettingsForm({
         id={`${idPrefix}-profile`}
         value={draft.profile}
         onChange={(profile) => set({ profile })}
-        emptyLabel={isSystem ? `Built-in: ${limits.builtin_profile.name}` : "Inherit"}
+        emptyLabel={only === "outbound_check" ? "使用本角色内置 Profile" : isSystem ? `Built-in: ${limits.builtin_profile.name}` : "Inherit"}
         roles={roles}
         describedBy={`${idPrefix}-profile-now ${idPrefix}-profile-hint`}
         unlistedName={effective?.profile.value.profile_id === draft.profile ? profileName(effective.profile.value) : undefined}
@@ -278,7 +278,8 @@ export function LayerSettingsForm({
   );
 
   return (
-    <form onSubmit={save} className="space-y-4">
+    <form onSubmit={save} className={cn("space-y-4", only === "outbound_check" &&
+      "pointer-coarse:[&_button]:min-h-11")}>
       {profileFirst && profileField}
       {profileFirst && (
         <h4 className="border-t border-border pt-4 text-xs font-semibold">More overrides</h4>

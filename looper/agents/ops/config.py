@@ -133,7 +133,7 @@ def _project_listed(view: Mapping[str, Any]) -> dict[str, Any]:
 def _model_project(view: Mapping[str, Any]) -> dict[str, Any]:
     """A project as the Manager's tool gives it: without the advisor's settings while its switch is off, so the
     model sees what it saw before the advisor (the advisor RFC, section 13)."""
-    hidden = set()
+    hidden = {"memory_lessons"}
     if view.get("advisor") != "on":
         hidden.update(ADVISOR_FIELDS)
     if view.get("subagents") != "on":

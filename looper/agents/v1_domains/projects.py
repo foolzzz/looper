@@ -23,7 +23,7 @@ EXECUTION = {
     "task_budget_action": _choice("wrap_up", "fail", "ask"), "review_policy": _choice("planner", "all"),
     "step_workspaces": _choice("shared", "worktree"), "task_workspaces": _choice("in_place", "worktree"),
     **dict.fromkeys(("planner_roles", "wait_commands", "user_gates", "agent_room", "operator_notes", "vault",
-                    "dependency_conditions", "advisor", "subagents"),
+                    "dependency_conditions", "advisor", "subagents", "memory_lessons"),
                     _choice("off", "on")),
     **dict.fromkeys(("workspace_links", "verification_paths", "advisor_internal_domains"),
                     {"type": ["array", "null"], "items": _STR}),
@@ -36,7 +36,7 @@ PROJECT = _object({"project_id": _STR, "name": _STR, "description": _STR, "work_
     "default_workflow": _NULL_STR,
     "background": _STR, "created_at": _STR, "updated_at": _STR,
     "task_count": _INT, "active_count": _INT, "schedule_count": _INT, **EXECUTION})
-PROJECT["required"] = [name for name in PROJECT["required"] if name not in SUBAGENT_FIELDS]
+PROJECT["required"] = [name for name in PROJECT["required"] if name not in (*SUBAGENT_FIELDS, "memory_lessons")]
 PROJECT["properties"]["acceptance_checks"] = ACCEPTANCE_CHECKS
 INPUT_EXECUTION = {}
 for field, schema in EXECUTION.items():
@@ -46,7 +46,7 @@ for field, schema in EXECUTION.items():
         schema = {"type": ["string", "boolean", "null"],
                   "enum": ["off", "draft", "write", "", True, False, None],
                   "description": "Lessons mode; true maps to write, false, null and empty string map to off."}
-    elif "enum" in schema or field in ("workspace_links", "verification_paths"):
+    elif field != "memory_lessons" and ("enum" in schema or field in ("workspace_links", "verification_paths")):
         schema = {"anyOf": [schema, {"const": ""}]}
     INPUT_EXECUTION[field] = schema
 PATCH_FIELDS = {"name": _STR, "description": _STR, "work_dir": _STR, "background": _STR,
@@ -59,12 +59,12 @@ MOVED = _object({"project": PROJECT, "old_dir": _STR, "new_dir": _STR, "link_old
     "notes": _object({"moved": _BOOL, "from": _STR, "to": _STR, "reason": _STR}, required=("moved",))})
 # The Manager's compact project leaves out the advisor's settings while the project's advisor is off (the advisor
 # RFC, section 13: what the model sees stays as it was).
-COMPACT_PROJECT = _object(PROJECT["properties"], [name for name in PROJECT["properties"] if name not in (*ADVISOR_FIELDS, *SUBAGENT_FIELDS, "acceptance_checks")])
+COMPACT_PROJECT = _object(PROJECT["properties"], [name for name in PROJECT["properties"] if name not in (*ADVISOR_FIELDS, *SUBAGENT_FIELDS, "acceptance_checks", "memory_lessons")])
 COMPACT_PROJECT_RESULT = _object({"project": COMPACT_PROJECT})
 COMPACT_MOVED = {**MOVED, "properties": {**MOVED["properties"], "project": COMPACT_PROJECT}}
 MOVE_PREVIEW = _object({"old_dir": _STR, "new_dir": _STR, "impact": _STR, "move_version": _STR})
 MOVE_REQUEST = {"project": _STR, "to": _STR, "link_old": _BOOL}
-SCHEMAS = {"Project": PROJECT, "ProjectExecution": _object(EXECUTION, [field for field in EXECUTION if field not in SUBAGENT_FIELDS]), "ProjectPatch": PATCH}
+SCHEMAS = {"Project": PROJECT, "ProjectExecution": _object(EXECUTION, [field for field in EXECUTION if field not in (*SUBAGENT_FIELDS, "memory_lessons")]), "ProjectPatch": PATCH}
 RESULTS = {
     # The compact Manager list omits the root when unset to preserve its model-visible result.
     "projects.list": _object({"projects": _array(_object({"project": _STR, "work_dir": _NULL_STR,
