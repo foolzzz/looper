@@ -262,6 +262,11 @@ def test_unavailable_verification_stops_rule_search():
         assert decision.selection == "fallback" and decision.rule_id is None
         assert decision.conditions[-1]["result"] == "unavailable"
     assert evaluate(candidate(first_fact=fact(state="closed")), [first, later]).action == "record_only"
+    missing = VerifiedFact(parse_target(URL, CONFIG), False)
+    decision = evaluate(candidate(first_fact=missing), [first, later])
+    assert decision.action == "record_only" and decision.rule_id == later["id"]
+    assert decision.conditions[0]["reason"] == "mr_not_found"
+    assert decision.attempts[0]["reason"] == "mr_missing"
 
 
 def test_prepare_uses_only_cited_event_urls_and_preserves_first_fact(tmp_path):
@@ -376,4 +381,37 @@ def test_raw_url_tokenization_preserves_valid_route_identifier_suffixes(tmp_path
         prepared = await prepare_message_candidates(parsed, {1:{"seq":1,"text":"Review " + dotted_url}}, config)
         assert prepared.candidates[0].target.mr_url == dotted_url
         assert prepared.candidates[0].first_fact.mr_id == "12."
+    asyncio.run(check())
+
+
+@pytest.mark.parametrize("exit_code", [0, 2])
+def test_normal_exit_terminates_detached_output_children(tmp_path, exit_code):
+    async def check():
+        ready = tmp_path / "child-ready"
+        marker = tmp_path / "child-survived"
+        child = (f"from pathlib import Path; import time; Path({str(ready)!r}).touch(); "
+                 f"time.sleep(0.8); Path({str(marker)!r}).touch()")
+        source = (
+            "import subprocess,sys,time\nfrom pathlib import Path\n"
+            f"subprocess.Popen([sys.executable,'-c',{child!r}], "
+            "stdin=subprocess.DEVNULL,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)\n"
+            f"while not Path({str(ready)!r}).exists(): time.sleep(0.01)\n"
+            f"print({json.dumps(response())!r})\nsys.exit({exit_code})"
+        )
+        result = await verify(URL, adapter(tmp_path, source))
+        assert ready.exists()
+        if exit_code == 0:
+            assert isinstance(result, VerifiedFact)
+        else:
+            assert result.reason == "verification_exit"
+        await asyncio.sleep(1)
+        assert not marker.exists()
+    asyncio.run(check())
+
+
+def test_relative_executable_is_never_resolved_through_path(tmp_path):
+    async def check():
+        config = adapter(tmp_path, f"print({json.dumps(response())!r})")
+        config.update(executable=Path(sys.executable).name, env={"PATH": str(Path(sys.executable).parent)})
+        assert (await verify(URL, config)).reason == "adapter_missing"
     asyncio.run(check())

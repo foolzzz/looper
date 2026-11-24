@@ -10,7 +10,7 @@ from tests.db_support import DSN, run_db
 pytestmark = pytest.mark.skipif(not DSN, reason="requires disposable LOOPER_TEST_DATABASE_URL")
 
 
-@pytest.mark.parametrize("reason", [None, "verification_unavailable"])
+@pytest.mark.parametrize("reason", [None, "mr_missing", "mr_not_open", "verification_unavailable"])
 def test_execution_statistics_count_verification_failures_without_creations(reason):
     async def test(pool):
         rule_id = str(uuid4())

@@ -344,3 +344,84 @@ def test_publish_is_requested_until_task_router_acknowledges_start(monkeypatch, 
         assert await tasks.start_ready_task(envelope.payload["task_id"], pool=pool)
         assert await pool.fetchval("SELECT start_state FROM intent_rule_executions") == "started"
     run_db(check, monkeypatch)
+
+
+@pytest.mark.parametrize("fresh_kind,reason,faults", [
+    ("missing", "mr_missing", 0), ("timeout", "verification_timeout", 1),
+    ("changed", "revision_changed", 0), ("closed", "mr_not_open", 0),
+])
+def test_stale_first_fact_never_creates_a_task(monkeypatch, tmp_path, fresh_kind, reason, faults):
+    async def check(pool):
+        from datetime import datetime, timedelta, timezone
+        from looper.agents import intent_rule_engine as engine
+        from looper.agents.api_v1 import OPERATOR
+        from looper.agents.intent_rule_verifier import VerificationUnavailable, VerifiedFact
+        from looper.db import intent_rules as store
+        await configure(pool, tmp_path)
+        async def verifier(*_args, **_kwargs):
+            return fact()
+        service = engine.IntentRuleService(db=pool, verifier=verifier)
+        await service.submit_discovery("discovery", "stale", "review-system", URL, principal=OPERATOR)
+        prepared = await pool.fetchval("SELECT prepared_target FROM intent_rule_work")
+        if isinstance(prepared, str):
+            import json
+            prepared = json.loads(prepared)
+        candidate = engine.PreparedCandidate.from_mapping(prepared["candidate"])
+        assert engine.evaluate(candidate, await store.read_rules(pool)).action == "create_task"
+        fresh = {"missing": VerifiedFact(fact().target, False),
+                 "timeout": VerificationUnavailable("verification_timeout"),
+                 "changed": fact("head-b"), "closed": fact(state="closed")}[fresh_kind]
+        service.verifier = lambda *_a, **_kw: asyncio.sleep(0, result=fresh)
+        await service.run_once()
+        assert await pool.fetchval("SELECT reason FROM intent_rule_work") == reason
+        assert await pool.fetchval("SELECT reason FROM intent_rule_hits") == reason
+        for table in ("tasks", "intent_rule_mr_claims", "intent_rule_executions", "intent_rule_task_starts"):
+            assert await pool.fetchval(f"SELECT count(*) FROM {table}") == 0
+        assert await pool.fetchval("SELECT coalesce(sum(used),0) FROM intent_rule_project_days") == 0
+        now = datetime.now(timezone.utc)
+        stats = await store.hit_stats(pool, since=now-timedelta(days=1), until=now+timedelta(seconds=1))
+        assert sum(row["verification_unavailable"] for row in stats["rules"]) == faults
+        # Positive control: a new observation of an unchanged open revision creates once.
+        service.verifier = verifier
+        await service.submit_discovery("discovery", "fresh", "review-system", URL, principal=OPERATOR)
+        await service.run_once()
+        assert await pool.fetchval("SELECT count(*) FROM tasks") == 1
+    run_db(check, monkeypatch)
+
+
+@pytest.mark.parametrize("entry,fresh_kind,reason", [
+    ("manual", "missing", "mr_missing"), ("manual", "timeout", "verification_timeout"),
+    ("claim_revision", "missing", "mr_missing"), ("claim_revision", "timeout", "verification_timeout"),
+    ("claim_revision", "changed", "revision_changed"),
+])
+def test_explicit_creation_entries_preserve_verification_reason(monkeypatch, tmp_path, entry, fresh_kind, reason):
+    async def check(pool):
+        from looper.agents import intent_rule_engine as engine
+        from looper.agents.api_v1 import OPERATOR
+        from looper.agents.intent_rule_verifier import VerificationUnavailable, VerifiedFact
+        from looper.agents.ops import OpError
+        await configure(pool, tmp_path)
+        service = engine.IntentRuleService(db=pool, verifier=lambda *_a, **_kw: asyncio.sleep(0, result=fact()))
+        monkeypatch.setattr(engine, "_INSTALLED", service)
+        record = await service.submit_discovery("discovery", "manual", "review-system", URL, principal=OPERATOR)
+        fresh = {"missing": VerifiedFact(fact().target, False),
+                 "timeout": VerificationUnavailable("verification_timeout"), "changed": fact("head-b")}[fresh_kind]
+        service.verifier = lambda *_a, **_kw: asyncio.sleep(0, result=fresh)
+        with pytest.raises(OpError) as error:
+            if entry == "manual":
+                await engine.discovery_build(record["discovery_id"], "review", "review", principal=OPERATOR, db=pool)
+            else:
+                await engine.claim_revision("task-existing", "review-system", URL, "head-a", principal=OPERATOR, db=pool)
+        assert str(error.value) == reason
+        assert await pool.fetchval("SELECT count(*) FROM tasks") == 0
+        assert await pool.fetchval("SELECT count(*) FROM intent_rule_mr_claims") == 0
+        assert await pool.fetchval("SELECT count(*) FROM intent_rule_executions") == 0
+        service.verifier = lambda *_a, **_kw: asyncio.sleep(0, result=fact())
+        if entry == "manual":
+            assert (await engine.discovery_build(record["discovery_id"], "review", "review", principal=OPERATOR, db=pool))["task_id"]
+        else:
+            await pool.execute("INSERT INTO tasks(id,project_id,requirement,status) VALUES('task-existing','review','Synthetic task','init')")
+            assert (await engine.claim_revision("task-existing", "review-system", URL, "head-a", principal=OPERATOR, db=pool))["task_id"] == "task-existing"
+        assert await pool.fetchval("SELECT count(*) FROM tasks") == 1
+        assert await pool.fetchval("SELECT count(*) FROM intent_rule_mr_claims") == 1
+    run_db(check, monkeypatch)

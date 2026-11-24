@@ -4,7 +4,7 @@ from __future__ import annotations
 import json
 from datetime import datetime, timezone
 
-ADAPTER = {"system_id": "review-system", "executable": "synthetic-verifier", "args": [],
+ADAPTER = {"system_id": "review-system", "executable": "/opt/synthetic/verifier", "args": [],
     "allowed_domains": ["review.example"], "route": [{"kind": "id", "name": "repository_id"},
         {"kind": "literal", "value": "mr"}, {"kind": "id", "name": "mr_id"}],
     "operator_id": "review-operator", "credential_env": {}, "env": {}}
@@ -40,8 +40,16 @@ async def configure(pool, directory, *, cap=50):
 
 
 def fact(revision="head-a", state="open"):
-    from looper.agents.intent_rule_verifier import VerifiedFact
-    return VerifiedFact.from_mapping({"schema_version":1,"status":"verified","facts":{
+    return verified_fact({"schema_version":1,"status":"verified","facts":{
         "exists":True,"state":state,"reviewers":["review-operator"],"repository":"repository", "mr_id":"7",
         "revision":revision,"canonical_url":URL}}, ADAPTER)
 
+
+
+def verified_fact(value, config):
+    """Build synthetic adapter facts without exposing a product verification entry."""
+    from looper.agents.intent_rule_verifier import VerifiedFact, _response, parse_target
+    target = parse_target(value["facts"]["canonical_url"], config)
+    result = _response(json.dumps(value).encode(), target, config)
+    assert isinstance(result, VerifiedFact)
+    return result

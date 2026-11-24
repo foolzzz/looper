@@ -12,7 +12,6 @@ import json
 import os
 import re
 import signal
-import shutil
 import tempfile
 from types import MappingProxyType
 from typing import Any, Mapping
@@ -110,17 +109,7 @@ class VerifiedFact:
         return value
 
     @classmethod
-    def from_mapping(cls, value: Mapping[str, Any], config: Mapping[str, Any] | None = None) -> VerifiedFact:
-        if config is not None:
-            raw_facts = value.get("facts", value)
-            target = parse_target(raw_facts.get("canonical_url", ""), config)
-            if target is None:
-                raise ValueError("Invalid response target")
-            response = value if "facts" in value else {"schema_version": 1, "status": "verified", "facts": value}
-            result = _response(json.dumps(response).encode(), target, config)
-            if not isinstance(result, VerifiedFact):
-                raise ValueError("Invalid verified response")
-            return result
+    def from_mapping(cls, value: Mapping[str, Any]) -> VerifiedFact:
         fields = dict(value)
         if fields.pop("status", None) != "verified":
             raise ValueError("Invalid persisted verification status")
@@ -273,10 +262,6 @@ async def verify(mr_url: str, config: Mapping[str, Any] | None, *,
             return VerificationUnavailable("adapter_missing")
         env[name] = secret
     executable = adapter["executable"]
-    if not executable.startswith("/"):
-        executable = shutil.which(executable, path=env.get("PATH", os.defpath))
-        if executable is None:
-            return VerificationUnavailable("adapter_start_failed")
     proc: asyncio.subprocess.Process | None = None
 
     async def call(cwd: str) -> VerificationResult:
@@ -308,6 +293,7 @@ async def verify(mr_url: str, config: Mapping[str, Any] | None, *,
         try:
             await asyncio.gather(*streams)
             code = await proc.wait()
+            await _terminate(proc)
         finally:
             for task in streams:
                 task.cancel()

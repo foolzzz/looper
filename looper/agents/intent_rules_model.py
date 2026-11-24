@@ -224,7 +224,8 @@ _PLAIN_ENV_NAME = {"type": "string", "pattern": (
 )}
 ADAPTER_SCHEMA = _object({
     "system_id": ID_SCHEMA,
-    "executable": {"type": "string", "pattern": r"^(?:/[^\x00\r\n]+|[A-Za-z0-9_.-]+)$(?![\s\S])"},
+    "executable": {"type": "string", "pattern": r"^[^\x00\r\n]+$(?![\s\S])",
+                   "description": "Absolute executable path; PATH lookup is not supported."},
     "args": _array({"type": "string", "pattern": r"^[^\x00]*$(?![\s\S])"}),
     "allowed_domains": _array(HOST_SCHEMA, minimum=1, unique=True),
     "route": _array(ROUTE_SEGMENT_SCHEMA, minimum=1), "operator_id": ID_SCHEMA,
@@ -326,6 +327,8 @@ def validate_adapter(value: Any) -> dict[str, Any] | None:
     if value is None:
         return None
     adapter = validate_schema(value, ADAPTER_SCHEMA)
+    if not PurePath(adapter["executable"]).is_absolute():
+        raise ValueError("Adapter executable must be an absolute path")
     if PurePath(adapter["executable"]).name.lower() in {"sh", "bash", "zsh", "dash", "fish", "csh", "ksh"}:
         raise ValueError("Adapter executable must not be a shell")
     names = [segment["name"] for segment in adapter["route"] if segment["kind"] == "id"]

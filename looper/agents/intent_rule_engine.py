@@ -183,6 +183,14 @@ def _identity(fact, adapter):
         "mr_id": body["mr_id"], "revision": body["revision"], "canonical_url": body["canonical_url"]}
 
 
+def _identity_failure(fact):
+    if isinstance(fact, VerificationUnavailable):
+        return fact.reason
+    if isinstance(fact, VerifiedFact) and not fact.exists:
+        return "mr_missing"
+    return "cannot_decide"
+
+
 def _fallback(decision, reason):
     # A matched rule can be denied at admission. Keep that rule/version for
     # attribution while recording the actual confirmation action and reason.
@@ -355,7 +363,7 @@ async def claim_and_create(conn, candidate, decision, fresh_facts, versions, *, 
     identity = _identity(fresh_facts, config["adapter"])
     first = _identity(candidate.first_fact, config["adapter"])
     if (decision.action == "create_task" or manual) and (identity is None or first is None):
-        reason = getattr(fresh_facts, "reason", None) or "verification_unavailable"
+        reason = _identity_failure(fresh_facts if identity is None else candidate.first_fact)
     elif identity and first and identity != first:
         reason = "revision_changed"
     if identity and fresh_facts.to_dict().get("facts", fresh_facts.to_dict()).get("state") != "open":
@@ -661,7 +669,7 @@ async def _manual(work, *, project_id, template_key, db, platform=None, via="das
     fresh = await service.verifier(candidate.target.canonical_url, config["adapter"]) if candidate.target else VerificationUnavailable("ambiguous_target")
     if _identity(fresh, config["adapter"]) is None:
         # A stable identity is mandatory even for an explicit manual action.
-        raise OpError(ErrorCode.CONFLICT, "verification_unavailable: MR identity could not be established")
+        raise OpError(ErrorCode.CONFLICT, _identity_failure(fresh))
     # Manual authorization does not reuse old reviewer/DM predicates or automatic quota.
     candidate = replace(candidate, first_fact=fresh)
     decision = RuleDecision(action="create_task", reason="matched", selection="manual", rule_id=None,
@@ -796,8 +804,10 @@ async def claim_revision(task_id, system_id, mr_url, expected_revision, *, princ
     service = installed() or IntentRuleService(db=pool)
     fact = await service.verifier(mr_url, adapter)
     identity = _identity(fact, adapter)
-    if identity is None or identity["revision"] != expected_revision:
-        raise OpError(ErrorCode.CONFLICT, "revision could not be verified")
+    if identity is None:
+        raise OpError(ErrorCode.CONFLICT, _identity_failure(fact))
+    if identity["revision"] != expected_revision:
+        raise OpError(ErrorCode.CONFLICT, "revision_changed")
     async with pool.acquire() as conn, conn.transaction():
         await rules.lock_admission(conn)
         if (await rules.get_config(conn))["generation"] != config["generation"]:

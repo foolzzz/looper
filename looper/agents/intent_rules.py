@@ -261,6 +261,8 @@ async def _prepare(conn, config, catalog, rules, command, operator_key, *, execu
             if row["position"] != position:
                 row["position"], row["version"] = position, row["version"] + 1
     elif kind == "settings":
+        if "adapter" in command:
+            _validate(model.validate_adapter, command["adapter"])
         for field in ("adapter", "discovery_sources"):
             if field in command:
                 config[field] = deepcopy(command[field])
