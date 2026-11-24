@@ -1,7 +1,7 @@
 """Optional vault directory for a project's knowledge; unset preserves existing reads."""
 
 name = "project_knowledge_dir"
-order = pending_order = 1920
+order = pending_order = 1970
 fresh_ddl = "ALTER TABLE projects ADD COLUMN IF NOT EXISTS knowledge_dir TEXT;\n"
 
 

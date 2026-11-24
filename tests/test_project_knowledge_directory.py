@@ -76,7 +76,7 @@ def test_directory_migration_is_ordered_and_adds_missing_column(monkeypatch):
     from looper.db.migrations import project_knowledge_dir as migration
 
     ordered = migrations.discover()
-    assert migration.order == migration.pending_order == 1920
+    assert migration.order == migration.pending_order == 1970
     assert sum(item.order == migration.order for item in ordered) == 1
     assert ordered.index(migration) > next(i for i, item in enumerate(ordered) if item.name == "memory_lessons")
 
