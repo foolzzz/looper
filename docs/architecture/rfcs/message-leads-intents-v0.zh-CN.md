@@ -251,8 +251,9 @@ tasked、rejected、merged 是终态。
 
   ```text
   ## Requests in group chats
-  For chats marked 全部消息, use this group rule instead of the user-only scope above and in Intent types.
-  Read every human sender's messages, including the user's own. Recognize development requests and bug reports
+  For chats marked 全部消息, messages that @-mention the user or were sent by the user still follow the scope
+  above and all enabled Intent types. Only the other human messages use the following group rule instead of
+  the user-only scope and type guidance above. Recognize development requests and bug reports in those messages
   regardless of whom they address (the group, a team, a named person, or nobody) and whether someone has accepted
   the work. Acceptance does not cancel the original request; do not make a separate intent for the acceptance.
   Use dev_task for a concrete requirement, change, scenario needing support or access request. Use bug_triage
@@ -432,7 +433,7 @@ v1 操作都是 `operator_only`：只接受操作者身份（仪表盘），API 
 
 **评测**（模型可见：识别说明、类型检查之外的回复、Manager 工具和契约）：
 
-- **合成用例**（进仓库，`evals/processor`，sonnet `--reps 2`）：`intents_group_requests`（操作者在群里提出的需求、没 @ 的 bug 报告、点名交给别人且已应承的开发请求各一条，夹着闲聊、答疑、没有新请求的跟进与附和：认出三条，类型分别是 `dev_task`、`bug_triage` 和 `dev_task`）、`intents_group_requests_short`（短 @ 故障报告和点名开发请求，含已应承的请求，夹着闲聊、答疑、附和、状态与决定：分别认作 `bug_triage` / `dev_task`，其余不认）、`intents_group_requests_merge`（三个人报同一个问题：一条意图，出处三条）、`intents_group_requests_quiet`（只有不算的那几类：`NONE`）、`intents_group_requests_injection`（要助手建任务的消息：进 `instructions_seen`，没有只以它为出处的意图）。原有意图用例的输入和 prompt 不变，不重跑。
+- **合成用例**（进仓库，`evals/processor`，sonnet `--reps 2`）：`intents_group_requests`（操作者在群里提出的需求、没 @ 的 bug 报告、点名交给别人且已应承的开发请求各一条，夹着闲聊、答疑、没有新请求的跟进与附和：认出三条，类型分别是 `dev_task`、`bug_triage` 和 `dev_task`）、`intents_group_requests_short`（短 @ 故障报告和点名开发请求，含已应承的请求，夹着闲聊、答疑、附和、状态与决定：分别认作 `bug_triage` / `dev_task`，其余不认）、`intents_group_requests_original_types`（同一名单群里告警机器人 @ 操作者的请求仍认作 `alert_triage`；第三方交给别人的告警请求不认）、`intents_group_requests_merge`（三个人报同一个问题：一条意图，出处三条）、`intents_group_requests_quiet`（只有不算的那几类：`NONE`）、`intents_group_requests_injection`（要助手建任务的消息：进 `instructions_seen`，没有只以它为出处的意图）。原有意图用例的输入和 prompt 不变，不重跑。
 - **本机标注集**（不进仓库）：用目标群已有的线索当标注：`request` 和 `issue` 两类当「应识别」，其余当「不应识别」。导出用 `looper leads eval-export` 新增的 `--chat`、`--days`、`--intents` 选项，写到被 git 忽略的路径（和现有导出一样，只能写到 `evals/runs/` 或仓库外）：这个群在这段时间里全部的人发消息（按意图运行的窗口切好），加上来源在这个群的线索和它们的标签。标签是模型整理出的线索，评测前由操作者在本机文件里核对一遍。`python -m evals.processor --intents-file FILE` 按「全部消息」的说明跑意图识别，只报告计数：应识别的召回、只以「不应识别」消息为出处的意图条数、每 100 条消息的意图数、合并率、每个窗口的花费；不打印消息和意图内容。
 - **Manager 对话评测**（第二个 PR）：`intents_recognize_once`（用户在私聊里问一个群最近一周有什么需求：先 `preview`、报条数和花费、等确认）、`intents_recognize_range_cap`（要 60 天：说明最多 30 天）；sonnet `--reps 2`，加 opus xhigh 的 Manager `--reps 1`。
 - **目标**（PR 里报告，达不到就先改说明再跑，不改用例迁就模型）：标注集召回不低于 80%；只以「不应识别」消息为出处的意图每 100 条消息不超过 3 条；合成用例全部通过。
