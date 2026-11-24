@@ -19,11 +19,14 @@ from typing import Literal
 from urllib.parse import unquote, urlsplit
 
 ROOT = Path(__file__).resolve().parents[1]
-# Local disposable Postgres is 127.0.0.1:54329. CI's service is localhost:5432
-# (.github/workflows/python-tests.yml). Either host spelling of those ports.
+# Local disposable Postgres is 127.0.0.1:54329 or 127.0.0.1:54331. CI's service
+# is localhost:5432 (.github/workflows/python-tests.yml). Either host spelling
+# of those ports.
 DISPOSABLE_SERVERS = frozenset({
     ("postgresql", "127.0.0.1", 54329, "postgres"),
     ("postgresql", "localhost", 54329, "postgres"),
+    ("postgresql", "127.0.0.1", 54331, "postgres"),
+    ("postgresql", "localhost", 54331, "postgres"),
     ("postgresql", "127.0.0.1", 5432, "postgres"),
     ("postgresql", "localhost", 5432, "postgres"),
 })
@@ -48,7 +51,11 @@ def require_disposable_database(database_url: str, *, served: bool) -> None:
     name = unquote(url.path.lstrip("/"))
     server = (url.scheme, url.hostname, url.port, url.username)
     name_ok = name.startswith("looper_eval_") if served else bool(name) and name not in OPERATOR_DATABASES
-    if server not in DISPOSABLE_SERVERS or url.password != "postgres" or not name_ok or url.query or url.fragment:
+    # The default disposable password is postgres. A suite can name one other
+    # password through the environment; the value is never written into a message.
+    override = os.environ.get("PYTEST_LOOPER_DISPOSABLE_PG_PASSWORD")
+    password_ok = url.password == "postgres" or bool(override) and url.password == override
+    if server not in DISPOSABLE_SERVERS or not password_ok or not name_ok or url.query or url.fragment:
         raise ValueError("runner serve tests require their own disposable local database")
 
 
@@ -121,9 +128,16 @@ async def _bootstrap(port: int, runtime_root: Path, work_dir: Path) -> None:
 
     supervisor = None
     if os.environ.get("PYTEST_LOOPER_RUNNER", "fake") == "fake":
+        raw_cap = os.environ.get("PYTEST_LOOPER_SESSION_CAP")
+        session_cap = int(raw_cap) if raw_cap else 4
         supervisor = RunnerSupervisor(runtime_root,
-            {"fake": [sys.executable, "-u", str(ROOT / "runners/fake/main.py")]}, connect=connect)
+            {"fake": [sys.executable, "-u", str(ROOT / "runners/fake/main.py")]},
+            session_cap=session_cap, connect=connect)
         _register(supervisor)
+        if os.environ.get("PYTEST_LOOPER_HOLD_SIBLING") == "1":
+            sibling = await supervisor.acquire("fake")
+            print("runner test sibling=" + json.dumps({"pid": sibling._generation.process.pid,
+                  "runner_id": sibling.runner_id}), flush=True)
 
     async def no_bots():
         return []

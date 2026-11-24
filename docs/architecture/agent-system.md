@@ -4703,9 +4703,13 @@ So:
 `cost_guard.mode` defaults to `off`; it accepts `off`, `observe` and opt-in `enforce`.
 Global and background-role daily caps have no default. Observe for a week before choosing limits;
 the Settings → 花费 page then offers the last 30 days' daily P95 × 1.5 as advice, never an applied cap.
+That page also edits the mode and the global and five background-role daily caps with a sparse confirmed update.
+The dashboard shows each global currency's headroom and the pending-hold count. Reading either surface does not enable the guard.
 The operator-only `cost_guard.get/update` operations expose this configuration and accounting; updates declare
 confirmation. They are separate from `chat_settings`, add no agent tool, and are available through the generated CLI.
 Configuration export/import includes explicit cost settings, never runtime observations; a client cannot import them.
+Dashboard and API imports refuse `cost_guard.mode: enforce`; import with `off` or `observe`, then use `cost_guard.update` with
+operator confirmation to enable enforcement.
 Lark and Telegram share the same Manager/model-run paths. Exact operator DM replies continue or stop a spend hold;
 the generated CLI and operator-only `cost_holds.list/decide` provide the same decisions. API requests record `api`
 as their source; they cannot claim `dashboard`.
