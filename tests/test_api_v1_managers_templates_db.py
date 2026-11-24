@@ -69,7 +69,7 @@ def test_list_includes_runtime_pending_error_and_spend(tmp_path, monkeypatch):
             assert status == 200
             manager = next(m for m in answer["result"]["managers"] if m["id"] == "manager-review")
             assert manager["state"]["sync"] == "pending" and manager["state"]["sync_error"] == "retrying"
-            assert manager["spend"] == {"today_usd": 2.5, "last_7d_usd": 2.5, "runs_today": 1}
+            assert manager["spend"] == {"today_usd": 2.5, "last_7d_usd": 2.5, "runs_today": 1, "cost_status": "known", "unpriced_runs": 0}
     run_db(run, monkeypatch, timeout=30)
 
 
