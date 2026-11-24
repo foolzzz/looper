@@ -535,6 +535,17 @@ async def compute(days: int, filters: Filters, *, now: datetime | None = None, p
             if "error" not in item:
                 item["previous"] = _evaluate(figure, loaded["previous"])
             result["alert_figures"][name] = item
+    from . import failure_handling
+    from .failures import FailureTyping
+
+    recovery = failure_handling.get_service()
+    if recovery is not None and recovery.known_mode() is FailureTyping.ACT:
+        try:
+            from ..db import step_failures
+            result["failure_handling"] = await step_failures.stats(pool=pool or recovery.pool)
+        except Exception:
+            logger.exception("Could not read failure recovery metrics")
+            result["failure_handling"] = {"error": "Failure recovery metrics are unavailable"}
     return result
 
 

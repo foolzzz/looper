@@ -118,6 +118,11 @@ class EvalTask:
                           Mapping[int, list[Mapping[str, Any]]]], str | None] | None = None
 
     @property
+    def failure_handling(self) -> bool:
+        """Explicit failure cases run alone so their engine setting stays isolated."""
+        return bool(self.fake.get("_engine_failures"))
+
+    @property
     def real_reviewer(self) -> bool:
         """Whether its script plays its Planner and Workers in real mode too, and only its Reviewers are Claude
         Code's (``fake_claude``'s ``real_reviewer``)."""
@@ -1874,11 +1879,12 @@ def select(ids: list[str] | None) -> tuple[EvalTask, ...]:
     unknown id."""
     if not ids:
         return TASKS
-    known = {task.id for task in TASKS}
+    available = (*TASKS, *FAILURE_TASKS)
+    known = {task.id for task in available}
     unknown = sorted(set(ids) - known)
     if unknown:
         raise ValueError(f"unknown task id(s): {', '.join(unknown)}; known: {', '.join(sorted(known))}")
-    return tuple(task for task in TASKS if task.id in ids)
+    return tuple(task for task in available if task.id in ids)
 
 
 # --- The advisor (the advisor RFC, section 16): a critical step's checkpoint, and an optional consult ---
@@ -2482,6 +2488,55 @@ ACCEPTANCE_TASKS = (
     ),
 )
 TASKS = TASKS + ACCEPTANCE_TASKS
+
+
+# Runtime errors are injected before any model call; subsequent roles use the real CLI.
+def _failure_flow(expected, *, reviewer=False, breaker=False):
+    def check(detail, records, events):
+        failed = [row for row in records if row.get("failure_class") == "transient"]
+        if len(failed) != expected:
+            return f"expected {expected} injected transient failures, got {len(failed)}"
+        if reviewer and len([row for row in records if role(row) == "worker"]) != 1:
+            return "review recovery reran the completed Worker"
+        if not any(entry.get("kind") == "failure_hold" for entry in detail.get("journal", [])):
+            return "the task has no failure hold audit"
+        if breaker and not any("Consecutive execution failures" in str(row.get("input_text") or "")
+                               for row in records if role(row) == "planner"):
+            return "the Planner did not receive the consecutive failure history"
+        return None
+    return check
+
+
+FAILURE_TASKS = (
+    EvalTask(id="failure_retry_context",
+        requirement="In one work step, ensure receipt.txt contains exactly one line: applied once. "
+                    "A previous runtime may have written it before failing. Inspect existing contents and do "
+                    "not append or duplicate an existing receipt. Then create done.txt containing done.",
+        check=_all(_equals("receipt.txt", "applied once"), _equals("done.txt", "done")),
+        flow_check=_failure_flow(1), expect={"min_steps": 1, "max_steps": 1, "max_retries": 0},
+        fake={"_engine_failures": {"worker": ["connection_failed"]}, "_engine_residual": True,
+              "plan": [_step("s1", "Ensure receipt.txt contains exactly applied once, then write done.txt containing done.",
+                             ["receipt.txt has one receipt and done.txt contains done"])],
+              "attempts": {"s1": [{"files": {"done.txt": "done\n"}}]}}),
+    EvalTask(id="failure_breaker_history",
+        requirement="In one work step create done.txt containing done. If infrastructure repeatedly fails, "
+                    "use the supplied consecutive failure history to authorize at most one explicit Planner retry; "
+                    "stop if it fails again instead of creating an unbounded retry loop.",
+        check=_equals("done.txt", "done"), flow_check=_failure_flow(3, breaker=True),
+        expect={"min_steps": 1, "max_steps": 1, "max_retries": 1},
+        fake={"_engine_failures": {"worker": ["connection_failed"] * 3},
+              "plan": [_step("s1", "Create done.txt containing done.", ["done.txt contains done"])],
+              "attempts": {"s1": [{"files": {"done.txt": "done\n"}}]}}),
+    EvalTask(id="failure_reviewer_resume",
+        requirement="In one work step create done.txt containing done. An independent Reviewer must verify "
+                    "that file. A Reviewer runtime interruption must resume that review, preserving the "
+                    "already completed Worker's output.",
+        check=_equals("done.txt", "done"), flow_check=_failure_flow(1, reviewer=True),
+        expect={"min_steps": 1, "max_steps": 1, "min_reviews": 1, "max_retries": 0},
+        fake={"_engine_failures": {"reviewer": ["connection_failed"]},
+              "plan": [_step("s1", "Create done.txt containing done.", ["done.txt contains done"], review=True)],
+              "attempts": {"s1": [{"files": {"done.txt": "done\n"}}]}}),
+)
 
 
 def _memory_kept(detail, _records, _events):
