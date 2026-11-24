@@ -53,17 +53,51 @@ def test_profile_rejected_before_network_probe(tmp_path, monkeypatch):
     assert run.await_count == 1
 
 
+def _linux_probe(namespace, interfaces):
+    links = {"lo": {"up": True, "iflink": 1, "addressed": False}}
+    for name in interfaces:
+        if name != "lo":
+            links[name] = {"up": False, "iflink": 0, "addressed": False}
+    return {"namespace": namespace, "interfaces": ["lo", *interfaces], "links": links,
+            "connect_errno": errno.ENETUNREACH}
+
+
 @pytest.mark.parametrize("namespace", ["net:[old]", "net:[new]"])
 def test_linux_requires_a_new_network_namespace(tmp_path, monkeypatch, namespace):
     monkeypatch.setattr(sandbox.sys, "platform", "linux")
     monkeypatch.setattr(sandbox.shutil, "which", lambda *args, **kwargs: "/usr/bin/unshare")
     monkeypatch.setattr(sandbox.os, "readlink", lambda path: "net:[old]")
-    run = AsyncMock(side_effect=[(0, b""), (0, json.dumps({
-        "namespace": namespace, "interfaces": ["lo"], "connect_errno": errno.ENETUNREACH,
-    }).encode())])
+    run = AsyncMock(side_effect=[(0, b""), (0, json.dumps(_linux_probe(namespace, [])).encode())])
     monkeypatch.setattr(sandbox, "_run_probe", run)
     result = asyncio.run(sandbox.local_prefix(tmp_path, {}))
     assert result == (("/usr/bin/unshare", "-rn", "--") if namespace != "net:[old]" else None)
+
+
+@pytest.mark.parametrize("extra", [{}, {"tunl0": {}}, {"gre0": {}, "sit0": {}}])
+def test_linux_accepts_down_unlinked_tunnel_fallbacks(tmp_path, monkeypatch, extra):
+    monkeypatch.setattr(sandbox.sys, "platform", "linux")
+    monkeypatch.setattr(sandbox.shutil, "which", lambda *args, **kwargs: "/usr/bin/unshare")
+    monkeypatch.setattr(sandbox.os, "readlink", lambda path: "net:[old]")
+    run = AsyncMock(side_effect=[(0, b""), (0, json.dumps(_linux_probe("net:[new]", list(extra))).encode())])
+    monkeypatch.setattr(sandbox, "_run_probe", run)
+    assert asyncio.run(sandbox.local_prefix(tmp_path, {})) == ("/usr/bin/unshare", "-rn", "--")
+
+
+@pytest.mark.parametrize("links", [
+    {"eth0": {"up": False, "iflink": 2, "addressed": False}},
+    {"tunl0": {"up": True, "iflink": 0, "addressed": False}},
+    {"gre0": {"up": False, "iflink": 0, "addressed": True}},
+])
+def test_linux_rejects_a_device_that_can_leave_the_namespace(tmp_path, monkeypatch, links):
+    monkeypatch.setattr(sandbox.sys, "platform", "linux")
+    monkeypatch.setattr(sandbox.shutil, "which", lambda *args, **kwargs: "/usr/bin/unshare")
+    monkeypatch.setattr(sandbox.os, "readlink", lambda path: "net:[old]")
+    body = _linux_probe("net:[new]", [])
+    body["interfaces"] = ["lo", *links]
+    body["links"].update(links)
+    run = AsyncMock(side_effect=[(0, b""), (0, json.dumps(body).encode())])
+    monkeypatch.setattr(sandbox, "_run_probe", run)
+    assert asyncio.run(sandbox.local_prefix(tmp_path, {})) is None
 
 
 @pytest.mark.skipif(sys.platform != "darwin", reason="macOS sandbox-exec enforcement")
