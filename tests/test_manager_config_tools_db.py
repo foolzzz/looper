@@ -696,7 +696,8 @@ def test_model_writes_report_prices_and_keep_exact_unknown_names(monkeypatch, tm
         fields = {"model": model["model_id"], "context_window": 200_000} if model else {
             "provider": "deepseek", "name": name, "protocol": "anthropic-messages"}
         answer = await _tool(_Chat(tmp_path), "looper_models", action=action, **fields)
-        assert any("no full price" in w and "spend caps" in w for w in answer["warnings"]) == (name == "deepseek-typo")
+        assert any("no full price" in w and "per-run caps stop on unpriced usage" in w
+                   for w in answer["warnings"]) == (name == "deepseek-typo")
         stored = (await _ok("POST", "/api/v1/models/get", {"model": answer['model']['model_id']}))["model"]
         assert stored["name"] == name and stored["provider_id"] == provider["provider_id"]
         assert stored["warnings"] == answer["warnings"]

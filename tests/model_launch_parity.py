@@ -330,6 +330,10 @@ async def capture_tiers(
         elif runtime == "omp":
             protocol, url, metadata, effort, mode = OMP_CASES[case]
             auth, name, budget = "api_key", "capture-omp[1m]", 0.5
+            # Current success captures have a cap, so even the open-model cases need explicit prices.
+            # Keep the historical adapter-only declarations above unchanged.
+            metadata = metadata or {"name": name, "input_usd_per_mtok": 0, "output_usd_per_mtok": 0,
+                                    "cache_read_usd_per_mtok": 0, "cache_write_usd_per_mtok": 0}
             root_context = omp_capture_root()
         elif runtime == "grok":
             fallback, cost, effort, mode, explicit_home = GROK_CASES[case]

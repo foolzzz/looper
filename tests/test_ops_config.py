@@ -579,7 +579,8 @@ def test_manager_model_warnings_and_price_status(monkeypatch, action, name, prot
     answer = asyncio.run(manager_config._models(Call(arguments, Turn(None, None), None)))
     assert answer["model"]["name"] == name and answer["model"]["protocol"] == protocol
     assert answer["warnings"] == view["warnings"]
-    assert any("no full price" in w and "spend caps" in w for w in answer["warnings"]) == unpriced
+    assert any("no full price" in w and "per-run caps stop on unpriced usage" in w
+               for w in answer["warnings"]) == unpriced
     assert any("context suffix" in w and name in w for w in answer["warnings"]) == suffix
     assert any(p["effective"] is None for p in answer["model"]["prices"].values()) == unpriced
 
