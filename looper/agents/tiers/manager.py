@@ -407,8 +407,7 @@ QUOTE_READ_SEC = 80.0
 # case) starts a new session. Anything else, "/new foo" or "/news" too, is a message for Claude.
 NEW_SESSION_COMMAND = "/new"
 PREPARATION_STEPS: tuple[str, ...] = (
-    "resident_settlement",
-    "persist_user_message", "attention_enabled", "route_to_gate", "route_memory", "route_intent", "read_quote", "status_thinking", "tools_probe", "turn_lock", "load_db_config",
+    "persist_user_message", "attention_enabled", "route_to_gate", "route_memory", "route_intent", "read_quote", "resident_settlement", "status_thinking", "tools_probe", "turn_lock", "load_db_config",
     "load_session_state", "agent_settings", "templates", "library", "library_server", "outbound_review", "llmrec_attach",
     "build_user_message", "session_budget",
     "claude_command", "tool_listing", "switch_session", "claude_stop", "resident_admission", "resume_brief", "recorder_start", "claude_start", "recorder_finish",
@@ -1677,7 +1676,6 @@ class ManagerAgent:
         comes back as an ``action``), stored, the tools probed, then the Manager's role, session, agent settings,
         library, prompt and the message Claude is sent. With ``ask`` (the resume retry, or a caller without a chat
         message) only the second half runs."""
-        await token.keep("resident_settlement", self._settle_native_inputs(token), 60)
         if ask is None:
             text = envelope.payload.get("text", "")
             if is_new_session_command(text):
@@ -1731,6 +1729,8 @@ class ManagerAgent:
                 return Prepared()
             # Read here, in the message's turn: in order, stoppable, and again when a restart replays the message.
             quoted = await token.step("read_quote", self._read_quote(envelope, quote_ref)) if quote_ref else None
+            # Code-only replies do not claim the resident or replace its native tool binding.
+            await token.keep("resident_settlement", self._settle_native_inputs(token), 60)
             origin = _message_origin(envelope)
             client_id, client_name = _message_client(envelope)
             # The calls Claude makes while answering belong to this message and its chat (and its API client).
@@ -1769,6 +1769,8 @@ class ManagerAgent:
                        if self.ops is not None and not self._mid_turn.native_started(token) else "")
             ask = Ask(text, "\n".join(part for part in (waiting, gate.note, stopped_note) if part), turn,
                       quoted=quoted)
+        else:
+            await token.keep("resident_settlement", self._settle_native_inputs(token), 60)
         token.prepared_ask = ask
         await token.step("load_db_config", self._load_db_config())
         if self._turned_off:  # the fleet has not stopped this instance yet: it must not act as the Manager
