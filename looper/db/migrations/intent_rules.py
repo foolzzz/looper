@@ -233,7 +233,7 @@ BEGIN
     RAISE EXCEPTION 'intent rule versions are append-only';
 END $$;
 DROP TRIGGER IF EXISTS intent_rule_versions_immutable ON intent_rule_versions;
-CREATE TRIGGER intent_rule_versions_immutable BEFORE UPDATE ON intent_rule_versions
+CREATE TRIGGER intent_rule_versions_immutable BEFORE UPDATE OR DELETE ON intent_rule_versions
     FOR EACH ROW EXECUTE FUNCTION intent_rule_versions_immutable();
 CREATE OR REPLACE FUNCTION intent_rule_hit_source_deleted() RETURNS trigger LANGUAGE plpgsql AS $$
 BEGIN
@@ -263,9 +263,11 @@ async def pending(conn):
         "(to_regclass('idx_intent_rule_hits_rule'),to_regclass('idx_intent_rule_hits_created'),"
         "to_regclass('idx_intent_rule_hit_sources_event'))"):
         return True
+    # pg_trigger's 27 is ROW | BEFORE | DELETE | UPDATE, including the legacy trigger's missing DELETE.
     return not await conn.fetchval("SELECT count(*) = 2 FROM pg_trigger WHERE NOT tgisinternal AND "
+        "tgenabled IN ('O','A') AND "
         "((tgrelid=to_regclass('intent_rule_hit_sources') AND tgname='intent_rule_hit_sources_drop') OR "
-        "(tgrelid=to_regclass('intent_rule_versions') AND tgname='intent_rule_versions_immutable'))")
+        "(tgrelid=to_regclass('intent_rule_versions') AND tgname='intent_rule_versions_immutable' AND tgtype=27))")
 
 
 async def apply(conn, *, sql, state):

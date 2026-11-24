@@ -434,11 +434,95 @@ def test_generic_configuration_surfaces_cannot_write_or_export_rule_settings(mon
             serialized = json.dumps(exported)
             assert "auto_task_daily_cap" not in serialized and "auto_task_config_version" not in serialized
             assert "intents.rules.enabled" not in serialized and "intent_rule_previews" not in serialized
-            await config_transfer.import_config(conn, {"format": "looper-config/v4", "settings": {
-                "system": {"intents.rules.enabled": "true", "intent_rule_config.adapter": {"executable": "bad"}}},
+            with pytest.raises(config_transfer.ConfigFileError, match="intent_rules.preview"):
+                await config_transfer.import_config(conn, {"format": "looper-config/v4", "settings": {
+                    "system": {"intents.rules.enabled": "true", "intent_rule_config.adapter": {"executable": "bad"}}},
+                    "projects": [{"name": "Review", "auto_task_daily_cap": 99,
+                                  "execution": {"auto_task_daily_cap": 99}}]}, apply=True)
+            await config_transfer.import_config(conn, {"format": "looper-config/v4",
                 "projects": [{"name": "Review", "auto_task_daily_cap": 99,
                               "execution": {"auto_task_daily_cap": 99}}]}, apply=True)
         assert tuple(await pool.fetchrow("SELECT auto_task_daily_cap,auto_task_config_version FROM projects")) == (50, 1)
         assert await pool.fetchval("SELECT value FROM system_settings WHERE key='intents.rules.enabled'") is None
         assert await pool.fetchval("SELECT generation FROM intent_rule_config") == 1
+    run_db(check, monkeypatch)
+
+
+@pytest.mark.parametrize("kind", ["rule_create", "settings", "project_cap", "template_contract"])
+def test_confirmation_does_not_lock_source_or_dependency_catalog_rows(monkeypatch, kind):
+    async def check(pool):
+        from looper.agents import intent_rules as service
+        from looper.agents.api_v1 import OPERATOR
+        await pool.execute("INSERT INTO projects(id,name) VALUES('review','Review')")
+        await pool.execute("INSERT INTO workflows(key,name,definition) VALUES('review','Review','{}')")
+        command = {
+            "rule_create": {"kind": "rule_create", "rule": rule()},
+            "settings": {"kind": "settings", "enabled": False},
+            "project_cap": {"kind": "project_cap", "project_id": "review",
+                "expected_config_version": 0, "auto_task_daily_cap": 50},
+            "template_contract": {"kind": "template_contract", "workflow_key": "review",
+                "expected_contract_version": 0, "contract": {"input_kind": "verified_mr", "comment_mode": "direct",
+                    "approve_requires_confirmation": True, "withdraw_requires_confirmation": True,
+                    "allow_merge": False, "allow_reviewer_changes": False}},
+        }[kind]
+        preview = await service.preview(0, command, principal=OPERATOR, db=pool)
+        prepare = service._prepare
+        inspected = False
+
+        async def inspect(conn, *args, **kwargs):
+            nonlocal inspected
+            # RowShareLock is acquired even for an empty SELECT ... FOR SHARE.
+            locks = await conn.fetch("SELECT locktype,mode,relation::regclass::text AS table_name FROM pg_locks "
+                                     "WHERE pid=pg_backend_pid() AND granted")
+            assert any(row["locktype"] == "advisory" for row in locks)
+            assert any(row["table_name"] == "intent_rule_config" and row["mode"] == "RowShareLock" for row in locks)
+            locked_tables = {row["table_name"] for row in locks if row["mode"] == "RowShareLock"}
+            assert "projects" in locked_tables and "workflows" in locked_tables
+            assert not locked_tables.intersection({"source_chats", "event_sources", "channel_configs", "system_settings", "intent_types"})
+            inspected = True
+            return await prepare(conn, *args, **kwargs)
+
+        monkeypatch.setattr(service, "_prepare", inspect)
+        result = await service.confirm(preview["preview_id"], [], principal=OPERATOR, db=pool)
+        assert inspected and result["generation"] == 1
+    run_db(check, monkeypatch)
+
+
+def test_automatic_rules_require_existing_project_cap_and_share_it(monkeypatch, tmp_path):
+    async def check(pool):
+        import asyncpg
+        from looper.agents import intent_rules as service
+        from looper.agents.api_v1 import OPERATOR
+        from looper.agents.ops import OpError
+        await pool.execute("INSERT INTO projects(id,name,work_dir) VALUES('review','Review',$1)", str(tmp_path))
+        await pool.execute("INSERT INTO workflows(key,name,definition) VALUES('review','Review','{}')")
+        await change(service, pool, {"kind": "template_contract", "workflow_key": "review",
+            "expected_contract_version": 0, "contract": {"input_kind": "verified_mr", "comment_mode": "direct",
+                "approve_requires_confirmation": True, "withdraw_requires_confirmation": True,
+                "allow_merge": False, "allow_reviewer_changes": False}})
+        automatic = rule(intent_type="mr_review", action="create_task", project_id="review", template_key="review",
+            conditions=[{"kind": "internal_mr_open", "allowed_domains": ["review.example.invalid"]}])
+        assert await pool.fetchval("SELECT auto_task_daily_cap FROM projects WHERE id='review'") is None
+        with pytest.raises(OpError, match="positive daily cap"):
+            await service.preview(1, {"kind": "rule_create", "rule": automatic}, principal=OPERATOR, db=pool)
+        for cap in (0, -1, True, "50"):
+            with pytest.raises(OpError) as refused:
+                await service.preview(1, {"kind": "project_cap", "project_id": "review",
+                    "expected_config_version": 0, "auto_task_daily_cap": cap}, principal=OPERATOR, db=pool)
+            assert refused.value.code.value == "invalid"
+        for cap in (0, -1):
+            with pytest.raises(asyncpg.CheckViolationError):
+                await pool.execute("UPDATE projects SET auto_task_daily_cap=$1 WHERE id='review'", cap)
+        await change(service, pool, {"kind": "project_cap", "project_id": "review",
+            "expected_config_version": 0, "auto_task_daily_cap": 50})
+        await change(service, pool, {"kind": "rule_create", "rule": automatic})
+        result, preview = await change(service, pool, {"kind": "rule_create", "rule": {**automatic, "position": 2}})
+        assert len(result["rules"]) == 2 and {row["project_id"] for row in result["rules"]} == {"review"}
+        assert preview["impact"]["projects"] == [{"id": "review", "auto_task_daily_cap": 50}]
+        assert (await service.list_rules(principal=OPERATOR, db=pool))["projects"] == [
+            {"id": "review", "name": "Review", "auto_task_daily_cap": 50, "config_version": 1}]
+        # Clearing the shared cap must fail while any automatic rule still references it.
+        with pytest.raises(OpError, match="positive daily cap"):
+            await service.preview(4, {"kind": "project_cap", "project_id": "review",
+                "expected_config_version": 1, "auto_task_daily_cap": None}, principal=OPERATOR, db=pool)
     run_db(check, monkeypatch)

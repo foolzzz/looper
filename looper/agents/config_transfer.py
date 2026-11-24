@@ -744,6 +744,13 @@ def validate_document(data: Any, *, label: str = "configuration") -> None:
         raise ConfigFileError("settings.cost_guard must be a JSON object")
     if not isinstance(data.get("settings", {}).get("manager_lanes", {}), dict):
         raise ConfigFileError("settings.manager_lanes must be a JSON object")
+    # Rule configuration uses its own versioned preview/confirm contract, also for operators.
+    settings = data.get("settings", {})
+    for path, values in (("settings", settings), ("settings.system", settings.get("system", {}))):
+        for name in values:
+            if (name in {"intent_rules", "intent_rule_config", "intents.rules"}
+                    or name.startswith(("intent_rule_config.", "intents.rules."))):
+                raise ConfigFileError(f"{path}.{name}: use intent_rules.preview and intent_rules.confirm")
     _check_retired_fields(data.get("settings", {}).get("layers", []), "settings.layers", ("model", "effort"))
     _check_retired_fields(data.get("providers", []), "providers", ("protocols", "base_url", "models"))
     for index, project in enumerate(data.get("projects", [])):

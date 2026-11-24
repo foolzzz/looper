@@ -164,13 +164,13 @@ async def get_hit(conn: Any, hit_id: int) -> dict | None:
 
 
 async def hit_stats(conn: Any, *, since: datetime, until: datetime, rule_id: str | None = None) -> dict:
-    rows = await conn.fetch("SELECT rule_id,rule_version AS version,count(*) AS hits, "
-        "count(*) FILTER (WHERE reason='verification_unavailable') AS verification_unavailable "
+    rows = await conn.fetch("SELECT rule_id,rule_version AS version,count(*) AS hits "
         "FROM intent_rule_hits WHERE created_at >= $1 AND created_at < $2 "
         "AND ($3::uuid IS NULL OR rule_id=$3) GROUP BY rule_id,rule_version ORDER BY rule_id,rule_version",
         since, until, UUID(rule_id) if rule_id is not None else None)
     return {"available": False, "range": {"since": since, "until": until},
-            "rules": [{**_row(row), "auto_created": None, "deduped": None, "daily_cap": None} for row in rows],
+            "rules": [{**_row(row), "verification_unavailable": None, "auto_created": None,
+                       "deduped": None, "daily_cap": None} for row in rows],
             "projects": []}
 
 

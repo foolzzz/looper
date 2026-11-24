@@ -59,6 +59,9 @@ def test_intent_rule_migration_fresh_upgrade_and_reentry(monkeypatch):
     "ALTER TABLE intent_rule_versions DROP CONSTRAINT intent_rule_versions_pkey",
     "DROP INDEX idx_intent_rule_hits_created",
     "DROP TRIGGER intent_rule_hit_sources_drop ON intent_rule_hit_sources",
+    "DROP TRIGGER intent_rule_versions_immutable ON intent_rule_versions; "
+    "CREATE TRIGGER intent_rule_versions_immutable BEFORE UPDATE ON intent_rule_versions "
+    "FOR EACH ROW EXECUTE FUNCTION intent_rule_versions_immutable()",
 ])
 def test_rule_migration_detects_missing_objects_even_with_a_marker(damage):
     from looper.db.migrations import intent_rules as migration
@@ -74,7 +77,11 @@ def test_rule_migration_detects_missing_objects_even_with_a_marker(damage):
     run_db(test)
 
 
-def test_rule_versions_reorder_delete_and_rollback_are_append_only():
+@pytest.mark.parametrize("statement", [
+    "UPDATE intent_rule_versions SET enabled=false WHERE rule_id=$1",
+    "DELETE FROM intent_rule_versions WHERE rule_id=$1",
+])
+def test_rule_versions_reorder_delete_and_rollback_are_append_only(statement):
     from looper.db import intent_rules as store
 
     async def test(pool):
@@ -104,7 +111,8 @@ def test_rule_versions_reorder_delete_and_rollback_are_append_only():
         assert (await store.history(pool, second))["current"]["deleted_at"] is not None
         # Even direct SQL cannot rewrite the historical contract.
         with pytest.raises(asyncpg.RaiseError, match="append-only"):
-            await pool.execute("UPDATE intent_rule_versions SET enabled=false WHERE rule_id=$1", first)
+            await pool.execute(statement, first)
+        assert [version["version"] for version in (await store.history(pool, first))["versions"]] == [1, 2, 3]
 
     run_db(test)
 

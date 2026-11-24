@@ -2,6 +2,13 @@
 
 A persisted preview binds the command and all current reference fingerprints.
 Confirmation owns one admission lock and one transaction, including its audit.
+
+Global row/admission lock order: source_chats (engine only) -> admission ->
+rule config/preview -> projects -> workflows -> template contracts. Management
+never row-locks source chats, event sources, channels, types or dependency settings
+as catalog references under admission. Those reads are optimistic: confirmation
+revalidates preview fingerprints, including reference versions; the engine must
+recheck current authorization and dependencies before admitting any execution.
 """
 from __future__ import annotations
 
@@ -62,10 +69,9 @@ def _fail(code: ErrorCode, message: str):
 async def _catalog(conn: Any, *, lock: bool = False) -> dict:
     """Small configuration tables only; never query messages or credentials.
 
-    Share locks keep the references stable through the confirming transaction.
+    Only project/template share locks follow the admission/config locks.
     Fingerprints are conservative: unrelated configuration edits also require a new preview.
     """
-    suffix = " FOR SHARE" if lock else ""
     queries = {
         "projects": "SELECT id,name,work_dir,auto_task_daily_cap,auto_task_config_version FROM projects ORDER BY id",
         "templates": "SELECT key,name,description,definition FROM workflows ORDER BY key",
@@ -79,7 +85,8 @@ async def _catalog(conn: Any, *, lock: bool = False) -> dict:
                         "('intents.enabled','delivery.enabled','intents.rules.enabled') ORDER BY key",
     }
     return {key: [{field: _json(value) if field in ("definition", "config") else value
-                   for field, value in dict(row).items()} for row in await conn.fetch(sql + suffix)]
+                   for field, value in dict(row).items()} for row in await conn.fetch(
+                       sql + (" FOR SHARE" if lock and key in ("projects", "templates", "contracts") else ""))]
             for key, sql in queries.items()}
 
 
