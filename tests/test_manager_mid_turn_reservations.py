@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -148,3 +149,102 @@ def test_unfolded_input_reservation(enabled, tmp_path, case):  # noqa: F811
             (tmp_path / "go").touch()
             await rig.close()
     run_db(test, enabled, timeout=90)
+
+
+@pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
+@pytest.mark.parametrize("times_out", [False, True])
+def test_fifo_item_waits_for_native_input_without_repeating_effects(enabled, tmp_path, times_out):  # noqa: F811
+    from looper.agents import chat_settings, claude_cli, completion_events, lanes_settings, session_routing
+    from looper.db import manager_events, projects, tasks
+
+    enabled.setattr(session_routing, "_routing_enabled", False)
+    enabled.setattr(lanes_settings, "_enabled", False)
+    enabled.setattr(chat_settings, "_completion_turns", chat_settings.CompletionTurns.DM_ONLY)
+    enabled.setattr(claude_cli, "RESERVED_INPUT_WAIT_SEC", 0.1 if times_out else 2, raising=False)
+    enabled.setattr(claude_cli, "INTERRUPT_GRACE_SEC", 0.2)
+    # The resident commits B to its transcript and performs a tool effect before
+    # the FIFO's earlier completion item gets its turn. It can still receive Stop.
+    script = SCRIPT_UNFOLDED.split("print(json.dumps({'type':'result','subtype':'success','is_error':False,'session_id':'synthetic-session',"
+                                   "'result':'native B answer'")[0] + r"""
+import select
+with open('transcript.jsonl', 'a') as log: log.write(json.dumps(second) + '\n')
+with open('effects', 'a') as log: log.write('B\n')
+pathlib.Path('native-running').touch()
+while not pathlib.Path('finish-native').exists():
+    if not select.select([sys.stdin], [], [], 0.01)[0]: continue
+    item = json.loads(sys.stdin.readline())
+    assert item['type'] == 'control_request'
+    emit = lambda event: print(json.dumps(event), flush=True)
+    emit({'type':'control_response','response':{'subtype':'success','request_id':item['request_id'],
+          'response':{'cancelled':False}}})
+    if item['request']['subtype'] == 'interrupt': break
+print(json.dumps({'type':'result','subtype':'success','is_error':False,'session_id':'synthetic-session',
+      'result':'native B answer','user_message_uuids':[second['uuid']]}), flush=True)
+for line in sys.stdin:
+    item = json.loads(line)
+    assert item['type'] == 'user'
+    with open('transcript.jsonl', 'a') as log: log.write(line)
+    if 'second' in item['message']['content']:
+        with open('effects', 'a') as log: log.write('B\n')
+    print(json.dumps(dict(item, isReplay=True)), flush=True)
+    print(json.dumps({'type':'result','subtype':'success','is_error':False,'session_id':'synthetic-session',
+          'result':'later answer','user_message_uuids':[item['uuid']]}), flush=True)
+"""
+
+    async def test(pool):
+        rig, resident, _ = _manager_rig(tmp_path, script)
+        project = await projects.create_project(name="synthetic", work_dir=str(tmp_path), pool=pool)
+        await tasks.create_task(task_id="synthetic-completed", requirement="synthetic", project_id=project["id"],
+                                title="Synthetic task", status="completed", work_dir=str(tmp_path), pool=pool)
+        settling = asyncio.Event()
+        settle = resident.settle_reserved_inputs
+
+        async def observed_settlement(**kwargs):
+            if resident._output is not None and resident._output.queued:
+                settling.set()
+            await settle(**kwargs)
+
+        enabled.setattr(resident, "settle_reserved_inputs", observed_settlement)
+        await rig.start()
+        release = None
+        try:
+            first, second = _web("first"), _web("second")
+            await rig.bus.publish(first)
+            await until(lambda: (tmp_path / "ready").exists() and resident._user_turn is not None
+                        and resident._user_turn.started)
+            await rig.bus.publish(second)
+            await until(lambda: (tmp_path / "got-second").exists())
+            from looper.agents.message import MessageEnvelope, MessageType, TASK_ROUTER_ADDRESS, MANAGER_ADDRESS
+
+            ended = MessageEnvelope.create(source=TASK_ROUTER_ADDRESS, target=MANAGER_ADDRESS,
+                message_type=MessageType.GOAL_STATUS,
+                payload={"task_id": "synthetic-completed", "status": "completed", "summary": "Synthetic result"})
+            recorded = await completion_events.record_web_end("manager", ended, "web-chat-1", "Synthetic fallback")
+            assert recorded.row["state"] == "pending"
+            batch = uuid.uuid4()
+            rows = await manager_events.claim("manager", "channel-web", "web-chat-1", batch)
+            assert len(rows) == 1
+            rig.manager._router.dispatch_completion(completion_events.wake(rig.manager.agent_address,
+                completion_events.Target("manager", "channel-web", "web-chat-1")), rows, batch, None)
+            (tmp_path / "go").touch()
+            await until(lambda: (tmp_path / "native-running").exists())
+            await asyncio.wait_for(settling.wait(), 5)
+
+            async def finish_native():
+                await asyncio.sleep(0.4)
+                (tmp_path / "finish-native").touch()
+
+            release = asyncio.create_task(finish_native())
+            assert await rig.reply(first) == "answer A"
+            assert await rig.reply(second) == "native B answer"
+            row = await pool.fetchrow("SELECT state, reason FROM manager_events WHERE id=$1", recorded.row["id"])
+            assert (row["state"], row["reason"]) == (("fallback", "turn_failed") if times_out else ("delivered", None))
+            assert (tmp_path / "effects").read_text().splitlines() == ["B"]
+            assert len((tmp_path / "transcript.jsonl").read_text().splitlines()) == (1 if times_out else 2)
+        finally:
+            (tmp_path / "finish-native").touch()
+            if release is not None:
+                await release
+            await rig.close()
+
+    run_db(test, enabled, timeout=45)
