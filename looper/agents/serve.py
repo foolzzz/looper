@@ -513,6 +513,12 @@ async def _back_up_before_schema_change(pool: Any, ops: OpsConfig, runtime_root:
         logger.warning("BACKUP SKIPPED (--skip-backup): the database schema of %s changes now without a backup; "
                        "the columns and tables its migrations drop cannot be restored", shown)
         return
+    if not registry_upgrade:
+        async with pool.acquire() as conn:
+            online = await db_backup.reusable_upgrade_backup(conn, ops, runtime_root)
+        if online is not None:
+            logger.info("relying on verified online upgrade backup %s; writes after its snapshot are absent", online)
+            return
     check, dumper = await asyncio.to_thread(self_check.check_pg_dump, server_version_num, True, ops)
     if dumper is None:
         raise StartupCheckFailed(self_check.format_checks([check]))
