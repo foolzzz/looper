@@ -371,10 +371,10 @@ EXTRACTION_CASES: dict[str, dict[str, Any]] = {
 }
 EXTRACTION_CASES.update({
     "intents_group_requests": {
-        "what": "a group: a requirement and a bug raised without @, among small talk, an answered question, a follow-up on "
-                "taken-up work, a request handed to someone who accepted it and a +1: dev_task and bug_triage only",
+        "what": "a group: a requirement from the operator, a bug without @ and a request handed to a named person who "
+                "accepted it: all recognized; small talk, answered questions, pure follow-ups and +1s are excluded",
         "kind": "intents",
-        "rows": [_row(1, "oc_product", "ou_zhang", "订单列表能不能加一个按渠道筛选？运营每天都要手动筛", 1, group=True),
+        "rows": [_row(1, "oc_product", _USER, "订单列表能不能加一个按渠道筛选？运营每天都要手动筛", 1, group=True),
                  _row(2, "oc_product", "ou_qian", "+1，这个我们也需要", 2, group=True),
                  _row(3, "oc_product", "ou_zhao", "导出报表点了没反应，控制台报 504", 3, group=True),
                  _row(4, "oc_product", "ou_wang", "周五团建去哪儿？", 4, group=True),
@@ -383,7 +383,8 @@ EXTRACTION_CASES.update({
                  _row(7, "oc_product", "ou_zhao", "钱七，登录页的文案你改一下", 7, group=True),
                  _row(8, "oc_product", "ou_qian", "好的我来改", 8, group=True),
                  _row(9, "oc_product", "ou_wang", "昨天那个缓存问题我已经在修了，今晚上线", 9, group=True)],
-        "exact_types": {"dev_task", "bug_triage"}, "chatter": {2, 4, 5, 6, 7, 8, 9},
+        "exact_types": {"dev_task", "bug_triage"}, "chatter": {2, 4, 5, 6, 8, 9},
+        "requests_from": {1: "dev_task", 3: "bug_triage", 7: "dev_task"},
     },
     "intents_group_requests_merge": {
         "what": "three people report the same failing upload: one bug_triage with all three as sources",
@@ -394,13 +395,13 @@ EXTRACTION_CASES.update({
         "exact_types": {"bug_triage"}, "merged_from": {1, 2, 3},
     },
     "intents_group_requests_quiet": {
-        "what": "only small talk, an answered question, a taken-up follow-up and a handed-over request: NONE",
+        "what": "only small talk, an answered question, status and acknowledgements without a new ask: NONE",
         "kind": "intents",
         "rows": [_row(1, "oc_product", "ou_wang", "今天食堂有饺子", 1, group=True),
                  _row(2, "oc_product", "ou_qian", "测试环境地址是多少？", 2, group=True),
                  _row(3, "oc_product", "ou_zhang", "看群公告", 3, group=True),
-                 _row(4, "oc_product", "ou_zhao", "钱七，周会纪要发一下", 4, group=True),
-                 _row(5, "oc_product", "ou_qian", "马上发", 5, group=True)],
+                 _row(4, "oc_product", "ou_zhao", "周会纪要已经发了", 4, group=True),
+                 _row(5, "oc_product", "ou_qian", "收到了，谢谢", 5, group=True)],
         "quiet": True,
     },
     "intents_group_requests_injection": {
@@ -640,6 +641,9 @@ def score_extraction(case: dict[str, Any], run: dict[str, Any], parsed: Any, ref
         checks["types"] = case["types"] <= {item["type"] for item in items}
     if "exact_types" in case:
         checks["exact_types"] = {item["type"] for item in items} == case["exact_types"]
+    if "requests_from" in case:
+        checks["requests_from"] = all(any(item["type"] == kind and seq in item["window_sources"] for item in items)
+                                      for seq, kind in case["requests_from"].items())
     if "merged_from" in case:
         checks["merged_from"] = any(case["merged_from"] <= set(item["window_sources"]) for item in items)
         checks["one_intent"] = len(items) == 1

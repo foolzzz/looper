@@ -129,7 +129,7 @@ def test_version_must_match_exactly(version, monkeypatch):
         assert "ANTHROPIC_API_KEY" not in kwargs["env"]
         return launcher.ProcessResult(0, json.dumps({"version": version, "ready": True}).encode(), b"")
     monkeypatch.setattr(launcher, "run_process", probe)
-    with pytest.raises(launcher.ValidationError, match="0.2.1-rc.2"):
+    with pytest.raises(launcher.ValidationError, match="0.2.2-rc.5"):
         launcher.probe_dsh()
 
 
@@ -138,7 +138,7 @@ def test_matching_version_still_needs_working_help_and_process_observation(ready
     monkeypatch.setattr(launcher.shutil, "which", lambda name: "/fake/dsh")
     monkeypatch.setattr(launcher.proc_tree, "_snapshot", lambda: {})
     async def probe(*args, **kwargs):
-        return launcher.ProcessResult(0, json.dumps({"version": "0.2.1-rc.2", "ready": ready}).encode(), b"")
+        return launcher.ProcessResult(0, json.dumps({"version": "0.2.2-rc.5", "ready": ready}).encode(), b"")
     monkeypatch.setattr(launcher, "run_process", probe)
     with pytest.raises(launcher.ValidationError):
         launcher.probe_dsh()

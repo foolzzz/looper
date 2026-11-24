@@ -195,11 +195,17 @@ async def _run(child: ChildRun, *, spawn_id: int, brief: Brief, settings: AgentS
         return CallFailed(execution=replace(result.execution, failure=CallFailure.BUDGET, reason=reason),
                           failure=CallFailure.BUDGET, reason=reason)
 
-    from .cost_guard import Held
+    from .cost_guard import Denied, Held
 
     try:
         done = await call(ChildCall(child, _parent(brief), settings, cap_usd, runtime_root, claude_bin,
                                     on_record=started, on_result=booked), parse=parse)
+    except Denied as denied:
+        role = child.role.value if child.role is not None else child.record_kind
+        reason = f"{role} reached today's spend cap ({denied.admission.scope.scope.value})"
+        failed = CallFailed(execution=Execution(None, failure=CallFailure.BUDGET, reason=reason),
+                            failure=CallFailure.BUDGET, reason=reason)
+        return failed, 0.0
     except Held as held:
         # A usage window is not a runtime error: do not start the run again, and return no advice.
         failed = CallFailed(execution=Execution(None, failure=CallFailure.UNAVAILABLE, reason=str(held)),
@@ -218,6 +224,12 @@ async def _run(child: ChildRun, *, spawn_id: int, brief: Brief, settings: AgentS
         try:
             done = await call(ChildCall(again, _parent(brief), settings, round(cap_usd - spent, 6), runtime_root,
                                         claude_bin, on_record=started, on_result=booked), parse=parse)
+        except Denied as denied:
+            role = child.role.value if child.role is not None else child.record_kind
+            reason = f"{role} reached today's spend cap ({denied.admission.scope.scope.value})"
+            failed = CallFailed(execution=Execution(None, failure=CallFailure.BUDGET, reason=reason),
+                                failure=CallFailure.BUDGET, reason=reason)
+            return failed, spent
         except Held as held:
             # The retry is the same usage window, not another runtime error. Keep the first run's spend.
             failed = CallFailed(execution=Execution(None, failure=CallFailure.UNAVAILABLE, reason=str(held)),
