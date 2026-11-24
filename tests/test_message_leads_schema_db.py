@@ -144,7 +144,9 @@ def test_a_database_without_the_tables_gets_them_on_upgrade(monkeypatch):
         await sup.lead(pool, [seq])
         await connection.ensure_schema(pool)  # and a second upgrade changes nothing
         assert await pool.fetchval("SELECT count(*) FROM message_leads") == 1
-        assert await pool.fetchval("SELECT count(*) FROM intent_type_versions") == 3
+        assert await pool.fetchval("SELECT count(*) FROM intent_type_versions") == 4
+        assert {row["type_key"] for row in await pool.fetch("SELECT type_key FROM intent_type_versions")} == {
+            "alert_triage", "bug_triage", "dev_task", "mr_review"}
         assert await pool.fetchval("SELECT to_regclass('memory_candidate_sources') IS NOT NULL")
 
     run_db(check, monkeypatch, timeout=30)

@@ -140,6 +140,14 @@ def _add_msgflow_parser(commands: argparse._SubParsersAction) -> None:
     imp.add_argument("--per-file", action="store_true", help="Also print one reconciliation line per file.")
     imp.add_argument("--source", help="The source id (default: the only one).")
     _add_location_flags(imp)
+    parity = sub.add_parser("parity", allow_abbrev=False, help="Read an independent frozen-window parity report.",
+        description="Read local bridge-reference and collection identities without calling the platform or changing state.")
+    parity.add_argument("--source", help="The source id (default: the only one).")
+    parity.add_argument("--session", help="A positive decimal parity session id (default: latest).")
+    parity.add_argument("--json", action="store_true", help="Print the closed versioned JSON report.")
+    parity.add_argument("--limit", type=int, default=100, help="Bucket page size (1 to 200).")
+    parity.add_argument("--cursor", help="A cursor from the preceding report page.")
+    _add_location_flags(parity)
     delete = sub.add_parser("delete", allow_abbrev=False, help="Delete one message after reviewing its limits.",
         description="Preview a message deletion, list copies it cannot reach, then type delete to confirm. "
                     "A tombstone prevents a later import from restoring the message.")

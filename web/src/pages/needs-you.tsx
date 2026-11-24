@@ -50,6 +50,7 @@ const LEDGER_KINDS: Record<string, string> = { pending: "to-do", decision: "deci
 const DELIVERY_SOURCES: Record<string, string> = {
   subscription: "Subscription push", intent: "Intent message", task_end: "Task end notice",
   catchup: "Lark catch-up dropped",
+  message_stream: "消息流采集/对账需处理",
 };
 
 const text = (value: unknown) => (typeof value === "string" ? value : "");
@@ -88,6 +89,11 @@ function details(kind: AttentionKind, item: AttentionItem): { line: string; badg
       return { line: parts(ref, context, facts.currency === "equivalent_usd" ? "等价花费" : "真钱",
         `已花及预留 $${count(facts.spent_usd).toFixed(2)} / 上限 $${count(facts.limit_usd).toFixed(2)}`), badges: [] };
     case "deliveries":
+      if (facts.source === "message_stream")
+        return { line: parts(DELIVERY_SOURCES.message_stream, context,
+          text(facts.session) && `对账 ${text(facts.session)}`,
+          facts.kind === "parity_drift" && `仅参考 ${count(facts.bridge_only)} · 仅采集 ${count(facts.collect_only)}`,
+          text(facts.fix)), badges: [] };
       return { line: parts(DELIVERY_SOURCES[text(facts.source)] ?? text(facts.source), ref,
         text(facts.channel) && `${facts.source === "catchup" ? "from" : "to"} ${channelLabel(text(facts.channel))}`,
         text(facts.fix)), badges: [] };
@@ -158,6 +164,8 @@ function Item({ kind, item, onResumed }: { kind: AttentionKind; item: AttentionI
 function Section({ section, onResumed }: { section: AttentionSection; onResumed: () => Promise<void> }) {
   const { kind, state, items } = section;
   const more = section.count - items.length;
+  const how = kind === "deliveries" && items.some((item) => item.facts.source === "message_stream")
+    ? "消息流问题请按各项建议检查；投递结果未知的通知不会自动重发，请核对聊天。" : HOW[kind];
   return (
     <section aria-label={TITLES[kind]} className="rounded-lg border border-border bg-card px-5 py-4">
       <h2 className="flex items-baseline gap-2 text-sm font-semibold">
@@ -171,7 +179,7 @@ function Section({ section, onResumed }: { section: AttentionSection; onResumed:
         </p>
       ) : (
         <>
-          {HOW[kind] && <p className="mt-1 text-xs text-muted-foreground">{HOW[kind]}</p>}
+          {how && <p className="mt-1 text-xs text-muted-foreground">{how}</p>}
           <ul className="mt-1 divide-y divide-border">
             {items.map((item) => <Item key={item.key} kind={kind} item={item} onResumed={onResumed} />)}
           </ul>
