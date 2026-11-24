@@ -3385,6 +3385,38 @@ memory page shows their candidates for the operator to review.
   checking what was written. An agent with a shell has the same system-user
   access to the vault; this supported write path does not isolate that user.
 
+### Project lesson retrospectives
+
+`memory_lessons` is independent of vault writing and defaults off. Both its `enabled` field and the project's
+`memory_lessons = 'on'` are required. On, project-scoped learnings still enter the task journal, but the old
+project-document drafts and `[LESSONS]` turn stop. Vault closeout keeps its separate setting and path. Empty
+lesson snapshots do not disable retrospectives; context injection is a separate feature.
+The server loads the validated switch before recovering tasks, and successful settings updates refresh it in
+memory. While off, retrospective ticks and terminal callbacks read only that switch, without database reads.
+Turning it on at runtime resumes processing within the next 10-second interval.
+
+After TaskRouter forwards the final completed/failed status and tears down the Planner, an independent terminal
+listener enqueues the newly observed journal range. Scheduler and retrospective callbacks cannot block one
+another on failure. `MemoryRetroService` recovers post-activation terminal tasks, claims a short database lease,
+then invokes the private `memory_retro` role without holding a connection or transaction. Migration 1980 widens
+the role/run-kind checks online; 1990 adds durable cursors, activation high-water, attempt leases, independent
+spend reservations, range output references and distinct-task reinforcement records. Retrying once consumes
+another reservation; missing costs consume the full reserved cap. The default cap is $0.10 per attempt and
+$0.50 per local day. The existing global cost guard still applies.
+
+The role uses `model_call.ChildCall`, one turn, an empty working directory, replaced prompt, no tools, MCP or
+harness, and at most 90 seconds. Its private records retain metadata and input digests, never journal or reply
+bodies. A built-in model awaits the approved real comparison; operators must select an explicit role profile.
+Escaped input includes only this range's displayed numbered journal evidence, up to 60 active project lessons
+and 20 held lessons. Strict JSON parsing drops unsafe items and records typed counts. A short transaction
+rechecks configuration, project, task, evidence, trust, lease, tombstones and replacement targets before saving
+candidates, sources, events, spending and the task activity. Shadow mode creates held lessons; external tasks
+always create independent held candidates and cannot reinforce trusted lessons. Later distinct tasks can renew
+an active lesson once each; replacement reuses the conservative protected-token gate. The existing operator-only
+lesson list and task activity expose results. Task deletion confirmation counts sourced active lessons once.
+Three distinct failed tasks claim one durable operator-only warning, at most once per local day; without an operator DM destination the
+warning stays in logs. This feature adds no channel completion footer, injection, weekly delivery or vault write.
+
 ### Project skills: skills a project writes
 
 A project can write its own Claude Code skills (`looper/agents/project_skills.py`,

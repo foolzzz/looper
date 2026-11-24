@@ -37,6 +37,47 @@ const MODEL_SUMMARY = "Account / Exact model / openai-responses";
 describe("the role layer's system prompt mode", () => {
   afterEach(() => vi.unstubAllGlobals());
 
+  it("explains why a retrospective needs its own profile", async () => {
+    const state = { values: VALUES, effective: EFFECTIVE };
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      const result = url === "/api/v1/registry/view" ? SUMMARY_REGISTRY
+        : url === "/api/v1/allowed_profiles/get" ? { profiles: [], choosable: [] }
+        : url.endsWith("/roles/list") ? { configs: [{ role: "memory_retro", display_name: "Memory retro", enabled: true,
+          system_prompt: "Keep evidenced project lessons.", default_prompt: "Keep evidenced project lessons.",
+          max_turns: 1, timeout_seconds: 90, extra_args: [], metadata: {} }] }
+        : { limits: LIMITS, system: state, roles: { memory_retro: state } };
+      return Response.json({ status: "ok", result });
+    }));
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    try {
+      await act(async () => root.render(<RolesSection sub="memory_retro" />));
+      expect(container.textContent).toContain("Choose an Agent Profile for this role before running retrospectives.");
+    } finally {
+      act(() => root.unmount());
+      container.remove();
+    }
+  });
+
+  it("keeps the retrospective role tool-less without harness or prompt mode controls", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => Response.json({ status: "ok", result: SUMMARY_REGISTRY })));
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    try {
+      await act(async () => root.render(<LayerSettingsForm idPrefix="retro" layer="role"
+        roles={["memory_retro"]} values={VALUES} effective={EFFECTIVE} limits={LIMITS}
+        onSave={async () => VALUES} />));
+      expect(container.querySelector("#retro-prompt-mode")).toBeNull();
+      expect(container.querySelector("#retro-harness")).toBeNull();
+    } finally {
+      act(() => root.unmount());
+      container.remove();
+    }
+  });
+
   it("shows the effective mode, saves nothing until changed, then saves the choice", async () => {
     vi.stubGlobal("fetch", vi.fn(async () => new Response("{}", { status: 500 })));
     const saved: LayerUpdate[] = [];
