@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import ast
 import json
+import logging
 import subprocess
 from pathlib import Path
 from types import SimpleNamespace
@@ -251,16 +252,21 @@ def test_subscription_reservation_adds_an_in_run_cap_only_with_an_enforced_scope
 
 @pytest.mark.parametrize('cap_owner', ['manager', 'guard'])
 @pytest.mark.parametrize('main_model', ['sonnet', 'opus'])
-def test_runtime_bill_survives_an_unknown_subagent_estimate(agent_db, tmp_path, monkeypatch, cap_owner, main_model, caplog):
+@pytest.mark.parametrize('root_log_level', [logging.WARNING, logging.INFO], ids=['warning', 'info'])
+def test_runtime_bill_survives_an_unknown_subagent_estimate(
+        agent_db, tmp_path, monkeypatch, cap_owner, main_model, caplog, root_log_level):
     from looper.agents import session_budget
     from looper.agents.agent_settings import AgentSettings, AgentType, Launch
     from looper.agents.cost_guard_settings import Config, Mode
     from looper.agents.profile_registry import builtin_resolved_profile
     from looper.agents.run_usage import Usage
-    from looper.agents.runtimes.pricing import usage_event
+    from looper.agents.runtimes import pricing
     from looper.agents.tiers import manager_budget
     from tests.runtime_model_helpers import with_model_name
 
+    caplog.set_level(root_log_level)
+    # Admission observations are INFO; only pricing/guard warnings indicate an unverifiable cap.
+    cost_loggers = {pricing.__name__, cost_guard.__name__}
     launch = Launch(AgentSettings(profile=with_model_name(builtin_resolved_profile(), main_model)),
                     role=AgentType.MANAGER)
     config = Config(mode=Mode.ENFORCE if cap_owner == 'guard' else Mode.OBSERVE,
@@ -279,11 +285,11 @@ def test_runtime_bill_survives_an_unknown_subagent_estimate(agent_db, tmp_path, 
         recorder = ClaudeRunRecorder(agent_id='manager', task_id=None, command=['claude'], cwd=str(tmp_path),
                                      input_text='test', launch=launch, **options)
         await recorder.start()
-        recorder.account(usage_event('claude-haiku-5-5', Usage(input_tokens=100)))
+        recorder.account(pricing.usage_event('claude-haiku-5-5', Usage(input_tokens=100)))
         assert recorder.cap_stop is None
         expected = 0.0002 if main_model == 'sonnet' else 0.0004
         assert recorder._spend.budget_cost_usd == pytest.approx(expected)
-        assert not caplog.records
+        assert not [r for r in caplog.records if r.name in cost_loggers and r.levelno >= logging.WARNING]
         await recorder.finish(output_text='done', result_event={
             'type': 'result', 'subtype': 'success', 'total_cost_usd': .05})
 
@@ -296,7 +302,7 @@ def test_runtime_bill_survives_an_unknown_subagent_estimate(agent_db, tmp_path, 
     assert not saved.get('metadata', {}).get('unknown_price_models')
     counter = next(item for item in guard.snapshot()['counters'] if item['scope'] == 'global_day')
     assert counter['spent_usd'] == .05 and counter['cost_status'] == 'known'
-    assert not caplog.records
+    assert not [r for r in caplog.records if r.name in cost_loggers and r.levelno >= logging.WARNING]
 
 
 def test_unknown_event_model_reaches_guard_settlement(monkeypatch):
