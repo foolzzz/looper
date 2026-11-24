@@ -1314,6 +1314,46 @@ processor's role prompt, its reply contract, the framing of its batch or its lau
 cases when the extraction's instructions, contracts or rendering change. There is no committed baseline yet: the first run (sonnet, `--reps 2`) reports absolute
 pass rates.
 
+The memory drafting cases (`memory_draft_*`, memory-write-path RFC section 11) build a temporary synthetic
+vault and use the production retrieval, input assembly, private `memory_draft` role, `model_call.ChildCall` and
+reply validator. `--mode fake` supplies scripted replies at the model backend seam, requires no database or
+model credentials, and checks the harness and validation only. It is **not model-quality or runtime-isolation
+evidence**. Fake mode accepts only the drafting cases. Real mode uses the selected profile for `memory_draft`
+and checks the stored run for tools and retained private text as well.
+
+| case | structured result checked |
+|---|---|
+| `memory_draft_new` | a new preference note and its index append |
+| `memory_draft_duplicate` | `duplicate` pointing at the supplied index |
+| `memory_draft_supplement` | a change to the supplied existing note |
+| `memory_draft_contradiction` | the old statement remains in the rules' superseded section |
+| `memory_draft_rejected` | `skip` pointing at the supplied rejected proposal |
+| `memory_draft_same_as` | `same_as` pointing at the supplied open proposal |
+| `memory_draft_revise` | `change` with `revise` pointing at the supplied open proposal |
+| `memory_draft_commitment` | one append to the supplied entry file, no new note |
+| `memory_draft_lead_injection` | an external fact remains a fact, with `instructions_seen` and no hard rule; code refuses an external preference |
+| `memory_draft_note_injection` | the note's instruction cannot expand the target boundary; an explicit escape reply is also rejected by the production validator |
+
+```bash
+uv run --extra test python -m evals.processor --mode fake --cases memory_draft --reps 2 \
+  --out evals/runs/memory-draft-fake.json
+```
+
+The pending real-model comparison is the same ten cases on Sonnet, two repetitions (20 calls), using a disposable
+PostgreSQL server and a synthetic vault only:
+
+```bash
+uv run --extra test python -m evals.processor --mode real \
+  --register-agent evals/agents/claude-login-sonnet.example.json \
+  --cases memory_draft --reps 2 --budget-usd 0.15 --timeout 120 \
+  --claude claude --pg-url "$LOOPER_EVAL_DATABASE_URL" --baseline evals/runs/memory-draft-fake.json
+```
+
+This real run needs separate paid-eval approval. Estimated cost is $0.60–1.60 from the RFC's unmeasured
+$0.03–0.08 per call; 20 per-call soft caps of $0.15 total $3.00, and a request crossing a soft cap may cost more.
+No real pass rate, latency or spend is claimed until that run is authorized and measured. Compare future real
+runs with the first stored real baseline; a fake baseline compares harness results only.
+
 The leads check's cases (`check_*`, RFC section 10.1) give `leads_check.check` synthetic extracted items, as
 `extraction.parse` gives them, with the messages they cite, and score its typed verdicts only. The `leads_check`
 role runs the profile `--check-register-agent SPEC.json` registers (or `--check-profile NAME` names), else its

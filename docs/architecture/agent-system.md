@@ -3044,9 +3044,9 @@ only the operator's confirmation of its exact content lets Looper write it
 into the vault's memory folder
 ([RFC](rfcs/memory-write-path-v0.zh-CN.md); a lesson that takes effect in
 PostgreSQL only is the [tiers RFC](rfcs/memory-tiers-v0.zh-CN.md)'s). This
-part includes the foundation, confirmed write path and operator DM delivery.
-Sources, drafting and the dashboard memory page follow separately.
-The write path adds no model-visible prompt, contract or tool.
+part includes the foundation, private drafting, the confirmed write path and
+operator DM delivery. Sources and the dashboard memory page follow separately.
+Drafting has its own contract; existing agents gain no prompt or tool.
 
 - **Tables** (migration `memory_candidates`): `memory_candidates` (shown as
   `M-0042`; its kind, state and reason, the least trusted class of its
@@ -3092,7 +3092,9 @@ The write path adds no model-visible prompt, contract or tool.
   found or a check failed, 2 usage, 3 not configured, 4 refused, 5 no such
   candidate, 6 database unusable).
 - **Operator actions:** `/api/v1/memory/confirm`, `confirm_many`, `reject`,
-  `edit`, `retry`, `revive` and `delete` are operator-only. Confirmation
+  `edit`, `retry`, `redraft`, `revive` and `delete` are operator-only.
+  Redrafting queues a conflict or a `draft_failed` candidate for a fresh revision;
+  it changes only Looper state (`inside`) and never confirms a write. Confirmation
   names the current content hash; a stale hash is a conflict. Batch
   confirmation returns a result for each selected item. Editing stores a
   new revision and clears confirmation; saving and confirming it is one
@@ -3103,6 +3105,38 @@ The write path adds no model-visible prompt, contract or tool.
   `confirm`; exit code 7 means the state does not allow the action. Deleting
   a candidate leaves its fingerprint as a tombstone and leaves vault notes
   alone.
+- **Drafting** (`memory_draft_service.py`, `memory_draft.py`, `memory_draft_role.py`):
+  the service polls every 10 seconds and PostgreSQL wakes it after a seed commits.
+  A short transaction uses an advisory lock and `SKIP LOCKED` to claim a `drafting`
+  vault candidate and a 180-second spend lease across servers. Input assembly and
+  the model call run after commit, with a 150-second outer deadline and no database
+  locks. A short transaction then checks the lease, candidate and saved settings
+  before persisting; a deleted/changed candidate or expired/replaced lease discards
+  the result. Deleting a seed does not release its live spend lease. Code searches only the kind's configured
+  folders (`vault.search`'s internal `under` argument), includes its rules, index,
+  entry pages and related open/rejected candidates, and bounds the escaped input
+  to 60,000 characters. The `memory_draft` role runs through `model_call.ChildCall`,
+  with its own built-in `claude-code/sonnet-5-5` profile, no harness or tools, a
+  replaced system prompt and an empty working directory. Its private `memory_draft`
+  record retains only input digest/length and typed events, never source or reply
+  bodies. The role is configurable in Settings → Roles. The deadline is at most
+  120 seconds; the existing drafting settings bound each call and the local day's
+  recorded spending. An unknown cost reserves a whole per-call cap. A depleted
+  allowance leaves candidates queued until the next day and records one daily
+  notice (sent to the configured operator DM when available).
+  Strict parsing resolves only supplied ids, checks paths, snapshots, frontmatter,
+  index updates, exact anchors and credentials, and saves a revision in `pending`.
+  Duplicate/rejected seeds are dropped; matching open candidates merge only source
+  classes their kind permits. A revision of a confirmed/writing/blocked/conflict
+  candidate stays in `drafting` with a durable `target_busy` wait naming that
+  candidate. Polls and restarts skip it without model calls until the target leaves
+  those states or is deleted; other seeds continue immediately. Runtime and malformed-JSON failures get two retries;
+  invalid changes and credentials are dropped immediately. `large_removal` and
+  `flagged` preserve review warnings. Off, the service performs no vault read,
+  model call or candidate write, and existing agent prompts/tools/launches stay
+  unchanged. The `memory_draft_role` migration (order 1830) widens role/run-kind checks with
+  `NOT VALID`, then validates online. The `memory_draft_queue` migration (order
+  1840) creates the durable target waits and spend lease tables.
 - **Writing** (`looper/agents/memory_write.py`): `looper serve` polls and
   wakes after confirmation or retry. With `memory_write` absent or disabled
   it writes nothing. A PostgreSQL session advisory lock per git repository

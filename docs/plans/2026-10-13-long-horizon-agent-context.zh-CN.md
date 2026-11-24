@@ -1105,7 +1105,9 @@ M7 先让计划状态有唯一来源（M7a），再在其上加任务记忆（M7
 
 - **默认关闭对照固定基线**（✅ 已完成）：Worker 启动和 Explorer 常驻签名使用注明来源的完整 commit SHA；可执行验收 Planner 复用现有 fixture 的 `main_revision`，不随 `origin/main` 移动。后续对照沿用 fixture 或固定 SHA 模式。
 
-- **记忆写入路径**（[RFC](../architecture/rfcs/memory-write-path-v0.zh-CN.md)）：本分支在确认后的 worktree 写入基础上实现操作者私聊推送、精确回复「记 / 驳回 / 重试」、结果通知、原推送状态更新和受阻告警，默认关闭。起草、来源和 dashboard 界面仍按 RFC 第 13 节后续切片推进。后续待维护者确认：记忆推送接入 `proactive_delivery`，新增 `ProactiveSource.MEMORY` 并与晨报等来源共同扩展 `proactive_deliveries.source` 约束。
+- **记忆写入路径**（[RFC](../architecture/rfcs/memory-write-path-v0.zh-CN.md)）：本分支在确认后的 worktree 写入和操作者私聊推送基础上实现私密无工具起草、目录限定检索、严格校验、预算与重试服务，默认关闭；目标候选忙碌时持久等待、无额外模型调用，领取后提交事务，用有期限的租约串行化花费。起草评测仅跑 fake mode，真实 Sonnet 评测待批准；来源和 dashboard 界面仍按 RFC 第 13 节后续切片推进。
+
+- **记忆私聊推送**（[RFC](../architecture/rfcs/memory-write-path-v0.zh-CN.md)）：本分支在确认后的 worktree 写入基础上实现操作者私聊推送、精确回复「记 / 驳回 / 重试」、结果通知、原推送状态更新和受阻告警，默认关闭。来源和 dashboard 界面仍按 RFC 第 13 节后续切片推进。后续待维护者确认：记忆推送接入 `proactive_delivery`，新增 `ProactiveSource.MEMORY` 并与晨报等来源共同扩展 `proactive_deliveries.source` 约束。
 
 - **平台子 agent 的入口接线**（[RFC](../architecture/rfcs/platform-subagents-v0.zh-CN.md)）：派生服务、运行树数据、预算预留、取消与恢复、只读 explorer 启动已实现，见[服务与数据验收](../validation/platform-subagents-service.zh-CN.md)。Worker 的三个工具、桥接幂等调用 id、办公台交付及父运行结束时的级联取消已实现，项目开关仍默认关，见[Worker 工具验收](../validation/platform-subagents-worker-tools.zh-CN.md)；真实模型运行与评测待授权执行。项目设置表单、操作者 `runs.tree`、运行树与等待时间线、费用分份、Agents 分组和 Pipeline 计数已在本分支实现（[界面与读取验收](../validation/run-tree/README.md)）。规划者入口、账号准入和运行树单节点取消仍待后续阶段。首次启用走项目设置表单及项目管理 API；Manager 工具列表和 schema 保持基线字节一致，从聊天修改设置及 Manager 对话对比留给后续 PR。
 - **可执行验收**（[RFC §13](../architecture/rfcs/executable-acceptance-v0.zh-CN.md#13-pr-拆分依赖与并行)）：类型与协议（#1552）、执行器与证据（#1565）已合入。证据门、检查专用 `recheck`、失败检查重试反馈、版本失效重测和 Reviewer 证据段已在本分支实现；关闭项目开关不会解除已有失败证据的阻挡。默认关闭及无检查步骤以固定提交对照，Python 3.11 定向测试 1193 项及隔离服务替身链路已通过；必需检查测得失败或出错时，步骤尝试以 `check_failed` 收尾（接在指标尝试 #1574 之上，合入顺序在其后），真实模型评测待授权。PR 5 的任务结果 `## Evidence` 与 Lark/Telegram 结束通知计数行已实现：只显示当前尝试中仍定义的检查，保留关闭前的证据，无证据时结果和通知逐项保持原样；结果含未运行检查及未绑定检查的标准数量，渠道不带输出或命令。任务页步骤卡由独立阶段交付。macOS local 的网络与 job-creation 禁止已在前阶段验证，Linux `unshare -rn` 尚未实测。

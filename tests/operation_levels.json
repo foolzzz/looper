@@ -169,6 +169,7 @@
  "memory.edit": "machine",
  "memory.get": "inside",
  "memory.list": "inside",
+ "memory.redraft": "inside",
  "memory.reject": "inside",
  "memory.retry": "machine",
  "memory.revive": "inside",
