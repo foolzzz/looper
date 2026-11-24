@@ -571,12 +571,30 @@ async def provider_limit_checks_for_database(database_url: str) -> list[Check]:
     conn = None
     try:
         conn = await asyncpg.connect(database_url, timeout=_DATABASE_TIMEOUT_SECONDS)
-        return await provider_limit_checks(pool=conn)
+        return [*(await provider_limit_checks(pool=conn)), *(await admission_checks(pool=conn))]
     except (asyncpg.PostgresError, OSError, TimeoutError):
         return []  # database readiness is reported separately; this probe is advisory
     finally:
         if conn is not None:
             await conn.close()
+
+
+async def admission_checks(*, pool=None) -> list[Check]:
+    """One advisory line for account admission; never sends a model request."""
+    from ..db import system_settings
+    from ..db.connection import get_pool
+    from . import admission
+
+    values = await system_settings.get_settings(
+        ["engine.admission.enabled", "engine.failure_typing"], pool=pool or get_pool())
+    if values.get("engine.admission.enabled") != "true":
+        return []
+    over = admission.daily_overadmissions()
+    typing_off = values.get("engine.failure_typing", "off") not in ("record", "act")
+    detail = ("Failure typing is off; quota failures cannot freeze accounts." if typing_off else
+              f"Account slots, lanes and quota freezes enabled; {over} interactive over-admissions today. "
+              "Planner and Manager turns are not admitted yet.")
+    return [Check("admission", "Account admission", WARN if typing_off or over > 3 else OK, detail)]
 
 
 async def provider_limit_checks(*, pool=None) -> list[Check]:

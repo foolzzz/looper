@@ -110,6 +110,7 @@ async def table_rows(pool: Any, tables: tuple[str, ...]) -> dict[str, Any]:
                  "subscriptions": "schedule_id", "subscription_runs": "run_id",
                  "subscription_deliveries": "run_id, segment",
                  "message_lead_sources": "lead_id, event_seq",
+                 "intent_sources": "intent_id, event_seq",
                  "message_lead_people": "lead_id, open_id, role"}.get(table, "id")
         rows[table] = [json.loads(row["row"]) for row in await pool.fetch(
             f"SELECT to_jsonb(t)::text AS row FROM {table} t ORDER BY {order}")]
@@ -165,7 +166,7 @@ def frozen_columns(expected: Any, actual: Any) -> Any:
     return actual
 
 
-def assert_golden(name: str, payload: Any, root: Path) -> None:
+def assert_golden(name: str, payload: Any, root: Path, *, baseline: str = BASELINE) -> None:
     def convert(item: Any) -> Any:
         if isinstance(item, Enum):
             return item.value
@@ -173,7 +174,7 @@ def assert_golden(name: str, payload: Any, root: Path) -> None:
             return "<timestamp>"
         raise TypeError(type(item).__name__)
 
-    actual = json.dumps(_normalize({"baseline": BASELINE, **payload}, root), ensure_ascii=False,
+    actual = json.dumps(_normalize({"baseline": baseline, **payload}, root), ensure_ascii=False,
                         indent=2, sort_keys=True, default=convert) + "\n"
     fixture = _FIXTURES / f"{name}.json"
     if os.environ.get("UPDATE_MODEL_CALL_GOLDENS") == "1":
@@ -181,7 +182,7 @@ def assert_golden(name: str, payload: Any, root: Path) -> None:
 
         repository = Path(__file__).resolve().parents[1]
         assert Path(looper.__file__).resolve().parent == repository / "looper", "load baseline checkout's package"
-        unchanged = subprocess.run(["git", "diff", "--quiet", BASELINE, "--", "looper"], cwd=repository)
+        unchanged = subprocess.run(["git", "diff", "--quiet", baseline, "--", "looper"], cwd=repository)
         assert unchanged.returncode == 0, "regenerate goldens only with production sources from baseline main"
         _FIXTURES.mkdir(parents=True, exist_ok=True)
         fixture.write_text(actual)

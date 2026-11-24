@@ -3,6 +3,7 @@ from .. import limit_signals
 from ..action_levels import ActionLevel
 from ..api_v1 import Operation, _array, _object, _BOOL, _STR, _INT, _NULL_STR
 from ..ops import ErrorCode, PublicOpError
+from .admission import ADMISSION
 
 _NUMBER = {"type": ["number", "null"]}
 _NULL_INT = {"type": ["integer", "null"]}
@@ -13,7 +14,7 @@ DAY = _object({"day": _STR, "runs": _INT, "input_tokens": _NULL_INT, "output_tok
     "cache_read_input_tokens": _NULL_INT, "cache_creation_input_tokens": _NULL_INT,
     "cost_usd": _NUMBER, "quota_failures": _NULL_INT}, closed=True)
 LIMITS = _object({"enabled": _BOOL, "providers": _array(_object({"provider_id": _STR, "name": _STR,
-    "cost_basis": {"enum": ["api_equivalent", "reported"]}, "admission": {"type": "null"},
+    "cost_basis": {"enum": ["api_equivalent", "reported"]}, "admission": {"anyOf": [{"type": "null"}, ADMISSION]},
     "windows": _array(WINDOW), "usage": _array(DAY)}, closed=True))}, closed=True)
 SETTINGS = _object({"enabled": _BOOL}, closed=True)
 RESULTS = {}

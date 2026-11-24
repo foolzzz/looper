@@ -182,6 +182,32 @@ export interface AlertSender {
   messages_30d: number;
 }
 
+export interface FollowedGroup {
+  chat_id: string;
+  name: string;
+  kind: string;
+  added_at: string;
+  read_from: string;
+  readable: boolean;
+  read_today: number;
+  skipped_today: number;
+  messages_24h: number;
+  intents_7d: number;
+}
+
+export interface FollowedGroups {
+  enabled: boolean;
+  delivery_enabled: boolean;
+  run_max: number;
+  day_max: number;
+  max_groups: number;
+  groups: FollowedGroup[];
+}
+
+export interface FollowedGroupPreview {
+  group: { chat_id: string; name: string; kind: string; messages_24h: number; estimate_usd: [number, number] };
+}
+
 export interface SubscriptionPresetFields {
   kind: "subscription";
   name: string;
@@ -342,4 +368,24 @@ export function intentAlertSendersPut(args: { app_id: string }): Promise<{ sende
 
 export function intentAlertSendersDelete(args: { app_id: string }): Promise<{ senders: AlertSender[] }> {
   return call("/api/v1/intent_alert_senders/delete", args);
+}
+
+export function intentGroupReadsList(args: { source_id?: string } = {}): Promise<FollowedGroups> {
+  return call("/api/v1/intent_group_reads/list", args);
+}
+
+export function intentGroupReadsPreview(args: { source_id?: string; chat_id: string }): Promise<FollowedGroupPreview> {
+  return call("/api/v1/intent_group_reads/preview", args);
+}
+
+export function intentGroupReadsPut(args: { source_id?: string; chat_id: string }): Promise<FollowedGroups> {
+  return call("/api/v1/intent_group_reads/put", args);
+}
+
+export function intentGroupReadsDelete(args: { source_id?: string; chat_id: string }): Promise<FollowedGroups> {
+  return call("/api/v1/intent_group_reads/delete", args);
+}
+
+export function intentGroupReadsSettingsPut(args: { source_id?: string; enabled: boolean }): Promise<FollowedGroups> {
+  return call("/api/v1/intent_group_reads/settings_put", args);
 }

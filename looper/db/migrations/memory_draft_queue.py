@@ -1,8 +1,8 @@
 """Persist drafting waits and serialize bounded draft spend across restarts."""
 
 name = "memory_draft_queue"
-order = 1500
-pending_order = 1500
+order = 1840
+pending_order = 1840
 fresh_ddl = """
 -- Persist waits across restarts. Removing either candidate removes only the wait; the seed can be claimed again.
 CREATE TABLE IF NOT EXISTS memory_draft_waits (

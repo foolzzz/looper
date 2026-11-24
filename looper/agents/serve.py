@@ -52,7 +52,7 @@ from .channels.registry import ChannelRegistry
 from .channels.chat_routing import ChatResolver, ChatStop
 from .channels.telegram import TelegramChannelAdapter
 from .channels.web import WebChannelAdapter
-from . import db_backup, keeper, self_check
+from . import admission, db_backup, keeper, self_check
 from .kept_run import KeeperSettings
 from .gate_courier import GateCourier
 from .gate_service import GateReminders
@@ -75,6 +75,7 @@ from .scheduler import Scheduler
 from .message import MessageType
 from .runtimes.runner.supervisor import RunnerSupervisor
 from .supervisor import AgentSupervisor
+from .tiers import triage_background
 from .tiers.manager import ManagerConfig
 from .tiers.task import TaskRouter
 from .tiers.worker import WorkerConfig, WorkerPool
@@ -732,6 +733,10 @@ async def _run_agent_system_owned(
 ) -> None:
     """Start the full agent system with the ops settings ``ops`` and run until interrupted."""
 
+    from . import session_routing
+
+    previous_routing = session_routing.routing_enabled()
+    previous_max_resident = session_routing.max_resident()
     loop_watch = LoopWatch()
     loop_watch.start()  # Observe synchronous startup work before the first await.
     try:
@@ -740,6 +745,9 @@ async def _run_agent_system_owned(
                                         runner_supervisors=runner_supervisors, ownership=ownership,
                                         exit_now=exit_now, loop_watch=loop_watch)
     finally:
+        # Startup loads process-wide routing settings; keep later serves independent, even after a failed start.
+        session_routing.set_routing_enabled(previous_routing)
+        session_routing.set_max_resident(previous_max_resident)
         await loop_watch.stop()
 
 
@@ -820,6 +828,7 @@ async def _run_agent_system_watched(
                 await chat_settings.load()
                 from . import lanes_settings
                 await lanes_settings.load()
+                await admission.initialize()
                 await persona.load()
                 from .channels import down_alert_settings
                 await down_alert_settings.load()
@@ -969,6 +978,8 @@ async def _run_agent_system_watched(
             # It fires the schedules once the agents and the HTTP server are up, and hears from the TaskRouter when a
             # task ends, to record a scheduled run's outcome.
             drain = DrainState()  # A new control plane always starts serving; drain is never stored.
+            admission.configure_drain(lambda: drain.draining)
+            drain.add_waker(lambda: asyncio.create_task(admission.wake()))
             scheduler = Scheduler(bus=bus, sender=registry.notify, dashboard_url=dashboard_url,
                                   runtime_root=runtime_root, drain=drain, poster=registry.post,
                                   claude_bin=claude_bin, own_apps=own_bot_app_ids,
@@ -980,6 +991,8 @@ async def _run_agent_system_watched(
             # The advisor's alerts go to the operator's chat through the same channels.
             from . import advisor_alerts, outbound_hook, usage_windows
             advisor_alerts.configure(registry.notify)
+            from . import admission_notices
+            admission_notices.configure(registry.notify)
             # So does the daily note that skill proposals wait for the operator (names and reasons, never content).
             from . import skill_proposal_notice
             skill_proposal_notice.configure(registry.notify, dashboard_url=dashboard_url)
@@ -1170,6 +1183,7 @@ async def _run_agent_system_watched(
         await memory_drafter.start(dsn)
         await memory_push_service.start()
         await reminder_service.start()  # idle while reminders are off
+        triage_background.configure(registry.post)
         await idle_check_service.start()
         await morning_brief_service.start()  # idle while the morning brief is off
         await metrics_alert_service.start()
@@ -1258,6 +1272,7 @@ async def _run_agent_system_watched(
             await supervisor.stop_all()
             for runner_supervisor in runner_supervisors:
                 await runner_supervisor.stop()
+            await admission.stop()
             await registry.stop_all()
             await bus.shutdown()
             if control is not None:
@@ -1311,6 +1326,8 @@ def _pending_advisory_checks() -> list[list[self_check.Check]]:
         (("lark_cli", "Lark channel"),), (("git", "git"),), (("projects_root", "Projects root"),),
         (("provider_limits", "Provider quotas"),),
     )
+    if admission.enabled():
+        groups += ((("admission", "Account admission"),),)
     return [[self_check.Check(id, label, self_check.PENDING, "Startup check in progress") for id, label in group]
             for group in groups]
 
@@ -1345,6 +1362,9 @@ async def _advisory_startup_checks(snapshot: list[dict[str, str]], database: sel
             asyncio.to_thread(self_check.check_projects_root, projects_root),
             self_check.provider_limit_checks(),
         )
+        # Keep the disabled path's checks unchanged; every enabled probe needs its own slots.
+        if admission.enabled():
+            probes += (self_check.admission_checks(),)
         await asyncio.gather(*(record(index, probe) for index, probe in enumerate(probes)))
         self_check.log_problems([database, *(check for group in groups for check in group)])
     except Exception:
