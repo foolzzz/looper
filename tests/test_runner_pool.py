@@ -95,8 +95,10 @@ def test_resume_can_use_another_member_with_shared_state(runners, tmp_path, pers
     run(exercise())
 
 
-def test_idle_extra_member_stops_but_last_member_stays(runners, monkeypatch, caplog):
+@pytest.mark.parametrize("root_log_level", [logging.WARNING, logging.INFO], ids=["quiet-cleanup", "logged-cleanup"])
+def test_idle_extra_member_stops_but_last_member_stays(runners, monkeypatch, caplog, root_log_level):
     monkeypatch.setattr(s, "IDLE_STOP_SECONDS", 0.05)
+    caplog.set_level(root_log_level)
     caplog.set_level(logging.INFO, logger=s.__name__)
     async def exercise():
         async with runners(session_cap=1) as (owner, processes):
@@ -109,7 +111,8 @@ def test_idle_extra_member_stops_but_last_member_stays(runners, monkeypatch, cap
             assert processes[0].returncode is None and len(owner._kinds["fake"].members) == 1
             replacement = await owner.acquire("fake")
             assert replacement.runner_id == first.runner_id
-        messages = [record.getMessage() for record in caplog.records]
+        # Process-tree cleanup also logs at INFO; member lifecycle fields belong to the supervisor.
+        messages = [record.getMessage() for record in caplog.records if record.name == s.__name__]
         assert sum("started:" in message for message in messages) == 2
         assert sum("stopped:" in message for message in messages) == 2
         assert all("sessions=" in message and "member" in message for message in messages)

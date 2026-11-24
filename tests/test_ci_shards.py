@@ -15,6 +15,8 @@ from types import SimpleNamespace
 import pytest
 import yaml
 
+from tests import conftest
+
 
 ROOT = Path(__file__).resolve().parents[1]
 PR_MARKERS = "not installed and not provenance"
@@ -80,6 +82,58 @@ def test_single_shard_preserves_unsharded_collection(collection) -> None:
     assert collection("1/1", path) == collection(None, path)
 
 
+def test_duration_assignment_is_deterministic_complete_and_balanced() -> None:
+    # Each shard can have one large and one small file for the optimal load of 13.
+    durations = {f"tests/test_{i}.py": float(seconds)
+                 for i, seconds in enumerate(range(1, 13))}
+    counts = dict.fromkeys(durations, 1)
+    assigned = conftest._assign_test_shards(counts, durations, 6)
+    assert assigned == conftest._assign_test_shards(
+        dict(reversed(list(counts.items()))), dict(reversed(list(durations.items()))), 6)
+    assert set(assigned) == set(counts)
+    assert set(assigned.values()) == set(range(1, 7))
+    loads = [sum(durations[path] for path in counts if assigned[path] == shard)
+             for shard in range(1, 7)]
+    assert max(loads) / min(loads) <= 1.05
+    assert max(loads) == pytest.approx(sum(durations.values()) / 6)
+
+
+def test_missing_file_uses_median_seconds_per_item() -> None:
+    counts = {"tests/test_a.py": 2, "tests/test_b.py": 4, "tests/test_new.py": 3}
+    # Rates are 2 and 4 s/item, so the new file weighs 9s and is placed first.
+    durations = {"tests/test_a.py": 4.0, "tests/test_b.py": 16.0,
+                 "tests/test_removed.py": 10000.0}
+    assert conftest._assign_test_shards(counts, durations, 2) == {
+        "tests/test_b.py": 1, "tests/test_new.py": 2, "tests/test_a.py": 2,
+    }
+
+
+def test_equal_weights_break_ties_by_path_then_shard() -> None:
+    counts = {f"tests/test_{letter}.py": 1 for letter in "dcba"}
+    durations = dict.fromkeys(counts, 2.0)
+    assert conftest._assign_test_shards(counts, durations, 2) == {
+        "tests/test_a.py": 1, "tests/test_b.py": 2,
+        "tests/test_c.py": 1, "tests/test_d.py": 2,
+    }
+
+
+def test_collection_of_only_new_files_can_still_be_sharded() -> None:
+    counts = {"tests/test_a.py": 1, "tests/test_b.py": 3}
+    assert conftest._assign_test_shards(counts, {"tests/test_old.py": 2.0}, 2) == {
+        "tests/test_b.py": 1, "tests/test_a.py": 2,
+    }
+
+
+@pytest.mark.parametrize("content", [None, "{", "{}", '{"tests/test_a.py": -1}',
+                                    '{"tests/test_a.py": NaN}', '{"tests/test_a.py": "slow"}'])
+def test_duration_table_fails_clearly_when_unavailable_or_invalid(tmp_path, content) -> None:
+    path = tmp_path / "shard_durations.json"
+    if content is not None:
+        path.write_text(content)
+    with pytest.raises(pytest.UsageError, match="shard_durations.json"):
+        conftest._load_shard_durations(path)
+
+
 @pytest.mark.parametrize("shard", ["2", "0/6", "7/6", "1/0", ""])
 def test_invalid_shard_fails_at_configuration(shard: str) -> None:
     result = subprocess.run(
@@ -97,7 +151,7 @@ def test_workflow_runs_six_shards_behind_stable_required_check() -> None:
     assert "shard: [1, 2, 3, 4, 5, 6]" in shards
     assert "name: Agent system tests (shard ${{ matrix.shard }}/6)" in shards
     assert "LOOPER_TEST_SHARD: ${{ matrix.shard }}/6" in shards
-    assert "timeout-minutes: 20" in shards
+    assert "timeout-minutes: 30" in shards
     assert "fail-fast: false" in shards
     result = workflow.split("  agent-system-result:\n", 1)[1].split("\n  dashboard:", 1)[0]
     assert re.search(r"^    name: Agent system tests$", result, re.MULTILINE)
@@ -105,6 +159,21 @@ def test_workflow_runs_six_shards_behind_stable_required_check() -> None:
     assert "if: always()" in result
     assert "SHARDS_RESULT: ${{ needs.agent-system.result }}" in result
     assert 'test "$SHARDS_RESULT" = success' in result
+
+
+def test_shards_upload_total_test_durations_even_on_failure() -> None:
+    steps = _workflow()["jobs"]["agent-system"]["steps"]
+    run = next(step for step in steps if step.get("name") == "Run the tests")["run"]
+    assert "--dist worksteal" in run
+    assert "--durations=25" in run
+    assert "--junitxml=agent-shard-junit.xml" in run
+    assert "junit_family=xunit1" in run  # Preserve file paths in xdist JUnit reports.
+    assert "junit_duration_report=total" in run  # setup + call + teardown
+    upload = next(step for step in steps if step.get("uses", "").startswith("actions/upload-artifact@"))
+    assert "always()" in upload["if"]
+    assert upload["with"]["name"] == "agent-shard-junit-${{ matrix.shard }}-of-6"
+    assert upload["with"]["path"] == "agent-shard-junit.xml"
+    assert int(upload["with"]["retention-days"]) <= 7
 
 
 def test_workflow_keeps_docs_only_required_jobs_successful() -> None:
@@ -120,6 +189,7 @@ def test_workflow_keeps_docs_only_required_jobs_successful() -> None:
         steps = body.split("    steps:\n", 1)[1].split("      - ")[1:]
         assert steps
         assert all("if: needs.changes.outputs.docs_only != 'true'" in step
+                   or "if: always() && needs.changes.outputs.docs_only != 'true'" in step
                    or "if: needs.changes.outputs.docs_only == 'true'" in step
                    for step in steps)
         assert any("run: echo" in step and "docs_only == 'true'" in step for step in steps)
@@ -198,9 +268,9 @@ def _workflow() -> dict:
     return yaml.load((ROOT / ".github/workflows/python-tests.yml").read_text(), Loader=yaml.BaseLoader)
 
 
-def test_workflow_runs_on_main_pushes() -> None:
+def test_workflow_runs_on_pull_requests_and_dispatch_only() -> None:
     assert _workflow()["on"] == {
-        "push": {"branches": ["main"]}, "pull_request": "", "workflow_dispatch": "",
+        "pull_request": "", "workflow_dispatch": "",
     }
 
 
@@ -212,9 +282,10 @@ def test_workflow_runs_on_main_pushes() -> None:
     ("pull_request", "refs/pull/1/merge", "codex/release", "false", "false", False, False),
     ("pull_request", "refs/pull/1/merge", "codex/docs", "true", "true", False, False),
     ("pull_request", "refs/pull/1/merge", "codex/release-2.0", "false", "true", True, False),
-    ("push", "refs/heads/main", "", "false", "false", True, True),
+    ("push", "refs/heads/main", "", "false", "false", False, False),
     ("push", "refs/heads/feature", "codex/release-2.0", "false", "false", False, False),
     ("workflow_dispatch", "refs/heads/main", "", "false", "false", True, True),
+    ("workflow_dispatch", "refs/heads/feature", "", "false", "false", True, True),
 ])
 def test_workflow_optional_job_conditions(event, ref, head, web, docs, canary, dashboard) -> None:
     # Evaluate the workflow's own conditions, with all dependencies successful.

@@ -18,7 +18,7 @@ def _reply(*sources, type_key="bug_triage"):
 
 
 def _types(monkeypatch):
-    async def types(_):
+    async def types(*_args, **_kwargs):
         return [{"key": key, "name": key, "guidance": "Synthetic guidance"}
                 for key in ("dev_task", "bug_triage", "alert_triage")]
 
