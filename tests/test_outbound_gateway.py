@@ -68,6 +68,121 @@ def test_breaker_single_probe_and_recovery():
     assert breaker.state == 'closed'
 
 
+@pytest.mark.parametrize('app_id', ['synthetic-app', 'telegram:10001'])
+def test_sibling_channels_share_breaker_and_single_recovery_probe(app_id, monkeypatch):
+    from looper.agents.channels import outbound_metrics as metrics
+    events = metrics.EventBuffer()
+    monkeypatch.setattr(metrics, 'events', events)
+
+    async def run():
+        clock = Clock()
+        first, sibling = [Gateway(channel, clock, clock.sleep, app_id=app_id)
+                          for channel in ('first', 'sibling')]
+        calls = []
+
+        async def failure():
+            calls.append('failure')
+            raise LarkCliError('lost response', error_type=TIMEOUT)
+
+        async def success():
+            calls.append('success')
+            return 'sent'
+
+        # Match the real-path failure: three CLI edits and two Bot edits.
+        for index, gateway in enumerate([first] * 3 + [sibling] * 2):
+            with pytest.raises(LarkCliError):
+                await gateway.edit(str(index), failure)
+        assert first.breaker.state == sibling.breaker.state == 'open'
+        for gateway in (first, sibling):
+            with pytest.raises(CircuitOpen):
+                await gateway.write('send', success)
+        assert calls == ['failure'] * 5
+        assert first.counters.breaker_opens == sibling.counters.breaker_opens == 1
+
+        clock.now = 60
+        probing, release = asyncio.Event(), asyncio.Event()
+
+        async def probe():
+            probing.set()
+            await release.wait()
+            return await failure()
+
+        task = asyncio.create_task(sibling.write('send', probe, retry=False))
+        await probing.wait()
+        assert first.breaker.state == 'half_open'
+        with pytest.raises(CircuitOpen):
+            await first.write('send', success)
+        release.set()
+        with pytest.raises(LarkCliError):
+            await task
+        assert first.breaker.state == sibling.breaker.state == 'open'
+        assert first.breaker.open_until == 120
+        clock.now = 120
+        assert await first.write('send', success) == 'sent'
+        assert sibling.breaker.state == 'closed'
+        assert await sibling.write('send', success) == 'sent'
+        assert calls == ['failure'] * 6 + ['success'] * 2
+        for gateway in (first, sibling):
+            counts = events.counts(gateway.channel_id)
+            assert counts[metrics.EventKind.BREAKER_OPEN] == 2
+            assert counts[metrics.EventKind.BREAKER_HALF_OPEN] == 2
+            assert counts[metrics.EventKind.BREAKER_RECOVERED] == 1
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize('other_app', ['different-app', 'telegram:synthetic-app', ''])
+def test_breaker_different_or_unknown_apps_stay_independent(other_app):
+    async def run():
+        clock = Clock()
+        first = Gateway('first', clock, clock.sleep, app_id='synthetic-app' if other_app else '')
+        other = Gateway('other', clock, clock.sleep, app_id=other_app)
+
+        async def failure():
+            raise LarkCliError('lost response', error_type=TIMEOUT)
+
+        async def success():
+            return 'sent'
+
+        for _ in range(5):
+            with pytest.raises(LarkCliError):
+                await first.write('edit', failure, retry=False)
+        assert first.breaker.state == 'open'
+        assert await other.write('send', success) == 'sent'
+        assert other.breaker.state == 'closed'
+        assert first.breaker.state == 'open'
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize('reset', ['success', 'rejected', 'window'])
+def test_sibling_breaker_failure_sequence_resets(reset):
+    async def run():
+        clock = Clock()
+        first, sibling = [Gateway(channel, clock, clock.sleep, app_id='synthetic-app')
+                          for channel in ('first', 'sibling')]
+
+        async def failure():
+            raise LarkCliError('lost response', error_type=TIMEOUT)
+
+        async def reset_call():
+            if reset == 'rejected':
+                raise LarkCliError('rejected', code=123)
+
+        for _ in range(4):
+            with pytest.raises(LarkCliError):
+                await first.write('edit', failure, retry=False)
+        if reset == 'window':
+            clock.now = 31
+        elif reset == 'rejected':
+            with pytest.raises(LarkCliError):
+                await sibling.write('edit', reset_call, retry=False)
+        else:
+            await sibling.write('edit', reset_call)
+        with pytest.raises(LarkCliError):
+            await first.write('edit', failure, retry=False)
+        assert first.breaker.state == sibling.breaker.state == 'closed'
+    asyncio.run(run())
+
+
 def test_backoff_retry_after_and_unknown_key():
     async def run():
         clock = Clock()

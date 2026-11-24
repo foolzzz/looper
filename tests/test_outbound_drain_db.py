@@ -9,6 +9,77 @@ from tests.db_support import DSN, run_db
 pytestmark = pytest.mark.skipif(not DSN, reason='disposable PostgreSQL required')
 
 
+def test_sibling_outbox_holds_sends_and_wakes_after_another_channels_probe(monkeypatch):
+    from looper.agents.channels import outbound
+    from looper.db import channel_outbox as db
+
+    async def check(pool):
+        now = [0.0]
+        first, sibling = [outbound.Gateway(channel, clock=lambda: now[0], app_id='synthetic-app')
+                          for channel in ('first', 'sibling')]
+
+        async def failure():
+            raise outbound.LarkCliError('lost response', error_type=outbound.TIMEOUT)
+
+        for _ in range(5):
+            with pytest.raises(outbound.LarkCliError):
+                await first.write('edit', failure, retry=False)
+        row = await db.insert_or_get(dict(channel_id='sibling', idempotency_key='held', kind='send',
+            chat='synthetic', body={'text': 'held'}, source='answer'))
+        transport = AsyncMock()
+        transport.send.return_value = 'om_recovered'
+        box = outbound.Outbox('sibling', transport, sibling)
+        deferred, parked, probing, release, saved = [asyncio.Event() for _ in range(5)]
+        defer, mark_sent, wait = db.defer_unsent, db.mark_sent, box._wake.wait
+
+        async def defer_unsent(*args):
+            await defer(*args)
+            deferred.set()
+
+        async def sent(*args):
+            await mark_sent(*args)
+            saved.set()
+
+        async def wait_for_work():
+            if sibling.breaker.state == 'half_open':
+                parked.set()
+            await wait()
+
+        async def probe():
+            probing.set()
+            await release.wait()
+            return 'om_probe'
+
+        monkeypatch.setattr(db, 'defer_unsent', defer_unsent)
+        monkeypatch.setattr(db, 'mark_sent', sent)
+        monkeypatch.setattr(box._wake, 'wait', wait_for_work)
+        task = None
+        try:
+            await box.start()
+            await asyncio.wait_for(deferred.wait(), 2)
+            held = await db.get(row['id'])
+            assert held['state'] == 'pending' and held['attempts'] == 0
+            transport.send.assert_not_awaited()
+            now[0] = 60
+            task = asyncio.create_task(first.write('send', probe))
+            await asyncio.wait_for(probing.wait(), 2)
+            await pool.execute('UPDATE channel_outbox SET next_attempt_at=now() WHERE id=$1', row['id'])
+            box._wake.set()
+            await asyncio.wait_for(parked.wait(), 2)
+            release.set()
+            assert await asyncio.wait_for(task, 2) == 'om_probe'
+            await asyncio.wait_for(saved.wait(), 2)
+            delivered = await db.get(row['id'])
+            assert delivered['state'] == 'sent' and delivered['attempts'] == 1
+            assert transport.send.await_count == 1
+        finally:
+            release.set()
+            if task is not None:
+                await asyncio.gather(task, return_exceptions=True)
+            await box.stop()
+    run_db(check, monkeypatch)
+
+
 def test_switch_off_still_drains_pending_and_retries(monkeypatch):
     from looper.agents.channels import outbound
 

@@ -16,7 +16,7 @@ from datetime import datetime, timedelta, timezone
 from enum import StrEnum
 from typing import Any
 from uuid import uuid4
-from weakref import WeakValueDictionary
+from weakref import WeakSet, WeakValueDictionary
 
 from .base import PostOutcome, PostReceipt
 from . import outbound_metrics
@@ -207,10 +207,16 @@ class _AppLimits:
     def __init__(self, settings, clock, sleep):
         self.loop = asyncio.get_running_loop()
         self.settings, self.clock, self.sleep = settings, clock, sleep
+        self.gateways: WeakSet[Gateway] = WeakSet()
+        self.breaker = Breaker(clock, on_transition=self._breaker_transition)
         self._limits = {}
         self._in_flight = 0
         self._slots = asyncio.Condition()
         self._configure()
+
+    def _breaker_transition(self, state: BreakerState):
+        for gateway in self.gateways:
+            gateway._breaker_transition(state)
 
     def _configure(self):
         limits = self.settings()
@@ -233,7 +239,7 @@ class _AppLimits:
                 self._slots.notify_all()
 
 
-# Share allowances only within their owning loop; release them with the last gateway.
+# Share allowances and circuit state within their owning loop; release with the last gateway.
 _APP_LIMITS: WeakValueDictionary[tuple[asyncio.AbstractEventLoop, str], _AppLimits] = WeakValueDictionary()
 
 
@@ -248,8 +254,8 @@ class Gateway:
         self._app_id = app_id
         self._app_limits: _AppLimits | None = None
         self.counters = Counters()
-        self.breaker = Breaker(clock, on_transition=self._breaker_transition)
         self._edits: dict[str, _Edit] = {}
+        self._outbox_wakes: WeakSet[asyncio.Event] = WeakSet()
 
     @property
     def _app(self) -> _AppLimits:
@@ -263,7 +269,12 @@ class Gateway:
                 if self._app_id:
                     _APP_LIMITS[key] = app
             self._app_limits = app
+            app.gateways.add(self)
         return self._app_limits
+
+    @property
+    def breaker(self) -> Breaker:
+        return self._app.breaker
 
     def _breaker_transition(self, state: BreakerState):
         kind = {"open": EventKind.BREAKER_OPEN, "half_open": EventKind.BREAKER_HALF_OPEN,
@@ -271,6 +282,9 @@ class Gateway:
         outbound_metrics.events.record(self.channel_id, kind)
         if state == 'open':
             self.counters.breaker_opens += 1
+        # A sibling may be waiting for the shared half-open probe to finish.
+        for wake in self._outbox_wakes:
+            wake.set()
 
     def record_backoff(self):
         self.counters.backoffs += 1
@@ -370,6 +384,7 @@ class Outbox:
         self.enabled = enabled
         self._start_lock = asyncio.Lock()
         self._wake = asyncio.Event()
+        self.gateway._outbox_wakes.add(self._wake)
         self._task: asyncio.Task | None = None
         self._recovery_task: asyncio.Task | None = None
         self._workers: set[asyncio.Task] = set()
