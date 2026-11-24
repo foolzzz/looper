@@ -100,6 +100,10 @@ def test_delivery_counts_only_actual_started_runs():
         assert await pool.fetchval('SELECT injected FROM memory_lesson_stats WHERE candidate_id=$1',candidate) == 1
         repeated = await store.prepare_injection('target','worker','attempt-3',block,db=pool,now=sup.NOW)
         assert repeated['state'] == 'uncertain'
+        recovered = await store.mark_delivered(uncertain['id'],db=pool,now=sup.NOW)
+        assert recovered['state'] == 'uncertain' and recovered['delivered_at'] is None
+        assert await pool.fetchval('SELECT injected FROM memory_lesson_stats WHERE candidate_id=$1',candidate) == 1
+        assert not await pool.fetchval('SELECT count(*) FROM memory_injection_items WHERE injection_id=$1',uncertain['id'])
     run_db(check, setup=setup)
 
 

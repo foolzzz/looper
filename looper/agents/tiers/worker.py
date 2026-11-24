@@ -2851,13 +2851,7 @@ class WorkerPool:
             async for event in channel.events():
                 model_event = runtime.is_model_event(event)
                 ctx.model_events += int(model_event)
-                # A kept run's original model output proves it consumed its input.
-                # Recover the existing delivery; never replay the input to repair a counter.
-                if model_event and ctx.lesson_injection_id is not None and not ctx.lesson_delivered:
-                    delivered = await db_lesson_injection.mark_delivered(
-                        ctx.lesson_injection_id, record_id=recorder.record_id,
-                        session_key=event.get("session_id"))
-                    ctx.lesson_delivered = delivered["state"] == "delivered"
+                # Replayed output cannot confirm a delivery left uncertain by a host crash.
                 replaying = isinstance(handle, KeptRun) and handle.replaying
                 if replaying:
                     recorder.account(event, replayed=True)

@@ -124,7 +124,7 @@ async def mark_delivered(injection_id,*,session_key=None,record_id=None,db=None,
         # All operations that touch multiple candidates take the same ascending candidate locks first.
         candidates = await conn.fetch('SELECT id FROM memory_candidates WHERE id=ANY($1) ORDER BY id FOR UPDATE',initial['candidate_ids'])
         row = await conn.fetchrow('SELECT * FROM memory_injections WHERE id=$1 FOR UPDATE',injection_id)
-        if row is None or row['state'] == 'abandoned':
+        if row is None or row['state'] in ('abandoned', 'uncertain'):
             return _delivery(row)
         if session_key and row['agent_kind'] == 'planner':
             prior = await planner_injection(row['task_id'],session_key,db=conn)
