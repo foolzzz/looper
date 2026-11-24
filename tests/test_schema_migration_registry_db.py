@@ -77,6 +77,47 @@ def test_new_migration_file_upgrades_and_initializes_the_same_schema(tmp_path, m
         sys.modules.pop(f"{migrations.__name__}.{module_name}", None)
 
 
+def test_reminder_send_boundary_upgrades_after_brief_and_retrospective_migrations(monkeypatch):
+    async def test():
+        async with fresh_connection() as conn:
+            previous = tuple(module for module in connection._MIGRATIONS if module.order < 1930)
+            with monkeypatch.context() as patch:
+                patch.setattr(connection, "_MIGRATIONS", previous)
+                patch.setattr(connection, "_PENDING_MIGRATIONS", migrations.pending_migrations(previous))
+                patch.setattr(connection, "_ONLINE_STEPS", migrations.online_steps(previous))
+                await connection.ensure_schema(conn)
+                assert not await connection.schema_change_pending(conn)
+
+            applied = []
+
+            def record(module):
+                original = module.apply
+
+                async def apply(conn, *, sql, state):
+                    pending = await module.pending(conn)
+                    await original(conn, sql=sql, state=state)
+                    if pending:
+                        assert state == "current"
+                        applied.append(module.order)
+
+                return apply
+
+            for module in connection._MIGRATIONS:
+                if module.order in (1930, 1980, 1990, 2020):
+                    monkeypatch.setattr(module, "apply", record(module))
+            assert await connection.schema_change_pending(conn)
+            await connection.ensure_schema(conn)
+            assert applied == [1930, 1980, 1990, 2020]
+            assert await conn.fetchval("SELECT count(*) FROM schema_migrations WHERE name = ANY($1)",
+                ["morning_brief_send_started", "memory_retro_role", "memory_retro_queue",
+                 "reminder_post_started"]) == 4
+            assert not await connection.schema_change_pending(conn)
+            await connection.ensure_schema(conn)
+            assert applied == [1930, 1980, 1990, 2020]
+
+    asyncio.run(test())
+
+
 @pytest.mark.parametrize("migration_name,rollback", [
     ("skill_proposal_feedback", "ALTER TABLE skill_proposal_events DROP COLUMN told_at"),
     ("mcp_tool_levels", "DROP TABLE mcp_tool_levels CASCADE"),

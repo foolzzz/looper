@@ -3336,6 +3336,22 @@ memory page shows their candidates for the operator to review.
   again afterwards, the writer checks the committed paths and bytes against
   the confirmed operations. A branch advance outside those paths can be
   rebased; touching a target requires new drafting and confirmation.
+- **Task source:** when memory writing is enabled with `sources.tasks`, the
+  project has a lesson or project target, and the operator has turned that
+  project's memory closeout on, an ended task's Planner proposes lesson and
+  project candidates instead of the vault closeout. The turn is `[MEMORY]`.
+  Its journal lines are numbered `J1`, `J2`, … for rows that have an id;
+  review rounds and rows the budget leaves out are not citable. A proposal
+  names its kind, statement, why, keywords and those journal ids. Items that
+  fail the shape, the kind, the evidence or a secret check are dropped and
+  counted; the task still ends. The activity line says what was proposed, or
+  the note when nothing was, and the drop counts when any were dropped. An
+  empty journal or a spent task cap skips the turn. Writing a confirmed
+  candidate that cites a task journal adds `Memory: M-… written to …` on that
+  task. The switch is operator-only (`memory_closeout.get` /
+  `memory_closeout.update`), default off, and omitted from project reads and
+  configuration export until it is on. While it is off, prompts, tool lists
+  and the vault closeout stay as they were.
 - **Failure and recovery:** a blocked write keeps its confirmation and waits
   for the operator's retry; a content conflict clears confirmation and
   requests redrafting once. No write stashes, resets or commits somebody
@@ -7034,11 +7050,17 @@ direct chat. It names what waits (the needs-you summary), reminders due that
 local day, and proactive messages deferred into the digest (`decision`
 `digest`). Every brief reads from the first attempt's dates (Monday also
 Saturday and Sunday) through the day being sent, except digest rows already
-recorded by id in `morning_brief_consumed`. The claim stores the ids that
-read returned, in that same write. A sent or uncertain brief records them in
+recorded by id in `morning_brief_consumed`. A row whose `schedule_id`
+is a schedule the needs section lists is left out of the deferred-message
+section; that schedule's line says how many deferred pushes it has
+(「，另有 N 条推迟的推送」). The claim stores the ids that
+read returned, including those rows, in that same write. A sent or uncertain brief records them in
 the same transaction as its row. A refusal records none and clears the stored
-ids, so a rejected Tuesday brief's digest is still in Wednesday's. A sender
-that stops before the record is `uncertain` on restart, and that recovery
+ids, so a rejected Tuesday brief's digest is still in Wednesday's. Immediately
+before the channel call, the sender commits `send_started_at`. A claim without
+that marker becomes retryable on recovery: its attempt is refunded, its first
+date is kept, and no digest or triage ids are consumed. A sender that stops
+after that marker is `uncertain` on restart, and that recovery
 consumes exactly the stored ids: it does not scan by `decided_at`. A row whose
 insert had not committed is therefore still read once, on the next brief.
 `consumed_until` is the check time, not a watermark. With
@@ -7062,7 +7084,9 @@ it had. The switch
 (`morning_brief.get`, `morning_brief.update`); off, a tick reads the in-memory
 switch and does nothing else. One `morning_briefs` row per local date and chat
 makes a restart and a second server send it at most once. A send that stops
-mid-way is `uncertain` and is not sent again. With `delivery.enabled` on, the
+mid-way is `uncertain` and is not sent again. Upgrades conservatively mark old
+`sending` rows as started because they cannot prove that no send occurred.
+With `delivery.enabled` on, the
 decision and the channel receipt share one `proactive_deliveries` row. A later
 successful try replaces a rejected receipt on that row (`outcome`, `sent_at`,
 `external_id`). A receipt already recorded as `sent` or `unknown` keeps those
