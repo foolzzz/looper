@@ -304,11 +304,10 @@ class AgentHTTPServer:
 
             try:
                 self._address_publication = Publication(self._runtime_root, self._host, self._port)
-            except BaseException:
-                self._server.close()
-                await self._server.wait_closed()
-                self._server = None
-                raise
+            except (OSError, ValueError) as exc:
+                # Address discovery is optional; it must never prevent HTTP startup.
+                logger.warning("Claude Code retrieval integration is unavailable: could not publish "
+                               "the server address (%s); HTTP server will continue serving", exc)
         from .. import _PROCESS_STARTED_AT
         logger.info("HTTP server listening on %s:%d (%.3f s since process start)",
                     self._host, self._port, time.monotonic() - _PROCESS_STARTED_AT)

@@ -173,7 +173,7 @@ def test_crash_leaves_a_stale_record_and_restart_replaces_it(tmp_path):
 
 @pytest.mark.parametrize("shutdown", ["stop", "close_listener"])
 @pytest.mark.parametrize("same_server", [False, True])
-def test_http_address_ownership_follows_listener_lifecycle(tmp_path, shutdown, same_server):
+def test_http_address_ownership_follows_listener_lifecycle(tmp_path, shutdown, same_server, caplog):
     async def run():
         other_root = tmp_path / "other"
         other_root.mkdir()
@@ -189,10 +189,14 @@ def test_http_address_ownership_follows_listener_lifecycle(tmp_path, shutdown, s
             await independent.start()
             assert server_address.read(tmp_path) == ("127.0.0.1", original._port)
             assert server_address.read(other_root) == ("127.0.0.1", independent._port)
-            with pytest.raises(ValueError, match="already owns"):
-                await replacement.start()
-            assert replacement._server is None
+            await replacement.start()
+            assert replacement._server.is_serving()
+            assert replacement._address_publication is None
+            assert "already owns" in caplog.text
+            assert "retrieval integration is unavailable" in caplog.text
             assert original._server.is_serving()
+            assert server_address.read(tmp_path) == ("127.0.0.1", original._port)
+            await replacement.stop()
             assert server_address.read(tmp_path) == ("127.0.0.1", original._port)
             if shutdown == "stop":
                 await original.stop()
@@ -215,6 +219,52 @@ def test_http_address_ownership_follows_listener_lifecycle(tmp_path, shutdown, s
             await replacement.stop()
         with pytest.raises(ValueError, match="stale"):
             server_address.read(tmp_path)
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("failure", ["lock_open", "record_replace"])
+def test_address_io_errors_leave_http_serving_and_release_publication(tmp_path, monkeypatch, caplog, failure):
+    async def run():
+        token = operator_auth.ensure_token(tmp_path)
+        server = AgentHTTPServer(host="127.0.0.1", port=0, runtime_root=tmp_path,
+                                 operator_token=token,
+                                 web_adapter=SimpleNamespace(), task_router=SimpleNamespace(),
+                                 supervisor=SimpleNamespace())
+        operation = "open" if failure == "lock_open" else "replace"
+        original = getattr(os, operation)
+
+        def denied(*args, **kwargs):
+            path = args[0] if failure == "lock_open" else args[1]
+            if path == tmp_path / (server_address.LOCK if failure == "lock_open" else server_address.FILE):
+                raise PermissionError("publication is read-only")
+            return original(*args, **kwargs)
+
+        try:
+            with monkeypatch.context() as patch:
+                patch.setattr(os, operation, denied)
+                await server.start()
+                assert server._port != 8767
+                reader, writer = await asyncio.open_connection("127.0.0.1", server._port)
+                try:
+                    writer.write(("GET /api/v1/openapi.json HTTP/1.1\r\nHost: 127.0.0.1\r\n"
+                                  f"Authorization: Bearer {token}\r\nConnection: close\r\n\r\n").encode())
+                    await writer.drain()
+                    response = await asyncio.wait_for(reader.read(), timeout=5)
+                    assert response.startswith(b"HTTP/1.1 200")
+                    assert b'"openapi"' in response
+                finally:
+                    writer.close()
+                    await writer.wait_closed()
+                assert server._address_publication is None
+                assert "retrieval integration is unavailable" in caplog.text
+                assert "publication is read-only" in caplog.text
+                assert not list(tmp_path.glob(f".{server_address.FILE}.*"))
+            await server.stop()
+            await server.start()
+            assert server_address.read(tmp_path) == ("127.0.0.1", server._port)
+        finally:
+            await server.stop()
 
     asyncio.run(run())
 
