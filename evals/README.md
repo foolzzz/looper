@@ -72,6 +72,14 @@ passes each one. A variant of that script, not another task id, fails it.
 `checks_per_criterion`, `checks_off`, `weak_check`, `edited_test` and
 `check_error_recheck` are the acceptance set (`--tasks acceptance`).
 
+`local` checks use the network sandbox. On Linux that is `unshare -rn`, which
+needs an unprivileged user namespace. If the kernel refuses it, the preflight
+records `sandbox_unavailable` and does not run the case unsandboxed or ask for
+a password. The Python test workflow sets
+`kernel.apparmor_restrict_unprivileged_userns=0` before the tests, because
+Ubuntu 24.04 restricts those namespaces through AppArmor, and ignores a missing
+key on other images.
+
 For each task it reads back from the API: success (the task completed, its
 files are right and the flow happened, such as the review or the retry), step
 count, the pairs of steps the plan lets run at the same time

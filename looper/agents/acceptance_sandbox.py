@@ -1,14 +1,16 @@
 """Fail-closed launchers for acceptance checks without network access.
 
 The macOS profile has been verified on macOS 26.6.2. Linux's ``unshare -rn``
-path remains unverified on a target host; every invocation must pass the same
-enforcement preflight. A new network namespace may also contain the kernel's
-down, unlinked tunnel fallbacks (``tunl0``, ``gre0``, and the rest). Those are
-not host interfaces. Anything up, addressed, or linked to another device is
-not enforcement. When the kernel refuses the unprivileged user namespace,
-passwordless ``sudo`` may open the network namespace; the check then continues
-as the same host user with no capabilities. Neither launcher restricts file
-access by the service user.
+path needs an unprivileged user namespace and remains unverified on a target
+host; every invocation must pass the same enforcement preflight. A new network
+namespace may also contain the kernel's down, unlinked tunnel fallbacks
+(``tunl0``, ``gre0``, and the rest). Those are not host interfaces. Anything
+up, addressed, or linked to another device is not enforcement. When the kernel
+refuses the unprivileged user namespace, the preflight fails closed: the check
+is not run unsandboxed, and nothing prompts for a password or escalates to
+root to open the namespace. A process that is already root may use ``unshare -n``
+and must pass the same preflight. Neither launcher restricts file access by the
+service user.
 """
 from __future__ import annotations
 
@@ -154,18 +156,12 @@ def _which(name: str, env: Mapping[str, str]) -> str | None:
     return shutil.which(name, path=env.get("PATH"))
 
 
-def _env_assignments(env: Mapping[str, str]) -> tuple[str, ...]:
-    """Env assignments ``sudo`` would otherwise reset. The caller already removed credentials."""
-    assignments = []
-    for key, value in env.items():
-        if (not key.isidentifier() or "\0" in value or "\n" in value or "\r" in value):
-            continue
-        assignments.append(f"{key}={value}")
-    return tuple(assignments)
-
-
 def _linux_prefixes(env: Mapping[str, str]) -> tuple[tuple[str, ...], ...]:
-    """Launchers to prove, in order. Each one must pass the same preflight."""
+    """Launchers to prove, in order. Each one must pass the same preflight.
+
+    A refused unprivileged user namespace is unavailable. There is no privilege
+    helper: resolving one from ``PATH`` would run as root before the preflight.
+    """
     unshare = _which("unshare", env)
     if unshare is None:
         return ()
@@ -173,18 +169,6 @@ def _linux_prefixes(env: Mapping[str, str]) -> tuple[tuple[str, ...], ...]:
     # Root does not need a user namespace to open a network namespace.
     if os.geteuid() == 0:
         prefixes.append((unshare, "-n", "--"))
-        return tuple(prefixes)
-    sudo, setpriv, env_bin = _which("sudo", env), _which("setpriv", env), _which("env", env)
-    if sudo is None or setpriv is None or env_bin is None:
-        return tuple(prefixes)
-    # setpriv runs before the probe and the check, so a refused uid_map cannot
-    # leave the command running as host root.
-    prefixes.append((
-        sudo, "-n", unshare, "-n", "--",
-        setpriv, f"--reuid={os.getuid()}", f"--regid={os.getgid()}", "--init-groups",
-        "--inh-caps=-all", "--ambient-caps=-all", "--bounding-set=-all", "--",
-        env_bin, "-i", *_env_assignments(env),
-    ))
     return tuple(prefixes)
 
 

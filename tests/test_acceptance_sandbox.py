@@ -112,65 +112,35 @@ def _bins(name, path=None):
             "env": "/usr/bin/env"}.get(name)
 
 
-def test_linux_sudo_netns_drops_back_to_the_caller_when_user_namespace_is_refused(tmp_path, monkeypatch):
+def _no_privilege_helper(run) -> None:
+    for call in run.await_args_list:
+        for part in call.args[0]:
+            assert part not in {"sudo", "setpriv"}
+            assert not str(part).endswith("/sudo") and not str(part).endswith("/setpriv")
+
+
+def test_refused_user_namespace_is_unavailable_even_if_sudo_is_installed(tmp_path, monkeypatch):
+    """A refused user namespace does not escalate, prompt, or run the check unsandboxed."""
     monkeypatch.setattr(sandbox.sys, "platform", "linux")
     monkeypatch.setattr(sandbox.shutil, "which", _bins)
     monkeypatch.setattr(sandbox.os, "geteuid", lambda: 1001)
     monkeypatch.setattr(sandbox.os, "getuid", lambda: 1001)
     monkeypatch.setattr(sandbox.os, "getgid", lambda: 1001)
     monkeypatch.setattr(sandbox.os, "readlink", lambda path: "net:[old]")
-    body = _linux_probe("net:[new]", ["tunl0", "gre0", "gretap0"], uid=1001)
-    # The dropped command is the host user inside the host uid map, not a user-namespace root.
+    body = _linux_probe("net:[new]", ["tunl0"], uid=1001)
     body["euid"] = 1001
     body["uid_map"] = "0 0 4294967295\n"
+    # Later successes are the removed privilege helper. They must never be reached.
     run = AsyncMock(side_effect=[(1, b"unshare: write failed /proc/self/uid_map: Operation not permitted"),
                                  (0, b""), (0, json.dumps(body).encode())])
     monkeypatch.setattr(sandbox, "_run_probe", run)
-    assert asyncio.run(sandbox.local_prefix(tmp_path, {"PATH": "/usr/bin", "HOME": "/home/ci"})) == (
-        "/usr/bin/sudo", "-n", "/usr/bin/unshare", "-n", "--",
-        "/usr/bin/setpriv", "--reuid=1001", "--regid=1001", "--init-groups",
-        "--inh-caps=-all", "--ambient-caps=-all", "--bounding-set=-all", "--",
-        "/usr/bin/env", "-i", "PATH=/usr/bin", "HOME=/home/ci",
-    )
-    assert run.await_args_list[0].args[0][:3] == ("/usr/bin/unshare", "-rn", "--")
-    assert run.await_count == 3
-
-
-@pytest.mark.parametrize("links", [
-    {"eth0": {"up": False, "iflink": 2, "addressed": False}},
-    {"tunl0": {"up": True, "iflink": 0, "addressed": False}},
-    {"gre0": {"up": False, "iflink": 0, "addressed": True}},
-])
-def test_linux_sudo_netns_still_rejects_a_device_that_can_leave(tmp_path, monkeypatch, links):
-    monkeypatch.setattr(sandbox.sys, "platform", "linux")
-    monkeypatch.setattr(sandbox.shutil, "which", _bins)
-    monkeypatch.setattr(sandbox.os, "geteuid", lambda: 1001)
-    monkeypatch.setattr(sandbox.os, "getuid", lambda: 1001)
-    monkeypatch.setattr(sandbox.os, "getgid", lambda: 1001)
-    monkeypatch.setattr(sandbox.os, "readlink", lambda path: "net:[old]")
-    body = _linux_probe("net:[new]", [], uid=1001)
-    body["euid"] = 1001
-    body["uid_map"] = "0 0 4294967295\n"
-    body["interfaces"] = ["lo", *links]
-    body["links"].update(links)
-    run = AsyncMock(side_effect=[(1, b""), (0, b""), (0, json.dumps(body).encode())])
-    monkeypatch.setattr(sandbox, "_run_probe", run)
-    assert asyncio.run(sandbox.local_prefix(tmp_path, {})) is None
-
-
-def test_linux_without_sudo_stays_unavailable_when_the_user_namespace_is_refused(tmp_path, monkeypatch):
-    monkeypatch.setattr(sandbox.sys, "platform", "linux")
-    monkeypatch.setattr(sandbox.shutil, "which", _unshare_only)
-    monkeypatch.setattr(sandbox.os, "geteuid", lambda: 1001)
-    monkeypatch.setattr(sandbox.os, "getuid", lambda: 1001)
-    monkeypatch.setattr(sandbox.os, "readlink", lambda path: "net:[old]")
-    run = AsyncMock(return_value=(1, b"unshare: unshare failed: Operation not permitted"))
-    monkeypatch.setattr(sandbox, "_run_probe", run)
-    assert asyncio.run(sandbox.local_prefix(tmp_path, {})) is None
+    assert asyncio.run(sandbox.local_prefix(tmp_path, {"PATH": "/tmp/writable:/usr/bin"})) is None
     assert run.await_count == 1
+    assert run.await_args_list[0].args[0][:3] == ("/usr/bin/unshare", "-rn", "--")
+    _no_privilege_helper(run)
 
 
-def test_linux_refuses_a_netns_whose_command_is_still_host_root(tmp_path, monkeypatch):
+def test_user_namespace_that_stays_host_root_is_unavailable(tmp_path, monkeypatch):
     monkeypatch.setattr(sandbox.sys, "platform", "linux")
     monkeypatch.setattr(sandbox.shutil, "which", _bins)
     monkeypatch.setattr(sandbox.os, "geteuid", lambda: 1001)
@@ -180,9 +150,11 @@ def test_linux_refuses_a_netns_whose_command_is_still_host_root(tmp_path, monkey
     body = _linux_probe("net:[new]", ["tunl0"], uid=1001)
     body["euid"] = 0
     body["uid_map"] = "0 0 4294967295\n"
-    run = AsyncMock(side_effect=[(1, b""), (0, b""), (0, json.dumps(body).encode())])
+    run = AsyncMock(side_effect=[(0, b""), (0, json.dumps(body).encode()), (0, b""), (0, b"")])
     monkeypatch.setattr(sandbox, "_run_probe", run)
     assert asyncio.run(sandbox.local_prefix(tmp_path, {})) is None
+    assert run.await_count == 2
+    _no_privilege_helper(run)
 
 
 def test_root_opens_a_netns_without_a_user_namespace(tmp_path, monkeypatch):
