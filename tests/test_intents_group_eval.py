@@ -33,6 +33,8 @@ def _types(monkeypatch):
 @pytest.mark.parametrize("case,reply", [
     ("intents_group_requests", {"intents": [_reply("m1", type_key="dev_task"), _reply("m3"),
                                            _reply("m7", type_key="dev_task")]}),
+    ("intents_group_requests_short", {"intents": [_reply("m1"), _reply("m3", type_key="dev_task"),
+                                                 _reply("m7"), _reply("m8", type_key="dev_task")]}),
     ("intents_group_requests_merge", {"intents": [_reply("m1", "m2", "m3")]}),
     ("intents_group_requests_quiet", "NONE"),
     ("intents_group_requests_injection", {"intents": [], "instructions_seen": ["m1"]}),
@@ -45,12 +47,23 @@ def test_group_cases_run_the_group_contract_offline(monkeypatch, tmp_path, case,
     assert run["passed"], run["checks"]
     assert fake.calls[0]["instructions"].endswith(extraction.GROUP_REQUESTS_NOTE)
     assert "《产品群》（群 · 全部消息）" in fake.calls[0]["input_text"]
-    if case == "intents_group_requests":
+    if case in ("intents_group_requests", "intents_group_requests_short"):
         _, refs = extraction.render("intents", evaluate.EXTRACTION_CASES[case]["rows"], context=[],
             participants=extraction.Participants({}, None), known=[], zone_name="UTC", text_max_chars=500)
-        missing_named = extraction.parse("intents", json.dumps({"intents": reply["intents"][:2]}), refs,
+        for missing in range(len(reply["intents"])):
+            partial = reply["intents"][:missing] + reply["intents"][missing + 1:]
+            parsed = extraction.parse("intents", json.dumps({"intents": partial}), refs,
+                now=evaluate._BASE, valid_days=90, enabled_types=("dev_task", "bug_triage"), app_seqs=())
+            assert not evaluate.score_extraction(evaluate.EXTRACTION_CASES[case], run, parsed, refs)["requests_from"]
+        wrong_type = [{**item, "type": "dev_task" if item["type"] == "bug_triage" else "bug_triage"}
+                      for item in reply["intents"]]
+        parsed = extraction.parse("intents", json.dumps({"intents": wrong_type}), refs,
             now=evaluate._BASE, valid_days=90, enabled_types=("dev_task", "bug_triage"), app_seqs=())
-        assert not evaluate.score_extraction(evaluate.EXTRACTION_CASES[case], run, missing_named, refs)["requests_from"]
+        assert not evaluate.score_extraction(evaluate.EXTRACTION_CASES[case], run, parsed, refs)["requests_from"]
+        for seq in evaluate.EXTRACTION_CASES[case]["chatter"]:
+            parsed = extraction.parse("intents", json.dumps({"intents": [*reply["intents"], _reply(f"m{seq}")]}), refs,
+                now=evaluate._BASE, valid_days=90, enabled_types=("dev_task", "bug_triage"), app_seqs=())
+            assert not evaluate.score_extraction(evaluate.EXTRACTION_CASES[case], run, parsed, refs)["nothing_from_chatter"]
     if "merged_from" in run["checks"]:
         text, refs = extraction.render("intents", evaluate.EXTRACTION_CASES[case]["rows"], context=[],
             participants=extraction.Participants({}, None), known=[], zone_name="UTC", text_max_chars=500)

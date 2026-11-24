@@ -67,14 +67,16 @@ GROUP_READ_MAX_GROUPS = 10
 GROUP_LABEL = " · 全部消息"
 GROUP_REQUESTS_NOTE = """\
 ## Requests in group chats
-A chat marked 全部消息 gives every human sender's messages, including the user's own. In it, an intent is a
-development request that anyone raises, even without mentioning the user: a new requirement, a change, a bug or
-problem report, a scenario that needs support, or a request for access, addressed to the group, a team, a named
-person or nobody in particular. A request or problem report addressed to a named person counts even if that
-person has accepted it. Use dev_task for a requirement or a change and bug_triage for a bug or a problem.
-Not an intent: small talk, answers to questions, +1s or echoes of someone else's request, and pure follow-ups,
-status updates or decisions that carry no new ask. When several messages raise the same thing, make one intent
-with all of them as its sources, or use same_as when a recent intent is that thing."""
+For chats marked 全部消息, use this group rule instead of the user-only scope above and in Intent types.
+Read every human sender's messages, including the user's own. Recognize development requests and bug reports
+regardless of whom they address (the group, a team, a named person, or nobody) and whether someone has accepted
+the work. Acceptance does not cancel the original request; do not make a separate intent for the acceptance.
+Use dev_task for a concrete requirement, change, scenario needing support or access request. Use bug_triage
+for reported broken behaviour, errors or incorrect data. A one-line bug report counts even with an @-mention
+of someone else, no explicit request to investigate, no detail and no link.
+Exclude small talk, Q&A answers, agreement or echoes, and follow-ups, status updates or decisions with no new
+request or bug report. Merge messages raising the same matter into one intent with all their sources, or use
+same_as for a recent intent about that matter."""
 SOURCES_MAX, ABOUT_MAX, SUPERSEDES_MAX = 10, 5, 3
 SUMMARY_MAX, DETAIL_MAX, TITLE_MAX, INTENT_SUMMARY_MAX = 200, 600, 60, 400
 # What a run costs the processor (Sonnet), measured on the real path and in the real-mode eval: a fixed part per run

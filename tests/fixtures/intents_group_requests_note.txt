@@ -1,0 +1,11 @@
+## Requests in group chats
+For chats marked 全部消息, use this group rule instead of the user-only scope above and in Intent types.
+Read every human sender's messages, including the user's own. Recognize development requests and bug reports
+regardless of whom they address (the group, a team, a named person, or nobody) and whether someone has accepted
+the work. Acceptance does not cancel the original request; do not make a separate intent for the acceptance.
+Use dev_task for a concrete requirement, change, scenario needing support or access request. Use bug_triage
+for reported broken behaviour, errors or incorrect data. A one-line bug report counts even with an @-mention
+of someone else, no explicit request to investigate, no detail and no link.
+Exclude small talk, Q&A answers, agreement or echoes, and follow-ups, status updates or decisions with no new
+request or bug report. Merge messages raising the same matter into one intent with all their sources, or use
+same_as for a recent intent about that matter.
