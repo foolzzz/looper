@@ -312,6 +312,8 @@ Manager has no tool for it. The dashboard shows the task page's 指标 card and 
   protocol supports UUID ownership, an unconfirmed addition reserves its next native turn and buffers
   output only through that native turn's own top-level result. Its queued caller claims it by message id
   without writing stdin again or restarting the resident, even when other queued work runs before claim.
+  With account admission enabled, the native reservation retains its session's existing slot until claim,
+  completion or withdrawal; claiming it transfers that slot instead of acquiring a second one.
   Its run records the injected input actually
   seen by the model. Native tool bindings and stream matches are published before claim, including while
   Manager prepares the queued turn. A stopped, failed or superseded owner withdraws its reservation;
@@ -2973,18 +2975,29 @@ Before, an unconfigured project ran at most 8 Planners, 16 Workers and 8
 Reviewers at once whatever its tasks; now N running tasks run N Planners and
 up to 16N Workers and 8N Reviewers. By default nothing caps the total.
 With `engine.admission.enabled`, each account's `max_concurrency` also bounds
-Workers, Reviewers, consults, processors, explorers and nested runs; `null` is unlimited.
+Workers, Reviewers, Planner exchanges, Manager turns, consults, processors,
+explorers and nested runs; `null` is unlimited.
 The account queue uses the shared `Lane` enum, aging and quota freezes, with
 durable state and an operator-only `providers.limits_clear` override. Nested
-runs borrow a running parent's slot. Explorers queue in their spawner's lane
-after a task-class pre-check, without holding the task lock. A blocking explorer
+runs borrow a running parent's slot. A frozen account sends each waiting user
+message one code-written reset-time status, keeps it pending and answers after
+recovery; `/stop` cancels the wait even on a runtime without interrupt support.
+The notice claim is saved with the pending message, so replay after restart does
+not repeat it. A quota probe prefers another waiting turn over a Manager user
+message. If a user probe fails on quota before producing text or tool calls, its
+failed run is recorded and the message requeues without an error reply. Turns
+waiting for a slot do not hold up draining; their messages remain pending.
+With admission on, model turns wait in their session worker even when lanes are
+off, preserving user order while the message loop delivers code-only notices.
+The status is not stored in conversation history or sent to the model.
+Explorers queue in their spawner's lane after a task-class pre-check, without
+holding the task lock. A blocking explorer
 wait lends one slot to its first queued child on the same account. If the wait
 ends first, that child keeps its slot and the parent reacquires with its original
 arrival order before the tool returns. Frozen accounts do not lend; queued tool
 results include `held: quota` and the known reset time. Kept explorers register
-their slots on adoption and release them on collection. Planner and Manager
-turns are not admitted yet. The switch defaults off and refuses activation
-while failure typing is off. The independent cost guard can still hold runs
+their slots on adoption and release them on collection. The switch defaults off
+and refuses activation while failure typing is off. The independent cost guard can still hold runs
 for spending; admission's 95% background pause does not change that policy.
 The converted alarm-like
 project (Planner 3, Worker 8, Reviewer 3) moves from at most 8 Workers and 3
