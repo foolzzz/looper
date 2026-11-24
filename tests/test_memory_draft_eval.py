@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from argparse import Namespace
 from unittest.mock import AsyncMock
 
@@ -75,3 +76,42 @@ def test_lead_eval_seeds_use_production_evidence_without_an_operator_quote(tmp_p
         assert seed["source_kind"] == "lead" and seed["source_class"] == "external"
         assert seed["untrusted"] is True and "quote" not in seed
         assert seed["sources"] == [{"lead_id": 7, "text": seed["statement"] + "\n" + seed["why"]}]
+
+
+@pytest.mark.parametrize(("quote", "leak"), [
+    (None, None), ("", None), (" \t\n", None),
+    ("Synthetic private quote.", None),
+    ("Synthetic private quote.", "record"), ("Synthetic private quote.", "event"),
+])
+def test_lead_record_ignores_blank_quotes_but_detects_leaks(monkeypatch, tmp_path, quote, leak):
+    from evals.processor import __main__ as evaluate
+    from evals.processor.memory_draft import _fixture
+    from looper.db import connection
+
+    _, _, seed, _, _ = _fixture(tmp_path, "lead_commitment")
+    if quote is not None:
+        seed["quote"] = quote
+    event = {"type": "system", "subtype": "init", "tools": [], "mcp_servers": []}
+    if leak == "event":
+        event["private_text"] = quote
+    pool = AsyncMock()
+    pool.fetch.return_value = [{"event": json.dumps(event)}]
+    pool.fetchval.return_value = json.dumps({"private_text": quote} if leak == "record" else {"status": " \t\n"})
+    monkeypatch.setattr(connection, "get_pool", lambda: pool)
+
+    record = asyncio.run(evaluate._record(7, "", [seed["statement"], seed.get("quote", "")]))
+    assert record == {"init_tools": 0, "init_mcp_servers": 0, "tool_uses": 0,
+                      "text_kept": leak is not None}
+
+
+def test_record_ignores_empty_and_blank_batch_messages(monkeypatch):
+    from evals.processor import __main__ as evaluate
+    from looper.db import connection
+
+    pool = AsyncMock()
+    pool.fetch.return_value = []
+    pool.fetchval.return_value = json.dumps({"status": " \t"})
+    monkeypatch.setattr(connection, "get_pool", lambda: pool)
+
+    record = asyncio.run(evaluate._record(7, "[12:00]《Synthetic》 Sender: \n[12:01]《Synthetic》 Sender:  \t"))
+    assert record["text_kept"] is False
