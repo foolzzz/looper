@@ -266,7 +266,7 @@ tasked、rejected、merged 是终态。
 
 ### 11.2 数据与开关
 
-- **迁移 `intent_group_reads`**（`order = 1500`、`pending_order = 1500`；`main` 上最高 1430，在审 PR 里最高 1480），随第一个实现 PR：
+- **迁移 `intent_group_reads`**（`order = 1800`、`pending_order = 1800`；在 #1540 的 1500、#1639 的 1600 和 #1641 的 1700/1701 之后；识别一次的迁移预留 1810），随第一个实现 PR：
 
   ```sql
   CREATE TABLE IF NOT EXISTS intent_group_reads (

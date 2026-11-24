@@ -515,7 +515,7 @@ async def _extraction_confirmation(schedule: Mapping[str, Any], *, now: datetime
     processor's Profile, the caps and what a day of the last 24 hours' messages would cost (by the unit costs
     ``extraction`` measured)."""
     from ..db.connection import get_pool
-    from . import processor
+    from . import leads_model, processor
     from .agent_settings import AgentType
     from .schedules import notify_targets
     from .source_service import own_bot_app_ids
@@ -530,9 +530,12 @@ async def _extraction_confirmation(schedule: Mapping[str, Any], *, now: datetime
     excluded = await pool.fetchval("SELECT count(*) FROM source_chats WHERE source_id = $1 AND extraction = 'excluded'",
                                    sub.get("source_id"))
     committed = await db_subs.committed_seq(pool, sub.get("source_id")) or 0
+    groups = 0
+    if kind == "intents" and await leads_model.group_read_enabled(pool):
+        groups = await pool.fetchval("SELECT count(*) FROM intent_group_reads WHERE source_id = $1", sub["source_id"])
     day = sum(row["events"] for row in await db_subs.extraction_tally(
         pool, sub, output_kind=kind, since=now - timedelta(days=1), to_seq=committed, own_apps=await own_bot_app_ids(),
-        include_import=False, zone_name=zone_name))
+        include_import=False, zone_name=zone_name, group_read=bool(groups)))
     chats = []
     if sub.get("include_chats"):
         chats.append(f"只读其中 {len(sub['include_chats'])} 个指定会话")
@@ -545,6 +548,9 @@ async def _extraction_confirmation(schedule: Mapping[str, Any], *, now: datetime
              f"{sub.get('max_age_minutes', '-')} 分钟，每次最多 {sub.get('max_events', '-')} 条（读不完的下一次接着读）",
              f"- 不整理的会话：{excluded} 个（消息流页设置）",
              f"- 规则：{describe_zh(rule, zone_name)}；接下来 {len(fires)} 次：{'、'.join(fires)}"]
+    if groups:
+        lines.insert(2, f"- 另读名单上的群：{groups} 个（各自从开始时间起人发的实时消息；每次最多 "
+                     f"{extraction.GROUP_READ_RUN_MAX} 条，每个群每天最多 {extraction.GROUP_READ_DAY_MAX} 条）")
     profile = await processor.chosen_profile(schedule["project_id"], schedule["id"])
     named = f"{profile.get('name')}（{profile.get('runtime')} · {profile.get('model') or '默认模型'}）"
     lines.append(f"- 处理 Profile：{named}，来源：{profile.get('source')}（processor.chosen_profile）")

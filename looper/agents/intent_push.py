@@ -196,6 +196,7 @@ class IntentPushService:
         row = await conn.fetchrow("SELECT * FROM intents WHERE id=$1", intent_id)
         if row is None:
             return
+        held = row["via"] == "followed_group" and not chat_settings.delivery_enabled()
         schedule = await db_schedules.get_schedule(row["schedule_id"], pool=conn) if row["schedule_id"] else None
         target = await target_for(schedule)
         if target is None:
@@ -213,14 +214,14 @@ class IntentPushService:
         posts = await conn.fetch("SELECT * FROM intent_posts WHERE intent_id=$1 ORDER BY id", intent_id)
         view = await intents.intent_view(row, db=conn)
         timezone = schedule["timezone"]
-        if row["state"] == "pending" and not any(post["kind"] == "push" for post in posts):
+        if not held and row["state"] == "pending" and not any(post["kind"] == "push" for post in posts):
             priority = await conn.fetchval("SELECT v.priority FROM intent_types t JOIN intent_type_versions v "
                                            "ON v.type_key=t.key AND v.version=t.version WHERE t.key=$1", row["type_key"])
             if priority != "quiet" and row["created_at"] >= now-timedelta(hours=24):
                 text = push_text(view, priority=priority, timezone=timezone)
                 await self._insert(conn, row["id"], "push", channel, chat, text,
                                    [candidate["id"] for candidate in view["candidates"]])
-        elif row["state"] == "merged" and not any(post["kind"] == "progress" for post in posts):
+        elif not held and row["state"] == "merged" and not any(post["kind"] == "progress" for post in posts):
             parent = await conn.fetchrow("SELECT * FROM intents WHERE id=$1", row["merged_into"])
             push = await conn.fetchrow("SELECT * FROM intent_posts WHERE intent_id=$1 AND kind='push' "
                                       "AND ((state='sent' AND external_id IS NOT NULL) OR (state='pending' AND $2)) "
@@ -236,6 +237,8 @@ class IntentPushService:
                 await self._finalize(conn, row, push, posts, schedule, final_text(view, timezone=timezone))
         for post in await conn.fetch("SELECT * FROM intent_posts WHERE intent_id=$1 AND state IN ('pending','failed') "
                                      "AND kind <> 'final' AND attempts < $2 ORDER BY id", intent_id, db_subs.DELIVERY_ATTEMPTS):
+            if held and post["kind"] in ("push", "progress"):
+                continue
             if (post["channel_id"], post["chat"]) == target:
                 await self._deliver(conn, row, post, schedule)
 

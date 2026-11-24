@@ -71,6 +71,8 @@ def test_a_database_without_the_tables_gets_them_on_upgrade(monkeypatch):
             await connection.ensure_schema(fresh)
             expected = await structure(fresh)
         await pool.execute(memory.DROP_MEMORY + "DROP FUNCTION triage_drop_event() CASCADE")
+        # Recreating intents must repair its later additions even if their marker survives.
+        await pool.execute("INSERT INTO schema_migrations(name) VALUES('intent_group_reads') ON CONFLICT DO NOTHING")
         async with dropped_tables(pool, *tables):
             await pool.execute("DELETE FROM schema_migrations WHERE name IN ('message_stream', 'subscriptions', "
                                "'subscription_rules', 'subscription_lookback', 'message_leads', 'event_triage', "
