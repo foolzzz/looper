@@ -1571,3 +1571,89 @@ the seven additions remain unmeasured until their approved paid runs.
 
 This adds an opt-in evaluation command only. Dashboard, Telegram, Lark runtime behavior,
 production prompts, tool lists and agent command lines are unchanged.
+
+## DSH CLI / runner density (`evals/dsh_density.py`)
+
+L1 uses the existing Anthropic Messages `MessagesServer` fixture from
+`tests/dsh_installed_stand_in.py`. It makes no external network requests and
+costs nothing. Run from a source checkout with an installed DSH and Node supported
+by the checkout's runner:
+
+```sh
+uv run --system-certs --python 3.11 --extra test python -m evals.dsh_density \
+  --steps 4 --workers 4 --idle-sessions 33 --memory-budget-mib 8192 \
+  --out evals/runs/dsh-density.json
+```
+
+The tool does not install dependencies or check SDK versions. The runner owns
+compatibility checks; the dependency upgrade is tracked separately in #1654
+(`0.2.2-rc.5`). Use `--dsh /path/to/dsh` and `--node /path/to/node` for an isolated
+installation matching the runner in the checkout. No Looper service, database,
+operator configuration or channel is involved. Dashboard, Telegram and Lark
+behavior are unchanged.
+
+Both modes receive the same model (`deepseek-flash`), effort (`high`), prompt,
+appended system instructions, task directory and `read`/`glob`/`grep` tools.
+Catalog skills, MCP, web fetch, subagents and compaction are disabled. CLI's
+ordinary empty catalog still enables web fetch, so the tool explicitly disables
+those services in its disposable patch. L1 compares the complete captured
+request bodies and rejects a mismatch or unexpected request count. A Node preload
+permits only the fake server's loopback port; environment allowlisting and private
+homes keep ambient credentials, proxies and user configuration out of children.
+
+The JSON report retains individual steps, RSS samples, helper process names,
+idle checkpoints and capacity assumptions; stdout prints a short table. A failed
+run writes `status: failed` and exits nonzero. Interpret the measurements as follows:
+
+- One cold step precedes `--steps` measured steps, in batches of `--workers`.
+  Every step reports entry-to-first-runtime-event time. CLI spawns on every step;
+  runner reuses its member. `spawn_to_first_event_ms` starts when the process
+  handle becomes available and is null for warm runner steps. Runner initialize
+  latency is separate. These are startup events, not first-token or task latency.
+- RSS is sampled with `ps` at `--sample-interval` (default 50 ms, plus process
+  listing time). DSH roots, all descendant helper/platform-tool processes and
+  their combined total are separate fields. The table has a helper column;
+  the JSON lists their names and PIDs. Cold and active windows are separate.
+  Shared pages are counted in each process's RSS; this is not unique physical
+  memory. The Python host and fake model server are excluded. The fake server
+  holds each response for 250 ms to make active memory observable; startup's
+  init event comes before that hold.
+- Idle measurements use a fresh runner pool, open N sessions without prompts,
+  and wait `--idle-settle` seconds (default 0.2) before each checkpoint. Increase
+  that interval on a slow machine. CLI idle entries are processes waiting for
+  stdin: DSH has not created a Session yet. Runner entries are opened Sessions.
+  The report provides total/N and the median within-member RSS increment
+  (which can be negative from GC). These two idle populations have different
+  lifecycle semantics. Retaining 33 runner leases verifies that sessions 1–32
+  share a member and session 33 uses a second. Fewer than 33 reports null for
+  that check. The current pool allows four members, or 128 sessions.
+- Worker capacity is an estimate from measured concurrent active RSS. CLI uses
+  `budget / (peak / workers)`. Runner uses its empty-member baseline plus a
+  measured per-Worker increment, charging another baseline every 32 Workers,
+  with at most four members. A nonpositive increment makes its estimate null.
+  This linear projection is not a concurrent load test at the projected size;
+  reserve memory for Looper, the OS and real tools outside the supplied budget.
+
+L2 is optional and off by default. To enable real DeepSeek calls, supply both
+`--real` and a finite positive `--total-cap-usd`, and provide `DEEPSEEK_API_KEY`
+in the parent environment. For example, append `--real --total-cap-usd 0.10`
+to the command above. Children still connect only to a loopback gateway. It
+forwards to DeepSeek after reserving request bytes as input tokens and at most
+1024 output tokens at the repository's built-in prices, without cache discounts.
+Reservations are shared across both modes and never refunded; requests exceeding
+the total are refused before forwarding. The report includes the price snapshot
+and reserved amount. This is conservative admission at those prices, **not a
+hard billing cap**. L2 has not been exercised against a real model by these tests.
+
+Tests only use fake providers, including the optional gateway's upstream:
+
+```sh
+uv run --system-certs --python 3.11 --extra test python -m pytest tests/test_dsh_density.py -n 2
+# Also exercise installed CLI + SDK against the local fake server, including 33 idle sessions:
+LOOPER_TEST_DSH_DENSITY_EXECUTABLE=/path/to/dsh \
+  uv run --system-certs --python 3.11 --extra test python -m pytest tests/test_dsh_density.py -n 2
+```
+
+The installed test is skipped unless that executable is explicitly selected.
+Its skip is a validation gap, not a passed DSH measurement. Reports are ignored
+local artifacts; do not commit raw samples or requests from a workstation.
