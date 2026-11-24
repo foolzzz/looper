@@ -45,7 +45,8 @@ OPERATIONS = (
         "/api/v1/admission_settings/update",
         "Enable or disable account admission.",
         "Enable or disable account admission. Enforces account slots, lanes and quota freezes for Workers, "
-        "Reviewers, consults, processors and nested runs. Planner and Manager turns are not admitted yet. "
+        "Reviewers, consults, processors and nested runs. Planner and Manager turns wait in their lanes; "
+        "while frozen, the Manager sends one reset-time notice and keeps the message. "
         "Requires failure typing; null restores the disabled default.",
         _object({"enabled": {"type": ["boolean", "null"]}}, closed=True),
         SETTINGS,
@@ -76,7 +77,8 @@ async def impact(server, operation, arguments, principal, headers):
     return (
         f"Set {admission_settings.KEY} to {str(bool(arguments['enabled'])).lower()}? "
         "Enforces account slots, priority lanes, background tightening and quota freezes for Workers, "
-        "Reviewers, consults, processors and nested runs. Planner and Manager turns are not admitted yet. "
+        "Reviewers, consults, processors and nested runs. Planner and Manager turns wait in their lanes; "
+        "while frozen, the Manager sends one reset-time notice and keeps the message. "
         "Disabling releases all admission waiters immediately."
     )
 

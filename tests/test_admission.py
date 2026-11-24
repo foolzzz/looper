@@ -45,6 +45,29 @@ async def tick():
         await asyncio.sleep(0)
 
 
+def test_quota_probe_prefers_another_waiter_to_a_manager_user_message(controller):
+    async def scenario():
+        c = controller
+        await c.transition("account", admission.QuotaFailure(None, None))
+        user = asyncio.create_task(c.acquire("account", Lane.INTERACTIVE, "user", user_message=True))
+        await tick()
+        worker = asyncio.create_task(c.acquire("account", Lane.USER_TASK, "worker"))
+        await tick()
+        assert [w.owner for w in c.waiters] == ["user", "worker"]
+        c.now = lambda: NOW + timedelta(minutes=6)
+        await c.wake()
+        await tick()
+        assert worker.done() and worker.result().probe
+        assert not user.done()
+        assert c._state("account").probe_owner == "worker"
+        user.cancel()
+        await asyncio.gather(user, return_exceptions=True)
+        await c.release("worker")
+        await c.stop()
+
+    asyncio.run(scenario())
+
+
 @pytest.mark.parametrize(
     "role,schedule_id,trigger,same,recovered,run_now,parent,expected",
     [

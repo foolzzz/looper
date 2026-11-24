@@ -84,6 +84,12 @@ def test_backfill_preserves_launch_records_progress_and_failure_mapping(
         assert await pool.fetchval("SELECT count(*) FROM message_leads") == (1 if case in {"success", "reformat"} else 0)
         settings = [json.loads(row["row"]) for row in await pool.fetch(
             "SELECT to_jsonb(t)::text AS row FROM system_settings t ORDER BY key")]
+        for setting in settings:
+            if setting["key"] == "leads.backfill.schedule-golden":
+                progress = json.loads(setting["value"])
+                assert progress.pop("scope") == {"days": 1, "as_of": _NOW.isoformat()}
+                # Only the new scope metadata differs from the original backfill checkpoint.
+                setting["value"] = json.dumps(progress)
         assert_golden(f"backfill-{case}", {"launches": read_launches(tmp_path),
             "tables": {**await table_rows(pool, _TABLES), "system_settings": settings},
             "exit_code": code, "output": output}, tmp_path)

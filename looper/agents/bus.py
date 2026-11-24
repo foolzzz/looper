@@ -151,6 +151,28 @@ class MessageJournal:
     def undelivered(self) -> list[MessageEnvelope]:
         return [MessageEnvelope.from_dict(raw) for _, raw in self._entries() if raw["message_id"] not in self._delivered]
 
+    def claim_notice(self, envelope: MessageEnvelope, notice: str) -> bool:
+        """Checkpoint an at-most-once notice with the held message; compaction retains its claim on replay."""
+        entries = self._entries()
+        claims = list(envelope.metadata.get("notice_claims", []))
+        for _, raw in entries:
+            if raw["message_id"] == envelope.message_id:
+                claims = list(raw["metadata"].get("notice_claims", []))
+                break
+        if notice in claims:
+            return False
+        claims.append(notice)
+        found = False
+        for _, raw in entries:
+            if raw["message_id"] == envelope.message_id:
+                raw["metadata"]["notice_claims"] = claims
+                found = True
+        if found:
+            self._replace(self._journal_path, "".join(json.dumps(raw, ensure_ascii=False) + "\n"
+                                                     for _, raw in entries))
+        envelope.metadata["notice_claims"] = claims
+        return True
+
     def compact(self) -> None:
         """Remove delivered entries only after validating the complete journal."""
         if not self._journal_path.exists():
@@ -230,6 +252,11 @@ class MessageBus:
         self._journal.compact()
         self._started = True
         self._queued_before_start.clear()
+
+    async def claim_message_notice(self, envelope: MessageEnvelope, notice: str) -> bool:
+        """Durably claim a notice before sending it, serialized with journal append and compaction."""
+        async with self._journal_lock:
+            return await self._journal_io(self._journal.claim_notice, envelope, notice)
 
     async def publish(self, envelope: MessageEnvelope) -> None:
         """Publish a message. Journaled before delivery for crash recovery (a status is not: ``_TRANSIENT``)."""

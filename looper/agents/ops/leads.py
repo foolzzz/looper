@@ -36,6 +36,8 @@ TOOL_NOTICE = ("来自飞书消息，未经确认。These are quoted notes from 
 # The line Looper adds after the reply, one per search.
 FOOTER = "（查了飞书消息线索：「{query}」，{count} 条）"
 # What a group chat gets instead of a reply that quotes a lead.
+MEMORY_PREFIX = "memory:"
+WITHHELD_MEMORY_REPLY = "这个回答用到了你私聊里提议的记忆，没有发到群里；请在私聊里问我。"
 WITHHELD_REPLY = "这个回答用到了你私聊里查到的消息线索，没有发到群里；请在私聊里问我。"
 DEFAULT_LIMIT = 5
 SEEN_SECONDS = 24 * 3600  # how long a returned summary is compared with group replies
@@ -214,6 +216,11 @@ def remember(manager_id: str, leads: Sequence[tuple[str, str]], *, now: float | 
                            "is over", manager_id, SEEN_MAX)
 
 
+def remember_memory(manager_id, candidate_id, statement):
+    from ..memory_model import format_id
+    remember(manager_id, [(MEMORY_PREFIX + format_id(candidate_id), statement)])
+
+
 def forget(manager_id: str) -> None:
     """Drop what ``manager_id``'s session searched (``/new``)."""
     _SEEN.pop(manager_id, None)
@@ -235,13 +242,14 @@ def quotes_a_lead(manager_id: str | None, reply: str, *, now: float | None = Non
 def for_group(text: str, *, manager_id: str | None = None) -> str:
     """``text`` as a group chat may get it: ``WITHHELD_REPLY`` instead when it quotes a lead (``quotes_a_lead``),
     logged without the text and counted (``withheld``). Every text Looper sends to a group goes through it."""
-    found = _quoted_by(manager_id, text) if text else None
+    entry = _quoted_entry(manager_id, text) if text else None
+    found = entry[0] if entry else None
     if found is None:
         return text
     _WITHHELD[found] += 1
     logger.warning("%s: a text for a group chat quoted a message lead searched in the user's own chat; Looper sent "
                    "a notice instead (%d so far)", found, _WITHHELD[found])
-    return WITHHELD_REPLY
+    return WITHHELD_MEMORY_REPLY if entry[1] and entry[1].startswith(MEMORY_PREFIX) else WITHHELD_REPLY
 
 
 def withheld(manager_id: str) -> int:
@@ -250,7 +258,11 @@ def withheld(manager_id: str) -> int:
 
 
 def _quoted_by(manager_id: str | None, reply: str, *, now: float | None = None) -> str | None:
-    """The Manager whose searches ``reply`` quotes (``quotes_a_lead``), or None."""
+    entry = _quoted_entry(manager_id, reply, now=now)
+    return entry[0] if entry else None
+
+
+def _quoted_entry(manager_id: str | None, reply: str, *, now: float | None = None) -> tuple[str, str | None] | None:
     moment = time.monotonic() if now is None else now
     body = None
     for key in ([manager_id] if manager_id is not None else list(_SEEN)):
@@ -259,12 +271,12 @@ def _quoted_by(manager_id: str | None, reply: str, *, now: float | None = None) 
             continue
         seen.expire(moment)
         if seen.full_until is not None:
-            return key
+            return key, None
         body = _normalized(reply) if body is None else body
-        if len(body) < QUOTE_CHARS:
-            continue
-        for _, summary in seen.leads.values():
+        for entry_id, (_, summary) in seen.leads.items():
             text = _normalized(summary)
-            if any(text[start:start + QUOTE_CHARS] in body for start in range(len(text) - QUOTE_CHARS + 1)):
-                return key
+            # Short memory statements match in full; leads keep their existing window.
+            window = min(QUOTE_CHARS, len(text)) if entry_id.startswith(MEMORY_PREFIX) else QUOTE_CHARS
+            if window and any(text[start:start + window] in body for start in range(len(text) - window + 1)):
+                return key, entry_id
     return None

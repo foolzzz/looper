@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 from ..db import managers as db_managers
-from . import card_actions, chat_settings, completion_events, intent_cards, ledger_cards
+from . import admission, card_actions, chat_settings, completion_events, intent_cards, ledger_cards
 from .channels.chat_routing import boundary_log
 from .channels.lark_quote import ReadQuote
 from .bus import MessageBus
@@ -237,6 +237,18 @@ class ManagerFleet:
         return next((ops for ops in list(self._ops.values()) if ops.authorized(authorization)), None)
 
     def drain_waiting(self) -> dict[str, Any]:
+        if admission.enabled():
+            def busy(agent: ManagerAgent) -> bool:
+                waiting = {session.key: session.lock_owner.message_id
+                           for session in agent._sessions.values()
+                           if session.lock_owner is not None and session.lock_owner.admission_waiting}
+                # These messages have no run yet and remain in the journal for restart.
+                return bool(agent._stop_tasks
+                    or (agent._handling is not None and agent._handling.message_id not in waiting.values())
+                    or any((session.turn_lock.locked() or agent._router.holds(session))
+                           and session.key not in waiting for session in agent._sessions.values()))
+
+            return {"manager_turns": [agent.agent_id for agent in self.agents() if busy(agent)]}
         return {"manager_turns": [agent.agent_id for agent in self.agents()
                                   if agent.busy or agent._handling is not None or agent._stop_tasks
                                   or agent._router.pending()]}
