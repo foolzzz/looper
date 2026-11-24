@@ -89,6 +89,101 @@ def test_runtime_failure_waits_and_recovers_only_the_failed_execution(monkeypatc
     run_db(body, monkeypatch, timeout=40)
 
 
+@pytest.mark.parametrize(("kind", "replace_other"), [("worker", False), ("reviewer", False),
+                                                    ("panel", False), ("worker", True)])
+@pytest.mark.parametrize("deciding", [False, True])
+def test_restart_delivers_unconsumed_breaker_decision_once(monkeypatch, tmp_path, kind, replace_other, deciding):
+    from looper.agents.failures import Failure, FailureCause
+    from looper.agents.tiers.planner_protocol import DecisionReply, StepSpec, TurnKind
+
+    async def body(pool):
+        await pool.execute("INSERT INTO projects(id,name) VALUES ('project','Synthetic breaker restart')")
+        await pool.execute("INSERT INTO tasks(id,project_id,requirement,status) VALUES "
+                           "('task','project','Recover a decision','executing')")
+        await pool.execute("INSERT INTO system_settings(key,value) VALUES ('engine.failure_typing','act')")
+        service = failure_handling.FailureHandlingService(pool=pool, mode=FailureTyping.ACT)
+        old = planner.PlannerAgent(task_id="task", runtime_root=tmp_path)
+        scope = planner.PlanStep("work", 0, "Original work", key="work", review=kind != "worker",
+            status="dispatched" if kind == "worker" else "completed", worker_id="worker",
+            result={"status": "completed", "summary": "Preserve worker output"} if kind != "worker" else None)
+        unit = (planner.PlanStep("seat", 1, "Review work", key="seat", reviews="work", status="dispatched")
+                if kind == "panel" else scope)
+        plan = planner.TaskPlan("plan", "goal", "Recover a decision", str(tmp_path),
+            [scope, unit] if kind == "panel" else [scope], status="executing", project_id="project")
+        try:
+            for index in range(3):
+                source = f"run-{index}"
+                unit.worker_id = source
+                unit.reviewer_id = source if kind != "worker" else None
+                await old._save(plan, *plan.steps, plan_row=True)
+                handled = await service.handle_step_result(task_id="task", step_id="work", run_id=source,
+                    role="worker" if kind == "worker" else "reviewer", failure=Failure(FailureCause.REPORT),
+                    target={"kind": kind, "unit_step_id": unit.step_id, "source": source},
+                    result={"status": "failed", "passed": False, "summary": f"Execution failure {index + 1}"})
+            assert handled.action == "breaker"
+            if replace_other:
+                # A first decision can replace another breaker while resume is iterating them.
+                other = planner.PlanStep("other", 1, "Old work", key="other", status="dispatched")
+                plan.steps.append(other)
+                for index in range(3):
+                    other.worker_id = f"other-{index}"
+                    await old._save(plan, other)
+                    await service.handle_step_result(task_id="task", step_id="other", run_id=other.worker_id,
+                        role="worker", failure=Failure(FailureCause.REPORT),
+                        target={"kind": "worker", "source": other.worker_id}, result={"status": "failed"})
+            if deciding:
+                # A crash after the decision projection was saved is a second recovery window.
+                scope.status = "deciding"
+                scope.result = ({"status": "failed", "summary": "Execution failure 3"} if kind == "worker" else
+                    {**scope.result, "verify_passed": False, "verify_summary": "Execution failure 3"})
+                if kind == "panel":
+                    unit.status = "pending"
+                await old._save(plan, *plan.steps)
+        finally:
+            await service.close()
+
+        service = failure_handling.FailureHandlingService(pool=pool, mode=FailureTyping.ACT)
+        monkeypatch.setattr(failure_handling, "_service", service)
+        sent, decisions = [], []
+        async def answer(turn, message, *_args, **_kwargs):
+            assert turn is TurnKind.DECISION
+            assert not any(item.message_type in (MessageType.WORK_ITEM, MessageType.VERIFY_REQUEST) for item in sent)
+            assert "Execution failure 3" in message
+            assert "Consecutive execution failures" in message
+            if kind != "worker":
+                assert resumed._plan.step("work").result["summary"] == "Preserve worker output"
+            decisions.append(message)
+            return DecisionReply(planner.Decision.REPLAN, "Use a different approach", "",
+                (StepSpec("other" if replace_other else "replacement", "Different work", (), (), False),), "")
+
+        resumed = planner.PlannerAgent(task_id="task", runtime_root=tmp_path)
+        resumed._bus = SimpleNamespace(publish=AsyncMock(side_effect=sent.append))
+        monkeypatch.setattr(resumed, "_ask", answer)
+        envelope = MessageEnvelope.create(source=planner_address("task"), target=planner_address("task"),
+            message_type=MessageType.TASK_RESUME, payload={"task_id": "task"})
+        try:
+            await resumed._load_plan()
+            await resumed._resume(envelope)
+            assert len(decisions) == 1
+            assert not await service.get_holds("task")
+            assert await pool.fetchval("SELECT streak FROM step_failure_state WHERE step_key='work'") == 3
+            assert await pool.fetchval("SELECT count(*) FROM step_failures") == (6 if replace_other else 3)
+            assert resumed._plan.step("work").status == "skipped"
+            assert resumed._plan.status == "executing"  # keep the task live to test deduplication
+            await resumed._resume(envelope)
+            restarted = planner.PlannerAgent(task_id="task", runtime_root=tmp_path)
+            restarted._bus = resumed._bus
+            ask = AsyncMock(side_effect=AssertionError("consumed breaker generated another decision"))
+            monkeypatch.setattr(restarted, "_ask", ask)
+            await restarted._load_plan()
+            await restarted._resume(envelope)
+            ask.assert_not_awaited()
+            assert len(decisions) == 1
+        finally:
+            await service.close()
+    run_db(body, monkeypatch, timeout=40)
+
+
 def test_panel_runtime_judgment_goes_to_decision_without_becoming_a_vote(monkeypatch, tmp_path):
     async def body(pool):
         await pool.execute("INSERT INTO projects(id,name) VALUES ('project','Synthetic panel')")

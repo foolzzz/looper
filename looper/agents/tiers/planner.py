@@ -4186,6 +4186,9 @@ class PlannerAgent:
         service = failure_handling.get_service()
         if await failures.typing_mode() is failures.FailureTyping.ACT or service is not None and service.recovering:
             await self._restore_failure_holds(plan)
+        breakers = [(step, step.failure_hold["failure_id"]) for step in plan.steps if step.failure_hold
+                    and step.failure_hold.get("kind") == "breaker"
+                    and step.failure_hold.get("step_id") == step.step_id]
         cut_off = [(step, step.status) for step in plan.steps if step.status in ("dispatched", "completed", "deciding")]
         cut_off = [(step, status) for step, status in cut_off if step.failure_hold is None]
         if ended_run_id := envelope.payload.get("ended_run_id"):
@@ -4227,6 +4230,33 @@ class PlannerAgent:
             # Every new decision or dispatch below still needs the ordinary budget check.
             if not await self._within_budget(plan):
                 return
+            for step, failure_id in breakers:
+                if plan.status not in _LIVE:
+                    return
+                if plan.step(step.step_id) is not step or step.status in ("verified", "skipped", "failed"):
+                    continue
+                if step.failure_hold is None or step.failure_hold.get("failure_id") != failure_id:
+                    continue  # an earlier decision replaced or released this held step
+                # The hold commits before _decide saves its projection. Its latest
+                # snapshot covers both crash windows; _decided consumes the hold.
+                hold = step.failure_hold
+                target, result = hold["target"], hold["result"]
+                review = target.get("kind") in ("reviewer", "panel")
+                if review:
+                    if target.get("kind") == "panel" and (unit := plan.step(target.get("unit_step_id"))) is not None:
+                        unit.result, unit.status = result, "pending"
+                        await self._save(plan, unit)
+                    step.result = {**(step.result or {}), "verify_passed": False,
+                                   "verify_summary": result.get("summary") or result.get("error") or
+                                                     "Review execution did not complete"}
+                else:
+                    step.result = result
+                context = DecisionContext(step.label, ResultKind.REVIEW if review else ResultKind.WORK, False,
+                    review or self._needs_review(step), step.retries, self._execution.step_retries)
+                decisions += 1
+                await self._decide(plan, step, context,
+                    self._review_report(step, result) if review else self._work_report(step, result),
+                    record_verification=False)
             for step, status in repeat:
                 if plan.status not in _LIVE:
                     return

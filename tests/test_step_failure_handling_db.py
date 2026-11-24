@@ -34,10 +34,6 @@ def test_breaker_boundary_and_reset_follow_maintainer_contract(monkeypatch):
             assert result.action == ('hold' if index == 1 else 'planner' if index == 2 else 'breaker')
             assert result.failure['streak'] == index
         assert (await step_failures.list_holds('t-failure', pool=pool))[0]['kind'] == 'breaker'
-        # A negative review is neither a failed run nor the success that clears its preceding failures.
-        await service.note_success(task_id='t-failure', step_id='s-failure', run_id='review-no', role='reviewer',
-                                   outcome='not_passed', target={'kind': 'reviewer'})
-        assert await pool.fetchval("SELECT streak FROM step_failure_state") == 3
         await pool.execute("UPDATE task_steps SET status='dispatched',worker_id='worker-success' WHERE id='s-failure'")
         await service.note_success(task_id='t-failure', step_id='s-failure', run_id='worker-success', role='worker',
                                    target={'kind': 'worker'})
@@ -45,6 +41,58 @@ def test_breaker_boundary_and_reset_follow_maintainer_contract(monkeypatch):
         assert len(await step_failures.list_failures('t-failure', pool=pool)) == 3
         await service.close()
     run_db(body, monkeypatch, timeout=30)
+
+
+@pytest.mark.parametrize(("outcome", "expected_streak"), [("not_passed", 3), ("passed", 0)])
+def test_current_reviewer_resets_streak_only_when_passed(monkeypatch, tmp_path, outcome, expected_streak):
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+
+    from looper.agents import failure_handling
+    from looper.agents.failures import Failure, FailureCause, FailureTyping
+    from looper.agents.message import MessageEnvelope, MessageType, planner_address, worker_address
+    from looper.agents.tiers import planner
+
+    async def body(pool):
+        await seed(pool)
+        await pool.execute("INSERT INTO system_settings(key,value) VALUES ('engine.failure_typing','act')")
+        service = failure_handling.FailureHandlingService(pool=pool, mode=FailureTyping.ACT)
+        monkeypatch.setattr(failure_handling, "_service", service)
+        try:
+            for index in range(1, 4):
+                reviewer = f"reviewer-failed-{index}"
+                await pool.execute("UPDATE task_steps SET status='completed',reviewer_id=$1 WHERE id='s-failure'",
+                                   reviewer)
+                handled = await service.handle_step_result(task_id='t-failure', step_id='s-failure',
+                    run_id=reviewer, role='reviewer', failure=Failure(FailureCause.REPORT),
+                    target={'kind': 'reviewer', 'source': reviewer}, result={'passed': False})
+                assert handled.failure['streak'] == index
+            assert handled.action == 'breaker'
+            await service.consume_breaker_hold('t-failure', 's-failure', handled.failure['id'])
+            # The next review has a fresh, current identity, so a source conflict cannot mask a reset.
+            agent = planner.PlannerAgent(task_id='t-failure', runtime_root=tmp_path)
+            agent._bus = SimpleNamespace(publish=AsyncMock())
+            step = planner.PlanStep('s-failure', 0, 'Do work', key='work', review=True,
+                status='completed', worker_id='worker-1', reviewer_id='reviewer-current',
+                result={'status': 'completed', 'summary': 'Worker output'})
+            plan = agent._plan = planner.TaskPlan('plan', 'goal', 'Synthetic task', str(tmp_path), [step],
+                                                status='executing', project_id='p-failure')
+            await agent._save(plan, step, plan_row=True)
+            decide = AsyncMock()
+            monkeypatch.setattr(agent, '_decide', decide)
+            await agent._handle_verify_result(MessageEnvelope.create(source=worker_address('reviewer-current'),
+                target=planner_address('t-failure'), message_type=MessageType.VERIFY_RESULT,
+                payload={'task_id': 's-failure', 'passed': outcome == 'passed', 'summary': 'Review verdict',
+                         'engine_run': {'outcome': outcome}}))
+            decide.assert_awaited_once()
+            assert step.result['verify_passed'] is (outcome == 'passed')
+            assert await pool.fetchval("SELECT streak FROM step_failure_state") == expected_streak
+            assert await pool.fetchval("SELECT count(*) FROM step_failures") == 3
+            assert await pool.fetchval("SELECT count(*) FROM step_failure_runs WHERE run_id='reviewer-current'") == (
+                1 if outcome == 'passed' else 0)
+        finally:
+            await service.close()
+    run_db(body, monkeypatch, timeout=40)
 
 
 def test_failure_result_and_success_are_idempotent_across_restart(monkeypatch):
