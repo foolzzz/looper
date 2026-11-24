@@ -196,6 +196,8 @@ DECIDED_OPERATIONS: dict[str, ActionLevel] = {
     "project_skills.proposals.reject": INSIDE,  # marks a stored proposal rejected; sends nothing
     "project_skills.proposals.restore": INSIDE,  # marks an expired stored proposal pending; sends nothing
     "project_skills.proposals.set_mode": INSIDE,  # stores a project's proposal switch; sends nothing
+    "memory_closeout.get": INSIDE,  # reads a project's memory closeout switch; sends nothing
+    "memory_closeout.update": INSIDE,  # stores a project flag; candidates still need the operator's confirmation
     "mcp_tool_levels.get": INSIDE,  # reads stored MCP trust declarations
     "mcp_tool_levels.put": INSIDE,  # stores MCP trust declarations; runs no MCP call
 
