@@ -3346,12 +3346,15 @@ memory page shows their candidates for the operator to review.
 `memory_lessons = 'on'` are required. On, project-scoped learnings still enter the task journal, but the old
 project-document drafts and `[LESSONS]` turn stop. Vault closeout keeps its separate setting and path. Empty
 lesson snapshots do not disable retrospectives; context injection is a separate feature.
+The server loads the validated switch before recovering tasks, and successful settings updates refresh it in
+memory. While off, retrospective ticks and terminal callbacks read only that switch, without database reads.
+Turning it on at runtime resumes processing within the next 10-second interval.
 
 After TaskRouter forwards the final completed/failed status and tears down the Planner, an independent terminal
 listener enqueues the newly observed journal range. Scheduler and retrospective callbacks cannot block one
 another on failure. `MemoryRetroService` recovers post-activation terminal tasks, claims a short database lease,
-then invokes the private `memory_retro` role without holding a connection or transaction. Migration 1950 widens
-the role/run-kind checks online; 1960 adds durable cursors, activation high-water, attempt leases, independent
+then invokes the private `memory_retro` role without holding a connection or transaction. Migration 1980 widens
+the role/run-kind checks online; 1990 adds durable cursors, activation high-water, attempt leases, independent
 spend reservations, range output references and distinct-task reinforcement records. Retrying once consumes
 another reservation; missing costs consume the full reserved cap. The default cap is $0.10 per attempt and
 $0.50 per local day. The existing global cost guard still applies.
