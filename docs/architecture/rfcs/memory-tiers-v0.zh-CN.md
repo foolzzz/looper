@@ -1,6 +1,6 @@
 # RFC：分层记忆 v0（任务级经验在 Looper 里自动生效）
 
-- **状态：** 决定已定，只有文档。第 2 节的 P1–P4 是产品决定；D1–D16 是本文的选择，被第 15 节问到的都已由维护者在 2026-11-20 按推荐确认；D17、D18 是其余的答复。实现按第 14 节的 PR 顺序做，等维护者安排开工。
+- **状态：** 第 14 节①已在本分支实现，待合入：数据表、经验生命周期与覆盖闸、默认关闭的系统及项目配置、操作者只读列表。配置可保存，但复盘、注入、每周卡片、私聊写操作和 Dashboard 专属页尚未实现；D15 的旧沉淀路径替换归②。第 2 节的产品决定和第 15 节的维护者答复保持不变。
 - **需求：** 记忆分两层。偏好、硬规则和跨项目结论照 [记忆写入路径 RFC](memory-write-path-v0.zh-CN.md)（#1476）的做法：操作者确认后才写进 vault。**任务级经验**（第一版只做从 `task_journal` 提炼的）不进 vault，在 Looper 的 PostgreSQL 里自动生效：每条带出处和 90 天有效期，随时可以撤销，每周给操作者一张卡片批量复核。本文设计这一层：经验怎么产生、怎么生效、注入哪些 agent 的上下文、怎么撤销、每周怎么复核、怎么晋升进 vault、怎么度量。
 - **相关：** [记忆写入路径 RFC](memory-write-path-v0.zh-CN.md)（#1476：共用的 `memory_candidates` 表、出处类别、指纹和墓碑、第 4.4 节为本文留的位置、私聊的回复路由）；[对外动作审查 RFC](outbound-review-v0.zh-CN.md)（任务的来源标记 `tasks.untrusted_inputs`）；[消息线索与意图 RFC](message-leads-intents-v0.zh-CN.md)（意图建出的任务）；[Manager 收尾、账本与晨报 RFC](manager-completion-ledger-v0.zh-CN.md)（晨报的节奏、只推私聊）；[Agent 系统架构](../agent-system.md) 的 "Project knowledge"、"A task's Planner's tools"。
 - **核对基线：** `main` `26d1b3a82`；#1476 还在合入队列里，本文按它的第 4 节的表写。
@@ -486,7 +486,7 @@ proved wrong here, list it in lessons_wrong and say why in your summary.
 
 | PR | 内容 | 依赖 | 模型可见 |
 |---|---|---|---|
-| ① 表和类型 | 第 4 节的增量约束和新表；`memory_model` 加 `looper` 的状态、原因、转换和覆盖闸的记号提取；`memory_lessons` 设置和项目开关；只读的 `memory.lessons_list` | #1476 PR2 | 否 |
+| ① 表和类型（本分支实现，待合入） | 迁移 `memory_lessons`（1910）补六张表、项目列和私聊墓碑来源；`memory_lessons_model` 独占经验转换、覆盖闸和设置类型，复用 `memory_model` 的枚举；独立操作者 `memory_lessons.settings_get/settings_put`、项目开关和只读 `memory.lessons_list`，均可由生成 CLI 使用。已有 vault 生命周期及模型可见内容保持原样 | #1476 PR2 | 否 |
 | ② 复盘 | `memory_retro` 角色、内置 Profile、契约、输入组装、解析和第 3.4 节的检查、`memory_retro_runs` 和记忆服务的队列、任务动态一行、D15 的切换；复盘评测 | ① | 是：复盘评测 |
 | ③ 生效和注入 | 快照、Planner 的一节和续接简报、Worker 和 Reviewer 的 `lessons` 层、契约的两个字段、引用的读取、`flagged_wrong`、撤销时给 Planner 的一行、注入日志和计数 | ① | 是：注入评测，加 Planner、Worker 契约的 prompt 评测对比 |
 | ④ 每周卡片和私聊 | 卡片的拼装和发送、四种回复（接进 #1476 的记忆路由）、任务结束通知末尾的一行、晋升生成候选和写入后的 `superseded`（依赖 #1476 PR3、PR4） | ①、#1476 PR6 | 否（代码在模型之前处理） |
