@@ -301,17 +301,31 @@ Manager has no tool for it. The dashboard shows the task page's 指标 card and 
   non-hosted Claude Code resident). Both inputs must resolve to the operator; other sessions, API clients,
   commands, gate/intent replies, attachments, quotes and chats with pending confirmations retain their queue
   path. With routing off, merging also requires the same chat. Earlier queued messages keep their order.
-  Admission lets OS read callbacks and the output reader run, then rechecks before and after writing,
-  even when a short line's drain returns immediately. A failed or late write queues the message.
-  If a result arrives after the write, the resident process is retired before queue
-  fallback, so the old pipe cannot consume the addition beside its queued turn. It is neither reported as
+  A typed input phase closes admission when top-level model generation begins, an addition is folded,
+  or a top-level tool result arrives, before event callbacks; the next assistant tool call reopens the
+  tool-wait window. Subagent generation does not close that window.
+  Each addition carries a UUID. Writing stdin or receiving a queued lifecycle is not acceptance: the resident
+  waits for its native replay within the original turn, or its UUID in that turn's result, before confirming
+  the merge. A session-ordered background task waits for that receipt outside the admission lock, keeping
+  the inbox available to other sessions and non-user events. Later messages in that session wait for
+  settlement before admission or queue dispatch. A failed or late write queues the message. When the
+  protocol supports UUID ownership, an unconfirmed addition reserves its next native turn and buffers
+  output only through that native turn's own top-level result. Its queued caller claims it by message id
+  without writing stdin again or restarting the resident, even when other queued work runs before claim.
+  Its run records the injected input actually
+  seen by the model. Native tool bindings and stream matches are published before claim, including while
+  Manager prepares the queued turn. A stopped, failed or superseded owner withdraws its reservation;
+  another caller settles existing reservations before starting on the resident. Otherwise the resident
+  first tries per-UUID cancellation, then a bounded gentle interrupt that spares background work, and
+  retires the process only when safe withdrawal is impossible. The addition is neither reported as
   merged nor settled with the original result. Unexpected admission failures are logged and retain the queue
-  path. The original tool binding stays in place. The final reply goes to
+  path. Folded additions keep the original tool binding. The final reply goes to
   the original chat and each addition from another chat; same-chat web additions get a terminal acknowledgement,
   while same-chat Lark/Telegram additions need no duplicate reply. Any participating chat can stop the turn.
   Additions settle only after reply handoff; shutdown before handoff leaves them replayable. Explicit stop
-  follows the existing withdrawal rule and settles all associated messages immediately, preventing replay of
-  stopped work. Typed additions record `metadata.merged` (kind, message id, chat, receipt time), plus each
+  first requests `cancel_async_message` for pending UUIDs, then uses the normal control interrupt,
+  killing only when graceful shutdown fails. It settles all associated messages immediately, preventing
+  replay of stopped work. Typed additions record `metadata.merged` (kind, message id, chat, receipt time), plus each
   addition's ack and first-reply metrics when metrics are on. A failed resume carries accepted additions into
   its retry even if the switch has since been turned off. Off, prompt/system text, tools, command and process
   signature retain their main-baseline bytes, and later messages remain separate turns. Dashboard controls and
@@ -324,7 +338,9 @@ Manager has no tool for it. The dashboard shows the task page's 指标 card and 
   Six consecutive top-level tool calls select a same-turn reminder, at most twice per turn, only when
   the configured runtime declares `MID_TURN_INPUT` and the active session is a direct resident stream-json
   process. Keeper and runner-hosted sessions are excluded. Only Claude Code declares this verified
-  capability. Reminders are model input, with no separate interim channel message.
+  capability. Reminders wait for consumption in background tasks, so event handling continues;
+  unfinished advisory inputs are withdrawn when their model turn ends. Reminders are model input,
+  with no separate interim channel message.
   The operator-only v1 operations `delivery_guard.get` and `delivery_guard.update` read or store the
   switch (`enabled`, null restores off); existing chat settings responses and Manager tools stay unchanged.
   Hidden turns send only the fixed follow-up message in the same session, without user-turn context,
