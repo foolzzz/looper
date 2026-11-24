@@ -357,19 +357,34 @@ def _manager_texts(bus: MessageBus) -> list[str]:
 
 
 def test_lark_reacts_get_to_an_admitted_direct_message_without_holding_it(tmp_path: Path,
-                                                                          lark_cli_stand_in: Path) -> None:
+                                                                          lark_cli_stand_in: Path,
+                                                                          monkeypatch: pytest.MonkeyPatch) -> None:
     from looper.agents.channels.lark import LarkChannelAdapter
 
     async def main() -> tuple[list[str], int]:
+        started, release = asyncio.Event(), asyncio.Event()
+        react = LarkChannelAdapter._react
+
+        async def blocked_react(self: Any, chat_id: str, message_id: str) -> None:
+            started.set()
+            await release.wait()
+            await react(self, chat_id, message_id)
+
+        # Hold the reaction explicitly: journal I/O may otherwise outlast the CLI call.
+        monkeypatch.setattr(LarkChannelAdapter, "_react", blocked_react)
         bus = MessageBus(runtime_root=tmp_path)
         adapter = LarkChannelAdapter(profile="other", runtime_root=tmp_path,
                                      allowlist=SenderAllowlist("channel-lark", frozenset({OPEN_ID})))
         adapter._bus = bus
-        await adapter._handle_lark_event(_lark_dm("om_9"))
-        # The Manager has the message while the reaction call is still running.
-        texts, pending = _manager_texts(bus), len(adapter._reactions._pending)
-        await _settled(adapter)
-        await bus.shutdown()
+        try:
+            await asyncio.wait_for(adapter._handle_lark_event(_lark_dm("om_9")), 5)
+            await asyncio.wait_for(started.wait(), 5)
+            # The Manager has the message while the reaction call is still running.
+            texts, pending = _manager_texts(bus), len(adapter._reactions._pending)
+        finally:
+            release.set()
+            await _settled(adapter)
+            await bus.shutdown()
         return texts, pending
 
     texts, pending = asyncio.run(main())

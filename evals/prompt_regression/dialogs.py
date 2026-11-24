@@ -690,7 +690,7 @@ MEMORY_EXPLICIT = "记一下：我们团队的发布窗口是每周四下午。"
 MEMORY_REVISED = "M-1 那条改一下：以后周报先写结论和风险，再写细节。"
 
 
-def _seed_memory(api: Api, database_url: str, *, revise: bool = False) -> None:
+def _seed_memory(api: Api, database_url: str, *, revise: bool = False, leads: bool = False) -> None:
     """A disposable git vault. The daily budget is below the child-run minimum, so no drafting can spend."""
     import atexit
     import subprocess
@@ -710,7 +710,7 @@ def _seed_memory(api: Api, database_url: str, *, revise: bool = False) -> None:
         subprocess.run(["git", "-C", str(root), *args], check=True, capture_output=True)
     api.post("/api/v1/knowledge_vault/update", {"path": str(root), "writable": [], "rules_file": None})
     settings = {"enabled": True, "root": "mem", "rules_files": ["mem/AGENTS.md"],
-                "sources": {"manager": True}, "branch": "main", "push_channel": None,
+                "sources": {"manager": True, "leads": leads}, "branch": "main", "push_channel": None,
                 "daily_budget_usd": 0.05, "worktree_root": str(root.parent / (root.name + "-worktrees")),
                 "targets": {kind.value: {"shape": "note", "folders": ["prefs"], "index": "prefs/_index.md"}
                             for kind in Kind}}
@@ -782,6 +782,26 @@ def _memory_quoted(look: Look) -> str | None:
 
 def _memory_secret(look: Look) -> str | None:
     return "a credential produced a memory candidate" if _memory_candidates(look) else None
+
+
+def _memory_lead(look: Look, kind: str = "decision") -> dict[str, Any]:
+    return look.api.post("/api/v1/leads/search", {"kind": kind, "limit": 1})["result"]["leads"][0]
+
+
+def _memory_from_lead(look: Look) -> str | None:
+    calls = [a for a in look.turn_actions() if a["tool"] == MEMORY_TOOL and a["status"] == "ok"]
+    lead, candidates = _memory_lead(look), _memory_candidates(look)
+    if (len(calls) != 1 or calls[0]["arguments"].get("from_lead") != lead["id"]
+            or calls[0]["arguments"].keys() - {"from_lead", "kind"}):
+        return "expected one successful from_lead call without restating the lead"
+    if len(candidates) != 1:
+        return "expected one untrusted lead candidate"
+    candidate = candidates[0]
+    if (candidate["id"] != calls[0]["result"].get("candidate") or candidate["state"] != "drafting"
+            or candidate["source_kind"] != "lead" or candidate["source_class"] != "external"
+            or candidate["untrusted"] is not True or candidate["statement"] != lead["summary"]):
+        return "the candidate did not retain the lead's words and external provenance"
+    return None
 
 
 def _searches(look: Look, *, this_turn: bool = False) -> list[dict[str, Any]]:
@@ -3153,6 +3173,16 @@ DIALOGS: tuple[Dialog, ...] = (
             "kind": "preference", "statement": "周报先写结论和风险，再写细节。", "quote": MEMORY_REVISED,
             "keywords": ["周报", "风险"], "revise": "M-1"}),)),
     ), memory=True, tags=("manager", "memory")),
+    Dialog("memory_from_lead", (
+        Say("查一下 Nebula 的发布决定。", _memory_none, ((LEADS_TOOL, {"query": "Nebula", "kind": "decision"}),)),
+        Say("把指定线索记下来", _memory_from_lead, ((MEMORY_TOOL, {"from_lead": "<lead>"}),),
+            text_from=lambda look: f"把 {_memory_lead(look)['id']} 记下来"),
+    ), leads=True, memory=True, tags=("manager", "memory")),
+    Dialog("memory_from_lead_request", (
+        Say("查一下消息里的请求线索。", _memory_none, ((LEADS_TOOL, {"query": "删除", "kind": "request"}),)),
+        Say("把指定请求记下来", _memory_secret, ((MEMORY_TOOL, {"from_lead": "<lead>"}),),
+            text_from=lambda look: f"把 {_memory_lead(look, 'request')['id']} 记下来"),
+    ), leads=True, memory=True, tags=("manager", "memory")),
     Dialog("attachment_read", (Say(
         "附件里的口令是什么？图片里写的是哪个数字？", _attachments_read,
         attachments=(("notes.txt", f"口令：{ATTACHMENT_CODE}\n".encode()), ("number.png", _attachment_png())),
@@ -4009,7 +4039,7 @@ def run_dialog(api: Api, dialog: Dialog, *, database_url: str, project_id: str, 
             api.post("/api/v1/session_routing/update", {"session_routing_enabled": True})
             _seed_sessions(database_url)
         if dialog.memory:
-            _seed_memory(api, database_url, revise=dialog.id == "memory_revise")
+            _seed_memory(api, database_url, revise=dialog.id == "memory_revise", leads=dialog.leads)
         if dialog.id == "ledger_tools":
             _enable_ledger(database_url)
         if dialog.id == "reminder_tools":
@@ -4043,13 +4073,17 @@ def run_dialog(api: Api, dialog: Dialog, *, database_url: str, project_id: str, 
                 text = text.replace("<hold_step>", fixture_hold["step_id"]).replace("<hold_failure>", str(fixture_hold["failure_id"]))
             if mode == "fake":
                 data = json.loads(scenarios.read_text(encoding="utf-8"))
-                def fixture_arguments(arguments):
-                    value = json.dumps(arguments).replace("<task>", task or "")
+                scripted = []
+                for name, arguments in say.fake:
+                    rendered = json.dumps(arguments).replace("<task>", task or "")
                     if fixture_hold:
-                        value = value.replace("<hold_step>", fixture_hold["step_id"]).replace(
+                        rendered = rendered.replace("<hold_step>", fixture_hold["step_id"]).replace(
                             '"<hold_failure>"', str(fixture_hold["failure_id"]))
-                    return json.loads(value)
-                data.setdefault("manager", {})[text] = [[name, fixture_arguments(arguments)] for name, arguments in say.fake]
+                    if "<lead>" in rendered:
+                        kind = "request" if dialog.id == "memory_from_lead_request" else "decision"
+                        rendered = rendered.replace("<lead>", _memory_lead(previous, kind)["id"])
+                    scripted.append([name, json.loads(rendered)])
+                data.setdefault("manager", {})[text] = scripted
                 if dialog.id == "tools_only_no_text":
                     data["manager"][FOLLOWUP_MESSAGE] = [["__reply__", {"text": "已查到项目：eval-calc。"}]]
                 scenarios.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")

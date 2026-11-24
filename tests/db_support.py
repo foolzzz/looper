@@ -152,8 +152,9 @@ async def dropped_tables(conn: Any, *tables: str) -> AsyncIterator[None]:
 
     A table added later may point at one an upgrade test drops. Its migration is not the one under test, so it stays:
     only its foreign keys into ``tables`` are set aside, and a new table never has to join an older test's list. End
-    the block once the upgrade has recreated the tables. A key no longer fitting its recreated table fails there; one
-    into a table still missing stays out. After an error in the block, that error is the one reported.
+    the block once the upgrade has recreated the tables. Keep an identical key the upgrade already restored. A key
+    no longer fitting its recreated table fails there; one into a table still missing stays out. After an error in
+    the block, that error is the one reported.
     """
     keys = await conn.fetch(
         "SELECT conrelid::regclass::text AS dependent, confrelid::regclass::text AS referenced, conname, "
@@ -172,8 +173,13 @@ async def dropped_tables(conn: Any, *tables: str) -> AsyncIterator[None]:
         for key in keys:
             try:
                 if await conn.fetchval("SELECT to_regclass($1) IS NOT NULL", key["referenced"]):
-                    await conn.execute(
-                        f'ALTER TABLE {key["dependent"]} ADD CONSTRAINT "{key["conname"]}" {key["definition"]}')
+                    restored = await conn.fetchval("SELECT pg_get_constraintdef(oid) FROM pg_constraint "
+                        "WHERE conrelid=to_regclass($1) AND conname=$2", key["dependent"], key["conname"])
+                    if restored is None:
+                        await conn.execute(
+                            f'ALTER TABLE {key["dependent"]} ADD CONSTRAINT "{key["conname"]}" {key["definition"]}')
+                    elif restored != key["definition"]:
+                        raise RuntimeError(f'upgrade changed foreign key {key["dependent"]}.{key["conname"]}')
             except Exception:
                 if not raised:
                     raise
