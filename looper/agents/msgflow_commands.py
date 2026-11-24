@@ -16,8 +16,9 @@ failure stops it there.
 ``--retry-skipped`` previews only hook-skipped windows, split per chat into at most 500 events. With ``--run``
 (and a budget), each sub-window's leads and progress commit together. A chat blocked again is recorded and never
 submitted again by retry; other failures leave its sub-window pending. The original skip is removed only after
-all its chats are settled. Legacy progress has no day range: ``--days`` defaults to 30 for retry and is frozen
-on its first checkpoint. The processor, input rendering and hooks are unchanged.
+all its chats are settled. Backfill progress freezes the original day range and reference time; retry uses
+those bounds. Legacy progress without them requires an explicit ``--days``. The processor, input rendering
+and hooks are unchanged.
 """
 
 from __future__ import annotations
@@ -172,7 +173,7 @@ def _usd(value: float) -> str:
     return f"${value:.3f}" if value < 0.1 else f"${value:.2f}" if value < 10 else f"${value:.1f}"
 
 
-async def _backfill(database_url: str, *, days: int, schedule_id: str | None, run: bool, budget_usd: float | None,
+async def _backfill(database_url: str, *, days: int | None, schedule_id: str | None, run: bool, budget_usd: float | None,
                     claude_bin: str, runtime_root: Any, retry_skipped: bool = False) -> tuple[int, str]:
     import json
     import math
@@ -211,9 +212,12 @@ async def _backfill(database_url: str, *, days: int, schedule_id: str | None, ru
             return await _retry_skipped(pool, schedule, progress, days=days, run=run, budget_usd=budget_usd,
                                         claude_bin=claude_bin, runtime_root=runtime_root)
         now = datetime.now(timezone.utc)
+        assert days is not None
+        saved_scope = progress.setdefault("scope", {"days": days, "as_of": now.isoformat()})
+        days, as_of = saved_scope["days"], datetime.fromisoformat(saved_scope["as_of"])
         scope = {**sub, "max_age_minutes": days * 1440, "max_events": BACKFILL_WINDOW}
         own_apps = await own_bot_app_ids()
-        tally = await db_subs.extraction_tally(pool, scope, output_kind="leads", since=now - timedelta(days=days),
+        tally = await db_subs.extraction_tally(pool, scope, output_kind="leads", since=as_of - timedelta(days=days),
                                                to_seq=start, own_apps=own_apps, include_import=True,
                                                zone_name=zone_name, from_seq=progress["done_seq"])
         count = sum(row["events"] for row in tally)
@@ -253,7 +257,7 @@ async def _backfill(database_url: str, *, days: int, schedule_id: str | None, ru
         stopped = ""
         while True:
             picked = await db_subs.extraction_window(pool, scope, output_kind="leads", from_seq=done, to_seq=start,
-                                                     now=now, own_apps=own_apps, include_import=True)
+                                                     now=as_of, own_apps=own_apps, include_import=True)
             if not picked["rows"]:
                 done = start
                 break
@@ -329,7 +333,7 @@ async def _backfill(database_url: str, *, days: int, schedule_id: str | None, ru
         await connection.close_pool()
 
 
-async def _retry_skipped(pool: Any, schedule: dict[str, Any], progress: dict[str, Any], *, days: int,
+async def _retry_skipped(pool: Any, schedule: dict[str, Any], progress: dict[str, Any], *, days: int | None,
                          run: bool, budget_usd: float | None, claude_bin: str, runtime_root: Any) -> tuple[int, str]:
     """Settle hook-skipped windows without ever resubmitting a chat that was blocked on retry.
 
@@ -346,11 +350,15 @@ async def _retry_skipped(pool: Any, schedule: dict[str, Any], progress: dict[str
     sid, sub, zone_name = schedule["id"], schedule["subscription"], schedule["timezone"]
     key = BACKFILL_KEY.format(sid)
     now = datetime.now(timezone.utc)
-    retry = progress.setdefault("retry_skipped", {"days": days, "as_of": now.isoformat(), "spent_usd": 0.0,
+    if "scope" not in progress and days is None:
+        return 1, "the original backfill day range was not saved; retry requires an explicit --days"
+    saved_scope = progress.setdefault("scope", {"days": days, "as_of": now.isoformat()})
+    retry = progress.setdefault("retry_skipped", {**saved_scope, "spent_usd": 0.0,
                                                  "blocked": []})
-    # Legacy backfills did not retain their day range. Freeze the requested range on the first writing retry.
-    scope = {**sub, "max_age_minutes": retry["days"] * 1440, "max_events": BACKFILL_WINDOW}
-    as_of = datetime.fromisoformat(retry["as_of"])
+    # Selection always uses the original bounds, even if retry state predates saved backfill scopes.
+    retry.update(saved_scope)
+    scope = {**sub, "max_age_minutes": saved_scope["days"] * 1440, "max_events": BACKFILL_WINDOW}
+    as_of = datetime.fromisoformat(saved_scope["as_of"])
     own_apps = await own_bot_app_ids()
     skipped = progress.setdefault("skipped", [])
     originals = [window for window in skipped if window["reason"] == extraction.SkipReason.BLOCKED_BY_HOOK.value]
@@ -405,7 +413,7 @@ async def _retry_skipped(pool: Any, schedule: dict[str, Any], progress: dict[str
     valid_days = await leads_model.valid_days(pool)
 
     async def checkpoint(conn: Any) -> None:
-        # Empty or excluded windows are settled too. Other skip reasons remain untouched.
+        # All in-scope rows were enumerated with the frozen bounds; retain any window with pending work.
         progress["skipped"] = [window for window in skipped if window not in originals
                                or any(item["window"] is window for item in pending)]
         await conn.execute(
@@ -502,8 +510,8 @@ def leads_backfill(args: Any, load_ops: Any) -> int:
     if args.days is None and not args.retry_skipped:
         print("error: --days is required unless --retry-skipped is used", file=sys.stderr)
         return 2
-    days = args.days if args.days is not None else 30
-    if not 1 <= days <= BACKFILL_MAX_DAYS:
+    days = args.days
+    if days is not None and not 1 <= days <= BACKFILL_MAX_DAYS:
         print(f"error: --days is a whole number from 1 to {BACKFILL_MAX_DAYS}", file=sys.stderr)
         return 2
     if args.run and not (args.budget_usd and args.budget_usd > 0
