@@ -1081,6 +1081,8 @@ class PlannerAgent:
         # The newest room message a failed [ROOM] turn had, and when it failed: the same messages go again only with
         # a newer one, or after ``ROOM_RETRY_SEC``.
         self._room_failed: tuple[int, float] = (0, 0.0)
+        self._failure_bootstrap_pending = False
+        self._failure_bootstrap_events: list[MessageEnvelope] = []
 
     @property
     def agent_id(self) -> str:
@@ -1097,6 +1099,11 @@ class PlannerAgent:
         if self._ops is not None:
             self._token = self._ops.issue(self._task_id)  # the task's earlier Planner's stops working
         await self._load_plan()
+        if self._plan is not None and self._plan.steps:
+            from .. import failure_handling
+            service = failure_handling.get_service()
+            self._failure_bootstrap_pending = service is not None and (
+                service.known_mode() is failures.FailureTyping.ACT or service.recovering)
         self._loop_task = asyncio.create_task(self._message_loop())
         self._supervise_task = asyncio.create_task(self._supervise_loop())
         self._idle_task = asyncio.create_task(self._idle_loop())
@@ -1199,8 +1206,29 @@ class PlannerAgent:
         except TurnBlocked as exc:
             assert self._plan is not None
             await self._fail_plan(self._plan, reason=str(exc), model_closeout=False)
+        finally:
+            if self._failure_bootstrap_pending and envelope.message_type in (
+                    MessageType.TASK_RESUME, MessageType.TASK_REQUEST):
+                self._failure_bootstrap_pending = False
+                pending, self._failure_bootstrap_events = self._failure_bootstrap_events, []
+                for event in pending:
+                    await self._bus.publish(event)
+            if not self._failure_bootstrap_pending and self._plan is not None \
+                    and self._plan.status in _LIVE and envelope.payload.get("event") != "failure_hold_released" \
+                    and any(step.failure_hold and step.failure_hold.get("kind") == "recovery"
+                            for step in self._plan.steps):
+                from .. import failure_handling
+                service = failure_handling.get_service()
+                if service is not None:
+                    await service.restore_task(self._task_id)
 
     async def _handle_event(self, envelope: MessageEnvelope) -> None:
+        if self._failure_bootstrap_pending and envelope.message_type is MessageType.SYSTEM_EVENT \
+                and envelope.payload.get("event") == "failure_hold_released":
+            # The router has started this mailbox but has not necessarily queued
+            # TASK_RESUME yet. New recovery runs must not be adopted as old ones.
+            self._failure_bootstrap_events.append(envelope)
+            return
         self._condition_attempts.clear()
         # The running run is read again for this event, once, before its first wait check.
         self._run_deadline = None
@@ -3012,7 +3040,12 @@ class PlannerAgent:
                 await self._report_progress(plan)
                 await self._dispatch_ready(plan)
                 return True
-            scope.failure_history = await service.continuous_failures(self._task_id, scope.step_id)
+            try:
+                scope.failure_history = await service.continuous_failures(self._task_id, scope.step_id)
+            except Exception:
+                scope.failure_history = []  # _decide retries the read and reports unavailable history explicitly
+                logger.exception("Failure history unavailable for task %s step %s; retaining the decision path",
+                                 self._task_id, scope.step_id)
             if review and handling.action in ("planner", "breaker"):
                 # Running failures must never become panel votes or advance advisory roles.
                 if unit.reviews:
@@ -3038,7 +3071,10 @@ class PlannerAgent:
     async def _read_failure_journal(self, plan: TaskPlan) -> None:
         from ...db import journal as db_journal
 
-        plan.journal = [JournalEntry.from_row(row) for row in await db_journal.list_entries(self._task_id)]
+        try:
+            plan.journal = [JournalEntry.from_row(row) for row in await db_journal.list_entries(self._task_id)]
+        except Exception:
+            logger.exception("Cannot reload failure journal for task %s; retaining the saved context", self._task_id)
 
     async def _restore_failure_holds(self, plan: TaskPlan) -> None:
         from .. import failure_handling
@@ -3077,13 +3113,17 @@ class PlannerAgent:
             return
         task = await db_tasks.get_task(self._task_id)
         if task is None or task["status"] not in db_tasks.ACTIVE_STATUSES or task.get("completed_at") is not None:
+            await failure_handling.get_service().ack_release(payload["failure_id"])
             return
         scope = plan.step(str(payload.get("step_id") or ""))
         if scope is None:
+            await failure_handling.get_service().ack_release(payload["failure_id"])
             return
         # A stale wake cannot release or redispatch a more recent failure.
         holds = await step_failures.list_holds(self._task_id)
         if any(h["step_id"] == scope.step_id for h in holds):
+            if all(h["failure_id"] != payload.get("failure_id") for h in holds if h["step_id"] == scope.step_id):
+                await failure_handling.get_service().ack_release(payload["failure_id"])
             return
         active = await failures.typing_mode() is failures.FailureTyping.ACT
         if payload.get("quota_exhausted") and active:
@@ -3094,6 +3134,7 @@ class PlannerAgent:
         action = str(payload.get("action") or "retry")
         await self._read_failure_journal(plan)
         scope.failure_hold = None
+        deferred = False
         for item in payload.get("targets") or [payload.get("target") or {}]:
             target = item.get("target", item)
             unit = plan.step(target.get("unit_step_id", scope.step_id))
@@ -3118,6 +3159,12 @@ class PlannerAgent:
                     await self._spawn_reviewer(plan, unit, same_attempt=True)
                 else:
                     await self._dispatch_step(plan, unit, same_attempt=True)
+                current = unit.reviewer_id if target.get("kind") in ("reviewer", "panel") else unit.worker_id
+                if current == source and plan.status in _LIVE:
+                    # A cost or acceptance hold can refuse the dispatch. Keep its
+                    # exact target durable until that independent wait is released.
+                    scope.failure_hold = unit.failure_hold = {"kind": "recovery", "failure_id": payload["failure_id"]}
+                    deferred = True
             else:
                 scope.failure_history = await failure_handling.get_service().continuous_failures(self._task_id, scope.step_id)
                 review = target.get("kind") in ("reviewer", "panel")
@@ -3132,7 +3179,7 @@ class PlannerAgent:
                     self._review_report(scope, result) if review else self._work_report(scope, result))
                 break  # all failures in this step are represented in this single decision
         await self._report_progress(plan)
-        if payload.get("failure_id") is not None:
+        if payload.get("failure_id") is not None and not deferred:
             await failure_handling.get_service().ack_release(payload["failure_id"])
 
     async def _attempt(self, step: PlanStep) -> int | None:

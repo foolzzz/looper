@@ -35,6 +35,11 @@ fixture data afterwards. Observed checks include:
 - A process restart retains an environment hold's identity and streak, starts no replacement while held, and
   confirmed release starts only its replacement execution. HTTP and the generated CLI read the persisted history.
 
+Deterministic actor/database regressions also deliver a release before startup's `TASK_RESUME`: Worker and
+Reviewer each dispatch once, duplicate outbox events are ignored, and the replacement result remains current.
+A release blocked by independent spend admission retains its exact execution target and unacknowledged outbox
+until that wait can resume; it does not fall through to an ordinary Worker dispatch.
+
 The process check uses real local timing for the first transient wait. Minute/hour deadline boundaries use
 controlled clocks in unit/database tests; no claim is made that a six-hour wait was observed in real time.
 Frontend checks use Vitest, a production build and headless Chromium against the isolated service. Screenshots

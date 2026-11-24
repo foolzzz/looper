@@ -117,3 +117,16 @@ def test_scheduled_first_frozen_admission_expires_without_starting_a_run(tmp_pat
         finally:
             await service.close()
     asyncio.run(asyncio.wait_for(scenario(), 5))
+
+
+@pytest.mark.parametrize("reader", ["planner", "worker", "lessons"])
+def test_failure_hold_audit_reaches_existing_model_context_readers(reader):
+    from looper.agents.tiers import journal
+    entry = journal.JournalEntry("step", "work", "Failure 42: operator released hold with retry.",
+                                 kind=journal.JournalKind.FAILURE_HOLD)
+    if reader == "worker":
+        text = journal.worker_section([entry], [])
+    else:
+        lines = journal.planner_section([entry]) if reader == "planner" else journal.lessons_journal([entry])
+        text = "\n".join(lines)
+    assert "Failure 42" in text and "operator released hold with retry" in text

@@ -11,8 +11,8 @@ from looper.agents.tiers import planner
 from tests.db_support import run_db
 
 
-@pytest.mark.parametrize("review", [False, True])
-def test_runtime_failure_waits_and_recovers_only_the_failed_execution(monkeypatch, tmp_path, review):
+@pytest.mark.parametrize(("review", "budget_wait"), [(False, False), (True, False), (True, True)])
+def test_runtime_failure_waits_and_recovers_only_the_failed_execution(monkeypatch, tmp_path, review, budget_wait):
     async def body(pool):
         await pool.execute("INSERT INTO projects(id,name) VALUES ('project','Synthetic recovery')")
         await pool.execute("INSERT INTO tasks(id,project_id,requirement,status) VALUES "
@@ -59,6 +59,15 @@ def test_runtime_failure_waits_and_recovers_only_the_failed_execution(monkeypatc
             await agent._restore_failure_holds(plan)
             assert unit.failure_hold["kind"] == "recovery"
             assert not plan.ready_steps()  # released, but not yet applied by the actor
+            if budget_wait:
+                with monkeypatch.context() as patch:
+                    patch.setattr(agent, "_within_budget", AsyncMock(return_value=False))
+                    await agent._handle_system_event(MessageEnvelope.create(source=planner_address("task"),
+                        target=planner_address("task"), message_type=MessageType.SYSTEM_EVENT, payload=events[-1]))
+                assert not any(e.message_type in (MessageType.WORK_ITEM, MessageType.VERIFY_REQUEST) for e in sent)
+                assert unit.failure_hold["kind"] == "recovery"
+                assert await pool.fetchval("SELECT delivered_at IS NULL FROM step_failure_releases")
+                await agent._restore_failure_holds(plan)
             await agent._handle_system_event(MessageEnvelope.create(source=planner_address("task"),
                 target=planner_address("task"), message_type=MessageType.SYSTEM_EVENT, payload=events[-1]))
             await agent._handle_system_event(MessageEnvelope.create(source=planner_address("task"),
@@ -100,6 +109,8 @@ def test_panel_runtime_judgment_goes_to_decision_without_becoming_a_vote(monkeyp
         decide, vote = AsyncMock(), AsyncMock(side_effect=AssertionError("runtime failure became a vote"))
         monkeypatch.setattr(agent, "_decide", decide)
         monkeypatch.setattr(agent, "_review_done", vote)
+        from looper.db import journal as db_journal
+        monkeypatch.setattr(db_journal, "list_entries", AsyncMock(side_effect=RuntimeError("synthetic journal unavailable")))
         try:
             await agent._handle_verify_result(MessageEnvelope.create(source=worker_address("reviewer"),
                 target=planner_address("task"), message_type=MessageType.VERIFY_RESULT,
@@ -205,4 +216,68 @@ def test_expired_step_quota_event_ends_the_task_without_another_model_turn(monke
             model.assert_not_awaited()
         finally:
             await service.close()
+    run_db(body, monkeypatch, timeout=40)
+
+
+@pytest.mark.parametrize("review", [False, True])
+def test_release_before_resume_bootstrap_dispatches_exactly_once(monkeypatch, tmp_path, review):
+    import asyncio
+    from looper.agents.bus import MessageBus
+    from looper.agents.failures import Failure, FailureCause
+    from tests.db_support import until as wait_until
+
+    async def body(pool):
+        await pool.execute("INSERT INTO projects(id,name,work_dir) VALUES ('project','Synthetic startup',$1)", str(tmp_path))
+        await pool.execute("INSERT INTO tasks(id,project_id,requirement,status,work_dir) VALUES "
+                           "('task','project','Resume once','executing',$1)", str(tmp_path))
+        await pool.execute("INSERT INTO system_settings(key,value) VALUES ('engine.failure_typing','act')")
+        events, dispatched = [], []
+        async def publish(task_id, payload):
+            events.append(payload)
+        service = failure_handling.FailureHandlingService(pool=pool, mode=FailureTyping.ACT, publish=publish)
+        monkeypatch.setattr(failure_handling, "_service", service)
+        bus = MessageBus(runtime_root=tmp_path)
+        bus.subscribe_topic(MessageType.WORK_ITEM, dispatched.append)
+        bus.subscribe_topic(MessageType.VERIFY_REQUEST, dispatched.append)
+        agent = planner.PlannerAgent(task_id="task", runtime_root=tmp_path)
+        unit = planner.PlanStep("step", 0, "Resume once", key="work", review=review, worker_id="old-worker",
+            reviewer_id="old-reviewer" if review else None, status="completed" if review else "dispatched",
+            result={"status": "completed", "summary": "Keep worker output", "changed_files": {}} if review else None)
+        plan = planner.TaskPlan("plan", "goal", "Resume once", str(tmp_path), [unit],
+                                status="executing", project_id="project")
+        await agent._save(plan, unit, plan_row=True)
+        source = "old-reviewer" if review else "old-worker"
+        handled = await service.handle_step_result(task_id="task", step_id="step", run_id=source,
+            role="reviewer" if review else "worker", failure=Failure(FailureCause.LOGIN),
+            target={"kind": "reviewer" if review else "worker", "unit_step_id": "step", "source": source},
+            result={"status": "failed", "summary": "Login required"})
+        try:
+            await agent.start(bus)
+            assert agent._failure_bootstrap_pending
+            await service.release_hold("task", "step", handled.failure["id"], "retry", operator=True)
+            released = MessageEnvelope.create(source=planner_address("task"), target=planner_address("task"),
+                message_type=MessageType.SYSTEM_EVENT, payload=events[-1])
+            await agent._handle(released)  # force the real startup window before TASK_RESUME
+            assert not dispatched
+            assert await pool.fetchval("SELECT delivered_at IS NULL FROM step_failure_releases")
+            await bus.publish(MessageEnvelope.create(source=planner_address("task"), target=planner_address("task"),
+                message_type=MessageType.TASK_RESUME, payload={"task_id": "task"}))
+            await wait_until(lambda: len(dispatched) >= 1, "one recovery dispatch", timeout=15)
+            await bus.publish(released)  # a duplicate restoration event is harmless
+            await asyncio.sleep(.05)
+            assert len(dispatched) == 1
+            assert dispatched[0].message_type is (MessageType.VERIFY_REQUEST if review else MessageType.WORK_ITEM)
+            decide = AsyncMock()
+            monkeypatch.setattr(agent, "_decide", decide)
+            await bus.publish(MessageEnvelope.create(source=dispatched[0].target, target=agent.agent_address,
+                message_type=MessageType.VERIFY_RESULT if review else MessageType.WORK_RESULT,
+                payload={"task_id": "step", "status": "completed", "passed": True, "summary": "Recovered",
+                         "engine_run": {"outcome": "passed" if review else "completed", "failure": None}}))
+            await wait_until(lambda: decide.await_count == 1, "the unique recovered result", timeout=15)
+            assert await pool.fetchval("SELECT streak FROM step_failure_state") == 0
+            assert await pool.fetchval("SELECT count(*) FROM step_failures") == 1
+        finally:
+            await agent.stop()
+            await service.close()
+            await bus.shutdown()
     run_db(body, monkeypatch, timeout=40)
