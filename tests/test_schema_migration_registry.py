@@ -134,7 +134,7 @@ def test_drafting_migrations_use_their_reserved_orders(name, order):
         assert migration.online_order == order
 
 
-@pytest.mark.parametrize("name,order", [("memory_retro_role", 1950), ("memory_retro_queue", 1960)])
+@pytest.mark.parametrize("name,order", [("memory_retro_role", 1980), ("memory_retro_queue", 1990)])
 def test_retrospective_migrations_use_their_reserved_orders(name, order):
     discovered = migrations.discover()
     migration = next(item for item in discovered if item.name == name)
