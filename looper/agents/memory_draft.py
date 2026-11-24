@@ -15,7 +15,7 @@ from enum import StrEnum
 from pathlib import PurePosixPath
 from typing import Any
 
-from . import memory_model as model, memory_write, vault
+from . import memory_model as model, memory_write, untrusted, vault
 from .advice_lint import _SECRETS
 
 INPUT_MAX_CHARS = 60_000
@@ -129,7 +129,10 @@ async def assemble(config: vault.VaultConfig, settings: model.MemorySettings, ca
         seed += "\n" + json.dumps(sources, ensure_ascii=False, sort_keys=True)
     escaped_seed = html.escape(seed, quote=False)
     if source_class is model.SourceClass.EXTERNAL or candidate.get("untrusted"):
-        escaped_seed = f"<untrusted>{escaped_seed}</untrusted>"
+        leads = [f"lead-{source['lead_id']}" for source in candidate.get("sources", ())
+                 if source.get("lead_id") is not None]
+        escaped_seed = untrusted.fence(escaped_seed, source=untrusted.Source.LEAD,
+                                       provenance={"lead": ", ".join(leads)} if leads else None)
     blocks.append(f'<seed kind="{kind.value}" source="{model.SourceKind(candidate["source_kind"]).value}">'
                   f"{escaped_seed}</seed>")
     blocks.append(_block("target", "", folders=", ".join(folders), files=", ".join(pages),

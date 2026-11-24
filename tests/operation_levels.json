@@ -169,6 +169,7 @@
  "memory.edit": "machine",
  "memory.get": "inside",
  "memory.list": "inside",
+ "memory.propose_from_lead": "inside",
  "memory.redraft": "inside",
  "memory.reject": "inside",
  "memory.retry": "machine",
