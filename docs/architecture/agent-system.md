@@ -3350,8 +3350,8 @@ lesson snapshots do not disable retrospectives; context injection is a separate 
 After TaskRouter forwards the final completed/failed status and tears down the Planner, an independent terminal
 listener enqueues the newly observed journal range. Scheduler and retrospective callbacks cannot block one
 another on failure. `MemoryRetroService` recovers post-activation terminal tasks, claims a short database lease,
-then invokes the private `memory_retro` role without holding a connection or transaction. Migration 1920 widens
-the role/run-kind checks online; 1930 adds durable cursors, activation high-water, attempt leases, independent
+then invokes the private `memory_retro` role without holding a connection or transaction. Migration 1950 widens
+the role/run-kind checks online; 1960 adds durable cursors, activation high-water, attempt leases, independent
 spend reservations, range output references and distinct-task reinforcement records. Retrying once consumes
 another reservation; missing costs consume the full reserved cap. The default cap is $0.10 per attempt and
 $0.50 per local day. The existing global cost guard still applies.

@@ -15,7 +15,8 @@ pytestmark = pytest.mark.skipif(not DSN, reason="requires disposable LOOPER_TEST
 def test_fresh_upgrade_repair_and_online_role_union():
     async def check():
         async with fresh_connection() as old, fresh_connection() as fresh:
-            previous = tuple(m for m in connection._MIGRATIONS if m.name not in {role.name,queue.name})
+            # Upgrade from merged dependencies only; no other open migration is needed.
+            previous = tuple(m for m in connection._MIGRATIONS if m.order <= 1910)
             await old.execute(migrations.schema_sql(connection.SCHEMA_PATH.read_text(), previous))
             from looper.db.bridge_upgrade import BASELINE
             await old.execute("INSERT INTO registry_schema_version(id,version) VALUES(TRUE,$1)",

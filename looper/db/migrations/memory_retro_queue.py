@@ -4,7 +4,7 @@ from . import OnlineStep
 from .memory_lessons import _column, _constraint, _normalized
 
 name = "memory_retro_queue"
-order = pending_order = online_order = 1930
+order = pending_order = online_order = 1960
 _COLUMNS = ("lease_token UUID", "lease_until TIMESTAMPTZ", "started_at TIMESTAMPTZ",
             "last_failure TEXT", "completed_notified_at TIMESTAMPTZ")
 _TABLES = {

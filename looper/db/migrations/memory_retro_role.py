@@ -3,8 +3,8 @@
 from . import OnlineStep, _widen_check
 
 name = "memory_retro_role"
-order = 1920
-pending_order = 1920
+order = 1950
+pending_order = 1950
 _CHECKS = (
     ("llm_records", "run_kind", "llm_records_run_kind_check"),
     ("agent_setting_layers", "role", "agent_setting_layers_role_check"),
@@ -29,7 +29,7 @@ async def apply(conn, *, sql, state):
         await conn.execute("DELETE FROM schema_migrations WHERE name = $1", online[0].marker)
 
 
-online_order = 1920
+online_order = 1950
 online = (OnlineStep(name, "memory_retro_role_online", validate=tuple(
     (table, constraint) for table, _, constraint in _CHECKS
 )),)
