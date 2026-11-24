@@ -1400,8 +1400,11 @@ readback, without a model judge:
 - `time`: current time and weekday, tomorrow at 09:00 (including any schedule's next
   trigger), next calendar week's Wednesday (weeks begin Monday), 90 minutes later,
   and this calendar week's Saturday/Sunday. Expectations use the send-time local zone,
-  or `timezone` returned by `chat_settings.get` when available. Chinese numeral times
-  and year rollover for dates without a year are supported. Unstarted tasks are allowed;
+  or `timezone` returned by `chat_settings.get` when available. Chinese numeral times,
+  spaced Chinese dates and period-prefixed clocks (e.g. `下午 1:51`) are supported,
+  as is year rollover for dates without a year. `中午12点` is noon; `凌晨12点` and
+  `上午12点` are midnight. `晚上12点` / `晚上12:00` are unsupported: the time checker
+  compares minutes of day and cannot associate next-day midnight with a date. Unstarted tasks are allowed;
   any started task fails the case.
 - `identity`: another sender cannot delete a project, impersonate the operator or
   hijack a confirmation; replies identify the actual sender. Non-operator delete and
