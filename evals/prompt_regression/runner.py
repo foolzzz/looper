@@ -290,13 +290,34 @@ def require_claude(mode: str, claude: str | None, runtime_types: Iterable[str]) 
                         "runtime with --agent or --register-agent)")
 
 
+def scored_expect(task: EvalTask, *, fake: bool) -> dict[str, int]:
+    """Bounds that score every mode, plus the script's own bounds in fake mode.
+
+    A scripted misbehavior is not a pass condition for a real model that is right on the first try.
+    """
+    expect = dict(task.expect)
+    if fake:
+        expect.update(task.fake.get("expect") or {})
+    return expect
+
+
+def uses_role_shim(tasks: Iterable[EvalTask]) -> bool:
+    """Whether real mode must install the stand-in so a scripted role stays on the script.
+
+    ``real_reviewer`` and ``real_planner`` already did. ``scripted_planner`` scripts only the Planner; without the
+    shim a real-mode run of that task alone sends the Planner to Claude Code.
+    """
+    return any(task.real_reviewer or task.fake.get("real_planner") or task.fake.get("scripted_planner")
+               for task in tasks)
+
+
 def install_claude(bin_dir: Path, *, mode: str, scenarios: Path | None = None,
                    max_budget_usd: float | None = None, real_claude: str | None = None,
                    real_reviewer: bool = False) -> Path | None:
     """Put the ``claude`` the server runs in ``bin_dir``: the stand-in, or real Claude Code with a budget (none when
     no agent runs it: ``real_claude`` None). With ``real_reviewer`` installs the role-selective stand-in in real
-    mode. Each task script chooses real Reviewers or a real Planner (``fake_claude.REAL_CLAUDE_ENV``); other tasks
-    remain fully real."""
+    mode. Each task script chooses real Reviewers, a real Planner, or a scripted Planner
+    (``fake_claude.REAL_CLAUDE_ENV``); other tasks remain fully real."""
     bin_dir.mkdir(parents=True, exist_ok=True)
     prefix = ""
     if mode == "fake":
@@ -629,6 +650,8 @@ def run_task(
     step_workspaces: str | None = None,
     chosen_profile_id: str | None = None,
     user_gates: str | None = None,
+    planner_roles: str | None = None,
+    record_completion_checks: bool = False,
     notes_root: Path | None = None,
     vault_dir: Path | None = None,
     fake: bool = False,
@@ -706,14 +729,18 @@ def run_task(
         if task.dependency_conditions:
             api.post("/api/v1/project_admin/update", {
                 "project_id": require_project(), "fields": {"dependency_conditions": "on"}})["result"]["project"]
-        if task.roles_on:
-            api.post("/api/v1/project_admin/update", {"project_id": require_project(), "fields": {"planner_roles": "on"}})["result"]["project"]
+        roles = planner_roles if planner_roles is not None else ("on" if task.roles_on else None)
+        if roles is not None:
+            api.post("/api/v1/project_admin/update", {"project_id": require_project(), "fields": {"planner_roles": roles}})["result"]["project"]
         for template in task.role_templates:
             fields = {"description": "", "harness": None, "profile_id": None, "items": [], **template}
             api.post("/api/v1/role_templates/put", {**fields, "project_id": require_project()})
         gates = _project_user_gates(task, user_gates)
         if gates is not None:
             api.post("/api/v1/project_admin/update", {"project_id": require_project(), "fields": {"user_gates": gates}})["result"]["project"]
+        if task.acceptance_checks:
+            _confirmed(api, "/api/v1/acceptance_checks/update",
+                       {"project_id": require_project(), "acceptance_checks": task.acceptance_checks})
         if task.schedule_template:
             owner_key = "eval-" + uuid.uuid4().hex[:8]
             api.post("/api/v1/managers/create", {"key": owner_key, "name": "Public reports " + owner_key,
@@ -812,6 +839,10 @@ def run_task(
                           for row in listed if row.get("project_id") == owned]
             detail = {**detail, "memory_candidates": candidates,
                       "activity_summaries": [str(row.get("summary") or "") for row in _all_activity(api, task_id)]}
+        acceptance = None
+        if any(step.get("checks") for step in (detail.get("steps") or [])):
+            evidence = api.post("/api/v1/task_evidence/get", {"task": task_id})["result"]
+            acceptance = metrics.acceptance_metrics(detail, evidence, records)
         result = metrics.task_metrics(
             detail=detail,
             activity=_all_activity(api, task_id),
@@ -821,7 +852,7 @@ def run_task(
                              merged_by_looper(work_dir, task_id) if step_workspaces else set()),
             work_dir=work_dir,
             check_problem=task.check(work_dir) or (task.flow_check(detail, records, events) if task.flow_check else None),
-            expect=task.expect,
+            expect=scored_expect(task, fake=fake),
             disciplines=task.disciplines,
             # The gates the runner ended because the Planner asked again after the script ran out.
             gate_asks_beyond_script=sum(1 for done in answered.values() if done > len(_script(task))),
@@ -832,6 +863,8 @@ def run_task(
             vault_log=_git_in(vault_dir, "log", "--format=%H%x00%s", "--name-only") if vault_dir else "",
             vault_check=task.vault_check,
             attempts_view=attempts_view,
+            acceptance=acceptance,
+            record_completion_checks=record_completion_checks,
         )
         result.update(metrics.attempt_fields(attempts_view))
         if step_workspaces:
@@ -844,6 +877,8 @@ def run_task(
         result["problems"].append(f"cancelled after {timeout:g} s")
     row = {"id": task.id, **result, "duration_s": round(duration, 1), "stopped_by_cap": stopped_by_cap,
            "timed_out": timed_out, "work_dir": str(work_dir), "wait_resumes": resumed}
+    if task.acceptance_checks:
+        row["acceptance_checks"] = task.acceptance_checks
     # A task cancelled at the cap or after its timeout is not scored: what it delivered says nothing of the model.
     if stopped_by_cap:
         return {**row, **error_row(ErrorClass.SPENDING_CAP, "cancelled at the spending cap")}
@@ -944,9 +979,26 @@ def effective_user_gates(task: EvalTask, user_gates: str | None) -> str:
     return "on" if ProjectExecution.from_row({"user_gates": gates}).gates_on else "off"
 
 
+def _confirmed(api: Api, path: str, body: Mapping[str, Any]) -> dict[str, Any]:
+    """POST ``path``, and confirm when the server asks. Anything else is an eval error."""
+    answer = api.post(path, body)
+    status = answer.get("status") if isinstance(answer, dict) else None
+    if status == "ok":
+        return answer
+    if status == "needs_confirmation":
+        confirmed = api.post("/api/v1/confirm", {"confirmation_id": answer["confirmation_id"]})
+        if not isinstance(confirmed, dict) or confirmed.get("status") != "ok":
+            answered = confirmed.get("status") if isinstance(confirmed, dict) else confirmed
+            raise EvalError(f"{path} confirmation answered {answered}")
+        return confirmed
+    raise EvalError(f"{path} answered {status}")
+
+
 TASK_SETS: dict[str, tuple[str, ...]] = {
     # Cases that are likely to fail on the first attempt (task-metrics RFC, section 9.4).
     "hard": ("hidden_precondition", "rethink_bug", "misleading_error"),
+    # Executable acceptance (RFC section 12): checks on, checks off, a trivial check, a rewritten test, a recheck.
+    "acceptance": ("checks_per_criterion", "checks_off", "weak_check", "edited_test", "check_error_recheck"),
     # The tasks whose pass or fail turns on the Planner's judgment: the opus tier (evals/README.md).
     "planner": ("dependent_steps", "parallel_parts", "interface_first", "supplement_replan", "supplement_no_change",
                 "requirement_edit", "roles_tester_docs", "roles_not_needed", "roles_multi_platform",
@@ -1147,6 +1199,8 @@ def run(
     step_workspaces: str | None = None,
     reps: int = 1,
     user_gates: str | None = None,
+    planner_roles: str | None = None,
+    worker_agent: dict[str, Any] | None = None,
     jobs: int = 1,
     case_budget_usd: float | None = None,
     pi_runtime: str = "cli",
@@ -1165,9 +1219,14 @@ def run(
     provider or a registered agent, Looper prices the runs at its prices, so ``max_budget_usd`` is the per-run
     cap Looper keeps (the system layer's ``run_budget_usd``) instead of Claude Code's ``--max-budget-usd``.
     ``user_gates`` (``on`` or ``off``) is the setting of every task's project but a gate task's, which has them on.
+    ``planner_roles`` overrides every task's role setting, including role tasks. ``worker_agent`` registers a
+    profile for the Worker role alone. Either option records completion/check evidence for grouped scoring;
+    without them the report retains its existing fields.
     """
     if mode not in ("fake", "real"):
         raise EvalError(f"mode must be fake or real, not {mode!r}")
+    if planner_roles not in (None, "on", "off"):
+        raise EvalError("planner_roles must be on or off")
     if provider is not None and not provider.api_key:
         raise EvalError(f"a provider needs its API key in ${API_KEY_ENV}")
     if reps < 1:
@@ -1178,7 +1237,8 @@ def run(
     if jobs > 1 and total_cap_usd is not None and case_budget_usd is None:
         raise EvalError("--jobs above 1 under a total cap needs --case-budget-usd (the most one case may spend)")
     real_claude = shutil.which("claude") if mode == "real" else None
-    require_claude(mode, real_claude, planned_runtime_types(register=register, agent=agent, model=model))
+    require_claude(mode, real_claude, planned_runtime_types(register=register, agent=agent, model=model,
+                                                          specs=(worker_agent,)))
     version = claude_version(real_claude)
     git = _git()  # what is being evaluated, before anything runs
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
@@ -1192,6 +1252,7 @@ def run(
     stopped = False
     aborted: str | None = None
     chosen: dict[str, Any] = {}
+    worker: dict[str, Any] = {}
     try:
         scenarios = root / "scenarios.json"
         work_dirs = {(task.id, rep): root / "work" / task.id / str(rep) for rep in range(1, reps + 1) for task in tasks}
@@ -1200,8 +1261,7 @@ def run(
                                          for (task_id, _), path in work_dirs.items()}), encoding="utf-8")
         install_claude(root / "bin", mode=mode, scenarios=scenarios,
                        max_budget_usd=None if provider is not None or register is not None else max_budget_usd,
-                       real_claude=real_claude, real_reviewer=any(task.real_reviewer or task.fake.get("real_planner")
-                                                                 for task in tasks))
+                       real_claude=real_claude, real_reviewer=uses_role_shim(tasks))
         (root / "runtime").mkdir(mode=0o700)
         home = root / "home" if mode == "fake" else None
         if home is not None:
@@ -1246,6 +1306,12 @@ def run(
             if register is not None:
                 api.post("/api/v1/agent_settings/update_system", {"values": {
                     "profile_id": chosen["profile_id"], "run_budget_usd": max_budget_usd}})["result"]
+            if worker_agent is not None:
+                worker = register_agent(api, worker_agent)
+                require_claude(mode, real_claude, [worker.get("runtime_type")])
+                api.post("/api/v1/agent_settings/update_role", {
+                    "role": "worker", "values": {"profile_id": worker["profile_id"],
+                                                    "run_budget_usd": max_budget_usd}})["result"]
             review_profile_id = None
             if any(task.workflow for task in tasks):
                 # The scripted fixture needs a distinct identity; it does not test runtime independence.
@@ -1273,6 +1339,8 @@ def run(
                                                      cap_left=cap_left, clock_offset=clock_offset,
                                                      step_workspaces=step_workspaces,
                                                      chosen_profile_id=chosen_profile_id, user_gates=user_gates,
+                                                     planner_roles=planner_roles,
+                                                     record_completion_checks=planner_roles is not None or worker_agent is not None,
                                                      review_profile_id=review_profile_id,
                                                      notes_root=notes_root, vault_dir=vault_dir, fake=mode == "fake"),
                 total_cap_usd=total_cap_usd,
@@ -1291,6 +1359,11 @@ def run(
         by_id = {task.id: task for task in tasks}
         for row in results:
             row["user_gates"] = effective_user_gates(by_id[row["id"]], user_gates)
+            if planner_roles is not None:
+                row["planner_roles"] = planner_roles
+            if worker_agent is not None:
+                row["worker_agent"] = {key: worker.get(key) for key in
+                                       ("profile_id", "name", "runtime_type", "model", "effort")}
         path = out_dir / f"{stamp}-{mode}.json"
         run_result = write_result({
             "schema": SCHEMA,

@@ -4,6 +4,7 @@ from datetime import datetime, timezone
 
 from ...db.intents import IntentRefused
 from .. import intents as service
+from .. import intent_recognition
 from ..api_v1 import Operation, _array, _object, _STR, _NULL_STR, _INT, _BOOL
 from ..leads_model import Confidence, IntentPriority, IntentState, parse_intent_id
 from ..ops import ErrorCode, OpError
@@ -71,6 +72,21 @@ _BINDINGS = _object({"bindings": _array(_BINDING)}, closed=True)
 _SOURCE_ID = {"source_id": _STR}
 
 
+_RECOGNITION_INTENT = _object({"id": _STR, "type": _object({"key": _STR, "name": _STR}, closed=True),
+    "title": _STR, "state": _enum(IntentState)}, closed=True)
+_RECOGNITION = _object({"id": _STR, "source_id": _STR, "chat_id": _STR, "name": _STR,
+    "state": _enum(("running", "done", "failed")), "range_from": _STR, "range_to": _STR,
+    "events_in_range": _INT, "events_read": _INT, "truncated": _nullable(_enum(("messages", "budget"))),
+    "cost_usd": {"type": "number"}, "error": _NULL_STR, "created_at": _STR, "finished_at": _NULL_STR,
+    "intents": _array(_RECOGNITION_INTENT)}, closed=True)
+_RECOGNITIONS = _object({"enabled": _BOOL, "recognitions": _array(_RECOGNITION)}, closed=True)
+_RECOGNITION_RANGE = {**_SOURCE_ID, **_CHAT, "since": _STR, "until": _STR}
+_RECOGNITION_PREVIEW = _object({"chat": _object({"chat_id": _STR, "name": _STR}, closed=True),
+    "range_from": _STR, "range_to": _STR, "effective_from": _STR, "events": _INT,
+    "truncated": _nullable(_enum(("messages", "budget"))), "schedule_id": _STR,
+    "estimate_usd": {**_array({"type": "number"}), "minItems": 2, "maxItems": 2}}, closed=True)
+
+
 def _op(domain, action, fields, result, *, required=None, risk="read", at_least=None):
     request = _object(fields, required, closed=True)
     if at_least:
@@ -122,6 +138,13 @@ OPERATIONS = (
         _object({"senders": _array(_SENDER)}, closed=True), required=["app_id"], risk="write"),
     _op("intent_alert_senders", "delete", {**_SOURCE_ID, "app_id": _STR},
         _object({"senders": _array(_SENDER)}, closed=True), required=["app_id"], risk="write"),
+    _op("intent_recognitions", "preview", _RECOGNITION_RANGE, _RECOGNITION_PREVIEW, required=["chat_id"]),
+    _op("intent_recognitions", "start", _RECOGNITION_RANGE,
+        _object({"recognition": _RECOGNITION}, closed=True), required=["chat_id"], risk="write"),
+    _op("intent_recognitions", "list", {**_SOURCE_ID,
+        "limit": {"type": "integer", "minimum": 1, "maximum": 50}}, _RECOGNITIONS, required=[]),
+    _op("intent_recognitions", "settings_put", {**_SOURCE_ID, "enabled": _BOOL}, _RECOGNITIONS,
+        required=["enabled"], risk="write"),
     _op("intent_group_reads", "list", _SOURCE_ID, _GROUPS, required=[]),
     _op("intent_group_reads", "preview", {**_SOURCE_ID, **_CHAT}, _PREVIEW, required=["chat_id"]),
     _op("intent_group_reads", "put", {**_SOURCE_ID, **_CHAT}, _GROUPS, required=["chat_id"], risk="write"),
@@ -135,6 +158,11 @@ async def run(server, operation, arguments, principal, headers):
     domain, action = operation.operation_id.split(".")
     values = dict(arguments)
     try:
+        if domain == "intent_recognitions":
+            if action == "start":
+                return _plain(await intent_recognition.service().begin(**values, requested_via="dashboard", reply=None))
+            function = {"preview": "preview", "list": "list_recognitions", "settings_put": "settings_put"}[action]
+            return _plain(await getattr(intent_recognition, function)(**values))
         if domain == "intents":
             if "intent_id" in values:
                 values["intent_id"] = parse_intent_id(values["intent_id"])

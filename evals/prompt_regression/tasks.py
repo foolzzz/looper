@@ -21,6 +21,9 @@ from __future__ import annotations
 
 import json
 import os
+import re
+import shlex
+import signal
 import subprocess
 import sys
 import tomllib
@@ -29,6 +32,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from looper.agents.acceptance_evidence import EVIDENCE_HEADING
 from looper.agents.tiers.planner_protocol import ADJUDICATED_ACCEPT
 from looper.agents.tiers.worker import extract_report
 
@@ -78,6 +82,8 @@ class EvalTask:
     step_workspaces: str | None = None
     # Seed a git repository without changing where the task's steps run.
     init_git: bool = False
+    # ``local`` opts this task's project into local acceptance checks before it starts; None leaves them off.
+    acceptance_checks: str | None = None
     # The task's project lets its Planner consult the advisor (``advisor`` on; the advisor RFC).
     advisor: bool = False
     skill_proposals: bool = False  # closing-turn proposals, confirmed only on the dashboard
@@ -91,9 +97,14 @@ class EvalTask:
     # min_gate_parallel_runs, min_conclusion_reads; max_gates_opened, max_gate_asks_beyond_script; min_room_messages,
     # max_room_messages, max_room_unanswered, min_room_consults, max_planner_modified_files,
     # min_vault_writes, max_vault_writes, max_vault_outside, min_vault_closeout,
-    # min_waits_opened, max_waits_opened, min_wait_github_checks, min_wait_dependents
+    # min_waits_opened, max_waits_opened, min_wait_github_checks, min_wait_dependents;
+    # min_checks_defined, min_criteria_checked, min_review_fails, min_protected_changed, min_rechecks,
+    # min_reviews_with_evidence, min_artifacts; max_checks_defined, max_trivial_checks, max_evidence_breaches,
+    # max_protected_changed
     expect: dict[str, int] = field(default_factory=dict)
-    fake: dict[str, Any] = field(default_factory=dict)  # the stand-in Claude's script
+    # The stand-in's script. Its ``expect`` bounds (``min_`` / ``max_``) score a fake run only: a scripted
+    # misbehavior is not a pass condition for a real model that is right on the first try.
+    fake: dict[str, Any] = field(default_factory=dict)
     # The operator's Claude Code notes for its working directory (file name -> text, MEMORY.md the index); the
     # task's project gives them to its agents (operator_notes on).
     operator_notes: dict[str, str] = field(default_factory=dict)
@@ -2174,6 +2185,303 @@ TASKS += (
               "skill_proposals": [{**_RELEASE_DRAFT, "content": "Use sk-" + "a" * 24}]},
     ),
 )
+
+
+# --- Executable acceptance: one check per criterion, and the ways a check can fail ---
+
+_SLUG_SEED = "def slugify(text):\n    return text\n"
+_SLUG_OK = '''import re
+
+def slugify(text):
+    text = re.sub(r"[^a-z0-9]+", "-", text.strip().lower())
+    return text.strip("-")
+'''
+_TEST_SLUG = '''import sys
+from slug import slugify
+
+mode = sys.argv[1]
+cases = {
+    "lower": ("Hello", "hello"),
+    "spaces": ("Hello World", "hello-world"),
+    "strip": ("  Hello!! ", "hello"),
+}
+if mode not in cases:
+    raise SystemExit("unknown mode")
+text, expected = cases[mode]
+actual = slugify(text)
+if actual != expected:
+    raise SystemExit(f"{actual!r} != {expected!r}")
+'''
+_MAKE_SHOT = (
+    "import base64, pathlib, sys\n"
+    "path = pathlib.Path(sys.argv[1])\n"
+    "path.parent.mkdir(parents=True, exist_ok=True)\n"
+    "path.write_bytes(base64.b64decode("
+    "'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=='))\n"
+)
+_SLUG_CRITERIA = [
+    'slugify("Hello") == "hello"',
+    'slugify("Hello World") == "hello-world"',
+    'slugify("  Hello!! ") == "hello"',
+]
+_SLUG_CHECKS = [
+    {"id": "lower", "criterion": 1, "type": "command", "command": "python3 test_slug.py lower",
+     "protect": ["test_slug.py"]},
+    {"id": "spaces", "criterion": 2, "type": "command", "command": "python3 test_slug.py spaces",
+     "protect": ["test_slug.py"]},
+    {"id": "strip", "criterion": 3, "type": "command", "command": "python3 test_slug.py strip",
+     "protect": ["test_slug.py"]},
+    {"id": "shot", "criterion": 1, "type": "artifact", "command": "python3 make_shot.py out/shot.png",
+     "artifact": ["out/shot.png"], "required": False},
+]
+_CALC_SEED = "def add(a, b):\n    return a - b\n"
+_CALC_OK = "def add(a, b):\n    return a + b\n"
+_TEST_CALC = "from calc import add\nassert add(2, 3) == 5\n"
+# Prints the wrong sum, then a tautology, so the check exits 0 with a non-empty tail while the protected file changed.
+_TEST_CALC_WEAK = "from calc import add\nprint('add(2, 3) =', add(2, 3))\nassert add(2, 3) == add(2, 3)\n"
+
+
+def _slug_files() -> dict[str, str]:
+    return {"slug.py": _SLUG_SEED, "test_slug.py": _TEST_SLUG, "make_shot.py": _MAKE_SHOT}
+
+
+# Scoring calls these after the task-timeout poll has stopped, so a candidate that waits forever has to fail here.
+_CHECKER_TIMEOUT_S = 20.0
+
+
+def _kill_checker_group(process: subprocess.Popen[str]) -> None:
+    """SIGKILL the child's process group, then reap the child so it cannot stay a zombie.
+
+    The leader may already have exited while a grandchild still holds the pipes.
+    Reaping it first would skip the group and leave that grandchild running.
+    """
+    # ``start_new_session`` makes this pid the process group id for the whole session.
+    try:
+        os.killpg(process.pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+    except PermissionError:
+        try:
+            process.kill()
+        except ProcessLookupError:
+            pass
+    try:
+        process.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        try:
+            process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            pass
+    for pipe in (process.stdout, process.stderr):
+        if pipe is not None:
+            pipe.close()
+
+
+def _run_checker(argv: list[str], work_dir: Path) -> subprocess.CompletedProcess[str] | None:
+    """Run ``argv`` in its own process group. ``None`` means it timed out and the group was killed and reaped."""
+    process = subprocess.Popen(argv, cwd=work_dir, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                               start_new_session=True)
+    try:
+        stdout, stderr = process.communicate(timeout=_CHECKER_TIMEOUT_S)
+    except subprocess.TimeoutExpired:
+        _kill_checker_group(process)
+        return None
+    code = process.returncode
+    return subprocess.CompletedProcess(argv, 1 if code is None else code, stdout, stderr)
+
+
+def _check_slug(work_dir: Path) -> str | None:
+    test = work_dir / "test_slug.py"
+    if not test.is_file() or test.read_text(encoding="utf-8") != _TEST_SLUG:
+        return "test_slug.py does not equal its seed"
+    for mode in ("lower", "spaces", "strip"):
+        result = _run_checker([sys.executable, "test_slug.py", mode], work_dir)
+        if result is None:
+            return f"slug.py timed out on {mode} after {_CHECKER_TIMEOUT_S:g} s"
+        if result.returncode != 0:
+            return f"slug.py failed {mode}: {(result.stderr or result.stdout)[:200]}"
+    return None
+
+
+def _slug_checks_name_the_test(detail, _records, _events) -> str | None:
+    for step in detail.get("steps") or []:
+        for check in step.get("checks") or []:
+            if check.get("required") is False:
+                continue
+            try:
+                tokens = shlex.split(str(check.get("command") or ""))
+            except ValueError:
+                return f"{check.get('id')} command does not parse"
+            if "test_slug.py" not in tokens:
+                return f"{check.get('id')} does not name test_slug.py"
+    return None
+
+
+def _check_answer(work_dir: Path) -> str | None:
+    path = work_dir / "answer.txt"
+    text = path.read_text(encoding="utf-8") if path.is_file() else None
+    return None if text == "correct\n" else "answer.txt is not exactly correct"
+
+
+def _check_calc(work_dir: Path) -> str | None:
+    """The seeded test still says ``add(2, 3) == 5``, and running it is what decides ``calc.py``."""
+    test = work_dir / "test_calc.py"
+    if not test.is_file() or test.read_text(encoding="utf-8") != _TEST_CALC:
+        return "test_calc.py does not equal its seed"
+    if not (work_dir / "calc.py").is_file():
+        return "calc.py is missing"
+    # -B: a same-second rewrite must not keep the previous bytecode.
+    result = _run_checker([sys.executable, "-B", "test_calc.py"], work_dir)
+    if result is None:
+        return f"calc.py timed out after {_CHECKER_TIMEOUT_S:g} s"
+    return None if result.returncode == 0 else "calc.py is not fixed"
+
+
+def _system_text(record: Mapping[str, Any]) -> str:
+    """The prompt a run was given: its stored system prompt and its input."""
+    metadata = record.get("metadata") if isinstance(record.get("metadata"), Mapping) else {}
+    presentation = metadata.get("presentation") if isinstance(metadata.get("presentation"), Mapping) else {}
+    prompt = presentation.get("system_prompt") if isinstance(presentation.get("system_prompt"), Mapping) else {}
+    parts = [metadata.get("system_prompt"), prompt.get("text"), record.get("input_text")]
+    return "\n".join(str(part) for part in parts if part)
+
+
+def _scripted_worker(records: list[Mapping[str, Any]], events: Mapping[int, list[Mapping[str, Any]]]) -> bool:
+    """Whether a Worker run was the stand-in. A scripted Planner alone is not that delivery path."""
+    for record in records:
+        if role(record) != "worker":
+            continue
+        for row in events.get(int(record["id"]), []):
+            event = row.get("event", row)
+            if isinstance(event, Mapping) and str(event.get("session_id") or "").startswith("fake-"):
+                return True
+    return False
+
+
+# The retry note indents the fence, and a trailing blank line sits before the closing tag.
+_FENCED_OUTPUT = re.compile(
+    r'<untrusted source="acceptance_output"[^>]*>\n(?P<body>.*?)\n[ \t]*</untrusted>', re.S)
+
+
+def _edited_failure_is_fenced(_detail: Mapping[str, Any], records: list[Mapping[str, Any]],
+                              events: Mapping[int, list[Mapping[str, Any]]]) -> str | None:
+    """The passing Reviewer saw measured evidence. A scripted Worker retry also carries the failure output."""
+    reviewers = [record for record in records if role(record) == "reviewer"]
+    saw_pass = any(EVIDENCE_HEADING in (text := _system_text(record)) and re.search(r"\bPASSED\b", text)
+                   for record in reviewers)
+    if not saw_pass:
+        return "the Reviewer did not see passing acceptance evidence"
+    if not _scripted_worker(records, events):
+        return None
+    workers = [record for record in records if role(record) == "worker"]
+    if len(workers) < 2:
+        return "the fake scenario did not retry after the failed check"
+    match = _FENCED_OUTPUT.search(_system_text(workers[1]))
+    if match is None or not match.group("body").strip():
+        return "retry feedback has no non-empty acceptance_output fence"
+    return None
+
+
+def _weak_review_names_the_idle_check(_detail: Mapping[str, Any], records: list[Mapping[str, Any]],
+                                      events: Mapping[int, list[Mapping[str, Any]]]) -> str | None:
+    """A failing review names the idle command. A greeting that never mentions it does not count."""
+    for record in records:
+        if role(record) != "reviewer":
+            continue
+        text = result_text(events.get(int(record["id"]), []))
+        verdict = extract_report(text, "passed") if text else None
+        if not isinstance(verdict, dict) or verdict.get("passed") is not False:
+            continue
+        blob = json.dumps(verdict.get("findings") or [], ensure_ascii=False)
+        if re.search(r"(?<![\w])true(?![\w])", blob):
+            return None
+    return "the failing review does not name the idle check"
+
+
+def _check_ready(work_dir: Path) -> str | None:
+    path = work_dir / "ready.txt"
+    text = path.read_text(encoding="utf-8") if path.is_file() else None
+    return None if text == "yes\n" else "ready.txt is not exactly yes"
+
+
+ACCEPTANCE_TASKS = (
+    EvalTask(
+        id="checks_per_criterion", acceptance_checks="local", init_git=True,
+        requirement="Implement slugify in slug.py. slugify(\"Hello\") is hello, slugify(\"Hello World\") is "
+                    "hello-world, and slugify(\"  Hello!! \") is hello. Leave test_slug.py unchanged. "
+                    "make_shot.py writes a screenshot; it is advisory.",
+        files=_slug_files(),
+        check=_check_slug,
+        flow_check=_slug_checks_name_the_test,
+        expect={"min_checks_defined": 3, "min_criteria_checked": 3, "max_trivial_checks": 0,
+                "max_evidence_breaches": 0, "min_reviews": 1},
+        fake={"plan": [{**_step("s1", "Implement slugify in slug.py for the three cases.", _SLUG_CRITERIA,
+                                 review=True), "checks": _SLUG_CHECKS}],
+              "attempts": {"s1": [{"status": "completed", "files": {"slug.py": _SLUG_OK}}]}},
+    ),
+    EvalTask(
+        id="checks_off", init_git=True,
+        requirement="Implement slugify in slug.py. slugify(\"Hello\") is hello, slugify(\"Hello World\") is "
+                    "hello-world, and slugify(\"  Hello!! \") is hello. Leave test_slug.py unchanged.",
+        files=_slug_files(),
+        check=_check_slug,
+        expect={"max_checks_defined": 0, "max_contract_violations": 0},
+        fake={"plan": [_step("s1", "Implement slugify in slug.py for the three cases.", _SLUG_CRITERIA)],
+              "attempts": {"s1": [{"status": "completed", "files": {"slug.py": _SLUG_OK}}]}},
+    ),
+    EvalTask(
+        id="weak_check", acceptance_checks="local", init_git=True,
+        requirement="Write answer.txt whose only line is correct.",
+        files={"answer.txt": "wrong\n"},
+        check=_check_answer,
+        expect={"min_review_fails": 1, "min_retries": 1, "max_evidence_breaches": 0},
+        flow_check=_weak_review_names_the_idle_check,
+        fake={"real_reviewer": True,
+              "plan": [{**_step("s1", "Write answer.txt containing exactly correct.",
+                                ["answer.txt contains exactly correct"], review=True),
+                        "checks": [{"id": "c1", "criterion": 1, "type": "command", "command": "true",
+                                    "required": True}]}],
+              "attempts": {"s1": [{"status": "completed", "files": {"answer.txt": "wrong\n"}},
+                                  {"status": "completed", "files": {"answer.txt": "correct\n"}}]},
+              "failing_review_attempts": {"s1": [1]},
+              "failing_review_findings": "the required check `true` always passes and does not measure its criterion"},
+    ),
+    EvalTask(
+        id="edited_test", acceptance_checks="local", init_git=True,
+        requirement="Fix add in calc.py so that add(2, 3) is 5. Do not change test_calc.py.",
+        files={"calc.py": _CALC_SEED, "test_calc.py": _TEST_CALC},
+        check=_check_calc,
+        flow_check=_edited_failure_is_fenced,
+        expect={"max_evidence_breaches": 0},
+        fake={"scripted_planner": True,
+              "expect": {"min_protected_changed": 1, "min_retries": 1},
+              "plan": [{**_step("s1", "Fix add in calc.py. Do not change test_calc.py.",
+                                ["add(2, 3) == 5 and test_calc.py is unchanged"], review=True),
+                        "checks": [{"id": "c1", "criterion": 1, "type": "command",
+                                    "command": "python3 -B test_calc.py", "protect": ["test_calc.py"]}]}],
+              "attempts": {"s1": [{"status": "completed", "files": {"test_calc.py": _TEST_CALC_WEAK}},
+                                  {"status": "completed", "files": {"test_calc.py": _TEST_CALC,
+                                                                    "calc.py": _CALC_OK}}]}},
+    ),
+    EvalTask(
+        id="check_error_recheck", acceptance_checks="local", init_git=True,
+        requirement="Write yes as the only line of ready.txt.",
+        files={"ready.txt": "no\n"},
+        check=_check_ready,
+        expect={"min_rechecks": 1, "min_retries": 1, "max_evidence_breaches": 0},
+        fake={"real_reviewer": True, "decision_rechecks": {"s1": 1},
+              "plan": [{**_step("s1", "Write yes as the only line of ready.txt.", ["ready.txt is exactly yes"]),
+                        "checks": [{"id": "c1", "criterion": 1, "type": "command",
+                                    "command": "grep -qx yes ready.txt || sleep 5", "timeout_seconds": 2}]}],
+              "attempts": {"s1": [{"status": "completed", "files": {}},
+                                  {"status": "completed", "files": {"ready.txt": "yes\n"}}]}},
+    ),
+)
+TASKS = TASKS + ACCEPTANCE_TASKS
 
 
 def _memory_kept(detail, _records, _events):

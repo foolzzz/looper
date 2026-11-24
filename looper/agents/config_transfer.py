@@ -12,7 +12,7 @@
   names its Agent Profile, ``profile``), and each role's prompt (``null`` while
   it follows the recommended one), timeout and enabled flag. Effort belongs to
   the Agent Profile; concurrency limits belong to current role layers.
-  ``settings.system`` carries ``manager.persona`` when that persona is set;
+  ``settings.system`` carries ``manager.persona`` when set and ``cards.actions.enabled`` when stored;
 - ``channels``: each chat channel's configuration;
 - ``managers`` (v4 only): live scenario definitions and task templates, with
   immutable Manager ids, natural profile/project references and no machine paths;
@@ -569,11 +569,19 @@ async def export_chunks(
         summary.counts["manager.installs"] = len(manager_installs)
     if scheduler := await stored_scheduler_settings(conn):  # only a stored setting is carried
         head["settings"]["scheduler"] = scheduler
-    from . import persona
+    from ..db import system_settings as db_settings
+    from . import card_actions, persona
 
+    system_settings = {}
     if system := await persona.export_value(conn):  # unset or unreadable: the key stays absent
-        head["settings"]["system"] = {persona.PERSONA_KEY: system}
-        summary.counts["settings.system"] = 1
+        system_settings[persona.PERSONA_KEY] = system
+    if await conn.fetchval("SELECT to_regclass('system_settings') IS NOT NULL"):
+        stored = await db_settings.get_settings([card_actions.ENABLED_KEY], pool=conn)
+        if stored.get(card_actions.ENABLED_KEY) in ("true", "false"):
+            system_settings[card_actions.ENABLED_KEY] = stored[card_actions.ENABLED_KEY] == "true"
+    if system_settings:
+        head["settings"]["system"] = system_settings
+        summary.counts["settings.system"] = len(system_settings)
     if chat := await stored_chat_settings(conn):
         head["settings"]["chat"] = chat
     if cost_guard := await stored_cost_guard_settings(conn):
@@ -1700,8 +1708,8 @@ class _Importer:
             self.record("settings.scheduler", name, Action.SKIPPED, reason="unknown scheduler setting")
 
     async def system(self, entry: Any) -> None:
-        """``manager.persona`` from the file. An empty value clears it; a refused value or unknown key is skipped."""
-        from . import persona
+        """Portable persona and card-button settings; refused values and unknown keys are skipped."""
+        from . import card_actions, persona
 
         try:
             entry = _mapping(entry, "system settings")
@@ -1724,7 +1732,24 @@ class _Importer:
                                           () if current == new else ("manager.persona",))
                     if self.apply and action in (Action.ADDED, Action.CHANGED):
                         await persona.write(parsed, conn=self.conn)
-        for name in sorted(set(entry) - {"manager.persona"}):
+        key = card_actions.ENABLED_KEY
+        if key in entry:
+            value = entry[key]
+            if value is not None and type(value) is not bool:
+                self.record("settings.system", key, Action.SKIPPED, reason=f"{key} must be true, false or null")
+            else:
+                current = (await self.conn.fetchval("SELECT value FROM system_settings WHERE key=$1", key)
+                           if await self.conn.fetchval("SELECT to_regclass('system_settings') IS NOT NULL") else None)
+                new = None if value is None else str(value).lower()
+                if current is not None or new is not None:
+                    action = self.outcome("settings.system", key, current, () if current == new else (key,))
+                    if self.apply and action in (Action.ADDED, Action.CHANGED):
+                        if new is None:
+                            await self.conn.execute("DELETE FROM system_settings WHERE key=$1", key)
+                        else:
+                            await self.conn.execute("INSERT INTO system_settings (key, value) VALUES ($1, $2) "
+                                "ON CONFLICT (key) DO UPDATE SET value=EXCLUDED.value, updated_at=now()", key, new)
+        for name in sorted(set(entry) - {"manager.persona", key}):
             self.record("settings.system", name, Action.SKIPPED, reason="unknown system setting")
 
     async def chat(self, entry: Any) -> None:

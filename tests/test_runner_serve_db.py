@@ -91,6 +91,8 @@ def events(url, record):
     _LOCAL_ADMIN,
     "postgresql://postgres:postgres@localhost:54329/my_disposable",
     "postgresql://postgres:postgres@127.0.0.1:5432/postgres",
+    "postgresql://postgres:postgres@127.0.0.1:54331/postgres",
+    "postgresql://postgres:postgres@localhost:54331/my_disposable",
 ])
 def test_admin_url_accepts_only_the_disposable_servers(url):
     parts = urlsplit(url)
@@ -121,6 +123,7 @@ def test_admin_url_rejects_operator_remote_and_other_servers(url):
 @pytest.mark.parametrize("url", [
     "postgresql://postgres:postgres@localhost:5432/looper_eval_abc",
     "postgresql://postgres:postgres@127.0.0.1:54329/looper_eval_abc",
+    "postgresql://postgres:postgres@127.0.0.1:54331/looper_eval_abc",
 ])
 def test_served_url_accepts_a_fresh_eval_database_on_either_disposable_server(url):
     require_disposable_database(url, served=True)
@@ -137,6 +140,20 @@ def test_served_url_accepts_a_fresh_eval_database_on_either_disposable_server(ur
 def test_served_url_rejects_anything_but_a_fresh_eval_database(url):
     with pytest.raises(ValueError, match="disposable local database"):
         require_disposable_database(url, served=True)
+
+
+def test_disposable_password_override_accepts_only_the_named_password(monkeypatch):
+    monkeypatch.setenv("PYTEST_LOOPER_DISPOSABLE_PG_PASSWORD", "synthetic-not-the-default")
+    require_disposable_database(
+        "postgresql://postgres:synthetic-not-the-default@127.0.0.1:54331/postgres", served=False)
+    require_disposable_database(
+        "postgresql://postgres:postgres@127.0.0.1:54331/looper_eval_abc", served=True)
+    with pytest.raises(ValueError, match="disposable local database"):
+        require_disposable_database(
+            "postgresql://postgres:other@127.0.0.1:54331/postgres", served=False)
+    with pytest.raises(ValueError, match="disposable local database"):
+        require_disposable_database(
+            "postgresql://postgres:secret@127.0.0.1:54331/looper_eval_abc", served=True)
 
 
 def test_isolated_serve_tools_host_charge_and_pre_request_denial(tmp_path):

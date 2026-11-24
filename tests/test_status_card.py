@@ -608,6 +608,8 @@ def test_queue_accounting_folds_the_bus_into_main_only_while_routing_is_off(tmp_
     from looper.agents.tiers.manager import ManagerAgent, ManagerConfig
     from looper.agents.tiers.turn_token import TurnToken
 
+    # Folding the bus into the main queue is the lanes-off path. A previous test on this
+    # worker can leave the process-wide switch on; this case is about routing, not lanes.
     monkeypatch.setattr(lanes_settings, "_enabled", False)
     monkeypatch.setattr(session_routing, "_routing_enabled", False)
 

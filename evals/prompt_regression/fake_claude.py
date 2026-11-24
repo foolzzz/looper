@@ -11,7 +11,9 @@ agent system started it in:
   wait steps in ``wait_pr_rereview`` and only work steps in ``wait_not_needed``;
   [DECISION] with
   what a careful Planner decides from the allowed decisions (accept, else
-  review a completed step that needs one, else retry a failed one, else fail),
+  review a completed step that needs one, else a scripted replan, else
+  recheck while ``decision_rechecks`` still has a use and recheck is offered,
+  else retry a failed one, else fail),
   with a progress note, and an accept with the task's final summary;
   [CHAT] (a change to the task) with the script's ``change_replan`` steps
   when it gives them, else by forwarding the new supplements to the running
@@ -70,10 +72,15 @@ The task is found by the process's working directory in ``scenarios.json``
 (``{work_dir: script}``). Every result reports the session's running cost.
 
 In real mode (``REAL_CLAUDE_ENV`` names Claude Code) every run goes to Claude
-Code, but for a task whose script sets ``real_reviewer``: its Planner and
-Workers play the script, and only its Reviewers are Claude Code's. With
-``real_planner``, only its Planner uses Claude Code and the execution/review
-fixtures remain scripted.
+Code, except where the task's script says otherwise. ``real_reviewer`` plays
+the Planner and Workers from the script and sends only Reviewers to Claude
+Code. ``real_planner`` sends only the Planner to Claude Code.
+``scripted_planner`` plays the Planner from the script and sends Workers and
+Reviewers to Claude Code. ``failing_review_findings`` (a string or a list)
+replaces the finding text when that review fails. ``decision_rechecks`` (a
+step id to a count) answers
+``recheck`` while that decision is offered and the step has used fewer
+rechecks than the count, then falls through to retry.
 """
 
 from __future__ import annotations
@@ -163,10 +170,14 @@ FINAL = {"delivered": "the task's files", "how_to_use": "read them", "verificati
          "open_issues": "none"}
 
 
-def _decide(script: dict[str, Any], message: str, retried: dict[str, int]) -> dict[str, Any]:
+def _decide(script: dict[str, Any], message: str, retried: dict[str, int],
+            rechecked: dict[str, int] | None = None) -> dict[str, Any]:
     """The decision on a step: with the advisor, its checkpoint's request (``advice_request``) and, after its answer,
-    the decision with what it takes of it; else accept, else review, else retry (``retried`` counts the retries of
+    the decision with what it takes of it; else accept, else review, else a scripted replan, else recheck
+    (``rechecked`` counts them, up to ``decision_rechecks``), else retry (``retried`` counts the retries of
     each step, for ``retry_feedback``), else fail."""
+    if rechecked is None:
+        rechecked = {}
     allowed_line = re.search(r"^Allowed decisions now: (.*)\.$", message, re.MULTILINE)
     allowed = {item.split(" ")[0] for item in (allowed_line.group(1).split(", ") if allowed_line else [])}
     step = re.match(r"\[DECISION\] Step (\S+)", message)
@@ -178,7 +189,7 @@ def _decide(script: dict[str, Any], message: str, retried: dict[str, int]) -> di
                                                        "why": "it fits the plan"}]}
         if "proceed" in allowed:
             return {"decision": "proceed", "advice_adoption": adoption}
-        return {**_decide(script, message.replace("the advisor answered your request", ""), retried),
+        return {**_decide(script, message.replace("the advisor answered your request", ""), retried, rechecked),
                 "advice_adoption": adoption}
     gates = (script.get("decision_gates") or {}).get(step.group(1) if step else "")
     if script.get("panel_adjudications") and "review_a (required): FAIL" in message:
@@ -194,6 +205,11 @@ def _decide(script: dict[str, Any], message: str, retried: dict[str, int]) -> di
     replacement = (script.get("decision_replans") or {}).get(step.group(1) if step else "")
     if replacement and "replan" in allowed:
         return {"decision": "replan", "reason": "verification needs a reviewed repair", "steps": replacement}
+    label = step.group(1) if step else ""
+    quota = (script.get("decision_rechecks") or {}).get(label, 0)
+    if "recheck" in allowed and rechecked.get(label, 0) < quota:
+        rechecked[label] = rechecked.get(label, 0) + 1
+        return {"decision": "recheck", "reason": "run the check again"}
     if "retry" in allowed:
         label = step.group(1) if step else ""
         notes = (script.get("retry_feedback") or {}).get(label) or []
@@ -287,6 +303,7 @@ def _planner(script: dict[str, Any], args: list[str], stdin: _Stdin) -> None:
     calls = script.get("planner_calls") or {}
     rpc = _mcp(args) if calls else None
     retried: dict[str, int] = {}
+    rechecked: dict[str, int] = {}
     while (line := stdin.readline()) is not None:
         if not line.strip():
             continue
@@ -311,7 +328,7 @@ def _planner(script: dict[str, Any], args: list[str], stdin: _Stdin) -> None:
             reply = {"steps": script["plan"]}
             writes = script.get("planner_writes")
         elif message.startswith("[DECISION]"):
-            reply = {**_decide(script, message, retried), "progress": PROGRESS}
+            reply = {**_decide(script, message, retried, rechecked), "progress": PROGRESS}
         elif message.startswith("[GATE]"):
             reply = _gate(script, message)
         elif message.startswith("[ADVICE]"):
@@ -506,8 +523,13 @@ def _reviewer(script: dict[str, Any], system_prompt: str, stdin: _Stdin) -> None
         findings = panel[min(int(attempt.group(1)) if attempt else 1, len(panel)) - 1]
         verdict = {"passed": not findings, "findings": findings, "summary": "Checked the requested file."}
     elif failed:
-        verdict = {"passed": False, "findings": ["the reported file does not meet the criteria" if read else
-                                               "the greeting is not what this role asks for"],
+        named = script.get("failing_review_findings")
+        if named is None:
+            findings = ["the reported file does not meet the criteria" if read else
+                        "the greeting is not what this role asks for"]
+        else:
+            findings = [named] if isinstance(named, str) else list(named)
+        verdict = {"passed": False, "findings": findings,
                    "summary": "The file is missing or incomplete." if read else "Not to this role's liking."}
     else:
         verdict = {"passed": True, "findings": [], "summary": "Meets the criteria."}
@@ -590,6 +612,19 @@ def _manager(scenarios_path: str, args: list[str], stdin: _Stdin) -> None:
             request_usage=request_usage)
 
 
+def scripted_run(script: dict[str, Any], *, review: bool, worker: bool) -> bool:
+    """Whether this run plays the script when real mode would otherwise exec Claude Code.
+
+    ``real_reviewer`` scripts the Planner and Workers. ``real_planner`` scripts Workers and Reviewers.
+    ``scripted_planner`` scripts only the Planner. An empty script scripts nothing.
+    """
+    return bool(
+        (script.get("real_reviewer") and not review)
+        or (script.get("real_planner") and (review or worker))
+        or (script.get("scripted_planner") and not review and not worker)
+    )
+
+
 def main(argv: list[str]) -> int:
     scenarios_path, args = argv[0], argv[1:]
     with open(scenarios_path, encoding="utf-8") as handle:
@@ -610,9 +645,9 @@ def main(argv: list[str]) -> int:
                 script = candidate
                 break
     review = re.search(r"^The step under review:", system_prompt, re.MULTILINE)
+    worker = re.search(r"^Your step:", system_prompt, re.MULTILINE)
     real = os.environ.get(REAL_CLAUDE_ENV)
-    scripted = (script.get("real_reviewer") and not review) or (script.get("real_planner") and
-                (review or re.search(r"^Your step:", system_prompt, re.MULTILINE)))
+    scripted = scripted_run(script, review=bool(review), worker=bool(worker))
     if real and not scripted:
         # Real mode: Claude Code runs it, with every argument it came with (the budget flags included).
         os.execv(real, [real, *args])
@@ -629,7 +664,7 @@ def main(argv: list[str]) -> int:
         _judge(stdin)
     elif review:
         _reviewer(script, system_prompt, stdin)
-    elif re.search(r"^Your step:", system_prompt, re.MULTILINE):
+    elif worker:
         _worker(script, system_prompt, stdin, args)
     else:
         _planner(script, args, stdin)

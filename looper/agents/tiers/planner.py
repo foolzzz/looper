@@ -120,6 +120,7 @@ from typing import Any, TypeVar
 
 from . import planner_budget
 from ..acceptance_checks import Check, parse_checks
+from .. import turn_admission
 from .. import acceptance_decisions, acceptance_result
 from ..project_execution import AcceptanceChecksMode
 from ..bus import MessageBus
@@ -972,6 +973,8 @@ class PlannerAgent:
         self._task_id = task_id
         self._runtime_root = runtime_root
         self._claude_bin = claude_bin
+        self._turn_kind: TurnKind | None = None
+        self._admission_recovered = False
         self._last_record_id: int | None = None
         self._checkpointed: set[str] = set()  # the steps whose checkpoint consult this Planner started
         self._consults: dict[int, _Consult] = {}  # the consults of the advisor going now, by agent_spawns id
@@ -3827,6 +3830,7 @@ class PlannerAgent:
         Otherwise run the same attempt again, keeping retries and feedback. A
         decision cut off by the restart uses the step's saved result.
         """
+        self._admission_recovered = True
         assert self._bus is not None
         plan = self._plan
         if plan is None:
@@ -4619,6 +4623,7 @@ class PlannerAgent:
         self, kind: TurnKind, message: str, parse: Callable[[str], T],
         run: Callable[[str], Awaitable[str]] | None,
     ) -> T:
+        self._turn_kind = kind
         await self._read_run_deadline()
         run = run or self._turn
         async with skill_proposal_sources.plan_message(self, kind, message) as message:
@@ -4758,6 +4763,7 @@ class PlannerAgent:
 
         The first turn of a new session for a plan under way starts with the resume brief.
         """
+        kind = self._turn_kind
         plan = self._plan
         assert plan is not None
         self._plan_staged = None
@@ -4947,6 +4953,7 @@ class PlannerAgent:
         self._fence = await untrusted.enabled()
         text, annotation = self._render_plan_message(plan, message, full_reason=full_reason)
         try:
+            self._turn_kind = kind
             return await self._exchange(f"{brief}\n\n{text}" if brief else text, process,
                                         settings.timeout_seconds, resuming=None if retried else resuming,
                                         fallbacks=changes, annotation=annotation)
@@ -5003,6 +5010,7 @@ class PlannerAgent:
             pid_of=lambda: self._claude.pid,
         )
 
+    @turn_admission.admitted_planner_exchange
     async def _exchange(self, text: str, process: _Process, limit: int, *, resuming: str | None = None,
                         fallbacks: Sequence[Mapping[str, Any]] = (),
                         annotation: Mapping[str, Any] | None = None, maintenance: bool = False) -> str:
