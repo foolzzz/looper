@@ -3,6 +3,42 @@
 Failure handling remains **off by default**. `record` retains classification without changing control flow;
 `act` adds step holds, bounded recovery, a three-failure breaker and confirmed operator control.
 
+## Release integration (2026-11-24)
+
+Integrated main through `34c7bfaf5`, including task-source memory closeout through `9e2a08218`.
+The latter is now on main and no longer contributes to this pull request's diff.
+The serve conflict keeps the retrospective terminal listener and the failure service's restore/recheck wiring.
+The evaluation conflict keeps the three opt-in failure cases and both normally registered memory-closeout cases.
+Each conflict resolution is explained in its merge commit.
+
+The migration orders on main and every open pull request were inspected: only this change reserves 1920.
+`test_failure_handling_upgrades_after_higher_order_retrospectives` first applies the released 1980/1990 migrations
+without 1920, verifies their transactional and online markers, then applies 1920 through `ensure_schema`.
+It checks fresh/upgrade schema equality, retained task and retrospective cursor data, admission detection and
+idempotent readback. This validation-only addition has 45 test lines and no production-code changes.
+
+The unchanged 22-item failure-off fixture passes against both this branch and a source archive of main
+`027d72aee`; the archive check asserts the imported package belongs to that archive. Expected values were not
+regenerated. Mutation evidence: removing the OFF early return in `failures.recorded` in an isolated test process
+makes `test_off_matches_each_frozen_item` fail at its final no-call assertion (11 forbidden classification calls).
+The mutation never changes the working tree.
+
+A fresh isolated serve process also passes an HTTP-only smoke with script runtimes: default-off task completion
+without failure rows, confirmed act activation with settings readback, environment hold/history and confirmed
+operator retry to completion. This checks merged service startup and shutdown without a CLI client or an outbound
+channel. The existing `test_failure_handling_serve_db.py` regression was not rerun in full; its complete
+timer/restart/CLI path remains unverified on this integration. No real model calls were made.
+
+The 37-file targeted Python 3.11 run used `-n 2`: **1,864 passed, 1 skipped, 2 failed**. The skipped case is the
+opt-in baseline capture. Both failures (`withdraw_then_continue`, `leads_english`) lost their eval server during
+startup: asyncpg's optional client-certificate loading raised `OSError: Invalid argument`. Rerunning the entire
+`test_prompt_eval.py` file with the disposable local DSN explicitly selecting `sslmode=disable` passed
+**551 checks**. No production change was needed for that rerun; the original selection therefore has
+**1,866 passing cases and 1 opt-in skip** after the failing file's complete rerun.
+The post-merge morning-brief/triage/off/registry checks passed **94 checks, 1 skipped**; optional-runner/off/registry
+checks passed **71 checks, 7 skipped** (optional runner prerequisites and baseline capture).
+All four changed frontend test files passed **7 checks**, and the production build passed.
+
 ## Automated and process checks
 
 The targeted Python 3.11 tests use disposable PostgreSQL databases, two pytest workers and synthetic runtimes.
