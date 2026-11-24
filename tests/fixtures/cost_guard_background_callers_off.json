@@ -1,0 +1,45 @@
+{
+  "recorded_at": "3c718301c47d3e246ffb3342d7c2bb0f47d6daed",
+  "callers": {
+    "off:processor": {
+      "type": "ProcessorRun",
+      "failure": null
+    },
+    "off:leads_check": {
+      "type": "ProcessorRun",
+      "failure": null
+    },
+    "off:advice_check": {
+      "type": "CallOk",
+      "failure": null
+    },
+    "off:outbound_check": {
+      "type": "Review",
+      "failure": null
+    },
+    "off:advisor": {
+      "type": "CallOk",
+      "failure": null
+    },
+    "observe:processor": {
+      "type": "ProcessorRun",
+      "failure": null
+    },
+    "observe:leads_check": {
+      "type": "ProcessorRun",
+      "failure": null
+    },
+    "observe:advice_check": {
+      "type": "CallOk",
+      "failure": null
+    },
+    "observe:outbound_check": {
+      "type": "Review",
+      "failure": null
+    },
+    "observe:advisor": {
+      "type": "CallOk",
+      "failure": null
+    }
+  }
+}

@@ -148,3 +148,7 @@ def test_the_count_line_says_what_the_check_did_only_when_it_is_on():
         "新线索 2，合并 0，推翻 0，丢弃 0；复核 3 条：保留 1，复核丢弃 1，改置信度 1")
     failed = {**checked, "checked": 0, "check_kept": 0, "check_dropped": 0, "check_fixed": 0, "check_failed": True}
     assert extraction.count_line("intents", failed).endswith("；复核没有完成，其余条目未经复核入库")
+
+
+def test_an_unpriced_check_keeps_its_cost_unknown():
+    assert leads_check.counts(leads_check.Checked("checked"), cost_usd=None)["check_cost_usd"] is None

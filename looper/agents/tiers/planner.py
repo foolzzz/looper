@@ -1019,6 +1019,7 @@ class PlannerAgent:
         self._agent_settings: AgentSettings | None = None
         # The project's execution settings as last read; everything inherits until the project is read.
         self._execution = ProjectExecution()
+        self._unknown_budget_models: tuple[str, ...] = ()
         self._condition_attempts: set[str] = set()
         # What the running Claude was started with (None before the first start).
         self._process: _Process | None = None
@@ -6124,12 +6125,25 @@ class PlannerAgent:
         if plan.status not in _LIVE:
             return False  # stopping or ended already
         try:
-            spent = float((await db_llm_records.task_costs([self._task_id]))[self._task_id]["cost_usd"])
+            costs = (await db_llm_records.task_costs([self._task_id]))[self._task_id]
+            spent = float(costs["cost_usd"])
         except Exception as exc:
             logger.warning("planner %s cannot read its task's cost", self.agent_id, exc_info=True)
             await self._activity("error", f"Warning: the task's cost is unavailable ({exc}); its spend cap "
                                           "is not checked this time"[:500])
             return True
+        from ..run_usage import CostStatus
+
+        if costs.get("cost_status") == CostStatus.UNKNOWN.value:
+            models = tuple(sorted(costs.get("unknown_models", [
+                str(row["model"]) for row in costs["by_model"] if row["unpriced_runs"] and any(
+                    row.get(key, 0) for key in ("input_tokens", "output_tokens", "cache_read_tokens", "cache_creation_tokens"))])))
+            if models and models != self._unknown_budget_models:
+                self._unknown_budget_models = models
+                await self._activity("error", f"Warning: the task spend cap cannot be verified: unknown cost for "
+                                             f"models {', '.join(models)}; ${format_usd(spent)} is only the known subtotal"[:500])
+        else:
+            self._unknown_budget_models = ()
         if spent < cap:
             return True
         held = self._adopted_runs | self._ending_runs

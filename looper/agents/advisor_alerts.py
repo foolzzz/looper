@@ -66,10 +66,15 @@ async def _due(task_id: str) -> list[tuple[str, str]]:
     pool = get_pool()
     due: list[tuple[str, str]] = []
     midnight = datetime.now().astimezone().replace(hour=0, minute=0, second=0, microsecond=0)
-    spent = float(await pool.fetchval("SELECT COALESCE(sum(spent_usd), 0) FROM agent_spawns WHERE kind = 'advisor' "
-                                      "AND created_at >= $1", midnight))
+    spend = await pool.fetchrow("SELECT COALESCE(sum(spent_usd), 0) AS usd, "
+                                "bool_or(jsonb_array_length(COALESCE(result->'unpriced_runs', '[]')) > 0) AS unknown "
+                                "FROM agent_spawns WHERE kind = 'advisor' AND created_at >= $1", midnight)
+    spent = float(spend["usd"])
     threshold = await daily_threshold()
-    if spent > threshold:
+    if spend["unknown"]:
+        due.append(("spend", f"告警：今天 advisor 的花费包含未知费用；已知小计 {spent:.2f} 美元，"
+                             f"无法核实 {threshold:.2f} 美元的告警阈值。"))
+    elif spent > threshold:
         due.append(("spend",
                     f"告警：今天 advisor 的花费 {spent:.2f} 美元，超过了 {threshold:.2f} 美元的告警阈值。"))
     row = await pool.fetchrow(

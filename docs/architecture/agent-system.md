@@ -367,8 +367,9 @@ Manager has no tool for it. The dashboard shows the task page's 指标 card and 
   rotations carry `metadata.session_bound` with the action, reason and before/after token counts.
   The budget also supplies a per-turn soft cap, including subscription runs priced from the model catalog;
   the existing process budget is unchanged. A capped turn gets the fixed `over_cap_reply`, and its next message
-  starts a process that resumes the session. An unpriced model gets no additional soft cap and logs a warning
-  once per profile/model; the Settings price warning and dashboard controls are not implemented yet.
+  starts a process that resumes the session. An unpriced configured model logs a warning once per profile/model;
+  unpriced usage from any actual event model stops a capped turn with an explicit budget error. This also catches
+  a runtime alias changing targets after preflight. The Settings price warning and dashboard controls are not implemented yet.
   Operator-only v1 operations `session_budget.get` and `session_budget.update` read or store a positive dollar
   budget (null unsets it; the recommended value is $4.00) and report invalid stored values. While unset, there
   is no additional recorder cap, session measurement write or maintenance check, and prompts, tools and
@@ -2598,6 +2599,36 @@ cost. The task cap and "raise the cap and continue" sum the recorded costs, so
 they use the same basis. `GET /api/tasks/:id` counts the runs of each basis
 (`equivalent_runs`: a runtime's own login, `provider_price_runs`: an API key provider).
 
+**Unknown prices.** `run_usage.CostStatus` is the shared `known` / `unknown` state for model prices,
+usage, cap accounting, consults and cost metrics. The Claude Code alias table follows actual reported model ids
+(`model` and `modelUsage`), including `haiku` → `claude-haiku-5-5`. Haiku 5.5 has no authoritative token-rate
+source in this repository, so it stays unknown; the Haiku 4.5 price is not reused. Known model rates retain their
+existing sources in `runtimes/pricing.py`; provider/protocol catalog overrides still take precedence.
+
+Unknown prices never make a run free. With a per-run cap (including the Manager session budget), the recorder
+warns once per unpriced event model and stops further calls. An authoritative runtime-reported cost still counts
+for task, daily and guard totals; a missing catalog estimate is recorded separately as `catalog_cost_status` and
+`catalog_unknown_price_models`. When the bill itself is unknown, dollars remain null and the ended record carries
+`metadata.cost_status = unknown` (plus `unknown_price_models` when event models are available).
+This is a soft stop after usage arrives, not a hard billing ceiling. Consult, processor and spawned-run postflight
+checks reject unknown costs; their preflight model checks remain in place. Explorer parent budgets report unknown
+coverage rather than repricing multi-model usage as the parent model.
+
+Task and daily schedule caps keep their known subtotal and explicitly warn with the unknown model ids when the
+cap is checked; the Planner also records a task activity warning. They may continue on that incomplete subtotal.
+The cost guard in both observe and enforce modes reports unknown settled costs and restored history for task,
+global day, role day and schedule day scopes (separately per billing currency). Its API counters carry
+`cost_status` and `unknown_models`, and `problem` displays the accounting gap on the existing costs dashboard.
+Unknown history is excluded from price-based estimate samples. This alert policy does not introduce estimated
+prices or extend which scopes enforce mode stops. With the guard off it adds no guard I/O or reservations.
+
+Task/model, Manager, schedule, spend and metric API summaries always carry `cost_status = known | unknown`.
+Incomplete aggregate totals retain their known subtotal and unknown-run counts; an unknown individual turn cost
+is null. Subscription daily totals include every extraction attempt and the check through typed record links, and advisor booking preserves
+unknown costs for daily alerts. The existing dashboard shows these unpriced-run counts,
+model rows with unknown cost, and metric unknown counts; metrics exclude unknown cases from cost averages.
+CLI cost reads share the same API. Telegram and Lark share the recorder and cap behavior and need no new commands.
+
 The `llm_profiles` table and the role configs' `runtime` and `llm_profile_id`
 were never on a launch path; the one-time migration `llm_profiles_removed`
 drops them (with `/api/llm-profiles`), and a role config update naming them
@@ -4607,14 +4638,34 @@ Spend refusals take precedence over usage-window holds. After spend admission, r
 failures hold all runs, including operator-started work; 95% utilization holds only background roles and
 schedule firings. Holds end at the reset, or after a cooldown of at most five minutes from the signal when
 reset time is unknown. The operator Manager exception applies only to spend, not rejected windows.
-Background-role and schedule budget enforcement remains inactive.
+A server already in enforce also stops background roles at their own, schedule or global daily caps,
+and skips schedule firings at caps previously only observed. Default off preserves existing behavior.
+Subscription triggers check the processor role cap as well as the schedule and global cap. A task-linked
+background call inherits its schedule but not the interactive task scope, following RFC §6.1; an exhausted
+task cap cannot mask a background role or global cap. Denied background
+calls retain each caller's existing BUDGET failure handling; outbound review blocks the action and creates a
+review-budget hold. Raising that role cap permits a new review, never automatically resends the blocked action.
+
+The optional `schedule_admin.create/update` field `daily_budget_equivalent_usd` must be finite and positive
+(or null); command schedules reject it. It is effective only in enforce. When set, the guard checks
+`daily_budget_usd` against real spend and the equivalent field against subscription equivalents, with separate
+reservations. The legacy mixed scheduler check is replaced only for these enforce/split schedules. With the
+field unset, both currencies still share `daily_budget_usd`. Off and observe retain the legacy mixed check,
+and null is omitted from schedule views. The Manager schedule tools are unchanged.
+
+Enforce sends code-written 80% and limit alerts through the Advisor alert target, with quiet hours applied.
+Each scope instance, currency and kind is claimed once per scheduler-local day in `system_settings`.
+Scheduler alerts publish after the firing transaction commits. Duplicate claims increment process-local
+counters; the next day sends one summary and clears them. A restart loses these repeat counts, but persistent
+claims still prevent resending the initial alert. Accounting errors send one guard-error alert per day and
+preserve the review classifier and audit requirements.
 
 Existing holds keep their decisions, Needs you cost items, Settings list and 24-hour expiry in every mode,
 including after restart. Continuing wakes the Planner to dispatch the next saved step; stopping and expiry use
 the task stop path with a persisted reason. Startup reads whether hold recovery is needed; after a hold exists,
 recovery stays enabled until restart to avoid racing a new hold commit. Off installations without saved holds
 retain their no-I/O admission, reply-routing and scheduler paths. The `cost_holds` migration also adds the
-project `ask` action. Alerts and unanswered-push pauses follow the
+project `ask` action. Backup-profile fallback and unanswered-push pauses follow the
 [cost guard RFC's PR split](rfcs/cost-guard-v0.zh-CN.md#15-pr-拆分).
 
 ### Why a run failed (failure classes)

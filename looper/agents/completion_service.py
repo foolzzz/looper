@@ -43,7 +43,7 @@ RESEND_SECONDS = 30.0
 # How often a pass reads the counts ``system.health`` shows (it reads them from memory, never the database).
 HEALTH_SECONDS = 30.0
 _HEALTH_KEYS = ("pending", "oldest_pending_seconds", "window_hours", "by_state", "by_reason", "turn_cost_usd",
-                "failing")
+                "failing", "cost_status", "unpriced_runs")
 _running: CompletionService | None = None
 
 

@@ -73,7 +73,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from enum import Enum
 from pathlib import Path
-from typing import Any, Protocol
+from typing import TYPE_CHECKING, Any, Protocol, TypeAlias
 
 import asyncpg
 
@@ -93,6 +93,12 @@ from . import subscriptions
 from .extraction import CATCH_UP_MAX, kind_on as extraction_on
 from .subscription_runs import OwnApps, Poster, SubscriptionRuns
 from .system_prompt import TASK_REQUIREMENT_LIMIT
+
+if TYPE_CHECKING:
+    from .cost_alerts import Alert, BudgetSkipped
+
+# Each firing owns its notices until its transaction commits.
+FiringNotice: TypeAlias = "tuple[str | None, Any] | BudgetSkipped | tuple[Alert, ...]"
 
 logger = logging.getLogger(__name__)
 
@@ -678,7 +684,7 @@ class Scheduler:
     # --- Firing ---
 
     async def _usage_block(self, schedule: Mapping[str, Any], now: datetime,
-                           notices: list[tuple[str | None, Any]]) -> _UsageWindowHeld | None:
+                           notices: list[FiringNotice]) -> _UsageWindowHeld | None:
         """The enforced usage-window hold, or None. A command is never held.
 
         Window reads stay outside the admission lock. The schedule is noted, and a notice appended to
@@ -688,16 +694,22 @@ class Scheduler:
         if schedule["kind"] == "command":
             return None
         from . import usage_windows
-        from .cost_guard import observe_schedule, schedule_enforced_hold
+        from .cost_guard import Decision, observe_schedule, schedule_enforced_hold
 
         found = await schedule_enforced_hold(schedule)
         if not found or found[0] is None:
             return None
         hold, provider_id = found
         noted = usage_windows.schedule_hold(schedule["id"], now=now)
-        if noted is None or noted["until"] != hold.until.isoformat():
-            admission = await observe_schedule(schedule)
-            if admission is not None and admission.until is not None:
+        new_window = noted is None or noted["until"] != hold.until.isoformat()
+        # Recheck spend even for a noted window, without duplicating its existing observation.
+        admission = await observe_schedule(schedule, defer_alerts=True, record=new_window)
+        if admission is not None and admission.decision in (Decision.DENY, Decision.ASK):
+            return None
+        if admission is not None and admission.alerts:
+            notices.append(admission.alerts)
+        if new_window:
+            if admission is not None and admission.decision is Decision.HOLD and admission.until is not None:
                 usage_windows.note_schedule(
                     schedule["id"], until=admission.until, reason=admission.reason or hold.reason.value,
                     reset_known=admission.reset_known, window=admission.window)
@@ -709,19 +721,25 @@ class Scheduler:
                             admission.until.isoformat(), admission.reason)
         return _UsageWindowHeld(hold.until, hold.reason.value)
 
-    async def _publish_hold_notices(self, notices: list[tuple[str | None, Any]]) -> None:
+    async def _publish_hold_notices(self, notices: list[FiringNotice]) -> None:
         """Send this firing's hold notices. The caller does this only after its transaction has committed."""
         if not notices:
             return
-        from . import usage_windows
+        from . import cost_alerts, usage_windows
 
-        for provider_id, hold in notices:
-            await usage_windows.notify_hold(provider_id, hold)
+        for notice in notices:
+            if isinstance(notice, cost_alerts.BudgetSkipped):
+                await cost_alerts.publish_skip(notice)
+            elif notice and isinstance(notice[0], cost_alerts.Alert):
+                await cost_alerts.flush(notice)
+            else:
+                provider_id, hold = notice
+                await usage_windows.notify_hold(provider_id, hold)
 
     async def _fire_due(self, now: datetime, *, kinds: Sequence[str] | None = None) -> None:
         handled: list[str] = []
         while True:
-            notices: list[tuple[str | None, Any]] = []
+            notices: list[FiringNotice] = []
             with ExitStack() as firing_guard:
                 launched: _Launched | None = None
                 schedule: dict[str, Any] | None = None
@@ -753,7 +771,7 @@ class Scheduler:
                     await self._follow(schedule, launched)
 
     async def _fire_schedule(self, conn: asyncpg.Connection, schedule: dict[str, Any],
-                             now: datetime, notices: list[tuple[str | None, Any]]) -> _Launched | None:
+                             now: datetime, notices: list[FiringNotice]) -> _Launched | None:
         """Handle a due schedule whose row ``conn`` holds."""
         try:
             rule, tz = cron.parse(schedule["cron"]), cron.zone(schedule["timezone"])
@@ -824,7 +842,7 @@ class Scheduler:
         a subscription's catch-up leaves ``operator`` false and can wait here. A hold commits nothing and its notice
         goes out after that commit. Any other failure rolls the firing back and sends nothing."""
         now = self._clock()
-        notices: list[tuple[str | None, Any]] = []
+        notices: list[FiringNotice] = []
         held: _UsageWindowHeld | None = None
         with ExitStack() as firing_guard:
             try:
@@ -885,7 +903,7 @@ class Scheduler:
         )
 
     async def _fire(self, conn: asyncpg.Connection, schedule: dict[str, Any], firing: Firing,
-                    now: datetime, *, notices: list[tuple[str | None, Any]],
+                    now: datetime, *, notices: list[FiringNotice],
                     operator: bool = False) -> _Launched:
         """One firing, the schedule's row held: after the overlap check, a queued or skipped run, or the run
         launched (``_launch``)."""
@@ -961,7 +979,7 @@ class Scheduler:
         return datetime.combine(local.date(), datetime.min.time(), tzinfo=self._day_zone)
 
     async def _launch(self, conn: asyncpg.Connection, schedule: dict[str, Any], firing: Firing, now: datetime, *,
-                      notices: list[tuple[str | None, Any]], common: Mapping[str, Any] | None = None,
+                      notices: list[FiringNotice], common: Mapping[str, Any] | None = None,
                       run_id: str | None = None, operator: bool = False) -> _Launched:
         """A firing past the overlap check: skipped at the daily budget, gating, or its task created.
 
@@ -975,18 +993,39 @@ class Scheduler:
                                                                 template_key=schedule.get("template_key")):
             return await self._create_run(conn, schedule, firing, now, common=common, run_id=run_id)
         from . import usage_windows
-        from .cost_guard import observe_schedule
+        from . import cost_alerts, cost_guard
+        from .cost_guard import Decision, LimitAction, observe_schedule
 
         if operator:
-            await observe_schedule(schedule, operator=True)
+            admission = await observe_schedule(schedule, operator=True, defer_alerts=True)
         else:
             held = await self._usage_block(schedule, now, notices)
             if held is not None:
                 raise held
             usage_windows.clear_schedule(schedule["id"])
-            await observe_schedule(schedule)
+            admission = await observe_schedule(schedule, defer_alerts=True)
+        if (admission is not None and admission.decision is Decision.DENY
+                and admission.action is LimitAction.SKIP and admission.reason is not cost_guard.DenialReason.GUARD_ERROR):
+            scope = admission.scope
+            assert scope is not None and scope.limit_usd is not None
+            error = (f"{scope.scope.value} {scope.scope_ref}: today's spent and reserved ${admission.spent_usd:.4f}, "
+                     f"the daily budget is ${scope.limit_usd:g}")
+            if run_id is None:
+                assert common is not None
+                skipped = await self._skip(conn, "skipped_budget", now, common, fired_at=now, error=error)
+            else:
+                skipped = await self._put(conn, run_id, None, status="skipped_budget", fired_at=now,
+                                          finished_at=now, error=error)
+            notices.append(cost_alerts.BudgetSkipped(schedule["id"], scope, scope.limit_usd,
+                admission.spent_usd, currency=admission.currency, alerts=admission.alerts))
+            return _Launched(skipped)
+        if admission is not None and admission.alerts:
+            notices.append(admission.alerts)
         budget = schedule["daily_budget_usd"]
-        if budget is not None:
+        split_enforced = (cost_guard.current().config.mode is cost_guard.settings.Mode.ENFORCE
+                          and schedule.get("daily_budget_equivalent_usd") is not None
+                          and admission is not None and admission.problem is None)
+        if budget is not None and not split_enforced:
             spent = await db_schedules.spent_since(conn, schedule["id"], self.day_start(now))
             if spent >= budget:
                 error = f"today's runs cost ${spent:.4f}, the daily budget is ${budget:g}"
@@ -995,6 +1034,15 @@ class Scheduler:
                     return _Launched(await self._skip(conn, "skipped_budget", now, common, fired_at=now, error=error))
                 return _Launched(await self._put(conn, run_id, None, status="skipped_budget", fired_at=now,
                                                  finished_at=now, error=error))
+        if (admission is not None and admission.reason is cost_guard.DenialReason.GUARD_ERROR
+                and admission.decision is Decision.DENY):
+            # Failed split accounting cannot bypass the legacy cap above or launch an unchecked run.
+            error = f"{admission.reason.value}: {admission.problem}"
+            if run_id is None:
+                assert common is not None
+                return _Launched(await self._skip(conn, "skipped_budget", now, common, fired_at=now, error=error))
+            return _Launched(await self._put(conn, run_id, None, status="skipped_budget", fired_at=now,
+                                             finished_at=now, error=error))
         # The run's timeout is fixed as it starts; changing the schedule or the default later leaves it be.
         timeout = {"run_timeout_seconds": await effective_run_timeout(schedule["run_timeout_mode"],
                                                                       schedule["run_timeout_seconds"], conn)}
@@ -1348,7 +1396,7 @@ class Scheduler:
     async def _start_queued(self, schedule_id: str) -> None:
         """Start a queued run when overlap permits; a drain-deferred parallel gate needs only a free slot."""
         now = self._clock()
-        notices: list[tuple[str | None, Any]] = []
+        notices: list[FiringNotice] = []
         held = False
         with ExitStack() as firing_guard:
             try:
