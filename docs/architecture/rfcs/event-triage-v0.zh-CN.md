@@ -1,6 +1,6 @@
 # RFC：事件分流 v0（重要、进摘要、忽略）
 
-- **状态：** 决定已定，基础层和分流运行已实现（第 11 节 PR ①②），默认关闭；why、管家交接和晨报尚未接入，真实模型验证待批准。第 12 节的问题已由维护者在 2026-11-22 答复，并写入第 3 节。按第 11 节分 PR 实现，全部默认关。
+- **状态：** 决定已定，基础层和分流运行已实现（第 11 节 PR ①②），默认关闭；why 尚未接入；管家交接和晨报事件段已实现，真实模型验证待批准。第 12 节的问题已由维护者在 2026-11-22 答复，并写入第 3 节。按第 11 节分 PR 实现，全部默认关。
 - **需求：** 产品设计第 3 期 P3.1：订阅的输出从「推 / 不推」改成三类，由订阅运行给出类别和一句理由。**重要**的交给管家，由它决定现在说还是不说；**进摘要**的放进下一次晨报；**忽略**的只记下理由。三类都落库，操作者能查某条消息为什么没告诉他。并入 M7a（消息线索与意图）。验收：用一组标注过的事件比较分流结果，「重要」的漏判率和误判率有数字。
 - **相关：**
   - [消息流与订阅 RFC](message-stream-v0.zh-CN.md)：事件表、processor 和订阅。
@@ -68,7 +68,7 @@
 | D3 | 契约是 `NONE` 或一个 JSON 对象（第 5.2 节）。`NONE` 表示整段都忽略，理由是「处理器回复了 NONE」 |
 | D4 | 代码只能把类别调高，不能调低（第 5.4 节）。早期用规则过滤的系统一夜丢过 47 封邮件，所以过滤交给模型，代码只做保底 |
 | D5 | 重要的事件写一行 `manager_events`（新 kind `triage`），由完成事件服务批成管家 main 会话里的一个后台回合。管家的回复经 `deliver()` 发出；回合失败、超时或被送达层推迟的，改进晨报，不另发代码通知，绝不把 processor 写的原文直接推出去。阻塞任务的关卡不走分流。维护者确认（Q3） |
-| D6 | 进摘要的事件由晨报读取；晨报把它们写进去的同一个事务里记下 `briefed_run_id`，所以只进一次 |
+| D6 | 进摘要的事件由晨报读取；晨报结算为已发送或不确定的同一个事务里写入 `morning_brief_triage`，所以只进一次 |
 | D7 | 「为什么没告诉我」由代码查询回答（第 7 节），不调模型 |
 | D8 | 只在 #1469 的对外动作审查打开、管家 main 会话（P1.3）和送达层（P2.6）合入之后，才能在线上打开。在此之前只能在一次性的 `looper serve` 上跑 |
 | D9 | 和旧的工作速报并行跑一周，然后停掉工作速报。维护者确认（Q2） |
@@ -84,10 +84,12 @@
 | 表或列 | 说明 |
 |---|---|
 | `subscriptions.output_kind` | 取值加 `triage` |
-| `triage_events` | 列：`id`（显示为 `E-123`）、`source_id`、`schedule_id`、`run_id`、`record_id`、`category`、`title`（不超过 60 字，忽略组为空）、`summary`（不超过 400 字，忽略组为空）、`reason`（不超过 100 字，不能为空）、`reason_kind`、`confidence`、`flagged`、`first_sent_at`、`last_sent_at`、`manager_event_id`、`briefed_run_id`、`created_at`。`reason_kind` 取值：`model` 表示模型给的理由，`raised` 表示被代码调高；`uncited` 仅保留为存储兼容值，新运行未引用的消息只计数、不写事件行。`flagged` 表示出处在 `instructions_seen` 里。约束：只有 `important` 能有 `manager_event_id`；只有 `digest` 和改进晨报的 `important` 能有 `briefed_run_id` |
+| `triage_events` | 列：`id`（显示为 `E-123`）、`source_id`、`schedule_id`、`run_id`、`record_id`、`category`、`title`（不超过 60 字，忽略组为空）、`summary`（不超过 400 字，忽略组为空）、`reason`（不超过 100 字，不能为空）、`reason_kind`、`confidence`、`flagged`、`first_sent_at`、`last_sent_at`、`manager_event_id`、`briefed_run_id`、`created_at`。`reason_kind` 取值：`model` 表示模型给的理由，`raised` 表示被代码调高；`uncited` 仅保留为存储兼容值，新运行未引用的消息只计数、不写事件行。`flagged` 表示出处在 `instructions_seen` 里。约束：只有 `important` 能有 `manager_event_id`；`briefed_run_id` 保留兼容、未使用且从不写入；晨报没有 `schedule_runs` id，消费记录用 `morning_brief_triage` |
 | `triage_event_sources` | `(event_id, event_seq)`，两个外键都是 `ON DELETE CASCADE` |
 | `subscription_runs.window_seqs` | `BIGINT[]`，只有分流运行写：这次窗口选中的消息。第 7 节据此精确回答「这条消息在不在这次运行里」。500 个 seq 约 4 KB |
 | `subscription_runs.extract_counts` | 分流运行记 `important`、`digest`、`ignore`、`uncited`、`raised`、`dropped`（按原因计），以及布尔值 `none`（模型明确回复 NONE；代码保底调高后仍保留） |
+| `morning_briefs.triage_ids` | `BIGINT[] NOT NULL DEFAULT '{}'`，与认领同一条语句存下本次读到的事件 id，供恢复使用 |
+| `morning_brief_triage` | `event_id` 为主键、外键指向 `triage_events(id) ON DELETE CASCADE`；另存 `local_date`、`channel_id`、`chat`、`created_at`。一个事件最多消费一次 |
 | `manager_events.kind` | 加 `triage`；`task_id` 只在 `task_end` 时必填（约束改为 `(kind = 'task_end') = (task_id IS NOT NULL)`）；`reason` 加 `manager_silent` |
 
 ## 5. 分流运行
@@ -151,8 +153,11 @@
 ### 6.2 进摘要：晨报
 
 - 晨报（M8 C4）加一节「进摘要的事件」，按时间倒序，最多 10 条，超出的写「另有 N 条，见消息流页」。
-- 晨报读的是：上一份晨报之后的 `digest` 事件，加上改进晨报的 `important` 事件。
-- 在写晨报的同一个事务里给这些事件记上 `briefed_run_id`。晨报失败就不记，下一份再带上。
+- 只在 `subscriptions.triage.enabled` 打开，且晨报目标等于 `operator_dm_target()` 时读取。范围与晨报摘要相同：首次尝试的第一个摘要日期当地零点起的 `digest` 事件，加上管家事件已结算为 `fallback` 的 `important` 事件，跳过 `morning_brief_triage` 已消费的 id。仍在等待或运行的重要事件不收。
+- 每条消息按最高类别、同类最早事件归属；事件在该运行里至少拥有一条窗口消息才列出。按 `last_sent_at DESC, id DESC` 排序。
+- 认领晨报的同一条语句把本次实际列出的 id 写进 `morning_briefs.triage_ids`。发送成功或不确定时，同一事务写入 `morning_brief_triage`；拒绝或释放认领清掉暂存 id、不消费，下一份仍能读取。中途停止后的恢复只消费暂存 id，不重扫；读取后才提交的事件留给下一份。
+- 每行显示事件编号、净化后的标题、会话名、当地时间和摘要；标题、会话名和摘要统一清除提及标记并转义 Markdown。标记事件加「含要求助手做事的话」，重要兜底事件加「重要，未能及时告诉你」。标题和摘要只展示给操作者，不送给模型。
+- 分流开启时，被送达层推迟的 `source = triage` 行不再收进旧的「推迟到这份晨报的消息」节，避免重复。没有操作者 DM 目标时不读取、不消费。
 
 ### 6.3 忽略
 
@@ -230,12 +235,12 @@
 | ② | 分流运行：预设、渲染、契约、解析、代码保底、入库；`evals/processor` 的 `triage_*` 用例和第一次实测 | ① |
 | ③ | 「为什么没告诉我」：查询、API、命令行、消息流页上的查询和运行计数 | ② |
 | ④ | 重要的事件交给管家：`manager_events` 的 `triage` kind、批处理、回合契约、`deliver()`、改进晨报的兜底 | ②，P1.3，#1486，#1469 |
-| ⑤ | 晨报的「进摘要的事件」一节 | ②，晨报 PR（P2.5 ④） |
+| ⑤ | 晨报的「进摘要的事件」一节（已实现，默认关闭） | ④，工作日晨报 |
 | ⑥ | 真实数据标注和线上指标 | ③ |
 
 ①②③ 可以先做，不依赖还没合入的送达层和晨报。④⑤ 等各自的前提合入后再开工。
 
-PR ① 提供基础层：迁移 `event_triage`、在线校验 `event_triage_online`、类型和只读查询，以及操作者专用的 `triage_settings.get/update`（`subscriptions.triage.enabled` 默认关闭）。PR ② 接入「事件分流」预设、确认、抽取运行、解析、代码保底和事件入库。关闭时只拒绝创建分流订阅，已有订阅仍可停用、改名和修改配置，已有订阅触发仍为 `skipped_gate`，不读消息、不启动 processor、不动游标。打开后只有确认仍有效的订阅会运行，结果仅存储；不交给管家、不投递、不进入晨报。
+PR ① 提供基础层：迁移 `event_triage`、在线校验 `event_triage_online`、类型和只读查询，以及操作者专用的 `triage_settings.get/update`（`subscriptions.triage.enabled` 默认关闭）。PR ② 接入「事件分流」预设、确认、抽取运行、解析、代码保底和事件入库。关闭时只拒绝创建分流订阅，已有订阅仍可停用、改名和修改配置，已有订阅触发仍为 `skipped_gate`，不读消息、不启动 processor、不动游标。打开后只有确认仍有效的订阅会运行，该阶段结果仅存储；后续的管家交接和晨报事件段沿用同一开关。
 
 ③ 交付查询、`triage.why`、`looper msgflow why`、消息流页上的「为什么没告诉我」，以及运行记录里的分流计数。每条消息旁的类别标签要等消息列表，不在这一次。
 

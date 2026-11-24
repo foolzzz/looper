@@ -1,4 +1,4 @@
-"""Bounded operator additions to a running Manager turn; no new model turn or tool binding.
+"""Bounded operator additions and ownership of their native next turns.
 
 The bus keeps each addition unacknowledged until the original turn has handed its
 reply to every participating chat. A failed write leaves the normal queue in charge.
@@ -17,11 +17,12 @@ from . import (
     operator_identity, session_routing, turn_metrics,
 )
 from .message import MessageEnvelope, MessageType, is_lark
-from .ops import TurnOrigin
+from .ops import Turn, TurnOrigin
 from .runtimes import Capability, MidTurnInput
 from .tiers.turn_token import TurnPhase, TurnToken
 
 if TYPE_CHECKING:
+    from .claude_cli import ResidentClaude
     from .tiers.manager import ManagerAgent, Prepared, ReplyOutcome
     from .tiers.manager_session import ManagerSession
 
@@ -38,6 +39,19 @@ def enabled(manager_id: str) -> bool:
 
 class MergedKind(str, Enum):
     OPERATOR_MESSAGE = "operator_message"
+
+
+class InputState(str, Enum):
+    PENDING_CONFIRMATION = "pending_confirmation"
+    CONFIRMED = "confirmed"
+    QUEUED = "queued"
+
+
+@dataclass
+class PendingInput:
+    item: MergedInput
+    state: InputState = InputState.PENDING_CONFIRMATION
+    settled: asyncio.Event = field(default_factory=asyncio.Event)
 
 
 @dataclass
@@ -77,7 +91,16 @@ class RunningInput:
     session: ManagerSession
     accepting: bool = True
     inputs: list[MergedInput] = field(default_factory=list)
+    pending: dict[str, PendingInput] = field(default_factory=dict)
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+
+
+@dataclass
+class _NativeInput:
+    token: TurnToken
+    session: ManagerSession
+    expected: set[str] = field(default_factory=set)
+    completed: bool = False
 
 
 class MidTurnInputs:
@@ -85,6 +108,41 @@ class MidTurnInputs:
         self.agent = agent
         self._turns: dict[str, RunningInput] = {}
         self._parents: dict[str, str] = {}
+        self._settlers: dict[str, asyncio.Task[None]] = {}
+        self._tasks: set[asyncio.Task[None]] = set()
+        self._native: dict[str, _NativeInput] = {}
+
+    def release_binding(self, token: TurnToken) -> None:
+        """A's cleanup must not erase B's already running native tool binding."""
+        self._native.pop(token.message_id, None)
+        session = self.agent._session_now()
+        native = next((item for item in self._native.values() if item.session is session and not item.completed), None)
+        self.agent._publish_binding(native.token if native is not None else None)
+
+    def expected(self, token: TurnToken, call_id: Any) -> bool:
+        """A replayed tool_use was already offered to the bridge while B was buffered."""
+        native = self._native.get(token.message_id)
+        if native is None or call_id not in native.expected:
+            return False
+        native.expected.remove(call_id)
+        return True
+
+    def native_started(self, token: TurnToken) -> bool:
+        return token.message_id in self._native
+
+    def _discard_native(self, resident: ResidentClaude, token: TurnToken) -> None:
+        if resident.reserved_input_text(token.message_id) is None:
+            return
+        task = asyncio.create_task(resident.discard_reserved_input(token.message_id))
+        self._tasks.add(task)
+
+        def finished(done: asyncio.Task[None]) -> None:
+            self._tasks.discard(done)
+            if not done.cancelled() and (exc := done.exception()) is not None:
+                logger.error("native input cleanup failed for %s", token.message_id,
+                             exc_info=(type(exc), exc, exc.__traceback__))
+
+        task.add_done_callback(finished)
 
     def open(self, token: TurnToken, prepared: Prepared, text: str) -> str:
         accepts = (enabled(self.agent.agent_id) and prepared.turn is not None
@@ -102,9 +160,15 @@ class MidTurnInputs:
 
     async def close(self, token: TurnToken) -> None:
         if (running := self._turns.get(token.message_id)) is not None:
-            running.accepting = False  # before awaiting a write already in flight
-            async with running.lock:
-                pass
+            running.accepting = False
+            # Only the turn owner waits for its receipts, outside the admission lock.
+            await asyncio.gather(*(item.settled.wait() for item in running.pending.values()))
+
+    async def shutdown(self) -> None:
+        tasks = tuple(self._tasks)
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
 
     def parent(self, message_id: str) -> str:
         return self._parents.get(message_id, message_id)
@@ -140,6 +204,37 @@ class MidTurnInputs:
         return self.agent.ops is not None and self.agent.ops.has_confirmation(self._chat(envelope))
 
     async def merge(self, session: ManagerSession, envelope: MessageEnvelope) -> bool:
+        """Hand admission to a session's ordered settler; never await a fold in the inbox loop."""
+        if envelope.message_type is not MessageType.USER_MESSAGE:
+            return False
+        previous = self._settlers.get(session.key)
+        token = session.running_token
+        if previous is None and (not enabled(self.agent.agent_id)
+                                 or token is None or token.message_id not in self._turns):
+            return False
+
+        async def settle() -> None:
+            if previous is not None:
+                await asyncio.shield(previous)
+            if not await self._try_merge(session, envelope) and self.agent._running:
+                self.agent._router.dispatch(session, envelope)
+
+        task = asyncio.create_task(settle())
+        self._settlers[session.key] = task
+        self._tasks.add(task)
+
+        def finished(done: asyncio.Task[None]) -> None:
+            self._tasks.discard(done)
+            if self._settlers.get(session.key) is done:
+                self._settlers.pop(session.key)
+            if not done.cancelled() and (exc := done.exception()) is not None:
+                logger.error("mid-turn settlement failed for %s", envelope.message_id,
+                             exc_info=(type(exc), exc, exc.__traceback__))
+
+        task.add_done_callback(finished)
+        return True  # this task now owns dispatch or merged delivery
+
+    async def _try_merge(self, session: ManagerSession, envelope: MessageEnvelope) -> bool:
         try:
             return await self._merge(session, envelope)
         except Exception:
@@ -193,22 +288,72 @@ class MidTurnInputs:
             merged_token = self.agent._turns.find(envelope.message_id) or self.agent._register_turn(envelope)
             # A stop from the addition's chat must reach the original even while stdin drains.
             self._parents[envelope.message_id] = token.message_id
-            written = False
-            try:
-                written = await session.claude.write_mid_turn(message)
-                if not written:
-                    return False
-            except (OSError, TimeoutError):
-                logger.warning("mid-turn input write failed; keeping message queued")
-                return False
-            finally:
-                if not written:
-                    self._parents.pop(envelope.message_id, None)
-                    if token.cancel.requested:
-                        merged_token.request_stop(token.stop.via if token.stop else "chat")
             item = MergedInput(envelope, merged_token, self._chat(envelope)[2] or "", message)
+            pending = PendingInput(item)
+            running.pending[envelope.message_id] = pending
+        written = False
+        try:
+            from .claude_cli import ResidentClaude
+            resident = session.claude
+
+            async def unfolded(event: dict[str, Any]) -> None:
+                from .tiers.manager import _looper_call, _message_client, _message_origin
+
+                if event.get("type") == "reservation_discarded":
+                    native = self._native.pop(envelope.message_id, None)
+                    if native is not None and self.agent.ops is not None:
+                        self.agent.ops.end_turn(native.token.ops_turn)
+                        self.agent.ops.publish_binding(None, session_key=session.key)
+                    return
+                native = self._native.get(envelope.message_id)
+                if native is None:
+                    origin = _message_origin(envelope)
+                    client_id, client_name = _message_client(envelope)
+                    turn = Turn(channel=origin["channel"], chat=origin["chat"], channel_id=origin["channel_id"],
+                                message_id=envelope.message_id, envelope=envelope, sender=origin["sender"],
+                                group=origin["group"], client_id=client_id, client_name=client_name,
+                                require_match=session.claude.shares_bridge,
+                                runtime=running.prepared.launch.runtime.type,
+                                speaker=running.prepared.turn.speaker)
+                    merged_token.ops_turn = turn
+                    native = self._native[envelope.message_id] = _NativeInput(merged_token, session)
+                    previous_settle = merged_token.on_settle
+
+                    def settled(ended: TurnToken) -> None:
+                        if previous_settle is not None:
+                            previous_settle(ended)
+                        self._discard_native(resident, ended)
+
+                    merged_token.on_settle = settled
+                    if not merged_token.live:
+                        self._discard_native(resident, merged_token)
+                    if self.agent.ops is not None:
+                        if merged_token.cancel.requested or not merged_token.live:
+                            self.agent.ops.stop_turn(turn)
+                        self.agent.ops.begin_turn(turn, merged_token.binding, session_key=session.key)
+                        self.agent.ops.publish_binding(merged_token.binding, session_key=session.key)
+                if event.get("type") == "result" and event.get("parent_tool_use_id") is None:
+                    native.completed = True
+                body = event.get("message") if event.get("type") == "assistant" else None
+                if self.agent.ops is not None and isinstance(body, dict):
+                    for block in body.get("content") or []:
+                        if isinstance(block, dict) and block.get("type") == "tool_use":
+                            bare, arguments = _looper_call(block.get("name"), block.get("input"))
+                            self.agent.ops.expect(merged_token.binding, bare, arguments, call_id=block.get("id"),
+                                                  parent_call_id=event.get("parent_tool_use_id"))
+                            if isinstance(block.get("id"), str):
+                                native.expected.add(block["id"])
+
+            if isinstance(session.claude, ResidentClaude):
+                written = await session.claude.write_mid_turn(message, message_id=envelope.message_id,
+                                                             on_unfolded=unfolded)
+            else:
+                written = await session.claude.write_mid_turn(message, message_id=envelope.message_id)
+            if not written:
+                return False
+            pending.state = InputState.CONFIRMED
             running.inputs.append(item)
-            # After a successful write, never queue a duplicate because a chat/metrics write failed.
+            # After confirmed consumption, never queue a duplicate because a chat/metrics write failed.
             try:
                 async with asyncio.timeout(10):
                     await self.agent._persist_user(envelope, text)
@@ -218,6 +363,14 @@ class MidTurnInputs:
             if chat_settings.metrics_enabled():
                 turn_metrics.background(self.agent._mark_metrics_replied(envelope))
             return True
+        finally:
+            if not written:
+                pending.state = InputState.QUEUED
+                self._parents.pop(envelope.message_id, None)
+                if token.cancel.requested:
+                    merged_token.request_stop(token.stop.via if token.stop else "chat")
+            pending.settled.set()
+            running.pending.pop(envelope.message_id, None)
 
     async def reply(self, original: MessageEnvelope, text: str, *, error: str | None,
                     outcome: ReplyOutcome) -> None:

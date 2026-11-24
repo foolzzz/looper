@@ -70,12 +70,74 @@ def test_invalid_times_are_not_accepted(reply):
     assert e.times_in(reply) == set()
 
 
+@pytest.mark.parametrize('case_id, reply', [
+    pytest.param('time_weekend', '11 月 28 日(周六)到 11 月 29 日(周日)', id='sonnet-weekend-1'),
+    pytest.param('time_weekend', '11 月 28 日(周六)到 11 月 29 日(周日)', id='sonnet-weekend-2'),
+    pytest.param('time_now', '2026-11-23(周一)下午 1:51', id='sonnet-now-2'),
+    pytest.param('time_next_wednesday', '2026 年 12 月 2 日（星期三）15:00', id='opus-wednesday'),
+])
+def test_saved_real_time_replies(case_id, reply):
+    # Exact reply excerpts quoted in PR #1559's real-eval comment (two weekend runs).
+    w = e.Window(reply, datetime(2026, 11, 23, 13, 51, tzinfo=ZoneInfo('UTC')), '')
+    case = next(c for c in e.CASES if c.id == case_id)
+    assert all(check(w) is None for check in case.checks)
+
+
+@pytest.mark.parametrize('reply, minutes', [
+    ('下午 1:51', 831), ('上午 1:51', 111), ('晚上 9：05', 1265), ('下午 15:00', 900),
+    ('上午12:00', 0), ('下午12:00', 720), ('中午12点', 720),
+    ('中午一点', 780), ('中午11:30', 690), ('凌晨12点', 0),
+    ('凌晨 12:05', 5), ('上午十二点半', 30), ('下午十二点半', 750),
+])
+def test_period_times_have_one_interpretation(reply, minutes):
+    assert e.times_in(reply) == {minutes}
+
+
+@pytest.mark.parametrize('reply', ['晚上12点', '晚上12:00', '上午13:51', '下午1:600'])
+def test_unsupported_or_invalid_period_times(reply):
+    assert e.times_in(reply) == set()
+
+
+@pytest.mark.parametrize('reply, hour, minute', [
+    ('中午10点', 22, 0), ('中午十点', 22, 0), ('中午10:30', 22, 30),
+    ('晚上15:00', 15, 0), ('晚上13:00', 13, 0), ('中午23:00', 23, 0),
+    ('下午18:00', 18, 0), ('上午13:51', 13, 51), ('凌晨13:00', 13, 0),
+])
+def test_contradictory_periods_cannot_pass_current_time(reply, hour, minute):
+    w = window(reply)
+    w.now = w.now.replace(hour=hour, minute=minute)
+    assert e.current_time(w) is not None
+    assert e.times_in(reply) == set()
+
+
+@pytest.mark.parametrize('reply', ['2 日', '活动在 2 日举行', '每 2 日检查一次', '2号'])
+def test_day_without_month_cannot_pass_next_wednesday(reply):
+    w = e.Window(reply, datetime(2026, 11, 23, tzinfo=ZoneInfo('UTC')), '')
+    assert e.wednesday(w) is not None
+    assert e.dates_in(reply, w.now.date()) == set()
+
+
+@pytest.mark.parametrize('check, reply', [
+    (e.weekend, '11 月 27 日(周六)到 11 月 29 日(周日)'),
+    (e.wednesday, '2026 年 12 月 3 日（星期三）15:00'),
+    (e.wednesday, '2025 年 12 月 2 日（星期三）15:00'),
+    (e.wednesday, '星期三15:00'),
+    (e.current_time, '2026-11-23(周一)上午 1:51'),
+    (e.tomorrow_9, '2026 年 11 月 24 日晚上 9:00'),
+    (e.tomorrow_9, '2026 年 11 月 25 日上午 9:00'),
+    (e.tomorrow_9, '上午 9:00'),
+])
+def test_incorrect_time_replies_still_fail(check, reply):
+    w = e.Window(reply, datetime(2026, 11, 23, 13, 51, tzinfo=ZoneInfo('UTC')), '')
+    assert check(w) is not None
+
+
 def test_explicit_month_rolls_year_but_explicit_year_does_not():
     today = date(2026, 12, 28)
     assert e.dates_in('1月3日', today) == {date(2027, 1, 3)}
     assert e.dates_in('2026年1月3日', today) == {date(2026, 1, 3)}
     assert e.dates_in('12月29号', today) == {date(2026, 12, 29)}
-    assert e.dates_in('3号', today) == {date(2027, 1, 3)}
+    assert e.dates_in('3号', today) == set()
     assert e.dates_in('2月30日', today) == set()
 
 

@@ -120,7 +120,7 @@ from typing import Any, TypeVar
 
 from . import planner_budget
 from ..acceptance_checks import Check, parse_checks
-from .. import acceptance_decisions
+from .. import acceptance_decisions, acceptance_result
 from ..project_execution import AcceptanceChecksMode
 from ..bus import MessageBus
 from ..supervisor import cancel_and_wait
@@ -5790,6 +5790,9 @@ class PlannerAgent:
         if judgments:
             summary += "\n\n## Review adjudications\n" + "\n".join(f"- {e.step}: {e.summary}" for e in judgments)
         summary += await self._advisor_summary()
+        evidence = await acceptance_result.for_plan(self, plan)
+        if evidence is not None:
+            summary += "\n\n" + evidence.section
         process = await self._process_record(plan)
         if process is not None:
             summary += "\n\n" + workflows.process_record_summary(process)
@@ -5804,6 +5807,7 @@ class PlannerAgent:
                 "status": "completed",
                 "progress": plan.progress_summary(),
                 "summary": summary,
+                **({"acceptance": evidence.payload()} if evidence else {}),
                 **({"process_record": process, "delivery_summary": workflows.process_record_summary(process)}
                    if process is not None else {}),
             },
@@ -5972,6 +5976,9 @@ class PlannerAgent:
                                ((s.label, s.status, s.result) for s in plan.steps),
                                process=workflows.process_record_summary(process) if process is not None else "")
         summary += await self._advisor_summary()
+        evidence = await acceptance_result.for_plan(self, plan)
+        if evidence is not None:
+            summary += "\n\n" + evidence.section
 
         await self._bus.publish(MessageEnvelope.create(
             source=self.agent_address,
@@ -5984,6 +5991,7 @@ class PlannerAgent:
                 "status": "failed",
                 "progress": plan.progress_summary(),
                 "summary": summary,
+                **({"acceptance": evidence.payload()} if evidence else {}),
                 "fail_kind": fail_kind.value if fail_kind else None,
                 "outcome_failure_kind": (attempts.TaskFailure.STEPS_FAILED if plan.has_failed else
                                          attempts.TaskFailure.PLANNER_FAILED).value,

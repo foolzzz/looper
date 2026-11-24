@@ -495,6 +495,127 @@ async def alert_sender_delete(app_id: str, *, source_id: str | None = None, db: 
     return {"senders": (await alert_senders_list(source_id=sid, db=db))["senders"]}
 
 
+class GroupReadNeedsDelivery(IntentRefused):
+    def __init__(self) -> None:
+        super().__init__("turn on the delivery layer (delivery.enabled) first: followed-group intents are capped "
+                         "and digested by it", code="conflict")
+
+
+async def _followable(db: Any, sid: str, chat_id: str) -> dict:
+    if not isinstance(chat_id, str) or not chat_id.strip():
+        raise ValueError("chat_id is required")
+    row = await db.fetchrow("SELECT chat_id,name,kind,inclusion,extraction FROM source_chats "
+                            "WHERE source_id=$1 AND chat_id=$2", sid, chat_id)
+    if row is None:
+        raise ValueError("unknown source chat")
+    if row["kind"] not in ("group", "topic"):
+        raise ValueError("only a group or topic chat: a direct chat is read in full already, and a chat of unknown "
+                         "kind must be recognized first")
+    if row["inclusion"] != "included" or row["extraction"] != "included":
+        raise ValueError("the chat is excluded from the message stream or from extraction; include it first")
+    return {"chat_id": row["chat_id"], "name": strip_mentions(row["name"]), "kind": row["kind"]}
+
+
+async def group_reads_list(*, source_id: str | None = None, db: Any = None, now: datetime | None = None) -> dict:
+    from . import chat_settings, cron, extraction
+
+    db = _db(db)
+    sid = await _source_id(source_id, db)
+    now = now or _now()
+    day = now.astimezone(cron.zone(cron.local_zone_name())).date()
+    rows = await db.fetch(
+        "SELECT g.chat_id,c.name,c.kind,g.added_at,g.read_from, "
+        "c.inclusion='included' AND c.extraction='included' AS readable, "
+        "COALESCE(d.read,0) AS read_today, COALESCE(d.skipped,0) AS skipped_today, "
+        "(SELECT count(*) FROM source_events e WHERE e.source_id=g.source_id AND e.chat_id=g.chat_id "
+        "AND e.sender_kind='user' AND e.origin='live' AND e.sent_at >= $3) AS messages_24h, "
+        "(SELECT count(*) FROM intents i WHERE i.source_id=g.source_id AND i.chat_id=g.chat_id "
+        "AND i.created_at >= $4) AS intents_7d "
+        "FROM intent_group_reads g JOIN source_chats c ON c.source_id=g.source_id AND c.chat_id=g.chat_id "
+        "LEFT JOIN intent_group_read_days d ON d.source_id=g.source_id AND d.chat_id=g.chat_id AND d.day=$2 "
+        "WHERE g.source_id=$1 ORDER BY g.added_at,g.chat_id", sid, day,
+        now - timedelta(hours=24), now - timedelta(days=7))
+    return {"enabled": await leads_model.group_read_enabled(db), "delivery_enabled": chat_settings.delivery_enabled(),
+            "run_max": extraction.GROUP_READ_RUN_MAX, "day_max": extraction.GROUP_READ_DAY_MAX,
+            "max_groups": extraction.GROUP_READ_MAX_GROUPS,
+            "groups": [{**dict(row), "name": strip_mentions(row["name"]), "added_at": _iso(row["added_at"]),
+                        "read_from": _iso(row["read_from"])} for row in rows]}
+
+
+async def group_read_preview(chat_id: str, *, source_id: str | None = None, db: Any = None,
+                             now: datetime | None = None) -> dict:
+    from . import extraction
+
+    db = _db(db)
+    sid = await _source_id(source_id, db)
+    group = await _followable(db, sid, chat_id)
+    n = await db.fetchval("SELECT count(*) FROM source_events WHERE source_id=$1 AND chat_id=$2 "
+                          "AND sender_kind='user' AND origin='live' AND sent_at >= $3", sid, chat_id,
+                          (now or _now()) - timedelta(hours=24))
+    low, high = extraction.estimate(min(n, extraction.GROUP_READ_DAY_MAX), min(n, 144))
+    return {"group": {**group, "messages_24h": n, "estimate_usd": [round(low, 4), round(high, 4)]}}
+
+
+async def group_read_put(chat_id: str, *, source_id: str | None = None, db: Any = None,
+                         now: datetime | None = None) -> dict:
+    from . import extraction
+
+    db = _db(db)
+    sid = await _source_id(source_id, db)
+    async with db.acquire() as conn, conn.transaction():
+        # Serialize additions per source so simultaneous requests cannot exceed the group's cap.
+        await conn.fetchval("SELECT id FROM event_sources WHERE id=$1 FOR UPDATE", sid)
+        await _followable(conn, sid, chat_id)
+        exists = await conn.fetchval("SELECT EXISTS(SELECT 1 FROM intent_group_reads WHERE source_id=$1 AND chat_id=$2)",
+                                     sid, chat_id)
+        if not exists and await conn.fetchval("SELECT count(*) FROM intent_group_reads WHERE source_id=$1", sid) \
+                >= extraction.GROUP_READ_MAX_GROUPS:
+            raise ValueError(f"at most {extraction.GROUP_READ_MAX_GROUPS} followed groups per source")
+        added = await conn.fetchval("INSERT INTO intent_group_reads(source_id,chat_id,added_at,read_from) "
+                                    "VALUES($1,$2,$3,$3) ON CONFLICT DO NOTHING RETURNING added_at",
+                                    sid, chat_id, now or _now())
+    if added:
+        logger.info("intent group read added: source=%s chat=%s read_from=%s", sid, chat_id, added.isoformat())
+    return await group_reads_list(source_id=sid, db=db, now=now)
+
+
+async def group_read_delete(chat_id: str, *, source_id: str | None = None, db: Any = None,
+                            now: datetime | None = None) -> dict:
+    db = _db(db)
+    sid = await _source_id(source_id, db)
+    deleted = await db.fetchval("DELETE FROM intent_group_reads WHERE source_id=$1 AND chat_id=$2 RETURNING read_from",
+                                sid, chat_id)
+    if deleted:
+        logger.info("intent group read revoked: source=%s chat=%s read_from=%s", sid, chat_id, deleted.isoformat())
+    return await group_reads_list(source_id=sid, db=db, now=now)
+
+
+async def group_read_settings_put(enabled: bool, *, source_id: str | None = None, db: Any = None) -> dict:
+    from . import chat_settings
+
+    if not isinstance(enabled, bool):
+        raise ValueError("enabled must be boolean")
+    if enabled and not chat_settings.delivery_enabled():
+        raise GroupReadNeedsDelivery()
+    db = _db(db)
+    sid = await _source_id(source_id, db)
+    key = leads_model.INTENTS_GROUP_READ_KEY
+    async with db.acquire() as conn, conn.transaction():
+        # Give the default-off setting a lockable row before checking for an off-to-on transition.
+        await conn.execute("INSERT INTO system_settings(key,value) VALUES($1,'false') ON CONFLICT DO NOTHING", key)
+        old = await conn.fetchval("SELECT value FROM system_settings WHERE key=$1 FOR UPDATE", key)
+        await conn.execute("INSERT INTO system_settings(key,value) VALUES($1,$2) "
+                           "ON CONFLICT(key) DO UPDATE SET value=EXCLUDED.value,updated_at=now()", key,
+                           str(enabled).lower())
+        # Match storage's chat order: closing waits for existing group writes to commit first.
+        await conn.fetch("SELECT source_id,chat_id FROM intent_group_reads ORDER BY source_id,chat_id FOR UPDATE")
+        if enabled and old != "true":
+            # A concurrent addition may be newer than this transaction's now().
+            await conn.execute("UPDATE intent_group_reads SET read_from=GREATEST(added_at,now())")
+    logger.info("intent group read setting: source=%s enabled=%s", sid, enabled)
+    return await group_reads_list(source_id=sid, db=db)
+
+
 async def stats(days: int = 30, *, now: datetime | None = None, db: Any = None) -> dict:
     if not isinstance(days, int) or isinstance(days, bool) or not 1 <= days <= 365:
         raise ValueError("days must be between 1 and 365")

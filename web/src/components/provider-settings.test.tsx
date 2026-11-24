@@ -50,6 +50,7 @@ let registryReads: number;
 beforeEach(() => {
   data = registry(); bodies = []; failure = ""; warnings = []; requests = []; registryReads = 0;
   vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+    if (String(input) === "/api/v1/admission_settings/get") return Response.json({ status: "ok", result: { enabled: false } });
     if (String(input) === "/api/v1/registry/view") {
       registryReads++;
       return Response.json({ status: "ok", result: data });
@@ -472,7 +473,7 @@ it("keeps a pending v1 write visible as an error without refreshing or confirmin
   expect(container.querySelector('[role="alert"]')?.textContent).toContain("active references");
   expect(container.querySelector("form")).not.toBeNull();
   expect(registryReads).toBe(1);
-  expect(fetch).toHaveBeenCalledTimes(2);
+  expect(fetch).toHaveBeenCalledTimes(3);
 });
 
 it("uses the normalized registry contract throughout", () => {
@@ -546,7 +547,7 @@ it("disables with confirmation, preserves selections and displays effects until 
   await render(false); await click("Enable provider Saved account");
   expect(confirmed).toHaveBeenCalledWith('Disable provider "Saved account"? 4 Agent Profile(s) use it. They keep their selections, but their runs will not start until you enable it again.');
   expect(requests).toEqual([{ path: "/api/v1/provider_accounts/set_enabled", body: { provider_id: "account-1", enabled: false } }]);
-  expect(container.querySelector('[role="switch"]')!.getAttribute("aria-checked")).toBe("false");
+  expect(container.querySelector('[role="switch"][aria-label="Enable provider Saved account"]')!.getAttribute("aria-checked")).toBe("false");
   expect(container.textContent).toContain("Disabled: its Agent Profiles do not run");
   expect([...container.querySelectorAll("span")].some((item) => item.textContent === "Disabled")).toBe(true);
   expect(container.querySelector('[role="status"]')!.textContent).toContain("Disabled, with these effects:");
@@ -562,7 +563,7 @@ it("does not disable when the confirmation is cancelled", async () => {
   data.providers = [account()]; vi.stubGlobal("confirm", vi.fn(() => false));
   await render(false); await click("Enable provider Saved account");
   expect(requests).toEqual([]);
-  expect(container.querySelector('[role="switch"]')!.getAttribute("aria-checked")).toBe("true");
+  expect(container.querySelector('[role="switch"][aria-label="Enable provider Saved account"]')!.getAttribute("aria-checked")).toBe("true");
 });
 
 it("toggles a built-in provider without profiles without confirmation", async () => {
@@ -577,7 +578,7 @@ it("toggles a built-in provider without profiles without confirmation", async ()
 it("keeps the provider enabled and shows a failed transition's error", async () => {
   data.providers = [account({ profile_count: 0 })]; failure = "provider update failed";
   await render(false); await click("Enable provider Saved account");
-  expect(container.querySelector('[role="switch"]')!.getAttribute("aria-checked")).toBe("true");
+  expect(container.querySelector('[role="switch"][aria-label="Enable provider Saved account"]')!.getAttribute("aria-checked")).toBe("true");
   expect(container.querySelector('[role="alert"]')!.textContent).toBe(failure);
   expect(container.querySelector('[role="status"]')).toBeNull();
 });
@@ -595,7 +596,7 @@ it("offers on-demand model fetching only for API-key providers", async () => {
 
 it("reads quota only when the provider's quota block is expanded", async () => {
   data.providers = [account()]; await render(false);
-  expect(fetch).toHaveBeenCalledTimes(1);
+  expect(fetch).toHaveBeenCalledTimes(2);
   vi.mocked(fetch).mockResolvedValueOnce(Response.json({ status: "ok", result: { enabled: false, providers: [] } }));
   await click("Quota for provider Saved account");
   expect(fetch).toHaveBeenLastCalledWith("/api/v1/providers/limits", expect.objectContaining({

@@ -1,0 +1,13 @@
+❌ 任务失败 · 生成示例交付并记录验收证据
+## Why it ended
+the step cannot be done
+## Process record
+
+- Roles: planner → claude-code/fake; worker → claude-code/fake
+- Reviews: 未记录
+- Verification: 未记录
+- Escalations: 未记录
+
+Full record: task page / looper_tasks get
+Checks: 1 failed
+[https://dashboard.example.invalid/#tasks/task-e95137abdb4d](https://dashboard.example.invalid/#tasks/task-e95137abdb4d)

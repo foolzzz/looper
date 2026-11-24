@@ -34,6 +34,7 @@ def config(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> vault.VaultConfig
     git(root, "init")
     git(root, "config", "user.name", "Vault Tester")
     git(root, "config", "user.email", "vault@example.test")
+    git(root, "config", "core.hooksPath", str(root / ".git/hooks"))
     (root / "codex-mem/AGENTS.md").write_text("Keep one topic per note.")
     git(root, "add", "--", "codex-mem/AGENTS.md")
     git(root, "-c", "commit.gpgsign=false", "commit", "-qm", "initial rules")
@@ -884,3 +885,20 @@ def test_search_finds_a_note_that_lacks_some_of_the_words(config: vault.VaultCon
     result = asyncio.run(vault.search(config, "calc staging server port"))
     assert [r["path"] for r in result["results"]] == ["codex-mem/projects/calc.md", "mine/other.md"]
     assert result["results"][0]["words"] == 3
+
+
+def test_search_under_excludes_other_folders_and_their_scan_budget(config: vault.VaultConfig) -> None:
+    (config.path / "codex-mem/one.md").write_text("needle")
+    (config.path / "mine/two.md").write_text("needle")
+    baseline = asyncio.run(vault.search(config, "needle"))
+    assert baseline["matches"] == 2
+    result = asyncio.run(vault.search(config, "needle", under=["codex-mem"]))
+    assert [row["path"] for row in result["results"]] == ["codex-mem/one.md"]
+    assert result["scanned"] < baseline["scanned"]
+    assert asyncio.run(vault.search(config, "needle", under=[]))["scanned"] == 0
+
+
+@pytest.mark.parametrize("under", [["../mine"], ["/mine"], [".git"], "mine", [1]])
+def test_search_under_refuses_invalid_boundaries(config: vault.VaultConfig, under) -> None:
+    with pytest.raises(OpError):
+        asyncio.run(vault.search(config, "needle", under=under))

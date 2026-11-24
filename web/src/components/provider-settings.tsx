@@ -18,6 +18,7 @@ import { useSettingsTarget } from "@/lib/settings-target";
 import { ProviderModelPicker } from "@/components/provider-model-picker";
 import { ModelsSection } from "@/components/model-settings";
 import { ProviderQuota } from "@/components/provider-quota";
+import { AdmissionSettings, ProviderAdmission } from "@/components/provider-admission";
 
 const usedBy = (count: number) =>
   count === 0 ? `no ${AGENT_PROFILE.plural}` : `used by ${count} ${count === 1 ? AGENT_PROFILE.name : AGENT_PROFILE.plural}`;
@@ -337,7 +338,7 @@ function LoginLine({ provider, label }: { provider: Provider; label: string }) {
   );
 }
 
-function ProviderRow({ provider, registry }: { provider: Provider; registry: Registry }) {
+function ProviderRow({ provider, registry, admissionEnabled }: { provider: Provider; registry: Registry; admissionEnabled: boolean }) {
   const [editing, setEditing] = useState(false);
   const [expanded, setExpanded] = useState(false);
   const [quota, setQuota] = useState(false);
@@ -414,6 +415,7 @@ function ProviderRow({ provider, registry }: { provider: Provider; registry: Reg
     >
       <p className="break-words text-xs text-muted-foreground">{details.join(" · ")}</p>
       {provider.login && <LoginLine provider={provider} label={oauthLabel ?? "runtime"} />}
+      <ProviderAdmission providerId={provider.provider_id} enabled={admissionEnabled} />
     </Row>
   );
 }
@@ -424,6 +426,7 @@ function ProviderRow({ provider, registry }: { provider: Provider; registry: Reg
  */
 export function ProvidersSection({ adding = false }: { adding?: boolean }) {
   const { registry, error } = useRegistry();
+  const [admissionEnabled, setAdmissionEnabled] = useState(false);
   if (!registry) {
     return error ? (
       <div role="alert" className="rounded-lg border border-destructive/50 bg-destructive/10 px-5 py-4 text-sm text-destructive">{error}</div>
@@ -434,6 +437,8 @@ export function ProvidersSection({ adding = false }: { adding?: boolean }) {
     );
   }
   return (
+    <>
+    <AdmissionSettings onEnabled={setAdmissionEnabled} />
     <RegistryList
       title="Providers"
       hint="Where the model runs and how Looper signs in to it."
@@ -442,8 +447,9 @@ export function ProvidersSection({ adding = false }: { adding?: boolean }) {
       form={(close) => <ProviderForm provider={null} registry={registry} onDone={close} />}
     >
       {registry.providers.map((provider) => (
-        <ProviderRow key={provider.provider_id} provider={provider} registry={registry} />
+        <ProviderRow key={provider.provider_id} provider={provider} registry={registry} admissionEnabled={admissionEnabled} />
       ))}
     </RegistryList>
+    </>
   );
 }

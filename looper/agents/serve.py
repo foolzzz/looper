@@ -52,7 +52,7 @@ from .channels.registry import ChannelRegistry
 from .channels.chat_routing import ChatResolver, ChatStop
 from .channels.telegram import TelegramChannelAdapter
 from .channels.web import WebChannelAdapter
-from . import db_backup, keeper, self_check
+from . import admission, db_backup, keeper, self_check
 from .kept_run import KeeperSettings
 from .gate_courier import GateCourier
 from .gate_service import GateReminders
@@ -62,6 +62,7 @@ from .ledger_reconciler import LedgerReconciler
 from .source_service import SourceService, own_bot_app_ids
 from .intent_push import IntentPushService
 from .memory_write import MemoryWriteService
+from .memory_draft_service import MemoryDraftService
 from .memory_push import MemoryPushService
 from .reminders import ReminderService
 from .idle_checks import IdleCheckService, PostFn
@@ -74,6 +75,7 @@ from .scheduler import Scheduler
 from .message import MessageType
 from .runtimes.runner.supervisor import RunnerSupervisor
 from .supervisor import AgentSupervisor
+from .tiers import triage_background
 from .tiers.manager import ManagerConfig
 from .tiers.task import TaskRouter
 from .tiers.worker import WorkerConfig, WorkerPool
@@ -378,6 +380,7 @@ async def seed_role_configs(pool: Any = None) -> None:
     from .leads_check import CHECK_TIMEOUT_SEC, LEADS_CHECK_ROLE_PROMPT
     from .explorer import EXPLORER_MAX_TURNS, EXPLORER_ROLE_PROMPT, EXPLORER_TIMEOUT_SEC
     from .outbound import OUTBOUND_ROLE_PROMPT, REVIEW_TIMEOUT_SEC as OUTBOUND_TIMEOUT_SEC
+    from .memory_draft_role import ROLE_PROMPT as MEMORY_DRAFT_ROLE_PROMPT, TIMEOUT_SEC as MEMORY_DRAFT_TIMEOUT_SEC
     from .processor import PROCESSOR_ROLE_PROMPT, PROCESSOR_TIMEOUT_SEC
     from .tiers.manager import DEFAULT_SYSTEM_PROMPT
     from .tiers.planner import DEFAULT_SYSTEM_PROMPT as PLANNER_SYSTEM_PROMPT
@@ -437,6 +440,13 @@ async def seed_role_configs(pool: Any = None) -> None:
             "timeout_seconds": CHECK_TIMEOUT_SEC,  # at most, per check
             # Its instructions and reply contract follow it.
             "system_prompt": LEADS_CHECK_ROLE_PROMPT,
+        },
+        {
+            "role": "memory_draft",
+            "display_name": "Memory draft",
+            "timeout_seconds": MEMORY_DRAFT_TIMEOUT_SEC,
+            "max_turns": 1,
+            "system_prompt": MEMORY_DRAFT_ROLE_PROMPT,
         },
         {
             "role": "explorer",
@@ -723,6 +733,11 @@ async def _run_agent_system_owned(
 ) -> None:
     """Start the full agent system with the ops settings ``ops`` and run until interrupted."""
 
+    from . import lanes_settings, session_routing
+
+    previous_lanes = lanes_settings.enabled()
+    previous_routing = session_routing.routing_enabled()
+    previous_max_resident = session_routing.max_resident()
     loop_watch = LoopWatch()
     loop_watch.start()  # Observe synchronous startup work before the first await.
     try:
@@ -731,6 +746,10 @@ async def _run_agent_system_owned(
                                         runner_supervisors=runner_supervisors, ownership=ownership,
                                         exit_now=exit_now, loop_watch=loop_watch)
     finally:
+        # Startup loads process-wide routing settings; keep later serves independent, even after a failed start.
+        lanes_settings.set_enabled(previous_lanes)
+        session_routing.set_routing_enabled(previous_routing)
+        session_routing.set_max_resident(previous_max_resident)
         await loop_watch.stop()
 
 
@@ -773,6 +792,7 @@ async def _run_agent_system_watched(
     http_server: AgentHTTPServer | None = None
     control = None
     memory_writer: MemoryWriteService | None = None
+    memory_drafter: MemoryDraftService | None = None
     memory_push_service: MemoryPushService | None = None
     mode = ShutdownMode.END_RUNS
     if ops.keeper_mode is KeeperMode.ON:
@@ -810,6 +830,7 @@ async def _run_agent_system_watched(
                 await chat_settings.load()
                 from . import lanes_settings
                 await lanes_settings.load()
+                await admission.initialize()
                 await persona.load()
                 from .channels import down_alert_settings
                 await down_alert_settings.load()
@@ -959,6 +980,8 @@ async def _run_agent_system_watched(
             # It fires the schedules once the agents and the HTTP server are up, and hears from the TaskRouter when a
             # task ends, to record a scheduled run's outcome.
             drain = DrainState()  # A new control plane always starts serving; drain is never stored.
+            admission.configure_drain(lambda: drain.draining)
+            drain.add_waker(lambda: asyncio.create_task(admission.wake()))
             scheduler = Scheduler(bus=bus, sender=registry.notify, dashboard_url=dashboard_url,
                                   runtime_root=runtime_root, drain=drain, poster=registry.post,
                                   claude_bin=claude_bin, own_apps=own_bot_app_ids,
@@ -970,6 +993,8 @@ async def _run_agent_system_watched(
             # The advisor's alerts go to the operator's chat through the same channels.
             from . import advisor_alerts, outbound_hook, usage_windows
             advisor_alerts.configure(registry.notify)
+            from . import admission_notices
+            admission_notices.configure(registry.notify)
             # So does the daily note that skill proposals wait for the operator (names and reasons, never content).
             from . import skill_proposal_notice
             skill_proposal_notice.configure(registry.notify, dashboard_url=dashboard_url)
@@ -990,7 +1015,8 @@ async def _run_agent_system_watched(
             intent_push_service = IntentPushService(registry, drain=drain)
             memory_writer = MemoryWriteService(runtime_root=runtime_root, drain=drain)
             memory_push_service = MemoryPushService(registry, drain=drain, dashboard_url=dashboard_url)
-            drain.add_source(lambda: {"starting": memory_writer.drain_waiting()})
+            memory_drafter = MemoryDraftService(runtime_root, drain=drain, claude_bin=claude_bin, sender=registry.notify)
+            drain.add_source(lambda: {"starting": memory_writer.drain_waiting() + memory_drafter.drain_waiting()})
             reminder_service = ReminderService(registry, drain=drain)
             ledger_reconciler = LedgerReconciler()
             supervisor.register(task_router)
@@ -1118,6 +1144,7 @@ async def _run_agent_system_watched(
                 loop_watch=loop_watch,
             )
             http_server._memory_writer = memory_writer
+            http_server._memory_drafter = memory_drafter
         fence.http_server = http_server
         with startup.measure("http"):
             await http_server.start()
@@ -1159,8 +1186,10 @@ async def _run_agent_system_watched(
         await source_service.start()
         await intent_push_service.start()
         await memory_writer.start()
+        await memory_drafter.start(dsn)
         await memory_push_service.start()
         await reminder_service.start()  # idle while reminders are off
+        triage_background.configure(registry.post)
         await idle_check_service.start()
         await morning_brief_service.start()  # idle while the morning brief is off
         await metrics_alert_service.start()
@@ -1234,6 +1263,7 @@ async def _run_agent_system_watched(
             await completion_service.stop()
             await source_service.stop()
             await intent_push_service.stop()
+            await memory_drafter.stop()
             await memory_push_service.stop()
             await memory_writer.stop()
             await reminder_service.stop()
@@ -1248,6 +1278,7 @@ async def _run_agent_system_watched(
             await supervisor.stop_all()
             for runner_supervisor in runner_supervisors:
                 await runner_supervisor.stop()
+            await admission.stop()
             await registry.stop_all()
             await bus.shutdown()
             if control is not None:
@@ -1275,6 +1306,8 @@ async def _run_agent_system_watched(
             with contextlib.suppress(asyncio.CancelledError):
                 await advisory_checks
         try:
+            if memory_drafter is not None:
+                await memory_drafter.stop()
             if memory_push_service is not None:
                 await memory_push_service.stop()
             if memory_writer is not None:
@@ -1299,6 +1332,8 @@ def _pending_advisory_checks() -> list[list[self_check.Check]]:
         (("lark_cli", "Lark channel"),), (("git", "git"),), (("projects_root", "Projects root"),),
         (("provider_limits", "Provider quotas"),),
     )
+    if admission.enabled():
+        groups += ((("admission", "Account admission"),),)
     return [[self_check.Check(id, label, self_check.PENDING, "Startup check in progress") for id, label in group]
             for group in groups]
 
@@ -1333,6 +1368,9 @@ async def _advisory_startup_checks(snapshot: list[dict[str, str]], database: sel
             asyncio.to_thread(self_check.check_projects_root, projects_root),
             self_check.provider_limit_checks(),
         )
+        # Keep the disabled path's checks unchanged; every enabled probe needs its own slots.
+        if admission.enabled():
+            probes += (self_check.admission_checks(),)
         await asyncio.gather(*(record(index, probe) for index, probe in enumerate(probes)))
         self_check.log_problems([database, *(check for group in groups for check in group)])
     except Exception:
