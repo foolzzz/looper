@@ -15,6 +15,8 @@ async def _never(call):  # pragma: no cover - never called
 
 def test_each_operator_only_tool_says_what_it_is_refused_for_in_its_own_words():
     assert {name: tool.refusal for name, tool in _OPERATOR_TOOLS.items()} == {
+        "looper_intents_recognize": "intents are recognized on request only in the user's own direct chat or on "
+                                   "the dashboard",
         "looper_leads_search": "message leads are searched only in the user's own direct chat or on the dashboard",
         "looper_vault_search": "the user's knowledge vault is searched and read only in their own direct chat or on "
                                "the dashboard",

@@ -11,6 +11,7 @@ from looper.agents.ops.clients import CLIENT_TOOLS
 from looper.agents.ops.ledger import TOOLS as LEDGER_TOOLS
 from looper.agents.ops.reminders import TOOLS as REMINDER_TOOLS
 from looper.agents.ops.skill_proposals import TOOL as SKILL_PROPOSE
+from looper.agents.ops.memory_propose import TOOL as MEMORY_PROPOSE
 from looper.agents.ops.service import CONFIRM_TOOL, MANAGER_TOOLS
 
 
@@ -25,6 +26,7 @@ SUCCESS_RESULT_KEYS = {
     ("looper_catalog", "install"): {"install", "item", "note"},
     ("looper_catalog", "update"): {"install", "item"},
     ("looper_schedules", "create"): {"schedule", "enabled", "shown_to_user"},
+    ("looper_memory_propose", None): {"candidate", "state", "shown_to_user"},
     ("looper_ledger_add", None): {"item", "shown_to_user"},
     ("looper_reminder_create", None): {"reminder", "shown_to_user"},
     ("looper_reminder_cancel", None): {"reminder", "shown_to_user"},
@@ -34,7 +36,7 @@ SUBJECTLESS_ACTIONS = {("looper_settings", action) for action in
 
 
 def test_every_write_action_has_exactly_one_kind_and_reads_have_none():
-    tools = {tool.name: tool for tool in (*MANAGER_TOOLS, *CLIENT_TOOLS, *LEDGER_TOOLS, *REMINDER_TOOLS, SKILL_PROPOSE)}
+    tools = {tool.name: tool for tool in (*MANAGER_TOOLS, *CLIENT_TOOLS, *LEDGER_TOOLS, *REMINDER_TOOLS, SKILL_PROPOSE, MEMORY_PROPOSE)}
     expected = set()
     for name, tool in tools.items():
         # Confirmation executes the original tool, whose category describes the effect.
@@ -83,6 +85,7 @@ def test_invalid_subject_is_rejected(monkeypatch, name, action, subject):
 # Independent of completeness: the semantic choices in RFC section 6.3, including its exceptions.
 @pytest.mark.parametrize("tool,groups", [
     ("looper_task_create", {"create": [None]}),
+    ("looper_memory_propose", {"create": [None]}),
     ("looper_skill_propose", {"create": ["create", "update"]}),
     ("looper_task_control", {"control": ["start", "stop", "restart", "start_over", "cancel"]}),
     ("looper_task_instruct", {"relay": [None]}),

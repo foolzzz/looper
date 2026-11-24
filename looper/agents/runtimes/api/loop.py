@@ -423,4 +423,7 @@ def loop_for(protocol: ApiProtocol) -> AgentLoop:
     if protocol == ApiProtocol.OPENAI_RESPONSES:
         from .responses import ResponsesCodec
         return NormaAgentLoop(ResponsesCodec())
+    if protocol == ApiProtocol.ANTHROPIC_MESSAGES:
+        from .messages import MessagesCodec
+        return NormaAgentLoop(MessagesCodec())
     raise RuntimeUnsupported(f'no API codec implemented for {protocol.value}')

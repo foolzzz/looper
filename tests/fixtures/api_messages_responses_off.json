@@ -1,0 +1,618 @@
+{
+  "normalization": "Only ephemeral root paths and elapsed/first-token milliseconds are normalized. Every surface is compared separately.",
+  "source_commit": "5f03d2929d14d21c6cc69ec053e0230370829f44",
+  "surfaces": {
+    "cancel": {
+      "events": [],
+      "history": [],
+      "outcome": "cancelled",
+      "request": {
+        "include": [
+          "reasoning.encrypted_content"
+        ],
+        "input": [
+          {
+            "content": "input",
+            "role": "user"
+          }
+        ],
+        "instructions": "system",
+        "max_output_tokens": 16000,
+        "model": "test-model",
+        "parallel_tool_calls": false,
+        "prompt_cache_key": "session",
+        "store": false,
+        "stream": true,
+        "tools": [
+          {
+            "description": "verbatim description",
+            "name": "lookup",
+            "parameters": {
+              "properties": {
+                "optional": {
+                  "type": "string"
+                }
+              },
+              "type": "object"
+            },
+            "strict": false,
+            "type": "function"
+          }
+        ]
+      },
+      "tool_calls": [],
+      "usage": {
+        "cache_read_tokens": null,
+        "cache_write_tokens": null,
+        "complete": false,
+        "input_tokens": null,
+        "output_tokens": null
+      }
+    },
+    "cli_launch_args": {
+      "claude-code": [
+        "--dangerously-skip-permissions",
+        "--disallowedTools",
+        "ListAgents,SendMessage",
+        "--model",
+        "test-model[1m]",
+        "--effort",
+        "high"
+      ],
+      "codex": [
+        "--json",
+        "--skip-git-repo-check",
+        "--dangerously-bypass-approvals-and-sandbox",
+        "-m",
+        "test-model[1m]",
+        "-c",
+        "model_reasoning_effort=\"high\""
+      ],
+      "dsh": [
+        "--profile",
+        "headless"
+      ],
+      "grok": [
+        "--prompt-file",
+        "/dev/stdin",
+        "--output-format",
+        "streaming-messages-json",
+        "--always-approve",
+        "--trust",
+        "--no-auto-update",
+        "-m",
+        "test-model[1m]",
+        "--effort",
+        "high"
+      ],
+      "omp": [
+        "-p",
+        "--mode",
+        "json",
+        "--no-title",
+        "--model",
+        "looper/test-model[1m]",
+        "--thinking",
+        "high"
+      ],
+      "pi": [
+        "-p",
+        "--mode",
+        "json",
+        "--offline",
+        "--no-approve",
+        "--no-context-files",
+        "--no-extensions",
+        "--no-mcp",
+        "--no-skills",
+        "--no-prompt-templates",
+        "--no-themes",
+        "-e",
+        "<repository>/looper/agents/runtimes/pi_extension/looper.ts",
+        "--provider",
+        "looper",
+        "--model",
+        "test-model[1m]",
+        "--thinking",
+        "high"
+      ]
+    },
+    "cli_launch_builders": {
+      "acp.environment": "673fadd8bd7d21b539bd1ec0e910befdacd212810614bbb7b84044dc5eacfd7b",
+      "acp.launch_args": "d96b262b7c312dc6fb087a559fe959b83e0913fe00c8b7093e111835ddbfe8f1",
+      "acp.resident_command": "bdf062446b08b3e9d925d8c1fd9cf44643c18a232d306cb54739779bf81d8bc7",
+      "acp.resume_args": "aad9512e4c8e7368434239c08fb28e41dcd5fd32eb84cb616f1f26f73974a2a7",
+      "acp.run_command": "d45df568fb87858e87bdff22fefa9ff30ebbdbfe5fbf65c0c6b8938036390bb3",
+      "claude-code.environment": "40b4ffbdfbe7d7104a94c5cac505327755b70f0af073571b0c4e1341b27f1178",
+      "claude-code.launch_args": "2368e0b53161431ae61040d6c510dbcb2263f550e22fe73de2c942bcba18f2c1",
+      "claude-code.resident_command": "6258fab4fe830ee045c8de04aa3761232537a1c5ade5232495919d074e7bd99e",
+      "claude-code.resume_args": "a6c03b0491ddf45850cac2183b3b76ee395601822b48e562d074459cb33cde5f",
+      "claude-code.run_command": "be152266bca7bfcd51660c314e6bebf5f1244565b1d1a26b549f58706cc2dac5",
+      "coco.environment": "a1b0b4cca8793d3e474124bbc796c2d7691c4c3c23bf3b87fd506948658691e1",
+      "coco.launch_args": "dcbac75181fa94097928d2e8f045a6dca5b4e1ba85984de7c174681792ca3439",
+      "coco.resident_command": "72813afb259e36d018eb9cdf5e8dc0c1ea6771042f485fea29e402ba32c69044",
+      "coco.resume_args": "410f4cd99cf0e78fb1f68e805d0b627a73ff8d7df5df538b08ccdf97af0b807c",
+      "coco.run_command": "c3bbed10cbf2222e3a5ae42bcff6f1e12fdec89f57f4124bd32a7cf3e1653b1a",
+      "codex.environment": "649ba3380ff7d5f5b1c452a240b9e485bf80b5fc743a9f8f75a702527b532181",
+      "codex.launch_args": "dcbac75181fa94097928d2e8f045a6dca5b4e1ba85984de7c174681792ca3439",
+      "codex.resident_command": "72813afb259e36d018eb9cdf5e8dc0c1ea6771042f485fea29e402ba32c69044",
+      "codex.resume_args": "410f4cd99cf0e78fb1f68e805d0b627a73ff8d7df5df538b08ccdf97af0b807c",
+      "codex.run_command": "c3bbed10cbf2222e3a5ae42bcff6f1e12fdec89f57f4124bd32a7cf3e1653b1a",
+      "cursor-agent.environment": "a013637accf265cb417eee89c33fbf9b7ad4ab18f982007449dc104262b65114",
+      "cursor-agent.launch_args": "34a93a90c31e4671472174058297ba6cea9c6135e6977722cbb6fac0ff6d5c74",
+      "cursor-agent.resident_command": "a392dce5a1ac75ba008e3d8836b31f3d80b8a035b17555a9325048f99c61caaa",
+      "cursor-agent.resume_args": "a6c03b0491ddf45850cac2183b3b76ee395601822b48e562d074459cb33cde5f",
+      "cursor-agent.run_command": "bbc4f80b91cc99f071c9679d8e2e0e67ef61598ea263c3f1b00e913ee39ab2ed",
+      "dsh.environment": "4845ce290b480e4c3b167ff7d00cb89fccc88189dfa40335ebf995fc5ca3795d",
+      "dsh.launch_args": "bd2455d6b9c7e087a087bcd0f6e1aca191fbc532c4778a9101d894b67ba2bfb4",
+      "dsh.resident_command": "685212533509c5ef2e542d29a5224ee93511aa211f385fd16043efbdb392d4fb",
+      "dsh.resume_args": "0fd4d7cf61ed2b81851247b88c5af085d2b8c6475d95427e26e0977cf2c660ad",
+      "dsh.run_command": "6d9d1868dae5e3e298e17866c4aaeab1dcafe2629c9ab24f70c6bada2315e437",
+      "grok.environment": "78cf85c952d01bf67dcb0814826a97fd6bb7580dda4de0600e58df5c12251cb4",
+      "grok.launch_args": "f31fac71bccb744a7fe826a68e5c56cac99a7205ae8ec1969f7e5970d74918cc",
+      "grok.resident_command": "346e2c36759b346b4576e133f3b07edaa23f2eb60ec4a4e3465b99542966b15d",
+      "grok.resume_args": "a6c03b0491ddf45850cac2183b3b76ee395601822b48e562d074459cb33cde5f",
+      "grok.run_command": "19187038f0eba82bc758349939c6f40365eb2ee99722b4470f38198f3ea99978",
+      "omp.environment": "dd5584955d55d3a1222c5979aef21bc3151aa461b0d3825adf51c3c46eb4e788",
+      "omp.launch_args": "6482913b7ca0d2851b3570139f52f39ee915cc07c517ce742623aac2cb781078",
+      "omp.resident_command": "bb481e2226c5b7d041e2071b13d7c0ec43ee869464dd6fc053bb0f1194e735e4",
+      "omp.resume_args": "a6c03b0491ddf45850cac2183b3b76ee395601822b48e562d074459cb33cde5f",
+      "omp.run_command": "e5b8a5f19ea08a19681136cafbbcb781372d1381b31a4c42c572dec56aeb02d2",
+      "pi.environment": "4326c1c07cc0212e543fe91f9fb16175a99309156fcd415fdd8391005512cff9",
+      "pi.launch_args": "18d07ff0a86c4edaaba676720bb0ced9a73cc2ceff4909d5460743960d4f252b",
+      "pi.resident_command": "47c92d6f6c145831e35f64b8b6bb9d12b915502d3285e44f0d2dda43b0b49b65",
+      "pi.resume_args": "08481b052ec8ebf0105a1ca0815e5bbbe92dcf1ade701ca4a9b062798b945cf5",
+      "pi.run_command": "63b484dd29a2249357059936eece15b6506961688057a93dc855fd659257dede"
+    },
+    "command": [
+      "looper-api",
+      "--protocol",
+      "openai-responses",
+      "--model",
+      "test-model[1m]",
+      "--base-url",
+      "https://example.invalid/v1",
+      "--effort",
+      "high",
+      "--context-window",
+      "128000",
+      "--system-prompt-file",
+      "<test-root>/.local/api/prompts/929fab9ee5d4055450606c24b03e82325ecaf062f881525efe6307390ab272ca.md"
+    ],
+    "command_prompt": "Custom instructions\n\nYou run on a model API, not inside a coding tool. Your only tools are Looper's platform tools (looper_*): you cannot read or write files, run commands, browse the web or use skills. When the user needs any of that, offer to create a task for it.\n\n---\n\nLooper instructions\n",
+    "events": [
+      {
+        "kind": "RequestDone",
+        "reasoning_summary": null,
+        "record": {
+          "duration_ms": "<duration>",
+          "first_token_ms": "<first-token>",
+          "index": 0,
+          "prompt_tokens": null,
+          "retries": 0,
+          "status": 200,
+          "upstream_id": "resp_1",
+          "usage": {
+            "cache_read_tokens": null,
+            "cache_write_tokens": null,
+            "complete": false,
+            "input_tokens": null,
+            "output_tokens": null
+          }
+        },
+        "text": "",
+        "tool_calls": [
+          {
+            "arguments": "{\"optional\":\"✓\"}",
+            "call_id": "call_1",
+            "name": "lookup"
+          }
+        ]
+      },
+      {
+        "call": {
+          "arguments": "{\"optional\":\"✓\"}",
+          "call_id": "call_1",
+          "name": "lookup"
+        },
+        "kind": "ToolDone",
+        "outcome": {
+          "is_error": true,
+          "ran": false,
+          "text": "result"
+        }
+      },
+      {
+        "kind": "TextDelta",
+        "text": "answer"
+      },
+      {
+        "kind": "RequestDone",
+        "reasoning_summary": null,
+        "record": {
+          "duration_ms": "<duration>",
+          "first_token_ms": "<first-token>",
+          "index": 1,
+          "prompt_tokens": 20,
+          "retries": 0,
+          "status": 200,
+          "upstream_id": "resp_1",
+          "usage": {
+            "cache_read_tokens": 4,
+            "cache_write_tokens": 3,
+            "complete": true,
+            "input_tokens": 13,
+            "output_tokens": 5
+          }
+        },
+        "text": "answer",
+        "tool_calls": []
+      }
+    ],
+    "history": [
+      {
+        "kind": "message",
+        "role": "assistant",
+        "text": "prior",
+        "version": 1
+      },
+      {
+        "kind": "reasoning",
+        "state": {
+          "encrypted_content": "opaque",
+          "item_id": "reason_1",
+          "model": "test-model[1m]",
+          "protocol": "openai-responses"
+        },
+        "summary": [
+          "summary"
+        ],
+        "version": 1
+      },
+      {
+        "call": {
+          "arguments": "{\"optional\":\"old\"}",
+          "call_id": "old",
+          "name": "lookup"
+        },
+        "kind": "tool_call",
+        "version": 1
+      },
+      {
+        "call_id": "old",
+        "is_error": false,
+        "kind": "tool_result",
+        "ran": true,
+        "text": "old result",
+        "version": 1
+      },
+      {
+        "kind": "message",
+        "role": "user",
+        "text": "input",
+        "version": 1
+      },
+      {
+        "call": {
+          "arguments": "{\"optional\":\"✓\"}",
+          "call_id": "call_1",
+          "name": "lookup"
+        },
+        "kind": "tool_call",
+        "version": 1
+      },
+      {
+        "call_id": "call_1",
+        "is_error": true,
+        "kind": "tool_result",
+        "ran": false,
+        "text": "result",
+        "version": 1
+      },
+      {
+        "kind": "message",
+        "role": "assistant",
+        "text": "answer",
+        "version": 1
+      }
+    ],
+    "invalid_tool_result": {
+      "is_error": true,
+      "ran": false,
+      "text": "{\"status\": \"error\", \"error\": {\"code\": \"invalid\", \"message\": \"the arguments must be a JSON object\"}}"
+    },
+    "launch_record": {
+      "api": {
+        "base_url_host": "example.invalid",
+        "protocol": "openai-responses"
+      },
+      "omitted": [],
+      "provider_env_ignored": [],
+      "settings_env_ignored": []
+    },
+    "platform_tool_boundaries": {
+      "ManagerTurnTools.call": "fd0ee63be8d5b164ab2c18fa009cccd6d5096bb4496a91a5f416c6e95246452f",
+      "ManagerTurnTools.specs": "5ad209dd8b79993bb09f84a4bbce877c0bfecbf225302477cc998c156e2b6cd3"
+    },
+    "requests": [
+      {
+        "body": {
+          "include": [
+            "reasoning.encrypted_content"
+          ],
+          "input": [
+            {
+              "content": "prior",
+              "role": "assistant"
+            },
+            {
+              "encrypted_content": "opaque",
+              "id": "reason_1",
+              "summary": [
+                {
+                  "text": "summary",
+                  "type": "summary_text"
+                }
+              ],
+              "type": "reasoning"
+            },
+            {
+              "arguments": "{\"optional\":\"old\"}",
+              "call_id": "old",
+              "name": "lookup",
+              "type": "function_call"
+            },
+            {
+              "call_id": "old",
+              "output": "old result",
+              "type": "function_call_output"
+            },
+            {
+              "content": "input",
+              "role": "user"
+            }
+          ],
+          "instructions": "system",
+          "max_output_tokens": 16000,
+          "model": "test-model[1m]",
+          "parallel_tool_calls": false,
+          "prompt_cache_key": "session",
+          "reasoning": {
+            "effort": "high"
+          },
+          "store": false,
+          "stream": true,
+          "tools": [
+            {
+              "description": "verbatim description",
+              "name": "lookup",
+              "parameters": {
+                "properties": {
+                  "optional": {
+                    "type": "string"
+                  }
+                },
+                "type": "object"
+              },
+              "strict": false,
+              "type": "function"
+            }
+          ]
+        },
+        "path": "/v1/responses"
+      },
+      {
+        "body": {
+          "include": [
+            "reasoning.encrypted_content"
+          ],
+          "input": [
+            {
+              "content": "prior",
+              "role": "assistant"
+            },
+            {
+              "encrypted_content": "opaque",
+              "id": "reason_1",
+              "summary": [
+                {
+                  "text": "summary",
+                  "type": "summary_text"
+                }
+              ],
+              "type": "reasoning"
+            },
+            {
+              "arguments": "{\"optional\":\"old\"}",
+              "call_id": "old",
+              "name": "lookup",
+              "type": "function_call"
+            },
+            {
+              "call_id": "old",
+              "output": "old result",
+              "type": "function_call_output"
+            },
+            {
+              "content": "input",
+              "role": "user"
+            },
+            {
+              "arguments": "{\"optional\":\"✓\"}",
+              "call_id": "call_1",
+              "name": "lookup",
+              "type": "function_call"
+            },
+            {
+              "call_id": "call_1",
+              "output": "result",
+              "type": "function_call_output"
+            }
+          ],
+          "instructions": "system",
+          "max_output_tokens": 16000,
+          "model": "test-model[1m]",
+          "parallel_tool_calls": false,
+          "prompt_cache_key": "session",
+          "reasoning": {
+            "effort": "high"
+          },
+          "store": false,
+          "stream": true,
+          "tools": [
+            {
+              "description": "verbatim description",
+              "name": "lookup",
+              "parameters": {
+                "properties": {
+                  "optional": {
+                    "type": "string"
+                  }
+                },
+                "type": "object"
+              },
+              "strict": false,
+              "type": "function"
+            }
+          ]
+        },
+        "path": "/v1/responses"
+      }
+    ],
+    "resume_answer": "resumed",
+    "resume_events": [
+      {
+        "kind": "TextDelta",
+        "text": "resumed"
+      },
+      {
+        "kind": "RequestDone",
+        "reasoning_summary": null,
+        "record": {
+          "duration_ms": "<duration>",
+          "first_token_ms": "<first-token>",
+          "index": 0,
+          "prompt_tokens": 20,
+          "retries": 0,
+          "status": 200,
+          "upstream_id": "resp_1",
+          "usage": {
+            "cache_read_tokens": 4,
+            "cache_write_tokens": 3,
+            "complete": true,
+            "input_tokens": 13,
+            "output_tokens": 5
+          }
+        },
+        "text": "resumed",
+        "tool_calls": []
+      }
+    ],
+    "resume_request": {
+      "include": [
+        "reasoning.encrypted_content"
+      ],
+      "input": [
+        {
+          "content": "prior",
+          "role": "assistant"
+        },
+        {
+          "encrypted_content": "opaque",
+          "id": "reason_1",
+          "summary": [
+            {
+              "text": "summary",
+              "type": "summary_text"
+            }
+          ],
+          "type": "reasoning"
+        },
+        {
+          "arguments": "{\"optional\":\"old\"}",
+          "call_id": "old",
+          "name": "lookup",
+          "type": "function_call"
+        },
+        {
+          "call_id": "old",
+          "output": "old result",
+          "type": "function_call_output"
+        },
+        {
+          "content": "input",
+          "role": "user"
+        },
+        {
+          "arguments": "{\"optional\":\"✓\"}",
+          "call_id": "call_1",
+          "name": "lookup",
+          "type": "function_call"
+        },
+        {
+          "call_id": "call_1",
+          "output": "result",
+          "type": "function_call_output"
+        },
+        {
+          "content": "answer",
+          "role": "assistant"
+        },
+        {
+          "content": "input",
+          "role": "user"
+        }
+      ],
+      "instructions": "system",
+      "max_output_tokens": 16000,
+      "model": "test-model[1m]",
+      "parallel_tool_calls": false,
+      "prompt_cache_key": "session",
+      "reasoning": {
+        "effort": "high"
+      },
+      "store": false,
+      "stream": true,
+      "tools": [
+        {
+          "description": "verbatim description",
+          "name": "lookup",
+          "parameters": {
+            "properties": {
+              "optional": {
+                "type": "string"
+              }
+            },
+            "type": "object"
+          },
+          "strict": false,
+          "type": "function"
+        }
+      ]
+    },
+    "runtime_note": "You run on a model API, not inside a coding tool. Your only tools are Looper's platform tools (looper_*): you cannot read or write files, run commands, browse the web or use skills. When the user needs any of that, offer to create a task for it.",
+    "system_append": "Custom instructions\n\nYou run on a model API, not inside a coding tool. Your only tools are Looper's platform tools (looper_*): you cannot read or write files, run commands, browse the web or use skills. When the user needs any of that, offer to create a task for it.\n\n---\n\nLooper instructions\n",
+    "system_replace": "You run on a model API, not inside a coding tool. Your only tools are Looper's platform tools (looper_*): you cannot read or write files, run commands, browse the web or use skills. When the user needs any of that, offer to create a task for it.\n\n---\n\nLooper instructions",
+    "tool_result": {
+      "is_error": true,
+      "ran": true,
+      "text": "{\"status\": \"error\", \"reason\": \"synthetic\"}"
+    },
+    "usage": [
+      {
+        "cache_read_tokens": null,
+        "cache_write_tokens": null,
+        "complete": false,
+        "input_tokens": null,
+        "output_tokens": null
+      },
+      {
+        "cache_read_tokens": 4,
+        "cache_write_tokens": 3,
+        "complete": true,
+        "input_tokens": 13,
+        "output_tokens": 5
+      }
+    ]
+  }
+}

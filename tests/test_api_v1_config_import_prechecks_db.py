@@ -28,6 +28,51 @@ async def request(server, token, action, data):
     return status, answer
 
 
+@pytest.mark.parametrize("token,status_code", [(TOKEN, 400), (CLIENT_TOKEN, 403)], ids=["operator", "client"])
+def test_import_cannot_enable_cost_enforcement(tmp_path, monkeypatch, token, status_code):
+    async def run(pool):
+        before = await pool.fetch("SELECT key, value FROM system_settings ORDER BY key")
+        document = {"format": config_transfer.FORMAT, "settings": {"cost_guard": {"mode": "enforce"},
+                    "scheduler": {"min_interval_seconds": 73}}}
+        async with _serving(tmp_path, listen=True) as server:
+            server._client_ops = ClientOps(SimpleNamespace())
+            for route in ("import_preview", "import_upload"):
+                body = {"document": document} if route == "import_preview" else document
+                status, refused = await request(server, token, f"config/{route}", body)
+                assert status == status_code, refused
+                if token == TOKEN:
+                    assert "cost_guard.update" in refused["error"]["message"]
+                assert not server._config_imports._pending
+                assert await pool.fetch("SELECT key, value FROM system_settings ORDER BY key") == before
+            server._config_imports.clear()
+    run_db(run, monkeypatch, timeout=30)
+
+
+@pytest.mark.parametrize("token,status_code", [(TOKEN, 400), (CLIENT_TOKEN, 403)], ids=["operator", "client"])
+def test_import_rechecks_cost_enforcement_before_execution(tmp_path, monkeypatch, token, status_code):
+    async def run(pool):
+        before = await pool.fetch("SELECT key, value FROM system_settings ORDER BY key")
+        baseline = {"format": config_transfer.FORMAT, "settings": {"scheduler": {"min_interval_seconds": 73}}}
+        async with _serving(tmp_path, listen=True) as server:
+            server._client_ops = ClientOps(SimpleNamespace())
+            status, staged = await request(server, token, "config/import_preview", {"document": baseline})
+            assert status == 200, staged
+            import_id = staged["result"]["import_id"]
+            if token == CLIENT_TOKEN:
+                status, pending = await request(server, token, "config/import_apply", {"import_id": import_id})
+                assert status == 202, pending
+            path = server._config_imports._pending[import_id].path
+            baseline["settings"]["cost_guard"] = {"mode": "enforce"}
+            path.write_text(json.dumps(baseline))
+            route, body = (("confirm", {"confirmation_id": pending["confirmation_id"]}) if token == CLIENT_TOKEN else
+                           ("config/import_apply", {"import_id": import_id}))
+            status, refused = await request(server, token, route, body)
+            assert status == status_code, refused
+            assert await pool.fetch("SELECT key, value FROM system_settings ORDER BY key") == before
+            server._config_imports.clear()
+    run_db(run, monkeypatch, timeout=30)
+
+
 @pytest.mark.parametrize("section,field,value", [
     ("settings.layers", "model", "opus"),
     ("settings.layers", "effort", None),

@@ -23,6 +23,7 @@ from .tiers.turn_token import TurnPhase, TurnToken
 
 if TYPE_CHECKING:
     from .claude_cli import ResidentClaude
+    from .turn_admission import ManagerLease
     from .tiers.manager import ManagerAgent, Prepared, ReplyOutcome
     from .tiers.manager_session import ManagerSession
 
@@ -111,6 +112,27 @@ class MidTurnInputs:
         self._settlers: dict[str, asyncio.Task[None]] = {}
         self._tasks: set[asyncio.Task[None]] = set()
         self._native: dict[str, _NativeInput] = {}
+        self._admissions: dict[str, ManagerLease] = {}
+
+    def claim_admission(self, token: TurnToken, provider_id: str) -> ManagerLease | None:
+        lease = self._admissions.get(token.message_id)
+        if lease is not None and lease.provider_id == provider_id:
+            return self._admissions.pop(token.message_id)  # transfer the reservation's reference to its caller
+        return None
+
+    async def _release_admission(self, message_id: str) -> None:
+        if (lease := self._admissions.pop(message_id, None)) is not None:
+            await lease.release()
+
+    def native_completed(self, token: TurnToken, prepared: Prepared) -> bool:
+        native = self._native.get(token.message_id)
+        if native is None or not native.completed:
+            return False
+        resident = prepared.session.claude
+        return bool(prepared.switch is None
+                    and prepared.launch.runtime is prepared.session.claude_runtime
+                    and not resident.stale(prepared.signature)
+                    and resident.reserved_input_text(token.message_id) is not None)
 
     def release_binding(self, token: TurnToken) -> None:
         """A's cleanup must not erase B's already running native tool binding."""
@@ -168,7 +190,11 @@ class MidTurnInputs:
         tasks = tuple(self._tasks)
         for task in tasks:
             task.cancel()
-        await asyncio.gather(*tasks, return_exceptions=True)
+        try:
+            await asyncio.gather(*tasks, return_exceptions=True)
+        finally:
+            for message_id in tuple(self._admissions):
+                await self._release_admission(message_id)
 
     def parent(self, message_id: str) -> str:
         return self._parents.get(message_id, message_id)
@@ -295,11 +321,15 @@ class MidTurnInputs:
         try:
             from .claude_cli import ResidentClaude
             resident = session.claude
+            if (lease := token.admission_lease) is not None:
+                lease.retain()  # before stdin.write: B can start before the write receipt returns
+                self._admissions[envelope.message_id] = lease
 
             async def unfolded(event: dict[str, Any]) -> None:
                 from .tiers.manager import _looper_call, _message_client, _message_origin
 
                 if event.get("type") == "reservation_discarded":
+                    await self._release_admission(envelope.message_id)
                     native = self._native.pop(envelope.message_id, None)
                     if native is not None and self.agent.ops is not None:
                         self.agent.ops.end_turn(native.token.ops_turn)
@@ -334,6 +364,7 @@ class MidTurnInputs:
                         self.agent.ops.publish_binding(merged_token.binding, session_key=session.key)
                 if event.get("type") == "result" and event.get("parent_tool_use_id") is None:
                     native.completed = True
+                    await self._release_admission(envelope.message_id)
                 body = event.get("message") if event.get("type") == "assistant" else None
                 if self.agent.ops is not None and isinstance(body, dict):
                     for block in body.get("content") or []:
@@ -364,6 +395,9 @@ class MidTurnInputs:
                 turn_metrics.background(self.agent._mark_metrics_replied(envelope))
             return True
         finally:
+            if (written or not isinstance(session.claude, ResidentClaude)
+                    or session.claude.reserved_input_text(envelope.message_id) is None):
+                await self._release_admission(envelope.message_id)
             if not written:
                 pending.state = InputState.QUEUED
                 self._parents.pop(envelope.message_id, None)
