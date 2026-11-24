@@ -8,7 +8,10 @@ The claim stores the ids that read returned, in that same write. A sent or uncer
 in the same transaction as its row. A refusal records none and clears the stored ids, so a Tuesday brief that
 was rejected is still in Wednesday's. If the sender stops before that record, recovery consumes exactly the
 stored ids and does not scan by time: a row whose insert had not committed is still read once, on the next
-brief. With triage enabled, the operator DM also gets owned digest and important fallback events, using
+brief. A digest row whose schedule is already a line in that needs section is not listed again: the line
+gains how many deferred pushes that schedule has, the row is left out of the digest section, and its id is still
+one of the ids the read returned, so it is claimed and consumed with the rest. With triage enabled, the operator
+DM also gets owned digest and important fallback events, using
 the same window and exact-id claim/settlement/recovery policy. No model sees those rendered fields.
 Nothing in any section means
 nothing is sent. The switch, the channel and the operator are read again after the summary and again
@@ -107,10 +110,80 @@ def _digest_line(row: Mapping[str, Any], tz: ZoneInfo) -> str:
     return f"- {kind}（{'，'.join(bits)}）"
 
 
+def _schedule_id(item: Mapping[str, Any]) -> str | None:
+    key = item.get("key")
+    prefix = "schedule:"
+    if isinstance(key, str) and key.startswith(prefix):
+        return key[len(prefix):]
+    return None
+
+
+def _with_deferred_note(line: str, count: int) -> str:
+    note = f"，另有 {count} 条推迟的推送"
+    if line.endswith("）"):
+        return f"{line[:-1]}{note}）"
+    return f"{line}{note}"
+
+
+def _replace_line_once(text: str, line: str, replacement: str) -> str | None:
+    lines = text.split("\n")
+    for index, current in enumerate(lines):
+        if current == line:
+            lines[index] = replacement
+            return "\n".join(lines)
+    return None
+
+
+def _fold_same_source(needs: str | None, digests: list[Mapping[str, Any]], summary: Mapping[str, Any]
+                      ) -> tuple[str | None, list[Mapping[str, Any]]]:
+    """One schedule, one line: deferred rows for a schedule the needs section lists join that line.
+
+    Any other row stays in the digest section, in the same order. A row whose schedule line is not in ``needs``
+    stays too. This does not decide which ids are consumed."""
+    if not needs or needs == attention.NOTHING or not digests:
+        return needs, digests
+    items: list[Mapping[str, Any]] = []
+    for section in summary.get("sections") or ():
+        if section.get("kind") == "schedules" and section.get("state") == "ok":
+            items.extend(section.get("items") or ())
+    listed: set[str] = set()
+    for item in items:
+        schedule_id = _schedule_id(item)
+        if schedule_id:
+            listed.add(schedule_id)
+    counts: dict[str, int] = {}
+    for row in digests:
+        schedule_id = row.get("schedule_id")
+        if schedule_id in listed:
+            counts[schedule_id] = counts.get(schedule_id, 0) + 1
+    if not counts:
+        return needs, list(digests)
+    text = needs
+    folded: set[str] = set()
+    now = datetime.now(timezone.utc)
+    for item in items:
+        schedule_id = _schedule_id(item)
+        count = counts.get(schedule_id or "")
+        if not schedule_id or not count:
+            continue
+        line = attention._line("schedules", item, now)
+        updated = _replace_line_once(text, line, _with_deferred_note(line, count))
+        if updated is None:
+            continue
+        text = updated
+        folded.add(schedule_id)
+    if not folded:
+        return needs, list(digests)
+    return text, [row for row in digests if row.get("schedule_id") not in folded]
+
+
 def render(*, day: date, needs: str | None, reminders: list[Mapping[str, Any]], digests: list[Mapping[str, Any]],
-           tz: ZoneInfo, triage: list[BriefEvent] = (), triage_more: int = 0) -> str | None:
+           tz: ZoneInfo, triage: list[BriefEvent] = (), triage_more: int = 0,
+           summary: Mapping[str, Any] | None = None) -> str | None:
     """The brief, or None when every section is empty. ``needs`` is the needs-you summary; the empty summary is
-    not a section."""
+    not a section. With ``summary``, a digest row for a schedule that summary lists is folded into that line."""
+    if summary is not None:
+        needs, digests = _fold_same_source(needs, digests, summary)
     sections: list[str] = []
     if needs and needs != attention.NOTHING:
         sections.append(needs)
@@ -277,10 +350,10 @@ class MorningBriefService:
                 return
             if not await _pending(conn, day, channel_id, chat):
                 continue
-            await self._one(conn, policy, now, day, start, needs, channel_id, chat)
+            await self._one(conn, policy, now, day, start, needs, summary, channel_id, chat)
 
     async def _one(self, conn: Any, policy: Any, now: datetime, day: date, start: datetime, needs: str,
-                   channel_id: str, chat: str) -> None:
+                   summary: Mapping[str, Any], channel_id: str, chat: str) -> None:
         if not await self._accepts(channel_id, chat):
             return
         if not await _pending(conn, day, channel_id, chat):
@@ -303,7 +376,7 @@ class MorningBriefService:
                 dates_start = datetime.combine(min(dates), time.min, tzinfo=policy.timezone)
                 triage, triage_more = await triage_events.for_brief(conn, dates_start=dates_start)
         text = render(day=day, needs=needs, reminders=reminders, digests=deferred, tz=policy.timezone,
-                      triage=triage, triage_more=triage_more)
+                      triage=triage, triage_more=triage_more, summary=summary)
         delivery = Delivery(DeliveryKind.MORNING_BRIEF, Urgency.NORMAL, ChatKind.DIRECT, silent=text is None)
         decision = proactive_delivery.deliver(delivery, policy, DeliveryState(now))
         if not await self._accepts(channel_id, chat):
@@ -311,6 +384,8 @@ class MorningBriefService:
         if text is None or decision.outcome is not Outcome.SEND:
             await store.skip(conn, day, channel_id, chat, now, "nothing to say")
             return
+        # Folding a row into its schedule's needs line drops it from the digest section only. The id is still
+        # one this read returned, so a sent or uncertain brief consumes it and it does not come back.
         read_ids = [row["id"] for row in deferred]
         triage_ids = [event.id for event in triage]
         if not await store.claim(conn, day, channel_id, chat, now, attempts_limit=ATTEMPTS, read_ids=read_ids,

@@ -86,13 +86,21 @@ async def _reminder(text: str, due_at: datetime, *, chat: str = OP, channel_id: 
 
 
 async def _digest(pool: Any, key: str, day: date, *, channel: str = "channel-lark", chat: str = OP,
-                  kind: str = "task_notice", reason: str = "quiet_hours", hour: int = 23, minute: int = 0) -> None:
+                  kind: str = "task_notice", reason: str = "quiet_hours", hour: int = 23, minute: int = 0,
+                  schedule_id: str | None = None) -> int:
     when = datetime(day.year, day.month, day.day, hour, minute, tzinfo=ZONE)
-    await pool.execute(
+    return await pool.fetchval(
         "INSERT INTO proactive_deliveries (dedupe_key, source, urgency, channel_id, chat, chat_kind, decision, "
-        "reason, counted, local_date, digest_date, decided_at) "
-        "VALUES ($1, $2, 'normal', $3, $4, 'direct', 'digest', $5, false, $6, $6, $7)",
-        key, kind, channel, chat, reason, day, when)
+        "reason, counted, local_date, digest_date, decided_at, schedule_id) "
+        "VALUES ($1, $2, 'normal', $3, $4, 'direct', 'digest', $5, false, $6, $6, $7, $8) RETURNING id",
+        key, kind, channel, chat, reason, day, when, schedule_id)
+
+
+async def _schedule(pool: Any, schedule_id: str, name: str, project_id: str, failures: int) -> None:
+    await pool.execute(
+        "INSERT INTO schedules (id, project_id, name, cron, timezone, requirement, consecutive_failures) "
+        "VALUES ($1, $2, $3, '0 9 * * *', 'UTC', 'Check it', $4)",
+        schedule_id, project_id, name, failures)
 
 
 def _service(channel: _Channel, when: datetime, *, managers: Any = None) -> morning_brief.MorningBriefService:
@@ -901,3 +909,70 @@ def test_the_source_check_is_found_by_its_column(monkeypatch: pytest.MonkeyPatch
         assert decoy is not None and "gate_reminder" in decoy
 
     run_db(test, monkeypatch)
+
+
+def test_a_failed_schedule_lists_its_deferred_push_once(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A digest row whose schedule is already a failing line joins that line. The digest section drops it, and
+    the brief still consumes its id. A healthy schedule's row stays in the digest section. Two failing schedules
+    do not take each other's count. The next brief does not list those rows again."""
+
+    async def test(pool: Any) -> None:
+        await _zone(pool)
+        await _operator(pool)
+        await pool.execute("INSERT INTO projects (id, name) VALUES ('proj', 'Demo'), ('other', 'Other')")
+        await _schedule(pool, "sched-beta", "Beta report", "other", 2)
+        await _schedule(pool, "sched-alpha", "Alpha report", "proj", 1)
+        await _schedule(pool, "sched-delta", "Delta report", "proj", 1)
+        await _schedule(pool, "sched-gamma", "Gamma report", "proj", 0)
+        sunday = date(2026, 11, 22)
+        ids = [
+            await _digest(pool, "beta-a", sunday, kind="subscription", hour=23, minute=0, schedule_id="sched-beta"),
+            await _digest(pool, "beta-b", sunday, kind="subscription", hour=23, minute=5, schedule_id="sched-beta"),
+            await _digest(pool, "alpha", sunday, kind="subscription", hour=23, minute=10, schedule_id="sched-alpha"),
+            await _digest(pool, "gamma", sunday, kind="subscription", hour=23, minute=20, schedule_id="sched-gamma"),
+            await _digest(pool, "notice", sunday, hour=23, minute=40),
+        ]
+        channel = _Channel()
+        await _service(channel, MONDAY).run_once()
+        (post,) = channel.posts
+        needs, digest = post["text"].split("推迟到这份晨报的消息\n", 1)
+        assert "- Beta report（Other；连续失败 2 次，另有 2 条推迟的推送）" in needs
+        assert "- Alpha report（Demo；连续失败 1 次，另有 1 条推迟的推送）" in needs
+        assert "- Delta report（Demo；连续失败 1 次）" in needs
+        assert "另有 2 条推迟的推送" not in needs.split("Alpha report", 1)[1]
+        assert "sched-gamma" not in needs and "sched-alpha" not in needs and "sched-beta" not in needs
+        assert digest == (
+            "- 订阅推送（免打扰，11-22 23:20，定时 sched-gamma）\n"
+            "- 任务通知（免打扰，11-22 23:40）")
+        assert await pool.fetchval("SELECT read_ids FROM morning_briefs") == ids
+        assert [row["delivery_id"] for row in await pool.fetch(
+            "SELECT delivery_id FROM morning_brief_consumed ORDER BY delivery_id")] == sorted(ids)
+        tuesday = datetime(2026, 11, 24, 9, 15, tzinfo=ZONE)
+        await _service(channel, tuesday).run_once()
+        later = channel.posts[1]["text"]
+        assert "推迟到这份晨报的消息" not in later and "另有" not in later
+        assert "- Beta report（Other；连续失败 2 次）" in later
+        assert "- Alpha report（Demo；连续失败 1 次）" in later
+        assert await pool.fetchval("SELECT count(*) FROM morning_brief_consumed") == len(ids)
+
+    run_with_channel_configs(test, monkeypatch)
+
+
+def test_the_brief_off_leaves_a_failed_schedules_deferred_push(monkeypatch: pytest.MonkeyPatch) -> None:
+    """While the brief is off, a tick does not send and does not consume a deferred push for a failing schedule."""
+
+    async def test(pool: Any) -> None:
+        await _zone(pool)
+        await _operator(pool)
+        await pool.execute("INSERT INTO projects (id, name) VALUES ('proj', 'Demo')")
+        await _schedule(pool, "sched-alpha", "Alpha report", "proj", 1)
+        delivery_id = await _digest(pool, "alpha", date(2026, 11, 22), kind="subscription", schedule_id="sched-alpha")
+        chat_settings.set_morning_brief_enabled(False)
+        channel = _Channel()
+        await morning_brief.MorningBriefService(channel, clock=_Clock(MONDAY)).run_once()
+        assert channel.posts == []
+        assert await pool.fetchval("SELECT count(*) FROM morning_briefs") == 0
+        assert await pool.fetchval("SELECT count(*) FROM morning_brief_consumed") == 0
+        assert await pool.fetchval("SELECT id FROM proactive_deliveries WHERE decision = 'digest'") == delivery_id
+
+    run_with_channel_configs(test, monkeypatch)
