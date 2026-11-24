@@ -184,6 +184,21 @@ describe("Ledger page", () => {
     expect(ledgerPage).toHaveBeenLastCalledWith(expect.objectContaining({ section: "all", kind: "pending", cursor: "stable-cursor" }), expect.anything());
     expect(host.querySelectorAll('[data-ledger-row]').length).toBe(2);
   });
+  it("retries a failed refresh from the first page while keeping loaded entries", async () => {
+    vi.mocked(ledgerPage).mockResolvedValue(page([item()], 1, "next-page"));
+    await render("kind=pending");
+    vi.mocked(ledgerPage).mockRejectedValueOnce(new Error("刷新离线"));
+    vi.mocked(useLedger).mockReturnValue({ ...state, revision: 1 });
+    await render();
+    expect(host.textContent).toContain("刷新离线");
+    expect(host.querySelectorAll('[data-ledger-row]').length).toBe(1);
+    vi.mocked(ledgerPage).mockResolvedValue(page([item({ title: "刷新后的事项" })], 1, "new-next-page"));
+    await press("重试");
+    const [request] = vi.mocked(ledgerPage).mock.calls.at(-1)!;
+    expect(request).not.toHaveProperty("cursor");
+    expect(host.querySelectorAll('[data-ledger-row]').length).toBe(1);
+    expect(host.textContent).toContain("刷新后的事项");
+  });
   it("ignores an old filter response and commits typed owner filters only when complete", async () => {
     let finish!: (value: LedgerPageResult) => void;
     vi.mocked(ledgerPage).mockImplementationOnce(() => new Promise((resolve) => {

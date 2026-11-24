@@ -43,8 +43,8 @@ function normalizedQuery(raw: string) {
   return query;
 }
 
-interface SectionState { items: LedgerItem[] | null; more: number; cursor: string | null; busy: boolean; error: string; forbidden: boolean; }
-const unread = (): SectionState => ({ items: null, more: 0, cursor: null, busy: true, error: "", forbidden: false });
+interface SectionState { items: LedgerItem[] | null; more: number; cursor: string | null; busy: boolean; error: string; forbidden: boolean; retryPage: "first" | "more" | null; }
+const unread = (): SectionState => ({ items: null, more: 0, cursor: null, busy: true, error: "", forbidden: false, retryPage: null });
 
 /** The page fetches its own sections; the sidebar's one-item read supplies only a badge. */
 
@@ -94,12 +94,12 @@ export function LedgerPage({ query = "", onQuery }: { query?: string; onQuery: (
       void ledgerPage(request(section), abort.signal).then((result) => {
         if (token !== generation.current || abort.signal.aborted) return;
         setMissing(result.missing_operator_ids);
-        setGroups((old) => ({ ...old, [section]: { items: result.items, more: result.more, cursor: result.next_cursor, busy: false, error: "", forbidden: false } }));
+        setGroups((old) => ({ ...old, [section]: { items: result.items, more: result.more, cursor: result.next_cursor, busy: false, error: "", forbidden: false, retryPage: null } }));
       }).catch((err) => {
         if (token !== generation.current || abort.signal.aborted) return;
         setGroups((old) => ({
           ...old, [section]: {
-            ...(old[section] || unread()), busy: false,
+            ...(old[section] || unread()), busy: false, retryPage: "first",
             error: errorText(err), forbidden: err instanceof V1Error && err.status === 403
           }
         }));
@@ -122,13 +122,13 @@ export function LedgerPage({ query = "", onQuery }: { query?: string; onQuery: (
       setGroups((old) => ({
         ...old, [section]: {
           items: [...entries.values()], more: result.more,
-          cursor: result.next_cursor, busy: false, error: "", forbidden: false
+          cursor: result.next_cursor, busy: false, error: "", forbidden: false, retryPage: null
         }
       }));
     } catch (err) {
       if (token === generation.current && !signal?.aborted) setGroups((old) => ({
         ...old, [section]: {
-          ...group, busy: false,
+          ...group, busy: false, retryPage: "more",
           error: errorText(err), forbidden: err instanceof V1Error && err.status === 403
         }
       }));
@@ -259,7 +259,7 @@ export function LedgerPage({ query = "", onQuery }: { query?: string; onQuery: (
                     读取失败：
                     {group.error}
                     {group.items?.length ? "已保留已读事项。" : ""}
-                    <Button variant="outline" size="sm" onClick={() => group.cursor && group.items?.length ? void more(section) : setReload((n) => n + 1)}>重试</Button>
+                    <Button variant="outline" size="sm" onClick={() => group.retryPage === "more" ? void more(section) : setReload((n) => n + 1)}>重试</Button>
                   </p>}
                   {group.more > 0 && <Button variant="outline" disabled={group.busy} onClick={() => void more(section)}>
                     {`另有 ${group.more} 项`}
