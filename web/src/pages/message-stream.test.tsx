@@ -9,6 +9,9 @@ import {
   type MessageStreamRun, type MessageStreamSource,
 } from "@/lib/api";
 import { leadsChats, leadsSearch, leadsSettingsGet } from "@/lib/api-leads";
+import { getMessageCollection } from "@/lib/api-message-collection";
+
+vi.mock("@/lib/api-message-collection", () => ({ getMessageCollection: vi.fn() }));
 
 vi.mock("@/lib/api", async (original) => ({
   ...await original<typeof import("@/lib/api")>(),
@@ -92,6 +95,26 @@ describe("MessageStreamPage", () => {
     expect(text).toContain("7 new · 2 already stored · 1 skipped");
     expect(text).toContain("1 of 3 files failed; first oc_a: RuntimeError");
     expect(text).toContain("1 file read again");
+    expect(getMessageCollection).not.toHaveBeenCalled();
+  });
+
+  it("opens historical collection status explicitly after rolling back to bridge", async () => {
+    vi.mocked(fetchMessageStream).mockResolvedValue({ sources: [source()] });
+    vi.mocked(getMessageCollection).mockRejectedValue(new Error("synthetic unavailable"));
+    await act(async () => root.render(<MessageStreamPage query="collection=lark-user" />));
+    expect(getMessageCollection).toHaveBeenCalledWith("lark-user", expect.any(AbortSignal));
+    expect(container.textContent).toContain("消息流采集与对账");
+    expect(container.textContent).toContain("synthetic unavailable");
+  });
+
+  it("opens the collector panel for collect sources without labeling the old bridge cron as its rule", async () => {
+    vi.mocked(fetchMessageStream).mockResolvedValue({ sources: [source({ ingest_mode: "collect" })] });
+    vi.mocked(getMessageCollection).mockRejectedValue(new Error("synthetic unavailable"));
+    await show();
+    expect(getMessageCollection).toHaveBeenCalledWith("lark-user", expect.any(AbortSignal));
+    expect(container.textContent).toContain("运行时间规则和完整性见采集与对账面板");
+    expect(container.textContent).not.toContain("every pass on");
+    expect(container.textContent).not.toContain("/srv/collector");
   });
 
   it("switches reading off and on through the same operation, and says when it failed", async () => {

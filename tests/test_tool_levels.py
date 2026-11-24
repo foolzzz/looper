@@ -149,6 +149,9 @@ def _operations() -> dict[str, Any]:
 
 # The operations whose level was decided one by one (every other one is inside).
 DECIDED_OPERATIONS: dict[str, ActionLevel] = {
+    "ledger.page": INSIDE,  # reads only Looper's ledger, including source status
+    "ledger.add": INSIDE,  # records an operator item inside Looper; executes no source action
+    "ledger.action": INSIDE,  # updates only Looper's ledger through its event transaction
     # Confirmation, including save-and-confirm, and retry can commit to the operator's vault.
     **dict.fromkeys(("memory.confirm", "memory.confirm_many", "memory.edit", "memory.retry"), MACHINE),
     "cost_guard.get": INSIDE,  # reads Looper's own observation settings and counters
@@ -178,6 +181,9 @@ DECIDED_OPERATIONS: dict[str, ActionLevel] = {
     "memory.propose_from_lead": INSIDE,  # stores a candidate inside Looper; writes no vault file
     "outbound_review.get": INSIDE,  # reads Looper's own review setting
     "outbound_review.update": INSIDE,  # changes Looper's own review setting
+    "outbound_review.list": INSIDE,  # reads stored audit rows without sending content
+    "untrusted_fence.get": INSIDE,  # reads Looper's own content-fence setting
+    "untrusted_fence.update": INSIDE,  # changes only how Looper wraps incoming content
     "project_skills.context_budget": INSIDE,  # reads the displayed skill-description budget; sends nothing
     "project_skills.deprecate": INSIDE,  # marks a catalog skill deprecated inside Looper; sends nothing and does not touch installs or files
     "project_skills.restore": INSIDE,  # marks a catalog skill active inside Looper; sends nothing and does not touch installs or files
@@ -197,6 +203,10 @@ DECIDED_OPERATIONS: dict[str, ActionLevel] = {
     "intent_bindings.put": INSIDE,  # maps a chat to a project; sends nothing anywhere
     # toggles bound_chats_only; the admission it widens is chat_routing's operator-only refusal to guard
     "channel_chats.set_policy": INSIDE,
+    "message_collection.get": INSIDE,  # reads source-local collection state
+    "message_collection.update": INSIDE,  # stores configuration without reading an account
+    "message_collection.mode_update": INSIDE,  # changes Looper's ingestion state
+    "message_collection.run_now": MACHINE,  # starts a local read-only collector CLI
 }
 
 

@@ -60,6 +60,9 @@ async def _require_row(table: str, key: str, value: str, db: Any) -> dict:
     row = await db.fetchrow(f"SELECT * FROM {table} WHERE {key}=$1", value)
     if row is None:
         raise ValueError(f"unknown {table}: {value}")
+    if table == "intent_types" and not leads_model.intent_type_visible(
+            row, rules_on=await leads_model.rule_types_enabled(db)):
+        raise IntentRefused(f"unknown intent type: {value}", code="not_found")
     return dict(row)
 
 
@@ -299,7 +302,10 @@ async def types_list(*, db: Any = None) -> dict:
         "FROM intent_types t JOIN intent_type_versions v ON v.type_key=t.key AND v.version=t.version "
         "JOIN intent_type_versions b ON b.type_key=t.key AND b.version=1 ORDER BY t.builtin DESC,t.key")
     result = []
+    rules_on = await leads_model.rule_types_enabled(db)
     for row in rows:
+        if not leads_model.intent_type_visible(row, rules_on=rules_on):
+            continue
         bindings = await db.fetch("SELECT b.project_id,p.name AS project_name,b.workflow_key FROM intent_type_projects b "
                                  "JOIN projects p ON p.id=b.project_id JOIN workflows w ON w.key=b.workflow_key WHERE b.type_key=$1 ORDER BY p.name,p.id", row["key"])
         result.append({key: row[key] for key in ("key", "builtin", "enabled", "version", *TYPE_FIELDS, "recommended")}
@@ -338,8 +344,10 @@ async def _validate_type(fields: dict, db: Any) -> dict:
 
 
 async def _type_capacity(conn: Any, *, excluding: str | None = None) -> None:
-    if await conn.fetchval("SELECT count(*) FROM intent_types WHERE enabled AND archived_at IS NULL "
-                           "AND ($1::text IS NULL OR key<>$1)", excluding) >= 10:
+    rows = await conn.fetch("SELECT key,builtin FROM intent_types WHERE enabled AND archived_at IS NULL "
+                            "AND ($1::text IS NULL OR key<>$1)", excluding)
+    rules_on = await leads_model.rule_types_enabled(conn)
+    if sum(leads_model.intent_type_visible(row, rules_on=rules_on) for row in rows) >= 10:
         raise IntentRefused("at most 10 enabled intent types")
 
 
@@ -620,7 +628,7 @@ async def stats(days: int = 30, *, now: datetime | None = None, db: Any = None) 
     if not isinstance(days, int) or isinstance(days, bool) or not 1 <= days <= 365:
         raise ValueError("days must be between 1 and 365")
     # A dropped intent (the check's) was never shown to the operator: not recognized, not in a rate's denominator.
-    rows = await _db(db).fetch("SELECT t.key,v.name, count(i.id) FILTER(WHERE i.state NOT IN ('merged','dropped')) "
+    rows = await _db(db).fetch("SELECT t.key,t.builtin,v.name, count(i.id) FILTER(WHERE i.state NOT IN ('merged','dropped')) "
         "AS recognized, "
         "count(i.id) FILTER(WHERE i.state='tasked') AS tasked,count(i.id) FILTER(WHERE i.state='rejected') AS rejected, "
         "count(i.id) FILTER(WHERE i.state='expired') AS expired,count(i.id) FILTER(WHERE i.state='merged') AS merged, "
@@ -629,7 +637,11 @@ async def stats(days: int = 30, *, now: datetime | None = None, db: Any = None) 
         "LEFT JOIN intents i ON i.type_key=t.key AND i.created_at >= $1 GROUP BY t.key,v.name ORDER BY t.key",
         (now or _now()) - timedelta(days=days))
     result = []
+    rules_on = await leads_model.rule_types_enabled(_db(db))
     for row in rows:
+        if not leads_model.intent_type_visible(row, rules_on=rules_on):
+            continue
+        row = {key: value for key, value in dict(row).items() if key != "builtin"}
         denominator = row["tasked"] + row["rejected"] + row["expired"]
         result.append({**dict(row), "adoption_rate": row["tasked"] / denominator if denominator else None,
                        "rejection_rate": row["rejected"] / denominator if denominator else None})

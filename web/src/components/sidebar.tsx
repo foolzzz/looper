@@ -4,6 +4,7 @@ import {
   LayoutDashboard,
   MessageSquare,
   ListTodo,
+  BookOpen,
   MessageCircleQuestion,
   Bot,
   CalendarClock,
@@ -23,15 +24,17 @@ import { SignOut } from "@/components/sign-out";
 import { ProjectDialog } from "@/components/project-dialog";
 import { SETTINGS_PAGES, type SettingsPageId } from "@/lib/settings-pages";
 import { fetchOverview } from "@/lib/api";
-import { attentionSettingsGet } from "@/lib/api-attention";
+import { attentionSettingsGet, fetchAttention, isAttentionOff } from "@/lib/api-attention";
 import { intentsSettingsGet } from "@/lib/api-leads";
 import { useProjects } from "@/lib/use-projects";
 import { useWaitingGates } from "@/lib/use-waiting-gates";
+import { useLedger } from "@/lib/use-ledger";
+import { startPolling } from "@/lib/polling";
 import { cn } from "@/lib/utils";
 
 /** "history" is one agent's session, or every run of one role; "projects" is one project, from the
  * sidebar's project list; "settings" is one of the Settings pages, from the group at the bottom. */
-export type Page = "dashboard" | "todo" | "chat" | "tasks" | "gates" | "projects" | "schedules" | "messages" | "intents" | "memory" | "settings" | "history";
+export type Page = "dashboard" | "todo" | "chat" | "tasks" | "ledger" | "gates" | "projects" | "schedules" | "messages" | "intents" | "memory" | "settings" | "history";
 
 const NAV_ITEMS: { page: Page; label: string; icon: React.ElementType }[] = [
   { page: "dashboard", label: "Dashboard", icon: LayoutDashboard },
@@ -70,6 +73,7 @@ export function Sidebar({
   onClose,
 }: SidebarProps) {
   const waitingGates = useWaitingGates();
+  const ledger = useLedger();
   const [version, setVersion] = useState<string | null>(null);
   const [intentsOn, setIntentsOn] = useState(false);
   useEffect(() => {
@@ -80,20 +84,31 @@ export function Sidebar({
     );
     return () => { live = false; };
   }, []);
-  // Read the switch without collecting a summary (which correctly returns 409 while off).
   const [todoOn, setTodoOn] = useState(false);
-  useEffect(() => {
-    let live = true;
-    attentionSettingsGet().then(
-      (settings) => { if (live) setTodoOn(settings.enabled === true); },
-      () => { if (live) setTodoOn(false); },
-    );
-    return () => { live = false; };
-  }, []);
+  const [todoCount, setTodoCount] = useState<number | null>(null);
+  useEffect(() => startPolling(async (signal) => {
+    try {
+      // Check the switch before collecting a summary: off must not provoke a 409.
+      const settings = await attentionSettingsGet();
+      if (signal.aborted) return;
+      setTodoOn(settings.enabled === true);
+      if (!settings.enabled) { setTodoCount(null); return; }
+      const summary = await fetchAttention(signal);
+      if (signal.aborted) return;
+      // total counts only readable sections; an incomplete total is not an exact count.
+      setTodoCount(summary.sections.every((section) => section.state === "ok") ? summary.total : null);
+    } catch (err) {
+      if (signal.aborted) return;
+      setTodoCount(null);
+      if (isAttentionOff(err)) setTodoOn(false);
+    }
+  }, 30_000), []);
   const navItems = [
     ...NAV_ITEMS.slice(0, 1),
     ...(todoOn ? [{ page: "todo" as const, label: "Needs you", icon: BellRing }] : []),
-    ...NAV_ITEMS.slice(1),
+    ...NAV_ITEMS.slice(1, 3),
+    ...(ledger.enabled ? [{ page: "ledger" as const, label: "Ledger 账本", icon: BookOpen }] : []),
+    ...NAV_ITEMS.slice(3),
     ...(intentsOn ? [{ page: "intents" as const, label: "Intents 意图", icon: ListChecks }] : []),
   ];
   useEffect(() => {
@@ -153,7 +168,25 @@ export function Sidebar({
             )}
           >
             <Icon className="h-4 w-4" />
-            {label}
+            <span className="min-w-0 text-left">{label}
+              {page === "ledger" && ledger.stale && <span className="block text-xs">暂无法刷新</span>}
+            </span>
+            {page === "todo" && todoCount === null && (
+              <span className="ml-auto" aria-label="待处理数量未知">?</span>
+            )}
+            {page === "todo" && todoCount !== null && todoCount > 0 && (
+              <Badge variant="warning" aria-label={`${todoCount} 项待你处理`} className="ml-auto tabular-nums">
+                {todoCount > 99 ? "99+" : todoCount}
+              </Badge>
+            )}
+            {page === "ledger" && ledger.count === null && (
+              <span className="ml-auto" aria-label="待处理数量未知">?</span>
+            )}
+            {page === "ledger" && ledger.count !== null && ledger.count > 0 && (
+              <Badge variant="warning" aria-label={`${ledger.count} 项待你处理`} className="ml-auto tabular-nums">
+                {ledger.count > 99 ? "99+" : ledger.count}
+              </Badge>
+            )}
             {page === "gates" && waitingGates !== null && waitingGates > 0 && (
               <Badge
                 variant="warning"

@@ -97,7 +97,7 @@ def test_workflow_runs_six_shards_behind_stable_required_check() -> None:
     assert "shard: [1, 2, 3, 4, 5, 6]" in shards
     assert "name: Agent system tests (shard ${{ matrix.shard }}/6)" in shards
     assert "LOOPER_TEST_SHARD: ${{ matrix.shard }}/6" in shards
-    assert "timeout-minutes: 20" in shards
+    assert "timeout-minutes: 30" in shards
     assert "fail-fast: false" in shards
     result = workflow.split("  agent-system-result:\n", 1)[1].split("\n  dashboard:", 1)[0]
     assert re.search(r"^    name: Agent system tests$", result, re.MULTILINE)
@@ -198,9 +198,9 @@ def _workflow() -> dict:
     return yaml.load((ROOT / ".github/workflows/python-tests.yml").read_text(), Loader=yaml.BaseLoader)
 
 
-def test_workflow_runs_on_main_pushes() -> None:
+def test_workflow_runs_on_pull_requests_and_dispatch_only() -> None:
     assert _workflow()["on"] == {
-        "push": {"branches": ["main"]}, "pull_request": "", "workflow_dispatch": "",
+        "pull_request": "", "workflow_dispatch": "",
     }
 
 
@@ -212,9 +212,10 @@ def test_workflow_runs_on_main_pushes() -> None:
     ("pull_request", "refs/pull/1/merge", "codex/release", "false", "false", False, False),
     ("pull_request", "refs/pull/1/merge", "codex/docs", "true", "true", False, False),
     ("pull_request", "refs/pull/1/merge", "codex/release-2.0", "false", "true", True, False),
-    ("push", "refs/heads/main", "", "false", "false", True, True),
+    ("push", "refs/heads/main", "", "false", "false", False, False),
     ("push", "refs/heads/feature", "codex/release-2.0", "false", "false", False, False),
     ("workflow_dispatch", "refs/heads/main", "", "false", "false", True, True),
+    ("workflow_dispatch", "refs/heads/feature", "", "false", "false", True, True),
 ])
 def test_workflow_optional_job_conditions(event, ref, head, web, docs, canary, dashboard) -> None:
     # Evaluate the workflow's own conditions, with all dependencies successful.

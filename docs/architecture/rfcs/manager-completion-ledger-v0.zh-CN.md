@@ -355,7 +355,7 @@ ALTER TABLE ledger_items ADD CONSTRAINT ledger_items_close_fk
 | 写入来自 | `actor_kind` | `via` | 依据 |
 |---|---|---|---|
 | 控制台聊天（操作者登录的会话，不经 API 客户端） | `user` | `dashboard` | 渠道是 `web`，`Turn.client_id` 为空 |
-| 控制台「待办」页 | `user` | `dashboard` | 操作者路由（`operator_auth`） |
+| 控制台账本页或操作者直接 HTTP | `user` | `api` | v1 操作者身份；接口不能区分浏览器与持有操作者 token 的请求 |
 | 飞书、Telegram **私聊**，发送者等于这个机器人的「我的 ID」 | `user` | `lark`、`telegram` | `Turn.group` 为假，`Turn.sender == operator_sender_id` |
 | 飞书、Telegram 私聊，其他白名单发送者 | `relayed` | 同上 | `relayed_by` 是发送者 |
 | 任何**群聊**回合（包括你自己在群里说的） | `relayed` | 同上 | `Turn.group` 为真（C3 按字面只认私聊，Q5） |
@@ -476,16 +476,28 @@ Looper itself registers open gates, confirmations and tasks: never add those.
 - **退出码：** 0 成功（`list` 有结果）；1 `list` 没有结果；2 用法错误；3 账本没有启用；4 被拒绝（规则或身份）；5 找不到条目；6 连不上数据库。「没有启用」和「没有结果」分别说明，和已定的 `looper leads search` 接口一致。
 - `loopercli` 只读：`/api/v1` 的 `ledger.list`、`ledger.get`，写入不开放。
 
-### 4.9 HTTP 接口与「待办」页
+### 4.9 HTTP 接口与账本页
 
-- **接口（操作者路由）：** `GET /api/ledger`（筛选：`status`、`kind`、`owner`、`project`；分页游标；同时返回各状态计数）；`GET /api/ledger/:id`（条目和事件）；`POST /api/ledger`（新增，`user`、`dashboard`）；`POST /api/ledger/:id/actions`（`{action, ...}`，同第 4.6 节）。账本关闭时返回 `409` 和「账本没有启用」。
-- **页面：** 侧栏 Tasks 之后加「待办」（`#ledger`），数字是「待你确认」的未结数。遵守 docs/design.md 的界面一节。
+- **接口：** 沿用 v1 的 `OpOk` / `OpError`、鉴权、Origin/CSRF 检查和错误脱敏；不另建旧 `/api/ledger` 路由。关闭时全部返回 `409`；非操作者调用新写操作始终是 `403`。
+
+  | operation / POST path | 请求 | result | 权限 |
+  |---|---|---|---|
+  | `ledger.list` `/api/v1/ledger/list` | `status? / kind? / owner? / project_id? / limit?` | `{items,more,counts}` | 原有只读，操作者和 API client |
+  | `ledger.get` `/api/v1/ledger/get` | `{item}` | `{item,events}`，事件从早到晚 | 原有只读，操作者和 API client |
+  | `ledger.page` `/api/v1/ledger/page` | `section? / status? / kind? / owner? / project_id? / limit? / cursor?` | `{items,more,next_cursor,counts,attention_count,missing_operator_ids}` | 操作者只读，不生成 CLI，无 agent tool |
+  | `ledger.add` `/api/v1/ledger/add` | `{kind,title,detail?,due?,owner?,project_id?,refs?,quote?}` | `{item}` | 操作者写，不生成 CLI，无 agent tool |
+  | `ledger.action` `/api/v1/ledger/action` | `{item,action}`；close/cancel 可带 note，note 必带 note，amend 必带 fields | `{item}` | 操作者写，不生成 CLI，无 agent tool |
+
+  新操作的 action level 都是 `inside`：只读写 Looper 自己的账本，不执行源对象或外部操作。请求是闭合 DTO，不接受 actor、via、source 或存储状态。写入只经 `db.ledger.apply`，身份是 `Actor("user", "api", actor_id="operator")`；页面当前输入的原话不套用聊天子串校验，也不伪造消息 id。操作者专属 page/get 可以补来源跳转；client 的原 list/get 不增加私聊定位信息。
+- **分页与计数：** `section` 为 `attention`（默认）、`work`、`recent_decisions` 或 `all`。前三组按第 4.9 节的分组条件在数据库筛选；attention 按到期升序、空值在后、编号倒序，其余按编号倒序。最近决定保留实际状态，排除仍在 attention 的未确认决定。筛选模式用 all，状态默认 open。limit 默认 10、范围 1–50；版本化 cursor 绑定分组、筛选和最后排序键，损坏或错用返回 400。`more` 是该页之后的准确剩余数，`attention_count` 不受筛选或分页影响，和 attention 共用谓词。
+- **页面：** 侧栏 Tasks 之后加「Ledger 账本」（`#ledger`），数字是全部 open pending 和未确认决定的数量，不是 open 总数；`#todo` 继续是独立的 Needs you 汇总。遵守 docs/design.md 的界面一节。
   - **首屏按要你做的事排：** 「要你拍板」（未结的 pending 和待核实的转述决定，逾期在前，然后按到期时间）→「进行中」（work_item）→「最近的决定」（30 天内）。每组超过 10 条折叠成「另有 N 项」。
   - **每行：** 编号、标题、来源（关卡 / 确认 / 任务 / 意图 / 手工，图标加文字）、状态文字、是否转述、负责人、项目、到期（逾期用文字「逾期 2 天」，颜色只作辅助）。
-  - **详情（同页抽屉）：** 字段、事件时间线（时间、动作、「你本人 / 转述 · 谁 / 系统」、经由、原话及其会话链接）。按钮按条目给：自有条目有「确认」（只对转述的决定）、「完成」「撤销」「重新打开」「编辑」「备注」；有源条目只有「去处理」（跳到关卡、任务）和「编辑到期、负责人」「备注」。
+  - **详情（同页抽屉）：** 字段、事件时间线（时间、动作、「你本人 / 转述 · 谁 / 系统」、经由、原话、备注和变更）。现有事件 DTO 不提供完整会话定位；缺少安全跳转时明确说明，不伪造会话链接。按钮按条目给：自有条目有「确认」（只对未确认的 open 决定）、「完成」（仅 pending/work_item）、「撤销」「重新打开」「编辑」「备注」；有源条目只有「去处理」（跳到关卡、任务或原提问会话）和「编辑到期、负责人」「备注」。撤销需行内确认，写后重新读取，不乐观提交或自动重试。
   - **筛选：** 状态、类型、负责人、项目；URL 记住筛选。
   - **空、出错、没启用：** 「没有未结的事项」；读取失败照实说失败；没启用时说明去 Settings → Chat 打开；没填「我的 ID」时顶部提示私聊里的决定会记成转述。
   - 窄屏单列卡片，按钮 `pointer-coarse:` 下不小于 44 px。
+  - 开关和徽标共用一个 provider：先读 chat settings，开启后每 30 秒及写成功时刷新计数；关闭时不读条目且隐藏导航。首次失败计数未知，刷新失败保留上次数值并标明；页面保留已读页和失败表单，支持原游标重试。
 
 ### 4.10 与其他对象的关系
 

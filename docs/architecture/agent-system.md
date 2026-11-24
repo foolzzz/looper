@@ -3355,8 +3355,12 @@ memory page shows their candidates for the operator to review.
   promoted (`vault_proposal`, the M-id); rejection leaves it unchanged. Deleting
   a lead or its source chat removes unwritten candidates and purges written
   candidate text while leaving vault notes intact. The source defaults off;
-  production enablement waits for outbound review. Manager `from_lead` support
-  follows separately.
+  production enablement waits for outbound review. With both Manager and lead
+  sources enabled, the operator can also name a lead in dashboard chat or their
+  direct chat: `looper_memory_propose(from_lead="lead-123", kind=...)` accepts
+  only an optional kind alongside the id. The candidate keeps only its lead
+  source; the Manager call is audited separately. The tool's schema and final
+  contract line expose this form only while the lead source is enabled.
 - **Known limits:** unsaved editor buffers do not block a write and a later
   editor save can overwrite it; the content hash and commit trailers allow
   checking what was written. An agent with a shell has the same system-user
@@ -5964,14 +5968,14 @@ See the [wait-step RFC](rfcs/plan-wait-step-v0.zh-CN.md).
 
 ### Message stream
 
-Looper can keep the messages of an outside collector in its own database
-([RFC](rfcs/message-stream-v0.zh-CN.md), `ingest_mode = bridge`). Only
-[subscriptions](#subscriptions-a-message-stream-on-a-time-rule) read them: no
-agent tool or prompt mentions the stream. With no source (the default), the server
-does one query per tick. Existing sources run daily retention even when off.
+Looper can bridge an outside collector's files or explicitly collect user messages
+into the same event sequence ([RFC](rfcs/message-stream-v0.zh-CN.md)). Existing
+[subscriptions](#subscriptions-a-message-stream-on-a-time-rule) and extraction consumers read them: no
+agent tool or prompt mentions the stream. With no source (the default), no
+collector task or metadata is created and no user CLI runs. Existing sources run daily retention even when off.
 
 - **Source** (`event_sources`): one row per account. `ingest_mode` is `off`,
-  `bridge` or `collect` (`collect` is not written yet); a bridged source names
+  `bridge` or `collect`; a bridged source names
   the collector's directory (`bridge_dir`, holding `chats/<chat_id>.ndjson`, with
   `chats.json` and `users.json` for names) and a time rule (default every two
   minutes). `user_open_id` is the user whose mentions are marked `mentions_me`;
@@ -6053,8 +6057,55 @@ does one query per tick. Existing sources run daily retention even when off.
   That suffix cannot match a schema-change dump (`looper-<database>-<stamp>.dump`),
   so each rotation deletes only its own files. Stopping the service terminates
   the daily `pg_dump`, kills it if it is still running, and reaps it.
-- **Not yet:** the collector. Lark and Telegram commands do not change; this
-  management surface is operator-only and adds no model-visible tools or prompts.
+- **Collection** (`message_collect.py`, migration `message_collection`, order
+  1950) is opt-in. Its own default ten-minute cron has a persistent fire slot
+  and generation, independent of the bridge rule. Each source runs in a background
+  task, with the same writer lock, serial read-only CLI calls, a 420-second
+  deadline and at most 20 seconds per call. Auth and bound identity are checked
+  before message reads. Search uses hourly slices; complete chat/thread reads
+  atomically commit events, inclusive timestamp/id cursors and independent
+  observations. A rotating sweep retries missed replies and failed chats; a
+  daily listing refreshes discovery. Partial work retains debt and never jumps
+  its watermark past a failed slice. Bot catch-up's SQLite debt is separate.
+- **Operator controls** are `message_collection.get`, `update`, `mode_update`
+  and `run_now`, also available through the generated CLI. Settings alone never
+  enable collection. Switching requires an explicit profile, a bound identity,
+  the expected generation and `bridge_stopped=true`. While holding the writer
+  lock it freezes a stopped bridge directory's previous 24 hours, verifies all
+  reference IDs were already committed, and changes mode and reference in one
+  transaction. Off/bridge rollback changes only `ingest_mode`, retaining file
+  offsets, canonical events and every consumer cursor. Imports and stale bridge
+  passes cannot write after collection takes ownership. Lark/Telegram receive
+  commands and model-visible tools/prompts stay unchanged.
+- **Independent parity** stores identities and container coverage in
+  `source_parity_sessions`, `source_parity_members` and `source_parity_coverage`;
+  it stores no message text, names or body hashes. Duplicate canonical events
+  still contribute collect observations. Complete coverage and zero identity/set
+  differences yield `matched`; complete differences yield `drift`; missing or
+  invalid evidence yields `incomplete`. Empty matches are explicitly unproven.
+  Deletes remove both sides' evidence in the deletion transaction and invalidate
+  affected sessions. Unresolved drift survives retention and rollback.
+  `looper msgflow parity --source ID [--session ID] [--json] [--limit N]
+  [--cursor TOKEN]` reads a consistent stored snapshot only; it never reads an
+  account, repairs data or changes an alert. IDs and sequence boundaries are
+  decimal strings; buckets page by chat and UTC hour while totals cover the
+  whole window. Exit codes: 0 matched, 1 drift, 2 usage, 3 pending/incomplete,
+  6 unavailable database or migration.
+- **Source alerts** require `alerts_enabled`. Durable episodes cover drift,
+  collection failure, stale at 60 minutes, missing/expired or changed identity,
+  expiry within 48 hours and three consecutive partial runs. Open and recovery
+  have independent stable keys and claimed send states. Notices use the existing
+  channel registry as the bot, only to a confirmed operator DM. With delivery
+  policy enabled they use `message_stream_alert` / normal urgency, respecting
+  quiet hours and the cap; deferred notices use the existing morning digest.
+  Unknown sends are never automatically retried. Needs you merges active source
+  problems into deliveries, retaining old catch-up items. Active episodes do not
+  age out at 72 hours; recovered unknown sends do. A rollback link opens
+  `#messages?collection=ID`; ordinary off/bridge pages make no collection request.
+  Rolling-24-hour sweep ratios count newly inserted IDs; a zero denominator is
+  unknown. The CLI flags were checked against offline help; live user-interface
+  envelopes, limits, scope and real cutover remain unverified. Validation uses
+  local CLI/channel/model stand-ins only.
 
 ### Subscriptions: a message stream on a time rule
 
@@ -6775,8 +6826,28 @@ writes nothing.
   database unusable.
 - **Reads:** `ledger.list` and `ledger.get` (`/api/v1`, read-only, open to an
   API client and the operator) answer `conflict` while the ledger is off.
-- **Not yet:** the To-do page, the ledger contract in the Manager's system
-  prompt (the tool descriptions are all it has), HTTP writes.
+- **Dashboard:** `#ledger`, "Ledger 账本" after Tasks, lists attention items
+  (open pending items and unconfirmed decisions), open work and the last
+  30 days' decisions. Filters and the detail drawer live in the hash query;
+  `#todo` remains the separate Needs you summary. `ledger.page` filters and
+  pages in the database with a cursor bound to its section and filters; its
+  attention count uses the same predicate as the attention section, including
+  sourced items' current state. The shared dashboard provider reads the
+  switch first, then refreshes the badge every 30 seconds and after writes.
+  Off, no entries are fetched and the navigation is hidden; failed refreshes
+  retain the previous count and say it could not be refreshed.
+- **Operator HTTP writes:** `ledger.add` and `ledger.action` use closed DTOs
+  and the same `db.ledger.apply` transaction and permissions. They record
+  `user`, `via=api`, `actor_id=operator`: v1 proves the operator's identity,
+  not whether it was a browser. Decisions added here are confirmed by that
+  input. The operations are operator-only, have no agent tool or generated
+  CLI command and act only inside Looper. Sourced items still change at their
+  source; the drawer only offers source navigation, due/owner edits and notes.
+  Only operator page/get responses add source links; client list/get keep
+  their existing source DTO. Writes read back before refreshing the page and
+  badge; conflicts retain input, and writes are never automatically retried.
+- **Not yet:** the ledger contract in the Manager's system prompt (the tool
+  descriptions are all it has).
 
 ### Proactive messages: the delivery layer
 
@@ -7691,6 +7762,22 @@ the outbound-review RFC) asks a tool-less run whether the operator asked for it,
 tool calls are its first caller, through a hook, while the system setting `outbound_review.enabled` is on (default
 off; `outbound_review.get` and `outbound_review.update`).
 
+Settings → Security (`#settings/security`) exposes this switch separately from the content fence. The operator
+confirms the direction before saving; a server confirmation, when requested, needs another explicit confirmation
+in its original session. The enabled Managers without a hook are shown with repair links; enabling still checks
+compatibility on the server. Settings → Roles → Outbound check selects its own Profile, prompt, timeout and run
+cap. It inherits only its own or built-in settings, not Shared defaults or a project's. Its actual timeout is at
+most 30 seconds, including a stored zero. Direct role writes and configuration imports of this role require the
+operator; generic Profile/provider and Shared defaults permissions keep their existing scope.
+
+The operator can read stored reviews at `#settings/security/audit` through `outbound_review.list`, including while
+the switch is off. Optional verdict and task filters use a bounded keyset cursor over `(created_at, id)`, newest
+first, with a default of 50 and maximum of 100 rows. Cursors are tied to the filters. The closed projection returns
+audit facts, decimal-string ids and nullable numeric cost/latency; it excludes action bodies, prompts, channel/chat
+and the action trail. The page provides earlier/back navigation, details and existing task/run links; unavailable
+cost or latency stays unknown. A run id beyond the existing run-read interface's safe integer range stays text.
+Reading these pages creates no setting or review and starts no classifier.
+
 - **The action** is typed: its tool and action, its `ActionLevel` (`inside`, `operator`, `origin`, `machine`,
   `external`, `unknown`; only `external` and `unknown` are reviewed), its target and a summary code wrote, and the
   text it would send. Every Looper tool declares its level in `ops/levels.py` (`TOOL_LEVELS`: a level, or a function of
@@ -7789,8 +7876,14 @@ off; `outbound_review.get` and `outbound_review.update`).
 
 Content from outside Looper that reaches a model goes in an `<untrusted source=... ...>` block
 (`looper/agents/untrusted.py`, the outbound-review RFC section 8) while the system setting
-`untrusted_fence.enabled` is `true` (there is no dashboard switch; off when it cannot be read). Off, every entry
+`untrusted_fence.enabled` is `true` (default off; runtime injection stays off when it cannot be read). Off, every entry
 writes what it wrote before, byte for byte.
+
+Settings → Security uses the operator-only `untrusted_fence.get/update` operations. Management reads report a
+database failure as unavailable, never as disabled; writes require a boolean and use the existing system setting.
+The switch changes only Looper-injected external content, independently of the outbound review. Neither switch is
+portable configuration, a Manager tool or a channel command; the generated CLI uses these same operator-only
+operations. Viewing settings does not write defaults.
 
 - **The block** (`untrusted.fence`) names its typed source (`untrusted.Source`) and where the content came from
   (`from`, `at`, `ref`, ...; quotes, angle brackets and line breaks dropped). The content loses its @ markup
@@ -8072,7 +8165,8 @@ PostgreSQL is a hard startup dependency. All data paths:
 | `task_user_gate_messages` | A gate's discussion, oldest first: the user's messages (`message`, `end`), the Planner's replies and code's notes (`opened`, `updated`, `reminder`, `cancelled`, `closed`, `resumed`, `error`), with `via`, the option a button chose, in a group chat the author, and for a user's message `from_operator` (whether the operator wrote it in their own turn, decided by code as it is stored; NULL: not known) |
 | `task_plans` | A task's plan, one row per task: `plan_id`, `status` (`planning`, `executing`, `verifying`, `stopping`, `completed`, `failed`), `correlation_id`, `origin_channel_id`, `final_summary`, `fail_reason`, and with step workspaces `start_branch` and `start_commit` (where the branch was when the task dispatched its first step; `''` otherwise); replaced when the task is planned again |
 | `subscriptions`, `subscription_runs` | A subscription's stream and what each of its runs read and made ([Subscriptions](#subscriptions-a-message-stream-on-a-time-rule)): the schedule's source, filter, window limits, rendering, quiet word, header, `cursor_seq` and `target_confirmed_at`; per run, the window (`from_seq`, `to_seq`), the counts, the processor's record, the `outcome`, the output and its notification |
-| `event_sources`, `source_chats`, `source_threads`, `source_people`, `source_runs`, `source_events`, `source_deletions` | The message stream ([Message stream](#message-stream)): a source and its ingest mode, directory, rule and `committed_seq`; its chats (kind, name, inclusion, `bridge_*` file state); thread cursors and people names (not used yet); one row per ingest run with its counts; and the events, each unique per source by `external_id`, with its `seq`, send time, `text`, raw `body` and `origin` |
+| `event_sources`, `source_chats`, `source_threads`, `source_people`, `source_runs`, `source_events`, `source_deletions` | The message stream ([Message stream](#message-stream)): a source and its ingest mode, directory, rule and `committed_seq`; chats, bridge offsets, chat/thread cursors, people names and ingest-run counts; unique events per source and `external_id`, with their `seq`, send time, `text`, raw `body` and `origin` |
+| `source_collection_settings`, `source_parity_sessions`, `source_parity_members`, `source_parity_coverage`, `source_stream_alerts` | Opt-in collector settings/fire slots, frozen reference windows and independent identity/coverage evidence, and durable alert episodes with separate open/recovery delivery claims |
 | `step_workspaces` | A step's git worktree ([Step workspaces](#step-workspaces)): `task_id`, `step_id` (both going with the task or step), `repo_dir` and `subdir` (the task directory in it), `target_branch`, `path`, `branch`, `base_commit`, `checkpoint`, `result_commit`, `merge_commit`, `state` (`active`, `merging`, `merged`, `unmerged`, `discarded`), `merge_error` (required when `unmerged`) with `merge_files`, `detail`, `links` (the paths linked back to the task directory's), `removed_at` (its directory and branch are gone); one in use (`active` or `merging`) per step |
 | `agent_sessions` | The session each resident agent resumes: `manager` or `planner-<task_id>`, its `session_id`, `session_totals`, the `runtime_type` and `provider_id` it belongs to and the `profile_id` that ran it last (`NULL` runtime: before Agent Profiles, Claude Code; `NULL` provider: before providers were recorded, Claude Code's own login), and `clean_start` (the user dropped the session with `/new`: the next one starts without a resume brief) |
 | `manager_sessions` | The default Manager's group (`group:`) and other-sender direct-chat (`dm:`) sessions with [session routing](#manager-session-routing) on, keyed by `(manager_id, session_key)` (`session_key` = `kind:channel_id:chat`): the same session fields as `agent_sessions`, `context_tokens` and `last_turn_cost_usd` (for session budgets), and `last_active_at`. `main` stays in `agent_sessions` |

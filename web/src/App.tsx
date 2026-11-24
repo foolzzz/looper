@@ -6,6 +6,7 @@ import { DrainBanner } from "@/components/drain-banner";
 import { SessionEndedBanner } from "@/components/session-ended-banner";
 import { useSessionEnded } from "@/lib/session";
 import { WaitingGatesProvider } from "@/lib/use-waiting-gates";
+import { LedgerProvider } from "@/lib/use-ledger";
 import { DashboardPage } from "@/pages/dashboard";
 import { ChatPage } from "@/pages/chat";
 import { TasksPage } from "@/pages/tasks";
@@ -15,12 +16,13 @@ import { MessageStreamPage } from "@/pages/message-stream";
 import { IntentsPage } from "@/pages/intents";
 import { MemoryPage } from "@/pages/memory";
 import { NeedsYouPage } from "@/pages/needs-you";
+import { LedgerPage } from "@/pages/ledger";
 import { SettingsPage } from "@/pages/settings";
 import { AgentHistoryPage, historyHref, isHistoryRole } from "@/pages/agent-history";
 import { ProjectPage } from "@/pages/project";
 import { DEFAULT_SETTINGS_PAGE, isSettingsPage, type SettingsPageId } from "@/lib/settings-pages";
 
-const PAGES = new Set<Page>(["dashboard", "todo", "chat", "tasks", "gates", "projects", "schedules", "messages", "intents", "memory", "settings", "history"]);
+const PAGES = new Set<Page>(["dashboard", "todo", "chat", "tasks", "ledger", "gates", "projects", "schedules", "messages", "intents", "memory", "settings", "history"]);
 
 interface Route {
   page: Page;
@@ -104,6 +106,7 @@ function App() {
 
   return (
     <WaitingGatesProvider>
+    <LedgerProvider>
     <div className="flex h-dvh w-screen overflow-hidden bg-background">
       <Sidebar
         activePage={route.page}
@@ -188,10 +191,15 @@ function App() {
             </div>
           )}
           {route.page === "messages" && (
-            <div className="h-full overflow-y-auto p-6"><MessageStreamPage /></div>
+            <div className="h-full overflow-y-auto p-6"><MessageStreamPage query={route.query} /></div>
           )}
           {route.page === "todo" && (
             <div className="h-full overflow-y-auto p-6"><NeedsYouPage /></div>
+          )}
+          {route.page === "ledger" && (
+            <div className="h-full overflow-y-auto">
+              <LedgerPage query={route.query} onQuery={(q, replace) => navigateSub("ledger", "", q, replace, route.query)} />
+            </div>
           )}
           {route.page === "intents" && (
             <div className="h-full overflow-y-auto"><IntentsPage /></div>
@@ -219,6 +227,7 @@ function App() {
         </main>
       </div>
     </div>
+    </LedgerProvider>
     </WaitingGatesProvider>
   );
 }
