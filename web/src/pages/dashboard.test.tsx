@@ -23,6 +23,13 @@ vi.mock("@/lib/status-card", async (original) => ({
 vi.mock("@/components/manager-sessions", () => ({ ManagerSessions: () => null }));
 vi.mock("@/components/task-quality-section", () => ({ TaskQualitySection: () => null }));
 vi.mock("@/components/sign-out", () => ({ SignOut: () => null }));
+vi.mock("@/lib/api-cost-guard", () => ({
+  fetchCostGuard: vi.fn(async () => ({
+    mode: "off", daily_usd: null, daily_equivalent_usd: null, roles: {}, counters: [], recent: [],
+    recommended_daily_usd: null, recommended_daily_equivalent_usd: null, problem: null,
+  })),
+  fetchCostHolds: vi.fn(async () => ({ holds: [] })),
+}));
 vi.mock("@/components/project-dialog", () => ({ ProjectDialog: () => null }));
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
