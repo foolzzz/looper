@@ -80,6 +80,11 @@ def build_parser() -> argparse.ArgumentParser:
     _add_leads_parser(commands)
     _add_memory_parser(commands)
     _add_decisions_parser(commands)
+    profile = commands.add_parser("profile", allow_abbrev=False, help="Read the operator profile locally.")
+    profile_sub = profile.add_subparsers(dest="profile_command", required=True)
+    show = profile_sub.add_parser(
+        "show", allow_abbrev=False, help="Print the compiled profile; silently exit 0 when unavailable (within 2 s).")
+    _add_location_flags(show)
     commands.add_parser(
         "mcp-server",
         allow_abbrev=False,
@@ -390,6 +395,10 @@ def main(argv: list[str] | None = None) -> int:
         from .agents import decision_commands
 
         return decision_commands.run(args, _load_ops)
+    if args.command == "profile":
+        from .agents import profile_commands
+
+        return profile_commands.show(args)
     if args.command == "mcp-server":
         from .agents import mcp_server
 
