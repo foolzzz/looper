@@ -24,6 +24,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import math
 import os
 import re
 import shutil
@@ -840,11 +841,15 @@ async def evaluate(args: argparse.Namespace, database_url: str, root: Path) -> l
             from looper.db import system_settings
 
             await system_settings.put_settings({untrusted.ENABLED_KEY: "true"})
-        if any(key not in DRAFT_CASES for key in args.cases) or args.cases_file or getattr(args, "intents_file", None):
+        engine = getattr(args, "messages_engine", None)
+        if engine is not None:
+            from looper.agents.serve import seed_role_configs
+            await seed_role_configs()
+        elif any(key not in DRAFT_CASES for key in args.cases) or args.cases_file or getattr(args, "intents_file", None):
             await _prepare(args)
         if any(key in DRAFT_CASES for key in args.cases):
             await _prepare_drafts(args)
-        if not getattr(args, "intents_file", None):
+        if engine is None and not getattr(args, "intents_file", None):
             print("processor runs " + json.dumps(await processor.chosen_profile(), ensure_ascii=False), flush=True)
             from looper.agents.agent_settings import AgentType
             print("leads check runs " + json.dumps(await processor.chosen_profile(role=AgentType.LEADS_CHECK),
@@ -855,6 +860,8 @@ async def evaluate(args: argparse.Namespace, database_url: str, root: Path) -> l
         case_budget = args.budget_usd
 
         def allow() -> bool:
+            if engine is not None and engine.halted:
+                return False
             total = getattr(args, "total_budget_usd", None)
             if total is not None and any(run["cost_usd"] is None or run.get("cost_unknown") for run in runs):
                 return False
@@ -923,7 +930,8 @@ async def _extract(args: argparse.Namespace, key: str, rep: int, root: Path) -> 
     instructions = extraction.instructions(
         kind, extraction.LEADS_INSTRUCTIONS if kind == "leads" else extraction.INTENTS_INSTRUCTIONS, types,
         group=any(row.get("via_group") for row in rows))
-    done = await processor.run(
+    engine = getattr(args, "messages_engine", None)
+    done = await (engine.run if engine is not None else processor.run)(
         owner=f"eval-{key}",
         instructions=instructions + (f"\n\n{extraction.REFORMAT_REMINDER}" if case.get("reminded") else ""),
         input_text=text, input_ref={"case": key, "rep": rep, "render": f"{kind}_window"},
@@ -938,7 +946,8 @@ async def _extract(args: argparse.Namespace, key: str, rep: int, root: Path) -> 
            "seconds": round(time.monotonic() - started, 1),
            "parsed": None if parsed is None else {"state": parsed.state, "reason": parsed.reason,
                                                   "items": len(parsed.items), "dropped": dict(parsed.dropped)},
-           **await _record(done.record_id, text, [row["text"] for row in (*rows, *context)])}
+           **(engine.facts(done) if engine is not None else
+              await _record(done.record_id, text, [row["text"] for row in (*rows, *context)]))}
     run["checks"] = score_extraction(case, run, parsed, refs)
     run["passed"] = all(run["checks"].values())
     print(f"rep {rep} {key}: {'pass' if run['passed'] else 'FAIL'} " + json.dumps(run["checks"]), flush=True)
@@ -1165,6 +1174,7 @@ async def _intents_file(args: argparse.Namespace, windows: list[dict[str, Any]],
     recalled: set[int] = set()
     counts = []
     cost = 0.0
+    engine = getattr(args, "messages_engine", None)
     for number, window in enumerate(windows, 1):
         remaining = args.budget_usd - cost  # the file run shares its hard cap across all windows
         if remaining <= 0:
@@ -1172,7 +1182,7 @@ async def _intents_file(args: argparse.Namespace, windows: list[dict[str, Any]],
         rows = window["rows"]
         text, refs = extraction.render("intents", rows, context=[], participants=window["participants"],
                                        known=[], zone_name="UTC", text_max_chars=60_000)
-        done = await processor.run(
+        done = await (engine.run if engine is not None else processor.run)(
             owner=f"eval-intents-file-{number}",
             instructions=extraction.instructions("intents", extraction.INTENTS_INSTRUCTIONS, types, group=True),
             input_text=text, input_ref={"case": "intents_file", "number": number, "rep": rep},
@@ -1189,7 +1199,9 @@ async def _intents_file(args: argparse.Namespace, windows: list[dict[str, Any]],
         counts.append({"number": number, "messages": len(rows), "intents": len(items),
                        "false_positives": sum(not cited & positive for cited in sources),
                        "intent_sources": sum(len(cited) for cited in sources),
-                       "cost_usd": done.cost_usd, "valid": valid})
+                       "cost_usd": done.cost_usd, "valid": valid,
+                       **({"usage": done.usage, "failure": done.failure and done.failure.value,
+                           "detail": done.detail} if engine is not None else {})})
         cost += done.cost_usd or 0.0
         print(f"rep {rep} intents file window {number}: messages {len(rows)}, intents {len(items)}, "
               f"cost ${done.cost_usd or 0:.4f}", flush=True)
@@ -1312,6 +1324,12 @@ def main() -> int:
     chosen = parser.add_mutually_exclusive_group()
     parser.add_argument("--mode", choices=("fake", "real"), default="real",
                         help="fake scripts only memory drafting replies; real runs the selected profile")
+    parser.add_argument("--engine", choices=("runtime", "messages"), default="runtime")
+    parser.add_argument("--base-url", help="Messages API base URL, including its version prefix")
+    parser.add_argument("--model", help="Messages model wire ID")
+    parser.add_argument("--api-key-env", help="environment variable containing the Messages API key")
+    parser.add_argument("--prices-file", help="JSON model-to-price table overriding built-in prices")
+    parser.add_argument("--max-output-tokens", type=int, default=4096)
     chosen.add_argument("--register-agent", help="a runtime/provider/model/agent spec to register and run")
     chosen.add_argument("--profile", help="an Agent Profile of the eval's new database to run")
     parser.add_argument("--reps", type=int, default=1)
@@ -1335,13 +1353,13 @@ def main() -> int:
     parser.add_argument("--out", help="the run's JSON; default evals/runs/<time>-processor.json")
     parser.add_argument("--baseline", help="a run's JSON to compare with")
     args = parser.parse_args()
-    if args.mode == "real" and not (args.register_agent or args.profile):
+    if args.engine == "runtime" and args.mode == "real" and not (args.register_agent or args.profile):
         parser.error("real mode requires --register-agent or --profile")
     if args.mode == "real" and not args.pg_url:
         parser.error("give --pg-url or LOOPER_EVAL_DATABASE_URL (a disposable PostgreSQL server)")
     if args.cases is None:
         args.cases = "memory_draft" if args.mode == "fake" else (
-            "" if args.cases_file or args.intents_file else ",".join(CASES))
+            "" if args.cases_file or args.intents_file else ("intents_*" if args.engine == "messages" else ",".join(CASES)))
     patterns = [key.strip() for key in args.cases.split(",") if key.strip()]
     known = {**CASES, **EXTRACTION_CASES, **CHECK_CASES, **TRIAGE_CASES, **DRAFT_CASES}
     args.cases = []
@@ -1353,6 +1371,24 @@ def main() -> int:
         args.cases.extend(key for key in matched if key not in args.cases)
     if args.mode == "fake" and (args.cases_file or args.intents_file or any(key not in DRAFT_CASES for key in args.cases)):
         parser.error("fake mode accepts only memory_draft cases")
+    if args.engine == "messages":
+        if any(not math.isfinite(value) or value <= 0 for value in
+               (args.budget_usd, args.timeout, *([args.total_budget_usd] if args.total_budget_usd is not None else []))):
+            parser.error("Messages budgets and timeout must be finite and positive")
+        if (args.mode != "real" or args.register_agent or args.profile or args.check_register_agent or args.check_profile
+                or args.cases_file or any(key not in EXTRACTION_CASES or EXTRACTION_CASES[key]["kind"] != "intents"
+                                          for key in args.cases)):
+            parser.error("messages engine accepts only intents cases and --intents-file, without Agent Profiles")
+        if not (args.base_url and args.model and args.api_key_env):
+            parser.error("messages engine requires --base-url, --model and --api-key-env")
+        from .messages import MessagesEngine
+        try:
+            args.messages_engine = MessagesEngine(args.base_url, args.model, args.api_key_env,
+                prices_file=args.prices_file, max_output_tokens=args.max_output_tokens, fence=args.untrusted_fence)
+        except ValueError as exc:
+            parser.error(str(exc))
+    elif any((args.base_url, args.model, args.api_key_env, args.prices_file)):
+        parser.error("Messages configuration requires --engine messages")
     if args.reps < 1 or args.budget_usd <= 0 or args.timeout <= 0:
         parser.error("reps, budget and timeout must be positive")
     if args.cases_file and not Path(args.cases_file).is_file():
@@ -1380,6 +1416,9 @@ def main() -> int:
     run = {"schema": SCHEMA, "commit": commit, "mode": args.mode, "profile": args.profile or args.register_agent,
            "check_profile": args.check_profile or args.check_register_agent, "reps": args.reps,
            "untrusted_fence": args.untrusted_fence, "runs": runs}
+    if args.engine == "messages":
+        run.update(engine="messages", model=args.model, prices=args.messages_engine.price.view(),
+                   max_output_tokens=args.max_output_tokens)
     if metrics := triage_metrics(runs):
         run["triage_metrics"] = metrics
     out = Path(args.out) if args.out else HERE / "evals" / "runs" / time.strftime("%Y%m%d-%H%M%S-processor.json")
