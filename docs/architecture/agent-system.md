@@ -2875,11 +2875,17 @@ Before, an unconfigured project ran at most 8 Planners, 16 Workers and 8
 Reviewers at once whatever its tasks; now N running tasks run N Planners and
 up to 16N Workers and 8N Reviewers. By default nothing caps the total.
 With `engine.admission.enabled`, each account's `max_concurrency` also bounds
-Workers, Reviewers, consults, processors and nested runs; `null` is unlimited.
+Workers, Reviewers, consults, processors, explorers and nested runs; `null` is unlimited.
 The account queue uses the shared `Lane` enum, aging and quota freezes, with
 durable state and an operator-only `providers.limits_clear` override. Nested
-runs borrow a running parent's slot. Planner and Manager turns and platform
-explorers are not admitted yet. The switch defaults off and refuses activation
+runs borrow a running parent's slot. Explorers queue in their spawner's lane
+after a task-class pre-check, without holding the task lock. A blocking explorer
+wait lends one slot to its first queued child on the same account. If the wait
+ends first, that child keeps its slot and the parent reacquires with its original
+arrival order before the tool returns. Frozen accounts do not lend; queued tool
+results include `held: quota` and the known reset time. Kept explorers register
+their slots on adoption and release them on collection. Planner and Manager
+turns are not admitted yet. The switch defaults off and refuses activation
 while failure typing is off. The independent cost guard can still hold runs
 for spending; admission's 95% background pause does not change that policy.
 The converted alarm-like
