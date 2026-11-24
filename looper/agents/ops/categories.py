@@ -33,6 +33,7 @@ CREATE, UPDATE, CONTROL, REMOVE, RELAY = (ActionCategory.CREATE, ActionCategory.
 
 TOOL_ACTIONS: Mapping[str, ActionKind | Mapping[str, ActionKind]] = {
     "looper_task_create": ActionKind(CREATE, "任务", "新建", "task_id"),
+    "looper_memory_propose": ActionKind(CREATE, "记忆提议", "新建", "candidate"),
     "looper_skill_propose": {action: ActionKind(CREATE, "skill 提议", "新建", "name")
                              for action in ("create", "update")},
     "looper_task_control": {

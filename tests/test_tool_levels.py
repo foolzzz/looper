@@ -27,6 +27,7 @@ RFC_TABLE: dict[str, ActionLevel | str] = {
     "looper_catalog": MACHINE, "looper_settings": "args", "looper_schedules": "args", "looper_confirm": INSIDE,
     "looper_ledger_add": INSIDE, "looper_ledger_update": INSIDE, "looper_leads_search": INSIDE,
     "looper_skill_propose": INSIDE,
+    "looper_memory_propose": INSIDE,
     "looper_session_search": INSIDE,  # reads earlier conversations stored by Looper
     "looper_reminder_list": INSIDE, "looper_reminder_create": OPERATOR, "looper_reminder_cancel": OPERATOR,
     "looper_task_pipeline": INSIDE, "looper_gates": "args",
