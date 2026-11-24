@@ -18,7 +18,15 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.15.33] - 2026-11-24
+
+### Fixed
+
+- **Fix release: adds jsonschema as a runtime dependency; v2.15.32 was not published.** ([#1709](https://github.com/foolzzz/looper/pull/1709)) v2.15.33 contains everything listed for v2.15.32.
+
 ## [2.15.32] - 2026-11-24
+
+Not published; superseded by v2.15.33.
 
 ### Added
 
