@@ -64,6 +64,8 @@ class FailureHandlingService:
         self.pool = pool
         self.publish = publish
         self.clock = clock or (lambda: datetime.now(timezone.utc))
+        self._sleep = asyncio.sleep
+        self._quota_deadlines: dict[str, datetime] = {}
         self.jitter = jitter or (lambda: random.uniform(.8, 1.2))
         self.mode = FailureTyping(mode)
         self._timers: dict[str, asyncio.Task] = {}
@@ -135,6 +137,12 @@ class FailureHandlingService:
         if answer.action in ('hold', 'breaker', 'planner'):
             self._history_tasks.add(kwargs['task_id'])
         if answer.hold:
+            try:
+                await self._prepare_quota_hold(answer.hold)
+            except Exception:
+                logger.exception('Could not persist scheduled quota deadline failure_id=%s', answer.failure['id'])
+                await self._route_recovery_error(answer.hold)
+                return answer
             self._schedule(answer.hold)
             if answer.hold['kind'] == 'quota' and answer.hold['provider_id']:
                 from . import admission
@@ -178,9 +186,10 @@ class FailureHandlingService:
     async def get_holds(self, task_id):
         return await store.list_holds(task_id, pool=self.pool)
 
-    async def _release(self, task_id, step_id, failure_id, action, *, actor):
+    async def _release(self, task_id, step_id, failure_id, action, *, actor, quota_exhausted=False):
         try:
-            answer = await store.release_hold(task_id, step_id, failure_id, action, actor=actor, pool=self.pool)
+            answer = await store.release_hold(task_id, step_id, failure_id, action, actor=actor,
+                                              quota_exhausted=quota_exhausted, pool=self.pool)
         except store.StoreError as exc:
             raise FailureHandlingError(exc.code, str(exc)) from exc
         self._cancel_timer(step_id)
@@ -216,28 +225,73 @@ class FailureHandlingService:
         if task is not None and task is not asyncio.current_task():
             task.cancel()
 
-    def _schedule(self, hold):
+    @staticmethod
+    def _has_quota_target(hold):
+        return hold['kind'] == 'quota' or any(item.get('failure_class') == 'quota' for item in hold.get('targets', []))
+
+    async def _prepare_quota_hold(self, hold):
+        if not self._has_quota_target(hold):
+            return
+        schedule_id = await (self.pool or get_pool()).fetchval('SELECT schedule_id FROM tasks WHERE id=$1', hold['task_id'])
+        if schedule_id:
+            from .turn_admission import scheduled_quota_deadline
+            quota_ids = [item['failure_id'] for item in hold.get('targets', []) if item.get('failure_class') == 'quota']
+            started = await (self.pool or get_pool()).fetchval(
+                'SELECT min(created_at) FROM step_failures WHERE id=ANY($1::bigint[])', quota_ids) if quota_ids else None
+            self._quota_deadlines[hold['task_id']] = await scheduled_quota_deadline(
+                hold['task_id'], schedule_id, self, started_at=started or hold['created_at'], pool=self.pool)
+
+    def _schedule(self, hold, *, recovery_error=False):
         self._cancel_timer(hold['step_id'])
         if self.mode is not FailureTyping.ACT or self._closed:
             return
-        if hold['kind'] == 'breaker':
+        if hold['kind'] == 'breaker' and hold['task_id'] not in self._quota_deadlines:
             return
-        if hold['kind'] == 'environment' and hold.get('reminded_at') is not None:
+        if hold['kind'] == 'environment' and hold.get('reminded_at') is not None and not self._has_quota_target(hold):
             return
-        task = asyncio.create_task(self._timer(dict(hold)), name=f"failure-hold-{hold['failure_id']}")
+        task = asyncio.create_task(self._timer(dict(hold), recovery_error=recovery_error), name=f"failure-hold-{hold['failure_id']}")
         self._timers[hold['step_id']] = task
 
-    async def _timer(self, hold):
+    async def _timer(self, hold, *, recovery_error=False):
         try:
-            due = hold['until'] or hold['created_at'] + timedelta(hours=1)
-            await asyncio.sleep(max(0, (due - self.clock()).total_seconds()))
+            if recovery_error:
+                await self._sleep(60)
+            await self._prepare_quota_hold(hold)
+            deadline = self._quota_deadlines.get(hold['task_id']) if self._has_quota_target(hold) else None
+            if hold['kind'] == 'breaker' and deadline is None:
+                return
+            if not recovery_error:
+                due = deadline if hold['kind'] == 'breaker' else hold['until'] or (deadline if hold.get('reminded_at') is not None else None) or (
+                    hold['created_at'] + timedelta(hours=1))
+                if deadline is not None:
+                    due = min(due, deadline)
+                await self._sleep(max(0, (due - self.clock()).total_seconds()))
             if self.mode is not FailureTyping.ACT or self._closed or hold['task_id'] in self._cancelled:
                 return
             current = next((item for item in await store.list_holds(hold['task_id'], pool=self.pool)
                             if item['step_id'] == hold['step_id'] and item['failure_id'] == hold['failure_id']), None)
             if current is None:
+                if recovery_error:
+                    for pending in await store.pending_releases(hold['task_id'], pool=self.pool):
+                        if pending['failure_id'] == hold['failure_id']:
+                            await self._emit(hold['task_id'], pending['payload'])
                 return
             hold = current
+            if deadline is not None and self.clock() >= deadline:
+                async with self._mode_lock:
+                    if self.mode is FailureTyping.ACT and not self._closed:
+                        await self._release(hold['task_id'], hold['step_id'], hold['failure_id'], 'planner',
+                                            actor='quota deadline', quota_exhausted=True)
+                return
+            if recovery_error:
+                async with self._mode_lock:
+                    if self.mode is FailureTyping.ACT and not self._closed:
+                        await self._release(hold['task_id'], hold['step_id'], hold['failure_id'], 'planner',
+                                            actor='recovery error')
+                return
+            if hold['kind'] == 'breaker':
+                self._schedule(hold)  # a wall-clock correction can only defer expiry, never permit a fourth run
+                return
             if hold['kind'] == 'environment':
                 row = await (self.pool or get_pool()).fetchrow(
                     'UPDATE step_holds SET reminded_at=$2 WHERE failure_id=$1 AND reminded_at IS NULL RETURNING step_id',
@@ -245,6 +299,8 @@ class FailureHandlingService:
                 if row is not None:
                     await self._emit(hold['task_id'], {'event': 'failure_hold_reminder', 'step_id': hold['step_id'],
                         'failure_id': hold['failure_id'], 'kind': 'environment', 'cause': hold['cause']})
+                if deadline is not None:
+                    self._schedule({**hold, 'reminded_at': self.clock()})
                 return
             if hold['kind'] == 'quota' and hold['provider_id']:
                 from . import admission
@@ -265,12 +321,31 @@ class FailureHandlingService:
         except FailureHandlingError as exc:
             if exc.code not in ('conflict', 'not_found'):
                 logger.error('Failure hold timer could not recover failure_id=%s: %s', hold['failure_id'], exc)
+                await self._route_recovery_error(hold, defer=recovery_error)
         except Exception:
             logger.exception('Failure hold timer failed task=%s step=%s failure_id=%s', hold['task_id'],
                              hold['step_id'], hold['failure_id'])
+            await self._route_recovery_error(hold, defer=recovery_error)
         finally:
             if self._timers.get(hold['step_id']) is asyncio.current_task():
                 self._timers.pop(hold['step_id'], None)
+
+    async def _route_recovery_error(self, hold, *, defer=False):
+        if self.mode is not FailureTyping.ACT or self._closed or hold['task_id'] in self._cancelled:
+            return
+        if not defer:
+            try:
+                async with self._mode_lock:
+                    await self._release(hold['task_id'], hold['step_id'], hold['failure_id'], 'planner', actor='recovery error')
+                return
+            except FailureHandlingError as exc:
+                if exc.code in ('conflict', 'not_found'):
+                    return
+                logger.error('Failure recovery routing remains pending failure_id=%s: %s', hold['failure_id'], exc)
+            except Exception:
+                logger.exception('Failure recovery routing remains pending failure_id=%s', hold['failure_id'])
+        # Only retry the durable routing operation, never the model, while storage is unavailable.
+        self._schedule(hold, recovery_error=True)
 
     async def restore_task(self, task_id):
         self._cancelled.discard(task_id)
@@ -278,6 +353,7 @@ class FailureHandlingService:
         if holds:
             self._history_tasks.add(task_id)
         for hold in holds:
+            await self._prepare_quota_hold(hold)
             self._schedule(hold)
         for pending in await store.pending_releases(task_id, pool=self.pool):
             status = await (self.pool or get_pool()).fetchval('SELECT status FROM tasks WHERE id=$1', task_id)
@@ -332,16 +408,11 @@ class FailureHandlingService:
                 logger.exception('Could not route pending mode recovery failure_id=%s', pending['failure_id'])
         if failed:
             raise FailureHandlingError('unavailable', 'Mode saved; some committed recoveries remain pending')
-        if not await store.pending_releases(pool=self.pool):
-            await system_settings.put_settings({'engine.failure_pending_recovery': None}, pool=self.pool)
-            self.recovering = False
+        self.recovering = await store.sync_recovery_marker(pool=self.pool)
 
     async def ack_release(self, failure_id):
         """Only the Planner that applied the committed recovery acknowledges its outbox row."""
-        await store.mark_delivered(failure_id, pool=self.pool)
-        if not await store.pending_releases(pool=self.pool):
-            await system_settings.put_settings({'engine.failure_pending_recovery': None}, pool=self.pool)
-            self.recovering = False
+        self.recovering = await store.mark_delivered(failure_id, pool=self.pool)
 
     async def cancel_task(self, task_id, *, reason='task ended', step_ids=None):
         if step_ids is None:
@@ -383,11 +454,14 @@ class FailureHandlingService:
                 elif hold['provider_id'] and (await admission._controller.snapshot(hold['provider_id']))['state'] != 'frozen':
                     self._schedule({**hold, 'until': self.clock()})
 
-    async def quota_deadline(self, task_id, max_seconds):
-        return await store.quota_deadline(task_id, max_seconds, now=self.clock(), pool=self.pool)
+    async def quota_deadline(self, task_id, max_seconds, *, started_at=None):
+        deadline = await store.quota_deadline(task_id, max_seconds, now=started_at or self.clock(), pool=self.pool)
+        self._quota_deadlines[task_id] = deadline
+        return deadline
 
     async def clear_quota_deadline(self, task_id):
         await (self.pool or get_pool()).execute('DELETE FROM task_quota_waits WHERE task_id=$1', task_id)
+        self._quota_deadlines.pop(task_id, None)
 
     async def operator_reset(self, task_id, *, operator, actor='operator'):
         return await store.operator_reset(task_id, operator=operator, actor=actor, pool=self.pool)

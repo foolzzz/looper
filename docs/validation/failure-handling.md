@@ -55,6 +55,7 @@ Reproduction (supply a disposable PostgreSQL URL):
 ```sh
 uv run --system-certs --python 3.11 --extra test python -m pytest -q -n 2 \
   tests/test_step_failure_handling_db.py tests/test_step_failure_planner_db.py \
+  tests/test_step_failure_deadline_db.py \
   tests/test_step_failure_schema_db.py tests/test_failure_handling_serve_db.py \
   tests/test_engine_failure_handling_off.py tests/test_worker_failure_handling.py \
   tests/test_planner_failure_handling.py tests/test_processor_failure_handling_db.py \

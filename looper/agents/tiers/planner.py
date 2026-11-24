@@ -2965,7 +2965,7 @@ class PlannerAgent:
         unit.failure_retry = None
         if signal.get("quota_exhausted"):
             await self._fail_plan(plan, reason="Scheduled task exhausted its quota wait deadline",
-                                  fail_kind=FailKind.QUOTA_EXHAUSTED)
+                                  fail_kind=FailKind.QUOTA_EXHAUSTED, model_closeout=False)
             return True
         outcome = signal.get("outcome")
         scope = plan.step(unit.reviews) if unit.reviews else unit
@@ -3017,6 +3017,7 @@ class PlannerAgent:
                 # Running failures must never become panel votes or advance advisory roles.
                 if unit.reviews:
                     unit.result, unit.status = result, "pending"
+                    await self._save(plan, unit)
                 scope.result = {**(scope.result or {}), "verify_passed": False,
                                 "verify_summary": result.get("summary") or result.get("error") or
                                                   "Review execution did not complete"}
@@ -3084,8 +3085,13 @@ class PlannerAgent:
         holds = await step_failures.list_holds(self._task_id)
         if any(h["step_id"] == scope.step_id for h in holds):
             return
-        action = str(payload.get("action") or "retry")
         active = await failures.typing_mode() is failures.FailureTyping.ACT
+        if payload.get("quota_exhausted") and active:
+            await self._fail_plan(plan, reason="Scheduled task exhausted its quota wait deadline",
+                                  fail_kind=FailKind.QUOTA_EXHAUSTED, model_closeout=False)
+            await failure_handling.get_service().ack_release(payload["failure_id"])
+            return
+        action = str(payload.get("action") or "retry")
         await self._read_failure_journal(plan)
         scope.failure_hold = None
         for item in payload.get("targets") or [payload.get("target") or {}]:
@@ -3541,6 +3547,16 @@ class PlannerAgent:
         Without a valid decision the step's own verdict decides, and no
         Reviewer is spawned.
         """
+        if not step.failure_history:
+            from .. import failure_handling
+            service = failure_handling.get_service()
+            if service is not None and service.known_mode() is failures.FailureTyping.ACT:
+                try:
+                    step.failure_history = await service.continuous_failures(self._task_id, step.step_id)
+                except Exception:
+                    logger.exception("Cannot read decision failure history for task %s step %s",
+                                     self._task_id, step.step_id)
+                    report = [*report, "Failure history is unavailable; read tasks.failure_history before retrying."]
         view = plan.view()
         context = self._open_now(plan, step, context)
         entries = []
@@ -3618,7 +3634,7 @@ class PlannerAgent:
         if plan.status not in _LIVE:
             return
         if getattr(exc, "fail_kind", None) is FailKind.QUOTA_EXHAUSTED:
-            await self._fail_plan(plan, reason=str(exc), fail_kind=FailKind.QUOTA_EXHAUSTED)
+            await self._fail_plan(plan, reason=str(exc), fail_kind=FailKind.QUOTA_EXHAUSTED, model_closeout=False)
             return
         context = await acceptance_decisions.fallback_context(self, plan, step, context)
         if context is None:

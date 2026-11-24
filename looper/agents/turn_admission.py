@@ -81,22 +81,22 @@ def freeze_reply(account: str, windows: Sequence[str], resets_at: datetime | Non
             "你的消息已保留，额度恢复后自动回答；发 /stop 可取消。")
 
 
-async def scheduled_quota_deadline(task_id: str, schedule_id: str | None, service) -> datetime:
+async def scheduled_quota_deadline(task_id: str, schedule_id: str | None, service, *, started_at=None, pool=None) -> datetime:
     """Persist the first quota wait, capped at six hours or one schedule period, whichever is shorter."""
     from ..db import schedules
     from . import cron
 
     maximum = 6 * 3600.0
     if schedule_id:
-        row = await schedules.get_schedule(schedule_id)
+        row = await schedules.get_schedule(schedule_id, **({"pool": pool} if pool is not None else {}))
         if row is not None:
-            now = datetime.now(timezone.utc)
+            now = started_at or (service.clock() if callable(getattr(service, "clock", None)) else datetime.now(timezone.utc))
             rule, zone = cron.parse(row["cron"]), cron.zone(row["timezone"])
             first = cron.next_fire(rule, zone, now)
             following = cron.next_fire(rule, zone, first) if first else None
             if first is not None and following is not None:
                 maximum = min(maximum, (following - first).total_seconds())
-    return await service.quota_deadline(task_id, maximum)
+    return await service.quota_deadline(task_id, maximum, **({"started_at": started_at} if started_at is not None else {}))
 
 
 def admitted_manager_turn(method):

@@ -191,7 +191,7 @@ async def list_holds(task_id=None, *, pool=None):
         'ORDER BY h.created_at,h.step_id', task_id)]
 
 
-async def release_hold(task_id, step_id, failure_id, action, *, actor='operator', pool=None):
+async def release_hold(task_id, step_id, failure_id, action, *, actor='operator', quota_exhausted=False, pool=None):
     if action not in ('retry', 'planner', 'stop'):
         raise StoreError('invalid', 'Unknown hold action')
     pool = pool or get_pool()
@@ -206,6 +206,9 @@ async def release_hold(task_id, step_id, failure_id, action, *, actor='operator'
                    'result': row['targets'][0]['result'] if row['targets'] else {},
                    'failure': {'class': row['targets'][0].get('failure_class', row['kind']),
                                'cause': row['targets'][0].get('failure_cause', row['cause'])} if row['targets'] else {}}
+        if quota_exhausted:
+            payload['quota_exhausted'] = True
+        await _lock_recovery_marker(conn)
         await conn.execute('INSERT INTO step_failure_releases(failure_id,task_id,step_identity,action,payload) '
                            'VALUES($1,$2,$3,$4,$5::jsonb) ON CONFLICT DO NOTHING',
                            failure_id, task_id, step_id, action, json.dumps(payload))
@@ -221,8 +224,32 @@ async def pending_releases(task_id=None, *, pool=None):
         'ORDER BY failure_id', task_id)]
 
 
+async def _lock_recovery_marker(conn):
+    await conn.execute("INSERT INTO system_settings(key,value) VALUES('engine.failure_pending_recovery','true') "
+                       "ON CONFLICT(key) DO UPDATE SET value='true',updated_at=now()")
+    await conn.fetchrow("SELECT key FROM system_settings WHERE key='engine.failure_pending_recovery' FOR UPDATE")
+
+
+async def _sync_recovery_marker(conn):
+    pending = await conn.fetchval("SELECT EXISTS(SELECT 1 FROM step_failure_releases WHERE delivered_at IS NULL) "
+        "OR (COALESCE((SELECT value FROM system_settings WHERE key='engine.failure_typing'),'off') <> 'act' "
+        "AND EXISTS(SELECT 1 FROM step_holds))")
+    if not pending:
+        await conn.execute("DELETE FROM system_settings WHERE key='engine.failure_pending_recovery'")
+    return bool(pending)
+
+
+async def sync_recovery_marker(*, pool=None):
+    async with (pool or get_pool()).acquire() as conn, conn.transaction():
+        await _lock_recovery_marker(conn)
+        return await _sync_recovery_marker(conn)
+
+
 async def mark_delivered(failure_id, *, pool=None):
-    await (pool or get_pool()).execute('UPDATE step_failure_releases SET delivered_at=now() WHERE failure_id=$1', failure_id)
+    async with (pool or get_pool()).acquire() as conn, conn.transaction():
+        await _lock_recovery_marker(conn)
+        await conn.execute('UPDATE step_failure_releases SET delivered_at=now() WHERE failure_id=$1', failure_id)
+        return await _sync_recovery_marker(conn)
 
 
 async def clear_task_holds(task_id, *, reason='task ended', step_ids=None, pool=None):
@@ -236,8 +263,10 @@ async def clear_task_holds(task_id, *, reason='task ended', step_ids=None, pool=
             await _journal(conn, task_id, row['step_id'], f"Failure {row['failure_id']}: hold cleared ({reason}).")
         # Do not leave a committed release capable of resurrecting a stopped task.
         if step_ids is None:
+            await _lock_recovery_marker(conn)
             await conn.execute('UPDATE step_failure_releases SET delivered_at=now() WHERE task_id=$1 '
                                'AND delivered_at IS NULL', task_id)
+            await _sync_recovery_marker(conn)
         return [dict(row) for row in rows]
 
 
@@ -269,7 +298,7 @@ async def stats(*, pool=None):
         'COALESCE(max(extract(epoch FROM now()-created_at)),0)::float8 AS longest_wait_seconds FROM step_holds')
     distribution = await pool.fetch('SELECT role,failure_class,streak,count(*) AS failures,'
         "count(*) FILTER (WHERE action='breaker') AS breakers FROM step_failures "
-        "WHERE created_at>=date_trunc('day',now()) GROUP BY role,failure_class,streak ORDER BY 1,2,3")
-    retries = await pool.fetchval("SELECT count(*) FROM step_failure_releases WHERE action='retry' AND payload->>'actor'='timer' AND created_at>=date_trunc('day',now())")
+        "WHERE created_at>=(date_trunc('day',now() AT TIME ZONE 'UTC') AT TIME ZONE 'UTC') GROUP BY role,failure_class,streak ORDER BY 1,2,3")
+    retries = await pool.fetchval("SELECT count(*) FROM step_failure_releases WHERE action='retry' AND payload->>'actor'='timer' AND created_at>=(date_trunc('day',now() AT TIME ZONE 'UTC') AT TIME ZONE 'UTC')")
     return {**dict(counts), 'automatic_retries': retries, 'distribution': [dict(row) for row in distribution],
             'breakers_today': sum(row['breakers'] for row in distribution)}

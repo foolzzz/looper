@@ -109,8 +109,19 @@ def test_panel_runtime_judgment_goes_to_decision_without_becoming_a_vote(monkeyp
             vote.assert_not_awaited()
             assert work.result["summary"] == "Keep this output"
             assert seat.status == "pending"
+            assert await pool.fetchval("SELECT status FROM task_steps WHERE id='seat'") == "pending"
             assert await pool.fetchval("SELECT step_identity FROM step_failures") == "work"
             assert work.failure_history[0]["target"]["unit_step_id"] == "seat"
+            work.failure_history.clear()  # a restored actor has only the persisted evidence
+            monkeypatch.setattr(agent, "_decide", planner.PlannerAgent._decide.__get__(agent))
+            reply = SimpleNamespace(decision=planner.Decision.FAIL)
+            ask = AsyncMock(return_value=reply)
+            monkeypatch.setattr(agent, "_ask", ask)
+            monkeypatch.setattr(agent, "_apply_decision", AsyncMock())
+            context = planner.DecisionContext("work", planner.ResultKind.REVIEW, False, True, 0, 2)
+            await agent._decide(plan, work, context, ["Review execution failed"])
+            assert "Consecutive execution failures" in ask.await_args.args[1]
+            assert "judgment (report)" in ask.await_args.args[1]
         finally:
             await service.close()
     run_db(body, monkeypatch, timeout=40)
@@ -143,6 +154,55 @@ def test_replan_replaces_a_held_step_without_resetting_failure_state(monkeypatch
             assert held.worker_id is None and held.instruction == "Replacement instruction"
             assert await pool.fetchval("SELECT streak FROM step_failure_state") == 1
             assert await pool.fetchval("SELECT count(*) FROM step_failures") == 1
+        finally:
+            await service.close()
+    run_db(body, monkeypatch, timeout=40)
+
+
+@pytest.mark.parametrize("leave_act", [False, True])
+def test_expired_step_quota_event_ends_the_task_without_another_model_turn(monkeypatch, tmp_path, leave_act):
+    from looper.agents.failures import Failure, FailureCause
+
+    async def body(pool):
+        await pool.execute("INSERT INTO projects(id,name) VALUES ('project','Synthetic quota expiry')")
+        await pool.execute("INSERT INTO tasks(id,project_id,requirement,status) VALUES "
+                           "('task','project','Bound quota waiting','executing')")
+        await pool.execute("INSERT INTO system_settings(key,value) VALUES ('engine.failure_typing','act')")
+        events = []
+        async def publish(task_id, payload):
+            events.append(payload)
+        service = failure_handling.FailureHandlingService(pool=pool, mode=FailureTyping.ACT, publish=publish)
+        monkeypatch.setattr(failure_handling, "_service", service)
+        agent = planner.PlannerAgent(task_id="task", runtime_root=tmp_path)
+        sent = []
+        agent._bus = SimpleNamespace(publish=AsyncMock(side_effect=sent.append))
+        step = planner.PlanStep("step", 0, "Wait safely", key="work", status="dispatched", worker_id="worker")
+        plan = agent._plan = planner.TaskPlan("plan", "goal", "Bound quota waiting", str(tmp_path), [step],
+                                             status="executing", project_id="project")
+        await agent._save(plan, step, plan_row=True)
+        model = AsyncMock(side_effect=AssertionError("quota expiration started a model turn"))
+        monkeypatch.setattr(agent, "_ask", model)
+        try:
+            handled = await service.handle_step_result(task_id="task", step_id="step", run_id="worker", role="worker",
+                failure=Failure(FailureCause.RATE_LIMIT), target={"kind": "worker", "source": "worker"}, result={})
+            step.status, step.failure_hold = "pending", handled.hold
+            await service.release_hold("task", "step", handled.failure["id"], "planner", operator=True)
+            expired = {**events[-1], "quota_exhausted": True}
+            decision = AsyncMock()
+            if leave_act:
+                await service.set_mode("off")
+                monkeypatch.setattr(agent, "_decide", decision)
+            await agent._failure_hold_event(plan, expired)
+            statuses = [item.payload for item in sent if item.message_type is MessageType.GOAL_STATUS]
+            if leave_act:
+                assert plan.status == "executing"
+                decision.assert_awaited_once()
+                assert not any(item.get("fail_kind") for item in statuses)
+            else:
+                assert plan.status == "failed"
+                assert len(statuses) == 1 and statuses[0]["fail_kind"] == "quota_exhausted"
+            assert await pool.fetchval("SELECT count(*) FROM step_failures") == 1
+            model.assert_not_awaited()
         finally:
             await service.close()
     run_db(body, monkeypatch, timeout=40)
