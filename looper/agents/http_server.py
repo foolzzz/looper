@@ -741,7 +741,7 @@ class AgentHTTPServer:
             (name == "cost_guard.update" and data.get("mode") == "enforce")
             or (name == "cost_holds.decide" and data.get("new_limit_usd") is not None))
         requires_consent = cost_consent or principal.kind == "client" or name in (
-            "manager_chat_bindings.put", "managers.update", "memory.settings_put")
+            "manager_chat_bindings.put", "managers.update", "memory.settings_put", "memory_lessons.settings_put")
         return await self._client_ops.call(principal, session, name, data,
                                           require_confirmation=requires_consent, **kwargs)
 
