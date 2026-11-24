@@ -95,7 +95,7 @@ export function OutboundReviewAudit() {
     <CardHeader><a className="inline-flex min-h-11 items-center text-sm text-primary underline" href="#settings/security">返回安全设置</a><CardTitle>对外动作审计</CardTitle></CardHeader>
     <CardContent className="min-w-0 space-y-4">
       <form className="flex flex-wrap items-end gap-3" onSubmit={(event) => { event.preventDefault(); filterTask(); }}>
-        <label className="min-w-0 flex-1 space-y-1 text-sm">任务 ID<Input className="pointer-coarse:text-base" aria-label="任务 ID" maxLength={200} value={taskDraft} onChange={(event) => setTaskDraft(event.target.value)} placeholder="全部任务" /></label>
+        <label className="min-w-0 basis-full space-y-1 text-sm sm:flex-1">任务 ID<Input className="pointer-coarse:text-base" aria-label="任务 ID" maxLength={200} value={taskDraft} onChange={(event) => setTaskDraft(event.target.value)} placeholder="全部任务" /></label>
         <Button type="submit">筛选</Button>
         <label className="inline-flex min-h-11 items-center gap-2 text-sm"><input type="checkbox" checked={blocked}
           onChange={(event) => { setBlocked(event.target.checked); setCursors([undefined]); setPage(null); }} />只看拦截</label>

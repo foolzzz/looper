@@ -278,7 +278,8 @@ export function LayerSettingsForm({
   );
 
   return (
-    <form onSubmit={save} className="space-y-4">
+    <form onSubmit={save} className={cn("space-y-4", only === "outbound_check" &&
+      "pointer-coarse:[&_button]:min-h-11")}>
       {profileFirst && profileField}
       {profileFirst && (
         <h4 className="border-t border-border pt-4 text-xs font-semibold">More overrides</h4>
