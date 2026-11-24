@@ -3,7 +3,9 @@ import { AlertTriangle, CheckCircle2, CircleOff } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
-import { fetchVaultSettings, updateVaultSettings, type VaultSettings } from "@/lib/api";
+import { Switch } from "@/components/ui/switch";
+import { fetchResidentProfileSettings, updateResidentProfileSettings,
+  fetchVaultSettings, updateVaultSettings, type VaultSettings } from "@/lib/api";
 import { errorText } from "@/lib/use-action";
 
 export function VaultSettingsSection() {
@@ -14,6 +16,7 @@ export function VaultSettingsSection() {
   const [path, setPath] = useState("");
   const [writable, setWritable] = useState("");
   const [rulesFile, setRulesFile] = useState("");
+  const [profileSource, setProfileSource] = useState("关于我.md");
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
   const [saved, setSaved] = useState(false);
@@ -23,6 +26,7 @@ export function VaultSettingsSection() {
     setPath(value.path ?? "");
     setWritable(value.writable.join(", "));
     setRulesFile(value.rules_file ?? "");
+    setProfileSource(value.profile_source ?? "关于我.md");
   };
 
   useEffect(() => {
@@ -80,6 +84,10 @@ export function VaultSettingsSection() {
             path: path.trim() || null,
             writable: writable.split(",").map((folder) => folder.trim()).filter(Boolean),
             rules_file: rulesFile.trim() || null,
+            // Omit the default so an older vault without a profile can still be saved.
+            ...(profileSource.trim() && profileSource.trim() !== "关于我.md"
+              ? { profile_source: profileSource.trim() } : {}),
+            ...(settings.manager_read ? { manager_read: true } : {}),
           });
         }}>
           <p role={settings.problem ? "alert" : "status"}
@@ -109,6 +117,14 @@ export function VaultSettingsSection() {
               A note inside the vault with the rules the Planner follows in its closeout when a task ends. Optional.
             </p>
           </div>
+          <div className="space-y-1.5">
+            <label htmlFor={`${id}-profile`} className="text-xs font-medium text-muted-foreground">画像文件</label>
+            <Input id={`${id}-profile`} value={profileSource} onChange={(event) => setProfileSource(event.target.value)}
+                   placeholder="关于我.md" disabled={saving} aria-describedby={`${id}-profile-help`} />
+            <p id={`${id}-profile-help`} className="text-xs text-muted-foreground">
+              相对知识库根目录的一份 Markdown 笔记，例如 notes/profile.md。留空使用 关于我.md。
+            </p>
+          </div>
           <div className="flex flex-wrap items-center gap-3">
             <Button type="submit" disabled={saving}>{saving ? "Saving…" : "Save"}</Button>
             {settings.configured && <Button type="button" variant="outline" disabled={saving}
@@ -118,6 +134,47 @@ export function VaultSettingsSection() {
           {error && <p role="alert" className="break-words text-sm text-destructive">{error}</p>}
         </form>
       )}
+      {settings && !loadError && <ResidentProfileSwitch />}
     </Card>
   );
+}
+
+function ResidentProfileSwitch() {
+  const [enabled, setEnabled] = useState<boolean | null>(null);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState("");
+  const [attempt, setAttempt] = useState(0);
+  useEffect(() => {
+    let alive = true;
+    fetchResidentProfileSettings().then((value) => {
+      if (alive) { setEnabled(value.enabled); setError(""); }
+    }).catch((err: unknown) => { if (alive) setError(errorText(err)); });
+    return () => { alive = false; };
+  }, [attempt]);
+  const save = async (next: boolean) => {
+    if (!confirm(next ? "开启管家画像？这会在你自己的会话中加入画像内容。" : "关闭管家画像？后续回合将不再加入画像。")) return;
+    setSaving(true);
+    setError("");
+    try {
+      setEnabled((await updateResidentProfileSettings(next)).enabled);
+    } catch (err) {
+      setError(errorText(err));
+    } finally {
+      setSaving(false);
+    }
+  };
+  return <div className="mt-5 space-y-2 border-t border-border pt-4">
+    <div className="flex items-center justify-between gap-3">
+      <div className="space-y-1">
+        <p className="text-sm font-medium">管家常驻画像</p>
+        <p className="text-xs text-muted-foreground">默认关闭。开启后，管家在你自己的会话中使用编译后的画像。</p>
+      </div>
+      <Switch label="管家常驻画像" checked={enabled ?? false} disabled={enabled === null || saving}
+              onChange={(next) => void save(next)} />
+    </div>
+    {error && <div className="space-y-2">
+      <p role="alert" className="break-words text-sm text-destructive">{error}</p>
+      {enabled === null && <Button type="button" variant="outline" onClick={() => setAttempt((n) => n + 1)}>重试画像设置</Button>}
+    </div>}
+  </div>;
 }

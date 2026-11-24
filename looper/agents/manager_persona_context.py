@@ -26,14 +26,14 @@ class Scope(Enum):
 
 
 async def scope(manager_id: str, route: SessionKey, envelope: MessageEnvelope | None, *,
-                shown: Sequence[str] = ()) -> Scope:
+                shown: Sequence[str] = (), private: bool = False) -> Scope:
     """Use trusted message origin; an unknown operator never grants access to private fields."""
     from .tiers.manager import _message_origin
 
     value = persona.current()
     # Clearing the live value can still leave a private persona in main's last whole block.
     had_persona = bool(shown and shown[0] == HEADING)
-    if manager_id != DEFAULT_MANAGER_ID or not (value.name or value.tone or value.notes or had_persona):
+    if manager_id != DEFAULT_MANAGER_ID or not (value.name or value.tone or value.notes or had_persona or private):
         return Scope.FULL  # off: no identity read or change to the stable block
     if route.kind is not SessionKind.MAIN:
         return Scope.NAME

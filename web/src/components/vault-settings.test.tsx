@@ -14,10 +14,10 @@ vi.mock("@/lib/api", async (original) => ({
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
 const EMPTY: VaultSettings = {
-  configured: false, path: null, writable: [], rules_file: null, git: false, problem: null,
+  configured: false, path: null, writable: [], rules_file: null, profile_source: "关于我.md", git: false, problem: null,
 };
 const CONFIGURED: VaultSettings = {
-  configured: true, path: "/srv/notes", writable: ["codex-mem"], rules_file: "codex-mem/AGENTS.md", git: true, problem: null,
+  configured: true, path: "/srv/notes", writable: ["codex-mem"], rules_file: "codex-mem/AGENTS.md", profile_source: "关于我.md", git: true, problem: null,
 };
 
 describe("Knowledge vault settings", () => {
@@ -32,6 +32,8 @@ describe("Knowledge vault settings", () => {
     put = async () => Response.json({ status: "ok", result: CONFIGURED });
     fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       if (init?.method !== "POST") throw new Error(`Unexpected method: ${init?.method}`);
+      if (String(input) === "/api/v1/profile_settings/get") return Response.json({ status: "ok", result: { enabled: false } });
+      if (String(input) === "/api/v1/profile_settings/update") return Response.json({ status: "ok", result: JSON.parse(String(init.body)) });
       if (String(input) === "/api/v1/knowledge_vault/update") return put(JSON.parse(String(init.body)));
       if (String(input) === "/api/v1/knowledge_vault/get") return Response.json({ status: "ok", result: settings });
       throw new Error(`Unexpected request: ${input}`);
@@ -73,7 +75,7 @@ describe("Knowledge vault settings", () => {
     let finish!: (value: Response) => void;
     fetchMock.mockImplementationOnce(() => new Promise<Response>((resolve) => { finish = resolve; }));
     await render();
-    expect(container.textContent).toBe("Loading…");
+    expect(container.textContent).toContain("Loading…");
     await act(async () => finish(Response.json({ status: "ok", result: EMPTY })));
     expect(container.textContent).toContain("Not configured: agents have no vault.");
   });
@@ -120,7 +122,7 @@ describe("Knowledge vault settings", () => {
     expect(container.querySelector('[role="alert"]')?.textContent).toBe("Settings unavailable");
     await act(async () => button("Retry").click());
     expect(container.textContent).toContain("Not configured: agents have no vault.");
-    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(fetchMock.mock.calls.filter(([url]) => String(url).includes("knowledge_vault"))).toHaveLength(2);
   });
 
   it("saves parsed folders and empty rules, then uses the returned form values", async () => {
@@ -156,6 +158,41 @@ describe("Knowledge vault settings", () => {
     expect(field("Writable folders").value).toBe("codex-mem, notes,");
     expect(button("Save").disabled).toBe(false);
     expect(container.textContent).not.toContain("Saved.");
+  });
+
+  it("saves the selected profile note and preserves the independent Manager read permission", async () => {
+    settings = { ...CONFIGURED, profile_source: "notes/profile.md", manager_read: true };
+    await render();
+    expect(field("画像文件").value).toBe("notes/profile.md");
+    await edit("画像文件", " notes/updated.md ");
+    await submit();
+    expect(JSON.parse(String(sent().body))).toEqual({
+      path: "/srv/notes", writable: ["codex-mem"], rules_file: "codex-mem/AGENTS.md",
+      profile_source: "notes/updated.md", manager_read: true,
+    });
+  });
+
+  it("uses the default profile when the path is cleared", async () => {
+    settings = { ...CONFIGURED, profile_source: "notes/profile.md" };
+    await render();
+    await edit("画像文件", "");
+    await submit();
+    expect(JSON.parse(String(sent().body))).not.toHaveProperty("profile_source");
+  });
+
+  it("confirms and saves the resident profile switch independently of the vault form", async () => {
+    const confirm = vi.fn().mockReturnValueOnce(false).mockReturnValueOnce(true);
+    vi.stubGlobal("confirm", confirm);
+    await render();
+    const toggle = container.querySelector<HTMLButtonElement>('[role="switch"][aria-label="管家常驻画像"]')!;
+    expect(toggle.getAttribute("aria-checked")).toBe("false");
+    await act(async () => toggle.click());
+    expect(fetchMock.mock.calls.some(([input]) => String(input).endsWith("profile_settings/update"))).toBe(false);
+    await act(async () => toggle.click());
+    expect(toggle.getAttribute("aria-checked")).toBe("true");
+    const request = fetchMock.mock.calls.find(([input]) => String(input).endsWith("profile_settings/update"))![1];
+    expect(JSON.parse(String(request?.body))).toEqual({ enabled: true });
+    expect(fetchMock.mock.calls.some(([input]) => String(input).endsWith("knowledge_vault/update"))).toBe(false);
   });
 
   it("turns off the vault with only path=null and clears the form", async () => {
