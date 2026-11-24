@@ -3128,21 +3128,44 @@ The tools are Looper's MCP tools, the same on every runtime.
 - **Writing** (`looper_vault_write`: `path`, `content`, `expected_sha256`,
   `reason`): a Markdown note in a writable folder, at most 64 KiB, and at most
   256 KiB per run; any other path (the operator's `mine/`, say) is refused
-  with the writable folders named. Under one thread lock per vault, in one
-  worker thread: the folders are walked from directory descriptors without
-  following links (a link anywhere below the writable folder is refused), the
-  note's sha256 is compared with `expected_sha256` (null for a new note; a
-  mismatch is `conflict`: read it again), the text goes to a temporary file
-  that replaces the note, and `git --literal-pathspecs add` and `commit -m
-  "looper: <task id> <seat>: <reason>" -- <path>` commit that path only (the
-  operator's other staged changes stay staged), as the vault's repository
-  configures the author, with its own hooks, `commit.gpgsign=false`, a 30 s
-  timeout and three tries on `index.lock`. The seat is `planner` or the run's
-  (`worker@s2`). The task's activity notes each write with its commit
-  (`Vault: planner wrote codex-mem/x.md (commit 1a2b3c4d5e6f): <reason>`), or
-  a fixed reason it was not committed (not a git repository, commit failed
-  with git's exit status, timed out; never git's output), and each refused
-  write.
+  with the writable folders named. The shared `vault_commit` transaction holds
+  the vault's thread lock and a repository file lock, validates the exact paths,
+  writes in an owned git worktree, stages only those paths and verifies the
+  committed bytes, modes and message before an ff-only merge into the checked-out
+  branch. The operator's other staged changes stay staged. Hooks run with
+  `commit.gpgsign=false`, a 30 s timeout and three tries on `index.lock` for
+  add/commit. The seat is `planner` or the run's (`worker@s2`). A blocked
+  fast-forward preserves the owned branch and worktree, returns a typed blocked
+  result and persists an operator notice in Needs you (when that summary is
+  enabled). It never stashes, resets or commits an editor's changes. A handled
+  branch stops appearing once its commit is merged or the operator removes it;
+  unreadable repositories appear as attention errors. Notices do not enter the
+  model's idle context. Activity records distinguish writes from blocked commits.
+  A non-git vault retains its existing locked file-write behavior.
+- **Worktree location.** The operator-only `knowledge_vault.update` accepts
+  optional absolute `worktree_root`; the default is the user's
+  `~/worktrees/looper-vault`, outside the vault and runtime directory. Memory
+  writing keeps its own existing `worktree_root` override and otherwise uses
+  the same default. No worktree root is created merely by reading settings.
+- **Project export.** Project settings optionally store `knowledge_dir`, a
+  vault-relative directory with no `..`, absolute or hidden components, files
+  on its directory path, or symbolic-link components. It may be created by a
+  later export. Unset preserves existing behavior; setting it alone changes
+  no model prompt, knowledge index, tool listing or read path.
+  `looper knowledge migrate --project <name>` previews each source row from
+  `project_documents`: target filename, UTF-8 size, an over-8-KiB flag, original
+  title/summary/id/sha256 frontmatter, and a reference note for a path-kind row
+  (the original file is never read). `--execute` first saves a private JSON
+  backup of the complete source rows under the selected runtime's
+  `backups/project-knowledge` directory and prints its sha256, then uses one
+  shared vault transaction with source provenance in the commit message.
+  Every merged file is read back and its sha256 compared with the exported
+  bytes. Existing targets with different bytes are reported and refused;
+  missing vault or project directory settings also refuse the command.
+  Source rows are never updated or deleted. Dashboard settings and the direct
+  operator CLI are the only new entry points; Lark and Telegram keep their
+  existing knowledge reads. Running `--execute` or setting `knowledge_dir` on
+  real projects requires the maintainer's approval.
 - **The closeout.** When a task completes (after its lessons) or fails, and
   its project has the vault on with a writable folder, its Planner gets one
   `[VAULT]` turn before the task's final status: the vault's rules file (at
@@ -3292,7 +3315,7 @@ memory page shows their candidates for the operator to review.
   revision, attempt and content-hash trailers. Before fast-forwarding, and
   again afterwards, the writer checks the committed paths and bytes against
   the confirmed operations. A branch advance outside those paths can be
-  rebased; touching a target requires new drafting and confirmation.
+  replayed and reverified on the new base before merging; touching a target requires new drafting and confirmation.
 - **Failure and recovery:** a blocked write keeps its confirmation and waits
   for the operator's retry; a content conflict clears confirmation and
   requests redrafting once. No write stashes, resets or commits somebody
