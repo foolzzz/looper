@@ -82,26 +82,31 @@ def test_a_fresh_database_records_no_failure_typing_marker():
 
 
 def test_engine_settings_switch_failure_typing(tmp_path, monkeypatch):
+    from looper.agents import failure_handling
+
     async def body(pool):
-        async with v1_api(tmp_path, pool) as call:
-            status, answer = await call("engine_settings.get")
-            assert status == 200 and answer["result"] == {"failure_typing": {
-                "value": "off", "source": "built-in", "built_in": "off"}}
-            status, answer = await call("engine_settings.get", client=True)
-            assert status == 403
-            status, answer = await call("engine_settings.update", {"failure_typing": "record"})
-            assert status == 200 and answer["result"]["failure_typing"]["value"] == "record"
-            assert await pool.fetchval("SELECT value FROM system_settings WHERE key = 'engine.failure_typing'") \
-                == "record"
-            status, answer = await call("engine_settings.update", {"failure_typing": "act"})
-            assert status == 400 and "not available yet" in answer["error"]["message"]
-            status, answer = await call("engine_settings.update", {"failure_typing": "sometimes"})
-            assert status == 400
-            status, answer = await call("engine_settings.update", {})
-            assert status == 400
-            status, answer = await call("engine_settings.update", {"failure_typing": None})
-            assert answer["result"]["failure_typing"] == {"value": "off", "source": "built-in", "built_in": "off"}
-            assert await pool.fetchval("SELECT count(*) FROM system_settings WHERE key = 'engine.failure_typing'") == 0
+        service = failure_handling.FailureHandlingService(pool=pool)
+        monkeypatch.setattr(failure_handling, "_service", service)
+        try:
+            async with v1_api(tmp_path, pool) as call:
+                status, answer = await call("engine_settings.get")
+                assert status == 200 and answer["result"] == {"failure_typing": {
+                    "value": "off", "source": "built-in", "built_in": "off"}}
+                status, answer = await call("engine_settings.get", client=True)
+                assert status == 403
+                for mode in ("record", "act", None):
+                    status, answer = await call("engine_settings.update", {"failure_typing": mode})
+                    assert status == 202
+                    status, answer = await call("confirm", {"confirmation_id": answer["confirmation_id"]})
+                    assert status == 200 and answer["result"]["failure_typing"]["value"] == (mode or "off")
+                    assert service.mode.value == (mode or "off")
+                assert await pool.fetchval("SELECT count(*) FROM system_settings WHERE key = 'engine.failure_typing'") == 0
+                status, answer = await call("engine_settings.update", {"failure_typing": "sometimes"})
+                assert status == 400
+                status, answer = await call("engine_settings.update", {})
+                assert status == 400
+        finally:
+            await service.close()
 
     run_db(body, monkeypatch, timeout=60)
 

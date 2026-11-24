@@ -137,6 +137,8 @@ class FailKind(str, Enum):
     """Why a failed task failed, when code can tell (``tasks.fail_kind``)."""
 
     TASK_BUDGET = "task_budget"  # it reached its project's task spend cap (task_budget_usd)
+    QUOTA_EXHAUSTED = "quota_exhausted"
+    ENVIRONMENT = "environment"
 
 
 def _config_json(config: Mapping[str, Any] | None) -> str:

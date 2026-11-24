@@ -6,10 +6,11 @@ that local day, and proactive messages held for the digest. Every brief reads fr
 dates (Monday also Saturday and Sunday) through the day being sent, except digest rows already recorded by id.
 The claim stores the ids that read returned, in that same write. A sent or uncertain brief records those ids,
 in the same transaction as its row. A refusal records none and clears the stored ids, so a Tuesday brief that
-was rejected is still in Wednesday's. If the sender stops before that record, recovery consumes exactly the
-stored ids and does not scan by time: a row whose insert had not committed is still read once, on the next
-brief. A digest row whose schedule is already a line in that needs section is not listed again: the line
-gains how many deferred pushes that schedule has, the row is left out of the digest section, and its id is still
+was rejected is still in Wednesday's. Immediately before the channel call, the sender commits ``send_started_at``.
+If it stops before that boundary, recovery refunds the attempt and consumes nothing. After that boundary,
+recovery consumes exactly the stored ids and does not scan by time: a row whose insert had not committed is
+still read once, on the next brief. A digest row whose schedule is already a line in that needs section is not
+listed again: the line gains how many deferred pushes that schedule has, the row is left out of the digest section, and its id is still
 one of the ids the read returned, so it is claimed and consumed with the rest. With triage enabled, the operator
 DM also gets owned digest and important fallback events, using
 the same window and exact-id claim/settlement/recovery policy. No model sees those rendered fields.
@@ -467,6 +468,8 @@ class MorningBriefService:
             # Recovery consumes exactly what is still present in this final rendering.
             await conn.execute('UPDATE morning_briefs SET read_ids=$4::bigint[] WHERE local_date=$1 '
                                "AND channel_id=$2 AND chat=$3 AND status='sending'", day, channel_id, chat, read_ids)
+        if not await store.mark_send_started(conn, day, channel_id, chat, self._clock()):
+            return
         external: str | None = None
         try:
             receipt = await self._registry.post(
