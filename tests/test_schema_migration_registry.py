@@ -84,22 +84,25 @@ def test_new_fresh_ddl_is_appended_without_changing_the_baseline_bytes():
     )
 
 
-def test_unanswered_pause_migrations_sort_after_every_other_order():
+def test_unanswered_pause_migrations_keep_unique_relative_order():
     discovered = migrations.discover()
     by_name = {migration.name: migration for migration in discovered}
+    assert "schedule_pause_reasons" in by_name
+    assert "cost_holds_unanswered" in by_name
     pause = by_name["schedule_pause_reasons"]
     holds = by_name["cost_holds_unanswered"]
     assert (pause.order, pause.pending_order, pause.online_order) == (1700, 1700, 1700)
     assert (holds.order, holds.pending_order, holds.online_order) == (1701, 1701, 1701)
-    for migration in discovered:
-        if migration.name in ("schedule_pause_reasons", "cost_holds_unanswered"):
-            continue
-        assert migration.order < 1700
-        if migration.pending_order is not None:
-            assert migration.pending_order < 1700
-        online_order = getattr(migration, "online_order", None)
-        if online_order is not None:
-            assert online_order < 1700
+    # Orders are coordinated to be unique. Later migrations may use higher numbers.
+    for field in ("order", "pending_order", "online_order"):
+        values = [getattr(migration, field, None) for migration in discovered]
+        assert values.count(1700) == 1
+        assert values.count(1701) == 1
+    assert discovered.index(pause) < discovered.index(holds)
+    pending = migrations.pending_migrations(discovered)
+    assert pending.index(pause) < pending.index(holds)
+    online = [step.migration for step in migrations.online_steps(discovered)]
+    assert online.index(pause.name) < online.index(holds.name)
 
 
 def test_current_baseline_additions_have_upgrade_and_admission_migrations():
