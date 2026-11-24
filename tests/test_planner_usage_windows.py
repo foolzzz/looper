@@ -122,10 +122,12 @@ def test_a_window_refused_before_start_never_records_a_failed_attempt(monkeypatc
     from types import SimpleNamespace
     from looper.agents import attempts
     from looper.agents.tiers.worker import RunOutcome, WorkerConfig, WorkerPool
+    from tests.runtime_model_helpers import builtin_launch
 
     async def check():
         pool = WorkerPool(config=WorkerConfig(), runtime_root=tmp_path)
         context = SimpleNamespace(verification=None, handle=None, attempt_id=42,
+                                  worker_id='worker-window', parent_task_id='task-window', launch=builtin_launch(),
                                   outcome=RunOutcome.RUN_FAILED, run_failure=None, verification_writes=None)
         pool._prepare = AsyncMock(return_value=context)
         pool._execute_once = AsyncMock(side_effect=cg.Held(NOW + timedelta(minutes=5), 'rejected'))

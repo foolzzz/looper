@@ -1634,7 +1634,7 @@ class ClaudeRunRecorder:
 
     async def start(self) -> None:
         from ..db import llm_records
-        from . import cost_guard
+        from . import admission, cost_guard
         from .runtimes.instructions import record as instructions_record
 
         role = getattr(self._launch, "role", None)
@@ -1667,6 +1667,7 @@ class ClaudeRunRecorder:
                 parent_record_id=self._parent_record_id,
                 metadata={
                     "command": self._command,
+                    **admission.record_metadata(),
                     # What Looper appended (its file holds the same text); Claude Code's own prompt is not included.
                     **(self._system_prompt.record() if self._system_prompt is not None else {}),
                     # The model asked for and where it came from; the variables' names, not their values.
@@ -2058,12 +2059,19 @@ class ClaudeRunRecorder:
         from .llmrec import LlmrecRoute, RouteKind
         from .llmrec.control import controller
 
+        found = None
         if basis is not None:
             result_event, outcome, given = basis
             found = await failures.recorded(self._runtime(), result_event, self._evidence, outcome=outcome, given=given)
             if found is not None:
                 fields.update(failure_class=found.cls.value, failure_cause=found.cause.value,
                               metadata={**(fields.get("metadata") or {}), "failure": found.metadata()})
+
+        from . import admission
+
+        if admission.enabled():
+            await admission.recorded(self._provider().id, self._agent_id, self._record_id, found,
+                                     interrupted=fields.get("status") == "interrupted")
 
         route = self._launch.llmrec if self._launch is not None else None
         owner = controller()

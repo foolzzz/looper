@@ -15,8 +15,8 @@ import shutil
 from typing import Any
 
 from ..db import (connection as db_connection, decision_snapshots, idle_checks, manager_events, proactive_deliveries,
-                  schedules as db_schedules, llm_requests, channel_outbox)
-from . import chat_attachments, scheduler_settings
+                  schedules as db_schedules, llm_requests, channel_outbox, provider_admission)
+from . import admission, chat_attachments, scheduler_settings
 from .command_runs import CommandRuns, Finished, Lost, LOGS_DIR, RUNNER_DIR, RUNS_DIR
 from .llmrec import ROUTES_DIR, RouteFile
 from .llmrec import settings as llmrec_settings
@@ -40,6 +40,7 @@ class Report:
     notifications: int = 0
     manager_events: int = 0
     channel_outbox: int = 0
+    provider_admission_events: int = 0
     decision_snapshots: int = 0
     proactive_deliveries: int = 0
     idle_checks: int = 0
@@ -275,6 +276,9 @@ async def run_once(runtime_root: Path, now: datetime, *, current_runner: Path | 
 
     with _step(report, "channel outbox"):
         report.channel_outbox = await channel_outbox.purge(now)
+    if admission.enabled():
+        with _step(report, "provider_admission_events"):
+            report.provider_admission_events = await provider_admission.prune()
     with _step(report, "skill tombstones"):
         async with db_connection.transaction() as conn:
             from .skill_versions import purge_tombstones
@@ -344,9 +348,9 @@ async def run_once(runtime_root: Path, now: datetime, *, current_runner: Path | 
     logger.info("housekeeping runs_deleted=%d notifications_deleted=%d manager_events_deleted=%d "
                 "decision_snapshots_deleted=%d logs_deleted=%d log_bytes=%d "
                 "run_dirs=%d runner_files=%d llm_requests=%d llm_routes=%d llm_route_files=%d chat_attachments=%d "
-                "skill_tombstones=%d rotated=%s failed_steps=%s",
+                "skill_tombstones=%d provider_admission_events=%d rotated=%s failed_steps=%s",
                 report.runs, report.notifications, report.manager_events, report.decision_snapshots, report.logs,
                 report.log_bytes, report.run_dirs, report.runner_files,
                 report.llm_requests, report.llm_routes, report.llm_route_files, report.chat_attachments,
-                report.skill_tombstones, ",".join(report.rotated), report.failed_steps)
+                report.skill_tombstones, report.provider_admission_events, ",".join(report.rotated), report.failed_steps)
     return report

@@ -175,3 +175,48 @@ def test_provider_limit_probe_has_pending_and_failure_states(monkeypatch):
         assert next(c for c in snapshot if c["id"] == "provider_limits")["status"] == "warn"
 
     asyncio.run(run())
+
+
+@pytest.mark.parametrize("probe_fails", [False, True], ids=["warning", "exception"])
+def test_enabled_admission_probe_publishes_its_own_result(monkeypatch, caplog, probe_fails):
+    from looper.agents import admission
+
+    monkeypatch.setattr(admission._controller, "active", True)
+
+    async def run():
+        pending = serve._pending_advisory_checks()
+        assert pending[-1][0].id == "admission"
+        assert pending[-1][0].status == serve.self_check.PENDING
+        ready, finish = asyncio.Event(), asyncio.Event()
+        warning = serve.self_check.Check("admission", "Account admission", "warn", "typing is off")
+
+        async def probe():
+            ready.set()
+            await finish.wait()
+            if probe_fails:
+                raise ConnectionRefusedError("admission unavailable")
+            return [warning]
+
+        ok = serve.self_check.Check("database", "Database", "ok", "ready")
+        monkeypatch.setattr(serve.self_check, "admission_checks", probe)
+        for name in ("claude_check", "codex_login_check", "grok_login_check", "cursor_login_check",
+                     "ttadk_check", "llmrec_check", "gateway_check", "provider_limit_checks"):
+            monkeypatch.setattr(serve.self_check, name, AsyncMock(return_value=[]))
+        for name in ("check_lark_cli", "check_git", "check_projects_root"):
+            monkeypatch.setattr(serve.self_check, name, lambda *_: [])
+        snapshot = []
+        task = asyncio.create_task(serve._advisory_startup_checks(snapshot, ok,
+            claude_bin="unused", lark_enabled=False, projects_root=""))
+        try:
+            await asyncio.wait_for(ready.wait(), 2)
+            assert next(c for c in snapshot if c["id"] == "admission")["status"] == "pending"
+        finally:
+            finish.set()
+            await task
+        result = next(c for c in snapshot if c["id"] == "admission")
+        assert result["status"] == "warn"
+        assert result["detail"] == ("Startup check failed" if probe_fails else warning.detail)
+        assert "SELF-CHECK WARN Account admission:" in caplog.text
+        assert not any(c["status"] == "pending" for c in snapshot)
+
+    asyncio.run(run())
