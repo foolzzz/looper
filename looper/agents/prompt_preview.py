@@ -91,6 +91,11 @@ async def preview(profile_id: str, role: str, project_id: str | None = None) -> 
 
         if await leads_on():  # the default Manager's, as ManagerAgent._composed_prompt adds it
             contract_name, contract = "TOOLS_CONTRACT+LEADS_CONTRACT", contract + "\n" + LEADS_CONTRACT
+        from .ops.intents_recognize import CONTRACT as RECOGNIZE_CONTRACT, enabled as recognize_enabled
+
+        if await recognize_enabled():
+            contract_name += "+INTENTS_RECOGNIZE_CONTRACT"
+            contract += "\n" + RECOGNIZE_CONTRACT
         from .ops.manager_vault import VAULT_CONTRACT, manager_vault
 
         if await manager_vault() is not None:  # as ManagerAgent._composed_prompt adds it

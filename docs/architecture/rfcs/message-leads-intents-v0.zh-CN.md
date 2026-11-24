@@ -294,7 +294,7 @@ tasked、rejected、merged 是终态。
   ```
 
   撤销就是删掉 `intent_group_reads` 的那一行；再加入是新的一行，开始时间是再加入的时刻。计数表只留 30 天：写计数的事务顺手删掉更早的行。
-- **迁移 `intent_recognitions`**（`order = 1510`），随第二个实现 PR：建 `intent_recognitions`（11.7），`intents` 加 `recognition_id BIGINT REFERENCES intent_recognitions(id) ON DELETE CASCADE`，把 `intents_via_check` 放宽到含 `on_request`，并加约束 `(via = 'on_request') = (recognition_id IS NOT NULL)`。
+- **迁移 `intent_recognitions`**（`order = 1810`、`pending_order = 1810`，在持续识别的 1800 之后），随第二个实现 PR：建 `intent_recognitions`（11.7），`intents` 加 `recognition_id BIGINT REFERENCES intent_recognitions(id) ON DELETE CASCADE`，从 `intents_via_check` 的当前值放宽到含 `on_request`，保留 `followed_group` 等已有值，并加约束 `(via = 'on_request') = (recognition_id IS NOT NULL)`。
 - **开关：** `intents.group_read.enabled`（持续识别）和 `intents.on_request.enabled`（识别一次），都只有字符串 `true` 是开，读法和 `intents.enabled` 一样；键名和读取函数放在 `leads_model`。两个都要 `intents.enabled` 开着才起作用。打开持续识别时，`delivery.enabled` 不是开就拒绝，并说明原因。开关只管读不读，不动名单；关着也能维护名单。
 - **能加什么：** `source_chats.kind` 为 `group` 或 `topic` 的会话（私聊本来就整段读；`unknown` 等采集认出类型再加），会话已在消息流里，并且没有被消息流或抽取排除。每个来源最多 10 个群。加入以后才被排除的，名单行留着但不读，列表里标出来。「识别一次」对会话的要求相同，不要求在名单上。
 - **不导出：** 配置导出（`config_transfer`）不含名单、开关和识别记录。

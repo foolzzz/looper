@@ -70,6 +70,7 @@ from ..tiers.manager_session import MAIN_SESSION, on_session_replaced
 from ..turn_context import SpeakerKind
 from . import API_CHANNEL, Audience, Call, ErrorCode, OpError, RestrictedTool, Risk, Tool, Turn, TurnState, check_arguments
 from .concurrency import TOOLS as CONCURRENCY_TOOLS
+from . import intents_recognize
 from . import ledger as ledger_tools
 from . import reminders as reminder_tools
 from . import skill_proposals as skill_proposal_tools
@@ -164,11 +165,14 @@ TASKS_SCOPE_TOOLS: tuple[Tool, ...] = (*TASK_TOOLS, *(t for t in CONFIG_TOOLS if
 READ_ONLY_TASKS = frozenset({"looper_projects"})
 # Every tool a Manager may have had: a call of one it no longer has is told so. The leads search is the default
 # Manager's while leads are on, the vault's reads while it lets the Manager read it, session search while it is on,
-# and the reminder tools while reminders are on (``ManagerOps._with_operator_tools``).
+# the reminder tools while reminders are on, and recognition while its switches are on
+# (``ManagerOps._with_operator_tools``).
 _MANAGER_TOOL_NAMES = {tool.name: tool for tool in (*MANAGER_TOOLS, LEADS_SEARCH, *VAULT_READ_TOOLS, SESSION_SEARCH,
-                                                    *reminder_tools.TOOLS, skill_proposal_tools.TOOL, memory_tools.TOOL)}
+                                                    *reminder_tools.TOOLS, intents_recognize.TOOL,
+                                                    skill_proposal_tools.TOOL, memory_tools.TOOL)}
 # The default Manager's tools that only the user's own turns run, each behind its own switch.
-_OPERATOR_TOOLS = {tool.name: tool for tool in (LEADS_SEARCH, *VAULT_READ_TOOLS, SESSION_SEARCH, *reminder_tools.TOOLS)}
+_OPERATOR_TOOLS = {tool.name: tool for tool in (LEADS_SEARCH, *VAULT_READ_TOOLS, SESSION_SEARCH, *reminder_tools.TOOLS,
+                                              intents_recognize.TOOL)}
 _LEDGER_TOOLS = {tool.name: tool for tool in ledger_tools.TOOLS}
 
 
@@ -400,7 +404,8 @@ class ManagerOps:
         """``scope`` with the default Manager's operator-only tools exactly while their switches are on:
         ``looper_leads_search`` while ``leads.enabled`` is, as ``leads.search_mode`` describes it
         (``ops.leads.leads_tool``), the vault's reads while the vault setting holds and says ``manager_read``,
-        ``looper_session_search`` while ``manager.session_search.enabled`` is; the reminder tools while ``reminders.enabled`` is.
+        ``looper_session_search`` while ``manager.session_search.enabled`` is; the reminder tools while
+        ``reminders.enabled`` is; recognition while both intents and on-request recognition are enabled.
         Any other Manager's as it is; off, the
         default Manager's is what it was before them."""
         if scope.manager_id != DEFAULT_MANAGER_ID:
@@ -409,7 +414,8 @@ class ManagerOps:
         wanted = [*((leads,) if leads is not None else ()),
                   *(VAULT_READ_TOOLS if await manager_vault() is not None else ()),
                   *((SESSION_SEARCH,) if await session_search_on() else ()),
-                  *(reminder_tools.TOOLS if await reminders_on() else ())]
+                  *(reminder_tools.TOOLS if await reminders_on() else ()),
+                  *((intents_recognize.TOOL,) if await intents_recognize.enabled() else ())]
         current = [tool for tool in scope.tools.values() if tool.name in _OPERATOR_TOOLS]
         if len(wanted) == len(current) and all(new is old for new, old in zip(wanted, current)):
             return scope

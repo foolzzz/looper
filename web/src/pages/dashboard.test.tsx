@@ -6,7 +6,7 @@ import { DashboardPage } from "@/pages/dashboard";
 import { Sidebar } from "@/components/sidebar";
 import { WaitingGatesProvider } from "@/lib/use-waiting-gates";
 import { fetchManagerMetrics, type ManagerMetrics } from "@/lib/manager-metrics";
-import { fetchStatusCard } from "@/lib/status-card";
+import { fetchStatusCard, type StatusSection } from "@/lib/status-card";
 import { V1Error } from "@/lib/v1";
 import { fetchGates, fetchOverview, fetchProjectsList, fetchTasks, fetchTaskDetail, postGateMessage, GATE_MESSAGE_MAX_CHARS,
   type GateList, type AgentProcess, type Overview, type TaskDetail, type UserGate, type GatePosted } from "@/lib/api";
@@ -120,6 +120,75 @@ describe("Dashboard waiting gates", () => {
 
   it("shows no Status card while the switch is off and keeps the other sections", async () => {
     await show();
+    expect(container.querySelector('section[aria-label="Status"]')).toBeNull();
+    expect(fetchStatusCard).toHaveBeenCalledTimes(1);
+    expect(container.querySelector('nav[aria-label="Tasks by group"]')).not.toBeNull();
+  });
+
+  it.each(["tasks", "schedules"] as const)("shows the first status snapshot when %s breaks the overview, and retries", async (source) => {
+    vi.mocked(fetchOverview).mockRejectedValue(new Error(`${source} unavailable`));
+    const sections: StatusSection[] = [
+      { name: "manager", state: "ok", error: null, managers: [{ manager_id: "main", queued: 0, sessions: [] }] },
+      { name: "tasks", state: "ok", error: null, count: 2 },
+      { name: "schedules", state: "ok", error: null, running: [], next: [] },
+    ];
+    vi.mocked(fetchStatusCard).mockResolvedValue({ read_at: "2026-10-20T10:12:00Z", text: "",
+      sections: sections.map((s) => s.name === source ? { ...s, state: "error", error: `${source} unavailable` } : s) });
+    await show();
+    const card = container.querySelector('section[aria-label="Status"]')!;
+    expect(card).not.toBeNull();
+    expect(card.querySelector('[role="alert"]')!.textContent).toContain(`${source} unavailable`);
+    expect(card.textContent).toContain("Idle");
+    expect(card.querySelector(`a[href="#${source === "tasks" ? "schedules" : "tasks"}"]`)).not.toBeNull();
+
+    vi.mocked(fetchOverview).mockResolvedValue(overview);
+    vi.mocked(fetchStatusCard).mockResolvedValue({ read_at: "2026-10-20T10:12:15Z", text: "", sections });
+    await act(async () => { await vi.advanceTimersByTimeAsync(15_000); });
+    expect(container.querySelector('section[aria-label="Status"]')).toBe(card);
+    expect(card.querySelector('[role="alert"]')).toBeNull();
+    expect(card.textContent).toContain("2 running");
+    expect(container.querySelector('nav[aria-label="Tasks by group"]')).not.toBeNull();
+    expect(fetchStatusCard).toHaveBeenCalledTimes(2);
+  });
+
+  it("shows each error on first load when all status sources fail", async () => {
+    vi.mocked(fetchOverview).mockRejectedValue(new Error("sources unavailable"));
+    vi.mocked(fetchStatusCard).mockResolvedValue({ read_at: "2026-10-20T10:12:00Z", text: "",
+      sections: ["manager", "waiting", "reminders", "tasks", "schedules"].map((name) =>
+        ({ name, state: "error", error: `${name} unavailable` }) as StatusSection) });
+    await show();
+    const card = container.querySelector('section[aria-label="Status"]')!;
+    expect(card).not.toBeNull();
+    expect(card.querySelectorAll('[role="alert"]')).toHaveLength(5);
+    for (const name of ["manager", "waiting", "reminders", "tasks", "schedules"])
+      expect(card.textContent).toContain(`${name} unavailable`);
+    expect(card.textContent).not.toContain("0 running");
+  });
+
+  it("shows a status error even when both first requests reject", async () => {
+    vi.mocked(fetchOverview).mockRejectedValue(new Error("overview unavailable"));
+    vi.mocked(fetchStatusCard).mockRejectedValue(new Error("snapshot unavailable"));
+    await show();
+    const card = container.querySelector('section[aria-label="Status"]')!;
+    expect(card).not.toBeNull();
+    expect(card.querySelector('[role="alert"]')!.textContent).toContain("snapshot unavailable");
+  });
+
+  it("reads the status while the first overview is still pending", async () => {
+    vi.mocked(fetchOverview).mockReturnValue(new Promise(() => {}));
+    vi.mocked(fetchStatusCard).mockRejectedValue(new Error("snapshot unavailable"));
+    await show();
+    expect(container.textContent).toContain("Connecting...");
+    expect(container.querySelector('section[aria-label="Status"] [role="alert"]')!.textContent)
+      .toContain("snapshot unavailable");
+  });
+
+  it("keeps the off card hidden without restarting its polling when the overview recovers", async () => {
+    vi.mocked(fetchOverview).mockRejectedValueOnce(new Error("overview unavailable"));
+    await show();
+    expect(container.textContent).toContain("Connection failed");
+    expect(fetchStatusCard).toHaveBeenCalledTimes(1);
+    await act(async () => { await vi.advanceTimersByTimeAsync(60_000); });
     expect(container.querySelector('section[aria-label="Status"]')).toBeNull();
     expect(fetchStatusCard).toHaveBeenCalledTimes(1);
     expect(container.querySelector('nav[aria-label="Tasks by group"]')).not.toBeNull();

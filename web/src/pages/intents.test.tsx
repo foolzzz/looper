@@ -9,6 +9,8 @@ import {
   intentsBuild, intentsList, intentsReject, intentsSettingsGet, intentsStats,
   intentGroupReadsList, intentGroupReadsPreview, intentGroupReadsPut, intentGroupReadsDelete,
   intentGroupReadsSettingsPut, leadsChats,
+  intentRecognitionsList, intentRecognitionsPreview, intentRecognitionsStart, intentRecognitionsSettingsPut,
+  type IntentRecognition,
   type Intent, type IntentType, type IntentTypeVersion, type FollowedGroup, type FollowedGroups,
 } from "@/lib/api-leads";
 import { V1Error } from "@/lib/v1";
@@ -22,7 +24,8 @@ vi.mock("@/lib/api-leads", () => ({
   intentsBuild: vi.fn(), intentsReject: vi.fn(), intentTypesList: vi.fn(), intentTypesHistory: vi.fn(),
   intentTypesCreate: vi.fn(), intentTypesSave: vi.fn(), intentTypesRollback: vi.fn(), intentTypesArchive: vi.fn(),
   intentTypesSetProjectTemplate: vi.fn(), intentBindingsList: vi.fn(), intentBindingsPut: vi.fn(),
-  intentBindingsDelete: vi.fn(), intentAlertSendersList: vi.fn(), intentAlertSendersPut: vi.fn(),
+  intentRecognitionsList: vi.fn(), intentRecognitionsPreview: vi.fn(), intentRecognitionsStart: vi.fn(),
+  intentRecognitionsSettingsPut: vi.fn(), intentBindingsDelete: vi.fn(), intentAlertSendersList: vi.fn(), intentAlertSendersPut: vi.fn(),
   intentAlertSendersDelete: vi.fn(), intentGroupReadsList: vi.fn(), intentGroupReadsPreview: vi.fn(),
   intentGroupReadsPut: vi.fn(), intentGroupReadsDelete: vi.fn(), intentGroupReadsSettingsPut: vi.fn(), leadsChats: vi.fn(),
 }));
@@ -84,6 +87,8 @@ describe("Intents page", () => {
       projects_root: "",
     });
     vi.mocked(fetchWorkflows).mockResolvedValue([{ key: "fix", name: "Fix" } as Workflow]);
+    vi.mocked(intentRecognitionsList).mockResolvedValue({ enabled: false, recognitions: [] });
+    vi.mocked(intentRecognitionsSettingsPut).mockResolvedValue({ enabled: true, recognitions: [] });
     vi.mocked(intentGroupReadsList).mockResolvedValue(groupPage);
     vi.mocked(intentGroupReadsPreview).mockResolvedValue({ group: {
       chat_id: followedGroup.chat_id, name: followedGroup.name, kind: "group", messages_24h: 130, estimate_usd: [0.03, 0.08],
@@ -104,6 +109,7 @@ describe("Intents page", () => {
     act(() => root.unmount());
     container.remove();
     vi.clearAllMocks();
+    vi.useRealTimers();
   });
 
   const show = async () => { await act(async () => { root.render(<IntentsPage />); }); };
@@ -252,6 +258,81 @@ describe("Intents page", () => {
     await act(async () => enabledToggle.click());
     expect(intentGroupReadsSettingsPut).toHaveBeenCalledWith({ enabled: true });
     expect(container.querySelector('[role="switch"]')?.getAttribute("aria-checked")).toBe("true");
+  });
+
+  it("previews and confirms a one-off recognition, then shows its record", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-11-23T12:00:00Z"));
+    const preview = {
+      chat: { chat_id: "oc_product", name: "合成产品群" }, range_from: "2026-11-16T12:00:00.000Z",
+      range_to: "2026-11-23T12:00:00.000Z", effective_from: "2026-11-16T12:00:00.000Z",
+      events: 130, truncated: null, estimate_usd: [0.03, 0.08] as [number, number], schedule_id: "schedule-intents",
+    };
+    const record: IntentRecognition = {
+      id: "R-12", chat_id: "oc_product", name: "合成产品群", range_from: preview.range_from, range_to: preview.range_to,
+      state: "running", events_in_range: 130, events_read: 0, truncated: null, cost_usd: 0, error: null,
+      created_at: preview.range_to, finished_at: null, intents: [],
+    };
+    vi.mocked(intentRecognitionsPreview).mockResolvedValue(preview);
+    vi.mocked(intentRecognitionsStart).mockResolvedValue({ recognition: record });
+    await show();
+    await act(async () => button(container, "群需求")!.click());
+    expect(button(container, "识别一次")!.disabled).toBe(true);
+    await act(async () => container.querySelector<HTMLButtonElement>('[role="switch"][aria-label="启用识别一次"]')!.click());
+    expect(intentRecognitionsSettingsPut).toHaveBeenCalledWith({ enabled: true });
+    expect(intentGroupReadsSettingsPut).not.toHaveBeenCalled();
+    await act(async () => button(container, "识别一次")!.click());
+    let dialog = container.querySelector('[role="dialog"]')!;
+    const since = (dialog.querySelector('[aria-label="范围起点"]') as HTMLInputElement).value;
+    const until = (dialog.querySelector('[aria-label="范围终点"]') as HTMLInputElement).value;
+    expect(new Date(until).getTime() - new Date(since).getTime()).toBe(7 * 86400000);
+    expect(intentRecognitionsPreview).not.toHaveBeenCalled();
+    await act(async () => button(dialog, "预览条数和花费")!.click());
+    expect(intentRecognitionsPreview).toHaveBeenCalledWith({ chat_id: "oc_product", since: preview.range_from, until: preview.range_to });
+    expect(dialog.textContent).toContain("130 条人发消息");
+    expect(dialog.textContent).toContain("$0.03–$0.08");
+    expect(intentRecognitionsStart).not.toHaveBeenCalled();
+    await act(async () => button(dialog, "取消")!.click());
+    expect(intentRecognitionsStart).not.toHaveBeenCalled();
+    await act(async () => button(container, "识别一次")!.click());
+    dialog = container.querySelector('[role="dialog"]')!;
+    await act(async () => button(dialog, "预览条数和花费")!.click());
+    vi.mocked(intentRecognitionsList).mockResolvedValue({ enabled: true, recognitions: [record] });
+    await act(async () => button(dialog, "确认识别")!.click());
+    expect(intentRecognitionsStart).toHaveBeenCalledWith({ chat_id: "oc_product", since: preview.range_from, until: preview.range_to });
+    expect(container.querySelector('[role="dialog"]')).toBeNull();
+    expect(container.textContent).toContain("R-12");
+    expect(container.textContent).toContain("识别中");
+    vi.mocked(intentRecognitionsList).mockResolvedValue({ enabled: true, recognitions: [{ ...record, state: "done",
+      events_read: 130, cost_usd: 0.04, finished_at: preview.range_to,
+      intents: [{ id: "I-0042", type: { key: "dev_task", name: "开发任务" }, title: "添加渠道筛选", state: "pending" }],
+    }] });
+    await act(async () => vi.advanceTimersByTimeAsync(5000));
+    expect(container.textContent).toContain("已完成");
+    expect(container.textContent).toContain("读了 130 / 130 条");
+    expect(container.textContent).toContain("$0.0400");
+    expect(container.textContent).toContain("I-0042 · 开发任务 · 添加渠道筛选");
+    const calls = vi.mocked(intentRecognitionsList).mock.calls.length;
+    await act(async () => vi.advanceTimersByTimeAsync(5000));
+    expect(intentRecognitionsList).toHaveBeenCalledTimes(calls);
+  });
+
+  it("defaults skipped groups to today and rejects a range longer than 30 days", async () => {
+    vi.mocked(intentGroupReadsList).mockResolvedValue({ ...groupPage, groups: [followedGroup] });
+    vi.mocked(intentRecognitionsList).mockResolvedValue({ enabled: true, recognitions: [] });
+    await show();
+    await act(async () => button(container, "群需求")!.click());
+    await act(async () => button(container, "识别一次")!.click());
+    const dialog = container.querySelector('[role="dialog"]')!;
+    const since = dialog.querySelector<HTMLInputElement>('[aria-label="范围起点"]')!;
+    expect(new Date(since.value).getHours()).toBe(0);
+    const longAgo = new Date(Date.now() - 31 * 86400000);
+    const local = new Date(longAgo.getTime() - longAgo.getTimezoneOffset() * 60000).toISOString().slice(0, 16);
+    await act(async () => setValue(since, local));
+    await act(async () => button(dialog, "预览条数和花费")!.click());
+    expect(dialog.textContent).toContain("跨度不超过 30 天");
+    expect(intentRecognitionsPreview).not.toHaveBeenCalled();
+    expect(intentRecognitionsStart).not.toHaveBeenCalled();
   });
 
   it("says when nothing is pending", async () => {
