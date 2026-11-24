@@ -19,7 +19,7 @@ from looper.agents.runtimes.runner import dsh_command
 from looper.agents.runtimes.runner.protocol import MAX_FRAME_BYTES
 from looper.agents.runtimes.runner.supervisor import RunnerSupervisor, _ENV
 
-_REQUIRED = "GAP: installed dsh 0.2.1-rc.2 and Node 22.19+ are required; the DSH runner was not run"
+_REQUIRED = "GAP: installed dsh 0.2.2-rc.5 and Node 22.19+ are required; the DSH runner was not run"
 OFFER = {"protocol_versions": ["0.1"], "looper_version": "test", "host_capabilities": {
     "tools_call": True, "budget_authorize": True, "bus": False, "exec_slots": False}}
 
@@ -47,7 +47,7 @@ def require_dsh() -> tuple[str, str]:
                 if package.is_file():
                     metadata = json.loads(package.read_text())
                     if metadata.get("name") == "@deepseek-ai/dsh":
-                        if metadata.get("version") == "0.2.1-rc.2":
+                        if metadata.get("version") == "0.2.2-rc.5":
                             return node, str(Path(executable).absolute())
                         break
                 parent = parent.parent

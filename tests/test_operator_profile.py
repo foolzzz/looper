@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from looper.agents.operator_profile import CAP, ProfileError, compile_profile, directory
+from looper.agents.operator_profile import CAP, ProfileError, compile_profile
 
 
 def _note(root: Path, rel: str, text: str) -> None:
@@ -293,23 +293,18 @@ def test_preferences_alone_compile_and_an_inside_symlink_keeps_the_named_path(tm
     assert compiled.fields["name"]["value"] == "Ada"
 
 
-def test_directory_accepts_only_an_absolute_directory(tmp_path: Path) -> None:
-    folder = tmp_path / "vault"
-    folder.mkdir()
-    assert directory(str(folder)) == str(folder.resolve())
-    note = folder / "关于我.md"
-    note.write_text("x", encoding="utf-8")
-    with pytest.raises(ProfileError, match="must be a directory"):
-        directory(str(note))
-    with pytest.raises(ProfileError, match="absolute directory"):
-        directory("vault")
-    with pytest.raises(ProfileError, match="does not exist"):
-        directory(str(tmp_path / "missing"))
-    with pytest.raises(ProfileError, match="absolute directory"):
-        directory("\x00")
-    with pytest.raises(ProfileError, match="absolute directory"):
-        directory("/" + ("a" * 1100))
-    assert CAP == 1500
+def test_configured_file_reuses_frontmatter_handling_and_cap(tmp_path: Path) -> None:
+    _note(tmp_path, "关于我.md", "## 名字\nIgnored\n")
+    _note(tmp_path, "偏好/rule.md", "## Rule\nIgnored preference\n")
+    _note(tmp_path, "记忆/画像.md", "---\nsummary: Ignored metadata\n---\n## 名字\nAda\n"
+          "- Working on a compiler [kind:: fact]\n")
+    compiled = compile_profile(tmp_path, source="记忆/画像.md")
+    assert compiled.text == "Name: Ada\nStanding rules:\n- Working on a compiler"
+    assert compiled.sources == ("记忆/画像.md",)
+    assert compiled.fields["name"]["line"] == 4
+    _note(tmp_path, "记忆/画像.md", "---\nsummary: metadata\n---\n## Name\n" + "名" * 1600)
+    capped = compile_profile(tmp_path, source="记忆/画像.md")
+    assert len(capped.text) == CAP and capped.text.endswith("…")
 
 
 _ENTRY = "- 回复用中文 [kind:: preference] [source:: 对话 2026-11-20] [confidence:: high]"

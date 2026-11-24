@@ -74,7 +74,7 @@ def _vault(tmp_path):
     ("scheduler_settings", {"min_interval_seconds", "run_timeout_seconds", "run_retention_days",
                             "session_context_max_tokens"}),
     ("wait_settings", {"max_wait_seconds", "min_check_seconds"}),
-    ("knowledge_vault", {"configured", "path", "writable", "rules_file", "manager_read", "git", "problem"}),
+    ("knowledge_vault", {"configured", "path", "writable", "rules_file", "manager_read", "profile_source", "git", "problem"}),
 ])
 @pytest.mark.parametrize("client", [False, True])
 def test_full_get_views_are_nonempty_and_typed(tmp_path, monkeypatch, family, fields, client):
@@ -82,12 +82,34 @@ def test_full_get_views_are_nonempty_and_typed(tmp_path, monkeypatch, family, fi
         await vault.update_settings(_vault(tmp_path))
         async with _api(tmp_path, pool) as (_, post, token):
             status, body = await post(f"{family}/get", identity=token if client else TOKEN)
+            if family == "knowledge_vault" and client:
+                assert status == 403 and body["error"]["code"] == "forbidden"
+                return
             assert status == 200 and set(body["result"]) == fields
             if family == "knowledge_vault":
                 assert body["result"]["configured"] is True
             else:
                 assert all(entry["value"] is not None for name, entry in body["result"].items()
                            if name != "run_timeout_seconds")
+    run_db(run, monkeypatch, timeout=20)
+
+
+def test_profile_source_api_is_operator_only_and_replacement_defaults(tmp_path, monkeypatch):
+    async def run(pool):
+        data = _vault(tmp_path)
+        (tmp_path / "notes" / "profile.md").write_text("## Name\nAda\n")
+        data["profile_source"] = "profile.md"
+        async with _api(tmp_path, pool) as (_, post, token):
+            before = await system_settings.get_settings([vault.SETTING_KEY])
+            status, body = await post("knowledge_vault/update", data, identity=token)
+            assert status == 403 and body["error"]["code"] == "forbidden"
+            assert await system_settings.get_settings([vault.SETTING_KEY]) == before
+            status, body = await post("knowledge_vault/update", data)
+            assert status == 200 and body["result"]["profile_source"] == "profile.md"
+            assert (await post("knowledge_vault/get"))[1]["result"]["profile_source"] == "profile.md"
+            del data["profile_source"]
+            status, body = await post("knowledge_vault/update", data)
+            assert status == 200 and body["result"]["profile_source"] == "关于我.md"
     run_db(run, monkeypatch, timeout=20)
 
 
@@ -127,7 +149,7 @@ def test_numeric_rules_preserve_bounds_types_and_defaults(tmp_path, monkeypatch,
     run_db(run, monkeypatch, timeout=20)
 
 
-@pytest.mark.parametrize("family", ["scheduler_settings", "wait_settings", "knowledge_vault"])
+@pytest.mark.parametrize("family", ["scheduler_settings", "wait_settings"])
 def test_client_confirmation_is_isolated_and_abandoned_changes_do_not_persist(tmp_path, monkeypatch, family):
     async def run(pool):
         data = {"scheduler_settings": {"min_interval_seconds": 77},
@@ -171,7 +193,7 @@ def test_invalid_updates_preserve_the_full_snapshot(tmp_path, monkeypatch, famil
     async def run(pool):
         async with _api(tmp_path, pool) as (_, post, token):
             before = (await post(f"{family}/get"))[1]["result"]
-            status, body = await post(f"{family}/update", data, identity=token)
+            status, body = await post(f"{family}/update", data, identity=TOKEN if family == "knowledge_vault" else token)
             assert status == 400 and body["error"]["code"] == "invalid"
             assert (await post(f"{family}/get"))[1]["result"] == before
     run_db(run, monkeypatch, timeout=20)
@@ -215,7 +237,7 @@ def test_vault_invalid_path_writable_and_rules_do_not_write(tmp_path, monkeypatc
                 "clear_with_writable": {"path": None}}[invalid]}
         async with _api(tmp_path, pool) as (_, post, token):
             before = await system_settings.get_settings([vault.SETTING_KEY])
-            status, body = await post("knowledge_vault/update", data, identity=token)
+            status, body = await post("knowledge_vault/update", data)
             assert status == 400 and body["error"]["code"] == "invalid"
             assert await system_settings.get_settings([vault.SETTING_KEY]) == before
     run_db(run, monkeypatch, timeout=20)
@@ -228,11 +250,9 @@ def test_vault_git_problem_clear_and_execution_revalidation_leave_notes_untouche
         data = _vault(tmp_path)
         subprocess.run(["git", "init", "-q", data["path"]], check=True, timeout=10)
         async with _api(tmp_path, pool) as (_, post, token):
-            status, pending = await post("knowledge_vault/update", data, identity=token)
-            assert status == 202
             root = tmp_path / "notes"
             (root / "writable").rmdir()
-            status, body = await post("confirm", {"confirmation_id": pending["confirmation_id"]}, identity=token)
+            status, body = await post("knowledge_vault/update", data)
             assert status == 400 and body["error"]["code"] == "invalid"
             assert await system_settings.get_settings([vault.SETTING_KEY]) == {}
             (root / "writable").mkdir()
@@ -243,7 +263,7 @@ def test_vault_git_problem_clear_and_execution_revalidation_leave_notes_untouche
             assert problem["configured"] is False and problem["problem"] and problem["path"] == data["path"]
             status, body = await post("knowledge_vault/update", clear)
             assert status == 200 and body["result"] == {"configured": False, "path": None, "writable": [],
-                                                       "rules_file": None, "manager_read": False, "git": False,
+                                                       "rules_file": None, "manager_read": False, "profile_source": "关于我.md", "git": False,
                                                        "problem": None}
             assert (root / "rules.md").read_text() == "Example rules\n"
             assert subprocess.run(["git", "-C", data["path"], "log", "--oneline"], capture_output=True,
