@@ -37,12 +37,16 @@ to it; ``chosen_profile`` says beforehand which Agent Profile the run would use,
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
+import random
 import re
 import shutil
+import time
 import uuid
 from collections.abc import Mapping
+from contextlib import AsyncExitStack
 from dataclasses import dataclass, replace
 from enum import Enum
 from pathlib import Path
@@ -51,6 +55,7 @@ from typing import Any
 from .run_usage import CostStatus, cost_status
 from .agent_settings import Access, AgentSettings, AgentType, Launch, load_agent_settings, sha256_text
 from .runtimes import CostSource
+from . import failures
 
 logger = logging.getLogger(__name__)
 
@@ -235,6 +240,7 @@ class ProcessorRun:
     detail: str = ""
     # The Agent Profile the run launched with (``profile_facts``), from the settings it was started on.
     profile: Mapping[str, Any] | None = None
+    engine_failure: failures.Failure | None = None
 
 
 # The roles that run as the processor does (``run``'s ``role``) and the role prompt each is recommended.
@@ -349,11 +355,97 @@ def _check(owner: str, instructions: str, quiet_word: str, budget_usd: float, ti
         raise ValueError("a processor run needs a spend cap and a deadline above 0")
 
 
+@dataclass
+class _QuotaWait:
+    started: float | None = None
+
+
+@dataclass(frozen=True)
+class _RetryPrepared:
+    settings: AgentSettings
+    config: _Role
+    hooks: Any
+    fence: bool
+    deadline: float
+    quota_wait: _QuotaWait
+    recovery: bool = False
+
+
 async def run(*, owner: str, instructions: str, input_text: str, input_ref: Mapping[str, Any], quiet_word: str,
               budget_usd: float, timeout_s: float, runtime_root: Path, claude_bin: str = "claude",
               project_id: str | None = None, schedule_id: str | None = None,
               metadata: Mapping[str, Any] | None = None, contract: str | None = None,
               role: AgentType = AgentType.PROCESSOR) -> ProcessorRun:
+    """Run one logical batch, with bounded runtime recovery only in failure-typing act mode.
+
+    A retry consumes the same caller deadline and spend cap. Every real attempt still owns its recorder and
+    private directory, and callers receive all attempts' cost, including failed attempts.
+    """
+    arguments = dict(owner=owner, instructions=instructions, input_text=input_text, input_ref=input_ref,
+                     quiet_word=quiet_word, budget_usd=budget_usd, timeout_s=timeout_s, runtime_root=runtime_root,
+                     claude_bin=claude_bin, project_id=project_id, schedule_id=schedule_id, metadata=metadata,
+                     contract=contract, role=role)
+    if await failures.typing_mode() is not failures.FailureTyping.ACT:
+        return await _run_once(**arguments)
+    from . import failure_handling, untrusted
+
+    _check(owner, instructions, quiet_word, budget_usd, timeout_s)
+    _check_role(role)
+    started = time.monotonic()
+    settings = await load_agent_settings(role, project_id, schedule_id=schedule_id)
+    config = await _role(role)
+    deadline = started + timeout_s
+    prepared = _RetryPrepared(settings, config, _managed_hooks(settings), await untrusted.enabled(), deadline, _QuotaWait())
+    total: float | None = 0.0
+    attempts = 0
+    last: ProcessorRun | None = None
+    while True:
+        remaining = deadline - time.monotonic()
+        left_usd = budget_usd - (total or 0.0)
+        if remaining <= 0:
+            if last is None:
+                return ProcessorRun(None, cost_usd=0, failure=ProcessorFailure.TIMEOUT,
+                                    detail="the processor call expired while preparing its launch")
+            return replace(last, reply=None, cost_usd=total, failure=ProcessorFailure.TIMEOUT,
+                           detail="the logical processor call reached its deadline")
+        if left_usd <= 0:
+            assert last is not None
+            return replace(last, reply=None, cost_usd=total, failure=ProcessorFailure.BUDGET,
+                           detail="the logical processor call reached its spend cap")
+        last = await _run_once(**{**arguments, "budget_usd": left_usd, "timeout_s": remaining},
+                               _prepared=replace(prepared, recovery=attempts > 0))
+        attempts += 1
+        total = total + last.cost_usd if total is not None and last.cost_usd is not None else None
+        last = replace(last, cost_usd=total)
+        found = last.engine_failure
+        # Policy refusals, blocked hooks, unknown cost and spend guards have no retry policy.
+        if (last.failure is not ProcessorFailure.FAILED or found is None or total is None or attempts >= 3
+                or found.cls not in (failures.FailureClass.QUOTA, failures.FailureClass.TRANSIENT)):
+            return last
+        service = failure_handling.get_service()
+        if service is None or service.known_mode() is not failures.FailureTyping.ACT:
+            return last
+        if found.cls is failures.FailureClass.TRANSIENT:
+            delay = (120 if attempts == 1 else 600) * random.uniform(0.8, 1.2)
+            wake_deadline = deadline
+        else:
+            if prepared.quota_wait.started is None:
+                prepared.quota_wait.started = time.monotonic()
+            wake_deadline = min(deadline, prepared.quota_wait.started + 6 * 3600)
+            delay = service.quota_delay(found, attempts)
+        wait = min(delay, max(0.0, wake_deadline - time.monotonic()))
+        if not await service.wait_turn(wait):
+            return last
+        if time.monotonic() >= wake_deadline:
+            return replace(last, reply=None, failure=ProcessorFailure.TIMEOUT,
+                           detail="the logical processor call reached its deadline")
+
+
+async def _run_once(*, owner: str, instructions: str, input_text: str, input_ref: Mapping[str, Any], quiet_word: str,
+              budget_usd: float, timeout_s: float, runtime_root: Path, claude_bin: str = "claude",
+              project_id: str | None = None, schedule_id: str | None = None,
+              metadata: Mapping[str, Any] | None = None, contract: str | None = None,
+              role: AgentType = AgentType.PROCESSOR, _prepared: _RetryPrepared | None = None) -> ProcessorRun:
     """One processor run (the module's notes) of ``instructions`` over ``input_text``, recorded as
     ``processor:<owner>`` with ``metadata`` and, as its input, ``input_ref`` (which must not hold the text) with the
     text's sha256 and length. ``budget_usd`` and ``timeout_s`` bound it. ``contract`` replaces the reply section
@@ -369,14 +461,16 @@ async def run(*, owner: str, instructions: str, input_text: str, input_ref: Mapp
 
     _check(owner, instructions, quiet_word, budget_usd, timeout_s)
     _check_role(role)
-    settings = await load_agent_settings(role, project_id, schedule_id=schedule_id)
+    settings = (_prepared.settings if _prepared is not None else
+                await load_agent_settings(role, project_id, schedule_id=schedule_id))
     if problem := _problem(settings, role):
-        return ProcessorRun(None, failure=ProcessorFailure.REFUSED, detail=problem)
-    hooks = _managed_hooks(settings)
+        return ProcessorRun(None, failure=ProcessorFailure.REFUSED, detail=problem,
+                            engine_failure=failures.Failure(failures.FailureCause.PROFILE) if _prepared else None)
+    hooks = _prepared.hooks if _prepared is not None else _managed_hooks(settings)
     if hooks is not None and await _refuses_managed_hooks():
         return ProcessorRun(None, failure=ProcessorFailure.REFUSED, detail=_managed_refusal(hooks))
     facts = profile_facts(settings, hooks.view() if hooks is not None else None)
-    config = await _role(role)
+    config = _prepared.config if _prepared is not None else await _role(role)
     if not config.enabled:
         return ProcessorRun(None, failure=ProcessorFailure.REFUSED,
                             detail=f"{'the processor role' if role is AgentType.PROCESSOR else _named(role)} is "
@@ -402,15 +496,62 @@ async def run(*, owner: str, instructions: str, input_text: str, input_ref: Mapp
     directory.mkdir(mode=0o700, parents=True)
     from . import admission
 
-    async with admission.slot(launch.profile.provider.id, admission.Lane.BACKGROUND,
-                              owner=run_id):
+    async with AsyncExitStack() as stack:
         try:
+            if _prepared is None:
+                await stack.enter_async_context(admission.slot(launch.profile.provider.id, admission.Lane.BACKGROUND,
+                                                               owner=run_id))
+            else:
+                # A pre-existing frozen account has no recorder yet, but still consumes the caller's deadline.
+                from . import failure_handling
+
+                frozen = False
+                try:
+                    async with asyncio.timeout(max(0, _prepared.deadline - time.monotonic())) as waiting:
+                        async def on_frozen(found):
+                            nonlocal frozen
+                            frozen = True
+                            if _prepared.quota_wait.started is None:
+                                _prepared.quota_wait.started = time.monotonic()
+                            waiting.reschedule(min(_prepared.deadline, _prepared.quota_wait.started + 6 * 3600))
+
+                        lane = admission.Lane.RECOVERY if _prepared.recovery else admission.Lane.BACKGROUND
+                        service = failure_handling.get_service()
+                        acquire = asyncio.create_task(stack.enter_async_context(admission.slot(
+                            launch.profile.provider.id, lane, owner=run_id, on_frozen=on_frozen)))
+                        drain = (asyncio.create_task(service.wait_turn(
+                            max(0, _prepared.deadline - time.monotonic()))) if service is not None else None)
+                        try:
+                            if drain is not None:
+                                done, _ = await asyncio.wait((acquire, drain), return_when=asyncio.FIRST_COMPLETED)
+                                if drain in done and not await drain:
+                                    return ProcessorRun(None, cost_usd=0, failure=ProcessorFailure.FAILED,
+                                                        detail="failure handling ended while waiting for admission",
+                                                        engine_failure=failures.Failure(
+                                                            failures.FailureCause.USAGE_LIMIT if frozen else
+                                                            failures.FailureCause.UNKNOWN))
+                            await acquire
+                        finally:
+                            jobs = [acquire, *([drain] if drain is not None else [])]
+                            for job in jobs:
+                                if not job.done():
+                                    job.cancel()
+                            await asyncio.gather(*jobs, return_exceptions=True)
+                        owner_token = admission._current_owner.set(run_id)
+                        stack.callback(admission._current_owner.reset, owner_token)
+                except TimeoutError:
+                    return ProcessorRun(None, cost_usd=0, failure=ProcessorFailure.TIMEOUT,
+                                        detail="the processor call expired while waiting for admission",
+                                        engine_failure=failures.Failure(failures.FailureCause.USAGE_LIMIT) if frozen else
+                                        failures.TIMED_OUT)
+                deadline = min(deadline, max(0, _prepared.deadline - time.monotonic()))
             prompt_file = system_prompt.write_file(runtime_root)
             try:
                 command = launch.runtime.run_command(launch.executable(claude_bin), cwd=directory, prompt_file=prompt_file,
                                                      launch=launch, max_turns=config.max_turns)
             except RuntimeUnsupported as exc:
-                return ProcessorRun(None, failure=ProcessorFailure.REFUSED, detail=str(exc))
+                return ProcessorRun(None, failure=ProcessorFailure.REFUSED, detail=str(exc),
+                                    engine_failure=failures.Failure(failures.FailureCause.PROFILE) if _prepared else None)
             recorder = ClaudeRunRecorder(agent_id=agent_id, task_id=None, command=command, cwd=str(directory),
                                          input_text=reference, system_prompt=system_prompt, launch=launch,
                                          whole_process=True, keep=typed_events, schedule_id=schedule_id)
@@ -431,13 +572,16 @@ async def run(*, owner: str, instructions: str, input_text: str, input_ref: Mapp
                 from . import untrusted
 
                 finished = await single_run.run_once(
-                    recorder, command, cwd=str(directory), prompt=user_turn(input_text, fence=await untrusted.enabled()),
+                    recorder, command, cwd=str(directory),
+                    prompt=user_turn(input_text, fence=_prepared.fence if _prepared is not None else await untrusted.enabled()),
                     launch=launch, timeout=deadline,
                     what=f"the {role.value} run", label=f"{role.value} {agent_id} {run_id}", quiet=True)
             except single_run.StartFailed as exc:
                 await recorder.annotate({"processor_failure": ProcessorFailure.FAILED.value})
-                return ProcessorRun(None, recorder.record_id, failure=ProcessorFailure.FAILED,
-                                    detail=f"its runtime does not start: {exc}")
+                return ProcessorRun(None, recorder.record_id, cost_usd=0 if _prepared else None,
+                                    failure=ProcessorFailure.FAILED,
+                                    detail=f"its runtime does not start: {exc}",
+                                    engine_failure=recorder.failure_signal() if _prepared else None)
         finally:
             shutil.rmtree(directory, ignore_errors=True)
     result, record_id = finished.result, recorder.record_id
@@ -465,5 +609,6 @@ async def run(*, owner: str, instructions: str, input_text: str, input_ref: Mapp
         failed = ProcessorFailure.BUDGET, f"it cost {cost:.4f} USD, over its cap of {cap:g} USD"
     if failed is not None:
         await recorder.annotate({"processor_failure": failed[0].value})
-        return ProcessorRun(None, record_id, cost, failure=failed[0], detail=failed[1], profile=facts)
+        return ProcessorRun(None, record_id, cost, failure=failed[0], detail=failed[1], profile=facts,
+                            engine_failure=recorder.failure_signal() if _prepared else None)
     return ProcessorRun(str(result.get("result") or ""), record_id, cost, profile=facts)

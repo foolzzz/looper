@@ -561,6 +561,7 @@ class TaskRouter:
         ))
 
         if ends_task(status):
+            await self._clear_failure_holds(task_id)
             budget = fail_kind == db_tasks.FailKind.TASK_BUDGET.value
             await attempts.close_attempts(
                 task_id, failure_kind=attempts.FailureKind.TASK_BUDGET if budget else
@@ -619,6 +620,7 @@ class TaskRouter:
     async def _handle_cancel(self, envelope: MessageEnvelope) -> None:
         assert self._bus is not None
         task_id = envelope.payload.get("task_id", "")
+        await self._clear_failure_holds(task_id)
         task = self._tasks.get(task_id)
         if not task:
             return
@@ -645,6 +647,7 @@ class TaskRouter:
     async def _handle_stop(self, envelope: MessageEnvelope) -> None:
         assert self._bus is not None
         task_id = envelope.payload.get("task_id", "")
+        await self._clear_failure_holds(task_id)
         task = self._tasks.get(task_id)
         from .. import cost_guard
         await cost_guard.release_queued(task_id)
@@ -686,6 +689,14 @@ class TaskRouter:
     def forget_task(self, task_id: str) -> None:
         """Drop an already stopped task after its database row has been deleted."""
         self._tasks.pop(task_id, None)
+
+    @staticmethod
+    async def _clear_failure_holds(task_id: str) -> None:
+        from .. import failure_handling, failures
+
+        service = failure_handling.get_service()
+        if service is not None and service.mode is failures.FailureTyping.ACT:
+            await service.cancel_task(task_id)
 
     @staticmethod
     async def _stop_note(task_id: str, reason: str | None = None) -> str:

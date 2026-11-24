@@ -11,6 +11,17 @@ ADAPTER = {"system_id": "review-system", "executable": "/opt/synthetic/verifier"
 URL = "https://review.example/repository/mr/7"
 
 
+def daytime_zone(now: datetime | None = None) -> str:
+    """A fixed-offset zone in which ``now`` is about midday, outside the delivery layer's 22:00-08:00 quiet hours.
+
+    The checks turn delivery on; a fixed "UTC" made rule notices digest instead of send whenever CI ran between
+    22:00 and 08:00 UTC. Etc/GMT+N is UTC-N, and the range UTC-12..UTC+14 always contains a midday offset."""
+    hour = (now or datetime.now(timezone.utc)).astimezone(timezone.utc).hour
+    offset = 12 - hour  # local hour = utc hour + offset
+    offset = offset + 24 if offset < -12 else offset - 24 if offset > 14 else offset
+    return "UTC" if offset == 0 else f"Etc/GMT{'-' if offset > 0 else '+'}{abs(offset)}"
+
+
 async def configure(pool, directory, *, cap=50):
     from looper.db import intent_rules as store
     from uuid import uuid4
@@ -36,7 +47,7 @@ async def configure(pool, directory, *, cap=50):
             edited_by="operator")
         await conn.executemany("INSERT INTO system_settings(key,value) VALUES($1,$2)", [
             ("intents.rules.enabled","true"),("intents.enabled","true"),("delivery.enabled","true"),
-            ("user.timezone","UTC")])
+            ("user.timezone",daytime_zone())])
 
 
 def fact(revision="head-a", state="open"):

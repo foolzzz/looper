@@ -1,4 +1,4 @@
-"""Why a run failed, as a type (the engine reliability RFC, section 4; this step only records it).
+"""Why a run failed, as a type (the engine reliability RFC, section 4; record mode only records it).
 
 A failed run gets one ``FailureCause``, and each cause belongs to one ``FailureClass``:
 
@@ -43,7 +43,7 @@ class FailureTyping(StrEnum):
 
     OFF = "off"  # nothing is classified (no row: the default)
     RECORD = "record"  # failed runs are classified and recorded; nothing else changes
-    ACT = "act"  # failures are handled by their class (not built yet: recorded as ``record``)
+    ACT = "act"  # record and handle failures with bounded recovery and operator-controlled holds
 
 
 class FailureClass(StrEnum):
