@@ -196,6 +196,12 @@ async def build(intent_id: int, *, via: str, origin: Mapping[str, Any] | None = 
     if platform is None:
         raise IntentRefused("task service is unavailable")
     now = now or _now()
+    if await leads_model.rule_types_enabled(_db(db)):
+        mr = await _db(db).fetchrow("SELECT type_key FROM intents WHERE id=$1", intent_id)
+        if mr and mr["type_key"] == leads_model.RULE_INTENT_TYPE:
+            from . import intent_rule_engine
+            return await intent_rule_engine.manual_build(intent_id, via=via, origin=origin, candidate=candidate,
+                project_id=project_id, workflow_key=workflow_key, platform=platform, db=_db(db), card_press=card_press)
     fence = await untrusted.enabled(_db(db))  # before the connection below: a build holds no second one
     async with _db(db).acquire() as conn, conn.transaction():
         await _enabled(conn)
@@ -667,6 +673,8 @@ async def settings_put(enabled: bool, *, db: Any = None) -> dict:
     if not isinstance(enabled, bool):
         raise ValueError("enabled must be boolean")
     async with _db(db).acquire() as conn, conn.transaction():
+        from ..db.intent_rules import lock_admission
+        await lock_admission(conn)
         await conn.execute("INSERT INTO system_settings(key,value) VALUES('intents.enabled',$1) "
                            "ON CONFLICT(key) DO UPDATE SET value=EXCLUDED.value,updated_at=now()", str(enabled).lower())
         if not enabled:

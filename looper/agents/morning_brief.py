@@ -95,7 +95,10 @@ def _reminder_line(row: Mapping[str, Any], tz: ZoneInfo) -> str:
     return f"- {local:%H:%M} {_plain(row['text'])}"
 
 
-def _digest_line(row: Mapping[str, Any], tz: ZoneInfo) -> str:
+def _digest_line(row: Mapping[str, Any], tz: ZoneInfo, *, dashboard_url: str = "") -> str:
+    if row.get("rule_notice"):
+        from .intent_rule_delivery import notice_text
+        return "- " + notice_text(row["rule_notice"], dashboard_url=dashboard_url).replace("\n", "；")
     kind = _KIND_LABELS.get(row["kind"], row["kind"])
     reason = _REASON_LABELS.get(row["reason"], row["reason"])
     when = row["decided_at"].astimezone(tz)
@@ -108,7 +111,7 @@ def _digest_line(row: Mapping[str, Any], tz: ZoneInfo) -> str:
 
 
 def render(*, day: date, needs: str | None, reminders: list[Mapping[str, Any]], digests: list[Mapping[str, Any]],
-           tz: ZoneInfo, triage: list[BriefEvent] = (), triage_more: int = 0) -> str | None:
+           tz: ZoneInfo, triage: list[BriefEvent] = (), triage_more: int = 0, dashboard_url: str = "") -> str | None:
     """The brief, or None when every section is empty. ``needs`` is the needs-you summary; the empty summary is
     not a section."""
     sections: list[str] = []
@@ -117,7 +120,7 @@ def render(*, day: date, needs: str | None, reminders: list[Mapping[str, Any]], 
     if reminders:
         sections.append("今天的提醒\n" + "\n".join(_reminder_line(row, tz) for row in reminders))
     if digests:
-        sections.append("推迟到这份晨报的消息\n" + "\n".join(_digest_line(row, tz) for row in digests))
+        sections.append("推迟到这份晨报的消息\n" + "\n".join(_digest_line(row, tz, dashboard_url=dashboard_url) for row in digests))
     if triage:
         lines = [_triage_line(event, tz) for event in triage]
         if triage_more > 0:
@@ -182,8 +185,9 @@ class MorningBriefService:
     tick while it is off), and not while the server drains."""
 
     def __init__(self, registry: Any, *, drain: Any = None, clock: Callable[[], datetime] | None = None,
-                 managers: Any = None, interval: float = TICK_SECONDS) -> None:
+                 managers: Any = None, interval: float = TICK_SECONDS, dashboard_url: str = "") -> None:
         self._registry = registry
+        self._dashboard_url = dashboard_url
         self._drain = drain
         self._clock = clock or (lambda: datetime.now(timezone.utc))
         self._managers = managers
@@ -281,6 +285,44 @@ class MorningBriefService:
 
     async def _one(self, conn: Any, policy: Any, now: datetime, day: date, start: datetime, needs: str,
                    channel_id: str, chat: str) -> None:
+        from . import leads_model
+
+        if not await leads_model.rules_enabled(db=conn):
+            await self._one_current(conn, policy, now, day, start, needs, channel_id, chat)
+            return
+        from ..db import attention as attention_store
+        from .intent_rule_delivery import confirmation_locks, discovery_locks
+
+        rows, _ = await attention_store.pending_intents(attention.SHOWN, db=conn, rules_on=True)
+        intent_ids = [row['id'] for row in rows]
+        # Digest progress may refer to a merged intent. Protect that parent too.
+        origin = await store.first_attempt_date(conn, channel_id, chat) or day
+        deferred = await store.digests(conn, channel_id=channel_id, chat=chat, until=now,
+                                       dates=list(digest_dates_through(origin, day)))
+        refs = [int(row['source_ref']) for row in deferred
+                if row.get('kind') == 'intent' and str(row.get('source_ref', '')).isdecimal()]
+        if refs:
+            sources = await conn.fetch('SELECT id,merged_into FROM intents WHERE id=ANY($1::bigint[])', refs)
+            intent_ids.extend(row['id'] for row in sources)
+            intent_ids.extend(row['merged_into'] for row in sources if row['merged_into'] is not None)
+        discovery_ids = [row['rule_notice']['discovery_id'] for row in deferred
+                         if row.get('rule_notice', {}).get('kind') == 'discovery_confirmation']
+        async with confirmation_locks(conn, intent_ids), discovery_locks(conn, discovery_ids):
+            # Keep all non-intent sections current too. The final refresh cannot
+            # reintroduce a handled candidate while its execution gate is held.
+            summary = await attention.collect(managers=self._managers)
+            intent_section = next((section for section in summary['sections'] if section['kind'] == 'intents'), None)
+            if intent_section and intent_section.get('state') == 'ok':
+                intent_section['items'] = [item for item in intent_section['items']
+                                           if item['key'] in {f'intent:{iid}' for iid in intent_ids}]
+                intent_section['count'] = len(intent_section['items'])
+                summary['total'] = sum(section.get('count', 0) for section in summary['sections'])
+            await self._one_current(conn, policy, now, day, start, attention.summary_text(summary), channel_id, chat,
+                                    protected_intents=set(intent_ids), protected_discoveries=set(discovery_ids))
+
+    async def _one_current(self, conn: Any, policy: Any, now: datetime, day: date, start: datetime, needs: str,
+                           channel_id: str, chat: str, *, protected_intents: set[int] | None = None,
+                           protected_discoveries: set[int] | None = None) -> None:
         if not await self._accepts(channel_id, chat):
             return
         if not await _pending(conn, day, channel_id, chat):
@@ -295,6 +337,14 @@ class MorningBriefService:
         dates = list(digest_dates_through(origin, day))
         deferred = await store.digests(
             conn, channel_id=channel_id, chat=chat, until=now, dates=dates)
+        if protected_intents is not None:
+            # A row committed after the protected read remains for the next brief.
+            deferred = [row for row in deferred if not (
+                row.get('kind') == 'intent' and str(row.get('source_ref', '')).isdecimal()
+                and int(row['source_ref']) not in protected_intents)]
+            deferred = [row for row in deferred if not (
+                row.get('rule_notice', {}).get('kind') == 'discovery_confirmation'
+                and row['rule_notice']['discovery_id'] not in (protected_discoveries or set()))]
         triage: list[BriefEvent] = []
         triage_more = 0
         if await triage_settings.enabled(db=conn):
@@ -303,7 +353,7 @@ class MorningBriefService:
                 dates_start = datetime.combine(min(dates), time.min, tzinfo=policy.timezone)
                 triage, triage_more = await triage_events.for_brief(conn, dates_start=dates_start)
         text = render(day=day, needs=needs, reminders=reminders, digests=deferred, tz=policy.timezone,
-                      triage=triage, triage_more=triage_more)
+                      triage=triage, triage_more=triage_more, dashboard_url=self._dashboard_url)
         delivery = Delivery(DeliveryKind.MORNING_BRIEF, Urgency.NORMAL, ChatKind.DIRECT, silent=text is None)
         decision = proactive_delivery.deliver(delivery, policy, DeliveryState(now))
         if not await self._accepts(channel_id, chat):
@@ -328,6 +378,17 @@ class MorningBriefService:
         if not await self._accepts(channel_id, chat):
             await store.release(conn, day, channel_id, chat)
             return
+        if any(row.get('source_ref') for row in deferred):
+            deferred = await store.filter_rule_digests(conn, deferred, channel_id=channel_id, chat=chat)
+            text = render(day=day, needs=needs, reminders=reminders, digests=deferred, tz=policy.timezone,
+                          triage=triage, triage_more=triage_more, dashboard_url=self._dashboard_url)
+            read_ids = [row['id'] for row in deferred]
+            if text is None:
+                await store.release(conn, day, channel_id, chat)
+                return
+            # Recovery consumes exactly what is still present in this final rendering.
+            await conn.execute('UPDATE morning_briefs SET read_ids=$4::bigint[] WHERE local_date=$1 '
+                               "AND channel_id=$2 AND chat=$3 AND status='sending'", day, channel_id, chat, read_ids)
         external: str | None = None
         try:
             receipt = await self._registry.post(

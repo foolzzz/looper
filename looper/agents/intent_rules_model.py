@@ -62,6 +62,51 @@ class Selection(StrEnum):
     MATCHED = "matched"
     UNMATCHED = "unmatched"
     FALLBACK = "fallback"
+    MANUAL = "manual"
+
+
+class ExecutionReason(StrEnum):
+    MATCHED = "matched"
+    NO_MATCH = "no_match"
+    TYPE_MISMATCH = "type_mismatch"
+    SCOPE_MISMATCH = "scope_mismatch"
+    CONDITION_FAILED = "condition_failed"
+    FLAGGED = "flagged"
+    AMBIGUOUS_TARGET = "ambiguous_target"
+    VERIFICATION_UNAVAILABLE = "verification_unavailable"
+    ADAPTER_MISSING = "adapter_missing"
+    ADAPTER_START_FAILED = "adapter_start_failed"
+    VERIFICATION_TIMEOUT = "verification_timeout"
+    VERIFICATION_OUTPUT_LIMIT = "verification_output_limit"
+    VERIFICATION_EXIT = "verification_exit"
+    VERIFICATION_PROTOCOL = "verification_protocol"
+    AUTHENTICATION_FAILED = "authentication_failed"
+    PERMISSION_DENIED = "permission_denied"
+    NOT_READABLE = "not_readable"
+    CANNOT_DECIDE = "cannot_decide"
+    UPSTREAM_ERROR = "upstream_error"
+    MR_MISSING = "mr_missing"
+    MR_NOT_OPEN = "mr_not_open"
+    REPOSITORY_DENIED = "repository_denied"
+    NOT_REVIEWER = "not_reviewer"
+    NOT_ADDRESSED = "not_addressed"
+    SENDER_DENIED = "sender_denied"
+    CONFIG_CHANGED = "config_changed"
+    PROJECT_CHANGED = "project_changed"
+    TEMPLATE_CHANGED = "template_changed"
+    SOURCE_REVOKED = "source_revoked"
+    SWITCH_OFF = "switch_off"
+    DELIVERY_OFF = "delivery_off"
+    INTENTS_OFF = "intents_off"
+    REVISION_CHANGED = "revision_changed"
+    DEDUPED = "deduped"
+    UNKNOWN_LEGACY_REVISION = "unknown_legacy_revision"
+    DAILY_CAP = "daily_cap"
+    AUDIT_UNAVAILABLE = "audit_unavailable"
+    START_FAILED = "start_failed"
+    NOTIFICATION_FAILED = "notification_failed"
+    REVOKE_FAILED = "revoke_failed"
+    ALREADY_TERMINAL = "already_terminal"
 
 
 class Acceptance(StrEnum):
@@ -236,7 +281,7 @@ MR_IDENTITY_SCHEMA = _object({"system_id": ID_SCHEMA, "repository_id": ID_SCHEMA
 HIT_SCHEMA = _object({
     "evaluation_key": ID_SCHEMA, "intent_id": _nullable(POSITIVE_INT), "discovery_id": _nullable(POSITIVE_INT),
     "generation": NONNEGATIVE_INT, "rule_id": _nullable(UUID_SCHEMA), "rule_version": _nullable(_RULE_INT),
-    "selection": _enum(Selection), "action": _enum(Action), "reason": _nullable(ID_SCHEMA),
+    "selection": _enum(Selection), "action": _enum(Action), "reason": _nullable(_enum(ExecutionReason)),
     "verified_at": _nullable(TIMESTAMP_SCHEMA), "mr_identity": _nullable(MR_IDENTITY_SCHEMA),
 })
 CONDITION_RESULT_SCHEMA = _object({
@@ -244,6 +289,11 @@ CONDITION_RESULT_SCHEMA = _object({
     "rule_version": _RULE_INT, "kind": _enum(ConditionKind), "result": _enum(ConditionState),
     "reason": _enum(ConditionReason), "verified_at": _nullable(TIMESTAMP_SCHEMA),
 })
+ATTEMPT_RESULT_SCHEMA = _object({
+    "rule_id": UUID_SCHEMA, "rule_version": _RULE_INT, "rule_position": _RULE_INT,
+    "result": _enum(ConditionState), "reason": _enum(ExecutionReason),
+})
+
 
 
 # Match the transport and PostgreSQL: integral JSON floats are not Python integers.
@@ -343,6 +393,9 @@ def validate_hit(value: Any) -> dict[str, Any]:
     if hit["selection"] == Selection.FALLBACK:
         if hit["rule_id"] is not None or hit["action"] != Action.PUSH_FOR_CONFIRMATION:
             raise ValueError("Invalid fallback hit")
+    elif hit["selection"] == Selection.MANUAL:
+        if hit["action"] != Action.CREATE_TASK:
+            raise ValueError("Manual MR execution must create or link a task")
     elif hit["rule_id"] is None:
         raise ValueError("A selected rule requires an ID and version")
     validate_mr_identity(hit["mr_identity"])

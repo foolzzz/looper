@@ -199,7 +199,9 @@ def _intent_item(row: Mapping[str, Any]) -> dict[str, Any]:
 async def _intents(_: Any) -> Read:
     if not await leads_model.intents_enabled():
         return NotRead.OFF
-    rows, count = await store.pending_intents(SHOWN)
+    rules_on = await leads_model.rules_enabled()
+    rows, count = (await store.pending_intents(SHOWN, rules_on=True) if rules_on
+                   else await store.pending_intents(SHOWN))
     return [_intent_item(row) for row in rows], count
 
 
@@ -221,10 +223,16 @@ def _channel_type(channel: str | None) -> str | None:
     return parsed.channel_type if parsed is not None else channel
 
 
-_DELIVERY_HREF = {"subscription": "#schedules/{ref}", "intent": "#intents", "task_end": "#tasks/{ref}"}
+_DELIVERY_HREF = {"subscription": "#schedules/{ref}", "intent": "#intents", "task_end": "#tasks/{ref}",
+                  "intent_rule": "#intents"}
 
 
 def _delivery_item(row: Mapping[str, Any]) -> dict[str, Any]:
+    if row["source"] == "intent_rule":
+        task = row["ref"] if row["ref"] and row["ref"].startswith("task-") else None
+        return _item(f"delivery:intent_rule:{row['key']}", row["title"], since=row["at"],
+                     href=f"#tasks/{task}" if task else "#intents", ref=task,
+                     source="intent_rule", channel=_channel_type(row["channel"]), reason=row.get("reason"))
     title = _task_name(row, row["ref"]) if row["source"] == "task_end" else row["title"]
     if row.get("reason") == "final_notice_retry_exhausted":
         title += "（最终状态通知重试已耗尽）"
@@ -237,7 +245,9 @@ def _delivery_item(row: Mapping[str, Any]) -> dict[str, Any]:
 
 
 async def _deliveries(_: Any) -> Read:
-    rows, count = await store.uncertain_deliveries(datetime.now(timezone.utc) - DELIVERY_WINDOW, SHOWN)
+    since = datetime.now(timezone.utc) - DELIVERY_WINDOW
+    rows, count = (await store.uncertain_deliveries(since, SHOWN, rules_on=True)
+                   if await leads_model.rules_enabled() else await store.uncertain_deliveries(since, SHOWN))
     catchup = await _catchup_items()
     return [*catchup, *(_delivery_item(row) for row in rows)][:SHOWN], count + len(catchup)
 
@@ -316,7 +326,9 @@ async def _earliest_logins(_: Any) -> dict[str, Any] | None:
 async def _earliest_intents(_: Any) -> dict[str, Any] | None:
     if not await leads_model.intents_enabled():
         return None
-    row = await store.earliest_pending_intent()
+    rules_on = await leads_model.rules_enabled()
+    row = (await store.earliest_pending_intent(rules_on=True) if rules_on
+           else await store.earliest_pending_intent())
     return None if row is None else _intent_item(row)
 
 
@@ -328,7 +340,9 @@ async def _earliest_ledger(_: Any) -> dict[str, Any] | None:
 
 
 async def _earliest_deliveries(_: Any) -> dict[str, Any] | None:
-    row = await store.earliest_uncertain_delivery(datetime.now(timezone.utc) - DELIVERY_WINDOW)
+    since = datetime.now(timezone.utc) - DELIVERY_WINDOW
+    row = (await store.earliest_uncertain_delivery(since, rules_on=True)
+           if await leads_model.rules_enabled() else await store.earliest_uncertain_delivery(since))
     return _oldest([*([] if row is None else [_delivery_item(row)]), *await _catchup_items()])
 
 
@@ -388,7 +402,7 @@ _CHANNELS = {"web": "控制台聊天", "lark": "飞书", "lark_bot": "飞书", "
 _ALERTS = {"failures": "连续失败告警", "stale": "太久没成功", "deadline": "没在截止时间前成功", "overlap": "运行重叠",
            "unanswered": "没人回，已自动暂停"}
 _LEDGER_KINDS = {"pending": "待办", "decision": "待确认的决定", "work_item": "在做的事"}
-_DELIVERY_SOURCES = {"subscription": "订阅推送", "intent": "意图消息", "task_end": "任务结束通知", "catchup": "飞书消息补收失败"}
+_DELIVERY_SOURCES = {"subscription": "订阅推送", "intent": "意图消息", "task_end": "任务结束通知", "catchup": "飞书消息补收失败", "intent_rule": "规则执行通知"}
 _HINTS = {"gates": "发 /gates 看编号，再用 /gate N <回答> 回答。",
           "confirmations": "在提问的那个聊天里回复「确认」，或回复别的放弃。",
           "cost": "回复「继续 {ref} <新上限美元>」提高上限并继续，或「停 {ref}」。",

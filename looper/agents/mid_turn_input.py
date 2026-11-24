@@ -289,6 +289,8 @@ class MidTurnInputs:
                 or envelope.payload.get("attachments") or envelope.payload.get("quote_ref")
                 or gate_routing.references(envelope) is not None or intent_routing.is_reply(text)):
             return False
+        if await intent_routing.is_bound_revoke(text):
+            return False
         original = running.prepared.envelope
         if not session_routing.routes(self.agent.agent_id) and self._chat(envelope) != self._chat(original):
             return False

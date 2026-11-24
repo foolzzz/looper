@@ -1057,7 +1057,7 @@ async def _run_agent_system_watched(
             scheduler.manager_busy = lambda manager_id: bool((agent := fleet.get(manager_id)) is not None
                                                              and agent.busy)
             await fleet.load()
-            morning_brief_service = MorningBriefService(registry, drain=drain, managers=fleet)
+            morning_brief_service = MorningBriefService(registry, drain=drain, managers=fleet, dashboard_url=dashboard_url)
             metrics_alert_service = MetricsAlertService(registry)
             from .completion_service import CompletionService
             completion_service = CompletionService(
@@ -1150,6 +1150,10 @@ async def _run_agent_system_watched(
                 startup_steps=startup.steps,
                 loop_watch=loop_watch,
             )
+            from . import intent_rule_engine
+            intent_rule_service = intent_rule_engine.IntentRuleService(platform, registry, drain=drain, dashboard_url=dashboard_url)
+            intent_rule_engine.install(intent_rule_service)
+            http_server._intent_rule_executor = intent_rule_service
             http_server._memory_writer = memory_writer
             http_server._memory_drafter = memory_drafter
         fence.http_server = http_server
@@ -1191,6 +1195,7 @@ async def _run_agent_system_watched(
         await completion_service.start()
         # Sources that are off (the default) cost one query per tick.
         await source_service.start()
+        await intent_rule_service.start()
         await intent_push_service.start()
         await memory_writer.start()
         await memory_drafter.start(dsn)
@@ -1270,6 +1275,8 @@ async def _run_agent_system_watched(
             await completion_service.stop()
             await source_service.stop()
             await recognition_service.stop()
+            await intent_rule_service.stop()
+            intent_rule_engine.install(None)
             await intent_push_service.stop()
             await memory_drafter.stop()
             await memory_push_service.stop()

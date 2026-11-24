@@ -18,11 +18,10 @@ import hashlib
 import json
 from typing import Any
 from uuid import UUID, uuid4
-from zoneinfo import ZoneInfo
 
 from ..db import intent_rules as store
 from ..db.connection import _connection, get_pool
-from . import chat_settings, cron, intent_rules_model as model, leads_model
+from . import chat_settings, intent_rules_model as model, leads_model
 from .api_v1 import Principal
 from .ops import ErrorCode, OpError
 from .ops.service import _plain
@@ -439,7 +438,7 @@ def _time(value: str | datetime | None, default: datetime) -> datetime:
 
 
 async def hit_stats(*, principal=None, db=None, rule_id=None, since=None, until=None) -> dict:
-    _operator(principal)
+    operator_key = _operator(principal)
     if rule_id is not None:
         _validate(model.validate_schema, rule_id, model.UUID_SCHEMA)
     end = _time(until, _now())
@@ -448,8 +447,14 @@ async def hit_stats(*, principal=None, db=None, rule_id=None, since=None, until=
         _fail(ErrorCode.INVALID, "statistics range must be positive and at most 90 days")
     conn = db or get_pool()
     result = await store.hit_stats(conn, rule_id=rule_id, since=start, until=end)
-    zone = chat_settings.timezone() or cron.local_zone_name()
-    result["projects"] = [{"project_id": row["id"], "local_day": _now().astimezone(ZoneInfo(zone)).date().isoformat(),
-        "timezone": zone, "used": None, "cap": row["auto_task_daily_cap"]}
-        for row in await conn.fetch("SELECT id,auto_task_daily_cap FROM projects WHERE auto_task_daily_cap IS NOT NULL ORDER BY id")]
+    from . import turn_context
+    zone_info = turn_context.zone()
+    zone = getattr(zone_info, "key", None) or str(zone_info)
+    local_day = _now().astimezone(zone_info).date()
+    result["projects"] = [{"project_id": row["id"], "local_day": local_day.isoformat(),
+        "timezone": zone, "used": row["used"], "cap": row["auto_task_daily_cap"]}
+        for row in await conn.fetch("SELECT p.id,p.auto_task_daily_cap,COALESCE(d.used,0) AS used "
+            "FROM projects p LEFT JOIN intent_rule_project_days d ON d.project_id=p.id "
+            "AND d.operator_key=$1 AND d.local_day=$2 WHERE p.auto_task_daily_cap IS NOT NULL ORDER BY p.id",
+            operator_key, local_day)]
     return _plain(result)
