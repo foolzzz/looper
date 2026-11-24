@@ -62,3 +62,30 @@ def test_never_saved_scores_the_model_reply_after_removing_the_footer(reply, pas
     check = dialogs.select(["memory_never_saved"])[0].says[0].check
     assert (check(look([proposal()], [{"id": "M-0001", "kind": "preference", "state": "drafting"}],
                       reply)) is None) is passed
+
+
+@pytest.mark.parametrize("mutation", [None, "restated", "wrong_lead", "trusted", "absent", "twice"])
+def test_lead_dialog_checks_the_call_and_external_candidate(mutation):
+    call = {"tool": dialogs.MEMORY_TOOL, "status": "ok", "arguments": {"from_lead": "lead-17"},
+            "result": {"candidate": "M-0001"}}
+    candidate = {"id": "M-0001", "kind": "decision", "state": "drafting", "source_kind": "lead",
+                 "source_class": "external", "untrusted": True, "statement": "Synthetic decision"}
+    if mutation == "restated":
+        call["arguments"]["statement"] = "Rewritten"
+    elif mutation == "wrong_lead":
+        call["arguments"]["from_lead"] = "lead-18"
+    elif mutation == "trusted":
+        candidate["untrusted"] = False
+    observed = look([call, call] if mutation == "twice" else [call],
+                    [] if mutation == "absent" else [candidate])
+    post = observed.api.post
+    observed.api.post = lambda path, body: ({"result": {"leads": [
+        {"id": "lead-17", "summary": "Synthetic decision"}]}} if path == "/api/v1/leads/search" else post(path, body))
+    check = dialogs.select(["memory_from_lead"])[0].says[-1].check
+    assert (check(observed) is None) is (mutation is None)
+
+
+def test_request_lead_dialog_rejects_any_persisted_candidate():
+    check = dialogs.select(["memory_from_lead_request"])[0].says[-1].check
+    assert check(look()) is None
+    assert check(look(candidates=[{"id": "M-0001"}])) is not None
