@@ -104,7 +104,7 @@ def test_task_cost_matches_db_and_keeps_manager_out_of_cap_spend(tmp_path, monke
             assert await planner._cap_reached() is None
             planner._execution = ProjectExecution(task_budget_usd=1.75)
             assert await planner._cap_reached() == 1.75
-            assert cost["by_model"][-1] == {"model": None, "cost_usd": None, "runs": 1, "running": 0,
+            assert cost["by_model"][-1] == {"model": None, "cost_usd": None, "cost_status": "unknown", "runs": 1, "running": 0,
                 "unpriced_runs": 1, "interrupted_runs": 1, "input_tokens": 1, "output_tokens": 2,
                 "cache_read_tokens": 3, "cache_creation_tokens": 4,
                 "cache_reported_runs": 1, "cache_missing_runs": 0,
@@ -146,7 +146,7 @@ def test_project_breakdown_is_limited_and_reports_more_tasks(tmp_path, monkeypat
             assert result["total"]["equivalent_usd"] == pytest.approx(0.35)
             assert result["more_tasks"] == 1 and len(result["tasks"]) == 10
             assert result["tasks"][0] == {"task_id": "task-example", "name": "Example task",
-                "provider_priced_usd": 1.5, "equivalent_usd": 0.25, "runs": 4}
+                "provider_priced_usd": 1.5, "equivalent_usd": 0.25, "runs": 4, "cost_status": "unknown"}
     run_db(run, monkeypatch, timeout=30)
 
 
@@ -157,11 +157,11 @@ def test_global_aggregates_include_unassigned_tasks_and_manager_totals(tmp_path,
             status, result = await call({})
             assert status == 200 and result["since"] is result["until"] is None
             assert result["total"] == await llm_records.spend_since(None, pool=pool) == {
-                "provider_priced_usd": 17.5, "equivalent_usd": 5.75, "runs": 8, "running": 1, "unpriced_runs": 1}
+                "provider_priced_usd": 17.5, "equivalent_usd": 5.75, "runs": 8, "running": 1, "unpriced_runs": 1, "cost_status": "unknown"}
             assert result["projects"] == [
-                {"project": "Other", "provider_priced_usd": 7, "equivalent_usd": 0, "runs": 1, "tasks": 1},
-                {"project": "Example", "provider_priced_usd": 1.5, "equivalent_usd": 0.25, "runs": 4, "tasks": 1},
-                {"project": None, "provider_priced_usd": 0, "equivalent_usd": 0.5, "runs": 1, "tasks": 1}]
+                {"project": "Other", "provider_priced_usd": 7, "equivalent_usd": 0, "runs": 1, "tasks": 1, "cost_status": "known"},
+                {"project": "Example", "provider_priced_usd": 1.5, "equivalent_usd": 0.25, "runs": 4, "tasks": 1, "cost_status": "unknown"},
+                {"project": None, "provider_priced_usd": 0, "equivalent_usd": 0.5, "runs": 1, "tasks": 1, "cost_status": "known"}]
             assert result["total"]["runs"] - sum(p["runs"] for p in result["projects"]) == 2
     run_db(run, monkeypatch, timeout=30)
 

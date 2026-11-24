@@ -48,6 +48,7 @@ from enum import Enum
 from pathlib import Path
 from typing import Any
 
+from .run_usage import CostStatus, cost_status
 from .agent_settings import Access, AgentSettings, AgentType, Launch, load_agent_settings, sha256_text
 from .runtimes import CostSource
 
@@ -454,7 +455,7 @@ async def run(*, owner: str, instructions: str, input_text: str, input_ref: Mapp
         failed = ProcessorFailure.BUDGET, f"it reached its spend cap of {cap:g} USD"
     elif (why := single_run.unsuccessful(result, errors=False)) is not None:
         failed = ProcessorFailure.FAILED, why
-    elif cost is None:
+    elif cost_status(cost) is CostStatus.UNKNOWN:
         failed = ProcessorFailure.BUDGET, f"its cost is unknown, so its cap of {cap:g} USD cannot be checked"
     elif cost > cap:
         failed = ProcessorFailure.BUDGET, f"it cost {cost:.4f} USD, over its cap of {cap:g} USD"
