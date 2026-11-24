@@ -295,6 +295,7 @@ interface Draft {
   gateTimeout: string;
   /** USD; "" = no daily cap. */
   dailyBudget: string;
+  dailyEquivalentBudget: string;
   notify: ScheduleNotify;
   notifyFormat: ScheduleNotifyFormat;
   userGates: ScheduleUserGates;
@@ -346,6 +347,7 @@ function draftOf(schedule: ScheduleInfo | null, limits: ScheduleLimits): Draft {
       gateCommand: "",
       gateTimeout: "",
       dailyBudget: "",
+      dailyEquivalentBudget: "",
       notify: "failures",
       notifyFormat: "report",
       userGates: "off",
@@ -380,6 +382,7 @@ function draftOf(schedule: ScheduleInfo | null, limits: ScheduleLimits): Draft {
     gateCommand: schedule.gate_command ?? "",
     gateTimeout: schedule.gate_timeout_seconds == null ? "" : String(schedule.gate_timeout_seconds),
     dailyBudget: schedule.daily_budget_usd == null ? "" : String(schedule.daily_budget_usd),
+    dailyEquivalentBudget: schedule.daily_budget_equivalent_usd == null ? "" : String(schedule.daily_budget_equivalent_usd),
     notify: schedule.notify,
     notifyFormat: schedule.notify_format ?? "report",
     userGates: schedule.user_gates,
@@ -478,7 +481,8 @@ function fieldsOf(draft: Draft, limits: ScheduleLimits, schedule: ScheduleInfo |
     task_limits: taskLimitsOf(draft.taskLimits),
     gate_command: draft.gateCommand.trim() || null,
     gate_timeout_seconds: numberOf(draft.gateTimeout),
-    daily_budget_usd: numberOf(draft.dailyBudget), user_gates: draft.userGates,
+    daily_budget_usd: numberOf(draft.dailyBudget),
+    daily_budget_equivalent_usd: numberOf(draft.dailyEquivalentBudget), user_gates: draft.userGates,
   };
 }
 
@@ -532,6 +536,7 @@ function createFields(fields: FormFields, managerId: string, kind: ScheduleKind)
     gate_command,
     gate_timeout_seconds,
     daily_budget_usd,
+    daily_budget_equivalent_usd,
     notify_target,
     success_deadline, alert_failures_after, alert_stale_after_seconds, alert_overlap_after,
     ...rest
@@ -552,6 +557,7 @@ function createFields(fields: FormFields, managerId: string, kind: ScheduleKind)
     ...(gate_command ? { gate_command } : {}),
     ...(gate_timeout_seconds != null ? { gate_timeout_seconds } : {}),
     ...(daily_budget_usd != null ? { daily_budget_usd } : {}),
+    ...(daily_budget_equivalent_usd != null ? { daily_budget_equivalent_usd } : {}),
     ...(notify_target ? { notify_target } : {}),
   };
 }
@@ -800,6 +806,12 @@ function GateBudgetNotify({
               : "Empty: none. Once this schedule's runs today have spent it, later fires are skipped until midnight, server time."}
           </p>
         </div>
+        <div className="space-y-1">
+          <label htmlFor={id("daily-equivalent-budget")} className={LABEL}>每日等价花费上限（花费守卫执行时生效）</label>
+          <Input id={id("daily-equivalent-budget")} inputMode="decimal" value={draft.dailyEquivalentBudget}
+            onChange={(e) => set("dailyEquivalentBudget", e.target.value)} placeholder="不限" />
+          <p className="text-xs text-muted-foreground">执行模式下两种花费分别计算；关闭或观察模式仍沿用原来的混合每日上限。</p>
+        </div>
       </div>
 
       </>}
@@ -968,7 +980,7 @@ function TaskScheduleForm({
   const badGateTimeout =
     gateTimeout != null &&
     !(Number.isInteger(gateTimeout) && gateTimeout >= 1 && gateTimeout <= limits.gate_timeout_max_seconds);
-  const badDailyBudget = Number.isNaN(fields.daily_budget_usd);
+  const badDailyBudget = Number.isNaN(fields.daily_budget_usd) || Number.isNaN(fields.daily_budget_equivalent_usd);
   const maxParallel = fields.max_parallel_runs;
   const badMaxParallel =
     fields.overlap === "parallel" &&
@@ -1505,7 +1517,7 @@ interface SubDraft {
   name: string; cron: string; timezone: string; requirement: string;
   source: string; chatKinds: SubscriptionChatKind[]; senderKinds: SubscriptionSenderKind[];
   excludeMe: boolean; history: boolean; maxAge: string; maxEvents: string; textChars: string;
-  quiet: string; header: string; budget: string; dailyBudget: string;
+  quiet: string; header: string; budget: string; dailyBudget: string; dailyEquivalentBudget: string;
   overlap: ScheduleOverlap; catchUp: ScheduleCatchUp; notify: ScheduleNotify; notifyTarget: string;
   /** What a run writes. "" is a push subscription that predates the field. */
   outputKind: OutputKind;
@@ -1522,6 +1534,7 @@ function subDraftOf(schedule: ScheduleInfo | null, limits: ScheduleLimits): SubD
     textChars: String(sub?.text_max_chars ?? 200), quiet: sub?.quiet_word ?? "SKIP", header: sub?.output_header ?? "",
     budget: schedule?.run_budget_usd == null ? "" : String(schedule.run_budget_usd),
     dailyBudget: schedule?.daily_budget_usd == null ? "" : String(schedule.daily_budget_usd),
+    dailyEquivalentBudget: schedule?.daily_budget_equivalent_usd == null ? "" : String(schedule.daily_budget_equivalent_usd),
     overlap: schedule?.overlap === "queue" ? "queue" : "skip", catchUp: schedule?.catch_up ?? "once",
     notify: schedule?.notify ?? "failures", notifyTarget: targetKey(schedule?.notify_target ?? null),
     outputKind: outputKindOf(sub?.output_kind),
@@ -1551,6 +1564,7 @@ function subFieldsOf(d: SubDraft, limits: ScheduleLimits) {
     name: d.name.trim(), cron: d.cron.trim(), timezone: d.timezone.trim() || limits.default_timezone,
     requirement: d.requirement.trim(), overlap: d.overlap, catch_up: d.catchUp, notify: d.notify,
     notify_target: targetOf(d.notifyTarget), run_budget_usd: numberOf(d.budget), daily_budget_usd: numberOf(d.dailyBudget),
+    daily_budget_equivalent_usd: numberOf(d.dailyEquivalentBudget),
   };
   const subscription: SubscriptionFields = {
     source_id: d.source.trim(), chat_kinds: d.chatKinds, sender_kinds: d.senderKinds,
@@ -1623,7 +1637,7 @@ function SubscriptionForm({
     !inRange(sub.max_age_minutes, 5, 10080) && "a look-back of 5 to 10080 minutes",
     !inRange(sub.max_events, 1, 2000) && "a message cap of 1 to 2000", !inRange(sub.text_max_chars, 20, 4000) && "a text length of 20 to 4000",
     !sub.quiet_word || /\s/.test(sub.quiet_word) ? "a quiet word of one word" : false,
-    Number.isNaN(fields.schedule.daily_budget_usd) && "a daily budget as a number",
+    (Number.isNaN(fields.schedule.daily_budget_usd) || Number.isNaN(fields.schedule.daily_budget_equivalent_usd)) && "a daily budget as a number",
   ].filter(Boolean);
   const invalid = problems.length > 0 || tooLong || check?.preview?.valid === false;
   const id = (field: string) => `${idPrefix}-${field}`;
@@ -1650,12 +1664,13 @@ function SubscriptionForm({
     setBusy(true);
     setError("");
     try {
-      const { notify_target, run_budget_usd, daily_budget_usd, ...rest } = fields.schedule;
+      const { notify_target, run_budget_usd, daily_budget_usd, daily_budget_equivalent_usd, ...rest } = fields.schedule;
       const next = schedule
         ? await updateSchedule(schedule.schedule_id, changes)
         : await createSchedule(project.project_id, {
           ...rest, kind: "subscription", run_budget_usd, subscription: fields.subscription,
-          ...(daily_budget_usd != null ? { daily_budget_usd } : {}), ...(notify_target ? { notify_target } : {}),
+          ...(daily_budget_usd != null ? { daily_budget_usd } : {}),
+          ...(daily_budget_equivalent_usd != null ? { daily_budget_equivalent_usd } : {}), ...(notify_target ? { notify_target } : {}),
         });
       if (schedule) { setDraft(subDraftOf(next, limits)); setSaved(true); }
       onSaved(next);
@@ -1779,6 +1794,12 @@ function SubscriptionForm({
           <div className="space-y-1">
             <label htmlFor={id("daily")} className={LABEL}>Daily budget (USD)</label>
             <Input id={id("daily")} inputMode="decimal" value={draft.dailyBudget} onChange={(e) => set("dailyBudget", e.target.value)} placeholder="No daily cap" />
+          </div>
+          <div className="space-y-1">
+            <label htmlFor={id("daily-equivalent")} className={LABEL}>每日等价花费上限（花费守卫执行时生效）</label>
+            <Input id={id("daily-equivalent")} inputMode="decimal" value={draft.dailyEquivalentBudget}
+              onChange={(e) => set("dailyEquivalentBudget", e.target.value)} placeholder="不限" />
+            <p className="text-xs text-muted-foreground">执行模式下分别计算；关闭或观察模式仍沿用混合每日上限。</p>
           </div>
           <div className="space-y-1">
             {draft.outputKind === "triage" ? <p className="text-xs text-muted-foreground">结果仅存储，暂不发送；重要事件等待管家交接，摘要等待晨报接入。</p> : <>

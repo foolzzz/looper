@@ -48,6 +48,7 @@ from enum import Enum
 from pathlib import Path
 from typing import Any
 
+from .run_usage import CostStatus, cost_status
 from .agent_settings import Access, AgentSettings, AgentType, Launch, load_agent_settings, sha256_text
 from .runtimes import CostSource
 
@@ -413,10 +414,14 @@ async def run(*, owner: str, instructions: str, input_text: str, input_ref: Mapp
             recorder = ClaudeRunRecorder(agent_id=agent_id, task_id=None, command=command, cwd=str(directory),
                                          input_text=reference, system_prompt=system_prompt, launch=launch,
                                          whole_process=True, keep=typed_events, schedule_id=schedule_id)
-            from .cost_guard import Held
+            from .cost_guard import Denied, Held
 
             try:
                 await recorder.start()
+            except Denied as denied:
+                scope = denied.admission.scope.scope.value
+                return ProcessorRun(None, failure=ProcessorFailure.BUDGET,
+                                    detail=f"{role.value} reached today's spend cap ({scope})")
             except Held as held:
                 return ProcessorRun(None, failure=ProcessorFailure.FAILED, detail=str(held))
             noted = {**(metadata or {}), **({"managed_hooks": hooks.view()} if hooks is not None else {})}
@@ -454,7 +459,7 @@ async def run(*, owner: str, instructions: str, input_text: str, input_ref: Mapp
         failed = ProcessorFailure.BUDGET, f"it reached its spend cap of {cap:g} USD"
     elif (why := single_run.unsuccessful(result, errors=False)) is not None:
         failed = ProcessorFailure.FAILED, why
-    elif cost is None:
+    elif cost_status(cost) is CostStatus.UNKNOWN:
         failed = ProcessorFailure.BUDGET, f"its cost is unknown, so its cap of {cap:g} USD cannot be checked"
     elif cost > cap:
         failed = ProcessorFailure.BUDGET, f"it cost {cost:.4f} USD, over its cap of {cap:g} USD"

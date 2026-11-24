@@ -5,7 +5,8 @@ from ..api_v1 import Operation, _object, _BOOL, _INT
 
 _COUNTS = {"type": "object", "additionalProperties": _INT}
 SUMMARY = _object({"window_hours": _INT, "total": _INT, "by_state": _COUNTS, "by_reason": _COUNTS,
-                   "turn_cost_usd": {"type": "number"}, "pending": _INT,
+                   "turn_cost_usd": {"type": "number"}, "pending": _INT, "unpriced_runs": _INT,
+                   "cost_status": {"type": "string", "enum": ["known", "unknown"]},
                    "oldest_pending_seconds": {"type": ["number", "null"]}, "failing": _BOOL}, closed=True)
 
 RESULTS = {}
