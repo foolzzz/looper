@@ -1,0 +1,19 @@
+[
+  {
+    "kind": "progress",
+    "text": "合成账号 的额度已用完（seven_day），11-23 15:51 重置。你的消息已保留，额度恢复后自动回答；发 /stop 可取消。",
+    "metadata_keys": [
+      "origin_channel_id",
+      "reply_route"
+    ]
+  },
+  {
+    "kind": "answer",
+    "text": "Done.\n```json\n{\"reply\": \"fixture reply\", \"action\": \"none\"}\n```",
+    "metadata_keys": [
+      "chat_record",
+      "origin_channel_id",
+      "reply_route"
+    ]
+  }
+]

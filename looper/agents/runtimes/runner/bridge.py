@@ -26,7 +26,14 @@ logger = logging.getLogger(__name__)
 MAX_ABANDONED_CONTROLS = 128
 MAX_TOMBSTONES = 128
 TOMBSTONE_MAX_AGE = 600.0
-_LOCAL_CONTROLS = frozenset({"session/cancel", "session/close"})
+# Cancel, close and health admit no session work. A timeout or caller cancel
+# abandons only that RPC; it must not mark the connection lost.
+_LOCAL_CONTROLS = frozenset({"session/cancel", "session/close", "runner/health"})
+
+
+def _drop_task_exception(task: asyncio.Task) -> None:
+    if not task.cancelled():
+        task.exception()
 
 
 class State(StrEnum):
@@ -91,6 +98,7 @@ class Pending:
     params: dict = field(repr=False)
     future: asyncio.Future = field(repr=False)
     entry: SessionEntry | None = field(default=None, repr=False)
+    received_at: float | None = None
 
 
 @dataclass(frozen=True)
@@ -195,8 +203,45 @@ class RunnerBridge:
         self._initialized = True
         return result
 
-    async def health(self):
-        return await self.request("runner/health", {})
+    async def health(self, *, timeout: float | None = None):
+        return await self.request("runner/health", {}, timeout=timeout)
+
+    def health_reply_buffered(self) -> bool:
+        """True when this health reply is already in the inbound buffer."""
+        reader = self._reader.reader
+        blob = bytes(getattr(reader, "_buffer", b"")) + b"".join(self._reader.parts)
+        if not blob:
+            return False
+        ids = [rpc_id for rpc_id, (method, _params) in self._abandoned_controls.items()
+               if method == "runner/health"]
+        ids.extend(rpc_id for rpc_id, pending in self._pending.items() if pending.method == "runner/health")
+        return any(rpc_id.encode("ascii") in blob for rpc_id in ids)
+
+    async def _health_in_time(self, rpc_id, future, started, limit, lag) -> bool:
+        """A reply processed after a host pause still meets the original deadline."""
+        # Report a known connection failure before yielding to recovery, which
+        # can cancel this probe. Host-lag accounting only applies to replies.
+        if self._error is not None:
+            raise self._error
+        # Let a tick queued before the pause record it before the comparison.
+        await asyncio.sleep(0)
+        if not future.done() and self.health_reply_buffered():
+            await asyncio.sleep(0)
+        if not future.done() or future.cancelled():
+            return False
+        pending = self._pending.get(rpc_id)
+        received = pending.received_at if pending is not None and pending.received_at is not None else time.monotonic()
+        return received - started - lag[0] <= limit
+
+    def _abandon_control(self, method, rpc_id, params, future) -> None:
+        if method in _LOCAL_CONTROLS:
+            # Cancel and close cannot admit new work. Keep bounded correlation
+            # state so its late response cannot take down another session.
+            if not future.done():
+                self._abandoned_controls[rpc_id] = (method, params)
+        else:
+            # A late acceptance cannot make an abandoned prompt runnable again.
+            self._fail(ConnectionLost("runner protocol-error: control abandoned or timed out"))
 
     async def _write(self, message, entry=None, *, before_write: Callable[[], None] | None = None):
         frame = p.encode_frame(message)
@@ -214,7 +259,13 @@ class RunnerBridge:
                 self._fail(ConnectionLost("runner-exited: stdin unavailable"))
                 raise self._error from None
 
-    async def request(self, method, params, *, _entry=None, before_write: Callable[[], None] | None = None):
+    async def request(self, method, params, *, timeout: float | None = None, _entry=None,
+                      before_write: Callable[[], None] | None = None):
+        if timeout is not None and method != "runner/health":
+            raise ValueError("per-call timeout is only valid for runner/health")
+        limit = self.control_timeout if timeout is None else timeout
+        if limit <= 0:
+            raise ValueError("runner bounds must be positive")
         if self._error:
             raise self._error
         if method != "initialize" and not self._initialized:
@@ -228,19 +279,49 @@ class RunnerBridge:
         rpc_id = f"l-{self._counter}"
         future = asyncio.get_running_loop().create_future()
         self._pending[rpc_id] = Pending(method, params, future, _entry)
+        lag = [0.0]
+        sampler = None
+        started = time.monotonic()
+        if method == "runner/health":
+            # Loop ticks, not the monotonic clock: a paused host must not look
+            # like a runner that missed the deadline. The stall can happen
+            # before this task is scheduled, so the first sample is the delay
+            # from here, not the overshoot of a sleep that starts afterwards.
+            tick = min(0.05, limit / 4)
+            armed = time.monotonic()
+
+            async def ticks():
+                late = time.monotonic() - armed
+                if late > 0:
+                    lag[0] += late
+                while True:
+                    mark = time.monotonic()
+                    await asyncio.sleep(tick)
+                    over = time.monotonic() - mark - tick
+                    if over > 0:
+                        lag[0] += over
+
+            sampler = asyncio.create_task(ticks())
         try:
-            async with asyncio.timeout(self.control_timeout):
+            async with asyncio.timeout(limit):
                 await self._write(p.Request(rpc_id, method, params), _entry, before_write=before_write)
                 return await asyncio.shield(future)
-        except (TimeoutError, asyncio.CancelledError):
-            if method in _LOCAL_CONTROLS:
-                # Cancel and close cannot admit new work. Keep bounded correlation
-                # state so its late response cannot take down another session.
-                if not future.done():
-                    self._abandoned_controls[rpc_id] = (method, params)
-            else:
-                # A late acceptance cannot make an abandoned prompt runnable again.
-                self._fail(ConnectionLost("runner protocol-error: control abandoned or timed out"))
+        except TimeoutError:
+            if method == "runner/health":
+                try:
+                    in_time = await self._health_in_time(rpc_id, future, started, limit, lag)
+                except asyncio.CancelledError:
+                    self._abandon_control(method, rpc_id, params, future)
+                    raise
+                if in_time:
+                    error = future.exception()
+                    if error is not None:
+                        raise error
+                    return future.result()
+            self._abandon_control(method, rpc_id, params, future)
+            raise
+        except asyncio.CancelledError:
+            self._abandon_control(method, rpc_id, params, future)
             raise
         finally:
             self._pending.pop(rpc_id, None)
@@ -248,6 +329,11 @@ class RunnerBridge:
                 future.cancel()
             elif not future.cancelled():
                 future.exception()  # Also consume a failure raised while writing.
+            if sampler is not None:
+                # Do not await it. A yield here lets generation recovery cancel
+                # this task and replace the health error with CancelledError.
+                sampler.cancel()
+                sampler.add_done_callback(_drop_task_exception)
 
     async def open_session(self, params):
         entry = SessionEntry(params["session_key"], params["role"])
@@ -442,6 +528,7 @@ class RunnerBridge:
                     pending = self._pending.get(message.id)
                     if not pending or not message.id.startswith("l-") or pending.future.done():
                         raise p.ProtocolError(p.ErrorCode.INVALID_REQUEST)
+                    pending.received_at = time.monotonic()
                     if message.error is not None:
                         p.verify_error(message.error, pending.params)
                         pending.future.set_exception(RpcFailure(message.error))

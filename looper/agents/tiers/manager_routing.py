@@ -29,7 +29,7 @@ from datetime import datetime, timezone
 from enum import StrEnum
 from typing import TYPE_CHECKING, Any
 
-from .. import lanes_settings, mid_turn_input, session_routing
+from .. import admission, lanes_settings, mid_turn_input, session_routing
 from ..lanes import Lane
 from ..message import MessageEnvelope, MessageType
 from ..runtimes import CLAUDE_CODE
@@ -140,14 +140,15 @@ class SessionRouter:
         main = self._agent._sessions[MAIN_SESSION]
         if kind is MessageType.IDLE_CHECK_DUE:
             return main if (lanes_settings.enabled() or session_routing.routes(self._agent.agent_id)
-                            or self.holds(main)) else None
+                            or self.holds(main) or admission.enabled()) else None
         if kind not in (MessageType.USER_MESSAGE, MessageType.COMPLETION_DUE):
             return None
-        if kind is MessageType.COMPLETION_DUE and lanes_settings.enabled():
+        if kind is MessageType.COMPLETION_DUE and (lanes_settings.enabled() or admission.enabled()):
             return None  # claim in the loop; only the claimed batch joins the background lane
         if not session_routing.routes(self._agent.agent_id):
             return main if self.holds(main) or (kind is MessageType.USER_MESSAGE
-                and (mid_turn_input.enabled(self._agent.agent_id) or lanes_settings.enabled())) else None
+                and (mid_turn_input.enabled(self._agent.agent_id) or lanes_settings.enabled()
+                     or admission.enabled())) else None
         if kind is MessageType.COMPLETION_DUE:
             return None  # claim first in the handler; only that event can name the session
         from .. import completion_events

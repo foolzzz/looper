@@ -26,7 +26,8 @@ RFC_TABLE: dict[str, ActionLevel | str] = {
     "looper_projects": "args", "looper_agent_profiles": INSIDE, "looper_models": INSIDE, "looper_providers": MACHINE,
     "looper_catalog": MACHINE, "looper_settings": "args", "looper_schedules": "args", "looper_confirm": INSIDE,
     "looper_ledger_add": INSIDE, "looper_ledger_update": INSIDE, "looper_leads_search": INSIDE,
-    "looper_skill_propose": INSIDE,
+    "looper_skill_propose": INSIDE, "looper_intents_recognize": OPERATOR,
+    "looper_memory_propose": INSIDE,
     "looper_session_search": INSIDE,  # reads earlier conversations stored by Looper
     "looper_reminder_list": INSIDE, "looper_reminder_create": OPERATOR, "looper_reminder_cancel": OPERATOR,
     "looper_task_pipeline": INSIDE, "looper_gates": "args",
@@ -155,6 +156,8 @@ DECIDED_OPERATIONS: dict[str, ActionLevel] = {
     **dict.fromkeys(("memory.confirm", "memory.confirm_many", "memory.edit", "memory.retry"), MACHINE),
     "cost_guard.get": INSIDE,  # reads Looper's own observation settings and counters
     "cost_guard.update": INSIDE,  # changes only Looper's observation configuration
+    "card_actions.get": INSIDE,  # reads Looper's stored card-button switch
+    "card_actions.update": INSIDE,  # stores permission; sends no cards and runs no click
     # Stores permission only; the runner executes checks separately after Worker success.
     "acceptance_checks.get": INSIDE, "acceptance_checks.update": INSIDE,
     "task_evidence.get": INSIDE,  # reads only stored check definitions and measured evidence

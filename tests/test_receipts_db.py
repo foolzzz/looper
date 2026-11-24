@@ -557,7 +557,7 @@ def _fake_tools() -> list[tuple[Any, Any]]:
     return found
 
 
-def _matrix_ops(tmp_path: Path, client: bool) -> Any:
+def _matrix_ops(tmp_path: Path, client: bool, monkeypatch: pytest.MonkeyPatch) -> Any:
     tools = [tool for tool, _ in _fake_tools()]
     if client:
         return _client_ops(tmp_path, tools=tools)
@@ -570,6 +570,14 @@ def _matrix_ops(tmp_path: Path, client: bool) -> Any:
         return ops._scope
 
     ops.current_scope = stand_ins
+
+    # Memory proposals commit after their audit row exists; replace that phase along with the tool's run.
+    from looper.agents.ops import memory_propose
+
+    async def committed(call: Any, answer: Any, action_id: Any) -> Any:
+        return answer
+
+    monkeypatch.setattr(memory_propose, "commit", committed)
     return ops
 
 
@@ -577,7 +585,7 @@ def _matrix_ops(tmp_path: Path, client: bool) -> Any:
 def test_off_every_write_tool_success_and_failure_are_as_before(monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
                                                                 client: bool) -> None:
     async def test(pool: Any) -> None:
-        ops = _matrix_ops(tmp_path, client)
+        ops = _matrix_ops(tmp_path, client, monkeypatch)
         principal = await _client(pool) if client else None
         turn = _web()
         if not client:
@@ -606,7 +614,7 @@ def test_on_every_write_tool_gets_its_receipt_and_category(monkeypatch: pytest.M
                                                            client: bool) -> None:
     async def test(pool: Any) -> None:
         receipts_settings.set_enabled(True)
-        ops = _matrix_ops(tmp_path, client)
+        ops = _matrix_ops(tmp_path, client, monkeypatch)
         principal = await _client(pool) if client else None
         for tool, kinds in _fake_tools():
             for action, kind in kinds.items():

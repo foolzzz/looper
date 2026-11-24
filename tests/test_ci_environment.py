@@ -7,6 +7,7 @@ import re
 from pathlib import Path
 
 import pytest
+import yaml
 
 from model_launch_parity import above_root_normalized
 
@@ -30,6 +31,9 @@ def test_python_tests_job_stages_dashboard_before_pytest() -> None:
     tests = re.search(r"^\s+run: .*python -m pytest\b", job, re.MULTILINE)
     assert node and stage and tests, job
     assert node.start() < stage.start() < tests.start(), job
+    steps = yaml.safe_load(text)["jobs"]["agent-system"]["steps"]
+    build = next(step for step in steps if step.get("run") == "scripts/stage-dashboard.sh")
+    assert build["if"] == "needs.changes.outputs.docs_only != 'true'"
 
 
 @pytest.mark.parametrize("workflow,job_name", [

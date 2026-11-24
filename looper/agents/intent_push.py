@@ -196,7 +196,8 @@ class IntentPushService:
         row = await conn.fetchrow("SELECT * FROM intents WHERE id=$1", intent_id)
         if row is None:
             return
-        held = row["via"] == "followed_group" and not chat_settings.delivery_enabled()
+        held = (row["via"] == "on_request"
+                or row["via"] == "followed_group" and not chat_settings.delivery_enabled())
         schedule = await db_schedules.get_schedule(row["schedule_id"], pool=conn) if row["schedule_id"] else None
         target = await target_for(schedule)
         if target is None:
