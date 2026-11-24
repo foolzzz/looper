@@ -3442,9 +3442,21 @@ Empty checks
 and the disabled permission are omitted from existing responses and exports;
 while off, Planner contracts and prompts remain byte-identical, including plan
 views of previously enabled projects with saved checks. Definitions remain in
-the database for operator evidence reads. See the
-[executable acceptance RFC](rfcs/executable-acceptance-v0.zh-CN.md), sections 6
-and 13, for the protocol and remaining result or channel evidence summaries.
+the database for operator evidence reads. Once a task has current evidence rows,
+its completed or failed result includes a code-written `## Evidence` section:
+one line per check with its criterion, state and measured version's short hash,
+plus the number of criteria without a check. Missing results say `not run`;
+advisory failures remain labeled advisory. Existing evidence stays visible after
+checks are disabled. With no current evidence rows, results and notices are unchanged.
+Lark and Telegram end notices include one check-count line without commands,
+output or artifact names; group notices omit the full evidence section.
+Manager completion-turn replies do not yet include that count line. A summary
+read failure while checks are enabled adds an unavailable-evidence section,
+without counts, and logs a warning and activity. A completed result keeps its
+process record last; a failed result appends evidence after its closing note.
+The dashboard and CLI task reads show the stored result, including evidence.
+See the [executable acceptance RFC](rfcs/executable-acceptance-v0.zh-CN.md),
+sections 6 and 13, for the protocol and remaining work.
 
 A task can also have a spend cap of its own (`tasks.budget_usd`, a scheduled
 run's `run_budget_usd`), which replaces its project's `task_budget_usd` for it
@@ -6169,20 +6181,8 @@ here pushes: the intent push service polls `intents`.
   every person's message in every chat kind, the user's own too; intents read a
   person's message in a direct chat, one that @-mentions the user or one the
   user sent (`event_sources.user_open_id`), and the alert bots listed in
-  `intent_alert_senders`. With `intents.group_read.enabled` on (default off), intents
-  also read live human messages in up to ten operator-named groups, with both
-  sent and ingest time at or after each group's `read_from`; at most 200 such
-  messages per run and 500 per group per server-local day. The run cap waits
-  for catch-up; the day cap skips and counts messages as the cursor passes.
-  Group-reading executions serialize per source so concurrent subscriptions
-  share the remaining daily allowance without blocking message ingestion.
-  Turning the switch on requires the delivery layer and resets every group's
-  start time; revoking a group also drops its uncommitted intents, preserving
-  existing intents. Group-derived intents carry `via = followed_group`, only
-  accept `dev_task` or `bug_triage`, and use nonurgent delivery limits and digests;
-  they stay on the intents page while delivery is off. The list and switch do
-  not change the subscription's confirmation version.
-- **The window is oldest first**
+  `intent_alert_senders`.
+- **The window is oldest first and drops nothing**
   (`db.subscriptions.extraction_window`): at most `max_events`, and the cursor
   moves only to the last event read. A full window ends the run with `more`, and
   the scheduler fires it again at once, at most six times in a row, and only

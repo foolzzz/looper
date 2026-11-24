@@ -179,3 +179,141 @@ def test_serve_gates_acceptance_and_delivers_retry_and_reviewer_evidence(tmp_pat
             assert len(after) == len(before) + 1 and after[-1]["id"] == pending["id"]
             assert after[-1]["state"] == "error" and after[-1]["error_kind"] == "interrupted"
             assert all(path.read_bytes() == b"acceptance artifact\n" for path in files)
+
+
+@pytest.mark.parametrize("ending", ["completed", "failed", "disabled"])
+def test_serve_persists_result_evidence_and_code_notice(tmp_path, monkeypatch, ending):
+    with _result_server(tmp_path, monkeypatch) as (api, url, work):
+        detail = _run_result_task(api, url, work, ending)
+        summary = detail["result_summary"] if ending != "failed" else detail["error"]
+        assert "## Evidence\n- s1 c1 (criterion 1): " in summary
+        if ending == "failed":
+            assert summary.index("## Why it ended") < summary.index("## Evidence")
+            assert ": failed at " in summary
+        else:
+            headings = [summary.index("## " + title) for title in
+                        ("Delivered", "How to use", "Verification", "Open issues", "Evidence")]
+            assert headings == sorted(headings)
+            assert ": passed at " in summary
+            appendix = detail["process_record"]["delivery_summary"]
+            assert summary.endswith(appendix)
+            assert summary.index("## Evidence") < summary.index(appendix)
+        notice_path = tmp_path / "notices.jsonl"
+        deadline = time.monotonic() + 10
+        while not notice_path.exists():
+            assert time.monotonic() < deadline, "code notice was not published"
+            time.sleep(0.05)
+        notices = [json.loads(line) for line in notice_path.read_text().splitlines()]
+        notice, = [item for item in notices if item["chat"] == "fixture-recipient"]
+        assert f"Checks: 1 {'failed' if ending == 'failed' else 'passed'}" in notice["text"]
+        assert "## Evidence" not in notice["text"] and "c1 (criterion" not in notice["text"]
+        assert "private-output-marker" not in notice["text"]
+
+
+def _result_server(tmp_path, monkeypatch, *, mode="network"):
+    """An isolated serve fixture; the only channel endpoint is a recorded bus envelope."""
+    from contextlib import contextmanager
+
+    @contextmanager
+    def serve():
+        runtime, home, bin_dir, work = (tmp_path / name for name in ("runtime", "home", "bin", "work"))
+        home.mkdir()
+        work.mkdir()
+        for args in (("init", "-q", "-b", "main"), ("config", "user.name", "Fixture User"),
+                     ("config", "user.email", "fixture@example.invalid")):
+            subprocess.run(["git", "-c", "core.hooksPath=/dev/null", *args], cwd=work, check=True,
+                           capture_output=True)
+        (work / "baseline.txt").write_text("original source\n")
+        subprocess.run(["git", "add", "baseline.txt"], cwd=work, check=True, capture_output=True)
+        subprocess.run(["git", "-c", "core.hooksPath=/dev/null", "-c", "commit.gpgSign=false",
+                        "commit", "-qm", "Fixture baseline"], cwd=work, check=True, capture_output=True)
+        checks = [{"id": "c1", "criterion": 1, "type": "command", "command":
+                   "printf 'private-output-marker\\n'; test \"$(cat delivered.txt)\" = delivered",
+                   "timeout_seconds": 10, **({"network": True} if mode == "network" else {})}]
+        scenario = {"plan": [{"id": "s1", "instruction": "Write the fixture deliverable.",
+            "acceptance_criteria": ["The file contains delivered."], "depends_on": [], "review": False,
+            "checks": checks}], "attempts": {"s1": [{"status": "completed",
+                "files": {"delivered.txt": "delivered\n"}}]}}
+        scenarios = tmp_path / "scenarios.json"
+        scenarios.write_text(json.dumps({str(work.resolve()): scenario}))
+        fake = runner.install_claude(bin_dir, mode="fake", scenarios=scenarios)
+        wrapper = fake.read_text().removeprefix("#!/bin/sh\n")
+        fake.write_text("#!/bin/sh\n"
+            "if [ \"$1\" = '--version' ]; then echo '2.1.285 (fixture runtime)'; exit 0; fi\n"
+            "if [ \"$1 $2\" = 'auth status' ]; then echo '{\"loggedIn\": true}'; exit 0; fi\n" + wrapper)
+        for name in ("codex", "omp", "pi", "dsh", "grok", "cursor-agent", "agent", "ttadk", "lark-cli", "coco"):
+            executable = bin_dir / name
+            executable.write_text(f"#!{sys.executable}\nimport sys\n"
+                "if '--version' in sys.argv: print('fixture runtime'); sys.exit(0)\n"
+                "sys.exit(1)\n")
+            executable.chmod(0o755)
+        monkeypatch.setattr(runner, "_SERVE", "import sys, json\nfrom pathlib import Path\n"
+            "from looper.cli import main\nfrom looper.agents.bus import MessageBus\n"
+            "from looper.agents.message import MessageType\n"
+            "publish = MessageBus.publish\n"
+            "async def recorded(self, envelope):\n"
+            "    if envelope.message_type == MessageType.CHAT_NOTICE:\n"
+            "        with (Path(sys.argv[2]).parent / 'notices.jsonl').open('a') as out:\n"
+            "            out.write(json.dumps(envelope.payload) + '\\n')\n"
+            "    return await publish(self, envelope)\n"
+            "MessageBus.publish = recorded\n"
+            "sys.exit(main(['serve', '--host', '127.0.0.1', '--port', sys.argv[1], '--runtime-root', sys.argv[2]]))\n")
+        environment = {"CLAUDE_CONFIG_DIR": str(home / ".claude"), "CODEX_HOME": str(home / ".codex"),
+            "GROK_HOME": str(home / ".grok"), "CURSOR_CONFIG_DIR": str(home / ".cursor-config"),
+            "CURSOR_DATA_DIR": str(home / ".cursor-data"), "XDG_CONFIG_HOME": str(home / ".config"),
+            "XDG_CACHE_HOME": str(home / ".cache"), "LOOPER_TELEGRAM_BOT_TOKEN": "", "LOOPER_EVAL_REAL_CLAUDE": ""}
+        with fresh_database_without_recording(str(DSN)) as (url, _):
+            with runner.running_server(database_url=url, runtime_root=runtime, bin_dir=bin_dir, home=home,
+                    notes_root=home / "notes", env=environment, startup_timeout=60,
+                    log_path=tmp_path / "serve.log") as api:
+                api.post("/api/v1/workflows/put", {"key": "evidence-fixture", "name": "Evidence fixture",
+                                                 "max_step_retries": 0})
+                yield api, url, work
+    return serve()
+
+
+def _run_result_task(api, url, work, ending):
+    scenarios = work.parent / "scenarios.json"
+    scripts = json.loads(scenarios.read_text())
+    script = scripts[str(work.resolve())]
+    if ending == "failed":
+        script["attempts"]["s1"][0]["files"]["delivered.txt"] = "incomplete\n"
+    if ending == "disabled":
+        script["plan"].append({"id": "g1", "kind": "gate", "topic": "Review measured result",
+            "agenda": [{"question": "End this fixture?"}], "depends_on": ["s1"]})
+    scenarios.write_text(json.dumps(scripts))
+    owner = api.post("/api/v1/project_admin/create", {"name": "验收证据示例", "work_dir": str(work)})[
+        "result"]["project"]["project_id"]
+    api.post("/api/v1/project_admin/update", {"project_id": owner, "fields": {
+        "task_workspaces": "in_place", "operator_notes": "off", "agent_room": "off"}})
+    mode = "network" if script["plan"][0]["checks"][0].get("network") else "local"
+    api.post("/api/v1/acceptance_checks/update", {"project_id": owner, "acceptance_checks": mode})
+    task_id = api.post("/api/v1/tasks/create", {"project_id": owner, "workflow": "evidence-fixture",
+        "requirement": "生成示例交付并记录验收证据"})["result"]["task_id"]
+
+    async def synthetic_notice_target():
+        conn = await asyncpg.connect(url)
+        try:
+            await conn.execute("UPDATE tasks SET origin_channel_id='channel-lark', chat_id='fixture-recipient', "
+                               "chat_kind='user' WHERE id=$1", task_id)
+        finally:
+            await conn.close()
+    asyncio.run(synthetic_notice_target())
+    api.post("/api/v1/ops/task_control/start", {"task_id": task_id})
+    deadline = time.monotonic() + 90
+    disabled = False
+    while True:
+        detail = api.post("/api/v1/tasks/detail", {"task_id": task_id})["result"]
+        if ending == "disabled" and not disabled and any(g.get("waiting_on") == "user" for g in detail.get("gates", [])):
+            measured = api.post("/api/v1/task_evidence/get", {"task": task_id})["result"]["steps"][0]["runs"]
+            assert measured and measured[-1]["state"] == "passed"
+            api.post("/api/v1/acceptance_checks/update", {"project_id": owner, "acceptance_checks": "off"})
+            api.post("/api/v1/ops/gates/reply", {"task_id": task_id, "gate": "g1", "text": "结束示例"})
+            disabled = True
+        if detail["status"] in {"completed", "failed", "stopped", "cancelled"}:
+            break
+        assert time.monotonic() < deadline, "scripted result task did not finish"
+        time.sleep(0.1)
+    assert detail["status"] == ("failed" if ending == "failed" else "completed"), detail
+    assert ending != "disabled" or disabled
+    return detail

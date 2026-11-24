@@ -90,6 +90,8 @@ def test_new_migration_file_upgrades_and_initializes_the_same_schema(tmp_path, m
     ("cost_holds", "DROP TABLE cost_holds"),
     ("intent_recognitions", "ALTER TABLE intents DROP COLUMN recognition_id CASCADE; "
                             "DROP TABLE intent_recognitions CASCADE"),
+    ("intent_group_reads", "DROP TABLE intent_group_reads, intent_group_read_days; "
+                           "ALTER TABLE intents DROP COLUMN via CASCADE"),
 ])
 def test_merged_migrations_remain_discoverable_and_upgrade(migration_name, rollback):
     async def test():

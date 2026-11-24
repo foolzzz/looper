@@ -47,6 +47,7 @@ from ..message import (
     manager_address,
     planner_address,
 )
+from .. import acceptance_result
 from ..task_notice import Notice, NotifyTarget, ends_task, notice_text, notify_channel
 from .planner import PlannerAgent, closing_note
 
@@ -544,7 +545,8 @@ class TaskRouter:
 
         payload = envelope.payload
         if ends_task(status) and (notice := self._notice(
-                task, status, summary, branch_line, delivery_summary=payload.get("delivery_summary"))) is not None:
+                task, status, summary, branch_line, delivery_summary=payload.get("delivery_summary"),
+                evidence=acceptance_result.ResultEvidence.from_payload(payload.get("acceptance")))) is not None:
             payload = {**payload, "notice": notice.payload()}
         if branch_line:  # where a worktree task's work is, for the Manager's completion turn (``completion_events``)
             payload = {**payload, "branch_line": branch_line}
@@ -576,7 +578,7 @@ class TaskRouter:
             await self._teardown_task(task_id)
 
     def _notice(self, task: Task, status: str, summary: str | None, branch_line: str | None = None, *,
-                delivery_summary: str | None = None) -> Notice | None:
+                delivery_summary: str | None = None, evidence: acceptance_result.ResultEvidence | None = None) -> Notice | None:
         """The end notice of a Telegram or Lark task that recorded who to tell (``task_notice``); None for any
         other. The Manager sends it behind the task's progress. ``branch_line``: where a worktree task's work is."""
         channel = notify_channel(task.origin_channel_id)
@@ -585,7 +587,7 @@ class TaskRouter:
         name = db_tasks.task_name(title=task.title, goal_id=task.goal_id, requirement=task.requirement,
                                   task_id=task.task_id)
         text = notice_text(task.task_id, name, status, summary, channel=channel, dashboard_url=self._dashboard_url,
-                           extra=branch_line, delivery_summary=delivery_summary, group=task.notify.group)
+                           extra=branch_line, delivery_summary=delivery_summary, group=task.notify.group, evidence=evidence)
         return Notice(channel, task.notify, text, channel_id=task.origin_channel_id)
 
     async def _finish_workspace(self, task: Task) -> str | None:

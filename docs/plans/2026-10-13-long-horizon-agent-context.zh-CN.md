@@ -1109,7 +1109,7 @@ M7 先让计划状态有唯一来源（M7a），再在其上加任务记忆（M7
 - **记忆写入路径**（[RFC](../architecture/rfcs/memory-write-path-v0.zh-CN.md)）：本分支在确认后的 worktree 写入基础上实现操作者私聊推送、精确回复「记 / 驳回 / 重试」、结果通知、原推送状态更新和受阻告警，默认关闭。起草、来源和 dashboard 界面仍按 RFC 第 13 节后续切片推进。后续待维护者确认：记忆推送接入 `proactive_delivery`，新增 `ProactiveSource.MEMORY` 并与晨报等来源共同扩展 `proactive_deliveries.source` 约束。
 
 - **平台子 agent 的入口接线**（[RFC](../architecture/rfcs/platform-subagents-v0.zh-CN.md)）：派生服务、运行树数据、预算预留、取消与恢复、只读 explorer 启动已实现，见[服务与数据验收](../validation/platform-subagents-service.zh-CN.md)。Worker 的三个工具、桥接幂等调用 id、办公台交付及父运行结束时的级联取消已实现，项目开关仍默认关，见[Worker 工具验收](../validation/platform-subagents-worker-tools.zh-CN.md)；真实模型运行与评测待授权执行。项目设置表单、操作者 `runs.tree`、运行树与等待时间线、费用分份、Agents 分组和 Pipeline 计数已在本分支实现（[界面与读取验收](../validation/run-tree/README.md)）。规划者入口、账号准入和运行树单节点取消仍待后续阶段。首次启用走项目设置表单及项目管理 API；Manager 工具列表和 schema 保持基线字节一致，从聊天修改设置及 Manager 对话对比留给后续 PR。
-- **可执行验收**（[RFC §13](../architecture/rfcs/executable-acceptance-v0.zh-CN.md#13-pr-拆分依赖与并行)）：类型与协议（#1552）、执行器与证据（#1565）已合入。证据门、检查专用 `recheck`、失败检查重试反馈、版本失效重测和 Reviewer 证据段已在本分支实现；关闭项目开关不会解除已有失败证据的阻挡。默认关闭及无检查步骤以固定提交对照，Python 3.11 定向测试 1193 项及隔离服务替身链路已通过；必需检查测得失败或出错时，步骤尝试以 `check_failed` 收尾（接在指标尝试 #1574 之上，合入顺序在其后），真实模型评测待授权，任务页与结果/渠道输出由后续阶段交付。macOS local 的网络与 job-creation 禁止已在前阶段验证，Linux `unshare -rn` 尚未实测。
+- **可执行验收**（[RFC §13](../architecture/rfcs/executable-acceptance-v0.zh-CN.md#13-pr-拆分依赖与并行)）：类型与协议（#1552）、执行器与证据（#1565）已合入。证据门、检查专用 `recheck`、失败检查重试反馈、版本失效重测和 Reviewer 证据段已在本分支实现；关闭项目开关不会解除已有失败证据的阻挡。默认关闭及无检查步骤以固定提交对照，Python 3.11 定向测试 1193 项及隔离服务替身链路已通过；必需检查测得失败或出错时，步骤尝试以 `check_failed` 收尾（接在指标尝试 #1574 之上，合入顺序在其后），真实模型评测待授权。PR 5 的任务结果 `## Evidence` 与 Lark/Telegram 结束通知计数行已实现：只显示当前尝试中仍定义的检查，保留关闭前的证据，无证据时结果和通知逐项保持原样；结果含未运行检查及未绑定检查的标准数量，渠道不带输出或命令。任务页步骤卡由独立阶段交付。macOS local 的网络与 job-creation 禁止已在前阶段验证，Linux `unshare -rn` 尚未实测。
 - **助理人格接线**（本分支已实现，未设置即关闭，依赖 #1533）：默认 Manager 把名字、语气和补充说明放在 `_sections()` 第一段，沿用稳定块更新规则；不注入称呼、不增加工作时间，群和他人私聊共用 main 时不注入人格，独立会话只给名字；受限回合发去人格的完整稳定块且不覆盖 main 的已展示状态，场景管家和其他角色不继承。固定 main 哈希、下一轮更新/清空、稳定块及隔离服务重启由定向测试覆盖；真实模型语气和改名评测待批准，尚未执行（[RFC §5.2](../architecture/rfcs/assistant-layer-v0.zh-CN.md#52-12-人格与称呼)）。
 
 - **助理每轮上下文接线**（本分支已实现，默认关）：Manager 用户回合用现有渲染器替换 `Channel:` 行，并按渠道发送者设置 `Turn.speaker`，接通现有升级和确认的授权检查；收尾、自主回合不注入。新增 main 的关闭路径固定基准及渠道身份、确认劫持、稳定块、隔离 serve 测试；真实模型的时间/身份评测未执行，待维护者批准后用 `evals.assistant_experience --turn-context --categories time,identity` 对比基线（[RFC §5.1](../architecture/rfcs/assistant-layer-v0.zh-CN.md#51-11-每轮上下文)）。
@@ -1162,6 +1162,8 @@ M7 先让计划状态有唯一来源（M7a），再在其上加任务记忆（M7
 
 ### 5.3 非核心待办（M6 之后统一做）
 
+- **可执行验收的关卡议程摘要**：在用户关卡议程附上依赖步骤的代码生成证据摘要（RFC D10）；涉及 `[GATE]` 模型上下文，需另行实现并获授权后做真实评测。
+- **Manager completion turns 的验收计数行**：当前代码结束通知有检查计数，`manager.completion_turns` 的 Manager 回复替代该通知时尚无计数；补充 completion facts 属于模型可见变化，需独立实现与评测。
 - **场景管家继承默认管家的人格**：`manager.persona` 现在只给默认管家；场景管家继承名字、称呼、语气和补充说明推迟到有使用方再加。
 - **订阅窗口与每日策略表单**：`window: lookback` 与 `delivery_policy: daily` 可通过 API/生成 CLI 配置；后续在 Dashboard 表单中补配置和窗口说明，并在 lookback 模式隐藏游标重置入口。现有推送确认和运行结果继续复用。
 - **定时任务节制字段的表单**：`active_hours`（生效时段）和 `idle_only`（只在空闲时运行）可通过 API、生成 CLI 和配置导入导出设置；后续在 Dashboard 的定时任务表单和详情里加上这两项和 `throttle` 视图。
