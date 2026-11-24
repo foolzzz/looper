@@ -3,9 +3,9 @@ name: Python Tests
 # The agent system's tests (pyproject.toml: testpaths = ["tests"]), with the
 # PostgreSQL ones run against the service database; and the dashboard's tests
 # (web/, npm test).
+# Main is covered by the coordinator's workflow_dispatch canary. A push trigger
+# would duplicate that run and compete for the same concurrency group.
 on:
-  push:
-    branches: [main]
   pull_request:
   workflow_dispatch:
 
@@ -156,7 +156,7 @@ jobs:
   bridge-schema-pg18:
     name: PostgreSQL 18 bridge upgrades and restarts
     needs: changes
-    if: (github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'workflow_dispatch' || (github.event_name == 'pull_request' && startsWith(github.head_ref, 'codex/release-'))
+    if: github.event_name == 'workflow_dispatch' || (github.event_name == 'pull_request' && startsWith(github.head_ref, 'codex/release-'))
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     services:
@@ -209,10 +209,10 @@ jobs:
 
   provenance:
     # Proofs that pinned fixtures came from an old revision (pytest -m provenance). The shards exclude
-    # them; they run on main pushes, dispatch canaries and release pull requests.
+    # them; they run in dispatch canaries and on release pull requests.
     name: Pinned-baseline provenance tests
     needs: changes
-    if: (github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'workflow_dispatch' || (github.event_name == 'pull_request' && startsWith(github.head_ref, 'codex/release-'))
+    if: github.event_name == 'workflow_dispatch' || (github.event_name == 'pull_request' && startsWith(github.head_ref, 'codex/release-'))
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     services:
@@ -291,7 +291,7 @@ jobs:
   dashboard:
     name: Dashboard tests
     needs: changes
-    if: needs.changes.outputs.docs_only != 'true' && (needs.changes.outputs.web == 'true' || (github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'workflow_dispatch' || (github.event_name == 'pull_request' && startsWith(github.head_ref, 'codex/release-')))
+    if: needs.changes.outputs.docs_only != 'true' && (needs.changes.outputs.web == 'true' || github.event_name == 'workflow_dispatch' || (github.event_name == 'pull_request' && startsWith(github.head_ref, 'codex/release-')))
     runs-on: ubuntu-latest
     timeout-minutes: 10
     defaults:
