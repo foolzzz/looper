@@ -3609,6 +3609,25 @@ def _newest_run(api: Api, agent: str) -> int:
     return max((record["id"] for record in records), default=0)
 
 
+async def _send_withdrawn(api: Api, body: dict[str, Any], database_url: str, timeout: float) -> None:
+    """Hold context preparation until the stop is accepted, before the model can receive this message."""
+    import asyncpg
+
+    conn = await asyncpg.connect(database_url, timeout=10, command_timeout=timeout)
+    try:
+        async with conn.transaction():
+            # Sending persists chat, but preparing the model's context reads projects. A warmed resident may
+            # otherwise receive (or even answer) the message between these separate HTTP requests.
+            await conn.execute("LOCK TABLE projects IN ACCESS EXCLUSIVE MODE")
+            api.post("/api/v1/operator_chat/send", body)
+            turn = api.post("/api/v1/operator_chat/turn", {"session_id": body["session_id"]})["result"].get("turn")
+            if not turn:
+                raise EvalError("no turn to withdraw: the message is not live")
+            api.post("/api/v1/operator_chat/stop", {"message_id": turn["message_id"]})
+    finally:
+        await conn.close()
+
+
 def _ask(api: Api, session: str, text: str, *, timeout: float,
          check_budget: Callable[[], None] | None = None, stop: bool = False, withdraw: bool = False,
          database_url: str | None = None, manager: str | None = None,
@@ -3629,12 +3648,12 @@ def _ask(api: Api, session: str, text: str, *, timeout: float,
     owner = {"manager": agent} if manager else {}  # a thread of a scenario Manager is read naming it
     if manager:
         body["target"] = {"kind": "manager", "id": agent}
-    api.post("/api/v1/operator_chat/send", body)
-    if withdraw:  # the message has its turn from its delivery on: the stop finds it wherever it is
-        turn = api.post("/api/v1/operator_chat/turn", {"session_id": session})["result"].get("turn")
-        if not turn:
-            raise EvalError("no turn to withdraw: the message is not live")
-        api.post("/api/v1/operator_chat/stop", {"message_id": turn["message_id"]})
+    if withdraw:
+        if database_url is None:
+            raise EvalError("withdrawing a message needs the dialog's disposable database")
+        asyncio.run(_send_withdrawn(api, body, database_url, timeout))
+    else:
+        api.post("/api/v1/operator_chat/send", body)
     deadline = time.monotonic() + timeout
     stopped = not stop
     while time.monotonic() < deadline:
