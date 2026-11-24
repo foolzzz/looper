@@ -569,7 +569,7 @@ describe("Agent Profiles", () => {
     dsh();
     await act(async () => root.render(<RuntimesSection />));
     expect([...container.querySelectorAll("h3")].map((h) => h.textContent)).toContain("DSH CLI");
-    expect(container.textContent).toContain("npm install -g @deepseek-ai/dsh@0.2.1-rc.2");
+    expect(container.textContent).toContain("npm install -g @deepseek-ai/dsh@0.2.2-rc.5");
     expect(container.textContent).toContain("Claude Code CLI");
     expect(container.textContent).toContain("Codex CLI");
   });

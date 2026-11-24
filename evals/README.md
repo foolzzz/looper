@@ -470,7 +470,7 @@ This opt-in check uses synthetic serve-test captures and never runs in the defau
 tracks passed, failed and untested separately. Local fake responses and the
 installed package's offline checks do not establish real-model acceptance.
 The opt-in launcher is [examples/dsh/validate.py](../examples/dsh/validate.py),
-using [agent-spec.json](../examples/dsh/agent-spec.json): DSH 0.2.1-rc.2,
+using [agent-spec.json](../examples/dsh/agent-spec.json): DSH 0.2.2-rc.5,
 DeepSeek Messages, `deepseek-flash`, effort `high`, effective append. It
 registers a DSH Profile for all four roles; `--provider-preset deepseek`
 would create a Claude Code Profile instead.
@@ -500,7 +500,7 @@ runtime with no flag. A command with no flag uses the runner. `--dsh-cli`
 selects the CLI path. `--dsh-runner` still selects the runner explicitly.
 Passing both flags is an error.
 
-Installed stand-in tests use DSH 0.2.1-rc.2, Node 22.19+ and a disposable
+Installed stand-in tests use DSH 0.2.2-rc.5, Node 22.19+ and a disposable
 `LOOPER_TEST_DATABASE_URL`. The smoke below is the unflagged runner path:
 
 ```sh

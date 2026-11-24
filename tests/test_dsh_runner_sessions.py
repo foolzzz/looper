@@ -321,8 +321,8 @@ rpc.method('test/inspect', async p => {{
 }});
 rpc.method('test/tool', async p => {{
   const r = sessions.get(p.session_id);
-  return await r.agentCtx.tools.execute({{agent: r.agent, name: p.name, arguments: p.arguments,
-    callId: 'test-tool', signal: new AbortController().signal}});
+  return (await r.agentCtx.tools.execute({{agent: r.agent, calls: [{{type: 'tool-call', id: 'test-tool',
+    name: p.name, arguments: JSON.stringify(p.arguments)}}], signal: new AbortController().signal}})).results[0].result;
 }});""")
 
     async def exercise():
