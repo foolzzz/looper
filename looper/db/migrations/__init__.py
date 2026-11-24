@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from importlib import import_module
 from pkgutil import iter_modules
@@ -70,14 +71,51 @@ def schema_sql(base_sql: str, modules: Iterable[ModuleType]) -> str:
     )
 
 
+_NOT_VALID = re.compile(r"\s+NOT\s+VALID\s*$", re.IGNORECASE)
+
+
+def _split_literals(text: str) -> list[tuple[str, str]]:
+    """Split ``text`` into SQL and single-quoted literals. A doubled quote stays inside the literal."""
+    parts: list[tuple[str, str]] = []
+    start = i = 0
+    while i < len(text):
+        if text[i] != "'":
+            i += 1
+            continue
+        if start < i:
+            parts.append(("sql", text[start:i]))
+        end = i + 1
+        while end < len(text):
+            if text[end] == "'":
+                if end + 1 < len(text) and text[end + 1] == "'":
+                    end += 2
+                    continue
+                end += 1
+                break
+            end += 1
+        parts.append(("lit", text[i:end]))
+        start = i = end
+    if start < len(text) or not parts:
+        parts.append(("sql", text[start:]))
+    return parts
+
+
 def printed_check(definition: str) -> str:
-    """``pg_get_constraintdef`` with ``NOT VALID``, casts and spacing removed.
+    """``pg_get_constraintdef`` with keywords, whitespace and parentheses normalized.
 
     Validation is the online step, so a validated check and the ``NOT VALID`` check
-    taken under the schema lock are the same predicate. Callers compare this text,
-    not a list of words inside it.
+    taken under the schema lock are the same predicate. ``::text`` casts are ignored
+    for the same reason. String literal contents are kept: ``'unanswered'`` and
+    ``'UNANSWERED'`` are different predicates. Callers compare this text, not a list
+    of words inside it.
     """
-    text = " ".join((definition or "").split())
-    if text.upper().endswith("NOT VALID"):
-        text = text[: -len("NOT VALID")].rstrip()
-    return "".join(text.lower().replace("::text", "").split())
+    parts = _split_literals(definition or "")
+    if parts[-1][0] == "sql":
+        parts[-1] = ("sql", _NOT_VALID.sub("", parts[-1][1]))
+    folded = []
+    for kind, text in parts:
+        if kind == "lit":
+            folded.append(text)
+        else:
+            folded.append("".join(text.lower().split()).replace("::text", ""))
+    return "".join(folded)

@@ -42,8 +42,9 @@ def needs_service():
 async def initialize(*, pool=None):
     """Note holds that still need a task wakeup.
 
-    Unsent questions are not delivered here. ``serve`` calls this before it has a sender;
-    ``deliver_unsent_questions`` runs once that sender exists.
+    Unsent questions are not delivered here. ``serve`` calls this before any channel
+    adapter exists. ``deliver_unsent_questions`` runs after every adapter is registered,
+    and a later unanswered pass retries a send that still failed.
     """
     from . import cost_guard
 
@@ -74,8 +75,8 @@ def configure(platform=None, *, sender=None, dashboard_url=''):
 async def deliver_unsent_questions(platform=None, *, sender=None, dashboard_url='', pool=None):
     """Install the sender, then send questions a restart left with ``asked_at`` null.
 
-    ``serve`` initializes cost holds first and only then has a channel sender. A send that
-    timed out is retried here, not on the earlier call.
+    ``serve`` calls this after every channel adapter is registered. A send that times out
+    or finds the channel not running leaves ``asked_at`` null, so a later pass retries it.
     """
     configure(platform, sender=sender, dashboard_url=dashboard_url)
     await resume_unanswered_questions(pool=pool)

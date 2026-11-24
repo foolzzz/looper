@@ -42,6 +42,9 @@ async def check(now: datetime) -> None:
             logger.warning("没人回的推送规则已打开，但 manager.metrics.enabled 是关的："
                            "没有推送和回复记录，本次不提问也不暂停")
         return
+    # A restart can try before the channel is up, or the send can time out. ``asked_at`` stays null, so this
+    # pass retries until the question is delivered. An unsent hold is not paused.
+    await cost_holds.resume_unanswered_questions()
     await _ask(now, rule)
     await _pause(now, rule)
 

@@ -428,7 +428,7 @@ def test_a_question_that_times_out_is_resent_after_restart_and_does_not_pause(mo
 
         async def sender(channel_id, chat, text, **kwargs):
             calls["n"] += 1
-            if calls["n"] == 1:
+            if calls["n"] < 3:
                 raise TimeoutError("injected")
             return True, None
 
@@ -442,18 +442,118 @@ def test_a_question_that_times_out_is_resent_after_restart_and_does_not_pause(mo
         await pool.execute("UPDATE cost_holds SET created_at=$2 WHERE id=$1",
                            hold_id, _MOMENT - timedelta(days=4))
         await unanswered_pushes.check(_MOMENT + timedelta(days=4))
-        assert calls["n"] == 1
+        # The later pass retries the undelivered question. It still timed out, so the schedule is not paused.
+        assert calls["n"] == 2
+        assert await pool.fetchval("SELECT asked_at FROM cost_holds WHERE id=$1", hold_id) is None
         assert await pool.fetchval("SELECT enabled FROM schedules WHERE id='sched-timeout'") is True
         # Same order as serve: cost guard starts while the sender is still unset, then the sender is configured.
         cost_holds.configure(sender=None, dashboard_url="")
         await cost_guard.initialize(day_start=lambda now: now, pool=pool)
-        assert calls["n"] == 1
+        assert calls["n"] == 2
         assert await pool.fetchval("SELECT asked_at FROM cost_holds WHERE id=$1", hold_id) is None
         await cost_holds.deliver_unsent_questions(
             sender=sender, dashboard_url="https://console.example", pool=pool)
-        assert calls["n"] == 2
+        assert calls["n"] == 3
         assert await pool.fetchval("SELECT asked_at FROM cost_holds WHERE id=$1", hold_id) is not None
         assert await pool.fetchval("SELECT enabled FROM schedules WHERE id='sched-timeout'") is True
+
+    run_db(body, monkeypatch, timeout=60)
+
+
+def _startup_marks(source: str) -> list[str]:
+    marks = []
+    for line in source.splitlines():
+        text = line.strip()
+        if text.startswith("await registry.register(web_adapter)"):
+            marks.append("web")
+        elif text.startswith("await _register_bots("):
+            marks.append("bots")
+        elif text.startswith("await cost_holds.deliver_unsent_questions("):
+            marks.append("deliver")
+        elif text.startswith("await scheduler.start("):
+            marks.append("check")
+    return marks
+
+
+def test_an_unsent_question_is_delivered_after_every_channel_adapter_registers(monkeypatch, tmp_path):
+    """Replay serve's startup marks. Deliver runs only after both bot registrations, through the real registry."""
+    from looper.agents.bus import MessageBus
+    from looper.agents.channels.base import ChannelAdapter, DeliveryReceipt, PostReceipt
+    from looper.agents.channels.chat_routing import RoutingSnapshot
+    from looper.agents.channels.registry import ChannelRegistry
+    from looper.agents.message import MessageEnvelope
+    from looper.agents.task_notice import NotifyTarget
+
+    serve = (Path(__file__).parents[1] / "looper/agents/serve.py").read_text()
+    marks = _startup_marks(serve)
+    assert marks.count("bots") == 2 and marks.count("deliver") == 1
+    assert marks.index("deliver") > max(index for index, mark in enumerate(marks) if mark == "bots")
+    assert marks.index("check") > marks.index("deliver") > marks.index("web")
+
+    class _Stub(ChannelAdapter):
+        def __init__(self, channel_id: str, channel_type: str) -> None:
+            self._id, self._type, self.calls = channel_id, channel_type, []
+
+        @property
+        def channel_type(self) -> str:
+            return self._type
+
+        @property
+        def channel_id(self) -> str:
+            return self._id
+
+        async def start(self, bus) -> None:
+            return None
+
+        async def stop(self) -> None:
+            return None
+
+        async def deliver(self, envelope: MessageEnvelope) -> DeliveryReceipt:
+            return DeliveryReceipt(channel=self._type, success=True)
+
+        async def notify(self, chat: str, text: str, *, idempotency_key: str | None = None) -> DeliveryReceipt:
+            self.calls.append(("notify", chat, text, idempotency_key))
+            return DeliveryReceipt(channel=self._type, success=True)
+
+        async def post(self, target: NotifyTarget, text: str, *, reply_to: str | None = None,
+                       idempotency_key: str | None = None) -> PostReceipt:
+            return PostReceipt(True, external_ids=["m1"])
+
+    async def body(pool):
+        await pool.execute("INSERT INTO projects(id,name) VALUES ('p-ask','Ask')")
+        await _schedule(pool, "sched-adapters")
+        await store.create_hold("schedule", "sched-adapters", None, None, None, "unanswered", pushes=15, pool=pool)
+        await _enable()
+        monkeypatch.setattr("looper.agents.channels.registry.load_snapshot", AsyncMock(
+            return_value=RoutingSnapshot("channel-telegram", "manager", False, {})))
+        monkeypatch.setattr("looper.agents.gate_service.dashboard_target", AsyncMock(return_value=SimpleNamespace(
+            channel_id="channel-telegram", target=SimpleNamespace(id="1000001", group=False))))
+        bus = MessageBus(runtime_root=tmp_path)
+        registry = ChannelRegistry(bus)
+        web = _Stub("channel-web", "web")
+        telegram = _Stub("channel-telegram", "telegram")
+        bots_seen = 0
+        for mark in marks:
+            if mark == "web":
+                await registry.register(web)
+                missing, error = await registry.notify("channel-telegram", "1000001", "too early")
+                assert (missing, error) == (
+                    False, "the telegram channel is not running: enable it in Settings → Channels")
+            elif mark == "bots":
+                bots_seen += 1
+                if bots_seen == 1:
+                    await registry.register(telegram)
+            elif mark == "deliver":
+                await cost_holds.deliver_unsent_questions(
+                    sender=registry.notify, dashboard_url="https://console.example", pool=pool)
+            elif mark == "check":
+                unanswered_pushes._last_checked = None
+                await unanswered_pushes.check(_MOMENT + timedelta(hours=2))
+        assert [call[0] for call in telegram.calls] == ["notify"]
+        assert await pool.fetchval(
+            "SELECT asked_at FROM cost_holds WHERE scope_ref='sched-adapters'") is not None
+        assert await pool.fetchval("SELECT state FROM cost_holds WHERE scope_ref='sched-adapters'") == "pending"
+        assert await pool.fetchval("SELECT enabled FROM schedules WHERE id='sched-adapters'") is True
 
     run_db(body, monkeypatch, timeout=60)
 
@@ -515,6 +615,41 @@ def test_a_reply_committed_before_the_pause_update_expires_the_hold(monkeypatch)
         assert await pool.fetchval("SELECT enabled FROM schedules WHERE id='sched-race-reply'") is True
 
     run_db(body, monkeypatch, timeout=60, max_size=4)
+
+
+def test_a_rewritten_string_literal_stays_pending_and_is_restored(monkeypatch):
+    assert printed_check("CHECK ((pause_reason = 'unanswered'))") != printed_check(
+        "CHECK ((pause_reason = 'UNANSWERED'))")
+    assert printed_check("CHECK ((a = 1) AND (b = 2)) NOT VALID") == printed_check("check (( a = 1 ) and ( b = 2 ))")
+    assert printed_check("CHECK (('a  b' = 'a  b'))") == "check(('a  b'='a  b'))"
+
+    async def body(pool):
+        await pool.execute("INSERT INTO projects(id,name) VALUES ('p-ask','Ask')")
+        await _schedule(pool, "sched-literal")
+        async with pool.acquire() as conn:
+            await conn.execute(
+                "INSERT INTO schema_migrations (name) VALUES ('schedule_pause_reasons') ON CONFLICT DO NOTHING")
+            await conn.execute("ALTER TABLE schedules DROP CONSTRAINT schedules_pause_reason_check")
+            await conn.execute(
+                "ALTER TABLE schedules ADD CONSTRAINT schedules_pause_reason_check CHECK "
+                "(pause_reason IN ('operator', 'UNANSWERED', 'budget', 'quota')) NOT VALID")
+            assert await schedule_pause_reasons.pending(conn)
+        with pytest.raises(Exception, match="schedules_pause_reason_check"):
+            await pool.execute(
+                "UPDATE schedules SET enabled=false, pause_reason='unanswered', paused_at=now(), next_fire_at=NULL "
+                "WHERE id='sched-literal'")
+        await connection.ensure_schema(pool)
+        async with pool.acquire() as conn:
+            assert not await schedule_pause_reasons.pending(conn)
+        await pool.execute(
+            "UPDATE schedules SET enabled=false, pause_reason='unanswered', paused_at=now(), next_fire_at=NULL "
+            "WHERE id='sched-literal'")
+        assert await pool.fetchval("SELECT pause_reason FROM schedules WHERE id='sched-literal'") == "unanswered"
+        with pytest.raises(Exception, match="schedules_pause_reason_check"):
+            await pool.execute(
+                "UPDATE schedules SET pause_reason='UNANSWERED' WHERE id='sched-literal'")
+
+    run_db(body, monkeypatch, timeout=120)
 
 
 def test_migration_pending_sees_a_dropped_check_while_the_marker_remains(monkeypatch):
