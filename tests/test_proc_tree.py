@@ -364,12 +364,14 @@ def test_snapshot_distinguishes_ps_failure_from_an_empty_listing(monkeypatch, re
     (2, "", "", None),
 ])
 def test_start_times_distinguishes_missing_pids_from_a_failed_ps(monkeypatch, returncode, output, stderr, expected):
+    monkeypatch.setattr(proc_tree, "_native_start_times", lambda pids: None)
     monkeypatch.setattr(proc_tree.subprocess, "run", lambda *args, **kwargs:
                         subprocess.CompletedProcess(args, returncode, stdout=output, stderr=stderr))
     assert proc_tree._start_times([123]) == expected
 
 
 def test_start_times_returns_unknown_when_ps_times_out(monkeypatch):
+    monkeypatch.setattr(proc_tree, "_native_start_times", lambda pids: None)
     def run(*args, **kwargs):
         raise subprocess.TimeoutExpired("ps", 5)
 
@@ -1559,7 +1561,8 @@ def test_turn_tree_leaves_a_reused_leaders_new_tree_alone(
             try:
                 await asyncio.wait_for(refreshed.wait(), 1)
             finally:
-                await tree.stop_ticker()
+                async with asyncio.timeout(1):
+                    await tree.stop_ticker()
         elif entry == "refresh":
             await tree.refresh(force=True)
         elif entry == "begin_end":
