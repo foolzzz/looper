@@ -775,10 +775,12 @@ async def recent_intents(conn: Any, source_id: str, *, now: datetime) -> list[di
 
 async def intent_types(conn: Any) -> list[dict[str, Any]]:
     """The enabled, not archived intent types, with their current version's name and guidance."""
-    rows = await conn.fetch("SELECT t.key, v.name, v.guidance FROM intent_types t JOIN intent_type_versions v "
+    rows = await conn.fetch("SELECT t.key, t.builtin, v.name, v.guidance FROM intent_types t JOIN intent_type_versions v "
                             "ON v.type_key = t.key AND v.version = t.version "
                             "WHERE t.enabled AND t.archived_at IS NULL ORDER BY t.builtin DESC, t.key")
-    return [dict(row) for row in rows]
+    rules_on = await leads_model.rule_types_enabled(conn)
+    return [{key: row[key] for key in ("key", "name", "guidance")} for row in rows
+            if leads_model.intent_type_visible(row, rules_on=rules_on)]
 
 
 def instructions(kind: str, requirement: str, types: Sequence[Mapping[str, Any]], *, group: bool = False) -> str:
