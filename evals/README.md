@@ -688,17 +688,17 @@ Once before a release, on the release candidate (`main` after every merge):
 - opus on the 24 Planner tasks: `run --mode real --model opus --reps 3
   --tasks planner --jobs 4 --max-budget-usd 3.0 --case-budget-usd 6.0
   --total-cap-usd 40` (the earlier baseline cost about $27.73);
-- haiku on all 91 dialogs: `dialogs --mode real --reps 3 --jobs 4
+- haiku on all 93 dialogs: `dialogs --mode real --reps 3 --jobs 4
   --max-budget-usd 1.0 --case-budget-usd 1.0 --total-cap-usd $HAIKU_DIALOG_CAP_USD`;
-- sonnet on all 91 dialogs: `dialogs --mode real --model sonnet --reps 3 --jobs 4
+- sonnet on all 93 dialogs: `dialogs --mode real --model sonnet --reps 3 --jobs 4
   --max-budget-usd 1.0 --case-budget-usd 1.0 --total-cap-usd $SONNET_DIALOG_CAP_USD`, refreshing
   `baselines/dialogs-real-sonnet.json`;
-- the opus xhigh Manager on all 91 dialogs: `dialogs --mode real --reps 3 --jobs 4
+- the opus xhigh Manager on all 93 dialogs: `dialogs --mode real --reps 3 --jobs 4
   --manager-model opus --manager-effort xhigh --max-budget-usd 3.0
   --case-budget-usd 3.0 --total-cap-usd $OPUS_DIALOG_CAP_USD`.
 
 Omitting `--dialogs` selects every dialog in `dialogs.select(None)`: currently
-91, or 273 case/reps per three-rep tier. A complete 91-dialog cost measurement is blocked
+93, or 279 case/reps per three-rep tier. A complete 93-dialog cost measurement is blocked
 pending evaluation credentials, a fresh disposable database/runtime root and
 an authorized budget. Set the three `*_DIALOG_CAP_USD` variables to explicitly
 authorized candidate measurement ceilings before running these commands;
@@ -707,8 +707,8 @@ until each tier completes. Do not extrapolate from the committed 24-dialog
 reports: at clean commit `c9ac42d5c562306259203790cb23766d9abed34f`,
 `dialogs-real-haiku.json` covers 72 rows / $4.226970 and
 `dialogs-real-opus.json` covers 72 rows / $8.426588 (other roles on haiku).
-Neither measures the current 91-dialog selection; no Sonnet dialog report exists.
-After each full real candidate run, verify all 91 IDs at reps 1–3, no cap stop,
+Neither measures the current 93-dialog selection; no Sonnet dialog report exists.
+After each full real candidate run, verify all 93 IDs at reps 1–3, no cap stop,
 skipped or error rows, and reconcile row costs with the report total. Record
 the candidate commit, models/Manager effort, selected IDs/count, repetitions,
 row count and measured total here before deriving numeric caps with headroom.
@@ -818,14 +818,20 @@ turning the search off are unit tests (`tests/test_session_search_db.py`).
 
 #### Memory proposals
 
-The seven `memory_*` dialogs enable Manager proposals in a disposable git vault. They cover a lasting preference,
+The nine `memory_*` dialogs enable Manager proposals in a disposable git vault. They cover a lasting preference,
 an explicit fact, a one-off request, someone else's quoted instruction, a synthetic credential, a reply that must
-not claim the proposal was saved, and revision of a seeded pending `M-0001`. Checks use this turn's typed actions
+not claim the proposal was saved, revision of a seeded pending `M-0001`, and operator-requested promotion of a decision lead or refusal of a
+request lead. Checks use this turn's typed actions
 and `/api/v1/memory/list`; only the saved-claim check reads reply wording, after removing Looper's footer.
 `push_channel` is unset and `daily_budget_usd` is $0.05, below the minimum drafting run, so the eval neither pushes
 nor spends on drafting. Run `--dialogs memory_preference,memory_none,memory_explicit,memory_quoted,memory_secret,memory_never_saved,memory_revise`
 in fake mode first. The proposed real comparison is Sonnet at two reps (cap $3) and the opus xhigh Manager at one
 rep (cap $2.50), both with four jobs and $1 per-case caps; estimated combined cost is $2.30, pending budget approval.
+
+The two lead dialogs enable `sources.leads`, search synthetic leads, then use the seeded lead id in the next message.
+`memory_from_lead` requires exactly one successful `from_lead` call without restating its words and an untrusted
+external candidate; `memory_from_lead_request` requires no candidate. Run these two in fake mode before the pending
+Sonnet comparison at two reps and opus xhigh Manager at one rep (estimated $0.63, combined cap $2).
 
 #### Delivery recovery
 
@@ -1087,6 +1093,8 @@ database, a disposable `looper serve`, and fake or real mode.
 | `memory_secret` | a synthetic credential: no memory candidate |
 | `memory_never_saved` | a preference proposal: persisted in drafting, and the model does not claim it was saved |
 | `memory_revise` | a seeded pending proposal: revise M-0001 and read it back in drafting, without another candidate |
+| `memory_from_lead` | a decision lead becomes one untrusted external candidate through `from_lead`, without restatement |
+| `memory_from_lead_request` | a request lead produces no memory candidate |
 | `attachment_read` | a code word in an uploaded UTF-8 text file and a four-digit number in a generated PNG both appear in the reply (Claude Code reads the attachments; fake mode checks the reply only) |
 | `config_tools` | the configuration tools: a project is created with the directory the user named (`looper_projects`); the Agent Profiles are listed; a Reviewer's profile in a project is set at once and the project's allowed list holds the one profile named (`looper_settings`); this week's spend is read (`looper_costs`); deleting the project waits for the user's word in the next message |
 | `task_cost` | a running task's cost by model: read for that task (`looper_costs` with its task_id), nothing changes, and the reply names each model of the task's cost and gives its cost as rounded (fake mode checks the read only) |
@@ -1143,7 +1151,7 @@ no reply within `--timeout` (`timeout`) or the eval itself failed (`harness`,
 such as the slow task not getting under way); after an error its remaining
 turns are not sent and the run goes on with the next dialog. Fake mode plays
 the Manager with the stand-in, which makes each message's scripted calls over
-MCP; it takes about two minutes. Real mode now selects all 91 dialogs by
+MCP; it takes about two minutes. Real mode now selects all 93 dialogs by
 default. The committed cost references cover only 24 dialogs (see the release
 tiers above), so neither they nor the default `--total-cap-usd` (0.50)
 establish a sufficient cap. Use an explicitly authorized measurement ceiling
@@ -1162,7 +1170,7 @@ content in `<untrusted>` blocks; compare with the same dialogs without it),
 `--claude <executable>` (the real Claude Code CLI; default `claude` on PATH),
 `--manager-model opus --manager-effort xhigh` (the Manager alone on that
 model, the other roles on `--model`; the historical 24-dialog Opus report
-does not establish a cap for the current 91 dialogs; give it
+does not establish a cap for the current 93 dialogs; give it
 `--max-budget-usd 3.0`, `--case-budget-usd 3.0` with `--jobs 4` and a
 `--total-cap-usd "$OPUS_DIALOG_CAP_USD"` authorized for candidate measurement),
 `--switch-agent SPEC.json` (`session_profile_switch`: register that spec as the profile `eval/switch`, while the
