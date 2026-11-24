@@ -161,9 +161,12 @@ def test_isolated_serve_recovers_unresponsive_runner_without_replaying_turn(tmp_
             lost, lost_result = None, None
             deadline = time.monotonic() + 90
             while time.monotonic() < deadline:
-                lost, lost_result = _lost_record(url)
-                if lost is not None and _reply(api, "health-hung") is not None:
-                    break
+                # The result event is stored before finish writes usage. Read the
+                # row only after the reply shows that the record has been closed.
+                if _reply(api, "health-hung") is not None:
+                    lost, lost_result = _lost_record(url)
+                    if lost is not None:
+                        break
                 time.sleep(0.5)
             assert lost is not None and lost_result is not None, "hung turn was not settled lost"
             elapsed = time.monotonic() - hung_at
