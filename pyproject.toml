@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "looper"
-version = "2.15.32"
+version = "2.15.33"
 description = "A self-hosted three-tier multi-agent system that runs Claude Code on your tasks, with a real-time web dashboard."
 readme = "README.md"
 requires-python = ">=3.11"
@@ -21,6 +21,7 @@ dependencies = [
   "python-telegram-bot>=22,<23",
   "websockets>=15,<16",
   "PyYAML>=6,<7",
+  "jsonschema>=4.23,<5",
 ]
 
 [project.urls]
