@@ -400,9 +400,10 @@ Manager has no tool for it. The dashboard shows the task page's 指标 card and 
   exactly the resident section's body, with no added newline, whether injection is on or off. It makes no model
   call or schema/cache write. Its worker has a 1-second deadline covering imports, settings and file I/O;
   missing settings, an unavailable database, an invalid profile or timeout prints nothing and exits 0.
-  Output is bounded by the compiler's 1500-character cap (at most 6000 UTF-8 bytes). This is intended for a
-  future local SessionStart hook; this change installs no hook. Lark and Telegram share the Manager path and
-  need no new configuration command. Real-model evaluation remains pending maintainer approval.
+  Output is bounded by the compiler's 1500-character cap (at most 6000 UTF-8 bytes).
+  `looper claude-code profile` prints the same text for the operator's own Claude Code
+  ([session-start hook](#the-operators-own-claude-code-profile-at-session-start)). Lark and Telegram share the
+  Manager path and need no new configuration command. Real-model evaluation remains pending maintainer approval.
   See the [operator profile RFC](rfcs/operator-profile-v0.zh-CN.md) for the original compiler design.
 - The reply is Claude's words, then what Looper itself writes to the user in
   that turn (`Turn.blocks`): a new task's configuration with the question
@@ -1301,6 +1302,30 @@ Grok and OMP agents get no flag for it: none of them has a tool that reaches
 another session (checked in Codex 0.162.0, whose multi-agent tools reach only
 the agents it spawns and whose message board is off; Grok 1.0.62, which Looper
 runs without the shared leader; OMP 18.4.3).
+
+### The operator's own Claude Code: profile at session start
+
+`looper claude-code profile` reuses `looper profile show` and the Manager's single compiler; it reads the
+configured vault note locally through the database, without an HTTP request, model call or cache write.
+`--hook` returns SessionStart JSON whose `additionalContext` is that same text, capped at 3000 characters.
+The shared reader has a 1-second deadline (within the 2-second hook budget); an unavailable or empty profile,
+errors and timeouts produce no stdout or stderr and exit 0. A stopped HTTP server alone does not prevent a read.
+Nothing is installed by default. `looper claude-code install hook --runtime-root <runtime root>` shows its
+user-settings path, added command and diff, asks for confirmation, backs up existing bytes and writes atomically.
+It preserves unrelated settings and symlinks, checks for concurrent edits, and reads the result back.
+`--dry-run` writes nothing; `--yes` skips confirmation after review. Organization-managed settings are never edited.
+`looper claude-code uninstall hook` previews and removes only Looper's entries; `looper claude-code status`
+reports the installed command, missing executables and whether the shared profile reader can return text.
+Looper's own Manager, Planner, Worker, Reviewer and consult launches exclude user settings with
+`--setting-sources project`; processor and other sealed or explicit-hook launches use `--setting-sources ""`.
+Both resident and one-shot commands use [the runtime's isolation flags](../../looper/agents/runtimes/claude_code.py)
+and [the shared isolation builder](../../looper/agents/claude_cli.py); consults reuse the one-shot command.
+Every [Launch.environment()](../../looper/agents/agent_settings.py) sets `LOOPER_AGENT_RUN`; hook mode and the shared
+`profile show` CLI also check that marker and silently exit 0 inside a Looper-started process.
+The Manager receives its profile through the server's resident-content path, independently of this hook.
+Managed hooks remain effective. A UserPromptSubmit hook's input does not contain SessionStart additional context,
+but it can read the session transcript; real-CLI verification of hook execution and transcript visibility is pending.
+The separately approved real-CLI check must also measure the injected profile's actual token count.
 
 ### What an agent may do
 
