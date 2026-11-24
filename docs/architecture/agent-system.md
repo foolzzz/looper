@@ -3200,6 +3200,20 @@ Drafting has its own contract; existing agents gain no prompt or tool.
   hours produce at most one alert per UTC day. Disabled writing or an unset
   push bot leaves delivery and reply routing inactive. Pushes currently use
   the channel registry directly; delivery-layer integration follows separately.
+- **Lead source** (`memory_leads.py`): the operator's leads-page action calls
+  `memory.propose_from_lead` only with `memory_write.enabled` and `sources.leads`
+  on. Code copies the summary, detail, sender and chat names into a seed;
+  decisions, commitments and facts map to the same memory kinds, with optional
+  overrides to any external kind (also person and project). Only active or
+  expired leads qualify; superseded, inaccurate, dropped and promoted leads
+  are refused, as is another open proposal for the same lead. The candidate is
+  untrusted, and its escaped drafting seed uses `untrusted.fence(source=LEAD)`
+  with lead provenance. It still needs confirmation. Writing marks the lead
+  promoted (`vault_proposal`, the M-id); rejection leaves it unchanged. Deleting
+  a lead or its source chat removes unwritten candidates and purges written
+  candidate text while leaving vault notes intact. The source defaults off;
+  production enablement waits for outbound review. Manager `from_lead` support
+  follows separately.
 - **Known limits:** unsaved editor buffers do not block a write and a later
   editor save can overwrite it; the content hash and commit trailers allow
   checking what was written. An agent with a shell has the same system-user
