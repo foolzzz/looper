@@ -265,7 +265,7 @@ def test_a_reminder_set_on_the_dashboard_goes_to_the_users_direct_chat_with_a_bo
     run_with_channel_configs(test, monkeypatch)
 
 
-def test_the_user_lists_their_reminders_and_cancels_a_pending_one_only(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_the_user_lists_their_reminders_and_cancels_a_pending_one(monkeypatch: pytest.MonkeyPatch) -> None:
     async def test(pool: Any) -> None:
         await _operator(pool)
         await _switch(pool)
@@ -288,6 +288,29 @@ def test_the_user_lists_their_reminders_and_cancels_a_pending_one_only(monkeypat
             answer = await _call(_ops(), _dm(), ops_reminders.CANCEL, {"id": reminder_id})
             assert answer["error"]["code"] == code, answer
         assert (await _statuses(pool))[sent][0] == "delivered"
+
+    run_with_channel_configs(test, monkeypatch)
+
+
+@pytest.mark.parametrize("state", ["uncertain", "failed", "missed"])
+def test_the_user_cancels_a_terminal_reminder_without_resending_it(monkeypatch, state):
+    async def test(pool):
+        await _operator(pool, enabled=True)
+        await _switch(pool)
+        now = datetime.now(UTC)
+        reminder_id = await _stored("Check the application", now - timedelta(hours=2))
+        await store.settle(pool, reminder_id, state, now=now, from_status="pending")
+        turn = _dm()
+        answer = await _call(_ops(), turn, ops_reminders.CANCEL, {"id": reminder_id})
+        assert answer["status"] == "ok", answer
+        assert answer["result"]["reminder"]["status"] == "cancelled"
+        assert f"已取消提醒 #{reminder_id}" in turn.blocks[0]
+        channel = _Channel()
+        service = reminders.ReminderService(channel, clock=_Clock(now))
+        await service.run_once()
+        await service.run_once()
+        assert channel.posts == []
+        assert await pool.fetchval("SELECT count(*) FROM proactive_deliveries") == 0
 
     run_with_channel_configs(test, monkeypatch)
 

@@ -36,6 +36,57 @@ async def setting(pool, key, value="true"):
                        "ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value", key, value)
 
 
+@pytest.mark.parametrize("state", ["uncertain", "failed", "missed"])
+def test_terminal_reminder_waits_once_for_the_user_without_an_idle_push(monkeypatch, state):
+    from looper.agents import idle_checks
+    from looper.db import reminders
+
+    async def check(pool):
+        row = await reminders.create(text="Check the application", due_at=NOW - timedelta(days=5), timezone="UTC",
+                                     channel_id="channel-lark", chat="ou_synthetic", created_channel="web",
+                                     created_message_id=None)
+        await reminders.settle(pool, row["id"], state, now=NOW - timedelta(days=4), from_status="pending")
+        for _ in range(2):
+            summary = await attention.collect()
+            found = section(summary, "reminders")
+            assert found is not None and found["count"] == 1
+            item, = found["items"]
+            assert item["title"] == row["text"]
+            assert item["facts"]["state"] == state and item["facts"]["due_at"] == row["due_at"]
+            assert item["key"] == f"reminder:{row['id']}"
+            assert await attention.earliest("reminders") == item
+            text = attention.summary_text(summary)
+            assert text.count(row["text"]) == 1 and state in text
+            assert row["due_at"].strftime("%Y-%m-%d %H:%M") in text
+            assert f"取消提醒 #{row['id']}" in text
+            if state == "uncertain":
+                assert "可能未送达" in text
+            assert idle_checks.select(summary, now=NOW) == []
+        assert await pool.fetchval("SELECT count(*) FROM proactive_deliveries") == 0
+        _, changed = await reminders.cancel(row["id"], now=NOW)
+        assert changed
+        assert section(await attention.collect(), "reminders")["count"] == 0
+        assert await attention.earliest("reminders") is None
+
+    run_db(check, monkeypatch)
+
+
+def test_terminal_reminder_visibility_expires_seven_days_after_settlement(monkeypatch):
+    from looper.db import reminders
+
+    async def check(pool):
+        for label, settled in (("expired", NOW - timedelta(days=7)),
+                               ("visible", NOW - timedelta(days=7) + timedelta(microseconds=1))):
+            row = await reminders.create(text=label, due_at=NOW - timedelta(days=10), timezone="UTC",
+                                         channel_id="channel-lark", chat="ou_synthetic", created_channel="web",
+                                         created_message_id=None)
+            await reminders.settle(pool, row["id"], "missed", now=settled, from_status="pending")
+        assert [row["text"] for row in await reminders.needing_attention(now=NOW)] == ["visible"]
+        assert await reminders.needing_attention(now=NOW + timedelta(microseconds=1)) == []
+
+    run_db(check, monkeypatch)
+
+
 async def schedule(pool, schedule_id, **columns):
     names = ["id", "project_id", "name", "cron", "timezone", "requirement", *columns]
     values = [schedule_id, "proj", schedule_id, "0 9 * * *", "UTC", "Check it", *columns.values()]

@@ -3,18 +3,19 @@
 A reminder is ``pending`` until it is due. Only the delivery (``agents.reminders.ReminderService``) moves it on: it
 claims one as ``sending`` (committed before the channel is asked) and settles it ``delivered``, ``failed`` or
 ``uncertain``, or settles one Looper could not send on time as ``missed``. Only the user cancels one
-(``cancelled``), and only while it is ``pending``.
+(``cancelled``), while it is ``pending`` or to dismiss a terminal not-delivered state.
 """
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any
 
 from .connection import get_pool
 
 STATUSES = ("pending", "sending", "delivered", "failed", "uncertain", "missed", "cancelled")
 LIST_DEFAULT, LIST_MAX = 20, 50
+ATTENTION_WINDOW = timedelta(days=7)
 
 
 def _db(db: Any) -> Any:
@@ -57,13 +58,28 @@ async def next_pending(*, db: Any = None) -> dict[str, Any] | None:
     return dict(row) if row is not None else None
 
 
+async def needing_attention(*, now: datetime, db: Any = None, channel_id: str | None = None,
+                            chat: str | None = None) -> list[dict[str, Any]]:
+    """Uncancelled terminal failures, for seven days after settlement; one row per reminder, oldest first.
+
+    The brief can narrow this read to its target. Reading never retries or records a delivery.
+    """
+    rows = await _db(db).fetch(
+        "SELECT * FROM reminders WHERE status IN ('uncertain', 'failed', 'missed') "
+        "AND settled_at > $1 AND settled_at <= $2 "
+        "AND ($3::text IS NULL OR channel_id = $3) AND ($4::text IS NULL OR chat = $4) "
+        "ORDER BY settled_at, id", now - ATTENTION_WINDOW, now, channel_id, chat)
+    return [dict(row) for row in rows]
+
+
 async def cancel(reminder_id: int, *, now: datetime, db: Any = None) -> tuple[dict[str, Any] | None, bool]:
-    """Cancel a pending reminder: (the reminder as it now is, whether this call cancelled it); (None, False) when
-    there is none."""
+    """Cancel a pending reminder or dismiss a terminal failure: (readback, changed); (None, False) if absent."""
     pool = _db(db)
     row = await pool.fetchrow(
-        "UPDATE reminders SET status = 'cancelled', detail = 'cancelled by the user', settled_at = $2, "
-        "updated_at = $2 WHERE id = $1 AND status = 'pending' RETURNING *", reminder_id, now)
+        "UPDATE reminders SET status = 'cancelled', detail = CASE WHEN status = 'pending' "
+        "THEN 'cancelled by the user' ELSE 'cancelled by the user after ' || status END, settled_at = $2, "
+        "updated_at = $2 WHERE id = $1 AND status IN ('pending', 'uncertain', 'failed', 'missed') RETURNING *",
+        reminder_id, now)
     if row is not None:
         return dict(row), True
     return await get(reminder_id, db=pool), False
