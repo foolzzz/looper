@@ -9,6 +9,7 @@ import asyncpg
 import pytest
 
 from looper.db import bridge_upgrade, connection, migrations
+from tests.bridge_schema_support import structure, witness
 from tests.db_support import DSN, fresh_connection, run_db
 
 pytestmark = pytest.mark.skipif(not DSN, reason="requires disposable LOOPER_TEST_DATABASE_URL")
@@ -51,12 +52,67 @@ def test_intent_rule_migration_fresh_upgrade_and_reentry(monkeypatch):
     asyncio.run(test())
 
 
+def test_rule_migration_ddl_and_apply_can_be_replayed():
+    from looper.db.migrations import intent_rules as migration
+
+    async def test():
+        async with fresh_connection() as conn:
+            await connection.ensure_schema(conn)
+            await conn.execute("INSERT INTO intent_rule_config(id, generation) VALUES (true, 7)")
+            # Force apply to run with all tables and most constraints already present.
+            await conn.execute("DROP INDEX idx_intent_rule_hits_created")
+            assert await migration.pending(conn)
+            await migration.apply(conn, sql="", state="current")
+            assert not await migration.pending(conn)
+            shape, saved = await structure(conn), await witness(conn)
+            for _ in range(2):
+                # Exercise the DDL itself even when apply's pending guard would skip it.
+                await conn.execute(migration.fresh_ddl)
+                await migration.apply(conn, sql="", state="current")
+                assert not await migration.pending(conn)
+                assert await structure(conn) == shape
+                assert await witness(conn) == saved
+
+    asyncio.run(test())
+
+
+def test_rule_migration_repairs_foreign_keys_after_workflow_upgrade():
+    from looper.db.migrations import intent_rules as migration, workflows
+
+    async def test():
+        async with fresh_connection() as conn:
+            await connection.ensure_schema(conn)
+            shape = await structure(conn)
+            # Recreate an older module while retaining the rule tables and their marker.
+            await conn.execute("INSERT INTO schema_migrations(name) VALUES ('intent_rules') ON CONFLICT DO NOTHING")
+            await conn.execute("ALTER TABLE projects DROP COLUMN default_workflow; "
+                               "ALTER TABLE tasks DROP COLUMN workflow; DROP TABLE workflows CASCADE; "
+                               "DELETE FROM schema_migrations WHERE name='workflows'")
+            assert await workflows.pending(conn)
+            assert await migration.pending(conn)
+            await workflows.apply(conn, sql="", state="current")
+            assert not await workflows.pending(conn)
+            assert await migration.pending(conn)
+            for _ in range(2):
+                await migration.apply(conn, sql="", state="current")
+                assert not await migration.pending(conn)
+                assert await structure(conn) == shape
+            assert await conn.fetchval("SELECT count(*) FROM schema_migrations WHERE name='intent_rules'") == 1
+
+    asyncio.run(test())
+
+
 @pytest.mark.parametrize("damage", [
     "DROP TABLE intent_rule_hit_sources",
     "ALTER TABLE projects DROP COLUMN auto_task_daily_cap",
     "ALTER TABLE projects DROP CONSTRAINT projects_auto_task_config_version_check",
     "ALTER TABLE intent_rules DROP CONSTRAINT intent_rules_position_key",
     "ALTER TABLE intent_rule_versions DROP CONSTRAINT intent_rule_versions_pkey",
+    "ALTER TABLE intent_rule_hits DROP CONSTRAINT intent_rule_hits_intent_id_fkey",
+    "ALTER TABLE intent_rule_template_contracts DROP CONSTRAINT intent_rule_template_contracts_workflow_key_fkey",
+    "ALTER TABLE intent_rule_hit_sources DROP CONSTRAINT intent_rule_hit_sources_event_seq_fkey",
+    "ALTER TABLE intent_rule_hit_sources DROP CONSTRAINT intent_rule_hit_sources_hit_id_fkey",
+    "ALTER TABLE intent_rule_condition_results DROP CONSTRAINT intent_rule_condition_results_hit_id_fkey",
     "DROP INDEX idx_intent_rule_hits_created",
     "DROP TRIGGER intent_rule_hit_sources_drop ON intent_rule_hit_sources",
     "DROP TRIGGER intent_rule_versions_immutable ON intent_rule_versions; "
