@@ -125,7 +125,8 @@ def _row(record: asyncpg.Record | None) -> dict[str, Any] | None:
     for key in ("budget_usd", "spent_usd"):
         if row.get(key) is not None:
             row[key] = float(row[key])
-    row["cost_status"] = (CostStatus.UNKNOWN if row["result"].get("unpriced_runs") else CostStatus.KNOWN).value
+    if row["result"].get("unpriced_runs"):
+        row["cost_status"] = CostStatus.UNKNOWN.value
     return row
 
 
