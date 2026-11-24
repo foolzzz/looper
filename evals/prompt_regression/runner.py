@@ -311,7 +311,7 @@ def uses_role_shim(tasks: Iterable[EvalTask]) -> bool:
 
 def install_claude(bin_dir: Path, *, mode: str, scenarios: Path | None = None,
                    max_budget_usd: float | None = None, real_claude: str | None = None,
-                   real_reviewer: bool = False) -> Path | None:
+                   real_reviewer: bool = False, failure_injection: bool = False) -> Path | None:
     """Put the ``claude`` the server runs in ``bin_dir``: the stand-in, or real Claude Code with a budget (none when
     no agent runs it: ``real_claude`` None). With ``real_reviewer`` installs the role-selective stand-in in real
     mode. Each task script chooses real Reviewers, a real Planner, or a scripted Planner
@@ -329,6 +329,9 @@ def install_claude(bin_dir: Path, *, mode: str, scenarios: Path | None = None,
             assert scenarios is not None
             target = [sys.executable, str(FAKE_CLAUDE), str(scenarios)]
             prefix = f"{REAL_CLAUDE_ENV}={shlex.quote(real_claude)} "
+    if failure_injection:
+        assert scenarios is not None
+        target = [sys.executable, str(Path(__file__).with_name("failure_cli.py")), str(scenarios), json.dumps(target)]
     extra = ["--max-budget-usd", f"{max_budget_usd:g}"] if mode == "real" and max_budget_usd else []
     script = bin_dir / "claude"
     run = prefix + "exec " + " ".join(shlex.quote(part) for part in target) + ' "$@"'
@@ -686,6 +689,8 @@ def run_task(
     created = api.post("/api/v1/tasks/create", {"requirement": task.requirement, "project": project, **workflow})["result"]
     task_id = created["task_id"]
     try:
+        if task.failure_handling:
+            _confirmed(api, "/api/v1/engine_settings/update", {"failure_typing": "act"})
         if task.planner_may_choose:
             if chosen_profile_id is None:
                 raise EvalError(f"{task.id} needs the profile its Planner may choose")
@@ -1183,6 +1188,8 @@ def run(
     profile for the Worker role alone. Either option records completion/check evidence for grouped scoring;
     without them the report retains its existing fields.
     """
+    if any(task.failure_handling for task in tasks) and len(tasks) != 1:
+        raise EvalError("failure-handling cases each require a separate run and disposable database; select one task")
     if mode not in ("fake", "real"):
         raise EvalError(f"mode must be fake or real, not {mode!r}")
     if planner_roles not in (None, "on", "off"):
@@ -1221,7 +1228,8 @@ def run(
                                          for (task_id, _), path in work_dirs.items()}), encoding="utf-8")
         install_claude(root / "bin", mode=mode, scenarios=scenarios,
                        max_budget_usd=None if provider is not None or register is not None else max_budget_usd,
-                       real_claude=real_claude, real_reviewer=uses_role_shim(tasks))
+                       real_claude=real_claude, real_reviewer=uses_role_shim(tasks),
+                       **({"failure_injection": True} if any(task.failure_handling for task in tasks) else {}))
         (root / "runtime").mkdir(mode=0o700)
         home = root / "home" if mode == "fake" else None
         if home is not None:
