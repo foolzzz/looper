@@ -149,6 +149,9 @@ def _operations() -> dict[str, Any]:
 
 # The operations whose level was decided one by one (every other one is inside).
 DECIDED_OPERATIONS: dict[str, ActionLevel] = {
+    "ledger.page": INSIDE,  # reads only Looper's ledger, including source status
+    "ledger.add": INSIDE,  # records an operator item inside Looper; executes no source action
+    "ledger.action": INSIDE,  # updates only Looper's ledger through its event transaction
     # Confirmation, including save-and-confirm, and retry can commit to the operator's vault.
     **dict.fromkeys(("memory.confirm", "memory.confirm_many", "memory.edit", "memory.retry"), MACHINE),
     "cost_guard.get": INSIDE,  # reads Looper's own observation settings and counters

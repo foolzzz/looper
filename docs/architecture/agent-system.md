@@ -6749,8 +6749,28 @@ writes nothing.
   database unusable.
 - **Reads:** `ledger.list` and `ledger.get` (`/api/v1`, read-only, open to an
   API client and the operator) answer `conflict` while the ledger is off.
-- **Not yet:** the To-do page, the ledger contract in the Manager's system
-  prompt (the tool descriptions are all it has), HTTP writes.
+- **Dashboard:** `#ledger`, "Ledger 账本" after Tasks, lists attention items
+  (open pending items and unconfirmed decisions), open work and the last
+  30 days' decisions. Filters and the detail drawer live in the hash query;
+  `#todo` remains the separate Needs you summary. `ledger.page` filters and
+  pages in the database with a cursor bound to its section and filters; its
+  attention count uses the same predicate as the attention section, including
+  sourced items' current state. The shared dashboard provider reads the
+  switch first, then refreshes the badge every 30 seconds and after writes.
+  Off, no entries are fetched and the navigation is hidden; failed refreshes
+  retain the previous count and say it could not be refreshed.
+- **Operator HTTP writes:** `ledger.add` and `ledger.action` use closed DTOs
+  and the same `db.ledger.apply` transaction and permissions. They record
+  `user`, `via=api`, `actor_id=operator`: v1 proves the operator's identity,
+  not whether it was a browser. Decisions added here are confirmed by that
+  input. The operations are operator-only, have no agent tool or generated
+  CLI command and act only inside Looper. Sourced items still change at their
+  source; the drawer only offers source navigation, due/owner edits and notes.
+  Only operator page/get responses add source links; client list/get keep
+  their existing source DTO. Writes read back before refreshing the page and
+  badge; conflicts retain input, and writes are never automatically retried.
+- **Not yet:** the ledger contract in the Manager's system prompt (the tool
+  descriptions are all it has).
 
 ### Proactive messages: the delivery layer
 
