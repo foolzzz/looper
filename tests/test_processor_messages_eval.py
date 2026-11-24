@@ -94,6 +94,27 @@ def test_request_reuses_processor_bytes_and_prices_usage(args, endpoint, tmp_pat
     assert KEY not in json.dumps(run)
 
 
+@pytest.mark.parametrize("mode", ["off", "on"])
+def test_messages_engine_keeps_mr_group_rules_and_scoring(args, endpoint, tmp_path, monkeypatch, mode):
+    args.intent_rules = mode
+    review_type = "mr_review" if mode == "on" else "bug_triage"
+    endpoint.reply = json.dumps({"intents": [
+        {"type": review_type, "title": "Review request", "summary": "Review the change",
+         "confidence": "high", "sources": ["m1"]},
+        {"type": "bug_triage", "title": "Bug report", "summary": "Investigate the bug",
+         "confidence": "high", "sources": ["m2"]}]})
+
+    async def no_runtime(**_kwargs):
+        pytest.fail("Messages comparison must not call the runtime")
+
+    monkeypatch.setattr(processor, "run", no_runtime)
+    run = asyncio.run(evaluate._extract(args, "intents_mr_review_group", 1, tmp_path))
+    assert (extraction.MR_REQUESTS_NOTE in endpoint.requests[0][2]["system"]) == (mode == "on")
+    assert run["parsed"]["items"] == 2
+    assert run["checks"]["type_and_sources"] == (mode == "on")
+    assert run["passed"] == (mode == "on")
+
+
 @pytest.mark.parametrize("status,delay,failure", [(401, 0, "HTTP 401"), (429, 0, "HTTP 429"),
     (503, 0, "HTTP 503"), (200, .8, "timeout")])
 def test_http_failures_fail_case_and_halt_unknown_spend(args, endpoint, tmp_path, capsys, status, delay, failure):
