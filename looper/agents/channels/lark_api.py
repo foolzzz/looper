@@ -15,7 +15,7 @@ from urllib.parse import parse_qs, quote, urlsplit
 import httpx
 
 from ..chat_attachments import TooLarge
-from .lark_cli import LarkCliError, MESSAGE_GONE_CODES, sent_message_id
+from .lark_cli import LarkCliError, MESSAGE_GONE_CODES, normalize_key, sent_message_id
 
 __all__ = ["BASE_URLS", "FEISHU_BASE_URL", "LARK_BASE_URL", "MESSAGE_GONE_CODES", "BotInfo", "LarkApi",
            "LarkApiError"]
@@ -176,8 +176,7 @@ class LarkApi:
     def _message(text: str | None, markdown: str | None, key: str | None = None) -> dict[str, Any]:
         if (text is None) == (markdown is None):
             raise ValueError("send exactly one of text and markdown")
-        if key is not None and not 0 < len(key) <= 50:
-            raise ValueError("an idempotency key has 1 to 50 characters")
+        key = normalize_key(key)  # the same long-key rule as the CLI transport: one message per logical key
         content = {"text": text} if text is not None else {"zh_cn": {"content": [[{"tag": "md", "text": markdown}]]}}
         body = {"msg_type": "text" if text is not None else "post", "content": json.dumps(content)}
         if key is not None:
@@ -207,8 +206,7 @@ class LarkApi:
 
     @staticmethod
     def _card(card: dict[str, Any], key: str | None) -> dict[str, Any]:
-        if key is not None and not 0 < len(key) <= 50:
-            raise ValueError("an idempotency key has 1 to 50 characters")
+        key = normalize_key(key)
         body = {"msg_type": "interactive", "content": json.dumps(card, ensure_ascii=False)}
         if key is not None:
             body["uuid"] = key

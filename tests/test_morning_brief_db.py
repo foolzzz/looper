@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import json
 from datetime import date, datetime, timedelta, timezone
+from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
 
@@ -103,6 +104,102 @@ def _service(channel: _Channel, when: datetime, *, managers: Any = None) -> morn
 async def _rows(pool: Any) -> list[dict[str, Any]]:
     return [dict(row) for row in await pool.fetch(
         "SELECT local_date, channel_id, chat, status, attempts FROM morning_briefs ORDER BY channel_id, chat")]
+
+
+@pytest.mark.parametrize(("outbound", "failure"), [(False, None), (False, "validation"), (False, "not_started"),
+                                                (True, None), (True, "validation")])
+def test_lark_brief_long_key_and_pre_send_retry(monkeypatch, tmp_path, lark_cli_stand_in, failure, outbound) -> None:
+    from looper.agents.bus import MessageBus
+    from looper.agents.channels.allowlist import SenderAllowlist
+    from looper.agents.channels.lark import LarkChannelAdapter
+    from looper.agents.channels.registry import ChannelRegistry
+
+    async def test(pool: Any) -> None:
+        await _zone(pool)
+        monkeypatch.setattr(chat_settings, "_outbound_enabled", outbound)
+        channel_id, chat = "channel-lark-123456789", "ou_" + "a" * 32
+        await pool.execute("UPDATE channel_configs SET channel_id = $1 WHERE channel_id = 'channel-lark'", channel_id)
+        await _operator(pool, channel_id, chat)
+        await _digest(pool, "deferred", MONDAY.date(), channel=channel_id, chat=chat, hour=7)
+        digest_id = await pool.fetchval("SELECT id FROM proactive_deliveries WHERE dedupe_key = 'deferred'")
+        monkeypatch.setattr(attention, "collect", _collect(_summary("ok")))
+        bus = MessageBus(runtime_root=tmp_path)
+        registry = ChannelRegistry(bus)
+        adapter = LarkChannelAdapter(runtime_root=tmp_path, channel_id=channel_id,
+                                     allowlist=SenderAllowlist(channel_id, frozenset({chat})))
+        registry._channels[channel_id] = adapter
+        service = _service(registry, MONDAY)
+        again = None
+        try:
+            if failure:
+                with monkeypatch.context() as patch:
+                    if failure == "validation":
+                        patch.setattr(morning_brief, "_key", lambda *args: "")
+                    else:
+                        patch.setenv("PATH", str(tmp_path / "no-executable"))
+                    await service.run_once()
+                assert (await _rows(pool))[0]["status"] == "failed"
+                assert await pool.fetchval("SELECT read_ids FROM morning_briefs") == []
+                assert await pool.fetchval("SELECT count(*) FROM morning_brief_consumed") == 0
+                assert not lark_cli_stand_in.exists()
+            await service.run_once()
+            await service.run_once()
+            row, = await _rows(pool)
+            assert (row["status"], row["attempts"]) == ("sent", 2 if failure else 1)
+            assert await pool.fetchval("SELECT read_ids FROM morning_briefs") == [digest_id]
+            assert await pool.fetchval("SELECT delivery_id FROM morning_brief_consumed") == digest_id
+            calls = [json.loads(line) for line in lark_cli_stand_in.read_text().splitlines()]
+            send, = [call for call in calls if "+messages-send" in call]
+            key = send[send.index("--idempotency-key") + 1]
+            assert 0 < len(key) <= 50
+            # A second adapter reuses the wire key (or the durable outbox row) without another delivery.
+            again = LarkChannelAdapter(runtime_root=tmp_path, channel_id=channel_id,
+                                      allowlist=SenderAllowlist(channel_id, frozenset({chat})))
+            from looper.agents.reminders import target
+            receipt = await again.post(target(chat), "same brief", idempotency_key=morning_brief._key(
+                MONDAY.date(), channel_id, chat))
+            assert receipt.success
+            calls = [json.loads(line) for line in lark_cli_stand_in.read_text().splitlines()]
+            assert [c[c.index("--idempotency-key") + 1] for c in calls] == [key] * (1 if outbound else 2)
+            delivered = Path(str(lark_cli_stand_in) + ".delivered.jsonl").read_text().splitlines()
+            assert len(delivered) == 1
+        finally:
+            await adapter._channel_outbox.stop()
+            if again is not None:
+                await again._channel_outbox.stop()
+            await bus.shutdown()
+
+    run_with_channel_configs(test, monkeypatch)
+
+
+@pytest.mark.parametrize("earlier_attempt", [False, True])
+def test_skipped_day_digests_are_included_only_after_the_first_attempt(monkeypatch, earlier_attempt) -> None:
+    async def test(pool: Any) -> None:
+        await _zone(pool)
+        await _operator(pool)
+        monkeypatch.setattr(attention, "collect", _collect(_summary("error", "synthetic unavailable")))
+        channel = _Channel()
+        tuesday = MONDAY + timedelta(days=1)
+        wednesday = MONDAY + timedelta(days=2)
+        if earlier_attempt:
+            await _service(channel, MONDAY).run_once()
+        await _digest(pool, "before-window", date(2026, 11, 20), hour=7)
+        await _digest(pool, "skipped-day", tuesday.date(), hour=7)
+        await _digest(pool, "today", wednesday.date(), hour=7)
+        service = _service(channel, tuesday)
+        chat_settings.set_morning_brief_enabled(False)
+        await service.run_once()
+        assert not await pool.fetchval("SELECT EXISTS(SELECT 1 FROM morning_briefs WHERE local_date = $1)",
+                                      tuesday.date())
+        await _service(channel, wednesday).run_once()
+        sent = channel.posts[-1]["text"]
+        assert ("11-24 07:00" in sent) is earlier_attempt
+        assert "11-25 07:00" in sent and "11-20 07:00" not in sent
+        consumed = await pool.fetch(
+            "SELECT dedupe_key FROM proactive_deliveries JOIN morning_brief_consumed ON delivery_id = id")
+        assert {r["dedupe_key"] for r in consumed} == ({"skipped-day", "today"} if earlier_attempt else {"today"})
+
+    run_with_channel_configs(test, monkeypatch)
 
 
 def test_nothing_to_say_sends_nothing_and_is_not_tried_again(monkeypatch: pytest.MonkeyPatch) -> None:
