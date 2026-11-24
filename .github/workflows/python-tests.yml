@@ -127,6 +127,12 @@ jobs:
         if: needs.changes.outputs.docs_only != 'true'
         run: scripts/stage-dashboard.sh
 
+      - name: Allow unprivileged user namespaces
+        if: needs.changes.outputs.docs_only != 'true'
+        run: |
+          # Ubuntu 24.04's AppArmor sysctl hides these namespaces. Other images have no such key.
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || test ! -e /proc/sys/kernel/apparmor_restrict_unprivileged_userns
+
       - name: Run the tests
         if: needs.changes.outputs.docs_only != 'true'
         run: uv run --extra test python -m pytest -q -n auto -rs --durations=25 -m "not installed and not provenance"

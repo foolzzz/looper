@@ -2381,7 +2381,11 @@ _FLOW = {"skill_proposal_useful": (2, 0, 0, 0), "skill_proposal_not_needed": (1,
          "reviewer_unrelated_note": (1, 2, 2, 0), "reviewer_elsewhere": (1, 0, 1, 0),
          "reviewer_elsewhere_wrong": (1, 1, 2, 0), "advisor_checkpoint": (1, 0, 0, 0),
          "advisor_optional_flaky": (1, 1, 0, 0),
-         "hidden_precondition": (1, 0, 0, 0), "rethink_bug": (1, 0, 0, 0), "misleading_error": (1, 0, 0, 0)}
+         "hidden_precondition": (1, 0, 0, 0), "rethink_bug": (1, 0, 0, 0), "misleading_error": (1, 0, 0, 0),
+         # One reviewed step; checks left off; a failed review then a retry; a protected edit, a fenced retry,
+         # then one passing review; one recheck of a timed-out check, then a retry.
+         "checks_per_criterion": (1, 0, 1, 0), "checks_off": (1, 0, 0, 0), "weak_check": (1, 1, 2, 0),
+         "edited_test": (1, 1, 1, 0), "check_error_recheck": (1, 1, 0, 0)}
 # (independent pairs, bracketed pairs, parallel workers): only the parts that need nothing of each other run side by
 # side; interface_first's sit between its interface step and its integration step.
 _SHAPE = {"skill_proposal_useful": (0, 0, 1), "skill_proposal_not_needed": (0, 0, 1),
@@ -2412,7 +2416,9 @@ _SHAPE = {"skill_proposal_useful": (0, 0, 1), "skill_proposal_not_needed": (0, 0
           "planner_plan_file": (0, 0, 1), "reviewer_retry_note": (0, 0, 1),
           "reviewer_unrelated_note": (0, 0, 1), "reviewer_elsewhere": (0, 0, 1),
           "reviewer_elsewhere_wrong": (0, 0, 1),
-          "hidden_precondition": (0, 0, 1), "rethink_bug": (0, 0, 1), "misleading_error": (0, 0, 1)}
+          "hidden_precondition": (0, 0, 1), "rethink_bug": (0, 0, 1), "misleading_error": (0, 0, 1),
+          "checks_per_criterion": (0, 0, 1), "checks_off": (0, 0, 1), "weak_check": (0, 0, 1),
+          "edited_test": (0, 0, 1), "check_error_recheck": (0, 0, 1)}
 # What only some tasks do; a task not named in a table is checked to do none of it. Tasks with Planner-defined or
 # template-installed roles run steps as them: each run on a stored version, with the boundaries before its contract, and the reviewed step
 # accepted only after both reviews passed. An advisory review role's failing review does not keep its step from being
