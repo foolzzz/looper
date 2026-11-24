@@ -124,15 +124,16 @@ async def create_project(
     work_dir: str = "",
     background: str = "",
     default_workflow: str | None = None,
+    knowledge_dir: str | None = None,
     execution: Mapping[str, Any] | None = None,
     project_id: str | None = None,
     pool: asyncpg.Pool | asyncpg.Connection | None = None,
 ) -> dict[str, Any]:
     pool = pool or get_pool()
     settings = _execution(execution)
-    columns = ["id", "name", "description", "work_dir", "background", "default_workflow", *settings]
+    columns = ["id", "name", "description", "work_dir", "background", "default_workflow", "knowledge_dir", *settings]
     values = [project_id or f"proj-{uuid.uuid4().hex[:12]}", name, description, work_dir, background,
-              default_workflow, *settings.values()]
+              default_workflow, knowledge_dir, *settings.values()]
     row = await pool.fetchrow(
         f"INSERT INTO projects ({', '.join(columns)}) "
         f"VALUES ({', '.join(f'${i}' for i in range(1, len(values) + 1))}) RETURNING *",
@@ -160,6 +161,7 @@ async def update_project(
     work_dir: str | None = None,
     background: str | None = None,
     default_workflow: str | None | EllipsisType = ...,
+    knowledge_dir: str | None | EllipsisType = ...,
     execution: Mapping[str, Any] | None = None,
     pool: asyncpg.Pool | None = None,
 ) -> bool:
@@ -170,6 +172,8 @@ async def update_project(
     settings = _execution(execution)
     if default_workflow is not ...:
         settings["default_workflow"] = default_workflow
+    if knowledge_dir is not ...:
+        settings["knowledge_dir"] = knowledge_dir
     assignments = "".join(f"{column} = ${i}, " for i, column in enumerate(settings, start=6))
     result = await pool.execute(
         f"""

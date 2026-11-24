@@ -39,6 +39,25 @@ describe("project deletion", () => {
   const section = () => container.querySelector('section[aria-labelledby$="-delete"]')!;
 
   it.each([
+    { before: null, choice: "projects/example", saved: "projects/example" },
+    { before: "projects/example", choice: "", saved: null },
+  ])("saves the vault knowledge directory ($before → $saved)", async ({ before, choice, saved }) => {
+    const fetcher = vi.fn(async () => Response.json({ status: "ok", result: { project: project({ knowledge_dir: saved }) } }));
+    vi.stubGlobal("fetch", fetcher);
+    await act(async () => root.render(<ProjectSettingsForm project={project({ knowledge_dir: before })} onDeleted={() => {}} />));
+    const input = container.querySelector<HTMLInputElement>('input[id$="-knowledge-dir"]')!;
+    expect(input.value).toBe(before ?? "");
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(input, choice);
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    await act(async () => container.querySelector("form")!.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true })));
+    expect(fetcher).toHaveBeenCalledExactlyOnceWith("/api/v1/project_admin/update", expect.objectContaining({
+      body: JSON.stringify({ project_id: "project-example", fields: { knowledge_dir: saved } }),
+    }));
+  });
+
+  it.each([
     { before: null, choice: "dev", saved: "dev" },
     { before: "dev", choice: "none", saved: null },
   ])("saves the project default workflow ($before → $saved)", async ({ before, choice, saved }) => {

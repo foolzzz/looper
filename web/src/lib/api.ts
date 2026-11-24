@@ -284,6 +284,8 @@ export type AcceptanceChecksMode = "off" | "local" | "network";
 export interface AcceptanceChecksSettings { acceptance_checks: AcceptanceChecksMode }
 
 export interface Project extends ProjectExecution {
+  /** Operator-selected directory relative to the knowledge vault; unset keeps current storage. */
+  knowledge_dir?: string | null;
   /** Omitted while off; permission is changed only through acceptance_checks operations. */
   acceptance_checks?: "local" | "network";
   project_id: string;
@@ -1313,6 +1315,8 @@ export async function createProject(fields: NewProjectFields): Promise<Project> 
 
 /** The project fields an update can change; an execution setting set to null inherits again. */
 export type ProjectUpdate = Partial<Omit<NewProjectFields, "name">> & { name?: string } & {
+  knowledge_dir?: string | null;
+} & {
   [K in keyof ProjectExecution]?: ProjectExecution[K] | string;
 };
 
@@ -5216,6 +5220,7 @@ export interface VaultSettings {
   rules_file: string | null;
   profile_source: string;
   manager_read?: boolean;
+  worktree_root?: string | null;
   git: boolean;
   problem: string | null;
 }
@@ -5232,6 +5237,7 @@ export async function updateVaultSettings(body: {
   rules_file?: string | null;
   profile_source?: string;
   manager_read?: boolean;
+  worktree_root?: string | null;
 }): Promise<VaultSettings> {
   const result = await callV1<VaultSettings>("/api/v1/knowledge_vault/update", body);
   if ("status" in result) throw new V1Error(202, "unavailable", result.impact);

@@ -51,6 +51,21 @@ afterEach(() => {
 });
 
 describe("Needs you page", () => {
+  it("shows blocked vault commits with their preserved branch and recovery location", async () => {
+    vi.mocked(fetchAttention).mockResolvedValue({ read_at: "2026-11-20T08:00:00Z", total: 1, sections: [
+      { kind: "vault_commits", state: "ok", count: 1, error: null, items: [
+        { key: "vault:synthetic", title: "知识库提交受阻", context: "vault", since: null,
+          href: null, ref: null, facts: { branch: "looper/vault/synthetic", worktree: "synthetic-worktree",
+            reason: "merge_blocked" } }] },
+    ] });
+    await render();
+    const section = host.querySelector('section[aria-label="知识库提交受阻"]')!;
+    expect(section.textContent).toContain("looper/vault/synthetic");
+    expect(section.textContent).toContain("synthetic-worktree");
+    expect(section.textContent).toContain("merge_blocked");
+    expect(section.textContent).toContain("保留");
+  });
+
   it("lists spend holds with their cap and a direct link to continue or stop", async () => {
     vi.mocked(fetchAttention).mockResolvedValue({ read_at: "2026-11-20T08:00:00Z", total: 1, sections: [
       { kind: "cost", state: "ok", count: 1, error: null, items: [

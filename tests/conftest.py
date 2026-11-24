@@ -985,3 +985,10 @@ def current_turn(monkeypatch: pytest.MonkeyPatch) -> None:
 
     monkeypatch.setattr(ManagerOps, "begin_turn", begin_turn)
     monkeypatch.setattr(ManagerOps, "call", bound_call)
+
+
+@pytest.fixture(autouse=True)
+def _temporary_vault_worktrees(monkeypatch, tmp_path):
+    """Filesystem transaction defaults in tests must never create real home worktrees."""
+    from looper.agents import vault_commit
+    monkeypatch.setattr(vault_commit, "default_worktree_root", lambda: tmp_path.parent / f"{tmp_path.name}-vault-worktrees")

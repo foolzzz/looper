@@ -79,6 +79,7 @@ def build_parser() -> argparse.ArgumentParser:
     _add_ledger_parser(commands)
     _add_leads_parser(commands)
     _add_memory_parser(commands)
+    _add_knowledge_parser(commands)
     _add_decisions_parser(commands)
     _add_claude_code_parser(commands)
     profile = commands.add_parser("profile", allow_abbrev=False, help="Read the operator profile locally.")
@@ -254,6 +255,16 @@ def _add_leads_parser(commands: argparse._SubParsersAction) -> None:
         _add_location_flags(command)
 
 
+def _add_knowledge_parser(commands: argparse._SubParsersAction) -> None:
+    knowledge = commands.add_parser("knowledge", allow_abbrev=False, help="Migrate project documents to the vault.")
+    sub = knowledge.add_subparsers(dest="knowledge_command", required=True)
+    migrate = sub.add_parser("migrate", allow_abbrev=False,
+                             help="Preview a project knowledge export; --execute backs up and writes it.")
+    migrate.add_argument("--project", required=True, help="Project name.")
+    migrate.add_argument("--execute", action="store_true", help="Back up the source rows and commit the export.")
+    _add_location_flags(migrate)
+
+
 def _add_memory_parser(commands: argparse._SubParsersAction) -> None:
     memory = commands.add_parser(
         "memory", allow_abbrev=False, help="Read and manage memory candidates; check what a write needs.",
@@ -417,6 +428,10 @@ def main(argv: list[str] | None = None) -> int:
         from .agents import leads_commands
 
         return leads_commands.run(args, _load_ops)
+    if args.command == "knowledge":
+        from .agents import knowledge_commands
+
+        return knowledge_commands.run(args, _load_ops)
     if args.command == "memory":
         from .agents import memory_commands
 
