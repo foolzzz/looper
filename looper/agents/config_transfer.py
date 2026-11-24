@@ -629,7 +629,8 @@ async def export_chunks(
                 "name": project["name"], "description": project["description"], "background": project["background"],
                 "default_workflow": project["default_workflow"],
                 "execution": omit_unset_subagents({column: project[column] for column in EXECUTION_COLUMNS}) | (
-                    {"acceptance_checks": project["acceptance_checks"]} if project.get("acceptance_checks") else {}),
+                    {"acceptance_checks": project["acceptance_checks"]} if project.get("acceptance_checks") else {}) | (
+                    {"memory_closeout": "on"} if project.get("memory_closeout") == "on" else {}),
                 **({"skill_proposals": project["skill_proposals"]} if project.get("skill_proposals") else {}),
                 "layers": [layer_entry(r) for r in layers if r["project_id"] == project["id"]],
                 "knowledge": [document_entry(r) for r in documents[project["id"]]],
@@ -2075,15 +2076,26 @@ class _Importer:
         from .projects import RequestError, _create_project_row, project_background, project_name, project_work_dir
 
         raw_name = entry.get("name") if isinstance(entry, Mapping) else None
+        closeout_set = False
+        closeout: str | None = None
         try:
             entry = _mapping(entry, "a project")
             try:
                 name = project_name(entry.get("name"))
                 background = project_background(entry.get("background", ""))
-                execution = execution_fields({column: _mapping(entry.get("execution", {}), "execution").get(column)
-                                              for column in EXECUTION_COLUMNS})
-                mode = acceptance_checks_mode(_mapping(entry.get("execution", {}), "execution").get("acceptance_checks"))
+                execution_raw = _mapping(entry.get("execution", {}), "execution")
+                execution = execution_fields({column: execution_raw.get(column) for column in EXECUTION_COLUMNS})
+                mode = acceptance_checks_mode(execution_raw.get("acceptance_checks"))
                 acceptance = None if mode is AcceptanceChecksMode.OFF else mode.value
+                if "memory_closeout" in execution_raw:
+                    raw_closeout = execution_raw.get("memory_closeout")
+                    if raw_closeout == "on":
+                        closeout = "on"
+                    elif raw_closeout == "off":
+                        closeout = None
+                    else:
+                        raise ValueError("memory_closeout must be off or on")
+                    closeout_set = True
             except ValueError as exc:
                 raise _Skip(str(exc)) from None
             if name.lower() in self.seen_projects:
@@ -2102,6 +2114,8 @@ class _Importer:
         row = self.target.projects.get(name.lower())
         if "acceptance_checks" in entry.get("execution", {}):
             values["acceptance_checks"] = acceptance
+        if closeout_set:
+            values["memory_closeout"] = closeout
         if row is None:
             try:
                 values["work_dir"] = project_work_dir(entry.get("work_dir", ""))
@@ -2128,6 +2142,9 @@ class _Importer:
                                  execution=execution, default_workflow=default, pool=self.conn)
         if self.apply and action in (Action.ADDED, Action.CHANGED) and "acceptance_checks" in values:
             await self.conn.execute("UPDATE projects SET acceptance_checks = $2 WHERE id = $1", project_id, acceptance)
+        if self.apply and action in (Action.ADDED, Action.CHANGED) and "memory_closeout" in values:
+            await self.conn.execute(
+                "UPDATE projects SET memory_closeout = $2 WHERE id = $1", project_id, values["memory_closeout"])
         self.project_ids[name.lower()] = project_id
         self.project_values[project_id] = {**(row or {}), "id": project_id, "name": name, **values}
         from .project_execution import ProjectExecution
