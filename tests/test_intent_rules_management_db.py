@@ -149,7 +149,7 @@ def test_project_auto_cap_has_one_versioned_owner(monkeypatch):
             monkeypatch.setattr(service, "_now", lambda: datetime(2026, 11, 23, 5, tzinfo=timezone.utc))
             stats = await service.hit_stats(principal=OPERATOR, db=conn)
             assert stats["projects"] == [{"project_id": "review", "local_day": "2026-11-22",
-                "timezone": "Pacific/Honolulu", "used": None, "cap": 50}]
+                "timezone": "Pacific/Honolulu", "used": 0, "cap": 50}]
             with pytest.raises(ValueError):
                 await projects.update_project("review", execution={"auto_task_daily_cap": 99}, pool=conn)
     run_db(check, monkeypatch)
@@ -195,7 +195,7 @@ def test_every_rule_operation_rejects_client_and_declares_inside(monkeypatch, tm
             status, _ = await call("intent_rules.confirm", {"preview_id": token, "acceptance": [], "change": {}})
             assert status == 400
             status, answer = await call("intent_rule_hits.stats")
-            assert status == 200 and answer["result"]["available"] is False
+            assert status == 200 and answer["result"]["available"] is True
     run_db(check, monkeypatch)
 
 

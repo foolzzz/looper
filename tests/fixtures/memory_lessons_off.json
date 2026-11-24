@@ -37,7 +37,6 @@
     "function:looper/agents/system_prompt.py:review_contract": "f4794fd1a2bcc37d03576c346e5924fc1f28f9690fb639c4e4525c96f3b6dd73",
     "function:looper/agents/system_prompt.py:work_contract": "ca8e9224e4ceaec99927b3f3d4256a48cec270029b7cfe8cbb800d632e5c6b20",
     "function:looper/agents/task_notice.py:notice_text": "41b3c63ebbd643180cfa4fa784cf93045c0b1c7db0d912064a2aa6c086b4994f",
-    "function:looper/agents/tiers/planner.py:PlannerAgent._capture_project_learnings": "3cf7702cdb23db7163cebf61a7207afc2e66ebfaaf49fa09ad407cbf4e13a7d6",
     "function:looper/agents/tiers/planner.py:PlannerAgent._distill_lessons": "1560686de1895d28af4155ffc79acbcd2588898235d6582144bc53a9d09acccb",
     "function:looper/agents/tiers/planner.py:PlannerAgent._lessons_message": "c801f8de30cba56f62b91c23ae8317d73cd2a4b137b99b92bbfe1e0b02e531e9",
     "function:looper/agents/tiers/planner.py:PlannerAgent._plan_message": "729d607128d1f3859decb58445a95bf0457d669c4f1013b0a2da2caea689e5b6",

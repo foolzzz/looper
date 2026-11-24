@@ -196,6 +196,12 @@ async def build(intent_id: int, *, via: str, origin: Mapping[str, Any] | None = 
     if platform is None:
         raise IntentRefused("task service is unavailable")
     now = now or _now()
+    if await leads_model.rule_types_enabled(_db(db)):
+        mr = await _db(db).fetchrow("SELECT type_key FROM intents WHERE id=$1", intent_id)
+        if mr and mr["type_key"] == leads_model.RULE_INTENT_TYPE:
+            from . import intent_rule_engine
+            return await intent_rule_engine.manual_build(intent_id, via=via, origin=origin, candidate=candidate,
+                project_id=project_id, workflow_key=workflow_key, platform=platform, db=_db(db), card_press=card_press)
     fence = await untrusted.enabled(_db(db))  # before the connection below: a build holds no second one
     async with _db(db).acquire() as conn, conn.transaction():
         await _enabled(conn)
@@ -365,6 +371,8 @@ async def type_create(key: str, *, name: str, guidance: str, priority: str, defa
                       edited_via: str = "dashboard", db: Any = None) -> dict:
     if not isinstance(key, str) or not re.fullmatch(r"[a-z][a-z0-9_]{0,31}", key):
         raise ValueError("key must match [a-z][a-z0-9_]{0,31}")
+    if key == leads_model.RULE_INTENT_TYPE:
+        raise IntentRefused("intent type key is reserved")
     async with _db(db).acquire() as conn, conn.transaction():
         await conn.execute("LOCK TABLE intent_types IN SHARE ROW EXCLUSIVE MODE")
         if await conn.fetchval("SELECT EXISTS(SELECT 1 FROM intent_types WHERE key=$1)", key):
@@ -634,7 +642,7 @@ async def stats(days: int = 30, *, now: datetime | None = None, db: Any = None) 
         "count(i.id) FILTER(WHERE i.state='expired') AS expired,count(i.id) FILTER(WHERE i.state='merged') AS merged, "
         "count(i.id) FILTER(WHERE i.state='dropped') AS dropped "
         "FROM intent_types t JOIN intent_type_versions v ON v.type_key=t.key AND v.version=t.version "
-        "LEFT JOIN intents i ON i.type_key=t.key AND i.created_at >= $1 GROUP BY t.key,v.name ORDER BY t.key",
+        "LEFT JOIN intents i ON i.type_key=t.key AND i.created_at >= $1 GROUP BY t.key,t.builtin,v.name ORDER BY t.key",
         (now or _now()) - timedelta(days=days))
     result = []
     rules_on = await leads_model.rule_types_enabled(_db(db))
@@ -665,6 +673,8 @@ async def settings_put(enabled: bool, *, db: Any = None) -> dict:
     if not isinstance(enabled, bool):
         raise ValueError("enabled must be boolean")
     async with _db(db).acquire() as conn, conn.transaction():
+        from ..db.intent_rules import lock_admission
+        await lock_admission(conn)
         await conn.execute("INSERT INTO system_settings(key,value) VALUES('intents.enabled',$1) "
                            "ON CONFLICT(key) DO UPDATE SET value=EXCLUDED.value,updated_at=now()", str(enabled).lower())
         if not enabled:

@@ -1,4 +1,4 @@
-"""Lesson settings persist across real CLI-server restarts without starting processing."""
+"""Lesson settings and legacy project-knowledge replacement survive real CLI-server restarts."""
 from __future__ import annotations
 
 import asyncio
@@ -6,6 +6,7 @@ import json
 import socket
 import sys
 import time
+import tomllib
 
 import asyncpg
 import httpx
@@ -60,8 +61,14 @@ def _port():
 
 
 def test_lesson_foundation_through_cli_serve_and_restart(monkeypatch,tmp_path):
-    monkeypatch.setattr(runner,'_SERVE','import sys\nfrom looper.cli import main\n'
-        'sys.exit(main(["serve","--host","127.0.0.1","--port",sys.argv[1],"--runtime-root",sys.argv[2]]))\n')
+    monkeypatch.setattr(runner,'_SERVE','import sys\nfrom pathlib import Path\nfrom dataclasses import replace\n'
+        'from looper import ops_config\nfrom looper.cli import main\n'
+        'path=Path(sys.argv[2])/ops_config.FILE\n'
+        'ops=ops_config.load(ops_config.Flags(runtime_root=sys.argv[2],config=path))\n'
+        'text=ops_config.render(replace(ops,host="127.0.0.1",port=int(sys.argv[1])))\n'
+        'ops_config.write_private(path,text.replace(\'# host = "127.0.0.1"\',\'host = "127.0.0.1"\'))\n'
+        'sys.exit(main(["serve","--config",str(path),"--host","127.0.0.1","--port",sys.argv[1],'
+        '"--runtime-root",sys.argv[2]]))\n')
     runtime,home,binaries,work=(tmp_path/name for name in ('runtime','home','bin','work'))
     for path in (home,binaries,work):
         path.mkdir()
@@ -88,6 +95,9 @@ def test_lesson_foundation_through_cli_serve_and_restart(monkeypatch,tmp_path):
         common=dict(database_url=url,runtime_root=runtime,bin_dir=binaries,home=home,notes_root=home/'notes',env=env,
                     port=_port(),log_path=tmp_path/'serve.log')
         with runner.running_server(**common) as api:
+            ops=tomllib.loads((runtime/'ops'/'server.toml').read_text())
+            assert ops['server']['host']=='127.0.0.1' and ops['server']['port']==common['port']
+            assert api.base_url==f"http://127.0.0.1:{common['port']}" and common['port']!=8767
             registry=api.post('/api/v1/registry/view',{})['result']
             runtime_spec=next(r for r in registry['runtimes'] if r['type']=='codex')
             models=api.post('/api/v1/ops/models/list',{})['result']['models']
@@ -113,7 +123,7 @@ def test_lesson_foundation_through_cli_serve_and_restart(monkeypatch,tmp_path):
             for path in ('memory/lessons_list','memory_lessons/settings_get','memory_lessons/settings_put'):
                 response=httpx.post(api.base_url+'/api/v1/'+path,json={},headers={'Authorization':'Bearer '+token})
                 assert response.status_code==403
-            # A normal task still follows the existing Planner/Worker path while the settings are enabled.
+            # Enabled projects replace legacy project drafts and LESSONS, including in shadow mode.
             task=api.post('/api/v1/tasks/create',{'project_id':'project-smoke','requirement':'Check synthetic data.',
                 'work_dir':str(work)})['result']
             task_id=task['task_id']
@@ -133,14 +143,14 @@ def test_lesson_foundation_through_cli_serve_and_restart(monkeypatch,tmp_path):
         async def verify():
             conn=await asyncpg.connect(url)
             try:
-                assert await conn.fetchval("SELECT count(*) FROM project_document_drafts WHERE task_id=$1",task_id)==2
-                for table in ('memory_retro_runs','memory_injections','memory_weekly_cards','task_lesson_snapshots'):
+                assert await conn.fetchval("SELECT count(*) FROM project_document_drafts WHERE task_id=$1",task_id)==0
+                for table in ('memory_injections','memory_weekly_cards','task_lesson_snapshots'):
                     assert await conn.fetchval(f'SELECT count(*) FROM {table}')==0
             finally:
                 await conn.close()
         asyncio.run(verify())
         records=[json.loads(line) for line in capture.read_text().splitlines()]
         assert any(row['stdin'].startswith('[PLAN]') for row in records)
-        assert any(row['stdin'].startswith('[LESSONS]') for row in records)
+        assert not any(row['stdin'].startswith('[LESSONS]') for row in records)
         assert all('Lessons from earlier tasks' not in row['system'] for row in records)
         assert all('memory_retro' not in row['stdin'] for row in records)

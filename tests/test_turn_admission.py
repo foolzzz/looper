@@ -198,6 +198,38 @@ def test_background_freeze_does_not_send_a_user_notice(controller):
     asyncio.run(run())
 
 
+def test_interactive_user_turn_yields_the_quota_probe_to_another_waiter(controller):
+    async def run():
+        c = controller
+        await c.transition("synthetic", admission.QuotaFailure(None, None))
+        entered = asyncio.Event()
+
+        @turn_admission.admitted_manager_turn
+        async def method(agent, token, prepared):
+            entered.set()
+            return "answer"
+
+        user = asyncio.create_task(method(manager(), token(), prepared()))
+        await wait_for_waiters(c, 1)
+        assert c.waiters[0].user_message is True
+        assert c.waiters[0].owner == "manager:main"
+        worker = asyncio.create_task(c.acquire("synthetic", Lane.USER_TASK, "worker"))
+        await wait_for_waiters(c, 2)
+        c.now = lambda: NOW + timedelta(minutes=6)
+        await c.wake()
+        await asyncio.wait_for(worker, 1)
+        grant = worker.result()
+        assert grant.probe
+        assert c._state("synthetic").probe_owner == "worker"
+        assert not entered.is_set()
+        user.cancel()
+        await asyncio.gather(user, return_exceptions=True)
+        await c.release("worker")
+        await c.stop()
+
+    asyncio.run(run())
+
+
 def test_freeze_once_per_message_then_probe_and_reply(controller):
     async def run():
         c, a = controller, manager()

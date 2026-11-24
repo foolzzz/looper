@@ -149,6 +149,7 @@ class ProactiveSource(str, Enum):
     SCHEDULE = 'schedule'
     ADVISOR_ALERT = 'advisor_alert'
     METRICS_ALERT = 'metrics_alert'
+    MESSAGE_STREAM_ALERT = 'message_stream_alert'
     AUTONOMOUS = 'autonomous'
     USER_REMINDER = 'user_reminder'
     IDLE_CHECK = 'idle_check'

@@ -456,12 +456,20 @@ def test_a_stop_lets_the_send_under_way_finish_and_starts_no_other(monkeypatch: 
 
 def test_a_stop_takes_at_most_its_grace_even_when_the_send_will_not_end(monkeypatch: pytest.MonkeyPatch) -> None:
     class Stuck(_Channel):
+        """A send that does not end, and whose cancellation cleanup does not end either, until ``release`` is set."""
+
+        def __init__(self) -> None:
+            super().__init__()
+            self.started = asyncio.Event()
+            self.release = asyncio.Event()
+
         async def post(self, *args: Any, **kwargs: Any) -> PostReceipt:
             self.posts.append(args)
+            self.started.set()
             try:
-                await asyncio.sleep(30)
+                await self.release.wait()
             except asyncio.CancelledError:
-                await asyncio.sleep(30)  # and its clean-up is slow too
+                await self.release.wait()  # its clean-up does not end on its own either
                 raise
             raise AssertionError
 
@@ -474,16 +482,25 @@ def test_a_stop_takes_at_most_its_grace_even_when_the_send_will_not_end(monkeypa
         channel = Stuck()
         service = reminders.ReminderService(channel, clock=_Clock(now), interval=0.05)
         await service.start()
-        for _ in range(200):
-            if channel.posts:
-                break
-            await asyncio.sleep(0.05)
+        sending = service._task
+        assert sending is not None
+        await asyncio.wait_for(channel.started.wait(), 5)  # stop only once a send is actually under way
         loop = asyncio.get_running_loop()
         began = loop.time()
-        await service.stop()
-        assert loop.time() - began < 1.0
-        # The send never answered: it stays claimed, and the next start settles it uncertain, never sending it again.
-        assert (await _statuses(pool))[reminder_id][0] == "sending"
+        try:
+            await service.stop()
+            assert loop.time() - began < 1.0
+            assert not sending.done()  # the send did not end; stop returned within the grace anyway
+            # The send never answered: it stays claimed, and the next start settles it uncertain, never sending it again.
+            assert (await _statuses(pool))[reminder_id][0] == "sending"
+        finally:
+            # Let the stuck send unwind so the schema pool can close. This is after the assertions.
+            channel.release.set()
+            if not sending.done():
+                try:
+                    await sending
+                except asyncio.CancelledError:
+                    pass
 
     run_with_channel_configs(test, monkeypatch)
 

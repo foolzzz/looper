@@ -54,16 +54,24 @@ _PREVIEW = _object({"preview_id": _UUID, "expires_at": _TIME, "generation": _INT
     "diff": _DIFF, "impact": _IMPACT, "required_acceptance": model.ACCEPTANCE_SCHEMA,
     "reference_fingerprints": _FINGERPRINTS}, closed=True)
 _CONFIRM = _object({"generation": _INT, "settings": _SETTINGS, "rules": _array(model.RULE_SCHEMA)}, closed=True)
+_EXECUTION = _object({"id": model.POSITIVE_INT, "task_id": _STR,
+    "mode": {"enum": ["auto", "manual"]}, "mr_key": model.MR_IDENTITY_SCHEMA,
+    "quota": _nullable(_object({"day": _STR, "project_id": _STR, "units": {"enum": [0,1]}}, closed=True)),
+    "start_state": {"enum": ["pending","requested","started","failed","cancelled"]},
+    "notice": _nullable(_object({"state": {"enum": ["pending","sending","sent","digest","failed","uncertain"]},
+        "decision": _nullable(_STR), "reason": _nullable(_STR)}, closed=True)),
+    "revoke": _object({"state": {"enum": ["none","requested","stopped","already_terminal","failed"]},
+        "reason": _nullable(_STR)}, closed=True), "last_error_code": _nullable(_STR)}, closed=True)
 _HIT = _object({"id": _INT, "created_at": _TIME, "rule_id": _nullable(_UUID), "rule_version": _NULL_INT,
     "selection": {"enum": [item.value for item in model.Selection]}, "action": {"enum": list(model.ACTIONS)},
     "reason": _nullable(_STR), "intent_id": _NULL_INT, "discovery_id": _NULL_INT,
     "task_id": _nullable(_STR), "mr_identity": _nullable(model.MR_IDENTITY_SCHEMA),
-    "execution_state": {"type": "null"}}, closed=True)
+    "execution_state": _nullable(_STR)}, closed=True)
 _CONDITION = model.CONDITION_RESULT_SCHEMA
 _SOURCES = _object({"event_seq": _INT, "source_id": _STR, "chat_id": _STR,
     "external_id": _STR, "sent_at": _TIME}, closed=True)
 _HIT_DETAIL = _object({"hit": _HIT, "conditions": _array(_CONDITION), "sources": _array(_SOURCES),
-    "execution": {"type": "null"}}, closed=True)
+    "execution": _nullable(_EXECUTION), "attempts": _array(model.ATTEMPT_RESULT_SCHEMA)}, closed=True)
 _STATS = _object({"available": _BOOL,
     "range": _object({"since": _TIME, "until": _TIME}, closed=True),
     "rules": _array(_object({"rule_id": _nullable(_UUID), "version": _NULL_INT, "hits": _INT,
@@ -74,7 +82,7 @@ _STATS = _object({"available": _BOOL,
 
 def _op(domain, action, request, result, *, write=False):
     summary = f"Manage intent rules: {action.replace('_', ' ')}." if domain == "intent_rules" else f"Read intent rule hits: {action}."
-    # Configuration and audit only: no adapter, channel or other external system is called.
+    # These operations administer local admission, tasks and audit; no review-system write is permitted.
     return Operation(f"{domain}.{action}", "POST", f"/api/v1/{domain}/{action}", summary, summary,
         request, result, risk="write" if write else "read", operator_only=True, cli=False, level=ActionLevel.INSIDE)
 
@@ -90,6 +98,32 @@ OPERATIONS = (
         _object({"hits": _array(_HIT), "more": _BOOL}, closed=True)),
     _op("intent_rule_hits", "get", _object({"hit_id": model.POSITIVE_INT}, closed=True), _HIT_DETAIL),
     _op("intent_rule_hits", "stats", _object({"rule_id": _UUID, "since": _TIME, "until": _TIME}, [], closed=True), _STATS),
+    _op("intent_rules", "discovery_submit", _object({"discovery_source_id":model.ID_SCHEMA,"source_ref":model.ID_SCHEMA,
+        "system_id":model.ID_SCHEMA,"mr_url":_STR}, closed=True),
+        _object({"discovery_id":model.POSITIVE_INT,"state":{"enum":["pending","confirmation","tasked","recorded","rejected"]},"task_id":_nullable(_STR)},closed=True),write=True),
+    _op("intent_rules", "discovery_get", _object({"discovery_id":model.POSITIVE_INT},closed=True),
+        _object({"discovery":_object({"id":model.POSITIVE_INT,"source_ref":_STR,"system_id":_STR,"mr_url":_STR,
+            "state":{"enum":["pending","confirmation","tasked","recorded","rejected"]},"task_id":_nullable(_STR)},closed=True),"hit_id":_nullable(model.POSITIVE_INT),
+            "execution":_nullable(_EXECUTION)},closed=True)),
+    _op("intent_rules", "discovery_build", _object({"discovery_id":model.POSITIVE_INT,"project_id":model.ID_SCHEMA,
+        "template_key":model.ID_SCHEMA},closed=True),_object({"task_id":_STR,"execution":_EXECUTION},closed=True),write=True),
+    _op("intent_rules", "discovery_reject", _object({"discovery_id":model.POSITIVE_INT},closed=True),
+        _object({"discovery_id":model.POSITIVE_INT,"state":{"const":"rejected"}},closed=True),write=True),
+    _op("intent_rules", "revoke", _object({"execution_id":model.POSITIVE_INT},closed=True),
+        _object({"execution_id":model.POSITIVE_INT,"task_id":_STR,
+            "state":{"enum":["requested","stopped","already_terminal","failed"]},"reason":_nullable(_STR)},closed=True),write=True),
+    _op("intent_rules", "claim_revision", _object({"task_id":model.ID_SCHEMA,"system_id":model.ID_SCHEMA,"mr_url":_STR,
+        "expected_revision":model.ID_SCHEMA},closed=True),
+        _object({"task_id":_STR,"mr_key":model.MR_IDENTITY_SCHEMA,"existing":_BOOL},closed=True),write=True),
+    _op("intent_rules", "migration_preview", _object({"discovery_source_id":model.ID_SCHEMA,
+        "entries":{"type":"array","minItems":1,"maxItems":100,"items":_object({"task_id":model.ID_SCHEMA,
+            "system_id":model.ID_SCHEMA,"mr_url":_STR,"revision":model.ID_SCHEMA},
+            ["task_id","system_id","mr_url"],closed=True)}},closed=True),
+        _object({"preview_id":_UUID,"verified":_INT,"blocked":_INT,"conflicts":_INT,
+            "impact":_array(_object({"task_id":_STR,"identity":_nullable(model.MR_IDENTITY_SCHEMA),
+                "status":{"enum":["verified","blocked","conflict"]},"task_fingerprint":_nullable(_STR)},closed=True))},closed=True),write=True),
+    _op("intent_rules", "migration_confirm", _object({"preview_id":_UUID},closed=True),
+        _object({"registered":_INT,"blocked":_INT,"conflicts":_INT},closed=True),write=True),
 )
 
 
@@ -98,6 +132,13 @@ async def run(server, operation, arguments, principal, headers):
     service._operator(principal)
     domain, action = operation.operation_id.split(".")
     values = dict(arguments)
+    if domain == "intent_rules" and action in {"discovery_submit","discovery_get","discovery_build","discovery_reject",
+                                              "revoke","claim_revision","migration_preview","migration_confirm"}:
+        from .. import intent_rule_engine as engine
+        if action == "discovery_submit":
+            return await engine.submit_discovery(principal=principal, **values)
+        function = getattr(engine, action)
+        return service._plain(await function(principal=principal, **values))
     if domain == "intent_rules":
         function = {"list": service.list_rules, "settings_get": service.settings_get, "history": service.history,
                     "preview": service.preview, "confirm": service.confirm}[action]

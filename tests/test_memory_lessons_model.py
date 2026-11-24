@@ -79,7 +79,7 @@ _DEFAULT = {
     "enabled": False, "auto_activate": False,
     "inject": {"planner": True, "worker": True, "reviewer": False},
     "max_lessons": 12, "max_chars": 3000, "project_cap": 60, "valid_days": 90,
-    "wrong_threshold": 2, "min_journal_entries": 3, "retro_budget_usd": 0.05, "daily_budget_usd": 0.5,
+    "wrong_threshold": 2, "min_journal_entries": 3, "retro_budget_usd": 0.10, "daily_budget_usd": 0.5,
     "weekly": {"enabled": True, "weekday": 1, "time": "09:30", "push_channel": None},
 }
 

@@ -15,7 +15,7 @@ The tasks' vault tools (``ops.vault.TOOLS``) are unchanged: their declaration is
 from __future__ import annotations
 
 import hashlib
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from typing import Any
 
 from .. import vault
@@ -60,19 +60,33 @@ def _remember(manager_id: str, texts: Iterable[tuple[str, str]]) -> None:
                                     for path, text in texts])
 
 
-async def _search(call: Call) -> dict[str, Any]:
+async def search_answer(arguments: Mapping[str, Any]) -> tuple[dict[str, Any], list[tuple[str, str]]]:
+    """The Manager's fenced search answer, and unfenced texts for its group backstop. No turn side effects."""
     config = await _config()
-    found = await vault.search(config, call.arguments["query"], call.arguments.get("limit"))
-    _remember(call.manager_id, ((result["path"], result["snippet"]) for result in found["results"]))
-    return await vault.model_result(config, {"notice": NOTICE, **found})
+    found = await vault.search(config, arguments["query"], arguments.get("limit"))
+    texts = [(result["path"], result["snippet"]) for result in found["results"]]
+    return await vault.model_result(config, {"notice": NOTICE, **found}), texts
+
+
+async def read_answer(arguments: Mapping[str, Any]) -> tuple[dict[str, Any], list[tuple[str, str]]]:
+    """The Manager's fenced note answer, and its unfenced text for the backstop. No turn side effects."""
+    config = await _config()
+    note = await vault.read(config, arguments["path"])
+    answer = {"notice": NOTICE, "path": note["path"], "bytes": note["bytes"], "content": note["content"],
+              "truncated": note["truncated"]}
+    return await vault.model_result(config, answer), [(note["path"], note["content"])]
+
+
+async def _search(call: Call) -> dict[str, Any]:
+    answer, texts = await search_answer(call.arguments)
+    _remember(call.manager_id, texts)
+    return answer
 
 
 async def _read(call: Call) -> dict[str, Any]:
-    config = await _config()
-    note = await vault.read(config, call.arguments["path"])
-    _remember(call.manager_id, [(note["path"], note["content"])])
-    return await vault.model_result(config, {"notice": NOTICE, "path": note["path"], "bytes": note["bytes"],
-                                             "content": note["content"], "truncated": note["truncated"]})
+    answer, texts = await read_answer(call.arguments)
+    _remember(call.manager_id, texts)
+    return answer
 
 
 _SCHEMAS = {tool.name: tool.schema for tool in TASK_TOOLS}

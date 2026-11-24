@@ -59,6 +59,7 @@ const ROLE_LABELS: Record<string, string> = {
   advisor: "Advisor",
   advice_check: "Advice check",
   leads_check: "Leads check",
+  memory_retro: "Memory retro",
   outbound_check: "对外动作审查",
 };
 

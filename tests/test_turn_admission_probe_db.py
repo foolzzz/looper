@@ -10,7 +10,7 @@ from looper.agents import admission, lanes_settings, session_routing
 from looper.agents.message import MessageType
 from tests.api_manager_support import USAGE, WEB, _manager, _message
 from tests.db_support import DSN, run_db, until
-from tests.fake_model_api import ResponseScript, failed, text_events
+from tests.fake_model_api import ResponseScript, call_events, failed, text_events
 
 pytestmark = pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
 PROVIDER = "prov-api-test"
@@ -103,6 +103,57 @@ def test_quota_probe_with_streamed_output_is_not_replayed(monkeypatch, tmp_path)
                             "partial probe keeps normal failure behavior")
                 await until(lambda: not chat.manager.busy, "failed turn ended")
                 assert len(chat.model.requests) == 1
+                assert not c.waiters and not c.running
+                assert c._state(PROVIDER).state is admission.AdmissionState.FROZEN
+                assert await pool.fetchval("SELECT failure_class FROM llm_records") == "quota"
+                assert user.message_id not in [e.message_id for e in chat.bus.journal.undelivered()]
+            finally:
+                await chat.manager.stop()
+                await c.stop()
+
+    run_db(run, monkeypatch, timeout=40)
+
+
+def test_quota_probe_with_a_tool_call_is_not_replayed(monkeypatch, tmp_path):
+    """A probe that already called a tool must fail in place. Replaying it would run the tool again."""
+    async def run(pool):
+        c = admission.Controller()
+        c.active = True
+        monkeypatch.setattr(admission, "_controller", c)
+        for name in ("slot", "transition", "wake"):
+            monkeypatch.setattr(admission, name, getattr(c, name))
+        monkeypatch.setattr(admission, "_freeze_alert", AsyncMock())
+        monkeypatch.setattr(lanes_settings, "enabled", lambda: True)
+        monkeypatch.setattr(session_routing, "routes", lambda _: False)
+        scripts = [ResponseScript(events=call_events("{}", name="looper_overview"))]
+        scripts.extend(ResponseScript(status=429, headers={"retry-after-ms": "1"}) for _ in range(3))
+        async with _manager(pool, tmp_path, monkeypatch, scripts) as chat:
+            calls = []
+
+            async def record_call(name, raw, **kwargs):
+                calls.append(name)
+                return {"status": "ok"}
+
+            monkeypatch.setattr(chat.ops, "call", record_call)
+            await pool.execute("INSERT INTO system_settings (key,value) VALUES ('engine.failure_typing','record')")
+            await c.transition(PROVIDER, admission.QuotaFailure(None, None))
+            await chat.bus.start()
+            await chat.manager.start(chat.bus)
+            user = _message("Do not repeat a tool call.")
+            await chat.bus.publish(user)
+            try:
+                await until(lambda: len(c.waiters) == 1, "user waits frozen")
+                c.now = lambda: datetime.now(timezone.utc) + timedelta(minutes=6)
+                await c.wake()
+                await until(lambda: len(chat.model.requests) >= 4, "tool call then quota attempts")
+                queue = chat.bus.get_queue(WEB.agent_id)
+                await until(lambda: any(e.message_type is MessageType.AGENT_REPLY for e in queue._queue)
+                            or (len(c.waiters) == 1 and not c.running),
+                            "tool probe failed in place or was incorrectly replayed")
+                assert any(e.message_type is MessageType.AGENT_REPLY for e in queue._queue)
+                await until(lambda: not chat.manager.busy, "failed turn ended")
+                assert calls == ["looper_overview"]
+                assert len(chat.model.requests) == 4
                 assert not c.waiters and not c.running
                 assert c._state(PROVIDER).state is admission.AdmissionState.FROZEN
                 assert await pool.fetchval("SELECT failure_class FROM llm_records") == "quota"
