@@ -84,6 +84,87 @@ def test_optional_lesson_messages_leave_empty_surfaces_unchanged(tmp_path):
     assert "FROZEN LESSONS" in agent._resume_brief(plan, lessons="FROZEN LESSONS")
 
 
+@pytest.mark.parametrize("recover", [False, True], ids=["recovery-off", "recovery-on"])
+@pytest.mark.parametrize("inject", [False, True], ids=["lessons-off", "lessons-on"])
+def test_failure_history_and_lessons_compose_once_in_transport_order(
+        recover, inject, tmp_path, monkeypatch, agent_db):
+    from looper.agents import claude_cli, failure_handling, failures
+    from looper.agents import memory_lesson_injection as lessons
+    from looper.agents.run_usage import Usage
+    from looper.agents.system_prompt import SystemPrompt
+    from looper.agents.tiers.planner_protocol import Decision
+    from looper.db import memory_lesson_injection as store
+
+    mode = failures.FailureTyping.ACT if recover else failures.FailureTyping.OFF
+    history = [{"role": "worker", "failure_class": "transient", "failure_cause": "connection_failed",
+                "run_id": "synthetic-run", "record_id": 12, "created_at": "2026-11-24T00:00:00Z",
+                "action": "breaker", "streak": 3}]
+    service = SimpleNamespace(known_mode=lambda: mode, continuous_failures=AsyncMock(return_value=history))
+    monkeypatch.setattr(failures, "typing_mode", AsyncMock(return_value=mode))
+    monkeypatch.setattr(failure_handling, "get_service", lambda: service)
+    note = "\n\n[EXPLORERS] Synthetic completed result."
+    monkeypatch.setattr(planner.subagent_delivery, "planner_turn_note", AsyncMock(return_value=(note, [])))
+    block = SimpleNamespace(text="## Lessons from earlier tasks\nM-0123: Check the synthetic evidence.",
+                            candidate_ids=(123,))
+    empty = SimpleNamespace(text="", candidate_ids=())
+    monkeypatch.setattr(lessons, "runtime_settings", AsyncMock(return_value=object() if inject else None))
+    monkeypatch.setattr(lessons, "render_for_run", AsyncMock(return_value=block if inject else empty))
+    for name in ("planner_injection", "recover_planner_injection", "bind_injection_record"):
+        monkeypatch.setattr(store, name, AsyncMock(return_value=None))
+    monkeypatch.setattr(lessons, "planner_notices", AsyncMock(return_value=SimpleNamespace(text="")))
+    monkeypatch.setattr(store, "prepare_injection", AsyncMock(return_value={"id": 7, "block": block}))
+    monkeypatch.setattr(store, "mark_delivered", AsyncMock(return_value={
+        "id": 7, "candidate_ids": (123,), "session_key": "synthetic-session"}))
+    sent = []
+
+    class Claude:
+        command, started, pid, stderr, totals = ["claude"], True, 1, "", Usage()
+
+        async def run_turn(self, text, on_event, stop=None, cancel=None):
+            sent.append(text)
+            if cancel is not None:
+                cancel.sent()
+            event = {"type": "result", "subtype": "success", "is_error": False, "result": "answer"}
+            return claude_cli.ResidentTurn(event, session_started=True, prompt_sent=True)
+
+    async def run():
+        agent = planner.PlannerAgent(task_id="task", runtime_root=tmp_path)
+        step = planner.PlanStep("step", 0, "Inspect evidence", key="s1", status="deciding")
+        plan = agent._plan = planner.TaskPlan("plan", "goal", "Inspect", str(tmp_path), [step],
+                                             status="executing", project_id="project")
+        plan.session_id = "synthetic-session"
+        agent._claude = Claude()
+        agent._save = AsyncMock()
+        agent._apply_decision = AsyncMock()
+        agent._asking = AsyncMock(return_value=lambda text: SimpleNamespace(decision=Decision.RETRY))
+        agent._read_run_deadline = AsyncMock()
+        agent._read_roles = AsyncMock()
+        process = planner._Process(["claude"], None, SystemPrompt("Stable system"), builtin_launch())
+        agent._turn = lambda text: agent._exchange(text, process, 5)
+        context = agent._open_now(plan, step, DecisionContext("s1", ResultKind.WORK, False, False, 0))
+        report = ["Synthetic execution stopped."]
+        baseline = agent._decision_message(plan, step, context, report)
+        await agent._decide(plan, step, context, report)
+        # These are the independently retained failure-history and lesson protocol bytes.
+        failure_section = ("Consecutive execution failures (since the last successful execution):\n"
+            "- worker (builtin, s1): transient (connection_failed); run=synthetic-run, record=12, "
+            "at=2026-11-24T00:00:00Z, action=breaker, streak=3")
+        expected = baseline.replace(report[0], report[0] + "\n\n" + failure_section) if recover else baseline
+        expected += note
+        if inject:
+            expected += "\n\n" + block.text + "\n" + (
+                "lessons_used (optional): ids of the lessons above you relied on.\n"
+                "lessons_wrong (optional): ids of the lessons above that proved wrong here.")
+        assert sent == [expected]
+        assert sent[0].count(failure_section) == int(recover)
+        assert sent[0].count(block.text) == int(inject)
+        assert sent[0].count(note) == 1
+        assert service.continuous_failures.await_count == int(recover)
+        planner.subagent_delivery.planner_turn_note.assert_awaited_once()
+
+    asyncio.run(run())
+
+
 def test_plan_and_decision_apply_references_only_after_actual_delivery(tmp_path, monkeypatch):
     from looper.agents import memory_lesson_injection as lessons
     from looper.db import memory_lesson_injection as store

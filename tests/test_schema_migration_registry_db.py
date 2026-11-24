@@ -12,6 +12,51 @@ from tests.db_support import DSN, fresh_connection
 pytestmark = pytest.mark.skipif(not DSN, reason="requires disposable LOOPER_TEST_DATABASE_URL")
 
 
+def test_failure_handling_upgrades_after_higher_order_retrospectives(monkeypatch):
+    from looper.db.migrations import step_failure_handling as failure
+
+    async def test():
+        async with fresh_connection() as upgraded, fresh_connection() as fresh:
+            previous = tuple(item for item in connection._MIGRATIONS if item.order <= 1910)
+            await upgraded.execute(migrations.schema_sql(connection.SCHEMA_PATH.read_text(), previous))
+            await upgraded.execute("INSERT INTO registry_schema_version(id,version) VALUES(TRUE,$1)",
+                                   connection.REGISTRY_SCHEMA_VERSION)
+            await upgraded.execute("INSERT INTO schema_migrations(name) VALUES($1)", bridge_upgrade.BASELINE)
+            # Apply the released retrospective migrations while 1920 is still absent.
+            with monkeypatch.context() as patch:
+                released = tuple(item for item in connection._MIGRATIONS if item.name != failure.name)
+                patch.setattr(connection, "_MIGRATIONS", released)
+                patch.setattr(connection, "_PENDING_MIGRATIONS", migrations.pending_migrations(released))
+                patch.setattr(connection, "_ONLINE_STEPS", migrations.online_steps(released))
+                await connection.ensure_schema(upgraded)
+                assert not await connection.schema_change_pending(upgraded)
+            markers = {row["name"] for row in await upgraded.fetch("SELECT name FROM schema_migrations")}
+            assert {"memory_retro_role", "memory_retro_role_online",
+                    "memory_retro_queue", "memory_retro_queue_online"} <= markers
+            assert failure.name not in markers
+            assert await upgraded.fetchval("SELECT to_regclass('step_holds') IS NULL")
+            await upgraded.execute("INSERT INTO projects(id,name) VALUES('upgrade-project','Kept project')")
+            await upgraded.execute("INSERT INTO tasks(id,project_id,requirement) "
+                                   "VALUES('upgrade-task','upgrade-project','Kept task')")
+            await upgraded.execute("INSERT INTO memory_retro_cursors(task_id,last_to_id) VALUES('upgrade-task',17)")
+
+            assert await connection.schema_change_pending(upgraded)
+            await connection.ensure_schema(upgraded)
+            await connection.ensure_schema(fresh)
+            assert await structure(upgraded) == await structure(fresh)
+            assert await upgraded.fetchval("SELECT requirement FROM tasks WHERE id='upgrade-task'") == "Kept task"
+            assert await upgraded.fetchval("SELECT last_to_id FROM memory_retro_cursors "
+                                           "WHERE task_id='upgrade-task'") == 17
+            assert markers | {failure.name, failure.online[0].marker} == {
+                row["name"] for row in await upgraded.fetch("SELECT name FROM schema_migrations")}
+            assert not await connection.schema_change_pending(upgraded)
+            saved = await witness(upgraded)
+            await connection.ensure_schema(upgraded)
+            assert await witness(upgraded) == saved
+
+    asyncio.run(test())
+
+
 _NEW_MIGRATION = '''\
 name = "registry_example_items"
 order = 10000
@@ -32,7 +77,8 @@ async def apply(conn, *, sql, state):
 '''
 
 
-def test_lesson_injection_upgrades_after_higher_order_retrospective_migrations(monkeypatch):
+@pytest.mark.parametrize("with_retrospectives", [False, True], ids=["without-retrospectives", "released-retrospectives"])
+def test_lesson_injection_upgrades_after_higher_order_retrospective_migrations(monkeypatch, with_retrospectives):
     from looper.db.migrations import memory_lesson_injection as injection
     from looper.db.migrations import memory_retro_queue, memory_retro_role
 
@@ -48,16 +94,23 @@ def test_lesson_injection_upgrades_after_higher_order_retrospective_migrations(m
 
     async def check():
         async with fresh_connection() as upgraded, fresh_connection() as fresh:
-            # Upgrade through the retrospective release first, without shipping injection.
+            previous = tuple(m for m in registry if m.order <= 1910)
+            await upgraded.execute(migrations.schema_sql(connection.SCHEMA_PATH.read_text(), previous))
+            await upgraded.execute("INSERT INTO registry_schema_version(id,version) VALUES(TRUE,$1)",
+                                   connection.REGISTRY_SCHEMA_VERSION)
+            await upgraded.execute("INSERT INTO schema_migrations(name) VALUES($1)", bridge_upgrade.BASELINE)
+            # Apply 1920/1930 first; also cover a database predating the higher orders.
             install(tuple(m for m in registry if m not in (injection, *retros)))
             await connection.ensure_schema(upgraded)
-            install(tuple(m for m in registry if m is not injection))
-            await connection.ensure_schema(upgraded)
+            if with_retrospectives:
+                install(tuple(m for m in registry if m is not injection))
+                await connection.ensure_schema(upgraded)
             assert not await connection.schema_change_pending(upgraded)
-            retro_markers = await upgraded.fetch(
-                "SELECT * FROM schema_migrations WHERE name = ANY($1) ORDER BY name",
-                [m.name for m in retros] + [m.online[0].marker for m in retros])
-            assert len(retro_markers) == 4
+            existing_markers = await upgraded.fetch("SELECT * FROM schema_migrations ORDER BY name")
+            names = {row["name"] for row in existing_markers}
+            assert {"step_failure_handling", "step_failure_handling_online", "morning_brief_send_started"} <= names
+            retro_names = {m.name for m in retros} | {m.online[0].marker for m in retros}
+            assert names & retro_names == (retro_names if with_retrospectives else set())
             await upgraded.execute("INSERT INTO system_settings(key,value) VALUES ('synthetic-upgrade','kept')")
             assert await upgraded.fetchval("SELECT to_regclass('task_lesson_snapshot_sets')") is None
 
@@ -71,7 +124,7 @@ def test_lesson_injection_upgrades_after_higher_order_retrospective_migrations(m
                 [injection.name, injection.online[0].marker]) == 2
             assert await upgraded.fetch(
                 "SELECT * FROM schema_migrations WHERE name = ANY($1) ORDER BY name",
-                [m.name for m in retros] + [m.online[0].marker for m in retros]) == retro_markers
+                sorted(names)) == existing_markers
             assert await upgraded.fetchval(
                 "SELECT value FROM system_settings WHERE key='synthetic-upgrade'") == "kept"
             await connection.ensure_schema(fresh)

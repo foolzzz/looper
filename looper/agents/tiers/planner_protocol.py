@@ -134,6 +134,8 @@ class TurnKind(str, Enum):
     LESSONS = "LESSONS"
     # The extra turn of a task that ended in a project with the knowledge vault on; its message gives its own shape.
     VAULT = "VAULT"
+    # The extra turn of an ended task whose project proposes memories; its message gives its own shape.
+    MEMORY = "MEMORY"
     # The last turn of a session the next agent cannot resume: what it hands over; its message gives its shape.
     HANDOFF = "HANDOFF"
     # The advisor asked back about a request: what the Planner adds, or that it withdraws (only with the advisor on).

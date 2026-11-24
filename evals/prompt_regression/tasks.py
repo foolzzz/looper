@@ -111,12 +111,19 @@ class EvalTask:
     # Opt the project into the run's one disposable knowledge vault and check this task's committed notes.
     vault: bool = False
     vault_check: Callable[[Path, list[str]], str | None] | None = None
+    # The run configures memory writing and switches this task's project to memory closeout.
+    memory_closeout: bool = False
     # Task-specific checks of the actual API steps, run records and reports, beyond aggregate flow counts.
     flow_check: Callable[[Mapping[str, Any], list[Mapping[str, Any]],
                           Mapping[int, list[Mapping[str, Any]]]], str | None] | None = None
     # Only explicitly selected lesson scenarios seed project lessons in the disposable database.
     lesson_mode: str | None = None
     lesson_seeds: tuple[tuple[str, str], ...] = ()
+
+    @property
+    def failure_handling(self) -> bool:
+        """Explicit failure cases run alone so their engine setting stays isolated."""
+        return bool(self.fake.get("_engine_failures"))
 
     @property
     def real_reviewer(self) -> bool:
@@ -1304,6 +1311,22 @@ EVAL_VAULT = {
     "mine/diary.md": "# Diary\n\nPersonal notes. Agents never write here.\n",
 }
 
+# The memory root a memory-closeout task proposes into. It stays outside the vault's writable folders.
+MEMORY_VAULT = {
+    "mem/AGENTS.md": "# Memory rules\n\nKeep one topic per note.\n",
+    "mem/lessons/_index.md": "## Index\n",
+    "mem/projects/_index.md": "## Index\n",
+}
+MEMORY_WRITE = {
+    "enabled": True, "root": "mem", "rules_files": ["mem/AGENTS.md"],
+    "targets": {
+        "lesson": {"shape": "note", "folders": ["lessons"], "index": "lessons/_index.md"},
+        "project": {"shape": "note", "folders": ["projects"], "index": "projects/_index.md"},
+    },
+    "sources": {"manager": False, "tasks": True, "leads": False},
+    "push_channel": None, "daily_budget_usd": 0.05,
+}
+
 
 def _calc_multiplies(work_dir: Path) -> str | None:
     done = subprocess.run([sys.executable, "-c", "import calc; assert calc.mul(3, 4) == 12"], cwd=work_dir,
@@ -1859,7 +1882,7 @@ def select(ids: list[str] | None) -> tuple[EvalTask, ...]:
     unknown id."""
     if not ids:
         return TASKS
-    available = (*TASKS, *LESSON_TASKS)
+    available = (*TASKS, *LESSON_TASKS, *FAILURE_TASKS)
     known = {task.id for task in available}
     unknown = sorted(set(ids) - known)
     if unknown:
@@ -2502,3 +2525,135 @@ LESSON_TASKS = tuple(
     )
     for scenario in ("use", "wrong") for suffix in ("", "_off")
 )
+
+# Runtime errors are injected before any model call; subsequent roles use the real CLI.
+def _failure_flow(expected, *, reviewer=False, breaker=False):
+    def check(detail, records, events):
+        failed = [row for row in records if row.get("failure_class") == "transient"]
+        if len(failed) != expected:
+            return f"expected {expected} injected transient failures, got {len(failed)}"
+        if reviewer and len([row for row in records if role(row) == "worker"]) != 1:
+            return "review recovery reran the completed Worker"
+        if not any(entry.get("kind") == "failure_hold" for entry in detail.get("journal", [])):
+            return "the task has no failure hold audit"
+        if breaker and not any("Consecutive execution failures" in str(row.get("input_text") or "")
+                               for row in records if role(row) == "planner"):
+            return "the Planner did not receive the consecutive failure history"
+        return None
+    return check
+
+
+FAILURE_TASKS = (
+    EvalTask(id="failure_retry_context",
+        requirement="In one work step, ensure receipt.txt contains exactly one line: applied once. "
+                    "A previous runtime may have written it before failing. Inspect existing contents and do "
+                    "not append or duplicate an existing receipt. Then create done.txt containing done.",
+        check=_all(_equals("receipt.txt", "applied once"), _equals("done.txt", "done")),
+        flow_check=_failure_flow(1), expect={"min_steps": 1, "max_steps": 1, "max_retries": 0},
+        fake={"_engine_failures": {"worker": ["connection_failed"]}, "_engine_residual": True,
+              "plan": [_step("s1", "Ensure receipt.txt contains exactly applied once, then write done.txt containing done.",
+                             ["receipt.txt has one receipt and done.txt contains done"])],
+              "attempts": {"s1": [{"files": {"done.txt": "done\n"}}]}}),
+    EvalTask(id="failure_breaker_history",
+        requirement="In one work step create done.txt containing done. If infrastructure repeatedly fails, "
+                    "use the supplied consecutive failure history to authorize at most one explicit Planner retry; "
+                    "stop if it fails again instead of creating an unbounded retry loop.",
+        check=_equals("done.txt", "done"), flow_check=_failure_flow(3, breaker=True),
+        expect={"min_steps": 1, "max_steps": 1, "max_retries": 1},
+        fake={"_engine_failures": {"worker": ["connection_failed"] * 3},
+              "plan": [_step("s1", "Create done.txt containing done.", ["done.txt contains done"])],
+              "attempts": {"s1": [{"files": {"done.txt": "done\n"}}]}}),
+    EvalTask(id="failure_reviewer_resume",
+        requirement="In one work step create done.txt containing done. An independent Reviewer must verify "
+                    "that file. A Reviewer runtime interruption must resume that review, preserving the "
+                    "already completed Worker's output.",
+        check=_equals("done.txt", "done"), flow_check=_failure_flow(1, reviewer=True),
+        expect={"min_steps": 1, "max_steps": 1, "min_reviews": 1, "max_retries": 0},
+        fake={"_engine_failures": {"reviewer": ["connection_failed"]},
+              "plan": [_step("s1", "Create done.txt containing done.", ["done.txt contains done"], review=True)],
+              "attempts": {"s1": [{"files": {"done.txt": "done\n"}}]}}),
+)
+
+
+def _memory_kept(detail, _records, _events):
+    """One lesson or project candidate for this task, citing its journal and leaving out its ticket."""
+    rows = detail.get("memory_candidates")
+    if rows is None:
+        return "memory readback is missing"
+    project_id = detail.get("project_id")
+    mine = [row for row in rows if row.get("project_id") == project_id and row.get("kind") in ("lesson", "project")]
+    if len(mine) != 1:
+        return "the closeout needs exactly one lesson or project candidate"
+    statement = str(mine[0].get("statement") or "")
+    if "CALC_LOCALE" not in statement or "TICKET-4401" in statement:
+        return "the candidate must keep CALC_LOCALE and leave out this task's ticket"
+    sources = mine[0].get("sources") or []
+    task_id = detail.get("task_id")
+    if not sources or any(source.get("kind") != "journal" or source.get("task_id") != task_id for source in sources):
+        return "every source must be a journal entry of this task"
+    return None
+
+
+def _memory_quiet(detail, _records, _events):
+    """A greeting task stores no candidate and still records the memory closeout."""
+    rows = detail.get("memory_candidates")
+    if rows is None:
+        return "memory readback is missing"
+    if any(row.get("project_id") == detail.get("project_id") for row in rows):
+        return "a greeting task stored a memory candidate"
+    if not any(str(line).startswith("Memory closeout:") for line in detail.get("activity_summaries") or []):
+        return "the task activity has no memory closeout line"
+    return None
+
+
+_CALC_FILES = {
+    "calc.py": "def add(a, b): return a + b\n",
+    "test_calc.py": "from calc import add, mul\n\nassert add(2, 3) == 5\nassert mul(3, 4) == 12\n",
+    "run_tests.py": (
+        "import os\nimport sys\n\n"
+        "if os.environ.get(\"CALC_LOCALE\") != \"C\":\n"
+        "    sys.exit(\"run_tests: set CALC_LOCALE=C first (the tests compare formatted numbers)\")\n"
+        "\nimport test_calc\n"),
+}
+_CALC_MUL = "def add(a, b): return a + b\n\ndef mul(a, b): return a * b\n"
+
+MEMORY_TASKS: tuple[EvalTask, ...] = (
+    EvalTask(
+        id="memory_closeout_keeps",
+        requirement=("Add mul(a, b) to calc.py, returning the product, and make `python run_tests.py` pass. "
+                     "Ticket TICKET-4401 tracks this task only and is not a fact later work needs."),
+        check=_calc_multiplies,
+        files=_CALC_FILES,
+        memory_closeout=True,
+        flow_check=_memory_kept,
+        expect={"min_steps": 1, "max_vault_writes": 0, "max_vault_outside": 0},
+        fake={
+            "plan": [_step("s1", "Add mul(a, b) to calc.py and run the tests.", ["python run_tests.py passes"])],
+            "attempts": {"s1": [{"status": "completed", "files": {"calc.py": _CALC_MUL},
+                                 "summary": "Added mul; run_tests.py needs CALC_LOCALE=C",
+                                 "learnings": ["TICKET-4401 is only this task's tracking id"]}]},
+            "memory_reply": {"memory": [{
+                "kind": "lesson",
+                "statement": "run_tests.py needs CALC_LOCALE=C or the formatted-number tests fail.",
+                "why": "the test runner exits unless that variable is C",
+                "keywords": ["tests", "locale"],
+                "evidence": ["<J:CALC_LOCALE>"],
+            }], "note": "kept the test runner locale"},
+        },
+    ),
+    EvalTask(
+        id="memory_closeout_nothing",
+        requirement="Write the word hello into hello.txt, nothing else.",
+        check=_equals("hello.txt", "hello"),
+        files={"README.md": "# greet\n"},
+        memory_closeout=True,
+        flow_check=_memory_quiet,
+        expect={"min_steps": 1, "max_vault_writes": 0, "max_vault_outside": 0},
+        fake={
+            "plan": [_step("s1", "Write hello into hello.txt.", ["hello.txt holds hello"])],
+            "attempts": {"s1": [{"status": "completed", "files": {"hello.txt": "hello\n"}}]},
+            "memory_reply": {"memory": [], "note": "nothing later work needs"},
+        },
+    ),
+)
+TASKS = TASKS + MEMORY_TASKS
