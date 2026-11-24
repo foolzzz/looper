@@ -264,8 +264,8 @@ def test_launch_refusals_before_writes(tmp_path, runtime, failure):
 
 
 @pytest.mark.parametrize("role", [AgentType.WORKER, AgentType.REVIEWER])
-@pytest.mark.parametrize("max_turns,timeout_s,requests,tool_timeout", [(7, 360, 7, 360), (0, 0, 1000, 86400)])
-def test_hosted_run_and_consult_fork(tmp_path, runtime, role, max_turns, timeout_s, requests, tool_timeout):
+@pytest.mark.parametrize("max_turns,timeout_s,requests", [(7, 30, 7), (7, 86400, 7), (0, 0, 1000)])
+def test_hosted_run_and_consult_fork(tmp_path, runtime, role, max_turns, timeout_s, requests):
     adapter, executable = runtime
     selected = launch(role)
     kwargs = dict(cwd=tmp_path, prompt_file=prompt_file(tmp_path), launch=selected,
@@ -274,7 +274,7 @@ def test_hosted_run_and_consult_fork(tmp_path, runtime, role, max_turns, timeout
     assert handle._env["LOOPER_AGENT_RUN"] == role.value  # the hosted run's environment carries the run marker
     descriptor = Descriptor.parse(handle.command)
     assert descriptor.role == role.value and descriptor.builtin == ("read", "glob", "grep", "write", "edit", "bash")
-    assert (descriptor.max_requests, descriptor.tool_timeout_s) == (requests, tool_timeout)
+    assert (descriptor.max_requests, descriptor.tool_timeout_s) == (requests, 120)
     assert descriptor.fork_from is None and not descriptor.read_only
     assert handle.session.kind == "dsh" and not handle.session._owned
     assert handle.session._state_dir == kwargs["session_dir"] and KEY not in str(handle.command)

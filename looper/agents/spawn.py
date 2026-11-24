@@ -55,6 +55,7 @@ OUTPUT_MAX_CHARS = 20_000
 
 class SpawnKind(str, Enum):
     ADVISOR = "advisor"
+    MEMORY_RETRO = "memory_retro"
     MEMORY_DRAFT = "memory_draft"  # a private vault draft; never a row of agent_spawns
     EXPLORER = "explorer"
     OUTBOUND = "outbound"  # a review of an outbound action (``outbound.review``); never a row of agent_spawns
@@ -66,6 +67,7 @@ _KINDS: Mapping[SpawnKind, tuple[Access, str, str]] = {
     SpawnKind.ADVISOR: (Access.ADVISOR, "advisor", "looper-advisor"),
     SpawnKind.OUTBOUND: (Access.ADVISOR, "outbound_check", "looper-outbound"),
     SpawnKind.MEMORY_DRAFT: (Access.ADVISOR, "memory_draft", "looper-memory-draft"),
+    SpawnKind.MEMORY_RETRO: (Access.ADVISOR, "memory_retro", "looper-memory-retro"),
     SpawnKind.EXPLORER: (Access.EXPLORE, "explorer", "looper-explorer"),
 }
 
