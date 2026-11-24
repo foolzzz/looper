@@ -3599,9 +3599,18 @@ Local checks on macOS use `sandbox-exec -p
 '(version 1)(allow default)(deny network*)(deny job-creation)' /bin/sh -c <check>`.
 Before execution, a fixed probe must prove both launch and network denial; missing
 or ineffective facilities record `error: sandbox_unavailable`, with no unsandboxed
-fallback. DNS, loopback and pathname Unix sockets are denied; file IO and pipes
-remain available. Linux uses `unshare -rn --` with the same fail-closed preflight
-and a distinct network-namespace check; this path has not been verified on Linux.
+fallback and no password prompt. DNS, loopback and pathname Unix sockets are
+denied; file IO and pipes remain available. Linux uses `unshare -rn --`, which
+needs an unprivileged user namespace. The same fail-closed preflight must show a new network namespace that
+cannot connect, containing only `lo` and down, unaddressed, unlinked tunnel
+fallbacks. An interface that is up, addressed, or linked to another device is
+not enforcement. If the kernel refuses the user namespace, the preflight records
+`error: sandbox_unavailable` and does not run the check. A process that is
+already root may use `unshare -n --` and must pass that preflight. The Python
+test workflow sets `kernel.apparmor_restrict_unprivileged_userns=0` before the
+tests, because Ubuntu 24.04 restricts unprivileged user namespaces through
+AppArmor; a missing key on other images is ignored. Each host still has to pass
+that preflight; there is no unsandboxed fallback.
 Only a check requesting `network: true` in a `network` project bypasses that launcher.
 Commands receive an OS-only subset of `child_env.inherited()`, without runtime
 credentials, proxies or SSH agents. This is not a file sandbox: commands retain the

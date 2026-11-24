@@ -288,13 +288,34 @@ def require_claude(mode: str, claude: str | None, runtime_types: Iterable[str]) 
                         "runtime with --agent or --register-agent)")
 
 
+def scored_expect(task: EvalTask, *, fake: bool) -> dict[str, int]:
+    """Bounds that score every mode, plus the script's own bounds in fake mode.
+
+    A scripted misbehavior is not a pass condition for a real model that is right on the first try.
+    """
+    expect = dict(task.expect)
+    if fake:
+        expect.update(task.fake.get("expect") or {})
+    return expect
+
+
+def uses_role_shim(tasks: Iterable[EvalTask]) -> bool:
+    """Whether real mode must install the stand-in so a scripted role stays on the script.
+
+    ``real_reviewer`` and ``real_planner`` already did. ``scripted_planner`` scripts only the Planner; without the
+    shim a real-mode run of that task alone sends the Planner to Claude Code.
+    """
+    return any(task.real_reviewer or task.fake.get("real_planner") or task.fake.get("scripted_planner")
+               for task in tasks)
+
+
 def install_claude(bin_dir: Path, *, mode: str, scenarios: Path | None = None,
                    max_budget_usd: float | None = None, real_claude: str | None = None,
                    real_reviewer: bool = False) -> Path | None:
     """Put the ``claude`` the server runs in ``bin_dir``: the stand-in, or real Claude Code with a budget (none when
     no agent runs it: ``real_claude`` None). With ``real_reviewer`` installs the role-selective stand-in in real
-    mode. Each task script chooses real Reviewers or a real Planner (``fake_claude.REAL_CLAUDE_ENV``); other tasks
-    remain fully real."""
+    mode. Each task script chooses real Reviewers, a real Planner, or a scripted Planner
+    (``fake_claude.REAL_CLAUDE_ENV``); other tasks remain fully real."""
     bin_dir.mkdir(parents=True, exist_ok=True)
     prefix = ""
     if mode == "fake":
@@ -684,6 +705,9 @@ def run_task(
         gates = _project_user_gates(task, user_gates)
         if gates is not None:
             api.post("/api/v1/project_admin/update", {"project_id": created['project_id'], "fields": {"user_gates": gates}})["result"]["project"]
+        if task.acceptance_checks:
+            _confirmed(api, "/api/v1/acceptance_checks/update",
+                       {"project_id": created["project_id"], "acceptance_checks": task.acceptance_checks})
         if task.schedule_template:
             owner_key = "eval-" + uuid.uuid4().hex[:8]
             api.post("/api/v1/managers/create", {"key": owner_key, "name": "Public reports " + owner_key,
@@ -775,6 +799,10 @@ def run_task(
         if task.skill_proposals:
             detail = {**detail, "skill_proposals": api.post("/api/v1/project_skills/proposals/list",
                       {"project_id": created["project_id"]})["result"]["proposals"]}
+        acceptance = None
+        if any(step.get("checks") for step in (detail.get("steps") or [])):
+            evidence = api.post("/api/v1/task_evidence/get", {"task": task_id})["result"]
+            acceptance = metrics.acceptance_metrics(detail, evidence, records)
         result = metrics.task_metrics(
             detail=detail,
             activity=_all_activity(api, task_id),
@@ -784,7 +812,7 @@ def run_task(
                              merged_by_looper(work_dir, task_id) if step_workspaces else set()),
             work_dir=work_dir,
             check_problem=task.check(work_dir) or (task.flow_check(detail, records, events) if task.flow_check else None),
-            expect=task.expect,
+            expect=scored_expect(task, fake=fake),
             disciplines=task.disciplines,
             # The gates the runner ended because the Planner asked again after the script ran out.
             gate_asks_beyond_script=sum(1 for done in answered.values() if done > len(_script(task))),
@@ -795,6 +823,7 @@ def run_task(
             vault_log=_git_in(vault_dir, "log", "--format=%H%x00%s", "--name-only") if vault_dir else "",
             vault_check=task.vault_check,
             attempts_view=attempts_view,
+            acceptance=acceptance,
             record_completion_checks=record_completion_checks,
         )
         result.update(metrics.attempt_fields(attempts_view))
@@ -808,6 +837,8 @@ def run_task(
         result["problems"].append(f"cancelled after {timeout:g} s")
     row = {"id": task.id, **result, "duration_s": round(duration, 1), "stopped_by_cap": stopped_by_cap,
            "timed_out": timed_out, "work_dir": str(work_dir), "wait_resumes": resumed}
+    if task.acceptance_checks:
+        row["acceptance_checks"] = task.acceptance_checks
     # A task cancelled at the cap or after its timeout is not scored: what it delivered says nothing of the model.
     if stopped_by_cap:
         return {**row, **error_row(ErrorClass.SPENDING_CAP, "cancelled at the spending cap")}
@@ -908,9 +939,26 @@ def effective_user_gates(task: EvalTask, user_gates: str | None) -> str:
     return "on" if ProjectExecution.from_row({"user_gates": gates}).gates_on else "off"
 
 
+def _confirmed(api: Api, path: str, body: Mapping[str, Any]) -> dict[str, Any]:
+    """POST ``path``, and confirm when the server asks. Anything else is an eval error."""
+    answer = api.post(path, body)
+    status = answer.get("status") if isinstance(answer, dict) else None
+    if status == "ok":
+        return answer
+    if status == "needs_confirmation":
+        confirmed = api.post("/api/v1/confirm", {"confirmation_id": answer["confirmation_id"]})
+        if not isinstance(confirmed, dict) or confirmed.get("status") != "ok":
+            answered = confirmed.get("status") if isinstance(confirmed, dict) else confirmed
+            raise EvalError(f"{path} confirmation answered {answered}")
+        return confirmed
+    raise EvalError(f"{path} answered {status}")
+
+
 TASK_SETS: dict[str, tuple[str, ...]] = {
     # Cases that are likely to fail on the first attempt (task-metrics RFC, section 9.4).
     "hard": ("hidden_precondition", "rethink_bug", "misleading_error"),
+    # Executable acceptance (RFC section 12): checks on, checks off, a trivial check, a rewritten test, a recheck.
+    "acceptance": ("checks_per_criterion", "checks_off", "weak_check", "edited_test", "check_error_recheck"),
     # The tasks whose pass or fail turns on the Planner's judgment: the opus tier (evals/README.md).
     "planner": ("dependent_steps", "parallel_parts", "interface_first", "supplement_replan", "supplement_no_change",
                 "requirement_edit", "roles_tester_docs", "roles_not_needed", "roles_multi_platform",
@@ -1173,8 +1221,7 @@ def run(
                                          for (task_id, _), path in work_dirs.items()}), encoding="utf-8")
         install_claude(root / "bin", mode=mode, scenarios=scenarios,
                        max_budget_usd=None if provider is not None or register is not None else max_budget_usd,
-                       real_claude=real_claude, real_reviewer=any(task.real_reviewer or task.fake.get("real_planner")
-                                                                 for task in tasks))
+                       real_claude=real_claude, real_reviewer=uses_role_shim(tasks))
         (root / "runtime").mkdir(mode=0o700)
         home = root / "home" if mode == "fake" else None
         if home is not None:

@@ -20,12 +20,15 @@ from __future__ import annotations
 
 import json
 import re
+import shlex
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from looper.agents.acceptance_evidence import EVIDENCE_HEADING
+from looper.agents.acceptance_gate import current_evidence
 from looper.agents.runtimes.omp import EDIT_TOOLS as OMP_EDIT_TOOLS
 from looper.agents.runtimes.omp import edited_paths as omp_edited_paths
 from looper.agents.tiers.planner_protocol import FINAL_HEADINGS
@@ -660,6 +663,73 @@ def plan_changes(activity: Iterable[Mapping[str, Any]]) -> int:
                and match.group(1) in ("add_steps", "replan"))
 
 
+# Commands that cannot fail and do not measure a criterion.
+NOOP_COMMANDS = (("true",), (":",), ("exit", "0"), ("/bin/true",))
+
+
+def _trivial_command(command: str) -> bool:
+    try:
+        tokens = tuple(shlex.split(command))
+    except ValueError:
+        return False
+    return tokens in NOOP_COMMANDS
+
+
+def acceptance_metrics(detail: Mapping[str, Any], evidence: Mapping[str, Any] | None,
+                       records: list[Mapping[str, Any]] | None = None) -> dict[str, int]:
+    """Counts for a task whose steps defined checks. An absent evidence read returns no keys.
+
+    ``evidence`` is one ``task_evidence.get`` result. ``records`` are the task's run records, used for
+    ``review_fails`` and ``reviews_with_evidence``; without them those two counts are zero.
+    """
+    if not isinstance(evidence, Mapping):
+        return {}
+    steps = list(detail.get("steps") or [])
+    definitions = [check for step in steps for check in (step.get("checks") or [])]
+    criteria = {(step.get("id"), check.get("criterion")) for step in steps for check in (step.get("checks") or [])
+                if check.get("required", True)}
+    runs = [run for item in (evidence.get("steps") or []) for run in (item.get("runs") or [])]
+    current = current_evidence(runs)
+    by_step: dict[Any, dict[Any, Mapping[str, Any]]] = {}
+    for row in current:
+        by_step.setdefault(row["step_id"], {})[row["check_id"]] = row
+    breaches = 0
+    for step in steps:
+        if step.get("status") != "verified":
+            continue
+        rows = by_step.get(step.get("id"), {})
+        for check in step.get("checks") or []:
+            if not check.get("required", True):
+                continue
+            row = rows.get(check.get("id"))
+            if row is None or row.get("state") != "passed" or row.get("protected_changed"):
+                breaches += 1
+                break
+    review_fails = reviews_with_evidence = 0
+    for record in records or []:
+        if role(record) != "reviewer":
+            continue
+        metadata = record.get("metadata") or {}
+        if metadata.get("outcome") == "not_passed":
+            review_fails += 1
+        if EVIDENCE_HEADING in str(record.get("input_text") or "") or EVIDENCE_HEADING in str(
+                metadata.get("system_prompt") or ""):
+            reviews_with_evidence += 1
+    rechecks = sum(int(((step.get("result") or {}).get("acceptance") or {}).get("rechecks_used") or 0)
+                   for step in steps)
+    return {
+        "checks_defined": len(definitions),
+        "criteria_checked": len(criteria),
+        "trivial_checks": sum(1 for check in definitions if _trivial_command(str(check.get("command") or ""))),
+        "protected_changed": sum(1 for run in runs if run.get("protected_changed")),
+        "rechecks": rechecks,
+        "evidence_breaches": breaches,
+        "review_fails": review_fails,
+        "artifacts": sum(1 for run in runs if run.get("artifacts")),
+        "reviews_with_evidence": reviews_with_evidence,
+    }
+
+
 def flow_problems(expect: Mapping[str, int], observed: Mapping[str, int]) -> list[str]:
     """The expected flow counts (``min_<metric>``, ``max_<metric>``) the task missed."""
     problems = []
@@ -707,6 +777,7 @@ def task_metrics(
     vault_log: str = "",
     vault_check: Callable[[Path, list[str]], str | None] | None = None,
     attempts_view: Mapping[str, Any] | None = None,
+    acceptance: Mapping[str, int] | None = None,
     record_completion_checks: bool = False,
     now: float,
 ) -> dict[str, Any]:
@@ -761,6 +832,8 @@ def task_metrics(
         **vault_metrics(vault_log, task_id),
         "vault_closeout": int(any(str(row.get("summary") or "").startswith("Vault closeout:") for row in activity)),
     }
+    if acceptance:
+        observed.update(acceptance)
     violations = contract_violation_counts(records, attempts_view)
     status = str(detail.get("status") or "")
     problems = []
