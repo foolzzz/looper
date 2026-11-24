@@ -119,9 +119,17 @@ class Grant:
     borrowed: bool = False
     probe: bool = False
     reported: bool = False
+    quota_failed: bool = False
     lent_by: str | None = None
     arrived: datetime | None = None
     sequence: int = 0
+
+
+@dataclass(frozen=True)
+class Frozen:
+    account: str
+    windows: tuple[str, ...]
+    resets_at: datetime | None
 
 
 @dataclass(frozen=True)
@@ -149,6 +157,9 @@ class Waiter:
     draining: Callable[[], bool] | None = None
     on_wait: Callable[[str], Awaitable[None]] | None = None
     last_message: str | None = None
+    on_frozen: Callable[[Frozen], Awaitable[None]] | None = None
+    frozen_told: bool = False
+    user_message: bool = False
 
 
 def effective_lane(lane: Lane, waited_seconds: float) -> Lane:
@@ -201,6 +212,7 @@ class Controller:
         self.lock = asyncio.Condition()
         self.states: dict[str, Account] = {}
         self.running: dict[str, Grant] = {}
+        self.record_owners: dict[int, str] = {}
         self.waiters: list[Waiter] = []
         self.lending: dict[str, Lending] = {}
         self.sequence = 0
@@ -509,7 +521,9 @@ class Controller:
                     await self._notify_waiters(provider_id, provider)
                     return
             if account.state is AdmissionState.PROBING:
-                self._grant(min(eligible, key=lambda w: w.sequence), probe=True)
+                # A retained user message is only the fallback probe. Prefer a
+                # Worker/Planner or background turn whenever one is waiting.
+                self._grant(min(eligible, key=lambda w: (w.user_message, w.sequence)), probe=True)
                 await self._notify_waiters(provider_id, provider)
                 return
         if account.state is not AdmissionState.OPEN:
@@ -554,9 +568,23 @@ class Controller:
         limit = provider.get("max_concurrency")
         waiting = [w for w in self.waiters if w.provider_id == provider_id]
         for waiter in waiting:
-            if waiter not in self.waiters or waiter.on_wait is None:
+            if waiter not in self.waiters:
                 continue
             if account.state is AdmissionState.FROZEN:
+                if waiter.on_frozen is not None and not waiter.frozen_told:
+                    waiter.frozen_told = True
+                    try:
+                        windows = await provider_limits.windows(provider_id)
+                        await waiter.on_frozen(Frozen(
+                            provider["name"],
+                            tuple(w["window_name"] for w in windows if w["status"] == "rejected"),
+                            account.until - timedelta(seconds=60)
+                            if account.until_known and account.until is not None else None,
+                        ))
+                    except Exception:
+                        logger.exception("Could not send frozen account notice")
+                if waiter.on_wait is None:
+                    continue
                 reset = (
                     (account.until - timedelta(seconds=60))
                     .astimezone()
@@ -568,7 +596,7 @@ class Controller:
             else:
                 count = sum(g.provider_id == provider_id for g in self.running.values())
                 message = f"Waits for {provider['name']}'s slot ({count} running, limit {limit if limit is not None else 'unlimited'})"
-            if message != waiter.last_message:
+            if waiter.on_wait is not None and message != waiter.last_message:
                 waiter.last_message = message
                 await waiter.on_wait(message)
 
@@ -580,7 +608,9 @@ class Controller:
         *,
         parent: str | None = None,
         on_wait=None,
+        on_frozen: Callable[[Frozen], Awaitable[None]] | None = None,
         draining=None,
+        user_message: bool = False,
         _original: Grant | None = None,
     ) -> Grant:
         if not self.active:
@@ -609,6 +639,8 @@ class Controller:
                     asyncio.get_running_loop().create_future(),
                     draining,
                     on_wait,
+                    on_frozen=on_frozen,
+                    user_message=user_message,
                 )
                 self.waiters.append(waiter)
                 while not waiter.ready.done():
@@ -645,13 +677,16 @@ class Controller:
         owner: str,
         parent: str | None = None,
         on_wait=None,
+        on_frozen: Callable[[Frozen], Awaitable[None]] | None = None,
         draining=None,
+        user_message: bool = False,
     ):
         if not self.active:
             yield Grant(provider_id, owner, lane)
             return
         grant = await self.acquire(
-            provider_id, lane, owner, parent=parent, on_wait=on_wait, draining=draining
+            provider_id, lane, owner, parent=parent, on_wait=on_wait,
+            on_frozen=on_frozen, draining=draining, user_message=user_message
         )
         token = _current_owner.set(owner)
         failed = False
@@ -661,7 +696,12 @@ class Controller:
             failed = True
             raise
         finally:
-            _current_owner.reset(token)
+            try:
+                _current_owner.reset(token)
+            except ValueError:
+                # Cancellable admission may enter in another task. The caller
+                # owns its context; that completed entry task needs no reset.
+                pass
             try:
                 current = self.running.get(owner, grant)
                 if self.active and current.probe and not current.reported:
@@ -680,6 +720,10 @@ class Controller:
                 self.lock.notify_all()
 
     async def release(self, owner: str) -> None:
+        self.record_owners = {
+            record_id: bound for record_id, bound in self.record_owners.items()
+            if bound != owner
+        }
         if not self.active:
             self.running.pop(owner, None)
             return
@@ -911,9 +955,24 @@ async def recorded(
                 provider_id, ProbeEnded(False, interrupted or failure is not None)
             )
         if grant is not None:
+            grant.quota_failed = quota
             grant.reported = True
     except Exception:
         logger.exception("Could not apply run result to account admission")
+
+
+def probing() -> bool:
+    if not enabled():
+        return False
+    grant = _controller.running.get(_current_owner.get())
+    return grant is not None and grant.probe
+
+
+def quota_probe_failed() -> bool:
+    if not enabled():
+        return False
+    grant = _controller.running.get(_current_owner.get())
+    return grant is not None and grant.probe and grant.quota_failed
 
 
 async def signal(
@@ -950,9 +1009,21 @@ def record_metadata() -> dict[str, int]:
     return {"admission_lane": grant.lane.value} if grant is not None else {}
 
 
+def bind_record(record_id: int | None) -> None:
+    """Bind a resident turn's record to its session-specific slot owner."""
+    if not enabled() or record_id is None:
+        return
+    owner = _current_owner.get()
+    if owner is not None:
+        _controller.record_owners[record_id] = owner
+
+
 async def parent_for(record_id: int | None) -> tuple[str | None, Lane]:
     if not enabled():
         return None, Lane.BACKGROUND
+    bound = _controller.record_owners.get(record_id)
+    if bound in _controller.running:
+        return bound, _controller.running[bound].lane
     current = _current_owner.get()
     if current in _controller.running:
         return current, _controller.running[current].lane
@@ -1058,3 +1129,8 @@ async def observed(
     provider_id: str, windows: list[tuple[str, dict]], record_id: int | None
 ) -> None:
     await signal(provider_id, record_id, windows)
+
+
+def waiting(owner: str) -> bool:
+    """An unstarted turn waiting for its account does not hold a service drain."""
+    return enabled() and any(waiter.owner == owner for waiter in _controller.waiters)

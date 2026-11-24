@@ -364,11 +364,15 @@ def test_group_read_upgrade_preserves_existing_intent_via_values(monkeypatch):
                            "CHECK (via IN ('subscription', 'on_request')); "
                            "DROP TABLE intent_group_reads, intent_group_read_days; "
                            "DELETE FROM schema_migrations WHERE name='intent_group_reads'")
-        iid = await leads_support.intent(pool, [event], via="on_request")
+        recognition_id = await pool.fetchval("INSERT INTO intent_recognitions(source_id,chat_id,range_from,range_to,"
+            "requested_via,events_in_range) VALUES($1,'g',$2,$3,'dashboard',1) RETURNING id",
+            SOURCE, NOW-timedelta(days=1), NOW)
+        iid = await leads_support.intent(pool, [event], via="on_request", recognition_id=recognition_id)
         await connection.ensure_schema(pool)
         assert await pool.fetchval("SELECT via FROM intents WHERE id=$1", iid) == "on_request"
         for via in ("subscription", "followed_group", "on_request"):
-            await pool.execute("UPDATE intents SET via=$1 WHERE id=$2", via, iid)
+            await pool.execute("UPDATE intents SET via=$1,recognition_id=$3 WHERE id=$2", via, iid,
+                               recognition_id if via == "on_request" else None)
         async with pool.acquire() as conn:
             assert not await intent_group_reads.pending(conn)
     run_db(check, monkeypatch)

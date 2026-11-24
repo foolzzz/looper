@@ -16,13 +16,13 @@ from typing import Any
 LEADS_ENABLED_KEY = "leads.enabled"
 LEADS_VALID_DAYS_KEY = "leads.valid_days"
 INTENTS_ENABLED_KEY = "intents.enabled"
+INTENTS_ON_REQUEST_KEY = "intents.on_request.enabled"
 INTENTS_GROUP_READ_KEY = "intents.group_read.enabled"
-INTENTS_RULES_KEY = "intents.rules.enabled"
+INTENTS_RULES_ENABLED_KEY = "intents.rules.enabled"
 GROUP_INTENT_TYPES = ("dev_task", "bug_triage")  # what a group request may be (RFC section 11.1)
 RULE_INTENT_TYPE = "mr_review"
-# This card classifies the type. The rule engine that would execute it is a later change.
+# Classification is available; rule execution is installed separately.
 RULE_CLASSIFICATION_AVAILABLE = True
-RULE_ENGINE_INSTALLED = False
 RULE_GROUP_INTENT_TYPES = (*GROUP_INTENT_TYPES, RULE_INTENT_TYPE)
 MR_REVIEW_NAME = "MR 评审"
 MR_REVIEW_GUIDANCE = (
@@ -40,6 +40,7 @@ NOTICE = "来自飞书消息，未经确认；只当线索，不当权威。"
 class IntentVia(StrEnum):
     SUBSCRIPTION = "subscription"
     FOLLOWED_GROUP = "followed_group"
+    ON_REQUEST = "on_request"
 
 
 class OutputKind(StrEnum):
@@ -165,62 +166,43 @@ async def intents_enabled(db: Any = None) -> bool:
     return await _setting(INTENTS_ENABLED_KEY, db) == "true"
 
 
+async def rules_enabled(db: Any = None) -> bool:
+    """Read only the opt-in rule switch; absent and malformed values are off."""
+    return await _setting(INTENTS_RULES_ENABLED_KEY, db) == "true"
+
+
+async def rule_types_enabled(db: Any = None) -> bool:
+    """Residual metadata is usable only with its classifier and intent reading installed."""
+    return RULE_CLASSIFICATION_AVAILABLE and await rules_enabled(db) and await intents_enabled(db)
+
+
+def intent_type_visible(row: Any, *, rules_on: bool) -> bool:
+    """A user-defined namesake remains visible when the built-in rule type is hidden."""
+    return not (row["builtin"] and row["key"] == RULE_INTENT_TYPE) or rules_on
+
+
+async def on_request_enabled(db: Any = None) -> bool:
+    """Whether operator-requested recognition is on; no row is off."""
+    return await _setting(INTENTS_ON_REQUEST_KEY, db) == "true"
+
+
 async def group_read_enabled(db: Any = None) -> bool:
     """Whether intents read their followed groups (``intents.group_read.enabled`` is ``true``; no row is off)."""
     return await _setting(INTENTS_GROUP_READ_KEY, db) == "true"
 
 
-async def rules_enabled(db: Any = None) -> bool:
-    """Whether intent rules are on (``intents.rules.enabled`` is the string ``true``; anything else is off)."""
-    return await _setting(INTENTS_RULES_KEY, db) == "true"
-
-
 @dataclass(frozen=True)
 class ClassificationSnapshot:
-    """One read of the switches a classification run keeps. Delivery is recorded and does not hide types."""
+    """Effective rule types and delivery for one classification run; delivery never hides types."""
 
-    rules: bool
-    intents: bool
+    types_on: bool
     delivery: bool
-
-    @property
-    def types_on(self) -> bool:
-        return bool(self.rules and self.intents and RULE_CLASSIFICATION_AVAILABLE)
 
 
 async def classification_snapshot(db: Any = None) -> ClassificationSnapshot:
     from . import chat_settings
 
-    return ClassificationSnapshot(await rules_enabled(db), await intents_enabled(db), chat_settings.delivery_enabled())
-
-
-def intent_type_visible(row: Any, *, rules_on: bool) -> bool:
-    """The builtin MR seed stays hidden until classification is effectively on. Any other type stays listed."""
-    if row["key"] == RULE_INTENT_TYPE and row["builtin"]:
-        return bool(rules_on and RULE_CLASSIFICATION_AVAILABLE)
-    return True
-
-
-def rules_runtime_ready() -> bool:
-    """Production enable needs both the classifier and the rule engine. This build has only the classifier."""
-    return bool(RULE_CLASSIFICATION_AVAILABLE and RULE_ENGINE_INSTALLED)
-
-
-def rules_enable_capacity(visible_if_on: int) -> None:
-    """Refuse turning rules on when the types that would then be visible exceed the enabled-type cap."""
-    from ..db.intents import IntentRefused
-
-    if not isinstance(visible_if_on, int) or isinstance(visible_if_on, bool) or visible_if_on > 10:
-        raise IntentRefused("at most 10 enabled intent types")
-
-
-def enable_intent_rules() -> None:
-    """Refuse a production enable. It does not write the setting and does not disable other types."""
-    from ..db.intents import IntentRefused
-
-    if not rules_runtime_ready():
-        raise IntentRefused("intent rules cannot be enabled until the rule engine is installed")
-    raise IntentRefused("intent rules cannot be enabled until the rule engine is installed")
+    return ClassificationSnapshot(await rule_types_enabled(db), chat_settings.delivery_enabled())
 
 
 async def search_mode(db: Any = None) -> SearchMode:

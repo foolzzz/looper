@@ -274,7 +274,10 @@ def test_new_project_directory_validation_still_refuses_invalid_requests(monkeyp
       "review_policy": None, "agent_room": "", "room_consults_per_task": None},
      ["task_workspaces（项目任务工作区）：in_place（默认）"]),
     ({}, ["task_workspaces（项目任务工作区）：worktree（默认）"]),
-], ids=["enabled", "off-and-zero", "inherit", "omitted"])
+    ({"memory_lessons": "on"}, ["memory_lessons（项目任务经验设置）：on"]),
+    ({"memory_lessons": "off"}, ["memory_lessons（项目任务经验设置）：off"]),
+    ({"memory_lessons": None}, ["memory_lessons（项目任务经验设置）：off（默认）"]),
+], ids=["enabled", "off-and-zero", "inherit", "omitted", "lessons-on", "lessons-off", "lessons-inherit"])
 def test_client_project_impact_discloses_execution_and_preserves_settings(monkeypatch, tmp_path, settings, disclosures):
     async def test(pool):
         client, token = await api_clients.create("Client", pool=pool)
@@ -287,10 +290,10 @@ def test_client_project_impact_discloses_execution_and_preserves_settings(monkey
             lines = asked["impact"].splitlines()
             assert "新建项目「Execution」" in lines[0] and str(tmp_path) in lines[0] and "创建任务" in lines[0]
             assert all(f"- {text}" in lines for text in disclosures), asked["impact"]
-            # Every accepted control is disclosed, including default and disabled controls.
+            # Existing controls always disclose; opt-in controls disclose only when submitted.
             from looper.agents.project_execution import FIELDS, SUBAGENT_FIELDS
             assert [line.split("（")[0].removeprefix("- ") for line in lines[1:]] == [
-                field for field in FIELDS if field not in SUBAGENT_FIELDS or field in settings]
+                field for field in FIELDS if field not in (*SUBAGENT_FIELDS, "memory_lessons") or field in settings]
             for field, raw in settings.items():
                 if raw is not None and raw != "" and field != "distill_lessons":
                     line = next(line for line in lines if line.startswith(f"- {field}（"))

@@ -39,7 +39,7 @@ function registry(pi: Runtime | null): Registry {
     providers: [], models: [], profiles: [], vendor_types: [], prices: { as_of: "", sources: [], models: {} },
     limits: { api_formats: [{ family: "anthropic", label: "Anthropic", protocols: [{ protocol: "anthropic-messages", label: "Anthropic Messages" }] }, { family: "openai", label: "OpenAI", protocols: [{ protocol: "openai-responses", label: "OpenAI Responses" }, { protocol: "openai-chat", label: "OpenAI Chat Completions" }] }],
       name_max_chars: 100, models_max: 10, model_fields: [], price_fields: [], protocols: ["openai-chat", "openai-responses"],
-      auth_kinds: ["api_key"], effort_levels: [], role_capabilities: { manager: [], planner: [], worker: [], reviewer: [], processor: [], advisor: [], advice_check: [], leads_check: [] },
+      auth_kinds: ["api_key"], effort_levels: [], role_capabilities: { manager: [], planner: [], worker: [], reviewer: [], processor: [], advisor: [], advice_check: [], leads_check: [], outbound_check: [] },
       secret_mask: "", provider_env_owned: [],
     },
   };
@@ -105,9 +105,9 @@ describe("Agent Runtimes", () => {
 
   const api = () => {
     body.runtime_types[0] = { ...body.runtime_types[0], type: "api", label: "Model API", runtime_id: "rt-api",
-      in_process: true, default_executable: "", roles: ["manager"], protocols: ["openai-responses"] };
+      in_process: true, default_executable: "", roles: ["manager"], protocols: ["anthropic-messages", "openai-responses"] };
     body.runtimes[0] = runtime({ runtime_id: "rt-api", type: "api", in_process: true, name: "Model API",
-      default_executable: null, path: null, version: "openai 2.0.0", roles: ["manager"] });
+      default_executable: null, path: null, version: "openai 3.37.0 / anthropic 2.3.0", roles: ["manager"] });
   };
   const apiCard = () => [...container.querySelectorAll("h3")]
     .find((node) => node.textContent === "Model API (SDK)")!.closest("li")!;
@@ -212,6 +212,8 @@ describe("Agent Runtimes", () => {
     await show();
     const node = apiCard();
     expect(fact(node, "Path")).toBe("Runs inside looper serve");
+    expect(fact(node, "Version")).toContain("openai 3.37.0 / anthropic 2.3.0");
+    expect(fact(node, "Roles")).toContain("Manager: can runPlanner: cannot run");
     expect(node.textContent).toContain("Comes with Looper; Re-detect checks its Python package.");
     expect(node.textContent).not.toContain("PATH");
     expect(node.querySelector("button")!.getAttribute("aria-label")).toBe("Re-detect Model API (SDK)");
@@ -219,7 +221,7 @@ describe("Agent Runtimes", () => {
 
   it("shows the package probe failure without a path fact or install command", async () => {
     api();
-    const error = "the openai Python package is not installed with this Looper; reinstall Looper";
+    const error = "the anthropic Python package is not installed with this Looper; reinstall Looper";
     body.runtimes[0] = { ...body.runtimes[0], version: null, probe_error: error, roles: [], capabilities: [] };
     await show();
     const node = apiCard();
@@ -231,7 +233,7 @@ describe("Agent Runtimes", () => {
 
   it("shows the initial package failure before a runtime has been registered", async () => {
     api();
-    const error = "the openai Python package is not installed with this Looper; reinstall Looper";
+    const error = "the anthropic Python package is not installed with this Looper; reinstall Looper";
     body.runtime_types[0].probe_error = error;
     body.runtimes = [];
     await show();

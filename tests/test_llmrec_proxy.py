@@ -362,6 +362,23 @@ def test_route_proxy_bypass_and_explicit_empty_environment(tmp_path, monkeypatch
     asyncio.run(asyncio.wait_for(check(), 5))
 
 
+def test_messages_path_stays_data_only_without_the_messages_sdk_header():
+    """A /messages path is not Anthropic SSE. The Messages SDK names events itself."""
+    async def check():
+        payload = events()
+        async with FakeModelAPI([ResponseScript(events=payload), ResponseScript(events=payload)]) as upstream:
+            async with httpx.AsyncClient() as client:
+                plain = await client.post(f'{upstream.base_url}/messages',
+                                          headers={'authorization': 'Bearer test-key'}, json={})
+                named = await client.post(f'{upstream.base_url}/messages',
+                                          headers={'authorization': 'Bearer test-key',
+                                                   'anthropic-version': '2023-06-01'}, json={})
+        data_only = b''.join((f'data: {json.dumps(event)}\n\n').encode() for event in payload)
+        assert plain.content == data_only
+        assert named.content.startswith(b'event: message_start\ndata: ')
+    asyncio.run(check())
+
+
 def test_passthrough_headers_base_path_and_binding(tmp_path):
     async def check():
         sink = Sink()

@@ -30,27 +30,43 @@ def _types(monkeypatch):
     monkeypatch.setattr(evaluate, "_record", record)
 
 
+@pytest.mark.parametrize("rep", [1, 2])
 @pytest.mark.parametrize("case,reply", [
     ("intents_group_requests", {"intents": [_reply("m1", type_key="dev_task"), _reply("m3"),
                                            _reply("m7", type_key="dev_task")]}),
+    ("intents_group_requests_short", {"intents": [_reply("m1"), _reply("m3", type_key="dev_task"),
+                                                 _reply("m7"), _reply("m8", type_key="dev_task")]}),
+    ("intents_group_requests_original_types", {"intents": [_reply("m1", type_key="alert_triage"), _reply("m2")]}),
     ("intents_group_requests_merge", {"intents": [_reply("m1", "m2", "m3")]}),
     ("intents_group_requests_quiet", "NONE"),
     ("intents_group_requests_injection", {"intents": [], "instructions_seen": ["m1"]}),
 ])
-def test_group_cases_run_the_group_contract_offline(monkeypatch, tmp_path, case, reply):
+def test_group_cases_run_the_group_contract_offline(monkeypatch, tmp_path, case, reply, rep):
     _types(monkeypatch)
     fake = processor_says(monkeypatch, reply if isinstance(reply, str) else json.dumps(reply))
     args = Namespace(budget_usd=0.3, timeout=20, claude="unused")
-    run = asyncio.run(evaluate._extract(args, case, 1, tmp_path))
+    run = asyncio.run(evaluate._extract(args, case, rep, tmp_path))
     assert run["passed"], run["checks"]
     assert fake.calls[0]["instructions"].endswith(extraction.GROUP_REQUESTS_NOTE)
     assert "《产品群》（群 · 全部消息）" in fake.calls[0]["input_text"]
-    if case == "intents_group_requests":
+    if "requests_from" in evaluate.EXTRACTION_CASES[case]:
         _, refs = extraction.render("intents", evaluate.EXTRACTION_CASES[case]["rows"], context=[],
             participants=extraction.Participants({}, None), known=[], zone_name="UTC", text_max_chars=500)
-        missing_named = extraction.parse("intents", json.dumps({"intents": reply["intents"][:2]}), refs,
-            now=evaluate._BASE, valid_days=90, enabled_types=("dev_task", "bug_triage"), app_seqs=())
-        assert not evaluate.score_extraction(evaluate.EXTRACTION_CASES[case], run, missing_named, refs)["requests_from"]
+        for missing in range(len(reply["intents"])):
+            partial = reply["intents"][:missing] + reply["intents"][missing + 1:]
+            parsed = extraction.parse("intents", json.dumps({"intents": partial}), refs,
+                now=evaluate._BASE, valid_days=90, enabled_types=("dev_task", "bug_triage", "alert_triage"), app_seqs=())
+            assert not evaluate.score_extraction(evaluate.EXTRACTION_CASES[case], run, parsed, refs)["requests_from"]
+        wrong_type = [{**item, "type": "dev_task" if item["type"] == "bug_triage" else "bug_triage"}
+                      for item in reply["intents"]]
+        parsed = extraction.parse("intents", json.dumps({"intents": wrong_type}), refs,
+            now=evaluate._BASE, valid_days=90, enabled_types=("dev_task", "bug_triage", "alert_triage"), app_seqs=())
+        assert not evaluate.score_extraction(evaluate.EXTRACTION_CASES[case], run, parsed, refs)["requests_from"]
+        for seq in evaluate.EXTRACTION_CASES[case]["chatter"]:
+            extra = _reply(f"m{seq}", type_key=reply["intents"][0]["type"])
+            parsed = extraction.parse("intents", json.dumps({"intents": [*reply["intents"], extra]}), refs,
+                now=evaluate._BASE, valid_days=90, enabled_types=("dev_task", "bug_triage", "alert_triage"), app_seqs=())
+            assert not evaluate.score_extraction(evaluate.EXTRACTION_CASES[case], run, parsed, refs)["nothing_from_chatter"]
     if "merged_from" in run["checks"]:
         text, refs = extraction.render("intents", evaluate.EXTRACTION_CASES[case]["rows"], context=[],
             participants=extraction.Participants({}, None), known=[], zone_name="UTC", text_max_chars=500)
