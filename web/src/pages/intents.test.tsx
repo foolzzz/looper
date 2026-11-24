@@ -7,7 +7,9 @@ import { fetchProjectsList, fetchWorkflows, type Project, type Workflow } from "
 import {
   intentTypesHistory, intentTypesList, intentTypesRollback, intentTypesSave,
   intentsBuild, intentsList, intentsReject, intentsSettingsGet, intentsStats,
-  type Intent, type IntentType, type IntentTypeVersion,
+  intentGroupReadsList, intentGroupReadsPreview, intentGroupReadsPut, intentGroupReadsDelete,
+  intentGroupReadsSettingsPut, leadsChats,
+  type Intent, type IntentType, type IntentTypeVersion, type FollowedGroup, type FollowedGroups,
 } from "@/lib/api-leads";
 import { V1Error } from "@/lib/v1";
 
@@ -21,7 +23,8 @@ vi.mock("@/lib/api-leads", () => ({
   intentTypesCreate: vi.fn(), intentTypesSave: vi.fn(), intentTypesRollback: vi.fn(), intentTypesArchive: vi.fn(),
   intentTypesSetProjectTemplate: vi.fn(), intentBindingsList: vi.fn(), intentBindingsPut: vi.fn(),
   intentBindingsDelete: vi.fn(), intentAlertSendersList: vi.fn(), intentAlertSendersPut: vi.fn(),
-  intentAlertSendersDelete: vi.fn(),
+  intentAlertSendersDelete: vi.fn(), intentGroupReadsList: vi.fn(), intentGroupReadsPreview: vi.fn(),
+  intentGroupReadsPut: vi.fn(), intentGroupReadsDelete: vi.fn(), intentGroupReadsSettingsPut: vi.fn(), leadsChats: vi.fn(),
 }));
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -41,6 +44,15 @@ function intent(extra: Partial<Intent> = {}): Intent {
     handled_at: null, handled_via: null, reject_reason: null, created_at: "2026-11-19T08:00:00Z", ...extra,
   };
 }
+
+const followedGroup: FollowedGroup = {
+  chat_id: "oc_product", name: "合成产品群", kind: "group", added_at: "2026-11-23T12:00:00Z",
+  read_from: "2026-11-23T12:00:00Z", readable: true, read_today: 20, skipped_today: 3,
+  messages_24h: 130, intents_7d: 4,
+};
+const groupPage: FollowedGroups = {
+  enabled: false, delivery_enabled: true, run_max: 200, day_max: 500, max_groups: 10, groups: [],
+};
 
 const builtin: IntentType = {
   key: "request", builtin: true, enabled: true, archived: false, version: 1, name: "请求", guidance: "内置说明",
@@ -72,6 +84,18 @@ describe("Intents page", () => {
       projects_root: "",
     });
     vi.mocked(fetchWorkflows).mockResolvedValue([{ key: "fix", name: "Fix" } as Workflow]);
+    vi.mocked(intentGroupReadsList).mockResolvedValue(groupPage);
+    vi.mocked(intentGroupReadsPreview).mockResolvedValue({ group: {
+      chat_id: followedGroup.chat_id, name: followedGroup.name, kind: "group", messages_24h: 130, estimate_usd: [0.03, 0.08],
+    } });
+    vi.mocked(intentGroupReadsPut).mockResolvedValue({ ...groupPage, groups: [followedGroup] });
+    vi.mocked(intentGroupReadsDelete).mockResolvedValue(groupPage);
+    vi.mocked(intentGroupReadsSettingsPut).mockResolvedValue({ ...groupPage, enabled: true });
+    vi.mocked(leadsChats).mockResolvedValue({ source_id: "synthetic", total: 3, chats: [
+      { chat_id: "oc_product", name: "合成产品群", kind: "group" },
+      { chat_id: "ou_peer", name: "合成私聊", kind: "p2p" },
+      { chat_id: "oc_unknown", name: "未识别类型", kind: "unknown" },
+    ] as import("@/lib/api-leads").LeadChat[] });
     container = document.createElement("div");
     document.body.append(container);
     root = createRoot(container);
@@ -180,6 +204,54 @@ describe("Intents page", () => {
     const dialog = container.querySelector("[role=dialog]")!;
     await act(async () => button(dialog, "回退到这一版")!.click());
     expect(intentTypesRollback).toHaveBeenCalledWith({ key: "custom_watch", version: 1 });
+  });
+
+  it("follows a group only after its preview is confirmed, and revokes it", async () => {
+    await show();
+    await act(async () => button(container, "群需求")!.click());
+    expect(container.textContent).toContain("还没有关注的群");
+    expect(container.textContent).not.toContain("合成私聊");
+    expect(container.textContent).not.toContain("未识别类型");
+    await act(async () => setValue(container.querySelector('input[aria-label="搜索群"]')!, "产品"));
+    expect(leadsChats).toHaveBeenLastCalledWith({ query: "产品" });
+    await act(async () => button(container, "关注")!.click());
+    expect(intentGroupReadsPreview).toHaveBeenCalledWith({ chat_id: "oc_product" });
+    expect(intentGroupReadsPut).not.toHaveBeenCalled();
+    let dialog = container.querySelector('[role="dialog"]')!;
+    expect(dialog.textContent).toContain("最近 24 小时 130 条");
+    expect(dialog.textContent).toContain("$0.03–$0.08");
+    expect(dialog.textContent).toContain("每个群每天最多 500 条");
+    await act(async () => button(dialog, "取消")!.click());
+    expect(intentGroupReadsPut).not.toHaveBeenCalled();
+    await act(async () => button(container, "关注")!.click());
+    dialog = container.querySelector('[role="dialog"]')!;
+    await act(async () => button(dialog, "确认关注")!.click());
+    expect(intentGroupReadsPut).toHaveBeenCalledWith({ chat_id: "oc_product" });
+    expect(container.querySelector('[role="dialog"]')).toBeNull();
+    expect(container.textContent).toContain("今天读了 20 条，跳过 3 条");
+    expect(container.textContent).toContain("7 天 4 条意图");
+    await act(async () => button(container, "撤销")!.click());
+    expect(intentGroupReadsDelete).toHaveBeenCalledWith({ chat_id: "oc_product" });
+    expect(container.textContent).toContain("还没有关注的群");
+  });
+
+  it("greys out the switch until the delivery layer is on", async () => {
+    vi.mocked(intentGroupReadsList).mockResolvedValue({ ...groupPage, delivery_enabled: false });
+    await show();
+    await act(async () => button(container, "群需求")!.click());
+    const toggle = container.querySelector<HTMLButtonElement>('[role="switch"]')!;
+    expect(toggle.disabled).toBe(true);
+    expect(container.textContent).toContain("先在 Settings 打开送达层");
+    await act(async () => toggle.click());
+    expect(intentGroupReadsSettingsPut).not.toHaveBeenCalled();
+    vi.mocked(intentGroupReadsList).mockResolvedValue(groupPage);
+    await act(async () => button(container, "意图")!.click());
+    await act(async () => button(container, "群需求")!.click());
+    const enabledToggle = container.querySelector<HTMLButtonElement>('[role="switch"]')!;
+    expect(enabledToggle.disabled).toBe(false);
+    await act(async () => enabledToggle.click());
+    expect(intentGroupReadsSettingsPut).toHaveBeenCalledWith({ enabled: true });
+    expect(container.querySelector('[role="switch"]')?.getAttribute("aria-checked")).toBe("true");
   });
 
   it("says when nothing is pending", async () => {
