@@ -84,9 +84,31 @@ def test_new_fresh_ddl_is_appended_without_changing_the_baseline_bytes():
     )
 
 
+def test_unanswered_pause_migrations_keep_unique_relative_order():
+    discovered = migrations.discover()
+    by_name = {migration.name: migration for migration in discovered}
+    assert "schedule_pause_reasons" in by_name
+    assert "cost_holds_unanswered" in by_name
+    pause = by_name["schedule_pause_reasons"]
+    holds = by_name["cost_holds_unanswered"]
+    assert (pause.order, pause.pending_order, pause.online_order) == (1700, 1700, 1700)
+    assert (holds.order, holds.pending_order, holds.online_order) == (1701, 1701, 1701)
+    # Orders are coordinated to be unique. Later migrations may use higher numbers.
+    for field in ("order", "pending_order", "online_order"):
+        values = [getattr(migration, field, None) for migration in discovered]
+        assert values.count(1700) == 1
+        assert values.count(1701) == 1
+    assert discovered.index(pause) < discovered.index(holds)
+    pending = migrations.pending_migrations(discovered)
+    assert pending.index(pause) < pending.index(holds)
+    online = [step.migration for step in migrations.online_steps(discovered)]
+    assert online.index(pause.name) < online.index(holds.name)
+
+
 def test_current_baseline_additions_have_upgrade_and_admission_migrations():
     discovered = migrations.discover()
-    expected = {"mcp_tool_levels", "failure_typing", "memory_candidates", "channel_outbox"}
+    expected = {"mcp_tool_levels", "failure_typing", "memory_candidates", "channel_outbox",
+                "memory_draft_role", "memory_draft_queue"}
     assert expected <= {migration.name for migration in discovered}
     assert expected <= {migration.name for migration in migrations.pending_migrations(discovered)}
     steps = migrations.online_steps(discovered)
@@ -101,3 +123,11 @@ def test_followed_group_migration_uses_its_reserved_order():
     discovered = migrations.discover()
     group_reads = next(migration for migration in discovered if migration.name == "intent_group_reads")
     assert (group_reads.order, group_reads.pending_order) == (1800, 1800)
+
+
+@pytest.mark.parametrize("name,order", [("memory_draft_role", 1830), ("memory_draft_queue", 1840)])
+def test_drafting_migrations_use_their_reserved_orders(name, order):
+    migration = next(item for item in migrations.discover() if item.name == name)
+    assert (migration.order, migration.pending_order) == (order, order)
+    if getattr(migration, "online", ()):
+        assert migration.online_order == order

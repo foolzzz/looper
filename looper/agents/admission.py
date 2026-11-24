@@ -10,12 +10,12 @@ import asyncio
 import contextvars
 import logging
 from collections import Counter
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
 from enum import StrEnum
-from typing import Any
+from typing import Any, Literal
 
 from ..db import llm_records, profile_registry, provider_limits, system_settings
 from . import attempts
@@ -120,6 +120,9 @@ class Grant:
     probe: bool = False
     reported: bool = False
     quota_failed: bool = False
+    lent_by: str | None = None
+    arrived: datetime | None = None
+    sequence: int = 0
 
 
 @dataclass(frozen=True)
@@ -127,6 +130,20 @@ class Frozen:
     account: str
     windows: tuple[str, ...]
     resets_at: datetime | None
+
+
+@dataclass(frozen=True)
+class Hold:
+    reason: Literal["quota"]
+    resets_at: datetime | None
+
+
+@dataclass
+class Lending:
+    parent: Grant
+    children: frozenset[str]
+    used: bool = False
+    child: str | None = None
 
 
 @dataclass
@@ -197,6 +214,7 @@ class Controller:
         self.running: dict[str, Grant] = {}
         self.record_owners: dict[int, str] = {}
         self.waiters: list[Waiter] = []
+        self.lending: dict[str, Lending] = {}
         self.sequence = 0
         self.warning_day: date | None = None
         self.overadmissions = 0
@@ -406,6 +424,12 @@ class Controller:
     async def set_enabled(self, value: bool) -> None:
         async with self.lock:
             self.active = value
+            if not value:
+                for intent in self.lending.values():
+                    self.running.setdefault(intent.parent.owner, intent.parent)
+                self.lending.clear()
+                for grant in self.running.values():
+                    grant.lent_by = None
             self.lock.notify_all()
 
     async def _background_paused(self, provider_id: str) -> bool:
@@ -439,7 +463,14 @@ class Controller:
         )
 
     def _grant(self, waiter: Waiter, *, probe=False) -> None:
-        grant = Grant(waiter.provider_id, waiter.owner, waiter.lane, probe=probe)
+        grant = Grant(
+            waiter.provider_id,
+            waiter.owner,
+            waiter.lane,
+            probe=probe,
+            arrived=waiter.arrived,
+            sequence=waiter.sequence,
+        )
         if self.active:
             self.running[waiter.owner] = grant
         if probe:
@@ -505,8 +536,20 @@ class Controller:
                 w.sequence,
             )
         )
+        try:
+            self._lend_waiters(
+                provider_id,
+                [w for w in eligible if not (w.lane is Lane.BACKGROUND and paused)],
+            )
+        except Exception:
+            logger.exception("Could not lend account slot; explorers queue normally")
+            for intent in tuple(self.lending.values()):
+                if intent.parent.provider_id == provider_id:
+                    self._undo_lend(intent)
         limit = provider.get("max_concurrency")
         for waiter in eligible:
+            if waiter.ready.done():
+                continue
             if waiter.lane is Lane.BACKGROUND and paused:
                 continue
             count = sum(g.provider_id == provider_id for g in self.running.values())
@@ -568,6 +611,7 @@ class Controller:
         on_frozen: Callable[[Frozen], Awaitable[None]] | None = None,
         draining=None,
         user_message: bool = False,
+        _original: Grant | None = None,
     ) -> Grant:
         if not self.active:
             return Grant(provider_id, owner, lane)
@@ -590,8 +634,8 @@ class Controller:
                     provider_id,
                     owner,
                     lane,
-                    self.now(),
-                    self.sequence,
+                    (_original.arrived or self.now()) if _original else self.now(),
+                    _original.sequence if _original else self.sequence,
                     asyncio.get_running_loop().create_future(),
                     draining,
                     on_wait,
@@ -606,8 +650,8 @@ class Controller:
                     if waiter.ready.done():
                         break
                     try:
-                        # Keep cancellation in this task: Python 3.11 wait_for can
-                        # swallow it when a condition notification wins the race.
+                        # Keep cancellation on this task: wait_for can swallow
+                        # it when a condition notification races on Python 3.11.
                         async with asyncio.timeout(RECHECK_SECONDS):
                             await self.lock.wait()
                     except asyncio.TimeoutError:
@@ -659,7 +703,8 @@ class Controller:
                 # owns its context; that completed entry task needs no reset.
                 pass
             try:
-                if self.active and grant.probe and not grant.reported:
+                current = self.running.get(owner, grant)
+                if self.active and current.probe and not current.reported:
                     await self.transition(provider_id, ProbeEnded(False, failed))
                 await self.release(owner)
             except Exception:
@@ -668,7 +713,10 @@ class Controller:
     async def register(self, provider_id: str, lane: Lane, owner: str) -> None:
         if self.active:
             async with self.lock:
-                self.running[owner] = Grant(provider_id, owner, lane)
+                self.sequence += 1
+                self.running[owner] = Grant(
+                    provider_id, owner, lane, arrived=self.now(), sequence=self.sequence
+                )
                 self.lock.notify_all()
 
     async def release(self, owner: str) -> None:
@@ -681,11 +729,130 @@ class Controller:
             return
         async with self.lock:
             grant = self.running.pop(owner, None)
+            intent = self.lending.pop(owner, None)
+            if intent is not None and intent.child in self.running:
+                self.running[intent.child].lent_by = None
+            if grant is not None and grant.lent_by is not None:
+                intent = self.lending.get(grant.lent_by)
+                if intent is not None and intent.child == owner:
+                    self.running[grant.lent_by] = intent.parent
+                    intent.child = None
             if grant is not None and grant.probe:
                 account = self._state(grant.provider_id)
                 if account.probe_owner == owner:
                     account.probe_owner = None
             self.lock.notify_all()
+
+    def hold(self, provider_id: str) -> Hold | None:
+        if not self.active:
+            return None
+        account = self.states.get(provider_id)
+        if account is None or account.state is not AdmissionState.FROZEN:
+            return None
+        return Hold(
+            "quota",
+            account.until - timedelta(seconds=60)
+            if account.until_known and account.until is not None
+            else None,
+        )
+
+    def _lend_waiters(self, provider_id: str, eligible: Sequence[Waiter]) -> None:
+        for intent in self.lending.values():
+            parent = intent.parent
+            if intent.used or parent.provider_id != provider_id:
+                continue
+            if self.running.get(parent.owner) is not parent:
+                continue
+            child = next(
+                (
+                    w
+                    for w in eligible
+                    if w.owner in intent.children and not w.ready.done()
+                ),
+                None,
+            )
+            if child is None:
+                continue
+            self._grant(child)
+            self.running[child.owner].lent_by = parent.owner
+            del self.running[parent.owner]
+            intent.used, intent.child = True, child.owner
+            self.lock.notify_all()
+
+    def _undo_lend(self, intent: Lending) -> None:
+        """Fail open after a controller error without leaving the parent blocked."""
+        parent = intent.parent
+        self.lending.pop(parent.owner, None)
+        if intent.child in self.running:
+            self.running[intent.child].lent_by = None
+        self.running[parent.owner] = parent
+
+    @asynccontextmanager
+    async def lend(self, parent_owner: str | None, children: Sequence[str]):
+        intent = None
+        if self.active and parent_owner is not None:
+            try:
+                async with self.lock:
+                    parent = self.running.get(parent_owner)
+                    if (
+                        parent is not None
+                        and parent_owner not in self.lending
+                        and self._state(parent.provider_id).state is AdmissionState.OPEN
+                    ):
+                        intent = Lending(parent, frozenset(children))
+                        self.lending[parent_owner] = intent
+                        await self._pump(parent.provider_id)
+                        self.lock.notify_all()
+            except asyncio.CancelledError:
+                if intent is not None:
+                    async with self.lock:
+                        if self.lending.get(parent_owner) is intent:
+                            del self.lending[parent_owner]
+                            if intent.child in self.running:
+                                self.running[intent.child].lent_by = None
+                            self.lock.notify_all()
+                raise
+            except Exception:
+                logger.exception(
+                    "Could not lend account slot; explorers queue normally"
+                )
+                if intent is not None:
+                    async with self.lock:
+                        if self.lending.get(parent_owner) is intent:
+                            self._undo_lend(intent)
+                        self.lock.notify_all()
+                    intent = None
+        cancelled = False
+        try:
+            yield
+        except asyncio.CancelledError:
+            cancelled = True
+            raise
+        finally:
+            if intent is not None:
+                try:
+                    reacquire = False
+                    async with self.lock:
+                        if self.lending.get(parent_owner) is intent:
+                            del self.lending[parent_owner]
+                            if intent.child in self.running:
+                                self.running[intent.child].lent_by = None
+                                reacquire = self.active and not cancelled
+                            self.lock.notify_all()
+                    if reacquire:
+                        await self.acquire(
+                            intent.parent.provider_id,
+                            intent.parent.lane,
+                            intent.parent.owner,
+                            _original=intent.parent,
+                        )
+                except Exception:
+                    logger.exception(
+                        "Could not reclaim lent account slot; admitting parent"
+                    )
+                    async with self.lock:
+                        self._undo_lend(intent)
+                        self.lock.notify_all()
 
     async def wake(self) -> None:
         async with self.lock:
@@ -759,6 +926,8 @@ release = _controller.release
 wake = _controller.wake
 stop = _controller.stop
 snapshot = _controller.snapshot
+lend = _controller.lend
+hold = _controller.hold
 daily_overadmissions = _controller.daily_overadmissions
 
 

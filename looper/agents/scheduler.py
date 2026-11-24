@@ -607,8 +607,10 @@ class Scheduler:
         stale alerts that are due. When a daily message backup is configured, start one that is due."""
         now = self._clock()
         from .cost_guard import refresh_day
+        from . import unanswered_pushes
 
         await refresh_day()
+        await unanswered_pushes.check(now)
         await self._settle_running(now)
         kinds = ("command",) if self._drain is not None and self._drain.draining else None
         for schedule_id in await db_schedules.schedules_with_queued_runs(kinds=kinds):

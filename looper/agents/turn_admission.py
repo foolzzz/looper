@@ -2,11 +2,13 @@
 from __future__ import annotations
 
 import logging
+import sys
 from collections.abc import Sequence
 from contextlib import AsyncExitStack
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from datetime import datetime, tzinfo
 from functools import wraps
+from types import TracebackType
 
 from . import admission, lanes, turn_context
 from .agent_settings import AgentType
@@ -23,6 +25,29 @@ _current_owner = admission._current_owner
 
 class RetryQuotaProbe(Exception):
     """A retained message's probe failed on quota before any model output."""
+
+
+@dataclass
+class ManagerLease:
+    """One session slot, retained while an injected input may run natively."""
+
+    session: object
+    provider_id: str
+    stack: AsyncExitStack
+    references: int = 1
+    failure: tuple[type[BaseException] | None, BaseException | None, TracebackType | None] = (None, None, None)
+
+    def retain(self) -> None:
+        self.references += 1
+
+    async def release(self, failure=(None, None, None)) -> None:
+        if self.failure[1] is None and failure[1] is not None:
+            self.failure = failure
+        self.references -= 1
+        if self.references == 0:
+            if getattr(self.session, "admission_lease", None) is self:
+                self.session.admission_lease = None
+            await self.stack.__aexit__(*self.failure)
 
 
 def manager_turn_lane(message_type: MessageType, origin: TurnOrigin | None) -> Lane | None:
@@ -52,7 +77,13 @@ def admitted_manager_turn(method):
     @wraps(method)
     async def run(agent, token, prepared):
         if not admission.enabled():
-            return await method(agent, token, prepared)
+            mid_turn = getattr(agent, "_mid_turn", None)
+            lease = mid_turn.claim_admission(token, prepared.launch.profile.provider.id) if mid_turn else None
+            try:
+                return await method(agent, token, prepared)
+            finally:
+                if lease is not None:
+                    await lease.release(sys.exc_info())
         try:
             lane = manager_turn_lane(prepared.envelope.message_type,
                                      prepared.turn.origin if prepared.turn is not None else None)
@@ -62,6 +93,9 @@ def admitted_manager_turn(method):
             return await method(agent, token, prepared)
         if lane is None or _current_owner.get() == owner:
             return await method(agent, token, prepared)
+        mid_turn = getattr(agent, "_mid_turn", None)
+        if mid_turn is not None and mid_turn.native_completed(token, prepared):
+            return await method(agent, token, prepared)  # already ran under the previous turn's slot
         told = logged = False
 
         async def on_wait(text):
@@ -78,13 +112,18 @@ def admitted_manager_turn(method):
                     frozen.account, frozen.windows, frozen.resets_at, turn_context.zone()))
 
         while True:
-            async with AsyncExitStack() as stack:
+            lease = mid_turn.claim_admission(token, prepared.launch.profile.provider.id) if mid_turn else None
+            stack = AsyncExitStack()
+            try:
                 token.admission_waiting = True
                 try:
-                    await token.step("account_admission", stack.enter_async_context(admission.slot(
-                        prepared.launch.profile.provider.id, lane, owner=owner,
-                        user_message=lane is Lane.INTERACTIVE,
-                        on_wait=on_wait, on_frozen=on_frozen if lane is Lane.INTERACTIVE else None)))
+                    if lease is None:
+                        await token.step("account_admission", stack.enter_async_context(admission.slot(
+                            prepared.launch.profile.provider.id, lane, owner=owner,
+                            user_message=lane is Lane.INTERACTIVE,
+                            on_wait=on_wait, on_frozen=on_frozen if lane is Lane.INTERACTIVE else None)))
+                        lease = ManagerLease(prepared.session, prepared.launch.profile.provider.id, stack)
+                        prepared.session.admission_lease = lease
                     token.admission_waiting = False
                     token.check()  # a simultaneous stop and grant must not start a record
                     # token.step enters the slot in a child task; bind this task's records too.
@@ -102,6 +141,11 @@ def admitted_manager_turn(method):
                         _current_owner.reset(context)
                 finally:
                     token.admission_waiting = False
+            finally:
+                if lease is not None:
+                    await lease.release(sys.exc_info())
+                else:
+                    await stack.__aexit__(*sys.exc_info())
     return run
 
 

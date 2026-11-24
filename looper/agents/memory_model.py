@@ -139,6 +139,13 @@ CONFIRMED_STATES = frozenset({State.CONFIRMED, State.WRITING, State.WRITTEN, Sta
 CLOSED_STATES = frozenset({State.WRITTEN, State.REJECTED, State.DROPPED})
 
 
+class DraftWaitReason(StrEnum):
+    TARGET_BUSY = "target_busy"  # The target's confirmed revision must finish before another can be drafted.
+
+
+DRAFT_BLOCKING_STATES = frozenset({State.CONFIRMED, State.WRITING, State.BLOCKED, State.CONFLICT})
+
+
 class Reason(StrEnum):
     # dropped
     DUPLICATE = "duplicate"

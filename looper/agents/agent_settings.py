@@ -153,6 +153,7 @@ class AgentType(str, Enum):
     ADVICE_CHECK = "advice_check"
     LEADS_CHECK = "leads_check"
     OUTBOUND_CHECK = "outbound_check"
+    MEMORY_DRAFT = "memory_draft"
     EXPLORER = "explorer"
 
 
@@ -163,7 +164,7 @@ TASK_ROLES = (AgentType.PLANNER, AgentType.WORKER, AgentType.REVIEWER)
 # their system prompt always replaces the runtime's, with no harness. The leads check is one too: an extraction run
 # starts it over what it found (``processor.run`` with its role).
 SPAWN_ROLES = (AgentType.ADVISOR, AgentType.ADVICE_CHECK, AgentType.LEADS_CHECK,
-               AgentType.OUTBOUND_CHECK)
+               AgentType.OUTBOUND_CHECK, AgentType.MEMORY_DRAFT)
 # The roles with no harness and a replaced system prompt: the processor and the spawned roles.
 NO_HARNESS_ROLES = (AgentType.PROCESSOR, *SPAWN_ROLES)
 # The roles a project's layers apply to: its tasks' and the processor of its schedules.
@@ -188,6 +189,7 @@ BUILTIN_SYSTEM_PROMPT_MODE = {
     AgentType.ADVISOR: SystemPromptMode.REPLACE, AgentType.ADVICE_CHECK: SystemPromptMode.REPLACE,
     AgentType.LEADS_CHECK: SystemPromptMode.REPLACE,
     AgentType.OUTBOUND_CHECK: SystemPromptMode.REPLACE,
+    AgentType.MEMORY_DRAFT: SystemPromptMode.REPLACE,
     AgentType.EXPLORER: SystemPromptMode.REPLACE,
 }
 

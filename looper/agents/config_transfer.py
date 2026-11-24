@@ -1606,7 +1606,7 @@ class _Importer:
                 raise _Skip(f"scope {scope!r} is not {' or '.join(scopes)} here")
             roles = ("planner", "worker", "reviewer", "processor") if scope == "role_project" else (
                 "manager", "planner", "worker", "reviewer", "processor", "advisor", "advice_check", "leads_check",
-                "outbound_check")
+                "outbound_check", "memory_draft")
             if scope in ("role", "role_project") and role not in roles:
                 raise _Skip(f"role {role!r} is not one of {', '.join(roles)}")
             if scope in ("system", "project") and role is not None:
@@ -2708,8 +2708,11 @@ class _Importer:
                 fields.update(enabled=False, next_fire_at=None)
                 if (values["cron"], values["timezone"]) != (row["cron"], row["timezone"]):
                     fields["rule_changed_at"] = datetime.now(UTC)
+                from .cost_guard_settings import cached as guard_settings
+
                 await db_schedules.update_schedule(self.conn, row["id"], fields, profiles=profile_ids,
-                                                   task_limits=limits)
+                                                   task_limits=limits,
+                                                   snooze_days=guard_settings().unanswered.snooze_days)
 
     def schedule_notes(self) -> None:
         if self.disabled_schedules:
