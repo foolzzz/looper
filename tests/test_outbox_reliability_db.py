@@ -13,9 +13,15 @@ pytestmark = pytest.mark.skipif(not DSN, reason='disposable PostgreSQL required'
 @pytest.mark.parametrize('restart', [False, True])
 def test_expired_unknown_pending_is_never_retried(monkeypatch, restart):
     from looper.agents.channels import outbound
-    from looper.db import channel_outbox as db
 
     async def check(pool):
+        async def wait_for_unknown_state(state):
+            while True:
+                row = await pool.fetchrow('SELECT * FROM channel_outbox')
+                if row and row['state'] == state and row['error_class'] == 'unknown':
+                    return row
+                await asyncio.sleep(.01)
+
         now = datetime.now(timezone.utc) + timedelta(seconds=1)
         transport = AsyncMock()
         transport.send.side_effect = outbound.LarkCliError('response lost', error_type=outbound.TIMEOUT)
@@ -25,7 +31,8 @@ def test_expired_unknown_pending_is_never_retried(monkeypatch, restart):
         monkeypatch.setattr(outbound, 'backoff', lambda *args: 10)
         try:
             await box.send('send', 'chat', {'text': 'hello'}, None, 'stable-key', 'answer')
-            original = await pool.fetchrow('SELECT * FROM channel_outbox')
+            # The caller's wait can expire before the background state write commits.
+            original = await wait_for_unknown_state('pending')
             assert original['state'] == 'pending' and original['error_class'] == 'unknown'
             # Moving the clock across the dedupe boundary must also protect pending rows.
             now += timedelta(hours=2)
@@ -37,7 +44,7 @@ def test_expired_unknown_pending_is_never_retried(monkeypatch, restart):
             else:
                 box._wake.set()
             receipt = await box.send('send', 'chat', {'text': 'hello'}, None, 'stable-key', 'answer')
-            current = await db.get(original['id'])
+            current = await wait_for_unknown_state('uncertain')
             assert current['state'] == 'uncertain'
             assert not receipt.success
             assert transport.send.await_count == 1
