@@ -7,6 +7,22 @@ from unittest.mock import AsyncMock
 from evals.processor.memory_retro import CASES, evaluate_case
 
 
+def test_fake_cli_runs_draft_and_retrospective_cases_together(monkeypatch, tmp_path):
+    import json
+
+    from evals.processor import __main__ as runner
+
+    out = tmp_path / "run.json"
+    monkeypatch.setattr("sys.argv", ["processor", "--mode", "fake", "--cases",
+        "memory_draft_*,memory_retro_*", "--reps", "2", "--out", str(out)])
+    assert runner.main() == 0
+    result = json.loads(out.read_text())
+    expected = set(runner.DRAFT_CASES) | set(CASES)
+    assert {run["case"] for run in result["runs"]} == expected
+    assert len(result["runs"]) == 2 * len(expected)
+    assert all(run["passed"] and run["cost_usd"] == 0 for run in result["runs"])
+
+
 def test_fake_retrospective_cases_cover_evidence_targets_and_negative_outcomes(tmp_path):
     async def run():
         return [await evaluate_case(key, rep, tmp_path / f"{key}-{rep}", mode="fake")
