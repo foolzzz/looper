@@ -693,31 +693,9 @@ export function DashboardPage() {
     }, 5000);
   }, []);
 
-  if (error && !overview) {
-    return (
-      <div className="flex h-full items-center justify-center">
-        <div className="text-center">
-          <p className="text-lg text-destructive">Connection failed</p>
-          <p className="mt-1 text-sm text-muted-foreground">{error}</p>
-          <p className="mt-3 text-xs text-muted-foreground">
-            Make sure <code className="text-foreground">looper serve</code> is running
-          </p>
-        </div>
-      </div>
-    );
-  }
-
-  if (!overview) {
-    return (
-      <div className="flex h-full items-center justify-center">
-        <p className="text-muted-foreground">Connecting...</p>
-      </div>
-    );
-  }
-
   return (
-    <div className="space-y-6">
-      <div className="space-y-2">
+    <div className={overview ? "space-y-6" : "flex h-full flex-col gap-6"}>
+      {overview && <div className="space-y-2">
         <div>
           <h1 className="text-2xl font-bold">Dashboard</h1>
           <p className="mt-1 text-sm text-muted-foreground">What is happening now</p>
@@ -728,16 +706,31 @@ export function DashboardPage() {
           </p>
         )}
         <Health unhealthy={overview.health.unhealthy} />
-      </div>
+      </div>}
+      {/* The snapshot reads independently, including before the overview's first successful read. */}
       <StatusCard />
-      <TaskCounts tasks={overview.tasks} />
-      <DashboardGates needsYou={overview.tasks.needs_you} waitingGates={waitingGates} revision={overview} />
-      <Agents overview={overview} />
-      <ManagerMetricsSection />
-      <TaskQualitySection />
-      <Concurrency projects={overview.projects} idle={overview.idle_projects} />
-      {overview.schedules.total > 0 && <Schedules schedules={overview.schedules} />}
-      <Spend spend={overview.spend_today} />
+      {!overview ? (
+        <div className="flex flex-1 items-center justify-center">
+          {error ? (
+            <div className="text-center">
+              <p className="text-lg text-destructive">Connection failed</p>
+              <p className="mt-1 text-sm text-muted-foreground">{error}</p>
+              <p className="mt-3 text-xs text-muted-foreground">
+                Make sure <code className="text-foreground">looper serve</code> is running
+              </p>
+            </div>
+          ) : <p className="text-muted-foreground">Connecting...</p>}
+        </div>
+      ) : <>
+        <TaskCounts tasks={overview.tasks} />
+        <DashboardGates needsYou={overview.tasks.needs_you} waitingGates={waitingGates} revision={overview} />
+        <Agents overview={overview} />
+        <ManagerMetricsSection />
+        <TaskQualitySection />
+        <Concurrency projects={overview.projects} idle={overview.idle_projects} />
+        {overview.schedules.total > 0 && <Schedules schedules={overview.schedules} />}
+        <Spend spend={overview.spend_today} />
+      </>}
     </div>
   );
 }

@@ -27,7 +27,7 @@ def api(monkeypatch: pytest.MonkeyPatch) -> ApiRuntime:
     monkeypatch.setitem(runtimes.ADAPTERS, "api", runtime)
     monkeypatch.setattr(service, "_login_modules", lambda: {})
     original = importlib.metadata.version
-    monkeypatch.setattr(importlib.metadata, "version", lambda name: "3.37.0" if name == "openai" else original(name))
+    monkeypatch.setattr(importlib.metadata, "version", lambda name: {"openai": "3.37.0", "anthropic": "2.3.0"}.get(name) or original(name))
     return runtime
 
 
@@ -38,14 +38,14 @@ def _missing_package(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(importlib.metadata, "version", version)
 
 
-async def _profile(api: ApiRuntime) -> dict[str, Any]:
+async def _profile(api: ApiRuntime, protocol: str = "openai-responses") -> dict[str, Any]:
     assert await service._detect(api)
     provider = (await service.create_provider({
         "name": "API account", "vendor_type": "custom", "api_key": "test-key",
-        "endpoints": [{"protocol": "openai-responses", "base_url": "http://127.0.0.1:1/v1"}],
+        "endpoints": [{"protocol": protocol, "base_url": "http://127.0.0.1:1/v1"}],
     }))["provider"]
     model = (await service.create_model({
-        "provider_id": provider["provider_id"], "name": "test-model", "protocol": "openai-responses",
+        "provider_id": provider["provider_id"], "name": "test-model", "protocol": protocol,
     }))["model"]
     return (await service.create_profile({
         "name": "API Manager", "runtime_id": "rt-api", "model_id": model["model_id"],
@@ -61,7 +61,7 @@ def test_detects_in_process_runtime_without_searching_path(api, monkeypatch):
     async def test(pool):
         assert await service._detect(api)
         row = await db.get_runtime("rt-api")
-        assert row["version"] == "openai 3.37.0"
+        assert row["version"] == "openai 3.37.0 / anthropic 2.3.0"
         assert set(row["capabilities"]) == {c.value for c in api.capabilities}
         view = service.runtime_view(row)
         assert view["in_process"] is True and view["path"] is None
@@ -94,9 +94,10 @@ def test_redetect_missing_sdk_explains_package_failure(api, monkeypatch):
     run_db(test, monkeypatch, timeout=30)
 
 
-def test_api_profile_can_be_selected_for_the_manager(api, monkeypatch):
+@pytest.mark.parametrize("protocol", ["openai-responses", "anthropic-messages"])
+def test_api_profile_can_be_selected_for_the_manager(api, monkeypatch, protocol):
     async def test(pool):
-        profile = await _profile(api)
+        profile = await _profile(api, protocol)
         status, payload = await _call("PUT", "/api/agent-settings/roles/manager", {
             "profile_id": profile["profile_id"],
         })
@@ -115,9 +116,10 @@ def test_api_profile_can_be_selected_for_the_manager(api, monkeypatch):
     *( ("project-role", role) for role in ("planner", "worker", "reviewer") ),
     *( ("task", role) for role in ("planner", "worker", "reviewer") ),
 ])
-def test_api_profile_is_refused_at_other_selection_layers(api, monkeypatch, scope, role):
+@pytest.mark.parametrize("protocol", ["openai-responses", "anthropic-messages"])
+def test_api_profile_is_refused_at_other_selection_layers(api, monkeypatch, scope, role, protocol):
     async def test(pool):
-        profile = await _profile(api)
+        profile = await _profile(api, protocol)
         body = {"profile_id": profile["profile_id"]}
         if scope == "system":
             path = "/api/agent-settings/system"

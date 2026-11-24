@@ -75,7 +75,7 @@ class ApiRuntime(RuntimeAdapter):
     reports_request_context = True
     default_executable = ""
     capabilities = frozenset({Capability.RESIDENT_SESSION, Capability.RESUME})
-    protocols = frozenset({ApiProtocol.OPENAI_RESPONSES})
+    protocols = frozenset({ApiProtocol.OPENAI_RESPONSES, ApiProtocol.ANTHROPIC_MESSAGES})
     auth_kinds = frozenset({AuthKind.API_KEY})
     roles = frozenset({"manager"})
     in_process = True
@@ -86,12 +86,14 @@ class ApiRuntime(RuntimeAdapter):
     provider_env_owned = frozenset({KEY_ENV})
 
     def probe(self, executable: str) -> Probe:
-        try:
-            version = importlib.metadata.version("openai")
-        except importlib.metadata.PackageNotFoundError:
-            return Probe(None, frozenset(),
-                         "the openai Python package is not installed with this Looper; reinstall Looper")
-        return Probe(f"openai {version}", self.capabilities)
+        versions = []
+        for package in ("openai", "anthropic"):
+            try:
+                versions.append(f"{package} {importlib.metadata.version(package)}")
+            except importlib.metadata.PackageNotFoundError:
+                return Probe(None, frozenset(),
+                             f"the {package} Python package is not installed with this Looper; reinstall Looper")
+        return Probe(" / ".join(versions), self.capabilities)
 
     def prompt_blocks(self, launch: Launch, looper_prompt: str, *, cwd: str | Path | None = None) -> list[PromptBlock]:
         return [PromptBlock("Looper instructions", "looper", prompt_text(launch, looper_prompt),
@@ -108,9 +110,10 @@ class ApiRuntime(RuntimeAdapter):
     def bind_provider(self, provider: ProviderSpec, model: str, effort: str | None) -> ProviderBinding:
         if provider.auth is AuthKind.OAUTH:
             raise RuntimeUnsupported(f"the api runtime takes an API key provider; {provider.name!r} is a login")
-        if provider.protocols != {ApiProtocol.OPENAI_RESPONSES}:
-            raise RuntimeUnsupported(f"the api runtime speaks openai-responses; provider {provider.name!r} "
-                                     "must supply that exact protocol")
+        if len(provider.protocols) != 1 or not provider.protocols <= self.protocols:
+            supported = ", ".join(sorted(protocol.value for protocol in self.protocols))
+            raise RuntimeUnsupported(f"the api runtime requires one supported protocol; provider {provider.name!r} "
+                                     f"must supply exactly one of {supported}")
         if len(provider.catalog) != 1 or provider.catalog[0].name != model:
             raise RuntimeUnsupported("the api runtime requires one resolved model matching the launch model")
         if not provider.api_key:
@@ -151,8 +154,16 @@ class ApiRuntime(RuntimeAdapter):
             finally:
                 Path(temporary).unlink(missing_ok=True)
         provider = launch.profile.provider
-        return Descriptor(ApiProtocol.OPENAI_RESPONSES, self.api_model(launch.model), provider.base_url,
-                          launch.effort, provider.catalog[0].context_window, str(target)).to_argv()
+        protocol = launch.profile.resolved_model.model.protocol
+        model, effort = launch.model, launch.effort
+        if protocol is ApiProtocol.ANTHROPIC_MESSAGES:
+            from ...model_names import parse_model_name
+
+            model = parse_model_name(model).base
+            if provider.catalog[0].efforts == ():
+                effort = None
+        return Descriptor(protocol, model, provider.base_url,
+                          effort, provider.catalog[0].context_window, str(target)).to_argv()
 
     def resume_args(self, session_id: str) -> list[str]:
         return ["--session", session_id]
@@ -206,7 +217,7 @@ class ApiRuntime(RuntimeAdapter):
 
         provider = launch.profile.provider
         return {
-            "api": {"protocol": ApiProtocol.OPENAI_RESPONSES.value,
+            "api": {"protocol": launch.profile.resolved_model.model.protocol.value,
                     "base_url_host": urlparse(provider.base_url).hostname},
             "omitted": [{"kind": item.kind.value, "name": item.name,
                          "reason": "the api runtime loads no plugins, skills or catalog MCP servers"}
