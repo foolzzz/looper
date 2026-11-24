@@ -97,7 +97,7 @@ def test_workflow_runs_six_shards_behind_stable_required_check() -> None:
     assert "shard: [1, 2, 3, 4, 5, 6]" in shards
     assert "name: Agent system tests (shard ${{ matrix.shard }}/6)" in shards
     assert "LOOPER_TEST_SHARD: ${{ matrix.shard }}/6" in shards
-    assert "timeout-minutes: 20" in shards
+    assert "timeout-minutes: 30" in shards
     assert "fail-fast: false" in shards
     result = workflow.split("  agent-system-result:\n", 1)[1].split("\n  dashboard:", 1)[0]
     assert re.search(r"^    name: Agent system tests$", result, re.MULTILINE)

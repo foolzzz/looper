@@ -60,8 +60,9 @@ jobs:
     needs: changes
     # Keep the runner's PostgreSQL 16 client package available alongside the service.
     runs-on: ubuntu-24.04
-    # Include service setup and dashboard staging, plus headroom for runner variance.
-    timeout-minutes: 20
+    # Include service setup and dashboard staging, plus headroom for runner variance and
+    # count-based shard imbalance (one shard can run about twice as long as the others).
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
