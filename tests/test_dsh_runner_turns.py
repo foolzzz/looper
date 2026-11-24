@@ -343,6 +343,37 @@ def test_runner_kill_mid_turn_then_resume(tmp_path):
     run(exercise())
 
 
+@pytest.mark.parametrize("change,model,effort", [("model", "deepseek-flash", None), ("effort", None, "low"),
+                                                  ("both", "deepseek-flash", "max")])
+def test_resume_with_same_provider_uses_the_new_model_and_effort(tmp_path, change, model, effort):
+    async def exercise():
+        _, installed = require_dsh()
+        with MessagesServer([["Saved"], ["Resumed"]]) as server:
+            async with raw_runner(tmp_path, installed, env=guard_env(tmp_path, server.port)) as (_, send, receive):
+                client = Client(send, receive)
+                await client.start()
+                params = params_for(tmp_path, server)
+                params["provider"]["effort"] = "high"
+                sid = (await client.call("session/new", params))["session_id"]
+                await client.prompt(sid, "one", "first")
+                assert (await client.settled(sid, "one"))["outcome"] == "completed"
+                await client.call("session/close", {"session_id": sid})
+                changed = {**params, "provider": {**params["provider"], **({"model": model} if model else {}),
+                                                  **({"effort": effort} if effort else {})}}
+                assert await client.call("session/load", {**changed, "session_id": sid}) == {
+                    "session_id": sid, "resumed": True}
+                await client.prompt(sid, "two", "second")
+                assert (await client.settled(sid, "two"))["outcome"] == "completed"
+                first, second = (request["body"] for request in server.requests)
+                assert second["model"] == (model or params["provider"]["model"]).removesuffix("[1m]")
+                if model:
+                    assert second["model"] != first["model"]
+                if effort:
+                    assert second.get("output_config", second.get("thinking")) != first.get(
+                        "output_config", first.get("thinking")), (first, second)
+    run(exercise())
+
+
 def test_unattributed_and_compaction_requests(tmp_path, monkeypatch):
     _, installed = require_dsh()
     session_file = dsh_command.entry().resolve().parent / "session.ts"

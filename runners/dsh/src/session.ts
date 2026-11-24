@@ -24,6 +24,15 @@ const builtins = new Set(['read', 'glob', 'grep', 'write', 'edit', 'bash']);
 let stateRoot: string;
 export function configureSessions(root: string): void { stateRoot = root; }
 function nonempty(value: unknown): value is string { return typeof value === 'string' && value.trim().length > 0; }
+async function savedRoute(id: string): Promise<string | undefined> {
+  const source = await ctx!.sessionPersistence.open(id, 'read');
+  try {
+    const { events } = await source.read();
+    const last = events.findLast((event: any) => event.type === 'model/selection' || event.type === 'request/header');
+    const route = last?.type === 'model/selection' ? last.data?.provider : last?.data?.header?.config?.provider;
+    return typeof route === 'string' && /^looper-[A-Za-z0-9_-]+$/.test(route) ? route : undefined;
+  } finally { await source.close(); }
+}
 function forkSeed(events: readonly any[]): { seed: any[]; inheritedEventCount: number } {
   const ended = events.findLast(event => event.type === 'turn/end')?.seq;
   if (ended === undefined) throw new RpcError(-32001, 'source session has no completed turn');
@@ -119,6 +128,13 @@ async function compose(params: Record<string, any>, resumed: boolean): Promise<o
           ...(provider.context_window ? { contextWindow: provider.context_window } : {}) }] }, environment);
     } catch { throw new RpcError(-32602, 'invalid provider endpoint'); }
     const key = provider.api_key;
+    if (resumed || record.fork) {
+      // The saved selection names the route of the lease that wrote it. Keep that name when it is free,
+      // so a resume or a fork of a closed session is not a model switch (a switch prices a compaction
+      // and refuses a window too small for it); otherwise the route is pinned below.
+      const saved = await savedRoute(resumed ? record.id : params.fork_from.session_id);
+      if (saved && ![...sessions.values()].some(other => other.route === saved)) record.route = saved;
+    }
     const consult = record.fork ? await consultDefaults(wireModel, record.route) : undefined;
     const setup = (agentCtx: any, agent: any) => {
       record.agentCtx = agentCtx;
@@ -165,11 +181,13 @@ async function compose(params: Record<string, any>, resumed: boolean): Promise<o
       : await ctx!.agents.create({ sessionId: record.id, meta: { cwd: record.cwd,
         ...(record.fork ? { parentSession: params.fork_from.session_id, isSeeded: true } : {}) },
         ...inherited, agentOptions, setup });
-    // A recorded selection outranks the live options, so a fork or resume of a session
-    // saved under another route would keep calling that route; pin this session's own.
-    const { model: selected } = record.handle.agent;
-    if (selected.current()?.provider !== record.route) {
-      selected.select({ provider: record.route, model: wireModel, reasoningEffort: provider.effort ?? 'high' });
+    // A recorded selection outranks the live options, so a fork or a resume of a session saved
+    // under another route, model or effort would keep calling the saved one while Looper prices
+    // this one. Compare all three; an unchanged fresh session records nothing extra.
+    const want = { provider: record.route, model: wireModel, reasoningEffort: provider.effort ?? 'high' };
+    const have = record.handle.agent.model.current();
+    if (have?.provider !== want.provider || have.model !== want.model || have.reasoningEffort !== want.reasoningEffort) {
+      record.handle.agent.model.select(want);
     }
     if (resumed && record.handle.agent.session.header.cwd !== record.cwd) {
       throw new RpcError(-32001, 'saved session belongs to another directory');

@@ -157,7 +157,11 @@ async function captureConsultDefaults(): Promise<any> {
     const snapshot = dsh.environment.createLaunchEnvironmentSnapshot([{ source: 'process', values }]);
     ({ ctx: template } = await dsh.profile.runProfile({ environment: snapshot, profile: 'headless', patchFiles: [overlay], args: [] }));
     if (!template?.systemPrompt || !template.tools) throw new Error();
-    return structuredClone(await template.systemPrompt.assemble());
+    const assembly = structuredClone(await template.systemPrompt.assemble());
+    // Since 0.2.1-rc.3 exit_plan_mode is declared only after a Session first enters plan mode, so the
+    // CLI never shows it to a one-shot run; the template snapshot lists every registered tool.
+    assembly.tools = assembly.tools.filter((tool: any) => tool.name !== 'exit_plan_mode');
+    return assembly;
   } finally {
     // runProfile installs process shutdown hooks in addition to its fiber.
     // The template must never exit the process before the live runner flushes.
