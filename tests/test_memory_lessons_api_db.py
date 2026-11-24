@@ -12,22 +12,31 @@ pytestmark = pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not
 
 
 
-def test_operator_lists_only_project_lessons_with_pagination(monkeypatch, tmp_path):
+@pytest.mark.parametrize("state", [None, "in_effect"])
+def test_operator_lists_only_project_lessons_with_pagination(monkeypatch, tmp_path, state):
     async def check(pool):
         first = await _lesson(pool, "project-a", "First")
+        vault = await _lesson(pool, "project-a", "Vault")
         second = await _lesson(pool, "project-a", "Second")
+        await pool.execute("UPDATE memory_candidates SET state='in_effect',reason=NULL WHERE id=ANY($1::bigint[])",
+                           [int(first[2:]), int(vault[2:]), int(second[2:])])
+        # Isolate the SQL destination filter from the schema's disjoint lifecycle constraint.
+        await pool.execute("ALTER TABLE memory_candidates DROP CONSTRAINT memory_candidates_tier")
+        await pool.execute("UPDATE memory_candidates SET destination='vault',valid_until=NULL,revision=1,"
+                           "content_hash=repeat('b',64) WHERE id=$1", int(vault[2:]))
         await _lesson(pool, "project-b", "Other")
         await sup.candidate(pool)
         await pool.execute("INSERT INTO projects(id,name) VALUES ('project-empty','Empty')")
         await pool.execute("INSERT INTO memory_lesson_stats(candidate_id,injected,cited) VALUES ($1,3,1)",
                            int(second[2:]))
+        filters = {"project": "project-a", **({"state": state} if state else {})}
         async with v1_api(tmp_path, pool) as call:
-            status, answer = await call("memory.lessons_list", {"project": "project-a", "limit": 1})
+            status, answer = await call("memory.lessons_list", {**filters, "limit": 1})
             assert status == 200, answer
             result = answer["result"]
             assert result["more"] and result["lessons"][0]["candidate"]["id"] == second
             assert result["lessons"][0]["stats"]["injected"] == 3
-            status, answer = await call("memory.lessons_list", {"project": "project-a", "limit": 1, "before": second})
+            status, answer = await call("memory.lessons_list", {**filters, "limit": 1, "before": second})
             assert status == 200 and not answer["result"]["more"], answer
             assert answer["result"]["lessons"][0]["candidate"]["id"] == first
             assert answer["result"]["lessons"][0]["stats"] == {
@@ -35,8 +44,9 @@ def test_operator_lists_only_project_lessons_with_pagination(monkeypatch, tmp_pa
                 "last_injected_at": None, "last_cited_at": None}
             status, answer = await call("memory.lessons_list", {"project": "project-empty"})
             assert status == 200 and answer["result"] == {"lessons": [], "more": False}
-            status, answer = await call("memory.lessons_list", {"state": "in_effect"})
-            assert status == 200 and answer["result"]["lessons"] == [], answer
+            status, answer = await call("memory.lessons_list", filters)
+            assert status == 200 and not answer["result"]["more"], answer
+            assert [item["candidate"]["id"] for item in answer["result"]["lessons"]] == [second, first]
             for body, expected in (({"project": "missing"},404), ({"state": "pending"},400),
                                    ({"before": "42"},400), ({"limit": 0},400), ({"limit": 201},400)):
                 status, answer = await call("memory.lessons_list", body)
