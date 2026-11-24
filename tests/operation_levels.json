@@ -20,6 +20,8 @@
  "attention.summary": "inside",
  "auth.clear_password": "inside",
  "auth.set_password": "inside",
+ "card_actions.get": "inside",
+ "card_actions.update": "inside",
  "catalog.install": "inside",
  "catalog.list": "inside",
  "catalog.uninstall": "inside",
