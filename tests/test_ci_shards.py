@@ -155,7 +155,7 @@ def test_workflow_runs_six_shards_behind_stable_required_check() -> None:
     assert "fail-fast: false" in shards
     result = workflow.split("  agent-system-result:\n", 1)[1].split("\n  dashboard:", 1)[0]
     assert re.search(r"^    name: Agent system tests$", result, re.MULTILINE)
-    assert "needs: [changes, agent-system, bridge-schema-pg18, provenance, dashboard]" in result
+    assert "needs: [changes, agent-system, bridge-schema-pg18, provenance, dashboard, wheel-smoke]" in result
     assert "if: always()" in result
     assert "SHARDS_RESULT: ${{ needs.agent-system.result }}" in result
     assert 'test "$SHARDS_RESULT" = success' in result
@@ -297,17 +297,18 @@ def test_workflow_optional_job_conditions(event, ref, head, web, docs, canary, d
         "startsWith": str.startswith,
     }
     jobs = _workflow()["jobs"]
-    for name, expected in (("bridge-schema-pg18", canary), ("provenance", canary), ("dashboard", dashboard)):
+    for name, expected in (("bridge-schema-pg18", canary), ("provenance", canary), ("dashboard", dashboard),
+                           ("wheel-smoke", event == "workflow_dispatch" and ref == "refs/heads/main")):
         expression = jobs[name]["if"].replace("&&", " and ").replace("||", " or ")
         assert eval(expression, {"__builtins__": {}}, context) is expected, name
 
 
 @pytest.mark.parametrize("results", [
-    dict(zip(("changes", "agent-system", "bridge-schema-pg18", "provenance", "dashboard"),
+    dict(zip(("changes", "agent-system", "bridge-schema-pg18", "provenance", "dashboard", "wheel-smoke"),
              ("success", "success", *optional)))
-    for optional in product(("success", "skipped"), repeat=3)
+    for optional in product(("success", "skipped"), repeat=4)
 ] + [
-    {name: result} for name in ("changes", "agent-system", "bridge-schema-pg18", "provenance", "dashboard")
+    {name: result} for name in ("changes", "agent-system", "bridge-schema-pg18", "provenance", "dashboard", "wheel-smoke")
     for result in ("failure", "cancelled")
 ] + [{name: "skipped"} for name in ("changes", "agent-system")])
 def test_required_check_uses_actual_needs_results(results) -> None:
@@ -370,3 +371,15 @@ def test_workflow_web_filter_scans_past_backend_changes(tmp_path, path, expected
              "GITHUB_OUTPUT": str(output)}, capture_output=True, text=True, timeout=10)
     assert result.returncode == 0, result.stdout + result.stderr
     assert dict(line.split("=", 1) for line in output.read_text().splitlines())["web"] == expected
+
+
+def test_canary_reuses_release_wheel_smoke_without_extras() -> None:
+    job = _workflow()["jobs"]["wheel-smoke"]
+    release = yaml.load((ROOT / ".github/workflows/release.yml").read_text(), Loader=yaml.BaseLoader)
+    release_steps = release["jobs"]["release"]["steps"]
+    assert job["services"]["postgres"] == release["jobs"]["release"]["services"]["postgres"]
+    for name in ("Build the dashboard", "Check that the installed wheel runs looper serve"):
+        step = next(step for step in job["steps"] if step.get("name") == name)
+        assert step == next(step for step in release_steps if step.get("name") == name)
+    assert job["timeout-minutes"]
+    assert "wheel-smoke" in _workflow()["jobs"]["agent-system-result"]["needs"]
