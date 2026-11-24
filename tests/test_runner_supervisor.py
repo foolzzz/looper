@@ -1275,7 +1275,24 @@ def _rows(directory):
     path = directory / "requests.jsonl"
     if not path.exists():
         return []
-    return [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
+    # The peer can still be appending the last record. Its newline commits it.
+    return [json.loads(line) for line in path.read_text().split("\n")[:-1] if line.strip()]
+
+
+@pytest.mark.parametrize("tail", [
+    '{"method": "session/cancel", "params": {"session_id": "../native-1", "',
+    '{"method": "session/cancel"}',
+])
+def test_request_rows_wait_for_the_writer_to_finish_a_record(tmp_path, tail):
+    path = tmp_path / "requests.jsonl"
+    complete = '{"method": "session/new"}\n'
+    path.write_text(complete + tail)
+    assert _rows(tmp_path) == [{"method": "session/new"}]
+    path.write_text(complete + '{"method": "session/cancel"}\n')
+    assert _rows(tmp_path) == [{"method": "session/new"}, {"method": "session/cancel"}]
+    path.write_text(complete + '{invalid}\n')
+    with pytest.raises(json.JSONDecodeError):
+        _rows(tmp_path)
 
 
 def _health_count(directory):
@@ -1701,12 +1718,11 @@ def test_local_cancel_capacity_skips_health_without_reclaim(runners, monkeypatch
             assert lease.valid and not lease._generation.failed and processes[0].returncode is None
             assert not any("runner_health_failed" in record.getMessage() for record in caplog.records)
             (directory / "hold-cancel").unlink()
-            await until(lambda: not any(item.method == "session/cancel"
-                                        for item in lease.bridge._pending.values()), timeout=3)
+            # Join all replies under the bridge's control deadline before the next tick.
+            await asyncio.gather(*tasks)
             clock.advance(10)
             await until(lambda: _health_count(directory) > sent, timeout=3)
             assert lease.valid and not lease._generation.failed
-            await asyncio.gather(*tasks)
     run(exercise())
 
 

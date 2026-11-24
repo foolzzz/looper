@@ -1,0 +1,31 @@
+{
+  "requirement": "request",
+  "types": [
+    {
+      "key": "alert_triage",
+      "name": "监控异常排查",
+      "guidance": "白名单里的告警机器人发出、需要人处理的告警：触发、持续或恶化。恢复通知、测试告警、群里已经有人认领的不算。"
+    },
+    {
+      "key": "bug_triage",
+      "name": "bug 排查",
+      "guidance": "有人报告用户负责或相关的系统出了问题，需要用户看：报错、行为异常、数据不对，最好带现象或链接。已经解决的不算。"
+    },
+    {
+      "key": "dev_task",
+      "name": "开发任务",
+      "guidance": "有人请用户做、或用户答应做一项开发工作（新功能、改动、修复、评审、上线），说得出要做什么。闲聊里的设想、别人自己在做的事不算。"
+    }
+  ],
+  "type_lines": {
+    "alert_triage": "- alert_triage 监控异常排查: 白名单里的告警机器人发出、需要人处理的告警：触发、持续或恶化。恢复通知、测试告警、群里已经有人认领的不算。",
+    "bug_triage": "- bug_triage bug 排查: 有人报告用户负责或相关的系统出了问题，需要用户看：报错、行为异常、数据不对，最好带现象或链接。已经解决的不算。",
+    "dev_task": "- dev_task 开发任务: 有人请用户做、或用户答应做一项开发工作（新功能、改动、修复、评审、上线），说得出要做什么。闲聊里的设想、别人自己在做的事不算。"
+  },
+  "group_requests_note": "## Requests in group chats\nFor chats marked 全部消息, messages that @-mention the user or were sent by the user still follow the scope\nabove and all enabled Intent types. Only the other human messages use the following group rule instead of\nthe user-only scope and type guidance above. Recognize development requests and bug reports in those messages\nregardless of whom they address (the group, a team, a named person, or nobody) and whether someone has accepted\nthe work. Acceptance does not cancel the original request; do not make a separate intent for the acceptance.\nUse dev_task for a concrete requirement, change, scenario needing support or access request. Use bug_triage\nfor reported broken behaviour, errors or incorrect data. A one-line bug report counts even with an @-mention\nof someone else, no explicit request to investigate, no detail and no link.\nExclude small talk, Q&A answers, agreement or echoes, and follow-ups, status updates or decisions with no new\nrequest or bug report. Merge messages raising the same matter into one intent with all their sources, or use\nsame_as for a recent intent about that matter.",
+  "instructions": {
+    "group_false": "request\n\n## Intent types\n- alert_triage 监控异常排查: 白名单里的告警机器人发出、需要人处理的告警：触发、持续或恶化。恢复通知、测试告警、群里已经有人认领的不算。\n- bug_triage bug 排查: 有人报告用户负责或相关的系统出了问题，需要用户看：报错、行为异常、数据不对，最好带现象或链接。已经解决的不算。\n- dev_task 开发任务: 有人请用户做、或用户答应做一项开发工作（新功能、改动、修复、评审、上线），说得出要做什么。闲聊里的设想、别人自己在做的事不算。",
+    "group_true": "request\n\n## Intent types\n- alert_triage 监控异常排查: 白名单里的告警机器人发出、需要人处理的告警：触发、持续或恶化。恢复通知、测试告警、群里已经有人认领的不算。\n- bug_triage bug 排查: 有人报告用户负责或相关的系统出了问题，需要用户看：报错、行为异常、数据不对，最好带现象或链接。已经解决的不算。\n- dev_task 开发任务: 有人请用户做、或用户答应做一项开发工作（新功能、改动、修复、评审、上线），说得出要做什么。闲聊里的设想、别人自己在做的事不算。\n\n## Requests in group chats\nFor chats marked 全部消息, messages that @-mention the user or were sent by the user still follow the scope\nabove and all enabled Intent types. Only the other human messages use the following group rule instead of\nthe user-only scope and type guidance above. Recognize development requests and bug reports in those messages\nregardless of whom they address (the group, a team, a named person, or nobody) and whether someone has accepted\nthe work. Acceptance does not cancel the original request; do not make a separate intent for the acceptance.\nUse dev_task for a concrete requirement, change, scenario needing support or access request. Use bug_triage\nfor reported broken behaviour, errors or incorrect data. A one-line bug report counts even with an @-mention\nof someone else, no explicit request to investigate, no detail and no link.\nExclude small talk, Q&A answers, agreement or echoes, and follow-ups, status updates or decisions with no new\nrequest or bug report. Merge messages raising the same matter into one intent with all their sources, or use\nsame_as for a recent intent about that matter."
+  },
+  "baseline": "b5989285ea1f9b9b3b148f06965392a48826ea2b"
+}

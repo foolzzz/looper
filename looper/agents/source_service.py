@@ -304,13 +304,21 @@ async def run_bridge_pass(source: Mapping[str, Any], *, trigger: str = "schedule
     pool = db if db is not None else get_pool()
     now = now or datetime.now(timezone.utc)
     mode = "import" if days is not None else "bridge"
-    directory = Path(source["bridge_dir"]).expanduser()
     # Every write of the pass goes through this connection, the one whose session holds the writer lock.
     async with pool.acquire() as lock:
         if not await store.try_lock(lock, source["id"]):
             return PassReport(status="skipped_busy")
         try:
-            return await _pass(source, directory, mode, trigger, days, dry_run, own_apps, now, lock, retention_days)
+            current = await store.get_source(source["id"], db=lock)
+            if current is None:
+                return PassReport(status="failed", error="source no longer exists")
+            if current["ingest_mode"] == "collect":
+                from ..db.message_collection import CollectionConflict
+                raise CollectionConflict("collection owns this source; switch to bridge before importing")
+            if days is None and current["ingest_mode"] != "bridge":
+                return PassReport(status="skipped_busy")
+            return await _pass(current, Path(current["bridge_dir"]).expanduser(), mode, trigger, days, dry_run,
+                               own_apps, now, lock, retention_days)
         finally:
             try:
                 await store.unlock(lock, source["id"])
@@ -404,6 +412,14 @@ def health(source: Mapping[str, Any], last_status: str | None, now: datetime) ->
     """``off``, ``degraded`` (the last run was partial), ``stale`` (no ok run for an hour) or ``healthy``."""
     if source["ingest_mode"] == "off":
         return "off"
+    if source["ingest_mode"] == "collect":
+        if source.get("auth_state") in ("missing", "expired") or last_status == "auth_failed":
+            return "degraded"
+        since = source.get("last_collect_ok_at") or source.get("collect_enabled_at") or source["updated_at"]
+        if (now - since).total_seconds() >= store.STALE_AFTER_SECONDS:
+            return "stale"
+        ratio = source.get("unindexed_ratio")
+        return "degraded" if last_status in ("partial", "failed", "search_failed", "interrupted") or (ratio is not None and ratio > .02) else "healthy"
     since = source["last_ok_at"] or source["updated_at"]
     if (now - since).total_seconds() > store.STALE_AFTER_SECONDS:
         return "stale"
@@ -414,7 +430,7 @@ class SourceService:
     """Every ``interval`` seconds, run a pass for each bridged source whose time rule has fired."""
 
     def __init__(self, *, interval: float = TICK_SECONDS, drain: DrainState | None = None,
-                 own_apps: OwnApps | None = None) -> None:
+                 own_apps: OwnApps | None = None, collector_backend: Any = None, alerts: Any = None) -> None:
         self._interval = interval
         self._drain = drain
         self._own_apps_source = own_apps
@@ -422,6 +438,10 @@ class SourceService:
         self._own_apps_at = float("-inf")
         self._task: asyncio.Task[Any] | None = None
         self._busy: set[str] = set()
+        self._collector_backend = collector_backend
+        self._alerts = alerts
+        self._collect_tasks: dict[str, asyncio.Task[Any]] = {}
+        self._alert_task: asyncio.Task[Any] | None = None
 
     async def start(self) -> None:
         if self._task is None:
@@ -432,6 +452,17 @@ class SourceService:
         if task is not None:
             task.cancel()
             await asyncio.gather(task, return_exceptions=True)
+        collecting = list(self._collect_tasks.values())
+        for running in collecting:
+            running.cancel()
+        await asyncio.gather(*collecting, return_exceptions=True)
+        self._collect_tasks.clear()
+        if self._alert_task is not None:
+            self._alert_task.cancel()
+            await asyncio.gather(self._alert_task, return_exceptions=True)
+            self._alert_task = None
+        if self._alerts is not None:
+            await self._alerts.stop()
 
     async def _loop(self) -> None:
         while True:
@@ -456,17 +487,23 @@ class SourceService:
 
     async def run_once(self, *, clock: Callable[[], datetime] | None = None) -> int:
         """Run each due bridged source; how many ran."""
+        now = (clock or (lambda: datetime.now(timezone.utc)))()
+        if self._alerts is not None and (self._alert_task is None or self._alert_task.done()):
+            self._alert_task = asyncio.create_task(self._alert_tick(now), name="source-alerts")
         if self._drain is not None and self._drain.draining:
             return 0
-        now = (clock or (lambda: datetime.now(timezone.utc)))()
         ran = 0
         for source in await store.list_sources():
             if source.get("retention_last_at") is None or now - source["retention_last_at"] >= timedelta(days=1):
                 try:
                     dropped = await store.retain_bodies(source["id"], now=now)
                     logger.info("source %s retention dropped %d raw bodies", source["id"], dropped)
+                    await self._prune_collection_metadata(source["id"], now)
                 except Exception:
                     logger.warning("source %s retention failed; trying again later", source["id"], exc_info=True)
+            if source["ingest_mode"] == "collect":
+                ran += await self._schedule_collect(source["id"], now)
+                continue
             if source["ingest_mode"] != "bridge" or source["id"] in self._busy:
                 continue
             try:
@@ -489,9 +526,121 @@ class SourceService:
                          now: datetime | None = None) -> PassReport:
         from . import scheduler_settings
 
+        if source["ingest_mode"] == "collect":
+            from .message_collect import run_collect_pass
+            return await run_collect_pass(source, backend=self._backend(), own_apps=await self.known_own_apps(), now=now)
         try:
             retention = await scheduler_settings.run_retention_days()
         except Exception:
             retention = scheduler_settings.DEFAULT_RUN_RETENTION_DAYS
         return await run_bridge_pass(source, trigger=trigger, own_apps=await self.known_own_apps(), now=now,
                                      retention_days=retention)
+
+
+    async def _prune_collection_metadata(self, source_id: str, now: datetime) -> None:
+        from ..db.connection import get_pool
+        from .message_collect import prune_collection
+
+        async with get_pool().acquire() as conn:
+            configured = await conn.fetchval(
+                "SELECT EXISTS(SELECT 1 FROM source_collection_settings WHERE source_id=$1)", source_id)
+            if not configured or not await store.try_lock(conn, source_id):
+                return
+            try:
+                await asyncio.wait_for(prune_collection(conn, source_id, now), 5)
+            finally:
+                await store.unlock(conn, source_id)
+
+    async def _alert_tick(self, now: datetime) -> None:
+        try:
+            await self._alerts.evaluate(now=now)
+            await self._alerts.flush()
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.warning("source alert tick failed; trying again later")
+
+    def _backend(self) -> Any:
+        if self._collector_backend is None:
+            from .message_collect_lark import LarkUserCollector
+            self._collector_backend = LarkUserCollector()
+        return self._collector_backend
+
+    async def _schedule_collect(self, source_id: str, now: datetime) -> int:
+        from ..db import message_collection as collection
+        from ..db.connection import get_pool
+        source = await collection.collector_source(source_id)
+        if source is None or source["ingest_mode"] != "collect":
+            return 0
+        try:
+            fire = cron.last_fire(cron.parse(source["collect_cron"]), cron.zone(source["timezone"]), now)
+        except ValueError:
+            logger.warning("source %s has an invalid collection time rule", source_id)
+            return 0
+        if fire is None or not await collection.claim_fire(source_id, source["generation"], fire):
+            return 0
+        if source_id in self._collect_tasks:
+            async with get_pool().acquire() as conn:
+                run_id = await store.start_run(conn, source_id, "collect", "scheduled", now=now)
+                await store.finish_run(conn, run_id, "skipped_busy", now=now)
+            return 0
+        self._launch_collect(source, now=now)
+        return 1
+
+    def _launch_collect(self, source: Mapping[str, Any], *, now: datetime | None = None,
+                        started: asyncio.Future | None = None) -> asyncio.Task[Any]:
+        from .message_collect import run_collect_pass
+        source_id = source["id"]
+
+        async def perform() -> Any:
+            try:
+                return await run_collect_pass(source, backend=self._backend(), generation=source["generation"],
+                    own_apps=await self.known_own_apps(), now=now, started=started)
+            except asyncio.CancelledError:
+                if started is not None and not started.done():
+                    started.cancel()
+                raise
+            except Exception as exc:
+                if started is not None and not started.done():
+                    started.set_exception(exc)
+                logger.warning("source %s collection failed: %s", source_id, type(exc).__name__)
+            finally:
+                try:
+                    if self._alerts is not None and not asyncio.current_task().cancelling():
+                        try:
+                            await asyncio.wait_for(self._alerts.evaluate(source_id), 5)
+                        except Exception:
+                            logger.warning("source %s alert evaluation failed", source_id)
+                finally:
+                    self._collect_tasks.pop(source_id, None)
+
+        task = asyncio.create_task(perform(), name=f"source-collect:{source_id}")
+        self._collect_tasks[source_id] = task
+        return task
+
+    async def run_now(self, source_id: str) -> dict[str, Any]:
+        """A bounded start handshake; never queue behind an account read or writer."""
+        from ..db import message_collection as collection
+        from .message_collect import CollectorError, CollectorErrorKind
+        if self._drain is not None and self._drain.draining:
+            raise CollectorError(CollectorErrorKind.CONFIGURATION)
+        if source_id in self._collect_tasks:
+            raise CollectorError(CollectorErrorKind.CONNECTION)
+        source = await collection.collector_source(source_id)
+        if source is None or source["ingest_mode"] != "collect":
+            raise CollectorError(CollectorErrorKind.CONFIGURATION)
+        # Recheck after the DB await, so simultaneous manual requests cannot overlap.
+        if source_id in self._collect_tasks:
+            raise CollectorError(CollectorErrorKind.CONNECTION)
+        started = asyncio.get_running_loop().create_future()
+        task = self._launch_collect(source, started=started)
+        try:
+            return await asyncio.wait_for(asyncio.shield(started), 5)
+        except BaseException:
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+            if not started.done():
+                started.cancel()
+            elif not started.cancelled():
+                started.exception()
+            raise

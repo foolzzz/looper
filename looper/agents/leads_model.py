@@ -8,6 +8,7 @@ Every part of the feature imports these names; none defines its own copy. A lead
 from __future__ import annotations
 
 import re
+from dataclasses import dataclass
 from datetime import datetime
 from enum import StrEnum
 from typing import Any
@@ -18,9 +19,16 @@ INTENTS_ENABLED_KEY = "intents.enabled"
 INTENTS_ON_REQUEST_KEY = "intents.on_request.enabled"
 INTENTS_GROUP_READ_KEY = "intents.group_read.enabled"
 INTENTS_RULES_ENABLED_KEY = "intents.rules.enabled"
-RULE_INTENT_TYPE = "mr_review"
-RULE_CLASSIFICATION_AVAILABLE = False
 GROUP_INTENT_TYPES = ("dev_task", "bug_triage")  # what a group request may be (RFC section 11.1)
+RULE_INTENT_TYPE = "mr_review"
+# Classification is available; rule execution is installed separately.
+RULE_CLASSIFICATION_AVAILABLE = True
+RULE_GROUP_INTENT_TYPES = (*GROUP_INTENT_TYPES, RULE_INTENT_TYPE)
+MR_REVIEW_NAME = "MR 评审"
+MR_REVIEW_GUIDANCE = (
+    "有人请求评审一个 MR，并指出要看的合并请求。只用来识别这类请求。"
+    "状态通报、感谢，或说明评审已经完成、没有新的评审请求，不算。"
+)
 LEADS_SEARCH_MODE_KEY = "leads.search_mode"
 DEFAULT_VALID_DAYS = 90
 VALID_DAYS_RANGE = (1, 365)
@@ -100,7 +108,7 @@ class IntentPriority(StrEnum):
     QUIET = "quiet"  # not pushed: the Intents page only
 
 
-BUILTIN_INTENT_TYPES = ("dev_task", "bug_triage", "alert_triage")
+BUILTIN_INTENT_TYPES = ("dev_task", "bug_triage", "alert_triage", RULE_INTENT_TYPE)
 # The only type an intent whose sources are all alert-bot messages may have.
 ALERT_TYPE = "alert_triage"
 
@@ -181,6 +189,20 @@ async def on_request_enabled(db: Any = None) -> bool:
 async def group_read_enabled(db: Any = None) -> bool:
     """Whether intents read their followed groups (``intents.group_read.enabled`` is ``true``; no row is off)."""
     return await _setting(INTENTS_GROUP_READ_KEY, db) == "true"
+
+
+@dataclass(frozen=True)
+class ClassificationSnapshot:
+    """Effective rule types and delivery for one classification run; delivery never hides types."""
+
+    types_on: bool
+    delivery: bool
+
+
+async def classification_snapshot(db: Any = None) -> ClassificationSnapshot:
+    from . import chat_settings
+
+    return ClassificationSnapshot(await rule_types_enabled(db), chat_settings.delivery_enabled())
 
 
 async def search_mode(db: Any = None) -> SearchMode:

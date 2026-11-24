@@ -231,7 +231,7 @@ class IntentRecognitions:
             floor = min((r["sent_at"] for r in chosen), default=row["range_from"])
             remaining = sorted([{**dict(r), "read_from": floor} for r in chosen], key=lambda r: r["seq"])
             allowed = {r["seq"] for r in remaining}
-            types = await extraction.intent_types(pool)
+            types = await extraction.intent_types(pool, rules_on=False)
             valid_days = await leads_model.valid_days(pool)
             totals, dropped, cost, read = Counter(), Counter(), 0.0, 0
             counts = {"effective_from": floor.isoformat()}
@@ -251,7 +251,7 @@ class IntentRecognitions:
                 async def run(reminder: str, budget_usd: float, timeout_s: float) -> processor.ProcessorRun:
                     return model_call.processor_result(await model_call.call(model_call.ProcessorCall(
                         owner=f"intent-recognition-{rid}", instructions=extraction.instructions("intents",
-                            schedule["requirement"], types, group=True) + (f"\n\n{reminder}" if reminder else ""),
+                            schedule["requirement"], types, group=True, rules=False) + (f"\n\n{reminder}" if reminder else ""),
                         input_text=found.text, input_ref=reference, quiet_word=extraction.QUIET_WORD,
                         budget_usd=budget_usd, timeout_s=timeout_s, runtime_root=self._runtime_root,
                         claude_bin=self._claude_bin, project_id=schedule["project_id"], schedule_id=schedule["id"],
@@ -261,7 +261,8 @@ class IntentRecognitions:
                 asked = await extraction.ask(run, lambda reply: extraction.parse("intents", reply, found.refs,
                     now=self._clock().astimezone(ZoneInfo(zone)), valid_days=valid_days,
                     enabled_types={t["key"] for t in types}, app_seqs=found.app_seqs,
-                    group_seqs={r["seq"] for r in found.rows}), budget_usd=max(0, RECOGNIZE_MAX_USD-cost), timeout_s=float(timeout))
+                    group_seqs={r["seq"] for r in found.rows}, group_types=leads_model.GROUP_INTENT_TYPES),
+                    budget_usd=max(0, RECOGNIZE_MAX_USD-cost), timeout_s=float(timeout))
                 cost += asked.cost_usd or 0.0
                 await pool.execute("UPDATE intent_recognitions SET cost_usd=$2 WHERE id=$1 AND state='running'", rid, cost)
                 if asked.cost_usd is None:

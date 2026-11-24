@@ -30,6 +30,7 @@ import subprocess
 import tempfile
 import threading
 import time
+import traceback
 import urllib.error
 import urllib.request
 from contextlib import contextmanager
@@ -452,6 +453,7 @@ def support():
 
 
 def request(base, path, token, method="GET", data=None):
+    assert urlsplit(base).port != 8767, "smoke must not target the operator service"
     headers = {"Authorization": "Bearer " + token, "Content-Type": "application/json"}
     req = urllib.request.Request(base + path, headers=headers, method=method,
                                  data=json.dumps(data).encode() if data is not None else None)
@@ -481,8 +483,6 @@ asyncio.run(check())
     ops = root / "ops"
     ops.mkdir(mode=0o700)
     config = ops / "server.toml"
-    config.write_text('[database]\nurl = ' + json.dumps(dsn) + '\n\n[runtimes]\npi = ' + json.dumps(pi_runtime) + '\n')
-    config.chmod(0o600)
     # A minimal PATH prevents startup from probing the operator's other CLIs.
     bin_dir = work / "safe-bin"
     bin_dir.mkdir()
@@ -503,6 +503,9 @@ asyncio.run(check())
     if port == 8767:
         raise RuntimeError("free port selection returned forbidden 8767")
     base = f"http://127.0.0.1:{port}"
+    config.write_text('[database]\nurl = ' + json.dumps(dsn) + '\n\n[server]\nhost = "127.0.0.1"\nport = ' + str(port)
+                      + '\n\n[runtimes]\npi = ' + json.dumps(pi_runtime) + '\n')
+    config.chmod(0o600)
     with (output / "serve.log").open("w") as log, managed_process(
         [str(python.parent / "looper"), "serve", "--host", "127.0.0.1", "--port", str(port),
          "--runtime-root", str(root)], cwd=work, env=env, stdout=log, stderr=subprocess.STDOUT,
@@ -551,7 +554,8 @@ asyncio.run(check())
         registry = request(base, "/api/v1/registry/view", token, "POST", {})["result"]
         saved = next(p for p in registry["profiles"] if p["profile_id"] == profile_id)
         assert saved["runtime_type"] == "pi"
-        assert set(saved["roles"]) == set(ROLES)
+        # Supported roles include read-only explorers; only the four session roles were assigned above.
+        assert set(saved["roles"]) == {*ROLES, "explorer"}, saved["roles"]
         assert {layer["role"] for layer in saved["used_by"]["layers"]} == set(ROLES)
         (output / "registry.json").write_text(json.dumps({"profile": saved, "probe": probe}, indent=2, default=str))
         if provider_state is not None:
@@ -705,7 +709,7 @@ def main(argv=None):
         summary["failed"].append("interrupted; subprocess cleanup completed")
     except Exception as error:
         # Raw exceptions can contain DSNs or subprocess output; retain them privately.
-        (output / "failure.log").write_text(str(error))
+        (output / "failure.log").write_text(traceback.format_exc())
         summary["failed"].append(type(error).__name__ + ": see private failure.log")
     finally:
         signal.alarm(0)
