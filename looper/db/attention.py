@@ -30,15 +30,24 @@ _PENDING_INTENTS = """
         """
 
 
-async def pending_intents(limit: int, *, db: Db | None = None) -> tuple[list[dict[str, Any]], int]:
+def _pending_intents_sql(rules_on: bool) -> str:
+    if not rules_on:
+        return _PENDING_INTENTS
+    return _PENDING_INTENTS + """
+        AND NOT EXISTS (SELECT 1 FROM intent_rule_work w WHERE w.intent_id=i.id
+                        AND (w.state <> 'decided' OR w.decision IS DISTINCT FROM 'push_for_confirmation'))
+        """
+
+
+async def pending_intents(limit: int, *, db: Db | None = None, rules_on: bool = False) -> tuple[list[dict[str, Any]], int]:
     """The intents still waiting to be built or rejected, urgent types first, then the newest."""
-    return await _limited(db, _PENDING_INTENTS, "(priority = 'urgent') DESC, created_at DESC, id DESC", limit)
+    return await _limited(db, _pending_intents_sql(rules_on), "(priority = 'urgent') DESC, created_at DESC, id DESC", limit)
 
 
-async def earliest_pending_intent(*, db: Db | None = None) -> dict[str, Any] | None:
+async def earliest_pending_intent(*, db: Db | None = None, rules_on: bool = False) -> dict[str, Any] | None:
     """The oldest intent still waiting, whichever its priority. The capped list above is not chronological."""
     row = await (db or get_pool()).fetchrow(
-        f"SELECT * FROM ({_PENDING_INTENTS}) AS found ORDER BY created_at ASC, id ASC LIMIT 1")
+        f"SELECT * FROM ({_pending_intents_sql(rules_on)}) AS found ORDER BY created_at ASC, id ASC LIMIT 1")
     return dict(row) if row is not None else None
 
 
@@ -93,17 +102,35 @@ _UNCERTAIN_DELIVERIES = """
         """
 
 
+def _uncertain_deliveries_sql(rules_on: bool) -> str:
+    if not rules_on:
+        return _UNCERTAIN_DELIVERIES
+    return _UNCERTAIN_DELIVERIES + """
+        UNION ALL
+        SELECT 'intent_rule', n.id::text, COALESCE(e.task_id, 'discovery:' || n.discovery_id, 'verification'),
+               CASE n.kind WHEN 'created' THEN '规则创建任务通知'
+                    WHEN 'discovery_confirmation' THEN 'MR 发现确认通知' ELSE 'MR 核验故障通知' END,
+               n.channel_id, n.updated_at, NULL, NULL, n.last_error_code
+        FROM intent_rule_notices n LEFT JOIN intent_rule_executions e ON e.id=n.execution_id
+        WHERE n.state IN ('failed','uncertain') AND n.updated_at >= $1
+        UNION ALL
+        SELECT 'intent_rule', 'start:' || e.id, e.task_id, '规则任务启动失败', NULL,
+               e.updated_at, NULL, NULL, e.last_error_code
+        FROM intent_rule_executions e WHERE e.start_state='failed' AND e.updated_at >= $1
+        """
+
+
 async def uncertain_deliveries(since: datetime, limit: int, *,
-                               db: Db | None = None) -> tuple[list[dict[str, Any]], int]:
+                               db: Db | None = None, rules_on: bool = False) -> tuple[list[dict[str, Any]], int]:
     """Messages Looper may or may not have sent since ``since`` (``uncertain``: the send was under way when the
     process died, or the channel's answer was lost; never sent again): a subscription's push (one row per run), a
     message about an intent, an exhausted intent final notice, and the message telling a task's end. Newest first.
     Partial indexes on uncertain deliveries and failed final notices keep this off their history."""
-    return await _limited(db, _UNCERTAIN_DELIVERIES, "at DESC, source, key", limit, since)
+    return await _limited(db, _uncertain_deliveries_sql(rules_on), "at DESC, source, key", limit, since)
 
 
-async def earliest_uncertain_delivery(since: datetime, *, db: Db | None = None) -> dict[str, Any] | None:
+async def earliest_uncertain_delivery(since: datetime, *, db: Db | None = None, rules_on: bool = False) -> dict[str, Any] | None:
     """The oldest delivery that may not have arrived since ``since``. The capped list above is newest first."""
     row = await (db or get_pool()).fetchrow(
-        f"SELECT * FROM ({_UNCERTAIN_DELIVERIES}) AS found ORDER BY at ASC, source, key LIMIT 1", since)
+        f"SELECT * FROM ({_uncertain_deliveries_sql(rules_on)}) AS found ORDER BY at ASC, source, key LIMIT 1", since)
     return dict(row) if row is not None else None
