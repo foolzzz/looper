@@ -147,6 +147,7 @@ _AGENT_DB_WRITES = (
     ("llm_records", "add_metadata"),
     ("llm_records", "touch_record"),
     ("llm_records", "update_event"),
+    ("manager_events", "recover"),
 )
 
 # The default Manager's row, what every read of a Manager answers in a unit test (its definition has no prompt, no
@@ -777,8 +778,8 @@ def agent_db(monkeypatch: pytest.MonkeyPatch, stub_claude_on_path: Path) -> Simp
         if function == "create_project":
             mock = AsyncMock(side_effect=_created_project)
         else:
-            # start_record hands back the new record's id; the other writes return nothing.
-            mock = AsyncMock(return_value=1 if function == "start_record" else None)
+            # Record creation returns an id; recovery returns the number of interrupted events.
+            mock = AsyncMock(return_value={"start_record": 1, "recover": 0}.get(function))
         monkeypatch.setattr(importlib.import_module(f"looper.db.{module_name}"), function, mock)
         setattr(db, function, mock)
     for module_name, function, value in _AGENT_DB_READS:
