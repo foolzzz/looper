@@ -62,7 +62,9 @@ _FIELDS = {
     "run_timeout_seconds": {"anyOf": [
         _nullable({"type": "integer", "minimum": 1, "maximum": schedules.RUN_TIMEOUT_MAX_SECONDS}),
         {"const": "default"}]},
-    "run_budget_usd": _BUDGET, "daily_budget_usd": _BUDGET, "gate_command": _NULL_STR,
+    "run_budget_usd": _BUDGET, "daily_budget_usd": _BUDGET,
+    "daily_budget_equivalent_usd": {**_BUDGET, "description":
+        "Optional equivalent-spend daily cap. Only enforce splits currencies; off/observe keep the legacy mixed daily_budget_usd check."}, "gate_command": _NULL_STR,
     "gate_timeout_seconds": _nullable({"type": "integer", "minimum": 1,
                                         "maximum": schedules.GATE_TIMEOUT_MAX_SECONDS}),
     "notify": _enum("failures", "alerts", "always", "never"),
@@ -310,6 +312,14 @@ async def impact(server, operation, arguments, principal, headers):
         except ValueError as exc:
             raise OpError(ErrorCode.INVALID if isinstance(exc, MissingDirectory) else ErrorCode.CONFLICT, str(exc)) from None
     raises = _raises_a_cap(row, fields, project["task_budget_usd"] if project else None)
+    if "daily_budget_equivalent_usd" in fields:
+        before = row.get("daily_budget_equivalent_usd")
+        if before is None:
+            before = row.get("daily_budget_usd")
+        after = fields["daily_budget_equivalent_usd"]
+        if after is None:
+            after = fields.get("daily_budget_usd", row.get("daily_budget_usd"))
+        raises = raises or (before is not None and (after is None or after > before))
     if edit is not None and not (data.get("enabled") and not row["enabled"]):
         lines = []
         for key in edit[1]:
@@ -329,11 +339,11 @@ async def impact(server, operation, arguments, principal, headers):
         if "work_dir" not in edit[1]:
             lines.append(f"directory: {directory({**row, **fields})}")
         lines.extend(f"{key}: {row[key]!r} → {data[key]!r}" for key in
-                     ("enabled", "run_budget_usd", "daily_budget_usd") if key in data and data[key] != row[key])
+                     ("enabled", "run_budget_usd", "daily_budget_usd", "daily_budget_equivalent_usd") if key in data and data[key] != row[key])
         return f"Update {subject}: {'; '.join(lines)}. {EDIT_EFFECT[edit[0]]}"
     if (data.get("enabled") and not row["enabled"]) or raises:
         changes = ", ".join(f"{key}: {row[key]!r} → {data[key]!r}" for key in
-                            ("enabled", "run_budget_usd", "daily_budget_usd") if key in data)
+                            ("enabled", "run_budget_usd", "daily_budget_usd", "daily_budget_equivalent_usd") if key in data)
         effect = (f"Enabling runs its shell command {_shown('command', {**row, **fields}, {})} "
                   f"in {directory({**row, **fields})} unattended at each fire, without an agent or model spend." if command else
                   "Enabling starts unattended scheduled tasks; raised or removed caps allow more spending.")
