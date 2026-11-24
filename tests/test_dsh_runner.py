@@ -248,9 +248,9 @@ def test_wheel_contains_the_dsh_runner(tmp_path):
     with zipfile.ZipFile(wheel) as archive:
         names = archive.namelist()
         assert {prefix + name for name in ("dsh_runner/package.json", "dsh_runner/src/main.ts",
-                "common/package.json", "common/rpc.ts")} <= set(names)
+                "dsh_runner/src/tool-deadlines.json", "common/package.json", "common/rpc.ts")} <= set(names)
         assert not any(name.startswith("runners/") for name in names)
-        assert all(name == prefix + "dsh_runner/package.json" or
+        assert all(name in {prefix + "dsh_runner/package.json", prefix + "dsh_runner/src/tool-deadlines.json"} or
                    (name.startswith(prefix + "dsh_runner/src/") and name.endswith(".ts"))
                    for name in names if name.startswith(prefix + "dsh_runner/"))
 
