@@ -4768,21 +4768,31 @@ So:
   left open however the run ended: `interrupted` when it was cancelled,
   `failed` after an error in Looper's handling of it. A close goes on when a
   cancellation arrives meanwhile, for at most `CLOSE_TIMEOUT_SEC` (5 s). A
-  run that ends without a result keeps what its usage events added up to: its
-  tokens, and their cost when Looper prices the run; with Claude Code's own
-  pricing its cost is not known. A Worker's or Reviewer's run that Looper
+  Worker or Reviewer checkpoints the latest cumulative reported tokens and cost
+  on its original row while live. Interrupted runs now record the usage reported
+  before the interruption, marked partial (`metadata.usage_status = partial`,
+  the typed `UsageStatus`): runtime-reported cost takes precedence; otherwise
+  the reported tokens use the run's existing frozen model/provider prices,
+  with `cost_source = provider_price`. Unknown prices keep cost null.
+  No reported usage leaves tokens and cost null, with `usage_status = unreported`
+  and `usage_reason = no_usage_reported_before_interruption`.
+  A Worker's or Reviewer's run that Looper
   stops after its result came keeps what that result reports, and a turn of
   the Planner or the Manager is recorded before its session is saved. A
   close that hits a database error is tried once more. At startup, before
   anything runs, `serve` ends every record still `running` as `interrupted`
   (`llm_records.end_unfinished_records`, logged with the count), with
   `finished_at` its last output (its start without one): each is a run a
-  previous server that was killed, crashed or stopped did not see end, and its
-  usage, held in memory until a run ends, is not known. A second start changes
-  nothing.
+  previous server that was killed, crashed or stopped did not see end. It keeps
+  the persisted usage checkpoint and the same partial/unreported marker.
+  A keeper adoption replays usage into a fresh accumulator, and successful final
+  settlement replaces that same row without setting interruption fields. Task
+  costs, daily spend, metrics and cost-cap reads include the partial row through
+  the existing `cost_usd` column; replay and final settlement add no second bill.
+  A second startup close changes nothing.
 - **A task's cost** (`llm_records.task_costs`) is the sum of its Planner's,
   Workers' and Reviewers' runs and its room consults, in total and by role, with the run count. It
-  also counts `running` runs (cost not known yet) and `unpriced_runs`
+  also counts `running` runs (reported usage may already have a cost checkpoint) and `unpriced_runs`
   (ended without a cost). A Manager turn about the task is not part of it.
 - **An agent's usage** (`llm_records.agent_usage`, `POST /api/v1/runs/usage {agent_id, turns?}`) gives its total cost, runs and compactions, its cost
   by session and by UTC day, and its latest turns (oldest first) with each
