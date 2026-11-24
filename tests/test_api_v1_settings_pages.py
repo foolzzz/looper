@@ -20,7 +20,7 @@ def test_generated_cli_sends_settings_page_requests(family, action, options, dat
     args = loopercli.build_parser(api_v1.document()).parse_args([family.replace("_", "-"), action, *options])
     calls = []
     api = SimpleNamespace(call=lambda *parts: (calls.append(parts) or (200, {"status": "ok", "result": {}})))
-    assert args._run(args, SimpleNamespace(api=lambda: api, as_json=True, session="settings")) == 0
+    assert args._run(args, SimpleNamespace(api=lambda: api, as_json=True, session="settings", operator=True)) == 0
     path = f"/api/v1/{family}/{action}"
     assert calls == [("POST", path, data)]
     op = api_v1.find("POST", path)

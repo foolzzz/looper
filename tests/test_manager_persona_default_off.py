@@ -125,3 +125,30 @@ def test_the_planner_prompt_keeps_its_main_hash_with_or_without_persona(value):
         assert not any(word and word in text for word in (value.name, value.tone, value.notes))
     finally:
         persona.set_current(previous)
+
+
+@pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
+@pytest.mark.parametrize("stored", [None, "false"])
+@pytest.mark.parametrize("stable", [False, True])
+def test_resident_profile_off_matches_fixed_main_baseline(monkeypatch, tmp_path, stored, stable):
+    from unittest.mock import AsyncMock
+    from looper.agents import operator_profile
+
+    async def check(pool):
+        root = tmp_path / "vault"
+        root.mkdir()
+        (root / "关于我.md").write_text("## Name\nSynthetic operator\n", encoding="utf-8")
+        await pool.execute("INSERT INTO system_settings (key,value) VALUES ('knowledge_vault',$1)",
+                           json.dumps({"path": str(root), "profile_source": "关于我.md"}))
+        if stored is not None:
+            await pool.execute("INSERT INTO system_settings (key,value) VALUES ('manager.profile.enabled',$1)", stored)
+        if stable:
+            await pool.execute("INSERT INTO system_settings (key,value) VALUES ('manager.stable_context','true')")
+        read = AsyncMock(side_effect=AssertionError("disabled profile was read"))
+        monkeypatch.setattr(operator_profile, "resident_text", read)
+        digests, tools, system = await observe(tmp_path, monkeypatch)
+        assert digests == BASELINE[stable]
+        assert_main_surfaces(tools, system, tmp_path, variant="stable_context" if stable else "default")
+        read.assert_not_awaited()
+
+    run_db(check, monkeypatch, timeout=40)

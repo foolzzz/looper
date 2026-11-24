@@ -220,6 +220,8 @@
  "processor_settings.get": "inside",
  "processor_settings.update": "inside",
  "profile.get": "inside",
+ "profile_settings.get": "inside",
+ "profile_settings.update": "inside",
  "profile_source.get": "inside",
  "profile_source.update": "inside",
  "profiles.create": "inside",
