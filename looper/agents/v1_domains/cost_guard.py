@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 
 from .. import cost_guard, cost_guard_settings as settings, cost_holds
 from ...db import cost_holds as holds_store
+from ..run_usage import CostStatus
 from ..action_levels import ActionLevel
 from ..api_v1 import Operation, _array, _object, _STR, _NULL_STR, _INT, _BOOL
 from ..ops import ErrorCode, OpError
@@ -16,7 +17,9 @@ _MODE = {"type": "string", "enum": ["off", "observe", "enforce"]}
 _LIMITS = _object(dict.fromkeys(settings.CAPS, _CAP), closed=True)
 _ROLES = _object(dict.fromkeys(settings.ROLES, _LIMITS), [], closed=True)
 _COUNTER = _object({"scope": _STR, "scope_ref": _STR, "currency": _STR, "spent_usd": {"type": "number"},
-                    "reserved_usd": {"type": "number"}, "limit_usd": _CAP}, closed=True)
+                    "reserved_usd": {"type": "number"}, "limit_usd": _CAP,
+                    "cost_status": {"type": "string", "enum": [status.value for status in CostStatus]},
+                    "unknown_models": _array(_STR)}, closed=True)
 _RECENT = _object({"at": _STR, "run_kind": _STR, "currency": _STR, "estimate_usd": {"type": "number"},
                    "estimate_source": _STR, "decision": _STR, "scope": _NULL_STR, "scope_ref": _NULL_STR,
                    "action": _NULL_STR, "would_hold_until": _NULL_STR, "would_hold_reason": _NULL_STR,

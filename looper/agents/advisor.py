@@ -43,6 +43,7 @@ from .advice import (
 from .advice_lint import describe, lint
 from .agent_settings import AgentSettings, AgentType, load_agent_settings
 from .model_call import CallFailed, CallFailure, CallResult, ChildCall, Execution, call
+from .run_usage import CostStatus, cost_status
 from .spawn import MIN_RUN_USD, ChildRun, SpawnKind, SpawnParent
 
 logger = logging.getLogger(__name__)
@@ -172,7 +173,7 @@ def _failure_state(failure: CallFailure) -> SpawnState:
 
 async def _run(child: ChildRun, *, spawn_id: int, brief: Brief, settings: AgentSettings, cap_usd: float,
                runtime_root: Path, claude_bin: str, parse: Callable[[str], T],
-               deadline: float | None = None) -> tuple[CallResult[T], float]:
+               deadline: float | None = None) -> tuple[CallResult[T], float | None]:
     """Run ``child``, and once more when it ended in error (not when it was refused, rate-limited, over budget or
     out of time), within ``deadline``; the last run's result, and what both spent. Each run is noted on the consult
     when it starts and its spend booked when it ends, so a consult stopped meanwhile keeps what its runs spent
@@ -182,6 +183,17 @@ async def _run(child: ChildRun, *, spawn_id: int, brief: Brief, settings: AgentS
 
     async def booked(done: Execution) -> None:
         await _book(spawn_id, done)
+
+    def unknown_cost(result: CallResult[T]) -> CallFailed | None:
+        if result.record_id is None or cost_status(result.cost_usd) is CostStatus.KNOWN:
+            return None
+        models = ", ".join(result.execution.models) or "unknown"
+        logger.warning("models %s: consult budget cannot be verified: cost unknown; no retry or answer", models)
+        reason = f"its cost is unknown, so its cap of {cap_usd:g} USD cannot be checked"
+        if isinstance(result, CallFailed) and result.failure is not CallFailure.RUNTIME:
+            return result  # Keep timeout/refusal classification; these failures never retry or return advice.
+        return CallFailed(execution=replace(result.execution, failure=CallFailure.BUDGET, reason=reason),
+                          failure=CallFailure.BUDGET, reason=reason)
 
     from .cost_guard import Denied, Held
 
@@ -199,6 +211,8 @@ async def _run(child: ChildRun, *, spawn_id: int, brief: Brief, settings: AgentS
         failed = CallFailed(execution=Execution(None, failure=CallFailure.UNAVAILABLE, reason=str(held)),
                             failure=CallFailure.UNAVAILABLE, reason=str(held))
         return failed, 0.0
+    if failed := unknown_cost(done):
+        return failed, None
     spent = done.cost_usd or 0.0
     left = _time_left(deadline)
     if (isinstance(done, CallFailed) and done.failure is CallFailure.RUNTIME
@@ -221,12 +235,14 @@ async def _run(child: ChildRun, *, spawn_id: int, brief: Brief, settings: AgentS
             failed = CallFailed(execution=Execution(None, failure=CallFailure.UNAVAILABLE, reason=str(held)),
                                 failure=CallFailure.UNAVAILABLE, reason=str(held))
             return failed, spent
+        if failed := unknown_cost(done):
+            return failed, None
         spent = round(spent + (done.cost_usd or 0.0), 6)
     return done, spent
 
 
 async def _book(spawn_id: int, done: Execution) -> None:
-    if done.record_id is not None and done.cost_usd:
+    if done.record_id is not None:
         await agent_spawns.book(spawn_id, done.record_id, done.cost_usd)
 
 
@@ -243,8 +259,9 @@ async def reconcile(spawn_id: int) -> None:
         if record_id in booked:
             continue
         record = await llm_records.get_record(record_id)
-        if record and record.get("cost_usd"):
-            await agent_spawns.book(spawn_id, record_id, float(record["cost_usd"]))
+        if record and record["status"] != "running":
+            await agent_spawns.book(spawn_id, record_id,
+                                    float(record["cost_usd"]) if record["cost_usd"] is not None else None)
 
 
 async def submit(spawn_id: int, raw_request: Any, raw_bindings: Any = None, *, context: Context = Context(),
@@ -270,6 +287,9 @@ async def submit(spawn_id: int, raw_request: Any, raw_bindings: Any = None, *, c
                 ids=context.ids, domains=context.domains)
     if hits:
         return await _return(row, describe(hits), [hit.view() for hit in hits])
+    if row.get("cost_status") == CostStatus.UNKNOWN.value:
+        return await _end(row, SpawnState.OVER_BUDGET, failure="budget",
+                          detail=f"its cost is unknown, so its cap of {float(row['budget_usd']):g} USD cannot be checked")
     if _left(row) < MIN_RUN_USD:
         return await _end(row, SpawnState.OVER_BUDGET, failure="budget",
                           detail=f"{_left(row):.2f} USD is left, less than a run needs")
@@ -407,6 +427,9 @@ async def _end(row: Mapping[str, Any], state: SpawnState, *, spent_usd: float = 
     moved = await agent_spawns.move(row["id"], state, expect=SpawnState(row["state"]), spent_usd=spent_usd,
                                     child_record_id=child.record_id if child is not None else None,
                                     result=result, append=append, detail=detail or None)
+    if state is SpawnState.OVER_BUDGET and (moved or row).get("cost_status") == CostStatus.UNKNOWN.value:
+        # Keep the unknown-cost diagnosis in the record; the Planner gets the existing budget failure text.
+        failure, detail = "budget", ""
     return Ended(state, response if state is SpawnState.ANSWERED else None, failure, detail, moved or {})
 
 

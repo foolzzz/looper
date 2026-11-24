@@ -1,4 +1,4 @@
-"""Alert-only figures leave the public metric response pinned to its recorded baseline."""
+"""Alert-only figures preserve the public baseline with explicit cost coverage."""
 
 import json
 import subprocess
@@ -70,18 +70,28 @@ def test_alert_figures_use_median_and_each_basis_own_known_accepted_steps(monkey
     run_db(check, monkeypatch, setup=seed)
 
 
-def test_public_metrics_are_byte_identical_to_the_fixed_baseline(monkeypatch):
+def test_public_metrics_match_the_fixed_baseline_with_explicit_cost_status(monkeypatch):
     source = subprocess.check_output(["git", "show", f"{BASELINE}:looper/agents/metrics.py"], text=True)
     baseline = ModuleType("looper.agents._metrics_alerts_baseline")
     monkeypatch.setitem(sys.modules, baseline.__name__, baseline)
     exec(compile(source, "recorded-metrics-baseline", "exec"), baseline.__dict__)
 
+    def with_cost_status(value):
+        if isinstance(value, list):
+            return [with_cost_status(item) for item in value]
+        if not isinstance(value, dict):
+            return value
+        result = {key: with_cost_status(item) for key, item in value.items()}
+        if "unknown_runs" in value or "mean_usd" in value:
+            result["cost_status"] = "unknown" if value.get("unknown_runs", value.get("unknown", 0)) else "known"
+        return result
+
     async def check(pool):
-        expected = await baseline.compute(7, baseline.Filters(), now=NOW, pool=pool)
+        expected = with_cost_status(await baseline.compute(7, baseline.Filters(), now=NOW, pool=pool))
         actual = await metrics.compute(7, metrics.Filters(), now=NOW, pool=pool)
         assert json.dumps(actual, sort_keys=True) == json.dumps(expected, sort_keys=True)
         assert "alert_figures" not in actual
-        expected_task = await baseline.task_attempts("current", pool=pool)
+        expected_task = with_cost_status(await baseline.task_attempts("current", pool=pool))
         actual_task = await metrics.task_attempts("current", pool=pool)
         assert json.dumps(actual_task, sort_keys=True) == json.dumps(expected_task, sort_keys=True)
     run_db(check, monkeypatch, setup=seed)

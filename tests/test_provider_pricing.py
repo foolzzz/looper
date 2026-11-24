@@ -274,7 +274,7 @@ def test_a_catalog_price_wins_and_an_unknown_one_comes_from_the_builtin_table() 
     # With Claude Code's own login, an alias is the model it runs (its runs report claude-opus-5-5 for opus).
     (AuthKind.OAUTH, "opus", "claude-opus-5-5"),
     (AuthKind.OAUTH, "sonnet[1m]", "claude-sonnet-5-5"),
-    (AuthKind.OAUTH, "haiku", "claude-haiku-4-5"),
+    (AuthKind.OAUTH, "haiku", "claude-haiku-5-5"),
     # With another provider, its environment may map an alias to a model of its own: unpriced.
     (AuthKind.API_KEY, "sonnet", None),
 ])
@@ -285,7 +285,7 @@ def test_a_claude_code_alias_is_priced_as_its_model_only_with_claude_codes_own_l
                             oauth_runtime_type="claude-code" if auth is AuthKind.OAUTH else None)
     price = model_price(provider, model)
     assert price == (model_price(provider, priced_as) if priced_as else model_price(_provider(), "no-such-model"))
-    assert price.complete is (priced_as is not None)
+    assert price.complete is (priced_as is not None and priced_as != "claude-haiku-5-5")
 
 
 @pytest.mark.parametrize("usage", [
@@ -326,11 +326,11 @@ def test_the_soft_cap_counts_usage_events_at_the_providers_prices() -> None:
     assert spend.add(request) is True and spend.exceeded  # $0.80: the request that crossed it
     assert spend.add(request) is False  # already over
     assert spend.usage.cost_usd == pytest.approx(1.2) and spend.usage.input_tokens == 600_000
-    # An unpriced request takes the run out of the cap, and nothing without a cap is ever over it.
+    # Unknown prices keep the dollars unknown and stop a capped run.
     unpriced = RunSpend(_provider(MAIN), "m-main", cap=0.0001)
     unpriced.add(usage_event("mystery-1", Usage(input_tokens=1)))
     unpriced.add(request)
-    assert unpriced.usage.cost_usd is None and not unpriced.exceeded
+    assert unpriced.usage.cost_usd is None and unpriced.budget_unverifiable
     assert (cap_exceeded(1.0, None), cap_exceeded(None, 1.0), cap_exceeded(0.5, 0.5), cap_exceeded(0.6, 0.5)) \
         == (False, False, False, True)
 
@@ -607,7 +607,8 @@ def test_recorder_writes_snapshot_cost_or_null_for_an_unpriced_request(agent_db,
         if unknown:
             await recorder.record(usage_event("unknown", Usage(output_tokens=1)))
             models["unknown"] = {"outputTokens": 1}
-            assert recorder.cap_stop is None
+            assert recorder.cap_stop is not None
+            assert "unknown" in str(recorder.cap_stop.result_event["errors"])
         await recorder.finish(output_text="done", result_event={
             "type": "result", "subtype": "success", "modelUsage": models, "total_cost_usd": 99})
 
@@ -616,6 +617,9 @@ def test_recorder_writes_snapshot_cost_or_null_for_an_unpriced_request(agent_db,
     assert saved["cost_source"] == "provider_price"
     assert saved["cost_usd"] == (None if unknown else 0.8)
     assert saved["input_tokens"] == (None if unknown else 300_000)
+    if unknown:
+        assert saved["metadata"]["cost_status"] == "unknown"
+        assert saved["metadata"]["unknown_price_models"] == ["unknown"]
 
 
 @pytest.mark.parametrize("priced", [True, False])
@@ -673,7 +677,7 @@ def test_pi_usage_reaches_provider_pricing_and_the_recorders_soft_cap(priced: bo
         assert stop is not None and stop.usage == own
         assert runtime.budget_error(stop.result_event)
     else:
-        assert crossed == [] and recorder.cap_stop is None
+        assert crossed == [1] and recorder.cap_stop is not None
     assert runtime.budget_error(result) is None
     assert runtime.budget_error({"subtype": "error_max_budget_usd"}) is None
 
@@ -802,3 +806,95 @@ def test_a_provider_priced_result_keeps_its_one_hour_writes_from_its_requests() 
     result["modelUsage"]["claude-fable-5-2"]["cacheCreationInputTokens"] = 12_000
     assert not cache_split_known(result)
     assert reported_totals(result, price).cost_usd == pytest.approx(0.192)
+
+
+def test_unknown_event_model_is_a_sticky_visible_budget_failure(caplog):
+    from looper.agents.run_usage import CostStatus
+
+    spend = RunSpend(_provider(MAIN), "m-main", cap=1)
+    spend.add(usage_event("claude-haiku-5-5", Usage(input_tokens=100)))
+    assert spend.cost_status is CostStatus.UNKNOWN
+    assert spend.budget_unverifiable
+    assert spend.unknown_models == {"claude-haiku-5-5"}
+    assert "claude-haiku-5-5" in caplog.text and "budget" in caplog.text
+    spend.add(usage_event("m-main", Usage(input_tokens=1)))
+    assert spend.cost_status is CostStatus.UNKNOWN and spend.budget_unverifiable
+
+
+def test_unknown_model_cannot_turn_off_the_recorders_cap(tmp_path):
+    from looper.agents.claude_cli import ClaudeRunRecorder
+    recorder = ClaudeRunRecorder(agent_id="worker-test", task_id=None, command=["claude"],
+        cwd=str(tmp_path), input_text="test", launch=_launch(_resolved(input_usd_per_mtok=2)))
+    recorder.account(usage_event("claude-haiku-5-5", Usage(input_tokens=100)))
+    stop = recorder.cap_stop
+    assert stop is not None and stop.usage.cost_usd is None
+    assert "claude-haiku-5-5" in str(stop.result_event["errors"])
+
+
+def test_final_model_usage_reports_unknown_prices_even_without_stream_events(caplog):
+    from looper.agents.run_usage import CostStatus
+    usage = reported_totals({"modelUsage": {"claude-haiku-5-5": {"inputTokens": 100}}}, pricer(_provider()))
+    assert usage.cost_status is CostStatus.UNKNOWN and usage.cost_usd is None
+    assert not caplog.records  # Reading prices without a cap is quiet.
+
+
+def test_final_usage_cannot_erase_an_unknown_event_price(agent_db, tmp_path):
+    from looper.agents.claude_cli import ClaudeRunRecorder
+
+    async def run():
+        recorder = ClaudeRunRecorder(agent_id="worker-test", task_id=None, command=["claude"],
+            cwd=str(tmp_path), input_text="test", launch=_launch(_resolved(input_usd_per_mtok=2)))
+        await recorder.start()
+        recorder.account(usage_event("claude-haiku-5-5", Usage(input_tokens=10)))
+        await recorder.finish(output_text="done", result_event={"type": "result", "subtype": "success"},
+                              usage=Usage(cost_usd=0.01, input_tokens=10))
+
+    asyncio.run(run())
+    saved = agent_db.finish_record.await_args.kwargs
+    assert saved["cost_usd"] is None
+    assert saved["metadata"]["cost_status"] == "unknown"
+    assert saved["metadata"]["unknown_price_models"] == ["claude-haiku-5-5"]
+
+
+@pytest.mark.parametrize("cap,warnings", [(None, 0), (1, 1)])
+def test_unknown_price_warnings_require_a_cap_and_are_deduplicated(caplog, cap, warnings):
+    spend = RunSpend(_provider(), "claude-haiku-5-5", cap)
+    for _ in range(50):
+        spend.add(usage_event("claude-haiku-5-5", Usage(input_tokens=1)))
+    assert len(caplog.records) == warnings
+
+
+@pytest.mark.parametrize("main_model", ["sonnet", "haiku"])
+def test_runtime_cap_estimates_auxiliary_usage_only_with_a_known_main_price(main_model, caplog):
+    from looper.agents.profile_registry import BUILTIN_PROVIDER
+
+    spend = RunSpend(BUILTIN_PROVIDER, main_model, cap=1, runtime_billed=True)
+    spend.add(usage_event("claude-haiku-5-5", Usage(input_tokens=100)))
+    if main_model == "sonnet":
+        assert spend.budget_cost_usd == pytest.approx(0.0002)
+        assert not spend.budget_unverifiable and not caplog.records
+        # An estimate still enforces the configured dollar limit.
+        spend.cap = 0.0003
+        assert spend.add(usage_event("claude-haiku-5-5", Usage(input_tokens=100)))
+    else:
+        assert spend.budget_unverifiable and "price unknown" in caplog.text
+
+
+@pytest.mark.parametrize("requested", [False, True])
+def test_recorder_only_marks_unknown_cost_after_a_request(agent_db, tmp_path, requested):
+    from looper.agents.claude_cli import ClaudeRunRecorder
+    from tests.runtime_model_helpers import builtin_launch
+
+    async def run():
+        recorder = ClaudeRunRecorder(agent_id="planner-test", task_id="task-test", command=["claude"],
+                                     cwd=str(tmp_path), input_text="synthetic", launch=builtin_launch())
+        await recorder.start()
+        recorder.account({"type": "system", "subtype": "init", "model": "claude-opus-5-5"})
+        if requested:
+            recorder.account({"type": "assistant", "message": {"model": "claude-opus-5-5",
+                                                                "content": [{"type": "text", "text": "answer"}]}})
+        await recorder.finish(output_text=None, result_event=None, error="synthetic failure")
+
+    asyncio.run(run())
+    saved = agent_db.finish_record.await_args.kwargs
+    assert (saved.get("metadata", {}).get("cost_status") == "unknown") is requested

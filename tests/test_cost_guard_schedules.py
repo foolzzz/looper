@@ -59,7 +59,9 @@ def test_disabled_schedule_outcome_is_frozen(monkeypatch, kind, mode, exceeded):
 
 
 def test_null_equivalent_cap_keeps_view_keys():
-    assert sorted(schedules.schedule_view(row())) == json.loads(FIXTURE.read_text())['schedule_view_keys']
+    view = schedules.schedule_view(row())
+    assert sorted(view) == sorted([*json.loads(FIXTURE.read_text())['schedule_view_keys'], 'cost_status'])
+    assert view['cost_status'] == 'known'
 
 
 @pytest.mark.parametrize('tool', TOOLS, ids=lambda tool: tool.name)

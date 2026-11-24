@@ -124,3 +124,21 @@ def test_two_guards_count_other_process_reservations_and_spend(monkeypatch, scop
         result = await guards[0].admit(cg.RunKind.PROCESSOR, scopes, cg.Currency.PROVIDER, .3)
         assert result.decision is cg.Decision.DENY and result.spent_usd == pytest.approx(.8)
     run_db(body, monkeypatch, timeout=30)
+
+
+def test_unknown_model_cost_survives_guard_restart_and_api_contract(monkeypatch):
+    from jsonschema import Draft202012Validator
+    from looper.agents.v1_domains.cost_guard import _COUNTER
+
+    async def body(pool):
+        record = await llm_records.start_record(agent_id='processor:unpriced', pool=pool)
+        await llm_records.finish_record(record, status='completed', model='haiku',
+                                        metadata={'model_reported': 'claude-haiku-5-5'}, pool=pool)
+        g = cg.Guard(Config(mode=Mode.OBSERVE, daily_usd=1), pool=pool)
+        await g.rebuild()
+        snapshot = g.snapshot()
+        row = next(c for c in snapshot['counters'] if c['scope'] == 'global_day')
+        assert row['cost_status'] == 'unknown' and row['unknown_models'] == ['claude-haiku-5-5']
+        assert 'claude-haiku-5-5' in snapshot['problem']
+        Draft202012Validator(_COUNTER).validate(row)
+    run_db(body, monkeypatch, timeout=30)

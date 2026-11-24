@@ -16,7 +16,7 @@ async def history(now: datetime, *, pool=None) -> list[dict]:
                     {RUN_KIND.replace('run_kind', 'r.run_kind').replace('agent_id', 'r.agent_id')},
                     r.metadata->'prompt_layers'->'role'->>'config_id') AS run_kind,
                r.task_id, COALESCE(t.schedule_id, r.metadata->>'cost_guard_schedule_id') AS schedule_id,
-               r.created_at, r.status, r.cost_usd, r.metadata,
+               r.created_at, r.status, r.cost_usd, COALESCE(r.metadata->>'model_reported', r.model) AS model, r.metadata,
                CASE WHEN {EQUIVALENT.replace('metadata', 'r.metadata')} THEN 'equivalent_usd'
                     ELSE 'provider_priced_usd' END AS currency
         FROM llm_records r LEFT JOIN tasks t ON t.id = r.task_id

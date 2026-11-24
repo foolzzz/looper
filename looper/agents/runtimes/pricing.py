@@ -6,7 +6,8 @@ catalog sets them within one account and protocol; each unknown field comes
 from the built-in table below, which ships with this version. Every run freezes
 its main model and protocol catalog, including auxiliary models, in one price snapshot. A model that has
 no price for a kind of token its run used is unpriced: the run records its
-tokens only, and no spend cap can apply to it.
+tokens only. A configured per-run cap stops further calls on unknown prices; cumulative
+caps report the missing cost rather than treating the subtotal as a complete bill.
 
 The built-in table (``BUILTIN_PRICES``) holds the vendors' official standard
 pay-as-you-go list prices, read on ``PRICES_AS_OF`` from ``PRICE_SOURCES``.
@@ -36,6 +37,7 @@ made and paid.
 
 from __future__ import annotations
 
+import logging
 import re
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, fields, replace
@@ -43,11 +45,13 @@ from types import MappingProxyType
 from typing import TYPE_CHECKING, Any
 
 from ..model_names import parse_model_name
-from ..run_usage import Price, Usage
+from ..run_usage import CostStatus, Price, Usage, cost_status
 from . import AuthKind, CostSource, RunCost
 
 if TYPE_CHECKING:
     from ..profile_registry import LegacyProviderSpec, ModelSpec, ProviderSpec, ResolvedModel
+
+logger = logging.getLogger(__name__)
 
 PRICE_FIELDS = ("input_usd_per_mtok", "output_usd_per_mtok", "cache_read_usd_per_mtok", "cache_write_usd_per_mtok")
 
@@ -65,9 +69,13 @@ class ModelPrice:
     cache_write_1h_usd_per_mtok: float | None = None
 
     @property
+    def status(self) -> CostStatus:
+        return CostStatus.KNOWN if all(getattr(self, name) is not None for name in PRICE_FIELDS) else CostStatus.UNKNOWN
+
+    @property
     def complete(self) -> bool:
         """Every price is known, so every run of the model can be priced."""
-        return all(getattr(self, name) is not None for name in PRICE_FIELDS)
+        return self.status is CostStatus.KNOWN
 
     def cost(self, usage: Usage) -> float | None:
         """What ``usage``'s tokens cost: None when it reports no tokens, or uses a kind whose price is unknown.
@@ -158,13 +166,13 @@ BUILTIN_PRICES: Mapping[str, ModelPrice] = {
     "kimi-k2.6": _p(0.95, 4.00, 0.16, 0.95),
 }
 
-# The model each of Claude Code's aliases runs with Claude Code's own login, as of PRICES_AS_OF (what its runs
-# report).
+# Claude Code login model ids, verified by recorded runtime model/modelUsage (2026-11-23).
+# Haiku 5.5 is deliberately unpriced: the repository has no authoritative rate for it.
 CLAUDE_CODE_ALIASES: Mapping[str, str] = {
     "fable": "claude-fable-5-2",
     "opus": "claude-opus-5-5",
     "sonnet": "claude-sonnet-5-5",
-    "haiku": "claude-haiku-4-5",
+    "haiku": "claude-haiku-5-5",
 }
 _CLAUDE_CODE = "claude-code"  # the Claude Code runtime's type, whose own login a provider may be
 
@@ -282,7 +290,10 @@ class RunSpend:
     """One run's spend at its provider's prices so far, from its usage events, against its per-run cap.
 
     ``usage`` sums the events' tokens and their cost; its ``cost_usd`` is None
-    once one event cannot be priced, which takes the run out of the cap.
+    once one event cannot be priced. Unknown event prices make a configured cap
+    unverifiable, which stops further calls, and log the actual model at WARNING.
+    Runtime-billed runs estimate unpriced auxiliary requests at the main model's
+    price for cap checks; the runtime bill settles the run.
     An explicit ``usage_complete=False`` also keeps the total unknown. With
     ``cost_basis=observed``, the soft cap instead checks reported complete root
     steps' cost. ``budget_verifiable`` is false when a root step is missing or
@@ -290,12 +301,14 @@ class RunSpend:
     """
 
     def __init__(self, provider: LegacyProviderSpec | ProviderSpec | ResolvedModel | Price,
-                 model: str, cap: float | None) -> None:
+                 model: str, cap: float | None, *, runtime_billed: bool = False) -> None:
+        self._runtime_billed = runtime_billed
         self._price = provider if callable(provider) else pricer(provider)
         self._model = model
         self.cap = cap
         self.usage = Usage()
         self._unpriced = False
+        self.unknown_models: set[str] = set()
         self.observed_cost_usd: float | None = None
         self.budget_verifiable = True
         self._observed_basis = False
@@ -307,7 +320,17 @@ class RunSpend:
             return False
         model, usage = found
         was = self.exceeded
-        cost = self._price(model or self._model, usage)
+        actual_model = model or self._model
+        cost = self._price(actual_model, usage)
+        if cost is None and self._runtime_billed:
+            # Auxiliary catalog gaps must not interrupt an authoritative runtime bill.
+            cost = self._price(self._model, usage)
+        # Check event models, not only the configured alias: auxiliary models and alias targets can change.
+        if cost_status(cost) is CostStatus.UNKNOWN and usage != Usage():
+            if self.cap is not None and actual_model not in self.unknown_models:
+                logger.warning("model %s: price unknown; spend budget cannot be verified%s", actual_model,
+                               "; stopping at the configured cap" if self.cap is not None else "")
+            self.unknown_models.add(actual_model)
         root_complete = event.get("root_usage_complete") is not False
         self._observed_basis = self._observed_basis or event.get("cost_basis") == "observed"
         if not root_complete:
@@ -321,14 +344,18 @@ class RunSpend:
         return not was and self.exceeded
 
     @property
+    def cost_status(self) -> CostStatus:
+        return CostStatus.UNKNOWN if self.unknown_models else self.usage.cost_status
+
+    @property
     def budget_cost_usd(self) -> float | None:
         """The soft cap's cost basis; observed root cost is never the complete bill."""
         return self.observed_cost_usd if self._observed_basis else self.usage.cost_usd
 
     @property
     def budget_unverifiable(self) -> bool:
-        """An observed-root contract requires stopping on a gap; other runtimes keep their existing policy."""
-        return self._observed_basis and not self.budget_verifiable
+        """Unknown event prices, and observed-root usage gaps, require stopping a capped run."""
+        return bool(self.unknown_models) or (self._observed_basis and not self.budget_verifiable)
 
     @property
     def exceeded(self) -> bool:

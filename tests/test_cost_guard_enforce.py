@@ -215,3 +215,36 @@ def test_a_queued_reservation_is_released_when_a_usage_window_becomes_rejected(m
         assert queued.reservation.token not in g._pending
         assert all(value == 0 for value in g._reserved.values())
     asyncio.run(check())
+
+
+def test_a_missing_result_model_uses_the_admitted_model_for_unknown_spend(monkeypatch):
+    async def check():
+        g = setup_guard(monkeypatch)
+        selected = launch()
+        selected.model = 'claude-haiku-5-5'
+        reservation = await cg.before_run(launch=selected, run_kind='worker', task_id='task-a')
+        await cg.bind(reservation, 42)
+        await cg.finish(42, cost_usd=None)
+        counter = next(item for item in g.snapshot()['counters'] if item['scope'] == 'task')
+        assert counter['unknown_models'] == ['claude-haiku-5-5']
+        assert counter['cost_status'] == 'unknown'
+    asyncio.run(check())
+
+
+def test_unknown_guard_warnings_are_once_per_scope_day_and_model_set(monkeypatch, caplog):
+    async def check():
+        g = setup_guard(monkeypatch)
+        selected = launch()
+        selected.model = 'claude-haiku-5-5'
+        reservation = await cg.before_run(launch=selected, run_kind='worker', task_id='task-a')
+        await cg.bind(reservation, 42)
+        await cg.finish(42, cost_usd=None)
+        scope = (cg.Scope(cg.BudgetScope.TASK, 'task-a', 2),)
+        for _ in range(5):
+            g._warn_unknown(scope, cg.Currency.PROVIDER)
+        warnings = [r for r in caplog.records if 'cannot verify' in r.message]
+        assert len(warnings) == 1
+        g.day = g.day.replace(day=g.day.day + 1)
+        g._warn_unknown(scope, cg.Currency.PROVIDER)
+        assert len([r for r in caplog.records if 'cannot verify' in r.message]) == 2
+    asyncio.run(check())

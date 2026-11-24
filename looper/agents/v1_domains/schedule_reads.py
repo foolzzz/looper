@@ -58,6 +58,7 @@ _SCHEDULE_FIELDS = {
     "run_timeout_seconds": {"anyOf": [_NULL_INT, {"const": "default"}]},
     "run_timeout_effective_seconds": _NULL_INT, "run_budget_usd": _NULL_NUMBER,
     "daily_budget_usd": _NULL_NUMBER, "spent_today_usd": {"type": "number"},
+    "cost_status": _enum("known", "unknown"),
     "gate_command": _NULL_STR, "gate_timeout_seconds": _NULL_INT,
     "profile_overrides": _object(dict.fromkeys(("planner", "worker", "reviewer", "processor"), _STR), [], closed=True),
     "task_limits": _object({"worker": _NULL_INT, "reviewer": _NULL_INT}),

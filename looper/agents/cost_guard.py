@@ -13,6 +13,7 @@ from typing import Callable
 
 from ..db import cost_guard as store
 from . import cost_guard_settings as settings, cost_alerts
+from .run_usage import CostStatus, cost_status
 
 logger = logging.getLogger(__name__)
 
@@ -116,6 +117,7 @@ class Reservation:
     dispatch_task_id: str | None = None
     dispatch_step_id: str | None = None
     profile_id: str | None = None
+    model: str | None = None
 
     def metadata(self):
         return {'reservation': {'usd': self.usd, 'currency': self.currency.value,
@@ -179,6 +181,8 @@ class Guard:
         self._lock = asyncio.Lock()
         self._spent = defaultdict(float)
         self._reserved = defaultdict(float)
+        self._unknown = defaultdict(set)
+        self._unknown_warned: dict[tuple, tuple] = {}
         self._scopes: dict[tuple, Scope] = {}
         self._pending: dict[str, Reservation] = {}
         self._records: dict[int, Reservation] = {}
@@ -204,6 +208,7 @@ class Guard:
         spent, reserved, samples = defaultdict(float), defaultdict(float), defaultdict(list)
         records, scopes, recent, daily = {}, {}, deque(maxlen=20), defaultdict(lambda: defaultdict(float))
         persisted_tokens = set()
+        unknown = defaultdict(set)
         for row in rows:
             metadata = row['metadata']
             # /new and /profile are code receipts, not model runs or estimate samples.
@@ -245,6 +250,9 @@ class Guard:
                     reserved[key] += reservation.usd
                 elif scope.scope is BudgetScope.TASK or row['created_at'] >= day:
                     spent[key] += cost
+                    if cost_status(row.get('cost_usd')) is CostStatus.UNKNOWN and row['status'] != 'running':
+                        unknown[key].update(metadata.get('unknown_price_models')
+                                            or [metadata.get('model_reported') or row.get('model') or '<unreported>'])
         # Admissions that have not finished opening their record are absent from the snapshot query.
         for reservation in self._pending.values():
             if reservation.token in persisted_tokens:
@@ -259,12 +267,27 @@ class Guard:
         self.day, self._limits = day, limits
         self._spent, self._reserved, self._samples = spent, reserved, samples
         self._scopes, self._records = scopes, records
+        self._unknown = unknown
+        for key, scope in scopes.items():
+            self._warn_unknown((scope,), key[2])
         # A week of observations precedes advice; recommendations are never applied as configuration.
         observed = [row['created_at'] for row in rows if row['metadata'].get('cost_guard')]
         if observed and min(observed) <= now-timedelta(days=7):
             days = [day-timedelta(days=i) for i in range(1, 31)]
             self._recommendations = {c: percentile([daily[c].get(d, 0.) for d in days])*1.5 for c in Currency}
         self.problem = None
+
+    def _warn_unknown(self, scopes, currency):
+        for scope in scopes:
+            currencies = Currency if scope.scope is BudgetScope.SCHEDULE_DAY else (currency,)
+            models = sorted(set().union(*(self._unknown[*scope.key, c] for c in currencies)))
+            warning_key = (*scope.key, tuple(currencies))
+            warning_state = (self.day, tuple(models))
+            if (models and scope.limit_usd is not None
+                    and self._unknown_warned.get(warning_key) != warning_state):
+                self._unknown_warned[warning_key] = warning_state
+                logger.warning('cost guard cannot verify %s %s spend cap: unknown price/cost for model(s) %s',
+                               scope.scope.value, scope.scope_ref, ', '.join(models))
 
     def _limit(self, scope, ref, currency, limits=None):
         limits = self._limits if limits is None else limits
@@ -323,6 +346,7 @@ class Guard:
         if not math.isfinite(estimate) or estimate < 0:
             raise ValueError('reservation estimate must be finite and nonnegative')
         action, hit = None, None
+        self._warn_unknown(scopes, currency)
         alerts = []
         hit_used = 0.
         accounting_scopes = scopes if accounting_scopes is None else accounting_scopes
@@ -420,24 +444,32 @@ class Guard:
             key = (*scope.key, reservation.currency)
             self._reserved[key] = max(0., self._reserved[key]-reservation.usd)
 
-    def finish(self, record_id, cost_usd):
+    def finish(self, record_id, cost_usd, *, model=None, unknown_models=()):
         reservation = self._records.pop(record_id, None)
         if reservation is None:
             return
         self._release(reservation)
-        if cost_usd is not None:
-            for scope in reservation.scopes:
-                if scope.scope is BudgetScope.TASK or reservation.created_at >= self.day:
-                    self._spent[*scope.key, reservation.currency] += float(cost_usd)
+        for scope in reservation.scopes:
+            if scope.scope is BudgetScope.TASK or reservation.created_at >= self.day:
+                key = (*scope.key, reservation.currency)
+                if cost_status(cost_usd) is CostStatus.UNKNOWN:
+                    self._unknown[key].update(unknown_models or [model or reservation.model or '<unreported>'])
+                else:
+                    self._spent[key] += float(cost_usd)
+        self._warn_unknown(reservation.scopes, reservation.currency)
 
     def snapshot(self):
+        models = sorted(set().union(*self._unknown.values())) if self._unknown else []
+        price_problem = ('未知价格或费用：' + ', '.join(models) + '；累计花费不完整，无法验证金额上限。') if models else None
         return {'counters': [{**scope.view(), 'currency': currency.value,
-                               'spent_usd': self._spent[key], 'reserved_usd': self._reserved[key]}
+                               'spent_usd': self._spent[key], 'reserved_usd': self._reserved[key],
+                               'cost_status': (CostStatus.UNKNOWN if self._unknown[key] else CostStatus.KNOWN).value,
+                               'unknown_models': sorted(self._unknown[key])}
                               for key, scope in self._scopes.items() for currency in [key[2]]],
                 'recent': list(reversed(self._recent)),
                 'recommended_daily_usd': self._recommendations[Currency.PROVIDER],
                 'recommended_daily_equivalent_usd': self._recommendations[Currency.EQUIVALENT],
-                'problem': self.problem}
+                'problem': '; '.join(p for p in (self.problem, price_problem) if p) or None}
 
 
 _guard: Guard | None = None
@@ -553,6 +585,8 @@ async def before_run(*, launch, run_kind, task_id=None, schedule_id=None, step_i
                     guard._reserved[*scope.key, currency] += estimate
                 result = replace(result, decision=Decision.ADMIT, reservation=reservation,
                                  alerts=tuple(a for a in result.alerts if a.kind is not cost_alerts.AlertKind.LIMIT))
+            if result.reservation is not None:
+                result.reservation.model = getattr(launch, 'model', None)
             admission = guard._apply_hold(kind, result, hold, provider_id)
     except (Denied, Held):
         raise
@@ -592,12 +626,12 @@ async def abandon(reservation):
             guard.abandon(reservation)
 
 
-async def finish(record_id, *, cost_usd=None, cost_source=None):
+async def finish(record_id, *, cost_usd=None, cost_source=None, model=None, unknown_models=()):
     guard = current()
     if guard.config.mode is settings.Mode.OFF:
         return
     async with guard._lock:
-        guard.finish(record_id, cost_usd)
+        guard.finish(record_id, cost_usd, model=model, unknown_models=unknown_models)
 
 
 async def _schedule_launch(schedule):
