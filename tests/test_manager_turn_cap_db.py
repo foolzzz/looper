@@ -8,9 +8,8 @@ from types import SimpleNamespace
 import pytest
 
 from looper.agents import chat_settings, session_budget, turn_metrics
+from looper.db import agent_sessions
 from looper.agents.claude_cli import ClaudeRunRecorder
-from looper.agents.runtimes.pricing import ModelPrice
-from looper.agents.tiers import manager_budget
 from tests.db_support import DSN, run_db
 from tests.manager_budget_support import manager
 
@@ -41,16 +40,23 @@ def test_subscription_turn_cap_replies_and_resumes(monkeypatch, tmp_path):
     run_db(check, monkeypatch, timeout=30)
 
 
-def test_no_catalog_price_has_no_soft_cap_and_warns_once(monkeypatch, tmp_path, caplog):
+def test_haiku_manager_unknown_price_explains_the_stop_and_warns_once_per_turn(monkeypatch, tmp_path, caplog):
     async def check(pool):
-        await session_budget.update({"turn_budget_usd": 0.01})
-        manager_budget._no_price.cache_clear()
-        monkeypatch.setattr(manager_budget, "pricer", lambda *a, **k: SimpleNamespace(model_price=lambda _: ModelPrice()))
-        async with manager(pool, tmp_path, monkeypatch, context=1000) as chat:
-            assert await chat.ask() == ["answer"]
-            assert chat.manager._session_now().budget.spend is None
-            assert await chat.ask("again") == ["answer"]
-        assert sum("no price;" in record.message for record in caplog.records) == 1
+        await session_budget.update({"turn_budget_usd": 4})
+        await pool.execute("INSERT INTO agent_profiles (id, name, runtime_id, model_id) "
+                           "SELECT 'test-haiku', 'Test Haiku', 'rt-claude-code', id FROM llm_models "
+                           "WHERE provider_id='prov-claude-subscription' AND name='haiku'")
+        await agent_sessions.select_profile("manager", "test-haiku")
+        reply = session_budget.over_cap_reply(4, unverifiable=True, unknown_models=("claude-haiku-5-5",))
+        async with manager(pool, tmp_path, monkeypatch, context=1000, model="claude-haiku-5-5") as chat:
+            assert await chat.ask() == [reply]
+            assert chat.manager._session_now().budget.spend.budget_unverifiable
+            assert await chat.ask("again") == [reply]
+        rows = await pool.fetch("SELECT cost_usd, cost_source FROM llm_records ORDER BY id")
+        assert len(rows) == 2
+        # The soft stop precedes the result event, so these turns have no runtime bill yet.
+        assert all(row["cost_usd"] is None and row["cost_source"] == "runtime" for row in rows)
+        assert sum("price unknown;" in record.message for record in caplog.records) == 2  # once per turn
     run_db(check, monkeypatch, timeout=30)
 
 

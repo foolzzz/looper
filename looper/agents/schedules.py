@@ -300,7 +300,8 @@ def _usage_hold(schedule_id: str) -> dict[str, Any] | None:
 
 
 def schedule_view(row: Mapping[str, Any], last_run: dict[str, Any] | None = None, *,
-                  spent_today: float = 0.0, default_timeout: int | None = None) -> dict[str, Any]:
+                  spent_today: float = 0.0, cost_status: str = "known",
+                  default_timeout: int | None = None) -> dict[str, Any]:
     """``default_timeout``: the system default run timeout, for a schedule that follows it."""
     target = {"channel": row["notify_channel"], "chat": row["notify_chat"]} if row.get("notify_channel") else None
     from .schedule_notify import alert_policy
@@ -338,7 +339,7 @@ def schedule_view(row: Mapping[str, Any], last_run: dict[str, Any] | None = None
         "user_gates": row.get("user_gates", UserGates.OFF.value),
         "active_hours": row.get("active_hours"), "idle_only": bool(row.get("idle_only")),
         "throttle": schedule_throttle.ScheduleThrottle.of(row).view(),
-        "notify_target": target, "spent_today_usd": round(spent_today, 6),
+        "notify_target": target, "spent_today_usd": round(spent_today, 6), "cost_status": cost_status,
         "alerts": {"failures_since": row.get("failures_alert_at"), "stale_since": row.get("stale_alert_at"),
                    "deadline_since": row.get("deadline_alert_at"), "overlap_since": row.get("overlap_alert_at")},
         "planner_session": {
@@ -754,10 +755,12 @@ async def _schedule_views(rows: list[dict[str, Any]], *, runtime_root: Path | No
     ids = [row["id"] for row in rows]
     latest = await db_schedules.latest_runs(ids)
     views = dict(zip(latest, await _run_views(list(latest.values()), runtime_root=runtime_root)))
-    spent = await db_schedules.spent_since_each(db_connection.get_pool(), ids, local_midnight())
+    statuses: dict[str, str] = {}
+    spent = await db_schedules.spent_since_each(db_connection.get_pool(), ids, local_midnight(), statuses=statuses)
     default = await default_run_timeout()
     targets = {(target["channel"], target["chat"]) for target in await notify_targets()}
-    found = [{**schedule_view(row, views.get(row["id"]), spent_today=spent[row["id"]], default_timeout=default),
+    found = [{**schedule_view(row, views.get(row["id"]), spent_today=spent[row["id"]],
+                             cost_status=statuses[row["id"]], default_timeout=default),
               "notify_target_available": not row.get("notify_channel") or
                   (row["notify_channel"], row["notify_chat"]) in targets}
              for row in rows]
@@ -1079,7 +1082,10 @@ async def update_schedule(schedule_id: str, data: dict[str, Any], *, now: dateti
             if (rule.text != row["cron"] or zone_name != row["timezone"]
                     or fields.get("success_deadline", row["success_deadline"]) != row["success_deadline"]):
                 fields["rule_changed_at"] = now  # so does it from a new rule, zone or deadline
-            await db_schedules.update_schedule(conn, schedule_id, fields, profiles=profiles, task_limits=task_limits)
+            from .cost_guard_settings import cached as guard_settings
+
+            await db_schedules.update_schedule(conn, schedule_id, fields, profiles=profiles, task_limits=task_limits,
+                                               snooze_days=guard_settings().unanswered.snooze_days)
             if stream_changes:
                 await db_subs.update(conn, schedule_id, stream_changes)
             if kind == Kind.SUBSCRIPTION.value and changes_config(row, fields, stream, profiles):

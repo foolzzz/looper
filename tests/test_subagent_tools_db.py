@@ -293,3 +293,16 @@ def test_non_keeper_shutdown_uses_parent_ended_reason(tmp_path, monkeypatch):
         row = await agent_spawns.get(reply["result"]["spawn"]["id"], pool=pool)
         assert row["state"] == "cancelled" and row["cancel_reason"] == "parent_ended"
     run_db(check, monkeypatch)
+
+
+def test_unknown_event_model_is_not_repriced_as_the_parent_model(tmp_path, caplog):
+    from looper.agents.ops.subagents import _Parent
+    from looper.agents.run_usage import Usage
+
+    settings = AgentSettings(profile=builtin_resolved_profile(), max_budget_usd=.2)
+    recorder = SimpleNamespace(record_id=1, _usage_so_far=Usage(input_tokens=100),
+                               _spend=SimpleNamespace(unknown_models={"claude-haiku-5-5"}))
+    seat = SimpleNamespace(step_id="step", work_dir=str(tmp_path), key="worker@s1")
+    caller = _Parent("task", seat, recorder, Launch(settings, role=AgentType.WORKER)).caller()
+    assert caller.spent_usd is None
+    assert "claude-haiku-5-5" in caplog.text and "parent spend cap" in caplog.text

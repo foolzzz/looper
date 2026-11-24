@@ -1641,7 +1641,7 @@ def test_dsh_resident_recorder_stops_at_observed_or_unverifiable_budget(tmp_path
 
 @pytest.mark.parametrize("runtime_type", ["claude-code", "omp"])
 @pytest.mark.parametrize("mode", ["priced", "unpriced", "incomplete"])
-def test_nonobserved_recorder_budget_keeps_existing_priced_and_unknown_behavior(tmp_path, runtime_type, mode):
+def test_nonobserved_recorder_budget_stops_on_priced_spend_or_unknown_price(tmp_path, runtime_type, mode):
     from looper.agents.claude_cli import ClaudeRunRecorder, SOFT_CAP
     from looper.agents.run_usage import Usage
     from looper.agents.runtimes.pricing import usage_event
@@ -1657,9 +1657,13 @@ def test_nonobserved_recorder_budget_keeps_existing_priced_and_unknown_behavior(
                         **({"usage_complete": False, "root_usage_complete": False} if mode == "incomplete" else {}))
     asyncio.run(recorder.record(event))
     stop = recorder.cap_stop
-    if mode == "priced":
+    if mode in ("priced", "unpriced"):
         assert stop is not None and stop.result_event[SOFT_CAP] and stop.result_event["is_error"]
-        assert stop.usage.cost_usd == pytest.approx(.000008442)
+        if mode == "priced":
+            assert stop.usage.cost_usd == pytest.approx(.000008442)
+        else:
+            assert stop.usage.cost_usd is None
+            assert "price unknown for model(s): unpriced-model" in stop.result_event["errors"][0]
     else:
         assert stop is None
 

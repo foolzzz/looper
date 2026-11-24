@@ -13,6 +13,7 @@ import math
 
 import asyncpg
 from collections.abc import Mapping
+from contextlib import AsyncExitStack
 from dataclasses import dataclass, replace
 from enum import StrEnum
 from pathlib import Path
@@ -21,8 +22,10 @@ from typing import Any
 from ..db import agent_spawns, llm_records, role_configs
 from ..db.connection import get_pool
 from ..db.agent_spawns import FINISHED, CancelReason, SpawnState
-from . import spawn
+from ..db.tasks import ACTIVE_STATUSES
+from . import admission, spawn
 from .agent_settings import Access, AgentType, Launch, load_agent_settings
+from .run_usage import CostStatus, cost_status
 from .runtimes import ReadOnly
 from .spawn import ChildFailure, ChildResult, ChildRun, MIN_RUN_USD, SpawnKind, SpawnParent
 
@@ -100,6 +103,15 @@ def _number(value: Any) -> bool:
     return type(value) in (int, float) and math.isfinite(value) and value >= 0
 
 
+def _unknown_models(record: Mapping[str, Any] | None) -> str:
+    record = record or {}
+    metadata = record.get("metadata") or {}
+    if isinstance(metadata, str):
+        metadata = json.loads(metadata)
+    return ", ".join(metadata.get("unknown_price_models") or
+                     [metadata.get("model_reported") or record.get("model") or "unknown"])
+
+
 class SpawnService:
     def __init__(self, runtime_root: Path, *, pool: Any = None, claude_bin: str = "claude",
                  keeper: Any = None, on_stale: Any = None, stop_parent: Any = None):
@@ -113,6 +125,9 @@ class SpawnService:
         self._handles: dict[int, Any] = {}
         self._children: dict[int, asyncio.Task] = {}
         self._homes: dict[int, str] = {}
+
+    def owner_of(self, spawn_id: int) -> str | None:
+        return self._homes.get(spawn_id)
 
     async def admit(self, caller: Spawner, brief: Any, *, key: str, kind: str = "explorer",
                     profile: str | None = None, budget_usd: float | None = None,
@@ -155,7 +170,7 @@ class SpawnService:
         parent = await llm_records.get_record(caller.parent.record_id, pool=self.pool) if caller.parent.record_id else None
         if (not task or not parent or parent["task_id"] != caller.parent.task_id
                 or (parent.get("run_kind") or llm_records.run_kind_of(parent["agent_id"])) != caller.role
-                or parent["status"] != "running" or task["status"] != "running"):
+                or parent["status"] != "running" or task["status"] not in ACTIVE_STATUSES):
             raise Refused(RefusalReason.ROLE, "the spawner must be a running parent in a running task")
         project = dict(await self.pool.fetchrow("SELECT * FROM projects WHERE id = $1", task["project_id"]))
         if project.get("subagents") != "on":
@@ -196,7 +211,7 @@ class SpawnService:
             if previous := await agent_spawns.by_key(caller.parent.record_id, key, pool=conn):
                 return previous
             # The lock also orders task stop and the reservation's release.
-            if await conn.fetchval("SELECT status FROM tasks WHERE id = $1", caller.parent.task_id) != "running":
+            if await conn.fetchval("SELECT status FROM tasks WHERE id = $1", caller.parent.task_id) not in ACTIVE_STATUSES:
                 raise Refused(RefusalReason.ROLE, "task ended before reservation")
             usage = await agent_spawns.commitment(caller.parent.task_id, caller.parent.record_id, pool=conn)
             if usage["parent_count"] >= (project.get("subagents_per_run") if project.get("subagents_per_run") is not None else 4):
@@ -205,11 +220,23 @@ class SpawnService:
                 raise Refused(RefusalReason.LIMIT_TASK, "per-task explorer limit reached")
             requested = budget_usd if budget_usd is not None else (project.get("subagent_budget_usd") or settings.max_budget_usd or .5)
             limits = [requested, (project.get("subagent_task_budget_usd") or 3) - usage["task_committed"]]
-            if caller.budget_usd is not None and caller.spent_usd is not None:
-                limits.append(caller.budget_usd - caller.spent_usd - usage["parent_committed"])
+            if caller.budget_usd is not None:
+                if cost_status(caller.spent_usd) is CostStatus.UNKNOWN:
+                    logger.warning("model %s: parent spend cap cannot be verified: cost unknown (record %s)",
+                                   _unknown_models(parent), caller.parent.record_id)
+                else:
+                    limits.append(caller.budget_usd - caller.spent_usd - usage["parent_committed"])
             if project.get("task_budget_usd") is not None:
-                spent = await conn.fetchval(f"SELECT COALESCE(sum(cost_usd), 0) FROM llm_records WHERE task_id = $1 AND {llm_records.TASK_SPEND}", caller.parent.task_id)
-                limits.append(project["task_budget_usd"] - float(spent) - usage["task_reserved"] - caller.unrecorded_usd)
+                costs = await conn.fetchrow(
+                    f"SELECT COALESCE(sum(cost_usd), 0) AS spent, array_agg(DISTINCT COALESCE("
+                    f"NULLIF(metadata->>'unknown_price_models', '[]'), metadata->>'model_reported', model, 'unknown')) "
+                    f"FILTER (WHERE cost_usd IS NULL AND status <> 'running') AS unknown_models "
+                    f"FROM llm_records WHERE task_id = $1 AND {llm_records.TASK_SPEND}", caller.parent.task_id)
+                if costs["unknown_models"]:
+                    logger.warning("models %s: task spend cap cannot be verified: cost unknown (task %s)",
+                                   ", ".join(sorted(costs["unknown_models"])), caller.parent.task_id)
+                limits.append(project["task_budget_usd"] - float(costs["spent"]) - usage["task_reserved"]
+                              - caller.unrecorded_usd)
             budget = min(limits)
             if budget < MIN_RUN_USD - 1e-9:
                 raise Refused(RefusalReason.BUDGET, "less than the minimum explorer budget remains")
@@ -248,6 +275,9 @@ class SpawnService:
         directory = Path(row["inputs"]["work_dir"])
         checkout = None
         child_task = None
+        record_id = None
+        admission_stack = None
+        grant = None
         try:
             task_row = dict(await self.pool.fetchrow("SELECT * FROM tasks WHERE id = $1", row["task_id"]))
             project = dict(await self.pool.fetchrow("SELECT * FROM projects WHERE id = $1", task_row["project_id"]))
@@ -274,7 +304,28 @@ class SpawnService:
                 max_turns=role.get("max_turns") or EXPLORER_MAX_TURNS,
                 role=AgentType.EXPLORER)
             self._homes[spawn_id] = child.agent_id
-            record_id = None
+            if admission.enabled():
+                try:
+                    # Check the task class before joining an account queue. The
+                    # locked launch below must still re-check after admission.
+                    limit = await self.pool.fetchval("SELECT max_concurrency FROM task_concurrency_limits WHERE task_id=$1 AND role='subagent'", row["task_id"]) or 4
+                    active = await self.pool.fetchval("SELECT count(*) FROM agent_spawns WHERE task_id=$1 AND kind='explorer' AND state IN ('asking','cancelling')", row["task_id"])
+                except Exception:
+                    logger.exception("Explorer %s task-class pre-check failed; skipping account admission", spawn_id)
+                else:
+                    if active >= limit:
+                        return await agent_spawns.get(spawn_id, pool=self.pool)
+                    _, lane = await admission.parent_for(row["parent_record_id"])
+
+                    async def on_wait(message):
+                        from ..db import activity
+                        await activity.insert_activity(task_id=row["task_id"], worker=child.agent_id,
+                            kind="subagent_wait", summary=f"Explorer {spawn_id}: {message}",
+                            metadata={"spawn_id": spawn_id}, pool=self.pool)
+
+                    admission_stack = AsyncExitStack()
+                    grant = await admission_stack.enter_async_context(admission.slot(
+                        launch.profile.provider.id, lane, owner=child.agent_id, on_wait=on_wait))
             claimed = asyncio.Event()
             launch_ready = asyncio.Event()
             async with agent_spawns.task_lock(row["task_id"], pool=self.pool) as conn:
@@ -283,7 +334,7 @@ class SpawnService:
                     return latest
                 task_status = await conn.fetchval("SELECT status FROM tasks WHERE id=$1", row["task_id"])
                 subagents_on = await conn.fetchval("SELECT subagents FROM projects WHERE id=$1 FOR UPDATE", task_row["project_id"])
-                if task_status != "running" or subagents_on != "on":
+                if task_status not in ACTIVE_STATUSES or subagents_on != "on":
                     moved = await agent_spawns.move(spawn_id, SpawnState.CANCELLED, expect=SpawnState.QUEUED,
                         cancel_reason=CancelReason.TASK_ENDED.value, pool=conn)
                     return moved or await agent_spawns.get(spawn_id, pool=conn)
@@ -335,6 +386,10 @@ class SpawnService:
                 return await self.finish(spawn_id)
             return current
         except spawn.ChildDetached:
+            if grant is not None:
+                # The adopter observes the eventual probe result. Detaching is
+                # only a local release, not the end of this kept process.
+                grant.reported = True
             return await agent_spawns.get(spawn_id, pool=self.pool)
         except asyncio.CancelledError:
             if child_task is not None:
@@ -357,6 +412,11 @@ class SpawnService:
                 return await self.finish(spawn_id)
             raise
         finally:
+            if admission_stack is not None:
+                if grant is not None and record_id is None:
+                    # An unstarted run cannot prove that the account's quota recovered.
+                    grant.reported = True
+                await admission_stack.aclose()
             self._homes.pop(spawn_id, None)
             self._children.pop(spawn_id, None)
             handle = self._handles.pop(spawn_id, None)
@@ -403,10 +463,13 @@ class SpawnService:
 
     async def enforce_parent_budget(self, parent_record_id: int, cap: float, spent_usd: float | None = None) -> None:
         """Soft-stop a parent when its own spend plus completed child spend exceeds its cap."""
-        if spent_usd is None:
-            spent_usd = await self.pool.fetchval("SELECT cost_usd FROM llm_records WHERE id=$1", parent_record_id)
-        if spent_usd is None:
-            return
+        if cost_status(spent_usd) is CostStatus.UNKNOWN:
+            parent = await self.pool.fetchrow("SELECT cost_usd, model, metadata FROM llm_records WHERE id=$1", parent_record_id)
+            spent_usd = parent["cost_usd"] if parent else None
+            if cost_status(spent_usd) is CostStatus.UNKNOWN:
+                logger.warning("model %s: parent spend cap cannot be verified: cost unknown (record %s)",
+                               _unknown_models(parent), parent_record_id)
+                return
         children = await self.pool.fetchval("SELECT COALESCE(sum(spent_usd),0) FROM agent_spawns WHERE parent_record_id=$1 AND kind='explorer'", parent_record_id)
         if float(spent_usd) + float(children) > cap and self.stop_parent:
             await self.stop_parent(parent_record_id)
@@ -438,6 +501,11 @@ class SpawnService:
         if state is SpawnState.QUEUED:
             moved = await agent_spawns.move(spawn_id, SpawnState.CANCELLED, expect=state,
                                             cancel_reason=reason.value, pool=self.pool)
+            if moved and admission.enabled():
+                running = self._running.get(spawn_id)
+                if running is not None and running is not asyncio.current_task() and not running.done():
+                    running.cancel()
+                    await asyncio.gather(running, return_exceptions=True)
             return moved or await agent_spawns.get(spawn_id, pool=self.pool)
         if state is SpawnState.ASKING:
             row = await agent_spawns.move(spawn_id, SpawnState.CANCELLING, expect=state,
@@ -519,6 +587,7 @@ class SpawnService:
         if not directory.resolve().is_relative_to((self.runtime_root / keeper_module.RUNS_DIR).resolve()):
             return False
         handle = None
+        admitted = False
         try:
             manifest = keeper_module.read_json(directory / keeper_module.MANIFEST) or {}
             if (manifest.get("role") != "explorer" or manifest.get("record_id") != row["child_record_id"]
@@ -545,6 +614,10 @@ class SpawnService:
             recorder = await ClaudeRunRecorder.resume(row["child_record_id"], agent_id=manifest["run_id"],
                 task_id=row["task_id"], command=handle.command, cwd=row["inputs"]["work_dir"],
                 step_id=row["step_id"], launch=launch, max_budget_usd=row["budget_usd"])
+            if admission.enabled():
+                _, lane = await admission.parent_for(row["parent_record_id"])
+                await admission.register(launch.profile.provider.id, lane, owner=manifest["run_id"])
+                admitted = True
         except Exception:
             if handle is not None:
                 await handle.end()
@@ -552,11 +625,11 @@ class SpawnService:
             logger.warning("cannot adopt explorer %s", row["id"], exc_info=True)
             return False
         self._handles[row["id"]] = handle
-        task = asyncio.create_task(self._collect_kept(row, handle, recorder, launch, manifest))
+        task = asyncio.create_task(self._collect_kept(row, handle, recorder, launch, manifest, admitted=admitted))
         self._running[row["id"]] = task
         return True
 
-    async def _collect_kept(self, row, handle, recorder, launch, manifest):
+    async def _collect_kept(self, row, handle, recorder, launch, manifest, *, admitted=False):
         from datetime import datetime, timezone
         try:
             record = await self.pool.fetchrow("SELECT created_at FROM llm_records WHERE id=$1", row["child_record_id"])
@@ -580,6 +653,11 @@ class SpawnService:
             await self.cancel(row["id"], reason=CancelReason.SERVER)
             raise
         finally:
+            if admitted:
+                try:
+                    await admission.release(manifest["run_id"])
+                except Exception:
+                    logger.exception("Could not release adopted explorer %s account slot", row["id"])
             self._children.pop(row["id"], None)
             try:
                 from .kept_run import KeptRunState
