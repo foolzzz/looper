@@ -8,6 +8,8 @@ import asyncio
 import base64
 import json
 import os
+import subprocess
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -67,6 +69,44 @@ def test_thread_reply_preserves_message_target_profile_and_idempotency_key() -> 
     assert command[command.index("--idempotency-key") + 1] == "synthetic-thread-reply"
     assert command.count("--reply-in-thread") == 1
     assert "--reply-in-thread" not in reply_command("om_syntheticgroupreply", text="received")
+
+
+@pytest.mark.parametrize("key", ["x", "x" * 50, "x" * 51, "晨报" * 60])
+def test_keys_are_stable_across_processes_and_short_keys_stay_unchanged(key: str) -> None:
+    command = send_command(user_id=OPEN_ID, text="brief", idempotency_key=key)
+    mapped = command[command.index("--idempotency-key") + 1]
+    assert 0 < len(mapped) <= 50
+    if len(key) <= 50:
+        assert mapped == key
+    reply = reply_command("om_synthetic", text="brief", idempotency_key=key)
+    assert reply[reply.index("--idempotency-key") + 1] == mapped
+    script = "from looper.agents.channels.lark_cli import _key; import sys; print(_key(sys.argv[1])[-1])"
+    for seed in ("1", "2"):
+        assert subprocess.check_output([sys.executable, "-c", script, key], text=True,
+                                       env={**os.environ, "PYTHONHASHSEED": seed}).strip() == mapped
+
+
+@pytest.mark.parametrize("reply_to", [None, "om_synthetic"])
+def test_local_validation_is_a_rejected_post(tmp_path: Path, lark_cli_stand_in: Path, reply_to) -> None:
+    from looper.agents.channels.base import PostOutcome
+    from looper.agents.task_notice import NotifyTarget, TargetKind
+
+    receipt = asyncio.run(_adapter(tmp_path).post(
+        NotifyTarget(TargetKind.USER, OPEN_ID), "brief", reply_to=reply_to, idempotency_key=""))
+    assert receipt.result is PostOutcome.REJECTED
+    assert _calls(lark_cli_stand_in) == []
+
+
+@pytest.mark.parametrize("method, kwargs", [("send", {"text": "brief"}),
+                                          ("send", {"user_id": OPEN_ID}),
+                                          ("reply", {"message_id": "om_synthetic"})])
+def test_cli_argument_validation_is_typed_not_sent(lark_cli_stand_in, method, kwargs) -> None:
+    from looper.agents.channels.lark_transport import CliTransport
+
+    with pytest.raises(LarkCliError) as failure:
+        asyncio.run(getattr(CliTransport(), method)(**kwargs))
+    assert failure.value.not_sent and failure.value.refused
+    assert _calls(lark_cli_stand_in) == []
 
 
 @pytest.mark.parametrize("raw", ["work; rm -rf /", "-x", " " * 3 + "a b"])
