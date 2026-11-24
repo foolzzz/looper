@@ -430,11 +430,14 @@ def running_server(*, database_url: str, runtime_root: Path, bin_dir: Path, log_
     manager_dir = runtime_root / "manager"
     manager_dir.mkdir(parents=True, exist_ok=True)
     ops = ops_config.OpsConfig(runtime_root=runtime_root, path=runtime_root / ops_config.FILE,
-                               database_url=database_url, operator_notes_root=str(notes_root) if notes_root else "",
+                               database_url=database_url, port=port, operator_notes_root=str(notes_root) if notes_root else "",
                                projects_root=str(projects_root) if projects_root is not None else "",
                                pi_runtime=pi_runtime, dsh_runtime=dsh_runtime,
                                keeper_mode=ops_config.KeeperMode(keeper_mode))
     ops_config.write_private(ops.path, ops_config.render(ops))
+    stored_port = ops_config.read_file(ops.path, required=True)["port"]
+    if stored_port != port or stored_port == RESERVED_PORT:
+        raise EvalError("eval ops file must name its isolated server port")
     # None of the operator's ops variables: the file names the eval's database.
     server_env = {**{k: v for k, v in os.environ.items() if k not in ops_config.VARIABLES},
                   "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}",
@@ -449,6 +452,8 @@ def running_server(*, database_url: str, runtime_root: Path, bin_dir: Path, log_
         cwd=str(runtime_root), env=server_env, stdout=log, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
     )
     api = Api(f"http://127.0.0.1:{port}")
+    if urllib.parse.urlsplit(api.base_url).port == RESERVED_PORT:
+        raise EvalError("eval clients require an isolated server")
     try:
         deadline = time.monotonic() + startup_timeout
         while True:

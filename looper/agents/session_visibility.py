@@ -5,8 +5,14 @@ sections, contracts and tools do not inherit permission. Main (including every
 turn while routing is off) keeps its existing assembly and authorization.
 """
 
-from dataclasses import dataclass
+from collections.abc import Mapping
+from dataclasses import dataclass, replace
 from enum import Enum
+from types import MappingProxyType
+
+from . import session_tools_settings
+from .ops.session_tools import (ChatTaskSummary, ChatTaskDetail, ChatWriteOutcome, ChatControlOutcome,
+                                ChatInstructOutcome)
 
 
 class Input(str, Enum):
@@ -47,6 +53,42 @@ PUBLIC_PROMPT = (
 )
 
 
+class IdKind(str, Enum):
+    TASK = "task"
+    SCHEDULE = "schedule"
+
+
+class WriteGate(str, Enum):
+    RUN = "run"
+    APPROVAL = "approval"
+
+
+@dataclass(frozen=True)
+class SessionToolRule:
+    ids: tuple[IdKind, ...]
+    view: tuple[type, ...]
+    operator: WriteGate | None
+    other: WriteGate | None
+
+
+SESSION_TOOL_RULES: Mapping[str, SessionToolRule] = MappingProxyType({
+    "looper_chat_tasks": SessionToolRule((IdKind.TASK,), (ChatTaskSummary, ChatTaskDetail), None, None),
+    "looper_chat_task_create": SessionToolRule((), (ChatWriteOutcome,), WriteGate.RUN, WriteGate.APPROVAL),
+    "looper_chat_task_control": SessionToolRule((IdKind.TASK,), (ChatControlOutcome,), WriteGate.RUN, WriteGate.APPROVAL),
+    "looper_chat_task_instruct": SessionToolRule((IdKind.TASK,), (ChatInstructOutcome,), WriteGate.RUN, WriteGate.APPROVAL),
+})
+NON_MAIN_WITH_TOOLS = replace(NON_MAIN_ALLOWLIST, tools=frozenset(SESSION_TOOL_RULES))
+PUBLIC_PROMPT_TOOLS = (
+    "You are Looper's chat assistant for this conversation. Use only this chat and its chat task tools.\n"
+    "Read only tasks belonging to this chat; private requirements, configuration and progress are unavailable.\n"
+    "The operator may create tasks in existing projects, start, stop, restart and send instructions here.\n"
+    "Other senders cannot write yet; cancellation and starting over require the operator's own chat.\n"
+    "Never ask this chat to confirm a refused action or claim it ran. You have no shell or file tools."
+)
+
+
 def for_session(key: str) -> SessionAllowlist | None:
     """An already routed turn stays restricted even if routing is switched off."""
-    return None if key == "main" else NON_MAIN_ALLOWLIST
+    if key == "main":
+        return None
+    return NON_MAIN_WITH_TOOLS if session_tools_settings.enabled() else NON_MAIN_ALLOWLIST

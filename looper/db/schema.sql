@@ -301,6 +301,7 @@ CREATE TABLE IF NOT EXISTS tasks (
     REFERENCES managers(id) ON DELETE RESTRICT,
     template JSONB,
     workflow JSONB,
+    origin_session TEXT CONSTRAINT tasks_origin_session_check CHECK (origin_session IS NULL OR origin_session ~ '^(group|dm):channel-[a-z_]+(-[1-9][0-9]*)?:.+$'),
     origin_thread TEXT,
     origin_reply_route JSONB CHECK (jsonb_typeof(origin_reply_route) = 'object'),
     schedule_id TEXT,
@@ -831,6 +832,7 @@ CREATE TABLE IF NOT EXISTS manager_library_installs (
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     PRIMARY KEY (manager_id, item_id)
 );
+CREATE INDEX IF NOT EXISTS idx_tasks_origin_session ON tasks (origin_session,created_at DESC) WHERE origin_session IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_tasks_manager ON tasks (manager_id, created_at DESC);
 
 -- The Manager a chat thread belongs to, for good; a thread without a row (from before, Lark's and Telegram's) is

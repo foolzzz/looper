@@ -830,8 +830,9 @@ async def _run_agent_system_watched(
                 await scheduler_settings.load()
                 await waits.load()
                 await chat_settings.load()
-                from . import lanes_settings
+                from . import lanes_settings, session_tools_settings
                 await lanes_settings.load()
+                await session_tools_settings.load()
                 await admission.initialize()
                 await persona.load()
                 from .channels import down_alert_settings

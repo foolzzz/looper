@@ -216,6 +216,7 @@ async def create_task(
     manager_id: str = "manager",
     template: Mapping[str, Any] | None = None,
     workflow: Mapping[str, Any] | None = None,
+    origin_session: str | None = None,
     origin_thread: str | None = None,
     origin_reply_route: Mapping[str, str] | None = None,
     client_id: str | None = None,
@@ -239,14 +240,14 @@ async def create_task(
     now = datetime.now(timezone.utc)
     config_json = _config_json(config)
     await pool.execute(
-        """
+        f"""
         INSERT INTO tasks (id, requirement, goal_id, work_dir, project_id,
                            config, status, correlation_id, origin_channel_id, chat_id, original_user_text, title,
                            created_at, updated_at, schedule_id, budget_usd, chat_kind, chat_mention,
                            workspace_dir, workspace_mode, workspace_base, manager_id, template, origin_thread,
-                           client_id, origin_reply_route, workflow, chat_group)
+                           client_id, origin_reply_route, workflow, chat_group{", origin_session" if origin_session is not None else ""})
         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $13, $14, $15, $16, $17, $18, $19, $20,
-                $21, $22::jsonb, $23, $24, $25::jsonb, $26::jsonb, $27)
+                $21, $22::jsonb, $23, $24, $25::jsonb, $26::jsonb, $27{", $28" if origin_session is not None else ""})
         ON CONFLICT (id) DO NOTHING
         """,
         task_id, requirement, goal_id, work_dir, project_id,
@@ -256,6 +257,7 @@ async def create_task(
         origin_thread or None, client_id,
         json.dumps(dict(origin_reply_route)) if origin_reply_route is not None else None,
         json.dumps(dict(workflow)) if workflow is not None else None, chat_group,
+        *([origin_session] if origin_session is not None else []),
     )
     return {"task_id": task_id, "created_at": now.isoformat()}
 

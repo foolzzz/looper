@@ -78,6 +78,7 @@ def test_new_migration_file_upgrades_and_initializes_the_same_schema(tmp_path, m
 
 
 @pytest.mark.parametrize("migration_name,rollback", [
+    ("task_origin_session", "ALTER TABLE tasks DROP COLUMN origin_session CASCADE"),
     ("skill_proposal_feedback", "ALTER TABLE skill_proposal_events DROP COLUMN told_at"),
     ("mcp_tool_levels", "DROP TABLE mcp_tool_levels CASCADE"),
     ("failure_typing", "ALTER TABLE llm_records DROP COLUMN failure_class, DROP COLUMN failure_cause"),

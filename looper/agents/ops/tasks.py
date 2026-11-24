@@ -371,10 +371,12 @@ async def _template_roles(template: TaskTemplate, project: Mapping[str, Any], fa
         raise OpError(ErrorCode.CONFLICT, str(exc)) from None
 
 
-async def _create(call: Call) -> dict[str, Any]:
+async def _create(call: Call, *, origin_session: str | None = None) -> dict[str, Any]:
     arguments, turn = call.arguments, call.turn
     template, values = await _template_of(call)
     placement = await effective_placement(template, arguments)
+    if origin_session is not None and placement.project is None:
+        raise OpError(ErrorCode.NOT_FOUND, "no such task in this chat")
     _placement_in_scope(call, placement)
     name, project, work_dir = placement.name, placement.project, placement.work_dir
     profiles = await _merged_profiles(template, arguments)
@@ -395,6 +397,8 @@ async def _create(call: Call) -> dict[str, Any]:
         "original_user_text": (str(envelope.payload.get("text") or "") or None) if envelope is not None else None,
         "manager_id": call.manager_id, "client_id": turn.client_id,
     }
+    if origin_session is not None:
+        row["origin_session"] = origin_session
     if envelope is not None and turn.chat and (turn.channel == "telegram" or is_lark(turn.channel)):
         route = {"chat_id": turn.chat}
         context = envelope.payload.get("channel_context") or {}
@@ -422,7 +426,7 @@ async def _create(call: Call) -> dict[str, Any]:
             template_name=template.name if template is not None else None,
             lock_manager=True, named=placement.named, visible_to=call.scope.tasks.manager_id,
             task_filter=call.scope.tasks,
-            show_configuration=not turn.group, template_display=used)
+            show_configuration=not turn.group and origin_session is None, template_display=used)
     except ProjectNameTaken:
         raise OpError(ErrorCode.CONFLICT, f"a project named {name!r} was created meanwhile: call again to use "
                                           "it") from None
@@ -430,7 +434,7 @@ async def _create(call: Call) -> dict[str, Any]:
         raise _request_error(exc) from None
     task_id, shown = result["task_id"], result["name"]
     project, created = result["project"], result["project_created"]
-    if turn.group:
+    if turn.group or origin_session is not None:
         block = GROUP_START_QUESTION
         told = ("In this group chat Looper adds only the question whether to start it now after your reply, not the "
                 "task's configuration; do not repeat the question or list the configuration.")
@@ -508,7 +512,7 @@ async def _control(call: Call, *, by: CancelBy = CancelBy.MANAGER) -> dict[str, 
         # TaskRouter may not have consumed the start yet; the successful request is enough to stop asking.
         if block := call.turn.created_task_blocks.pop(task_id, None):
             index = call.turn.blocks.index(block)
-            if call.turn.group:  # only the question was shown
+            if call.turn.group or call.confirmation.get("session_key"):  # only the question was shown
                 del call.turn.blocks[index]
             else:
                 configuration = block.partition("\n")[2].removesuffix(f"\n\n{START_QUESTION}")
@@ -533,7 +537,7 @@ async def _control(call: Call, *, by: CancelBy = CancelBy.MANAGER) -> dict[str, 
 # --- looper_task_instruct ---
 
 
-async def _instruct(call: Call) -> dict[str, Any]:
+async def _instruct(call: Call, *, from_operator: bool | None = None) -> dict[str, Any]:
     task_id = call.arguments["task_id"]
     task = await _task(task_id)
     if task["status"] == db_tasks.READY:
@@ -552,8 +556,9 @@ async def _instruct(call: Call) -> dict[str, Any]:
 
     from .service import operator_call
 
+    operator = await operator_call(call.turn) if from_operator is None else from_operator
     supplement = await add_task_supplement(task_id, call.arguments["text"], via=_via(call.turn), wake=wake,
-                                           from_operator=await operator_call(call.turn))
+                                           from_operator=operator)
     return {"task_id": task_id, "supplement_id": supplement,
             "note": "the task's Planner gets it in its next turn and decides whether to change the plan; every later "
                     "Worker and Reviewer sees it too"}
