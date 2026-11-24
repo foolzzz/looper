@@ -328,6 +328,36 @@ describe("花费观察", () => {
     expect(JSON.stringify(updates.at(-1)?.body)).not.toContain("unanswered_pushes");
   });
 
+  it.each([1e-7, 1.2345678901234566e-7, 1e21, Number.MIN_VALUE, Number.MAX_VALUE])(
+    "round trips cap %s as decimal text and keeps unedited global and role fields out of patches", async (cap) => {
+      result = { ...result, daily_usd: cap, roles: { processor: { daily_equivalent_usd: cap } } };
+      updateMode = "ok";
+      await render();
+      const decimal = (container.querySelector("#cost-guard-daily-usd") as HTMLInputElement).value;
+      expect(decimal).toMatch(/^\d+(?:\.\d+)?$/);
+      expect(Number(decimal)).toBe(cap);
+      expect((container.querySelector("#cost-guard-processor-daily-equivalent-usd") as HTMLInputElement).value).toBe(decimal);
+      await setMode("observe");
+      await click("保存");
+      expect(updates.map((call) => call.body)).toEqual([{ mode: "observe" }]);
+      await setAmount("cost-guard-daily-usd", "0");
+      await click("保存");
+      await setAmount("cost-guard-daily-usd", decimal);
+      await click("保存");
+      expect(updates.map((call) => call.body)).toEqual([{ mode: "observe" }, { daily_usd: 0 }, { daily_usd: cap }]);
+      expect(result.daily_usd).toBe(cap);
+      expect(result.roles).toEqual({ processor: { daily_equivalent_usd: cap } });
+    },
+  );
+
+  it("refuses a nonzero decimal that would silently underflow to zero", async () => {
+    await render();
+    await setAmount("cost-guard-processor-daily-usd", `0.${"0".repeat(324)}1`);
+    await click("保存");
+    expect(container.textContent).toContain("请填写非负的有限金额");
+    expect(updates).toEqual([]);
+  });
+
   it("saves_only_after_explicit_confirmation_and_reads_back", async () => {
     holds = [{ id: 3, scope: "task", scope_ref: "demo", currency: "provider_priced_usd", limit_usd: 1,
       spent_usd: 1, state: "pending", created_at: "2026-11-20T08:00:00Z" }];

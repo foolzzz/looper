@@ -50,7 +50,7 @@ function parseAmount(raw: string): number | null | undefined {
   if (text === "") return null;
   if (!/^(?:\d+\.?\d*|\.\d+)$/.test(text)) return undefined;
   const value = Number(text);
-  if (!Number.isFinite(value) || value < 0) return undefined;
+  if (!Number.isFinite(value) || value < 0 || (value === 0 && /[1-9]/.test(text))) return undefined;
   return value;
 }
 
@@ -61,7 +61,18 @@ type Draft = {
   roles: Record<CostGuardRole, { daily_usd: string; daily_equivalent_usd: string }>;
 };
 
-const textOf = (value: number | null | undefined) => (value == null ? "" : String(value));
+/** Expand the shortest round-trip representation without rounding small or large caps. */
+function textOf(value: number | null | undefined): string {
+  if (value == null) return "";
+  const [mantissa, exponent] = String(value).split("e");
+  if (!exponent) return mantissa;
+  const [whole, fraction = ""] = mantissa.split(".");
+  const digits = whole + fraction;
+  const point = whole.length + Number(exponent);
+  if (point <= 0) return `0.${"0".repeat(-point)}${digits}`;
+  if (point >= digits.length) return digits + "0".repeat(point - digits.length);
+  return `${digits.slice(0, point)}.${digits.slice(point)}`;
+}
 
 function draftFrom(view: CostGuardView): Draft {
   return {
@@ -81,6 +92,7 @@ function changedPatch(view: CostGuardView, draft: Draft): { valid: boolean; dirt
   let dirty = false;
   if (draft.mode !== view.mode) { dirty = true; patch.mode = draft.mode; }
   for (const cap of CAPS) {
+    if (draft[cap] === textOf(view[cap])) continue;
     const value = parseAmount(draft[cap]);
     if (value === undefined) { valid = false; dirty = true; }
     else if (value !== view[cap]) { dirty = true; patch[cap] = value; }
@@ -90,6 +102,7 @@ function changedPatch(view: CostGuardView, draft: Draft): { valid: boolean; dirt
     const saved = view.roles[role];
     const rolePatch: Partial<CostGuardView["roles"][CostGuardRole]> = {};
     for (const cap of CAPS) {
+      if (draft.roles[role][cap] === textOf(saved?.[cap])) continue;
       const value = parseAmount(draft.roles[role][cap]);
       if (value === undefined) { valid = false; dirty = true; }
       else if (value !== (saved?.[cap] ?? null)) { dirty = true; rolePatch[cap] = value; }
