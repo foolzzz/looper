@@ -102,6 +102,29 @@ def test_unknown_auth_envelope_is_protocol_failure(monkeypatch, raw):
     asyncio.run(check())
 
 
+@pytest.mark.parametrize(("code", "kind", "retry_after"), [
+    (429, CollectorErrorKind.RATE_LIMIT, 1.5),
+    (99991400, CollectorErrorKind.RATE_LIMIT, float("inf")),
+    (230002, CollectorErrorKind.NOT_MEMBER, None),
+    (99991672, CollectorErrorKind.PERMISSION, None),
+    ("429", CollectorErrorKind.PROTOCOL, None),
+])
+def test_raw_api_error_envelopes_keep_typed_failures_and_finite_retry_hint(monkeypatch, code, kind, retry_after):
+    async def answer(*args, **kwargs):
+        return {"code": code, "retry_after": retry_after}
+
+    monkeypatch.setattr(lark_cli, "run_json", answer)
+
+    async def check():
+        with pytest.raises(CollectorError) as failure:
+            await LarkUserCollector().list_messages("synthetic", "chat", "oc_synthetic", sup.NOW,
+                                                   sup.NOW+timedelta(seconds=1), "asc", "")
+        assert failure.value.kind is kind
+        assert failure.value.retry_after == (1.5 if retry_after == 1.5 else None)
+
+    asyncio.run(check())
+
+
 def test_cancelled_call_kills_and_reaps_its_local_cli_process(tmp_path):
     import os
     import sys

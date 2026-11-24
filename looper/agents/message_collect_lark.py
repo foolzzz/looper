@@ -65,11 +65,15 @@ async def _read(argv: list[str]) -> dict[str, Any]:
         # Never retain lark-cli's error text (it can contain credentials/content).
         raise CollectorError(kind, code=exc.code) from None
     code = answer.get("code", 0)
-    if type(code) is not int or code != 0:
-        raise CollectorError(
-            CollectorErrorKind.NOT_MEMBER if code == 230002 else CollectorErrorKind.PERMISSION,
-            code=code if type(code) is int else None,
-        )
+    if type(code) is not int:
+        raise CollectorError(CollectorErrorKind.PROTOCOL)
+    if code != 0:
+        kind = (CollectorErrorKind.RATE_LIMIT if code in (429, 99991400, 99991429) else
+                CollectorErrorKind.NOT_MEMBER if code == 230002 else CollectorErrorKind.PERMISSION)
+        retry = answer.get("retry_after")
+        if type(retry) not in (int, float) or not math.isfinite(retry) or retry < 0:
+            retry = None
+        raise CollectorError(kind, code=code, retry_after=retry)
     return answer
 
 

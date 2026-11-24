@@ -266,6 +266,30 @@ def test_changed_target_is_dashboard_only_and_channel_alias_is_normalized(monkey
     run_db(check, monkeypatch, timeout=30)
 
 
+def test_disabling_one_sources_alerts_prevents_its_pending_send_when_another_source_is_enabled(monkeypatch):
+    async def check(pool):
+        await seed(pool)
+        service = alerts.SourceAlerts(lambda *args, **kwargs: pytest.fail("disabled source must never send"))
+        await pool.execute("UPDATE event_sources SET auth_state='missing' WHERE id=$1", stream.SOURCE)
+        await service.evaluate(now=NOW)
+        await pool.execute("INSERT INTO event_sources(id,kind,name) VALUES('other-synthetic','lark_user','Synthetic')")
+        await pool.execute("INSERT INTO source_collection_settings(source_id,alerts_enabled) VALUES('other-synthetic',true)")
+        original = store.pending_notices
+
+        async def disable_after_listing(conn, **kwargs):
+            rows = await original(conn, **kwargs)
+            # Simulate an operator disabling this source after the send worker read its pending list.
+            await conn.execute("UPDATE source_collection_settings SET alerts_enabled=false WHERE source_id=$1", stream.SOURCE)
+            return rows
+
+        monkeypatch.setattr(store, "pending_notices", disable_after_listing)
+        await service.flush(now=NOW)
+        row = await pool.fetchrow("SELECT open_state,resolved_at FROM source_stream_alerts WHERE source_id=$1", stream.SOURCE)
+        assert row["open_state"] == "dashboard" and row["resolved_at"] is None
+
+    run_db(check, monkeypatch, timeout=30)
+
+
 def test_failed_delivery_decision_never_calls_platform_and_can_retry(monkeypatch):
     async def check(pool):
         await seed(pool)

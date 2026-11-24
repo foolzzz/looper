@@ -46,6 +46,20 @@ def test_incompatible_column_or_check_definition_is_rejected():
     asyncio.run(check())
 
 
+def test_missing_default_is_repaired_but_changed_default_is_rejected():
+    async def check():
+        async with fresh_connection() as conn:
+            await connection.ensure_schema(conn)
+            await conn.execute("ALTER TABLE source_collection_settings ALTER COLUMN generation DROP DEFAULT")
+            assert await migration.pending(conn)
+            await connection.ensure_schema(conn)
+            assert not await migration.pending(conn)
+            await conn.execute("ALTER TABLE source_collection_settings ALTER COLUMN generation SET DEFAULT 7")
+            with pytest.raises(RuntimeError, match="incompatible.*generation.*default"):
+                await migration.pending(conn)
+    asyncio.run(check())
+
+
 def test_upgrade_matches_fresh_and_online_validation_resumes_without_narrowing_sources():
     from looper.db.migrations import _widen_check
     from tests.bridge_schema_support import structure

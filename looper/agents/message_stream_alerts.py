@@ -158,8 +158,9 @@ class SourceAlerts:
         parsed = parse_channel_id(channel)
         if parsed is None or not chat or parsed.channel_type not in {"lark", "lark_bot", "telegram"}:
             return False
-        source = await conn.fetchrow("SELECT alert_channel, alert_chat FROM event_sources WHERE id = $1", row["source_id"])
-        if source is None or not source["alert_channel"] or (
+        source = await conn.fetchrow("SELECT e.alert_channel,e.alert_chat,s.alerts_enabled FROM event_sources e "
+            "JOIN source_collection_settings s ON s.source_id=e.id WHERE e.id=$1", row["source_id"])
+        if source is None or not source["alerts_enabled"] or not source["alert_channel"] or (
                 _channel_id(source["alert_channel"]), source["alert_chat"]) != (channel, chat):
             return False
         operator = await operator_identity.operator_sender_id(channel)

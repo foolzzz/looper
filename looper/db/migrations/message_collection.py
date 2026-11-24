@@ -132,8 +132,10 @@ async def _missing(conn):
             repairs.append(_create_table(table, columns, constraints))
             continue
         actual = {r["attname"]: r for r in await conn.fetch(
-            "SELECT a.attname, format_type(a.atttypid,a.atttypmod) AS type, a.attnotnull "
-            "FROM pg_attribute a WHERE a.attrelid=to_regclass($1) AND a.attnum>0 AND NOT a.attisdropped", table)}
+            "SELECT a.attname, format_type(a.atttypid,a.atttypmod) AS type, a.attnotnull, "
+            "pg_get_expr(d.adbin,d.adrelid) AS default_expr FROM pg_attribute a "
+            "LEFT JOIN pg_attrdef d ON d.adrelid=a.attrelid AND d.adnum=a.attnum "
+            "WHERE a.attrelid=to_regclass($1) AND a.attnum>0 AND NOT a.attisdropped", table)}
         for column, definition in columns.items():
             if column not in actual:
                 repairs.append(f"ALTER TABLE {table} ADD COLUMN {column} {definition};")
@@ -141,6 +143,18 @@ async def _missing(conn):
             expected_type = types[definition.split()[0]]
             if actual[column]["type"] != expected_type or actual[column]["attnotnull"] != ("NOT NULL" in definition):
                 raise RuntimeError(f"incompatible {table}.{column} definition")
+            default = actual[column]["default_expr"]
+            if definition.startswith("BIGSERIAL"):
+                if not default or not default.startswith("nextval(") or not await conn.fetchval(
+                        "SELECT pg_get_serial_sequence($1,$2)", table, column):
+                    raise RuntimeError(f"incompatible {table}.{column} sequence default")
+            else:
+                expected_default = definition.split(" DEFAULT ", 1)[1] if " DEFAULT " in definition else None
+                if expected_default is not None and default is None:
+                    repairs.append(f"ALTER TABLE {table} ALTER COLUMN {column} SET DEFAULT {expected_default};")
+                elif ((default is None) != (expected_default is None) or default is not None and
+                      _normal(default.replace("::jsonb", "")) != _normal(expected_default)):
+                    raise RuntimeError(f"incompatible {table}.{column} default")
         found = {r["conname"]: r for r in await conn.fetch(
             "SELECT conname,pg_get_constraintdef(oid) AS definition,convalidated FROM pg_constraint WHERE conrelid=to_regclass($1)", table)}
         for suffix, definition in constraints.items():
