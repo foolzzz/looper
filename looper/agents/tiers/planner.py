@@ -143,6 +143,7 @@ from .. import scheduler_settings
 from ..schedule_session import SessionBound, session_bound
 from ..llmrec import LlmrecRoute, control as llmrec
 from ..scheduler import continuing_run_preface
+from .. import memory_closeout
 from .. import vault
 from ..vault import VaultConfig
 from ..ops.vault import planner_guide
@@ -4612,6 +4613,16 @@ class PlannerAgent:
         Raises ``PlannerTurnError`` when Claude fails or times out, or when the
         repaired reply is still invalid.
         """
+        self._turn_read_only = kind is TurnKind.MEMORY
+        try:
+            return await self._ask_while_marked(kind, message, parse, run)
+        finally:
+            self._turn_read_only = False
+
+    async def _ask_while_marked(
+        self, kind: TurnKind, message: str, parse: Callable[[str], T],
+        run: Callable[[str], Awaitable[str]] | None,
+    ) -> T:
         self._turn_kind = kind
         await self._read_run_deadline()
         run = run or self._turn
@@ -5046,7 +5057,10 @@ class PlannerAgent:
                     self._pending_switch = self._pending_handoff = None
 
             if self._ops is not None and self._token is not None:
-                self._ops.begin_turn(self._token)  # its tools may change things in this turn only
+                if getattr(self, "_turn_read_only", False):
+                    self._ops.begin_turn(self._token, read_only=True)
+                else:
+                    self._ops.begin_turn(self._token)  # its tools may change things in this turn only
             try:
                 from ..runtimes.runner.session import RunnerSession
                 from ..runtimes.runner.turn import TurnLimits
@@ -5857,6 +5871,8 @@ class PlannerAgent:
         """
         if self._vault_closed:
             return
+        if await memory_closeout.applies(self, plan):  # memory-write-path RFC D11: [MEMORY] replaces [VAULT]
+            return await memory_closeout.run(self, plan, ended)
         try:
             if self._ops is None or self._token is None or not (await self._read_execution()).vault_on:
                 return
