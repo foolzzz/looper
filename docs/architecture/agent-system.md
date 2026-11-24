@@ -3500,8 +3500,14 @@ Local checks on macOS use `sandbox-exec -p
 Before execution, a fixed probe must prove both launch and network denial; missing
 or ineffective facilities record `error: sandbox_unavailable`, with no unsandboxed
 fallback. DNS, loopback and pathname Unix sockets are denied; file IO and pipes
-remain available. Linux uses `unshare -rn --` with the same fail-closed preflight
-and a distinct network-namespace check; this path has not been verified on Linux.
+remain available. Linux prefers `unshare -rn --`. When the kernel refuses that
+unprivileged user namespace, passwordless `sudo -n unshare -n` opens the network
+namespace and `setpriv` continues as the same host user with an empty capability
+set. Both launchers must pass the same fail-closed preflight: a new network
+namespace that cannot connect, containing only `lo` and down, unaddressed,
+unlinked tunnel fallbacks. An interface that is up, addressed, or linked to
+another device is not enforcement. Each host still has to pass that preflight;
+there is no unsandboxed fallback.
 Only a check requesting `network: true` in a `network` project bypasses that launcher.
 Commands receive an OS-only subset of `child_env.inherited()`, without runtime
 credentials, proxies or SSH agents. This is not a file sandbox: commands retain the
