@@ -144,6 +144,17 @@ def fake_runner():
             active[params["session_id"]] = params["trace_id"]
             result = {"session_id": params["session_id"], "trace_id": params["trace_id"], "accepted": True}
         else:
+            if method == "session/cancel" and Path("hold-cancel").exists():
+                held_id = request["id"]
+                held = {key: params[key] for key in ("session_id", "trace_id") if key in params}
+
+                def release_cancel(rpc_id=held_id, body=held):
+                    while Path("hold-cancel").exists():
+                        time.sleep(0.01)
+                    emit({"jsonrpc": "2.0", "id": rpc_id, "result": body})
+
+                threading.Thread(target=release_cancel, daemon=True).start()
+                continue
             if method == "session/cancel" and pending_prompt is not None:
                 emit({"jsonrpc": "2.0", "id": pending_prompt["id"],
                     "error": {"code": -32603, "message": "session already closed",
@@ -196,7 +207,8 @@ from looper.agents.log_redaction import add_secret
 from looper.agents.run_usage import Usage
 from looper.agents.runtimes.runner import protocol as p
 from looper.agents.runtimes.runner import supervisor as s
-from looper.agents.runtimes.runner.bridge import ConnectionLost, RpcFailure, RunnerBridge
+from looper.agents.runtimes.runner.bridge import (
+    MAX_ABANDONED_CONTROLS, ConnectionLost, RpcFailure, RunnerBridge)
 from looper.agents.runtimes.runner.turn import RunnerTurn
 
 NEW = next(c["message"]["params"] for c in json.loads(
@@ -1533,6 +1545,150 @@ def test_health_timeout_and_process_exit_count_one_failure(runners, monkeypatch)
             assert len(owner._kinds["fake"].failures) == 1 and turn.finishes == 1 and ends == [1]
             assert owner._kinds["fake"].restart is not None
     run(exercise())
+
+
+def test_host_stall_does_not_reclaim_a_runner_that_answered(runners, monkeypatch, caplog):
+    """A child that answers inside the deadline stays up when the host then pauses."""
+    monkeypatch.setattr(s, "HEALTH_INTERVAL_SECONDS", 0.05)
+    monkeypatch.setattr(s, "HEALTH_TIMEOUT_SECONDS", 0.2)
+    original = RunnerBridge._write
+    stalled = {"done": False}
+
+    async def stalled_write(self, message, entry=None, *, before_write=None):
+        await original(self, message, entry, before_write=before_write)
+        # Freeze after the frame is flushed. The peer answers during the pause;
+        # the loop cannot read that reply until the pause ends, past the deadline.
+        if not stalled["done"] and getattr(message, "method", None) == "runner/health":
+            stalled["done"] = True
+            time.sleep(0.35)
+
+    monkeypatch.setattr(RunnerBridge, "_write", stalled_write)
+
+    async def exercise():
+        async with runners(tool=True, settle_file=True) as (owner, processes):
+            lease = await owner.acquire("fake")
+            sid = await lease.open_session(NEW)
+            gate, events = asyncio.Event(), []
+            turn = CountingTurn(gate)
+            await lease.bridge.begin_turn(sid, "trace", events.append, turn, text="write")
+            await turn.entered.wait()
+            directory = lease._generation.directory
+            try:
+                await until(lambda: stalled["done"] and _answered(directory) >= 1, timeout=3)
+                await asyncio.sleep(0.6)
+                # The probe task must stay alive after the pause, not exit on the deadline's cancel.
+                assert _health_count(directory) >= 2
+                assert lease.valid and not lease._generation.failed and lease.session_id == sid
+                assert processes[0].returncode is None and turn.writes == 1
+                assert not any("runner_health_failed" in record.getMessage() for record in caplog.records)
+                (directory / "settle-now").write_text("1")
+                gate.set()
+                assert (await lease.bridge.wait_settled(sid, "trace")).outcome == "completed"
+            finally:
+                # Shutdown waits for this tool call. Open the gate if the probe failed.
+                if not gate.is_set():
+                    gate.set()
+    run(exercise())
+
+
+def test_inbound_health_reply_blocks_reclaim(runners, monkeypatch, caplog):
+    monkeypatch.setattr(s, "HEALTH_INTERVAL_SECONDS", 0.05)
+    monkeypatch.setattr(s, "HEALTH_TIMEOUT_SECONDS", 0.2)
+
+    async def exercise():
+        async with runners() as (owner, processes):
+            lease = await owner.acquire("fake")
+            bridge = lease.bridge
+
+            async def buffered(*, timeout=None):
+                bridge._abandoned_controls["l-buffer"] = ("runner/health", {})
+                bridge._reader.reader.feed_data(
+                    b'{"jsonrpc":"2.0","id":"l-buffer","result":{"sessions":0')
+                raise TimeoutError()
+
+            bridge.health = buffered
+            await until(lambda: "reply_buffered" in caplog.text, timeout=3)
+            await asyncio.sleep(0.3)
+            assert lease.valid and not lease._generation.failed
+            assert processes[0].returncode is None
+            assert not any("runner_health_failed" in record.getMessage() for record in caplog.records)
+    run(exercise())
+
+
+def test_local_cancel_capacity_skips_health_without_reclaim(runners, monkeypatch, caplog):
+    assert MAX_ABANDONED_CONTROLS == 128
+    monkeypatch.setattr(s, "HEALTH_INTERVAL_SECONDS", 10)
+
+    class Clock:
+        def __init__(self):
+            self.now = 0.0
+            self.waiters = []
+
+        def monotonic(self):
+            return self.now
+
+        def advance(self, dt):
+            self.now += dt
+            due = [fut for deadline, fut in self.waiters if deadline <= self.now + 1e-9]
+            self.waiters = [(deadline, fut) for deadline, fut in self.waiters if deadline > self.now + 1e-9]
+            for fut in due:
+                if not fut.done():
+                    fut.set_result(None)
+
+    clock = Clock()
+    monkeypatch.setattr(s, "time", clock)
+
+    async def fake_sleep(seconds):
+        if seconds <= 0:
+            await asyncio.sleep(0)
+            return
+        fut = asyncio.get_running_loop().create_future()
+        clock.waiters.append((clock.now + float(seconds), fut))
+        await fut
+
+    monkeypatch.setattr(s, "_sleep", fake_sleep)
+
+    async def exercise():
+        async with runners(tool=True) as (owner, processes):
+            lease = await owner.acquire("fake")
+            await until(lambda: len(clock.waiters) >= 1, timeout=3)
+            sid = await lease.open_session(NEW)
+            gate = asyncio.Event()
+            gate.set()
+            turn = CountingTurn(gate)
+            await lease.bridge.begin_turn(sid, "trace", lambda event: None, turn, text="write")
+            await turn.entered.wait()
+            directory = lease._generation.directory
+            (directory / "hold-cancel").write_text("1")
+            tasks = [asyncio.create_task(lease.bridge.cancel_turn(sid, "trace"))
+                     for _ in range(MAX_ABANDONED_CONTROLS)]
+            await until(lambda: sum(item.method == "session/cancel"
+                                    for item in lease.bridge._pending.values()) >= 128, timeout=3)
+            sent = _health_count(directory)
+            clock.advance(10)
+            await until(lambda: "reason=local_capacity" in caplog.text, timeout=3)
+            assert _health_count(directory) == sent
+            assert lease.valid and not lease._generation.failed and processes[0].returncode is None
+            assert not any("runner_health_failed" in record.getMessage() for record in caplog.records)
+            (directory / "hold-cancel").unlink()
+            await until(lambda: not any(item.method == "session/cancel"
+                                        for item in lease.bridge._pending.values()), timeout=3)
+            clock.advance(10)
+            await until(lambda: _health_count(directory) > sent, timeout=3)
+            assert lease.valid and not lease._generation.failed
+            await asyncio.gather(*tasks)
+    run(exercise())
+
+
+def test_health_reclaim_is_named_for_operators():
+    text = Path("docs/architecture/rfcs/agent-sdk-runner-v0.zh-CN.md").read_text()
+    health = text.split("### 5.4 生命周期", 1)[1].split("### 5.5", 1)[0]
+    assert "runner_health_failed kind=<kind> runner_id=<id> reason=<timeout|rpc_error|protocol_error>" in health
+    assert "runner protocol-error: health" in health
+    assert "runner unavailable: five failures within ten minutes" in health
+    assert '[runtimes] pi = "cli"' in health and '[runtimes] dsh = "cli"' in health
+    assert "回滚到上一版本" in health
+    assert "reason=local_capacity" in health
 
 
 def test_no_health_monitor_without_published_generation(runners):

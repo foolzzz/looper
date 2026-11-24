@@ -28,6 +28,7 @@ MAX_FAILURES = 5
 SHUTDOWN_TIMEOUT = 5.0
 HEALTH_INTERVAL_SECONDS = 10.0
 HEALTH_TIMEOUT_SECONDS = 30.0
+_HEALTH_LAG_TICK_SECONDS = 0.05
 DIAGNOSTIC_BYTES = 8192
 STDERR_LINES_PER_SECOND = 10
 STDERR_DRAIN_TIMEOUT = 1.0
@@ -75,6 +76,16 @@ def _exit_signal(process: asyncio.subprocess.Process) -> asyncio.Event:
 
 async def _sleep(seconds: float) -> None:
     await asyncio.sleep(seconds)
+
+
+def _host_lag_limit(timeout: float) -> float:
+    """Lag below this is scheduling noise, not a paused host."""
+    return max(0.05, timeout * 0.25)
+
+
+def _drop_task_exception(task: asyncio.Task) -> None:
+    if not task.cancelled():
+        task.exception()
 
 
 async def _joined(task):
@@ -434,22 +445,17 @@ class RunnerSupervisor:
             if bridge is None or generation not in generation.state.members:
                 return
             deadline = time.monotonic() + HEALTH_TIMEOUT_SECONDS
-            reason = None
             try:
-                await bridge.health(timeout=HEALTH_TIMEOUT_SECONDS)
+                reason = await self._health_probe(generation, bridge)
             except asyncio.CancelledError:
                 return
-            except TimeoutError:
-                reason = "timeout"
-            except RpcFailure:
-                reason = "rpc_error"
-            except Exception:
-                reason = "protocol_error"
             if reason is None:
                 if (generation.stopping or generation.failed or self._stopped
                         or generation not in generation.state.members):
                     return
                 logger.debug("runner_health_ok kind=%s runner_id=%s", generation.kind, generation.directory.name)
+                continue
+            if reason == "skip":
                 continue
             # A protocol failure may already have settled the member through on_failure.
             # Still record this probe's reason; _failed stays idempotent.
@@ -457,6 +463,78 @@ class RunnerSupervisor:
                 return
             self._health_lost(generation, reason, deadline)
             return
+
+    async def _health_probe(self, generation: _Generation, bridge: RunnerBridge) -> str | None:
+        """None when the member answered, ``skip`` for a round to retry, else a loss reason."""
+        reason, lag = await self._one_health(bridge)
+        if reason == "local_capacity":
+            self._skip_health(generation, "local_capacity")
+            return "skip"
+        if reason == "timeout" and bridge.health_reply_buffered():
+            self._skip_health(generation, "reply_buffered")
+            return "skip"
+        if reason == "timeout" and lag > _host_lag_limit(HEALTH_TIMEOUT_SECONDS):
+            # The loop was not running for most of the deadline. One more probe
+            # before a live process is treated as silent.
+            reason, lag = await self._one_health(bridge)
+            if reason == "local_capacity":
+                self._skip_health(generation, "local_capacity")
+                return "skip"
+            if reason == "timeout" and bridge.health_reply_buffered():
+                self._skip_health(generation, "reply_buffered")
+                return "skip"
+            if reason == "timeout" and lag > _host_lag_limit(HEALTH_TIMEOUT_SECONDS):
+                await asyncio.sleep(0)
+                if bridge.health_reply_buffered():
+                    self._skip_health(generation, "reply_buffered")
+                    return "skip"
+        return reason
+
+    async def _one_health(self, bridge: RunnerBridge) -> tuple[str | None, float]:
+        timeout = HEALTH_TIMEOUT_SECONDS
+        tick = min(_HEALTH_LAG_TICK_SECONDS, timeout / 4)
+        lag = 0.0
+        # Captured before the task is scheduled: a pause inside the probe
+        # happens before the first sleep and must still count as host lag.
+        armed = time.monotonic()
+
+        async def ticks() -> None:
+            nonlocal lag
+            late = time.monotonic() - armed
+            if late > 0:
+                lag += late
+            while True:
+                mark = time.monotonic()
+                await asyncio.sleep(tick)
+                over = time.monotonic() - mark - tick
+                if over > 0:
+                    lag += over
+
+        sampler = asyncio.create_task(ticks())
+        reason = None
+        try:
+            await bridge.health(timeout=timeout)
+        except asyncio.CancelledError:
+            raise
+        except TimeoutError:
+            reason = "timeout"
+        except RpcFailure:
+            reason = "rpc_error"
+        except ProtocolError as error:
+            # Raised before the frame is written. A remote failure is RpcFailure.
+            reason = "local_capacity" if error.code == ErrorCode.CAPACITY else "protocol_error"
+        except Exception:
+            reason = "protocol_error"
+        finally:
+            # Do not await it. Recovery cancels this probe as soon as the
+            # connection fails, and that yield would drop the probe's reason.
+            sampler.cancel()
+            sampler.add_done_callback(_drop_task_exception)
+        return reason, lag
+
+    def _skip_health(self, generation: _Generation, why: str) -> None:
+        logger.warning("runner_health_skipped kind=%s runner_id=%s reason=%s",
+                       generation.kind, generation.directory.name, why)
 
     def _health_lost(self, generation: _Generation, reason: str, deadline: float) -> None:
         """Poison this member once. Recovery is not awaited from the probe task."""
