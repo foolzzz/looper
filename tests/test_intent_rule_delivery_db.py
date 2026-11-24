@@ -424,3 +424,62 @@ def test_morning_brief_posts_an_absolute_link_for_a_rule_creation_digest(monkeyp
         assert await pool.fetchval('SELECT status FROM morning_briefs') == 'sent'
         assert await pool.fetchval('SELECT count(*) FROM morning_brief_consumed') == 1
     run_db(check, monkeypatch)
+
+
+@pytest.mark.parametrize('deferred', [False, True])
+def test_one_auto_created_event_has_at_most_one_notice_needs_you_and_brief_line(monkeypatch, tmp_path, deferred):
+    from looper.agents import extraction, intent_rule_engine as engine, intent_rule_evaluation as evaluation
+    from looper.agents.intent_rule_delivery import NoticeDispatcher
+    from tests.intent_rule_execution_support import URL, configure, fact
+
+    async def check(pool):
+        env = await setup(pool, monkeypatch)
+        # Keep the channel/schedule fixture, but let the engine own task creation.
+        await pool.execute('DELETE FROM intents')
+        await pool.execute('DELETE FROM system_settings')
+        await configure(pool, tmp_path)
+        await pool.execute("UPDATE schedules SET enabled=true WHERE id='rules-schedule'")
+        async def verifier(*_args, **_kwargs):
+            return fact()
+        monkeypatch.setattr(evaluation, 'verify', verifier)
+        seq = await add(pool, 'Review '+URL, kind='p2p', sent_at=NOW, chat_id='synthetic-review-dm')
+        parsed = extraction.Parsed('items', items=[{'type': 'mr_review', 'title': 'Synthetic MR review',
+            'summary': 'Synthetic request', 'confidence': 'high', 'sources': [seq], 'window_sources': [seq], 'same_as': None}])
+        prepared = await engine.prepare_for_extraction(parsed, source_id='stream', db=pool)
+        async with pool.acquire() as conn, conn.transaction():
+            await extraction.store_intents(conn, parsed, source_id='stream', schedule_id='rules-schedule',
+                run_id=None, record_id=None, now=NOW, more=False, rules_on=True, prepared_rules=prepared)
+        service = engine.IntentRuleService(db=pool, verifier=verifier)
+        await service.run_once()
+        await service.run_once()
+        task_id = await pool.fetchval('SELECT id FROM tasks')
+        assert task_id is not None, [dict(row) for row in await pool.fetch('SELECT state,decision,reason FROM intent_rule_work')]
+        assert await pool.fetchval('SELECT count(*) FROM tasks') == 1
+        assert await pool.fetchval("SELECT count(*) FROM intent_rule_notices WHERE kind='created'") == 1
+        assert await pool.fetchval("SELECT count(*) FROM intents WHERE state='tasked'") == 1
+
+        when = NOW.replace(hour=23) if deferred else NOW
+        notice = NoticeDispatcher(env.channels, clock=lambda: when, dashboard_url=DASHBOARD)
+        for _ in range(2):
+            await notice.run_once()
+            await env.service.run_once()
+        creation_notices = len(env.channels.posts)
+        rows, count = await attention_store.pending_intents(10, rules_on=True)
+        assert rows == [] and count == 0
+        summary = await attention.collect()
+        needs_you = sum(item['ref'] == task_id or item['title'] == 'Synthetic MR review'
+                        for section in summary['sections'] for item in section['items'])
+        assert all(section['state'] != 'error' for section in summary['sections'])
+        monkeypatch.setattr(chat_settings, '_morning_brief_enabled', True)
+        next_morning = (NOW + timedelta(days=1)).replace(hour=9, minute=15)
+        brief = morning_brief.MorningBriefService(env.channels, clock=lambda: next_morning, dashboard_url=DASHBOARD)
+        await brief.run_once()
+        await brief.run_once()
+        brief_posts = env.channels.posts[creation_notices:]
+        brief_lines = sum(task_id in line for post in brief_posts for line in post[2].splitlines())
+        counts = (creation_notices, needs_you, brief_lines)
+        assert counts == ((0, 0, 1) if deferred else (1, 0, 0))
+        assert all(value <= 1 for value in counts)
+        assert await pool.fetchval("SELECT count(*) FROM intent_posts WHERE kind IN ('push','progress')") == 0
+        assert await pool.fetchval('SELECT count(*) FROM morning_brief_consumed') == int(deferred)
+    run_db(check, monkeypatch)
