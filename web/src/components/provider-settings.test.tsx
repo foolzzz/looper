@@ -36,7 +36,7 @@ const registry = (): Registry => ({
   prices: { as_of: "", sources: [], models: {} },
   limits: { api_formats: [{ family: "anthropic", label: "Anthropic", protocols: [{ protocol: "anthropic-messages", label: "Anthropic Messages" }] }, { family: "openai", label: "OpenAI", protocols: [{ protocol: "openai-responses", label: "OpenAI Responses" }, { protocol: "openai-chat", label: "OpenAI Chat Completions" }] }],  name_max_chars: 100, models_max: 50, price_fields: [], model_fields: [],
     protocols: ["anthropic-messages", "openai-chat", "openai-responses"], auth_kinds: ["api_key", "oauth"],
-    effort_levels: [], role_capabilities: { manager: [], planner: [], worker: [], reviewer: [], processor: [], advisor: [], advice_check: [], leads_check: [] },
+    effort_levels: [], role_capabilities: { manager: [], planner: [], worker: [], reviewer: [], processor: [], advisor: [], advice_check: [], leads_check: [], memory_retro: [] },
     secret_mask: "***", provider_env_owned: [] },
 });
 let data: Registry;

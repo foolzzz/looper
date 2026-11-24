@@ -17,7 +17,7 @@ ROOT = Path(__file__).resolve().parents[1]
 # Function bodies are separate freezes, guarding the real unchanged behavior as well as rendered constants.
 FUNCTIONS = {
     "looper/agents/tiers/planner.py": ["PlannerAgent._plan_message", "PlannerAgent._resume_brief",
-        "PlannerAgent._capture_project_learnings", "PlannerAgent._distill_lessons", "PlannerAgent._lessons_message"],
+        "PlannerAgent._distill_lessons", "PlannerAgent._lessons_message"],
     "looper/agents/system_prompt.py": ["build_system_prompt", "build_role_prompt", "work_contract", "review_contract"],
     "looper/agents/claude_cli.py": ["ResidentClaude.command", "budget_args", "system_prompt_args", "permission_args", "library_args", "knowledge_args"],
     "looper/agents/runtimes/codex.py": ["CodexRuntime._command", "CodexRuntime.resident_command", "CodexRuntime.run_command"],

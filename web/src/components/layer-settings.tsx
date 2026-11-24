@@ -201,7 +201,7 @@ export function LayerSettingsForm({
   const [only] = roles;
   // The processor's, the advisor's, the advice check's and the leads check's own layers have no harness (their prompt
   // is their role prompt and what they are given) and no prompt mode: they always replace the runtime's prompt.
-  const processor = roles.length === 1 && ["processor", "advisor", "advice_check", "leads_check"].includes(only ?? "");
+  const processor = roles.length === 1 && ["processor", "advisor", "advice_check", "leads_check", "memory_retro"].includes(only ?? "");
   const concurrencyRole: TaskLimitRole | null =
     layer === "role" && roles.length === 1 && (only === "worker" || only === "reviewer") ? only : null;
 
