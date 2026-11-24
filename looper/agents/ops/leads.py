@@ -273,10 +273,10 @@ def _quoted_entry(manager_id: str | None, reply: str, *, now: float | None = Non
         if seen.full_until is not None:
             return key, None
         body = _normalized(reply) if body is None else body
-        if len(body) < QUOTE_CHARS:
-            continue
         for entry_id, (_, summary) in seen.leads.items():
             text = _normalized(summary)
-            if any(text[start:start + QUOTE_CHARS] in body for start in range(len(text) - QUOTE_CHARS + 1)):
+            # Short memory statements match in full; leads keep their existing window.
+            window = min(QUOTE_CHARS, len(text)) if entry_id.startswith(MEMORY_PREFIX) else QUOTE_CHARS
+            if window and any(text[start:start + window] in body for start in range(len(text) - window + 1)):
                 return key, entry_id
     return None

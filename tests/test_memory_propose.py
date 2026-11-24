@@ -90,3 +90,26 @@ def test_group_backstop_uses_the_memory_notice_for_a_proposed_statement():
         assert leads.for_group(statement) == leads.WITHHELD_REPLY
     finally:
         leads._SEEN.clear()
+
+
+@pytest.mark.parametrize('reply', ['周报先写结论。', '以后每一周的工作汇报都按这个约定处理：周报先写结论。'])
+def test_group_backstop_withholds_a_short_chinese_memory_statement(reply):
+    leads._SEEN.clear()
+    try:
+        leads.remember_memory('manager', 42, '周报先写结论。')
+        assert leads.for_group(reply) == leads.WITHHELD_MEMORY_REPLY
+        assert leads.for_group('周报先写。') == '周报先写。'
+        leads.forget('manager')
+        leads.remember('manager', [('lead-1', '周报先写结论。')])
+        assert leads.for_group(reply) == reply
+    finally:
+        leads._SEEN.clear()
+
+
+def test_group_backstop_does_not_match_a_memory_without_letters_or_digits():
+    leads._SEEN.clear()
+    try:
+        leads.remember_memory('manager', 42, '。！？')
+        assert leads.for_group('普通回复') == '普通回复'
+    finally:
+        leads._SEEN.clear()

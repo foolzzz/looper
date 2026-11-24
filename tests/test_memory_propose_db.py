@@ -165,7 +165,7 @@ def test_revise_reseeds_a_pending_proposal_of_this_manager(monkeypatch, tmp_path
 
 
 @pytest.mark.parametrize('change,code', [('drafting','conflict'), ('confirmed','conflict'), ('written','conflict'),
-    ('other_manager','not_found'), ('untrusted','invalid'), ('other_kind','invalid'), ('missing','not_found')])
+    ('other_manager','not_found'), ('untrusted','invalid'), ('lead','invalid'), ('other_kind','invalid'), ('missing','not_found')])
 def test_revise_refusals(monkeypatch, tmp_path, change, code):
     async def check(pool):
         await sup.setup(pool, tmp_path)
@@ -182,6 +182,8 @@ def test_revise_refusals(monkeypatch, tmp_path, change, code):
             await pool.execute("UPDATE memory_candidates SET manager_id=NULL WHERE id=$1", ident)
         if change == 'untrusted':
             await pool.execute('UPDATE memory_candidates SET untrusted=true WHERE id=$1', ident)
+        if change == 'lead':
+            await pool.execute("UPDATE memory_candidates SET source_kind='lead' WHERE id=$1", ident)
         if change == 'other_kind':
             raw = json.loads(await pool.fetchval("SELECT value FROM system_settings WHERE key='memory_write'"))
             raw['targets']['project'] = raw['targets']['preference']
