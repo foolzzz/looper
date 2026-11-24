@@ -303,7 +303,7 @@ PostgreSQL 是启动的硬性依赖。空库只运行一次 `looper/db/schema.sq
 | `projects.root` | 否 | 新建项目没给目录时的上级目录，必须是绝对路径：每个项目在它下面得到自己的目录。只写在文件里，默认不设置 |
 | `agent_host.keeper` | 否 | `"off"`（默认）或 `"on"`。开启后，每个 Worker 和 Reviewer 运行由一个 keeper 进程持有，计划内重启时它不退出，所以 `looper service upgrade` 升级控制面时不会结束正在运行的 agent（launchd，或用 `KillMode=process` 安装的 systemd 单元）。每个数据库只能有一个 `looper serve`。只写在文件里，改完重启 |
 | `runtimes.pi` | 否 | `"runner"`（默认）或 `"cli"`。Pi 的 Profile 走 SDK runner（Node 22.19+，pi 1.3.x）。`"cli"` 改走 Pi CLI。只写在文件里，启动读取一次，改完重启。runner 起不来时，错误写明原因和这条退路 |
-| `runtimes.dsh` | 否 | `"runner"`（默认）或 `"cli"`。DSH 的 Profile 走 SDK runner（Node 22.19+，dsh 0.2.1-rc.2）。`"cli"` 改走 DSH CLI。只写在文件里，启动读取一次，改完重启。runner 起不来时，错误写明原因和这条退路 |
+| `runtimes.dsh` | 否 | `"runner"`（默认）或 `"cli"`。DSH 的 Profile 走 SDK runner（Node 22.19+，dsh 0.2.2-rc.5）。`"cli"` 改走 DSH CLI。只写在文件里，启动读取一次，改完重启。runner 起不来时，错误写明原因和这条退路 |
 
 每一项按这个顺序取第一个：显式参数（`--host`、`--port`，以及把 `server.log_level` 设为 `debug` 的 `--verbose`）、文件、然后在文件还没写这项之前仍读的旧变量（环境里的 `LOOPER_DATABASE_URL`、`LOOPER_PUBLIC_URL`、`LOOPER_PG_DUMP`、`LOOPER_BACKUP_CMD`、`LOOPER_BACKUP_VERIFY_CMD`、`LOOPER_OPERATOR_NOTES_ROOT`，以及前四项的 `LOOPX_*` 同名；笔记根目录和校验命令只认 `LOOPER_` 前缀）、再是 checkout 的 `.env` 里的同名、最后是内置默认值。数据库 URL 没有默认值。用到旧变量就记一条弃用警告，只写变量名、不写值。支持的安装路径是私有运维文件加上 `--runtime-root`。runtime root 是 `--runtime-root`，否则是 `LOOPER_RUNTIME_ROOT`（已弃用，会警告；`LOOPX_RUNTIME_ROOT` 同样），否则是 `~/.looper`。文件本身不写 runtime root。`.env` 不再放进 Looper 的环境：只从中读上述旧设置，其余的键（例如某个渠道 token 变量）会被忽略，并在警告里点名。`runtimes.pi` 和 `runtimes.dsh` 只写在运维文件里。内置默认是 `"runner"`，文件里的 `"cli"` 是退回 CLI 的设置。Claude Code 使用 Claude Code CLI。
 
@@ -351,7 +351,7 @@ agent 还需要别的变量时，从它的设置里取（Settings，或项目层
 保存为 Settings → Agent Profiles 里的一个 **Agent Profile**，在 Settings → Roles 里选用。
 
 - **运行时**是 Looper 有适配器的某类 agent CLI：Claude Code、Codex、Cursor Agent、Grok、Coco（TRAE CLI）、OMP、Pi 或 DSH。运行时是内置的：Looper 在服务的 PATH 上找到它们并探测版本和能力，Settings → Agent Runtimes 列出它们并可 Re-detect；要换一个可执行文件，就改服务的 PATH。Model API 运行时在进程内运行，没有可执行文件，只运行 Manager。
-- Pi 和 DSH 的 Profile 默认走各自的 SDK runner（Node 22.19+，pi 1.3.x，dsh 0.2.1-rc.2）。Claude Code 使用 Claude Code CLI。要让其中一家改走 CLI，在运维文件里写 `[runtimes] pi = "cli"` 或 `[runtimes] dsh = "cli"`，然后重启。这项在启动时读取一次。runner 起不来时，错误写明原因和这条退路；CLI 只在写成这个显式值时使用。
+- Pi 和 DSH 的 Profile 默认走各自的 SDK runner（Node 22.19+，pi 1.3.x，dsh 0.2.2-rc.5）。Claude Code 使用 Claude Code CLI。要让其中一家改走 CLI，在运维文件里写 `[runtimes] pi = "cli"` 或 `[runtimes] dsh = "cli"`，然后重启。这项在启动时读取一次。runner 起不来时，错误写明原因和这条退路；CLI 只在写成这个显式值时使用。
 - **提供方**是 agent 请求发往的地方：它支持的协议、模型及价格，以及认证方式：运行时自己的登录，或 API key（API 从不返回它）。
 - 内置 agent `claude-code/opus`（Claude Code、它自己的登录、`opus`）运行所有没有另选 agent 的角色。
 

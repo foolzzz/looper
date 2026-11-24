@@ -444,7 +444,16 @@ how often the Planner asks when it need not, and `off` runs the other tasks
 without it). Each row records the `user_gates` its Planner had (`on` or
 `off`), and the comparison lists the tasks whose setting differs from the
 base's, or that a base from before user gates G2 (unset was off then) does
-not record. The runner plays the user in a task's
+not record. `--planner-roles on|off` overrides every selected task's
+`roles_on`, including role tasks, and records `planner_roles` in every row.
+Without it, each task keeps its existing setting and report fields.
+`--worker-agent SPEC.json` uses the same runtime/provider/model/agent spec as
+`--register-agent`, but registers it for the Worker role alone through the role
+settings; Planner and Reviewer keep their normal eval profiles. Each row records
+the Worker profile's id, name, runtime, model and effort in `worker_agent`.
+Either option also records `completion_checks_passed`, before the count assertions
+from `flow_problems`; neither changes the original outcome or problems.
+The runner plays the user in a task's
 gates: when one waits for the user it posts the task's `gate_script` in turn
 (`<end>` ends the discussion; a task without one answers "No preference:
 decide yourself and state your assumptions." and then ends it). When the
@@ -458,6 +467,36 @@ comparison again:
 uv run python -m evals.prompt_regression compare evals/runs/<new>.json [evals/runs/<base>.json]
 ```
 
+### Three groups
+
+Run the same tasks and repetitions with roles on, roles off, and roles off with
+a different Worker profile. This free example uses the scripted Claude stand-in
+for every role; fake mode measures the harness, not model quality. Give
+`LOOPER_EVAL_DATABASE_URL` a disposable PostgreSQL server (each run creates and
+drops its own database):
+
+```bash
+uv run python -m evals.prompt_regression run --mode fake --tasks single_step,reviewed_step,retry_after_failure --reps 2 --planner-roles on --out-dir evals/runs/roles-on
+uv run python -m evals.prompt_regression run --mode fake --tasks single_step,reviewed_step,retry_after_failure --reps 2 --planner-roles off --out-dir evals/runs/roles-off
+uv run python -m evals.prompt_regression run --mode fake --tasks single_step,reviewed_step,retry_after_failure --reps 2 --planner-roles off --worker-agent evals/agents/claude-login-sonnet.example.json --out-dir evals/runs/worker-profile
+uv run python -m evals.prompt_regression groups roles-on=evals/runs/roles-on/<run>.json roles-off=evals/runs/roles-off/<run>.json worker-profile=evals/runs/worker-profile/<run>.json --ignore-flow-assertions
+```
+
+Replace `<run>` with each run's timestamp. `groups LABEL=RUN.json ...` pools all
+repetitions per group: first-pass rate is `sum(first_pass_steps) /
+sum(accepted_steps)` with a Wilson 95% interval. Rework counts extra Worker runs
+(`retries`); cost, `duration_s`, Planner turns, roles defined and role runs are
+sums over started cases, including errors. Duration is summed task time, not
+batch wall time when cases overlap. Role adoption counts cases with `role_runs > 0`.
+Missing metrics show `–`; differing task/rep sets produce a warning.
+
+`--ignore-flow-assertions` scores completed tasks whose checks passed, ignoring
+only `flow_problems` bounds such as `min_roles_defined`. File checks, custom task
+checks and vault checks still count; errors and skipped rows remain unscored.
+The saved outcomes stay unchanged. Old passing rows remain usable; old failing
+rows without explicit completion/check evidence require a rerun with either new
+option. Without the scoring option, the table uses the original outcomes.
+
 ### DSH validation
 
 For a fixed ended Worker history, `python -m evals.dsh_consult_replay` records real
@@ -470,7 +509,7 @@ This opt-in check uses synthetic serve-test captures and never runs in the defau
 tracks passed, failed and untested separately. Local fake responses and the
 installed package's offline checks do not establish real-model acceptance.
 The opt-in launcher is [examples/dsh/validate.py](../examples/dsh/validate.py),
-using [agent-spec.json](../examples/dsh/agent-spec.json): DSH 0.2.1-rc.2,
+using [agent-spec.json](../examples/dsh/agent-spec.json): DSH 0.2.2-rc.5,
 DeepSeek Messages, `deepseek-flash`, effort `high`, effective append. It
 registers a DSH Profile for all four roles; `--provider-preset deepseek`
 would create a Claude Code Profile instead.
@@ -500,7 +539,7 @@ runtime with no flag. A command with no flag uses the runner. `--dsh-cli`
 selects the CLI path. `--dsh-runner` still selects the runner explicitly.
 Passing both flags is an error.
 
-Installed stand-in tests use DSH 0.2.1-rc.2, Node 22.19+ and a disposable
+Installed stand-in tests use DSH 0.2.2-rc.5, Node 22.19+ and a disposable
 `LOOPER_TEST_DATABASE_URL`. The smoke below is the unflagged runner path:
 
 ```sh

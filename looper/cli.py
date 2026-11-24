@@ -80,6 +80,12 @@ def build_parser() -> argparse.ArgumentParser:
     _add_leads_parser(commands)
     _add_memory_parser(commands)
     _add_decisions_parser(commands)
+    _add_claude_code_parser(commands)
+    profile = commands.add_parser("profile", allow_abbrev=False, help="Read the operator profile locally.")
+    profile_sub = profile.add_subparsers(dest="profile_command", required=True)
+    show = profile_sub.add_parser(
+        "show", allow_abbrev=False, help="Print the compiled profile; silently exit 0 when unavailable (within 2 s).")
+    _add_location_flags(show)
     commands.add_parser(
         "mcp-server",
         allow_abbrev=False,
@@ -89,6 +95,32 @@ def build_parser() -> argparse.ArgumentParser:
     version = commands.add_parser("version", allow_abbrev=False, help="Print the installed Looper version.")
     version.add_argument("--format", choices=["markdown", "json"], default="markdown", help="Output format.")
     return parser
+
+
+def _add_claude_code_parser(commands: argparse._SubParsersAction) -> None:
+    cc = commands.add_parser(
+        "claude-code", allow_abbrev=False,
+        help="Give your own Claude Code the Manager's operator profile (opt-in).",
+        description="Reuse looper profile show for your own Claude Code. Nothing is installed until install "
+                    "shows the change and you confirm it.")
+    sub = cc.add_subparsers(dest="claude_code_command", required=True)
+    profile = sub.add_parser(
+        "profile", allow_abbrev=False, help="Print the compiled operator profile.",
+        description="Reads the same local profile as looper profile show (2 s at most). Exit codes: "
+                    "0 printed, 1 unavailable or empty, 2 usage, 4 inside an agent run. "
+                    "With --hook: print SessionStart JSON or nothing, never write stderr, always exit 0.")
+    profile.add_argument("--hook", action="store_true", help="Claude Code SessionStart hook mode.")
+    for name, help_text in (("install", "Add the SessionStart hook after showing the change."),
+                            ("uninstall", "Remove the SessionStart hook after showing the change.")):
+        command = sub.add_parser(name, allow_abbrev=False, help=help_text)
+        # Python 3.11 argparse rejects [] with nargs="*", choices=["hook"]. Validate in run instead.
+        command.add_argument("parts", nargs="*", help="What to change: hook (default: every part).")
+        command.add_argument("--yes", action="store_true", help="Write without asking (review --dry-run first).")
+        command.add_argument("--dry-run", action="store_true", help="Show the change; write nothing.")
+        _add_location_flags(command)
+    status = sub.add_parser("status", allow_abbrev=False, help="Show what is installed and whether it works.")
+    for command in (profile, status):
+        _add_location_flags(command)
 
 
 def _add_msgflow_parser(commands: argparse._SubParsersAction) -> None:
@@ -390,6 +422,14 @@ def main(argv: list[str] | None = None) -> int:
         from .agents import decision_commands
 
         return decision_commands.run(args, _load_ops)
+    if args.command == "profile":
+        from .agents import profile_commands
+
+        return profile_commands.show(args)
+    if args.command == "claude-code":
+        from .agents import claude_code_entry
+
+        return claude_code_entry.run(args)
     if args.command == "mcp-server":
         from .agents import mcp_server
 

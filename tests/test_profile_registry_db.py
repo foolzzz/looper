@@ -877,7 +877,7 @@ def test_omp_on_path_becomes_a_builtin_runtime_once(monkeypatch: pytest.MonkeyPa
     run_db(_test, monkeypatch)
 
 
-def _version_dsh(path: Path, version: str = "0.2.1-rc.2") -> str:
+def _version_dsh(path: Path, version: str = "0.2.2-rc.5") -> str:
     """Exercise the real adapter's version/help probe without starting a model or plugins."""
     return fake_claude(path, (
         "import os, pathlib, sys\n"
