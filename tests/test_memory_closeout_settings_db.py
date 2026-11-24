@@ -98,6 +98,34 @@ def test_project_view_and_export_show_it_only_when_on(tmp_path, monkeypatch):
     run_db(run, monkeypatch)
 
 
+def test_config_import_of_the_switch_is_operator_only(tmp_path, monkeypatch):
+    async def run(pool):
+        project = await projects.create_project(name="Reports", pool=pool)
+        on_document = {"format": config_transfer.FORMAT, "projects": [
+            {"name": project["name"], "execution": {"memory_closeout": "on"}}]}
+        off_document = {"format": config_transfer.FORMAT, "projects": [
+            {"name": project["name"], "execution": {"memory_closeout": "off"}}]}
+        async with v1_api(tmp_path, pool) as call:
+            status, answer = await call("memory_closeout.update",
+                                        {"project_id": project["id"], "memory_closeout": "on"}, client=True)
+            assert status == 403 and answer["error"]["code"] == "forbidden", answer
+            status, answer = await call("config.import_preview", {"document": on_document}, client=True)
+            assert status == 403 and answer["error"]["code"] == "forbidden", answer
+            assert "operator" in answer["error"]["message"]
+            assert (await projects.get_project(project["id"], pool=pool))["memory_closeout"] is None
+            async with pool.acquire() as conn, conn.transaction():
+                await config_transfer.import_config(conn, on_document, apply=True)
+            assert (await projects.get_project(project["id"], pool=pool))["memory_closeout"] == "on"
+            status, answer = await call("config.import_preview", {"document": off_document}, client=True)
+            assert status == 403 and answer["error"]["code"] == "forbidden", answer
+            assert (await projects.get_project(project["id"], pool=pool))["memory_closeout"] == "on"
+            async with pool.acquire() as conn, conn.transaction():
+                await config_transfer.import_config(conn, off_document, apply=True)
+            assert (await projects.get_project(project["id"], pool=pool))["memory_closeout"] is None
+
+    run_db(run, monkeypatch)
+
+
 def test_migration_uses_its_reserved_order_and_check(monkeypatch):
     async def run(pool):
         found = next(item for item in migrations.discover() if item.name == "memory_closeout")

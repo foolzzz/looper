@@ -683,38 +683,45 @@ def run_task(
         workflow = {"workflow": definition["key"]}
     created = api.post("/api/v1/tasks/create", {"requirement": task.requirement, "project": project, **workflow})["result"]
     task_id = created["task_id"]
-    project_id = created["project_id"]
+    # Older harness doubles returned only task_id. That shape is enough unless a case below configures the project.
+    project_id = created.get("project_id")
+
+    def require_project() -> str:
+        if not isinstance(project_id, str) or not project_id:
+            raise EvalError(f"{task.id} needs the created task's project_id")
+        return project_id
+
     try:
         if task.planner_may_choose:
             if chosen_profile_id is None:
                 raise EvalError(f"{task.id} needs the profile its Planner may choose")
             api.post("/api/v1/allowed_profiles/replace",
-                     {"project_id": created["project_id"], "profile_ids": [chosen_profile_id]})
+                     {"project_id": require_project(), "profile_ids": [chosen_profile_id]})
         if task.skill_proposals:
-            api.post("/api/v1/project_skills/proposals/set_mode", {"project_id": project_id, "mode": "on"})
+            api.post("/api/v1/project_skills/proposals/set_mode", {"project_id": require_project(), "mode": "on"})
         if task.memory_closeout:
             if vault_dir is None:
                 raise EvalError(f"{task.id} needs the knowledge vault, and the server has no eval vault")
-            api.post("/api/v1/memory_closeout/update", {"project_id": project_id, "memory_closeout": "on"})
+            api.post("/api/v1/memory_closeout/update", {"project_id": require_project(), "memory_closeout": "on"})
         if task.dependency_conditions:
             api.post("/api/v1/project_admin/update", {
-                "project_id": created["project_id"], "fields": {"dependency_conditions": "on"}})["result"]["project"]
+                "project_id": require_project(), "fields": {"dependency_conditions": "on"}})["result"]["project"]
         if task.roles_on:
-            api.post("/api/v1/project_admin/update", {"project_id": created['project_id'], "fields": {"planner_roles": "on"}})["result"]["project"]
+            api.post("/api/v1/project_admin/update", {"project_id": require_project(), "fields": {"planner_roles": "on"}})["result"]["project"]
         for template in task.role_templates:
             fields = {"description": "", "harness": None, "profile_id": None, "items": [], **template}
-            api.post("/api/v1/role_templates/put", {**fields, "project_id": created["project_id"]})
+            api.post("/api/v1/role_templates/put", {**fields, "project_id": require_project()})
         gates = _project_user_gates(task, user_gates)
         if gates is not None:
-            api.post("/api/v1/project_admin/update", {"project_id": created['project_id'], "fields": {"user_gates": gates}})["result"]["project"]
+            api.post("/api/v1/project_admin/update", {"project_id": require_project(), "fields": {"user_gates": gates}})["result"]["project"]
         if task.schedule_template:
             owner_key = "eval-" + uuid.uuid4().hex[:8]
             api.post("/api/v1/managers/create", {"key": owner_key, "name": "Public reports " + owner_key,
                 "system_prompt": "Handle the public source report scenario.", "task_policy": "templates_only"})
             owner = "manager-" + owner_key
             api.post("/api/v1/manager_templates/put", {"manager_id": owner, "key": "report",
-                "project_id": created["project_id"], **task.schedule_template})
-            schedule = api.post("/api/v1/schedule_admin/create", {"project_id": created["project_id"], "fields": {
+                "project_id": require_project(), **task.schedule_template})
+            schedule = api.post("/api/v1/schedule_admin/create", {"project_id": require_project(), "fields": {
                 "name": "Public report", "cron": "0 9 * * *", "timezone": "UTC", "manager_id": owner,
                 "template_key": "report", "template_inputs": {"source_url": "https://example.org/report"},
                 "requirement": task.requirement}})["result"]["schedule"]
@@ -797,11 +804,12 @@ def run_task(
             attempts_view = None
         if task.skill_proposals:
             detail = {**detail, "skill_proposals": api.post("/api/v1/project_skills/proposals/list",
-                      {"project_id": project_id})["result"]["proposals"]}
+                      {"project_id": require_project()})["result"]["proposals"]}
         if task.memory_closeout:
+            owned = require_project()
             listed = api.post("/api/v1/memory/list", {"state": "all"})["result"]["candidates"]
             candidates = [api.post("/api/v1/memory/get", {"candidate": row["id"]})["result"]["candidate"]
-                          for row in listed if row.get("project_id") == project_id]
+                          for row in listed if row.get("project_id") == owned]
             detail = {**detail, "memory_candidates": candidates,
                       "activity_summaries": [str(row.get("summary") or "") for row in _all_activity(api, task_id)]}
         result = metrics.task_metrics(

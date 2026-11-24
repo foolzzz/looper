@@ -182,6 +182,50 @@ def test_vault_closeout_runs_when_any_switch_is_off(tmp_path, monkeypatch, case)
     run_db(run, monkeypatch)
 
 
+def test_memory_turn_does_not_write_a_configured_vault_folder(tmp_path, monkeypatch):
+    async def run(pool):
+        from looper.agents.ops.planner import PlannerOps
+        from looper.db import projects
+
+        project = await projects.create_project(name="Reports", pool=pool)
+        await projects.set_memory_closeout(project["id"], "on", pool=pool)
+        await pool.execute("UPDATE projects SET vault = 'on' WHERE id = $1", project["id"])
+        repo = await _enable(pool, tmp_path, LESSON_TARGETS)
+        (repo / "codex-mem").mkdir()
+        await vault.update_settings({"path": str(repo), "writable": ["codex-mem"]})
+        await _rows(pool, project["id"], task_id="task-memory")
+        ops = PlannerOps(object(), url="http://127.0.0.1:9")
+        token = ops.issue("task-memory")
+        agent, plan = _agent(tmp_path, monkeypatch, task_id="task-memory")
+        agent._ops = ops
+        agent._token = token
+        plan.project_id = project["id"]
+        target = repo / "codex-mem" / "build.md"
+        seen: dict = {}
+
+        async def ask(kind, message, parse):
+            ops.begin_turn(token)
+            header = "Bearer " + token
+            seen["names"] = [tool["name"] for tool in await ops.listing(header)]
+            seen["write"] = await ops.call(header, "looper_vault_write", {
+                "path": "codex-mem/build.md", "content": "Use make gen.\n", "reason": "keep the build command"})
+            ops.end_turn(token)
+            return parse(_proposals())
+
+        agent._ask = ask
+        await agent._vault_closeout(plan, "completed")
+        assert "looper_vault_write" not in seen["names"]
+        assert "looper_vault_search" in seen["names"] and "looper_vault_read" in seen["names"]
+        assert "looper_task_profile_set" not in seen["names"] and "looper_task_profiles" in seen["names"]
+        assert seen["write"]["error"]["code"] == "forbidden"
+        assert not target.exists()
+        rows = await pool.fetch("SELECT state, source_class FROM memory_candidates")
+        assert len(rows) == 2
+        assert all(row["state"] == "drafting" and row["source_class"] == "agent" for row in rows)
+
+    run_db(run, monkeypatch)
+
+
 def test_empty_journal_and_spent_cap_skip_both_closeouts(tmp_path, monkeypatch):
     async def run(pool):
         project = await projects_on(pool, tmp_path)

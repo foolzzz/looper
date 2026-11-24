@@ -17,7 +17,10 @@ logged.
   tools are not the Planner's (``forbidden``), nor the Planner's the Manager's.
 - **Turns.** ``read`` runs in any turn; ``write`` only in a turn Looper sent
   the Planner (``begin_turn``/``end_turn``), never in one its Claude runs on
-  its own (after background work ends).
+  its own (after background work ends). A memory closeout turn is read only
+  (``set_read_only``): its listing omits every tool that is not ``read``, and
+  calling one is refused. Proposals are stored after the turn, for the operator
+  to confirm.
 - **Profiles.** ``looper_task_profile_set`` chooses, from the profiles the
   project lets its Planners choose (``projects.choosable_profiles``: its list,
   ``project_allowed_profiles``, or every registered profile while the list is
@@ -185,6 +188,7 @@ class _Grant:
 
     task_id: str
     in_turn: bool = False
+    read_only: bool = False  # a memory closeout turn: list and run read tools only
     vault: VaultUsage = field(default_factory=VaultUsage)
 
 
@@ -243,14 +247,41 @@ class PlannerOps:
 
     # --- The Planner's turns ---
 
-    def begin_turn(self, token: str) -> None:
-        """The Planner holding ``token`` runs a turn Looper sent it: its calls may change things."""
+    def begin_turn(self, token: str, *, read_only: bool | None = None) -> None:
+        """The Planner holding ``token`` runs a turn Looper sent it: its calls may change things.
+
+        ``read_only`` true keeps the turn from writing. None leaves a flag already set, so opening the turn does
+        not clear a memory closeout that was marked before the model ran.
+        """
         if (grant := self._grants.get(_digest(token))) is not None:
             grant.in_turn = True
+            if read_only is not None:
+                grant.read_only = read_only
 
     def end_turn(self, token: str) -> None:
         if (grant := self._grants.get(_digest(token))) is not None:
             grant.in_turn = False
+            grant.read_only = False
+
+    def set_read_only(self, token: str, read_only: bool) -> None:
+        """Mark ``token`` read-only, or clear that, without opening the turn. A token that is gone is ignored."""
+        if (grant := self._grants.get(_digest(token))) is not None:
+            grant.read_only = read_only
+
+    def _risk(self, name: str) -> Risk | None:
+        if (tool := self._tools.get(name)) is not None:
+            return tool.risk
+        for catalog in (vault_ops.TOOLS, room_tools_for(MemberKind.PLANNER), subagent_ops.TOOLS):
+            for tool in catalog:
+                if tool.name == name:
+                    return tool.risk
+        return None
+
+    @staticmethod
+    def _shown(grant: _Grant | None, tools: Sequence[Tool]) -> list[dict[str, Any]]:
+        if grant is not None and grant.read_only:
+            tools = [tool for tool in tools if tool.risk is Risk.READ]
+        return [tool.listing() for tool in tools]
 
     # --- The endpoint ---
 
@@ -259,15 +290,16 @@ class PlannerOps:
         define roles."""
         grant = self._grant(header)
         roles_on = grant is not None and await _roles_on(grant.task_id)
-        tools = [tool.listing() for tool in self._tools.values() if roles_on or tool.name not in _ROLE_TOOL_NAMES]
+        tools = self._shown(grant, [tool for tool in self._tools.values()
+                                    if roles_on or tool.name not in _ROLE_TOOL_NAMES])
         if grant is not None and self.room is not None and await self.room.enabled(grant.task_id):
-            tools += [tool.listing() for tool in room_tools_for(MemberKind.PLANNER)]
+            tools += self._shown(grant, room_tools_for(MemberKind.PLANNER))
         if grant is not None:
             config, _ = await vault.for_task(grant.task_id)
             if config is not None:
-                tools += [tool.listing() for tool in vault_ops.tools_for(config)]
+                tools += self._shown(grant, vault_ops.tools_for(config))
             if self.subagents is not None and await _subagents_on(grant.task_id):
-                tools += [tool.listing() for tool in subagent_ops.TOOLS]
+                tools += self._shown(grant, subagent_ops.TOOLS)
         return tools
 
     async def retry_safety(self, header: str | None) -> dict[str, str] | None:
@@ -285,6 +317,9 @@ class PlannerOps:
             return _error(ErrorCode.FORBIDDEN, "this Planner's token no longer works: its task ended or a new "
                                                "Planner took over")
         task_id = grant.task_id
+        if grant.read_only and (risk := self._risk(name)) is not None and risk is not Risk.READ:
+            return _error(ErrorCode.FORBIDDEN, "this turn proposes memories for the operator to confirm; it does "
+                                               "not write")
         if name in ROOM_TOOL_NAMES and self.room is not None:
             return await self._room_call(grant, name, raw)
         if name in VAULT_TOOL_NAMES:

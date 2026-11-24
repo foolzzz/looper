@@ -4609,6 +4609,16 @@ class PlannerAgent:
         Raises ``PlannerTurnError`` when Claude fails or times out, or when the
         repaired reply is still invalid.
         """
+        self._turn_read_only = kind is TurnKind.MEMORY
+        try:
+            return await self._ask_while_marked(kind, message, parse, run)
+        finally:
+            self._turn_read_only = False
+
+    async def _ask_while_marked(
+        self, kind: TurnKind, message: str, parse: Callable[[str], T],
+        run: Callable[[str], Awaitable[str]] | None,
+    ) -> T:
         await self._read_run_deadline()
         run = run or self._turn
         async with skill_proposal_sources.plan_message(self, kind, message) as message:
@@ -5039,7 +5049,8 @@ class PlannerAgent:
                     self._pending_switch = self._pending_handoff = None
 
             if self._ops is not None and self._token is not None:
-                self._ops.begin_turn(self._token)  # its tools may change things in this turn only
+                # None would keep a flag already set; a normal turn passes false and a memory turn passes true.
+                self._ops.begin_turn(self._token, read_only=bool(getattr(self, "_turn_read_only", False)))
             try:
                 from ..runtimes.runner.session import RunnerSession
                 from ..runtimes.runner.turn import TurnLimits

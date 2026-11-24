@@ -50,8 +50,13 @@ class MemoryReply:
 
 
 def memory_message(ended: str, lines: Sequence[str], kinds: Sequence[str]) -> str:
-    """The ``[MEMORY]`` turn (memory-write-path RFC §3.3). ``kinds`` are the configured lesson and project targets."""
+    """The ``[MEMORY]`` turn (memory-write-path RFC §3.3). ``kinds`` are the configured lesson and project targets.
+
+    The journal is fenced as data on this turn whether or not ``untrusted_fence.enabled`` is set: Worker text is not
+    instructions, and a closing fence tag in a log must not end the block.
+    """
     shown = "|".join(kinds)
+    log = untrusted.fence("\n".join(lines), source=untrusted.Source.JOURNAL)
     return "\n".join([
         f"[MEMORY] The task {ended}. Propose what later work in any project should know, for the operator to confirm into",
         "their knowledge vault: verified lessons (a cause and its fix, a check that works, a pitfall) and stable facts about",
@@ -59,7 +64,8 @@ def memory_message(ended: str, lines: Sequence[str], kinds: Sequence[str]) -> st
         "already says, nothing about the operator's preferences. Each proposal cites the journal entries it rests on (the",
         "J ids). At most 5; none is a fine answer. Do not change any files.",
         "",
-        *lines,
+        untrusted.LEAD_LINE,
+        log,
         "",
         "End your reply with exactly one ```json block, and nothing after it:",
         "```json",
@@ -176,19 +182,27 @@ async def run(planner: Any, plan: Any, ended: str) -> None:
                 "error", f"Warning: no memory closeout: the task has spent its "
                          f"${format_usd(cap)} cap (task_budget_usd)"[:500])
             return
-        planner._fence = await untrusted.enabled()
-        lines, ids = journal.numbered_lessons_journal(entries, fence=planner._fence)
+        # One fence around the whole log. Per-entry fencing would leave Worker steps outside it.
+        lines, ids = journal.numbered_lessons_journal(entries)
         settings, problem = await memory_settings.load()
         if settings is None:
             raise RuntimeError(problem or "memory writing is not configured")
         kinds = _configured_kinds(settings)
+        # The turn may only propose. A writable vault folder stays unread for writes; candidates are stored after.
+        mark_read_only = getattr(getattr(planner, "_ops", None), "set_read_only", None)
+        if mark_read_only is not None and planner._token is not None:
+            mark_read_only(planner._token, True)
         try:
-            reply = await planner._ask(
-                TurnKind.MEMORY, memory_message(ended, lines, kinds),
-                lambda text: parse_memory(text, ids, kinds))
-        except PlannerTurnError as exc:
-            await planner._activity("error", f"Warning: the Planner's memory closeout failed: {exc}"[:500])
-            return
+            try:
+                reply = await planner._ask(
+                    TurnKind.MEMORY, memory_message(ended, lines, kinds),
+                    lambda text: parse_memory(text, ids, kinds))
+            except PlannerTurnError as exc:
+                await planner._activity("error", f"Warning: the Planner's memory closeout failed: {exc}"[:500])
+                return
+        finally:
+            if mark_read_only is not None and planner._token is not None:
+                mark_read_only(planner._token, False)
         proposed: list[str] = []
         dropped: Counter[str] = Counter(reply.dropped)
         for item in reply.items:
