@@ -369,9 +369,9 @@ def test_restart_retries_only_a_claim_whose_send_never_started(
         await _digest(pool, "restart-digest", MONDAY.date(), chat=who, hour=7)
         digest_id = await pool.fetchval("SELECT id FROM proactive_deliveries")
         if previous_attempts:
-            await pool.execute("INSERT INTO morning_briefs (local_date, channel_id, chat, status, attempts, detail) "
-                               "VALUES ($1, 'channel-lark', $2, 'failed', $3, 'refused')",
-                               MONDAY.date(), who, previous_attempts)
+            await pool.execute("INSERT INTO morning_briefs (local_date, channel_id, chat, status, attempts, detail, "
+                               "send_started_at) VALUES ($1, 'channel-lark', $2, 'failed', $3, 'refused', $4)",
+                               MONDAY.date(), who, previous_attempts, MONDAY - timedelta(minutes=1))
         adapter = LarkChannelAdapter(runtime_root=tmp_path,
                                      allowlist=SenderAllowlist("channel-lark", frozenset({who})))
         registry = ChannelRegistry(SimpleNamespace())
