@@ -5395,8 +5395,12 @@ the first enabled bot of the default Manager that names an `operator_sender_id`,
 is none. The table `reminders` (migration `reminders`) keeps each one with its target and status: `pending`,
 `sending`, `delivered`, `failed`, `uncertain`, `missed` or `cancelled`. `ReminderService` (started by `looper serve`,
 idle while the switch is off or the server drains) ticks every 10 seconds under one advisory lock. A stop starts no
-other send and takes at most 15 seconds, the cancellation of a send that did not finish included. A tick settles a
-`sending` row left by a stopped sender as `uncertain`, then sends the due ones in code-written words
+other send and takes at most 15 seconds, the cancellation of a send that did not finish included. A tick recovers a
+`sending` row left by a stopped sender as `pending` if no channel post started, or `uncertain` if one may have
+started. The sender commits `post_started_at` immediately before calling the channel, and clears it after an
+explicit refusal before retrying. Recovery updates reminder states and existing decision receipts in one
+transaction: started sends become `unknown`; receipts lost after a settled send are restored from that state.
+An upgrade treats pre-marker `sending` rows as possibly sent. The service then sends the due ones in code-written words
 (「⏰ 你在 <when asked> 让我提醒你：<text>」) through `ChannelRegistry.post` with the idempotency key
 `looper-reminder-<id>`, after checking that the bot still names that user as its operator. The rule keeps no state:
 every reminder due at most 2 minutes ago is sent, however many at once; one due longer ago was missed (Looper was
@@ -5408,8 +5412,12 @@ window. With `delivery.enabled` on, a claimed reminder asks `proactive_delivery.
 `user_reminder` / `user_set`: `send` / `urgent`, uncounted, never deferred to the digest. The decision and
 channel receipt (`sent`, `rejected`, `unknown`) share `looper-reminder-<id>` in `proactive_deliveries`, with
 the reminder id as `source_ref`; refused-send retries retain that decision. A failed decision is logged and
-the reminder still sent; a failed receipt write does not retry the send. Off, the post and reminder writes
-are unchanged and no delivery record is added. The time is the nearest future instant the wall time names in its zone: of the two when the clocks go back,
+the reminder still sent; a failed receipt write does not retry the send. Off, normal sends keep their existing
+message bytes, retry policy and outcomes, and no delivery record is added. Recovery uses the
+same marker with either delivery setting. Lark receives the same idempotency key on a safe retry, but recovery
+does not rely on channel deduplication: neither Lark nor Telegram resends a possibly started post. A crash after
+the marker commits but before the channel is called remains conservatively uncertain. Recovered pending rows
+follow the existing catch-up policy. The time is the nearest future instant the wall time names in its zone: of the two when the clocks go back,
 the first still ahead; one the clocks skip becomes the first valid minute after it; the confirmation says either.
 
 Continuing a task that failed at its spend cap needs a higher cap, which is
