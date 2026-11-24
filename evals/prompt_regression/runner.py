@@ -629,6 +629,8 @@ def run_task(
     step_workspaces: str | None = None,
     chosen_profile_id: str | None = None,
     user_gates: str | None = None,
+    planner_roles: str | None = None,
+    record_completion_checks: bool = False,
     notes_root: Path | None = None,
     vault_dir: Path | None = None,
     fake: bool = False,
@@ -694,8 +696,9 @@ def run_task(
         if task.dependency_conditions:
             api.post("/api/v1/project_admin/update", {
                 "project_id": created["project_id"], "fields": {"dependency_conditions": "on"}})["result"]["project"]
-        if task.roles_on:
-            api.post("/api/v1/project_admin/update", {"project_id": created['project_id'], "fields": {"planner_roles": "on"}})["result"]["project"]
+        roles = planner_roles if planner_roles is not None else ("on" if task.roles_on else None)
+        if roles is not None:
+            api.post("/api/v1/project_admin/update", {"project_id": created['project_id'], "fields": {"planner_roles": roles}})["result"]["project"]
         for template in task.role_templates:
             fields = {"description": "", "harness": None, "profile_id": None, "items": [], **template}
             api.post("/api/v1/role_templates/put", {**fields, "project_id": created["project_id"]})
@@ -821,6 +824,7 @@ def run_task(
             vault_check=task.vault_check,
             attempts_view=attempts_view,
             acceptance=acceptance,
+            record_completion_checks=record_completion_checks,
         )
         result.update(metrics.attempt_fields(attempts_view))
         if step_workspaces:
@@ -1155,6 +1159,8 @@ def run(
     step_workspaces: str | None = None,
     reps: int = 1,
     user_gates: str | None = None,
+    planner_roles: str | None = None,
+    worker_agent: dict[str, Any] | None = None,
     jobs: int = 1,
     case_budget_usd: float | None = None,
     pi_runtime: str = "cli",
@@ -1173,9 +1179,14 @@ def run(
     provider or a registered agent, Looper prices the runs at its prices, so ``max_budget_usd`` is the per-run
     cap Looper keeps (the system layer's ``run_budget_usd``) instead of Claude Code's ``--max-budget-usd``.
     ``user_gates`` (``on`` or ``off``) is the setting of every task's project but a gate task's, which has them on.
+    ``planner_roles`` overrides every task's role setting, including role tasks. ``worker_agent`` registers a
+    profile for the Worker role alone. Either option records completion/check evidence for grouped scoring;
+    without them the report retains its existing fields.
     """
     if mode not in ("fake", "real"):
         raise EvalError(f"mode must be fake or real, not {mode!r}")
+    if planner_roles not in (None, "on", "off"):
+        raise EvalError("planner_roles must be on or off")
     if provider is not None and not provider.api_key:
         raise EvalError(f"a provider needs its API key in ${API_KEY_ENV}")
     if reps < 1:
@@ -1186,7 +1197,8 @@ def run(
     if jobs > 1 and total_cap_usd is not None and case_budget_usd is None:
         raise EvalError("--jobs above 1 under a total cap needs --case-budget-usd (the most one case may spend)")
     real_claude = shutil.which("claude") if mode == "real" else None
-    require_claude(mode, real_claude, planned_runtime_types(register=register, agent=agent, model=model))
+    require_claude(mode, real_claude, planned_runtime_types(register=register, agent=agent, model=model,
+                                                          specs=(worker_agent,)))
     version = claude_version(real_claude)
     git = _git()  # what is being evaluated, before anything runs
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
@@ -1200,6 +1212,7 @@ def run(
     stopped = False
     aborted: str | None = None
     chosen: dict[str, Any] = {}
+    worker: dict[str, Any] = {}
     try:
         scenarios = root / "scenarios.json"
         work_dirs = {(task.id, rep): root / "work" / task.id / str(rep) for rep in range(1, reps + 1) for task in tasks}
@@ -1241,6 +1254,12 @@ def run(
             if register is not None:
                 api.post("/api/v1/agent_settings/update_system", {"values": {
                     "profile_id": chosen["profile_id"], "run_budget_usd": max_budget_usd}})["result"]
+            if worker_agent is not None:
+                worker = register_agent(api, worker_agent)
+                require_claude(mode, real_claude, [worker.get("runtime_type")])
+                api.post("/api/v1/agent_settings/update_role", {
+                    "role": "worker", "values": {"profile_id": worker["profile_id"],
+                                                    "run_budget_usd": max_budget_usd}})["result"]
             review_profile_id = None
             if any(task.workflow for task in tasks):
                 # The scripted fixture needs a distinct identity; it does not test runtime independence.
@@ -1268,6 +1287,8 @@ def run(
                                                      cap_left=cap_left, clock_offset=clock_offset,
                                                      step_workspaces=step_workspaces,
                                                      chosen_profile_id=chosen_profile_id, user_gates=user_gates,
+                                                     planner_roles=planner_roles,
+                                                     record_completion_checks=planner_roles is not None or worker_agent is not None,
                                                      review_profile_id=review_profile_id,
                                                      notes_root=notes_root, vault_dir=vault_dir, fake=mode == "fake"),
                 total_cap_usd=total_cap_usd,
@@ -1286,6 +1307,11 @@ def run(
         by_id = {task.id: task for task in tasks}
         for row in results:
             row["user_gates"] = effective_user_gates(by_id[row["id"]], user_gates)
+            if planner_roles is not None:
+                row["planner_roles"] = planner_roles
+            if worker_agent is not None:
+                row["worker_agent"] = {key: worker.get(key) for key in
+                                       ("profile_id", "name", "runtime_type", "model", "effort")}
         path = out_dir / f"{stamp}-{mode}.json"
         run_result = write_result({
             "schema": SCHEMA,

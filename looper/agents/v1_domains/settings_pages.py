@@ -1,8 +1,10 @@
 """Full dashboard settings projections and the existing compact settings tool results."""
 
+from dataclasses import replace
+
 from .. import scheduler_settings, schedules, vault, wait_service, waits
 from ..api_v1 import _array, _object, _STR, _NULL_STR, _INT, _BOOL, _OBJ
-from ..ops import Call, Turn
+from ..ops import API_CHANNEL, Call, Turn
 from ..ops.config import answered
 from ..ops.settings import _confirming
 from .global_settings import _operation
@@ -27,7 +29,7 @@ WAIT_SETTING = _object({
 WAIT_SETTINGS = _object({name: WAIT_SETTING for name in ("max_wait_seconds", "min_check_seconds")}, closed=True)
 VAULT_SETTINGS = _object({
     "configured": _BOOL, "path": _NULL_STR, "writable": _array(_STR), "rules_file": _NULL_STR,
-    "manager_read": _BOOL, "git": _BOOL, "problem": _NULL_STR,
+    "manager_read": _BOOL, "profile_source": _STR, "git": _BOOL, "problem": _NULL_STR,
 }, closed=True)
 SCHEMAS = {"SchedulerSetting": SCHEDULER_SETTING, "SchedulerSettings": SCHEDULER_SETTINGS,
            "WaitSetting": WAIT_SETTING, "WaitSettings": WAIT_SETTINGS, "VaultSettings": VAULT_SETTINGS}
@@ -38,7 +40,7 @@ LLMREC_LIMIT = _object({"value": {"type": "number"}, "built_in": {"type": "numbe
 LLMREC_LIMITS = _object({name: LLMREC_LIMIT for name in ("retention_days", "max_total_mb")}, closed=True)
 
 _COMPACT_VAULT = _object({name: schema for name, schema in VAULT_SETTINGS["properties"].items()
-                          if name not in ("git", "manager_read")}, closed=True)
+                          if name not in ("git", "manager_read", "profile_source")}, closed=True)
 _COMPACT_GATEWAY = _object({name: GATEWAY_SETTINGS["properties"][name] for name in
                            ("enabled", "port", "aliases")}, closed=True)
 RESULTS = {
@@ -79,7 +81,7 @@ _WAIT_UPDATE = _object({
     "min_check_seconds": _seconds(*waits.MIN_CHECK_RANGE),
 }, [], closed=True) | {"minProperties": 1}
 _VAULT_UPDATE = _object({"path": _NULL_STR, "writable": _array(_STR), "rules_file": _NULL_STR,
-                         "manager_read": _BOOL}, ["path"], closed=True)
+                         "manager_read": _BOOL, "profile_source": _STR}, ["path"], closed=True)
 
 OPERATIONS = (
     _operation("scheduler_settings.get", "Read scheduler settings and their effective sources.",
@@ -90,10 +92,10 @@ OPERATIONS = (
                _object({}, closed=True), WAIT_SETTINGS),
     _operation("wait_settings.update", "Update wait limits; null restores the built-in default.",
                _WAIT_UPDATE, WAIT_SETTINGS, "high", True),
-    _operation("knowledge_vault.get", "Read knowledge vault configuration and any problem.",
-               _object({}, closed=True), VAULT_SETTINGS),
-    _operation("knowledge_vault.update", "Replace knowledge vault configuration; a null path clears it.",
-               _VAULT_UPDATE, VAULT_SETTINGS, "high", True),
+    replace(_operation("knowledge_vault.get", "Read knowledge vault configuration and any problem.",
+                       _object({}, closed=True), VAULT_SETTINGS), operator_only=True),
+    replace(_operation("knowledge_vault.update", "Replace knowledge vault configuration; a null path clears it.",
+                       _VAULT_UPDATE, VAULT_SETTINGS, "high", True), operator_only=True),
 )
 
 
@@ -114,8 +116,9 @@ async def impact(server, operation, arguments, principal, headers):
     if (family == "knowledge_vault" and arguments.get("path") is None
             and arguments.get("writable", []) == [] and arguments.get("rules_file") in (None, "")):
         values = {"path": None}
-    # These existing risk helpers only read arguments; no Manager turn or platform is needed.
-    return await _confirming(Call({"action": action, action: values}, Turn(channel=None, chat=None), None))
+    # Carry the authenticated API principal into the shared confirmation helper's operator check.
+    turn = Turn(channel=API_CHANNEL, chat=None, client_id=principal.client_id)
+    return await _confirming(Call({"action": action, action: values}, turn, None))
 
 
 async def run(server, operation, arguments, principal, headers):

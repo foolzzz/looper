@@ -271,14 +271,21 @@ def test_confirmed_rejects_any_other_status():
                    "/api/v1/acceptance_checks/update", {})
 
 
-def test_task_metrics_apply_acceptance_counts_before_the_flow_bounds():
-    passed = _metrics(expect={"min_checks_defined": 3}, acceptance={"checks_defined": 3})
+@pytest.mark.parametrize("record_completion_checks", [False, True])
+def test_task_metrics_apply_acceptance_counts_before_the_flow_bounds(record_completion_checks):
+    passed = _metrics(expect={"min_checks_defined": 3}, acceptance={"checks_defined": 3},
+                      record_completion_checks=record_completion_checks)
     assert passed["success"]
     assert passed["checks_defined"] == 3
-    missed = _metrics(expect={"min_checks_defined": 3})
+    missed = _metrics(expect={"min_checks_defined": 3}, record_completion_checks=record_completion_checks)
     assert not missed["success"]
     assert "checks_defined" not in missed
     assert any(problem.startswith("checks_defined ") for problem in missed["problems"])
+    for row in (passed, missed):
+        if record_completion_checks:
+            assert row["completion_checks_passed"] is True
+        else:
+            assert "completion_checks_passed" not in row
 
 
 def _acceptance(task_id: str):

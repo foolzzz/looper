@@ -1,4 +1,4 @@
-"""Opt-in, offline verification of exactly dsh 0.2.1-rc.2; no real model eval.
+"""Opt-in, offline verification of exactly dsh 0.2.2-rc.5; no real model eval.
 
 Run: LOOPER_TEST_INSTALLED_DSH=1 uv run --extra test python -m pytest tests/test_dsh_installed.py
 Missing/mismatched installations are explicit gaps (skips), never substituted versions.
@@ -31,7 +31,7 @@ from tests.dsh_installed_stand_in import FetchMessages, MessagesServer, NETWORK_
 
 pytestmark = [pytest.mark.installed, pytest.mark.skipif(os.environ.get("LOOPER_TEST_INSTALLED_DSH") != "1",
                                 reason="Installed dsh verification requires LOOPER_TEST_INSTALLED_DSH=1")]
-VERSION = "0.2.1-rc.2"
+VERSION = "0.2.2-rc.5"
 KEY = "synthetic-offline-key"
 LITERAL = 'Looper literal {{unknown}} / {{ secrets }} 中文 ${value}'
 
@@ -204,7 +204,7 @@ def test_installed_dsh_dump_upload_policy_and_required_wrapper_exports(tmp_path,
                if "product-analytics" in row.get("name", ""))
     assert by_id["agent-default-model"]["config"] == {"provider": "deepseek-official", "model": "deepseek-flash"}
     assert by_id["llm-deepseek"]["config"]["baseURL"] == "http://127.0.0.1:1"
-    assert by_id["tools"]["config"] == {"mode": "native"}
+    assert "config" not in by_id["tools"]
     runner = by_id["headless-runner"]
     assert runner["name"].endswith("looper-bootstrap.mjs")
     assert runner["inject"] == ["headlessStartup"]
@@ -323,7 +323,7 @@ def test_installed_dsh_official_execution_guard_without_a_model(tmp_path, instal
     assert result.returncode == 0, result.stdout + result.stderr
     records = json.loads(result.stdout.splitlines()[-1])
     assert {row["tool"] for row in records if row["type"] == "tool_call"} >= {
-        "write", "edit", "bash", "run_code", "subagent", "workflow", "job_kill"}
+        "write", "edit", "bash", "subagent", "workflow", "job_kill"}
     assert any(row["method"] == "tools/call" for row in read_records(tmp_path / "mcp.jsonl"))
     assert read_records(Path(installation[2]["LOCAL_NETWORK_LOG"])) == []
 
