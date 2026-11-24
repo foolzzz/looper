@@ -30,6 +30,7 @@ def test_each_operator_only_tool_says_what_it_is_refused_for_in_its_own_words():
                                   "the dashboard",
         "looper_reminder_cancel": "looper_reminder_cancel runs only in the user's own direct chat or on "
                                   "the dashboard",
+        "looper_task_hold": "Failure holds are controlled only by the operator in the console or their direct chat.",
     }
 
 

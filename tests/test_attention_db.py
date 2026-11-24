@@ -3,6 +3,7 @@ that cannot be read, and the API that serves it."""
 
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import asyncpg
 import pytest
@@ -38,8 +39,13 @@ async def setting(pool, key, value="true"):
 
 @pytest.mark.parametrize("state", ["uncertain", "failed", "missed"])
 def test_terminal_reminder_waits_once_for_the_user_without_an_idle_push(monkeypatch, state):
-    from looper.agents import idle_checks
-    from looper.db import reminders
+    from looper.agents import failures, idle_checks
+    from looper.db import reminders, step_failures
+
+    monkeypatch.setattr(failures, "typing_mode", AsyncMock(return_value=failures.FailureTyping.ACT))
+    monkeypatch.setattr(step_failures, "list_holds", AsyncMock(return_value=[
+        {"task_id": "held-task", "step_id": "held-step", "step_key": "Resume work", "failure_id": 1,
+         "kind": "environment", "cause": "login", "created_at": NOW - timedelta(days=4), "streak": 3}]))
 
     async def check(pool):
         row = await reminders.create(text="Check the application", due_at=NOW - timedelta(days=5), timezone="UTC",
@@ -48,6 +54,10 @@ def test_terminal_reminder_waits_once_for_the_user_without_an_idle_push(monkeypa
         await reminders.settle(pool, row["id"], state, now=NOW - timedelta(days=4), from_status="pending")
         for _ in range(2):
             summary = await attention.collect()
+            kinds = [s["kind"] for s in summary["sections"]]
+            assert kinds.count("failure_holds") == kinds.count("reminders") == 1
+            assert kinds.index("failure_holds") < kinds.index("reminders")
+            assert section(summary, "failure_holds")["count"] == 1
             found = section(summary, "reminders")
             assert found is not None and found["count"] == 1
             item, = found["items"]
@@ -57,6 +67,7 @@ def test_terminal_reminder_waits_once_for_the_user_without_an_idle_push(monkeypa
             assert await attention.earliest("reminders") == item
             text = attention.summary_text(summary)
             assert text.count(row["text"]) == 1 and state in text
+            assert text.count("Resume work：login") == 1
             assert row["due_at"].strftime("%Y-%m-%d %H:%M") in text
             assert f"取消提醒 #{row['id']}" in text
             if state == "uncertain":

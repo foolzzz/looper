@@ -12,6 +12,51 @@ from tests.db_support import DSN, fresh_connection
 pytestmark = pytest.mark.skipif(not DSN, reason="requires disposable LOOPER_TEST_DATABASE_URL")
 
 
+def test_failure_handling_upgrades_after_higher_order_retrospectives(monkeypatch):
+    from looper.db.migrations import step_failure_handling as failure
+
+    async def test():
+        async with fresh_connection() as upgraded, fresh_connection() as fresh:
+            previous = tuple(item for item in connection._MIGRATIONS if item.order <= 1910)
+            await upgraded.execute(migrations.schema_sql(connection.SCHEMA_PATH.read_text(), previous))
+            await upgraded.execute("INSERT INTO registry_schema_version(id,version) VALUES(TRUE,$1)",
+                                   connection.REGISTRY_SCHEMA_VERSION)
+            await upgraded.execute("INSERT INTO schema_migrations(name) VALUES($1)", bridge_upgrade.BASELINE)
+            # Apply the released retrospective migrations while 1920 is still absent.
+            with monkeypatch.context() as patch:
+                released = tuple(item for item in connection._MIGRATIONS if item.name != failure.name)
+                patch.setattr(connection, "_MIGRATIONS", released)
+                patch.setattr(connection, "_PENDING_MIGRATIONS", migrations.pending_migrations(released))
+                patch.setattr(connection, "_ONLINE_STEPS", migrations.online_steps(released))
+                await connection.ensure_schema(upgraded)
+                assert not await connection.schema_change_pending(upgraded)
+            markers = {row["name"] for row in await upgraded.fetch("SELECT name FROM schema_migrations")}
+            assert {"memory_retro_role", "memory_retro_role_online",
+                    "memory_retro_queue", "memory_retro_queue_online"} <= markers
+            assert failure.name not in markers
+            assert await upgraded.fetchval("SELECT to_regclass('step_holds') IS NULL")
+            await upgraded.execute("INSERT INTO projects(id,name) VALUES('upgrade-project','Kept project')")
+            await upgraded.execute("INSERT INTO tasks(id,project_id,requirement) "
+                                   "VALUES('upgrade-task','upgrade-project','Kept task')")
+            await upgraded.execute("INSERT INTO memory_retro_cursors(task_id,last_to_id) VALUES('upgrade-task',17)")
+
+            assert await connection.schema_change_pending(upgraded)
+            await connection.ensure_schema(upgraded)
+            await connection.ensure_schema(fresh)
+            assert await structure(upgraded) == await structure(fresh)
+            assert await upgraded.fetchval("SELECT requirement FROM tasks WHERE id='upgrade-task'") == "Kept task"
+            assert await upgraded.fetchval("SELECT last_to_id FROM memory_retro_cursors "
+                                           "WHERE task_id='upgrade-task'") == 17
+            assert markers | {failure.name, failure.online[0].marker} == {
+                row["name"] for row in await upgraded.fetch("SELECT name FROM schema_migrations")}
+            assert not await connection.schema_change_pending(upgraded)
+            saved = await witness(upgraded)
+            await connection.ensure_schema(upgraded)
+            assert await witness(upgraded) == saved
+
+    asyncio.run(test())
+
+
 _NEW_MIGRATION = '''\
 name = "registry_example_items"
 order = 10000
@@ -80,7 +125,7 @@ def test_new_migration_file_upgrades_and_initializes_the_same_schema(tmp_path, m
 def test_reminder_send_boundary_upgrades_after_brief_and_retrospective_migrations(monkeypatch):
     async def test():
         async with fresh_connection() as conn:
-            previous = tuple(module for module in connection._MIGRATIONS if module.order < 1930)
+            previous = tuple(module for module in connection._MIGRATIONS if module.order < 1920)
             with monkeypatch.context() as patch:
                 patch.setattr(connection, "_MIGRATIONS", previous)
                 patch.setattr(connection, "_PENDING_MIGRATIONS", migrations.pending_migrations(previous))
@@ -103,17 +148,17 @@ def test_reminder_send_boundary_upgrades_after_brief_and_retrospective_migration
                 return apply
 
             for module in connection._MIGRATIONS:
-                if module.order in (1930, 1980, 1990, 2020):
+                if module.order in (1920, 1930, 1980, 1990, 2020):
                     monkeypatch.setattr(module, "apply", record(module))
             assert await connection.schema_change_pending(conn)
             await connection.ensure_schema(conn)
-            assert applied == [1930, 1980, 1990, 2020]
+            assert applied == [1920, 1930, 1980, 1990, 2020]
             assert await conn.fetchval("SELECT count(*) FROM schema_migrations WHERE name = ANY($1)",
-                ["morning_brief_send_started", "memory_retro_role", "memory_retro_queue",
-                 "reminder_post_started"]) == 4
+                ["step_failure_handling", "morning_brief_send_started", "memory_retro_role", "memory_retro_queue",
+                 "reminder_post_started"]) == 5
             assert not await connection.schema_change_pending(conn)
             await connection.ensure_schema(conn)
-            assert applied == [1930, 1980, 1990, 2020]
+            assert applied == [1920, 1930, 1980, 1990, 2020]
 
     asyncio.run(test())
 

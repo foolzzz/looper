@@ -4865,13 +4865,13 @@ project `ask` action. Backup-profile fallback and unanswered-push pauses follow 
 
 ### Why a run failed (failure classes)
 
-While the system setting `engine.failure_typing` is `record` (`off` by default; [engine reliability
+While the system setting `engine.failure_typing` is `record` or `act` (`off` by default; [engine reliability
 RFC](rfcs/engine-reliability-v0.zh-CN.md), section 4), the close of a failed run records why it failed as a type
 (`looper/agents/failures.py`): `llm_records.failure_class` (`quota`, `transient`, `environment` or `judgment`),
 `failure_cause` (each cause has one class, and a check constraint holds the pair: `usage_limit`, `rate_limit`;
 `connection_failed`, `provider_overloaded`, `start_timeout`; `runtime_missing`, `login`, `tls`, `profile`; `timeout`,
 `context`, `budget`, `report`, `unknown`), and `metadata.failure` (`signal`: `typed` or `text`, and `resets_at` for a
-used-up window). This step only records: what happens to a failed run, its step and its task is unchanged.
+used-up window). `record` leaves the task's existing control flow unchanged; `act` also handles failures below.
 
 - **Which runs.** A record that ends `failed`, and a Worker's or Reviewer's run whose own report says the step failed
   (`metadata.outcome` `reported_failed`, `contract` or `files_mismatch`: `judgment`, `report`). A Reviewer's
@@ -4891,9 +4891,10 @@ used-up window). This step only records: what happens to a failed run, its step 
     at capacity and a broken stream (`signal: text`).
   - The API runtime: its loop's error kind, which a failed result now carries (`error_kind`, `error_status`).
   - Other runtimes give no signal yet: their failures are `unknown`.
-- **Settings.** `engine_settings.get` and `engine_settings.update` (`{"failure_typing": "off" | "record" | null}`,
-  null for the built-in `off`; operator only; `act`, failure handling, is refused until it exists), and the generated
-  `loopercli engine-settings` commands. Not a Manager tool: nothing changes for the Manager, Telegram or Lark.
+- **Settings.** `engine_settings.get` and `engine_settings.update` (`{"failure_typing": "off" | "record" | "act" | null}`,
+  null for the built-in `off`; operator only, changes require confirmation), the generated
+  `loopercli engine-settings` commands, and Settings → LLM Providers. The Manager's `looper_settings` gains engine
+  read/write actions only while act is active. Initial activation uses the API, CLI or dashboard.
 - **Counts.** `runs.failures` (`{"days"}`, 1 to 90, 7 when omitted): the classified runs by UTC day, run kind,
   runtime, class and cause, the total by class, and `steps`: of the Workers' and Reviewers' classified runs, how
   many were not a judgment (the failures that reach a Planner without needing one).
@@ -4902,6 +4903,48 @@ used-up window). This step only records: what happens to a failed run, its step 
 - **Off.** No class and no `metadata.failure`: a record's close writes exactly what it wrote before. The migration
   `failure_typing` adds the two columns without a rewrite; its check is validated and its index
   (`idx_llm_records_failures`) built online.
+
+### Recovering failed executions
+
+With `engine.failure_typing=act`, a current Worker or Reviewer result is routed before a decision or review vote.
+Quota failures hold the step until reset plus 60 seconds, or an unknown-reset backoff of 5, 10, 20, 40, then 60
+minutes. Transient failures wait 120 and 600 seconds, each with ±20% jitter. Environment failures wait for the
+operator, independently of project user gates. Other ready steps keep running. Recovery releases task and account
+slots while waiting, re-enters account admission in the recovery lane, and dispatches only the failed execution
+unit. A review retry preserves the Worker's output and the review role, seat and round. The dynamic input warns
+that an incomplete run may have left changes; the original instruction remains intact.
+
+All four failure classes share one durable counter per work step, including its reviewers and panel seats. The
+third consecutive failure immediately opens the breaker and goes to Planner DECISION with the entire current
+sequence of typed failures. Successful execution resets the counter; `not_passed` neither increments nor resets
+it. Repeated negative verdicts retain the existing `max_step_retries` limit (`DecisionContext.offered` and
+`planner_protocol.parse_decision`). Replans and automatic recovery preserve the counter; an authenticated
+operator's confirmed restart/start-over resets it with an audit entry. History retains the original step/run
+identities for the task's lifetime, even after a step or run record is removed.
+
+An environment or breaker hold projects `waiting_user`, appears in Needs you when attention is enabled, and
+notifies the task's recorded source. The task's Pipeline shows holds, versioned actions and paginated history.
+Operator-only operations `tasks.failure_history`, `tasks.holds` and `tasks.hold_release` use the corresponding
+`POST /api/v1/tasks/...` paths. Release requires the exact `failure_id` and confirmation: retry only the failed
+unit, send the saved failure to the Planner, or stop the entire task. The act-only Manager tool `looper_task_hold`
+offers the same actions in the console and authenticated operator direct chats. The generated CLI uses these
+same operations. Old versions conflict; releases are persisted until the Planner acknowledges recovery.
+
+Planner runtime retries reuse the same prepared message, launch and session outside account slots. Transient
+turns allow at most three executions. A scheduled task's quota wait starts at its first frozen admission or quota
+failure, with a durable deadline of six hours or one schedule period, whichever is shorter; expiration uses
+`quota_exhausted`. A planning environment failure uses `environment`. Other turn failures retain their original
+fallback. Processor retries share the caller's total deadline and spend cap, report the sum of all attempts' cost,
+and preserve private batch filtering. Manager transient/environment errors produce fixed typed replies without
+automatic replay of tools. Leaving act wakes waits and drains step holds to the previous decision path; existing
+gates, waits and cost holds remain independent.
+
+Migration `step_failure_handling` (1920) adds explicit state, idempotent run evidence, append-only failures,
+current holds, a recovery outbox and scheduled quota deadlines. Existing checks widen without dropping other
+values. Task outcome metrics add act-only hold counts, longest wait, automatic retries, breaker counts and
+role/class/streak distributions; self-check warns above five breakers per UTC day. Environment holds have one
+durable reminder after an hour. See [validation](../validation/failure-handling.md) for measured coverage and
+pending real-model evaluations.
 
 ### Translated models (local gateway)
 
@@ -7203,7 +7246,9 @@ list or command line changes either way.
   pushes, intent messages and task-end messages of the last 72 hours, plus intent
   final notices whose bounded retries exhausted in that window. The
   `uncertain_deliveries` migration builds the existing tables' uncertain-row
-  indexes online; the final-notice table has its own failed-row index), plus
+  indexes online; the final-notice table has its own failed-row index),
+  `cost` (pending spend holds), `failure_holds` (environment and breaker holds
+  while failure handling is in act mode), then
   `reminders` (`uncertain`, `failed` and `missed` reminders until cancelled
   or seven days after settlement; excluded from idle checks). A
   section is `ok`, `error` (its source could not be read, with the reason;

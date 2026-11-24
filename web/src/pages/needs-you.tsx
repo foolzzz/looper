@@ -20,6 +20,7 @@ const linkClass =
   "rounded-sm hover:underline underline-offset-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring";
 
 const TITLES: Record<AttentionKind, string> = {
+  failure_holds: "运行失败等你处理",
   gates: "Gates waiting for your answer",
   confirmations: "Operations to confirm",
   schedules: "Failing schedules",
@@ -34,6 +35,7 @@ const TITLES: Record<AttentionKind, string> = {
 /** What to do about a section, said once under its heading. */
 const HOW: Partial<Record<AttentionKind, string>> = {
   cost: "在花费设置中提高上限并继续，或停下；也可在私聊回复「继续」或「停」。",
+  failure_holds: "在任务页选择已修好重试、交给 Planner 或停止；操作者明确重启任务可清零连续失败计数。",
   gates: "Answer on the task's page, or with /gates in your chat.",
   confirmations: "Reply 确认 in the chat that asked, before it lapses; anything else drops it.",
   intents: "Build or reject each one on the Intents page, or reply 建 / 驳回 with its number in your chat.",
@@ -62,6 +64,8 @@ function details(kind: AttentionKind, item: AttentionItem): { line: string; badg
   const { facts, context, ref } = item;
   const parts = (...values: (string | null | false | undefined)[]) => values.filter(Boolean).join(" · ");
   switch (kind) {
+    case "failure_holds":
+      return { line: parts(context, `连续失败 ${count(facts.streak)} 次`), badges: [text(facts.kind)] };
     case "gates":
       return { line: parts(context, text(facts.step),
         count(facts.questions) > 0 && plural(count(facts.questions), "open question")), badges: [] };
