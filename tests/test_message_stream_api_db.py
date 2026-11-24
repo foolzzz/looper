@@ -86,7 +86,8 @@ def test_the_switch_refuses_what_cannot_work_and_stores_nothing(monkeypatch, tmp
 def test_chat_controls_and_two_step_deletion_do_not_return_bodies(monkeypatch, tmp_path):
     async def check(pool):
         sup.append(tmp_path, "oc_synthetic", sup.message("synthetic-message", text="private synthetic body"))
-        source = await store.save_source("src", {"bridge_dir": str(tmp_path), "bridge_start_from": "beginning"}, db=pool)
+        source = await store.save_source("src", {"ingest_mode": "bridge", "bridge_dir": str(tmp_path),
+            "bridge_start_from": "beginning"}, db=pool)
         await source_service.run_bridge_pass(source, db=pool, now=sup.NOW)
         backups = tmp_path / "api" / "backups"
         backups.mkdir(parents=True)
@@ -183,7 +184,8 @@ def test_range_refuses_future_end_but_now_preserves_later_messages(monkeypatch, 
 
     async def check(pool):
         sup.append(tmp_path, "chat_synthetic", sup.message("old_message"))
-        source = await store.save_source("src", {"bridge_dir": str(tmp_path), "bridge_start_from": "beginning"}, db=pool)
+        source = await store.save_source("src", {"ingest_mode": "bridge", "bridge_dir": str(tmp_path),
+            "bridge_start_from": "beginning"}, db=pool)
         await source_service.run_bridge_pass(source, db=pool, now=sup.NOW)
         target = {"source_id": "src", "scope": "range", "start": (sup.NOW - timedelta(hours=1)).isoformat(),
                   "end": (sup.NOW + timedelta(hours=1)).isoformat()}

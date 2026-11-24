@@ -37,7 +37,7 @@ def test_tool_lists_only_configured_kinds_and_is_cached(monkeypatch):
     monkeypatch.setattr(memory_settings, 'stored', AsyncMock(return_value={
         'enabled': True, 'sources': {'manager': True}}))
     monkeypatch.setattr(memory_settings, 'load', AsyncMock(return_value=(SimpleNamespace(
-        targets={Kind.PROJECT: None, Kind.PREFERENCE: None}), None)))
+        targets={Kind.PROJECT: None, Kind.PREFERENCE: None}, sources=SimpleNamespace(leads=False)), None)))
     got = asyncio.run(tool.memory_tool())
     assert got is tool._tool_for(('preference', 'project'))
     assert got.schema['properties']['kind']['enum'] == ['preference', 'project']

@@ -78,6 +78,9 @@ of someone else, no explicit request to investigate, no detail and no link.
 Exclude small talk, Q&A answers, agreement or echoes, and follow-ups, status updates or decisions with no new
 request or bug report. Merge messages raising the same matter into one intent with all their sources, or use
 same_as for a recent intent about that matter."""
+MR_REQUESTS_NOTE = """\
+## MR review requests
+Someone may ask for an MR to be reviewed without @-mentioning the operator. That request can be mr_review. The type only classifies the request. It does not authorize an action."""
 SOURCES_MAX, ABOUT_MAX, SUPERSEDES_MAX = 10, 5, 3
 SUMMARY_MAX, DETAIL_MAX, TITLE_MAX, INTENT_SUMMARY_MAX = 200, 600, 60, 400
 # What a run costs the processor (Sonnet), measured on the real path and in the real-mode eval: a fixed part per run
@@ -402,7 +405,8 @@ def _lead(item: Mapping[str, Any], refs: Refs, *, now: datetime, valid_days: int
 
 
 def _intent(item: Mapping[str, Any], refs: Refs, *, enabled_types: Collection[str],
-            app_seqs: Collection[int], group_seqs: Collection[int] = ()) -> dict[str, Any]:
+            app_seqs: Collection[int], group_seqs: Collection[int] = (),
+            group_types: Collection[str] = leads_model.GROUP_INTENT_TYPES) -> dict[str, Any]:
     if not _member(item.get("type"), enabled_types):
         raise _Drop("unknown_type")
     if not _member(item.get("confidence"), _CONFIDENCES):
@@ -420,7 +424,7 @@ def _intent(item: Mapping[str, Any], refs: Refs, *, enabled_types: Collection[st
         raise _Drop("no_window_source")
     if all(seq in app_seqs for seq in sources) and item["type"] != leads_model.ALERT_TYPE:
         raise _Drop("app_only_not_alert")
-    if group_seqs and set(window) & set(group_seqs) and item["type"] not in leads_model.GROUP_INTENT_TYPES:
+    if group_seqs and set(window) & set(group_seqs) and item["type"] not in group_types:
         raise _Drop("group_type")
     return {"type": item["type"], "title": title, "summary": summary, "confidence": item["confidence"],
             "sources": sources, "window_sources": window, "same_as": same_as}
@@ -458,7 +462,8 @@ def _reply_object(kind: str, text: str) -> tuple[Any, str]:
 
 
 def parse(kind: str, reply: str, refs: Refs, *, now: datetime, valid_days: int, enabled_types: Collection[str],
-          app_seqs: Collection[int], group_seqs: Collection[int] = ()) -> Parsed:
+          app_seqs: Collection[int], group_seqs: Collection[int] = (),
+          group_types: Collection[str] = leads_model.GROUP_INTENT_TYPES) -> Parsed:
     """What ``reply`` says (the module's notes, step 4). ``now`` is in the schedule's zone: a lead's ``valid_until``
     is clamped to [tomorrow 00:00 there, now + ``valid_days``]. ``app_seqs`` are the input's alert-bot messages: an
     intent whose sources are all among them must be ``leads_model.ALERT_TYPE``."""
@@ -495,7 +500,7 @@ def parse(kind: str, reply: str, refs: Refs, *, now: datetime, valid_days: int, 
                 raise _Drop("unknown_kind" if kind == "leads" else "unknown_type")
             items.append(_lead(item, refs, now=now, valid_days=valid_days) if kind == "leads"
                          else _intent(item, refs, enabled_types=enabled_types, app_seqs=app_seqs,
-                                      group_seqs=group_seqs))
+                                      group_seqs=group_seqs, group_types=group_types))
         except _Drop as drop:
             dropped[str(drop)] += 1
         except (TypeError, ValueError, OverflowError):  # a shape no rule above foresaw: this item only
@@ -630,7 +635,7 @@ async def _lost_group_seqs(conn: asyncpg.Connection, source_id: str, seqs: Colle
 async def store_intents(conn: asyncpg.Connection, parsed: Parsed, *, source_id: str, schedule_id: str,
                         run_id: str | None, record_id: int | None, now: datetime, more: bool,
                         group: GroupStore | None = None, via: str = "subscription",
-                        recognition_id: int | None = None) -> dict[str, Any]:
+                        recognition_id: int | None = None, rules_on: bool = False) -> dict[str, Any]:
     """Write the parsed intents in the caller's transaction: ``pending``, or ``merged`` into the intent it is
     ``same_as`` when that one is pending or tasked within ``SAME_MATTER_WITHIN`` or rejected within
     ``REJECTED_WITHIN`` (a ``dropped`` one never: nothing is merged into it). One the check dropped is stored as
@@ -645,9 +650,14 @@ async def store_intents(conn: asyncpg.Connection, parsed: Parsed, *, source_id: 
         await db_subs.count_group_day(conn, source_id, group.day, read=group.read, skipped=group.skipped)
         lost = await _lost_group_seqs(conn, source_id, group.seqs, events)
     seen = set(parsed.instructions_seen_seqs)
+    # Recheck only a run that started with classification on, after the source locks and before any insert.
+    classification_on = await leads_model.rule_types_enabled(conn) if rules_on else False
     for item in parsed.items:
         sources = _live(item, events, revoked, counts)
         if sources is None or item["type"] not in versions:
+            continue
+        if rules_on and item["type"] == leads_model.RULE_INTENT_TYPE and not classification_on:
+            counts["dropped"]["rules_type"] = counts["dropped"].get("rules_type", 0) + 1
             continue
         if lost & set(item["window_sources"]):
             counts["dropped"]["group_revoked"] = counts["dropped"].get("group_revoked", 0) + 1
@@ -773,16 +783,25 @@ async def recent_intents(conn: Any, source_id: str, *, now: datetime) -> list[di
     return [dict(row) for row in rows]
 
 
-async def intent_types(conn: Any) -> list[dict[str, Any]]:
-    """The enabled, not archived intent types, with their current version's name and guidance."""
-    rows = await conn.fetch("SELECT t.key, v.name, v.guidance FROM intent_types t JOIN intent_type_versions v "
-                            "ON v.type_key = t.key AND v.version = t.version "
+async def intent_types(conn: Any, *, rules_on: bool | None = None) -> list[dict[str, Any]]:
+    """The enabled, not archived intent types, with their current version's name and guidance.
+
+    ``rules_on`` is the classification snapshot's ``types_on``. None reads that snapshot. The builtin MR seed
+    is omitted unless classification is on. The returned rows stay key, name and guidance."""
+    if rules_on is None:
+        rules_on = await leads_model.rule_types_enabled(conn)
+    rows = await conn.fetch("SELECT t.key, t.builtin, v.name, v.guidance FROM intent_types t "
+                            "JOIN intent_type_versions v ON v.type_key = t.key AND v.version = t.version "
                             "WHERE t.enabled AND t.archived_at IS NULL ORDER BY t.builtin DESC, t.key")
-    return [dict(row) for row in rows]
+    return [{"key": row["key"], "name": row["name"], "guidance": row["guidance"]}
+            for row in rows if leads_model.intent_type_visible(row, rules_on=rules_on)]
 
 
-def instructions(kind: str, requirement: str, types: Sequence[Mapping[str, Any]], *, group: bool = False) -> str:
-    """The processor's instructions: the subscription's requirement and, for intents, one line per enabled type."""
+def instructions(kind: str, requirement: str, types: Sequence[Mapping[str, Any]], *, group: bool = False,
+                 rules: bool = False) -> str:
+    """The processor's instructions: the subscription's requirement and, for intents, one line per enabled type.
+
+    ``rules`` adds the MR paragraph after the group note. A direct message (``group`` false) gets neither."""
     if kind == "triage":
         from . import triage_run
 
@@ -790,8 +809,12 @@ def instructions(kind: str, requirement: str, types: Sequence[Mapping[str, Any]]
     if kind != "intents":
         return requirement
     lines = [f"- {row['key']} {_flat(row['name'])}: {_flat(row['guidance'])}" for row in types]
-    return (f"{requirement.strip()}\n\n## Intent types\n" + "\n".join(lines)
-            + ("\n\n" + GROUP_REQUESTS_NOTE if group else ""))
+    note = ""
+    if group:
+        note = "\n\n" + GROUP_REQUESTS_NOTE
+        if rules:
+            note += "\n\n" + MR_REQUESTS_NOTE
+    return f"{requirement.strip()}\n\n## Intent types\n" + "\n".join(lines) + note
 
 
 async def participants(conn: Any, source_id: str, people: Collection[str]) -> Participants:
@@ -1122,7 +1145,9 @@ async def execute(runs: Any, run_id: str, schedule: Mapping[str, Any], stream: M
         await end(status="failed", outcome="failed", error="this server cannot run a processor")
         return False
     now = runs._clock()
-    types = await intent_types(pool) if kind == "intents" else []
+    classification = await leads_model.classification_snapshot(pool) if kind == "intents" else None
+    rules_on = bool(classification and classification.types_on)
+    types = await intent_types(pool, rules_on=rules_on) if kind == "intents" else []
     if kind == "intents" and not types:
         await end(status="completed", outcome="quiet", summary="没有启用的意图类型：这次没有整理",
                   advance_to=picked["last_seq"])
@@ -1147,13 +1172,15 @@ async def execute(runs: Any, run_id: str, schedule: Mapping[str, Any], stream: M
                  "context": found.context, "known": found.known}
     started = time_.monotonic()
     valid_days, enabled = await leads_model.valid_days(pool), {row["key"] for row in types}
+    group_types = leads_model.RULE_GROUP_INTENT_TYPES if rules_on else leads_model.GROUP_INTENT_TYPES
 
     previous_record_id: int | None = None
 
     async def run(reminder: str, budget_usd: float, timeout_s: float) -> processor.ProcessorRun:
         nonlocal previous_record_id
         done = model_call.processor_result(await model_call.call(model_call.ProcessorCall(
-            owner=schedule["id"], instructions=instructions(kind, schedule["requirement"], types, group=bool(group and group.seqs))
+            owner=schedule["id"], instructions=instructions(
+                kind, schedule["requirement"], types, group=bool(group and group.seqs), rules=rules_on)
             + (f"\n\n{reminder}" if reminder else ""), input_text=found.text, input_ref=reference,
             quiet_word=QUIET_WORD, budget_usd=budget_usd, timeout_s=timeout_s, runtime_root=runs._runtime_root,
             claude_bin=runs._claude_bin, project_id=schedule["project_id"], schedule_id=schedule["id"],
@@ -1169,7 +1196,8 @@ async def execute(runs: Any, run_id: str, schedule: Mapping[str, Any], stream: M
     asked = await ask(run, lambda reply: parse(kind, reply, found.refs, now=now.astimezone(_zone(zone_name)),
                                                valid_days=valid_days, enabled_types=enabled, app_seqs=found.app_seqs,
                                                group_seqs={r["seq"] for r in found.rows
-                                                           if r.get("via_group") and not r.get("original_scope")}),
+                                                           if r.get("via_group") and not r.get("original_scope")},
+                                               group_types=group_types),
                       budget_usd=schedule["run_budget_usd"], timeout_s=float(timeout))
     result, parsed = asked.result, asked.parsed
     if asked.skipped is not None:
@@ -1206,7 +1234,8 @@ async def execute(runs: Any, run_id: str, schedule: Mapping[str, Any], stream: M
                                              window_rows=found.rows)).as_dict()
         else:
             counts = await store_intents(conn, parsed, source_id=sub["source_id"], schedule_id=schedule["id"],
-                                         run_id=run_id, record_id=result.record_id, now=now, more=found.more, group=group)
+                                         run_id=run_id, record_id=result.record_id, now=now, more=found.more,
+                                         group=group, rules_on=rules_on)
         return {**counts, **checked.counts} if checked is not None else counts
 
     cost = asked.cost_usd

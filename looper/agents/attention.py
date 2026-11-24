@@ -239,7 +239,14 @@ def _delivery_item(row: Mapping[str, Any]) -> dict[str, Any]:
 async def _deliveries(_: Any) -> Read:
     rows, count = await store.uncertain_deliveries(datetime.now(timezone.utc) - DELIVERY_WINDOW, SHOWN)
     catchup = await _catchup_items()
-    return [*catchup, *(_delivery_item(row) for row in rows)][:SHOWN], count + len(catchup)
+    source_items, source_count = await _source_stream_items()
+    return [*catchup, *source_items, *(_delivery_item(row) for row in rows)][:SHOWN], count + len(catchup) + source_count
+
+
+async def _source_stream_items() -> tuple[list[dict[str, Any]], int]:
+    from .message_stream_alerts import attention_items
+
+    return await attention_items(SHOWN, since=datetime.now(timezone.utc) - DELIVERY_WINDOW)
 
 
 async def _catchup_items() -> list[dict[str, Any]]:
@@ -328,8 +335,12 @@ async def _earliest_ledger(_: Any) -> dict[str, Any] | None:
 
 
 async def _earliest_deliveries(_: Any) -> dict[str, Any] | None:
+    from .message_stream_alerts import earliest_active
+
     row = await store.earliest_uncertain_delivery(datetime.now(timezone.utc) - DELIVERY_WINDOW)
-    return _oldest([*([] if row is None else [_delivery_item(row)]), *await _catchup_items()])
+    source = await earliest_active(since=datetime.now(timezone.utc) - DELIVERY_WINDOW)
+    return _oldest([*([] if row is None else [_delivery_item(row)]), *await _catchup_items(),
+                    *([] if source is None else [source])])
 
 
 _READERS = {"gates": _gates, "confirmations": _confirmations, "schedules": _schedules, "logins": _logins,
@@ -388,7 +399,8 @@ _CHANNELS = {"web": "控制台聊天", "lark": "飞书", "lark_bot": "飞书", "
 _ALERTS = {"failures": "连续失败告警", "stale": "太久没成功", "deadline": "没在截止时间前成功", "overlap": "运行重叠",
            "unanswered": "没人回，已自动暂停"}
 _LEDGER_KINDS = {"pending": "待办", "decision": "待确认的决定", "work_item": "在做的事"}
-_DELIVERY_SOURCES = {"subscription": "订阅推送", "intent": "意图消息", "task_end": "任务结束通知", "catchup": "飞书消息补收失败"}
+_DELIVERY_SOURCES = {"subscription": "订阅推送", "intent": "意图消息", "task_end": "任务结束通知", "catchup": "飞书消息补收失败",
+                     "message_stream": "消息流采集/对账需处理"}
 _HINTS = {"gates": "发 /gates 看编号，再用 /gate N <回答> 回答。",
           "confirmations": "在提问的那个聊天里回复「确认」，或回复别的放弃。",
           "cost": "回复「继续 {ref} <新上限美元>」提高上限并继续，或「停 {ref}」。",
@@ -447,6 +459,8 @@ def _line(kind: str, item: Mapping[str, Any], now: datetime) -> str:
         return f"- {item['ref']} {title}（{label}）"
     if kind == "deliveries" and facts["source"] == "catchup":
         return f"- {_DELIVERY_SOURCES['catchup']}：{title}。{_plain(facts['fix'])}"
+    if kind == "deliveries" and facts["source"] == "message_stream":
+        return f"- {_DELIVERY_SOURCES['message_stream']}：{title}。{_plain(facts['fix'])}"
     where = _CHANNELS.get(facts["channel"] or "", facts["channel"] or "")
     return (f"- {_DELIVERY_SOURCES[facts['source']]}：{title}" + (f"（{item['ref']}）" if item["ref"] else "")
             + (f"，{where}" if where else "") + (f"，{waited}前" if waited else ""))
