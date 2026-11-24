@@ -1,5 +1,6 @@
 """A runtime bill remains authoritative through recorder, task, daily and guard reads."""
 from datetime import datetime, timezone
+import logging
 
 import pytest
 
@@ -9,7 +10,7 @@ from looper.agents.claude_cli import ClaudeRunRecorder
 from looper.agents.cost_guard_settings import Config, Mode
 from looper.agents.profile_registry import builtin_resolved_profile
 from looper.agents.run_usage import Usage
-from looper.agents.runtimes.pricing import usage_event
+from looper.agents.runtimes import pricing
 from looper.db import llm_records
 from tests.db_support import DSN, run_db
 from tests.runtime_model_helpers import with_model_name
@@ -17,7 +18,12 @@ from tests.runtime_model_helpers import with_model_name
 pytestmark = pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
 
 
-def test_runtime_bill_counts_for_task_daily_and_guard_after_unknown_catalog_event(monkeypatch, tmp_path, caplog):
+@pytest.mark.parametrize('root_log_level', [logging.WARNING, logging.INFO], ids=['warning', 'info'])
+def test_runtime_bill_counts_for_task_daily_and_guard_after_unknown_catalog_event(
+        monkeypatch, tmp_path, caplog, root_log_level):
+    caplog.set_level(root_log_level)
+    # Schema/admission INFO records do not mean pricing or settlement emitted a cost warning.
+    cost_loggers = {pricing.__name__, cg.__name__}
     async def check(pool):
         launch = Launch(AgentSettings(profile=with_model_name(builtin_resolved_profile(), "sonnet")),
                         role=AgentType.WORKER)
@@ -26,10 +32,10 @@ def test_runtime_bill_counts_for_task_daily_and_guard_after_unknown_catalog_even
         recorder = ClaudeRunRecorder(agent_id="worker-priced-runtime", task_id="priced-runtime", command=["claude"],
                                      cwd=str(tmp_path), input_text="synthetic", launch=launch)
         await recorder.start()
-        recorder.account(usage_event("claude-haiku-5-5", Usage(input_tokens=100)))
+        recorder.account(pricing.usage_event("claude-haiku-5-5", Usage(input_tokens=100)))
         assert recorder.cap_stop is None
         assert recorder._spend.budget_cost_usd == pytest.approx(0.0002)
-        assert not caplog.records
+        assert not [r for r in caplog.records if r.name in cost_loggers and r.levelno >= logging.WARNING]
         await recorder.finish(output_text="done", result_event={
             "type": "result", "subtype": "success", "total_cost_usd": 0.05})
         saved = await pool.fetchrow("SELECT cost_usd, cost_source, metadata FROM llm_records WHERE id=$1",
@@ -48,7 +54,7 @@ def test_runtime_bill_counts_for_task_daily_and_guard_after_unknown_catalog_even
             assert all(row["spent_usd"] == 0.05 and row["cost_status"] == "known" for row in counters)
 
     run_db(check, monkeypatch, timeout=30)
-    assert not caplog.records
+    assert not [r for r in caplog.records if r.name in cost_loggers and r.levelno >= logging.WARNING]
 
 
 def test_unpriced_main_model_keeps_runtime_bill_after_manager_turn_cap(monkeypatch, tmp_path):
@@ -69,7 +75,7 @@ def test_unpriced_main_model_keeps_runtime_bill_after_manager_turn_cap(monkeypat
         recorder = ClaudeRunRecorder(agent_id="manager", task_id=None, command=["claude"], cwd=str(tmp_path),
                                      input_text="synthetic", launch=launch, **options)
         await recorder.start()
-        recorder.account(usage_event("claude-haiku-5-5", Usage(input_tokens=100)))
+        recorder.account(pricing.usage_event("claude-haiku-5-5", Usage(input_tokens=100)))
         assert recorder.cap_stop is not None
         await recorder.finish(output_text="", result_event={
             "type": "result", "subtype": "success", "total_cost_usd": 0.05})
