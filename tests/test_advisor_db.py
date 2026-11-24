@@ -591,13 +591,14 @@ def test_unknown_advisor_cost_does_not_retry_with_a_full_budget(monkeypatch, tmp
     assert "claude-haiku-5-5" in caplog.text and "budget" in caplog.text
 
 
-@pytest.mark.parametrize("previous_run", [False, True])
-def test_unknown_cost_uses_existing_planner_failure_text(monkeypatch, tmp_path, previous_run):
+@pytest.mark.parametrize("phase", ["previous_run", "judge", "advisor"])
+def test_unknown_cost_uses_existing_planner_failure_text(monkeypatch, tmp_path, phase):
     from unittest.mock import AsyncMock
 
     from looper.agents import advisor
+    from looper.agents.agent_settings import AgentType
     from looper.agents.model_call import CallFailed, CallFailure, Execution
-    from looper.agents.tiers.planner_advice import ended_lines
+    from looper.agents.tiers.planner_advice import ended_lines, ended_message
     from looper.db import agent_spawns, llm_records
 
     async def check(pool):
@@ -606,25 +607,30 @@ def test_unknown_cost_uses_existing_planner_failure_text(monkeypatch, tmp_path, 
         await llm_records.finish_record(record, status="completed", model="claude-haiku-5-5", input_tokens=10,
                                        pool=pool)
         await agent_spawns.note_run(spawn, record)
-        async def failed_call(*args, **kwargs):
+        original_call = advisor.call
+
+        async def failed_call(request, **kwargs):
+            if phase == "advisor" and request.child.role is AgentType.ADVICE_CHECK:
+                return await original_call(request, **kwargs)
             await advisor._book(spawn, Execution(None, record_id=record))
             return CallFailed(execution=Execution(None, record_id=record, models=("claude-haiku-5-5",)),
                               failure=CallFailure.RUNTIME, reason="runtime failed")
 
         called = AsyncMock(side_effect=failed_call)
         monkeypatch.setattr(advisor, "call", called)
-        if previous_run:
+        if phase == "previous_run":
             await advisor._book(spawn, Execution(None, record_id=record))
         ended = await _submit(tmp_path, spawn, _request())
-        assert called.await_count == (0 if previous_run else 1)
-        assert ended_lines(ended.failure, ended.detail) == [
-            ("The consult gave no answer: budget, it reached its spend cap "
-             "(its cost is unknown, so its cap of 1 USD cannot be checked)." if previous_run else
-             "The consult gave no answer: judge, the judge could not check the request "
-             "(the judge could not judge the request: its cost is unknown, so its cap of 1 USD cannot be checked)."),
+        assert called.await_count == {"previous_run": 0, "judge": 1, "advisor": 2}[phase]
+        assert ended_lines(ended.failure, ended.detail) == ended_lines("budget") == [
+            "The consult gave no answer: budget, it reached its spend cap.",
             "Decide without it; advise is offered again for this once something new is known.",
         ]
+        assert ended_message("Rewrite", 1, ended.failure, ended.detail, "proceed, replan") == ended_message(
+            "Rewrite", 1, "budget", "", "proceed, replan")
         row = await agent_spawns.get(spawn)
+        assert row["state"] == "over_budget"
+        assert "its cost is unknown" in row["detail"]
         assert row["cost_status"] == "unknown"
         assert row["result"]["unpriced_runs"] == [record]
 

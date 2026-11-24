@@ -415,6 +415,9 @@ async def _end(row: Mapping[str, Any], state: SpawnState, *, spent_usd: float = 
     moved = await agent_spawns.move(row["id"], state, expect=SpawnState(row["state"]), spent_usd=spent_usd,
                                     child_record_id=child.record_id if child is not None else None,
                                     result=result, append=append, detail=detail or None)
+    if state is SpawnState.OVER_BUDGET and (moved or row).get("cost_status") == CostStatus.UNKNOWN.value:
+        # Keep the unknown-cost diagnosis in the record; the Planner gets the existing budget failure text.
+        failure, detail = "budget", ""
     return Ended(state, response if state is SpawnState.ANSWERED else None, failure, detail, moved or {})
 
 
