@@ -36,16 +36,35 @@ async def test_exact_grammar_and_non_operator_fall_through(monkeypatch):
     monkeypatch.setattr(routing.operator_identity, 'operator_sender_id', AsyncMock(return_value='operator'))
     pending = AsyncMock(return_value=[{'id': 8}])
     monkeypatch.setattr(routing.store, 'list_pending', pending)
+    # A bare id is a budget hold here, so it still falls through. Only that form reads the row.
+    looked = AsyncMock(return_value={'id': 8, 'state': 'pending', 'reason': 'budget'})
+    monkeypatch.setattr(routing.store, 'get', looked)
     for text in ('请继续', '继续 C-8 4 美元', '停 C-8 now', '继续 C-8', 'stop', '继续 C-8 -1'):
         assert await routing.route(envelope(text), platform=SimpleNamespace()) is None
     assert await routing.route(envelope('停', sender='someone'), platform=SimpleNamespace()) is None
     pending.assert_not_awaited()
+    assert looked.await_count == 1
     decide = AsyncMock(return_value={'state': 'continued'})
     monkeypatch.setattr(routing.cost_holds, 'decide', decide)
     result = await routing.route(envelope('继续 C-8 4'), platform=SimpleNamespace())
     assert result.action is not None
     assert '继续' in await result.action()
     assert decide.call_args.args[:3] == (8, 'continue', 4.0)
+
+
+@async_test
+async def test_bare_continue_decides_only_a_pending_unanswered_hold(monkeypatch):
+    monkeypatch.setattr(settings, 'cached', lambda: settings.Config(
+        unanswered=settings.UnansweredRule(enabled=True)))
+    monkeypatch.setattr(routing.operator_identity, 'operator_sender_id', AsyncMock(return_value='operator'))
+    monkeypatch.setattr(routing.store, 'get', AsyncMock(return_value={
+        'id': 3, 'state': 'pending', 'reason': 'unanswered'}))
+    monkeypatch.setattr(routing.store, 'list_pending', AsyncMock(side_effect=AssertionError('id is explicit')))
+    decide = AsyncMock(return_value={'state': 'continued'})
+    monkeypatch.setattr(routing.cost_holds, 'decide', decide)
+    result = await routing.route(envelope('继续 C-3'), platform=SimpleNamespace())
+    assert '继续' in await result.action()
+    assert decide.call_args.args[:3] == (3, 'continue', None)
 
 
 @async_test

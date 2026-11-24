@@ -4,10 +4,13 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { NeedsYouPage } from "@/pages/needs-you";
 import { attentionSettingsGet, fetchAttention, type AttentionSummary } from "@/lib/api-attention";
-import { V1Error } from "@/lib/v1";
+import { callV1, confirmV1, V1Error } from "@/lib/v1";
 
 vi.mock("@/lib/api-attention", async (original) => ({
   ...await original<typeof import("@/lib/api-attention")>(), attentionSettingsGet: vi.fn(), fetchAttention: vi.fn(),
+}));
+vi.mock("@/lib/v1", async (original) => ({
+  ...await original<typeof import("@/lib/v1")>(), callV1: vi.fn(), confirmV1: vi.fn(),
 }));
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -120,6 +123,28 @@ describe("Needs you page", () => {
     expect(host.textContent).toContain("chat-synthetic: 08:00–08:02");
     expect(host.textContent).toContain("Check the chat and forward missed messages to Looper.");
     expect(host.querySelector('a[href="#settings/channels"]')).not.toBeNull();
+  });
+
+  it("resumes an automatically paused schedule after confirmation", async () => {
+    vi.mocked(fetchAttention).mockResolvedValue({ read_at: "2026-11-20T08:00:00Z", total: 1, sections: [
+      { kind: "schedules", state: "ok", count: 1, error: null, items: [
+        { key: "schedule:sched-paused", title: "Morning brief", context: "Demo", since: "2026-11-20T05:00:00Z",
+          href: "#schedules/sched-paused", ref: null, facts: { alerts: ["unanswered"], failures: 0,
+            last_status: null, last_ok_at: null } }] },
+    ] });
+    vi.mocked(callV1).mockResolvedValue({ status: "needs_confirmation", confirmation_id: "confirm-resume",
+      expires_in_seconds: 60, impact: "Enable the schedule.", session: "resume-session" });
+    vi.mocked(confirmV1).mockResolvedValue({ id: "sched-paused" });
+    await render();
+    const section = host.querySelector('section[aria-label="Failing schedules"]')!;
+    expect(section.textContent).toContain("nobody replied, paused automatically");
+    expect(section.textContent).toContain("恢复");
+    await act(async () => { (section.querySelector("button") as HTMLButtonElement).click(); });
+    expect(callV1).toHaveBeenCalledWith("/api/v1/schedule_admin/update", {
+      schedule_id: "sched-paused", fields: { enabled: true },
+    });
+    expect(confirmV1).toHaveBeenCalledWith("confirm-resume", "resume-session");
+    expect(fetchAttention).toHaveBeenCalledTimes(2);
   });
 
   it("says when the summary is off", async () => {
