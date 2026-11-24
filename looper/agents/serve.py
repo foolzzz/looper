@@ -733,8 +733,9 @@ async def _run_agent_system_owned(
 ) -> None:
     """Start the full agent system with the ops settings ``ops`` and run until interrupted."""
 
-    from . import session_routing
+    from . import lanes_settings, session_routing
 
+    previous_lanes = lanes_settings.enabled()
     previous_routing = session_routing.routing_enabled()
     previous_max_resident = session_routing.max_resident()
     loop_watch = LoopWatch()
@@ -746,6 +747,7 @@ async def _run_agent_system_owned(
                                         exit_now=exit_now, loop_watch=loop_watch)
     finally:
         # Startup loads process-wide routing settings; keep later serves independent, even after a failed start.
+        lanes_settings.set_enabled(previous_lanes)
         session_routing.set_routing_enabled(previous_routing)
         session_routing.set_max_resident(previous_max_resident)
         await loop_watch.stop()
@@ -1038,9 +1040,6 @@ async def _run_agent_system_watched(
             from .managers import ManagerFleet
             platform = Platform(bus=bus, task_router=task_router, worker_pool=worker_pool, manager=None,
                                 supervisor=supervisor, scheduler=scheduler, runtime_root=runtime_root)
-            from . import cost_alerts, cost_holds
-            cost_alerts.configure(registry.notify, dashboard_url=dashboard_url)
-            cost_holds.configure(platform, sender=registry.notify, dashboard_url=dashboard_url)
             tools_ready = asyncio.Event()
             fleet = ManagerFleet(platform=platform, supervisor=supervisor, runtime_root=runtime_root,
                                  url=_local_url(host, port), config=manager_config, broadcaster=broadcaster, drain=drain,
@@ -1063,6 +1062,13 @@ async def _run_agent_system_watched(
                              stop_chat=fleet.stop_chat, startup=startup)
         await _register_bots(registry, bot_rows, runtime_root, fleet.is_running, ("lark", "lark_bot"),
                              stop_chat=fleet.stop_chat, startup=startup)
+        from . import cost_alerts, cost_holds
+        cost_alerts.configure(registry.notify, dashboard_url=dashboard_url)
+        # The web adapter is registered long before these bots. Deliver only after every adapter is registered:
+        # a Telegram or Lark question sent earlier is "not running" and stays unsent. A later unanswered pass
+        # retries a send that still fails.
+        await cost_holds.deliver_unsent_questions(
+            platform, sender=registry.notify, dashboard_url=dashboard_url, pool=pool)
 
         # Receive and persist backlog before listening. Managers wait for HTTP readiness;
         # advisory checks run afterwards and only warn here and on system/status.

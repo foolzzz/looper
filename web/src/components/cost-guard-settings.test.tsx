@@ -179,4 +179,18 @@ describe("花费观察", () => {
     expect(container.textContent).toContain("没有等待决定的花费");
   });
 
+  it("continues an unanswered hold without an amount field", async () => {
+    holds = [{ id: 4, scope: "schedule", scope_ref: "sched-brief", currency: null, limit_usd: null, spent_usd: null,
+      pushes: 15, reason: "unanswered", state: "pending", created_at: "2026-11-20T08:00:00Z" }];
+    needsConfirmation = true;
+    await render();
+    expect(container.querySelector('input[aria-label="C-4 新上限（美元）"]')).toBeNull();
+    expect(container.textContent).toContain("15 条推送没人回");
+    expect(container.textContent).not.toContain("新上限");
+    await act(async () => (Array.from(container.querySelectorAll("button")).find((button) => button.textContent === "继续") as HTMLButtonElement).click());
+    expect(decisions).toEqual([{ hold_id: 4, decision: "continue" }]);
+    expect(container.textContent).toContain("确认继续");
+    expect(container.textContent).not.toContain("确认提高上限");
+  });
+
 });

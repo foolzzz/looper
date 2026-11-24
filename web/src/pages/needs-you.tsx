@@ -11,6 +11,7 @@ import { sinceText } from "@/lib/gates";
 import { startPolling } from "@/lib/polling";
 import { errorText } from "@/lib/use-action";
 import { cn } from "@/lib/utils";
+import { callV1, confirmV1, type V1PendingConfirmation } from "@/lib/v1";
 
 /** How often the page reads the summary again. */
 const REFRESH_MS = 15_000;
@@ -41,6 +42,7 @@ const HOW: Partial<Record<AttentionKind, string>> = {
 
 const ALERTS: Record<string, string> = {
   failures: "failures alert", stale: "no success for too long", deadline: "missed its deadline", overlap: "runs overlap",
+  unanswered: "nobody replied, paused automatically",
 };
 const LEDGER_KINDS: Record<string, string> = { pending: "to-do", decision: "decision to confirm", work_item: "work item" };
 const DELIVERY_SOURCES: Record<string, string> = {
@@ -78,6 +80,9 @@ function details(kind: AttentionKind, item: AttentionItem): { line: string; badg
       return { line: parts(ref, LEDGER_KINDS[text(facts.kind)] ?? text(facts.kind)),
         badges: facts.overdue === true ? ["overdue"] : [] };
     case "cost":
+      if (facts.reason === "unanswered") {
+        return { line: parts(ref, context, count(facts.pushes) > 0 && `${count(facts.pushes)} 条推送没人回`), badges: [] };
+      }
       return { line: parts(ref, context, facts.currency === "equivalent_usd" ? "等价花费" : "真钱",
         `已花及预留 $${count(facts.spent_usd).toFixed(2)} / 上限 $${count(facts.limit_usd).toFixed(2)}`), badges: [] };
     case "deliveries":
@@ -87,10 +92,31 @@ function details(kind: AttentionKind, item: AttentionItem): { line: string; badg
   }
 }
 
-function Item({ kind, item }: { kind: AttentionKind; item: AttentionItem }) {
+function isPending(value: unknown): value is V1PendingConfirmation {
+  return Boolean(value) && typeof value === "object" && (value as { status?: string }).status === "needs_confirmation";
+}
+
+function Item({ kind, item, onResumed }: { kind: AttentionKind; item: AttentionItem; onResumed: () => Promise<void> }) {
   const { line, badges } = details(kind, item);
+  const paused = kind === "schedules" && Array.isArray(item.facts.alerts) && item.facts.alerts.includes("unanswered");
+  const scheduleId = item.key.startsWith("schedule:") ? item.key.slice("schedule:".length) : "";
+  const [busy, setBusy] = useState(false);
+  const [resumeError, setResumeError] = useState("");
+  async function resume() {
+    setBusy(true); setResumeError("");
+    try {
+      const result = await callV1("/api/v1/schedule_admin/update",
+        { schedule_id: scheduleId, fields: { enabled: true } });
+      if (isPending(result)) {
+        const confirmed = await confirmV1(result.confirmation_id, result.session);
+        if (isPending(confirmed)) { setResumeError("仍需要确认后才能恢复。"); return; }
+      }
+      await onResumed();
+    } catch (err) { setResumeError(errorText(err)); }
+    finally { setBusy(false); }
+  }
   return (
-    <li className="flex flex-col gap-1 py-2.5 text-sm sm:flex-row sm:items-baseline sm:gap-4">
+    <li className="flex min-w-0 flex-col gap-2 py-2.5 text-sm sm:flex-row sm:flex-wrap sm:items-center sm:gap-4">
       <div className="min-w-0 flex-1 space-y-0.5">
         {item.href ? (
           <a href={item.href} className={cn(
@@ -116,11 +142,16 @@ function Item({ kind, item }: { kind: AttentionKind; item: AttentionItem }) {
           {sinceText(item.since)} ago
         </time>
       )}
+      {paused && (
+        <Button type="button" variant="outline" size="sm" className="shrink-0" disabled={busy}
+          onClick={() => void resume()}>恢复</Button>
+      )}
+      {resumeError && <p role="alert" className="w-full min-w-0 text-xs text-destructive [overflow-wrap:anywhere]">{resumeError}</p>}
     </li>
   );
 }
 
-function Section({ section }: { section: AttentionSection }) {
+function Section({ section, onResumed }: { section: AttentionSection; onResumed: () => Promise<void> }) {
   const { kind, state, items } = section;
   const more = section.count - items.length;
   return (
@@ -138,7 +169,7 @@ function Section({ section }: { section: AttentionSection }) {
         <>
           {HOW[kind] && <p className="mt-1 text-xs text-muted-foreground">{HOW[kind]}</p>}
           <ul className="mt-1 divide-y divide-border">
-            {items.map((item) => <Item key={item.key} kind={kind} item={item} />)}
+            {items.map((item) => <Item key={item.key} kind={kind} item={item} onResumed={onResumed} />)}
           </ul>
           {more > 0 && <p className="mt-1 text-xs text-muted-foreground">and {more} more</p>}
         </>
@@ -222,7 +253,7 @@ export function NeedsYouPage() {
         </p>
       )}
 
-      {shown.map((section) => <Section key={section.kind} section={section} />)}
+      {shown.map((section) => <Section key={section.kind} section={section} onResumed={() => read()} />)}
 
       {summary && (clear.length > 0 || unknown.length > 0) && (
         <div className="space-y-1 text-xs text-muted-foreground">

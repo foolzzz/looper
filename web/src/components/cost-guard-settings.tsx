@@ -32,20 +32,28 @@ function outcomeText(row: Observation): string {
   return "超出上限";
 }
 const SOURCES: Record<string, string> = { run_cap: "单次上限", p95: "近 30 天 P95", floor: "角色下限", floor_no_samples: "无历史样本，使用下限" };
-const SCOPES: Record<string, string> = { task: "任务", schedule_day: "定时任务当天", role_day: "角色当天", global_day: "全局当天" };
+const SCOPES: Record<string, string> = { task: "任务", schedule_day: "定时任务当天", role_day: "角色当天", global_day: "全局当天",
+  schedule: "定时任务" };
 
-type Hold = { id: number; scope: string; scope_ref: string; currency: string; limit_usd: number;
-  spent_usd: number; created_at: string; task_ids?: string[]; reason?: string };
+type Hold = { id: number; scope: string; scope_ref: string; currency: string | number | null;
+  limit_usd: string | number | null; spent_usd: string | number | null; created_at: string;
+  task_ids?: string[]; reason?: string; pushes?: number | null };
+
+function unansweredHold(hold: Hold): boolean {
+  return hold.reason === "unanswered"
+    || (hold.currency == null && hold.limit_usd == null && hold.spent_usd == null && hold.pushes != null);
+}
 
 /** One hold's explicit decision, including the existing operator confirmation when a cap is raised. */
 function HoldDecision({ hold, onDecided }: { hold: Hold; onDecided: () => void }) {
+  const unanswered = unansweredHold(hold);
   const [amount, setAmount] = useState("");
   const [pending, setPending] = useState<V1PendingConfirmation | null>(null);
   const [pendingDecision, setPendingDecision] = useState<"continue" | "stop">("continue");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   async function decide(decision: "continue" | "stop") {
-    const value = amount.trim() ? Number(amount) : undefined;
+    const value = !unanswered && amount.trim() ? Number(amount) : undefined;
     if (decision === "continue" && value !== undefined && (!Number.isFinite(value) || value < 0)) {
       setError("请填写有效的美元上限。"); return;
     }
@@ -71,18 +79,20 @@ function HoldDecision({ hold, onDecided }: { hold: Hold; onDecided: () => void }
   }
   return <li className="space-y-3 py-4 first:pt-0 last:pb-0">
     <p className="font-medium">C-{hold.id} · {SCOPES[hold.scope] ?? hold.scope} {hold.scope_ref}</p>
-    <p className="text-sm text-muted-foreground">{currency(hold.currency)}已花及预留 {money(hold.spent_usd)} / 上限 {money(hold.limit_usd)}。{hold.task_ids?.length || hold.scope === "task" ? "24 小时未回答会停下任务。" : "24 小时未回答，上限不变。"}{hold.reason === "review_budget" && "被拦下的动作不会自动重发。"}</p>
+    <p className="text-sm text-muted-foreground">{unanswered
+      ? `${hold.pushes ?? ""} 条推送没人回。继续不需要填写上限；停则暂停这个定时任务。`
+      : <>{currency(String(hold.currency ?? ""))}已花及预留 {money(typeof hold.spent_usd === "number" ? hold.spent_usd : null)} / 上限 {money(typeof hold.limit_usd === "number" ? hold.limit_usd : null)}。{hold.task_ids?.length || hold.scope === "task" ? "24 小时未回答会停下任务。" : "24 小时未回答，上限不变。"}{hold.reason === "review_budget" && "被拦下的动作不会自动重发。"}</>}</p>
     {pending ? <div className="space-y-2" role="status">
       <p className="text-sm">{pending.impact}</p>
       <div className="flex flex-wrap gap-2">
-        <Button type="button" disabled={busy} onClick={() => void confirm()}>{pendingDecision === "stop" ? "确认停下" : "确认提高上限"}</Button>
+        <Button type="button" disabled={busy} onClick={() => void confirm()}>{pendingDecision === "stop" ? "确认停下" : unanswered ? "确认继续" : "确认提高上限"}</Button>
         <Button type="button" variant="outline" disabled={busy} onClick={() => setPending(null)}>取消</Button>
       </div>
     </div> : <div className="flex flex-wrap items-end gap-2">
-      <label className="space-y-1 text-sm">新上限（美元）
+      {!unanswered && <label className="space-y-1 text-sm">新上限（美元）
         <Input className="w-40" aria-label={`C-${hold.id} 新上限（美元）`} inputMode="decimal" value={amount}
           onChange={(event) => setAmount(event.target.value)} placeholder="继续时可提高" disabled={busy} />
-      </label>
+      </label>}
       <Button type="button" disabled={busy} onClick={() => void decide("continue")}>继续</Button>
       <Button type="button" variant="outline" disabled={busy} onClick={() => void decide("stop")}>停</Button>
     </div>}

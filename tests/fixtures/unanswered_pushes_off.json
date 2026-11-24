@@ -1,0 +1,271 @@
+{
+  "attention": {
+    "cost": null,
+    "schedules": {
+      "count": 1,
+      "items": [
+        {
+          "facts": {
+            "alerts": [
+              "failures"
+            ],
+            "failures": 2,
+            "last_ok_at": null,
+            "last_status": null
+          },
+          "key": "schedule:sched-failing",
+          "ref": null,
+          "title": "Failing brief"
+        }
+      ],
+      "state": "ok"
+    }
+  },
+  "failing": [
+    {
+      "consecutive_failures": 2,
+      "id": "sched-failing",
+      "last_status": null,
+      "name": "Failing brief",
+      "project_id": "p-off",
+      "project_name": "Off"
+    }
+  ],
+  "manager_tool_names": [
+    "looper_overview",
+    "looper_tasks",
+    "looper_task_create",
+    "looper_task_control",
+    "looper_task_instruct",
+    "looper_task_gate_reply",
+    "looper_task_update",
+    "looper_concurrency",
+    "looper_projects",
+    "looper_agent_profiles",
+    "looper_providers",
+    "looper_models",
+    "looper_catalog",
+    "looper_config_export",
+    "looper_costs",
+    "looper_settings",
+    "looper_schedules",
+    "looper_confirm"
+  ],
+  "queries_on_check": 0,
+  "resume": {
+    "enabled": true,
+    "id": "sched-disabled",
+    "name": "Disabled brief",
+    "pause_reason": null,
+    "paused_at": null,
+    "unanswered_snooze_until": null
+  },
+  "routes": {
+    "hello": null,
+    "\u505c": null,
+    "\u505c C-1": null,
+    "\u7ee7\u7eed": null,
+    "\u7ee7\u7eed C-1": null,
+    "\u7ee7\u7eed C-1 5": null
+  },
+  "schedule_tool_schemas": {
+    "looper_schedules": {
+      "additionalProperties": false,
+      "properties": {
+        "action": {
+          "enum": [
+            "list",
+            "get",
+            "create",
+            "update",
+            "enable",
+            "disable",
+            "run",
+            "delete",
+            "reset_planner_session"
+          ],
+          "type": "string"
+        },
+        "enabled": {
+          "description": "list: only those enabled (true) or not.",
+          "type": "boolean"
+        },
+        "fields": {
+          "description": "create, update (only those to change; null clears one).",
+          "properties": {
+            "alert_failures_after": {
+              "description": "Alert after this many consecutive failures; null: default.",
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "alert_overlap_after": {
+              "description": "Alert after this many consecutive overlap skips; 0: off; null: default.",
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "alert_stale_after_seconds": {
+              "description": "Alert after this many seconds without success; null: default.",
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "catch_up": {
+              "enum": [
+                "once",
+                "skip"
+              ],
+              "type": "string"
+            },
+            "command": {
+              "description": "kind command: the shell command, as the user gave it.",
+              "type": "string"
+            },
+            "cron": {
+              "description": "5 fields.",
+              "type": "string"
+            },
+            "daily_budget_usd": {
+              "type": "number"
+            },
+            "env": {
+              "additionalProperties": {
+                "type": "string"
+              },
+              "description": "kind command: variables to set; never secrets (use env_file).",
+              "type": "object"
+            },
+            "env_file": {
+              "description": "kind command: a KEY=VALUE file read at each run; only its path is stored.",
+              "type": "string"
+            },
+            "gate_command": {
+              "description": "Shell; prints each run's input, nothing skips it.",
+              "type": "string"
+            },
+            "gate_timeout_seconds": {
+              "type": "integer"
+            },
+            "kind": {
+              "description": "create only. command: runs `command` with /bin/sh at each firing, no task, no agent and no model spend; for scripts the user names. Default agent.",
+              "enum": [
+                "agent",
+                "command"
+              ],
+              "type": "string"
+            },
+            "max_parallel_runs": {
+              "type": "integer"
+            },
+            "name": {
+              "type": "string"
+            },
+            "notify": {
+              "enum": [
+                "failures",
+                "alerts",
+                "always",
+                "never"
+              ],
+              "type": "string"
+            },
+            "notify_format": {
+              "description": "report (default): operator report; deliverable: delivered text only, agent schedules only.",
+              "enum": [
+                "report",
+                "deliverable"
+              ],
+              "type": "string"
+            },
+            "notify_target": {
+              "description": "{channel, chat}; null: dashboard only.",
+              "type": "object"
+            },
+            "overlap": {
+              "enum": [
+                "skip",
+                "queue",
+                "parallel"
+              ],
+              "type": "string"
+            },
+            "profiles": {
+              "description": "{planner, worker, reviewer}: Agent Profile (id or name) per role; a role left out keeps the project's. Set only what the user asks for: a repetitive schedule's Planner may be a cheaper profile.",
+              "type": "object"
+            },
+            "requirement": {
+              "type": "string"
+            },
+            "run_budget_usd": {
+              "type": "number"
+            },
+            "run_timeout_seconds": {
+              "description": "Seconds; null: no limit; 'default' (a new schedule's): the system default."
+            },
+            "success_deadline": {
+              "description": "HH:MM in the schedule's zone: alert once when no run succeeded since the previous deadline.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "task_limits": {
+              "description": "{worker, reviewer}: each run's task's own limits.",
+              "type": "object"
+            },
+            "template_inputs": {
+              "additionalProperties": {
+                "type": "string"
+              },
+              "description": "Static string values by template input key; omitted: keep inputs unless changing template_key. Supplied values replace all inputs.",
+              "type": "object"
+            },
+            "template_key": {
+              "description": "This schedule owner's template key; omitted: keep selection; a new key resets inherited inputs; null clears selection and inputs.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "timezone": {
+              "description": "IANA.",
+              "type": "string"
+            },
+            "user_gates": {
+              "description": "Allow this schedule's tasks to ask for user input when the project also allows user gates. Default off. Waiting counts against the run timeout.",
+              "enum": [
+                "off",
+                "on"
+              ],
+              "type": "string"
+            },
+            "work_dir": {
+              "description": "'' for the project's.",
+              "type": "string"
+            }
+          },
+          "type": "object"
+        },
+        "project": {
+          "description": "create: its project; list: only its schedules; with a schedule's name: its project.",
+          "minLength": 1,
+          "type": "string"
+        },
+        "schedule": {
+          "description": "Its id (sched-...) or name.",
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": [
+        "action"
+      ],
+      "type": "object"
+    }
+  },
+  "sha": "3c718301c47d3e246ffb3342d7c2bb0f47d6daed"
+}

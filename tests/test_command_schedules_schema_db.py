@@ -104,7 +104,8 @@ def test_existing_baseline_upgrades_once_preserves_data_and_matches_fresh():
             expected = {line.strip().split()[0]: None for line in _SCHEDULE_COLUMNS.splitlines()}
             expected.update({line.strip().split()[0]: None for line in _SESSION_COLUMNS.splitlines()})
             expected.update(kind="agent", env="{}", consecutive_overlaps=0, notify_format="report", active_hours=None,
-                            idle_only=False, daily_budget_equivalent_usd=None)
+                            idle_only=False, daily_budget_equivalent_usd=None,
+                            pause_reason=None, paused_at=None, unanswered_snooze_until=None)
             assert dict(await old.fetchrow("SELECT * FROM schedules")) == {**before["schedules"][0], **expected}
             run_defaults = {line.strip().split()[0]: None for line in _RUN_COLUMNS.splitlines()}
             run_defaults.update({line.strip().split()[0]: None for line in _SESSION_RUN_COLUMNS.splitlines()})
@@ -176,6 +177,13 @@ def test_additive_run_column_upgrade_preserves_runs_and_matches_fresh(column, de
     ("schedules", "consecutive_overlaps=-1", False),
     ("schedules", "alert_failures_after=1,alert_stale_after_seconds=300,alert_overlap_after=0", True),
     ("schedules", "alert_failures_after=1000,alert_stale_after_seconds=2592000,alert_overlap_after=10000", True),
+    ("schedules", "pause_reason='operator',paused_at=now()", True),
+    ("schedules", "pause_reason='unanswered',paused_at=now()", True),
+    ("schedules", "pause_reason='budget',paused_at=now()", True),
+    ("schedules", "pause_reason='quota',paused_at=now()", True),
+    ("schedules", "pause_reason='bogus',paused_at=now()", False),
+    ("schedules", "pause_reason='unanswered'", False),
+    ("schedules", "paused_at=now()", False),
     ("schedule_runs", "status='succeeded'", True),
     ("schedule_runs", "status='interrupted'", True),
     ("schedule_runs", "status='bogus'", False),
