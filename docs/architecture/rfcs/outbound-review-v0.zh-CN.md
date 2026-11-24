@@ -394,6 +394,15 @@ CREATE INDEX IF NOT EXISTS idx_outbound_reviews_blocked ON outbound_reviews (cre
 - **审计列表：** 一个列表页（时间、agent、工具、目标、判定、理由、花费、耗时），可以按「只看拦截」和任务筛选；任务页的 Agents 运行树里，分类器的运行挂在发起它的运行下面（复用 `kind`、`parent_record_id`）。
 - 按 `docs/design.md` 的界面规则做，用一次性的 serve 拍 1280 和 390 两种宽度的无头截图。
 
+管理入口已实现：`#settings/security` 独立保存两个开关；`#settings/roles/outbound_check` 配置分类器，
+只使用本角色或内置设置，实际超时最多30秒（存储0也封顶）；`#settings/security/audit` 分页读取审计。
+开关、审计以及该安全角色的直接写入和配置导入只允许 operator；通用 Profile、provider 和 Shared defaults
+权限保持原边界。审计仅返回白名单事实，关联 id 是十进制字符串，未知金额/耗时不显示成0；大于现有运行读取
+接口安全整数范围的运行编号保留原文，不生成失真的链接。cursor 绑定筛选，使用时间与 id 的 keyset，不先 COUNT。
+两个开关不进入 portable 配置或 Manager 工具；Telegram/Lark 沿用 Web 设置入口，CLI 复用同一 API。
+管理读取的数据库故障显示不可读，不能伪装成关闭。默认关闭和运行时模型可见内容保持原样。
+隔离服务与浏览器验收见[验证记录](../../validation/outbound-review-settings/README.md)；合成审计数据不代表运行过分类器。
+
 ## 13. 评测与测试
 
 - **单测（测试先行）：** 每个工具都声明了级别（清单测试）；`level_of` 的每种参数分支；审查在确认之前、拦了不问、放行后照旧确认；非操作者回合直接拦；判定解析的每种失败；每种失败语义都拦截并写审计；拦截时模型和操作者各收到什么；围栏转义（内容里的 `</untrusted>`、属性里的引号）、@ 标记去除；关闭时逐字节不变（工具列表、提示词、命令行的摘要）；来源标记：只有返回了线索的查询才标记会话，新会话失效，带标记的会话里四种写调用给任务加标记，意图建的任务加 `intent`；带线索的任务里 Worker、Reviewer 带钩子、其他任务不带；没有拦截点时不派发、尝试失败并通知；有 Manager 跑在没有拦截点的运行时上时拒绝打开审查；钩子包装在检查程序缺失、崩溃时输出 deny。

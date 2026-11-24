@@ -178,6 +178,9 @@ DECIDED_OPERATIONS: dict[str, ActionLevel] = {
     "memory.propose_from_lead": INSIDE,  # stores a candidate inside Looper; writes no vault file
     "outbound_review.get": INSIDE,  # reads Looper's own review setting
     "outbound_review.update": INSIDE,  # changes Looper's own review setting
+    "outbound_review.list": INSIDE,  # reads stored audit rows without sending content
+    "untrusted_fence.get": INSIDE,  # reads Looper's own content-fence setting
+    "untrusted_fence.update": INSIDE,  # changes only how Looper wraps incoming content
     "project_skills.context_budget": INSIDE,  # reads the displayed skill-description budget; sends nothing
     "project_skills.deprecate": INSIDE,  # marks a catalog skill deprecated inside Looper; sends nothing and does not touch installs or files
     "project_skills.restore": INSIDE,  # marks a catalog skill active inside Looper; sends nothing and does not touch installs or files
