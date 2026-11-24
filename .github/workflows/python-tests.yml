@@ -4,6 +4,8 @@ name: Python Tests
 # PostgreSQL ones run against the service database; and the dashboard's tests
 # (web/, npm test).
 on:
+  push:
+    branches: [main]
   pull_request:
   workflow_dispatch:
 
@@ -19,18 +21,21 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       docs_only: ${{ steps.filter.outputs.docs_only }}
+      web: ${{ steps.filter.outputs.web }}
     steps:
       - uses: actions/checkout@v7
         with:
           fetch-depth: 0
-      - name: Detect docs-only pull requests
+      - name: Detect docs-only and dashboard changes
         id: filter
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
           docs_only=false
+          web=true
           if [[ "$GITHUB_EVENT_NAME" == pull_request ]]; then
+            web=false
             # Disable rename detection so moving code into docs still runs tests.
             git diff --no-renames --name-only -z "$BASE_SHA...$HEAD_SHA" > "$RUNNER_TEMP/changed-paths"
             if [[ -s "$RUNNER_TEMP/changed-paths" ]]; then
@@ -38,12 +43,17 @@ jobs:
               while IFS= read -r -d '' path; do
                 case "$path" in
                   docs/*|*.md) ;;
-                  *) docs_only=false; break ;;
+                  *) docs_only=false ;;
+                esac
+                # Include staging and source-fingerprint inputs outside web/.
+                case "$path" in
+                  web/*|scripts/stage-dashboard.sh|looper/components.py|looper/components.toml|.github/workflows/python-tests.yml|.npmrc|.gitignore) web=true ;;
                 esac
               done < "$RUNNER_TEMP/changed-paths"
             fi
           fi
           echo "docs_only=$docs_only" >> "$GITHUB_OUTPUT"
+          echo "web=$web" >> "$GITHUB_OUTPUT"
 
   agent-system:
     name: Agent system tests (shard ${{ matrix.shard }}/6)
@@ -123,9 +133,16 @@ jobs:
           /usr/lib/postgresql/16/bin/pg_dump --version
           /usr/lib/postgresql/16/bin/pg_restore --version
 
+      # Browser and serve tests require real staged assets, even on backend-only PRs.
       - name: Build the dashboard
         if: needs.changes.outputs.docs_only != 'true'
         run: scripts/stage-dashboard.sh
+
+      - name: Allow unprivileged user namespaces
+        if: needs.changes.outputs.docs_only != 'true'
+        run: |
+          # Ubuntu 24.04's AppArmor sysctl hides these namespaces. Other images have no such key.
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || test ! -e /proc/sys/kernel/apparmor_restrict_unprivileged_userns
 
       - name: Run the tests
         if: needs.changes.outputs.docs_only != 'true'
@@ -138,6 +155,7 @@ jobs:
   bridge-schema-pg18:
     name: PostgreSQL 18 bridge upgrades and restarts
     needs: changes
+    if: (github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'workflow_dispatch' || (github.event_name == 'pull_request' && startsWith(github.head_ref, 'codex/release-'))
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     services:
@@ -190,10 +208,10 @@ jobs:
 
   provenance:
     # Proofs that pinned fixtures came from an old revision (pytest -m provenance). The shards exclude
-    # them; they run in the main canary (workflow_dispatch) and on release pull requests.
+    # them; they run on main pushes, dispatch canaries and release pull requests.
     name: Pinned-baseline provenance tests
     needs: changes
-    if: github.event_name == 'workflow_dispatch' || startsWith(github.head_ref, 'codex/release-')
+    if: (github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'workflow_dispatch' || (github.event_name == 'pull_request' && startsWith(github.head_ref, 'codex/release-'))
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     services:
@@ -246,22 +264,33 @@ jobs:
 
   agent-system-result:
     name: Agent system tests
-    needs: [agent-system, bridge-schema-pg18]
+    needs: [changes, agent-system, bridge-schema-pg18, provenance, dashboard]
     if: always()
     runs-on: ubuntu-24.04
     steps:
-      - name: Require every shard to succeed
+      - name: Require shards and any enabled checks to succeed
         env:
+          CHANGES_RESULT: ${{ needs.changes.result }}
           SHARDS_RESULT: ${{ needs.agent-system.result }}
           PG18_RESULT: ${{ needs.bridge-schema-pg18.result }}
+          PROVENANCE_RESULT: ${{ needs.provenance.result }}
+          DASHBOARD_RESULT: ${{ needs.dashboard.result }}
         run: |
           echo "Agent system shards: $SHARDS_RESULT"
+          test "$CHANGES_RESULT" = success
           test "$SHARDS_RESULT" = success
-          test "$PG18_RESULT" = success
+          # Optional jobs may be skipped by their job conditions, but never fail silently.
+          for result in "$PG18_RESULT" "$PROVENANCE_RESULT" "$DASHBOARD_RESULT"; do
+            case "$result" in
+              success|skipped) ;;
+              *) echo "Enabled check did not succeed: $result"; exit 1 ;;
+            esac
+          done
 
   dashboard:
     name: Dashboard tests
     needs: changes
+    if: needs.changes.outputs.docs_only != 'true' && (needs.changes.outputs.web == 'true' || (github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'workflow_dispatch' || (github.event_name == 'pull_request' && startsWith(github.head_ref, 'codex/release-')))
     runs-on: ubuntu-latest
     timeout-minutes: 10
     defaults:

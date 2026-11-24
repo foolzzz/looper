@@ -123,6 +123,8 @@ class MemoryDraftService:
                 "ORDER BY c.updated_at,c.id FOR UPDATE OF c SKIP LOCKED LIMIT 1", list(model.DRAFT_BLOCKING_STATES))
             if row is None:
                 return False
+            if await self._merge_exact(conn, row):
+                return True
             now = datetime.now(timezone.utc)
             midnight = now.astimezone().replace(hour=0, minute=0, second=0, microsecond=0)
             # Unknown-cost runs reserve a whole cap, so a missing price never opens an unlimited budget.
@@ -214,12 +216,12 @@ class MemoryDraftService:
                                now=datetime.now(timezone.utc))
 
     async def _failed(self, conn, cid, failure):
-        # Attempts since the last explicit redraft survive restarts; they are distinct from write attempts.
+        # Attempts since the last new seed or explicit redraft survive restarts, apart from write attempts.
         await store._event(conn, cid, model.Action.DRAFT, model.Actor.SYSTEM, model.Via.SYSTEM,
                            note=f"draft_failed:{failure}")
         count = await conn.fetchval("SELECT count(*) FROM memory_candidate_events WHERE candidate_id=$1 "
                                     "AND action='draft' AND id>COALESCE((SELECT max(id) FROM memory_candidate_events "
-                                    "WHERE candidate_id=$1 AND action='redraft'),0)", cid)
+                                    "WHERE candidate_id=$1 AND action IN ('redraft','propose')),0)", cid)
         if count >= 3:
             await self._drop(conn, cid, model.Reason.DRAFT_FAILED)
         logger.warning("memory draft candidate=%s failure=%s attempt=%s", model.format_id(cid), failure, count)
@@ -253,16 +255,7 @@ class MemoryDraftService:
                 logger.info("memory draft candidate=%s waiting=%s target=%s", model.format_id(row["id"]),
                             model.DraftWaitReason.TARGET_BUSY.value, model.format_id(target_id))
                 return True
-            await conn.execute("INSERT INTO memory_candidate_sources(candidate_id,kind,manager_action_id,journal_id,lead_id,quote) "
-                               "SELECT $2,s.kind,s.manager_action_id,s.journal_id,s.lead_id,s.quote FROM memory_candidate_sources s "
-                               "WHERE s.candidate_id=$1 AND NOT EXISTS (SELECT 1 FROM memory_candidate_sources t "
-                               "WHERE t.candidate_id=$2 AND t.kind=s.kind AND "
-                               "t.manager_action_id IS NOT DISTINCT FROM s.manager_action_id AND "
-                               "t.journal_id IS NOT DISTINCT FROM s.journal_id AND t.lead_id IS NOT DISTINCT FROM s.lead_id)",
-                               row["id"], target_id)
-            await conn.execute("UPDATE memory_candidates SET source_class=$2,untrusted=untrusted OR $3, "
-                               "flagged=flagged OR $4 WHERE id=$1",
-                               target_id, combined.value, row["untrusted"], bool(result.instructions_seen))
+            await self._merge_into(conn, row, target, flagged=bool(result.instructions_seen))
             # Free this candidate's old conflict path before the target's new revision takes it.
             await self._drop(conn, row["id"], model.Reason.SAME_AS, merged_into=target_id)
             if decision == "same_as":
@@ -277,6 +270,33 @@ class MemoryDraftService:
                                  now=datetime.now(timezone.utc), large_removal=result.large_removal,
                                  flagged=bool(result.instructions_seen), hard_rule=result.hard_rule, record_id=record_id)
         return True
+
+    async def _merge_exact(self, conn, row):
+        target = await conn.fetchrow("SELECT * FROM memory_candidates WHERE destination='vault' AND kind=$1 "
+                                     "AND fingerprint=$2 AND id<>$3 AND (state IN "
+                                     "('pending','confirmed','writing','blocked','conflict') OR (state='drafting' AND id<$3)) "
+                                     "ORDER BY id LIMIT 1 FOR UPDATE SKIP LOCKED", row["kind"], row["fingerprint"], row["id"])
+        if target is None:
+            return False
+        if not model.allowed(target["kind"], model.least_trusted([row["source_class"], target["source_class"]])):
+            await self._drop(conn, row["id"], model.Reason.DUPLICATE)
+        else:
+            await self._merge_into(conn, row, target)
+            await self._drop(conn, row["id"], model.Reason.SAME_AS, merged_into=target["id"])
+        return True
+
+    async def _merge_into(self, conn, row, target, flagged=False):
+        combined = model.least_trusted([row["source_class"], target["source_class"]])
+        await conn.execute("INSERT INTO memory_candidate_sources(candidate_id,kind,manager_action_id,journal_id,lead_id,quote) "
+                               "SELECT $2,s.kind,s.manager_action_id,s.journal_id,s.lead_id,s.quote FROM memory_candidate_sources s "
+                               "WHERE s.candidate_id=$1 AND NOT EXISTS (SELECT 1 FROM memory_candidate_sources t "
+                               "WHERE t.candidate_id=$2 AND t.kind=s.kind AND "
+                               "t.manager_action_id IS NOT DISTINCT FROM s.manager_action_id AND "
+                               "t.journal_id IS NOT DISTINCT FROM s.journal_id AND t.lead_id IS NOT DISTINCT FROM s.lead_id)",
+                               row["id"], target["id"])
+        await conn.execute("UPDATE memory_candidates SET source_class=$2,untrusted=untrusted OR $3, "
+                               "flagged=flagged OR $4 WHERE id=$1",
+                               target["id"], combined.value, row["untrusted"], flagged or row["flagged"])
 
     async def _budget_notice(self, settings, day):
         # Commit the claim before sending: a crash after delivery must not send it again.

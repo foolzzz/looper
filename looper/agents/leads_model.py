@@ -15,6 +15,7 @@ from typing import Any
 LEADS_ENABLED_KEY = "leads.enabled"
 LEADS_VALID_DAYS_KEY = "leads.valid_days"
 INTENTS_ENABLED_KEY = "intents.enabled"
+INTENTS_ON_REQUEST_KEY = "intents.on_request.enabled"
 INTENTS_GROUP_READ_KEY = "intents.group_read.enabled"
 INTENTS_RULES_ENABLED_KEY = "intents.rules.enabled"
 RULE_INTENT_TYPE = "mr_review"
@@ -31,6 +32,7 @@ NOTICE = "来自飞书消息，未经确认；只当线索，不当权威。"
 class IntentVia(StrEnum):
     SUBSCRIPTION = "subscription"
     FOLLOWED_GROUP = "followed_group"
+    ON_REQUEST = "on_request"
 
 
 class OutputKind(StrEnum):
@@ -169,6 +171,11 @@ async def rule_types_enabled(db: Any = None) -> bool:
 def intent_type_visible(row: Any, *, rules_on: bool) -> bool:
     """A user-defined namesake remains visible when the built-in rule type is hidden."""
     return not (row["builtin"] and row["key"] == RULE_INTENT_TYPE) or rules_on
+
+
+async def on_request_enabled(db: Any = None) -> bool:
+    """Whether operator-requested recognition is on; no row is off."""
+    return await _setting(INTENTS_ON_REQUEST_KEY, db) == "true"
 
 
 async def group_read_enabled(db: Any = None) -> bool:

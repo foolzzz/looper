@@ -33,7 +33,7 @@ from tests.model_call_support import assert_golden, frozen_columns, golden_cli, 
 from tests.subscription_support import DM, SOURCE, add, lark_targets, source
 
 pytestmark = pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
-_BASELINE = "b325f7480869858825fe508e124d69fbbd590690"
+_BASELINE = "b5989285ea1f9b9b3b148f06965392a48826ea2b"
 _NOW = datetime(2026, 11, 23, 14, tzinfo=timezone.utc)
 _FIXTURE = Path(__file__).parent / "fixtures/model_calls/intents-rules-off.json"
 

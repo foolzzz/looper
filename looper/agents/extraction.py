@@ -67,14 +67,17 @@ GROUP_READ_MAX_GROUPS = 10
 GROUP_LABEL = " · 全部消息"
 GROUP_REQUESTS_NOTE = """\
 ## Requests in group chats
-A chat marked 全部消息 gives every human sender's messages, including the user's own. In it, an intent is a
-development request that anyone raises, even without mentioning the user: a new requirement, a change, a bug or
-problem report, a scenario that needs support, or a request for access, addressed to the group, a team, a named
-person or nobody in particular. A request or problem report addressed to a named person counts even if that
-person has accepted it. Use dev_task for a requirement or a change and bug_triage for a bug or a problem.
-Not an intent: small talk, answers to questions, +1s or echoes of someone else's request, and pure follow-ups,
-status updates or decisions that carry no new ask. When several messages raise the same thing, make one intent
-with all of them as its sources, or use same_as when a recent intent is that thing."""
+For chats marked 全部消息, messages that @-mention the user or were sent by the user still follow the scope
+above and all enabled Intent types. Only the other human messages use the following group rule instead of
+the user-only scope and type guidance above. Recognize development requests and bug reports in those messages
+regardless of whom they address (the group, a team, a named person, or nobody) and whether someone has accepted
+the work. Acceptance does not cancel the original request; do not make a separate intent for the acceptance.
+Use dev_task for a concrete requirement, change, scenario needing support or access request. Use bug_triage
+for reported broken behaviour, errors or incorrect data. A one-line bug report counts even with an @-mention
+of someone else, no explicit request to investigate, no detail and no link.
+Exclude small talk, Q&A answers, agreement or echoes, and follow-ups, status updates or decisions with no new
+request or bug report. Merge messages raising the same matter into one intent with all their sources, or use
+same_as for a recent intent about that matter."""
 SOURCES_MAX, ABOUT_MAX, SUPERSEDES_MAX = 10, 5, 3
 SUMMARY_MAX, DETAIL_MAX, TITLE_MAX, INTENT_SUMMARY_MAX = 200, 600, 60, 400
 # What a run costs the processor (Sonnet), measured on the real path and in the real-mode eval: a fixed part per run
@@ -626,7 +629,8 @@ async def _lost_group_seqs(conn: asyncpg.Connection, source_id: str, seqs: Colle
 
 async def store_intents(conn: asyncpg.Connection, parsed: Parsed, *, source_id: str, schedule_id: str,
                         run_id: str | None, record_id: int | None, now: datetime, more: bool,
-                        group: GroupStore | None = None, via: str = "subscription") -> dict[str, Any]:
+                        group: GroupStore | None = None, via: str = "subscription",
+                        recognition_id: int | None = None) -> dict[str, Any]:
     """Write the parsed intents in the caller's transaction: ``pending``, or ``merged`` into the intent it is
     ``same_as`` when that one is pending or tasked within ``SAME_MATTER_WITHIN`` or rejected within
     ``REJECTED_WITHIN`` (a ``dropped`` one never: nothing is merged into it). One the check dropped is stored as
@@ -662,13 +666,14 @@ async def store_intents(conn: asyncpg.Connection, parsed: Parsed, *, source_id: 
         intent_id = await conn.fetchval(
             "INSERT INTO intents (source_id, schedule_id, type_key, type_version, title, summary, confidence, state, "
             "chat_id, project_id, merged_into, flagged, run_id, record_id, handled_at, handled_via, check_verdict, "
-            "check_reason, check_record_id, via) "
-            "VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20) RETURNING id",
+            "check_reason, check_record_id, via, recognition_id) "
+            "VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21) RETURNING id",
             source_id, schedule_id, item["type"], versions[item["type"]], item["title"], item["summary"],
             item["confidence"], "dropped" if dropped else "merged" if target else "pending", chat_id, project_id,
             target, any(seq in seen for seq in sources), run_id, record_id, now if dropped else None,
             "system" if dropped else None, verdict, reason, checked_by,
-            leads_model.IntentVia.FOLLOWED_GROUP if group and group.seqs.intersection(item["window_sources"]) else via)
+            leads_model.IntentVia.FOLLOWED_GROUP if group and group.seqs.intersection(item["window_sources"]) else via,
+            recognition_id)
         # Only its own sources: the messages its text came from (a merged one's are not the target's).
         await conn.executemany("INSERT INTO intent_sources (intent_id, event_seq) VALUES ($1, $2) ON CONFLICT DO NOTHING",
                                [(intent_id, seq) for seq in sources])
@@ -832,12 +837,17 @@ class Batch:
 
 
 async def batch(conn: Any, kind: str, sub: Mapping[str, Any], picked: Mapping[str, Any], *, zone_name: str,
-                now: datetime, own_apps: Collection[str], to_seq: int, known_since: datetime | None = None) -> Batch:
+                now: datetime, own_apps: Collection[str], to_seq: int, known_since: datetime | None = None,
+                context_seqs: Collection[int] | None = None) -> Batch:
     """Render the window ``picked`` (``extraction_window``) with its context, participants and known leads or recent
     intents; rows past ``INPUT_MAX_CHARS`` are left for the next window (``more``, ``last_seq``)."""
     rows = list(picked["rows"])
     source_id = sub["source_id"]
     before, parents = await context_candidates(conn, source_id, rows, to_seq=to_seq, own_apps=own_apps)
+    if context_seqs is not None:
+        allowed = set(context_seqs)
+        before = [row for row in before if row["seq"] in allowed]
+        parents = [row for row in parents if row["seq"] in allowed]
     if kind == "triage":
         from . import triage_run
 
