@@ -6,9 +6,12 @@ import contextlib
 import copy
 import difflib
 import io
+import ipaddress
 import json
 import os
 import shlex
+import shutil
+import subprocess
 import stat
 import sys
 import tempfile
@@ -17,6 +20,9 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
+from http.client import HTTPException
+from urllib.error import URLError
+from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_opener
 
 MAX_CONTEXT_CHARS = 3000
 HOOK_TIMEOUT_SECONDS = 5
@@ -176,6 +182,127 @@ def uninstall_change(data: dict) -> tuple[dict, str] | None:
     return data, "Removes from hooks.SessionStart:\n" + _render({"hooks": old})
 
 
+def _confirm(prompt: str, yes: bool, confirm=None, *, out=None) -> int:
+    out = sys.stdout if out is None else out
+    if yes:
+        return OK
+    if confirm is None and not sys.stdin.isatty():
+        print("confirmation needed: run it in a terminal, or pass --yes after reviewing --dry-run", file=out)
+        return USAGE
+    accepted = confirm(prompt) if confirm is not None else input(prompt).strip().lower() in ("y", "yes")
+    if not accepted:
+        print("nothing written", file=out)
+        return EMPTY
+    return OK
+
+
+class _NoRedirect(HTTPRedirectHandler):
+    def redirect_request(self, *_args, **_kwargs):
+        return None
+
+
+def _loopback(host: str) -> str | None:
+    if host == "localhost":
+        return "127.0.0.1"
+    try:
+        address = ipaddress.ip_address(host)
+    except ValueError:
+        return None
+    if not address.is_loopback:
+        return None
+    return f"[{address}]" if address.version == 6 else str(address)
+
+
+def mcp_entry(runtime_root: Path, config: str | None) -> dict:
+    from .service import looper_command
+
+    argv = [*looper_command(sys.executable), "claude-code", "mcp", "--runtime-root", str(runtime_root)]
+    if config:
+        argv += ["--config", str(Path(config).expanduser().absolute())]
+    return {"type": "stdio", "command": argv[0], "args": argv[1:]}
+
+
+def _claude(args) -> str | None:
+    return shutil.which(getattr(args, "claude", None) or "claude")
+
+
+def _claude_mcp(claude: str, *arguments: str) -> subprocess.CompletedProcess:
+    return subprocess.run([claude, "mcp", *arguments], capture_output=True, text=True, timeout=30)
+
+
+def edit_mcp(args, runtime_root: Path | None, *, confirm=None, out=None) -> int:
+    from .claude_code_mcp import SERVER_NAME
+
+    out = sys.stdout if out is None else out
+    install = args.claude_code_command == "install"
+    entry = mcp_entry(runtime_root, args.config) if install else None
+    claude = _claude(args)
+    command = ([claude or "claude", "mcp", "add-json", "--scope", "user", SERVER_NAME,
+                json.dumps(entry, ensure_ascii=False)] if install else
+               [claude or "claude", "mcp", "remove", "--scope", "user", SERVER_NAME])
+    if not claude:
+        print("Claude Code's claude command was not found; run this yourself:", file=out)
+        print(shlex.join(command), file=out)
+        return EMPTY
+    try:
+        registered = _claude_mcp(claude, "get", SERVER_NAME).returncode == 0
+        if registered == install:
+            print("looper-memory is already registered with Claude Code. To register it again (for example "
+                  "after moving Looper): looper claude-code uninstall mcp, then install mcp" if install else
+                  "looper-memory is not registered with Claude Code.", file=out)
+            return OK
+        if install:
+            print("Registers an MCP server with Claude Code at user scope "
+                  "(Claude Code writes it to ~/.claude.json):", file=out)
+            print(json.dumps(entry, indent=2, ensure_ascii=False), file=out)
+        print(shlex.join(command), file=out)
+        if args.dry_run:
+            return OK
+        code = _confirm("Apply this MCP registration change? [y/N] ", args.yes, confirm, out=out)
+        if code != OK:
+            return code
+        result = subprocess.run(command, capture_output=True, text=True, timeout=30)
+        if result.returncode != 0:
+            print("\n".join(result.stderr.splitlines()[-5:]) or "Claude Code MCP command failed", file=out)
+            return EMPTY
+        registered = _claude_mcp(claude, "get", SERVER_NAME).returncode == 0
+        if registered != install:
+            print("claude mcp add-json reported success but get does not find looper-memory" if install else
+                  "claude mcp remove reported success but get still finds looper-memory", file=out)
+            return EMPTY
+        print("registered. Open a new Claude Code session; the first call of each tool asks for your permission. "
+              "Undo: looper claude-code uninstall mcp" if install else "removed.", file=out)
+        return OK
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        print(f"Claude Code MCP command failed: {exc}", file=out)
+        return EMPTY
+
+
+def _retrieval_settings(args) -> tuple[dict, dict]:
+    from .. import ops_config
+    from . import operator_auth
+
+    ops = ops_config.load(ops_config.Flags(runtime_root=args.runtime_root, config=args.config), require_database=False)
+    address = _loopback(ops.host)
+    if address is None:
+        raise ValueError(f"server.host {ops.host} is not a loopback address")
+    token = operator_auth.read_token(ops.runtime_root)
+    if not token:
+        raise ValueError("no operator token: start Looper once (looper serve)")
+    opener = build_opener(ProxyHandler({}), _NoRedirect())
+    answers = []
+    for path in ("knowledge_vault/get", "leads/settings_get"):
+        request = Request(f"http://{address}:{ops.port}/api/v1/{path}", data=b"{}", method="POST",
+                          headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json",
+                                   "Accept": "application/json"})
+        with opener.open(request, timeout=2) as response:
+            answer = json.load(response)
+        if not isinstance(answer, dict) or answer.get("status") != "ok" or not isinstance(answer.get("result"), dict):
+            raise ValueError("invalid retrieval settings response")
+        answers.append(answer["result"])
+    return answers[0], answers[1]
+
+
 def edit_settings(change: Callable[[dict], tuple[dict, str] | None], *, yes: bool, dry_run: bool,
                   confirm: Callable[[str], bool] | None = None, out=None, environ=os.environ) -> int:
     from .. import child_env
@@ -202,15 +329,9 @@ def edit_settings(change: Callable[[dict], tuple[dict, str] | None], *, yes: boo
             print("note: the file is rewritten in Claude Code's own 2-space JSON format", file=out)
         if dry_run:
             return OK
-        if not yes:
-            prompt = f"Write these changes to {path}? [y/N] "
-            if confirm is None and not sys.stdin.isatty():
-                print("confirmation needed: run it in a terminal, or pass --yes after reviewing --dry-run", file=out)
-                return USAGE
-            accepted = confirm(prompt) if confirm is not None else input(prompt).strip().lower() in ("y", "yes")
-            if not accepted:
-                print("nothing written", file=out)
-                return EMPTY
+        code = _confirm(f"Write these changes to {path}? [y/N] ", yes, confirm, out=out)
+        if code != OK:
+            return code
         current = target.read_bytes() if target.exists() else None
         if _target(path) != target or current != original:
             print("the settings file changed while waiting; nothing written; run it again", file=out)
@@ -272,13 +393,13 @@ def status_command(args, *, out=None) -> int:
     except (SettingsError, OSError, RuntimeError) as exc:
         print(str(exc), file=out)
         return EMPTY
-    healthy = len(handlers) == 1
+    hook_healthy = len(handlers) == 1
     if not handlers:
         print("  profile hook: not installed\ninstall: looper claude-code install hook", file=out)
     for handler in handlers:
         executable = shlex.split(handler["command"])[0]
         exists = Path(executable).is_file() and os.access(executable, os.X_OK)
-        healthy &= exists
+        hook_healthy &= exists
         print(f"  profile hook: installed ({handler['command']})" if exists else
               f"  profile hook: installed, but its looper is missing: {executable}", file=out)
     fetched = fetch_profile(args.runtime_root, args.config)
@@ -286,11 +407,46 @@ def status_command(args, *, out=None) -> int:
         print(f"Looper: profile readable locally\n  profile: {len(fetched.text)} characters", file=out)
     else:
         print(f"Looper: not answering ({fetched.reason})\n  profile: {fetched.reason}", file=out)
-    return OK if healthy and fetched.code == OK else EMPTY
+    claude = _claude(args)
+    registered = False
+    registration_known = True
+    if claude is None:
+        registration = "unknown (claude not found)"
+    else:
+        try:
+            registered = _claude_mcp(claude, "get", "looper-memory").returncode == 0
+            registration = "registered" if registered else "not registered"
+        except (OSError, subprocess.TimeoutExpired):
+            registration, registration_known = "unknown (claude failed)", False
+    print(f"  retrieval MCP server (looper-memory): {registration}", file=out)
+    retrieval_healthy = False
+    try:
+        vault, leads = _retrieval_settings(args)
+        retrieval_healthy = (vault.get("configured") is True and vault.get("manager_read") is True
+                            and not vault.get("problem"))
+        vault_status = (f"readable (root {vault.get('path')})" if retrieval_healthy else
+                        f"off: {vault.get('problem') or 'manager_read is off or the vault is not configured'}")
+        print(f"  knowledge vault for the Manager: {vault_status}", file=out)
+        if type(leads.get("enabled")) is not bool:
+            raise ValueError("invalid message leads settings response")
+        print("  message leads: " + ("on" if leads["enabled"] else "off"), file=out)
+    except (ValueError, OSError, URLError, HTTPException) as exc:
+        print(f"  knowledge vault for the Manager: off: {exc}\n  message leads: unknown", file=out)
+        retrieval_healthy = False
+    healthy = registration_known and bool(handlers or registered)
+    if handlers:
+        healthy &= hook_healthy and fetched.code == OK
+    if registered:
+        healthy &= retrieval_healthy
+    return OK if healthy else EMPTY
 
 
 def run(args, *, confirm=None, out=None) -> int:
     out = sys.stdout if out is None else out
+    if args.claude_code_command == "mcp":
+        from . import claude_code_mcp
+
+        return claude_code_mcp.main(args.runtime_root, args.config)
     if args.claude_code_command == "profile":
         if args.hook:
             # Buffer both streams: an exception must never leave partial JSON or diagnostics in a hook.
@@ -305,8 +461,8 @@ def run(args, *, confirm=None, out=None) -> int:
         return profile_command(args)
     if args.claude_code_command == "status":
         return status_command(args, out=out)
-    if any(part != "hook" for part in args.parts):
-        print("unknown part: expected hook", file=out)
+    if any(part not in ("hook", "mcp") for part in args.parts):
+        print("unknown part: expected hook or mcp", file=out)
         return USAGE
     from .. import child_env
 
@@ -314,13 +470,15 @@ def run(args, *, confirm=None, out=None) -> int:
         print("refused inside a Looper agent run", file=out)
         return REFUSED
     desired = None
+    runtime_root = None
     if args.claude_code_command == "install":
         from .. import ops_config
 
         try:
             ops = ops_config.load(ops_config.Flags(runtime_root=args.runtime_root, config=args.config),
                                   require_database=False)
-            desired = desired_handler(ops.runtime_root, args.config)
+            runtime_root = ops.runtime_root
+            desired = desired_handler(runtime_root, args.config)
         except (ops_config.OpsConfigError, OSError) as exc:
             print(f"ops settings unusable: {exc}", file=out)
             return USAGE
@@ -335,8 +493,15 @@ def run(args, *, confirm=None, out=None) -> int:
                   "the SessionStart hook is not installed", file=out)
         return result
 
-    code = edit_settings(change, yes=args.yes, dry_run=args.dry_run, confirm=confirm, out=out)
-    if code == OK and changed and not args.dry_run:
-        print("installed. Open a new Claude Code session (or /clear) to load it. "
-              "Undo: looper claude-code uninstall hook" if desired is not None else "removed.", file=out)
-    return code
+    first_error = OK
+    for part in (args.parts or ["hook", "mcp"]):
+        if part == "mcp":
+            code = edit_mcp(args, runtime_root, confirm=confirm, out=out)
+        else:
+            code = edit_settings(change, yes=args.yes, dry_run=args.dry_run, confirm=confirm, out=out)
+            if code == OK and changed and not args.dry_run:
+                print("installed. Open a new Claude Code session (or /clear) to load it. "
+                      "Undo: looper claude-code uninstall hook" if desired is not None else "removed.", file=out)
+        if first_error == OK and code != OK:
+            first_error = code
+    return first_error

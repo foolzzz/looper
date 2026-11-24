@@ -421,7 +421,18 @@ class AgentHTTPServer:
             principal = None
             if area is operator_auth.Access.CLIENT:
                 try:
-                    principal = await self._client_principal(headers, peer_host)
+                    if operator_auth.is_retrieval(headers, token=self._operator_token, peer_host=peer_host):
+                        # Scope is checked before body reads, uploads, streams or v1 dispatch. Never trust a
+                        # caller-supplied client label to restrict an unrestricted operator credential.
+                        if (method, path) not in operator_auth.RETRIEVAL_READS:
+                            status, answer = api_v1.error(ErrorCode.FORBIDDEN,
+                                "the memory credential allows only the three retrieval reads")
+                            writer.write(_json_response(status, answer, headers=V1_HEADERS))
+                            await writer.drain()
+                            return
+                        principal = api_v1.OPERATOR
+                    else:
+                        principal = await self._client_principal(headers, peer_host)
                 except Exception:
                     logger.warning("could not check an API client token for %s %s from %s", method, path, peer_host,
                                    exc_info=True)

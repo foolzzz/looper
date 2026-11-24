@@ -101,26 +101,24 @@ async def leads_on() -> bool:
         return False
 
 
-async def _run(call: Call) -> dict[str, Any]:
+async def manager_answer(arguments: Mapping[str, Any], *, now: datetime | None = None
+                         ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    """The Manager's fenced answer without ids, and shown leads with ids. No footer or group-backstop effects."""
     from .. import untrusted
     from ..leads import search
-    from ..subscriptions import strip_mentions
 
     if not await leads_model.leads_enabled():
         raise OpError(ErrorCode.CONFLICT, "message leads are turned off")
-    arguments = call.arguments
     query = " ".join(arguments["query"].split())
-    now = datetime.now(timezone.utc)
+    now = now or datetime.now(timezone.utc)
     days = arguments.get("days")
     found = await search(words=query.split(), chat=arguments.get("chat"), person=arguments.get("person"),
                          since=now - timedelta(days=days) if days else None, kind=arguments.get("kind"),
                          state=arguments.get("state") or "active", limit=arguments.get("limit") or DEFAULT_LIMIT,
                          now=now)
     shown = found["leads"]
-    call.turn.blocks.append(FOOTER.format(query=strip_mentions(query), count=len(shown)))
-    remember(call.manager_id, [(lead["id"], lead["summary"]) for lead in shown])
     fence = await untrusted.enabled()
-    return _Answer({"notice": f"{TOOL_NOTICE} {untrusted.LEAD_LINE}" if fence else TOOL_NOTICE,
+    return {"notice": f"{TOOL_NOTICE} {untrusted.LEAD_LINE}" if fence else TOOL_NOTICE,
                     "leads": [{"kind": lead["kind"], "summary": _fenced(lead) if fence else lead["summary"],
                                "confidence": lead["confidence"],
                                "state": lead["state"], "valid_until": lead["valid_until"],
@@ -128,7 +126,17 @@ async def _run(call: Call) -> dict[str, Any]:
                                             for key in _SOURCE_FIELDS}
                                            for source in lead["sources"]]}
                               for lead in shown],
-                    "more": found["more"]}, [lead["id"] for lead in shown])
+                    "more": found["more"]}, shown
+
+
+async def _run(call: Call) -> dict[str, Any]:
+    from ..subscriptions import strip_mentions
+
+    answer, shown = await manager_answer(call.arguments)
+    query = " ".join(call.arguments["query"].split())
+    call.turn.blocks.append(FOOTER.format(query=strip_mentions(query), count=len(shown)))
+    remember(call.manager_id, [(lead["id"], lead["summary"]) for lead in shown])
+    return _Answer(answer, [lead["id"] for lead in shown])
 
 
 def _source_field(key: str, value: Any) -> Any:
