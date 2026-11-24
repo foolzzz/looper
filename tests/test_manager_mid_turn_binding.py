@@ -342,9 +342,13 @@ def test_discarded_reservation_clears_only_its_own_binding(enabled, tmp_path, re
                         and resident._user_turn.started)
             await rig.bus.publish(second)
             await until(lambda: (tmp_path / "injected.txt").exists())
+            owner = next(owner for owner in resident._user_turn.input_owners.values()
+                         if owner.message_id == second.message_id)
             (tmp_path / "finish-a").touch()
             await until(lambda: (tmp_path / "native-tool").exists())
-            owner = resident._output.queued[second.message_id]
+            # The child marker can precede the parent's processing of A's result and B's start.
+            await until(lambda: owner.buffering, "native input to start buffering")
+            assert resident._output.queued.get(second.message_id) is owner
             binding = rig.manager._turns.find(second.message_id).binding
             assert json.loads(bridge_file.read_text())["turn"] == binding
             (tmp_path / "finish-b").touch()
