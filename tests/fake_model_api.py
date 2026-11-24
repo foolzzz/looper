@@ -19,6 +19,10 @@ class ResponseScript:
     error_body_bytes: int | None = None
     sse_line_ending: str = "\n"
     sse_final_ending: str | None = None
+    # None follows the Messages SDK's anthropic-version header. A /messages path
+    # is not enough: the recorder passthrough tests use that path and require
+    # data-only frames. The SDK drops frames that have no event name.
+    named_events: bool | None = None
     gate: asyncio.Event | None = None
     gate_reached: asyncio.Event = field(default_factory=asyncio.Event, init=False)
     closed: asyncio.Event = field(default_factory=asyncio.Event, init=False)
@@ -115,8 +119,11 @@ class FakeModelAPI:
                 ending = script.sse_line_ending * 2
                 if count == len(script.events) - 1 and script.sse_final_ending is not None:
                     ending = script.sse_final_ending
+                name_events = script.named_events
+                if name_events is None:
+                    name_events = "anthropic-version" in headers
                 event_name = (f"event: {envelope['type']}{script.sse_line_ending}"
-                              if lines[0].split()[1].endswith('/messages') and isinstance(envelope, dict) else "")
+                              if name_events and isinstance(envelope, dict) else "")
                 chunk = f"{event_name}data: {data}{ending}".encode()
                 writer.write(f"{len(chunk):x}\r\n".encode() + chunk + b"\r\n")
                 await writer.drain()
