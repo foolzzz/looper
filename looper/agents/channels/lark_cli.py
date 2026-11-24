@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import hashlib
 import json
 import math
 import os
@@ -146,7 +147,7 @@ def send_command(*, chat_id: str | None = None, user_id: str | None = None, text
                  idempotency_key: str | None = None) -> list[str]:
     """The lark-cli argv that sends, as the bot, ``text`` or ``markdown`` (a rich-text post that renders it) to a
     chat (``oc_...``) or a user (an open_id, ``ou_...``): exactly one target and one body. With
-    ``idempotency_key`` (at most 50 characters) Lark sends one message for the key within an hour."""
+    ``idempotency_key`` Lark sends one message for the key within an hour; long keys are hashed to fit."""
     if (chat_id is None) == (user_id is None):
         raise ValueError("send to exactly one of a chat and a user")
     if (text is None) == (markdown is None):
@@ -175,12 +176,20 @@ def _body(text: str | None, markdown: str | None) -> list[str]:
     return [flag, "@" + value if value.startswith("@") else value]
 
 
-def _key(idempotency_key: str | None) -> list[str]:
+def normalize_key(idempotency_key: str | None) -> str | None:
     if idempotency_key is None:
-        return []
-    if not 0 < len(idempotency_key) <= 50:
-        raise ValueError("an idempotency key has 1 to 50 characters")
-    return ["--idempotency-key", idempotency_key]
+        return None
+    if not idempotency_key:
+        raise ValueError("an idempotency key must not be empty")
+    if len(idempotency_key) > 50:
+        # Preserve existing short keys; hash the full long key identically across processes and restarts.
+        idempotency_key = "looper:" + hashlib.sha256(idempotency_key.encode("utf-8")).hexdigest()[:43]
+    return idempotency_key
+
+
+def _key(idempotency_key: str | None) -> list[str]:
+    key = normalize_key(idempotency_key)
+    return ["--idempotency-key", key] if key is not None else []
 
 
 def mention(open_id: str) -> str:
