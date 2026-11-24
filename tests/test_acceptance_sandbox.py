@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import errno
 import json
+import os
 import shlex
 import shutil
 import sys
@@ -53,17 +54,121 @@ def test_profile_rejected_before_network_probe(tmp_path, monkeypatch):
     assert run.await_count == 1
 
 
+def _unshare_only(name, path=None):
+    return "/usr/bin/unshare" if name == "unshare" else None
+
+
+def _linux_probe(namespace, interfaces, uid=None):
+    # euid 0 mapped to ``uid`` is an unprivileged user namespace, not host root.
+    uid = os.getuid() if uid is None else uid
+    links = {"lo": {"up": True, "iflink": 1, "addressed": False}}
+    for name in interfaces:
+        if name != "lo":
+            links[name] = {"up": False, "iflink": 0, "addressed": False}
+    return {"namespace": namespace, "interfaces": ["lo", *interfaces], "links": links,
+            "connect_errno": errno.ENETUNREACH, "euid": 0, "uid_map": f"0 {uid} 1\n"}
+
+
 @pytest.mark.parametrize("namespace", ["net:[old]", "net:[new]"])
 def test_linux_requires_a_new_network_namespace(tmp_path, monkeypatch, namespace):
     monkeypatch.setattr(sandbox.sys, "platform", "linux")
-    monkeypatch.setattr(sandbox.shutil, "which", lambda *args, **kwargs: "/usr/bin/unshare")
+    monkeypatch.setattr(sandbox.shutil, "which", _unshare_only)
     monkeypatch.setattr(sandbox.os, "readlink", lambda path: "net:[old]")
-    run = AsyncMock(side_effect=[(0, b""), (0, json.dumps({
-        "namespace": namespace, "interfaces": ["lo"], "connect_errno": errno.ENETUNREACH,
-    }).encode())])
+    run = AsyncMock(side_effect=[(0, b""), (0, json.dumps(_linux_probe(namespace, [])).encode())])
     monkeypatch.setattr(sandbox, "_run_probe", run)
     result = asyncio.run(sandbox.local_prefix(tmp_path, {}))
     assert result == (("/usr/bin/unshare", "-rn", "--") if namespace != "net:[old]" else None)
+
+
+@pytest.mark.parametrize("extra", [{}, {"tunl0": {}}, {"gre0": {}, "sit0": {}}])
+def test_linux_accepts_down_unlinked_tunnel_fallbacks(tmp_path, monkeypatch, extra):
+    monkeypatch.setattr(sandbox.sys, "platform", "linux")
+    monkeypatch.setattr(sandbox.shutil, "which", _unshare_only)
+    monkeypatch.setattr(sandbox.os, "readlink", lambda path: "net:[old]")
+    run = AsyncMock(side_effect=[(0, b""), (0, json.dumps(_linux_probe("net:[new]", list(extra))).encode())])
+    monkeypatch.setattr(sandbox, "_run_probe", run)
+    assert asyncio.run(sandbox.local_prefix(tmp_path, {})) == ("/usr/bin/unshare", "-rn", "--")
+
+
+@pytest.mark.parametrize("links", [
+    {"eth0": {"up": False, "iflink": 2, "addressed": False}},
+    {"tunl0": {"up": True, "iflink": 0, "addressed": False}},
+    {"gre0": {"up": False, "iflink": 0, "addressed": True}},
+])
+def test_linux_rejects_a_device_that_can_leave_the_namespace(tmp_path, monkeypatch, links):
+    monkeypatch.setattr(sandbox.sys, "platform", "linux")
+    monkeypatch.setattr(sandbox.shutil, "which", _unshare_only)
+    monkeypatch.setattr(sandbox.os, "readlink", lambda path: "net:[old]")
+    body = _linux_probe("net:[new]", [])
+    body["interfaces"] = ["lo", *links]
+    body["links"].update(links)
+    run = AsyncMock(side_effect=[(0, b""), (0, json.dumps(body).encode())])
+    monkeypatch.setattr(sandbox, "_run_probe", run)
+    assert asyncio.run(sandbox.local_prefix(tmp_path, {})) is None
+
+
+def _bins(name, path=None):
+    return {"unshare": "/usr/bin/unshare", "sudo": "/usr/bin/sudo", "setpriv": "/usr/bin/setpriv",
+            "env": "/usr/bin/env"}.get(name)
+
+
+def _no_privilege_helper(run) -> None:
+    for call in run.await_args_list:
+        for part in call.args[0]:
+            assert part not in {"sudo", "setpriv"}
+            assert not str(part).endswith("/sudo") and not str(part).endswith("/setpriv")
+
+
+def test_refused_user_namespace_is_unavailable_even_if_sudo_is_installed(tmp_path, monkeypatch):
+    """A refused user namespace does not escalate, prompt, or run the check unsandboxed."""
+    monkeypatch.setattr(sandbox.sys, "platform", "linux")
+    monkeypatch.setattr(sandbox.shutil, "which", _bins)
+    monkeypatch.setattr(sandbox.os, "geteuid", lambda: 1001)
+    monkeypatch.setattr(sandbox.os, "getuid", lambda: 1001)
+    monkeypatch.setattr(sandbox.os, "getgid", lambda: 1001)
+    monkeypatch.setattr(sandbox.os, "readlink", lambda path: "net:[old]")
+    body = _linux_probe("net:[new]", ["tunl0"], uid=1001)
+    body["euid"] = 1001
+    body["uid_map"] = "0 0 4294967295\n"
+    # Later successes are the removed privilege helper. They must never be reached.
+    run = AsyncMock(side_effect=[(1, b"unshare: write failed /proc/self/uid_map: Operation not permitted"),
+                                 (0, b""), (0, json.dumps(body).encode())])
+    monkeypatch.setattr(sandbox, "_run_probe", run)
+    assert asyncio.run(sandbox.local_prefix(tmp_path, {"PATH": "/tmp/writable:/usr/bin"})) is None
+    assert run.await_count == 1
+    assert run.await_args_list[0].args[0][:3] == ("/usr/bin/unshare", "-rn", "--")
+    _no_privilege_helper(run)
+
+
+def test_user_namespace_that_stays_host_root_is_unavailable(tmp_path, monkeypatch):
+    monkeypatch.setattr(sandbox.sys, "platform", "linux")
+    monkeypatch.setattr(sandbox.shutil, "which", _bins)
+    monkeypatch.setattr(sandbox.os, "geteuid", lambda: 1001)
+    monkeypatch.setattr(sandbox.os, "getuid", lambda: 1001)
+    monkeypatch.setattr(sandbox.os, "getgid", lambda: 1001)
+    monkeypatch.setattr(sandbox.os, "readlink", lambda path: "net:[old]")
+    body = _linux_probe("net:[new]", ["tunl0"], uid=1001)
+    body["euid"] = 0
+    body["uid_map"] = "0 0 4294967295\n"
+    run = AsyncMock(side_effect=[(0, b""), (0, json.dumps(body).encode()), (0, b""), (0, b"")])
+    monkeypatch.setattr(sandbox, "_run_probe", run)
+    assert asyncio.run(sandbox.local_prefix(tmp_path, {})) is None
+    assert run.await_count == 2
+    _no_privilege_helper(run)
+
+
+def test_root_opens_a_netns_without_a_user_namespace(tmp_path, monkeypatch):
+    monkeypatch.setattr(sandbox.sys, "platform", "linux")
+    monkeypatch.setattr(sandbox.shutil, "which", _unshare_only)
+    monkeypatch.setattr(sandbox.os, "geteuid", lambda: 0)
+    monkeypatch.setattr(sandbox.os, "getuid", lambda: 0)
+    monkeypatch.setattr(sandbox.os, "readlink", lambda path: "net:[old]")
+    body = _linux_probe("net:[new]", ["tunl0"], uid=0)
+    body["euid"] = 0
+    body["uid_map"] = "0 0 4294967295\n"
+    run = AsyncMock(side_effect=[(1, b""), (0, b""), (0, json.dumps(body).encode())])
+    monkeypatch.setattr(sandbox, "_run_probe", run)
+    assert asyncio.run(sandbox.local_prefix(tmp_path, {})) == ("/usr/bin/unshare", "-n", "--")
 
 
 @pytest.mark.skipif(sys.platform != "darwin", reason="macOS sandbox-exec enforcement")
