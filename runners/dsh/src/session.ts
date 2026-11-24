@@ -165,6 +165,12 @@ async function compose(params: Record<string, any>, resumed: boolean): Promise<o
       : await ctx!.agents.create({ sessionId: record.id, meta: { cwd: record.cwd,
         ...(record.fork ? { parentSession: params.fork_from.session_id, isSeeded: true } : {}) },
         ...inherited, agentOptions, setup });
+    // A recorded selection outranks the live options, so a fork or resume of a session
+    // saved under another route would keep calling that route; pin this session's own.
+    const { model: selected } = record.handle.agent;
+    if (selected.current()?.provider !== record.route) {
+      selected.select({ provider: record.route, model: wireModel, reasoningEffort: provider.effort ?? 'high' });
+    }
     if (resumed && record.handle.agent.session.header.cwd !== record.cwd) {
       throw new RpcError(-32001, 'saved session belongs to another directory');
     }

@@ -5,7 +5,7 @@ import { createRequire } from 'node:module';
 import { pathToFileURL } from 'node:url';
 import { RpcError } from '../../common/rpc.ts';
 
-const VERSION = '0.2.1-rc.2';
+const VERSION = '0.2.2-rc.5';
 const packages = ['dsh-launch-environment', 'dsh-llm', 'dsh-llm-deepseek', 'dsh-session',
   'dsh-session-persistence', 'dsh-session-persistence-jsonl', 'dsh-agent', 'dsh-agent-loop',
   'dsh-tools', 'dsh-tool-fs', 'dsh-tool-fs-search', 'dsh-system-prompt', 'cordis'] as const;
@@ -54,8 +54,8 @@ export async function load(executable: string): Promise<Dsh> {
     }
     if (!pkg) throw new RpcError(-32009, 'dsh executable is not inside @deepseek-ai/dsh');
     const gate = (metadata: Manifest, name: string) => {
-      if (name === '@deepseek-ai/cordis' ? !/^4\.0\.\d+$/.test(metadata.version) : metadata.version !== VERSION) {
-        throw new RpcError(-32009, `${name} version ${metadata.version} is unsupported; require ${name === '@deepseek-ai/cordis' ? '4.0.x' : VERSION}`);
+      if (name === '@deepseek-ai/cordis' ? !/^4\.1\.\d+$/.test(metadata.version) : metadata.version !== VERSION) {
+        throw new RpcError(-32009, `${name} version ${metadata.version} is unsupported; require ${name === '@deepseek-ai/cordis' ? '4.1.x' : VERSION}`);
       }
     };
     gate(pkg, '@deepseek-ai/dsh');
@@ -116,9 +116,12 @@ const disabled = ['hmr', 'settings', 'config-editor', 'plugin-manager', 'tool-pl
   // Looper caps tool output; a second spill policy would rewrite the host's result.
   'llm-deepseek', 'llm-retry', 'spill-policy', 'tool-bash', 'tool-pwsh', 'tool-jobs', 'jobs',
   'subagent', 'subagent-spawn-in-process', 'subagent-fork-in-process', 'tool-subagent-control',
-  'tool-subagent-list-agents', 'tool-subagent', 'tool-subagent-fork', 'ptc-runtime', 'workflow-ptc', 'tool-workflow',
+  'tool-subagent', 'agent-team', 'tool-agent-team', 'tool-subagent-fork', 'ptc-runtime', 'workflow-ptc', 'tool-workflow',
   'web', 'web-search-deepseek', 'web-deepseek-api', 'web-fetch-http', 'tool-web',
   'skill', 'skill-filesystem', 'tool-skill', 'goal', 'goal-round-driver', 'command-goal', 'tool-goal'];
+// headless-startup is disabled, so sandbox-policy must drop its headlessStartup
+// injection or it waits for that service forever (and the tools with it).
+const policyInject = { inject: [] as string[] };
 type ConsultDefaults = { text: string; tools: any[] };
 let defaults: Promise<any> | undefined;
 /** Copy model-visible CLI defaults, never its executors or live services. */
@@ -130,10 +133,9 @@ async function captureConsultDefaults(): Promise<any> {
     'credentials', 'authorization', 'deepseek-account', 'llm-deepseek-account', 'llm-pi-ai', 'llm-deepseek',
     'otel', 'session-telemetry-otel', 'session-log-deepseek', 'plugin-package-inventory-deepseek',
     'session-title', 'session-title-llm', 'agent-instructions', 'headless-startup', 'headless-runner',
-    'web-search-deepseek', 'web-deepseek-api', 'goal-round-driver', 'command-goal',
+    'web-search-deepseek', 'web-deepseek-api', 'goal-round-driver', 'command-goal', 'agent-team', 'tool-agent-team',
     'compaction-basic', 'command-compact'];
   const config = {
-    tools: { mode: 'native' },
     'sandbox-policy': { mode: 'danger-full-access', workspaceRoot: process.cwd() },
     approval: { policy: 'never' },
     'session-persistence-jsonl': { root: join(root, 'sessions') },
@@ -143,7 +145,7 @@ async function captureConsultDefaults(): Promise<any> {
   };
   await writeFile(overlay, JSON.stringify([
     ...templateDisabled.map(id => ({ id, disabled: true })),
-    ...Object.entries(config).map(([id, config]) => ({ id, config })),
+    ...Object.entries(config).map(([id, config]) => ({ id, config, ...(id === 'sandbox-policy' ? policyInject : {}) })),
   ]), { mode: 0o600 });
   let template: Context | undefined;
   const signals = ['SIGINT', 'SIGTERM'] as const;
@@ -181,7 +183,6 @@ export function boot(stateRoot: string): Promise<Context> {
       // Dispose the declaration-only profile before booting the live composition.
       await (defaults ??= captureConsultDefaults());
       const config = {
-        tools: { mode: 'native' },
         'sandbox-policy': { mode: 'danger-full-access', workspaceRoot: process.cwd() },
         approval: { policy: 'never' },
         'session-persistence-jsonl': { root: stateRoot },
@@ -192,7 +193,7 @@ export function boot(stateRoot: string): Promise<Context> {
       const overlay = join(process.cwd(), 'looper-overlay.json');
       await writeFile(overlay, JSON.stringify([
         ...disabled.map(id => ({ id, disabled: true })),
-        ...Object.entries(config).map(([id, config]) => ({ id, config })),
+        ...Object.entries(config).map(([id, config]) => ({ id, config, ...(id === 'sandbox-policy' ? policyInject : {}) })),
       ]), { mode: 0o600 });
       environment = dsh.environment.createLaunchEnvironmentSnapshot([{ source: 'process', values: { ...process.env } }]);
       ({ ctx } = await dsh.profile.runProfile({ environment, profile: 'headless', patchFiles: [overlay], args: [] }));
