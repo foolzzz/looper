@@ -5214,6 +5214,8 @@ export interface VaultSettings {
   path: string | null;
   writable: string[];
   rules_file: string | null;
+  profile_source: string;
+  manager_read?: boolean;
   git: boolean;
   problem: string | null;
 }
@@ -5228,8 +5230,22 @@ export async function updateVaultSettings(body: {
   path: string | null;
   writable?: string[];
   rules_file?: string | null;
+  profile_source?: string;
+  manager_read?: boolean;
 }): Promise<VaultSettings> {
   const result = await callV1<VaultSettings>("/api/v1/knowledge_vault/update", body);
+  if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
+  return result;
+}
+
+export async function fetchResidentProfileSettings(): Promise<{ enabled: boolean }> {
+  const result = await callV1<{ enabled: boolean }>("/api/v1/profile_settings/get", {});
+  if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
+  return result;
+}
+
+export async function updateResidentProfileSettings(enabled: boolean): Promise<{ enabled: boolean }> {
+  const result = await callV1<{ enabled: boolean }>("/api/v1/profile_settings/update", { enabled });
   if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
   return result;
 }
