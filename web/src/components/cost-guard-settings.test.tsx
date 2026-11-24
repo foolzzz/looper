@@ -23,6 +23,7 @@ describe("花费观察", () => {
   let readbackFails: boolean;
   let confirmExpires: boolean;
   let gets: number;
+  let lostResponse: "network" | "json" | "server" | null;
 
   beforeEach(() => {
     container = document.createElement("div");
@@ -31,7 +32,7 @@ describe("花费观察", () => {
     unavailable = false;
     holds = []; decisions = []; needsConfirmation = false;
     updates = []; confirms = []; updateMode = "confirm";
-    hangGet = false; getForbidden = false; readbackFails = false; confirmExpires = false; gets = 0;
+    hangGet = false; getForbidden = false; readbackFails = false; confirmExpires = false; gets = 0; lostResponse = null;
     result = { mode: "off", daily_usd: null, daily_equivalent_usd: null, roles: {}, problem: null,
       counters: [], recent: [], recommended_daily_usd: null, recommended_daily_equivalent_usd: null };
     vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
@@ -51,6 +52,7 @@ describe("花费观察", () => {
         if (body.confirmation_id === "confirm-guard") {
           if (confirmExpires) return Response.json({ status: "error", error: { code: "invalid", message: "确认已过期" } }, { status: 400 });
           applyUpdate(updates.at(-1)?.body ?? {});
+          if (lostResponse) return loseResponse();
           return Response.json({ status: "ok", result });
         }
         holds = [];
@@ -64,6 +66,7 @@ describe("花费观察", () => {
         if (updateMode === "down") return Response.json({ status: "error", error: { code: "unavailable", message: "服务暂不可用" } }, { status: 503 });
         if (updateMode === "ok") {
           applyUpdate(body);
+          if (lostResponse) return loseResponse();
           return Response.json({ status: "ok", result });
         }
         return Response.json({ status: "needs_confirmation", confirmation_id: "confirm-guard",
@@ -81,6 +84,12 @@ describe("花费观察", () => {
         : Response.json({ status: "ok", result });
     }));
   });
+
+  function loseResponse(): Response {
+    if (lostResponse === "network") throw new TypeError("Connection lost");
+    if (lostResponse === "json") return new Response('{"status":');
+    return Response.json({ status: "error", error: { code: "unavailable", message: "Response lost" } }, { status: 503 });
+  }
 
   function applyUpdate(body: Record<string, unknown>) {
     if (body.roles && typeof body.roles === "object") {
@@ -376,6 +385,8 @@ describe("花费观察", () => {
     expect(container.textContent).toContain("服务暂不可用");
     expect((container.querySelector("#cost-guard-daily-usd") as HTMLInputElement).value).toBe("4");
     updateMode = "ok";
+    await click("重新读取");
+    await setAmount("cost-guard-daily-usd", "4");
     readbackFails = true;
     await click("保存");
     expect(container.textContent).toContain("状态未知。请只读重试，不会自动再次保存。");
@@ -408,6 +419,42 @@ describe("花费观察", () => {
     await click("保存");
     expect(updates).toHaveLength(2);
     expect(updates[1].body).toEqual({ mode: "enforce" });
+  });
+
+  it.each([
+    ["direct", "network"], ["direct", "json"], ["direct", "server"],
+    ["confirm", "network"], ["confirm", "json"], ["confirm", "server"],
+  ] as const)("locks writes after a committed %s save loses its %s response until a read succeeds", async (action, failure) => {
+    updateMode = action === "direct" ? "ok" : "confirm";
+    await render();
+    await setMode("observe");
+    await setAmount("cost-guard-daily-usd", "4");
+    lostResponse = failure;
+    await click("保存");
+    if (action === "confirm") await click("确认保存");
+    expect(result.daily_usd).toBe(4); // The server committed before the response failed.
+    expect(container.textContent).toContain("状态未知");
+    expect(container.textContent).not.toContain("已保存");
+    expect(container.textContent).not.toContain("Update cost guard settings?");
+    expect((container.querySelector("#cost-guard-mode") as HTMLSelectElement).disabled).toBe(true);
+    expect((container.querySelector("#cost-guard-daily-usd") as HTMLInputElement).disabled).toBe(true);
+    expect((Array.from(container.querySelectorAll("button")).find((button) => button.textContent === "取消编辑") as HTMLButtonElement).disabled).toBe(true);
+    await click("保存");
+    expect(updates).toHaveLength(1);
+    expect(confirms).toHaveLength(action === "confirm" ? 1 : 0);
+    readbackFails = true;
+    await click("重新读取");
+    expect(container.textContent).toContain("状态未知");
+    expect((container.querySelector("#cost-guard-mode") as HTMLSelectElement).disabled).toBe(true);
+    readbackFails = false;
+    result = { ...result, daily_usd: 7 }; // Reconcile with the current server state, not the old draft.
+    await click("重新读取");
+    expect(container.textContent).not.toContain("状态未知");
+    expect((container.querySelector("#cost-guard-daily-usd") as HTMLInputElement).value).toBe("7");
+    expect((container.querySelector("#cost-guard-mode") as HTMLSelectElement).disabled).toBe(false);
+    expect(container.querySelector("#cost-guard-save")?.getAttribute("aria-disabled")).toBe("true");
+    expect(updates).toHaveLength(1);
+    expect(confirms).toHaveLength(action === "confirm" ? 1 : 0);
   });
 
   it("shows_loading_forbidden_and_retry_without_writing", async () => {

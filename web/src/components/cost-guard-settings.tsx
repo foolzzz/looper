@@ -202,6 +202,7 @@ export function CostGuardSettingsSection() {
       if (!active.current || signal.aborted) return;
       setView(next);
       if (replaceDraft || !draftRef.current) setDraft(draftFrom(next));
+      if (replaceDraft) setWriteError("");
       setLoadError(null); setStale(false); setUnknown(false); setForbidden(false);
     } catch (error) {
       if (!active.current || signal.aborted || stopped(error)) return;
@@ -255,7 +256,7 @@ export function CostGuardSettingsSection() {
   }, [pending, unknown, view]);
 
   const parsed = view && draft ? changedPatch(view, draft) : { valid: true, dirty: false, patch: null };
-  const locked = Boolean(pending) || forbidden || busy;
+  const locked = Boolean(pending) || forbidden || busy || unknown;
   const canSave = Boolean(parsed.patch && parsed.valid && parsed.dirty && !locked && !unknown && !loading);
 
   async function readBack() {
@@ -282,8 +283,9 @@ export function CostGuardSettingsSection() {
       await readBack();
       returnFocus.current = true;
     } catch (error) {
-      if (!active.current || stopped(error)) return;
+      if (!active.current || error instanceof SessionEndedError) return;
       if (error instanceof V1Error && error.status === 403) setForbidden(true);
+      setUnknown(!(error instanceof V1Error && error.status >= 400 && error.status < 500));
       setWriteError(messageOf(error));
     } finally {
       busyRef.current = false;
@@ -292,7 +294,7 @@ export function CostGuardSettingsSection() {
   }
 
   async function confirmSave() {
-    if (!pending || busyRef.current) return;
+    if (!pending || unknown || busyRef.current) return;
     busyRef.current = true; setBusy(true); setWriteError("");
     try {
       const result = await updateCostGuard(parsed.patch ?? {}, pending);
@@ -302,9 +304,10 @@ export function CostGuardSettingsSection() {
       await readBack();
       returnFocus.current = true;
     } catch (error) {
-      if (!active.current || stopped(error)) return;
+      if (!active.current || error instanceof SessionEndedError) return;
       setPending(null);
       if (error instanceof V1Error && error.status === 403) setForbidden(true);
+      setUnknown(!(error instanceof V1Error && error.status >= 400 && error.status < 500));
       setWriteError(messageOf(error));
     } finally {
       busyRef.current = false;
@@ -313,7 +316,7 @@ export function CostGuardSettingsSection() {
   }
 
   function edit(next: Draft) {
-    if (pending || forbidden) return;
+    if (locked) return;
     setDraft(next); setWriteError("");
   }
 
@@ -323,7 +326,7 @@ export function CostGuardSettingsSection() {
     {loadError && <p role="alert" className="text-sm text-destructive">{loadError}</p>}
     {unknown && <p role="alert" className="text-sm text-destructive">状态未知。请只读重试，不会自动再次保存。</p>}
     {stale && view && <p role="status" className="text-sm text-warning">数据未刷新</p>}
-    {(loadError || unknown) && !forbidden && <Button type="button" variant="outline" className="pointer-coarse:text-base" onClick={() => refresh(false)}>重新读取</Button>}
+    {(loadError || unknown) && !forbidden && <Button type="button" variant="outline" className="pointer-coarse:text-base" onClick={() => refresh(unknown)}>重新读取</Button>}
     {showForm && view && draft && <Card>
       <CardHeader><CardTitle className="flex flex-wrap items-center gap-3">花费守卫 <Badge variant="outline">{modeLabel(view.mode)}</Badge></CardTitle></CardHeader>
       <CardContent className="space-y-4 text-sm">
