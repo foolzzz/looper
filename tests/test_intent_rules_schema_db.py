@@ -24,7 +24,8 @@ def test_intent_rule_migration_fresh_upgrade_and_reentry(monkeypatch):
 
     async def test():
         async with fresh_connection() as upgraded, fresh_connection() as fresh:
-            old = tuple(m for m in connection._MIGRATIONS if m.name != migration.name)
+            old = tuple(m for m in connection._MIGRATIONS
+                        if m.name not in {migration.name, "intent_rule_execution"})
             with monkeypatch.context() as patch:
                 patch.setattr(connection, "_MIGRATIONS", old)
                 patch.setattr(connection, "_PENDING_MIGRATIONS", migrations.pending_migrations(old))
@@ -186,6 +187,9 @@ def test_rule_hit_evidence_deletion_drops_the_whole_hit():
                "rule_id": None, "rule_version": None, "selection": "fallback",
                "action": "push_for_confirmation", "reason": None, "verified_at": None, "mr_identity": None}
         async with pool.acquire() as conn, conn.transaction():
+            discovery = await store.create_discovery(conn, discovery_source_id="source", source_ref="evidence",
+                system_id="review", mr_url="https://review.example/repo/mr/1")
+            hit["discovery_id"] = discovery["id"]
             hit_id = await store.append_hit(conn, hit, conditions=[], sources=seqs)
             assert await store.append_hit(conn, hit, conditions=[], sources=seqs) == hit_id
         assert len((await store.get_hit(pool, hit_id))["sources"]) == 2
@@ -197,12 +201,12 @@ def test_rule_hit_evidence_deletion_drops_the_whole_hit():
     run_db(test)
 
 
-def test_uninstalled_execution_counts_are_unavailable():
+def test_empty_execution_counts_are_available():
     from looper.db import intent_rules as store
 
     async def test(pool):
         stats = await store.hit_stats(pool, since=NOW, until=NOW.replace(day=21))
-        assert stats["available"] is False
+        assert stats["available"] is True
         assert stats["rules"] == []
 
     run_db(test)

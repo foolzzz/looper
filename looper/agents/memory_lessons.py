@@ -1,4 +1,4 @@
-"""Operator lesson reads, lifecycle controls and independent settings."""
+"""Operator lesson reads, lifecycle controls and asynchronous retrospective settings."""
 from __future__ import annotations
 
 import json
@@ -10,6 +10,19 @@ from ..db import memory_lessons as store, memory as db_memory, projects, system_
 from . import memory, memory_lessons_model as model, memory_model
 from .memory_settings import _push_channel_problem
 from .ops import ErrorCode, OpError
+
+
+# Loaded before task recovery; successful operator updates refresh the switch, like the morning brief.
+_enabled = False
+
+
+def enabled() -> bool:
+    return _enabled
+
+
+async def load(db: Any = None) -> None:
+    global _enabled
+    _enabled = (await settings_view(db))["enabled"]
 
 
 async def act(action: str, candidate: str, *, via: memory_model.Via = memory_model.Via.DASHBOARD,
@@ -93,8 +106,18 @@ async def _checked(body: Mapping[str, Any], db: Any = None):
 
 
 async def update_settings(body: Mapping[str, Any], *, db: Any = None) -> dict[str, Any]:
+    global _enabled
     settings = await _checked(body, db)
-    await system_settings.put_settings({model.SETTING_KEY: json.dumps(settings.to_json(), allow_nan=False)}, pool=db)
+    from datetime import datetime, timezone
+    from ..db import connection, memory_retro
+
+    async with (db or connection.get_pool()).acquire() as conn, conn.transaction():
+        if settings.enabled:
+            await memory_retro.activate(conn, now=datetime.now(timezone.utc))
+        await conn.execute("INSERT INTO system_settings(key,value) VALUES($1,$2) ON CONFLICT(key) "
+                           "DO UPDATE SET value=EXCLUDED.value,updated_at=now()",
+                           model.SETTING_KEY, json.dumps(settings.to_json(), allow_nan=False))
+    _enabled = settings.enabled
     return await settings_view(db)
 
 
@@ -107,6 +130,8 @@ async def confirmation_impact(body: Mapping[str, Any], *, db: Any = None) -> str
              settings.weekly.push_channel != old.weekly.push_channel)):
         return ("Allow future task lessons to affect later tasks in the same project without individual operator "
                 "review? Push channel: " + (settings.weekly.push_channel or "none") +
-                ". Enabled projects may inject existing active lessons into later runs. "
-                "Retrospective generation and weekly delivery ship separately.")
+                ". Retrospectives run after enabled project tasks finish. Each attempt is capped at $0.10 by default; "
+                "65 terminal tasks per day would reserve up to $6.50 before retries, subject to the daily budget. "
+                "Actual cost depends on enabled projects and model pricing. "
+                "Enabled projects may inject existing active lessons into later runs. Weekly delivery ships separately.")
     return None

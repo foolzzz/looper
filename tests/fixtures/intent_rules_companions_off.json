@@ -1,0 +1,12 @@
+{
+  "baseline": "7f2e3d0dccd9f6ab986ca9955ca9136dd3f2a8fc",
+  "outputs": {
+    "attention": "需要你处理（1 项）：\n\n待处理的意图 1：\n- I-0001 Fix the login page（开发任务）\n\n回复「建 I-0001」建任务，「驳回 I-0001」驳回。\n\n等你确认的操作：这里读不到\n\n登录失效：这里读不到",
+    "intent_push": "💡 I-0001 · 开发任务（置信度：高）\nFix the login page\nSomeone asked the user to fix the login page error.\n来源：私聊 · ou_alice · 11-23 14:00\n项目：Frozen project（模板：项目默认）\n回复「建」或「建 I-0001」建任务并开始；「驳回 I-0001」驳回。24 小时没处理会过期。",
+    "mid_turn": [
+      "[Looper] Another message from the user arrived while you were working (Channel: the Looper dashboard chat). Answer it in this same reply.\nAdditional synthetic request",
+      "[Looper] Another message from the user arrived while you were working (Channel: the Looper dashboard chat). Answer it in this same reply.\n撤销 task-unbound-synthetic"
+    ],
+    "morning_brief": "晨报 · 11-23（周一）\n\n需要你处理（1 项）：\n\n待处理的意图 1：\n- I-0001 Fix the login page（开发任务）\n\n回复「建 I-0001」建任务，「驳回 I-0001」驳回。\n\n等你确认的操作：这里读不到\n\n登录失效：这里读不到\n\n推迟到这份晨报的消息\n- 意图（免打扰，11-23 14:00）"
+  }
+}

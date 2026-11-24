@@ -1330,6 +1330,35 @@ Managed hooks remain effective. A UserPromptSubmit hook's input does not contain
 but it can read the session transcript; real-CLI verification of hook execution and transcript visibility is pending.
 The separately approved real-CLI check must also measure the injected profile's actual token count.
 
+**Retrieval (`looper claude-code mcp`).** This opt-in stdio server offers `vault_search`, `vault_read` and
+`leads_search`, forwarding to the corresponding operator-only `manager_retrieval.*` v1 reads. They reuse the
+default Manager's answer functions, knowledge vault root and switches (`manager_read` and `leads.enabled`).
+Each message lead adds a `label` saying it came from messages and is only a lead; the existing untrusted fence
+also applies. These reads have no chat footer or group backstop side effects: Claude Code is not a Looper group
+chat. No tool writes, and nothing is installed by default. Dashboard, Telegram and Lark retain the Manager's tools.
+`looper claude-code install mcp` previews the entry and command, then asks before running
+`claude mcp add-json --scope user`; `uninstall mcp` previews and confirms removal. With no part specified,
+installation and removal process the hook and MCP separately, in that order. `status` checks installed parts,
+including the current vault root and message-lead switch.
+The listening HTTP server atomically publishes its bound host and port in the runtime root's
+`server-address.json`. MCP resolves it on each call; `status` uses the same resolver. This covers both
+`serve --port` and service-unit overrides without freezing the address into the MCP registration.
+The server holds a lock on the published record until its listener closes. Shutdown or a crash leaves
+an unlocked, stale record: clients report it and never fall back to another port. A missing record,
+including one deleted while locked, also refuses retrieval and asks the operator to run `looper serve`;
+the ops file is never a fallback address. Wildcard listeners resolve to their loopback address;
+other non-loopback destinations remain refused.
+Address publication failures only degrade this integration: the HTTP server keeps serving and logs a warning.
+If another listener owns the same runtime root's address, the second listener does not replace that record;
+retrieval keeps using the first listener. The second listener does not automatically claim the record later.
+Each call rereads the local operator token and derives a domain-separated, read-only credential; the raw token
+is never sent by MCP or stored in its entry. The HTTP connection gate permits that credential only on direct
+loopback connections and only for the three POST retrieval paths, before body reads, uploads or dispatch.
+Every other v1 operation returns 403. The retrieval gate also rereads the current token on every retrieval
+request: operator rotation immediately invalidates the old derived credential without restarting serve.
+Tools still list when Looper is stopped; calls return the reason without retrying. Managed `PreToolUse` and
+`PostToolUse` hooks can see the calls and results. Real-model checks of this integration remain pending approval.
+
 ### What an agent may do
 
 The Manager, the Workers and the Reviewers have every tool but the ones that
@@ -1956,8 +1985,22 @@ Manager tools.
   for each turn. File tools stay within the working directory and explicit
   added directories; bash is not confined to those paths and is not an OS
   sandbox. Bash uses the session's private HOME and environment, with a
-  ceiling of the run timeout (86,400 seconds when unset); a shorter tool
-  timeout is honored. An unset run request limit becomes 1,000 requests.
+  per-call deadline of 120 seconds, independent of the Worker's run deadline
+  (seeded at 86,400 seconds). A shorter model-requested timeout is honored;
+  longer requests are clamped to the session deadline and a hard 600-second
+  cap. No new operator setting is required. Timeout or abort sends TERM to the
+  shell group, KILL after two seconds, then drains output for at most 500 ms
+  before ending that call's executor. Timeout results keep the existing
+  `is_error=false` contract and include the timeout text; cancellation remains
+  an error. If the shell exits while a background process keeps its output
+  open, output drains for at most 500 ms before returning the exit code and an
+  explicit background-output note. A process that escaped the shell group can
+  survive; its session owner must manage its lifetime separately. Runner
+  diagnostics include tool span identifiers, deadlines, elapsed time and
+  cleanup phases, with a command hash rather than command text. These changes
+  affect only operators who select the opt-in DSH runtime; dashboard, channels
+  and CLI continue to show the paired tool result through their existing paths.
+  An unset run request limit becomes 1,000 requests.
   Spend and request caps are checked before every model request, including
   compaction, with no provider retry. Per-request token buckets use the saved
   model's effective prices (`cost_source=provider_price`); these reservations
@@ -3361,6 +3404,38 @@ memory page shows their candidates for the operator to review.
   editor save can overwrite it; the content hash and commit trailers allow
   checking what was written. An agent with a shell has the same system-user
   access to the vault; this supported write path does not isolate that user.
+
+### Project lesson retrospectives
+
+`memory_lessons` is independent of vault writing and defaults off. Both its `enabled` field and the project's
+`memory_lessons = 'on'` are required. On, project-scoped learnings still enter the task journal, but the old
+project-document drafts and `[LESSONS]` turn stop. Vault closeout keeps its separate setting and path. Empty
+lesson snapshots do not disable retrospectives; context injection is a separate feature.
+The server loads the validated switch before recovering tasks, and successful settings updates refresh it in
+memory. While off, retrospective ticks and terminal callbacks read only that switch, without database reads.
+Turning it on at runtime resumes processing within the next 10-second interval.
+
+After TaskRouter forwards the final completed/failed status and tears down the Planner, an independent terminal
+listener enqueues the newly observed journal range. Scheduler and retrospective callbacks cannot block one
+another on failure. `MemoryRetroService` recovers post-activation terminal tasks, claims a short database lease,
+then invokes the private `memory_retro` role without holding a connection or transaction. Migration 1980 widens
+the role/run-kind checks online; 1990 adds durable cursors, activation high-water, attempt leases, independent
+spend reservations, range output references and distinct-task reinforcement records. Retrying once consumes
+another reservation; missing costs consume the full reserved cap. The default cap is $0.10 per attempt and
+$0.50 per local day. The existing global cost guard still applies.
+
+The role uses `model_call.ChildCall`, one turn, an empty working directory, replaced prompt, no tools, MCP or
+harness, and at most 90 seconds. Its private records retain metadata and input digests, never journal or reply
+bodies. A built-in model awaits the approved real comparison; operators must select an explicit role profile.
+Escaped input includes only this range's displayed numbered journal evidence, up to 60 active project lessons
+and 20 held lessons. Strict JSON parsing drops unsafe items and records typed counts. A short transaction
+rechecks configuration, project, task, evidence, trust, lease, tombstones and replacement targets before saving
+candidates, sources, events, spending and the task activity. Shadow mode creates held lessons; external tasks
+always create independent held candidates and cannot reinforce trusted lessons. Later distinct tasks can renew
+an active lesson once each; replacement reuses the conservative protected-token gate. The existing operator-only
+lesson list and task activity expose results. Task deletion confirmation counts sourced active lessons once.
+Three distinct failed tasks claim one durable operator-only warning, at most once per local day; without an operator DM destination the
+warning stays in logs. This feature adds no channel completion footer, injection, weekly delivery or vault write.
 
 ### Project skills: skills a project writes
 
@@ -5245,8 +5320,8 @@ contract 5.3 KB (5,309 bytes of `TOOLS_CONTRACT`).
 | `looper_settings` | `view` the shared defaults and each role's layer, what applies to each role with its source and its timeout, or with `project` its layer, its roles' layers and its allowed profiles; `set` `values` on one layer (neither `role` nor `project`: the shared defaults; `role`; `project`; both: the role in the project): `profile` by id or name, `harness_prompt`, `env` (the layer's whole `{NAME: value}`), `run_budget_usd`, `max_concurrency` (the `worker` or `reviewer` role: the default for every task), `timeout_seconds` (a role alone, as Settings → Roles saves it), null clearing one, written by `agent_settings.update_system`, `update_role` or `update_project` and letting what waits check again after a limit; `allowed_profiles`: `add` profiles to a project's list or `remove` some (one not on it is refused), then the whole list is set by `projects.set_allowed_profiles`, which checks each. The answer gives each value before and after and what now applies | view reads; write; the shared defaults, a role's default concurrency limit and a higher or removed spend cap (any run of the layer's roles, resolved through the layers) are high, shown before → after |
 | `looper_schedules` | `list` every project's schedules as the Schedules page does (`schedules.list_all_schedules`; by `project`, by `enabled`): id, name, project, rule, zone, the rule in words, kind, enabled, user gates, next fire, last run (kind and exit code included), failures in a row; `get` one (`GET /api/schedules/:id`, the requirement cut to 1,000 characters) with its 5 latest runs, the routine skips left out and counted, as its page shows them; `create` one in an existing `project` from `fields` (the `fields` that `POST /api/v1/schedule_admin/create` takes, `profiles` being its `profile_overrides`, and `task_limits`), always disabled (`created_via` `manager`): Looper adds its configuration (project, directory, the rule in words and its next 3 fires in its zone, overlap, pre-run gate, user gates, caps, notify, profiles, task limits for agent schedules; kind, command in a verbatim code fence, timeout, env keys only, env file, success deadline and alert thresholds for command schedules) and 「要启用吗？回复「启用」就启用」 to the reply (in a group chat only 「要启用吗？@我回复「启用」就启用…」), and the turn that created it may neither `enable` nor `run` it (`conflict`: the user has not seen it); made from a Telegram or Lark chat without a `notify_target`, it tells whoever asked when their channel's allowlist lets them; `update` the `fields` given (`schedules.update_schedule`; null clears one, `profiles` and `task_limits` are replaced whole), and Looper adds each change before → after (commands in verbatim code fences, and the next 3 fires for a new rule or zone); every command schedule update also says it uses no agent or model spend; in a group chat it adds one line naming the settings that changed and whether the schedule is enabled, without their values; `enable` one (as its switch does; the answer says when it was so already) or `run` it now (`schedules.run_now`: the dashboard's Run now, through the overlap check, its next fire time left; the answer is the run), each asking first: a command schedule shows its exact command in a code fence, directory, timeout and env keys only (plus env file when set); enabling also shows its success deadline and alert thresholds, and both confirmations say it runs without an agent or model spend. An agent schedule keeps its task and spending confirmation. In a group chat these confirmations, and those of a raised cap or an enabled command's edit, are one question each, without the requirement, command, directory, environment or budgets. The call answers `needs_confirmation` and does nothing until the user's next message confirms (a schedule already enabled is not asked), and the turn that created a schedule may do neither (`conflict`); `disable` one (the user confirms first for a running command schedule, including after a refused delete); `delete` one (`schedules.delete_schedule`; a command schedule with a running run is refused (`conflict`) before anything is asked, saying it can be deleted once the command finishes, that disabling stops new fires, and that a queued run still starts after the running one even when the schedule is disabled); `reset_planner_session` clears its stored Planner session and holder after the user confirms in their next message. The reset confirmation says whether a session is stored, that the next run starts fresh, and that a run in flight keeps its own session until it ends and cannot write back. A schedule is named by its id, or by its name ignoring case, within `project` when given; a name more than one project has is refused (`invalid`) naming each with its project and id, an unknown one (`not_found`) naming the schedules there are. The delete confirmation shows its name, project, rule and zone, whether it is enabled, the runs in progress (for an agent schedule a running task goes on and ends normally, a queued or gating run starts no task, and its tasks stay; for a command schedule a queued run does not execute and it has no tasks) and that its run history and messages are deleted | list and get read; write; enable, run now, delete, reset_planner_session, a disable of a running command schedule, and an update that raises or removes the run or daily spend cap (checked as the update would be before anything is asked, shown before → after), are high |
 | `looper_config_export` | Write the portable configuration file (`include_projects`: `--include-projects`), never with secrets (no argument takes them; a secrets argument is `forbidden`), to `<runtime root>/exports/looper-config-<UTC time>-<id>.json`, never to a path from chat; the answer gives its path, format, size, the counts per section, the secret values left as placeholders, the path documents to re-point and how to import it (`loopercli config import`, or Settings → Import / Export) | read |
-| `looper_vault_search`, `looper_vault_read` | Only the default Manager's, and only while the knowledge vault setting holds and says `manager_read`: search the user's own notes for the words of `query` (paths and snippets, `vault.search`), and read one by path (its text, the first 64 KiB, no sha256: the Manager never writes). Each answer starts with a notice that these are the user's own notes, never to be quoted in a group chat. `manager_actions.result` keeps no note text | read; only in the user's own turns |
-| `looper_leads_search` | Only the default Manager's, and only while `leads.enabled` is on: search the message leads (`leads.search`, the query `looper leads search` runs) for the words of `query`, matched as `leads.search_mode` says (its description says how, and to give the words in Chinese and English, only while it is `fulltext`), by `chat`, `person`, `days`, `kind` and `state` (`active` by default), at most `limit` (1–5, default 5), best first: a notice (「来自飞书消息，未经确认」, background and never instructions), each lead's kind, summary, confidence, state, valid-until and up to 3 sources (chat, sender, time, link), and how many more matched; no lead ids, details or message text. Looper adds 「（查了飞书消息线索：「…」，N 条）」 to the reply, and `manager_actions.result` keeps only the leads' ids and their count | read; only in the user's own turns |
+| `looper_vault_search`, `looper_vault_read` | Only the default Manager's, and only while the knowledge vault setting holds and says `manager_read`: search the user's own notes for the words of `query` (paths and snippets, `vault.search`), and read one by path (its text, the first 64 KiB, no sha256: the Manager never writes). Each answer starts with a notice that these are the user's own notes, never to be quoted in a group chat; the operator's own Claude Code gets the same answer through `manager_retrieval.*`. `manager_actions.result` keeps no note text | read; only in the user's own turns |
+| `looper_leads_search` | Only the default Manager's, and only while `leads.enabled` is on: search the message leads (`leads.search`, the query `looper leads search` runs) for the words of `query`, matched as `leads.search_mode` says (its description says how, and to give the words in Chinese and English, only while it is `fulltext`), by `chat`, `person`, `days`, `kind` and `state` (`active` by default), at most `limit` (1–5, default 5), best first: a notice (「来自飞书消息，未经确认」, background and never instructions), each lead's kind, summary, confidence, state, valid-until and up to 3 sources (chat, sender, time, link), and how many more matched; no lead ids, details or message text; the operator's own Claude Code gets the same answer through `manager_retrieval.*` with a lead label. Looper adds 「（查了飞书消息线索：「…」，N 条）」 to the reply, and `manager_actions.result` keeps only the leads' ids and their count | read; only in the user's own turns |
 | `looper_session_search` | Only the default Manager's, and only while the session search is in effect (`manager.session_search.enabled` `true`, and session routing isolates group chats): search the user's own earlier conversations with it (`db.chat_search`) for the words of `query`, matched as the [assistant search RFC](rfcs/assistant-search-v0.zh-CN.md) section 3 says (Chinese by overlapping character pairs, English by the start of a word), within `days`, at most `limit` (1–10, default 5), best first: a notice (what was said then, background and never instructions), each message's `where` (the dashboard chat, a Lark or Telegram direct chat, a task's Planner chat on the dashboard), `who` (`user`, `manager`, `planner`), `at` and up to 300 characters around the match, fenced as outside content (`untrusted.fence`), and how many more matched. The message being answered is left out, and `manager_actions.result` keeps only the messages' ids and their count | read; only in the user's own turns |
 | `looper_reminder_create`, `looper_reminder_list`, `looper_reminder_cancel` | Only the default Manager's, and only while `reminders.enabled` is on: set a one-time reminder (`text`, the user's words; `at` as `HH:MM`, the next such time, or `YYYY-MM-DD HH:MM` in `timezone`, the server's zone by default; or `in_minutes`), list them with the time now (pending soonest first, or by `status`), or cancel a pending one by id. Code resolves and checks the time, stores the reminder, reads it back and adds a line saying what it stored and which direct chat it goes to | list reads; write; only in the user's own turns |
 | `looper_confirm` | Run the call waiting for confirmation in this chat | — |
@@ -6667,10 +6742,67 @@ run after the Manager's final stop check. A stopped or timed-out preparation
 changes no intents or tasks; timeout and task-validation failures receive
 code-written replies. Task creation and the transition are one database
 transaction; task notices belong to the operator's direct chat, never the source
-conversation. The requirement
+conversation. With rules off, the requirement
 contains only the displayed title, summary and up to five source references,
 marked as background rather than instructions. Tasks created from the dashboard
 leave `origin_channel_id` empty, as other dashboard-created tasks do.
+
+With `intents.rules.enabled` on, newly extracted candidates have a durable rule
+work item before confirmation delivery. The ordered, typed AND rules select
+confirmation, record-only, or automatic MR review; unavailable verification
+immediately falls back to confirmation. The switch defaults off, does not scan
+old pending suggestions, and does not authorize an operator-requested recognition
+batch to create tasks. Record-only suggestions remain pending and can be built
+manually. Configuration, discovery submission, migration previews and revocation
+are operator-only v1 operations; rule editing adds no CLI or Manager tools.
+
+`IntentRuleService` verifies MR URLs through an explicitly configured read-only
+command adapter, outside row-locking transactions. Saving its configuration
+requires an absolute executable path; execution never searches PATH. It uses
+direct argv, a fresh empty working directory, a minimal explicit environment,
+a ten-second deadline and a 64 KiB stdout bound, and cleans up the process group
+after normal exits as well as failures. The request contains only the canonical MR URL and
+protocol version. A host integration can inject dedicated credential references
+with `intent_rule_verifier.configure_credentials`; a missing reference confirms
+instead of borrowing another provider's credentials. The empty directory is not
+a sandbox. The response is a closed schema, and its canonical target must match
+the requested system, repository route and MR. Reviewer IDs come from the API;
+DM targets, mentions and sender IDs come from the same real request event.
+
+Before creation the service verifies again and, under the shared admission lock,
+rechecks the switch, delivery, rule generation, project/workflow snapshots,
+source authorization and the original revision. The transaction atomically
+claims `(system_id, repository_id, mr_id, revision)`, creates the existing task
+lifecycle's ready task, transitions the candidate, consumes the shared operator /
+project / local-day quota, writes audit and queues start and notice outboxes.
+Messages, structured discoveries and manual MR builds share that claim. Existing
+or cancelled revisions link the same task without another quota charge. Manual
+builds do not consume automatic quota. An unknown historical revision blocks the
+MR until the operator resolves its ownership; migration preview/confirmation
+registers reliable existing ownership without switching an installation.
+
+Automatic and manual rule-bound MR requirements contain only a fixed review
+sentence and the verified URL, with an explicit project and workflow. Message
+titles, summaries and source text never become Worker instructions. Starts
+recover only their committed task ID and are acknowledged by the atomic
+`init → pending` transition, not by successful bus publication. Revocation
+serializes with that transition, cancels a ready task locally or asks the current
+TaskRouter to stop active work, and reports the observed state. Claims and quota
+survive revocation; posted review comments cannot be withdrawn by this action.
+
+Rule notices use normal proactive delivery to the current operator DM, with
+separate `rule-created:`, `rule-discovery:` and fault-episode references. Quiet
+hours and daily limits retain a digest; uncertain channel receipts do not blindly
+retry. Source deletion clears message audit while committed execution/start and
+minimal MR claims survive. Confirmation push, attention and morning-brief items
+are checked again at send time under the same candidate gate. Switching rules
+off holds notices without stopping committed starts or tasks; switching back on
+resumes the same notices and never creates again. Three consecutive unavailable
+checks produce one normal operator notice per fault episode. Execution readback
+includes start, quota, delivery and revocation facts, and statistics count unique
+automatic executions rather than multiplying tasks through deduplicated hits.
+The remote API and local commit cannot be atomic: the workflow must still read
+the current MR before working on it.
 
 The one state writer permits `pending → tasked | rejected | expired` and
 `expired → tasked`. A transition of an intent whose push was delivered (sent, with a

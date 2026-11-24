@@ -43,7 +43,10 @@ OPERATIONS = (
     Operation("memory_lessons.settings_put", "POST", "/api/v1/memory_lessons/settings_put",
         "Replace lesson settings, filling omitted fields with defaults.",
         "Replace lesson settings, filling omitted fields with defaults. Confirms automatic activation and "
-        "active weekly delivery target changes. Enabled projects inject lessons when their agents start.",
+        "active weekly delivery target changes. Enabled projects run asynchronous journal retrospectives; "
+        "the default per-attempt cap is $0.10, with a separate daily allowance. For illustration, 65 terminal "
+        "tasks at one attempt each reserve at most $6.50 before retries and the daily limit. "
+        "Enabled projects inject lessons when their agents start.",
         _SETTINGS, _VIEW, risk="write", confirms=True, operator_only=True, level=ActionLevel.INSIDE),
     Operation("memory.task_lessons", "POST", "/api/v1/memory/task_lessons",
         "Read a task's frozen lessons and paginated injection history.",

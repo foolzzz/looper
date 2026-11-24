@@ -330,6 +330,25 @@ def bearer(headers: Mapping[str, str]) -> str | None:
     return _bearer(headers)
 
 
+# A domain-separated credential: it cannot recover the operator token and rotates with it.
+RETRIEVAL_READS = frozenset(("POST", f"/api/v1/manager_retrieval/{name}")
+                          for name in ("vault_search", "vault_read", "leads_search"))
+
+
+def retrieval_token(token: str) -> str:
+    """Derive the memory entry's read-only credential without storing another secret."""
+    return "lmr_" + hmac.new(token.encode(), b"looper-memory-retrieval-v1", hashlib.sha256).hexdigest()
+
+
+def is_retrieval(headers: Mapping[str, str], *, token: str | None, peer_host: str | None) -> bool:
+    """A memory credential is accepted only as a bearer on a direct loopback connection."""
+    credential = bearer(headers)
+    return bool(token and credential and peer_host and is_loopback(peer_host)
+                and is_loopback(hostname(headers.get("host", "")))
+                and "forwarded" not in headers and "x-forwarded-for" not in headers
+                and hmac.compare_digest(credential.encode(), retrieval_token(token).encode()))
+
+
 def cookie(headers: Mapping[str, str], name: str) -> str | None:
     for item in headers.get("cookie", "").split(";"):
         key, separator, value = item.partition("=")

@@ -32,6 +32,58 @@ async def apply(conn, *, sql, state):
 '''
 
 
+def test_lesson_injection_upgrades_after_higher_order_retrospective_migrations(monkeypatch):
+    from looper.db.migrations import memory_lesson_injection as injection
+    from looper.db.migrations import memory_retro_queue, memory_retro_role
+
+    registry = connection._MIGRATIONS
+    retros = (memory_retro_role, memory_retro_queue)
+    assert [m.name for m in registry if m.order == 1940] == [injection.name]
+    assert [m.order for m in registry if m in (injection, *retros)] == [1940, 1980, 1990]
+
+    def install(modules):
+        monkeypatch.setattr(connection, "_MIGRATIONS", modules)
+        monkeypatch.setattr(connection, "_PENDING_MIGRATIONS", migrations.pending_migrations(modules))
+        monkeypatch.setattr(connection, "_ONLINE_STEPS", migrations.online_steps(modules))
+
+    async def check():
+        async with fresh_connection() as upgraded, fresh_connection() as fresh:
+            # Upgrade through the retrospective release first, without shipping injection.
+            install(tuple(m for m in registry if m not in (injection, *retros)))
+            await connection.ensure_schema(upgraded)
+            install(tuple(m for m in registry if m is not injection))
+            await connection.ensure_schema(upgraded)
+            assert not await connection.schema_change_pending(upgraded)
+            retro_markers = await upgraded.fetch(
+                "SELECT * FROM schema_migrations WHERE name = ANY($1) ORDER BY name",
+                [m.name for m in retros] + [m.online[0].marker for m in retros])
+            assert len(retro_markers) == 4
+            await upgraded.execute("INSERT INTO system_settings(key,value) VALUES ('synthetic-upgrade','kept')")
+            assert await upgraded.fetchval("SELECT to_regclass('task_lesson_snapshot_sets')") is None
+
+            # Admission is read-only; a lower order addition must still run on a current DB.
+            install(registry)
+            before = await witness(upgraded)
+            assert await connection.schema_change_pending(upgraded)
+            assert await witness(upgraded) == before
+            await connection.ensure_schema(upgraded)
+            assert await upgraded.fetchval("SELECT count(*) FROM schema_migrations WHERE name = ANY($1)",
+                [injection.name, injection.online[0].marker]) == 2
+            assert await upgraded.fetch(
+                "SELECT * FROM schema_migrations WHERE name = ANY($1) ORDER BY name",
+                [m.name for m in retros] + [m.online[0].marker for m in retros]) == retro_markers
+            assert await upgraded.fetchval(
+                "SELECT value FROM system_settings WHERE key='synthetic-upgrade'") == "kept"
+            await connection.ensure_schema(fresh)
+            assert await structure(upgraded) == await structure(fresh)
+            assert not await connection.schema_change_pending(upgraded)
+            saved = await witness(upgraded)
+            await connection.ensure_schema(upgraded)
+            assert await witness(upgraded) == saved
+
+    asyncio.run(check())
+
+
 def test_new_migration_file_upgrades_and_initializes_the_same_schema(tmp_path, monkeypatch):
     module_name = "registry_test_example_items"
     (tmp_path / f"{module_name}.py").write_text(_NEW_MIGRATION)

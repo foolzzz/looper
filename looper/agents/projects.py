@@ -1186,15 +1186,27 @@ async def start_ready_task(task_id: str, bus: MessageBus, source: AgentAddress, 
     if task["status"] != db_tasks.READY:
         raise RequestError(HTTP_400, f"the task is {task['status']}, not ready: only a task that was created and "
                                      "never started can be started")
-    await bus.publish(MessageEnvelope.create(
-        source=source, target=TASK_ROUTER_ADDRESS, message_type=MessageType.TASK_START, payload={"task_id": task_id},
-    ))
+    if (task.get("config") or {}).get("intent_rule_bound"):
+        from ..db import intent_rule_execution
+        from ..db.connection import _connection
+        async with _connection(pool or db_connection.get_pool()) as conn, conn.transaction():
+            await conn.fetchrow("SELECT id FROM tasks WHERE id=$1 FOR UPDATE", task_id)
+            execution = await intent_rule_execution.get_execution(conn, task_id=task_id, lock=True)
+            if execution is None or execution["revoke_state"] != "none":
+                raise RequestError(HTTP_409, "the rule task has been revoked")
+            await conn.fetchrow("SELECT task_id FROM intent_rule_task_starts WHERE task_id=$1 FOR UPDATE", task_id)
+            await bus.publish(MessageEnvelope.create(source=source, target=TASK_ROUTER_ADDRESS,
+                message_type=MessageType.TASK_START, payload={"task_id": task_id}))
+    else:
+        await bus.publish(MessageEnvelope.create(
+            source=source, target=TASK_ROUTER_ADDRESS, message_type=MessageType.TASK_START, payload={"task_id": task_id},
+        ))
     return {"started": task_id, "project_id": task["project_id"]}
 
 
-async def check_task_control(task_id: str, action: str) -> dict[str, Any]:
+async def check_task_control(task_id: str, action: str, *, pool: Any = None) -> dict[str, Any]:
     """The task when its state allows a control action, also used before asking for confirmation."""
-    task = await db_tasks.get_task(task_id)
+    task = await db_tasks.get_task(task_id, **({"pool": pool} if pool is not None else {}))
     if task is None:
         raise RequestError(HTTP_404, f"no task {task_id}: find its id with looper_tasks")
     status = task["status"]

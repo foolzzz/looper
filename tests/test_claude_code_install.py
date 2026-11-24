@@ -1,6 +1,9 @@
 """The opt-in hook edits only temporary user settings and preserves unrelated data."""
 
 import json
+import contextlib
+import threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import shlex
 import stat
 import subprocess
@@ -35,6 +38,7 @@ def _handlers(path):
 def sandbox(tmp_path, monkeypatch):
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "cc"))
+    monkeypatch.setenv("PATH", "/usr/bin:/bin")
     monkeypatch.delenv("LOOPER_AGENT_RUN", raising=False)
     monkeypatch.setattr(service, "looper_command", lambda _: ["/opt/looper/bin/looper"])
     runtime = tmp_path / "rt"
@@ -43,7 +47,8 @@ def sandbox(tmp_path, monkeypatch):
 
 
 def _run(sandbox, monkeypatch, command="install", *, answer=True, flags=()):
-    args = cli.build_parser().parse_args(["claude-code", command, "--runtime-root", str(sandbox[0]), *flags])
+    parts = [] if command == "status" else ["hook"]
+    args = cli.build_parser().parse_args(["claude-code", command, *parts, "--runtime-root", str(sandbox[0]), *flags])
     return cc.run(args, confirm=lambda _: answer() if callable(answer) else answer)
 
 
@@ -293,3 +298,202 @@ def test_install_reports_readback_failure_and_keeps_the_backup(sandbox, monkeypa
     assert _run(sandbox, monkeypatch) == 1
     assert "settings readback failed" in capsys.readouterr().out
     assert len(_backups(path)) == 1 and _backups(path)[0].read_bytes() == original
+
+
+@pytest.fixture
+def fake_claude(tmp_path):
+    executable = tmp_path / "bin" / "claude"
+    executable.parent.mkdir()
+    executable.write_text("#!" + sys.executable + "\n" + r'''
+import json, pathlib, sys
+root = pathlib.Path(__file__).parent
+with (root / 'calls.jsonl').open('a') as stream:
+    stream.write(json.dumps(sys.argv[1:]) + '\n')
+state = root / 'registered'
+command = sys.argv[2]
+if command == 'get':
+    sys.exit(0 if state.exists() else 1)
+if (root / 'fail').exists():
+    print('registration failed', file=sys.stderr)
+    sys.exit(3)
+if not (root / 'no-change').exists():
+    if command == 'add-json': state.touch()
+    elif command == 'remove': state.unlink(missing_ok=True)
+''')
+    executable.chmod(0o700)
+    return executable
+
+
+def _mcp_run(sandbox, executable, command="install", *, answer=True, flags=(), parts=("mcp",)):
+    args = cli.build_parser().parse_args(["claude-code", command, *parts, "--runtime-root", str(sandbox[0]),
+                                          "--claude", str(executable), *flags])
+    return cc.run(args, confirm=lambda _: answer)
+
+
+def _calls(executable):
+    path = executable.parent / "calls.jsonl"
+    return [json.loads(line) for line in path.read_text().splitlines()] if path.exists() else []
+
+
+def test_install_mcp_shows_the_exact_command_and_runs_it_after_yes(sandbox, fake_claude, capsys):
+    assert _mcp_run(sandbox, fake_claude, answer=False) == 1
+    output = capsys.readouterr().out
+    assert "add-json --scope user looper-memory" in output
+    assert json.dumps(cc.mcp_entry(sandbox[0], None), indent=2) in output
+    assert _calls(fake_claude) == [["mcp", "get", "looper-memory"]]
+    assert _mcp_run(sandbox, fake_claude) == 0
+    calls = _calls(fake_claude)
+    added = [call for call in calls if call[1] == "add-json"]
+    assert len(added) == 1
+    assert added[0][:5] == ["mcp", "add-json", "--scope", "user", "looper-memory"]
+    entry = json.loads(added[0][5])
+    assert entry == cc.mcp_entry(sandbox[0], None)
+    assert "env" not in entry and "operator-token" not in added[0][5]
+    assert calls[-1] == ["mcp", "get", "looper-memory"]
+
+
+def test_install_mcp_when_already_registered_changes_nothing(sandbox, fake_claude, capsys):
+    (fake_claude.parent / "registered").touch()
+    assert _mcp_run(sandbox, fake_claude) == 0
+    assert "already registered" in capsys.readouterr().out
+    assert _calls(fake_claude) == [["mcp", "get", "looper-memory"]]
+
+
+def test_install_mcp_without_claude_prints_the_command(sandbox, monkeypatch, tmp_path, capsys):
+    monkeypatch.setenv("PATH", "")
+    assert _mcp_run(sandbox, tmp_path / "missing-claude") == 1
+    assert "add-json --scope user looper-memory" in capsys.readouterr().out
+
+
+def test_uninstall_mcp_runs_remove_with_user_scope(sandbox, fake_claude):
+    (fake_claude.parent / "registered").touch()
+    assert _mcp_run(sandbox, fake_claude, "uninstall") == 0
+    assert _calls(fake_claude) == [["mcp", "get", "looper-memory"],
+        ["mcp", "remove", "--scope", "user", "looper-memory"], ["mcp", "get", "looper-memory"]]
+
+
+@pytest.mark.parametrize("command,registered", [("install", False), ("uninstall", True)])
+def test_mcp_dry_run_does_not_change_registration(sandbox, fake_claude, command, registered):
+    if registered:
+        (fake_claude.parent / "registered").touch()
+    assert _mcp_run(sandbox, fake_claude, command, flags=("--dry-run",)) == 0
+    assert _calls(fake_claude) == [["mcp", "get", "looper-memory"]]
+
+
+@pytest.mark.parametrize("failure", ["fail", "no-change"])
+def test_install_mcp_reports_command_failure_or_bad_readback(sandbox, fake_claude, failure):
+    (fake_claude.parent / failure).touch()
+    assert _mcp_run(sandbox, fake_claude) == 1
+
+
+def test_mcp_without_a_terminal_needs_yes(sandbox, fake_claude, monkeypatch):
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: False)
+    args = cli.build_parser().parse_args(["claude-code", "install", "mcp", "--runtime-root", str(sandbox[0]),
+                                         "--claude", str(fake_claude)])
+    assert cc.run(args) == 2
+    assert _calls(fake_claude) == [["mcp", "get", "looper-memory"]]
+
+
+def test_mcp_install_is_refused_inside_an_agent_run(sandbox, fake_claude, monkeypatch):
+    monkeypatch.setenv("LOOPER_AGENT_RUN", "1")
+    assert _mcp_run(sandbox, fake_claude) == 4
+    assert _calls(fake_claude) == []
+
+
+def test_install_without_parts_shows_and_confirms_each_part(sandbox, fake_claude):
+    prompts = []
+    args = cli.build_parser().parse_args(["claude-code", "install", "--runtime-root", str(sandbox[0]),
+                                         "--claude", str(fake_claude)])
+    assert cc.run(args, confirm=lambda prompt: prompts.append(prompt) or True) == 0
+    assert len(prompts) == 2
+    assert "settings.json" in prompts[0] and "MCP" in prompts[1]
+
+
+@contextlib.contextmanager
+def _retrieval_server(runtime, *, readable=True):
+    from looper.agents import operator_auth, server_address
+    token = operator_auth.ensure_token(runtime)
+    state = {"readable": readable, "paths": []}
+
+    class Handler(BaseHTTPRequestHandler):
+        def log_message(self, *_args):
+            pass
+
+        def do_POST(self):
+            assert self.headers["Authorization"] == "Bearer " + token
+            state["paths"].append(self.path)
+            result = ({"configured": True, "manager_read": state["readable"], "path": "notes", "problem": None}
+                      if self.path.endswith("knowledge_vault/get") else {"enabled": False})
+            body = json.dumps({"status": "ok", "result": result}).encode()
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    publication = server_address.Publication(runtime, "127.0.0.1", server.server_port)
+    ops_config.write_private(runtime / ops_config.FILE, f"[server]\nport = {server.server_port}\n")
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield state
+    finally:
+        server.shutdown()
+        thread.join(timeout=3)
+        server.server_close()
+        publication.close()
+
+
+def test_status_reports_retrieval(sandbox, fake_claude, capsys):
+    (fake_claude.parent / "registered").touch()
+    with _retrieval_server(sandbox[0]) as state:
+        assert _mcp_run(sandbox, fake_claude, "status", parts=()) == 0
+        output = capsys.readouterr().out
+        assert "retrieval MCP server (looper-memory): registered" in output
+        assert "knowledge vault for the Manager: readable (root notes)" in output
+        assert "message leads: off" in output
+        assert state["paths"] == ["/api/v1/knowledge_vault/get", "/api/v1/leads/settings_get"]
+        state["readable"] = False
+        assert _mcp_run(sandbox, fake_claude, "status", parts=()) == 1
+
+
+def test_status_reports_registered_mcp_without_looper_as_unhealthy(sandbox, fake_claude, capsys):
+    (fake_claude.parent / "registered").touch()
+    assert _mcp_run(sandbox, fake_claude, "status", parts=()) == 1
+    assert "knowledge vault for the Manager: off:" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("failure", ["fail", "no-change"])
+def test_uninstall_mcp_reports_command_failure_or_bad_readback(sandbox, fake_claude, failure):
+    (fake_claude.parent / "registered").touch()
+    (fake_claude.parent / failure).touch()
+    assert _mcp_run(sandbox, fake_claude, "uninstall") == 1
+
+
+def test_uninstall_mcp_when_not_registered_changes_nothing(sandbox, fake_claude):
+    assert _mcp_run(sandbox, fake_claude, "uninstall") == 0
+    assert _calls(fake_claude) == [["mcp", "get", "looper-memory"]]
+
+
+def test_mcp_command_timeout_is_reported(sandbox, fake_claude, monkeypatch, capsys):
+    def timeout(*args, **kwargs):
+        raise subprocess.TimeoutExpired(args[0], 30)
+
+    monkeypatch.setattr(cc.subprocess, "run", timeout)
+    assert _mcp_run(sandbox, fake_claude) == 1
+    assert "timed out" in capsys.readouterr().out
+
+
+def test_mcp_entry_carries_absolute_config_without_credentials(sandbox, tmp_path):
+    config = tmp_path / "settings with spaces.toml"
+    entry = cc.mcp_entry(sandbox[0], str(config))
+    assert entry["args"] == ["claude-code", "mcp", "--runtime-root", str(sandbox[0]), "--config", str(config)]
+    assert set(entry) == {"type", "command", "args"}
+
+
+def test_explicit_missing_claude_never_falls_back_to_another_install(sandbox, fake_claude, monkeypatch):
+    monkeypatch.setenv("PATH", str(fake_claude.parent))
+    args = cli.build_parser().parse_args(["claude-code", "install", "mcp", "--runtime-root", str(sandbox[0]),
+                                          "--claude", str(fake_claude.parent / "missing"), "--yes"])
+    assert cc.run(args) == 1
+    assert not (fake_claude.parent / "calls.jsonl").exists()

@@ -42,8 +42,11 @@ def test_fresh_and_upgraded_lesson_schema_are_equivalent():
 
     async def check():
         async with fresh_connection() as upgraded, fresh_connection() as fresh:
-            old = tuple(m for m in connection._MIGRATIONS if m.name not in {migration.name, "memory_lesson_injection"})
+            # Later migrations may depend on the lesson tables: start before the foundation.
+            old = tuple(m for m in connection._MIGRATIONS if m.order < migration.order)
             await upgraded.execute(migrations.schema_sql(connection.SCHEMA_PATH.read_text(), old))
+            for table in TABLES:
+                assert await upgraded.fetchval("SELECT to_regclass($1)", table) is None
             await upgraded.execute("INSERT INTO registry_schema_version(id,version) VALUES(TRUE,$1)",
                                    connection.REGISTRY_SCHEMA_VERSION)
             from looper.db.bridge_upgrade import BASELINE
@@ -53,6 +56,8 @@ def test_fresh_and_upgraded_lesson_schema_are_equivalent():
             await connection.ensure_schema(upgraded)
             await connection.ensure_schema(fresh)
             assert await structure(upgraded) == await structure(fresh)
+            assert not await connection.schema_change_pending(upgraded)
+            assert not await connection.schema_change_pending(fresh)
             assert await upgraded.fetchval("SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE name=$1)", migration.name)
             assert {r[0] for r in await fresh.fetch("SELECT name FROM schema_migrations")} == {BASELINE}
             candidate, _ = await lesson(upgraded)

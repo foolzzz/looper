@@ -183,12 +183,55 @@ async def digests(conn: Any, *, channel_id: str, chat: str, until: datetime,
     in ``morning_brief_consumed`` is not read again. A morning brief is not one of them. ``source`` is what the
     metrics call the send point. There is no lower bound on ``decided_at``: a row that commits after this read,
     with an earlier ``decided_at``, is still here next time."""
+    from ..agents import leads_model
+
     triage_filter = "AND source <> 'triage' " if await triage_settings.enabled(db=conn) else ""
+    rules_on = await leads_model.rules_enabled(db=conn)
+    # Disabled execution never reads a rule table. Its committed notices must also
+    # stay deferred here, rather than escaping through the independent brief switch.
+    rule_filter = ("" if rules_on else "AND NOT (source='intent' AND COALESCE(source_ref,'') "
+                   "~ '^rule-(created|discovery|fault):[0-9]+$') ")
+    reference = ",source_ref" if rules_on else ""
     rows = await conn.fetch(
-        "SELECT id, source AS kind, reason, decided_at, task_id, schedule_id FROM proactive_deliveries "
+        "SELECT id, source AS kind, reason, decided_at, task_id, schedule_id" + reference + " FROM proactive_deliveries "
         "WHERE decision = 'digest' AND channel_id = $1 AND chat = $2 AND source <> 'morning_brief' "
-        + triage_filter + "AND decided_at <= $3 AND digest_date = ANY($4::date[]) "
+        + triage_filter + rule_filter + "AND decided_at <= $3 AND digest_date = ANY($4::date[]) "
         "AND NOT EXISTS (SELECT 1 FROM morning_brief_consumed c WHERE c.delivery_id = proactive_deliveries.id) "
         "ORDER BY decided_at, id",
         channel_id, chat, until, dates or [])
-    return [dict(row) for row in rows]
+    result = [dict(row) for row in rows]
+    return await filter_rule_digests(conn, result, channel_id=channel_id, chat=chat) if rules_on else result
+
+
+async def filter_rule_digests(conn: Any, rows: list[dict[str, Any]], *, channel_id: str,
+                              chat: str) -> list[dict[str, Any]]:
+    """Recheck the exact previously read rows immediately before a brief is posted."""
+    from ..agents.intent_rule_delivery import (confirmation_allowed, is_rule_reference, notice_context,
+                                                notice_target, notice_visible)
+    from ..agents import leads_model
+
+    rules_on = await leads_model.rules_enabled(db=conn)
+    kept: list[dict[str, Any]] = []
+    for row in rows:
+        ref = row.get('source_ref')
+        if row['kind'] != 'intent' or not ref:
+            kept.append(row)
+        elif is_rule_reference(ref):
+            if not rules_on:
+                continue
+            context = await notice_context(conn, ref)
+            if (context and context['state'] == 'digest' and await notice_visible(conn, context)
+                    and await notice_target(conn, context) == (channel_id, chat)):
+                kept.append({**row, 'rule_notice': context})
+        elif rules_on and ref.isdecimal():
+            intent = await conn.fetchrow('SELECT id,state,merged_into FROM intents WHERE id=$1', int(ref))
+            if intent is None or not await confirmation_allowed(conn, intent['id'], rules_on=True):
+                continue
+            if intent['state'] == 'pending':
+                kept.append(row)
+            elif (intent['state'] == 'merged' and intent['merged_into'] is not None
+                  and await confirmation_allowed(conn, intent['merged_into'], rules_on=True)):
+                kept.append(row)
+        else:
+            kept.append(row)
+    return kept

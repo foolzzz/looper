@@ -32,10 +32,10 @@ import { formatUsd } from "@/lib/usage";
 import { cn } from "@/lib/utils";
 
 const ROLES: readonly AgentRole[] = [
-  "manager", "planner", "worker", "reviewer", "processor", "advisor", "advice_check", "leads_check", "outbound_check"];
+  "manager", "planner", "worker", "reviewer", "processor", "advisor", "advice_check", "leads_check", "outbound_check", "memory_retro"];
 /** The roles another run starts (the advisor's, the leads check's): only their own row chooses their profile, else
  *  their built-in one. */
-const SPAWNED: readonly string[] = ["advisor", "advice_check", "leads_check", "outbound_check"];
+const SPAWNED: readonly string[] = ["advisor", "advice_check", "leads_check", "outbound_check", "memory_retro"];
 const isRole = (role: string): role is AgentRole => (ROLES as readonly string[]).includes(role);
 
 /** The role configs in the order a task meets them. */
@@ -47,8 +47,8 @@ function rank(role: string) {
 // --- The role prompt ---
 
 /** The role prompt: one text, the role layer of the agent's system prompt. */
-function RolePromptEditor({ id, value, onChange, processor, spawned = false, outbound = false }: {
-  id: string; value: string; onChange: (v: string) => void; processor: boolean; spawned?: boolean; outbound?: boolean;
+function RolePromptEditor({ id, value, onChange, processor, spawned = false, retro = false, outbound = false }: {
+  id: string; value: string; onChange: (v: string) => void; processor: boolean; spawned?: boolean; retro?: boolean; outbound?: boolean;
 }) {
   const lineCount = value.split("\n").length;
 
@@ -69,6 +69,8 @@ function RolePromptEditor({ id, value, onChange, processor, spawned = false, out
             the reply format, in place of the runtime&apos;s own prompt; a run&apos;s history page shows that whole
             prompt.
           </>
+        ) : retro ? (
+          <>This role reads only a finished task journal and same-project lessons, then replies privately with evidenced lessons.</>
         ) : spawned ? (
           <>
             This text is the role layer. At launch Looper follows it with the reply format, in place of the
@@ -194,7 +196,7 @@ function RoleConfigForm({
             value={form.max_turns}
             onChange={(e) => setForm({ ...form, max_turns: Number(e.target.value) })}
           />
-          <p className="text-[11px] text-muted-foreground">0 = unlimited</p>
+          <p className="text-[11px] text-muted-foreground">{config.role === "memory_retro" ? "Always one turn" : "0 = unlimited"}</p>
         </div>
         <div className="space-y-1.5">
           <label htmlFor={`${id}-timeout`} className="text-xs font-medium text-muted-foreground">Timeout (s)</label>
@@ -205,7 +207,8 @@ function RoleConfigForm({
             value={form.timeout_seconds}
             onChange={(e) => setForm({ ...form, timeout_seconds: Number(e.target.value) })}
           />
-          <p className="text-[11px] text-muted-foreground">{config.role === "outbound_check"
+          <p className="text-[11px] text-muted-foreground">{config.role === "memory_retro"
+            ? "At most 90 seconds" : config.role === "outbound_check"
             ? "实际最多30秒；更短配置会缩短等待，0 仍按30秒封顶。" : "0 = unlimited"}</p>
         </div>
       </div>
@@ -232,8 +235,10 @@ function RoleConfigForm({
           <span className="text-xs font-medium text-muted-foreground">Permissions</span>
           <p className="text-sm">No tools: no built-in tool, MCP server, plugin, skill or command</p>
           <p className="text-[11px] text-muted-foreground">
-            It sees only the Planner&apos;s request, in an empty directory, and can only reply. Its Agent Profile needs
-            a runtime that can run without tools; a project turns consults on in its settings (Advisor).
+            {config.role === "memory_retro"
+              ? "It reads the finished task journal in an empty directory and can only reply. Its Agent Profile needs a runtime that can run without tools."
+              : <>It sees only the Planner&apos;s request, in an empty directory, and can only reply. Its Agent Profile needs
+                a runtime that can run without tools; a project turns consults on in its settings (Advisor).</>}
           </p>
         </div>
       ) : (
@@ -272,6 +277,7 @@ function RoleConfigForm({
         onChange={(v) => setForm({ ...form, system_prompt: v })}
         processor={config.role === "processor"}
         spawned={SPAWNED.includes(config.role)}
+        retro={config.role === "memory_retro"}
         outbound={config.role === "outbound_check"}
       />
 
@@ -307,6 +313,7 @@ const ROLE_JOBS: Record<AgentRole, string> = {
   advisor: "answers the Planner's checked request about a hard step, with no tools",
   advice_check: "checks the Planner's request before it goes to the advisor, with no tools",
   leads_check: "checks each extracted lead and intent against its messages before it is stored, with no tools",
+  memory_retro: "distills evidenced project lessons after tasks finish, with no tools; choose an explicit profile",
   outbound_check: "只读动作及触发上下文，不带工具；判断是否由操作者要求",
 };
 
@@ -503,6 +510,11 @@ export function RolesSection({ sub }: { sub: string }) {
                               ? "Empty fields use this role's built-in defaults: the shared defaults do not apply to it."
                               : "Empty fields use the shared defaults."}
                           </p>
+                          {role === "memory_retro" && settings.roles[role].effective.profile.source === "builtin" && (
+                            <p className="mt-1 text-xs text-warning">
+                              No built-in model is selected yet. Choose an Agent Profile for this role before running retrospectives.
+                            </p>
+                          )}
                         </div>
                         {runs}
                       </div>
