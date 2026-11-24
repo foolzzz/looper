@@ -20,7 +20,7 @@ def installed(tmp_path, monkeypatch, request):
     kind = request.param
     module = pi_runner if kind == "pi" else dsh_runner
     package, version = (("@earendil-works/pi-coding-agent", "1.3.0") if kind == "pi"
-                        else ("@deepseek-ai/dsh", "0.2.1-rc.2"))
+                        else ("@deepseek-ai/dsh", "0.2.2-rc.5"))
     root = tmp_path / "package"
     root.mkdir()
     (root / "package.json").write_text(json.dumps({"name": package, "version": version}))
@@ -60,7 +60,7 @@ def test_enable_refusal_does_not_abort_serve(tmp_path, monkeypatch, installed, f
         monkeypatch.setattr(module.shutil, "which", lambda name: "./node" if name == "node" else which(name))
         cause = "requires an absolute Node executable"
     elif failure == "resolve":
-        monkeypatch.setattr(module, "_package_version", lambda *args: "1.3.0" if kind == "pi" else "0.2.1-rc.2")
+        monkeypatch.setattr(module, "_package_version", lambda *args: "1.3.0" if kind == "pi" else "0.2.2-rc.5")
         original = Path.resolve
 
         def resolve(path, *args, **kwargs):

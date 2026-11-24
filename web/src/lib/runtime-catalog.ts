@@ -20,7 +20,7 @@ export const RUNTIME_TYPES: Record<string, RuntimeTypeInfo> = {
   "cursor-agent": { kind: "CLI", title: "Cursor CLI", install: "curl https://cursor.com/install -fsS | bash" },
   omp: { kind: "CLI", title: "OMP CLI" },
   grok: { kind: "CLI", title: "Grok CLI" },
-  dsh: { kind: "CLI", title: "DSH CLI", install: "npm install -g @deepseek-ai/dsh@0.2.1-rc.2" },
+  dsh: { kind: "CLI", title: "DSH CLI", install: "npm install -g @deepseek-ai/dsh@0.2.2-rc.5" },
   pi: { kind: "CLI", title: "Pi CLI", install: "npm install -g --ignore-scripts @earendil-works/pi-coding-agent" },
 };
 
