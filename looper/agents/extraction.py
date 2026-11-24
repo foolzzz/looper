@@ -67,13 +67,14 @@ GROUP_READ_MAX_GROUPS = 10
 GROUP_LABEL = " · 全部消息"
 GROUP_REQUESTS_NOTE = """\
 ## Requests in group chats
-A chat marked 全部消息 gives every person's message, not only the ones to the user. In it, an intent is a
+A chat marked 全部消息 gives every human sender's messages, including the user's own. In it, an intent is a
 development request that anyone raises, even without mentioning the user: a new requirement, a change, a bug or
-problem report, a scenario that needs support, or a request for access, addressed to the group, a team or nobody
-in particular. Use dev_task for a requirement or a change and bug_triage for a bug or a problem. Not an intent:
-small talk, answers to questions, follow-ups on something someone has already taken up, a request handed to a
-named person who accepted it, and +1s or echoes of someone else's request. When several messages raise the same
-thing, make one intent with all of them as its sources, or use same_as when a recent intent is that thing."""
+problem report, a scenario that needs support, or a request for access, addressed to the group, a team, a named
+person or nobody in particular. A request or problem report addressed to a named person counts even if that
+person has accepted it. Use dev_task for a requirement or a change and bug_triage for a bug or a problem.
+Not an intent: small talk, answers to questions, +1s or echoes of someone else's request, and pure follow-ups,
+status updates or decisions that carry no new ask. When several messages raise the same thing, make one intent
+with all of them as its sources, or use same_as when a recent intent is that thing."""
 SOURCES_MAX, ABOUT_MAX, SUPERSEDES_MAX = 10, 5, 3
 SUMMARY_MAX, DETAIL_MAX, TITLE_MAX, INTENT_SUMMARY_MAX = 200, 600, 60, 400
 # What a run costs the processor (Sonnet), measured on the real path and in the real-mode eval: a fixed part per run
@@ -1157,7 +1158,8 @@ async def execute(runs: Any, run_id: str, schedule: Mapping[str, Any], stream: M
 
     asked = await ask(run, lambda reply: parse(kind, reply, found.refs, now=now.astimezone(_zone(zone_name)),
                                                valid_days=valid_days, enabled_types=enabled, app_seqs=found.app_seqs,
-                                               group_seqs=group.seqs if group else ()),
+                                               group_seqs={r["seq"] for r in found.rows
+                                                           if r.get("via_group") and not r.get("original_scope")}),
                       budget_usd=schedule["run_budget_usd"], timeout_s=float(timeout))
     result, parsed = asked.result, asked.parsed
     if asked.skipped is not None:

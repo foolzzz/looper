@@ -281,6 +281,9 @@ export function ScheduleDetail({ scheduleId, onDeleted }: { scheduleId: string; 
             <span className="block">
               Per day: {schedule.daily_budget_usd != null ? formatUsd(schedule.daily_budget_usd) : "no cap"}
             </span>
+            {schedule.daily_budget_equivalent_usd != null && <span className="block">
+              每日等价花费上限：{formatUsd(schedule.daily_budget_equivalent_usd)}（花费守卫执行时生效）
+            </span>}
           </Field>
           </>}
           <Field label="Run timeout">

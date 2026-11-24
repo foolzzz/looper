@@ -52,7 +52,7 @@ MODEL_MAP = {
 }
 
 HOME_LAYOUT_ID = "dsh-home/v1"
-SUPPORTED_VERSION = "0.2.1-rc.2"
+SUPPORTED_VERSION = "0.2.2-rc.5"
 READ_ONLY_DENIAL = "Error: LOOPER_READ_ONLY: tool is not allowed in a read-only run"
 _PROBE_TIMEOUT_SEC = 10.0
 # The private paths and provider overlay are authoritative, even over explicit settings/provider env.
@@ -756,7 +756,7 @@ def _root_only_consult(launch: Launch) -> bool:
 
 
 def _launch_patch(launch: Launch, cwd: str | Path) -> list[dict[str, Any]]:
-    """Complete rc.2 configs: a patch replaces each config, rather than merging its fields."""
+    """Complete 0.2.2 configs: a patch replaces each config, rather than merging its fields."""
     policy = validate_provider(launch.profile.provider, launch.model, launch.effort)
     search = _web_search(launch) and not _root_only_consult(launch)
     catalog = materialize(launch.library, launch.profile.runtime.executable or "dsh")
@@ -767,7 +767,6 @@ def _launch_patch(launch: Launch, cwd: str | Path) -> list[dict[str, Any]]:
         "agent-default-model": {"provider": policy.route, "model": policy.model},
         "llm-deepseek": {"apiKeyEnv": KEY_ENV, "baseURL": policy.base_url, "reasoningEffort": policy.effort,
                          "models": [{"id": policy.model}]},
-        "tools": {"mode": "native"},
         "sandbox-policy": {"mode": "danger-full-access", "workspaceRoot": str(Path(cwd).absolute())},
         "approval": {"policy": "never"},
         "skill-filesystem": {"includeDefaultRoots": False, "customSkillDirs": list(catalog.skill_dirs), "watch": False},

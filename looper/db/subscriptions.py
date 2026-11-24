@@ -284,7 +284,7 @@ class GroupRead:
     left: Mapping[str, int]
 
 
-_GROUP_FROM = f"""
+_GROUP_FROM = """
         FROM source_events e
         JOIN event_sources s ON s.id = e.source_id
         JOIN source_chats c ON c.source_id = e.source_id AND c.chat_id = e.chat_id
@@ -293,8 +293,7 @@ _GROUP_FROM = f"""
           AND c.inclusion = 'included' AND c.extraction = 'included'
           AND (cardinality($4::text[]) = 0 OR e.chat_id = ANY($4::text[])) AND NOT e.chat_id = ANY($5::text[])
           AND e.sender_kind = 'user' AND e.origin = 'live'
-          AND e.sent_at >= g.read_from AND e.ingested_at >= g.read_from
-          AND NOT COALESCE({_EXTRACTION_SCOPE['intents']}, false)"""
+          AND e.sent_at >= g.read_from AND e.ingested_at >= g.read_from"""
 
 _WINDOW_COLUMNS = """e.seq, e.external_id, e.chat_id, c.kind AS chat_kind, c.name AS chat_name, e.thread_id, e.root_id,
                e.parent_id, e.sender_id, e.sender_kind,
@@ -340,7 +339,8 @@ async def extraction_tally(conn: Db, sub: Mapping[str, Any], *, output_kind: str
     if group_read and output_kind == "intents":
         extra = await conn.fetch(
             f"SELECT c.kind AS chat_kind, (e.sent_at AT TIME ZONE $7)::date AS day, count(*) AS events "
-            f"{_GROUP_FROM} AND e.sent_at >= $6 GROUP BY 1, 2",
+            f"{_GROUP_FROM} AND NOT COALESCE({_EXTRACTION_SCOPE['intents']}, false) "
+            "AND e.sent_at >= $6 GROUP BY 1, 2",
             sub["source_id"], from_seq, to_seq, list(sub["include_chats"]), list(sub["exclude_chats"]), since,
             zone_name)
         totals = Counter({(r["day"], r["chat_kind"]): r["events"] for r in rows})
@@ -361,6 +361,9 @@ async def extraction_window(conn: Db, sub: Mapping[str, Any], *, output_kind: st
     if group_read is not None and (output_kind != "intents" or include_import):
         raise ValueError("only an intents run reads followed groups")
     where = _extraction_from(output_kind)
+    if group_read is not None:
+        # Every eligible followed-group human message uses the group rule and its allowance, including own/@.
+        where += f" AND e.seq NOT IN (SELECT e.seq {_GROUP_FROM})"
     common = (sub["source_id"], from_seq, to_seq, list(sub["include_chats"]), list(sub["exclude_chats"]),
               list(own_apps), include_import)
     oldest = now - timedelta(minutes=sub["max_age_minutes"])
@@ -379,6 +382,7 @@ async def extraction_window(conn: Db, sub: Mapping[str, Any], *, output_kind: st
         lefts = [group_read.left[c] for c in chats]
         extra = await conn.fetch(
             f"""SELECT x.* FROM (SELECT {_WINDOW_COLUMNS}, g.read_from, true AS via_group,
+                       COALESCE({_EXTRACTION_SCOPE['intents']}, false) AS original_scope,
                        row_number() OVER (PARTITION BY e.chat_id ORDER BY e.seq) AS chat_n
                     {_GROUP_FROM} AND e.sent_at >= $6) x
                 JOIN unnest($7::text[], $8::int[]) AS q(chat_id, left_n) ON q.chat_id = x.chat_id

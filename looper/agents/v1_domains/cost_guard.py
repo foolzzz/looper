@@ -50,6 +50,7 @@ HOLD = _object({"id": _INT, "scope": _STR, "scope_ref": _STR, "currency": _NULL_
                 "limit_usd": _NULL_NUMBER, "spent_usd": _NULL_NUMBER,
                 "pushes": {"type": ["integer", "null"]}, "reason": _STR,
                 "state": _STR, "created_at": _STR, "decided_at": _NULL_STR, "decided_via": _NULL_STR}, closed=True)
+HOLD["properties"]["task_ids"] = _array(_STR)
 HOLD["required"] = [name for name in HOLD["required"] if name != "pushes"]
 _DECIDE = _object({"hold_id": {"type": "integer", "minimum": 1},
                    "decision": {"type": "string", "enum": ["continue", "stop"]},
@@ -65,7 +66,8 @@ _ENFORCE = ("Enforce holds task dispatches at task and global daily caps and ref
             "yourself; 95% utilization holds only schedule firings and background roles. Holds last until reset, "
             "or at most five minutes when reset time is unknown. Window rows apply when "
             "engine.limit_signals.enabled is on; otherwise only quota-failure rules apply. No account is switched. "
-            "Background-role and schedule budget enforcement remains inactive.")
+            "A server already in enforce now stops background roles at their own, schedule or global daily caps "
+            "and skips schedule firings at caps previously only observed. Default off preserves existing behavior.")
 _UNANSWERED_IMPACT = (
     " Turning on unanswered pushes asks once after that many direct pushes in the window go without a reply, "
     "pauses the schedule after more days with no answer and no reply, and resumes it from Needs you.")

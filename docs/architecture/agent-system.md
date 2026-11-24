@@ -1857,12 +1857,21 @@ Manager tools.
   `grok/sessions/<agent>`, `pi/sessions/<agent>`) of agents whose saved session (`agent_sessions`)
   is not of that runtime.
 - **DSH** (`looper/agents/runtimes/dsh.py`, DeepSeek Harness
-  `@deepseek-ai/dsh` **0.2.1-rc.2**; [RFC and validation status](rfcs/dsh-runtime-v0.zh-CN.md))
+  `@deepseek-ai/dsh` **0.2.2-rc.5**; [RFC and validation status](rfcs/dsh-runtime-v0.zh-CN.md))
   is available to Manager, Planner, Worker and Reviewer through the same Agent
   Profiles and role/project/task overrides. Put the supported `dsh` on the
   server's PATH, re-detect it in Settings → Agent Runtimes, then create an
   Agent Profile selecting a saved `anthropic-messages` model from an API-key
   provider with a matching endpoint.
+  The version gate is an exact match, on the `dsh` CLI probe and on the SDK
+  runner (`@deepseek-ai/dsh` and every `@deepseek-ai/dsh-*` package it loads must
+  be 0.2.2-rc.5, with `@deepseek-ai/cordis` 4.1.x). Any other version, older or
+  newer, is reported as unsupported and DSH steps fail the version check until
+  the installed package matches. Upgrade order: install
+  `npm install -g @deepseek-ai/dsh@0.2.2-rc.5` before or together with the Looper
+  release. To roll back, install the previous Looper release together with its
+  pinned `dsh` (for example `@deepseek-ai/dsh@0.2.1-rc.2` for Looper releases
+  before this one); the two must move together.
   Only `deepseek-flash`, `deepseek-flash[1m]`, `deepseek-v4-pro` and
   `deepseek-v4-pro[1m]` are accepted; the `[1m]` suffix is removed on the wire,
   after validating the saved model reference. Effort is `low`, `high`
@@ -4625,14 +4634,34 @@ Spend refusals take precedence over usage-window holds. After spend admission, r
 failures hold all runs, including operator-started work; 95% utilization holds only background roles and
 schedule firings. Holds end at the reset, or after a cooldown of at most five minutes from the signal when
 reset time is unknown. The operator Manager exception applies only to spend, not rejected windows.
-Background-role and schedule budget enforcement remains inactive.
+A server already in enforce also stops background roles at their own, schedule or global daily caps,
+and skips schedule firings at caps previously only observed. Default off preserves existing behavior.
+Subscription triggers check the processor role cap as well as the schedule and global cap. A task-linked
+background call inherits its schedule but not the interactive task scope, following RFC §6.1; an exhausted
+task cap cannot mask a background role or global cap. Denied background
+calls retain each caller's existing BUDGET failure handling; outbound review blocks the action and creates a
+review-budget hold. Raising that role cap permits a new review, never automatically resends the blocked action.
+
+The optional `schedule_admin.create/update` field `daily_budget_equivalent_usd` must be finite and positive
+(or null); command schedules reject it. It is effective only in enforce. When set, the guard checks
+`daily_budget_usd` against real spend and the equivalent field against subscription equivalents, with separate
+reservations. The legacy mixed scheduler check is replaced only for these enforce/split schedules. With the
+field unset, both currencies still share `daily_budget_usd`. Off and observe retain the legacy mixed check,
+and null is omitted from schedule views. The Manager schedule tools are unchanged.
+
+Enforce sends code-written 80% and limit alerts through the Advisor alert target, with quiet hours applied.
+Each scope instance, currency and kind is claimed once per scheduler-local day in `system_settings`.
+Scheduler alerts publish after the firing transaction commits. Duplicate claims increment process-local
+counters; the next day sends one summary and clears them. A restart loses these repeat counts, but persistent
+claims still prevent resending the initial alert. Accounting errors send one guard-error alert per day and
+preserve the review classifier and audit requirements.
 
 Existing holds keep their decisions, Needs you cost items, Settings list and 24-hour expiry in every mode,
 including after restart. Continuing wakes the Planner to dispatch the next saved step; stopping and expiry use
 the task stop path with a persisted reason. Startup reads whether hold recovery is needed; after a hold exists,
 recovery stays enabled until restart to avoid racing a new hold commit. Off installations without saved holds
 retain their no-I/O admission, reply-routing and scheduler paths. The `cost_holds` migration also adds the
-project `ask` action. Alerts and unanswered-push pauses follow the
+project `ask` action. Backup-profile fallback and unanswered-push pauses follow the
 [cost guard RFC's PR split](rfcs/cost-guard-v0.zh-CN.md#15-pr-拆分).
 
 ### Why a run failed (failure classes)
