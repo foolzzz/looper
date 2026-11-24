@@ -179,16 +179,16 @@ sys.exit(main(['serve','--host','127.0.0.1','--port',sys.argv[1],'--runtime-root
             assert ended["status"] == "completed", dict(ended)
             counts = sql("SELECT extract_counts FROM subscription_runs WHERE run_id=$1", run["run_id"], fetch=True)[0][0]
             counts = json.loads(counts) if isinstance(counts, str) else counts
-            assert (counts["new"], counts["group_read"], counts["group_over_cap"]) == (4,3,0)
+            assert (counts["new"], counts["group_read"], counts["group_over_cap"]) == (4,4,0)
             recognized = sql("SELECT title,type_key,via FROM intents ORDER BY id", fetch=True)
             assert {(row["title"], row["type_key"], row["via"]) for row in recognized} == {
                 ("REQUEST_SYNTHETIC","dev_task","followed_group"), ("BUG_SYNTHETIC","bug_triage","followed_group"),
-                ("MENTION_CONTROL","dev_task","subscription"), ("DM_CONTROL","dev_task","subscription")}
+                ("MENTION_CONTROL","dev_task","followed_group"), ("DM_CONTROL","dev_task","subscription")}
             until(lambda: len(sql("SELECT id FROM proactive_deliveries WHERE source='intent'", fetch=True)) == 4,
                   "intent delivery decisions")
             decisions = sql("SELECT urgency,chat_kind,chat,decision FROM proactive_deliveries WHERE source='intent'", fetch=True)
             assert all(tuple(row.values()) == ("normal","direct",OPEN_ID,"send") for row in decisions)
-            assert sql("SELECT read,skipped FROM intent_group_read_days", fetch=True)[0]["read"] == 3
+            assert sql("SELECT read,skipped FROM intent_group_read_days", fetch=True)[0]["read"] == 4
             post("intent_group_reads/delete", {"source_id":"smoke", "chat_id":"oc_followed_smoke"})
             sent = datetime.now(timezone.utc) + timedelta(seconds=1)
             flow.append(bridge, "oc_followed_smoke", flow.message("om_revoked", text="REVOKED_SYNTHETIC", sent_at=sent))
@@ -198,7 +198,7 @@ sys.exit(main(['serve','--host','127.0.0.1','--port',sys.argv[1],'--runtime-root
             run = post("schedule_admin/run", {"schedule_id":sid})["run"]
             ended = until(lambda: finished(run["run_id"]), "second intent run")
             assert ended["status"] == "completed", dict(ended)
-            assert len(sql("SELECT id FROM intents WHERE via='followed_group'", fetch=True)) == 2
+            assert len(sql("SELECT id FROM intents WHERE via='followed_group'", fetch=True)) == 3
             assert len(sql("SELECT id FROM intents", fetch=True)) == 5
             launches = [json.loads(line) for line in seen.read_text().splitlines()]
             assert len(launches) == 2 and extraction.GROUP_REQUESTS_NOTE in launches[0]["instructions"]
