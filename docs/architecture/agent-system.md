@@ -365,8 +365,9 @@ Manager has no tool for it. The dashboard shows the task page's 指标 card and 
   rotations carry `metadata.session_bound` with the action, reason and before/after token counts.
   The budget also supplies a per-turn soft cap, including subscription runs priced from the model catalog;
   the existing process budget is unchanged. A capped turn gets the fixed `over_cap_reply`, and its next message
-  starts a process that resumes the session. An unpriced model gets no additional soft cap and logs a warning
-  once per profile/model; the Settings price warning and dashboard controls are not implemented yet.
+  starts a process that resumes the session. An unpriced configured model logs a warning once per profile/model;
+  unpriced usage from any actual event model stops a capped turn with an explicit budget error. This also catches
+  a runtime alias changing targets after preflight. The Settings price warning and dashboard controls are not implemented yet.
   Operator-only v1 operations `session_budget.get` and `session_budget.update` read or store a positive dollar
   budget (null unsets it; the recommended value is $4.00) and report invalid stored values. While unset, there
   is no additional recorder cap, session measurement write or maintenance check, and prompts, tools and
@@ -2595,6 +2596,36 @@ subagent's, Claude Code's side requests) count only in the run's recorded
 cost. The task cap and "raise the cap and continue" sum the recorded costs, so
 they use the same basis. `GET /api/tasks/:id` counts the runs of each basis
 (`equivalent_runs`: a runtime's own login, `provider_price_runs`: an API key provider).
+
+**Unknown prices.** `run_usage.CostStatus` is the shared `known` / `unknown` state for model prices,
+usage, cap accounting, consults and cost metrics. The Claude Code alias table follows actual reported model ids
+(`model` and `modelUsage`), including `haiku` → `claude-haiku-5-5`. Haiku 5.5 has no authoritative token-rate
+source in this repository, so it stays unknown; the Haiku 4.5 price is not reused. Known model rates retain their
+existing sources in `runtimes/pricing.py`; provider/protocol catalog overrides still take precedence.
+
+Unknown prices never make a run free. With a per-run cap (including the Manager session budget), the recorder
+warns once per unpriced event model and stops further calls. An authoritative runtime-reported cost still counts
+for task, daily and guard totals; a missing catalog estimate is recorded separately as `catalog_cost_status` and
+`catalog_unknown_price_models`. When the bill itself is unknown, dollars remain null and the ended record carries
+`metadata.cost_status = unknown` (plus `unknown_price_models` when event models are available).
+This is a soft stop after usage arrives, not a hard billing ceiling. Consult, processor and spawned-run postflight
+checks reject unknown costs; their preflight model checks remain in place. Explorer parent budgets report unknown
+coverage rather than repricing multi-model usage as the parent model.
+
+Task and daily schedule caps keep their known subtotal and explicitly warn with the unknown model ids when the
+cap is checked; the Planner also records a task activity warning. They may continue on that incomplete subtotal.
+The cost guard in both observe and enforce modes reports unknown settled costs and restored history for task,
+global day, role day and schedule day scopes (separately per billing currency). Its API counters carry
+`cost_status` and `unknown_models`, and `problem` displays the accounting gap on the existing costs dashboard.
+Unknown history is excluded from price-based estimate samples. This alert policy does not introduce estimated
+prices or extend which scopes enforce mode stops. With the guard off it adds no guard I/O or reservations.
+
+Task/model, Manager, schedule, spend and metric API summaries always carry `cost_status = known | unknown`.
+Incomplete aggregate totals retain their known subtotal and unknown-run counts; an unknown individual turn cost
+is null. Subscription daily totals include every extraction attempt and the check through typed record links, and advisor booking preserves
+unknown costs for daily alerts. The existing dashboard shows these unpriced-run counts,
+model rows with unknown cost, and metric unknown counts; metrics exclude unknown cases from cost averages.
+CLI cost reads share the same API. Telegram and Lark share the recorder and cap behavior and need no new commands.
 
 The `llm_profiles` table and the role configs' `runtime` and `llm_profile_id`
 were never on a launch path; the one-time migration `llm_profiles_removed`

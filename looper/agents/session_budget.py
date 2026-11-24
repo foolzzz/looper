@@ -3,7 +3,7 @@ Runtime wiring lives in ``tiers.manager_budget``.
 
 ``manager.turn_budget_usd`` (a positive number of US dollars) turns it on; no row is off. When it is on, the
 Manager will, after each turn, apply ``decide`` to that turn's context and cost, compact or rotate its session as
-the decision says, cap each turn's spend at the budget (``turn_cap``) and answer a turn stopped there with
+the decision says, cap each turn's spend at the budget and answer a turn stopped there with
 ``over_cap_reply``. The context limit is the one setting resident sessions share with schedule Planners
 (``scheduler.session_context_max_tokens``), and the bound is #1473's ``schedule_session.session_bound``: one
 threshold and one cost rule, except that an unknown turn cost does not trigger the Manager's cost rule.
@@ -45,14 +45,6 @@ class Outcome(str, Enum):
 
     COMPACTED = "compacted"
     ROTATED = "rotated"
-
-
-class TurnCap(str, Enum):
-    """Whether a Manager turn's spend is capped at the budget."""
-
-    OFF = "off"  # no budget set
-    CAPPED = "capped"
-    NO_PRICE = "no_price"  # a budget, but no price for the turn's model: no soft cap, and Settings says so
 
 
 @dataclass(frozen=True)
@@ -117,16 +109,12 @@ def bound_metadata(outcome: Outcome, decision: Decision, after_tokens: int | Non
             "after_tokens": after_tokens}
 
 
-def turn_cap(budget_usd: float | None, *, priced: bool) -> TurnCap:
-    """Whether a Manager turn is capped at the budget. ``priced``: a price is known for the turn's model (the
-    provider's, or the model catalog's for a run the runtime prices itself); without one there is no soft cap."""
-    if budget_usd is None:
-        return TurnCap.OFF
-    return TurnCap.CAPPED if priced else TurnCap.NO_PRICE
-
-
-def over_cap_reply(budget_usd: float) -> str:
-    """The fixed reply to a turn its spend stopped at the budget (RFC 5.4)."""
+def over_cap_reply(budget_usd: float, *, unverifiable: bool = False, unknown_models: tuple[str, ...] = ()) -> str:
+    """Explain whether a turn stopped at its cap or could not verify its spend."""
+    if unverifiable:
+        reason = "模型价格未知（" + "、".join(unknown_models) + "）" if unknown_models else "用量不完整"
+        return (f"这一轮因{reason}，无法核实单轮上限 ${format_usd(budget_usd)}，已经停下。"
+                "已经做了的工具调用没有撤销。可以检查价格配置后再问，或发 /new。")
     return (f"这一轮的花费到了单轮上限 ${format_usd(budget_usd)}，已经停下。已经做了的工具调用没有撤销。"
             "可以换个问法再问，或发 /new。")
 

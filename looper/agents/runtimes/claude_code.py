@@ -27,7 +27,7 @@ Anthropic-format endpoint, with the operator's subscription signed in:
 - A subagent started without a model runs the main model, or
   ``CLAUDE_CODE_SUBAGENT_MODEL`` when set. One started with an alias
   (``haiku``, ``sonnet``, ``opus``, as the model may choose) requests the
-  model the alias names: ``claude-haiku-4-5-20251001`` unless
+  model the alias names: ``claude-haiku-5-5`` for ``haiku`` unless
   ``ANTHROPIC_DEFAULT_HAIKU_MODEL`` maps it, and that request fails at an
   endpoint without Claude models. ``CLAUDE_CODE_SUBAGENT_MODEL`` does not
   override an alias. So the binding maps the opus and sonnet aliases and the

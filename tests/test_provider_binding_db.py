@@ -323,7 +323,8 @@ def test_a_profile_whose_models_have_no_price_is_registered_with_a_warning(monke
         answer = await _profile(provider, "mystery-1")
         assert answer["profile"]["cost"] == {"source": "provider_price", "equivalent": False,
                                              "unpriced": ["mystery-1", "mystery-mini"]}
-        assert len(answer["warnings"]) == 2 and all("spend caps do not apply" in w for w in answer["warnings"])
+        assert len(answer["warnings"]) == 2 and all("capped runs stop on unpriced usage" in w
+                                                  for w in answer["warnings"])
         # Priced in the catalog: no warning.
         priced = [{"name": "mystery-1", "input_usd_per_mtok": 1, "output_usd_per_mtok": 2,
                    "cache_read_usd_per_mtok": 0.1, "cache_write_usd_per_mtok": 1}]
