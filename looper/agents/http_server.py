@@ -57,6 +57,7 @@ from .tiers.worker import WorkerPool
 
 if TYPE_CHECKING:
     from .. import components
+    from .server_address import Publication
 
 logger = logging.getLogger(__name__)
 
@@ -279,6 +280,7 @@ class AgentHTTPServer:
         # Configuration files uploaded for import, waiting to be applied (under the runtime root).
         self._config_imports = config_imports.ConfigImports(runtime_root) if runtime_root else None
         self._server: asyncio.Server | None = None
+        self._address_publication: Publication | None = None
         self._components: components.Manifest | None = None
 
     async def start(self) -> None:
@@ -297,6 +299,15 @@ class AgentHTTPServer:
         attention.use_status_checks(self._checks_now, catchup=catchup)
         if self._port == 0:
             self._port = self._server.sockets[0].getsockname()[1]
+        if self._runtime_root is not None:
+            from .server_address import Publication
+
+            try:
+                self._address_publication = Publication(self._runtime_root, self._host, self._port)
+            except (OSError, ValueError) as exc:
+                # Address discovery is optional; it must never prevent HTTP startup.
+                logger.warning("Claude Code retrieval integration is unavailable: could not publish "
+                               "the server address (%s); HTTP server will continue serving", exc)
         from .. import _PROCESS_STARTED_AT
         logger.info("HTTP server listening on %s:%d (%.3f s since process start)",
                     self._host, self._port, time.monotonic() - _PROCESS_STARTED_AT)
@@ -348,6 +359,9 @@ class AgentHTTPServer:
         """Stop accepting connections immediately, without shutting down services."""
         if self._server:
             self._server.close()
+        if self._address_publication is not None:
+            self._address_publication.close()
+            self._address_publication = None
 
     async def stop(self) -> None:
         attention.use_status_checks(None, owner=self._checks_now)
@@ -360,6 +374,9 @@ class AgentHTTPServer:
             await self._server.wait_closed()
             self._server = None
             logger.info("HTTP server stopped")
+        if self._address_publication is not None:
+            self._address_publication.close()
+            self._address_publication = None
         if self._config_imports:
             self._config_imports.clear()
 
@@ -421,7 +438,21 @@ class AgentHTTPServer:
             principal = None
             if area is operator_auth.Access.CLIENT:
                 try:
-                    principal = await self._client_principal(headers, peer_host)
+                    credential = operator_auth.bearer(headers)
+                    token = (operator_auth.read_token(self._runtime_root)
+                             if self._runtime_root and credential and credential.startswith("lmr_") else None)
+                    if operator_auth.is_retrieval(headers, token=token, peer_host=peer_host):
+                        # Scope is checked before body reads, uploads, streams or v1 dispatch. Never trust a
+                        # caller-supplied client label to restrict an unrestricted operator credential.
+                        if (method, path) not in operator_auth.RETRIEVAL_READS:
+                            status, answer = api_v1.error(ErrorCode.FORBIDDEN,
+                                "the memory credential allows only the three retrieval reads")
+                            writer.write(_json_response(status, answer, headers=V1_HEADERS))
+                            await writer.drain()
+                            return
+                        principal = api_v1.OPERATOR
+                    else:
+                        principal = await self._client_principal(headers, peer_host)
                 except Exception:
                     logger.warning("could not check an API client token for %s %s from %s", method, path, peer_host,
                                    exc_info=True)

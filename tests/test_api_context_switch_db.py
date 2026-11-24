@@ -56,6 +56,7 @@ class TestManagerContext:
                 assert await pool.fetchval(
                     "SELECT context_tokens FROM api_sessions WHERE session_id=$1", old) == 150_001
                 await chat.manager.stop()
+                await chat.stop_endpoint()
                 rebuilt = manager_module.ManagerAgent(
                     config=manager_module.ManagerConfig(work_dir=tmp_path), runtime_root=tmp_path)
                 rebuilt._bus = chat.bus
@@ -107,6 +108,7 @@ class TestManagerContext:
                 async with AsyncExitStack() as stack:
                     if restart:
                         await manager.stop()
+                        await chat.stop_endpoint()
                         manager = manager_module.ManagerAgent(
                             config=manager_module.ManagerConfig(work_dir=tmp_path), runtime_root=tmp_path)
                         manager._bus = chat.bus
