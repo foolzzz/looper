@@ -229,7 +229,7 @@ def test_a_tasks_cost_is_the_sum_of_its_planner_worker_and_reviewer_runs() -> No
              "input_tokens": 0, "output_tokens": 0, "cache_read_tokens": 0, "cache_creation_tokens": 0,
              "cache_reported_runs": 0, "cache_missing_runs": 1,
              "cache_hit_prompt_tokens": 0, "cache_hit_read_tokens": 0,
-             "cost_usd": 9.0},
+             "cost_usd": 9.0, "cost_status": "known"},
         ]
         assert sum(r["runs"] for r in t1["by_model"]) == t1["runs"]
         # The total is the sum of the task's runs as each is recorded.
@@ -239,7 +239,7 @@ def test_a_tasks_cost_is_the_sum_of_its_planner_worker_and_reviewer_runs() -> No
         assert sum(Decimal(str(r["cost_usd"] or 0)) for r in t1["by_model"]) == Decimal(str(t1["cost_usd"]))
         assert costs["t2"]["cost_usd"] == 1.0 and costs["t2"]["runs"] == 1
         assert costs["t3"] == {"cost_usd": 0.0, "runs": 0, "running": 0, "unpriced_runs": 0, "equivalent_runs": 0,
-                               "provider_price_runs": 0, "by_role": {
+                               "provider_price_runs": 0, "cost_status": "known", "unknown_models": [], "by_role": {
             "planner": {"cost_usd": 0.0, "runs": 0}, "worker": {"cost_usd": 0.0, "runs": 0},
             "reviewer": {"cost_usd": 0.0, "runs": 0}}, "by_model": [], "manager_by_model": []}
         assert await llm_records.task_costs([], pool=pool) == {}
@@ -284,22 +284,22 @@ def test_a_tasks_cost_by_model_counts_its_runs_tokens_and_the_managers_turns_abo
              "input_tokens": 110, "output_tokens": 25, "cache_read_tokens": 1000, "cache_creation_tokens": 50,
              "cache_reported_runs": 2, "cache_missing_runs": 0,
              "cache_hit_prompt_tokens": 1160, "cache_hit_read_tokens": 1000,
-             "cost_usd": 0.75},
+             "cost_usd": 0.75, "cost_status": "known"},
             {"model": "claude-haiku-4-5", "runs": 2, "running": 0, "unpriced_runs": 1, "interrupted_runs": 1,
              "input_tokens": 8, "output_tokens": 1, "cache_read_tokens": 1, "cache_creation_tokens": 1,
              "cache_reported_runs": 2, "cache_missing_runs": 0,
              "cache_hit_prompt_tokens": 10, "cache_hit_read_tokens": 1,
-             "cost_usd": 0.01},
+             "cost_usd": 0.01, "cost_status": "unknown"},
             {"model": "deepseek-flash", "runs": 2, "running": 0, "unpriced_runs": 2, "interrupted_runs": 0,
              "input_tokens": 4_000_000_000, "output_tokens": 0, "cache_read_tokens": 0, "cache_creation_tokens": 0,
              "cache_reported_runs": 2, "cache_missing_runs": 0,
              "cache_hit_prompt_tokens": 4_000_000_000, "cache_hit_read_tokens": 0,
-             "cost_usd": None},
+             "cost_usd": None, "cost_status": "unknown"},
             {"model": None, "runs": 1, "running": 1, "unpriced_runs": 0, "interrupted_runs": 0,
              "input_tokens": 0, "output_tokens": 0, "cache_read_tokens": 0, "cache_creation_tokens": 0,
              "cache_reported_runs": 0, "cache_missing_runs": 1,
              "cache_hit_prompt_tokens": 0, "cache_hit_read_tokens": 0,
-             "cost_usd": None},
+             "cost_usd": None, "cost_status": "known"},
         ]
         assert all(isinstance(row[key], int) for row in t1["by_model"] for key in (
             "input_tokens", "output_tokens", "cache_read_tokens", "cache_creation_tokens"))
@@ -308,7 +308,7 @@ def test_a_tasks_cost_by_model_counts_its_runs_tokens_and_the_managers_turns_abo
              "input_tokens": 30, "output_tokens": 4, "cache_read_tokens": 50, "cache_creation_tokens": 6,
              "cache_reported_runs": 1, "cache_missing_runs": 0,
              "cache_hit_prompt_tokens": 86, "cache_hit_read_tokens": 50,
-             "cost_usd": 0.02},
+             "cost_usd": 0.02, "cost_status": "known"},
         ]
         assert t1["cost_usd"] == 0.76
         assert sum(Decimal(str(r["cost_usd"] or 0)) for r in t1["by_model"]) == Decimal(str(t1["cost_usd"]))
@@ -319,7 +319,7 @@ def test_a_tasks_cost_by_model_counts_its_runs_tokens_and_the_managers_turns_abo
              "input_tokens": 42, "output_tokens": 0, "cache_read_tokens": 0, "cache_creation_tokens": 0,
              "cache_reported_runs": 0, "cache_missing_runs": 1,
              "cache_hit_prompt_tokens": 0, "cache_hit_read_tokens": 0,
-             "cost_usd": 1.0},
+             "cost_usd": 1.0, "cost_status": "known"},
         ]
 
     run_db(test, max_size=2)

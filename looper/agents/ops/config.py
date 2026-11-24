@@ -25,6 +25,7 @@ from ...db import llm_records as db_llm_records, projects as db_projects, manage
 from .. import catalog, profile_registry, projects
 from ..agent_settings import SettingsError, SettingsNotFound
 from ..model_names import MODEL_NAME_SCHEMA
+from ..run_usage import CostStatus
 from ..project_execution import ADVISOR_FIELDS, SUBAGENT_FIELDS
 from ..projects import RequestError, project_name
 from ..llmrec.dialects import ChatDialect
@@ -692,16 +693,19 @@ async def _costs(call: Call) -> dict[str, Any]:
     tasks = await db_llm_records.task_spend(since, until, project_id=project_id, manager_id=manager_id)
     if project is not None:
         answer["tasks"] = [{key: row[key] for key in ("task_id", "name", "provider_priced_usd", "equivalent_usd",
-                                                     "runs")} for row in tasks[:COST_TASKS_LISTED]]
+                                                     "runs", "cost_status")} for row in tasks[:COST_TASKS_LISTED]]
         answer["more_tasks"] = max(0, len(tasks) - COST_TASKS_LISTED)
     else:
         by_project: dict[str | None, dict[str, Any]] = {}
         for row in tasks:
             entry = by_project.setdefault(row["project_id"], {"project": row["project_name"], "provider_priced_usd": 0.0,
-                                                              "equivalent_usd": 0.0, "runs": 0, "tasks": 0})
+                                                              "equivalent_usd": 0.0, "runs": 0, "tasks": 0,
+                                                              "cost_status": CostStatus.KNOWN.value})
             for key in ("provider_priced_usd", "equivalent_usd", "runs"):
                 entry[key] += row[key]
             entry["tasks"] += 1
+            if row["cost_status"] == CostStatus.UNKNOWN.value:
+                entry["cost_status"] = CostStatus.UNKNOWN.value
         answer["projects"] = sorted(by_project.values(),
                                     key=lambda e: -(e["provider_priced_usd"] + e["equivalent_usd"]))
         answer["note_projects"] = "projects counts its tasks' runs; the total also counts the Manager's"

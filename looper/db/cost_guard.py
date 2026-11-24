@@ -16,7 +16,7 @@ async def history(now: datetime, *, pool=None) -> list[dict]:
                     {RUN_KIND.replace('run_kind', 'r.run_kind').replace('agent_id', 'r.agent_id')},
                     r.metadata->'prompt_layers'->'role'->>'config_id') AS run_kind,
                r.task_id, COALESCE(t.schedule_id, r.metadata->>'cost_guard_schedule_id') AS schedule_id,
-               r.created_at, r.status, r.cost_usd, r.metadata,
+               r.created_at, r.status, r.cost_usd, COALESCE(r.metadata->>'model_reported', r.model) AS model, r.metadata,
                CASE WHEN {EQUIVALENT.replace('metadata', 'r.metadata')} THEN 'equivalent_usd'
                     ELSE 'provider_priced_usd' END AS currency
         FROM llm_records r LEFT JOIN tasks t ON t.id = r.task_id
@@ -36,11 +36,10 @@ async def limits(*, pool=None) -> dict:
     pool = pool or get_pool()
     tasks = await pool.fetch("SELECT t.id, t.schedule_id, COALESCE(t.budget_usd, p.task_budget_usd) AS cap "
                              "FROM tasks t JOIN projects p ON p.id = t.project_id")
-    schedules = await pool.fetch("SELECT id, daily_budget_usd FROM schedules")
+    schedules = await pool.fetch("SELECT id, daily_budget_usd, daily_budget_equivalent_usd FROM schedules")
     return {'tasks': {r['id']: {'cap': float(r['cap']) if r['cap'] is not None else None,
                                'schedule_id': r['schedule_id']} for r in tasks},
-            'schedules': {r['id']: float(r['daily_budget_usd']) if r['daily_budget_usd'] is not None else None
-                          for r in schedules}}
+            'schedules': {r['id']: _schedule_caps(r) for r in schedules}}
 
 
 async def context(task_id: str | None, schedule_id: str | None, *, pool=None) -> dict:
@@ -56,6 +55,12 @@ async def context(task_id: str | None, schedule_id: str | None, *, pool=None) ->
                                          'schedule_id': row['schedule_id']}
             schedule_id = schedule_id or row['schedule_id']
     if schedule_id:
-        cap = await pool.fetchval("SELECT daily_budget_usd FROM schedules WHERE id = $1", schedule_id)
-        result['schedules'][schedule_id] = float(cap) if cap is not None else None
+        row = await pool.fetchrow("SELECT daily_budget_usd, daily_budget_equivalent_usd FROM schedules WHERE id = $1", schedule_id)
+        if row:
+            result['schedules'][schedule_id] = _schedule_caps(row)
     return result
+
+
+def _schedule_caps(row):
+    return {key: float(row[column]) if row[column] is not None else None
+            for key, column in (('usd', 'daily_budget_usd'), ('equivalent_usd', 'daily_budget_equivalent_usd'))}

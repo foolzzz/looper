@@ -1068,7 +1068,8 @@ async def _run_agent_system_watched(
                              stop_chat=fleet.stop_chat, startup=startup)
         await _register_bots(registry, bot_rows, runtime_root, fleet.is_running, ("lark", "lark_bot"),
                              stop_chat=fleet.stop_chat, startup=startup)
-        from . import cost_holds
+        from . import cost_alerts, cost_holds
+        cost_alerts.configure(registry.notify, dashboard_url=dashboard_url)
         # The web adapter is registered long before these bots. Deliver only after every adapter is registered:
         # a Telegram or Lark question sent earlier is "not running" and stays unsent. A later unanswered pass
         # retries a send that still fails.

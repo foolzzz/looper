@@ -3,12 +3,12 @@ from __future__ import annotations
 
 import asyncio
 import dataclasses
-from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
 
+from looper.agents import lanes_settings
 from looper.agents.bus import MessageBus
 from looper.agents.managers import ManagerFleet
 from looper.agents.managers_api import ManagerDefinition, ManagerTools, TaskPolicy, TaskScope
@@ -148,11 +148,20 @@ def test_close_failure_keeps_session_and_retries_without_content_in_log(manager,
     asyncio.run(run())
 
 
-def test_message_during_close_waits_before_preparing_resident(manager, tmp_path, monkeypatch):
+@pytest.mark.parametrize("lanes", [False, True])
+def test_message_during_close_waits_before_preparing_resident(manager, tmp_path, monkeypatch, lanes):
+    monkeypatch.setattr(lanes_settings, "_enabled", lanes)
+
     async def run():
         agent, clock, _ = manager
         bus = MessageBus(runtime_root=tmp_path)
-        entered, finish, answered = asyncio.Event(), asyncio.Event(), asyncio.Event()
+        entered, finish, answered, handling = (asyncio.Event() for _ in range(4))
+        handle = agent._handle_user_message
+
+        async def handle_user_message(envelope):
+            handling.set()
+            await handle(envelope)
+
         async def close():
             entered.set()
             await finish.wait()
@@ -163,13 +172,15 @@ def test_message_during_close_waits_before_preparing_resident(manager, tmp_path,
             answered.set()
         monkeypatch.setattr(agent._claude, "try_stop_if_idle", close)
         monkeypatch.setattr(agent, "_answer_user_message", answer)
+        monkeypatch.setattr(agent, "_handle_user_message", handle_user_message)
         await agent.start(bus)
         closing = asyncio.create_task(agent.try_suspend_idle(60))
         try:
             await entered.wait()
             clock.now = 61
             await bus.publish(message(agent))
-            await until(lambda: agent._handling is not None)
+            # Both the main loop and a session worker must wait at the resident's close gate.
+            await asyncio.wait_for(handling.wait(), 2)
             assert not answered.is_set()
             finish.set()
             assert await closing

@@ -95,6 +95,7 @@ def test_new_migration_file_upgrades_and_initializes_the_same_schema(tmp_path, m
     ("cost_holds", "DROP TABLE cost_holds"),
     ("intent_recognitions", "ALTER TABLE intents DROP COLUMN recognition_id CASCADE; "
                             "DROP TABLE intent_recognitions CASCADE"),
+    ("schedule_equivalent_budget", "ALTER TABLE schedules DROP COLUMN daily_budget_equivalent_usd"),
     ("intent_group_reads", "DROP TABLE intent_group_reads, intent_group_read_days; "
                            "ALTER TABLE intents DROP COLUMN via"),
 ])
@@ -204,3 +205,18 @@ def test_recognition_repairs_running_index_with_its_marker_present(replacement):
             assert not await intent_recognitions.pending(conn)
             assert not await connection.schema_change_pending(conn)
     asyncio.run(check())
+
+
+def test_equivalent_budget_migration_repairs_column_even_with_marker():
+    async def test():
+        from looper.db.migrations import schedule_equivalent_budget as migration
+        assert migration.order == migration.pending_order == 1600
+        async with fresh_connection() as conn:
+            await connection.ensure_schema(conn)
+            assert not await migration.pending(conn)
+            await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", migration.name)
+            await conn.execute("ALTER TABLE schedules DROP COLUMN daily_budget_equivalent_usd")
+            assert await migration.pending(conn)
+            await connection.ensure_schema(conn)
+            assert not await migration.pending(conn)
+    asyncio.run(test())

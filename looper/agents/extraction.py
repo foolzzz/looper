@@ -67,13 +67,14 @@ GROUP_READ_MAX_GROUPS = 10
 GROUP_LABEL = " · 全部消息"
 GROUP_REQUESTS_NOTE = """\
 ## Requests in group chats
-A chat marked 全部消息 gives every person's message, not only the ones to the user. In it, an intent is a
+A chat marked 全部消息 gives every human sender's messages, including the user's own. In it, an intent is a
 development request that anyone raises, even without mentioning the user: a new requirement, a change, a bug or
-problem report, a scenario that needs support, or a request for access, addressed to the group, a team or nobody
-in particular. Use dev_task for a requirement or a change and bug_triage for a bug or a problem. Not an intent:
-small talk, answers to questions, follow-ups on something someone has already taken up, a request handed to a
-named person who accepted it, and +1s or echoes of someone else's request. When several messages raise the same
-thing, make one intent with all of them as its sources, or use same_as when a recent intent is that thing."""
+problem report, a scenario that needs support, or a request for access, addressed to the group, a team, a named
+person or nobody in particular. A request or problem report addressed to a named person counts even if that
+person has accepted it. Use dev_task for a requirement or a change and bug_triage for a bug or a problem.
+Not an intent: small talk, answers to questions, +1s or echoes of someone else's request, and pure follow-ups,
+status updates or decisions that carry no new ask. When several messages raise the same thing, make one intent
+with all of them as its sources, or use same_as when a recent intent is that thing."""
 SOURCES_MAX, ABOUT_MAX, SUPERSEDES_MAX = 10, 5, 3
 SUMMARY_MAX, DETAIL_MAX, TITLE_MAX, INTENT_SUMMARY_MAX = 200, 600, 60, 400
 # What a run costs the processor (Sonnet), measured on the real path and in the real-mode eval: a fixed part per run
@@ -1000,9 +1001,9 @@ async def ask(run: Callable[[str, float, float], Awaitable[processor.ProcessorRu
     (``BUDGET``) or its deadline (``TIMEOUT``), so the window is kept. Any other failure is the last run's, for the
     caller."""
     started = time_.monotonic()
-    result, cost, reminded = await run("", budget_usd, timeout_s), None, False
+    result, cost, reminded = await run("", budget_usd, timeout_s), 0.0, False
     while True:
-        cost = result.cost_usd if cost is None else cost + (result.cost_usd or 0.0)
+        cost = cost + result.cost_usd if cost is not None and result.cost_usd is not None else None
         if result.failure is processor.ProcessorFailure.BLOCKED:
             return Asked(result, None, cost, SkipReason.BLOCKED_BY_HOOK)
         if result.failure is not None:
@@ -1144,7 +1145,10 @@ async def execute(runs: Any, run_id: str, schedule: Mapping[str, Any], stream: M
     started = time_.monotonic()
     valid_days, enabled = await leads_model.valid_days(pool), {row["key"] for row in types}
 
+    previous_record_id: int | None = None
+
     async def run(reminder: str, budget_usd: float, timeout_s: float) -> processor.ProcessorRun:
+        nonlocal previous_record_id
         done = model_call.processor_result(await model_call.call(model_call.ProcessorCall(
             owner=schedule["id"], instructions=instructions(kind, schedule["requirement"], types, group=bool(group and group.seqs))
             + (f"\n\n{reminder}" if reminder else ""), input_text=found.text, input_ref=reference,
@@ -1153,12 +1157,16 @@ async def execute(runs: Any, run_id: str, schedule: Mapping[str, Any], stream: M
             contract=triage_run.CONTRACT if kind == "triage" else CONTRACTS[kind],
             metadata={"subscription": {**reference, "render_sha256": subscriptions.digest(found.text),
                                        "reminded": bool(reminder)}}, role=AgentType.PROCESSOR), parse=str))
-        await db_subs.update_run(pool, run_id, record_id=done.record_id, events_selected=len(found.rows))
+        # Keep the final reply's record as record_id, and retain the one replaced by its retry.
+        fields = {"retry_record_id": previous_record_id} if reminder else {}
+        await db_subs.update_run(pool, run_id, record_id=done.record_id, events_selected=len(found.rows), **fields)
+        previous_record_id = done.record_id
         return done
 
     asked = await ask(run, lambda reply: parse(kind, reply, found.refs, now=now.astimezone(_zone(zone_name)),
                                                valid_days=valid_days, enabled_types=enabled, app_seqs=found.app_seqs,
-                                               group_seqs=group.seqs if group else ()),
+                                               group_seqs={r["seq"] for r in found.rows
+                                                           if r.get("via_group") and not r.get("original_scope")}),
                       budget_usd=schedule["run_budget_usd"], timeout_s=float(timeout))
     result, parsed = asked.result, asked.parsed
     if asked.skipped is not None:
@@ -1180,6 +1188,7 @@ async def execute(runs: Any, run_id: str, schedule: Mapping[str, Any], stream: M
         checked = await _check(runs, kind, parsed, found, schedule, run_id=run_id, types=types,
                                extracted_usd=asked.cost_usd or 0.0, record_id=result.record_id, now=now,
                                left_s=float(timeout) - (time_.monotonic() - started))
+        await db_subs.update_run(pool, run_id, check_record_id=checked.record_id)
 
     async def store(conn: asyncpg.Connection) -> Mapping[str, Any]:
         if kind == "leads":
@@ -1197,7 +1206,10 @@ async def execute(runs: Any, run_id: str, schedule: Mapping[str, Any], stream: M
                                          run_id=run_id, record_id=result.record_id, now=now, more=found.more, group=group)
         return {**counts, **checked.counts} if checked is not None else counts
 
-    cost = asked.cost_usd if checked is None else (asked.cost_usd or 0.0) + checked.counts["check_cost_usd"]
+    cost = asked.cost_usd
+    if checked is not None:
+        check_cost = checked.counts["check_cost_usd"]
+        cost = cost + check_cost if cost is not None and check_cost is not None else None
     # What the check did, typed: skipped (off, or nothing to check), checked or failed (fail-open: stored unchecked).
     check_status = ("skipped" if checked is None or not (parsed.state == "items" and parsed.items)
                     else "failed" if checked.counts["check_failed"] else "checked")
@@ -1221,7 +1233,7 @@ async def _check(runs: Any, kind: str, parsed: Parsed, found: Batch, schedule: M
     cap = schedule["run_budget_usd"] - extracted_usd
     if schedule.get("daily_budget_usd") is not None:
         spent = await db_schedules.spent_since(db_connection.get_pool(), schedule["id"], runs.day_start(now))
-        cap = min(cap, schedule["daily_budget_usd"] - spent - extracted_usd)
+        cap = min(cap, schedule["daily_budget_usd"] - spent)
     reference = {"kind": f"{kind}_check", "schedule_id": schedule["id"], "run_id": run_id, "record_id": record_id}
     try:
         outcome = await leads_check.check(

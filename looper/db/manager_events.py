@@ -18,6 +18,7 @@ from uuid import UUID, uuid4
 import asyncpg
 
 from .connection import get_pool
+from ..agents.run_usage import CostStatus
 
 Db = asyncpg.Pool | asyncpg.Connection
 
@@ -363,13 +364,16 @@ async def summary(*, hours: int = SUMMARY_HOURS, pool: Db | None = None) -> dict
         by_state[row["state"]] = by_state.get(row["state"], 0) + row["n"]
         if row["reason"]:
             by_reason[row["reason"]] = by_reason.get(row["reason"], 0) + row["n"]
-    cost = await db.fetchval(
-        "SELECT round(sum(cost_usd)::numeric, 6) FROM llm_records WHERE id IN (SELECT DISTINCT record_id "
+    cost = await db.fetchrow(
+        "SELECT round(sum(cost_usd)::numeric, 6) AS usd, count(*) FILTER "
+        "(WHERE cost_usd IS NULL AND status <> 'running') AS unpriced_runs FROM llm_records WHERE id IN (SELECT DISTINCT record_id "
         "FROM manager_events WHERE record_id IS NOT NULL AND created_at >= now() - make_interval(hours => $1))", hours)
     waiting = await db.fetchrow("SELECT count(*) AS n, extract(epoch FROM now() - min(created_at)) AS oldest "
                                 "FROM manager_events WHERE state = 'pending'")
     return {"window_hours": hours, "total": sum(by_state.values()), "by_state": by_state, "by_reason": by_reason,
-            "turn_cost_usd": float(cost) if cost is not None else 0.0, "pending": waiting["n"],
+            "turn_cost_usd": float(cost["usd"]) if cost["usd"] is not None else 0.0,
+            "cost_status": (CostStatus.UNKNOWN if cost["unpriced_runs"] else CostStatus.KNOWN).value,
+            "unpriced_runs": cost["unpriced_runs"], "pending": waiting["n"],
             "oldest_pending_seconds": round(float(waiting["oldest"]), 1) if waiting["oldest"] is not None else None,
             "failing": await failing(pool=db)}
 

@@ -13,6 +13,7 @@ from typing import Any
 import asyncpg
 
 from .connection import get_pool
+from ..agents.run_usage import CostStatus
 
 # The kinds of request (``advice.AdviceKind``'s values; the db package does not import the agents').
 _KINDS = frozenset({"diagnose", "design_choice", "plan_review", "unblock"})
@@ -115,6 +116,7 @@ async def consults_view(task_id: str, *, pool: asyncpg.Pool | None = None) -> li
             "attempt": row["attempt"] if row["attempt"] is not None else brief.get("attempt"),
             "state": row["state"], "failure": result.get("failure"), "rounds": row["rounds"], "returns": row["returns"],
             "spent_usd": float(row["spent_usd"]), "status": advice.get("status"),
+            "cost_status": (CostStatus.UNKNOWN if result.get("unpriced_runs") else CostStatus.KNOWN).value,
             "checks": [{"stage": stage, "category": category, "count": count}
                        for (stage, category), count in checks.items()],
             "answers": [{"question_id": a["question_id"], "conclusion": a["conclusion"],
