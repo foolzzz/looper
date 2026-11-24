@@ -457,6 +457,7 @@ class Prepared:
     launch: Any = None
     prompt_file: Any = None
     signature: Any = None
+    signature_components: dict[str, str] = field(default_factory=dict)
     switch: Any = None
     turn_text: str = ""
     run: RunState = field(default_factory=RunState)
@@ -1842,6 +1843,9 @@ class ManagerAgent:
             launch.library.sha256, launch.binding_sha256,
             launch.llmrec.url if isinstance(launch.llmrec, LlmrecRoute) else None,
         )
+        components = dict(zip(("launch_args", "system_prompt", "env", "library", "provider_binding", "llmrec_url"),
+                              signature))
+        components["tools"] = None
         has_workflows = any("workflow" in t["inputSchema"].get("properties", {}) for t in tools)
         has_leads = any(t["name"] in (ops_leads.LEADS_TOOL, *ops_vault.TOOL_NAMES) for t in tools)
         has_ledger = any(t["name"].startswith("looper_ledger_") for t in tools)
@@ -1853,6 +1857,11 @@ class ManagerAgent:
             # The MCP tool list is read when the process starts: a changed one restarts it.
             listing = json.dumps(tools, sort_keys=True) if self.ops is not None else ""
             signature += (hashlib.sha256(listing.encode("utf-8")).hexdigest(),)
+            components["tools"] = signature[-1]
+        # Diagnostic hashes are separate from the unchanged resident comparison. Hash even absent components
+        # and existing digests so no command, URL or provider binding value can reach the restart log.
+        signature_components = {name: hashlib.sha256(json.dumps(value).encode("utf-8")).hexdigest()
+                                for name, value in components.items()}
         session = self._session_now()
         switch = session_switch.profile_switch(session.session_id, session.session_runtime, self._session_profile,
                                                launch, session_provider=self._session_provider,
@@ -1866,7 +1875,7 @@ class ManagerAgent:
             command = await token.step("claude_command", asyncio.to_thread(self._claude_command, prompt_file, launch))
             await token.step("claude_start", self._restore_resident(token, session, envelope, command,
                                                                    signature, launch, seconds=10))
-            self._process = _Process(command, signature, system_prompt, launch)
+            self._process = _Process(command, signature, system_prompt, launch, signature_components)
             if self.ops is not None:
                 self.ops.activate_tool_hook(launch.tool_hook, session_key=self._session_now().key)
         if switch is None and session.session_id and session.session_runtime == "api" \
@@ -1878,7 +1887,7 @@ class ManagerAgent:
             with self._runtime_start_budget(launch) as seconds:
                 await token.step("claude_start", self._restore_resident(token, session, envelope, command,
                                                                        signature, launch, seconds=seconds))
-            self._process = _Process(command, signature, system_prompt, launch)
+            self._process = _Process(command, signature, system_prompt, launch, signature_components)
             if self.ops is not None:
                 self.ops.activate_tool_hook(launch.tool_hook, session_key=self._session_now().key)
         if switch is None and session.session_id and isinstance(self._claude, ReportsContext) \
@@ -1907,6 +1916,7 @@ class ManagerAgent:
         return Prepared(
             envelope=envelope, turn=ask.turn, message=ask.message, note=ask.note, retried=ask.retried, system_prompt=system_prompt,
             launch=launch, prompt_file=prompt_file, signature=signature, switch=switch, turn_text=turn_text,
+            signature_components=signature_components,
             run=RunState(persona_scope=persona_scope), quoted=ask.quoted,
             state=tuple(state) if state is not None else None, session=session)
 
@@ -1979,6 +1989,15 @@ class ManagerAgent:
         else:
             await self._claude.stop(kill=True)
 
+    def _log_signature_change(self, prepared: Prepared) -> None:
+        previous = self._process
+        if previous is not None and previous.signature != prepared.signature and previous.signature_components:
+            changed = ", ".join(f"{name}={previous.signature_components[name][:8]}->{value[:8]}"
+                                for name, value in prepared.signature_components.items()
+                                if previous.signature_components[name] != value)
+            logger.info("Manager %s session=%s restarting: signature changed: %s",
+                        self.agent_id, prepared.session.key, changed)
+
     async def _start_turn(self, token: TurnToken, prepared: Prepared) -> None:
         """The prepared turn gets its process: the session switch, the runtime swap and the stale process's stop,
         the resume brief, the record and Claude's start. ``prepared.run`` holds what the run needs afterwards."""
@@ -2007,7 +2026,11 @@ class ManagerAgent:
             await token.keep("claude_stop", self._stop_replaced_session(whole_tree=unhooked), 30)
             self._claude, self._claude_runtime = launch.runtime.resident_session(self._resident_label()), launch.runtime
         if self._claude.stale(signature):
+            self._log_signature_change(prepared)
             await token.keep("claude_stop", self._stop_replaced_session(whole_tree=unhooked), 30)
+        elif not self._claude.started:
+            # An idle library refresh may already have closed the resident before reaching this point.
+            self._log_signature_change(prepared)
         if not self._claude.started and session_routing.routes(self.agent_id):
             # Room under the resident cap, or a wait for it (``SessionRouter.admit``).
             await token.step("resident_admission", self._router.admit(session, envelope))
@@ -2063,7 +2086,8 @@ class ManagerAgent:
                             autonomous=self._autonomous_turns(command, prepared.system_prompt, launch),
                             price=launch.price), seconds, undo=lambda: self._claude.stop(kill=True))
                 except TurnStopped:
-                    self._process = _Process(self._claude.command or command, signature, prepared.system_prompt, launch)
+                    self._process = _Process(self._claude.command or command, signature, prepared.system_prompt, launch,
+                                             prepared.signature_components)
                     if self.ops is not None:
                         self.ops.activate_tool_hook(launch.tool_hook, session_key=self._session_now().key)
                     raise
@@ -2083,7 +2107,7 @@ class ManagerAgent:
                     # A per-turn runtime may materialize its owner's home at start.
                     command = self._claude.command
                     await token.step("recorder_annotate", recorder.annotate({"command": command}))
-                self._process = _Process(command, signature, prepared.system_prompt, launch)
+                self._process = _Process(command, signature, prepared.system_prompt, launch, prepared.signature_components)
                 if self.ops is not None:
                     self.ops.activate_tool_hook(launch.tool_hook, session_key=self._session_now().key)
         except TurnStopped:
@@ -2128,6 +2152,7 @@ class ManagerAgent:
                         # launch in this turn's record and retry the capability refresh next turn.
                         prepared = replace(prepared, launch=previous.launch, system_prompt=previous.system_prompt,
                                            signature=previous.signature,
+                                           signature_components=previous.signature_components,
                                            prompt_file=previous.system_prompt.write_file(self._session_root()))
                         if prepared.turn is not None:
                             prepared.turn.blocks.append(notice)
