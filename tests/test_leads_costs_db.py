@@ -108,17 +108,25 @@ def test_subscription_check_record_upgrade_backfills_and_retains_the_foreign_key
                            "VALUES ('s', 'p', 'Schedule', '0 * * * *', 'UTC', 'Check')")
         await pool.execute("INSERT INTO schedule_runs (id, schedule_id, scheduled_for, trigger, status) "
                            "VALUES ('r', 's', now(), 'manual', 'completed')")
-        await pool.execute("ALTER TABLE subscription_runs DROP COLUMN check_record_id")
+        await pool.execute("ALTER TABLE subscription_runs DROP COLUMN check_record_id, DROP COLUMN retry_record_id")
         await pool.execute("INSERT INTO subscription_runs (run_id, from_seq, to_seq) VALUES ('r', 0, 0)")
         for _ in range(2):
             rid = await llm_records.start_record(agent_id="leads_check-s", run_kind="leads_check",
                                                  metadata={"leads_check": {"run_id": "r"}}, pool=pool)
+        extraction_records = [await llm_records.start_record(agent_id="processor-s", run_kind="processor",
+                                                               metadata={"subscription": {"run_id": "r"}}, pool=pool)
+                              for _ in range(2)]
+        await subscriptions.update_run(pool, "r", record_id=extraction_records[-1])
         await migration.apply(pool, sql="", state="current")
         assert not await migration.pending(pool)
-        assert (await subscriptions.get_runs(["r"], db=pool))["r"]["check_record_id"] == rid
+        restored = (await subscriptions.get_runs(["r"], db=pool))["r"]
+        assert restored["check_record_id"] == rid
+        assert restored["retry_record_id"] == extraction_records[0]
         await migration.apply(pool, sql="", state="current")
         await pool.execute("DELETE FROM llm_records WHERE id = $1", rid)
         assert await pool.fetchval("SELECT check_record_id FROM subscription_runs WHERE run_id = 'r'") is None
+        await pool.execute("DELETE FROM llm_records WHERE id = $1", extraction_records[0])
+        assert await pool.fetchval("SELECT retry_record_id FROM subscription_runs WHERE run_id = 'r'") is None
 
     run_db(test)
 

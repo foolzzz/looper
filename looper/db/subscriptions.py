@@ -487,7 +487,7 @@ async def get_runs(run_ids: Sequence[str], *, db: Db | None = None) -> dict[str,
     return {row["run_id"]: dict(row) for row in rows}
 
 
-_RUN_FIELDS = ("record_id", "check_record_id", "outcome", "output_text", "output_sha256", "notification_id",
+_RUN_FIELDS = ("record_id", "retry_record_id", "check_record_id", "outcome", "output_text", "output_sha256", "notification_id",
                "events_selected", "skip_reason")
 
 

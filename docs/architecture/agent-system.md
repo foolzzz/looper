@@ -2622,7 +2622,7 @@ prices or extend which scopes enforce mode stops. With the guard off it adds no 
 
 Task/model, Manager, schedule, spend and metric API summaries always carry `cost_status = known | unknown`.
 Incomplete aggregate totals retain their known subtotal and unknown-run counts; an unknown individual turn cost
-is null. Subscription daily totals include both extraction and check records, and advisor booking preserves
+is null. Subscription daily totals include every extraction attempt and the check through typed record links, and advisor booking preserves
 unknown costs for daily alerts. The existing dashboard shows these unpriced-run counts,
 model rows with unknown cost, and metric unknown counts; metrics exclude unknown cases from cost averages.
 CLI cost reads share the same API. Telegram and Lark share the recorder and cap behavior and need no new commands.

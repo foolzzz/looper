@@ -188,8 +188,8 @@ async def _run(child: ChildRun, *, spawn_id: int, brief: Brief, settings: AgentS
         if result.record_id is None or cost_status(result.cost_usd) is CostStatus.KNOWN:
             return None
         models = ", ".join(result.execution.models) or "unknown"
-        reason = f"models {models}: consult budget cannot be verified: cost unknown; no retry or answer"
-        logger.warning(reason)
+        logger.warning("models %s: consult budget cannot be verified: cost unknown; no retry or answer", models)
+        reason = f"its cost is unknown, so its cap of {cap_usd:g} USD cannot be checked"
         if isinstance(result, CallFailed) and result.failure is not CallFailure.RUNTIME:
             return result  # Keep timeout/refusal classification; these failures never retry or return advice.
         return CallFailed(execution=replace(result.execution, failure=CallFailure.BUDGET, reason=reason),
@@ -277,7 +277,7 @@ async def submit(spawn_id: int, raw_request: Any, raw_bindings: Any = None, *, c
         return await _return(row, describe(hits), [hit.view() for hit in hits])
     if row.get("cost_status") == CostStatus.UNKNOWN.value:
         return await _end(row, SpawnState.OVER_BUDGET, failure="budget",
-                          detail="consult budget cannot be verified: previous run cost unknown")
+                          detail=f"its cost is unknown, so its cap of {float(row['budget_usd']):g} USD cannot be checked")
     if _left(row) < MIN_RUN_USD:
         return await _end(row, SpawnState.OVER_BUDGET, failure="budget",
                           detail=f"{_left(row):.2f} USD is left, less than a run needs")

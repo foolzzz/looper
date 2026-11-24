@@ -589,3 +589,43 @@ def test_unknown_advisor_cost_does_not_retry_with_a_full_budget(monkeypatch, tmp
     assert called.await_count == 1
     assert result.failure is CallFailure.BUDGET and spent is None
     assert "claude-haiku-5-5" in caplog.text and "budget" in caplog.text
+
+
+@pytest.mark.parametrize("previous_run", [False, True])
+def test_unknown_cost_uses_existing_planner_failure_text(monkeypatch, tmp_path, previous_run):
+    from unittest.mock import AsyncMock
+
+    from looper.agents import advisor
+    from looper.agents.model_call import CallFailed, CallFailure, Execution
+    from looper.agents.tiers.planner_advice import ended_lines
+    from looper.db import agent_spawns, llm_records
+
+    async def check(pool):
+        spawn, _ = await _consult(pool)
+        record = await llm_records.start_record(agent_id="advisor-unknown", task_id="task-a", pool=pool)
+        await llm_records.finish_record(record, status="completed", model="claude-haiku-5-5", input_tokens=10,
+                                       pool=pool)
+        await agent_spawns.note_run(spawn, record)
+        async def failed_call(*args, **kwargs):
+            await advisor._book(spawn, Execution(None, record_id=record))
+            return CallFailed(execution=Execution(None, record_id=record, models=("claude-haiku-5-5",)),
+                              failure=CallFailure.RUNTIME, reason="runtime failed")
+
+        called = AsyncMock(side_effect=failed_call)
+        monkeypatch.setattr(advisor, "call", called)
+        if previous_run:
+            await advisor._book(spawn, Execution(None, record_id=record))
+        ended = await _submit(tmp_path, spawn, _request())
+        assert called.await_count == (0 if previous_run else 1)
+        assert ended_lines(ended.failure, ended.detail) == [
+            ("The consult gave no answer: budget, it reached its spend cap "
+             "(its cost is unknown, so its cap of 1 USD cannot be checked)." if previous_run else
+             "The consult gave no answer: judge, the judge could not check the request "
+             "(the judge could not judge the request: its cost is unknown, so its cap of 1 USD cannot be checked)."),
+            "Decide without it; advise is offered again for this once something new is known.",
+        ]
+        row = await agent_spawns.get(spawn)
+        assert row["cost_status"] == "unknown"
+        assert row["result"]["unpriced_runs"] == [record]
+
+    run_db(check, monkeypatch, setup=_setup)

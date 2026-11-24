@@ -746,7 +746,7 @@ async def spent_since_each(conn: Db, schedule_ids: list[str], since: datetime, *
     # Consults and subscription checks can postdate a run's settlement. Include their live subtotal once;
     # other task runs keep their settled cost rather than letting later unrelated records move it.
     role = _SPEND_ROLE.replace("agent_id", "l.agent_id")
-    linked = "l.id = ANY(ARRAY[sr.record_id, sr.check_record_id])"
+    linked = "l.id = ANY(ARRAY[sr.record_id, sr.retry_record_id, sr.check_record_id])"
     rows = await conn.fetch(
         f"""
         SELECT r.schedule_id, sum(

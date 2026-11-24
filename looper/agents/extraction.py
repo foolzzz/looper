@@ -993,9 +993,9 @@ async def ask(run: Callable[[str, float, float], Awaitable[processor.ProcessorRu
     (``BUDGET``) or its deadline (``TIMEOUT``), so the window is kept. Any other failure is the last run's, for the
     caller."""
     started = time_.monotonic()
-    result, cost, reminded = await run("", budget_usd, timeout_s), None, False
+    result, cost, reminded = await run("", budget_usd, timeout_s), 0.0, False
     while True:
-        cost = result.cost_usd if cost is None else cost + (result.cost_usd or 0.0)
+        cost = cost + result.cost_usd if cost is not None and result.cost_usd is not None else None
         if result.failure is processor.ProcessorFailure.BLOCKED:
             return Asked(result, None, cost, SkipReason.BLOCKED_BY_HOOK)
         if result.failure is not None:
@@ -1137,7 +1137,10 @@ async def execute(runs: Any, run_id: str, schedule: Mapping[str, Any], stream: M
     started = time_.monotonic()
     valid_days, enabled = await leads_model.valid_days(pool), {row["key"] for row in types}
 
+    previous_record_id: int | None = None
+
     async def run(reminder: str, budget_usd: float, timeout_s: float) -> processor.ProcessorRun:
+        nonlocal previous_record_id
         done = model_call.processor_result(await model_call.call(model_call.ProcessorCall(
             owner=schedule["id"], instructions=instructions(kind, schedule["requirement"], types, group=bool(group and group.seqs))
             + (f"\n\n{reminder}" if reminder else ""), input_text=found.text, input_ref=reference,
@@ -1146,7 +1149,10 @@ async def execute(runs: Any, run_id: str, schedule: Mapping[str, Any], stream: M
             contract=triage_run.CONTRACT if kind == "triage" else CONTRACTS[kind],
             metadata={"subscription": {**reference, "render_sha256": subscriptions.digest(found.text),
                                        "reminded": bool(reminder)}}, role=AgentType.PROCESSOR), parse=str))
-        await db_subs.update_run(pool, run_id, record_id=done.record_id, events_selected=len(found.rows))
+        # Keep the final reply's record as record_id, and retain the one replaced by its retry.
+        fields = {"retry_record_id": previous_record_id} if reminder else {}
+        await db_subs.update_run(pool, run_id, record_id=done.record_id, events_selected=len(found.rows), **fields)
+        previous_record_id = done.record_id
         return done
 
     asked = await ask(run, lambda reply: parse(kind, reply, found.refs, now=now.astimezone(_zone(zone_name)),
