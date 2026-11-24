@@ -310,11 +310,16 @@ Manager has no tool for it. The dashboard shows the task page's 指标 card and 
   the inbox available to other sessions and non-user events. Later messages in that session wait for
   settlement before admission or queue dispatch. A failed or late write queues the message. When the
   protocol supports UUID ownership, an unconfirmed addition reserves its next native turn and buffers
-  output until the queued caller claims it by message id, without writing stdin again or restarting the
-  resident. Otherwise the resident first tries per-UUID cancellation, then a gentle interrupt, and
+  output only through that native turn's own top-level result. Its queued caller claims it by message id
+  without writing stdin again or restarting the resident, even when other queued work runs before claim.
+  Its run records the injected input actually
+  seen by the model. Native tool bindings and stream matches are published before claim, including while
+  Manager prepares the queued turn. A stopped, failed or superseded owner withdraws its reservation;
+  another caller settles existing reservations before starting on the resident. Otherwise the resident
+  first tries per-UUID cancellation, then a bounded gentle interrupt that spares background work, and
   retires the process only when safe withdrawal is impossible. The addition is neither reported as
   merged nor settled with the original result. Unexpected admission failures are logged and retain the queue
-  path. The original tool binding stays in place. The final reply goes to
+  path. Folded additions keep the original tool binding. The final reply goes to
   the original chat and each addition from another chat; same-chat web additions get a terminal acknowledgement,
   while same-chat Lark/Telegram additions need no duplicate reply. Any participating chat can stop the turn.
   Additions settle only after reply handoff; shutdown before handoff leaves them replayable. Explicit stop
