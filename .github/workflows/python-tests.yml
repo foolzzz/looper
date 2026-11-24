@@ -147,7 +147,15 @@ jobs:
 
       - name: Run the tests
         if: needs.changes.outputs.docs_only != 'true'
-        run: uv run --extra test python -m pytest -q -n auto -rs --durations=25 -m "not installed and not provenance"
+        run: uv run --extra test python -m pytest -q -n auto -rs --durations=25 --junitxml=agent-shard-junit.xml -o junit_family=xunit1 -o junit_duration_report=total -m "not installed and not provenance"
+
+      - name: Upload shard durations
+        if: always() && needs.changes.outputs.docs_only != 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: agent-shard-junit-${{ matrix.shard }}-of-6
+          path: agent-shard-junit.xml
+          retention-days: 7
 
       - name: Report docs-only success
         if: needs.changes.outputs.docs_only == 'true'

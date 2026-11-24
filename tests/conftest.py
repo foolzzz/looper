@@ -3,12 +3,15 @@ from __future__ import annotations
 import contextlib
 import copy
 import json
+import math
 import os
 import re
 import sys
+from collections import Counter
 from collections.abc import Callable
 from datetime import datetime, timezone
 from pathlib import Path
+from statistics import median
 from types import SimpleNamespace
 from typing import Any
 
@@ -36,6 +39,7 @@ import worker_database  # noqa: E402
 
 
 _TEST_SHARD = pytest.StashKey[tuple[int, int]]()
+_SHARD_DURATIONS = pytest.StashKey[dict[str, float]]()
 _STAGED_DASHBOARD_DIR = REPO_ROOT / "looper" / "web" / "dashboard"
 
 
@@ -102,8 +106,39 @@ def pytest_configure(config: pytest.Config) -> None:
         if match is None or int(match[1]) > int(match[2]):
             raise pytest.UsageError("LOOPER_TEST_SHARD must be N/TOTAL with 1 <= N <= TOTAL")
         config.stash[_TEST_SHARD] = (int(match[1]), int(match[2]))
+        config.stash[_SHARD_DURATIONS] = _load_shard_durations(REPO_ROOT / "tests/shard_durations.json")
     # Before any test module is imported (several read the URL at import): an xdist worker gets a database of its own.
     worker_database.start(getattr(config, "workerinput", {}).get("workerid"))
+
+
+def _load_shard_durations(path: Path) -> dict[str, float]:
+    try:
+        durations = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(durations, dict) or not durations or any(
+            not isinstance(name, str) or not name.startswith("tests/") or not name.endswith(".py")
+            or isinstance(seconds, bool) or not isinstance(seconds, (int, float))
+            or not math.isfinite(seconds) or seconds < 0
+            for name, seconds in durations.items()
+        ):
+            raise ValueError("expected a nonempty mapping of test file paths to finite, nonnegative seconds")
+        return durations
+    except (OSError, ValueError) as exc:
+        raise pytest.UsageError(f"Cannot load shard durations from {path}: {exc}") from exc
+
+
+def _assign_test_shards(counts: dict[str, int], durations: dict[str, float], total: int) -> dict[str, int]:
+    rates = [durations[path] / count for path, count in counts.items() if path in durations]
+    # A selection containing only new files has no measured item counts; estimate one item per recorded file.
+    seconds_per_item = median(rates) if rates else median(durations.values())
+    weights = {path: durations.get(path, count * seconds_per_item) for path, count in counts.items()}
+    loads = [0.0] * total
+    assigned = {}
+    # Largest files first, with stable ties so every xdist worker collects the same node IDs.
+    for path in sorted(weights, key=lambda path: (-weights[path], path)):
+        group = min(range(total), key=loads.__getitem__)
+        assigned[path] = group + 1
+        loads[group] += weights[path]
+    return assigned
 
 
 @pytest.hookimpl(trylast=True)
@@ -111,18 +146,8 @@ def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item
     if _TEST_SHARD not in config.stash:
         return
     shard, total = config.stash[_TEST_SHARD]
-    weights: dict[str, int] = {}
-    for item in items:
-        path = item.path.relative_to(config.rootpath).as_posix()
-        # Prompt eval exercises whole fake-agent flows; counting cases alone underweights it.
-        weights[path] = weights.get(path, 0) + (4 if path == "tests/test_prompt_eval.py" else 1)
-    loads = [0] * total
-    assigned = {}
-    # Largest files first, with stable ties so every xdist worker collects the same node IDs.
-    for path in sorted(weights, key=lambda path: (-weights[path], path)):
-        group = min(range(total), key=loads.__getitem__)
-        assigned[path] = group + 1
-        loads[group] += weights[path]
+    counts = Counter(item.path.relative_to(config.rootpath).as_posix() for item in items)
+    assigned = _assign_test_shards(counts, config.stash[_SHARD_DURATIONS], total)
     selected, deselected = [], []
     for item in items:
         path = item.path.relative_to(config.rootpath).as_posix()

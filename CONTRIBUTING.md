@@ -33,6 +33,16 @@ disposable database; they create and drop their own schemas. CI runs the same
 command against a PostgreSQL service on every pull request. Which tests a
 change needs is described in section 1 of the development plan.
 
+PR agent tests use six whole-file shards balanced by the recorded seconds in
+`tests/shard_durations.json`. New files use their item count times the median
+seconds per item of the collected, recorded files. CI uploads each shard's JUnit
+report (including setup and teardown) for seven days, even when tests fail.
+After a completed run, refresh the committed weights with an authenticated `gh`:
+
+```bash
+python scripts/refresh_shard_durations.py RUN_ID
+```
+
 `tests/test_upgrade_kept_runs_serve_db.py` registers a job in your real
 per-user launchd domain, so it runs only with `LOOPER_TEST_LAUNCHD=1`. Tests
 that start keeper processes record them, and the next pytest session reaps
