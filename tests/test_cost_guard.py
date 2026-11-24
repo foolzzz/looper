@@ -89,20 +89,25 @@ def test_restart_recovers_running_reservations_and_ignores_finished_reservations
     asyncio.run(check())
 
 
-def test_scheduler_day_boundary_is_reused_and_daily_p95_refreshed(monkeypatch):
+@pytest.mark.parametrize('mode', [Mode.OBSERVE, Mode.ENFORCE])
+def test_scheduler_day_boundary_is_reused_and_daily_p95_refreshed(monkeypatch, mode):
     from looper.agents.scheduler import Scheduler
     async def check():
         now = [datetime(2026, 11, 23, 7, 59, tzinfo=timezone.utc)]
         scheduler = Scheduler(bus=SimpleNamespace(), day_zone="America/Los_Angeles")
         g = guard(monkeypatch)
+        g.config = Config(mode=mode)
         g.clock = lambda: now[0]
         g.day_start = scheduler.day_start
         await g.rebuild()
         assert g.day == datetime(2026, 11, 22, tzinfo=ZoneInfo("America/Los_Angeles"))
         await g.admit(cg.RunKind.WORKER, (), cg.Currency.PROVIDER, 1)
+        await g.admit(cg.RunKind.WORKER, (), cg.Currency.PROVIDER, 1)
+        assert len(g.snapshot()['recent']) == 2
         now[0] += timedelta(minutes=2)
         await g.admit(cg.RunKind.WORKER, (), cg.Currency.PROVIDER, 1)
-        assert cg.store.history.await_count == 2
+        assert cg.store.history.await_count == (4 if mode is Mode.ENFORCE else 2)
+        assert len(g.snapshot()['recent']) == 1
         assert g.day == datetime(2026, 11, 23, tzinfo=ZoneInfo("America/Los_Angeles"))
     asyncio.run(check())
 

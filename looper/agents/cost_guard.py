@@ -253,9 +253,12 @@ class Guard:
                 key = (*scope.key, reservation.currency)
                 scopes[key] = scope
                 reserved[key] += reservation.usd
+        # Same-day accounting reads retain observations with no model record, including holds and denials.
+        if self.day != day:
+            self._recent = recent
         self.day, self._limits = day, limits
         self._spent, self._reserved, self._samples = spent, reserved, samples
-        self._scopes, self._records, self._recent = scopes, records, recent
+        self._scopes, self._records = scopes, records
         # A week of observations precedes advice; recommendations are never applied as configuration.
         observed = [row['created_at'] for row in rows if row['metadata'].get('cost_guard')]
         if observed and min(observed) <= now-timedelta(days=7):

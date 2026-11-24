@@ -78,6 +78,12 @@ including those written by another process on the same day. This reads committed
 evidence before deciding; it does not serialize simultaneous admissions whose
 records have not been written yet. Reusing the existing history rebuild adds a
 history/limits read to each enforced check; no load benchmark was run.
+Same-day accounting reads retain the local observation queue: usage-window holds
+and denied admissions do not open model records, so rebuilding that queue from
+`llm_records` would erase them. Startup and day changes still restore persisted
+observations. Schedule hold deduplication, extensions and expiry keep their
+existing behavior. Dashboard, CLI, Lark and Telegram need no companion changes;
+they use the same guard and scheduler paths.
 
 `FALLBACK`, unanswered-push handling, the full spend settings editor and moving
 the day boundary to the operator's timezone remain separate work. No real-model
@@ -97,11 +103,15 @@ checks passed. No skipped test is counted as a pass.
 The two changed frontend test files passed 75 tests. The production frontend
 build passed with its existing bundle-size warning.
 
-Review corrections passed **640 tests** with Python 3.11, `-n 1` and disposable
-PostgreSQL: only touched test files plus the command-schedule schema, migration
-registry, API document and tool-level checks. Temporarily restoring the pre-fix
-`cost_guard.py` and `scheduler.py` made all **25 new regressions fail**; restoring
-the fixes passed the final run. The scheduler DB regression exercised a real
-firing transaction, cursor preservation and post-commit error publication.
-The standalone service/browser scenario above was not rerun for these review
-corrections; no UI or model-visible content changed.
+The usage-window correction passed **1,536 tests** across all cost-guard, alert,
+hold and schedule test files, plus the usage-window database, processor, migration
+registry and isolated account-admission serve tests. An additional **49 tests**
+covered usage-window policy, Planner holds and processor database behavior.
+Both runs used Python 3.11, `-n 2` and disposable PostgreSQL, with no failures or
+skips. Before the correction, both long-hold catch-up variants failed at the
+second tick; the expanded same-day/day-boundary test also failed in `enforce`
+while passing in `observe`. The final run retained the 20 two-process accounting
+cases, fail-closed schedule firing, global review holds, migration repair and
+alert claim coverage. The fix adds four production lines and seven test lines.
+The isolated serve test used stand-in CLIs and a fresh database. The standalone
+spend/browser scenario above was not rerun; no UI or model-visible content changed.
