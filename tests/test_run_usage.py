@@ -252,3 +252,9 @@ class TestRecorder:
         assert finish["compactions"] == [
             {"trigger": "auto", "pre_tokens": 25120, "post_tokens": 1359, "duration_ms": 13135},
         ]
+
+
+def test_cost_coverage_distinguishes_unknown_from_explicitly_free_usage():
+    from looper.agents.run_usage import CostStatus
+    assert Usage().cost_status is CostStatus.UNKNOWN
+    assert Usage(cost_usd=0).cost_status is CostStatus.KNOWN

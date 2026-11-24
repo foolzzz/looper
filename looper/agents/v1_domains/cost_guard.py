@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 
 from .. import cost_guard, cost_guard_settings as settings, cost_holds
 from ...db import cost_holds as holds_store
+from ..run_usage import CostStatus
 from ..action_levels import ActionLevel
 from ..api_v1 import Operation, _array, _object, _STR, _NULL_STR, _INT, _BOOL
 from ..ops import ErrorCode, OpError
@@ -16,7 +17,9 @@ _MODE = {"type": "string", "enum": ["off", "observe", "enforce"]}
 _LIMITS = _object(dict.fromkeys(settings.CAPS, _CAP), closed=True)
 _ROLES = _object(dict.fromkeys(settings.ROLES, _LIMITS), [], closed=True)
 _COUNTER = _object({"scope": _STR, "scope_ref": _STR, "currency": _STR, "spent_usd": {"type": "number"},
-                    "reserved_usd": {"type": "number"}, "limit_usd": _CAP}, closed=True)
+                    "reserved_usd": {"type": "number"}, "limit_usd": _CAP,
+                    "cost_status": {"type": "string", "enum": [status.value for status in CostStatus]},
+                    "unknown_models": _array(_STR)}, closed=True)
 _RECENT = _object({"at": _STR, "run_kind": _STR, "currency": _STR, "estimate_usd": {"type": "number"},
                    "estimate_source": _STR, "decision": _STR, "scope": _NULL_STR, "scope_ref": _NULL_STR,
                    "action": _NULL_STR, "would_hold_until": _NULL_STR, "would_hold_reason": _NULL_STR,
@@ -47,6 +50,7 @@ HOLD = _object({"id": _INT, "scope": _STR, "scope_ref": _STR, "currency": _NULL_
                 "limit_usd": _NULL_NUMBER, "spent_usd": _NULL_NUMBER,
                 "pushes": {"type": ["integer", "null"]}, "reason": _STR,
                 "state": _STR, "created_at": _STR, "decided_at": _NULL_STR, "decided_via": _NULL_STR}, closed=True)
+HOLD["properties"]["task_ids"] = _array(_STR)
 HOLD["required"] = [name for name in HOLD["required"] if name != "pushes"]
 _DECIDE = _object({"hold_id": {"type": "integer", "minimum": 1},
                    "decision": {"type": "string", "enum": ["continue", "stop"]},
@@ -62,7 +66,8 @@ _ENFORCE = ("Enforce holds task dispatches at task and global daily caps and ref
             "yourself; 95% utilization holds only schedule firings and background roles. Holds last until reset, "
             "or at most five minutes when reset time is unknown. Window rows apply when "
             "engine.limit_signals.enabled is on; otherwise only quota-failure rules apply. No account is switched. "
-            "Background-role and schedule budget enforcement remains inactive.")
+            "A server already in enforce now stops background roles at their own, schedule or global daily caps "
+            "and skips schedule firings at caps previously only observed. Default off preserves existing behavior.")
 _UNANSWERED_IMPACT = (
     " Turning on unanswered pushes asks once after that many direct pushes in the window go without a reply, "
     "pauses the schedule after more days with no answer and no reply, and resumes it from Needs you.")

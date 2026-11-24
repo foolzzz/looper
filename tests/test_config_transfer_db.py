@@ -239,7 +239,7 @@ async def _populate(monkeypatch: pytest.MonkeyPatch, pool: Any, work_dir: Path) 
         "name": "nightly", "cron": "0 2 * * *", "timezone": "Asia/Shanghai", "requirement": "Check the deps.",
         "work_dir": str(work_dir), "overlap": "parallel", "max_parallel_runs": 2, "catch_up": "skip",
         "run_timeout_seconds": 1800, "run_budget_usd": 1.5, "gate_command": "echo new", "gate_timeout_seconds": 30,
-        "daily_budget_usd": 3, "notify": "always", "user_gates": "on",
+        "daily_budget_usd": 3, "daily_budget_equivalent_usd": 5, "notify": "always", "user_gates": "on",
         "notify_target": {"channel": "telegram", "chat": "123456789"},
         "profile_overrides": {"worker": "claude-code/sonnet"}, "task_limits": {"worker": 2}}}))["schedule"]
     await _ok("POST", "/api/v1/schedule_admin/update", {"schedule_id": nightly['schedule_id'], "fields": {"enabled": True}})
@@ -335,7 +335,7 @@ async def _state(pool: Any) -> dict[str, Any]:
 # A schedule's own settings, as its row has them.
 _SCHEDULE_COLUMNS = ("cron", "timezone", "requirement", "overlap", "max_parallel_runs", "catch_up",
                      "run_timeout_mode", "run_timeout_seconds", "run_budget_usd", "gate_command",
-                     "gate_timeout_seconds", "daily_budget_usd", "notify", "user_gates",
+                     "gate_timeout_seconds", "daily_budget_usd", "daily_budget_equivalent_usd", "notify", "user_gates",
                      "notify_channel", "notify_chat")
 
 
@@ -959,6 +959,7 @@ def test_a_schedule_whose_settings_changed_is_rewritten_disabled_and_one_that_di
                 "profiles": {}, "task_limits": {}}
             # Not whether it was enabled, nor its directory: a flag says it had one.
             assert "enabled" not in nightly and "work_dir" not in nightly and nightly["repoint"] is True
+            assert nightly["daily_budget_equivalent_usd"] == 5
             assert (nightly["profiles"], nightly["task_limits"]) == ({"worker": "claude-code/sonnet"}, {"worker": 2})
             assert (await _transfer_file(target_url, "import", str(exported), apply=True))[0] == 0
             _serve(monkeypatch, target)

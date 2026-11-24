@@ -155,9 +155,12 @@ async def _question(row, *, pool=None):
     scope = '任务' if row['scope'] == 'task' else '今天的全局花费'
     currency = '等价花费' if row['currency'] == 'equivalent_usd' else '真钱'
     link = _dashboard_url.rstrip('/') + '/#todo'
-    text = (f"{label}：{scope}的{currency}到了上限，已花及预留 ${row['spent_usd']:g} / 上限 ${row['limit_usd']:g}。\n"
+    opening = ("对外审查今天的预算用完了，要提高上限吗？被拦下的动作不会自动重发。"
+               if row['reason'] == 'review_budget' else f"{scope}的{currency}到了上限，")
+    expiry = '24 小时未答复将停下。' if row['task_ids'] else '24 小时未回答，上限不变。'
+    text = (f"{label}：{opening}已花及预留 ${row['spent_usd']:g} / 上限 ${row['limit_usd']:g}。\n"
             f"回复「继续 {label} <新上限美元>」或「停 {label}」；只有一条等待时也可回复「继续」或「停」。\n"
-            f"24 小时未答复将停下。控制台：{link}")
+            f"{expiry}控制台：{link}")
     logger.warning('spend hold %s waits for the operator', label)
     await _send_hold(row, text, urgency=delivery.Urgency.BLOCKING, dedupe_key=f"cost-hold:{row['id']}",
                      source_ref=label)
@@ -203,8 +206,10 @@ async def _continue_limit(conn, row, new_limit):
     if row['scope'] == 'task':
         current = await conn.fetchval("SELECT COALESCE(t.budget_usd,p.task_budget_usd) FROM tasks t "
             "JOIN projects p ON p.id=t.project_id WHERE t.id=$1 FOR UPDATE OF t", row['scope_ref'])
-    elif row['scope'] == 'global_day':
-        key = 'cost_guard.daily_equivalent_usd' if row['currency'] == 'equivalent_usd' else 'cost_guard.daily_usd'
+    elif row['scope'] in ('global_day', 'role_day'):
+        cap = 'daily_equivalent_usd' if row['currency'] == 'equivalent_usd' else 'daily_usd'
+        key = (f"cost_guard.roles.{row['scope_ref']}.{cap}" if row['scope'] == 'role_day'
+               else f'cost_guard.{cap}')
         raw = await conn.fetchval("SELECT value FROM system_settings WHERE key=$1", key)
         current = float(raw) if raw is not None else None
     else:

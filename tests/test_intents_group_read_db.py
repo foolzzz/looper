@@ -39,7 +39,8 @@ async def window(pool, allowance=None, **fields):
 
 
 @pytest.mark.parametrize("case", ["human_live_after", "mentions_me", "operator_own", "bot_app", "other_kind",
-    "imported", "history", "sent_before_start", "ingested_before_start", "unlisted_group", "unbound_user"])
+    "imported", "history", "sent_before_start", "ingested_before_start", "unlisted_group", "unbound_user",
+    "operator_before_start", "operator_history", "unlisted_operator"])
 def test_followed_group_reads_only_live_human_messages_since_read_from(monkeypatch, case):
     async def check(pool):
         await source(pool)
@@ -61,16 +62,68 @@ def test_followed_group_reads_only_live_human_messages_since_read_from(monkeypat
             fields["chat_id"] = "h"
         elif case == "unbound_user":
             await pool.execute("UPDATE event_sources SET user_open_id=NULL WHERE id=$1", SOURCE)
+        elif case in ("operator_before_start", "operator_history", "unlisted_operator"):
+            fields["sender"] = DM
+            fields.update({"sent_at": START - timedelta(seconds=1)} if case == "operator_before_start" else
+                          {"origin": "history"} if case == "operator_history" else {"chat_id": "h"})
         seq = await add(pool, "synthetic request", **fields)
         result = await window(pool)
-        expected = case in ("human_live_after", "mentions_me", "operator_own", "unbound_user")
+        original = case in ("operator_before_start", "operator_history", "unlisted_operator")
+        expected = original or case in ("human_live_after", "mentions_me", "operator_own", "unbound_user")
         assert [r["seq"] for r in result["rows"]] == ([seq] if expected else [])
         if expected:
-            assert result["rows"][0]["via_group"] is (case not in ("mentions_me", "operator_own"))
+            assert result["rows"][0]["via_group"] is (not original)
         # A positive control proves that the selector remains live in every negative case.
         control = await add(pool, "direct control", chat_id="dm", kind="p2p", sent_at=NOW)
         assert control in [r["seq"] for r in (await window(pool))["rows"]]
     run_db(check, monkeypatch)
+
+
+@pytest.mark.parametrize("speaker", ["operator", "mentions_me", "third_person"])
+@pytest.mark.parametrize("type_key", ["dev_task", "alert_triage"])
+def test_followed_group_rules_preserve_original_types_without_duplicate_intents(monkeypatch, tmp_path, speaker, type_key):
+    fake = processor_says(monkeypatch, json.dumps({"intents": [
+        {"type": type_key, "title": "Named request", "summary": "Synthetic", "confidence": "high", "sources": ["m1"]},
+        {"type": "alert_triage", "title": "Direct alert", "summary": "Synthetic", "confidence": "high", "sources": ["m2"]}]}))
+    async def check(pool):
+        await source(pool)
+        row = await schedule(pool)
+        await followed(pool)
+        await add(pool, "OLD_CONTEXT_SENTINEL", chat_id="g", sent_at=START - timedelta(minutes=1))
+        fields = {"sender": DM} if speaker == "operator" else {"mentions_me": speaker == "mentions_me"}
+        group = await add(pool, "钱七，登录页的文案你改一下", chat_id="g", sent_at=NOW, **fields)
+        direct = await add(pool, "direct alert", sender=DM, chat_id="dm", kind="p2p", sent_at=NOW)
+        selected = (await window(pool))["rows"]
+        assert [(r["seq"], r["via_group"]) for r in selected] == [(group, True), (direct, False)]
+        assert selected[0]["read_from"] == START
+        tally = await db_subs.extraction_tally(pool, sub(), output_kind="intents", since=START, to_seq=direct,
+                    own_apps=(), include_import=False, zone_name="UTC", group_read=True)
+        assert sum(r["events"] for r in tally) == 2
+        result = await run_once(pool, tmp_path, row)
+        dropped = speaker == "third_person" and type_key == "alert_triage"
+        assert result["extract_counts"]["dropped"] == ({"group_type": 1} if dropped else {})
+        assert result["extract_counts"]["group_read"] == 1
+        assert [(r["title"], r["via"]) for r in await pool.fetch("SELECT title,via FROM intents ORDER BY id")] == [
+            *([] if dropped else [("Named request", "followed_group")]), ("Direct alert", "subscription")]
+        assert await pool.fetchval("SELECT count(*) FROM intent_sources WHERE event_seq=$1", group) == (0 if dropped else 1)
+        assert extraction.GROUP_REQUESTS_NOTE in fake.calls[0]["instructions"]
+        assert "OLD_CONTEXT_SENTINEL" not in fake.calls[0]["input_text"]
+        assert "群 · 全部消息" in fake.calls[0]["input_text"]
+    run_db(check, monkeypatch, setup=seed_role_configs)
+
+
+def test_operator_dm_alone_keeps_original_instructions_with_group_read_on(monkeypatch, tmp_path):
+    fake = processor_says(monkeypatch, "NONE")
+    async def check(pool):
+        await source(pool)
+        row = await schedule(pool)
+        await followed(pool)
+        await add(pool, "direct request", sender=DM, chat_id="dm", kind="p2p", sent_at=NOW)
+        result = await run_once(pool, tmp_path, row)
+        assert result["extract_counts"]["group_read"] == 0
+        assert extraction.GROUP_REQUESTS_NOTE not in fake.calls[0]["instructions"]
+        assert extraction.GROUP_LABEL not in fake.calls[0]["input_text"]
+    run_db(check, monkeypatch, setup=seed_role_configs)
 
 
 @pytest.mark.parametrize("how", ["extraction_excluded", "stream_excluded", "subscription_excludes",
@@ -129,14 +182,15 @@ async def run_once(pool, tmp_path, row, run_id="r"):
     return result
 
 
-def test_followed_rows_are_capped_per_run_and_per_group_per_day(monkeypatch, tmp_path):
+@pytest.mark.parametrize("sender", ["ou_alice", DM])
+def test_followed_rows_are_capped_per_run_and_per_group_per_day(monkeypatch, tmp_path, sender):
     fake = processor_says(monkeypatch, "NONE")
     async def check(pool):
         await source(pool)
         row = await schedule(pool)
         await followed(pool)
         await followed(pool, "h")
-        g = [await add(pool, "group request", chat_id="g", sent_at=NOW) for _ in range(4)]
+        g = [await add(pool, "group request", chat_id="g", sender=sender, sent_at=NOW) for _ in range(4)]
         direct = await add(pool, "direct", chat_id="dm", kind="p2p", sent_at=NOW)
         h = await add(pool, "other group", chat_id="h", sent_at=NOW)
         capped = await window(pool, db_subs.GroupRead(3, {"g": 10, "h": 10}))

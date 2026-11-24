@@ -22,7 +22,7 @@ from uuid import uuid4
 
 from . import failures, live_runs, proc_tree
 from .live_runs import LiveRun
-from .run_usage import Price, Usage, compaction, reported_totals, request_context, request_tokens, run_usage
+from .run_usage import CostStatus, Price, Usage, compaction, reported_totals, request_context, request_tokens, run_usage
 from .system_prompt_mode import SystemPromptMode
 
 if TYPE_CHECKING:
@@ -1858,6 +1858,7 @@ class ClaudeRunRecorder:
         self._model_reported: str | None = None
         self._context_tokens: int | None = None  # the prompt of the run's latest main-loop request
         self._compactions: list[dict[str, Any]] = []
+        self._request_observed = False
         self._streamed = Usage()  # the tokens of the run's model requests so far, from its usage events
         # What its stream said about how it may fail, and what its close classifies (``failures``).
         self._evidence = failures.Evidence()
@@ -1930,12 +1931,14 @@ class ClaudeRunRecorder:
         if (reservation is not None and cost_guard.current().config.mode is cost_guard.settings.Mode.ENFORCE
                 and reservation.currency is cost_guard.Currency.EQUIVALENT and self._launch is not None
                 and any(scope.limit_usd is not None for scope in reservation.scopes)):
+            from .runtimes import CostSource
             from .runtimes.pricing import RunSpend, pricer
 
             if self._spend is None:
                 price = pricer(self._launch.settings.resolved_model, catalog=self._launch.settings.pricing_catalog)
                 if price is not None:
-                    self._spend = RunSpend(price, self._launch.model, reservation.usd)
+                    self._spend = RunSpend(price, self._launch.model, reservation.usd,
+                                           runtime_billed=self._launch.cost_source is CostSource.RUNTIME)
             elif self._spend.cap is None or self._spend.cap > reservation.usd:
                 self._spend.cap = reservation.usd
         self._track(datetime.now(timezone.utc))
@@ -2004,6 +2007,7 @@ class ClaudeRunRecorder:
         it to the record, which may wait on the database. A ``replayed`` event (a resumed run's output read again)
         rebuilds the run's usage but is not new: its tokens are not counted in the run's TPM again."""
         self._evidence.observe(event)
+        self._request_observed = self._request_observed or self._runtime().is_model_event(event)
         self._model_reported = self._runtime().reported_model(event) or self._model_reported
         if event.get("type") == "system" and event.get("subtype") == "status":
             if event.get("status") == "compacting":
@@ -2086,7 +2090,9 @@ class ClaudeRunRecorder:
             result.update(usage_complete=False, root_usage_complete=spend.budget_verifiable,
                           cost_basis="observed", observed_cost_usd=spend.observed_cost_usd)
         if spend.budget_unverifiable:
-            result["errors"] = ["Cannot verify the configured budget: root step usage is missing or unpriced"]
+            result["errors"] = ["Cannot verify the configured budget: " + (
+                "price unknown for model(s): " + ", ".join(sorted(spend.unknown_models)) if spend.unknown_models
+                else "root step usage is missing or unpriced")]
         return CapStop(result, spend.usage)
 
     def _track(self, started_at: datetime) -> None:
@@ -2300,6 +2306,18 @@ class ClaudeRunRecorder:
 
                 cost = replace(cost, source=CostSource.PROVIDER_PRICE)
             usage = cost.usage
+            if self._spend is not None and self._spend.unknown_models:
+                from .runtimes import CostSource
+
+                # Catalog estimates cannot replace a runtime's own reported bill.
+                metadata = {"catalog_cost_status": CostStatus.UNKNOWN.value,
+                            "catalog_unknown_price_models": sorted(self._spend.unknown_models), **(metadata or {})}
+                if cost.source is not CostSource.RUNTIME:
+                    usage = replace(usage, cost_usd=None)
+            if usage.cost_status is CostStatus.UNKNOWN and (usage != Usage() or self._request_observed):
+                metadata = {"cost_status": usage.cost_status.value, **(metadata or {})}
+                if self._spend is not None and self._spend.unknown_models:
+                    metadata["unknown_price_models"] = sorted(self._spend.unknown_models)
             if self._model_reported:
                 metadata = {"model_reported": self._model_reported, **(metadata or {})}
             if self._model_display:
@@ -2371,7 +2389,9 @@ class ClaudeRunRecorder:
         from . import cost_guard
 
         await cost_guard.finish(self._record_id, cost_usd=fields.get("cost_usd"),
-                                cost_source=fields.get("cost_source"))
+                                cost_source=fields.get("cost_source"),
+                                model=self._model_reported or fields.get("model"),
+                                unknown_models=(fields.get("metadata") or {}).get("unknown_price_models", ()))
 
     def _closed_write(self, write: asyncio.Task[None]) -> None:
         _closing.discard(write)
