@@ -9,7 +9,7 @@ from . import cost_holds, gate_routing, operator_identity
 from .intent_routing import RouteResult
 from .message import is_lark
 
-_CONTINUE = re.compile(r"继续(?: C-([1-9][0-9]{0,18}) ([0-9]+(?:\.[0-9]+)?))?")
+_CONTINUE = re.compile(r"继续(?: C-([1-9][0-9]{0,18})(?: ([0-9]+(?:\.[0-9]+)?))?)?")
 _STOP = re.compile(r"停(?: C-([1-9][0-9]{0,18}))?")
 
 
@@ -35,6 +35,11 @@ async def route(envelope, *, platform):
         number = int(explicit)
         if number > 9223372036854775807:
             return RouteResult('没有这条花费等待。')
+        # A bare 「继续 C-<id>」 decides only an unanswered hold. Budget holds keep today's fall-through.
+        if continuing and continuing.group(2) is None:
+            row = await store.get(number)
+            if row is None or row.get('state') != 'pending' or row.get('reason') != 'unanswered':
+                return None
     else:
         pending = await store.list_pending()
         if not pending:
