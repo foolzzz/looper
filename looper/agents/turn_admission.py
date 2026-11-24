@@ -9,9 +9,11 @@ from dataclasses import dataclass, replace
 from datetime import datetime, tzinfo
 from functools import wraps
 from types import TracebackType
+from typing import Any
 
 from . import admission, lanes, turn_context
 from .agent_settings import AgentType
+from .failures import FailureClass
 from .lanes import Lane
 from .message import MessageType
 from .ops import TurnOrigin
@@ -25,6 +27,25 @@ _current_owner = admission._current_owner
 
 class RetryQuotaProbe(Exception):
     """A retained message's probe failed on quota before any model output."""
+
+
+def quota_diagnostic(payload: dict[str, Any]) -> bool:
+    return (admission.probing() and payload.get("type") == "assistant"
+            and payload.get("error") == "rate_limit")
+
+
+async def retry_quota_probe(token: TurnToken, recorder, *, model_output: bool) -> None:
+    if model_output or token.partial or token.cancel.requested or not admission.probing():
+        return
+    if not admission.quota_probe_failed():
+        # Closing a record bounds its background writes. Classify the captured runtime evidence
+        # before settling even when the record's database writer has not finished yet.
+        cause = recorder.failure_signal()
+        if cause is not None and cause.cls is FailureClass.QUOTA:
+            await recorder.report_admission(cause)
+            raise RetryQuotaProbe()
+    if admission.quota_probe_failed():
+        raise RetryQuotaProbe()
 
 
 @dataclass

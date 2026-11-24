@@ -154,6 +154,7 @@ class AgentType(str, Enum):
     LEADS_CHECK = "leads_check"
     OUTBOUND_CHECK = "outbound_check"
     MEMORY_DRAFT = "memory_draft"
+    MEMORY_RETRO = "memory_retro"
     EXPLORER = "explorer"
 
 
@@ -164,7 +165,7 @@ TASK_ROLES = (AgentType.PLANNER, AgentType.WORKER, AgentType.REVIEWER)
 # their system prompt always replaces the runtime's, with no harness. The leads check is one too: an extraction run
 # starts it over what it found (``processor.run`` with its role).
 SPAWN_ROLES = (AgentType.ADVISOR, AgentType.ADVICE_CHECK, AgentType.LEADS_CHECK,
-               AgentType.OUTBOUND_CHECK, AgentType.MEMORY_DRAFT)
+               AgentType.OUTBOUND_CHECK, AgentType.MEMORY_DRAFT, AgentType.MEMORY_RETRO)
 # The roles with no harness and a replaced system prompt: the processor and the spawned roles.
 NO_HARNESS_ROLES = (AgentType.PROCESSOR, *SPAWN_ROLES)
 # The roles a project's layers apply to: its tasks' and the processor of its schedules.
@@ -190,6 +191,7 @@ BUILTIN_SYSTEM_PROMPT_MODE = {
     AgentType.LEADS_CHECK: SystemPromptMode.REPLACE,
     AgentType.OUTBOUND_CHECK: SystemPromptMode.REPLACE,
     AgentType.MEMORY_DRAFT: SystemPromptMode.REPLACE,
+    AgentType.MEMORY_RETRO: SystemPromptMode.REPLACE,
     AgentType.EXPLORER: SystemPromptMode.REPLACE,
 }
 
@@ -806,6 +808,8 @@ async def load_agent_settings(
         return replace(resolve(role, {}, project_id), profile=builtin_resolved_profile(),
                        error=f"cannot read the agent settings ({type(exc).__name__})")
     settings = resolve(role, index_layers(rows, project_id), project_id)
+    if AgentType(role) is AgentType.MEMORY_RETRO and settings.profile_source is Layer.BUILTIN and profile_id is None:
+        return replace(settings, profile_error="memory_retro requires an explicit profile in Settings → Roles")
     if profile_id is not None:
         row = await profile_registry.get_profile(profile_id)
         if row is None:

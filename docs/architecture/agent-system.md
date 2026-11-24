@@ -1985,8 +1985,22 @@ Manager tools.
   for each turn. File tools stay within the working directory and explicit
   added directories; bash is not confined to those paths and is not an OS
   sandbox. Bash uses the session's private HOME and environment, with a
-  ceiling of the run timeout (86,400 seconds when unset); a shorter tool
-  timeout is honored. An unset run request limit becomes 1,000 requests.
+  per-call deadline of 120 seconds, independent of the Worker's run deadline
+  (seeded at 86,400 seconds). A shorter model-requested timeout is honored;
+  longer requests are clamped to the session deadline and a hard 600-second
+  cap. No new operator setting is required. Timeout or abort sends TERM to the
+  shell group, KILL after two seconds, then drains output for at most 500 ms
+  before ending that call's executor. Timeout results keep the existing
+  `is_error=false` contract and include the timeout text; cancellation remains
+  an error. If the shell exits while a background process keeps its output
+  open, output drains for at most 500 ms before returning the exit code and an
+  explicit background-output note. A process that escaped the shell group can
+  survive; its session owner must manage its lifetime separately. Runner
+  diagnostics include tool span identifiers, deadlines, elapsed time and
+  cleanup phases, with a command hash rather than command text. These changes
+  affect only operators who select the opt-in DSH runtime; dashboard, channels
+  and CLI continue to show the paired tool result through their existing paths.
+  An unset run request limit becomes 1,000 requests.
   Spend and request caps are checked before every model request, including
   compaction, with no provider retry. Per-request token buckets use the saved
   model's effective prices (`cost_source=provider_price`); these reservations
@@ -3368,6 +3382,38 @@ memory page shows their candidates for the operator to review.
   editor save can overwrite it; the content hash and commit trailers allow
   checking what was written. An agent with a shell has the same system-user
   access to the vault; this supported write path does not isolate that user.
+
+### Project lesson retrospectives
+
+`memory_lessons` is independent of vault writing and defaults off. Both its `enabled` field and the project's
+`memory_lessons = 'on'` are required. On, project-scoped learnings still enter the task journal, but the old
+project-document drafts and `[LESSONS]` turn stop. Vault closeout keeps its separate setting and path. Empty
+lesson snapshots do not disable retrospectives; context injection is a separate feature.
+The server loads the validated switch before recovering tasks, and successful settings updates refresh it in
+memory. While off, retrospective ticks and terminal callbacks read only that switch, without database reads.
+Turning it on at runtime resumes processing within the next 10-second interval.
+
+After TaskRouter forwards the final completed/failed status and tears down the Planner, an independent terminal
+listener enqueues the newly observed journal range. Scheduler and retrospective callbacks cannot block one
+another on failure. `MemoryRetroService` recovers post-activation terminal tasks, claims a short database lease,
+then invokes the private `memory_retro` role without holding a connection or transaction. Migration 1980 widens
+the role/run-kind checks online; 1990 adds durable cursors, activation high-water, attempt leases, independent
+spend reservations, range output references and distinct-task reinforcement records. Retrying once consumes
+another reservation; missing costs consume the full reserved cap. The default cap is $0.10 per attempt and
+$0.50 per local day. The existing global cost guard still applies.
+
+The role uses `model_call.ChildCall`, one turn, an empty working directory, replaced prompt, no tools, MCP or
+harness, and at most 90 seconds. Its private records retain metadata and input digests, never journal or reply
+bodies. A built-in model awaits the approved real comparison; operators must select an explicit role profile.
+Escaped input includes only this range's displayed numbered journal evidence, up to 60 active project lessons
+and 20 held lessons. Strict JSON parsing drops unsafe items and records typed counts. A short transaction
+rechecks configuration, project, task, evidence, trust, lease, tombstones and replacement targets before saving
+candidates, sources, events, spending and the task activity. Shadow mode creates held lessons; external tasks
+always create independent held candidates and cannot reinforce trusted lessons. Later distinct tasks can renew
+an active lesson once each; replacement reuses the conservative protected-token gate. The existing operator-only
+lesson list and task activity expose results. Task deletion confirmation counts sourced active lessons once.
+Three distinct failed tasks claim one durable operator-only warning, at most once per local day; without an operator DM destination the
+warning stays in logs. This feature adds no channel completion footer, injection, weekly delivery or vault write.
 
 ### Project skills: skills a project writes
 
@@ -6674,10 +6720,67 @@ run after the Manager's final stop check. A stopped or timed-out preparation
 changes no intents or tasks; timeout and task-validation failures receive
 code-written replies. Task creation and the transition are one database
 transaction; task notices belong to the operator's direct chat, never the source
-conversation. The requirement
+conversation. With rules off, the requirement
 contains only the displayed title, summary and up to five source references,
 marked as background rather than instructions. Tasks created from the dashboard
 leave `origin_channel_id` empty, as other dashboard-created tasks do.
+
+With `intents.rules.enabled` on, newly extracted candidates have a durable rule
+work item before confirmation delivery. The ordered, typed AND rules select
+confirmation, record-only, or automatic MR review; unavailable verification
+immediately falls back to confirmation. The switch defaults off, does not scan
+old pending suggestions, and does not authorize an operator-requested recognition
+batch to create tasks. Record-only suggestions remain pending and can be built
+manually. Configuration, discovery submission, migration previews and revocation
+are operator-only v1 operations; rule editing adds no CLI or Manager tools.
+
+`IntentRuleService` verifies MR URLs through an explicitly configured read-only
+command adapter, outside row-locking transactions. Saving its configuration
+requires an absolute executable path; execution never searches PATH. It uses
+direct argv, a fresh empty working directory, a minimal explicit environment,
+a ten-second deadline and a 64 KiB stdout bound, and cleans up the process group
+after normal exits as well as failures. The request contains only the canonical MR URL and
+protocol version. A host integration can inject dedicated credential references
+with `intent_rule_verifier.configure_credentials`; a missing reference confirms
+instead of borrowing another provider's credentials. The empty directory is not
+a sandbox. The response is a closed schema, and its canonical target must match
+the requested system, repository route and MR. Reviewer IDs come from the API;
+DM targets, mentions and sender IDs come from the same real request event.
+
+Before creation the service verifies again and, under the shared admission lock,
+rechecks the switch, delivery, rule generation, project/workflow snapshots,
+source authorization and the original revision. The transaction atomically
+claims `(system_id, repository_id, mr_id, revision)`, creates the existing task
+lifecycle's ready task, transitions the candidate, consumes the shared operator /
+project / local-day quota, writes audit and queues start and notice outboxes.
+Messages, structured discoveries and manual MR builds share that claim. Existing
+or cancelled revisions link the same task without another quota charge. Manual
+builds do not consume automatic quota. An unknown historical revision blocks the
+MR until the operator resolves its ownership; migration preview/confirmation
+registers reliable existing ownership without switching an installation.
+
+Automatic and manual rule-bound MR requirements contain only a fixed review
+sentence and the verified URL, with an explicit project and workflow. Message
+titles, summaries and source text never become Worker instructions. Starts
+recover only their committed task ID and are acknowledged by the atomic
+`init → pending` transition, not by successful bus publication. Revocation
+serializes with that transition, cancels a ready task locally or asks the current
+TaskRouter to stop active work, and reports the observed state. Claims and quota
+survive revocation; posted review comments cannot be withdrawn by this action.
+
+Rule notices use normal proactive delivery to the current operator DM, with
+separate `rule-created:`, `rule-discovery:` and fault-episode references. Quiet
+hours and daily limits retain a digest; uncertain channel receipts do not blindly
+retry. Source deletion clears message audit while committed execution/start and
+minimal MR claims survive. Confirmation push, attention and morning-brief items
+are checked again at send time under the same candidate gate. Switching rules
+off holds notices without stopping committed starts or tasks; switching back on
+resumes the same notices and never creates again. Three consecutive unavailable
+checks produce one normal operator notice per fault episode. Execution readback
+includes start, quota, delivery and revocation facts, and statistics count unique
+automatic executions rather than multiplying tasks through deduplicated hits.
+The remote API and local commit cannot be atomic: the workflow must still read
+the current MR before working on it.
 
 The one state writer permits `pending → tasked | rejected | expired` and
 `expired → tasked`. A transition of an intent whose push was delivered (sent, with a
