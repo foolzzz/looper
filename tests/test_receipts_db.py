@@ -253,16 +253,20 @@ def test_a_cancelled_or_failed_press_is_told_to_the_next_turn_too(monkeypatch: p
         press = _presser(monkeypatch, ops)
         asked, turn = await _ask(ops)
         assert (await press(_value(turn, "cancel"))).toast == "已取消"
-        assert _begin(ops, _turn("om_1")) == (
+        following = _turn("om_1")
+        assert _begin(ops, following) == (
             f"[Looper] After your last reply, the operator answered confirmation {asked['confirmation_id']} with its "
             "card: it was cancelled; it did not run.")
+        ops.end_turn(following)  # The Manager ends a delivered turn before starting the next one.
         asked, turn = await _ask(ops)
         await pool.execute("DELETE FROM projects WHERE id = $1", project["id"])  # gone before the press
         failed = await (await press(_value(turn))).later
         assert failed.text.endswith("\n\n❌ 没做成：删除项目「sample」（没找到）") and "没有执行：" not in failed.text
-        assert _begin(ops, _turn("om_2")) == (
+        following = _turn("om_2")
+        assert _begin(ops, following) == (
             f"[Looper] After your last reply, the operator answered confirmation {asked['confirmation_id']} with its "
             "card: it failed (没找到).")
+        ops.end_turn(following)
 
     run_db(test, monkeypatch, timeout=30)
 

@@ -270,6 +270,8 @@ ROLE_CAPABILITIES: Mapping[str, frozenset[Capability]] = {
     "leads_check": frozenset({Capability.RUN, Capability.NO_TOOLS}),
     # The outbound review runs once with no tools, over an action another run proposed (the outbound-review RFC).
     "outbound_check": frozenset({Capability.RUN, Capability.NO_TOOLS}),
+    # Vault text is read only in a private run with no tool.
+    "memory_draft": frozenset({Capability.RUN, Capability.NO_TOOLS}),
 }
 # The roles whose runs have tools: every role but the processor. A profile chosen for all of them at once (the
 # shared defaults) or as another profile's fallback is checked against these; a profile is checked for the processor

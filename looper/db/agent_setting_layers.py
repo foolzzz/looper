@@ -69,7 +69,7 @@ async def list_layers(
         "FROM agent_setting_layers l WHERE l.project_id IS NULL OR l.project_id = $1 "
         "ORDER BY array_position(ARRAY['system', 'role', 'project', 'role_project'], l.scope), "
         "l.project_id NULLS FIRST, array_position(ARRAY['manager', 'planner', 'worker', 'reviewer', 'processor', "
-        "'advisor', 'advice_check', 'leads_check', 'outbound_check'], l.role)",
+        "'advisor', 'advice_check', 'leads_check', 'outbound_check', 'memory_draft'], l.role)",
         project_id,
     )
     layers = [_row(r) for r in rows]

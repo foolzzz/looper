@@ -81,7 +81,7 @@ from ..runtimes.omp import safe_error
 from ..runtimes.per_turn import STDERR_DRAIN_SEC, stderr_tail
 from ..runtimes.api.tools import RoomTurnTools
 from ..task_roles import TaskRole, run_role
-from ..room import MemberKind, RoomDelivery, RoomInput, Seat, room_section, run_seat, run_session_dir
+from ..room import MemberKind, RoomDelivery, RoomDeliveryState, RoomInput, Seat, room_section, run_seat, run_session_dir
 from ..message import (
     AgentAddress,
     MessageEnvelope,
@@ -1674,6 +1674,9 @@ class WorkerPool:
     def room_in_flight(self, worker_id: str) -> int:
         state = self._reminders.get(worker_id)
         return state.through if state else 0
+
+    def room_delivery_state(self, worker_id: str) -> RoomDeliveryState | None:
+        return self._reminders.get(worker_id)
 
     def _drop_reminders(self, worker_id: str) -> None:
         state = self._reminders.pop(worker_id, None)
