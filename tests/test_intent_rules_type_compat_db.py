@@ -31,6 +31,8 @@ def test_rules_enabled_reads_only_its_exact_boolean_key(monkeypatch, value, expe
 def test_legacy_type_entry_points_hide_only_unavailable_builtin_seed(monkeypatch, builtin, rules_value, intents_on, available, visible):
     async def check(pool):
         monkeypatch.setattr(leads_model, "RULE_CLASSIFICATION_AVAILABLE", available)
+        await pool.execute("DELETE FROM intent_type_versions WHERE type_key='mr_review'")
+        await pool.execute("DELETE FROM intent_types WHERE key='mr_review'")
         await pool.execute("INSERT INTO intent_types(key,version,builtin) VALUES('mr_review',1,$1)", builtin)
         await pool.execute("INSERT INTO intent_type_versions(type_key,version,name,guidance,priority,edited_via) "
                            "VALUES('mr_review',1,'MR review','Classify review requests','normal','builtin')")
