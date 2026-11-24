@@ -91,8 +91,11 @@ def test_endpoint_refuses_another_sessions_binding(tmp_path: Path, forged: bool)
         assert answer["error"]["code"] == "forbidden"
         assert any(row["reason"] == "other_session" for row in ops.binding_report()["by"])
         own = await _call(ops, credential, "group-binding" if forged else "main-binding")
-        assert own["status"] == "ok"
-        assert ran == ["group-message" if forged else "main-message"]
+        if forged:
+            assert own["status"] == "error" and own["error"]["code"] == "forbidden"
+            assert ran == []  # even its own binding cannot grant an unlisted tool
+        else:
+            assert own["status"] == "ok" and ran == ["main-message"]
 
     asyncio.run(run())
 
@@ -113,11 +116,11 @@ def test_switch_off_keeps_binding_enforced_until_routed_turn_ends(tmp_path: Path
         assert missing["status"] == "error" and ran == []
         credential = ops.server_config(session_key=GROUP)["env"][service.TOKEN_ENV]
         own = await _call(ops, credential, "group-binding")
-        assert own["status"] == "ok" and ran == ["group-message"]
+        assert own["status"] == "error" and own["error"]["code"] == "forbidden" and ran == []
         ops.end_turn(group)
         assert not ops.binding_report()["enforced"]
         resumed = await _call(ops, "main-token", None)
-        assert resumed["status"] == "ok" and ran == ["group-message", "main-message"]
+        assert resumed["status"] == "ok" and ran == ["main-message"]
 
     asyncio.run(run())
 
