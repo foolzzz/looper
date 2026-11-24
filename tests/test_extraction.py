@@ -6,6 +6,7 @@ from __future__ import annotations
 import asyncio
 import json
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from zoneinfo import ZoneInfo
 
 import pytest
@@ -347,6 +348,8 @@ def test_context_anchored_on_a_group_row_stays_inside_its_range(anchor):
 
 
 def test_group_rows_are_labelled_and_the_note_is_added_only_with_them():
+    assert extraction.GROUP_REQUESTS_NOTE == (
+        Path(__file__).parent / "fixtures" / "intents_group_requests_note.txt").read_text().rstrip("\n")
     rows = [{**row(1, "g", "request", minutes=0), "via_group": True, "read_from": T},
             row(2, "h", "mention", minutes=1, name="另一群")]
     text, _ = render("intents", rows, context=[], participants=PEOPLE, known=[], zone_name=ZONE, text_max_chars=500)
