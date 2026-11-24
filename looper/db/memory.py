@@ -137,6 +137,47 @@ async def create(conn: asyncpg.Connection, *, kind: model.Kind | str, statement:
     return candidate_id
 
 
+async def reseed(conn: asyncpg.Connection, candidate_id: int, *, statement: str, why: str,
+                 keywords: Sequence[str], evidence: Sequence[Evidence], actor: Actor, via: Via,
+                 now: datetime) -> dict[str, Any]:
+    """Correct a trusted pending Manager seed, retaining revisions and adding the new turn as evidence."""
+    _in_transaction(conn)
+    row = await _locked(conn, candidate_id)
+    _ensure_vault(row)
+    statement, why = statement.strip(), why.strip()
+    if not statement or len(statement) > model.STATEMENT_MAX_CHARS or len(why) > model.WHY_MAX_CHARS:
+        raise MemoryRefused(f"a seed's statement has 1 to {model.STATEMENT_MAX_CHARS} characters and its why at most "
+                            f"{model.WHY_MAX_CHARS}", code="invalid")
+    words = _keywords(keywords)
+    if row["state"] != State.PENDING:
+        raise MemoryRefused("only a pending proposal can be revised", code="state", state=row["state"])
+    if row["source_kind"] != model.SourceKind.MANAGER_TURN or row["untrusted"]:
+        raise MemoryRefused("only a proposal made from the user's own words can be revised", code="invalid")
+    if not evidence or any(item.kind is not EvidenceKind.MANAGER_TURN for item in evidence):
+        raise MemoryRefused("a revised seed needs the user's own Manager turn as evidence", code="invalid")
+    if any(item.quote is not None and len(item.quote) > model.QUOTE_MAX_CHARS for item in evidence):
+        raise MemoryRefused(f"only an operator turn has a quote, of at most {model.QUOTE_MAX_CHARS} characters",
+                            code="invalid")
+    classes = [item["source_class"] for item in await conn.fetch(
+        "SELECT source_class FROM memory_candidate_sources WHERE candidate_id=$1", candidate_id)]
+    combined = model.least_trusted([*classes, *(model.EVIDENCE_CLASS[item.kind] for item in evidence)])
+    if not model.allowed(row["kind"], combined):
+        raise MemoryRefused(f"a {row['kind']} cannot come from {combined} sources", code="class")
+    fingerprint = model.fingerprint(row["kind"], statement)
+    if await conn.fetchval("SELECT EXISTS (SELECT 1 FROM memory_tombstones WHERE fingerprint=$1)", fingerprint):
+        # New evidence is entirely the operator's own turns, even if older sources lowered the candidate's class.
+        await conn.execute("DELETE FROM memory_tombstones WHERE fingerprint=$1", fingerprint)
+    await conn.execute("UPDATE memory_candidates SET statement=$2,why=$3,keywords=$4,fingerprint=$5,updated_at=$6 "
+                       "WHERE id=$1", candidate_id, statement, why, words, fingerprint, now)
+    for item in evidence:
+        await conn.execute("INSERT INTO memory_candidate_sources(candidate_id,kind,manager_action_id,quote) "
+                           "VALUES($1,$2,$3,$4)", candidate_id, item.kind.value, item.manager_action_id, item.quote)
+    result = await transition(conn, candidate_id, State.DRAFTING, action=Action.PROPOSE, actor=actor, via=via,
+                              now=now)
+    await conn.execute("SELECT pg_notify('looper_memory_draft', '')")
+    return result
+
+
 def _actor_may(action: Action, actor: Actor, via: Via) -> None:
     """The schema's rules on who acts (memory_events_user, memory_events_confirm, memory_events_system)."""
     if action in model.USER_ACTIONS and actor is not Actor.USER:
