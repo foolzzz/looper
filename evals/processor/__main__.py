@@ -404,6 +404,17 @@ EXTRACTION_CASES.update({
         "exact_types": {"bug_triage", "dev_task"}, "chatter": {2, 4, 5, 6, 9, 10, 11},
         "requests_from": {1: "bug_triage", 3: "dev_task", 7: "bug_triage", 8: "dev_task"},
     },
+    "intents_group_requests_original_types": {
+        "what": "a followed group: an alert bot's request @-mentioning the operator keeps alert_triage; "
+                "a third party's alert request to someone else produces no intent",
+        "kind": "intents",
+        "rows": [{**_row(1, "oc_product", "cli_alertbot", "@李四 监控告警：存储容量超过阈值，请看一下这条告警。",
+                        1, mentions_me=True, group=True), "original_scope": True},
+                 _row(2, "oc_product", "ou_wang", "@钱七 监控告警：内存使用率超过阈值，请看一下这条告警。",
+                      2, group=True)],
+        "exact_types": {"alert_triage"}, "chatter": {2},
+        "requests_from": {1: "alert_triage"},
+    },
     "intents_group_requests_merge": {
         "what": "three people report the same failing upload: one bug_triage with all three as sources",
         "kind": "intents",
@@ -950,7 +961,7 @@ async def _extract(args: argparse.Namespace, key: str, rep: int, root: Path) -> 
     parsed = None if done.reply is None else extraction.parse(
         kind, done.reply, refs, now=_BASE.replace(hour=3), valid_days=90, enabled_types={t["key"] for t in types},
         app_seqs={row["seq"] for row in (*rows, *context) if row["sender_kind"] == "app"},
-        group_seqs={row["seq"] for row in rows if row.get("via_group")})
+        group_seqs={row["seq"] for row in rows if row.get("via_group") and not row.get("original_scope")})
     run = {"case": key, "rep": rep, "reply": done.reply, "failure": done.failure and done.failure.value,
            "detail": done.detail, "cost_usd": done.cost_usd, "events": len(rows),
            "seconds": round(time.monotonic() - started, 1),

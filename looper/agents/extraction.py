@@ -67,8 +67,9 @@ GROUP_READ_MAX_GROUPS = 10
 GROUP_LABEL = " · 全部消息"
 GROUP_REQUESTS_NOTE = """\
 ## Requests in group chats
-For chats marked 全部消息, use this group rule instead of the user-only scope above and in Intent types.
-Read every human sender's messages, including the user's own. Recognize development requests and bug reports
+For chats marked 全部消息, messages that @-mention the user or were sent by the user still follow the scope
+above and all enabled Intent types. Only the other human messages use the following group rule instead of
+the user-only scope and type guidance above. Recognize development requests and bug reports in those messages
 regardless of whom they address (the group, a team, a named person, or nobody) and whether someone has accepted
 the work. Acceptance does not cancel the original request; do not make a separate intent for the acceptance.
 Use dev_task for a concrete requirement, change, scenario needing support or access request. Use bug_triage
