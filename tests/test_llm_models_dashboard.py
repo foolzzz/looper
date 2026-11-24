@@ -344,10 +344,11 @@ def _row(page, name):
     return page.get_by_role("listitem").filter(has=page.get_by_text(name, exact=True))
 
 
-def _finish_form(form, submit):
+def _finish_form(form, submit, operation):
     expect = pytest.importorskip("playwright.sync_api", reason="UNTESTED: optional Playwright package missing").expect
 
-    with form.page.expect_response(lambda r: "/api/" in r.url and r.request.method in ("POST", "PUT")) as response:
+    with form.page.expect_response(lambda r: r.url.endswith(f"/api/v1/{operation}")
+                                   and r.request.method == "POST") as response:
         form.get_by_role("button", name=submit, exact=True).click()
     assert response.value.status in (200, 201), response.value.text()
     if submit == "Add provider" and response.value.json()["result"]["provider"]["auth"] == "api_key":
@@ -544,7 +545,7 @@ def test_provider_model_checklist_and_stored_key_failure(dashboard_page, dashboa
     account.get_by_role("button", name="Edit provider Gateway account", exact=True).click()
     edit = page.get_by_role("form", name="Edit provider Gateway account", exact=True)
     edit.get_by_label("API key", exact=True).fill("wrong-key")
-    _finish_form(edit, "Save")
+    _finish_form(edit, "Save", "provider_accounts/update")
     with page.expect_response(lambda response: response.url.endswith("/api/v1/provider_accounts/fetch_models")) as failed:
         account.get_by_role("button", name="Fetch the models of provider Gateway account", exact=True).click()
     assert failed.value.status == 200
@@ -595,7 +596,7 @@ def test_anthropic_provider_edits_preserve_unchanged_url(dashboard_page, dashboa
             "placeholder", "https://api.example.com")
         for label, value in changes.items():
             form.get_by_label(label, exact=True).fill(value)
-        _finish_form(form, "Save")
+        _finish_form(form, "Save", "provider_accounts/update")
         endpoint = next(e for e in _registry_state(server)["endpoints"] if e["provider_id"] == "prov-legacy")
         assert endpoint["base_url"] == expected_url
     _row(page, "Renamed account").get_by_role("button", name="Edit provider Renamed account", exact=True).click()
@@ -654,7 +655,7 @@ def test_provider_account_actions_preserve_mask_and_refresh(dashboard_page, dash
     form.get_by_role("checkbox", name="openai-chat", exact=True).check()
     form.get_by_label("openai-chat URL", exact=True).fill(listing_gateway[0])
     form.get_by_label("API key", exact=True).fill(SECRET)
-    _finish_form(form, "Add provider")
+    _finish_form(form, "Add provider", "provider_accounts/create")
     account = _row(page, ACCOUNT)
     expect(account).to_contain_text("API key: ***")
     provider = next(p for p in server.api.post("/api/v1/provider_accounts/list", {})["result"]["providers"]
@@ -663,7 +664,7 @@ def test_provider_account_actions_preserve_mask_and_refresh(dashboard_page, dash
     edit = page.get_by_role("form", name=f"Edit provider {ACCOUNT}")
     expect(edit.get_by_label("API key", exact=True)).to_have_value("")
     edit.get_by_label("Max concurrent runs", exact=True).fill("4")
-    _finish_form(edit, "Save")
+    _finish_form(edit, "Save", "provider_accounts/update")
     saved = next(p for p in _registry_state(server)["providers"] if p["id"] == provider["provider_id"])
     assert saved["synthetic_key"]
     expect(account).to_contain_text("at most 4 runs")
@@ -738,7 +739,7 @@ def test_complete_dashboard_configuration_flow(dashboard_page, dashboard_server,
     expect(form.get_by_role("alert")).to_be_visible()
     assert not any(p["name"] == ACCOUNT for p in _registry_state(server)["providers"])
     form.get_by_label("openai-chat URL", exact=True).fill(f"{gateway_root}/openai-chat")
-    _finish_form(form, "Add provider")
+    _finish_form(form, "Add provider", "provider_accounts/create")
     account = _row(page, ACCOUNT)
     expect(account).to_contain_text("API key: not set")
     provider = next(p for p in server.api.post("/api/v1/provider_accounts/list", {})["result"]["providers"] if p["name"] == ACCOUNT)
@@ -763,7 +764,7 @@ def test_complete_dashboard_configuration_flow(dashboard_page, dashboard_server,
             model_form.get_by_label(label, exact=True).fill("0")
         model_form.get_by_label("Effort support", exact=True).select_option("supported")
         model_form.get_by_label("Supported efforts", exact=True).fill("low, high")
-        _finish_form(model_form, "Add model")
+        _finish_form(model_form, "Add model", "models/add_many")
     models = server.api.post("/api/v1/ops/models/list", {"provider": pid})["result"]["models"]
     assert len(models) == 2 and {m["name"] for m in models} == {MODEL_NAME}
     by_protocol = {m["protocol"]: m for m in models}
@@ -783,12 +784,15 @@ def test_complete_dashboard_configuration_flow(dashboard_page, dashboard_server,
     profile_form.get_by_label("Protocol *", exact=True).select_option("anthropic-messages")
     profile_form.get_by_label("Provider *", exact=True).select_option(pid)
     expect(unavailable).to_be_disabled()
+    # This smoke exercises Worker roles, which the Manager-only SDK runtime cannot run.
+    profile_form.get_by_label("Runtime", exact=True).select_option("rt-claude-code")
     profile_form.get_by_label("Effort", exact=True).select_option("high")
     profile_form.get_by_label("Custom prompt", exact=True).fill("Public smoke preview marker")
-    _finish_form(profile_form, "Add Agent Profile")
+    _finish_form(profile_form, "Add Agent Profile", "profiles/create")
     profile = next(p for p in server.api.post("/api/v1/registry/view", {})["result"]["profiles"] if p["name"] == "Smoke profile")
     profile_id = profile["profile_id"]
     assert profile["model_id"] == mid and profile["provider"]["provider_id"] == pid
+    assert profile["runtime_id"] == "rt-claude-code"
     assert next(p for p in server.api.post("/api/v1/provider_accounts/list", {})["result"]["providers"] if p["provider_id"] == pid)["api_key"] is None
     saved = next(p for p in _registry_state(server)["profiles"] if p["id"] == profile_id)
     assert (saved["model_id"], saved["effort"], saved["custom_prompt"]) == (mid, "high", "Public smoke preview marker")
@@ -809,7 +813,7 @@ def test_complete_dashboard_configuration_flow(dashboard_page, dashboard_server,
     profile_edit = page.get_by_role("form", name="Edit Agent Profile Smoke profile", exact=True)
     profile_edit.get_by_label("Effort", exact=True).select_option("low")
     profile_edit.get_by_label("Custom prompt", exact=True).fill("Updated public smoke preview marker")
-    _finish_form(profile_edit, "Save")
+    _finish_form(profile_edit, "Save", "profiles/update")
     updated = next(p for p in _registry_state(server)["profiles"] if p["id"] == profile_id)
     assert (updated["effort"], updated["custom_prompt"]) == ("low", "Updated public smoke preview marker")
 
@@ -823,7 +827,8 @@ def test_complete_dashboard_configuration_flow(dashboard_page, dashboard_server,
     nested.get_by_label("Model *", exact=True).fill(MODEL_NAME)
     nested.get_by_label("Protocol *", exact=True).select_option("anthropic-messages")
     nested.get_by_label("Provider *", exact=True).select_option(pid)
-    _finish_form(nested, "Add Agent Profile")
+    nested.get_by_label("Runtime", exact=True).select_option("rt-claude-code")
+    _finish_form(nested, "Add Agent Profile", "profiles/create")
     embedded = next(p for p in server.api.post("/api/v1/registry/view", {})["result"]["profiles"]
                     if p["name"] == "Embedded smoke profile")
     expect(selection.locator(f'option[value="{embedded["profile_id"]}"]')).to_have_count(1)
@@ -863,7 +868,7 @@ def test_complete_dashboard_configuration_flow(dashboard_page, dashboard_server,
     account.get_by_role("button", name=f"Edit provider {ACCOUNT}", exact=True).click()
     edit = page.get_by_role("form", name=f"Edit provider {ACCOUNT}", exact=True)
     edit.get_by_label("API key", exact=True).fill(SECRET)
-    _finish_form(edit, "Save")
+    _finish_form(edit, "Save", "provider_accounts/update")
     assert SECRET not in page.content()
     assert next(p for p in server.api.post("/api/v1/provider_accounts/list", {})["result"]["providers"] if p["provider_id"] == pid)["api_key"] == "***"
 
@@ -943,7 +948,7 @@ def test_vendor_suggestions_are_explicit_and_invalid_inputs_do_not_write(dashboa
         expect(form.get_by_label(f'{endpoint["protocol"]} URL', exact=True)).to_have_value(endpoint["base_url"])
         # Fail the automatic listing locally, without depending on external DNS.
         form.get_by_label(f'{endpoint["protocol"]} URL', exact=True).fill(listing_gateway[0])
-    _finish_form(form, "Add provider")
+    _finish_form(form, "Add provider", "provider_accounts/create")
     provider = next(p for p in server.api.post("/api/v1/provider_accounts/list", {})["result"]["providers"] if p["name"] == "Smoke vendor account")
     assert provider["model_count"] == 0
     account = _row(page, "Smoke vendor account")
@@ -968,7 +973,7 @@ def test_vendor_suggestions_are_explicit_and_invalid_inputs_do_not_write(dashboa
         expect(form.get_by_label("Context window", exact=True)).to_have_value(value)
         assert _registry_state(server) == before
     form.get_by_label("Context window", exact=True).fill("32000")
-    _finish_form(form, "Add model")
+    _finish_form(form, "Add model", "models/add_many")
     [model] = server.api.post("/api/v1/ops/models/list", {"provider": provider["provider_id"]})["result"]["models"]
     assert (model["name"], model["protocol"], model["context_window"]) == (suggestion["name"], suggestion["protocol"], 32000)
     assert next(m for m in _registry_state(server)["models"] if m["id"] == model["model_id"])["context_window"] == 32000
@@ -1066,7 +1071,7 @@ def test_pi_and_dsh_profile_choices_match_their_typed_runtime_contract(dashboard
     selected = next(m for m in models if m["protocol"] == "anthropic-messages" and m["name"] == supported[-1])
     effort.select_option("max")
     form.get_by_label("Custom prompt", exact=True).fill("Typed runtime public marker")
-    _finish_form(form, "Add Agent Profile")
+    _finish_form(form, "Add Agent Profile", "profiles/create")
     profile = next(p for p in server.api.post("/api/v1/registry/view", {})["result"]["profiles"] if p["name"] == "Typed runtime smoke")
     assert (profile["runtime_id"], profile["model_id"], profile["effort"], profile["agent_teams"],
             profile["custom_prompt"]) == ("rt-dsh", selected["model_id"], "max", False, "Typed runtime public marker")
@@ -1242,11 +1247,12 @@ def test_profile_form_chooses_model_protocol_and_enabled_provider(dashboard_page
         expect(providers).to_have_value(enabled["provider_id"])
         runtime = form.get_by_label("Runtime", exact=True)
         claude = runtime.locator('option[value="rt-claude-code"]')
-        # Claude Code reaches a chat model through the local gateway; the SDK runtime speaks only Responses.
+        # Claude Code reaches a chat model through the local gateway; the SDK runtime cannot speak Chat.
         expect(claude).to_be_enabled()
         expect(claude).to_contain_text("via local gateway")
         expect(runtime.locator('option[value="rt-api"]')).to_be_disabled()
-        expect(runtime.locator('option[value="rt-api"]')).to_contain_text("speaks OpenAI Responses")
+        expect(runtime.locator('option[value="rt-api"]')).to_contain_text("Anthropic Messages")
+        expect(runtime.locator('option[value="rt-api"]')).to_contain_text("OpenAI Responses")
         expect(form).to_contain_text("Runtimes that reach it through the local gateway: Claude Code")
         expect(form.get_by_role("alert")).to_have_count(0)
         screenshot = os.environ.get("LOOPER_DASHBOARD_SMOKE_SCREENSHOT")
@@ -1265,7 +1271,7 @@ def test_profile_form_chooses_model_protocol_and_enabled_provider(dashboard_page
         protocol.select_option("anthropic-messages")
         expect(claude).to_be_enabled()
         selected = models["Enabled account", "anthropic-messages"]
-        _finish_form(form, "Add Agent Profile")
+        _finish_form(form, "Add Agent Profile", "profiles/create")
         profile = next(p for p in server.api.post("/api/v1/registry/view", {})["result"]["profiles"]
                        if p["name"] == "Model first smoke")
         assert (profile["model_id"], profile["runtime_id"]) == (selected["model_id"], "rt-claude-code")
