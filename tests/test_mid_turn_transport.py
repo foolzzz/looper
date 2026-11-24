@@ -677,7 +677,8 @@ def test_completed_original_waits_for_gentle_interrupt_proof_before_retiring(pro
                     "subtype": "success", "request_id": message["request_id"],
                     "response": {"cancelled": False}}})
             else:
-                assert message["request"] == {"subtype": "interrupt", "cancel_queued": True}
+                assert message["request"] == {"subtype": "interrupt", "cancel_queued": True,
+                                              "spare_background_tasks": True}
                 request = message
                 interrupt_written.set()
 
@@ -685,7 +686,7 @@ def test_completed_original_waits_for_gentle_interrupt_proof_before_retiring(pro
         pending = asyncio.create_task(resident.write_mid_turn("advisory"))
         await written.wait()
         await output._dispatch({"type": "result", "user_message_uuids": [turn.uuid]})
-        await interrupt_written.wait()
+        await asyncio.wait_for(interrupt_written.wait(), 5)
         assert not pending.done()  # writing CONTROL alone is not safe settlement
         assert resident._process is not None and resident._process.returncode is None
         if proof == "cancelled_receipt":
@@ -735,5 +736,88 @@ def test_consumption_during_failed_drain_cleanup_prevents_a_duplicate_retry() ->
         assert len([line for line in writer.lines if json.loads(line)["type"] == "user"]) == 1
         assert not turn.input_receipts and not output.queued and not output.discard
         assert resident._process is not None
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("superseded,respond", [(False, True), (True, True), (True, False)])
+def test_unclaimed_native_turn_is_settled_before_resident_reuse(tmp_path, monkeypatch, superseded, respond):
+    """An unfinished B must be interrupted, or boundedly retired, before C is written."""
+    from looper.agents import claude_cli
+
+    monkeypatch.setattr(claude_cli, "INTERRUPT_GRACE_SEC", 0.3)
+
+    async def run():
+        resident = ResidentClaude(label="synthetic-unclaimed")
+        script = (
+            "import json, sys\n"
+            "def emit(item): print(json.dumps(item), flush=True)\n"
+            "first = json.loads(sys.stdin.readline())\n"
+            "emit(dict(first, isReplay=True))\n"
+            "emit({'type':'assistant','message':{'content':[{'type':'tool_use','id':'a'}]}})\n"
+            "second = json.loads(sys.stdin.readline())\n"
+            "emit({'type':'result','result':'A','user_message_uuids':[first['uuid']]})\n"
+            "emit(dict(second, isReplay=True))\n"
+            # A subagent's result cannot release the native parent's buffer.
+            "emit({'type':'result','parent_tool_use_id':'b-child','result':'child'})\n"
+            "for line in sys.stdin:\n"
+            "    item = json.loads(line)\n"
+            "    if item['type'] == 'control_request':\n"
+            "        with open('controls.jsonl','a') as log: log.write(line)\n"
+            f"        if not {respond!r}: continue\n"
+            "        request = item['request']\n"
+            "        emit({'type':'control_response','response':{'subtype':'success',"
+            "'request_id':item['request_id'],'response':{'cancelled':False}}})\n"
+            "        if request['subtype'] == 'interrupt':\n"
+            "            assert request['spare_background_tasks']\n"
+            "            emit({'type':'result','result':'B interrupted','user_message_uuids':[second['uuid']]})\n"
+            "    else:\n"
+            "        emit(dict(item, isReplay=True))\n"
+            "        emit({'type':'result','result':'C','user_message_uuids':[item['uuid']]})\n"
+        )
+        await resident.start([sys.executable, "-u", "-c", script], cwd=str(tmp_path), signature=1)
+        process = resident._process
+        tool, buffered = asyncio.Event(), asyncio.Event()
+
+        async def observe(event):
+            if event.get("type") == "assistant":
+                tool.set()
+
+        async def unfolded(event):
+            if event.get("parent_tool_use_id") == "b-child":
+                buffered.set()
+
+        first = asyncio.create_task(resident.run_turn("A", observe))
+        try:
+            await asyncio.wait_for(tool.wait(), 3)
+            assert not await resident.write_mid_turn("B", message_id="B", on_unfolded=unfolded)
+            await asyncio.wait_for(first, 3)
+            await asyncio.wait_for(buffered.wait(), 3)
+            output = resident._output
+            assert output._buffering is not None and not output.queued["B"].completed.is_set()
+            if superseded:
+                next_turn = resident.run_turn("C", observe, tag=SimpleNamespace(message_id="C"))
+                if respond:
+                    result = await asyncio.wait_for(next_turn, 3)
+                    assert result.result_event["result"] == "C"
+                else:
+                    with pytest.raises(RuntimeError, match="settling an unclaimed input"):
+                        await asyncio.wait_for(next_turn, 3)
+            else:
+                await asyncio.wait_for(resident.discard_reserved_input("B"), 3)
+                result = await asyncio.wait_for(resident.run_turn("C", observe), 3)
+                assert result.result_event["result"] == "C"
+            assert output.queued == {} and output._buffering is None
+            if respond:
+                assert resident._process is process and process.returncode is None
+                controls = [json.loads(line)["request"] for line in (tmp_path / "controls.jsonl").read_text().splitlines()]
+                assert [item["subtype"] for item in controls] == ["cancel_async_message", "interrupt"]
+            else:
+                assert resident._process is None and process.returncode is not None
+        finally:
+            await resident.stop(kill=True)
+            if not first.done():
+                first.cancel()
+            await asyncio.gather(first, return_exceptions=True)
 
     asyncio.run(run())

@@ -1,4 +1,4 @@
-"""Bounded operator additions to a running Manager turn; no new model turn or tool binding.
+"""Bounded operator additions and ownership of their native next turns.
 
 The bus keeps each addition unacknowledged until the original turn has handed its
 reply to every participating chat. A failed write leaves the normal queue in charge.
@@ -17,11 +17,12 @@ from . import (
     operator_identity, session_routing, turn_metrics,
 )
 from .message import MessageEnvelope, MessageType, is_lark
-from .ops import TurnOrigin
+from .ops import Turn, TurnOrigin
 from .runtimes import Capability, MidTurnInput
 from .tiers.turn_token import TurnPhase, TurnToken
 
 if TYPE_CHECKING:
+    from .claude_cli import ResidentClaude
     from .tiers.manager import ManagerAgent, Prepared, ReplyOutcome
     from .tiers.manager_session import ManagerSession
 
@@ -94,6 +95,14 @@ class RunningInput:
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 
 
+@dataclass
+class _NativeInput:
+    token: TurnToken
+    session: ManagerSession
+    expected: set[str] = field(default_factory=set)
+    completed: bool = False
+
+
 class MidTurnInputs:
     def __init__(self, agent: ManagerAgent) -> None:
         self.agent = agent
@@ -101,6 +110,39 @@ class MidTurnInputs:
         self._parents: dict[str, str] = {}
         self._settlers: dict[str, asyncio.Task[None]] = {}
         self._tasks: set[asyncio.Task[None]] = set()
+        self._native: dict[str, _NativeInput] = {}
+
+    def release_binding(self, token: TurnToken) -> None:
+        """A's cleanup must not erase B's already running native tool binding."""
+        self._native.pop(token.message_id, None)
+        session = self.agent._session_now()
+        native = next((item for item in self._native.values() if item.session is session and not item.completed), None)
+        self.agent._publish_binding(native.token if native is not None else None)
+
+    def expected(self, token: TurnToken, call_id: Any) -> bool:
+        """A replayed tool_use was already offered to the bridge while B was buffered."""
+        native = self._native.get(token.message_id)
+        if native is None or call_id not in native.expected:
+            return False
+        native.expected.remove(call_id)
+        return True
+
+    def native_started(self, token: TurnToken) -> bool:
+        return token.message_id in self._native
+
+    def _discard_native(self, resident: ResidentClaude, token: TurnToken) -> None:
+        if resident.reserved_input_text(token.message_id) is None:
+            return
+        task = asyncio.create_task(resident.discard_reserved_input(token.message_id))
+        self._tasks.add(task)
+
+        def finished(done: asyncio.Task[None]) -> None:
+            self._tasks.discard(done)
+            if not done.cancelled() and (exc := done.exception()) is not None:
+                logger.error("native input cleanup failed for %s", token.message_id,
+                             exc_info=(type(exc), exc, exc.__traceback__))
+
+        task.add_done_callback(finished)
 
     def open(self, token: TurnToken, prepared: Prepared, text: str) -> str:
         accepts = (enabled(self.agent.agent_id) and prepared.turn is not None
@@ -163,11 +205,12 @@ class MidTurnInputs:
 
     async def merge(self, session: ManagerSession, envelope: MessageEnvelope) -> bool:
         """Hand admission to a session's ordered settler; never await a fold in the inbox loop."""
-        if not enabled(self.agent.agent_id) or envelope.message_type is not MessageType.USER_MESSAGE:
+        if envelope.message_type is not MessageType.USER_MESSAGE:
             return False
         previous = self._settlers.get(session.key)
         token = session.running_token
-        if previous is None and (token is None or token.message_id not in self._turns):
+        if previous is None and (not enabled(self.agent.agent_id)
+                                 or token is None or token.message_id not in self._turns):
             return False
 
         async def settle() -> None:
@@ -250,7 +293,62 @@ class MidTurnInputs:
             running.pending[envelope.message_id] = pending
         written = False
         try:
-            written = await session.claude.write_mid_turn(message, message_id=envelope.message_id)
+            from .claude_cli import ResidentClaude
+            resident = session.claude
+
+            async def unfolded(event: dict[str, Any]) -> None:
+                from .tiers.manager import _looper_call, _message_client, _message_origin
+
+                if event.get("type") == "reservation_discarded":
+                    native = self._native.pop(envelope.message_id, None)
+                    if native is not None and self.agent.ops is not None:
+                        self.agent.ops.end_turn(native.token.ops_turn)
+                        self.agent.ops.publish_binding(None, session_key=session.key)
+                    return
+                native = self._native.get(envelope.message_id)
+                if native is None:
+                    origin = _message_origin(envelope)
+                    client_id, client_name = _message_client(envelope)
+                    turn = Turn(channel=origin["channel"], chat=origin["chat"], channel_id=origin["channel_id"],
+                                message_id=envelope.message_id, envelope=envelope, sender=origin["sender"],
+                                group=origin["group"], client_id=client_id, client_name=client_name,
+                                require_match=session.claude.shares_bridge,
+                                runtime=running.prepared.launch.runtime.type,
+                                speaker=running.prepared.turn.speaker)
+                    merged_token.ops_turn = turn
+                    native = self._native[envelope.message_id] = _NativeInput(merged_token, session)
+                    previous_settle = merged_token.on_settle
+
+                    def settled(ended: TurnToken) -> None:
+                        if previous_settle is not None:
+                            previous_settle(ended)
+                        self._discard_native(resident, ended)
+
+                    merged_token.on_settle = settled
+                    if not merged_token.live:
+                        self._discard_native(resident, merged_token)
+                    if self.agent.ops is not None:
+                        if merged_token.cancel.requested or not merged_token.live:
+                            self.agent.ops.stop_turn(turn)
+                        self.agent.ops.begin_turn(turn, merged_token.binding, session_key=session.key)
+                        self.agent.ops.publish_binding(merged_token.binding, session_key=session.key)
+                if event.get("type") == "result" and event.get("parent_tool_use_id") is None:
+                    native.completed = True
+                body = event.get("message") if event.get("type") == "assistant" else None
+                if self.agent.ops is not None and isinstance(body, dict):
+                    for block in body.get("content") or []:
+                        if isinstance(block, dict) and block.get("type") == "tool_use":
+                            bare, arguments = _looper_call(block.get("name"), block.get("input"))
+                            self.agent.ops.expect(merged_token.binding, bare, arguments, call_id=block.get("id"),
+                                                  parent_call_id=event.get("parent_tool_use_id"))
+                            if isinstance(block.get("id"), str):
+                                native.expected.add(block["id"])
+
+            if isinstance(session.claude, ResidentClaude):
+                written = await session.claude.write_mid_turn(message, message_id=envelope.message_id,
+                                                             on_unfolded=unfolded)
+            else:
+                written = await session.claude.write_mid_turn(message, message_id=envelope.message_id)
             if not written:
                 return False
             pending.state = InputState.CONFIRMED

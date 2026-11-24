@@ -236,6 +236,35 @@ def test_shutdown_keeps_merged_message_for_replay(enabled, tmp_path):
     run_case(test, enabled, tmp_path)
 
 
+def test_disabling_input_keeps_pending_settlement_order(enabled, tmp_path):
+    async def test(rig, pool):
+        first = await start_turn(rig)
+        entered, release = asyncio.Event(), asyncio.Event()
+
+        async def pending(text, **kwargs):
+            entered.set()
+            await release.wait()
+            return False
+
+        enabled.setattr(rig.main, "write_mid_turn", pending)
+        second, third = _web("second"), _web("third")
+        try:
+            await rig.bus.publish(second)
+            await asyncio.wait_for(entered.wait(), 5)
+            enabled.setattr(chat_settings, "_mid_turn_input_enabled", False)
+            await rig.bus.publish(third)
+            await drained(rig)
+            release.set()
+            await until(lambda: not rig.manager._mid_turn._tasks)
+            rig.main.release.set()
+            await rig.reply(first)
+            assert (await rig.reply(second)).endswith("回复 2")
+            assert (await rig.reply(third)).endswith("回复 3")
+        finally:
+            release.set()
+    run_case(test, enabled, tmp_path)
+
+
 def test_a_queued_command_keeps_later_input_in_order(enabled, tmp_path):
     async def test(rig, pool):
         await start_turn(rig)

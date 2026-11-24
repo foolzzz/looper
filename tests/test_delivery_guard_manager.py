@@ -17,8 +17,8 @@ from looper.agents.runtimes import Capability
 from looper.agents.tiers.turn_token import TurnToken
 
 
-@pytest.mark.parametrize("consumed", [True, False])
-def test_pending_reminder_does_not_block_event_handling(tmp_path, consumed):
+@pytest.mark.parametrize("ending", ["consumed", "cancelled", "dequeued"])
+def test_pending_reminder_does_not_block_event_handling(tmp_path, ending):
     from looper.agents.delivery_guard_manager import observe, finish
 
     async def run():
@@ -46,6 +46,7 @@ def test_pending_reminder_does_not_block_event_handling(tmp_path, consumed):
 
         script = """
 import json, sys
+import pathlib, subprocess
 def out(event):
     print(json.dumps(event), flush=True)
 first = json.loads(sys.stdin.readline())
@@ -54,18 +55,37 @@ out({'type':'assistant','message':{'content':[{'type':'tool_use','id':str(i)} fo
 reminder = json.loads(sys.stdin.readline())
 out({'type':'assistant','message':{'content':[{'type':'text','text':'Progress.'}]}})
 sys.stdin.readline()
-if CONSUMED:
+if ENDING == 'consumed':
     out(dict(reminder, isReplay=True))
 out({'type':'result','subtype':'success','is_error':False,'result':'Done.',
-     'user_message_uuids':[first['uuid']] + ([reminder['uuid']] if CONSUMED else [])})
-if not CONSUMED:
+     'user_message_uuids':[first['uuid']] + ([reminder['uuid']] if ENDING == 'consumed' else [])})
+if ENDING != 'consumed':
+    if ENDING == 'dequeued':
+        child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)'])
+        out({'type':'command_lifecycle','command_uuid':reminder['uuid'],'state':'started'})
+        out(dict(reminder, isReplay=True))
     control = json.loads(sys.stdin.readline())
     assert control['request'] == {'subtype':'cancel_async_message', 'message_uuid':reminder['uuid']}
     out({'type':'control_response','response':{'subtype':'success','request_id':control['request_id'],
-         'response':{'cancelled':True,'message_uuid':reminder['uuid']}}})
+         'response':{'cancelled':ENDING == 'cancelled','message_uuid':reminder['uuid']}}})
+    if ENDING == 'dequeued':
+        control = json.loads(sys.stdin.readline())
+        request = control['request']
+        assert request['subtype'] == 'interrupt' and request['cancel_queued'] is True
+        if not request.get('spare_background_tasks'):
+            child.terminate()
+            child.wait()
+        assert child.poll() is None, 'interrupt ended background work'
+        pathlib.Path('background-survived').touch()
+        out({'type':'control_response','response':{'subtype':'success','request_id':control['request_id'],
+             'response':{'cancelled':[]}}})
+        out({'type':'result','subtype':'error_during_execution','is_error':True,'result':'',
+             'user_message_uuids':[reminder['uuid']]})
+        child.terminate()
+        child.wait()
 sys.stdin.read()
 """
-        script = "CONSUMED = " + repr(consumed) + "\n" + script
+        script = "ENDING = " + repr(ending) + "\n" + script
         await resident.start([sys.executable, "-u", "-c", script], cwd=str(tmp_path), signature=1)
         process = resident._process
         handling = asyncio.create_task(handle())
@@ -82,6 +102,8 @@ sys.stdin.read()
             await finish(token)
             assert result.result_event["result"] == "Done."
             assert resident._process is process and process.returncode is None
+            if ending == "dequeued":
+                assert (tmp_path / "background-survived").exists()
         finally:
             await finish(token)
             handling.cancel()

@@ -671,6 +671,8 @@ class _QueuedInput:
     buffering: bool = False
     withdrawn: bool = False
     completed: asyncio.Event = field(default_factory=asyncio.Event)
+    on_unfolded: Callable[[dict[str, Any]], Awaitable[None]] | None = None
+    settling: asyncio.Task[None] | None = None
 
 
 @dataclass(eq=False)
@@ -815,9 +817,13 @@ class _Output:
         if not replaying and self._buffering is not None:
             # The next native turn can start before Manager has delivered A.
             # Reserve its output for B, rather than treating it as autonomous.
-            self._buffering.events.append(event)
-            if event.get("type") == "result":
-                self._buffering.completed.set()
+            owner = self._buffering
+            owner.events.append(event)
+            if event.get("type") == "result" and event.get("parent_tool_use_id") is None:
+                owner.completed.set()
+                self._buffering = None  # later native turns must never enter B's buffer
+            if owner.on_unfolded is not None:
+                await owner.on_unfolded(event)
             return
         if event.get("type") == "command_lifecycle" or _is_replay(event):
             self._marks_turns = True
@@ -1160,13 +1166,14 @@ class ResidentClaude:
         process, output = self._process, self._output
         assert process is not None and process.stdin is not None and output is not None
         cancel = cancel or TurnCancel.never()
+        message_id = getattr(tag, "message_id", None)
+        # A FIFO completion or a replacement can run before the written input's
+        # owner. Settle that native turn before admitting a different prompt.
+        await self.settle_reserved_inputs(keep_message_id=message_id)
+        if self._process is not process:
+            raise RuntimeError("resident ended while settling an unclaimed input")
         if cancel.requested:
-            if (queued := output.queued.get(getattr(tag, "message_id", None))) is not None:
-                # This message may already be running natively, though its owner
-                # has not claimed the reserved result yet.
-                pending = _UserTurn(queued.uuid, text, tag, on_event,
-                                    asyncio.get_running_loop().create_future())
-                await self._withdraw_mid_turn(queued, pending, output)
+            await self.discard_reserved_input(message_id)
             return ResidentTurn(user_stop_result(), stopped=StopMethod.KILL, prompt_sent=False, usage=Usage())
         checkpoint: frozenset[int] | None = None
         checkpoint_taken = False
@@ -1199,7 +1206,8 @@ class ResidentClaude:
                     # New events stay buffered while callbacks replay the earlier ones.
                     while queued.events:
                         await output._dispatch(queued.events.popleft(), replaying=True)
-                    output._buffering = None
+                    if output._buffering is queued:
+                        output._buffering = None
                     output.queued.pop(queued.message_id, None)
                 cancel.sent()
             except (BrokenPipeError, ConnectionResetError):
@@ -1258,7 +1266,48 @@ class ResidentClaude:
             prompt_sent=sent,
         )
 
-    async def write_mid_turn(self, text: str, *, message_id: str | None = None) -> bool:
+    def reserved_input_text(self, message_id: str) -> str | None:
+        owner = self._output.queued.get(message_id) if self._output is not None else None
+        return owner.text if owner is not None else None
+
+    async def settle_reserved_inputs(self, *, keep_message_id: str | None = None) -> None:
+        """Settle earlier native work before a different caller publishes its tool binding."""
+        output = self._output
+        for message_id in tuple(output.queued) if output is not None else ():
+            # Completed output is already settled: keep it for its owner's
+            # later claim rather than writing that message into the transcript twice.
+            if (message_id != keep_message_id and (owner := output.queued.get(message_id)) is not None
+                    and not owner.completed.is_set()):
+                await self.discard_reserved_input(message_id)
+
+    async def discard_reserved_input(self, message_id: str | None) -> None:
+        """A token ended without claiming: bounded withdrawal before this resident is reused."""
+        output = self._output
+        owner = output.queued.get(message_id) if output is not None else None
+        if owner is None:
+            return
+        if owner.settling is None:
+            owner.settling = asyncio.create_task(self._discard_reserved_input(owner, output))
+        await asyncio.shield(owner.settling)
+
+    async def _discard_reserved_input(self, owner: _QueuedInput, output: _Output) -> None:
+        pending = _UserTurn(owner.uuid, owner.text, None, None, asyncio.get_running_loop().create_future())
+        pending.done.set_result(None)  # only B's own result or an explicit control receipt can settle it
+        try:
+            if not owner.completed.is_set():
+                await self._withdraw_mid_turn(owner, pending, output)
+        finally:
+            owner.withdrawn = True
+            output.queued.pop(owner.message_id, None)
+            if output._buffering is owner:
+                output._buffering = None
+            owner.events.clear()
+            self._withdrawals.pop(owner.uuid, None)
+            if owner.on_unfolded is not None:
+                await owner.on_unfolded({"type": "reservation_discarded"})
+
+    async def write_mid_turn(self, text: str, *, message_id: str | None = None,
+                             on_unfolded: Callable[[dict[str, Any]], Awaitable[None]] | None = None) -> bool:
         """Wait for native consumption; optionally reserve an unfurled next turn for its caller.
 
         A keyed input that misses this turn keeps its UUID and resident: the next
@@ -1275,7 +1324,7 @@ class ResidentClaude:
         uuid = str(uuid4())
         receipt = asyncio.get_running_loop().create_future()
         turn.input_receipts[uuid] = receipt
-        owner = _QueuedInput(uuid, message_id or uuid, text)
+        owner = _QueuedInput(uuid, message_id or uuid, text, on_unfolded=on_unfolded)
         turn.input_owners[uuid] = owner
         written = merged = False
         try:
@@ -1320,9 +1369,14 @@ class ResidentClaude:
                 self._withdrawals.pop(uuid, None)
 
     async def _withdraw_mid_turn(self, owner: _QueuedInput, turn: _UserTurn, output: _Output) -> None:
+        if owner.completed.is_set():
+            output.queued.pop(owner.message_id, None)
+            return
         if await self._cancel_async_input(owner.uuid, turn):
             owner.withdrawn = True
             output.queued.pop(owner.message_id, None)
+            if output._buffering is owner:
+                output._buffering = None
             return
         receipt = turn.input_receipts.get(owner.uuid)
         if receipt is not None and receipt.done() and receipt.result():
@@ -1336,7 +1390,8 @@ class ResidentClaude:
             async with asyncio.timeout(INTERRUPT_GRACE_SEC):
                 # A cancellation can lose the dequeue race. Interrupt the active
                 # native turn gently and clear anything it put back in its queue.
-                request_id = write_control(process.stdin, {"subtype": "interrupt", "cancel_queued": True})
+                request_id = write_control(process.stdin, {"subtype": "interrupt", "cancel_queued": True,
+                                                           "spare_background_tasks": True})
                 receipt = asyncio.get_running_loop().create_future()
                 self._controls[request_id] = receipt
                 await process.stdin.drain()
