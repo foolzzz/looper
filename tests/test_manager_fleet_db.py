@@ -692,6 +692,10 @@ def test_delete_refuses_in_flight_api_append_and_preserves_session(tmp_path, mon
                     await r.bus.publish(_user(review))
                     # The real SDK starts lazily; run_db bounds startup and the turn together.
                     await entered.wait()
+                    # Init saves the session asynchronously, independently of the transcript append.
+                    async with asyncio.timeout(5):
+                        while await agent_sessions.get_session(review) is None:
+                            await asyncio.sleep(0)
                     with pytest.raises(OpError, match="retry after its work finishes"):
                         await manager_domain.run(
                             SimpleNamespace(_managers=r.fleet), api_v1.find("POST", "/api/v1/managers/delete"),
