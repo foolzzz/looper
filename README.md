@@ -469,7 +469,7 @@ never shows the value.
 | `projects.root` | No | Absolute parent directory for new projects created without a directory: each gets its own directory under it. File only, unset by default |
 | `agent_host.keeper` | No | `"off"` (default) or `"on"`. On, each Worker and Reviewer run is held by a keeper process that outlives a planned restart, so `looper service upgrade` can upgrade the control plane without ending running agents (launchd, or a systemd unit installed with `KillMode=process`). Needs one `looper serve` per database. File only; restart to apply |
 | `runtimes.pi` | No | `"runner"` (default) or `"cli"`. Pi profiles run on the SDK runner (Node 22.19+, pi 1.3.x). `"cli"` opts out onto the Pi CLI. File only, read once at startup; restart to apply. A runner that cannot start names the cause and this opt-out |
-| `runtimes.dsh` | No | `"runner"` (default) or `"cli"`. DSH profiles run on the SDK runner (Node 22.19+, dsh 0.2.1-rc.2). `"cli"` opts out onto the DSH CLI. File only, read once at startup; restart to apply. A runner that cannot start names the cause and this opt-out |
+| `runtimes.dsh` | No | `"runner"` (default) or `"cli"`. DSH profiles run on the SDK runner (Node 22.19+, dsh 0.2.2-rc.5). `"cli"` opts out onto the DSH CLI. File only, read once at startup; restart to apply. A runner that cannot start names the cause and this opt-out |
 
 Each setting comes from the first of these: an explicit flag (`--host`,
 `--port`, or `--verbose`, which sets `server.log_level` to `debug`), the
@@ -585,7 +585,7 @@ Settings → Agent Profiles and selected in Settings → Roles.
   Re-detect one. A different binary comes from the server's PATH. The Model
   API runtime runs in-process, with no executable, and runs only the Manager.
 - Pi and DSH profiles run on their SDK runners by default (Node 22.19+, pi
-  1.3.x, dsh 0.2.1-rc.2). Claude Code uses the Claude Code CLI. To use the CLI
+  1.3.x, dsh 0.2.2-rc.5). Claude Code uses the Claude Code CLI. To use the CLI
   for one of those two, set `[runtimes] pi = "cli"` or
   `[runtimes] dsh = "cli"` in the ops file and restart. The setting is read
   once at startup. A runner that cannot start names the cause and that

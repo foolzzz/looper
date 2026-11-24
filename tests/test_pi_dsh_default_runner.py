@@ -172,7 +172,7 @@ def test_dsh_sdk_outside_the_pin_names_the_version_and_the_opt_out(tmp_path, mon
     assert dsh_runner.enable(tmp_path) is None
     message = ADAPTERS["dsh"].unavailable
     assert type(ADAPTERS["dsh"]) is DshRunnerRuntime
-    assert "0.2.1-rc.2" in message and "0.2.0" in message and "node 22.19+" in message
+    assert "0.2.2-rc.5" in message and "0.2.0" in message and "node 22.19+" in message
     assert '[runtimes] dsh = "cli" in the ops file' in message
     with pytest.raises(RuntimeUnsupported, match="0.2.0"):
         ADAPTERS["dsh"].hosted_run("dsh", cwd=tmp_path, prompt_file=tmp_path / "absent", launch=None,
@@ -183,7 +183,7 @@ def test_supported_sdk_versions_still_install_the_runner(tmp_path, monkeypatch):
     monkeypatch.setitem(ADAPTERS, "pi", PiRuntime())
     monkeypatch.setitem(ADAPTERS, "dsh", dsh_runtime.DshRuntime())
     pi = _package(tmp_path / "pi-sdk", "@earendil-works/pi-coding-agent", "1.3.2")
-    dsh = _package(tmp_path / "dsh-sdk", "@deepseek-ai/dsh", "0.2.1-rc.2")
+    dsh = _package(tmp_path / "dsh-sdk", "@deepseek-ai/dsh", "0.2.2-rc.5")
     seen = {}
 
     def supervisor(root, commands, **kwargs):
@@ -373,7 +373,7 @@ def test_default_runner_pools_35_sdk_sessions_and_stops_idle_extra(tmp_path, mon
 def test_lazy_spawn_failure_retains_cause_and_opt_out(tmp_path, monkeypatch, kind, role):
     module = pi_runner if kind == "pi" else dsh_runner
     package, version = (("@earendil-works/pi-coding-agent", "1.3.2") if kind == "pi"
-                        else ("@deepseek-ai/dsh", "0.2.1-rc.2"))
+                        else ("@deepseek-ai/dsh", "0.2.2-rc.5"))
     executable = _package(tmp_path, package, version)
     node = tmp_path / "node"
     node.write_text("#!/bin/sh\nprintf 'v24.20.0\\n'\n")
@@ -600,7 +600,7 @@ def test_executable_removed_after_enable_names_cause_and_opt_out(tmp_path, monke
 
     module = pi_runner if kind == "pi" else dsh_runner
     package, version = (("@earendil-works/pi-coding-agent", "1.3.2") if kind == "pi"
-                        else ("@deepseek-ai/dsh", "0.2.1-rc.2"))
+                        else ("@deepseek-ai/dsh", "0.2.2-rc.5"))
     executable = _package(tmp_path, package, version)
     node = tmp_path / "node"
     node.write_text("#!/bin/sh\nprintf 'v24.20.0\\n'\n")
