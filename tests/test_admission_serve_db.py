@@ -217,8 +217,8 @@ def test_serve_serializes_freezes_probes_then_operator_clear(tmp_path, monkeypat
             _until(lambda: _events(state, "quota"), "quota fixture Worker")
             serial = task("serial")
             _until(
-                lambda: sum(_limits(api)["waiting"].values()) == 3,
-                "three account waiters",
+                lambda: _limits(api)["waiting"]["user_task"] == 1,
+                "Planner waits before planning the three steps",
             )
             assert not _events(state, "serial")
             (state / "release-quota-a").touch()
@@ -233,18 +233,22 @@ def test_serve_serializes_freezes_probes_then_operator_clear(tmp_path, monkeypat
                 "frozen task activity",
             )
             assert not _events(state, "serial")
+            assert not _query(url, "SELECT id FROM llm_records WHERE task_id=$1", serial)
             assert len((state / "alerts.jsonl").read_text().splitlines()) == 1
             (state / "offset").write_text("65")
-            probe = _until(lambda: _events(state, "serial"), "one oldest-waiter probe")
-            assert len(probe) == 1 and _limits(api)["state"] == "probing"
-            assert (
-                _limits(api)["running"] == 1
-                and sum(_limits(api)["waiting"].values()) == 2
-            )
-            (state / ("release-serial-" + probe[0]["step"])).touch()
+            first_worker = _until(lambda: _events(state, "serial"), "Planner probe succeeds before Workers")
+            assert len(first_worker) == 1 and _limits(api)["state"] == "open"
+            planner = _query(url, "SELECT status,metadata FROM llm_records WHERE task_id=$1 AND agent_id=$2",
+                             serial, f"planner-{serial}")
+            assert planner[0]["status"] == "completed"
+            assert json.loads(planner[0]["metadata"])["admission_lane"] == 1
+            _until(lambda: _limits(api)["running"] == 1
+                   and sum(_limits(api)["waiting"].values()) == 2,
+                   "two Workers wait behind the first after planning")
+            (state / ("release-serial-" + first_worker[0]["step"])).touch()
             _until(
                 lambda: len(_events(state, "serial")) == 2,
-                "successful probe releases the next Worker",
+                "releasing the first Worker starts the next",
             )
             assert _limits(api)["state"] == "open" and _limits(api)["running"] == 1
             second = _events(state, "serial")[1]["step"]

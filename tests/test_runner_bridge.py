@@ -1355,3 +1355,78 @@ def test_load_refusal_registers_nothing():
             assert error.value.code == p.ErrorCode.SESSION_NOT_FOUND
             assert not bridge.sessions and not bridge._error and not failures
     run(exercise())
+
+
+_HEALTH = {"sessions": 0, "running": 0, "inflight_requests": 0, "tool_processes": 0,
+           "rss_bytes": 0, "event_loop_lag_ms": 0}
+
+
+def test_health_deadline_overrides_control_timeout_only_for_health():
+    import time as wall
+
+    async def exercise():
+        async with connection(control_timeout=0.05) as (bridge, reader, writer, failures):
+            with pytest.raises(ValueError, match="runner/health"):
+                await bridge.request("session/new", NEW, timeout=1)
+            with pytest.raises(ValueError, match="positive"):
+                await bridge.health(timeout=0)
+            pending = asyncio.create_task(bridge.health(timeout=0.8))
+            request = await p.read_frame(reader)
+            assert request.method == "runner/health"
+            await asyncio.sleep(0.2)
+            assert not pending.done() and not failures
+            await send(writer, p.Response(request.id, result=_HEALTH))
+            assert await pending == _HEALTH and not failures and not bridge.writer.is_closing()
+            started = wall.monotonic()
+            opening = asyncio.create_task(bridge.open_session(NEW))
+            await p.read_frame(reader)
+            with pytest.raises(TimeoutError):
+                await opening
+            assert wall.monotonic() - started < 0.4
+    asyncio.run(asyncio.wait_for(exercise(), 5))
+
+
+def test_cancelled_health_accepts_only_its_correlated_late_reply(monkeypatch):
+    monkeypatch.setattr("looper.agents.runtimes.runner.bridge.MAX_ABANDONED_CONTROLS", 1)
+
+    async def dropped(bridge, reader, writer, failures):
+        pending = asyncio.create_task(bridge.health())
+        request = await p.read_frame(reader)
+        pending.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await pending
+        assert request.id in bridge._abandoned_controls and request.id not in bridge._pending
+        return request
+
+    async def exercise():
+        async with connection() as (bridge, reader, writer, failures):
+            request = await dropped(bridge, reader, writer, failures)
+            with pytest.raises(p.ProtocolError) as rejected:
+                await bridge.health()
+            assert rejected.value.code == p.ErrorCode.CAPACITY
+            assert len(bridge._abandoned_controls) == 1 and not bridge._pending
+            await send(writer, p.Response(request.id, result=_HEALTH))
+            async with asyncio.timeout(1):
+                while request.id in bridge._abandoned_controls:
+                    await asyncio.sleep(0.01)
+            assert not failures and not bridge.writer.is_closing()
+            opening = asyncio.create_task(bridge.open_session(NEW))
+            opened = await p.read_frame(reader)
+            await send(writer, p.Response(opened.id, result={"session_id": "s"}))
+            assert await opening == "s"
+        async with connection() as (bridge, reader, writer, failures):
+            request = await dropped(bridge, reader, writer, failures)
+            await send(writer, p.Response("l-999", result=_HEALTH))
+            async with asyncio.timeout(1):
+                while not failures:
+                    await asyncio.sleep(0.01)
+            assert request.id in bridge._abandoned_controls
+        async with connection() as (bridge, reader, writer, failures):
+            request = await dropped(bridge, reader, writer, failures)
+            illegal = dict(_HEALTH, sessions=-1)
+            await send(writer, p.Response(request.id, result=illegal))
+            async with asyncio.timeout(1):
+                while not failures:
+                    await asyncio.sleep(0.01)
+            assert not bridge._abandoned_controls
+    asyncio.run(asyncio.wait_for(exercise(), 5))

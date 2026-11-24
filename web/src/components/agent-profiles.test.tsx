@@ -503,14 +503,14 @@ describe("Agent Profiles", () => {
 
   const apiRuntime = () => {
     registry.runtime_types.push({ ...registry.runtime_types[0], type: "api", label: "Model API", runtime_id: "rt-api",
-      in_process: true, protocols: ["openai-responses"], roles: ["manager"], auth_kinds: ["api_key"], supported_models: null });
+      in_process: true, protocols: ["anthropic-messages", "openai-responses"], roles: ["manager"], auth_kinds: ["api_key"], supported_models: null });
     registry.runtimes.push({ ...registry.runtimes[0], type: "api", runtime_id: "rt-api", type_label: "Model API",
-      in_process: true, path: null, protocols: ["openai-responses"], roles: ["manager"], auth_kinds: ["api_key"] });
+      in_process: true, path: null, protocols: ["anthropic-messages", "openai-responses"], roles: ["manager"], auth_kinds: ["api_key"] });
   };
 
   it("shows the package probe error for an unavailable in-process runtime", async () => {
     apiRuntime();
-    const error = "the openai Python package is not installed with this Looper; reinstall Looper";
+    const error = "the anthropic Python package is not installed with this Looper; reinstall Looper";
     registry.runtime_types.at(-1)!.probe_error = error;
     registry.runtimes = registry.runtimes.filter((runtime) => runtime.type !== "api");
     await show(null);
@@ -531,20 +531,38 @@ describe("Agent Profiles", () => {
     expect(option.textContent).not.toContain("CLI probe failed");
   });
 
-  it("lets a detected API runtime be selected", async () => {
+  it.each(["anthropic-messages", "openai-responses"] as const)("lets a detected API runtime select %s from server capabilities", async (protocol) => {
     apiRuntime();
-    await show(CODEX);
+    await show(protocol === "openai-responses" ? CODEX : PROFILE);
     expect([...select("Runtime").options].find((option) => option.value === "rt-api")?.disabled).toBe(false);
     await choose("Runtime", "rt-api");
     expect(select("Runtime").value).toBe("rt-api");
+    await submit();
+    expect(requests[0].body).toMatchObject({ runtime_id: "rt-api", model_id: protocol === "openai-responses" ? "model-responses" : "model-messages" });
+  });
+
+  it("uses server roles to limit a Messages API profile to Manager selectors", async () => {
+    apiRuntime();
+    registry.profiles.push({ ...PROFILE, profile_id: "messages-api", name: "Messages API Manager",
+      runtime_id: "rt-api", runtime_type: "api", roles: ["manager"], agent_teams: false });
+    await act(async () => root.render(<>
+      <AgentProfileSelect id="manager-profile" value="" onChange={() => {}} emptyLabel="Inherited" roles={["manager"]} />
+      <AgentProfileSelect id="worker-profile" value="" onChange={() => {}} emptyLabel="Inherited" roles={["worker"]} />
+    </>));
+    const manager = container.querySelector<HTMLSelectElement>("#manager-profile")!;
+    const worker = container.querySelector<HTMLSelectElement>("#worker-profile")!;
+    expect(manager.querySelector<HTMLOptionElement>('option[value="messages-api"]')!.disabled).toBe(false);
+    expect(worker.querySelector<HTMLOptionElement>('option[value="messages-api"]')!.disabled).toBe(true);
+    expect(worker.querySelector<HTMLOptionElement>('option[value="messages-api"]')!.textContent).toContain("cannot run the Worker");
   });
 
   it("disables an API runtime for protocols it does not speak", async () => {
     apiRuntime();
     await show();
+    await choose("Protocol *", "openai-chat");
     const option = select("Runtime").querySelector<HTMLOptionElement>('option[value="rt-api"]')!;
     expect(option.disabled).toBe(true);
-    expect(option.textContent).toContain("speaks OpenAI Responses");
+    expect(option.textContent).toContain("speaks Anthropic Messages, OpenAI Responses");
   });
 
   it("uses the shared effort list for the API runtime", async () => {

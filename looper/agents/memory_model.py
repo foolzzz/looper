@@ -259,6 +259,7 @@ TRANSITIONS: Mapping[tuple[State, State], frozenset[Action]] = {
     (State.DRAFTING, State.PENDING): frozenset({Action.DRAFT}),
     (State.DRAFTING, State.DROPPED): frozenset({Action.DROP, Action.MERGE}),
     (State.PENDING, State.PENDING): frozenset({Action.EDIT, Action.REDRAFT, Action.MERGE}),
+    (State.PENDING, State.DRAFTING): frozenset({Action.PROPOSE}),
     (State.PENDING, State.CONFIRMED): frozenset({Action.CONFIRM}),
     (State.PENDING, State.REJECTED): frozenset({Action.REJECT}),
     (State.PENDING, State.EXPIRED): frozenset({Action.EXPIRE}),

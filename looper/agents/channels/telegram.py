@@ -874,6 +874,10 @@ class TelegramChannelAdapter(ChannelAdapter):
             context.update(user_id=update.effective_user.id, username=update.effective_user.username or "")
             if update.message is not None:  # None for an edited /new
                 context["message_id"] = str(update.message.message_id)
+                # Keep provenance without copying the original sender's identity or quoted content.
+                for key in ("forward_origin", "quote", "external_reply"):
+                    if getattr(update.message, key, None) is not None:
+                        context[key] = True
                 replied = getattr(update.message, "reply_to_message", None)
                 if replied is not None:
                     context["reply_to_message_id"] = str(replied.message_id)

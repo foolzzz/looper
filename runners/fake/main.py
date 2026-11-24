@@ -111,6 +111,8 @@ class Fake:
                     script = selection.get("fake_script", script)
             except ValueError:
                 pass
+            if script == "ordinary" and (Path.cwd() / "hold-turn").is_file():
+                script = "pause-at-boundary"
             if script not in SCRIPTS:
                 raise p.ProtocolError(p.ErrorCode.INVALID_PARAMS)
             if script == "exit-mid-turn":
@@ -187,6 +189,14 @@ class Fake:
                         "authorize_covers": ["turn"]})
             elif not self.initialized:
                 raise p.ProtocolError(p.ErrorCode.INVALID_REQUEST)
+            elif method == "runner/health":
+                if (Path.cwd() / "hang-health").is_file():
+                    return
+                running = sum(session.task is not None and not session.task.done()
+                              for session in self.sessions.values())
+                result = {"sessions": len(self.sessions), "running": running,
+                          "inflight_requests": len(self.pending), "tool_processes": 0,
+                          "rss_bytes": 0, "event_loop_lag_ms": 0}
             elif method == "session/new":
                 if len(self.sessions) >= 4:
                     raise p.ProtocolError(p.ErrorCode.CAPACITY)
@@ -199,6 +209,7 @@ class Fake:
                     raise p.ProtocolError(p.ErrorCode.SESSION_NOT_FOUND)
                 correlation = {k: params[k] for k in ("session_id", "trace_id") if k in params}
                 if method == "session/prompt":
+                    Path("prompted").touch()
                     if session.task:
                         raise p.ProtocolError(p.ErrorCode.SESSION_BUSY)
                     tool = "looper_tasks" if session.params["role"] == "manager" else "looper_task_profiles"

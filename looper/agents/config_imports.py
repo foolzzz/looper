@@ -77,11 +77,19 @@ def _about(data: dict[str, Any]) -> dict[str, str]:
 async def authorize(data: dict[str, Any], policy: Literal["client", "operator"] | None) -> dict[str, Any]:
     """Check the staging policy, including at confirmation; exclude a client's unchanged default from execution."""
     if policy != "client":
+        guard = data.get("settings", {}).get("cost_guard", {})
+        if isinstance(guard, dict) and guard.get("mode") == "enforce":
+            raise ConfigFileError("Configuration import cannot enable cost enforcement. Import with cost_guard.mode "
+                                  "set to off or observe, then enable enforce through cost_guard.update "
+                                  "with operator confirmation.")
         return data
     settings = data.get("settings", {})
     if any(isinstance(entry, dict) and entry.get("role") == "outbound_check"
            for section in ("roles", "layers") for entry in settings.get(section, [])):
         raise OpError(ErrorCode.FORBIDDEN, "Outbound check settings require operator identity; "
+                      "upload this configuration with an operator token")
+    if "cards.actions.enabled" in data.get("settings", {}).get("system", {}):
+        raise OpError(ErrorCode.FORBIDDEN, "Card button settings require operator identity; "
                       "upload this configuration with an operator token")
     if "cost_guard" in data.get("settings", {}):
         raise OpError(ErrorCode.FORBIDDEN, "Cost guard settings require operator identity; "
