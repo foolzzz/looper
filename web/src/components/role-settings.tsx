@@ -32,10 +32,10 @@ import { formatUsd } from "@/lib/usage";
 import { cn } from "@/lib/utils";
 
 const ROLES: readonly AgentRole[] = [
-  "manager", "planner", "worker", "reviewer", "processor", "advisor", "advice_check", "leads_check", "memory_retro"];
+  "manager", "planner", "worker", "reviewer", "processor", "advisor", "advice_check", "leads_check", "outbound_check", "memory_retro"];
 /** The roles another run starts (the advisor's, the leads check's): only their own row chooses their profile, else
  *  their built-in one. */
-const SPAWNED: readonly string[] = ["advisor", "advice_check", "leads_check", "memory_retro"];
+const SPAWNED: readonly string[] = ["advisor", "advice_check", "leads_check", "outbound_check", "memory_retro"];
 const isRole = (role: string): role is AgentRole => (ROLES as readonly string[]).includes(role);
 
 /** The role configs in the order a task meets them. */
@@ -47,8 +47,8 @@ function rank(role: string) {
 // --- The role prompt ---
 
 /** The role prompt: one text, the role layer of the agent's system prompt. */
-function RolePromptEditor({ id, value, onChange, processor, spawned = false, retro = false }: {
-  id: string; value: string; onChange: (v: string) => void; processor: boolean; spawned?: boolean; retro?: boolean;
+function RolePromptEditor({ id, value, onChange, processor, spawned = false, retro = false, outbound = false }: {
+  id: string; value: string; onChange: (v: string) => void; processor: boolean; spawned?: boolean; retro?: boolean; outbound?: boolean;
 }) {
   const lineCount = value.split("\n").length;
 
@@ -61,7 +61,9 @@ function RolePromptEditor({ id, value, onChange, processor, spawned = false, ret
         </span>
       </div>
       <p id={`${id}-hint`} className="text-[11px] text-muted-foreground">
-        {processor ? (
+        {outbound ? (
+          <>只读动作及触发上下文，不带工具。角色提示后附审查回复契约，替换运行时提示；运行记录可查看完整提示。</>
+        ) : processor ? (
           <>
             This text is the role layer. At launch Looper follows it with the instructions of what it processes and
             the reply format, in place of the runtime&apos;s own prompt; a run&apos;s history page shows that whole
@@ -205,7 +207,9 @@ function RoleConfigForm({
             value={form.timeout_seconds}
             onChange={(e) => setForm({ ...form, timeout_seconds: Number(e.target.value) })}
           />
-          <p className="text-[11px] text-muted-foreground">{config.role === "memory_retro" ? "At most 90 seconds" : "0 = unlimited"}</p>
+          <p className="text-[11px] text-muted-foreground">{config.role === "memory_retro"
+            ? "At most 90 seconds" : config.role === "outbound_check"
+            ? "实际最多30秒；更短配置会缩短等待，0 仍按30秒封顶。" : "0 = unlimited"}</p>
         </div>
       </div>
 
@@ -219,6 +223,12 @@ function RoleConfigForm({
           </p>
           <ManagedHooks />
           <LeadsSettings />
+        </div>
+      ) : config.role === "outbound_check" ? (
+        <div className="space-y-1">
+          <span className="text-xs font-medium text-muted-foreground">权限</span>
+          <p className="text-sm">只读动作及触发上下文，不带工具</p>
+          <p className="text-[11px] text-muted-foreground">没有内置工具、MCP、插件、skill 或命令；Profile 必须支持无工具运行。审查开启时，关闭本角色导致判定不可用会拦截。</p>
         </div>
       ) : SPAWNED.includes(config.role) ? (
         <div className="space-y-1">
@@ -268,6 +278,7 @@ function RoleConfigForm({
         processor={config.role === "processor"}
         spawned={SPAWNED.includes(config.role)}
         retro={config.role === "memory_retro"}
+        outbound={config.role === "outbound_check"}
       />
 
       {config.default_prompt && config.system_prompt !== config.default_prompt && (
@@ -303,6 +314,7 @@ const ROLE_JOBS: Record<AgentRole, string> = {
   advice_check: "checks the Planner's request before it goes to the advisor, with no tools",
   leads_check: "checks each extracted lead and intent against its messages before it is stored, with no tools",
   memory_retro: "distills evidenced project lessons after tasks finish, with no tools; choose an explicit profile",
+  outbound_check: "只读动作及触发上下文，不带工具；判断是否由操作者要求",
 };
 
 /** The Shared defaults row (the system layer): its id, and its link #settings/roles/shared. */
@@ -324,7 +336,7 @@ function effectiveProfileText(effective: EffectiveSettings, registry: Registry |
 function sharedSummary(effective: EffectiveSettings, roles: number, registry: Registry | null) {
   const budget = effective.run_budget_usd.value;
   return [
-    `Applies to all ${count(roles, "role")}`,
+    `供 ${roles} 个角色继承；独立调用的无工具角色除外`,
     effectiveProfileText(effective, registry),
     budget == null ? "no spend cap" : `${formatUsd(budget)} cap per run`,
     effective.env.length ? count(effective.env.length, "environment variable") : "no environment variables",
@@ -412,8 +424,8 @@ export function RolesSection({ sub }: { sub: string }) {
       {configs.length > 0 && (
         // In the place of the page's description, right under its title: it names the roles the server has.
         <p className="-mt-5 max-w-3xl text-sm text-muted-foreground">
-          Looper has {count(configs.length, "role")}: {listed(configs.map(nameOf))}. Each runs with the shared
-          defaults unless it sets its own value. A project can override both on its Agent Profiles tab.
+          Looper has {count(configs.length, "role")}: {listed(configs.map(nameOf))}. 带工具的角色默认继承 Shared defaults，项目可以覆盖。
+          单独调用的无工具角色只使用自身设置或内置设置，不继承 Shared defaults 或项目设置。
         </p>
       )}
 
@@ -435,7 +447,7 @@ export function RolesSection({ sub }: { sub: string }) {
             id={`roles-${SHARED}`}
             {...row(SHARED)}
             name="Shared defaults"
-            summary={sharedSummary(settings.system.effective, configs.length, registry)}
+            summary={sharedSummary(settings.system.effective, configs.filter((c) => !SPAWNED.includes(c.role)).length, registry)}
           >
             {(marks) => (
               <LayerSettingsForm

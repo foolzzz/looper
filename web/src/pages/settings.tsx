@@ -16,6 +16,8 @@ import { AcpReviewerSettingsSection } from "@/components/acp-reviewer-settings";
 import { SchedulerSection } from "@/components/scheduler-settings";
 import { MemorySettingsSection } from "@/components/memory-settings";
 import { VaultSettingsSection } from "@/components/vault-settings";
+import { SecuritySettingsSection } from "@/components/security-settings";
+import { OutboundReviewAudit } from "@/components/outbound-review-audit";
 import {
   AGENT_PROFILE,
   DEFAULT_SETTINGS_PAGE,
@@ -46,6 +48,7 @@ const DESCRIPTIONS: Record<Exclude<SettingsPageId, "roles">, React.ReactNode> = 
     "Connect external messaging platforms. Each channel's card says where its credential comes from; saved " +
     "bot connection, credential and allowlist changes take effect after the server restarts. Chat bindings and Only bound chats apply immediately. Channels admit listed senders by default; a Lark chat binding can admit everyone in that chat. Each Manager can have its own bots; a bot's Manager is set when it is added.",
   chat: "How the chat with the Manager behaves, on the dashboard and on the channels.",
+  security: "对外动作审查、不可信内容围栏与审计。两个开关独立保存，默认关闭。",
   cost: "真钱、订阅等价花费和在跑运行的预留分开观察。默认关闭；执行模式按金额上限和用量窗口决定是否暂缓。",
   scheduler:
     "System-wide limits of schedules: how close two fires may be, and the run timeout of schedules that follow the default.",
@@ -82,6 +85,7 @@ export function SettingsPage({ sub }: { sub: string }) {
       {page === "catalog" && <CatalogCard />}
       {page === "channels" && <ChannelsSection />}
       {page === "chat" && <ChatSettingsSection />}
+      {page === "security" && (inner === "audit" ? <OutboundReviewAudit /> : <SecuritySettingsSection />)}
       {page === "cost" && <CostGuardSettingsSection />}
       {page === "scheduler" && <SchedulerSection />}
       {page === "vault" && <><VaultSettingsSection /><MemorySettingsSection /></>}

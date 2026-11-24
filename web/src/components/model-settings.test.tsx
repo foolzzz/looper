@@ -46,7 +46,7 @@ beforeEach(() => {
     prices: { as_of: "", sources: [], models: {} },
     limits: { api_formats: [{ family: "anthropic", label: "Anthropic", protocols: [{ protocol: "anthropic-messages", label: "Anthropic Messages" }] }, { family: "openai", label: "OpenAI", protocols: [{ protocol: "openai-responses", label: "OpenAI Responses" }, { protocol: "openai-chat", label: "OpenAI Chat Completions" }] }],  name_max_chars: 100, models_max: 50, price_fields: PRICE_FIELDS, model_fields: [],
       protocols: ["openai-chat", "anthropic-messages", "openai-responses"], auth_kinds: ["api_key", "oauth"],
-      effort_levels: ["low", "high"], role_capabilities: { manager: [], planner: [], worker: [], reviewer: [], processor: [], advisor: [], advice_check: [], leads_check: [], memory_retro: [] },
+      effort_levels: ["low", "high"], role_capabilities: { manager: [], planner: [], worker: [], reviewer: [], processor: [], advisor: [], advice_check: [], leads_check: [], outbound_check: [], memory_retro: [] },
       secret_mask: "***", provider_env_owned: [] },
   };
   vi.stubGlobal("confirm", vi.fn(() => true));
