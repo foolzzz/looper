@@ -308,3 +308,36 @@ def test_run_waits_for_project_switch_transaction(tmp_path, monkeypatch):
         assert result['state'] == 'cancelled' and result['cancel_reason'] == 'task_ended'
         no_spawn.assert_not_awaited()
     run_db(check, monkeypatch, timeout=30)
+
+
+@pytest.mark.parametrize("metadata", [
+    {"model_reported": "claude-haiku-5-5"},
+    {"model_reported": "claude-opus-5-5", "unknown_price_models": ["claude-haiku-5-5", "other-unknown"]},
+])
+def test_unknown_task_spend_warns_when_reserving_an_explorer(tmp_path, monkeypatch, caplog, metadata):
+    async def check(pool):
+        service, parent = await setup(pool, tmp_path, monkeypatch, task_budget_usd=1)
+        unknown = await llm_records.start_record(agent_id="worker-previous", task_id="t", pool=pool)
+        await llm_records.finish_record(unknown, status="completed", model="haiku", metadata=metadata, pool=pool)
+        await service.admit(parent, brief(), key="unknown-task-cost", budget_usd=.1)
+        assert "claude-haiku-5-5" in caplog.text and "task spend cap" in caplog.text
+        if metadata.get("unknown_price_models"):
+            assert "other-unknown" in caplog.text
+    run_db(check, monkeypatch)
+
+
+@pytest.mark.parametrize("metadata", [
+    {"model_reported": "claude-haiku-5-5"},
+    {"model_reported": "claude-opus-5-5", "unknown_price_models": ["claude-haiku-5-5", "other-unknown"]},
+])
+def test_unknown_parent_spend_warns_during_child_settlement(tmp_path, monkeypatch, caplog, metadata):
+    async def check(pool):
+        service, parent = await setup(pool, tmp_path, monkeypatch)
+        import json
+        await pool.execute("UPDATE llm_records SET model='haiku', metadata=$2::jsonb WHERE id=$1",
+                           parent.parent.record_id, json.dumps(metadata))
+        await service.enforce_parent_budget(parent.parent.record_id, .5)
+        assert "claude-haiku-5-5" in caplog.text and "parent spend cap" in caplog.text
+        if metadata.get("unknown_price_models"):
+            assert "other-unknown" in caplog.text
+    run_db(check, monkeypatch)

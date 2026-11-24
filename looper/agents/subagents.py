@@ -25,6 +25,7 @@ from ..db.agent_spawns import FINISHED, CancelReason, SpawnState
 from ..db.tasks import ACTIVE_STATUSES
 from . import admission, spawn
 from .agent_settings import Access, AgentType, Launch, load_agent_settings
+from .run_usage import CostStatus, cost_status
 from .runtimes import ReadOnly
 from .spawn import ChildFailure, ChildResult, ChildRun, MIN_RUN_USD, SpawnKind, SpawnParent
 
@@ -100,6 +101,15 @@ def _brief(value: Any, directory: Path) -> dict[str, Any]:
 
 def _number(value: Any) -> bool:
     return type(value) in (int, float) and math.isfinite(value) and value >= 0
+
+
+def _unknown_models(record: Mapping[str, Any] | None) -> str:
+    record = record or {}
+    metadata = record.get("metadata") or {}
+    if isinstance(metadata, str):
+        metadata = json.loads(metadata)
+    return ", ".join(metadata.get("unknown_price_models") or
+                     [metadata.get("model_reported") or record.get("model") or "unknown"])
 
 
 class SpawnService:
@@ -210,11 +220,23 @@ class SpawnService:
                 raise Refused(RefusalReason.LIMIT_TASK, "per-task explorer limit reached")
             requested = budget_usd if budget_usd is not None else (project.get("subagent_budget_usd") or settings.max_budget_usd or .5)
             limits = [requested, (project.get("subagent_task_budget_usd") or 3) - usage["task_committed"]]
-            if caller.budget_usd is not None and caller.spent_usd is not None:
-                limits.append(caller.budget_usd - caller.spent_usd - usage["parent_committed"])
+            if caller.budget_usd is not None:
+                if cost_status(caller.spent_usd) is CostStatus.UNKNOWN:
+                    logger.warning("model %s: parent spend cap cannot be verified: cost unknown (record %s)",
+                                   _unknown_models(parent), caller.parent.record_id)
+                else:
+                    limits.append(caller.budget_usd - caller.spent_usd - usage["parent_committed"])
             if project.get("task_budget_usd") is not None:
-                spent = await conn.fetchval(f"SELECT COALESCE(sum(cost_usd), 0) FROM llm_records WHERE task_id = $1 AND {llm_records.TASK_SPEND}", caller.parent.task_id)
-                limits.append(project["task_budget_usd"] - float(spent) - usage["task_reserved"] - caller.unrecorded_usd)
+                costs = await conn.fetchrow(
+                    f"SELECT COALESCE(sum(cost_usd), 0) AS spent, array_agg(DISTINCT COALESCE("
+                    f"NULLIF(metadata->>'unknown_price_models', '[]'), metadata->>'model_reported', model, 'unknown')) "
+                    f"FILTER (WHERE cost_usd IS NULL AND status <> 'running') AS unknown_models "
+                    f"FROM llm_records WHERE task_id = $1 AND {llm_records.TASK_SPEND}", caller.parent.task_id)
+                if costs["unknown_models"]:
+                    logger.warning("models %s: task spend cap cannot be verified: cost unknown (task %s)",
+                                   ", ".join(sorted(costs["unknown_models"])), caller.parent.task_id)
+                limits.append(project["task_budget_usd"] - float(costs["spent"]) - usage["task_reserved"]
+                              - caller.unrecorded_usd)
             budget = min(limits)
             if budget < MIN_RUN_USD - 1e-9:
                 raise Refused(RefusalReason.BUDGET, "less than the minimum explorer budget remains")
@@ -441,10 +463,13 @@ class SpawnService:
 
     async def enforce_parent_budget(self, parent_record_id: int, cap: float, spent_usd: float | None = None) -> None:
         """Soft-stop a parent when its own spend plus completed child spend exceeds its cap."""
-        if spent_usd is None:
-            spent_usd = await self.pool.fetchval("SELECT cost_usd FROM llm_records WHERE id=$1", parent_record_id)
-        if spent_usd is None:
-            return
+        if cost_status(spent_usd) is CostStatus.UNKNOWN:
+            parent = await self.pool.fetchrow("SELECT cost_usd, model, metadata FROM llm_records WHERE id=$1", parent_record_id)
+            spent_usd = parent["cost_usd"] if parent else None
+            if cost_status(spent_usd) is CostStatus.UNKNOWN:
+                logger.warning("model %s: parent spend cap cannot be verified: cost unknown (record %s)",
+                               _unknown_models(parent), parent_record_id)
+                return
         children = await self.pool.fetchval("SELECT COALESCE(sum(spent_usd),0) FROM agent_spawns WHERE parent_record_id=$1 AND kind='explorer'", parent_record_id)
         if float(spent_usd) + float(children) > cap and self.stop_parent:
             await self.stop_parent(parent_record_id)

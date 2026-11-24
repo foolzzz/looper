@@ -263,7 +263,7 @@ def counts(checked: Checked | None, *, cost_usd: float | None) -> dict[str, Any]
             "check_dropped": sum(v.verdict == "drop" for v in verdicts),
             "check_fixed": sum(v.verdict == "fix" for v in verdicts),
             "check_failed": checked is None or checked.state != "checked",
-            "check_cost_usd": round(cost_usd or 0.0, 6)}
+            "check_cost_usd": round(cost_usd, 6) if cost_usd is not None else None}
 
 
 def apply(items: Sequence[dict[str, Any]], checked: Checked, *, record_id: int | None) -> None:
