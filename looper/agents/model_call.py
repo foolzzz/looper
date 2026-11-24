@@ -19,6 +19,7 @@ from .spawn import ChildFailure, ChildRun, SpawnParent
 
 if TYPE_CHECKING:
     from .processor import ProcessorRun
+    from .failures import Failure
 
 T = TypeVar("T")
 
@@ -45,6 +46,7 @@ class Execution:
     reason: str = ""
     models: tuple[str, ...] = ()
     profile: Mapping[str, Any] | None = None
+    engine_failure: Failure | None = None
 
     def round(self) -> dict[str, Any]:
         return {"record_id": self.record_id, "cost_usd": self.cost_usd, "models": list(self.models),
@@ -124,7 +126,8 @@ class SubscriptionBackend:
                     ProcessorFailure.BUDGET: CallFailure.BUDGET, ProcessorFailure.FAILED: CallFailure.RUNTIME,
                     ProcessorFailure.BLOCKED: CallFailure.BLOCKED}
         return Execution(done.reply, done.record_id, done.cost_usd,
-                         failures[done.failure] if done.failure is not None else None, done.detail, profile=done.profile)
+                         failures[done.failure] if done.failure is not None else None, done.detail, profile=done.profile,
+                         engine_failure=done.engine_failure)
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -171,7 +174,7 @@ def processor_result(result: CallResult[str]) -> ProcessorRun:
     done = result.execution
     return ProcessorRun(result.value if isinstance(result, CallOk) else None, done.record_id, done.cost_usd,
                         failures.get(result.failure, ProcessorFailure.FAILED) if isinstance(result, CallFailed) else None,
-                        done.reason, done.profile)
+                        done.reason, done.profile, done.engine_failure)
 
 
 async def call(request: Request, *, parse: Callable[[str], T], backend: Backend | None = None) -> CallResult[T]:

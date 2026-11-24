@@ -1,3 +1,4 @@
+import { TaskFailureHolds } from "@/components/task-failure-holds";
 import { type CSSProperties, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   ArrowLeft,
@@ -854,6 +855,8 @@ function OverviewTab({
     <div className="space-y-6 p-5">
       <TaskGates task={task} onChanged={onGateChanged} />
       <TaskWaits task={task} onChanged={onContinued} />
+      {task.status === "failed" && (task.fail_kind === "environment" || task.fail_kind === "quota_exhausted") &&
+        <p role="status" className="text-sm text-destructive">{task.fail_kind === "environment" ? "运行环境需要修复后重启任务。" : "额度等待已达到任务时限。"}</p>}
       {task.status === "failed" && task.fail_kind === "task_budget" && (
         <ContinueAtCap
           taskId={task.task_id}
@@ -1290,6 +1293,7 @@ function TaskRoles({ task, onEdited }: { task: TaskDetail; onEdited: () => void 
 type BadgeVariant = "default" | "success" | "warning" | "destructive" | "outline";
 
 const JOURNAL_KINDS: Record<JournalEntry["kind"], { label: string; variant: BadgeVariant }> = {
+  failure_hold: { label: "失败处理", variant: "warning" },
   step_accepted: { label: "Accepted", variant: "success" },
   step_failed: { label: "Failed", variant: "destructive" },
   step_retry: { label: "Retry", variant: "warning" },
@@ -2563,7 +2567,11 @@ function TaskDetailPage({ taskId, gateStep, tab: tabParam, focusStep, onTab, roo
         )}
         {task && tab === "run-tree" && <RunTree taskId={taskId} refreshKey={`${task.status}:${task.cost?.runs}:${task.cost?.running}`} />}
         {task && tab === "pipeline" && (
-          <PipelineTab task={task} runs={taskRuns.runs} onOpenGate={openGate} pinned={focusStep} />
+          <>
+            {(task.holds !== undefined || task.journal?.some(entry => entry.kind === "failure_hold")) && <div className="p-4"><TaskFailureHolds taskId={taskId} holds={task.holds ?? []}
+              onChanged={() => { void fetchTaskDetail(taskId).then(value => { setTask(value); setActionError(""); }, error => setActionError(String(error))); }} /></div>}
+            <PipelineTab task={task} runs={taskRuns.runs} onOpenGate={openGate} pinned={focusStep} />
+          </>
         )}
         {task && tab === "room" && <TaskRoomTab key={`${task.task_id}:${runs}`} task={task} filter={roomFilter} role={roomRole} onFilter={onRoomFilter} />}
         {task && tab === "agents" && (

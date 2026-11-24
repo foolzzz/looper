@@ -83,6 +83,7 @@ def _step(step: PlanStep) -> dict[str, Any]:
         "gate": None if step.gate is None else _value(step.gate.state),
         "wait": None if step.wait is None else {"state": _value(step.wait.state),
                                                 "outcome": _value(step.wait.outcome)},
+        **({"failure_hold": True} if step.failure_hold is not None else {}),
     }
 
 
@@ -111,13 +112,15 @@ class _Step:
     result: dict[str, Any]
     gate: _Gate | None
     wait: _Wait | None
+    # Readiness needs only hold presence, never its failure evidence. Missing on older snapshots means no hold.
+    failure_hold: bool | None = None
 
     @classmethod
     def of(cls, raw: Mapping[str, Any]) -> _Step:
         wait = raw["wait"]
         return cls(raw["id"], raw["key"], raw["kind"], raw["status"], list(raw["depends_on"]), raw["ready_when"],
                    raw["reviews"], dict(raw["result"]), None if raw["gate"] is None else _Gate(raw["gate"]),
-                   None if wait is None else _Wait(wait["state"], wait["outcome"]))
+                   None if wait is None else _Wait(wait["state"], wait["outcome"]), raw.get("failure_hold"))
 
 
 def _repo_kind(repo: Repo | Unusable) -> str:
