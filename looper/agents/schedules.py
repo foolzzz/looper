@@ -1079,7 +1079,10 @@ async def update_schedule(schedule_id: str, data: dict[str, Any], *, now: dateti
             if (rule.text != row["cron"] or zone_name != row["timezone"]
                     or fields.get("success_deadline", row["success_deadline"]) != row["success_deadline"]):
                 fields["rule_changed_at"] = now  # so does it from a new rule, zone or deadline
-            await db_schedules.update_schedule(conn, schedule_id, fields, profiles=profiles, task_limits=task_limits)
+            from .cost_guard_settings import cached as guard_settings
+
+            await db_schedules.update_schedule(conn, schedule_id, fields, profiles=profiles, task_limits=task_limits,
+                                               snooze_days=guard_settings().unanswered.snooze_days)
             if stream_changes:
                 await db_subs.update(conn, schedule_id, stream_changes)
             if kind == Kind.SUBSCRIPTION.value and changes_config(row, fields, stream, profiles):

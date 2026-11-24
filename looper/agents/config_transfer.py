@@ -2708,8 +2708,11 @@ class _Importer:
                 fields.update(enabled=False, next_fire_at=None)
                 if (values["cron"], values["timezone"]) != (row["cron"], row["timezone"]):
                     fields["rule_changed_at"] = datetime.now(UTC)
+                from .cost_guard_settings import cached as guard_settings
+
                 await db_schedules.update_schedule(self.conn, row["id"], fields, profiles=profile_ids,
-                                                   task_limits=limits)
+                                                   task_limits=limits,
+                                                   snooze_days=guard_settings().unanswered.snooze_days)
 
     def schedule_notes(self) -> None:
         if self.disabled_schedules:
