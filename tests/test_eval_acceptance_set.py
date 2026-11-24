@@ -388,6 +388,51 @@ def test_calc_checker_fails_a_hanging_candidate(tmp_path: Path, monkeypatch: pyt
                 pass
 
 
+def test_checker_timeout_kills_a_grandchild_after_the_leader_exits(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """The direct child exits after forking a sleeper that keeps the pipe. The grandchild must not survive."""
+    limit = 0.5
+    monkeypatch.setattr(eval_tasks, "_CHECKER_TIMEOUT_S", limit)
+    (tmp_path / "test_calc.py").write_text(_TEST_CALC, encoding="utf-8")
+    (tmp_path / "calc.py").write_text(
+        "import os, time\n"
+        "from pathlib import Path\n"
+        "child = os.fork()\n"
+        "if child == 0:\n"
+        "    Path('child.pid').write_text(str(os.getpid()))\n"
+        "    time.sleep(60)\n"
+        "    raise SystemExit(0)\n"
+        "Path('parent.pid').write_text(str(os.getpid()))\n"
+        "os._exit(0)\n",
+        encoding="utf-8")
+    pids: list[int] = []
+    started = time.monotonic()
+    try:
+        reason = _check_calc(tmp_path)
+        elapsed = time.monotonic() - started
+        pids = _recorded_pids(tmp_path)
+        assert reason == f"calc.py timed out after {limit:g} s"
+        assert elapsed < 5
+        assert len(pids) == 2
+        deadline = time.monotonic() + 2
+        while time.monotonic() < deadline and not all(_dead(pid) for pid in pids):
+            time.sleep(0.05)
+        assert all(_dead(pid) for pid in pids)
+    finally:
+        for pid in pids or _recorded_pids(tmp_path):
+            try:
+                os.killpg(pid, signal.SIGKILL)
+            except (ProcessLookupError, PermissionError):
+                pass
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            try:
+                os.waitpid(pid, os.WNOHANG)
+            except ChildProcessError:
+                pass
+
+
 def test_slug_checker_fails_a_hanging_candidate(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     limit = 0.5
     monkeypatch.setattr(eval_tasks, "_CHECKER_TIMEOUT_S", limit)

@@ -2232,22 +2232,26 @@ _CHECKER_TIMEOUT_S = 20.0
 
 
 def _kill_checker_group(process: subprocess.Popen[str]) -> None:
-    """SIGKILL the child's process group, then reap the child so it cannot stay a zombie."""
-    if process.poll() is None:
+    """SIGKILL the child's process group, then reap the child so it cannot stay a zombie.
+
+    The leader may already have exited while a grandchild still holds the pipes.
+    Reaping it first would skip the group and leave that grandchild running.
+    """
+    # ``start_new_session`` makes this pid the process group id for the whole session.
+    try:
+        os.killpg(process.pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+    except PermissionError:
         try:
-            os.killpg(process.pid, signal.SIGKILL)
+            process.kill()
         except ProcessLookupError:
             pass
-        except PermissionError:
-            try:
-                process.kill()
-            except ProcessLookupError:
-                pass
     try:
         process.wait(timeout=5)
     except subprocess.TimeoutExpired:
         try:
-            process.kill()
+            os.killpg(process.pid, signal.SIGKILL)
         except ProcessLookupError:
             pass
         try:
