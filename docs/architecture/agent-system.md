@@ -7020,8 +7020,11 @@ direct chat. It names what waits (the needs-you summary), reminders due that
 local day, and proactive messages deferred into the digest (`decision`
 `digest`). Every brief reads from the first attempt's dates (Monday also
 Saturday and Sunday) through the day being sent, except digest rows already
-recorded by id in `morning_brief_consumed`. The claim stores the ids that
-read returned, in that same write. A sent or uncertain brief records them in
+recorded by id in `morning_brief_consumed`. A row whose `schedule_id`
+is a schedule the needs section lists is left out of the deferred-message
+section; that schedule's line says how many deferred pushes it has
+(「，另有 N 条推迟的推送」). The claim stores the ids that
+read returned, including those rows, in that same write. A sent or uncertain brief records them in
 the same transaction as its row. A refusal records none and clears the stored
 ids, so a rejected Tuesday brief's digest is still in Wednesday's. A sender
 that stops before the record is `uncertain` on restart, and that recovery
