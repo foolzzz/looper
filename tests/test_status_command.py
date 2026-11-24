@@ -141,8 +141,9 @@ def test_only_the_operator_is_answered_and_the_reply_is_not_stored(
         built.append(kwargs["source"])
         return {"read_at": "x", "text": "截至 11-22 15:05\n管家：空闲；排队 0 条", "sections": []}
 
+    identity_channels = []
     async def operator_id(channel_id: str) -> str:
-        assert channel_id == "channel-telegram"
+        identity_channels.append(channel_id)
         return "7"
 
     monkeypatch.setattr(status_card, "_enabled", True)
@@ -180,6 +181,7 @@ def test_only_the_operator_is_answered_and_the_reply_is_not_stored(
             await bus.shutdown()
 
     asyncio.run(run())
+    assert identity_channels == ["channel-telegram"] * 3
 
 
 @pytest.mark.parametrize("mid_turn_enabled", [False, True])

@@ -106,8 +106,9 @@ def test_people_query_completeness_and_external_failure(tmp_path, monkeypatch, k
     async def run(pool):
         await channel_configs.set_config("channel-lark_bot", {"config": {"app_id": "cli_example"}})
         await channel_configs.set_bot_token("channel-lark_bot", "example-test-secret")
+        queries = []
         async def search(query, *args):
-            assert query == "Example"
+            queries.append(query)
             if fails:
                 raise lark_cli.LarkCliError("Directory unavailable")
             return [PERSON] if kind == "lark" else ([PERSON], complete)
@@ -120,6 +121,7 @@ def test_people_query_completeness_and_external_failure(tmp_path, monkeypatch, k
                 assert "result" not in answer
             else:
                 assert status == 200 and answer["result"] == {"people": [PERSON], "complete": complete}
+            assert queries == ["Example"]
     run_db(run, monkeypatch, setup=_seed, timeout=30)
 
 

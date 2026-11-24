@@ -75,14 +75,16 @@ def test_only_own_worker_end_updates_the_session_idle_clock(monkeypatch, tmp_pat
         monkeypatch.setattr(agent, "_clock", lambda: clock[0])
         group = agent._router.session(SessionKey(SessionKind.GROUP, "channel-lark", "oc_idle_group"))
         entered, release = asyncio.Event(), asyncio.Event()
+        sessions = []
         async def handle(envelope):
-            assert agent._session_now() is group
+            sessions.append(agent._session_now())
             entered.set()
             await release.wait()
         agent._handle = handle
         agent._router.dispatch(group, _user())
         try:
             await entered.wait()
+            assert len(sessions) == 1 and sessions[0] is group
             assert main.turn_ended_at is None and group.turn_ended_at is None
             clock[0] = 1900.0
             release.set()

@@ -167,8 +167,9 @@ def test_message_during_close_waits_before_preparing_resident(manager, tmp_path,
             await finish.wait()
             agent._claude.started = False
             return True
+        resident_states = []
         async def answer(*args):
-            assert not agent._claude.started
+            resident_states.append(agent._claude.started)
             answered.set()
         monkeypatch.setattr(agent._claude, "try_stop_if_idle", close)
         monkeypatch.setattr(agent, "_answer_user_message", answer)
@@ -185,6 +186,7 @@ def test_message_during_close_waits_before_preparing_resident(manager, tmp_path,
             finish.set()
             assert await closing
             await asyncio.wait_for(answered.wait(), 2)
+            assert resident_states == [False]
         finally:
             finish.set()
             await closing
@@ -299,13 +301,15 @@ def test_sweep_keeps_sleeping_owner_routable_and_retires_without_a_timer(tmp_pat
             assert fleet.state(agent.agent_id) == {
                 "running": False, "busy": False, "healthy": True, "sync": "ok"}
             report_seen = asyncio.Event()
+            report_types = []
             async def handle_report(envelope):
-                assert envelope.message_type == MessageType.TASK_ACCEPTED
+                report_types.append(envelope.message_type)
                 report_seen.set()
             monkeypatch.setattr(agent, "_handle", handle_report)
             await bus.publish(MessageEnvelope.create(source=channel_address("web"), target=agent.agent_address,
                               message_type=MessageType.TASK_ACCEPTED, payload={"task_id": "t"}))
             await asyncio.wait_for(report_seen.wait(), 1)
+            assert report_types == [MessageType.TASK_ACCEPTED]
             assert not fleet.default._claude.started
             if retire == "delete":
                 rows.clear()
