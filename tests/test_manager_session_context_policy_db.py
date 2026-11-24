@@ -146,3 +146,25 @@ def test_upgrade_marks_existing_histories_legacy_and_is_idempotent(monkeypatch):
             assert not await connection.schema_change_pending(conn)
 
     run_db(check, monkeypatch, timeout=30)
+
+
+def test_unclassified_injected_notes_are_not_a_routed_input_grant(routed, tmp_path):
+    async def check(pool):
+        rig = _Rig(tmp_path)
+        route = SessionKey(SessionKind.DM, "channel-lark", "oc_synthetic_notes")
+        resident = _Resident("session-notes")
+        session = rig.manager._router.session(route)
+        session.claude = resident
+        await rig.start()
+        current = rig.manager._current.set(session)
+        try:
+            envelope = _lark("Hello", route.chat, OTHER, group=False)
+            await rig.manager._run_turn("Hello", envelope, note="PRIVATE_UNCLASSIFIED_NOTE")
+            assert len(resident.turns) == 1
+            assert "Hello" in resident.turns[0]
+            assert "PRIVATE_UNCLASSIFIED_NOTE" not in resident.turns[0]
+        finally:
+            rig.manager._current.reset(current)
+            await rig.close()
+
+    run_db(check, routed, timeout=30)

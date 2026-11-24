@@ -428,6 +428,7 @@ class Ask:
     turn: Turn | None = None
     retried: bool = False  # the resume retry: running goes back to starting
     quoted: lark_quote.QuoteRead | None = None  # what the message quotes, read once (``_read_quote``)
+    stop_notice: str = ""  # session-owned code notice; generic notes are not a routed input grant
 
 
 @dataclass
@@ -1694,6 +1695,10 @@ class ManagerAgent:
         comes back as an ``action``), stored, the tools probed, then the Manager's role, session, agent settings,
         library, prompt and the message Claude is sent. With ``ask`` (the resume retry, or a caller without a chat
         message) only the second half runs."""
+        restricted = session_visibility.for_session(self._session_now().key) is not None
+        if restricted and ask is not None and ask.turn is not None and (
+                lanes.manager_lane(ask.turn.origin) is lanes.Lane.BACKGROUND):
+            raise _CompletionNotTaken()  # no background model input is on the allowlist
         if ask is None:
             text = envelope.payload.get("text", "")
             if is_new_session_command(text):
@@ -1801,9 +1806,11 @@ class ManagerAgent:
             waiting = (self.ops.begin_turn(turn, binding=token.binding, session_key=self._session_now().key)
                        if self.ops is not None and not self._mid_turn.native_started(token) else "")
             ask = Ask(text, "\n".join(part for part in (waiting, gate.note, stopped_note) if part), turn,
-                      quoted=quoted)
+                      quoted=quoted, stop_notice=stopped_note)
         else:
             await token.keep("resident_settlement", self._settle_native_inputs(token), 60)
+        if restricted:
+            ask = replace(ask, note=ask.stop_notice)
         token.prepared_ask = ask
         await token.step("load_db_config", self._load_db_config())
         if self._turned_off:  # the fleet has not stopped this instance yet: it must not act as the Manager

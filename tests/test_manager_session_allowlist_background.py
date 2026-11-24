@@ -10,6 +10,8 @@ from looper.agents import completion_events
 from looper.agents.session_routing import SessionKey, SessionKind
 from looper.agents.tiers import background_turn
 from looper.agents.tiers.manager import ManagerAgent, ManagerConfig
+from looper.agents.tiers.manager import Ask, _CompletionNotTaken
+from looper.agents.ops import Turn, TurnOrigin
 
 
 @pytest.mark.parametrize("kind", [SessionKind.GROUP, SessionKind.DM])
@@ -58,5 +60,17 @@ def test_main_completion_still_runs_the_model_path_and_its_existing_fallback(mon
         model.assert_awaited_once()
         assert model.call_args.args[:2] == (rows, batch)
         fallback.assert_awaited_once_with(batch, "empty_reply", {"rows": rows}, rejected=False)
+
+    asyncio.run(check())
+
+
+def test_unlisted_background_input_cannot_bypass_the_completion_entry_point(tmp_path):
+    async def check():
+        manager = ManagerAgent(config=ManagerConfig(work_dir=tmp_path), runtime_root=tmp_path)
+        session = manager._router.session(SessionKey(SessionKind.DM, "channel-lark", "oc_synthetic_background"))
+        manager._current.set(session)
+        with pytest.raises(_CompletionNotTaken):
+            await manager._prepare_turn(None, None, ask=Ask(
+                "PRIVATE_BACKGROUND_INPUT", turn=Turn(None, None, origin=TurnOrigin.COMPLETION)))
 
     asyncio.run(check())
