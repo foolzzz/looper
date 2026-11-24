@@ -165,6 +165,7 @@ export const memoryEdit = async (candidate: string, contentHash: string, changes
 export const memoryRetry = async (candidate: string) => (await call<{ candidate: MemoryDetail }>("retry", { candidate })).candidate;
 export const memoryRevive = async (candidate: string) => (await call<{ candidate: MemoryDetail }>("revive", { candidate })).candidate;
 export const memoryDelete = (candidate: string) => call<{ candidate: string; deleted: boolean }>("delete", { candidate });
+export const memoryProposeFromLead = async (lead: string, kind?: string) => (await call<{ candidate: MemoryDetail }>("propose_from_lead", { lead, ...(kind ? { kind } : {}) })).candidate;
 export const memorySettingsGet = () => call<MemorySettingsView>("settings_get");
 export const memoryCheck = () => call<MemoryCheck>("check");
 
