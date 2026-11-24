@@ -7,6 +7,8 @@ import os
 from pathlib import Path
 from unittest.mock import AsyncMock
 
+import pytest
+
 from looper.agents.housekeeping import prune_logs, prune_runner_files, rotate
 
 
@@ -72,8 +74,13 @@ def test_runner_cleanup_keeps_current_and_recent_source(tmp_path: Path) -> None:
     assert current.exists() and recent.exists() and other.exists() and not old.exists()
 
 
-def test_hourly_housekeeping_prunes_expired_chat_attachments_and_reports_count(tmp_path, monkeypatch, caplog):
+@pytest.mark.parametrize("admission_on", [False, True])
+def test_hourly_housekeeping_prunes_expired_chat_attachments_and_reports_count(tmp_path, monkeypatch, caplog,
+                                                                            admission_on):
     from looper.agents import chat_attachments, housekeeping
+
+    monkeypatch.setattr(housekeeping.admission, "enabled", lambda: admission_on)
+    admission_prune = AsyncMock(return_value=3)
 
     @asynccontextmanager
     async def transaction():
@@ -100,6 +107,7 @@ def test_hourly_housekeeping_prunes_expired_chat_attachments_and_reports_count(t
     monkeypatch.setattr(skill_proposal_notice, "notify_pending", AsyncMock(return_value=False))
     outbox_purge = AsyncMock(return_value=2)
     monkeypatch.setattr(housekeeping.channel_outbox, "purge", outbox_purge)
+    monkeypatch.setattr(housekeeping.provider_admission, "prune", admission_prune)
     old = chat_attachments.message_dir(tmp_path, "web", "expired")
     fresh = chat_attachments.message_dir(tmp_path, "web", "recent")
     (old / "note.txt").write_text("old")
@@ -111,6 +119,8 @@ def test_hourly_housekeeping_prunes_expired_chat_attachments_and_reports_count(t
         report = asyncio.run(housekeeping.run_once(tmp_path, NOW, current_runner=None, commands=None))
     assert report.chat_attachments == 1 and report.skill_tombstones == 0 and report.failed_steps == {}
     assert report.channel_outbox == 2
+    assert report.provider_admission_events == (3 if admission_on else 0)
+    assert admission_prune.await_count == int(admission_on)
     outbox_purge.assert_awaited_once_with(NOW)
     tombstones.assert_awaited_once()
     expiry.assert_awaited_once_with(None, NOW)

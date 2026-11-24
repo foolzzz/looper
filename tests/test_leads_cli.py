@@ -48,3 +48,14 @@ def test_real_launch_environment_refuses_leads_cli(tmp_path, argv):
         env=env, cwd=tmp_path, capture_output=True, text=True, timeout=60)
     assert result.returncode == 4, result.stderr
     assert not (tmp_path / "runtime").exists()
+
+
+@pytest.mark.parametrize("options", [
+    ["--chat", "synthetic"], ["--days", "7"], ["--intents"],
+    ["--chat", "synthetic", "--intents"],
+    ["--chat", "synthetic", "--days", "31", "--intents"],
+])
+def test_intents_eval_export_validates_the_complete_option_group_before_connecting(monkeypatch, options):
+    monkeypatch.delenv("LOOPER_AGENT_RUN", raising=False)
+    monkeypatch.setattr(cli, "_load_ops", lambda _: pytest.fail("invalid options must not connect"))
+    assert cli.main(["leads", "eval-export", "--out", "set.jsonl", *options]) == 2

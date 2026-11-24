@@ -19,7 +19,7 @@ import stat
 import subprocess
 import threading
 import time
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any
@@ -265,7 +265,8 @@ def _relative(config: VaultConfig, raw: str, *, what: str, resolve: bool = True)
     return rel
 
 
-async def search(config: VaultConfig, query: str, limit: int | None = None) -> dict:
+async def search(config: VaultConfig, query: str, limit: int | None = None, *,
+                 under: Sequence[str] | None = None) -> dict:
     """Search Markdown paths and text in a thread, within the scan and snippet limits."""
     if not isinstance(query, str) or not (words := query.lower().split()):
         raise OpError(ErrorCode.INVALID, "query must contain at least one word")
@@ -273,6 +274,19 @@ async def search(config: VaultConfig, query: str, limit: int | None = None) -> d
         limit = SEARCH_DEFAULT_LIMIT
     if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= SEARCH_MAX_LIMIT:
         raise OpError(ErrorCode.INVALID, f"limit must be from 1 to {SEARCH_MAX_LIMIT}")
+    folders: tuple[PurePosixPath, ...] | None = None
+    if under is not None:
+        if not isinstance(under, Sequence) or isinstance(under, (str, bytes)):
+            raise OpError(ErrorCode.INVALID, "under must be a list of vault-relative folders")
+        checked = []
+        for raw in under:
+            rel = _relative(config, raw, what="under folder")
+            if any((config.path.joinpath(*rel.parts[:n])).is_symlink() for n in range(1, len(rel.parts) + 1)):
+                raise OpError(ErrorCode.FORBIDDEN, "an under folder passes through a symbolic link")
+            if not (config.path / rel).is_dir():
+                raise OpError(ErrorCode.INVALID, "an under folder must exist")
+            checked.append(rel)
+        folders = tuple(checked)
 
     def scan() -> dict:
         results: list[dict] = []
@@ -283,6 +297,12 @@ async def search(config: VaultConfig, query: str, limit: int | None = None) -> d
                 truncated = True
                 break
             dirs[:] = sorted(d for d in dirs if not d.startswith(".") and not (Path(directory) / d).is_symlink())
+            if folders is not None:
+                relative = PurePosixPath(Path(directory).relative_to(config.path).as_posix())
+                dirs[:] = [d for d in dirs if any((relative / d).is_relative_to(folder)
+                                                or folder.is_relative_to(relative / d) for folder in folders)]
+                if not any(relative.is_relative_to(folder) for folder in folders):
+                    continue
             for filename in sorted(files):
                 if (time.monotonic() - started >= SEARCH_MAX_SECONDS
                         or total_bytes >= SEARCH_MAX_BYTES or scanned >= SEARCH_MAX_FILES):

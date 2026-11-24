@@ -45,7 +45,7 @@ def _item(root: Path, worker_id: str = "w1") -> MessageEnvelope:
 
 @asynccontextmanager
 async def _pool(root: Path, monkeypatch: pytest.MonkeyPatch, *runs: ScriptedRun,
-                timeout: int = 0, cap: float | None = None):
+                timeout: int = 0, cap: float | None = None, drain=None):
     calls: list[dict[str, Any]] = []
     remaining = iter(runs)
 
@@ -68,7 +68,7 @@ async def _pool(root: Path, monkeypatch: pytest.MonkeyPatch, *runs: ScriptedRun,
     bus = MessageBus(runtime_root=root)
     results: list[MessageEnvelope] = []
     bus.subscribe_topic(MessageType.WORK_RESULT, results.append)
-    pool = WorkerPool(config=WorkerConfig(), runtime_root=root)
+    pool = WorkerPool(config=WorkerConfig(), runtime_root=root, drain=drain)
     await pool.start(bus)
     try:
         yield pool, calls, results
@@ -84,6 +84,107 @@ async def _finish(pool: WorkerPool, root: Path, worker_id: str = "w1", *, attemp
     await pool._tasks[worker_id]
     await asyncio.sleep(0)  # the done callback releases the slot
     assert worker_id not in pool._slots and worker_id not in pool._active
+
+
+def test_account_wait_precedes_record_and_process_start(tmp_path, monkeypatch, agent_db):
+    from looper.agents import admission
+    from datetime import datetime, timezone
+
+    waiting, granted = asyncio.Event(), asyncio.Event()
+    grant_time = None
+
+    @asynccontextmanager
+    async def slot(provider_id, lane, *, owner, **kwargs):
+        assert provider_id == "prov-claude-subscription" and owner == "w1"
+        waiting.set()
+        await granted.wait()
+        yield
+
+    monkeypatch.setattr(admission, "slot", slot)
+    monkeypatch.setattr(admission, "enabled", lambda: True)
+    monkeypatch.setattr(admission, "recorded", AsyncMock())
+    run = ScriptedRun(_events())
+
+    async def scenario():
+        nonlocal grant_time
+        async with _pool(tmp_path, monkeypatch, run) as (pool, _, results):
+            execute_once = pool._execute_once
+
+            async def execute(ctx, fallbacks):
+                assert ctx.started_at >= grant_time  # queued time is not a kept run's execution time
+                return await execute_once(ctx, fallbacks)
+
+            monkeypatch.setattr(pool, "_execute_once", execute)
+            await pool._dispatch(_item(tmp_path))
+            await waiting.wait()
+            assert "w1" in pool._slots  # task limit is acquired before account admission
+            agent_db.start_record.assert_not_awaited()
+            assert run.launch_calls == 0
+            grant_time = datetime.now(timezone.utc)
+            granted.set()
+            await pool._tasks["w1"]
+            assert run.launch_calls == 1 and results[0].payload["status"] == "completed"
+
+    asyncio.run(asyncio.wait_for(scenario(), 5))
+
+
+@pytest.mark.parametrize("scope", ["turns", "runs"])
+def test_frozen_account_waiter_does_not_block_drain(tmp_path, monkeypatch, agent_db, scope):
+    from datetime import datetime, timedelta, timezone
+    from looper.agents import admission
+    from looper.agents.drain import DrainState, DrainScope
+    from looper.db import profile_registry, provider_limits
+
+    async def scenario():
+        c = admission.Controller()
+        c.active = True
+        provider = "prov-claude-subscription"
+        c.states[provider] = admission.Account(
+            state=admission.AdmissionState.FROZEN,
+            until=datetime.now(timezone.utc) + timedelta(hours=2),
+        )
+        monkeypatch.setattr(admission, "_controller", c)
+        monkeypatch.setattr(admission, "slot", c.slot)
+        monkeypatch.setattr(admission, "RECHECK_SECONDS", .01)
+        monkeypatch.setattr(profile_registry, "get_provider", AsyncMock(
+            return_value={"id": provider, "name": "Synthetic account", "max_concurrency": 1,
+                          "vendor_type": "anthropic"}))
+        monkeypatch.setattr(provider_limits, "windows", AsyncMock(return_value=[]))
+        monkeypatch.setattr(admission, "worker_lane", AsyncMock(return_value=admission.Lane.USER_TASK))
+        monkeypatch.setattr(admission, "recorded", AsyncMock())
+        waiting = asyncio.Event()
+        drain = DrainState()
+        run = ScriptedRun(_events(), hold=True)
+        async with _pool(tmp_path, monkeypatch, run, drain=drain) as (pool, _, results):
+            async def activity(*args):
+                if c.waiters:
+                    waiting.set()
+
+            monkeypatch.setattr(pool, "_activity", activity)
+            await pool._dispatch(_item(tmp_path))
+            task = pool._tasks["w1"]
+            await waiting.wait()
+            assert "w1" in pool._slots and len(c.waiters) == 1
+            agent_db.start_record.assert_not_awaited()
+            status = drain.begin(DrainScope(scope))
+            assert status["phase"] == "drained"
+            assert status["waiting"]["runs"] == []
+
+            # Even a recovered account cannot start this queued run during the drain.
+            c.states[provider] = admission.Account()
+            await c.wake()
+            await asyncio.sleep(.03)
+            assert run.launch_calls == 0 and not results
+            drain.cancel()
+            await c.wake()
+            await run.started.wait()
+            assert len(pool.drain_waiting()["runs"]) == 1
+            run.release.set()
+            await task
+            assert results[0].payload["status"] == "completed"
+            assert not c.running and not c.waiters
+
+    asyncio.run(asyncio.wait_for(scenario(), 5))
 
 
 def test_hosted_run_completes_without_a_process(tmp_path: Path, monkeypatch: pytest.MonkeyPatch,

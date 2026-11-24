@@ -324,3 +324,44 @@ def test_malformed_fields_drop_their_item_only_and_a_far_date_is_clamped():
     assert found.items[1]["valid_until"] == datetime(2026, 11, 21, tzinfo=ZoneInfo(ZONE))
     found = parsed_intents(intent(type=["dev_task"]), intent(confidence=[]), intent(title="kept"))
     assert dict(found.dropped) == {"unknown_type": 1, "bad_confidence": 1} and len(found.items) == 1
+
+
+@pytest.mark.parametrize("anchor", ["group", "base", "off"])
+def test_context_anchored_on_a_group_row_stays_inside_its_range(anchor):
+    first = row(3, "g", "first", minutes=3, parent="om_1")
+    group = row(4, "g", "group", minutes=4, parent="om_2")
+    if anchor != "off":
+        group.update(via_group=True, read_from=T + timedelta(minutes=2))
+        first.update(via_group=anchor == "group", read_from=T + timedelta(minutes=2))
+    base = row(5, "g", "base", minutes=5, parent="om_0")
+    parents = [row(n, "g", "old parent", minutes=-n) for n in range(3)]
+    before = [row(6, "g", "before", minutes=1), row(7, "g", "inside range", minutes=2)]
+    selected = extraction.select_context([first, group, base], before, parents)
+    seqs = {r["seq"] for r in selected}
+    if anchor == "group":
+        assert seqs == {0, 7}  # original-scope parent remains, old group parent and before do not
+    elif anchor == "base":
+        assert seqs == {0, 1, 6, 7}  # original anchor's parent and before retain their scope
+    else:
+        assert seqs == {0, 1, 2, 6, 7}
+
+
+def test_group_rows_are_labelled_and_the_note_is_added_only_with_them():
+    rows = [{**row(1, "g", "request", minutes=0), "via_group": True, "read_from": T},
+            row(2, "h", "mention", minutes=1, name="另一群")]
+    text, _ = render("intents", rows, context=[], participants=PEOPLE, known=[], zone_name=ZONE, text_max_chars=500)
+    assert "《发布群》（群 · 全部消息）" in text and "《另一群》（群）" in text
+    assert text.count(extraction.GROUP_LABEL) == 1
+    base = extraction.instructions("intents", "request", [])
+    assert extraction.instructions("intents", "request", [], group=False) == base
+    assert extraction.instructions("intents", "request", [], group=True) == base + "\n\n" + extraction.GROUP_REQUESTS_NOTE
+    assert extraction.instructions("leads", "request", [], group=True) == "request"
+
+
+@pytest.mark.parametrize("kind,sources,dropped", [("alert_triage", ["m1"], True), ("custom", ["m1"], True),
+    ("dev_task", ["m1"], False), ("bug_triage", ["m1"], False), ("alert_triage", ["m2"], False)])
+def test_a_group_row_intent_must_be_a_dev_task_or_a_bug(kind, sources, dropped):
+    found = parse("intents", json.dumps({"intents": [intent(type=kind, sources=sources)]}), REFS,
+                  now=NOW, valid_days=90, enabled_types=TYPES | {"custom"}, app_seqs=(), group_seqs={101})
+    assert len(found.items) == (0 if dropped else 1)
+    assert dict(found.dropped) == ({"group_type": 1} if dropped else {})

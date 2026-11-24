@@ -392,10 +392,11 @@ def test_turning_the_brief_off_during_the_last_operator_check_drops_the_claim(
         real_targets = morning_brief.operator_targets
 
         async def claim(conn: Any, local_date: date, channel_id: str, chat: str, now: datetime, *,
-                        attempts_limit: int, read_ids: list[int] | None = None) -> bool:
+                        attempts_limit: int, read_ids: list[int] | None = None,
+                        triage_ids: list[int] | None = None) -> bool:
             nonlocal claimed
             ok = await real_claim(conn, local_date, channel_id, chat, now, attempts_limit=attempts_limit,
-                                  read_ids=read_ids)
+                                  read_ids=read_ids, triage_ids=triage_ids)
             claimed = claimed or bool(ok)
             return ok
 
@@ -451,10 +452,11 @@ def test_a_refused_retry_switched_off_keeps_that_days_digest_for_the_next(
         real_targets = morning_brief.operator_targets
 
         async def claim(conn: Any, local_date: date, channel_id: str, chat: str, now: datetime, *,
-                        attempts_limit: int, read_ids: list[int] | None = None) -> bool:
+                        attempts_limit: int, read_ids: list[int] | None = None,
+                        triage_ids: list[int] | None = None) -> bool:
             nonlocal taken
             ok = await real_claim(conn, local_date, channel_id, chat, now, attempts_limit=attempts_limit,
-                                  read_ids=read_ids)
+                                  read_ids=read_ids, triage_ids=triage_ids)
             taken = taken or bool(ok)
             return ok
 

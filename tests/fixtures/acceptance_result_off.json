@@ -1,0 +1,51 @@
+{
+  "generated_at": "9912920e45b6519749547974e953716c0b6c7c32",
+  "planner": {
+    "completed": {
+      "summary": "## Delivered\nA report and its reader.\n\n## How to use\nOpen the report.\n\n## Verification\nThe reader was checked.\n\n## Open issues\nNone.",
+      "keys": [
+        "goal_id",
+        "plan_id",
+        "progress",
+        "status",
+        "summary",
+        "task_id"
+      ]
+    },
+    "failed": {
+      "summary": "## Why it ended\nThe reader could not be completed.\n\n## Done\n- s1: Report part 1.\n\n## Not done\n- s2 (failed): failed: Reader failed.\n- s3 (not started)",
+      "keys": [
+        "fail_kind",
+        "goal_id",
+        "outcome_failure_kind",
+        "plan_id",
+        "progress",
+        "status",
+        "summary",
+        "task_id"
+      ]
+    }
+  },
+  "notices": {
+    "completed": {
+      "lark_direct": "✅ 任务完成 · Create a report and its reader.\n## Delivered\nA report and its reader.\n## Process record\nDelivery is ready for review.\nBranch: report-fixture\n[https://dashboard.example.invalid/#tasks/task-fixture](https://dashboard.example.invalid/#tasks/task-fixture)",
+      "lark_group": "✅ 任务完成 · Create a report and its reader.\n## Delivered\nA report and its reader.\n\n## How to use\nOpen the report.\n\n## Verification\nThe reader was checked.\n\n## Open issues\nNone.\n## Process record\nDelivery is ready for review.\nBranch: report-fixture",
+      "telegram": "✅ 任务完成 · Create a report and its reader.\n## Delivered\nA report and its reader.\n## Process record\nDelivery is ready for review.\nBranch: report-fixture\nhttps://dashboard.example.invalid/#tasks/task-fixture"
+    },
+    "failed": {
+      "lark_direct": "❌ 任务失败 · Create a report and its reader.\n## Why it ended\nThe reader could not be completed.\n## Process record\nDelivery is ready for review.\nBranch: report-fixture\n[https://dashboard.example.invalid/#tasks/task-fixture](https://dashboard.example.invalid/#tasks/task-fixture)",
+      "lark_group": "❌ 任务失败 · Create a report and its reader.\n## Why it ended\nThe reader could not be completed.\n\n## Done\n- s1: Report part 1.\n\n## Not done\n- s2 (failed): failed: Reader failed.\n- s3 (not started)\n## Process record\nDelivery is ready for review.\nBranch: report-fixture",
+      "telegram": "❌ 任务失败 · Create a report and its reader.\n## Why it ended\nThe reader could not be completed.\n## Process record\nDelivery is ready for review.\nBranch: report-fixture\nhttps://dashboard.example.invalid/#tasks/task-fixture"
+    }
+  },
+  "schedules": {
+    "completed": {
+      "report": "定时任务「Daily report」（项目 Report project）2026-11-22 12:00 UTC 的运行：完成\n## Delivered\nA report and its reader.\n## How to use\nOpen the report.\n## Verification\nThe reader was checked.\n## Open issues\nNone.\n花费 $0 · https://dashboard.example.invalid/#tasks/task-fixture",
+      "deliverable": "A report and its reader."
+    },
+    "failed": {
+      "report": "定时任务「Daily report」（项目 Report project）2026-11-22 12:00 UTC 的运行：失败\n## Why it ended\nThe reader could not be completed.\n## Done\n- s1: Report part 1.\n## Not done\n- s2 (failed): failed: Reader failed.\n- s3 (not started)\n花费 $0 · https://dashboard.example.invalid/#tasks/task-fixture",
+      "deliverable": "今天的「Daily report」没能按时生成。\n原因：\nThe reader could not be completed."
+    }
+  }
+}

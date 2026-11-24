@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Loader2 } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -14,6 +14,9 @@ import {
   intentBindingsDelete, intentBindingsList, intentBindingsPut,
   intentTypesArchive, intentTypesCreate, intentTypesHistory, intentTypesList, intentTypesRollback,
   intentTypesSave, intentTypesSetProjectTemplate,
+  intentGroupReadsDelete, intentGroupReadsList, intentGroupReadsPreview, intentGroupReadsPut,
+  intentGroupReadsSettingsPut, leadsChats,
+  type FollowedGroups, type FollowedGroupPreview, type LeadChat,
   intentsBuild, intentsList, intentsReject, intentsSettingsGet, intentsStats, intentsUpdate,
   type AlertSender, type Intent, type IntentBinding, type IntentStatsType, type IntentType, type IntentTypeVersion,
 } from "@/lib/api-leads";
@@ -29,6 +32,7 @@ const TABS = [
   { id: "types", label: "类型" },
   { id: "bindings", label: "会话绑定" },
   { id: "alerts", label: "告警机器人" },
+  { id: "groups", label: "群需求" },
 ] as const;
 type TabId = (typeof TABS)[number]["id"];
 const INTENT_STATES = ["pending", "tasked", "rejected", "expired", "merged"];
@@ -38,7 +42,7 @@ function conflictOf(err: unknown): string {
   return err instanceof V1Error && err.code === "conflict" ? err.message : "";
 }
 
-/** The Intents page: pending intents, their types, chat bindings and alert bots. */
+/** The Intents page: pending intents, their types, chat bindings, alert bots and followed groups. */
 export function IntentsPage() {
   const [tab, setTab] = useState<TabId>("intents");
   const [enabled, setEnabled] = useState<boolean | null>(null);
@@ -86,6 +90,7 @@ export function IntentsPage() {
         {tab === "types" && <TypesTab />}
         {tab === "bindings" && <BindingsTab />}
         {tab === "alerts" && <AlertsTab />}
+        {tab === "groups" && <GroupsTab />}
       </div>
     </div>
   );
@@ -680,6 +685,129 @@ function AlertsTab() {
           ))}
         </ul>
       )}
+    </div>
+  );
+}
+
+function GroupsTab() {
+  const returnFocus = useRef<HTMLElement | null>(null);
+  const searchInput = useRef<HTMLInputElement>(null);
+  const [page, setPage] = useState<FollowedGroups | null>(null);
+  const [query, setQuery] = useState("");
+  const [chats, setChats] = useState<LeadChat[]>([]);
+  const [pending, setPending] = useState<FollowedGroupPreview["group"] | null>(null);
+  const [error, setError] = useState("");
+  const [conflict, setConflict] = useState("");
+  const [searchError, setSearchError] = useState("");
+  const [loading, setLoading] = useState(true);
+  const [busy, setBusy] = useState(false);
+  const [attempt, setAttempt] = useState(0);
+  useEffect(() => {
+    let live = true;
+    intentGroupReadsList().then((next) => {
+      if (!live) return;
+      setPage(next);
+      setError("");
+      setConflict("");
+    }, (err: unknown) => {
+      if (!live) return;
+      const message = conflictOf(err);
+      setConflict(message);
+      setError(message ? "" : errorText(err));
+    }).finally(() => { if (live) setLoading(false); });
+    return () => { live = false; };
+  }, [attempt]);
+  useEffect(() => {
+    let live = true;
+    leadsChats({ query: query.trim() }).then((next) => {
+      if (live) {
+        setChats(next.chats.filter((chat) => chat.kind === "group" || chat.kind === "topic"));
+        setSearchError("");
+      }
+    }, (err: unknown) => { if (live) setSearchError(errorText(err)); });
+    return () => { live = false; };
+  }, [query, attempt]);
+  const change = async (action: () => Promise<FollowedGroups>) => {
+    setBusy(true);
+    try {
+      setPage(await action());
+      if (pending) searchInput.current?.focus();
+      setPending(null);
+      setError("");
+      setConflict("");
+    } catch (err) {
+      const message = conflictOf(err);
+      setConflict(message);
+      setError(message ? "" : errorText(err));
+    } finally { setBusy(false); }
+  };
+  const preview = async (chatId: string) => {
+    returnFocus.current = document.activeElement as HTMLElement | null;
+    setBusy(true);
+    try {
+      setPending((await intentGroupReadsPreview({ chat_id: chatId })).group);
+      setError("");
+      setConflict("");
+    } catch (err) {
+      const message = conflictOf(err);
+      setConflict(message);
+      setError(message ? "" : errorText(err));
+    } finally { setBusy(false); }
+  };
+  const closePreview = () => {
+    if (busy) return;
+    setPending(null);
+    returnFocus.current?.focus();
+  };
+  const followed = new Set(page?.groups.map((group) => group.chat_id));
+  return (
+    <div className="space-y-4">
+      <Notice loading={loading} error={error} conflict={conflict} onRetry={() => { setLoading(true); setAttempt((n) => n + 1); }} empty="" />
+      {page && <>
+        <div className="flex items-center justify-between gap-3">
+          <div className="space-y-1">
+            <h2 className="text-sm font-medium">持续识别群里的开发需求</h2>
+            <p className="text-xs text-muted-foreground">只读名单上的群，每次最多 {page.run_max} 条，每个群每天最多 {page.day_max} 条；最多关注 {page.max_groups} 个群。</p>
+          </div>
+          <Switch label="持续识别群需求" checked={page.enabled} disabled={busy || !page.delivery_enabled}
+            onChange={(enabled) => void change(() => intentGroupReadsSettingsPut({ enabled }))} />
+        </div>
+        {!page.delivery_enabled && <p className="text-sm text-muted-foreground">先在 Settings 打开送达层：名单上的群产生的意图要按非紧急类限量，超出的进晨报</p>}
+        {page.groups.length === 0 && <p role="status" className="text-sm text-muted-foreground">还没有关注的群</p>}
+        <ul className="space-y-2" aria-label="关注的群">
+          {page.groups.map((group) => <li key={group.chat_id} className="flex flex-wrap items-center justify-between gap-3 rounded-md border border-border px-3 py-2 text-sm">
+            <div className="min-w-0 flex-1 space-y-1">
+              <div className="flex flex-wrap items-center gap-2"><span className="break-words font-medium">{group.name}</span>
+                <Badge variant="outline">{group.kind === "topic" ? "话题群" : "群"}</Badge>
+                {!group.readable && <Badge variant="outline">已排除，不读</Badge>}
+              </div>
+              <p className="text-xs text-muted-foreground">加入：{new Date(group.added_at).toLocaleString("zh-CN")} · 开始：{new Date(group.read_from).toLocaleString("zh-CN")}</p>
+              <p className="text-xs text-muted-foreground tabular-nums">今天读了 {group.read_today} 条，跳过 {group.skipped_today} 条 · 24 小时 {group.messages_24h} 条消息 · 7 天 {group.intents_7d} 条意图</p>
+            </div>
+            <Button type="button" size="sm" variant="ghost" disabled={busy}
+              onClick={() => void change(() => intentGroupReadsDelete({ chat_id: group.chat_id }))}>撤销</Button>
+          </li>)}
+        </ul>
+        <div className="space-y-2">
+          <Input ref={searchInput} aria-label="搜索群" value={query} onChange={(event) => { setChats([]); setSearchError(""); setQuery(event.target.value); }} placeholder="搜索要关注的群" />
+          {searchError && <p role="alert" className="text-sm text-destructive">{searchError}</p>}
+          <ul className="space-y-2" aria-label="群搜索结果">
+            {chats.filter((chat) => !followed.has(chat.chat_id)).map((chat) => <li key={chat.chat_id} className="flex items-center justify-between gap-3 text-sm">
+              <span className="min-w-0 break-words">{chat.name} · {chat.kind === "topic" ? "话题群" : "群"}</span>
+              <Button type="button" size="sm" variant="outline" disabled={busy || page.groups.length >= page.max_groups}
+                onClick={() => void preview(chat.chat_id)}>关注</Button>
+            </li>)}
+          </ul>
+        </div>
+        {pending && <ConfirmDialog title="关注这个群" onClose={closePreview}>
+          <p className="text-sm">从现在起读「{pending.name}」里人发的消息；加入之前的、机器人和导入的都不读。最近 24 小时 {pending.messages_24h} 条，每天约 ${pending.estimate_usd[0]}–${pending.estimate_usd[1]}；每个群每天最多 {page.day_max} 条。推送走送达层，只发你的私聊。</p>
+          {(error || conflict) && <p role="alert" className="text-sm text-destructive">{error || conflict}</p>}
+          <div className="flex justify-end gap-2">
+            <Button type="button" size="sm" variant="outline" disabled={busy} onClick={closePreview}>取消</Button>
+            <Button type="button" size="sm" disabled={busy} onClick={() => void change(() => intentGroupReadsPut({ chat_id: pending.chat_id }))}>确认关注</Button>
+          </div>
+        </ConfirmDialog>}
+      </>}
     </div>
   );
 }

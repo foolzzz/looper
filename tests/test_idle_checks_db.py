@@ -197,6 +197,8 @@ def test_an_item_is_named_once_unless_its_check_never_reached_the_operator(monke
         bus = Bus()
         idle = service(bus)
         check_id = await idle.run_once()
+        if state in ("sent", "uncertain"):
+            assert await store.claim_sending(check_id)
         await store.settle(check_id, state, reason="turn_failed" if state == "failed" else None)
         await two_hours_back(pool)  # the next idle period, past the gap
         assert (await idle.run_once() is not None) is again
