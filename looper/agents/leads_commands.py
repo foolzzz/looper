@@ -147,6 +147,14 @@ async def _export(pool: asyncpg.Pool, out: Path, sample: int) -> tuple[int, str]
                          "reply_to": refs.get(item["parent_id"] or ""), "sent_at": item["sent_at"].isoformat(),
                          "text": item["text"] or ""} for number, item in enumerate(found, 1)]},
             ensure_ascii=False))
+    code, target = _write_export(out, lines)
+    if code != OK:
+        return code, target
+    return OK, (f"已导出 {len(lines)} 条到 {target}：不准确 {len(marked)} 条，看作正确 {len(good)} 条"
+                "（含出处消息原文，只留在本机）")
+
+
+def _write_export(out: Path, lines: list[str]) -> tuple[int, str]:
     # Written where it really is (checked by ``committable``), through a file of mode 600 beside it that replaces
     # it at once: a link is never followed, and a failure leaves nothing behind.
     target = resolved(out)
@@ -165,12 +173,64 @@ async def _export(pool: asyncpg.Pool, out: Path, sample: int) -> tuple[int, str]
             raise
     except OSError as error:
         return USAGE, f"cannot write {out}: {error}"
-    return OK, (f"已导出 {len(lines)} 条到 {target}：不准确 {len(marked)} 条，看作正确 {len(good)} 条"
-                "（含出处消息原文，只留在本机）")
+    return OK, str(target)
+
+
+async def _export_intents(pool: asyncpg.Pool, out: Path, chat: str, days: int) -> tuple[int, str]:
+    """Export one chat's human windows and all sourced lead labels; identities and summaries stay out."""
+    exact = await pool.fetch("SELECT source_id, chat_id FROM source_chats WHERE chat_id = $1 LIMIT 2", chat)
+    chats = exact or await pool.fetch(
+        "SELECT source_id, chat_id FROM source_chats WHERE name ILIKE '%' || $1 || '%' LIMIT 2", chat)
+    if len(chats) != 1:
+        raise ValueError("--chat must identify exactly one collected chat")
+    sid, cid = chats[0]["source_id"], chats[0]["chat_id"]
+    until = datetime.now().astimezone()
+    since = until - timedelta(days=days)
+    rows = await pool.fetch(
+        "SELECT seq, external_id, parent_id, sender_id, sent_at, text FROM source_events "
+        "WHERE source_id = $1 AND chat_id = $2 AND sender_kind = 'user' AND origin <> 'import' "
+        "AND sent_at >= $3 AND sent_at < $4 ORDER BY seq", sid, cid, since, until)
+    if not rows:
+        return EMPTY, "没有可导出的消息"
+    refs = {row["seq"]: f"x{number}" for number, row in enumerate(rows, 1)}
+    external = {row["external_id"]: refs[row["seq"]] for row in rows}
+    people: dict[str, str] = {}
+    windows: list[dict[str, Any]] = []
+    messages: list[dict[str, Any]] = []
+    size = 0
+    for row in rows:
+        text = row["text"] or ""
+        if len(text) > 60_000:
+            raise ValueError("a message exceeds the 60,000-character window limit")
+        if messages and (len(messages) == 500 or size + len(text) > 60_000):
+            windows.append({"type": "window", "number": len(windows) + 1, "messages": messages})
+            messages, size = [], 0
+        sender = people.setdefault(row["sender_id"], f"P{len(people) + 1}")
+        messages.append({"ref": refs[row["seq"]], "sender": sender, "sent_at": row["sent_at"].isoformat(),
+                         "text": text, "reply_to": external.get(row["parent_id"])})
+        size += len(text)
+    if messages:
+        windows.append({"type": "window", "number": len(windows) + 1, "messages": messages})
+    found = await pool.fetch(
+        "SELECT l.id, l.kind, array_agg(s.event_seq ORDER BY s.event_seq) AS seqs "
+        "FROM message_leads l JOIN message_lead_sources s ON s.lead_id = l.id "
+        "WHERE s.event_seq = ANY($1::bigint[]) GROUP BY l.id, l.kind ORDER BY l.id", list(refs))
+    labels = [{"type": "label", "lead": leads_model.format_lead_id(row["id"]), "kind": row["kind"],
+               "expected": "intent" if row["kind"] in ("request", "issue") else "none",
+               "sources": [refs[seq] for seq in row["seqs"]]} for row in found]
+    code, destination = _write_export(out, [json.dumps(line, ensure_ascii=False) for line in [*windows, *labels]])
+    if code != OK:
+        return code, destination
+    kinds = {kind: sum(row["kind"] == kind for row in labels) for kind in ("request", "issue")}
+    return OK, (f"已导出 {len(windows)} 个窗口，{len(rows)} 条消息；请求 {kinds['request']} 条，"
+                f"问题 {kinds['issue']} 条，其他 {len(labels) - sum(kinds.values())} 条标签"
+                "（标签须在本机核对，只留在本机）")
 
 
 async def _command(pool: asyncpg.Pool, args: Any) -> tuple[int, str]:
     if args.leads_command == "eval-export":
+        if args.intents:
+            return await _export_intents(pool, Path(args.out), args.chat, args.days)
         return await _export(pool, Path(args.out), args.sample)
     if args.leads_command == "search":
         query = {"words": args.words, "chat": args.chat, "person": args.person, "since": args.since_time,
@@ -239,6 +299,11 @@ def run(args: Any, load_ops: Any) -> int:
             if args.state not in leads_model.SEARCH_STATES:
                 raise ValueError("unknown lead state")
         elif args.leads_command == "eval-export":
+            selected = (args.chat is not None, args.days is not None, args.intents)
+            if any(selected) and not all(selected):
+                raise ValueError("--chat, --days and --intents must be given together")
+            if args.intents and (not args.chat.strip() or not 1 <= args.days <= 30):
+                raise ValueError("--chat must be nonempty and --days must be 1 to 30")
             if not 0 <= args.sample <= SAMPLE_MAX:
                 raise ValueError(f"--sample must be 0 to {SAMPLE_MAX}")
         else:
