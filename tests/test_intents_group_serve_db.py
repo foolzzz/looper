@@ -39,7 +39,7 @@ with open(SEEN, 'a') as seen:
     seen.write(json.dumps({'input': text, 'instructions': prompt}) + '\n')
 items = []
 for ref, marker in re.findall(r'\[(m\d+)\][^\n]*?(REQUEST_SYNTHETIC|BUG_SYNTHETIC|DM_CONTROL|MENTION_CONTROL)', text):
-    items.append({'type':'bug_triage' if marker == 'BUG_SYNTHETIC' else 'dev_task',
+    items.append({'type':{'BUG_SYNTHETIC':'bug_triage', 'MENTION_CONTROL':'alert_triage'}.get(marker, 'dev_task'),
         'title':marker, 'summary':'Synthetic request for the offline smoke', 'confidence':'high', 'sources':[ref]})
 reply = json.dumps({'intents':items, 'instructions_seen':[]}) if items else 'NONE'
 model = sys.argv[sys.argv.index('--model') + 1]
@@ -183,7 +183,7 @@ sys.exit(main(['serve','--host','127.0.0.1','--port',sys.argv[1],'--runtime-root
             recognized = sql("SELECT title,type_key,via FROM intents ORDER BY id", fetch=True)
             assert {(row["title"], row["type_key"], row["via"]) for row in recognized} == {
                 ("REQUEST_SYNTHETIC","dev_task","followed_group"), ("BUG_SYNTHETIC","bug_triage","followed_group"),
-                ("MENTION_CONTROL","dev_task","followed_group"), ("DM_CONTROL","dev_task","subscription")}
+                ("MENTION_CONTROL","alert_triage","followed_group"), ("DM_CONTROL","dev_task","subscription")}
             until(lambda: len(sql("SELECT id FROM proactive_deliveries WHERE source='intent'", fetch=True)) == 4,
                   "intent delivery decisions")
             decisions = sql("SELECT urgency,chat_kind,chat,decision FROM proactive_deliveries WHERE source='intent'", fetch=True)

@@ -1152,7 +1152,8 @@ async def execute(runs: Any, run_id: str, schedule: Mapping[str, Any], stream: M
 
     asked = await ask(run, lambda reply: parse(kind, reply, found.refs, now=now.astimezone(_zone(zone_name)),
                                                valid_days=valid_days, enabled_types=enabled, app_seqs=found.app_seqs,
-                                               group_seqs=group.seqs if group else ()),
+                                               group_seqs={r["seq"] for r in found.rows
+                                                           if r.get("via_group") and not r.get("original_scope")}),
                       budget_usd=schedule["run_budget_usd"], timeout_s=float(timeout))
     result, parsed = asked.result, asked.parsed
     if asked.skipped is not None:

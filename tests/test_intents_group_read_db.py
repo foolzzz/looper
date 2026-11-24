@@ -79,18 +79,18 @@ def test_followed_group_reads_only_live_human_messages_since_read_from(monkeypat
     run_db(check, monkeypatch)
 
 
-@pytest.mark.parametrize("speaker", ["operator", "mentions_me"])
-def test_followed_original_scope_messages_use_group_rules_and_keep_dms_original(monkeypatch, tmp_path, speaker):
+@pytest.mark.parametrize("speaker", ["operator", "mentions_me", "third_person"])
+@pytest.mark.parametrize("type_key", ["dev_task", "alert_triage"])
+def test_followed_group_rules_preserve_original_types_without_duplicate_intents(monkeypatch, tmp_path, speaker, type_key):
     fake = processor_says(monkeypatch, json.dumps({"intents": [
-        {"type": "dev_task", "title": "Named request", "summary": "Synthetic", "confidence": "high", "sources": ["m1"]},
-        {"type": "alert_triage", "title": "Group alert", "summary": "Synthetic", "confidence": "high", "sources": ["m1"]},
+        {"type": type_key, "title": "Named request", "summary": "Synthetic", "confidence": "high", "sources": ["m1"]},
         {"type": "alert_triage", "title": "Direct alert", "summary": "Synthetic", "confidence": "high", "sources": ["m2"]}]}))
     async def check(pool):
         await source(pool)
         row = await schedule(pool)
         await followed(pool)
         await add(pool, "OLD_CONTEXT_SENTINEL", chat_id="g", sent_at=START - timedelta(minutes=1))
-        fields = {"sender": DM} if speaker == "operator" else {"mentions_me": True}
+        fields = {"sender": DM} if speaker == "operator" else {"mentions_me": speaker == "mentions_me"}
         group = await add(pool, "钱七，登录页的文案你改一下", chat_id="g", sent_at=NOW, **fields)
         direct = await add(pool, "direct alert", sender=DM, chat_id="dm", kind="p2p", sent_at=NOW)
         selected = (await window(pool))["rows"]
@@ -100,10 +100,12 @@ def test_followed_original_scope_messages_use_group_rules_and_keep_dms_original(
                     own_apps=(), include_import=False, zone_name="UTC", group_read=True)
         assert sum(r["events"] for r in tally) == 2
         result = await run_once(pool, tmp_path, row)
-        assert result["extract_counts"]["dropped"] == {"group_type": 1}
+        dropped = speaker == "third_person" and type_key == "alert_triage"
+        assert result["extract_counts"]["dropped"] == ({"group_type": 1} if dropped else {})
         assert result["extract_counts"]["group_read"] == 1
         assert [(r["title"], r["via"]) for r in await pool.fetch("SELECT title,via FROM intents ORDER BY id")] == [
-            ("Named request", "followed_group"), ("Direct alert", "subscription")]
+            *([] if dropped else [("Named request", "followed_group")]), ("Direct alert", "subscription")]
+        assert await pool.fetchval("SELECT count(*) FROM intent_sources WHERE event_seq=$1", group) == (0 if dropped else 1)
         assert extraction.GROUP_REQUESTS_NOTE in fake.calls[0]["instructions"]
         assert "OLD_CONTEXT_SENTINEL" not in fake.calls[0]["input_text"]
         assert "群 · 全部消息" in fake.calls[0]["input_text"]

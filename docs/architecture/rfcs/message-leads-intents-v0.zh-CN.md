@@ -261,7 +261,7 @@ tasked、rejected、merged 是终态。
   with all of them as its sources, or use same_as when a recent intent is that thing.
   ```
 
-- **代码检查：** `parse` 读回复时，一个意图只要有一条 `m` 出处是全部消息，类型就必须是 `dev_task` 或 `bug_triage`，否则丢弃并按 `group_type` 计数。回复契约不变。
+- **代码检查：** 持续识别中，只有「仅因名单才读到」的 `m` 出处受 `dev_task` / `bug_triage` 限制；引用它的意图若是其他类型，`parse` 丢弃并按 `group_type` 计数。原范围的消息（操作者本人发的、群里 @ 操作者的、私聊）保留所有已启用类型；其中满足名单条件的群消息也参与群开发需求识别，同一消息只读取一次、只走一次解析和入库。「识别一次」的出处仍按全部消息检查类型。回复契约不变。
 - **合并：** 用第 4 节的规则：`same_as` 指向 6 小时内待处理或已建任务的，或 30 天内被驳回的，就合并；一条意图可以有多条出处。
 - **入库标记：** `intents.via`（`subscription` 默认、`followed_group`、`on_request`）。一个意图只要有一条 `m` 出处是名单消息，就是 `followed_group`；「识别一次」的都是 `on_request`。
 
@@ -312,7 +312,7 @@ OR (e.sender_kind = 'user' AND e.origin = 'live' AND EXISTS (
 
 - **只读人发的，按类型化字段判断，不看文字：** `sender_kind = 'user'`（来自飞书的 `sender_type`，排除 `app` 和 `other`）；`origin = 'live'`（排除 `import`，也排除 `history`：首次拉会话或话题带出的更早消息、晚到 24 小时以上的桥接行）。Looper 自己的应用照旧排除。
 - **原有条件都还在：** 会话在消息流和抽取里都是 included、订阅的 `include_chats` 和 `exclude_chats`、`max_age_minutes`、不读导入。排除优先于名单。
-- 名单消息由一次独立的查询读出，带 `via_group` 和它的群的 `read_from`，不按发送者区分：操作者本人发的、@ 操作者的与其他人发的走同一群需求规则、前文边界和额度。开启时，原范围查询排除这些名单消息，避免重复或从原范围绕过群额度；名单外的消息（含操作者私聊）不变。关闭或名单为空时原范围查询一字不改。
+- 名单消息由一次独立的查询读出，带 `via_group`、它的群的 `read_from` 和按原范围条件计算的 `original_scope`。操作者本人发的、@ 操作者的与其他人发的都参与群需求识别，前文边界和额度一致；`original_scope` 为真时保留全部已启用类型，其余受 11.1 的开发类型限制。开启时，原范围查询排除这些名单消息，避免重复或从原范围绕过群额度；名单外的消息（含操作者私聊）不变。关闭或名单为空时原范围查询一字不改。
 - **前文：** 一个会话的 `c` 前文锚在它窗口里的第一条消息上；第一条是名单消息时，前文只取发送时间不早于开始时间的；名单消息的父消息也一样。锚在原范围消息上的前文和父消息照旧。
 - **确认文字：** 开关开、名单非空时，意图订阅确认文字的读取范围后加一行「另读名单上的群：N 个（各自从开始时间起人发的实时消息；每次最多 200 条，每个群每天最多 500 条）」，24 小时估算也算上名单消息；否则不变。
 - **入库时复查：** 在第 4 节的入库事务里，锁住出处之后，再按会话 `FOR SHARE` 锁住名单行、读开关。一个条目只要有一条 `m` 出处是名单消息，而它的群已不在名单上、开始时间晚于这条消息的发送或入库时间，或者开关已关，整条丢弃，按 `group_revoked` 计数。撤销（删行）和入库因此串行：撤销先提交，入库读不到这一行就丢；入库先锁住，撤销等它提交，这一批算撤销之前读的，留下。
@@ -415,7 +415,8 @@ v1 操作都是 `operator_only`：只接受操作者身份（仪表盘），API 
 | `test_re_adding_or_switching_on_starts_again_from_now`（数据库） | 撤销后再加入、开关关了再开：中间的消息都不读；开着时再设一次开不改开始时间 |
 | `test_context_anchored_on_a_group_row_stays_inside_its_range`（纯函数） | 锚在全部消息上的前文和父消息不早于开始时间（或范围起点）；锚在原范围消息上的照旧 |
 | `test_group_rows_are_labelled_and_the_note_is_added_only_with_them`（纯函数） | 只有含全部消息的会话标题带标记；没有时指令和输入逐字节不变 |
-| `test_a_group_row_intent_must_be_a_dev_task_or_a_bug`（纯函数） | 引用全部消息的条目是别的类型时丢弃并计 `group_type`；只引用原范围消息的条目不受限 |
+| `test_a_group_row_intent_must_be_a_dev_task_or_a_bug`（纯函数） | 引用受限的群消息的条目是别的类型时丢弃并计 `group_type`；只引用原范围消息的条目不受限 |
+| `test_followed_group_rules_preserve_original_types_without_duplicate_intents`（数据库，参数化） | 名单群里操作者本人和 @ 操作者的消息保留其他类型，第三方的其他类型丢弃；操作者本人的开发请求按群规则识别；每条消息只入库一条意图，私聊照旧 |
 | `test_followed_group_intents_go_only_through_the_delivery_layer`（数据库） | `followed_group` 的意图：送达层开时按非紧急类决定、超出上限进摘要；送达层关时不推；只推到操作者私聊；`subscription` 的意图推送不变 |
 | `test_triage_and_leads_ignore_followed_groups`（数据库） | 开关开、名单非空时，线索和事件分流的窗口和估算不变 |
 | `test_group_reads_round_trip_and_refusals`（接口） | 五个操作的声明形状；`preview` 不写名单；私聊、`unknown`、被排除、不存在的会话、第 11 个群被拒；重复加入不改开始时间；送达层关时打开持续识别被拒（`conflict`）；API 客户端被拒 |

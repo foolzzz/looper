@@ -382,6 +382,7 @@ async def extraction_window(conn: Db, sub: Mapping[str, Any], *, output_kind: st
         lefts = [group_read.left[c] for c in chats]
         extra = await conn.fetch(
             f"""SELECT x.* FROM (SELECT {_WINDOW_COLUMNS}, g.read_from, true AS via_group,
+                       COALESCE({_EXTRACTION_SCOPE['intents']}, false) AS original_scope,
                        row_number() OVER (PARTITION BY e.chat_id ORDER BY e.seq) AS chat_n
                     {_GROUP_FROM} AND e.sent_at >= $6) x
                 JOIN unnest($7::text[], $8::int[]) AS q(chat_id, left_n) ON q.chat_id = x.chat_id
