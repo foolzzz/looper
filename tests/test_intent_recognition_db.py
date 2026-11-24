@@ -115,36 +115,43 @@ def test_recognize_once_reads_only_the_range_and_moves_nothing(monkeypatch, tmp_
 
 
 @pytest.mark.parametrize("speaker", ["operator", "mentions_me", "third_person"])
-def test_recognize_once_uses_current_group_contract_for_every_human_sender(monkeypatch, tmp_path, speaker):
+@pytest.mark.parametrize("rules_on", [False, True])
+def test_recognize_once_uses_current_group_contract_for_every_human_sender(monkeypatch, tmp_path, speaker, rules_on):
     fake = processor_says(monkeypatch, json.dumps({"intents": [
         {"type": key, "title": key, "summary": "Synthetic request", "confidence": "high", "sources": [f"m{n}"]}
-        for n, key in enumerate(("dev_task", "bug_triage", "alert_triage"), 1)]}))
+        for n, key in enumerate(("dev_task", "bug_triage", "alert_triage", "mr_review"), 1)]}))
 
     async def check(pool):
         schedule = await configured(pool)
+        if rules_on:
+            await pool.execute("INSERT INTO system_settings(key,value) VALUES('intents.rules.enabled','true')")
         fields = {"sender": DM} if speaker == "operator" else {"mentions_me": speaker == "mentions_me"}
         seqs = [await add(pool, text, chat_id="g", sent_at=SINCE + timedelta(minutes=n), **fields)
                 for n, text in enumerate(("Morgan, please change the login copy. Morgan: accepted.",
                                           "Morgan, the upload is broken. Morgan: I will fix it.",
-                                          "Synthetic alert control"), 1)]
+                                          "Synthetic alert control", "Please review the synthetic MR"), 1)]
         service = intent_recognition.IntentRecognitions(SimpleNamespace(), runtime_root=tmp_path,
                                                         claude_bin="unused", clock=lambda: NOW)
         await service.start()
         try:
             await service.begin(source_id=SOURCE, chat_id="g", requested_via="dashboard", reply=None)
             record = await finished(service, pool)
-            assert record["state"] == "done" and record["events_read"] == 3
+            assert record["state"] == "done" and record["events_read"] == 4
             assert len(fake.calls) == 1
             assert fake.calls[0]["instructions"] == extraction.instructions(
-                "intents", schedule["requirement"], await extraction.intent_types(pool), group=True)
+                "intents", schedule["requirement"], await extraction.intent_types(pool, rules_on=False), group=True, rules=False)
             assert fake.calls[0]["contract"] == extraction.INTENTS_CONTRACT
+            assert "mr_review" not in fake.calls[0]["instructions"]
+            assert extraction.MR_REQUESTS_NOTE not in fake.calls[0]["instructions"]
+            assert await pool.fetchval("SELECT count(*) FROM tasks") == 0
+            assert await pool.fetchval("SELECT count(*) FROM intent_posts") == 0
             assert extraction.GROUP_LABEL in fake.calls[0]["input_text"]
             assert [(r["type_key"], r["via"]) for r in await pool.fetch(
                 "SELECT type_key,via FROM intents ORDER BY id")] == [
                     ("dev_task", "on_request"), ("bug_triage", "on_request")]
             assert [r["event_seq"] for r in await pool.fetch(
                 "SELECT event_seq FROM intent_sources ORDER BY event_seq")] == seqs[:2]
-            assert json.loads(record["counts"])["dropped"] == {"group_type": 1}
+            assert json.loads(record["counts"])["dropped"] == {"group_type": 1, "unknown_type": 1}
         finally:
             await service.stop()
     run_db(check, monkeypatch, setup=seed_role_configs)

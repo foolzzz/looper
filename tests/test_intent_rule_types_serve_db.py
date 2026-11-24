@@ -12,9 +12,8 @@ import asyncpg
 import pytest
 
 from evals.prompt_regression import runner
-from looper.agents import leads_model, subscriptions
+from looper.agents import subscriptions
 from looper.agents.serve import seed_channel_configs
-from looper.db.intents import IntentRefused
 from tests import msgflow_support as flow
 from tests.db_support import DSN, fresh_database_without_recording
 from tests.fake_claude import fake_claude
@@ -67,8 +66,11 @@ def test_mr_review_classification_runs_through_isolated_serve(monkeypatch, tmp_p
     monkeypatch.setattr(runner, "_SERVE", '''import sys
 from datetime import datetime, timezone
 from functools import partial
+from looper import ops_config
 from looper.agents import serve
 from looper.cli import main
+config = ops_config.load(ops_config.Flags(runtime_root=sys.argv[2], port=int(sys.argv[1])))
+ops_config.write_private(config.path, ops_config.render(config))
 serve.SourceService = partial(serve.SourceService, interval=.2)
 serve.IntentPushService = partial(serve.IntentPushService, interval=.2,
     clock=lambda: datetime.now(timezone.utc).replace(hour=14))
@@ -129,6 +131,7 @@ sys.exit(main(['serve','--host','127.0.0.1','--port',sys.argv[1],'--runtime-root
         with runner.running_server(database_url=url, runtime_root=root / "runtime", bin_dir=bin_dir, home=home,
                 notes_root=home / "notes", env=environment, port=port, startup_timeout=90,
                 log_path=root / "serve.log") as api:
+            assert urlsplit(api.base_url).port == port and port != 8767
             def post(domain, body):
                 result = api.post(f"/api/v1/{domain}", body)
                 if result["status"] == "needs_confirmation":
@@ -155,15 +158,17 @@ sys.exit(main(['serve','--host','127.0.0.1','--port',sys.argv[1],'--runtime-root
             post("intent_group_reads/put", {"source_id": "smoke", "chat_id": "oc_followed_smoke"})
             hidden = post("intent_types/list", {})
             assert "mr_review" not in [row["key"] for row in hidden["types"]]
-            with pytest.raises(runner.EvalError, match="409") as refused:
+            with pytest.raises(runner.EvalError, match="404") as refused:
                 api.post("/api/v1/intent_types/history", {"key": "mr_review"})
-            assert "intent type is not available" in str(refused.value)
+            assert "unknown intent type" in str(refused.value)
             assert "识别评审" not in str(refused.value)
-            with pytest.raises(runner.EvalError, match="409") as archived:
+            with pytest.raises(runner.EvalError, match="404") as archived:
                 api.post("/api/v1/intent_types/archive", {"key": "mr_review"})
-            assert "intent type is not available" in str(archived.value)
-            with pytest.raises(IntentRefused, match="rule engine is installed"):
-                leads_model.enable_intent_rules()
+            assert "unknown intent type" in str(archived.value)
+            with pytest.raises(runner.EvalError, match="409") as unavailable:
+                api.post("/api/v1/intent_rules/preview", {"expected_generation": 0,
+                    "change": {"kind": "settings", "enabled": True}})
+            assert "runtime_ready" in str(unavailable.value)
             assert sql("SELECT value FROM system_settings WHERE key='intents.rules.enabled'", fetch=True) == []
             sql("INSERT INTO system_settings(key,value) VALUES('intents.rules.enabled','true')")
             shown = post("intent_types/list", {})

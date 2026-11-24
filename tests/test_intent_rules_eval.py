@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-import importlib.util
 import json
 from argparse import Namespace
 from pathlib import Path
@@ -12,8 +11,7 @@ import pytest
 
 from evals.processor import __main__ as evaluate
 from looper.agents import extraction, leads_model
-from looper.agents.leads_model import GROUP_INTENT_TYPES, IntentVia
-from looper.agents.ops.service import MANAGER_TOOLS
+from looper.agents.leads_model import GROUP_INTENT_TYPES
 from looper.db import connection
 from tests.subscription_support import processor_says
 
@@ -45,6 +43,7 @@ def _args(mode):
 
 def test_default_off_instructions_match_the_recorded_types():
     recorded = json.loads(_FIXTURE.read_text(encoding="utf-8"))
+    assert recorded["baseline"] == "b5989285ea1f9b9b3b148f06965392a48826ea2b"
     types = recorded["types"]
     requirement = recorded["requirement"]
     direct = extraction.instructions("intents", requirement, types, group=False, rules=False)
@@ -142,11 +141,7 @@ def test_mr_review_eval_cases_use_production_render_and_parse_offline(monkeypatc
     evaluate._require_intent_rules_cases(parser, Namespace(intent_rules=None, cases=["intents_basic"]))
 
 
-def test_recognize_once_keeps_development_only_types_with_rules_on(monkeypatch, tmp_path):
-    assert importlib.util.find_spec("looper.db.migrations.intent_recognitions") is None
-    assert set(IntentVia) == {IntentVia.SUBSCRIPTION, IntentVia.FOLLOWED_GROUP}
-    assert all("recognize" not in tool.name for tool in MANAGER_TOOLS)
-    assert leads_model.rules_runtime_ready() is False
+def test_development_file_eval_keeps_development_only_types(monkeypatch, tmp_path):
     recorded = {}
     real_instructions = extraction.instructions
     real_parse = extraction.parse
