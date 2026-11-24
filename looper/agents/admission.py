@@ -119,6 +119,7 @@ class Grant:
     borrowed: bool = False
     probe: bool = False
     reported: bool = False
+    quota_failed: bool = False
 
 
 @dataclass(frozen=True)
@@ -141,6 +142,7 @@ class Waiter:
     last_message: str | None = None
     on_frozen: Callable[[Frozen], Awaitable[None]] | None = None
     frozen_told: bool = False
+    user_message: bool = False
 
 
 def effective_lane(lane: Lane, waited_seconds: float) -> Lane:
@@ -488,7 +490,9 @@ class Controller:
                     await self._notify_waiters(provider_id, provider)
                     return
             if account.state is AdmissionState.PROBING:
-                self._grant(min(eligible, key=lambda w: w.sequence), probe=True)
+                # A retained user message is only the fallback probe. Prefer a
+                # Worker/Planner or background turn whenever one is waiting.
+                self._grant(min(eligible, key=lambda w: (w.user_message, w.sequence)), probe=True)
                 await self._notify_waiters(provider_id, provider)
                 return
         if account.state is not AdmissionState.OPEN:
@@ -563,6 +567,7 @@ class Controller:
         on_wait=None,
         on_frozen: Callable[[Frozen], Awaitable[None]] | None = None,
         draining=None,
+        user_message: bool = False,
     ) -> Grant:
         if not self.active:
             return Grant(provider_id, owner, lane)
@@ -591,6 +596,7 @@ class Controller:
                     draining,
                     on_wait,
                     on_frozen=on_frozen,
+                    user_message=user_message,
                 )
                 self.waiters.append(waiter)
                 while not waiter.ready.done():
@@ -629,13 +635,14 @@ class Controller:
         on_wait=None,
         on_frozen: Callable[[Frozen], Awaitable[None]] | None = None,
         draining=None,
+        user_message: bool = False,
     ):
         if not self.active:
             yield Grant(provider_id, owner, lane)
             return
         grant = await self.acquire(
             provider_id, lane, owner, parent=parent, on_wait=on_wait,
-            on_frozen=on_frozen, draining=draining
+            on_frozen=on_frozen, draining=draining, user_message=user_message
         )
         token = _current_owner.set(owner)
         failed = False
@@ -779,9 +786,24 @@ async def recorded(
                 provider_id, ProbeEnded(False, interrupted or failure is not None)
             )
         if grant is not None:
+            grant.quota_failed = quota
             grant.reported = True
     except Exception:
         logger.exception("Could not apply run result to account admission")
+
+
+def probing() -> bool:
+    if not enabled():
+        return False
+    grant = _controller.running.get(_current_owner.get())
+    return grant is not None and grant.probe
+
+
+def quota_probe_failed() -> bool:
+    if not enabled():
+        return False
+    grant = _controller.running.get(_current_owner.get())
+    return grant is not None and grant.probe and grant.quota_failed
 
 
 async def signal(
@@ -938,3 +960,8 @@ async def observed(
     provider_id: str, windows: list[tuple[str, dict]], record_id: int | None
 ) -> None:
     await signal(provider_id, record_id, windows)
+
+
+def waiting(owner: str) -> bool:
+    """An unstarted turn waiting for its account does not hold a service drain."""
+    return enabled() and any(waiter.owner == owner for waiter in _controller.waiters)

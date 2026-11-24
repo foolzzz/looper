@@ -84,7 +84,8 @@ def token():
 
 
 def manager():
-    return NS(agent_id="manager", _send_status=AsyncMock())
+    status = AsyncMock()
+    return NS(agent_id="manager", _send_status=status, _freeze_notice_once=status)
 
 
 async def wait_for_waiters(c, n):
@@ -457,4 +458,40 @@ def test_shutdown_cancels_planner_and_manager_waiting_during_drain(controller):
         await asyncio.gather(*jobs, return_exceptions=True)
         call.assert_not_called()
         assert not c.waiters and not c.running
+    asyncio.run(run())
+
+
+def test_resumed_planner_first_real_exchange_uses_recovery_only_once(
+    controller, tmp_path, agent_db, planner_claude,
+):
+    from looper.agents.message import MessageEnvelope, planner_address
+    from looper.agents.tiers.planner import PlanStep, PlannerAgent, TaskPlan
+
+    reply = ('```json\n{"decision":"accept","final":{"delivered":"Saved work",'
+             '"how_to_use":"Use the result","verification":"Checked","open_issues":"None"}}\n```')
+    claude = planner_claude(reply, reply)
+
+    async def run():
+        planner = PlannerAgent(task_id="resume-admission", runtime_root=tmp_path, claude_bin=claude.bin)
+        planner._bus = NS(publish=AsyncMock())
+        planner._plan = TaskPlan("resume-plan", "resume-goal", "Finish saved work", str(tmp_path),
+            status="executing", steps=[
+                PlanStep(step_id=f"saved-{index}", index=index, instruction="Finish saved work",
+                         status="deciding", result={"status": "completed", "summary": "Done"})
+                for index in range(2)
+            ])
+        try:
+            await asyncio.wait_for(planner._resume(MessageEnvelope.create(
+                source=planner_address("previous"), target=planner.agent_address,
+                message_type=MessageType.TASK_RESUME, payload={})), 10)
+            assert planner._plan.status == "completed"
+            assert [call.kwargs["metadata"]["admission_lane"]
+                    for call in agent_db.start_record.await_args_list] == [Lane.RECOVERY.value, Lane.BACKGROUND.value]
+            assert len(claude.turns()) == 2
+            assert all("[DECISION] Step" in turn["text"] for turn in claude.turns())
+            assert not controller.running
+        finally:
+            await planner.stop()
+            await controller.stop()
+
     asyncio.run(run())

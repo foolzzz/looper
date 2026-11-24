@@ -1580,6 +1580,9 @@ class ClaudeRunRecorder:
         # What its stream said about how it may fail, and what its close classifies (``failures``).
         self._evidence = failures.Evidence()
         self._failure_basis: tuple[dict[str, Any] | None, str | None, failures.Failure | None] | None = None
+        self._admission_reported = False
+        self._admission_quota_reported = False
+        self._admission_report_version = 0
         self._result_only_usage = False  # side requests whose full usage is absent from the request stream
         self._compacting = False  # an unresolved attempt may have made a hidden summary request
         self._started = _clock()
@@ -1949,6 +1952,42 @@ class ClaudeRunRecorder:
             outcome=outcome, metadata=notes,
         )
 
+    def failure_signal(self) -> failures.Failure:
+        """Classify the observed run without waiting for recording or reading settings.
+
+        A quota probe must retain its message even when the record's bounded
+        close times out. Callers choose whether this signal controls a run;
+        failure typing still independently controls what the record stores.
+        """
+        result, outcome, given = self._failure_basis or (self._result, None, None)
+        return failures.classify(self._runtime(), result, self._evidence, outcome=outcome, given=given)
+
+    async def report_admission(self, found: failures.Failure | None, *, interrupted: bool = False) -> None:
+        """Apply one run's signal once, allowing a probe's quota evidence to upgrade an untyped result.
+
+        A timed-out writer can finish after its caller already protected the
+        message and an operator cleared the account. It must not freeze it again.
+        """
+        from . import admission
+
+        if not admission.enabled():
+            return
+        quota = found is not None and found.cls is failures.FailureClass.QUOTA
+        if self._admission_reported and (not quota or self._admission_quota_reported):
+            return
+        previous = self._admission_reported, self._admission_quota_reported
+        self._admission_reported = True
+        self._admission_quota_reported |= quota
+        self._admission_report_version += 1
+        version = self._admission_report_version
+        try:
+            await admission.recorded(self._provider().id, self._agent_id, self._record_id, found,
+                                     interrupted=interrupted)
+        except BaseException:
+            if self._admission_report_version == version:
+                self._admission_reported, self._admission_quota_reported = previous
+            raise
+
     async def annotate(self, metadata: dict[str, Any]) -> None:
         """Add ``metadata``'s keys to the run's record once it ended; a database error is logged and never fails
         the run."""
@@ -2068,11 +2107,7 @@ class ClaudeRunRecorder:
                 fields.update(failure_class=found.cls.value, failure_cause=found.cause.value,
                               metadata={**(fields.get("metadata") or {}), "failure": found.metadata()})
 
-        from . import admission
-
-        if admission.enabled():
-            await admission.recorded(self._provider().id, self._agent_id, self._record_id, found,
-                                     interrupted=fields.get("status") == "interrupted")
+        await self.report_admission(found, interrupted=fields.get("status") == "interrupted")
 
         route = self._launch.llmrec if self._launch is not None else None
         owner = controller()

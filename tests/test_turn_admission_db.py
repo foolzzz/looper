@@ -12,7 +12,9 @@ from looper.agents import admission, chat_settings, completion_events, lanes_set
 from looper.agents.channels.web import WebChannelAdapter
 from looper.agents.lanes import Lane
 from looper.agents.message import MANAGER_ADDRESS, TASK_ROUTER_ADDRESS, MessageEnvelope, MessageType, channel_address
+from looper.agents.runtimes import adapter
 from looper.agents.runtimes.api.session import ApiSession
+from looper.agents.runtimes.omp import ResidentOmp
 from looper.db import provider_limits, projects, tasks
 from tests.api_manager_support import USAGE, _manager, _message, _replies
 from tests.db_support import DSN, run_db, until, v1_api
@@ -272,5 +274,57 @@ def test_draining_waiting_manager_shutdown_keeps_message_unsettled_without_recor
             assert any(envelope.message_id == user.message_id for envelope, _ in chat.manager.stopped_in_flight)
             assert not c.waiters and not c.running
             assert await pool.fetchval("SELECT count(*) FROM llm_records") == 0
+
+    run_db(run, monkeypatch, timeout=35)
+
+
+def test_user_arrival_preempts_waiting_background_on_real_noninterruptible_runtime(monkeypatch, tmp_path):
+    monkeypatch.setattr(chat_settings, "_completion_turns", chat_settings.CompletionTurns.DM_ONLY)
+    # A regression must fail on arrival classification, before the background timeout can release it.
+    monkeypatch.setattr(completion_events, "TURN_SECONDS", 60)
+
+    async def run(pool):
+        c = _controller(monkeypatch)
+        async with _manager(pool, tmp_path, monkeypatch, [_script("Interactive answer.")]) as chat:
+            await provider_limits.upsert(PROVIDER, "seven_day", {
+                "status": "allowed", "utilization": .95, "source": "claude_stream",
+                "observed_at": datetime.now(timezone.utc),
+            }, pool=pool)
+            due = await _completion(chat, pool, tmp_path)
+            settled = []
+            original = chat.bus.settle_handled
+
+            def settle(envelope):
+                settled.append(envelope.message_id)
+                original(envelope)
+
+            monkeypatch.setattr(chat.bus, "settle_handled", settle)
+            await chat.bus.start()
+            await chat.manager.start(chat.bus)
+            await chat.bus.publish(due)
+            await until(lambda: len(c.waiters) == 1, "background waits before any model request")
+            session = chat.manager._sessions["main"]
+            token = session.running_token
+            assert token is not None and token.admission_waiting
+            assert chat.model.requests == []
+            assert await pool.fetchval("SELECT count(*) FROM llm_records") == 0
+            # The prior resident can be a per-turn runtime with no interrupt channel.
+            # This is its actual capability, rather than an overridden API capability.
+            await session.claude.stop()
+            session.claude = ResidentOmp(label=chat.manager.agent_id)
+            session.claude_runtime = adapter("omp")
+            assert not session.claude.can_interrupt
+            user = _message("Answer while the background is waiting.")
+            await chat.bus.publish(user)
+            await until(lambda: user.message_id in settled, "user preempts without a runtime interrupt", timeout=8)
+            assert token.cancel.requested and token.preempted_by == user.message_id
+            assert settled.index(due.message_id) < settled.index(user.message_id)
+            row = await pool.fetchrow("SELECT state, reason, delivery FROM manager_events")
+            assert tuple(row) == ("fallback", "turn_stopped", "sent")
+            assert [reply.payload["text"] for reply in _replies(chat.bus) if
+                    reply.payload["text"] == "Interactive answer."] == ["Interactive answer."]
+            assert len(chat.model.requests) == 1
+            assert not c.waiters and not c.running
+            await c.stop()
 
     run_db(run, monkeypatch, timeout=35)

@@ -4,6 +4,7 @@ from __future__ import annotations
 import logging
 from collections.abc import Sequence
 from contextlib import AsyncExitStack
+from dataclasses import replace
 from datetime import datetime, tzinfo
 from functools import wraps
 
@@ -13,10 +14,15 @@ from .lanes import Lane
 from .message import MessageType
 from .ops import TurnOrigin
 from .tiers.planner_protocol import TurnKind
+from .tiers.turn_token import TurnPhase
 
 logger = logging.getLogger(__name__)
 # Share the grant owner with record binding and nested tool runs.
 _current_owner = admission._current_owner
+
+
+class RetryQuotaProbe(Exception):
+    """A retained message's probe failed on quota before any model output."""
 
 
 def manager_turn_lane(message_type: MessageType, origin: TurnOrigin | None) -> Lane | None:
@@ -68,25 +74,34 @@ def admitted_manager_turn(method):
             nonlocal told
             if lane is Lane.INTERACTIVE and not told:
                 told = True
-                await agent._send_status(prepared.envelope, freeze_reply(
+                await agent._freeze_notice_once(prepared.envelope, freeze_reply(
                     frozen.account, frozen.windows, frozen.resets_at, turn_context.zone()))
 
-        async with AsyncExitStack() as stack:
-            token.admission_waiting = True
-            try:
-                await token.step("account_admission", stack.enter_async_context(admission.slot(
-                    prepared.launch.profile.provider.id, lane, owner=owner,
-                    on_wait=on_wait, on_frozen=on_frozen if lane is Lane.INTERACTIVE else None)))
-                token.admission_waiting = False
-                token.check()  # a simultaneous stop and grant must not start a record
-                # token.step enters the slot in a child task; bind this task's records too.
-                context = _current_owner.set(owner)
+        while True:
+            async with AsyncExitStack() as stack:
+                token.admission_waiting = True
                 try:
-                    return await method(agent, token, prepared)
+                    await token.step("account_admission", stack.enter_async_context(admission.slot(
+                        prepared.launch.profile.provider.id, lane, owner=owner,
+                        user_message=lane is Lane.INTERACTIVE,
+                        on_wait=on_wait, on_frozen=on_frozen if lane is Lane.INTERACTIVE else None)))
+                    token.admission_waiting = False
+                    token.check()  # a simultaneous stop and grant must not start a record
+                    # token.step enters the slot in a child task; bind this task's records too.
+                    context = _current_owner.set(owner)
+                    try:
+                        return await method(agent, token, prepared)
+                    except RetryQuotaProbe:
+                        token.check()
+                        token.phase = TurnPhase.RUNNING if prepared.retried else TurnPhase.PREPARING
+                        token.cancel.prompt_sent = False
+                        token.failed_step = None
+                        prepared = replace(prepared,
+                            run=type(prepared.run)(persona_scope=prepared.run.persona_scope))
+                    finally:
+                        _current_owner.reset(context)
                 finally:
-                    _current_owner.reset(context)
-            finally:
-                token.admission_waiting = False
+                    token.admission_waiting = False
     return run
 
 
