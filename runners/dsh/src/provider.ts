@@ -13,7 +13,7 @@ let installed = false, counter = 0;
 
 type ProviderFailure = { code: string; message: string; providerRetryAfterMs?: number };
 type RetryCode = 'EMPTY_RESPONSE' | 'RATE_LIMIT' | 'SERVER' | 'TIMEOUT' | 'TRANSPORT';
-// dsh-llm 0.2.1-rc.2 retry-policy defaults, consumed by dsh-llm-retry.
+// dsh-llm 0.2.2-rc.5 retry-policy defaults, consumed by dsh-llm-retry.
 // The DeepSeek adapter normalizes api_error/overloaded_error (including busy)
 // to SERVER before the hook sees the terminal failure. No message heuristics.
 const retryCodes: ReadonlySet<RetryCode> = new Set(['EMPTY_RESPONSE', 'RATE_LIMIT', 'SERVER', 'TIMEOUT', 'TRANSPORT']);
@@ -131,7 +131,12 @@ export function installProvider(): void {
     const attempt = attempts.get(owners.get(message.request)!);
     if (attempt) attempt.bodyDone = true;
   });
-  ctx!.on('llm/stream', (options: any, next: () => AsyncIterable<any>) => (async function* () {
+  // cordis 4.1 allows next() once per dispatch. A retry re-enters llm.stream with a
+  // copy of the options; the copy passes straight through this hook to the adapter.
+  const reentries = new WeakSet<object>();
+  ctx!.on('llm/stream', function (this: any, options: any, next: () => AsyncIterable<any>) { const self = this; return (async function* () {
+    const llm = self;
+    if (reentries.has(options)) { yield* next(); return; }
     const record = sessions.get(options.sessionId), turn = record?.turn;
     if (!record || !turn || turn.settled || turn.settling || turn.cancel || turn.overflow
         || options.provider !== record.route
@@ -208,10 +213,12 @@ export function installProvider(): void {
       let usage: any, terminal: string | undefined, terminalChunk: any, modelOutput = false, retry = false;
       const buffered: any[] = [];
       try {
-        // In 0.2.1-rc.2 next() creates a fresh adapterStream, including when
-        // the outer call was prepared. DeepSeek's captured stream factory is
-        // reusable and resolves auth again for every HTTP request.
-        for await (const chunk of next()) {
+        // Each llm.stream call creates a fresh adapterStream; DeepSeek's captured
+        // stream factory is reusable and resolves auth again for every HTTP request.
+        let source: AsyncIterable<any>;
+        if (number === 1) source = next();
+        else { const copy = { ...options }; reentries.add(copy); source = llm.stream(copy); }
+        for await (const chunk of source) {
           if (['block-start', 'text-delta', 'reasoning-delta', 'tool-call-delta', 'block-end'].includes(chunk.type)) modelOutput = true;
           if (chunk.type === 'text-delta' && kind === 'turn' && !turn.settled) {
             void update(record.id, turn.trace, 'text_delta', { text: chunk.text });
@@ -283,7 +290,7 @@ export function installProvider(): void {
       }
       return;
     }
-  })());
+  })(); });
 }
 
 export function endRequest(record: Session, turn: Turn, id: string, status: string,
