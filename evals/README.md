@@ -444,7 +444,16 @@ how often the Planner asks when it need not, and `off` runs the other tasks
 without it). Each row records the `user_gates` its Planner had (`on` or
 `off`), and the comparison lists the tasks whose setting differs from the
 base's, or that a base from before user gates G2 (unset was off then) does
-not record. The runner plays the user in a task's
+not record. `--planner-roles on|off` overrides every selected task's
+`roles_on`, including role tasks, and records `planner_roles` in every row.
+Without it, each task keeps its existing setting and report fields.
+`--worker-agent SPEC.json` uses the same runtime/provider/model/agent spec as
+`--register-agent`, but registers it for the Worker role alone through the role
+settings; Planner and Reviewer keep their normal eval profiles. Each row records
+the Worker profile's id, name, runtime, model and effort in `worker_agent`.
+Either option also records `completion_checks_passed`, before the count assertions
+from `flow_problems`; neither changes the original outcome or problems.
+The runner plays the user in a task's
 gates: when one waits for the user it posts the task's `gate_script` in turn
 (`<end>` ends the discussion; a task without one answers "No preference:
 decide yourself and state your assumptions." and then ends it). When the
@@ -457,6 +466,36 @@ comparison again:
 ```bash
 uv run python -m evals.prompt_regression compare evals/runs/<new>.json [evals/runs/<base>.json]
 ```
+
+### Three groups
+
+Run the same tasks and repetitions with roles on, roles off, and roles off with
+a different Worker profile. This free example uses the scripted Claude stand-in
+for every role; fake mode measures the harness, not model quality. Give
+`LOOPER_EVAL_DATABASE_URL` a disposable PostgreSQL server (each run creates and
+drops its own database):
+
+```bash
+uv run python -m evals.prompt_regression run --mode fake --tasks single_step,reviewed_step,retry_after_failure --reps 2 --planner-roles on --out-dir evals/runs/roles-on
+uv run python -m evals.prompt_regression run --mode fake --tasks single_step,reviewed_step,retry_after_failure --reps 2 --planner-roles off --out-dir evals/runs/roles-off
+uv run python -m evals.prompt_regression run --mode fake --tasks single_step,reviewed_step,retry_after_failure --reps 2 --planner-roles off --worker-agent evals/agents/claude-login-sonnet.example.json --out-dir evals/runs/worker-profile
+uv run python -m evals.prompt_regression groups roles-on=evals/runs/roles-on/<run>.json roles-off=evals/runs/roles-off/<run>.json worker-profile=evals/runs/worker-profile/<run>.json --ignore-flow-assertions
+```
+
+Replace `<run>` with each run's timestamp. `groups LABEL=RUN.json ...` pools all
+repetitions per group: first-pass rate is `sum(first_pass_steps) /
+sum(accepted_steps)` with a Wilson 95% interval. Rework counts extra Worker runs
+(`retries`); cost, `duration_s`, Planner turns, roles defined and role runs are
+sums over started cases, including errors. Duration is summed task time, not
+batch wall time when cases overlap. Role adoption counts cases with `role_runs > 0`.
+Missing metrics show `–`; differing task/rep sets produce a warning.
+
+`--ignore-flow-assertions` scores completed tasks whose checks passed, ignoring
+only `flow_problems` bounds such as `min_roles_defined`. File checks, custom task
+checks and vault checks still count; errors and skipped rows remain unscored.
+The saved outcomes stay unchanged. Old passing rows remain usable; old failing
+rows without explicit completion/check evidence require a rerun with either new
+option. Without the scoring option, the table uses the original outcomes.
 
 ### DSH validation
 

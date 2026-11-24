@@ -707,6 +707,7 @@ def task_metrics(
     vault_log: str = "",
     vault_check: Callable[[Path, list[str]], str | None] | None = None,
     attempts_view: Mapping[str, Any] | None = None,
+    record_completion_checks: bool = False,
     now: float,
 ) -> dict[str, Any]:
     """One task's result: success and why not, the flow counts, cost, contract violations and the Planner's
@@ -771,6 +772,7 @@ def task_metrics(
     if vault_check is not None and vault_dir is not None:
         if problem := vault_check(vault_dir, observed["vault_paths"]):
             problems.append(problem)
+    completion_checks_passed = not problems
     problems += flow_problems({"max_vault_outside": 0, **expect}, {
         **observed, "contract_violations": violations["total"],
         "planner_modified_files": len(set(planner_edits) | set(changed_by_planner))})
@@ -819,6 +821,7 @@ def task_metrics(
         "status": status,
         "success": not problems,
         "problems": problems,
+        **({"completion_checks_passed": completion_checks_passed} if record_completion_checks else {}),
         **observed,
         "planner_turns": kinds,
         "cost_usd": round(float(cost.get("cost_usd") or 0.0), 6),
