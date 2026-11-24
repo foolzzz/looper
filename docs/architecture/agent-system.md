@@ -7561,6 +7561,22 @@ the outbound-review RFC) asks a tool-less run whether the operator asked for it,
 tool calls are its first caller, through a hook, while the system setting `outbound_review.enabled` is on (default
 off; `outbound_review.get` and `outbound_review.update`).
 
+Settings → Security (`#settings/security`) exposes this switch separately from the content fence. The operator
+confirms the direction before saving; a server confirmation, when requested, needs another explicit confirmation
+in its original session. The enabled Managers without a hook are shown with repair links; enabling still checks
+compatibility on the server. Settings → Roles → Outbound check selects its own Profile, prompt, timeout and run
+cap. It inherits only its own or built-in settings, not Shared defaults or a project's. Its actual timeout is at
+most 30 seconds, including a stored zero. Direct role writes and configuration imports of this role require the
+operator; generic Profile/provider and Shared defaults permissions keep their existing scope.
+
+The operator can read stored reviews at `#settings/security/audit` through `outbound_review.list`, including while
+the switch is off. Optional verdict and task filters use a bounded keyset cursor over `(created_at, id)`, newest
+first, with a default of 50 and maximum of 100 rows. Cursors are tied to the filters. The closed projection returns
+audit facts, decimal-string ids and nullable numeric cost/latency; it excludes action bodies, prompts, channel/chat
+and the action trail. The page provides earlier/back navigation, details and existing task/run links; unavailable
+cost or latency stays unknown. A run id beyond the existing run-read interface's safe integer range stays text.
+Reading these pages creates no setting or review and starts no classifier.
+
 - **The action** is typed: its tool and action, its `ActionLevel` (`inside`, `operator`, `origin`, `machine`,
   `external`, `unknown`; only `external` and `unknown` are reviewed), its target and a summary code wrote, and the
   text it would send. Every Looper tool declares its level in `ops/levels.py` (`TOOL_LEVELS`: a level, or a function of
@@ -7659,8 +7675,14 @@ off; `outbound_review.get` and `outbound_review.update`).
 
 Content from outside Looper that reaches a model goes in an `<untrusted source=... ...>` block
 (`looper/agents/untrusted.py`, the outbound-review RFC section 8) while the system setting
-`untrusted_fence.enabled` is `true` (there is no dashboard switch; off when it cannot be read). Off, every entry
+`untrusted_fence.enabled` is `true` (default off; runtime injection stays off when it cannot be read). Off, every entry
 writes what it wrote before, byte for byte.
+
+Settings → Security uses the operator-only `untrusted_fence.get/update` operations. Management reads report a
+database failure as unavailable, never as disabled; writes require a boolean and use the existing system setting.
+The switch changes only Looper-injected external content, independently of the outbound review. Neither switch is
+portable configuration, a Manager tool or a channel command; the generated CLI uses these same operator-only
+operations. Viewing settings does not write defaults.
 
 - **The block** (`untrusted.fence`) names its typed source (`untrusted.Source`) and where the content came from
   (`from`, `at`, `ref`, ...; quotes, angle brackets and line breaks dropped). The content loses its @ markup
