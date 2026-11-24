@@ -36,7 +36,7 @@ def _types(monkeypatch):
                                            _reply("m7", type_key="dev_task")]}),
     ("intents_group_requests_short", {"intents": [_reply("m1"), _reply("m3", type_key="dev_task"),
                                                  _reply("m7"), _reply("m8", type_key="dev_task")]}),
-    ("intents_group_requests_original_types", {"intents": [_reply("m1", type_key="alert_triage")]}),
+    ("intents_group_requests_original_types", {"intents": [_reply("m1", type_key="alert_triage"), _reply("m2")]}),
     ("intents_group_requests_merge", {"intents": [_reply("m1", "m2", "m3")]}),
     ("intents_group_requests_quiet", "NONE"),
     ("intents_group_requests_injection", {"intents": [], "instructions_seen": ["m1"]}),

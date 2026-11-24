@@ -406,14 +406,14 @@ EXTRACTION_CASES.update({
     },
     "intents_group_requests_original_types": {
         "what": "a followed group: an alert bot's request @-mentioning the operator keeps alert_triage; "
-                "a third party's alert request to someone else produces no intent",
+                "a third party's relayed alert request to someone else counts as bug_triage",
         "kind": "intents",
         "rows": [{**_row(1, "oc_product", "cli_alertbot", "@李四 监控告警：存储容量超过阈值，请看一下这条告警。",
                         1, mentions_me=True, group=True), "original_scope": True},
                  _row(2, "oc_product", "ou_wang", "@钱七 监控告警：内存使用率超过阈值，请看一下这条告警。",
                       2, group=True)],
-        "exact_types": {"alert_triage"}, "chatter": {2},
-        "requests_from": {1: "alert_triage"},
+        "exact_types": {"alert_triage", "bug_triage"}, "chatter": set(),
+        "requests_from": {1: "alert_triage", 2: "bug_triage"},
     },
     "intents_group_requests_merge": {
         "what": "three people report the same failing upload: one bug_triage with all three as sources",
