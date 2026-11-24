@@ -12,21 +12,26 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import uuid
 from collections.abc import Mapping, Sequence
 from datetime import datetime
+from functools import lru_cache
 from typing import Any
 
 import asyncpg
 
+from ..agents.run_usage import CostStatus
 from .connection import get_pool
 from .llm_records import TASK_SPEND, _SPEND_ROLE
 from . import agent_sessions, subscriptions, tasks
 
+logger = logging.getLogger(__name__)
+
 # The schedule fields a request sets (looper/agents/schedules.py validates them).
 FIELDS = ("name", "cron", "timezone", "requirement", "work_dir", "overlap", "max_parallel_runs", "catch_up",
           "run_timeout_mode", "run_timeout_seconds", "run_budget_usd", "gate_command", "gate_timeout_seconds",
-          "daily_budget_usd", "notify", "notify_format", "notify_channel", "notify_chat", "user_gates", "template_key", "template_inputs",
+          "daily_budget_usd", "daily_budget_equivalent_usd", "notify", "notify_format", "notify_channel", "notify_chat", "user_gates", "template_key", "template_inputs",
           "kind", "command", "env", "env_file", "success_deadline", "alert_failures_after",
           "alert_stale_after_seconds", "alert_overlap_after", "active_hours", "idle_only")
 
@@ -739,18 +744,30 @@ async def spent_since(conn: Db, schedule_id: str, since: datetime) -> float:
     return (await spent_since_each(conn, [schedule_id], since))[schedule_id]
 
 
-async def spent_since_each(conn: Db, schedule_ids: list[str], since: datetime) -> dict[str, float]:
+@lru_cache(maxsize=256)
+def _warn_unknown_spend(schedule_id: str, since: datetime, models: str) -> None:
+    logger.warning("Schedule %s daily spend cap cannot be verified: cost_status=%s for models %s; "
+                   "spend is only the known subtotal", schedule_id, CostStatus.UNKNOWN.value, models)
+
+
+async def spent_since_each(conn: Db, schedule_ids: list[str], since: datetime, *,
+                           statuses: dict[str, str] | None = None) -> dict[str, float]:
     """``spent_since`` for each of ``schedule_ids``, in one query."""
-    # ``consult.spent > 0`` is the only reason to leave the recorded cost. A run with no consult stays on
-    # COALESCE(snapshot, live), so later non-consult rows do not move a finished run.
+    # Consults and subscription checks can postdate a run's settlement. Include their live subtotal once;
+    # other task runs keep their settled cost rather than letting later unrelated records move it.
     role = _SPEND_ROLE.replace("agent_id", "l.agent_id")
+    linked = "l.id = ANY(ARRAY[sr.record_id, sr.retry_record_id, sr.check_record_id])"
     rows = await conn.fetch(
         f"""
         SELECT r.schedule_id, sum(
-                   CASE WHEN consult.spent > 0
-                        THEN GREATEST(COALESCE(r.cost_usd::numeric, 0), COALESCE(live.spent, 0))
-                        ELSE COALESCE(r.cost_usd::numeric, live.spent) END) AS spent
-        FROM schedule_runs r
+                   CASE WHEN consult.spent > 0 OR subscription.spent IS NOT NULL
+                        THEN GREATEST(COALESCE(r.cost_usd::numeric, 0),
+                                      COALESCE(live.spent, 0) + COALESCE(subscription.spent, 0))
+                        ELSE COALESCE(r.cost_usd::numeric, live.spent) END) AS spent,
+               string_agg(DISTINCT unknown.models, ', ') AS unknown_models,
+               bool_or(s.daily_budget_usd IS NOT NULL) AS has_cap
+        FROM schedule_runs r JOIN schedules s ON s.id = r.schedule_id
+        LEFT JOIN subscription_runs sr ON sr.run_id = r.id
         LEFT JOIN LATERAL (
             SELECT sum(g.cost_usd) AS spent FROM (
                 SELECT round(sum(l.cost_usd::numeric), 6) AS cost_usd
@@ -763,10 +780,37 @@ async def spent_since_each(conn: Db, schedule_ids: list[str], since: datetime) -
             SELECT COALESCE(sum(l.cost_usd::numeric), 0) AS spent
             FROM llm_records l WHERE l.task_id = r.task_id AND ({role}) = 'consult'
         ) consult ON true
+        LEFT JOIN LATERAL (
+            SELECT sum(l.cost_usd::numeric) AS spent FROM llm_records l
+            WHERE {linked} AND NOT COALESCE(l.task_id = r.task_id
+                AND {TASK_SPEND.replace("agent_id", "l.agent_id")}, false)
+        ) subscription ON true
+        LEFT JOIN LATERAL (
+            SELECT string_agg(DISTINCT COALESCE(
+                       CASE WHEN jsonb_typeof(l.metadata->'unknown_price_models') = 'array'
+                            THEN NULLIF(l.metadata->>'unknown_price_models', '[]') END,
+                       l.metadata->>'model_reported', l.model, 'unknown model'), ', ') AS models
+            FROM llm_records l
+            WHERE ((l.task_id = r.task_id AND {TASK_SPEND.replace("agent_id", "l.agent_id")})
+                   OR {linked})
+                AND l.status <> 'running' AND l.cost_usd IS NULL
+                AND (COALESCE(l.input_tokens, 0) + COALESCE(l.output_tokens, 0)
+                     + COALESCE(l.cache_read_tokens, 0) + COALESCE(l.cache_creation_tokens, 0) > 0
+                     OR l.metadata->>'cost_status' = 'unknown'
+                     OR (jsonb_typeof(l.metadata->'unknown_price_models') = 'array'
+                         AND l.metadata->'unknown_price_models' <> '[]'::jsonb))
+        ) unknown ON true
         WHERE r.schedule_id = ANY($1::text[]) AND r.fired_at >= $2 GROUP BY r.schedule_id
         """,
         schedule_ids, since,
     )
+    for row in rows:
+        if row["unknown_models"] and row["has_cap"]:
+            _warn_unknown_spend(row["schedule_id"], since, row["unknown_models"])
+    if statuses is not None:
+        unknown = {row["schedule_id"] for row in rows if row["unknown_models"]}
+        statuses.update({sid: (CostStatus.UNKNOWN if sid in unknown else CostStatus.KNOWN).value
+                         for sid in schedule_ids})
     spent = {row["schedule_id"]: float(row["spent"] or 0) for row in rows}
     return {schedule_id: spent.get(schedule_id, 0.0) for schedule_id in schedule_ids}
 

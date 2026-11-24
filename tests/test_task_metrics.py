@@ -74,7 +74,7 @@ def test_task_cost_keeps_unknown_apart_from_zero_and_both_bases():
             run(task="d", outcome="failed", stop_cause="error", provider_priced_usd=99.0)]
     cost = m.task_cost_per_completed(data(tasks=rows))
     assert cost["n"] == 3
-    assert cost["provider_priced"] == {"mean_usd": 3.0, "n_known": 2, "unknown": 1}
+    assert cost["provider_priced"] == {"mean_usd": 3.0, "n_known": 2, "unknown": 1, "cost_status": "unknown"}
     assert cost["equivalent"]["mean_usd"] == 0.5
     assert m.task_cost_per_completed(data(tasks=[run(unpriced_runs=1)]))["provider_priced"]["mean_usd"] is None
 
@@ -230,8 +230,8 @@ def test_cost_tree_attributes_by_ancestor_and_never_drops_unattributed_spend():
             first["advisor"].usd["provider_priced"]) == (1.0, 0.25, 0.75)
     assert tree.planning.usd["provider_priced"] == 0.5 + 0.125 + 0.0625 + 0.03125
     assert tree.unattributed["advisor"].usd["provider_priced"] == 2.0
-    assert tree.unattributed["worker"].view()["provider_priced"] == {"usd": 3.0, "runs": 1, "unknown_runs": 0}
-    assert tree.unattributed["worker"].view()["equivalent"] == {"usd": None, "runs": 1, "unknown_runs": 1}
+    assert tree.unattributed["worker"].view()["provider_priced"] == {"usd": 3.0, "runs": 1, "unknown_runs": 0, "cost_status": "known"}
+    assert tree.unattributed["worker"].view()["equivalent"] == {"usd": None, "runs": 1, "unknown_runs": 1, "cost_status": "unknown"}
     total = m._sum([*tree.attempts[10].values(), *tree.attempts[11].values(), tree.planning,
                     *tree.unattributed.values()])
     assert total.usd["provider_priced"] == pytest.approx(sum(r["cost_usd"] for r in records
@@ -250,9 +250,9 @@ def test_step_cost_splits_first_attempt_and_retries_and_keeps_unknown_apart():
     cost = m.step_cost_per_accepted(data(attempts=[a1, a2, b1], records=records))
     paid = cost["provider_priced"]
     assert cost["n"] == 2
-    assert paid["total"] == {"mean_usd": 3.5, "n_known": 1, "unknown": 1}
+    assert paid["total"] == {"mean_usd": 3.5, "n_known": 1, "unknown": 1, "cost_status": "unknown"}
     assert paid["first"]["mean_usd"] == 1.5 and paid["retry"]["mean_usd"] == 1.0
-    assert cost["equivalent"]["total"] == {"mean_usd": 0.0, "n_known": 2, "unknown": 0}
+    assert cost["equivalent"]["total"] == {"mean_usd": 0.0, "n_known": 2, "unknown": 0, "cost_status": "known"}
 
 
 def test_one_failed_part_costs_only_its_figures():
@@ -260,3 +260,13 @@ def test_one_failed_part_costs_only_its_figures():
     result = m._evaluate(m.task_success_rate, d)
     assert result == {"error": "RuntimeError: tasks unreadable"}
     assert "error" not in m._evaluate(m.step_rework_rate, d)
+
+
+def test_cost_metrics_expose_shared_unknown_state_for_partial_subtotals():
+    from looper.agents.run_usage import CostStatus
+    cost = m.Cost()
+    cost.add({"equivalent": False, "cost_usd": 2.0})
+    cost.add({"equivalent": False, "cost_usd": None})
+    assert cost.view()["provider_priced"] == {
+        "usd": 2.0, "runs": 2, "unknown_runs": 1, "cost_status": CostStatus.UNKNOWN.value}
+    assert m._average_cost([(2.0, 0), (0.0, 1)])["cost_status"] == CostStatus.UNKNOWN.value

@@ -202,9 +202,9 @@ def test_the_projects_list_is_set_whole_by_id_or_name_and_read_back(monkeypatch:
         assert answer["restricted"] is True and answer["choosable"] == answer["profiles"]
         assert set(answer["profiles"][0]) == {"profile_id", "name", "runtime", "model", "effort", "roles",
                                               "usd_per_million_tokens"}
-        # Claude Code's own login runs an alias as Anthropic's model, at its price.
+        # Haiku resolves to 5.5, whose price is unknown; Sonnet retains its known rate.
         assert [p["usd_per_million_tokens"] for p in answer["profiles"]] == [
-            {"input": 1.0, "output": 5.0}, {"input": 2.0, "output": 10.0}]
+            {"input": None, "output": None}, {"input": 2.0, "output": 10.0}]
         assert await _call("GET", path) == (200, answer)
 
         # A bad list changes nothing.

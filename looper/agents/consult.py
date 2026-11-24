@@ -55,6 +55,7 @@ from dataclasses import replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from .run_usage import CostStatus, cost_status
 from .. import child_env
 from .llmrec import control as llmrec
 from ..db import llm_records as db_llm_records, projects as db_projects, room as db_room, steps as db_steps
@@ -437,7 +438,7 @@ class ConsultService:
             # Claude's fork result includes earlier runs; only its own recorded cost can check this cap.
             if cost is None and runtime.type != "claude-code" and isinstance(result.get("total_cost_usd"), (int, float)):
                 cost = float(result["total_cost_usd"])
-            if cost is None:
+            if cost_status(cost) is CostStatus.UNKNOWN:
                 raise _Failed(FallbackReason.BUDGET, f"its cost is unknown, so its cap of {budget:g} USD "
                                                     "(room_consult_budget_usd) cannot be checked: its answers are dropped")
             if cost > budget:

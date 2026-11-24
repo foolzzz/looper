@@ -57,9 +57,10 @@ _COUNTS = {"type": "object", "additionalProperties": _INT}
 _COMPLETION = {"type": ["object", "null"], "properties": {
     "pending": _INT, "oldest_pending_seconds": {"type": ["number", "null"]}, "window_hours": _INT,
     "by_state": _COUNTS, "by_reason": _COUNTS, "turn_cost_usd": {"type": "number"}, "failing": _BOOL,
+    "cost_status": {"type": "string", "enum": ["known", "unknown"]}, "unpriced_runs": _INT,
     "checked_at": _STR},
     "required": ["pending", "oldest_pending_seconds", "window_hours", "by_state", "by_reason", "turn_cost_usd",
-                 "failing", "checked_at"], "additionalProperties": False}
+                 "failing", "checked_at", "cost_status", "unpriced_runs"], "additionalProperties": False}
 _HEALTH = _object({
     "status": {"const": "ok"}, "version": _STR, "pid": _INT, "started_at": _STR, "now": _STR,
     "completion": _COMPLETION,
