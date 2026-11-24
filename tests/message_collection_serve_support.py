@@ -1,6 +1,7 @@
 """Isolated public-CLI service, local accounts and a read-only collector wire fixture."""
 
 import os
+import json
 from pathlib import Path
 import shutil
 import signal
@@ -12,12 +13,23 @@ from urllib.parse import unquote, urlsplit
 
 from evals.prompt_regression.runner import Api, EvalError, free_port
 from looper import ops_config
-from looper.agents import operator_auth
+from looper.agents import operator_auth, proc_tree
 from tests.fake_claude import fake_claude
 from lark_cli_stand_in import _STAND_IN, BOT_OPEN_ID
 
 ROOT = Path(__file__).resolve().parents[1]
 _COLLECTOR = r'''
+if name != "collector-synthetic" and args[:3] == ["api", "GET", "/open-apis/im/v1/messages"] and args[3:6] == ["--as", "bot", "--params"]:
+    params = json.loads(args[6])
+    rows = world.get("bot_history", {}).get(params["container_id"], [])
+    # Descending chat reads enumerate roots; this fixture has no bot threads.
+    if params.get("sort_type") == "ByCreateTimeDesc":
+        rows = []
+    more = bool(rows and world.get("history_two_pages") and not params.get("page_token"))
+    answer({"code": 0, "data": {"items": rows[:1] if params.get("page_token") else rows,
+                               "has_more": more, "page_token": "overlap" if more else ""}})
+if name != "collector-synthetic" and args[:2] == ["api", "GET"] and args[2].startswith("/open-apis/im/v1/chats/") and args[3:] == ["--as", "bot"]:
+    answer({"code": 0, "data": {"chat_mode": "group"}})
 if name == "collector-synthetic":
     state = world["collector"]
     if args == ["auth", "status", "--json"]:
@@ -108,8 +120,23 @@ def serving(root, database_url, world, *, port=None):
         database_url=database_url, host="127.0.0.1", port=port, operator_notes_root=str(home / "notes"))
     ops_config.write_private(ops.path, ops_config.render(ops))
     assert ops.path.stat().st_mode & 0o777 == 0o600
+    # Record the actual service child of uv so SIGINT reaches serve alone. Signalling its whole process
+    # group would kill a blocked CLI before SourceService can cancel it and falsify an interrupted run.
+    startup = root / "python-startup"
+    startup.mkdir(exist_ok=True)
+    identity_path = root / "service-identity.json"
+    identity_path.unlink(missing_ok=True)
+    (startup / "sitecustomize.py").write_text(
+        "import json,os,sys\nfrom pathlib import Path\n"
+        "if Path(sys.argv[0]).name == 'looper' and sys.argv[1:2] == ['serve']:\n"
+        " import looper\n"
+        f" assert Path(looper.__file__).resolve().parent == Path({str(ROOT / 'looper')!r})\n"
+        f" path=Path({str(identity_path)!r})\n"
+        " path.write_text(json.dumps({'pid':os.getpid(),'python':sys.executable,'module':looper.__file__}))\n"
+        " path.chmod(0o600)\n"
+        " print('isolated service sys.executable='+sys.executable+' looper.__file__='+looper.__file__,flush=True)\n")
     env = {"PATH": os.pathsep.join((str(bin_dir), "/usr/bin", "/bin", "/usr/sbin", "/sbin")),
-           "HOME": str(home), "PYTHONPATH": str(ROOT), "PYTHONUNBUFFERED": "1",
+           "HOME": str(home), "PYTHONPATH": os.pathsep.join((str(startup), str(ROOT))), "PYTHONUNBUFFERED": "1",
            "UV_PYTHON": sys.executable, "UV_NO_SYNC": "1", "CLAUDE_CONFIG_DIR": str(home / ".claude")}
     uv = shutil.which("uv")
     assert uv is not None
@@ -119,6 +146,7 @@ def serving(root, database_url, world, *, port=None):
             "--config", str(ops.path), "--runtime-root", str(runtime), "--skip-backup"],
             cwd=ROOT, env=env, stdout=log, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL, start_new_session=True)
         api = Api(f"http://127.0.0.1:{port}", timeout=10)
+        service_pid, service_started = None, None
         try:
             deadline = time.monotonic() + 60
             while True:
@@ -134,10 +162,24 @@ def serving(root, database_url, world, *, port=None):
                 except (OSError, EvalError):
                     assert time.monotonic() < deadline, log_path.read_text()[-3000:]
                     time.sleep(.1)
+            identity = json.loads(identity_path.read_text())
+            assert Path(identity["module"]).resolve().parent == ROOT / "looper"
+            service_pid = identity["pid"]
+            service_started = proc_tree._start_time(service_pid)
+            assert service_started is not None
             yield api, ops
         finally:
             if process.poll() is None:
-                os.killpg(process.pid, signal.SIGINT)
+                if identity_path.exists():
+                    owned_pid = json.loads(identity_path.read_text())["pid"]
+                    current_start = proc_tree._start_time(owned_pid)
+                    if current_start is not None:
+                        assert owned_pid in proc_tree._tree(process, proc_tree._snapshot(), {})
+                        if service_pid == owned_pid:
+                            assert current_start == service_started
+                        os.kill(owned_pid, signal.SIGINT)
+                else:
+                    process.send_signal(signal.SIGINT)
                 try:
                     process.wait(timeout=25)
                 except subprocess.TimeoutExpired:

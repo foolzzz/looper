@@ -17,7 +17,7 @@ from evals.prompt_regression.runner import EvalError
 from tests import msgflow_support as flow
 from tests.db_support import DSN, fresh_database_without_recording
 from tests.message_collection_serve_support import ROOT, assert_target, serving, until
-from lark_cli_stand_in import OPEN_ID, WORLD
+from lark_cli_stand_in import BOT_MENTION, BOT_OPEN_ID, OPEN_ID, WORLD
 
 pytestmark = pytest.mark.skipif(not DSN, reason="requires disposable LOOPER_TEST_DATABASE_URL")
 
@@ -178,10 +178,57 @@ def test_isolated_serve_bridge_collect_parity_alert_and_rollback(tmp_path):
             assert_target(ops.path, ops.runtime_root, api)
         user_reads = sum("collector-synthetic" in json.loads(line) for line in (root / "lark-calls.jsonl").read_text().splitlines())
         flow.append(bridge, "oc_collect_synthetic", flow.message("om_after_rollback", sent_at=datetime.now(timezone.utc)))
+        # The bot's live ingress and overlapping startup history keep their independent SQLite boundary.
+        at = datetime.now(timezone.utc)-timedelta(seconds=1)
+        admitted = "Synthetic admitted bot event."
+        ignored = "Synthetic unmentioned group event."
+        state["events"] = [
+            {"type": "im.message.receive_v1", "chat_id": "oc_ingress_synthetic", "chat_type": "group",
+             "message_id": "om_admitted_synthetic", "message_type": "text", "sender_id": OPEN_ID,
+             "sender_type": "user", "content": admitted, "mentions": [BOT_MENTION]},
+            {"type": "im.message.receive_v1", "chat_id": "oc_ingress_synthetic", "chat_type": "group",
+             "message_id": "om_ignored_synthetic", "message_type": "text", "sender_id": OPEN_ID,
+             "sender_type": "user", "content": ignored},
+        ]
+        state["bot_history"] = {"oc_ingress_synthetic": [
+            flow.message("om_admitted_synthetic", text=admitted, sent_at=at, sender=OPEN_ID,
+                         mentions=[(BOT_OPEN_ID, "HelperBot")]),
+            flow.message("om_ignored_synthetic", text=ignored, sent_at=at, sender=OPEN_ID),
+        ]}
+        state["history_two_pages"] = True
+        world.write_text(json.dumps(state))
+
+        async def debt():
+            from looper.agents.channels.lark_inbox import LarkInbox
+            inbox = await LarkInbox.open(root / "runtime/.local/lark/channel-lark/inbox.sqlite3")
+            try:
+                await inbox.checkpoint(at.timestamp()-60)
+                await inbox.defer("oc_ingress_synthetic", at.timestamp()-60, at.timestamp()+1)
+            finally:
+                await inbox.close()
+        asyncio.run(debt())
         with serving(root, url, world) as (api, ops):
+            until(lambda: sql("SELECT 1 FROM chat_messages WHERE role='user' AND content LIKE $1",
+                              "%"+admitted+"%", fetch=True))
             until(lambda: len(sql("SELECT seq FROM source_events", fetch=True)) == 6, timeout=80)
+            assert len(sql("SELECT 1 FROM chat_messages WHERE role='user' AND content LIKE $1",
+                           "%"+admitted+"%", fetch=True)) == 1
+            assert not sql("SELECT 1 FROM chat_messages WHERE role='user' AND content LIKE $1",
+                           "%"+ignored+"%", fetch=True)
             assert sql("SELECT ingest_mode FROM event_sources", fetch=True)[0]["ingest_mode"] == "bridge"
             assert sum("collector-synthetic" in json.loads(line) for line in (root / "lark-calls.jsonl").read_text().splitlines()) == user_reads
+        calls = [json.loads(line) for line in (root / "lark-calls.jsonl").read_text().splitlines()]
+        assert any("--as" in call and "bot" in call and any("overlap" in arg for arg in call) for call in calls)
+
+        async def catchup_readback():
+            from looper.agents.channels.lark_inbox import LarkInbox
+            inbox = await LarkInbox.open(root / "runtime/.local/lark/channel-lark/inbox.sqlite3")
+            try:
+                assert "oc_ingress_synthetic" not in await inbox.debts()
+                assert await inbox.processed("om_admitted_synthetic")
+            finally:
+                await inbox.close()
+        asyncio.run(catchup_readback())
 
 
 def test_two_isolated_servers_share_writer_lock_and_shutdown_interrupts_collection(tmp_path):
