@@ -30,6 +30,7 @@ from .ops import ErrorCode, OpError
 from .project_execution import ProjectExecution
 
 SETTING_KEY = "knowledge_vault"
+DEFAULT_PROFILE_SOURCE = "关于我.md"
 READ_MAX_BYTES = WRITE_MAX_BYTES = 64 * 1024
 RUN_WRITE_MAX_BYTES = 256 * 1024
 SEARCH_FILE_MAX_BYTES = 512 * 1024
@@ -53,6 +54,7 @@ class VaultConfig:
     rules_file: str | None
     # The default Manager may search and read it in the user's own turns (``ops.manager_vault``); off by default.
     manager_read: bool = False
+    profile_source: str = DEFAULT_PROFILE_SOURCE
 
     def folders(self) -> str:
         return ", ".join(f"{w}/" for w in self.writable)
@@ -98,12 +100,29 @@ def _open_real_path(path: Path) -> list[int]:
     return fds
 
 
-def check_config(raw: Mapping) -> VaultConfig:
+def profile_path(root: Path, source: str) -> Path:
+    """One Markdown profile file, confined to the vault after resolving symbolic links."""
+    if problem := _path_problem(source):
+        raise ValueError(f"profile_source {problem}")
+    if Path(source).suffix.lower() != ".md":
+        raise ValueError("profile_source must name one Markdown (.md) file")
+    try:
+        target = (root / source).resolve()
+        if not target.is_relative_to(root):
+            raise ValueError("profile_source resolves outside the knowledge vault")
+        if not stat.S_ISREG(target.stat().st_mode):
+            raise ValueError("profile_source must exist and be a regular file")
+    except (OSError, RuntimeError) as exc:
+        raise ValueError("profile_source must exist and be a readable regular file") from exc
+    return target
+
+
+def check_config(raw: Mapping, *, validate_profile: bool = True) -> VaultConfig:
     """The stored setting checked against the directory as it is now; raises ``ValueError`` on a problem."""
     if not isinstance(raw, Mapping):
         raise ValueError("the knowledge vault setting must be an object")
     for key in raw:
-        if key not in ("path", "writable", "rules_file", "manager_read"):
+        if key not in ("path", "writable", "rules_file", "manager_read", "profile_source"):
             raise ValueError(f"unknown knowledge vault key {key!r}")
     manager_read = raw.get("manager_read", False)
     if not isinstance(manager_read, bool):
@@ -167,7 +186,14 @@ def check_config(raw: Mapping) -> VaultConfig:
             raise ValueError(f"rules file {rules} leaves the vault (a symbolic link?)")
         if not target.is_file():
             raise ValueError(f"rules file {rules} must exist and be a regular file")
-    return VaultConfig(root, tuple(folders), rules, manager_read)
+    source = raw.get("profile_source", DEFAULT_PROFILE_SOURCE)
+    if not isinstance(source, str):
+        raise ValueError("profile_source must be a path relative to the knowledge vault")
+    # Old settings need no profile file. Explicit saves validate it; readers recheck only when compiling,
+    # so removing a profile cannot disable unrelated vault tools.
+    if validate_profile and ("profile_source" in raw or (root / source).exists() or (root / source).is_symlink()):
+        profile_path(root, source)
+    return VaultConfig(root, tuple(folders), rules, manager_read, source)
 
 
 async def load() -> tuple[VaultConfig | None, str | None]:
@@ -177,7 +203,7 @@ async def load() -> tuple[VaultConfig | None, str | None]:
         return None, None
     try:
         raw = json.loads(stored[SETTING_KEY])
-        config = check_config(raw)
+        config = check_config(raw, validate_profile=False)
         if str(config.path) != raw.get("path"):
             # It was saved resolved: a link somewhere on the path now leads elsewhere.
             raise ValueError(f"the vault path {raw.get('path')} now leads to {config.path} (a symbolic link?)")
@@ -210,7 +236,7 @@ async def settings_view() -> dict:
     raw: Mapping = {}
     if config:
         raw = {"path": str(config.path), "writable": list(config.writable), "rules_file": config.rules_file,
-               "manager_read": config.manager_read}
+               "manager_read": config.manager_read, "profile_source": config.profile_source}
     elif problem:
         stored = await system_settings.get_settings([SETTING_KEY])
         try:
@@ -222,7 +248,8 @@ async def settings_view() -> dict:
     path = raw.get("path")
     is_git = await _git_root(Path(path)) is not None if isinstance(path, str) and os.path.isabs(path) else False
     return {"configured": config is not None, "path": path, "writable": raw.get("writable") or [],
-            "rules_file": raw.get("rules_file"), "manager_read": raw.get("manager_read") is True, "git": is_git,
+            "rules_file": raw.get("rules_file"), "manager_read": raw.get("manager_read") is True,
+            "profile_source": raw.get("profile_source", DEFAULT_PROFILE_SOURCE), "git": is_git,
             "problem": problem}
 
 
@@ -238,6 +265,7 @@ async def update_settings(body: Mapping) -> dict:
             config = check_config(body)
             await system_settings.put_settings({SETTING_KEY: json.dumps({
                 "path": str(config.path), "writable": list(config.writable), "rules_file": config.rules_file,
+                **({"profile_source": config.profile_source} if config.profile_source != DEFAULT_PROFILE_SOURCE else {}),
                 **({"manager_read": True} if config.manager_read else {})})})
     except ValueError as exc:
         raise projects.RequestError(projects.HTTP_400, str(exc)) from None

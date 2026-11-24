@@ -372,22 +372,39 @@ Manager has no tool for it. The dashboard shows the task page's 指标 card and 
   budget (null unsets it; the recommended value is $4.00) and report invalid stored values. While unset, there
   is no additional recorder cap, session measurement write or maintenance check, and prompts, tools and
   command lines stay unchanged.
-- **Operator profile** (`operator_profile.py`, `manager.profile.source`, default unset): a deterministic compiler
-  reads `关于我.md` (or `记忆/关于我.md`, but not both) and `偏好/**/*.md` from the folder the operator names.
-  That folder must resolve, symlinks included, inside the configured knowledge vault; save and read both check.
-  Notes whose path has a part starting with `.` or `_` are skipped. It produces a typed profile — name, address,
-  reply language, time zone, working hours, communication preferences and standing rules. Heading fields cite the
-  note path, heading and line. A markdown bullet with inline `[kind:: …]` fields is one entry: `kind` chooses
-  the field, and the entry cites the note path and that line. A `summary` is not required for those notes.
-  Content inside a code fence is ignored, and backticks in the output are normalized. A single-value field with
-  a second value fails the compile. The rendered text is at most 1500 characters; lower-priority fields are
-  dropped first, and the last remaining field is truncated with `…` when it alone is still over the cap. `profile.get`
-  stores the result in `profile_blocks` and keeps the version when the compiled body is unchanged. The
-  operator-only v1 operations are `profile.get`, `profile_source.get` and `profile_source.update` (null clears
-  the folder and the cached block). They are not chat settings and not Manager tools. **Manager wiring is
-  pending:** with the folder unset nothing is compiled and nothing is written, and storing a folder changes no
-  prompt, tool list, record or channel call. See the
-  [operator profile RFC](rfcs/operator-profile-v0.zh-CN.md).
+- **Operator profile** (`operator_profile.py`): the deterministic compiler reads one Markdown file,
+  `knowledge_vault.profile_source`, relative to the configured vault root (default `关于我.md`). Settings →
+  Knowledge vault exposes the path; `knowledge_vault.get/update` are operator-only, as are the source aliases
+  `profile_source.get/update`. The aliases now take a relative file rather than an absolute directory; null
+  restores the default. The old `manager.profile.source` directory setting is no longer read. A replacement
+  knowledge-vault update without `profile_source` restores `关于我.md`. Existing vault settings without the key
+  remain valid even when that default note is absent. An explicitly saved source must be an existing regular
+  `.md` file whose resolved path, including symlinks, stays inside the vault. Every compilation checks again;
+  a missing, invalid or unreadable source logs a warning and yields no profile, without disabling other vault
+  tools or returning a previously cached profile.
+  The compiler preserves typed fields — name, address, reply language, time zone, working hours, communication
+  preferences and standing rules — with relative-path, heading and line citations. Inline `[kind:: …]` bullets
+  keep their existing classification and inactive-entry filtering. Frontmatter and fenced code are excluded;
+  backticks are normalized. Duplicate single-value fields fail compilation. The text stays within 1500 Unicode
+  characters, dropping lower-priority fields first and truncating a remaining oversized field with `…`.
+  `profile.get` caches the compiled block in `profile_blocks`, retaining its version when the body is unchanged.
+  Manager and CLI reads do not write that cache.
+  The independent operator-only `profile_settings.get/update` operations control `manager.profile.enabled`
+  (default off; null restores off). Settings → Knowledge vault exposes its confirmed switch. Off, the Manager
+  never compiles a profile and its model-facing bytes remain unchanged. On, the default Manager's own dashboard
+  and operator direct-chat turns include an `Operator profile` resident section. Group and other-sender turns,
+  routed non-main sessions and scenario Managers omit it. With `manager.stable_context` on it is inside the
+  stable block and follows its whole/change/unchanged rules; otherwise it is its own resident section before
+  Projects. Shared turns never receive private profile text in stable-state removal lines either. This does
+  not erase profile text already present in a shared resident session's history.
+  `looper profile show [--runtime-root …] [--config …]` reads the same file with the same compiler and prints
+  exactly the resident section's body, with no added newline, whether injection is on or off. It makes no model
+  call or schema/cache write. Its worker has a 1-second deadline covering imports, settings and file I/O;
+  missing settings, an unavailable database, an invalid profile or timeout prints nothing and exits 0.
+  Output is bounded by the compiler's 1500-character cap (at most 6000 UTF-8 bytes). This is intended for a
+  future local SessionStart hook; this change installs no hook. Lark and Telegram share the Manager path and
+  need no new configuration command. Real-model evaluation remains pending maintainer approval.
+  See the [operator profile RFC](rfcs/operator-profile-v0.zh-CN.md) for the original compiler design.
 - The reply is Claude's words, then what Looper itself writes to the user in
   that turn (`Turn.blocks`): a new task's configuration with the question
   whether to start it, and what an operation needing confirmation does. In a
@@ -1857,12 +1874,21 @@ Manager tools.
   `grok/sessions/<agent>`, `pi/sessions/<agent>`) of agents whose saved session (`agent_sessions`)
   is not of that runtime.
 - **DSH** (`looper/agents/runtimes/dsh.py`, DeepSeek Harness
-  `@deepseek-ai/dsh` **0.2.1-rc.2**; [RFC and validation status](rfcs/dsh-runtime-v0.zh-CN.md))
+  `@deepseek-ai/dsh` **0.2.2-rc.5**; [RFC and validation status](rfcs/dsh-runtime-v0.zh-CN.md))
   is available to Manager, Planner, Worker and Reviewer through the same Agent
   Profiles and role/project/task overrides. Put the supported `dsh` on the
   server's PATH, re-detect it in Settings → Agent Runtimes, then create an
   Agent Profile selecting a saved `anthropic-messages` model from an API-key
   provider with a matching endpoint.
+  The version gate is an exact match, on the `dsh` CLI probe and on the SDK
+  runner (`@deepseek-ai/dsh` and every `@deepseek-ai/dsh-*` package it loads must
+  be 0.2.2-rc.5, with `@deepseek-ai/cordis` 4.1.x). Any other version, older or
+  newer, is reported as unsupported and DSH steps fail the version check until
+  the installed package matches. Upgrade order: install
+  `npm install -g @deepseek-ai/dsh@0.2.2-rc.5` before or together with the Looper
+  release. To roll back, install the previous Looper release together with its
+  pinned `dsh` (for example `@deepseek-ai/dsh@0.2.1-rc.2` for Looper releases
+  before this one); the two must move together.
   Only `deepseek-flash`, `deepseek-flash[1m]`, `deepseek-v4-pro` and
   `deepseek-v4-pro[1m]` are accepted; the `[1m]` suffix is removed on the wire,
   after validating the saved model reference. Effort is `low`, `high`
@@ -3032,7 +3058,10 @@ The tools are Looper's MCP tools, the same on every runtime.
   checked when the setting is saved), `writable`
   (folders inside it, each an existing directory, neither a link nor below
   one, so a link is refused when the setting is saved; empty: read only), `rules_file` (a file inside it, optional)
-  and `manager_read` (true: the default Manager reads it in the user's own turns; stored only when true).
+  `manager_read` (true: the default Manager reads it in the user's own turns; stored only when true),
+  and `profile_source` (a Markdown file relative to the vault root, default `关于我.md`; see Operator profile).
+  The get/update API and the Manager's setting action are operator-only. Updates replace the configuration:
+  omitting `profile_source` restores its default, independently of the resident-injection switch.
   It is checked again whenever it is read: a vault that no longer holds (its
   directory removed, a folder turned into a link out of it) is `problem`, and
   every tool refuses with it. It is a local path, so the configuration export

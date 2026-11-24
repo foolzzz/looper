@@ -361,6 +361,7 @@ async def _confirming(call: Call) -> str | None:
     if call.arguments["action"] == "waits":
         return await _wait_confirming(call)
     if call.arguments["action"] == "knowledge_vault":
+        await _vault_operator(call)
         values = _vault_values(call.arguments)
         try:
             config = None if values == {"path": None} else vault.check_config(values)
@@ -379,6 +380,11 @@ async def _confirming(call: Call) -> str | None:
             f"- 目录：{before['path'] or '未配置'} → {after['path'] or '未配置'}",
             f"- 可写目录：{before_folders} → {', '.join(after['writable']) or '无'}",
             f"- 规则文件：{before['rules_file'] or '无'} → {after['rules_file'] or '无'}",
+            *([f"- 画像文件：{before.get('profile_source', vault.DEFAULT_PROFILE_SOURCE)} → "
+               f"{config.profile_source if config else vault.DEFAULT_PROFILE_SOURCE}"]
+              if config and (config.profile_source != vault.DEFAULT_PROFILE_SOURCE
+                             or before.get('profile_source', vault.DEFAULT_PROFILE_SOURCE) != config.profile_source)
+              else []),
             *([f"- 管家在你自己的聊天里读笔记：{'是' if before.get('manager_read') else '否'} → "
                f"{'是' if manager_read else '否'}"] if manager_read or before.get("manager_read") else []),
             "开着知识库的项目里，任务的 agent 可以读这个目录里的全部笔记，并直接写入可写目录（每次写入是一次 git 提交）。",
@@ -426,6 +432,13 @@ def _vault_values(arguments: Mapping[str, Any]) -> dict[str, Any]:
     if not isinstance(values, Mapping) or not values:
         raise OpError(ErrorCode.INVALID, "knowledge_vault: give a nonempty settings object ({\"path\": null} clears it)")
     return dict(values)
+
+
+async def _vault_operator(call: Call) -> None:
+    from .service import operator_call
+
+    if not await operator_call(call.turn):
+        raise OpError(ErrorCode.FORBIDDEN, "knowledge vault settings are operator-only")
 
 
 async def _timeout(place: _Place) -> int | None:
@@ -595,6 +608,7 @@ async def _settings(call: Call) -> dict[str, Any]:
     if action == "waits":
         return await _wait_set(call)
     if action == "knowledge_vault":
+        await _vault_operator(call)
         return {"knowledge_vault": await answered(vault.update_settings(_vault_values(call.arguments)))}
     return await _set(call)
 

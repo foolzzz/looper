@@ -33,7 +33,7 @@ def run(coroutine):
     asyncio.run(asyncio.wait_for(coroutine, 120))
 
 
-def fake_package(tmp_path, *, version="0.2.1-rc.2", dependency="0.2.1-rc.2", missing=False, delay=False):
+def fake_package(tmp_path, *, version="0.2.2-rc.5", dependency="0.2.2-rc.5", missing=False, delay=False):
     root = tmp_path / "fake-dsh"
     (root / "lib").mkdir(parents=True)
     (root / "package.json").write_text(json.dumps({"name": "@deepseek-ai/dsh", "version": version,
@@ -55,7 +55,7 @@ export async function runProfile() {
         package = root / "node_modules/@deepseek-ai" / name
         (package / "lib").mkdir(parents=True)
         (package / "package.json").write_text(json.dumps({"name": f"@deepseek-ai/{name}",
-            "version": "4.0.0" if name == "cordis" else dependency if name == "dsh-llm" else "0.2.1-rc.2",
+            "version": "4.1.0" if name == "cordis" else dependency if name == "dsh-llm" else "0.2.2-rc.5",
             "type": "module", "exports": {".": {"default": "./lib/index.js"}}}))
         (package / "lib/index.js").write_text("\n".join(f"export function {export}() {{}}"
             for export in exports if not (missing and export == "registerDeepSeekProvider")))
@@ -92,7 +92,7 @@ def test_initialize_reports_the_gated_sdk(tmp_path):
             await send("initialize", OFFER)
             result = (await receive())["result"]
             assert result == {"protocol_version": "0.1", "runner": {"kind": "dsh", "version": "0.1.0"},
-                "sdk": {"name": "@deepseek-ai/dsh", "version": "0.2.1-rc.2"}, "capabilities": CAPABILITIES}
+                "sdk": {"name": "@deepseek-ai/dsh", "version": "0.2.2-rc.5"}, "capabilities": CAPABILITIES}
             await send("initialize", OFFER, id="l-2")
             assert (await receive())["error"]["code"] == -32600
             for index, method in enumerate(("nope/x", "shutdown"), 3):
@@ -106,8 +106,8 @@ def test_initialize_reports_the_gated_sdk(tmp_path):
     ("outside", "not inside"), ("protocol", "0.1"), ("node", "22.19")])
 def test_unverified_sdk_is_refused(tmp_path, monkeypatch, case, diagnostic):
     executable = fake_package(tmp_path, version="0.2.1-rc.3" if case == "version" else
-        "0.2.0" if case == "old" else "0.2.1-rc.2", dependency="0.2.1-rc.1" if case == "dependency"
-        else "0.2.1-rc.2", missing=case == "missing")
+        "0.2.0" if case == "old" else "0.2.2-rc.5", dependency="0.2.1-rc.1" if case == "dependency"
+        else "0.2.2-rc.5", missing=case == "missing")
     if case == "outside":
         executable = tmp_path / "outside.js"
         executable.write_text("")

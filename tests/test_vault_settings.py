@@ -63,7 +63,7 @@ def test_vault_settings_are_saved_read_back_and_cleared_without_a_database(
                                             "rules_file": "rules.md"})
         expected = {"path": str(tmp_path.resolve()), "writable": ["codex-mem"], "rules_file": "rules.md"}
         assert json.loads(stored_vault[vault.SETTING_KEY]) == expected
-        assert view == {"configured": True, **expected, "manager_read": False, "git": False, "problem": None}
+        assert view == {"configured": True, **expected, "manager_read": False, "profile_source": "关于我.md", "git": False, "problem": None}
         assert await vault.settings_view() == view
         config, problem = await vault.load()
         assert config == vault.VaultConfig(tmp_path.resolve(), ("codex-mem",), "rules.md") and problem is None
@@ -111,7 +111,7 @@ def test_a_removed_vault_is_inactive_but_its_saved_values_stay_visible(
         root.rmdir()
         config, problem = await vault.load()
         assert config is None and problem and "does not exist" in problem
-        assert await vault.settings_view() == {"configured": False, **saved, "manager_read": False, "git": False,
+        assert await vault.settings_view() == {"configured": False, **saved, "manager_read": False, "profile_source": "关于我.md", "git": False,
                                                "problem": problem}
         assert await vault.active() is None
         assert stored_vault[vault.SETTING_KEY] == raw
@@ -160,12 +160,28 @@ def _setting_call(values: Any = None, *, include: bool = True) -> Call:
 
 def _view(path: str | None = None) -> dict[str, Any]:
     return {"configured": path is not None, "path": path, "writable": [], "rules_file": None,
-            "manager_read": False, "git": False, "problem": None}
+            "manager_read": False, "profile_source": "关于我.md", "git": False, "problem": None}
 
 
 def test_the_settings_schema_accepts_the_vault_action() -> None:
     values = {"action": "knowledge_vault", "knowledge_vault": {"path": None}}
     assert check_arguments(settings.TOOLS[0].schema, values) == values
+
+
+@pytest.mark.parametrize("phase", [settings._confirming, settings._settings])
+def test_vault_setting_action_refuses_nonoperator_before_read_or_write(monkeypatch, phase) -> None:
+    from looper.agents.ops import service
+
+    monkeypatch.setattr(service, "operator_call", AsyncMock(return_value=False))
+    view = AsyncMock()
+    update = AsyncMock()
+    monkeypatch.setattr(vault, "settings_view", view)
+    monkeypatch.setattr(vault, "update_settings", update)
+    with pytest.raises(OpError) as caught:
+        asyncio.run(phase(_setting_call({"path": None})))
+    assert caught.value.code is ErrorCode.FORBIDDEN
+    view.assert_not_awaited()
+    update.assert_not_awaited()
 
 
 @pytest.mark.parametrize("values", [None, {}])
@@ -272,7 +288,7 @@ def test_the_global_settings_view_includes_the_vault_without_git(monkeypatch: py
     monkeypatch.setattr(vault, "settings_view", AsyncMock(return_value=view))
     call = Call({"action": "view"}, Turn("web", "A"), SimpleNamespace(runtime_root=None))
     result = asyncio.run(settings._settings(call))
-    assert result["knowledge_vault"] == {key: value for key, value in view.items() if key not in ("git", "manager_read")}
+    assert result["knowledge_vault"] == {key: value for key, value in view.items() if key not in ("git", "manager_read", "profile_source")}
 
 
 def test_the_vault_http_routes_use_the_settings_functions(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
