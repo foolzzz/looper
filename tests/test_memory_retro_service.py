@@ -24,6 +24,7 @@ def test_disabled_service_does_not_scan_or_claim(monkeypatch, tmp_path):
     from looper.agents.memory_retro_service import MemoryRetroService
 
     async def check():
+        monkeypatch.setattr(memory_lessons, "_enabled", False)
         monkeypatch.setattr(memory_lessons, "settings_view", AsyncMock(return_value={
             "enabled": False, "problem": None, "settings": {}}))
         pool = SimpleNamespace(acquire=lambda: (_ for _ in ()).throw(AssertionError("disabled queue access")))
@@ -31,7 +32,64 @@ def test_disabled_service_does_not_scan_or_claim(monkeypatch, tmp_path):
         assert not await service.run_once()
         await service.enqueue_finished("task-synthetic", "completed")
         assert service.drain_waiting() == 0
+        memory_lessons.settings_view.assert_not_awaited()
     asyncio.run(check())
+
+
+def test_runtime_switch_leaves_disabled_ticks_and_completions_database_free(monkeypatch, tmp_path):
+    from looper.agents import memory_lessons, memory_retro_service
+    from tests.db_support import run_db, v1_api
+
+    async def check(pool):
+        monkeypatch.setattr(memory_lessons, "_enabled", False)
+        await memory_lessons.load(db=pool)
+        service = memory_retro_service.MemoryRetroService(tmp_path, db=pool)
+        service._pass = AsyncMock(return_value=False)
+        settings_read = AsyncMock(wraps=memory_lessons.settings_view)
+        monkeypatch.setattr(memory_lessons, "settings_view", settings_read)
+        monkeypatch.setattr(memory_retro_service, "TICK_SECONDS", .01)
+        ticks = asyncio.Queue()
+        run_once = service.run_once
+
+        async def tick():
+            result = await run_once()
+            ticks.put_nowait(None)
+            return result
+
+        service.run_once = tick
+        scheduled = AsyncMock()
+        ended = memory_retro_service.terminal_listener(scheduled, service)
+        await service.start()
+        try:
+            async with v1_api(tmp_path, pool) as call:
+                for _ in range(3):
+                    await asyncio.wait_for(ticks.get(), 1)
+                await ended("task-synthetic", "completed")
+                scheduled.assert_awaited_once_with("task-synthetic", "completed")
+                settings_read.assert_not_awaited()
+                service._pass.assert_not_awaited()
+
+                status, answer = await call("memory_lessons.settings_put", {"enabled": True})
+                assert status == 200 and answer["result"]["enabled"], answer
+                # The next tick sees the committed switch, without restarting the service.
+                while not ticks.empty():
+                    ticks.get_nowait()
+                await asyncio.wait_for(ticks.get(), 1)
+                service._pass.assert_awaited()
+                settings_read.assert_awaited()
+
+                status, answer = await call("memory_lessons.settings_put", {"enabled": False})
+                assert status == 200 and not answer["result"]["enabled"], answer
+                settings_read.reset_mock()
+                service._pass.reset_mock()
+                for _ in range(3):
+                    await asyncio.wait_for(ticks.get(), 1)
+                await ended("task-synthetic", "failed")
+                settings_read.assert_not_awaited()
+                service._pass.assert_not_awaited()
+        finally:
+            await service.stop()
+    run_db(check, monkeypatch, timeout=15)
 
 
 def test_failure_notice_only_uses_the_configured_operator_destination(monkeypatch, tmp_path):

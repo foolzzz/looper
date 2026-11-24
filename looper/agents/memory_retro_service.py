@@ -61,6 +61,8 @@ class MemoryRetroService:
             self._task = None
 
     async def _settings(self):
+        if not memory_lessons.enabled():
+            return None
         view = await memory_lessons.settings_view(self.db)
         return memory_lessons_model.parse_settings(view["settings"]) if view["enabled"] and not view["problem"] else None
 

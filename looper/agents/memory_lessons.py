@@ -11,6 +11,19 @@ from .memory_settings import _push_channel_problem
 from .ops import ErrorCode, OpError
 
 
+# Loaded before task recovery; successful operator updates refresh the switch, like the morning brief.
+_enabled = False
+
+
+def enabled() -> bool:
+    return _enabled
+
+
+async def load(db: Any = None) -> None:
+    global _enabled
+    _enabled = (await settings_view(db))["enabled"]
+
+
 async def list_view(*, project: str | None = None, state: str = "all", limit: int = 50,
                     before: str | None = None, db: Any = None) -> dict[str, Any]:
     if state != "all" and state not in memory_model.LOOPER_STATES:
@@ -58,6 +71,7 @@ async def _checked(body: Mapping[str, Any], db: Any = None):
 
 
 async def update_settings(body: Mapping[str, Any], *, db: Any = None) -> dict[str, Any]:
+    global _enabled
     settings = await _checked(body, db)
     from datetime import datetime, timezone
     from ..db import connection, memory_retro
@@ -68,6 +82,7 @@ async def update_settings(body: Mapping[str, Any], *, db: Any = None) -> dict[st
         await conn.execute("INSERT INTO system_settings(key,value) VALUES($1,$2) ON CONFLICT(key) "
                            "DO UPDATE SET value=EXCLUDED.value,updated_at=now()",
                            model.SETTING_KEY, json.dumps(settings.to_json(), allow_nan=False))
+    _enabled = settings.enabled
     return await settings_view(db)
 
 

@@ -1018,6 +1018,8 @@ async def _run_agent_system_watched(
             # posts what the gates' discussions say to the chats their tasks came from.
             gate_reminders = GateReminders()
             gate_courier = GateCourier(registry.post, dashboard_url=dashboard_url, post_card=registry.post_card)
+            from . import memory_lessons
+            await memory_lessons.load()
             memory_retro_service = MemoryRetroService(runtime_root, drain=drain, claude_bin=claude_bin,
                                                       sender=registry.notify)
             task_router = TaskRouter(runtime_root=runtime_root, broadcaster=broadcaster, claude_bin=claude_bin,
@@ -1212,7 +1214,7 @@ async def _run_agent_system_watched(
         await intent_push_service.start()
         await memory_writer.start()
         await memory_drafter.start(dsn)
-        await memory_retro_service.start(dsn)
+        await memory_retro_service.start(dsn)  # off ticks and terminal callbacks only check the in-memory switch
         await memory_push_service.start()
         await reminder_service.start()  # idle while reminders are off
         triage_background.configure(registry.post)
