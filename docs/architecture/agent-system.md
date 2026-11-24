@@ -6613,9 +6613,11 @@ manually. Configuration, discovery submission, migration previews and revocation
 are operator-only v1 operations; rule editing adds no CLI or Manager tools.
 
 `IntentRuleService` verifies MR URLs through an explicitly configured read-only
-command adapter, outside row-locking transactions. It uses direct argv, a fresh
-empty working directory, a minimal explicit environment, a ten-second deadline
-and a 64 KiB stdout bound. The request contains only the canonical MR URL and
+command adapter, outside row-locking transactions. Saving its configuration
+requires an absolute executable path; execution never searches PATH. It uses
+direct argv, a fresh empty working directory, a minimal explicit environment,
+a ten-second deadline and a 64 KiB stdout bound, and cleans up the process group
+after normal exits as well as failures. The request contains only the canonical MR URL and
 protocol version. A host integration can inject dedicated credential references
 with `intent_rule_verifier.configure_credentials`; a missing reference confirms
 instead of borrowing another provider's credentials. The empty directory is not
