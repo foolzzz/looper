@@ -603,11 +603,14 @@ def test_a_bad_header_zone_still_reads_the_card(monkeypatch: pytest.MonkeyPatch,
 
 def test_queue_accounting_folds_the_bus_into_main_only_while_routing_is_off(tmp_path: Any,
                                                                            monkeypatch: pytest.MonkeyPatch) -> None:
-    from looper.agents import session_routing
+    from looper.agents import lanes_settings, session_routing
     from looper.agents.managers_api import DEFAULT_MANAGER_ID
     from looper.agents.tiers.manager import ManagerAgent, ManagerConfig
     from looper.agents.tiers.turn_token import TurnToken
 
+    # Folding the bus into the main queue is the lanes-off path. A previous test on this
+    # worker can leave the process-wide switch on; this case is about routing, not lanes.
+    monkeypatch.setattr(lanes_settings, "_enabled", False)
     monkeypatch.setattr(session_routing, "_routing_enabled", False)
 
     async def check() -> None:
