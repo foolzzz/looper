@@ -310,7 +310,7 @@ def test_preempts_waiting_background_without_interrupt(controller):
     asyncio.run(run())
 
 
-def test_exchange_callers_and_kind_capture():
+def test_exchange_callers():
     from looper.agents.tiers.planner import PlannerAgent
     tree = ast.parse(inspect.getsource(inspect.getmodule(PlannerAgent)))
     callers = set()
@@ -329,9 +329,37 @@ def test_exchange_callers_and_kind_capture():
                         assert any(k.arg == "maintenance" and isinstance(k.value, ast.Constant) and k.value.value
                                    for k in node.keywords)
     assert callers == {"_run_turn", "_switch_session"}
-    ask = next(n for n in ast.walk(tree) if isinstance(n, ast.AsyncFunctionDef) and n.name == "_ask")
-    assert isinstance(ask.body[1], ast.Assign)
-    assert ast.unparse(ask.body[1]) == "self._turn_kind = kind"
+
+
+@pytest.mark.parametrize(("kind", "lane"), [
+    (TurnKind.CHAT, Lane.INTERACTIVE),
+    (TurnKind.GATE, Lane.INTERACTIVE),
+    (TurnKind.RESTART, Lane.RECOVERY),
+    (TurnKind.DECISION, Lane.USER_TASK),
+    (TurnKind.MEMORY, Lane.USER_TASK),
+])
+def test_ask_captures_kind_for_admission(controller, monkeypatch, tmp_path, kind, lane):
+    from looper.agents.tiers.planner import PlannerAgent
+
+    async def run():
+        agent = PlannerAgent(task_id="synthetic", runtime_root=tmp_path)
+        agent._turn_kind = TurnKind.PLAN  # The next turn must replace the previous kind before admission.
+        monkeypatch.setattr(agent, "_read_run_deadline", AsyncMock())
+        monkeypatch.setattr(agent, "_read_roles", AsyncMock())
+        monkeypatch.setattr(admission, "worker_lane", AsyncMock(return_value=Lane.USER_TASK))
+
+        @turn_admission.admitted_planner_exchange
+        async def exchange(self, text, process, limit, **kwargs):
+            assert self._turn_kind is kind
+            assert controller.running[self.agent_id].lane is lane
+            assert self._turn_read_only is (kind is TurnKind.MEMORY)
+            return "answer"
+
+        assert await agent._ask(kind, "message", str, run=lambda text: exchange(agent, text, prepared(), 1)) == "answer"
+        assert not agent._turn_read_only
+        assert not controller.running
+
+    asyncio.run(run())
 
 
 def test_interactive_two_minute_protection_overadmits_worker(controller, caplog):

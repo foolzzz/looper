@@ -5057,8 +5057,10 @@ class PlannerAgent:
                     self._pending_switch = self._pending_handoff = None
 
             if self._ops is not None and self._token is not None:
-                # None would keep a flag already set; a normal turn passes false and a memory turn passes true.
-                self._ops.begin_turn(self._token, read_only=bool(getattr(self, "_turn_read_only", False)))
+                if getattr(self, "_turn_read_only", False):
+                    self._ops.begin_turn(self._token, read_only=True)
+                else:
+                    self._ops.begin_turn(self._token)  # its tools may change things in this turn only
             try:
                 from ..runtimes.runner.session import RunnerSession
                 from ..runtimes.runner.turn import TurnLimits
