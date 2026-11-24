@@ -91,7 +91,7 @@ def test_new_migration_file_upgrades_and_initializes_the_same_schema(tmp_path, m
     ("intent_recognitions", "ALTER TABLE intents DROP COLUMN recognition_id CASCADE; "
                             "DROP TABLE intent_recognitions CASCADE"),
     ("intent_group_reads", "DROP TABLE intent_group_reads, intent_group_read_days; "
-                           "ALTER TABLE intents DROP COLUMN via CASCADE"),
+                           "ALTER TABLE intents DROP COLUMN via"),
 ])
 def test_merged_migrations_remain_discoverable_and_upgrade(migration_name, rollback):
     async def test():
@@ -150,4 +150,21 @@ def test_recognition_repairs_incomplete_schema_with_its_marker_present(rollback)
             definition = await conn.fetchval("SELECT pg_get_constraintdef(oid) FROM pg_constraint "
                 "WHERE conrelid='intents'::regclass AND conname='intents_on_request'")
             assert "on_request" in definition and "recognition_id IS NOT NULL" in definition
+    asyncio.run(check())
+
+
+def test_recognition_upgrade_preserves_existing_intent_via_values():
+    async def check():
+        async with fresh_connection() as conn:
+            await connection.ensure_schema(conn)
+            await conn.execute("ALTER TABLE intents DROP CONSTRAINT intents_via_check; "
+                "ALTER TABLE intents ADD CONSTRAINT intents_via_check "
+                "CHECK (via IN ('subscription', 'followed_group', 'future_source'))")
+            assert await connection.schema_change_pending(conn)
+            await connection.ensure_schema(conn)
+            definition = await conn.fetchval("SELECT pg_get_constraintdef(oid) FROM pg_constraint "
+                "WHERE conrelid='intents'::regclass AND conname='intents_via_check'")
+            for via in ("subscription", "followed_group", "future_source", "on_request"):
+                assert f"'{via}'" in definition
+            assert not await connection.schema_change_pending(conn)
     asyncio.run(check())

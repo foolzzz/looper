@@ -97,7 +97,8 @@ def test_current_baseline_additions_have_upgrade_and_admission_migrations():
                                 "ON llm_records (created_at) WHERE failure_class IS NOT NULL"),)
 
 
-def test_followed_group_migration_uses_its_reserved_order():
+@pytest.mark.parametrize("name,order", [("intent_group_reads", 1800), ("intent_recognitions", 1810)])
+def test_intent_migration_uses_its_reserved_order(name, order):
     discovered = migrations.discover()
-    group_reads = next(migration for migration in discovered if migration.name == "intent_group_reads")
-    assert (group_reads.order, group_reads.pending_order) == (1800, 1800)
+    migration = next(migration for migration in discovered if migration.name == name)
+    assert (migration.order, migration.pending_order) == (order, order)

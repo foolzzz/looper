@@ -1,8 +1,10 @@
 """Operator-confirmed, bounded, one-off recognition runs, independent of subscription cursors."""
 
+from . import _widen_check
+
 name = "intent_recognitions"
-order = 1510
-pending_order = 1510
+order = 1810
+pending_order = 1810
 fresh_ddl = """
 CREATE TABLE IF NOT EXISTS intent_recognitions (
     id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
@@ -31,8 +33,10 @@ CREATE TABLE IF NOT EXISTS intent_recognitions (
 CREATE UNIQUE INDEX IF NOT EXISTS idx_intent_recognitions_running ON intent_recognitions (source_id)
     WHERE state = 'running';
 ALTER TABLE intents ADD COLUMN IF NOT EXISTS recognition_id BIGINT REFERENCES intent_recognitions(id) ON DELETE CASCADE;
-ALTER TABLE intents DROP CONSTRAINT IF EXISTS intents_via_check;
-ALTER TABLE intents ADD CONSTRAINT intents_via_check CHECK (via IN ('subscription', 'followed_group', 'on_request'));
+"""
+fresh_ddl += _widen_check.ddl("intents", "via", "intents_via_check", ("on_request",))
+fresh_ddl += """
+ALTER TABLE intents VALIDATE CONSTRAINT intents_via_check;
 ALTER TABLE intents DROP CONSTRAINT IF EXISTS intents_on_request;
 ALTER TABLE intents ADD CONSTRAINT intents_on_request CHECK ((via = 'on_request') = (recognition_id IS NOT NULL));
 """
