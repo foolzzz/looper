@@ -561,6 +561,7 @@ M7 先让计划状态有唯一来源（M7a），再在其上加任务记忆（M7
 
 | 日期 | 事项 |
 |---|---|
+| 2026-11-23 | Prompt eval 工具新增 `--planner-roles`、Worker 专用 Agent Profile 和 `groups` 汇总，可用同批任务比较三组，并单独忽略流程计数断言。默认运行及产品行为不变；验证限 fake mode，不涉及真实模型调用。 |
 | 2026-11-23 | Claude Code 会话画像 hook 已实现（#1659，基于 #1658，待合入）：CLI 复用同一画像读取链路，提供安装、卸载和状态，默认不安装。设置变更先展示 diff、确认、备份并读回，拒写组织设置；Looper 子进程标记使 hook 静默退出，真实 Claude CLI、组织 hook 与注入 token 数验证待单独批准。 |
 | 2026-11-23 | 发布 v2.15.30：自 v2.15.29 标签（打在发布提交 `44255827f`）到冻结点 `d2bbc5b35`。那个标签的冻结点 `c03ad4e73` 之后合入、但不在标签上的 #1611、#1636 在本版本发布。#1643 是 v2.15.29 的发布拉取请求，不是本版本的改动。没有一个新开关默认打开。`intents.group_read.enabled`、`cost_guard.unanswered_pushes.enabled` 和 `engine.admission.enabled` 都只有字符串 `true` 才打开，升级不写这些键。`cost_guard.mode` 仍默认 `off`；已经是 `enforce` 的安装会开始执行后台角色、定时任务和全局每日上限。`FALLBACK` 和把日界改成操作者时区不在本版本。识别一次不在本版本。关闭时：记忆起草仍 LISTEN `looper_memory_draft`，每 10 秒读 `memory_write` 后返回；空闲检查恢复先把本管家的 `sending` 写成 `uncertain`；账号准入只读设置，不是 `true` 就不加载状态；没人回的检查在查询前返回，但启动时仍会查 `asked_at` 为空的未回答暂停（升级后没有这种行）。从 v2.15.29 升级，按 `pending()` 和在线标记会跑 9 条迁移、4 个新在线步骤。`subscription_check_record` 按已有 `llm_records` 回填两个可空列。`haiku` 别名解析到未标价的 `claude-haiku-5-5`，种子 `ON CONFLICT DO NOTHING`，不改写已有模型行。`web/` 有改动，仪表盘包由发布流程重新构建。花费守卫评审修复、未知模型价格和办公台普通 inbox 已有台账行，不重复。测试 #1645。 |
 | 2026-11-23 | 名单群里点名给个人的开发请求也算（#1656，已合入，没有新开关）：符合条件的人类消息都走群规则和额度，包括操作者自己的和 @ 操作者的。只因名单才读到的消息，类型不是 `dev_task` 或 `bug_triage` 就丢弃。本来就在原抽取范围内的消息保留全部已启用类型。同一条消息只读取、解析和入库一次。名单外保持原范围。模型说明以 `## Requests in group chats` 开头。没有新设置，没有迁移。没有做真实模型评测。 |

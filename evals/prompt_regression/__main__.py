@@ -1,4 +1,4 @@
-"""``python -m evals.prompt_regression run|dialogs|compare`` (see ``evals/README.md``)."""
+"""``python -m evals.prompt_regression run|dialogs|compare|groups`` (see ``evals/README.md``)."""
 
 from __future__ import annotations
 
@@ -79,6 +79,8 @@ def _parser() -> argparse.ArgumentParser:
     run.add_argument("--register-agent", type=Path, metavar="SPEC.json",
                      help="register this agent (runtime, provider, agent; the provider's key from the variable "
                           "its api_key_env names) and run every role on it; see evals/README.md")
+    run.add_argument("--worker-agent", type=Path, metavar="SPEC.json",
+                     help="register this Agent Profile for the Worker role alone; other roles keep the normal profile")
     run.add_argument("--provider-preset",
                      help="every role runs Claude Code with a provider registered from this preset's "
                           f"Anthropic-format API (such as glm-bigmodel), its API key from ${runner.API_KEY_ENV}")
@@ -116,6 +118,8 @@ def _parser() -> argparse.ArgumentParser:
     run.add_argument("--user-gates", choices=("on", "off"),
                      help="give every task's project this user_gates setting, over the task's own (gate tasks "
                           "turn it on)")
+    run.add_argument("--planner-roles", choices=("on", "off"),
+                     help="override planner_roles on every selected task, including role tasks")
     run.add_argument("--untrusted-fence", action="store_true",
                      help="turn untrusted_fence.enabled on in the run's database (outside content fenced)")
 
@@ -167,6 +171,10 @@ def _parser() -> argparse.ArgumentParser:
     cmp = sub.add_parser("compare", help="Print the comparison table of two run files.")
     cmp.add_argument("new", type=Path)
     cmp.add_argument("base", type=Path, nargs="?")
+    groups = sub.add_parser("groups", help="Summarize labelled task runs as comparable groups.")
+    groups.add_argument("groups", nargs="+", metavar="LABEL=RUN.json")
+    groups.add_argument("--ignore-flow-assertions", action="store_true",
+                        help="score completion and checks, ignoring only the flow_problems count assertions")
     return parser
 
 
@@ -200,6 +208,20 @@ def _selected_runtime(args: argparse.Namespace, kind: str) -> str:
 
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
+    if args.command == "groups":
+        try:
+            labelled = {}
+            for entry in args.groups:
+                label, separator, filename = entry.partition("=")
+                if not separator or not label or not filename or label in labelled:
+                    raise runner.EvalError("groups needs unique LABEL=RUN.json arguments")
+                labelled[label] = runner.validate_report(json.loads(Path(filename).read_text(encoding="utf-8")),
+                                                          dialogs=False)
+            print(compare.groups_markdown(labelled, ignore_flow_assertions=args.ignore_flow_assertions))
+        except (OSError, ValueError, runner.EvalError) as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 2
+        return 0
     if args.command == "compare":
         try:
             new = runner.validate_report(json.loads(args.new.read_text(encoding="utf-8")))
@@ -232,6 +254,7 @@ def main(argv: list[str] | None = None) -> int:
             agent=args.agent,
             provider=provider,
             register=json.loads(args.register_agent.read_text(encoding="utf-8")) if args.register_agent else None,
+            worker_agent=json.loads(args.worker_agent.read_text(encoding="utf-8")) if args.worker_agent else None,
             max_budget_usd=args.max_budget_usd if real else None,
             total_cap_usd=args.total_cap_usd if real else None,
             task_timeout=args.task_timeout,
@@ -239,6 +262,7 @@ def main(argv: list[str] | None = None) -> int:
             step_workspaces=args.step_workspaces,
             reps=args.reps,
             user_gates=args.user_gates,
+            planner_roles=args.planner_roles,
             jobs=args.jobs,
             case_budget_usd=args.case_budget_usd if real else None,
             pi_runtime=_selected_runtime(args, "pi"),
