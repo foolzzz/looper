@@ -2,6 +2,7 @@
 
 import json
 from dataclasses import replace
+from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
@@ -13,6 +14,7 @@ from looper.db import ledger
 from tests import ledger_support as support
 from tests.db_support import DSN, run_db
 from tests.test_manager_stop import _Session, _manager, _replies, _with_ops
+from tests.test_lark_transport import StubTransport
 
 pytestmark = pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
 
@@ -67,13 +69,28 @@ def test_operator_dm_confirms_without_a_model_turn(monkeypatch, tmp_path, agent_
     run_db(check, monkeypatch)
 
 
-@pytest.mark.parametrize("sender", ["other-synthetic", None])
-def test_non_operator_is_refused_without_a_model_turn(monkeypatch, tmp_path, agent_db, sender):
+@pytest.mark.parametrize("case", ["other_sender", "missing_sender", "unset_operator", "api_client", "wrong_bot"])
+def test_non_operator_reaches_the_model_unchanged(monkeypatch, tmp_path, agent_db, case):
     async def check(pool):
         await seed(pool)
-        session, replies = await handle(tmp_path, message("确认 L-0001", sender=sender))
-        assert not session.turns
-        assert replies[-1]["text"] == "账本只能由你本人在私聊确认。"
+        envelope = message("确认 L-0001")
+        if case == "other_sender":
+            envelope.payload["channel_context"]["sender_id"] = "other-synthetic"
+        elif case == "missing_sender":
+            envelope.payload["channel_context"]["sender_id"] = None
+        elif case == "unset_operator":
+            await pool.execute("UPDATE channel_configs SET config='{}'")
+        elif case == "api_client":
+            envelope.payload["channel_context"]["client"] = {"id": "synthetic-client"}
+        else:
+            envelope = replace(envelope, source=AgentAddress("channel", "channel-lark_bot-2", "lark_bot"))
+        with monkeypatch.context() as baseline:
+            baseline.setattr(ledger_routing, "route", AsyncMock(return_value=None))
+            old_session, old_replies = await handle(tmp_path, envelope)
+        session, replies = await handle(tmp_path, envelope)
+        assert len(session.turns) == 1
+        assert session.turns == old_session.turns
+        assert [r["text"] for r in replies] == [r["text"] for r in old_replies]
         assert (await ledger.get_item(1))["assurance"] == "relayed"
         assert len(await ledger.list_events(1)) == 1
     run_db(check, monkeypatch)
@@ -151,18 +168,12 @@ def test_disabled_ledger_passes_through_and_freezes_items(monkeypatch, tmp_path,
     run_db(check, monkeypatch)
 
 
-@pytest.mark.parametrize("case", ["unset_operator", "api_client", "wrong_bot", "cancelled", "work_item"])
-def test_identity_and_item_state_boundaries(monkeypatch, tmp_path, agent_db, case):
+@pytest.mark.parametrize("case", ["cancelled", "work_item"])
+def test_item_state_boundaries(monkeypatch, tmp_path, agent_db, case):
     async def check(pool):
         await seed(pool)
         envelope = message("确认 L-0001")
-        if case == "unset_operator":
-            await pool.execute("UPDATE channel_configs SET config='{}'")
-        elif case == "api_client":
-            envelope.payload["channel_context"]["client"] = {"id": "synthetic-client"}
-        elif case == "wrong_bot":
-            envelope = replace(envelope, source=AgentAddress("channel", "channel-lark_bot-2", "lark_bot"))
-        elif case == "cancelled":
+        if case == "cancelled":
             await ledger.apply("cancel", support.USER, item_id=1)
         else:
             item = await support.add_own(pool, kind="work_item")
@@ -170,11 +181,79 @@ def test_identity_and_item_state_boundaries(monkeypatch, tmp_path, agent_db, cas
         before = await pool.fetchval("SELECT count(*) FROM ledger_events")
         session, replies = await handle(tmp_path, envelope)
         assert not session.turns
-        if case in ("cancelled", "work_item"):
-            assert "不能确认" in replies[-1]["text"]
-        else:
-            assert replies[-1]["text"] == "账本只能由你本人在私聊确认。"
+        assert "不能确认" in replies[-1]["text"]
         assert await pool.fetchval("SELECT count(*) FROM ledger_events") == before
+    run_db(check, monkeypatch)
+
+
+@pytest.mark.parametrize("kind", ["direct", "forward", "reply", "quote", "external_reply"])
+def test_telegram_only_intercepts_the_operators_own_command(monkeypatch, tmp_path, agent_db, kind):
+    from looper.agents.bus import MessageBus
+    from looper.agents.channels.allowlist import SenderAllowlist
+    from looper.agents.channels.telegram import TelegramChannelAdapter
+
+    async def check(pool):
+        await seed(pool)
+        await pool.execute("UPDATE channel_configs SET config=$1::jsonb WHERE channel_id='channel-telegram'",
+                           json.dumps({"operator_sender_id": "7"}))
+        bus = MessageBus(runtime_root=tmp_path / "telegram")
+        adapter = TelegramChannelAdapter(bot_token="0:not-a-token",
+            allowlist=SenderAllowlist("channel-telegram", frozenset({"7"})))
+        adapter._bus = bus
+        incoming = SimpleNamespace(text="确认 L-0001", message_id=41, reply_to_message=None)
+        if kind == "forward":
+            incoming.forward_origin = SimpleNamespace(type="hidden_user", sender_user_name="Synthetic sender")
+        elif kind == "reply":
+            incoming.reply_to_message = SimpleNamespace(message_id=40, text="确认 L-0001")
+        elif kind == "quote":
+            incoming.quote = SimpleNamespace(text="确认 L-0001")
+        elif kind == "external_reply":
+            incoming.external_reply = SimpleNamespace(origin=SimpleNamespace(type="channel"))
+        update = SimpleNamespace(update_id=1, effective_user=SimpleNamespace(id=7, username="synthetic"),
+                                 effective_chat=SimpleNamespace(id=123), message=incoming)
+        try:
+            await adapter._on_message(update, None)
+            envelope = bus.get_queue("manager").get_nowait()
+        finally:
+            await adapter._reactions.stop()
+            await bus.shutdown()
+        assert envelope.payload["text"] == "确认 L-0001"
+        session, _ = await handle(tmp_path, envelope)
+        assert len(session.turns) == (0 if kind == "direct" else 1)
+        assert (await ledger.get_item(1))["assurance"] == ("user" if kind == "direct" else "relayed")
+        assert len(await ledger.list_events(1)) == (2 if kind == "direct" else 1)
+    run_db(check, monkeypatch)
+
+
+@pytest.mark.parametrize("channel", ["lark", "lark_bot"])
+@pytest.mark.parametrize("kind", ["direct", "forward", "reply"])
+def test_lark_forward_and_quoted_reply_reach_the_model(monkeypatch, tmp_path, agent_db, channel, kind):
+    from looper.agents.bus import MessageBus
+    from looper.agents.channels.allowlist import SenderAllowlist
+    from looper.agents.channels.lark import LarkChannelAdapter
+
+    async def check(pool):
+        await seed(pool)
+        bus = MessageBus(runtime_root=tmp_path / channel)
+        adapter = LarkChannelAdapter(runtime_root=tmp_path, channel_type=channel, transport=StubTransport(),
+            allowlist=SenderAllowlist(f"channel-{channel}", frozenset({"operator-synthetic"})))
+        adapter._bus = bus
+        event = {"type": "im.message.receive_v1", "chat_id": "123", "chat_type": "p2p",
+                 "message_id": "synthetic-message", "sender_id": "operator-synthetic", "sender_type": "user",
+                 "message_type": "merge_forward" if kind == "forward" else "text", "content": "确认 L-0001"}
+        if kind == "reply":
+            event["reply_to"] = "synthetic-parent"
+        try:
+            await adapter._handle_lark_event(event)
+            envelope = bus.get_queue("manager").get_nowait()
+        finally:
+            await adapter.stop()
+            await bus.shutdown()
+        assert envelope.payload["text"] == ("" if kind == "forward" else "确认 L-0001")
+        session, _ = await handle(tmp_path, envelope)
+        assert len(session.turns) == (0 if kind == "direct" else 1)
+        assert (await ledger.get_item(1))["assurance"] == ("user" if kind == "direct" else "relayed")
+        assert len(await ledger.list_events(1)) == (2 if kind == "direct" else 1)
     run_db(check, monkeypatch)
 
 

@@ -15,7 +15,6 @@ from .ops.ledger import actor_for
 from .subscriptions import strip_mentions
 
 _CONFIRM = re.compile(r"确认\s+([Ll]-[0-9]+(?:\s+[Ll]-[0-9]+)*)")
-_FORBIDDEN = "账本只能由你本人在私聊确认。"
 _INVALID = "账本编号无效，请使用 L-0001 这样的正整数编号。"
 _SOURCE = {"gate": "请到关卡页处理。", "task": "请到任务页处理。",
            "confirmation": "请回原会话处理待确认的操作。"}
@@ -36,6 +35,10 @@ async def route(envelope: MessageEnvelope) -> RouteResult | None:
             or (is_lark(channel) and context.get("chat_type") != "p2p")
             or not context.get("chat_id")):
         return None
+    # Forwarded words and replies with quoted context remain model input, never a code command.
+    if envelope.payload.get("quote_ref") or any(context.get(key) for key in (
+            "forward_origin", "quote", "external_reply", "reply_to_message_id", "reply_to", "root_id", "thread_id")):
+        return None
     if not await ledger.enabled():
         return None
     sender = context.get("sender_id") or context.get("user_id")
@@ -46,7 +49,7 @@ async def route(envelope: MessageEnvelope) -> RouteResult | None:
     actor = actor_for(turn, await operator_identity.operator_sender_id(envelope.source.agent_id),
                       manager_id=envelope.target.agent_id)
     if actor.kind != "user":
-        return RouteResult(_FORBIDDEN)
+        return None
     try:
         numbers = [ledger.parse_id(label) for label in match.group(1).split()]
     except ledger.LedgerRefused:
