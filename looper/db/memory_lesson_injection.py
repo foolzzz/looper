@@ -334,3 +334,9 @@ async def reset_planner_disabled_notice(task_id,session_key,*,db=None):
     """An enabled session begins a new close episode; retain per-lesson notice acknowledgements."""
     await (db or get_pool()).execute('UPDATE task_lesson_planner_state SET disabled_acked=false '
         'WHERE task_id=$1 AND session_key IS NOT DISTINCT FROM $2 AND disabled_acked',task_id,session_key)
+
+
+async def has_prepared_injections(task_id,*,db=None):
+    """Read whether an owned task has unacknowledged launches before supervisor recovery."""
+    return await (db or get_pool()).fetchval('SELECT EXISTS(SELECT 1 FROM memory_injections '
+        "WHERE task_id=$1 AND state='prepared')",task_id)

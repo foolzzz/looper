@@ -414,3 +414,75 @@ def test_invalid_reference_fields_do_not_count_otherwise_valid_arrays(tmp_path, 
         assert "invalid" in agent._activity.await_args.args[1]
 
     asyncio.run(run())
+
+
+def test_start_quarantines_interrupted_runs_only_for_the_restored_task(tmp_path, monkeypatch):
+    """A restored task owns recovery even when ordinary runs left no keeper manifest."""
+    from datetime import datetime, timezone
+    from looper.agents import memory_lesson_injection as service
+    from looper.agents.bus import MessageBus
+    from looper.agents.memory_model import Action, Actor, State, Via, parse_id
+    from looper.db import memory, memory_lessons, plans
+    from looper.db import memory_lesson_injection as store
+    from tests.db_support import run_db
+    from tests.memory_lessons_support import lesson
+
+    async def check(pool):
+        model_turn = AsyncMock(side_effect=AssertionError("model execution is forbidden in this recovery test"))
+        monkeypatch.setattr(planner.PlannerAgent, "_run_turn", model_turn)
+        candidate = parse_id(await lesson(pool, "project", "Recover ordinary synthetic runs"))
+        await pool.execute("UPDATE projects SET memory_lessons='on' WHERE id='project'")
+        await pool.execute("INSERT INTO system_settings(key,value) VALUES "
+                           "('memory_lessons','{\"enabled\":true,\"inject\":{\"reviewer\":true}}')")
+        await pool.execute("INSERT INTO projects(id,name) VALUES ('off-project','Never enabled')")
+        await pool.execute("INSERT INTO tasks(id,requirement,project_id) VALUES "
+                           "('target','Inspect','project'),('other','Other task','project'),"
+                           "('off-task','No project lessons','off-project'),('fresh-task','New task','off-project')")
+        async with memory.transaction(pool) as conn:
+            await memory_lessons.transition_lesson(conn, candidate, State.IN_EFFECT, action=Action.ACTIVATE,
+                actor=Actor.USER, via=Via.DASHBOARD, now=datetime.now(timezone.utc), valid_days=90)
+        block = await service.ensure_snapshot("target", "project")
+        await service.ensure_snapshot("other", "project")
+        lost = []
+        for role in ("worker", "reviewer"):
+            delivery = await store.prepare_injection("target", role, "lost-" + role, block, project_id="project")
+            lost.append(delivery["id"])
+        other = await store.prepare_injection("other", "worker", "other-launch", block, project_id="project")
+        for task_id in ("target", "off-task"):
+            plan = planner.TaskPlan("plan-" + task_id, "goal", "Inspect", str(tmp_path), status="executing")
+            await plans.save(task_id, plan=plan.row())
+        # Recovery must still quarantine historical launches after the operator closes the feature.
+        await pool.execute("UPDATE system_settings SET value='{\"enabled\":false}' WHERE key='memory_lessons'")
+        recover = AsyncMock(wraps=store.recover_prepared)
+        monkeypatch.setattr(store, "recover_prepared", recover)
+        bus = MessageBus(tmp_path / "bus")
+        restored = planner.PlannerAgent(task_id="target", runtime_root=tmp_path)
+        try:
+            await restored.start(bus)
+            assert restored._plan is not None
+            assert [row["state"] for row in await pool.fetch("SELECT state FROM memory_injections "
+                "WHERE id=ANY($1) ORDER BY id", lost)] == ["uncertain", "uncertain"]
+            recover.assert_awaited_once_with(task_id="target")
+            assert await pool.fetchval("SELECT state FROM memory_injections WHERE id=$1", other["id"]) == "prepared"
+            assert not await pool.fetchval("SELECT count(*) FROM memory_lesson_stats")
+            assert not list(tmp_path.rglob("manifest.json"))
+            # Loading a plan again within the same owner never sweeps a current run's preparation.
+            await pool.execute("UPDATE system_settings SET value='{\"enabled\":true}' WHERE key='memory_lessons'")
+            current = await store.prepare_injection("target", "worker", "current-launch", block, project_id="project")
+            await restored._load_plan()
+            assert await pool.fetchval("SELECT state FROM memory_injections WHERE id=$1", current["id"]) == "prepared"
+            assert recover.await_count == 1
+        finally:
+            await restored.stop()
+        for task_id in ("off-task", "fresh-task"):
+            agent = planner.PlannerAgent(task_id=task_id, runtime_root=tmp_path)
+            try:
+                await agent.start(bus)
+                assert recover.await_count == 1
+                assert not await pool.fetchval("SELECT count(*) FROM task_lesson_snapshot_sets WHERE task_id=$1", task_id)
+                assert not await pool.fetchval("SELECT count(*) FROM memory_injections WHERE task_id=$1", task_id)
+            finally:
+                await agent.stop()
+        model_turn.assert_not_awaited()
+
+    run_db(check, monkeypatch)

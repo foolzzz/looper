@@ -1081,6 +1081,15 @@ class PlannerAgent:
         if self._ops is not None:
             self._token = self._ops.issue(self._task_id)  # the task's earlier Planner's stops working
         await self._load_plan()
+        if self._plan is not None:
+            # Only a restored owner can quarantine launches left by its predecessor.
+            # This precedes adoption or redispatch and also covers ordinary runs
+            # without keeper manifests. Never sweep preparations during live turns.
+            try:
+                if await db_lesson_injection.has_prepared_injections(self._task_id):
+                    await db_lesson_injection.recover_prepared(task_id=self._task_id)
+            except Exception:
+                logger.warning("planner %s cannot recover interrupted lesson deliveries", self.agent_id, exc_info=True)
         self._loop_task = asyncio.create_task(self._message_loop())
         self._supervise_task = asyncio.create_task(self._supervise_loop())
         self._idle_task = asyncio.create_task(self._idle_loop())
