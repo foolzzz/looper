@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import subprocess
 import sys
 from typing import Any
@@ -13,7 +14,12 @@ TIMEOUT_SECONDS = 1.0
 MAX_OUTPUT_BYTES = 6000  # the compiler's 1500 Unicode characters, at most four bytes each
 
 
-def show(args: Any) -> int:
+def read_text(args: Any) -> str:
+    """Read the same resident text for every local CLI consumer; no writes or model calls."""
+    from .. import child_env
+
+    if os.environ.get(child_env.AGENT_RUN_ENV):
+        return ""
     command = [sys.executable, "-m", __name__]
     for flag in ("runtime_root", "config"):
         if value := getattr(args, flag, None):
@@ -22,10 +28,14 @@ def show(args: Any) -> int:
         result = subprocess.run(command, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
                                 stderr=subprocess.DEVNULL, timeout=TIMEOUT_SECONDS, check=False)
         if result.returncode == 0 and len(result.stdout) <= MAX_OUTPUT_BYTES:
-            result.stdout.decode("utf-8")  # reject malformed worker output before writing any bytes
-            sys.stdout.buffer.write(result.stdout)
+            return result.stdout.decode("utf-8")
     except (OSError, subprocess.TimeoutExpired, UnicodeError):
         pass
+    return ""
+
+
+def show(args: Any) -> int:
+    sys.stdout.buffer.write(read_text(args).encode("utf-8"))
     return 0
 
 
