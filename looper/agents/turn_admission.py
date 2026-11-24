@@ -16,7 +16,7 @@ from .lanes import Lane
 from .message import MessageType
 from .ops import TurnOrigin
 from .tiers.planner_protocol import TurnKind
-from .tiers.turn_token import TurnPhase
+from .tiers.turn_token import TurnPhase, TurnToken
 
 logger = logging.getLogger(__name__)
 # Share the grant owner with record binding and nested tool runs.
@@ -31,7 +31,7 @@ class RetryQuotaProbe(Exception):
 class ManagerLease:
     """One session slot, retained while an injected input may run natively."""
 
-    session: object
+    token: TurnToken
     provider_id: str
     stack: AsyncExitStack
     references: int = 1
@@ -40,13 +40,20 @@ class ManagerLease:
     def retain(self) -> None:
         self.references += 1
 
+    def bind(self, token: TurnToken) -> None:
+        """The queued native turn takes ownership when it claims a retained slot."""
+        if self.token.admission_lease is self:
+            self.token.admission_lease = None
+        self.token = token
+        token.admission_lease = self
+
     async def release(self, failure=(None, None, None)) -> None:
         if self.failure[1] is None and failure[1] is not None:
             self.failure = failure
         self.references -= 1
         if self.references == 0:
-            if getattr(self.session, "admission_lease", None) is self:
-                self.session.admission_lease = None
+            if self.token.admission_lease is self:
+                self.token.admission_lease = None
             await self.stack.__aexit__(*self.failure)
 
 
@@ -79,6 +86,8 @@ def admitted_manager_turn(method):
         if not admission.enabled():
             mid_turn = getattr(agent, "_mid_turn", None)
             lease = mid_turn.claim_admission(token, prepared.launch.profile.provider.id) if mid_turn else None
+            if lease is not None:
+                lease.bind(token)
             try:
                 return await method(agent, token, prepared)
             finally:
@@ -122,8 +131,8 @@ def admitted_manager_turn(method):
                             prepared.launch.profile.provider.id, lane, owner=owner,
                             user_message=lane is Lane.INTERACTIVE,
                             on_wait=on_wait, on_frozen=on_frozen if lane is Lane.INTERACTIVE else None)))
-                        lease = ManagerLease(prepared.session, prepared.launch.profile.provider.id, stack)
-                        prepared.session.admission_lease = lease
+                        lease = ManagerLease(token, prepared.launch.profile.provider.id, stack)
+                    lease.bind(token)
                     token.admission_waiting = False
                     token.check()  # a simultaneous stop and grant must not start a record
                     # token.step enters the slot in a child task; bind this task's records too.

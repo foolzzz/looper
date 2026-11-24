@@ -43,14 +43,14 @@ def test_manager_probe_failure_survives_native_lease_retention(monkeypatch, reta
         @turn_admission.admitted_manager_turn
         async def turn(agent, token, prepared):
             if retained:
-                session.admission_lease.retain()
+                token.admission_lease.retain()
             raise ValueError("synthetic runtime failure")
 
         with pytest.raises(ValueError, match="synthetic runtime failure"):
             await turn(SimpleNamespace(agent_id="manager"), token, prepared)
         if retained:
             assert controller.running and not transition.called
-            await session.admission_lease.release()
+            await token.admission_lease.release()
         assert transition.call_args.args == ("synthetic", admission.ProbeEnded(False, True))
         assert controller._state("synthetic").state is admission.AdmissionState.PROBING
         assert not controller.running
@@ -58,7 +58,8 @@ def test_manager_probe_failure_survives_native_lease_retention(monkeypatch, reta
     asyncio.run(run())
 
 
-def test_shutdown_releases_unstarted_native_input_slot(monkeypatch):
+@pytest.mark.parametrize("admission_on", [False, True])
+def test_native_turn_transfers_slot_until_shutdown(monkeypatch, admission_on):
     async def run():
         controller = admission.Controller()
         controller.active = True
@@ -75,13 +76,21 @@ def test_shutdown_releases_unstarted_native_input_slot(monkeypatch):
 
         @turn_admission.admitted_manager_turn
         async def turn(agent, token, prepared):
-            session.admission_lease.retain()
-            agent._mid_turn._admissions["native-input"] = session.admission_lease
+            token.admission_lease.retain()
+            agent._mid_turn._admissions["native-input" if token.message_id == "synthetic" else "next-input"] = (
+                token.admission_lease)
 
         await turn(agent, token, prepared)
         assert list(controller.running) == ["manager:main"]
+        lease = token.admission_lease
+        assert lease.references == 1
+        native = TurnToken("native-input", None, "web", "synthetic", controller.now())
+        monkeypatch.setattr(admission, "enabled", lambda: admission_on)
+        await turn(agent, native, prepared)
+        assert token.admission_lease is None and native.admission_lease is lease
+        assert lease.references == 1 and list(controller.running) == ["manager:main"]
         await agent._mid_turn.shutdown()
         assert not controller.running
-        assert session.admission_lease is None
+        assert native.admission_lease is None
 
     asyncio.run(run())

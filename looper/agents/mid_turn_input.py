@@ -321,7 +321,7 @@ class MidTurnInputs:
         try:
             from .claude_cli import ResidentClaude
             resident = session.claude
-            if (lease := getattr(session, "admission_lease", None)) is not None:
+            if (lease := token.admission_lease) is not None:
                 lease.retain()  # before stdin.write: B can start before the write receipt returns
                 self._admissions[envelope.message_id] = lease
 

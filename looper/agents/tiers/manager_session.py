@@ -25,7 +25,6 @@ if TYPE_CHECKING:
     from ..runtimes import ResidentSession, RuntimeAdapter
     from ..session_switch import SessionSwitch
     from ..system_prompt import SystemPrompt
-    from ..turn_admission import ManagerLease
     from .state_view import StateShown
     from .turn_token import TurnToken
     from .manager_budget import BudgetTurn
@@ -121,7 +120,6 @@ class ManagerSession:
     last_activity: float
     turn_ended_at: float | None = None  # this session's own worker/loop end, for main's idle-check clock
     budget: BudgetTurn | None = None  # enabled turn only; retained through reply and session maintenance
-    admission_lease: ManagerLease | None = None  # shared with inputs Claude may unfold into native next turns
 
     def __setattr__(self, name: str, value: Any) -> None:
         # The one primitive every reset path goes through: a saved session cleared or replaced by another.
