@@ -26,7 +26,9 @@ logger = logging.getLogger(__name__)
 MAX_ABANDONED_CONTROLS = 128
 MAX_TOMBSTONES = 128
 TOMBSTONE_MAX_AGE = 600.0
-_LOCAL_CONTROLS = frozenset({"session/cancel", "session/close"})
+# Cancel, close and health admit no session work. A timeout or caller cancel
+# abandons only that RPC; it must not mark the connection lost.
+_LOCAL_CONTROLS = frozenset({"session/cancel", "session/close", "runner/health"})
 
 
 class State(StrEnum):
@@ -195,8 +197,8 @@ class RunnerBridge:
         self._initialized = True
         return result
 
-    async def health(self):
-        return await self.request("runner/health", {})
+    async def health(self, *, timeout: float | None = None):
+        return await self.request("runner/health", {}, timeout=timeout)
 
     async def _write(self, message, entry=None, *, before_write: Callable[[], None] | None = None):
         frame = p.encode_frame(message)
@@ -214,7 +216,13 @@ class RunnerBridge:
                 self._fail(ConnectionLost("runner-exited: stdin unavailable"))
                 raise self._error from None
 
-    async def request(self, method, params, *, _entry=None, before_write: Callable[[], None] | None = None):
+    async def request(self, method, params, *, timeout: float | None = None, _entry=None,
+                      before_write: Callable[[], None] | None = None):
+        if timeout is not None and method != "runner/health":
+            raise ValueError("per-call timeout is only valid for runner/health")
+        limit = self.control_timeout if timeout is None else timeout
+        if limit <= 0:
+            raise ValueError("runner bounds must be positive")
         if self._error:
             raise self._error
         if method != "initialize" and not self._initialized:
@@ -229,7 +237,7 @@ class RunnerBridge:
         future = asyncio.get_running_loop().create_future()
         self._pending[rpc_id] = Pending(method, params, future, _entry)
         try:
-            async with asyncio.timeout(self.control_timeout):
+            async with asyncio.timeout(limit):
                 await self._write(p.Request(rpc_id, method, params), _entry, before_write=before_write)
                 return await asyncio.shield(future)
         except (TimeoutError, asyncio.CancelledError):

@@ -14,7 +14,27 @@ import time
 def fake_runner():
     """A standalone stdlib peer: no server import or PYTHONPATH is needed."""
     import subprocess
+    import threading
     options = json.loads(sys.argv[1])
+    stdout_lock = threading.Lock()
+
+    def emit(payload):
+        line = json.dumps(payload)
+        with stdout_lock:
+            sys.stdout.write(line + "\n")
+            sys.stdout.flush()
+
+    def health_body():
+        busy = 1 if active else 0
+        return {"sessions": count, "running": busy, "inflight_requests": busy,
+                "tool_processes": busy, "rss_bytes": 0,
+                "event_loop_lag_ms": 5000 if busy else 0}
+
+    def answer_health(rpc_id):
+        body = health_body()
+        with Path("health-sent.jsonl").open("a") as marker:
+            marker.write(json.dumps({"id": rpc_id, **body}) + "\n")
+        emit({"jsonrpc": "2.0", "id": rpc_id, "result": body})
 
     def start_child():
         return subprocess.Popen([sys.executable, "-c",
@@ -66,8 +86,8 @@ def fake_runner():
             if options.get("slow_open"):
                 time.sleep(0.25)
             if options.get("reject_open"):
-                print(json.dumps({"jsonrpc": "2.0", "id": request["id"],
-                    "error": {"code": -32602, "message": "invalid session"}}), flush=True)
+                emit({"jsonrpc": "2.0", "id": request["id"],
+                    "error": {"code": -32602, "message": "invalid session"}})
                 continue
             count += 1
             result = ({"session_id": params["session_id"], "resumed": True} if method == "session/load"
@@ -80,10 +100,43 @@ def fake_runner():
                 # Keep reading the shared pipe while this one response is withheld.
                 continue
             if options.get("reject_close") or (options.get("reject_close_once") and closes == 1):
-                print(json.dumps({"jsonrpc": "2.0", "id": request["id"],
-                    "error": {"code": -32603, "message": "session persistence failed", "data": params}}), flush=True)
+                emit({"jsonrpc": "2.0", "id": request["id"],
+                    "error": {"code": -32603, "message": "session persistence failed", "data": params}})
                 continue
             result = {key: params[key] for key in ("session_id", "trace_id") if key in params}
+        elif method == "runner/health":
+            if options.get("health_eof"):
+                sys.stdout.flush()
+                os.close(1)
+                time.sleep(60)
+                return
+            if options.get("health_error"):
+                emit({"jsonrpc": "2.0", "id": request["id"],
+                    "error": {"code": -32603, "message": "secret-health-body-sentinel"}})
+                continue
+            if options.get("health_invalid"):
+                emit({"jsonrpc": "2.0", "id": request["id"],
+                    "result": {"sessions": "secret-health-body-sentinel"}})
+                continue
+            if Path("hang-health").exists():
+                if not Path("hang-noted").exists():
+                    Path("hang-noted").write_text("1")
+                    emit({"jsonrpc": "2.0", "method": "session/update", "params": {
+                        "session_id": "not-a-session", "trace_id": "not-a-trace",
+                        "kind": "text_delta", "text": "still-busy"}})
+                continue
+            if Path("health-hold").exists():
+                rpc_id = request["id"]
+
+                def release(held=rpc_id):
+                    while Path("health-hold").exists():
+                        time.sleep(0.01)
+                    answer_health(held)
+
+                threading.Thread(target=release, daemon=True).start()
+                continue
+            answer_health(request["id"])
+            continue
         elif method == "session/prompt":
             if options.get("close_before_prompt") and count == 1:
                 pending_prompt = request
@@ -92,23 +145,42 @@ def fake_runner():
             result = {"session_id": params["session_id"], "trace_id": params["trace_id"], "accepted": True}
         else:
             if method == "session/cancel" and pending_prompt is not None:
-                print(json.dumps({"jsonrpc": "2.0", "id": pending_prompt["id"],
+                emit({"jsonrpc": "2.0", "id": pending_prompt["id"],
                     "error": {"code": -32603, "message": "session already closed",
-                        "data": {key: pending_prompt["params"][key] for key in ("session_id", "trace_id")}}}), flush=True)
+                        "data": {key: pending_prompt["params"][key] for key in ("session_id", "trace_id")}}})
                 pending_prompt = None
             result = {key: params[key] for key in ("session_id", "trace_id") if key in params}
-        print(json.dumps({"jsonrpc": "2.0", "id": request["id"], "result": result}), flush=True)
+        emit({"jsonrpc": "2.0", "id": request["id"], "result": result})
         if method == "session/close" and params["session_id"] in active:
-            print(json.dumps({"jsonrpc": "2.0", "method": "session/update", "params": {
+            emit({"jsonrpc": "2.0", "method": "session/update", "params": {
                 "session_id": params["session_id"], "trace_id": active.pop(params["session_id"]),
                 "kind": "settled", "outcome": "cancelled", "final_text": "",
-                "requests": 0, "usage_complete": True}}), flush=True)
+                "requests": 0, "usage_complete": True}})
         if method == "session/prompt" and options.get("corrupt"):
-            print("corrupt stdout", flush=True)
+            with stdout_lock:
+                sys.stdout.write("corrupt stdout\n")
+                sys.stdout.flush()
         if method == "session/prompt" and options.get("tool"):
-            print(json.dumps({"jsonrpc": "2.0", "id": "r-1", "method": "tools/call", "params": {
+            emit({"jsonrpc": "2.0", "id": "r-1", "method": "tools/call", "params": {
                 "session_id": params["session_id"], "trace_id": params["trace_id"],
-                "call_id": "call", "name": "write", "arguments": {}}}), flush=True)
+                "call_id": "call", "name": "write", "arguments": {}}})
+        if method == "session/prompt" and options.get("auto_settle"):
+            emit({"jsonrpc": "2.0", "method": "session/update", "params": {
+                "session_id": params["session_id"], "trace_id": params["trace_id"],
+                "kind": "settled", "outcome": "completed", "final_text": "done",
+                "requests": 0, "usage_complete": True}})
+        if method == "session/prompt" and options.get("settle_file"):
+            sid, tid = params["session_id"], params["trace_id"]
+
+            def wait_settle(session_id=sid, trace_id=tid):
+                while not Path("settle-now").exists():
+                    time.sleep(0.01)
+                emit({"jsonrpc": "2.0", "method": "session/update", "params": {
+                    "session_id": session_id, "trace_id": trace_id,
+                    "kind": "settled", "outcome": "completed", "final_text": "done",
+                    "requests": 0, "usage_complete": True}})
+
+            threading.Thread(target=wait_settle, daemon=True).start()
     if options.get("uncooperative") or options.get("corrupt"):
         time.sleep(60)
 
@@ -1184,4 +1256,328 @@ def test_five_cancelled_cold_starts_do_not_block_next_start(runners, monkeypatch
             lease = await owner.acquire("fake")
             assert lease.valid and len(spawned) == 6
             await lease.release()
+    run(exercise())
+
+
+def _rows(directory):
+    path = directory / "requests.jsonl"
+    if not path.exists():
+        return []
+    return [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
+
+
+def _health_count(directory):
+    return sum(row["method"] == "runner/health" for row in _rows(directory))
+
+
+def _answered(directory):
+    path = directory / "health-sent.jsonl"
+    if not path.exists():
+        return 0
+    return sum(1 for line in path.read_text().splitlines() if line.strip())
+
+
+class CountingTurn(Turn):
+    def __init__(self, gate=None):
+        super().__init__(gate)
+        self.writes = 0
+
+    async def call_tool(self, params):
+        self.writes += 1
+        return await super().call_tool(params)
+
+
+def test_health_monitor_polls_each_live_generation_without_overlap(runners, monkeypatch):
+    assert s.HEALTH_INTERVAL_SECONDS == 10 and s.HEALTH_TIMEOUT_SECONDS == 30
+
+    class Clock:
+        def __init__(self):
+            self.now = 0.0
+            self.waiters = []
+
+        def monotonic(self):
+            return self.now
+
+        def advance(self, dt):
+            self.now += dt
+            due = [fut for deadline, fut in self.waiters if deadline <= self.now + 1e-9]
+            self.waiters = [(deadline, fut) for deadline, fut in self.waiters if deadline > self.now + 1e-9]
+            for fut in due:
+                if not fut.done():
+                    fut.set_result(None)
+
+    clock = Clock()
+    monkeypatch.setattr(s, "time", clock)
+
+    async def fake_sleep(seconds):
+        if seconds <= 0:
+            await asyncio.sleep(0)
+            return
+        fut = asyncio.get_running_loop().create_future()
+        clock.waiters.append((clock.now + float(seconds), fut))
+        await fut
+
+    monkeypatch.setattr(s, "_sleep", fake_sleep)
+
+    async def sleeping(n):
+        async with asyncio.timeout(3):
+            while len(clock.waiters) < n:
+                await asyncio.sleep(0.01)
+
+    async def probes(dirs, counts, sleepers):
+        async with asyncio.timeout(3):
+            while True:
+                if ([_health_count(d) for d in dirs] == counts and len(clock.waiters) >= sleepers):
+                    return
+                await asyncio.sleep(0.01)
+
+    async def exercise():
+        async with runners(session_cap=1) as (owner, _):
+            first, second = await owner.acquire("fake"), await owner.acquire("fake")
+            dirs = [first._generation.directory, second._generation.directory]
+            await sleeping(2)
+            assert [_health_count(d) for d in dirs] == [0, 0]
+            clock.advance(10)
+            await probes(dirs, [1, 1], 2)
+            clock.advance(10)
+            await probes(dirs, [2, 2], 2)
+            clock.advance(25)
+            await probes(dirs, [3, 3], 2)
+            assert clock.now == 45
+            (dirs[0] / "health-hold").write_text("1")
+            clock.advance(5)
+            await until(lambda: _health_count(dirs[0]) == 4 and _health_count(dirs[1]) == 4
+                        and _answered(dirs[0]) == 3 and len(clock.waiters) >= 1, timeout=3)
+            clock.advance(25)
+            await asyncio.sleep(0.05)
+            assert _health_count(dirs[0]) == 4 and _answered(dirs[0]) == 3
+            await probes([dirs[1]], [5], 1)
+            assert _health_count(dirs[0]) == 4
+            (dirs[0] / "health-hold").unlink()
+            await until(lambda: _answered(dirs[0]) == 4 and len(clock.waiters) >= 2, timeout=3)
+            assert _health_count(dirs[0]) == 4 and clock.now == 75
+    run(exercise())
+
+
+def test_busy_runner_answering_health_is_not_reaped(runners, monkeypatch):
+    monkeypatch.setattr(s, "HEALTH_INTERVAL_SECONDS", 0.05)
+    monkeypatch.setattr(s, "HEALTH_TIMEOUT_SECONDS", 0.4)
+
+    async def exercise():
+        async with runners(tool=True, settle_file=True) as (owner, processes):
+            lease = await owner.acquire("fake")
+            pid = processes[0].pid
+            sid = await lease.open_session(NEW)
+            gate, events = asyncio.Event(), []
+            turn = CountingTurn(gate)
+            await lease.bridge.begin_turn(sid, "trace", events.append, turn, text="write")
+            await turn.entered.wait()
+            directory = lease._generation.directory
+            await until(lambda: _answered(directory) >= 1)
+            sent = json.loads((directory / "health-sent.jsonl").read_text().splitlines()[-1])
+            assert sent["event_loop_lag_ms"] == 5000 and sent["running"] == 1 and sent["tool_processes"] == 1
+            await asyncio.sleep(0.12)
+            assert processes[0].pid == pid and processes[0].returncode is None and lease.valid
+            assert not lease._generation.failed and lease.session_id == sid and turn.writes == 1
+            (directory / "settle-now").write_text("1")
+            gate.set()
+            assert (await lease.bridge.wait_settled(sid, "trace")).outcome == "completed"
+            assert turn.writes == 1 and processes[0].returncode is None and lease.valid
+            assert len([event for event in events if event["type"] == "result"]) == 1
+    run(exercise())
+
+
+def test_health_timeout_loses_only_the_hung_member_and_replaces_on_demand(runners, monkeypatch, caplog):
+    monkeypatch.setattr(s, "HEALTH_INTERVAL_SECONDS", 0.05)
+    # A loaded host can take longer than a few hundred milliseconds to answer
+    # one health RPC. The hung member never answers; only this bound moves.
+    monkeypatch.setattr(s, "HEALTH_TIMEOUT_SECONDS", 1.5)
+    monkeypatch.setattr(s, "BACKOFF_BASE", 2.0)
+
+    async def exercise():
+        async with runners(session_cap=1, pipe_child=True, tool=True) as (owner, processes):
+            hung, sibling = await owner.acquire("fake"), await owner.acquire("fake")
+            (hung._generation.directory / "hang-health").write_text("1")
+            sid = await hung.open_session(NEW)
+            gate, events = asyncio.Event(), []
+            turn = CountingTurn(gate)
+            await hung.bridge.begin_turn(sid, "trace", events.append, turn, text="write")
+            await turn.entered.wait()
+            await until(lambda: hung._generation.failed, timeout=5)
+            assert turn.writes == 1
+            gate.set()
+            assert (await hung.bridge.wait_settled(sid, "trace")).outcome == "lost"
+            assert turn.finishes == 1 and len([e for e in events if e["type"] == "result"]) == 1
+            await asyncio.shield(hung._generation.failure)
+            state = owner._kinds["fake"]
+            assert len(state.failures) == 1 and not hung.valid and not sibling._generation.failed
+            assert processes[0].returncode is not None and not proc_tree.tree_of(processes[0])
+            child = json.loads((hung._generation.directory / "observed.json").read_text())["child"]
+            sibling_child = json.loads((sibling._generation.directory / "observed.json").read_text())["child"]
+            assert child not in proc_tree._snapshot() and sibling_child in proc_tree._snapshot()
+            assert processes[1].returncode is None and sibling.valid
+            assert _health_count(sibling._generation.directory) >= 1
+            failed = [r.getMessage() for r in caplog.records if "runner_health_failed" in r.getMessage()]
+            assert len(failed) == 1 and "reason=timeout" in failed[0] and "still-busy" not in failed[0]
+            await asyncio.sleep(0.1)
+            assert len(processes) == 2 and (state.restart is None or not state.restart.done())
+            await asyncio.shield(state.restart)
+            replacement = await owner.acquire("fake")
+            assert len(processes) == 3 and replacement.runner_id != hung.runner_id
+            assert processes[-1].pid != processes[0].pid
+            await replacement.load_session({**NEW, "session_id": sid})
+            methods = [row["method"] for row in _rows(replacement._generation.directory)]
+            assert "session/load" in methods and "session/prompt" not in methods and turn.writes == 1
+    run(exercise())
+
+
+@pytest.mark.parametrize(("mode", "reason"), [
+    ("health_error", "rpc_error"),
+    ("health_invalid", "protocol_error"),
+    ("health_eof", "protocol_error"),
+])
+def test_health_rpc_failure_is_bounded_and_recovered(runners, monkeypatch, caplog, mode, reason):
+    monkeypatch.setattr(s, "HEALTH_INTERVAL_SECONDS", 0.02)
+    monkeypatch.setattr(s, "HEALTH_TIMEOUT_SECONDS", 1.5)
+
+    async def exercise():
+        async with runners(**{mode: True}) as (owner, processes):
+            lease = await owner.acquire("fake")
+            await until(lambda: lease._generation.failed, timeout=5)
+            await asyncio.shield(lease._generation.failure)
+            state = owner._kinds["fake"]
+            assert len(state.failures) == 1 and processes[0].returncode is not None
+            failed = [r.getMessage() for r in caplog.records if "runner_health_failed" in r.getMessage()]
+            assert len(failed) == 1 and f"reason={reason}" in failed[0]
+            assert "secret-health-body-sentinel" not in caplog.text
+            assert "secret-health-body-sentinel" not in (state.last_failure or "")
+            await asyncio.shield(state.restart)
+            replacement = await owner.acquire("fake")
+            assert replacement.valid and replacement.runner_id != lease.runner_id
+    run(exercise())
+
+
+@pytest.mark.parametrize("how", ["stop", "idle"])
+def test_dispose_joins_inflight_health_without_false_loss_or_restart(runners, monkeypatch, caplog, how):
+    monkeypatch.setattr(s, "HEALTH_INTERVAL_SECONDS", 0.02)
+    monkeypatch.setattr(s, "HEALTH_TIMEOUT_SECONDS", 5)
+    monkeypatch.setattr(s, "IDLE_STOP_SECONDS", 0.15)
+
+    async def exercise():
+        async with runners(session_cap=1, auto_settle=True) as (owner, processes):
+            first = await owner.acquire("fake")
+            sid = await first.open_session(NEW)
+            events, turn = [], Turn()
+            await first.bridge.begin_turn(sid, "trace", events.append, turn, text="done")
+            summary = await first.bridge.wait_settled(sid, "trace")
+            assert summary.outcome == "completed" and turn.finishes == 1
+            directory = first._generation.directory
+            (directory / "health-hold").write_text("1")
+            await until(lambda: _health_count(directory) > _answered(directory), timeout=3)
+            second = await owner.acquire("fake")
+            failures = len(owner._kinds["fake"].failures)
+            if how == "stop":
+                await owner.stop()
+                assert all(process.returncode is not None for process in processes) and not owner._tasks
+            else:
+                await first.release()
+                await until(lambda: processes[0].returncode is not None, timeout=3)
+                assert processes[1].returncode is None and second.valid
+            assert len(owner._kinds["fake"].failures) == failures
+            assert summary.outcome == "completed" and turn.finishes == 1
+            assert len([e for e in events if e["type"] == "result"]) == 1
+            assert events[-1]["runner"]["outcome"] == "completed"
+            assert not any("runner_health_failed" in r.getMessage() for r in caplog.records)
+            assert first._generation.health.done()
+    run(exercise())
+
+
+def test_health_timeout_and_process_exit_count_one_failure(runners, monkeypatch):
+    monkeypatch.setattr(s, "HEALTH_INTERVAL_SECONDS", 0.05)
+    monkeypatch.setattr(s, "HEALTH_TIMEOUT_SECONDS", 5)
+
+    async def exercise():
+        entered, go, ends = asyncio.Event(), asyncio.Event(), []
+        async with runners() as (owner, processes):
+            connect = owner.connect
+
+            async def wrapped(process, kind):
+                bridge = await connect(process, kind)
+
+                async def held(*, timeout=None):
+                    entered.set()
+                    await go.wait()
+                    raise TimeoutError()
+
+                bridge.health = held
+                return bridge
+
+            owner.connect = wrapped
+            lease = await owner.acquire("fake")
+            await entered.wait()
+            generation = lease._generation
+            original = generation.tree.end
+
+            async def end():
+                ends.append(1)
+                await original()
+
+            generation.tree.end = end
+            sid = await lease.open_session(NEW)
+            turn = Turn()
+            await lease.bridge.begin_turn(sid, "trace", lambda event: None, turn, text="accepted")
+            go.set()
+            processes[0].kill()
+            assert (await lease.bridge.wait_settled(sid, "trace")).outcome == "lost"
+            await asyncio.shield(generation.failure)
+            assert len(owner._kinds["fake"].failures) == 1 and turn.finishes == 1 and ends == [1]
+            assert owner._kinds["fake"].restart is not None
+    run(exercise())
+
+
+def test_no_health_monitor_without_published_generation(runners):
+    import dataclasses
+    import hashlib
+
+    from looper.agents.claude_cli import (
+        CONSULT_TOOLS, READ_ONLY_ALLOWED, READ_ONLY_MODE, WRITE_TOOLS, permission_args)
+    from looper.agents.run_usage import Usage
+    from looper.agents.runtimes import ApiProtocol
+    from looper.agents.runtimes.api.adapter import RUNTIME_NOTE, Descriptor
+
+    frozen = json.loads((Path(__file__).parent / "fixtures" / "runner_health_off.json").read_text())
+    argv = Descriptor(ApiProtocol.OPENAI_RESPONSES, "fake-model", "https://example.invalid/v1",
+                      "low", 100000, "prompt.md").to_argv()
+    assert argv == frozen["api_argv"]
+    assert hashlib.sha256(RUNTIME_NOTE.encode()).hexdigest() == frozen["api_runtime_note_sha256"]
+    assert permission_args() == frozen["cli_permission_args"]
+    assert list(READ_ONLY_MODE) == frozen["cli_read_only_mode"]
+    assert list(WRITE_TOOLS) == frozen["cli_write_tools"]
+    assert list(CONSULT_TOOLS) == frozen["cli_consult_tools"]
+    assert list(READ_ONLY_ALLOWED) == frozen["cli_read_only_allowed"]
+    assert [item.name for item in dataclasses.fields(Usage)] == frozen["usage_fields"]
+    assert s.HEALTH_INTERVAL_SECONDS == 10 and s.HEALTH_TIMEOUT_SECONDS == 30
+
+    def live_health(owner):
+        return [task for task in owner._tasks if getattr(task.get_coro(), "__name__", "") == "_health"]
+
+    async def exercise():
+        async with runners() as (owner, processes):
+            await owner.stop()
+            with pytest.raises(s.RunnerUnavailable):
+                await owner.acquire("fake")
+            assert not processes and not live_health(owner)
+            assert not list(owner.root.glob("*/requests.jsonl"))
+        async with runners(version="9.9") as (owner, processes):
+            with pytest.raises(s.RunnerUnavailable):
+                await owner.acquire("fake")
+            assert not owner._kinds["fake"].members and not live_health(owner)
+            logged = list(owner.root.glob("*/requests.jsonl"))
+            assert logged and all("runner/health" not in path.read_text() for path in logged)
+        async with runners() as (owner, processes):
+            before = len(processes)
+            await owner.stop()
+            with pytest.raises(s.RunnerUnavailable):
+                await owner.acquire("fake")
+            assert len(processes) == before and not live_health(owner) and not owner._tasks
     run(exercise())

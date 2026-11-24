@@ -26,6 +26,8 @@ BACKOFF_MAX = 60.0
 FAILURE_WINDOW = 600.0
 MAX_FAILURES = 5
 SHUTDOWN_TIMEOUT = 5.0
+HEALTH_INTERVAL_SECONDS = 10.0
+HEALTH_TIMEOUT_SECONDS = 30.0
 DIAGNOSTIC_BYTES = 8192
 STDERR_LINES_PER_SECOND = 10
 STDERR_DRAIN_TIMEOUT = 1.0
@@ -69,6 +71,10 @@ def _exit_signal(process: asyncio.subprocess.Process) -> asyncio.Event:
         protocol.process_exited = previous
         event.set()
     return event
+
+
+async def _sleep(seconds: float) -> None:
+    await asyncio.sleep(seconds)
 
 
 async def _joined(task):
@@ -158,6 +164,7 @@ class _Generation:
     failed: bool = False
     stopping: bool = False
     idle: asyncio.Task | None = None
+    health: asyncio.Task | None = None
     diagnostics: deque[bytes] = field(default_factory=deque, repr=False)
 
 
@@ -358,6 +365,7 @@ class RunnerSupervisor:
             state.members.append(generation)
             generation.waiter = self._own(self._wait(generation))
             self._idle(generation)
+            generation.health = self._own(self._health(generation))
             logger.info("runner %s member %s started: sessions=%d capacity=%d pool_sessions=%d",
                         kind, directory.name.rsplit("-", 1)[1], len(generation.leases), generation.cap,
                         sum(len(member.leases) for member in state.members))
@@ -399,6 +407,68 @@ class RunnerSupervisor:
 
     async def _wait(self, generation: _Generation) -> None:
         await generation.exited.wait()
+        self._failed(generation)
+
+    async def _health(self, generation: _Generation) -> None:
+        """Probe one published generation. Missed ticks are skipped, never burst."""
+        started = time.monotonic()
+        step = 1
+        interval = HEALTH_INTERVAL_SECONDS
+        while not generation.stopping and not generation.failed and not self._stopped:
+            now = time.monotonic()
+            while started + step * interval <= now:
+                step += 1
+            try:
+                await _sleep(started + step * interval - now)
+            except asyncio.CancelledError:
+                return
+            if generation.stopping or generation.failed or self._stopped:
+                return
+            now = time.monotonic()
+            if now < started + step * interval:
+                continue
+            step += 1
+            while started + step * interval <= time.monotonic():
+                step += 1
+            bridge = generation.bridge
+            if bridge is None or generation not in generation.state.members:
+                return
+            deadline = time.monotonic() + HEALTH_TIMEOUT_SECONDS
+            reason = None
+            try:
+                await bridge.health(timeout=HEALTH_TIMEOUT_SECONDS)
+            except asyncio.CancelledError:
+                return
+            except TimeoutError:
+                reason = "timeout"
+            except RpcFailure:
+                reason = "rpc_error"
+            except Exception:
+                reason = "protocol_error"
+            if reason is None:
+                if (generation.stopping or generation.failed or self._stopped
+                        or generation not in generation.state.members):
+                    return
+                logger.debug("runner_health_ok kind=%s runner_id=%s", generation.kind, generation.directory.name)
+                continue
+            # A protocol failure may already have settled the member through on_failure.
+            # Still record this probe's reason; _failed stays idempotent.
+            if generation.stopping or self._stopped:
+                return
+            self._health_lost(generation, reason, deadline)
+            return
+
+    def _health_lost(self, generation: _Generation, reason: str, deadline: float) -> None:
+        """Poison this member once. Recovery is not awaited from the probe task."""
+        if generation.stopping or self._stopped:
+            return
+        pid = generation.process.pid
+        logger.warning("runner_health_failed kind=%s runner_id=%s reason=%s deadline=%.6f pid=%s",
+                       generation.kind, generation.directory.name, reason, deadline,
+                       "none" if pid is None else pid)
+        bridge = generation.bridge
+        if bridge is not None and bridge._error is None:
+            bridge._fail(ConnectionLost(f"runner protocol-error: health {reason}"))
         self._failed(generation)
 
     def _failed(self, generation: _Generation) -> None:
@@ -514,6 +584,8 @@ class RunnerSupervisor:
         if generation.idle is not None and generation.idle is not asyncio.current_task():
             generation.idle.cancel()
             generation.idle = None
+        if generation.health is not None and generation.health is not asyncio.current_task():
+            generation.health.cancel()
         session_count = len(generation.leases)
         process = generation.process
         known = {}
@@ -550,8 +622,8 @@ class RunnerSupervisor:
                 logger.warning("runner %s stderr did not close within %.1f s", generation.kind, STDERR_DRAIN_TIMEOUT)
                 generation.stderr.cancel()
                 process._transport.get_pipe_transport(2).close()
-        results = await asyncio.gather(*(t for t in (generation.stderr, generation.waiter, *releases)
-                                         if t is not None), return_exceptions=True)
+        results = await asyncio.gather(*(t for t in (generation.stderr, generation.waiter, generation.health, *releases)
+                                         if t is not None and t is not asyncio.current_task()), return_exceptions=True)
         results.extend(await asyncio.gather(*(lease.release() for lease in list(generation.leases)),
                                             return_exceptions=True))
         for error in results:
