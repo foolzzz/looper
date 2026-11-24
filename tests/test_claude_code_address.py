@@ -171,6 +171,54 @@ def test_crash_leaves_a_stale_record_and_restart_replaces_it(tmp_path):
         server_address.read(tmp_path)
 
 
+@pytest.mark.parametrize("shutdown", ["stop", "close_listener"])
+@pytest.mark.parametrize("same_server", [False, True])
+def test_http_address_ownership_follows_listener_lifecycle(tmp_path, shutdown, same_server):
+    async def run():
+        other_root = tmp_path / "other"
+        other_root.mkdir()
+
+        def server(root):
+            return AgentHTTPServer(host="127.0.0.1", port=0, runtime_root=root,
+                                   web_adapter=SimpleNamespace(), task_router=SimpleNamespace(),
+                                   supervisor=SimpleNamespace())
+
+        original, independent, replacement = server(tmp_path), server(other_root), server(tmp_path)
+        try:
+            await original.start()
+            await independent.start()
+            assert server_address.read(tmp_path) == ("127.0.0.1", original._port)
+            assert server_address.read(other_root) == ("127.0.0.1", independent._port)
+            with pytest.raises(ValueError, match="already owns"):
+                await replacement.start()
+            assert replacement._server is None
+            assert original._server.is_serving()
+            assert server_address.read(tmp_path) == ("127.0.0.1", original._port)
+            if shutdown == "stop":
+                await original.stop()
+            else:
+                original.close_listener()
+            with pytest.raises(ValueError, match="stale"):
+                server_address.read(tmp_path)
+            if same_server:
+                replacement = original
+            await replacement.start()
+            address = ("127.0.0.1", replacement._port)
+            assert server_address.read(tmp_path) == address
+            # Late cleanup by the old server must not revoke the new publication.
+            if not same_server:
+                await original.stop()
+            assert server_address.read(tmp_path) == address
+        finally:
+            await original.stop()
+            await independent.stop()
+            await replacement.stop()
+        with pytest.raises(ValueError, match="stale"):
+            server_address.read(tmp_path)
+
+    asyncio.run(run())
+
+
 @pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
 def test_serve_mcp_and_status_share_the_isolated_address(tmp_path, monkeypatch):
     from evals.prompt_regression import runner
