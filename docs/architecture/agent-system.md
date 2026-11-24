@@ -1348,6 +1348,9 @@ an unlocked, stale record: clients report it and never fall back to another port
 including one deleted while locked, also refuses retrieval and asks the operator to run `looper serve`;
 the ops file is never a fallback address. Wildcard listeners resolve to their loopback address;
 other non-loopback destinations remain refused.
+Address publication failures only degrade this integration: the HTTP server keeps serving and logs a warning.
+If another listener owns the same runtime root's address, the second listener does not replace that record;
+retrieval keeps using the first listener. The second listener does not automatically claim the record later.
 Each call rereads the local operator token and derives a domain-separated, read-only credential; the raw token
 is never sent by MCP or stored in its entry. The HTTP connection gate permits that credential only on direct
 loopback connections and only for the three POST retrieval paths, before body reads, uploads or dispatch.
