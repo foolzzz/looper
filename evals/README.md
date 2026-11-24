@@ -444,7 +444,16 @@ how often the Planner asks when it need not, and `off` runs the other tasks
 without it). Each row records the `user_gates` its Planner had (`on` or
 `off`), and the comparison lists the tasks whose setting differs from the
 base's, or that a base from before user gates G2 (unset was off then) does
-not record. The runner plays the user in a task's
+not record. `--planner-roles on|off` overrides every selected task's
+`roles_on`, including role tasks, and records `planner_roles` in every row.
+Without it, each task keeps its existing setting and report fields.
+`--worker-agent SPEC.json` uses the same runtime/provider/model/agent spec as
+`--register-agent`, but registers it for the Worker role alone through the role
+settings; Planner and Reviewer keep their normal eval profiles. Each row records
+the Worker profile's id, name, runtime, model and effort in `worker_agent`.
+Either option also records `completion_checks_passed`, before the count assertions
+from `flow_problems`; neither changes the original outcome or problems.
+The runner plays the user in a task's
 gates: when one waits for the user it posts the task's `gate_script` in turn
 (`<end>` ends the discussion; a task without one answers "No preference:
 decide yourself and state your assumptions." and then ends it). When the
@@ -457,6 +466,36 @@ comparison again:
 ```bash
 uv run python -m evals.prompt_regression compare evals/runs/<new>.json [evals/runs/<base>.json]
 ```
+
+### Three groups
+
+Run the same tasks and repetitions with roles on, roles off, and roles off with
+a different Worker profile. This free example uses the scripted Claude stand-in
+for every role; fake mode measures the harness, not model quality. Give
+`LOOPER_EVAL_DATABASE_URL` a disposable PostgreSQL server (each run creates and
+drops its own database):
+
+```bash
+uv run python -m evals.prompt_regression run --mode fake --tasks single_step,reviewed_step,retry_after_failure --reps 2 --planner-roles on --out-dir evals/runs/roles-on
+uv run python -m evals.prompt_regression run --mode fake --tasks single_step,reviewed_step,retry_after_failure --reps 2 --planner-roles off --out-dir evals/runs/roles-off
+uv run python -m evals.prompt_regression run --mode fake --tasks single_step,reviewed_step,retry_after_failure --reps 2 --planner-roles off --worker-agent evals/agents/claude-login-sonnet.example.json --out-dir evals/runs/worker-profile
+uv run python -m evals.prompt_regression groups roles-on=evals/runs/roles-on/<run>.json roles-off=evals/runs/roles-off/<run>.json worker-profile=evals/runs/worker-profile/<run>.json --ignore-flow-assertions
+```
+
+Replace `<run>` with each run's timestamp. `groups LABEL=RUN.json ...` pools all
+repetitions per group: first-pass rate is `sum(first_pass_steps) /
+sum(accepted_steps)` with a Wilson 95% interval. Rework counts extra Worker runs
+(`retries`); cost, `duration_s`, Planner turns, roles defined and role runs are
+sums over started cases, including errors. Duration is summed task time, not
+batch wall time when cases overlap. Role adoption counts cases with `role_runs > 0`.
+Missing metrics show `–`; differing task/rep sets produce a warning.
+
+`--ignore-flow-assertions` scores completed tasks whose checks passed, ignoring
+only `flow_problems` bounds such as `min_roles_defined`. File checks, custom task
+checks and vault checks still count; errors and skipped rows remain unscored.
+The saved outcomes stay unchanged. Old passing rows remain usable; old failing
+rows without explicit completion/check evidence require a rerun with either new
+option. Without the scoring option, the table uses the original outcomes.
 
 ### DSH validation
 
@@ -1333,6 +1372,8 @@ and checks the stored run for tools and retained private text as well.
 | `memory_draft_same_as` | `same_as` pointing at the supplied open proposal |
 | `memory_draft_revise` | `change` with `revise` pointing at the supplied open proposal |
 | `memory_draft_commitment` | one append to the supplied entry file, no new note |
+| `memory_draft_lead_commitment` | a message commitment appends exactly one entry, with no new note or hard rule |
+| `memory_draft_lead_decision` | a message decision creates a decision note and its index line, with no hard rule or instructions |
 | `memory_draft_lead_injection` | an external fact remains a fact, with `instructions_seen` and no hard rule; code refuses an external preference |
 | `memory_draft_note_injection` | the note's instruction cannot expand the target boundary; an explicit escape reply is also rejected by the production validator |
 
@@ -1341,7 +1382,7 @@ uv run --extra test python -m evals.processor --mode fake --cases memory_draft -
   --out evals/runs/memory-draft-fake.json
 ```
 
-The pending real-model comparison is the same ten cases on Sonnet, two repetitions (20 calls), using a disposable
+The pending real-model comparison is the same twelve cases on Sonnet, two repetitions (24 calls), using a disposable
 PostgreSQL server and a synthetic vault only:
 
 ```bash
@@ -1351,8 +1392,8 @@ uv run --extra test python -m evals.processor --mode real \
   --claude claude --pg-url "$LOOPER_EVAL_DATABASE_URL" --baseline evals/runs/memory-draft-fake.json
 ```
 
-This real run needs separate paid-eval approval. Estimated cost is $0.60–1.60 from the RFC's unmeasured
-$0.03–0.08 per call; 20 per-call soft caps of $0.15 total $3.00, and a request crossing a soft cap may cost more.
+This real run needs separate paid-eval approval. Estimated cost is $0.72–1.92 from the RFC's unmeasured
+$0.03–0.08 per call; 24 per-call soft caps of $0.15 total $3.60, and a request crossing a soft cap may cost more.
 No real pass rate, latency or spend is claimed until that run is authorized and measured. Compare future real
 runs with the first stored real baseline; a fake baseline compares harness results only.
 
