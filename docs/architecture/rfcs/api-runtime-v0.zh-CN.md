@@ -395,7 +395,7 @@ Looper 的 effort 档位是 `low/medium/high/xhigh/max`（`agent_settings.py:126
 
 | 步 | 内容 | 依赖 |
 |---|---|---|
-| 2.1 | `anthropic` 编解码器：Bearer 认证、`[1m]` 后缀、缓存标记、thinking 块回传、`max_tokens`；假 Messages 服务；`anthropic` 依赖 | 阶段 1 第 2、3、4 步 |
+| 2.1 | `anthropic` 编解码器：Bearer 认证、`[1m]` 后缀、缓存标记、thinking 块回传、`max_tokens`；假 Messages 服务；`anthropic` 依赖。协议实现及本地 SDK、隔离服务验收见[验收记录](../../validation/api-messages/README.md)；沿用会话实现的首批元数据事务差异另列，不作为已满足项 | 阶段 1 第 2、3、4 步 |
 | 2.2 | DeepSeek 真实验证：key 在运行时读进内存，全部对话与 Claude Code + DeepSeek 对照；GLM、Kimi、OpenCode 有 key 时跑三个对话；核实第 8.4 节右列 | 2.1 |
 
 **之后：** 需要时再做 Chat Completions 编解码器；目录里的外部 MCP；规划者（需要工作区工具，另立 RFC）。Norma 已是阶段 1 的循环来源；后续只跟踪 `loopgo-main:go/internal/norma`，副本制作独立于 Python 实现。
