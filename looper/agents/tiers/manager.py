@@ -3536,10 +3536,12 @@ class ManagerAgent:
         last one: a new session (``/new``, a switch such as a full context, none saved), a new process (a server
         restart, an idle close), or a runtime whose resident session does not report its compactions."""
         session = self._session_now()
-        if persona_scope is manager_persona_context.Scope.OMIT:
-            # Never diff private main state into a shared group/other-sender turn, even as removed lines.
+        if persona_scope.isolated:
+            # Never diff private main state into another audience's turn, even as removed lines.
             return state_view.render(sections, None, session=session.session_id,
-                                     whole_reason="persona omitted for shared turn")
+                                     whole_reason="persona omitted for shared turn"
+                                     if persona_scope is manager_persona_context.Scope.OMIT
+                                     else "operator profile omitted for client turn")
         shown = self._state_shown
         reason = None
         if not launch.runtime.resident_compaction_events:
@@ -3562,7 +3564,7 @@ class ManagerAgent:
         (``seen``) with the generation it was rendered for. A turn that did not go through leaves no block a later
         turn may refer to; a compaction or a turn of its own meanwhile forgot it already (``_context_changed``)."""
         session = self._session_now()
-        if run.state is None or run.persona_scope is manager_persona_context.Scope.OMIT:
+        if run.state is None or run.persona_scope.isolated:
             return
         if not seen:
             self._state_shown, self._state_lost = None, "the last turn did not go through"
