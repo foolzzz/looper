@@ -81,7 +81,7 @@ from .leads import LEADS_TOOL, TOOL as LEADS_SEARCH, leads_tool
 from .manager_vault import TOOLS as VAULT_READ_TOOLS, manager_vault
 from .schedules import TOOLS as SCHEDULE_TOOLS
 from .session_search import TOOL as SESSION_SEARCH, enabled as session_search_on
-from .settings import TOOLS as SETTINGS_TOOLS, ENGINE_TOOL as ENGINE_SETTINGS_TOOL
+from .settings import TOOLS as SETTINGS_TOOLS, engine_tool
 from .tasks import TOOLS as TASK_TOOLS, task_create_tool, task_directory_tool, task_workflow_tool
 
 logger = logging.getLogger(__name__)
@@ -413,7 +413,7 @@ class ManagerOps:
             return scope
         from ..failures import FailureTyping, typing_mode
         act = await typing_mode() is FailureTyping.ACT
-        chosen_settings = ENGINE_SETTINGS_TOOL if act else SETTINGS_TOOLS[0]
+        chosen_settings = engine_tool() if act else SETTINGS_TOOLS[0]
         if "looper_settings" in scope.tools and scope.tools["looper_settings"] is not chosen_settings:
             scope = replace(scope, tools=_tool_map([chosen_settings if tool.name == "looper_settings" else tool
                                                   for tool in scope.tools.values()]))

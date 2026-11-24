@@ -2221,7 +2221,7 @@ class WorkerPool:
             result = (_verify_failed(agent_settings.profile_error) if is_verify
                       else {"status": "failed", "error": agent_settings.profile_error})
             return await self._control_failure(result, failures.Failure(failures.FailureCause.PROFILE),
-                                               provider_id=agent_settings.profile.provider.id)
+                                               provider_id=agent_settings.resolved_model.provider.id)
         worker_runtime_id = payload.get("worker_runtime_id")
         if is_verify and not worker_runtime_id and payload.get("worker_id") and parent_task_id:
             # Results saved before review panels did not include their developer's runtime.

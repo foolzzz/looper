@@ -6465,8 +6465,6 @@ class PlannerAgent:
             self._fence = await untrusted.enabled()
             lessons = await self._ask(TurnKind.LESSONS, self._lessons_message(plan), parse_lessons)
         except PlannerTurnError as exc:
-            if exc.fail_kind is FailKind.QUOTA_EXHAUSTED and plan.status == "failed":
-                return
             await self._activity("error", f"Warning: the Planner could not write the task's lessons: {exc}"[:500])
             return
         title = f"Lessons: {_clip(plan.requirement, project_knowledge.TITLE_MAX_CHARS - 12)}"

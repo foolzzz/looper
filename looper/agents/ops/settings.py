@@ -20,6 +20,7 @@ from __future__ import annotations
 import logging
 from collections.abc import Mapping
 from dataclasses import dataclass, replace
+from functools import cache
 from typing import Any
 
 from ...db import agent_sessions as db_agent_sessions, system_settings
@@ -713,6 +714,7 @@ async def _engine_operator(call: Call) -> None:
         raise OpError(ErrorCode.FORBIDDEN, "engine settings are operator-only")
 
 
+@cache
 def engine_tool() -> Tool:
     """A separate catalog value leaves the default-off definition byte-for-byte intact."""
     from copy import deepcopy
@@ -726,6 +728,3 @@ def engine_tool() -> Tool:
     return replace(original, description=original.description +
         " engine: operator-only failure_typing (off, record, act, or null for built-in off); view includes engine. "
         "Every engine change requires confirmation and leaving act drains failure waits to the Planner.", schema=schema)
-
-
-ENGINE_TOOL = engine_tool()
