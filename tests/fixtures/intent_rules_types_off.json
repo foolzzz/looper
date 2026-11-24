@@ -1,0 +1,30 @@
+{
+  "requirement": "request",
+  "types": [
+    {
+      "key": "alert_triage",
+      "name": "监控异常排查",
+      "guidance": "白名单里的告警机器人发出、需要人处理的告警：触发、持续或恶化。恢复通知、测试告警、群里已经有人认领的不算。"
+    },
+    {
+      "key": "bug_triage",
+      "name": "bug 排查",
+      "guidance": "有人报告用户负责或相关的系统出了问题，需要用户看：报错、行为异常、数据不对，最好带现象或链接。已经解决的不算。"
+    },
+    {
+      "key": "dev_task",
+      "name": "开发任务",
+      "guidance": "有人请用户做、或用户答应做一项开发工作（新功能、改动、修复、评审、上线），说得出要做什么。闲聊里的设想、别人自己在做的事不算。"
+    }
+  ],
+  "type_lines": {
+    "alert_triage": "- alert_triage 监控异常排查: 白名单里的告警机器人发出、需要人处理的告警：触发、持续或恶化。恢复通知、测试告警、群里已经有人认领的不算。",
+    "bug_triage": "- bug_triage bug 排查: 有人报告用户负责或相关的系统出了问题，需要用户看：报错、行为异常、数据不对，最好带现象或链接。已经解决的不算。",
+    "dev_task": "- dev_task 开发任务: 有人请用户做、或用户答应做一项开发工作（新功能、改动、修复、评审、上线），说得出要做什么。闲聊里的设想、别人自己在做的事不算。"
+  },
+  "group_requests_note": "## Requests in group chats\nA chat marked 全部消息 gives every human sender's messages, including the user's own. In it, an intent is a\ndevelopment request that anyone raises, even without mentioning the user: a new requirement, a change, a bug or\nproblem report, a scenario that needs support, or a request for access, addressed to the group, a team, a named\nperson or nobody in particular. A request or problem report addressed to a named person counts even if that\nperson has accepted it. Use dev_task for a requirement or a change and bug_triage for a bug or a problem.\nNot an intent: small talk, answers to questions, +1s or echoes of someone else's request, and pure follow-ups,\nstatus updates or decisions that carry no new ask. When several messages raise the same thing, make one intent\nwith all of them as its sources, or use same_as when a recent intent is that thing.",
+  "instructions": {
+    "group_false": "request\n\n## Intent types\n- alert_triage 监控异常排查: 白名单里的告警机器人发出、需要人处理的告警：触发、持续或恶化。恢复通知、测试告警、群里已经有人认领的不算。\n- bug_triage bug 排查: 有人报告用户负责或相关的系统出了问题，需要用户看：报错、行为异常、数据不对，最好带现象或链接。已经解决的不算。\n- dev_task 开发任务: 有人请用户做、或用户答应做一项开发工作（新功能、改动、修复、评审、上线），说得出要做什么。闲聊里的设想、别人自己在做的事不算。",
+    "group_true": "request\n\n## Intent types\n- alert_triage 监控异常排查: 白名单里的告警机器人发出、需要人处理的告警：触发、持续或恶化。恢复通知、测试告警、群里已经有人认领的不算。\n- bug_triage bug 排查: 有人报告用户负责或相关的系统出了问题，需要用户看：报错、行为异常、数据不对，最好带现象或链接。已经解决的不算。\n- dev_task 开发任务: 有人请用户做、或用户答应做一项开发工作（新功能、改动、修复、评审、上线），说得出要做什么。闲聊里的设想、别人自己在做的事不算。\n\n## Requests in group chats\nA chat marked 全部消息 gives every human sender's messages, including the user's own. In it, an intent is a\ndevelopment request that anyone raises, even without mentioning the user: a new requirement, a change, a bug or\nproblem report, a scenario that needs support, or a request for access, addressed to the group, a team, a named\nperson or nobody in particular. A request or problem report addressed to a named person counts even if that\nperson has accepted it. Use dev_task for a requirement or a change and bug_triage for a bug or a problem.\nNot an intent: small talk, answers to questions, +1s or echoes of someone else's request, and pure follow-ups,\nstatus updates or decisions that carry no new ask. When several messages raise the same thing, make one intent\nwith all of them as its sources, or use same_as when a recent intent is that thing."
+  }
+}

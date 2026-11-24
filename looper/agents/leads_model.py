@@ -8,6 +8,7 @@ Every part of the feature imports these names; none defines its own copy. A lead
 from __future__ import annotations
 
 import re
+from dataclasses import dataclass
 from datetime import datetime
 from enum import StrEnum
 from typing import Any
@@ -16,7 +17,18 @@ LEADS_ENABLED_KEY = "leads.enabled"
 LEADS_VALID_DAYS_KEY = "leads.valid_days"
 INTENTS_ENABLED_KEY = "intents.enabled"
 INTENTS_GROUP_READ_KEY = "intents.group_read.enabled"
+INTENTS_RULES_KEY = "intents.rules.enabled"
 GROUP_INTENT_TYPES = ("dev_task", "bug_triage")  # what a group request may be (RFC section 11.1)
+RULE_INTENT_TYPE = "mr_review"
+# This card classifies the type. The rule engine that would execute it is a later change.
+RULE_CLASSIFICATION_AVAILABLE = True
+RULE_ENGINE_INSTALLED = False
+RULE_GROUP_INTENT_TYPES = (*GROUP_INTENT_TYPES, RULE_INTENT_TYPE)
+MR_REVIEW_NAME = "MR 评审"
+MR_REVIEW_GUIDANCE = (
+    "有人请求评审一个 MR，并指出要看的合并请求。只用来识别这类请求。"
+    "状态通报、感谢，或说明评审已经完成、没有新的评审请求，不算。"
+)
 LEADS_SEARCH_MODE_KEY = "leads.search_mode"
 DEFAULT_VALID_DAYS = 90
 VALID_DAYS_RANGE = (1, 365)
@@ -95,7 +107,7 @@ class IntentPriority(StrEnum):
     QUIET = "quiet"  # not pushed: the Intents page only
 
 
-BUILTIN_INTENT_TYPES = ("dev_task", "bug_triage", "alert_triage")
+BUILTIN_INTENT_TYPES = ("dev_task", "bug_triage", "alert_triage", RULE_INTENT_TYPE)
 # The only type an intent whose sources are all alert-bot messages may have.
 ALERT_TYPE = "alert_triage"
 
@@ -156,6 +168,59 @@ async def intents_enabled(db: Any = None) -> bool:
 async def group_read_enabled(db: Any = None) -> bool:
     """Whether intents read their followed groups (``intents.group_read.enabled`` is ``true``; no row is off)."""
     return await _setting(INTENTS_GROUP_READ_KEY, db) == "true"
+
+
+async def rules_enabled(db: Any = None) -> bool:
+    """Whether intent rules are on (``intents.rules.enabled`` is the string ``true``; anything else is off)."""
+    return await _setting(INTENTS_RULES_KEY, db) == "true"
+
+
+@dataclass(frozen=True)
+class ClassificationSnapshot:
+    """One read of the switches a classification run keeps. Delivery is recorded and does not hide types."""
+
+    rules: bool
+    intents: bool
+    delivery: bool
+
+    @property
+    def types_on(self) -> bool:
+        return bool(self.rules and self.intents and RULE_CLASSIFICATION_AVAILABLE)
+
+
+async def classification_snapshot(db: Any = None) -> ClassificationSnapshot:
+    from . import chat_settings
+
+    return ClassificationSnapshot(await rules_enabled(db), await intents_enabled(db), chat_settings.delivery_enabled())
+
+
+def intent_type_visible(row: Any, *, rules_on: bool) -> bool:
+    """The builtin MR seed stays hidden until classification is effectively on. Any other type stays listed."""
+    if row["key"] == RULE_INTENT_TYPE and row["builtin"]:
+        return bool(rules_on and RULE_CLASSIFICATION_AVAILABLE)
+    return True
+
+
+def rules_runtime_ready() -> bool:
+    """Production enable needs both the classifier and the rule engine. This build has only the classifier."""
+    return bool(RULE_CLASSIFICATION_AVAILABLE and RULE_ENGINE_INSTALLED)
+
+
+def rules_enable_capacity(visible_if_on: int) -> None:
+    """Refuse turning rules on when the types that would then be visible exceed the enabled-type cap."""
+    from ..db.intents import IntentRefused
+
+    if not isinstance(visible_if_on, int) or isinstance(visible_if_on, bool) or visible_if_on > 10:
+        raise IntentRefused("at most 10 enabled intent types")
+
+
+def enable_intent_rules() -> None:
+    """Refuse a production enable. It does not write the setting and does not disable other types."""
+    from ..db.intents import IntentRefused
+
+    if not rules_runtime_ready():
+        raise IntentRefused("intent rules cannot be enabled until the rule engine is installed")
+    raise IntentRefused("intent rules cannot be enabled until the rule engine is installed")
 
 
 async def search_mode(db: Any = None) -> SearchMode:

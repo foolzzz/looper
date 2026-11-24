@@ -291,6 +291,17 @@ async def reject(intent_id: int, *, via: str, reason: str | None = None, now: da
     return {"intent": (await get(intent_id, db=db))["intent"]}
 
 
+async def _rules_on(db: Any) -> bool:
+    return (await leads_model.classification_snapshot(db)).types_on
+
+
+async def _visible_type(key: str, db: Any) -> dict:
+    row = await _require_row("intent_types", "key", key, db)
+    if not leads_model.intent_type_visible(row, rules_on=await _rules_on(db)):
+        raise IntentRefused("intent type is not available")
+    return row
+
+
 async def types_list(*, db: Any = None) -> dict:
     db = _db(db)
     rows = await db.fetch("SELECT t.*,v.name,v.guidance,v.priority,v.workflow_key AS default_workflow, "
@@ -298,8 +309,11 @@ async def types_list(*, db: Any = None) -> dict:
         "AND v.workflow_key IS NOT DISTINCT FROM b.workflow_key AND b.edited_via='builtin') AS recommended "
         "FROM intent_types t JOIN intent_type_versions v ON v.type_key=t.key AND v.version=t.version "
         "JOIN intent_type_versions b ON b.type_key=t.key AND b.version=1 ORDER BY t.builtin DESC,t.key")
+    visible = await _rules_on(db)
     result = []
     for row in rows:
+        if not leads_model.intent_type_visible(row, rules_on=visible):
+            continue
         bindings = await db.fetch("SELECT b.project_id,p.name AS project_name,b.workflow_key FROM intent_type_projects b "
                                  "JOIN projects p ON p.id=b.project_id JOIN workflows w ON w.key=b.workflow_key WHERE b.type_key=$1 ORDER BY p.name,p.id", row["key"])
         result.append({key: row[key] for key in ("key", "builtin", "enabled", "version", *TYPE_FIELDS, "recommended")}
@@ -313,7 +327,7 @@ async def _type_result(key: str, db: Any) -> dict:
 
 async def type_history(key: str, *, db: Any = None) -> dict:
     db = _db(db)
-    current = await _require_row("intent_types", "key", key, db)
+    current = await _visible_type(key, db)
     rows = await db.fetch("SELECT version,name,guidance,priority,workflow_key AS default_workflow,rolled_back_from,edited_via,created_at "
                           "FROM intent_type_versions WHERE type_key=$1 ORDER BY version DESC", key)
     return {"key": key, "current": current["version"],
@@ -338,8 +352,11 @@ async def _validate_type(fields: dict, db: Any) -> dict:
 
 
 async def _type_capacity(conn: Any, *, excluding: str | None = None) -> None:
-    if await conn.fetchval("SELECT count(*) FROM intent_types WHERE enabled AND archived_at IS NULL "
-                           "AND ($1::text IS NULL OR key<>$1)", excluding) >= 10:
+    visible = await _rules_on(conn)
+    rows = await conn.fetch("SELECT key, builtin, enabled, archived_at FROM intent_types")
+    count = sum(1 for row in rows if row["enabled"] and row["archived_at"] is None and row["key"] != excluding
+                and leads_model.intent_type_visible(row, rules_on=visible))
+    if count >= 10:
         raise IntentRefused("at most 10 enabled intent types")
 
 
@@ -357,6 +374,8 @@ async def type_create(key: str, *, name: str, guidance: str, priority: str, defa
                       edited_via: str = "dashboard", db: Any = None) -> dict:
     if not isinstance(key, str) or not re.fullmatch(r"[a-z][a-z0-9_]{0,31}", key):
         raise ValueError("key must match [a-z][a-z0-9_]{0,31}")
+    if key == leads_model.RULE_INTENT_TYPE:
+        raise IntentRefused("intent type key is reserved")
     async with _db(db).acquire() as conn, conn.transaction():
         await conn.execute("LOCK TABLE intent_types IN SHARE ROW EXCLUSIVE MODE")
         if await conn.fetchval("SELECT EXISTS(SELECT 1 FROM intent_types WHERE key=$1)", key):
@@ -374,7 +393,7 @@ async def type_save(key: str, *, edited_via: str = "dashboard", db: Any = None, 
     async with _db(db).acquire() as conn, conn.transaction():
         # Serializing edits also makes the ten-type cap safe across concurrent requests.
         await conn.execute("LOCK TABLE intent_types IN SHARE ROW EXCLUSIVE MODE")
-        current = await _require_row("intent_types", "key", key, conn)
+        current = await _visible_type(key, conn)
         if current["archived_at"]:
             raise IntentRefused("this intent type is archived")
         changes = await _validate_type(fields, conn)
@@ -393,7 +412,7 @@ async def type_save(key: str, *, edited_via: str = "dashboard", db: Any = None, 
 async def type_rollback(key: str, version: int, *, edited_via: str = "dashboard", db: Any = None) -> dict:
     async with _db(db).acquire() as conn, conn.transaction():
         await conn.execute("LOCK TABLE intent_types IN SHARE ROW EXCLUSIVE MODE")
-        current = await _require_row("intent_types", "key", key, conn)
+        current = await _visible_type(key, conn)
         if current["archived_at"]:
             raise IntentRefused("this intent type is archived")
         old = await conn.fetchrow("SELECT *,workflow_key AS default_workflow FROM intent_type_versions WHERE type_key=$1 AND version=$2", key, version)
@@ -406,7 +425,7 @@ async def type_rollback(key: str, version: int, *, edited_via: str = "dashboard"
 
 async def type_archive(key: str, *, db: Any = None) -> dict:
     async with _db(db).acquire() as conn, conn.transaction():
-        current = await _require_row("intent_types", "key", key, conn)
+        current = await _visible_type(key, conn)
         if current["builtin"]:
             raise IntentRefused("built-in intent types cannot be archived")
         await conn.execute("UPDATE intent_types SET archived_at=COALESCE(archived_at,now()),enabled=false WHERE key=$1", key)
@@ -415,7 +434,7 @@ async def type_archive(key: str, *, db: Any = None) -> dict:
 
 async def set_project_template(key: str, project_id: str, workflow_key: str | None, *, db: Any = None) -> dict:
     async with _db(db).acquire() as conn, conn.transaction():
-        await _require_row("intent_types", "key", key, conn)
+        await _visible_type(key, conn)
         await _require_row("projects", "id", project_id, conn)
         if workflow_key is None:
             await conn.execute("DELETE FROM intent_type_projects WHERE type_key=$1 AND project_id=$2", key, project_id)
@@ -620,18 +639,24 @@ async def stats(days: int = 30, *, now: datetime | None = None, db: Any = None) 
     if not isinstance(days, int) or isinstance(days, bool) or not 1 <= days <= 365:
         raise ValueError("days must be between 1 and 365")
     # A dropped intent (the check's) was never shown to the operator: not recognized, not in a rate's denominator.
-    rows = await _db(db).fetch("SELECT t.key,v.name, count(i.id) FILTER(WHERE i.state NOT IN ('merged','dropped')) "
+    db = _db(db)
+    rows = await db.fetch("SELECT t.key,t.builtin,v.name, count(i.id) FILTER(WHERE i.state NOT IN ('merged','dropped')) "
         "AS recognized, "
         "count(i.id) FILTER(WHERE i.state='tasked') AS tasked,count(i.id) FILTER(WHERE i.state='rejected') AS rejected, "
         "count(i.id) FILTER(WHERE i.state='expired') AS expired,count(i.id) FILTER(WHERE i.state='merged') AS merged, "
         "count(i.id) FILTER(WHERE i.state='dropped') AS dropped "
         "FROM intent_types t JOIN intent_type_versions v ON v.type_key=t.key AND v.version=t.version "
-        "LEFT JOIN intents i ON i.type_key=t.key AND i.created_at >= $1 GROUP BY t.key,v.name ORDER BY t.key",
+        "LEFT JOIN intents i ON i.type_key=t.key AND i.created_at >= $1 "
+        "GROUP BY t.key,t.builtin,v.name ORDER BY t.key",
         (now or _now()) - timedelta(days=days))
+    visible = await _rules_on(db)
     result = []
     for row in rows:
+        if not leads_model.intent_type_visible(row, rules_on=visible):
+            continue
         denominator = row["tasked"] + row["rejected"] + row["expired"]
-        result.append({**dict(row), "adoption_rate": row["tasked"] / denominator if denominator else None,
+        shown = {key: row[key] for key in ("key", "name", "recognized", "tasked", "rejected", "expired", "merged", "dropped")}
+        result.append({**shown, "adoption_rate": row["tasked"] / denominator if denominator else None,
                        "rejection_rate": row["rejected"] / denominator if denominator else None})
     return {"days": days, "types": result}
 
