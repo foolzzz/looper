@@ -1,0 +1,220 @@
+{
+  "base_sha": "9912920e45b6519749547974e953716c0b6c7c32",
+  "repr": "sha256 of name=value lines for the EvalTask fields listed here; callables use inspect.getsource plus the values their closure captured, other values use repr",
+  "fields": [
+    "id",
+    "requirement",
+    "check",
+    "files",
+    "chat",
+    "edit_requirement",
+    "planner_may_choose",
+    "roles_on",
+    "schedule_template",
+    "workflow",
+    "role_templates",
+    "user_gates",
+    "dependency_conditions",
+    "gate_script",
+    "gate_answers_from_client",
+    "gate_reply_after_s",
+    "gate_reply_after_worker_start",
+    "wait_resume_after_s",
+    "gh_pr_diffs",
+    "gh_pr_fix_files",
+    "gh_pr_fix_after_s",
+    "gh_pr_views",
+    "disciplines",
+    "step_workspaces",
+    "init_git",
+    "advisor",
+    "skill_proposals",
+    "expect",
+    "fake",
+    "operator_notes",
+    "vault",
+    "vault_check",
+    "flow_check"
+  ],
+  "tasks": {
+    "single_step": "3b6f2e5d283290a34aabedba7ecf33dcec529a4563eaa6e51be2afc58832fff6",
+    "wait_pr_rereview": "c3c4ae7a858624875cd01071bc9392de3dad297d4f18aa2d097a55cf190ef55b",
+    "wait_pr_comment_injection": "86fadd1092b66895da1106388d8a005cf8abe6273c3d6b02a5df3e2f82be8486",
+    "wait_not_needed": "d9829c78028c2e8ecab8cfe727a02e1317fc890e8e71f06b5df8499d8860443e",
+    "dependent_steps": "eebb19f6d72f0a13e48a8ac617b47e46425425fcd62b6ed994da9b5f7bac593e",
+    "many_steps": "a2a6efc2e230f4472045a2b78a3e07f71aa9208290262be2302823f4715441c4",
+    "parallel_parts": "593595843ef01d7e45807989aba937bef1c8a68f68c82aac9da529415f85a186",
+    "interface_first": "ab02d1b93b6df23afd218daffd2a11a493fc3e844ed70d464bbfbd2fb5f7d993",
+    "reviewed_step": "375fd8798e3d07732e374e569d8d7928e44b4a8c36605aa194f106619e9708a1",
+    "retry_after_failure": "f226c4c8544d0d5a2590dc6d03f40eb09d73cd9ebb5a5ad26555cd0733732226",
+    "workflow_verify_loop": "4b096d17e71370b735f3f3cfeda7cd4ac4b87f691487dc2003266dc9c2689ef6",
+    "chat_correction": "a5531fff704b1165b1ac26b1f475f155217a02d9d1129043f11da883019df066",
+    "supplement_replan": "0055a42c3d7613ae2f3ddf0d351be99fca76fd4c3972b229d3b161a012fe3de0",
+    "requirement_edit": "65baa3559a90ae3c09d4a2ea732119409495b6b6dc0f05563ea7567111ca033e",
+    "supplement_no_change": "0e9bc28d88f900252e839fbae960c752a560e6b59fe25458f4ef95e30b7476fc",
+    "profile_choice": "b257911eea5f108055731a0129bbc963275d98545f4a119d1768a3952e3b257e",
+    "roles_tester_docs": "1f76ba99fb8972c571e0295ef939ac2adf927cf628353abf942eb5c8a9293f4a",
+    "roles_security_review": "471dd7035e57c8781d02c66908bf2c3eb9c0f2d618ba2a3c60cb864b42efa762",
+    "roles_advisory_review": "79c0e6519f5a851674613d8c136491b98c1895df1c73a7b335f5e1663293feed",
+    "roles_two_reviews": "e0d8b47186a48747f96366f827bf2c408baf441c8070fc4ad8ebd495e43a8009",
+    "roles_multi_platform": "ea67d0288ecdaed4dbb26ffe13814e8f45cc6d1bc6b006f59f663f9ea45f2dc4",
+    "roles_template_fits": "7258f7044e7af33e14a43a96185a8df8296e21b472fc3591024e8109d86480dd",
+    "roles_template_unfit": "a23f40f5fa7daa7a4a66e090310b20d53de876d23a3ea8c27428b9283114647a",
+    "roles_not_needed": "de06ebd191c64aac5b01379809f307665be8b95cee42a91e73e4acceebf12422",
+    "gate_ambiguous": "17a2e84f321197bb303374dd1dbd71b9f297bfcd7bda4e391a03e62cbbfcd87d",
+    "gate_outside_answer": "03dd8a0d62b9f5f592d0966964e81c616bc575a79ab378a5e892519573b372a3",
+    "gate_not_needed": "eddacbe605166bf4c9b15e8451c04ecba5677f5aa6279a489b9ad1ec8f56d93c",
+    "gate_end_early": "663108c58f7149ab788902398c56ff0e0b9fea6ded76f86cec47cc91a833e8d4",
+    "gate_parallel_branch": "fd4a458d32fa5cef85fef00b0bceeae0057c5902d1613bfcef5ef6f85a095178",
+    "gate_discoverable": "baa9f894abb560baf561c111b11d91d53f87ba6b00303fc722dd2b783565c7b3",
+    "operator_notes": "5c53e3ce8d64ef74c93ddb16857dad218408db59c35bd210cbee940750dd78c9",
+    "operator_notes_stale": "737c68407650731015a678f52ea3abd859d60fd08600c9458d7fb7b066381022",
+    "vault_closeout_keeps": "dee5bcb78879bbb9eab011c54a191aa1e66533ad7f3211f0e9c86d054f033c06",
+    "vault_closeout_nothing": "7350ae04541630180fb59745a4db4db400f379b7d11605264551a9b183677e5b",
+    "room_interface": "45f88dbb3f3748b28fe15c208431796e62c0f61a02104cda56b1f0c195a79c03",
+    "room_consult": "e20f37faa61398696ce1d245142673692da706efb471b334e2ceac9bf9c49677",
+    "room_quiet": "132a78a76a0f2c0665e0801cfa572c938300b9d0b2e38713f68f7b2769c02900",
+    "planner_plan_file": "706062047572ad915e4ce19aae5d8b2ba39acde7b4ff7121c1989bdc3b7b54cf",
+    "reviewer_retry_note": "8fc4bd6d4750ebde66e5ce85735ebafb3df43931f55240d13743d4c76fb02c39",
+    "reviewer_unrelated_note": "cba0cef6a72cb093ba6105662122079dd00798723e547a80f2da52677422efc5",
+    "reviewer_elsewhere": "ff89ca523c2b3c63d784410015ab4ff7b1450a7ea17b2226ab99a06846c7a8fa",
+    "reviewer_elsewhere_wrong": "341ecfd07e14c50b6a3e61f22d070513dee5dbfc6ca34e92a93bf617529a551d",
+    "schedule_template_report": "76ab9674f2c5a3d0d69574eb5237a7c27c186c4346fed09320dbd87fe0dc4c74",
+    "any_of_ready": "77b72dfdb7dfc68090159f1a332b96bd12fb19e3c3dfbb6f5b70891b346d7f09",
+    "conditions_not_needed": "59627b8d6caee32a88c600228287b8c13a676cffaa116d6ee3296f2ce980c4ee",
+    "panel_merge": "74eae5f2552fe0b15d53585dd0c5d17160d368e11bbf4defd7dcd8cdf7cbfab0",
+    "panel_adjudicate": "1abd9a670c39d2429fd9bd0073b6ce206e9274d5252e54ea95853a6d5c08f08b",
+    "advisor_checkpoint": "8a6ce183e1bbba8a28d87cc0f637f5f59e0a7f10800e1dccb9e841627890eaee",
+    "advisor_optional_flaky": "846bfc0e67dfece9a82cc85c4339851aa9e5d4886311a986d78f2d52a9ccfdb2",
+    "hidden_precondition": "99a36ff1573aeaa0908e5f6ec459a356ea8e33b359da2c8da31d622929c224a4",
+    "rethink_bug": "c2d5b6eeed5c8141be1a6640d958f7d72f01b6b7a65d69cb59a51aff450d2899",
+    "misleading_error": "55ce8579df0552b475b8283d4c5e96256cf0cf4600f5f300161250a97f8052bf",
+    "skill_proposal_useful": "bf53d1e8c8dec0510215108bdd4bbeca40b44c52325a6fc77dc4c3fedb4ffd5d",
+    "skill_proposal_not_needed": "ab85c11fd29ba21ebfe83327cd3bc071fef92a97be710bd409390ba3c7cac913",
+    "skill_proposal_leak": "a734f2f7a95b55a384c000d35e7d0e6970a1910922e60f507df0acfaec242ae8"
+  },
+  "select_tasks": {
+    "hard": [
+      "hidden_precondition",
+      "rethink_bug",
+      "misleading_error"
+    ],
+    "planner": [
+      "wait_pr_rereview",
+      "wait_not_needed",
+      "dependent_steps",
+      "parallel_parts",
+      "interface_first",
+      "supplement_replan",
+      "requirement_edit",
+      "supplement_no_change",
+      "roles_tester_docs",
+      "roles_multi_platform",
+      "roles_template_fits",
+      "roles_template_unfit",
+      "roles_not_needed",
+      "gate_ambiguous",
+      "gate_not_needed",
+      "gate_parallel_branch",
+      "gate_discoverable",
+      "operator_notes",
+      "operator_notes_stale",
+      "vault_closeout_keeps",
+      "vault_closeout_nothing",
+      "room_interface",
+      "room_consult",
+      "planner_plan_file",
+      "panel_merge",
+      "panel_adjudicate"
+    ]
+  },
+  "decide": [
+    {
+      "name": "accept",
+      "script": {},
+      "message": "[DECISION] Step s1\nAllowed decisions now: accept, fail.",
+      "answer": {
+        "decision": "accept",
+        "reason": "meets the acceptance criteria",
+        "summary": "The step is done.",
+        "final": {
+          "delivered": "the task's files",
+          "how_to_use": "read them",
+          "verification": "each step was checked",
+          "open_issues": "none"
+        }
+      }
+    },
+    {
+      "name": "review",
+      "script": {},
+      "message": "[DECISION] Step s1\nThe step needs a passing review.\nAllowed decisions now: review, retry (1 left).",
+      "answer": {
+        "decision": "review",
+        "reason": "the step asks for an independent review"
+      }
+    },
+    {
+      "name": "scripted replan",
+      "script": {
+        "decision_replans": {
+          "s1": [
+            {
+              "id": "s2"
+            }
+          ]
+        }
+      },
+      "message": "[DECISION] Step s1\nAllowed decisions now: replan, fail.",
+      "answer": {
+        "decision": "replan",
+        "reason": "verification needs a reviewed repair",
+        "steps": [
+          {
+            "id": "s2"
+          }
+        ]
+      }
+    },
+    {
+      "name": "retry",
+      "script": {
+        "retry_feedback": {
+          "s1": [
+            "again"
+          ]
+        }
+      },
+      "message": "[DECISION] Step s1\nAllowed decisions now: retry (1 left), fail.",
+      "answer": {
+        "decision": "retry",
+        "reason": "the step failed",
+        "feedback": "again"
+      }
+    },
+    {
+      "name": "fail",
+      "script": {},
+      "message": "[DECISION] Step s1\nAllowed decisions now: fail.",
+      "answer": {
+        "decision": "fail",
+        "reason": "the step cannot be done"
+      }
+    },
+    {
+      "name": "advise",
+      "script": {
+        "advice_request": {
+          "questions": []
+        }
+      },
+      "message": "[DECISION] Step s1\nAllowed decisions now: advise.",
+      "answer": {
+        "decision": "advise",
+        "advice_request": {
+          "questions": []
+        }
+      }
+    }
+  ]
+}

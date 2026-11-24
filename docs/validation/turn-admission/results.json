@@ -1,0 +1,8 @@
+{
+  "dashboard_wait_then_reply": true,
+  "quota_freeze_one_lark_progress": true,
+  "planner_wait_then_clear": true,
+  "freeze_status_not_persisted": true,
+  "manager_inputs_exclude_freeze_status": true,
+  "completion_utilization_preempt": true
+}

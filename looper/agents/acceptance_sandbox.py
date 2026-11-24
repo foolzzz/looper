@@ -1,8 +1,16 @@
 """Fail-closed launchers for acceptance checks without network access.
 
 The macOS profile has been verified on macOS 26.6.2. Linux's ``unshare -rn``
-path remains unverified on a target host; every invocation must pass the same
-enforcement preflight. Neither launcher restricts file access by the service user.
+path needs an unprivileged user namespace and remains unverified on a target
+host; every invocation must pass the same enforcement preflight. A new network
+namespace may also contain the kernel's down, unlinked tunnel fallbacks
+(``tunl0``, ``gre0``, and the rest). Those are not host interfaces. Anything
+up, addressed, or linked to another device is not enforcement. When the kernel
+refuses the unprivileged user namespace, the preflight fails closed: the check
+is not run unsandboxed, and nothing prompts for a password or escalates to
+root to open the namespace. A process that is already root may use ``unshare -n``
+and must pass the same preflight. Neither launcher restricts file access by the
+service user.
 """
 from __future__ import annotations
 
@@ -40,8 +48,73 @@ if sys.platform == "darwin":
         sys.exit(1)
 else:
     result["namespace"] = os.readlink("/proc/self/ns/net")
-    result["interfaces"] = [name for _, name in socket.if_nameindex()]
-    if result["namespace"] == sys.argv[1] or result["interfaces"] != ["lo"]:
+    result["euid"] = os.geteuid()
+    try:
+        result["uid_map"] = open("/proc/self/uid_map").read()
+    except OSError:
+        result["uid_map"] = ""
+    names = [name for _, name in socket.if_nameindex()]
+    result["interfaces"] = names
+    links = {}
+
+    def host_uid():
+        euid = result["euid"]
+        if not isinstance(euid, int) or isinstance(euid, bool) or euid < 0:
+            return None
+        for line in result["uid_map"].splitlines():
+            parts = line.split()
+            if len(parts) != 3:
+                continue
+            try:
+                inside, outside, count = int(parts[0]), int(parts[1]), int(parts[2])
+            except ValueError:
+                continue
+            if count > 0 and inside <= euid < inside + count:
+                return outside + (euid - inside)
+        return None
+
+    try:
+        expected_uid = int(sys.argv[2])
+    except (IndexError, ValueError):
+        expected_uid = None
+    # A root helper must already have dropped back to the caller. Host uid 0
+    # here would be the real root, not the root of an unprivileged user namespace.
+    isolated = (host_uid() == expected_uid and isinstance(result["namespace"], str)
+                and result["namespace"] != sys.argv[1] and "lo" in names)
+
+    def addressed(name):
+        import fcntl
+        import struct
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        try:
+            fcntl.ioctl(sock, 0x8915, struct.pack("16sH14s", name.encode()[:15], socket.AF_INET, b"\\0" * 14))
+        except OSError:
+            pass
+        else:
+            return True
+        finally:
+            sock.close()
+        try:
+            text = open("/proc/net/if_inet6").read()
+        except OSError:
+            return True
+        return any(line.split()[-1:] == [name] for line in text.splitlines() if line.split())
+
+    for name in names:
+        try:
+            flags = int(open("/sys/class/net/" + name + "/flags").read(), 16)
+            link = int(open("/sys/class/net/" + name + "/iflink").read())
+        except OSError:
+            isolated = False
+            links[name] = {"up": None, "iflink": None, "addressed": None}
+            continue
+        has_address = addressed(name)
+        links[name] = {"up": bool(flags & 1), "iflink": link, "addressed": has_address}
+        # iflink 0 is an unconnected kernel tunnel. lo is the only other device a fresh netns may have.
+        if name != "lo" and (flags & 1 or link != 0 or has_address):
+            isolated = False
+    result["links"] = links
+    if not isolated:
         print(json.dumps(result))
         sys.exit(1)
 try:
@@ -79,40 +152,100 @@ async def _run_probe(argv: tuple[str, ...], work_dir: Path,
             await proc_tree.end(process, label="acceptance sandbox preflight")
 
 
-async def local_prefix(work_dir: Path, env: Mapping[str, str]) -> tuple[str, ...] | None:
-    """Return a verified launcher prefix, or None; never execute a check as fallback."""
-    namespace = ""
-    if sys.platform == "darwin":
-        executable = shutil.which("sandbox-exec", path=env.get("PATH"))
-        prefix = (executable, "-p", MACOS_PROFILE) if executable else None
-    elif sys.platform == "linux":
-        executable = shutil.which("unshare", path=env.get("PATH"))
-        prefix = (executable, "-rn", "--") if executable else None
-        try:
-            namespace = os.readlink("/proc/self/ns/net")
-        except OSError:
-            return None
-    else:
-        return None
-    if prefix is None:
-        return None
+def _which(name: str, env: Mapping[str, str]) -> str | None:
+    return shutil.which(name, path=env.get("PATH"))
+
+
+def _linux_prefixes(env: Mapping[str, str]) -> tuple[tuple[str, ...], ...]:
+    """Launchers to prove, in order. Each one must pass the same preflight.
+
+    A refused unprivileged user namespace is unavailable. There is no privilege
+    helper: resolving one from ``PATH`` would run as root before the preflight.
+    """
+    unshare = _which("unshare", env)
+    if unshare is None:
+        return ()
+    prefixes = [(unshare, "-rn", "--")]
+    # Root does not need a user namespace to open a network namespace.
+    if os.geteuid() == 0:
+        prefixes.append((unshare, "-n", "--"))
+    return tuple(prefixes)
+
+
+async def _verified_prefix(prefix: tuple[str, ...], namespace: str, uid: int, work_dir: Path,
+                           env: Mapping[str, str]) -> bool:
     shell = (*prefix, "/bin/sh", "-c")
     if await _run_probe((*shell, "true"), work_dir, env) != (0, b""):
-        return None
-    command = shlex.join((sys.executable, "-I", "-S", "-c", _PROBE, namespace))
+        return False
+    command = shlex.join((sys.executable, "-I", "-S", "-c", _PROBE, namespace, str(uid)))
     reply = await _run_probe((*shell, command), work_dir, env)
     if reply is None or reply[0] != 0:
-        return None
+        return False
     try:
         result = json.loads(reply[1])
     except (ValueError, UnicodeError):
-        return None
+        return False
     if not isinstance(result, dict):
-        return None
+        return False
     if sys.platform == "darwin":
-        enforced = result.get("bind_errno") == result.get("connect_errno") == errno.EPERM
-    else:
-        enforced = (isinstance(result.get("namespace"), str) and result["namespace"] != namespace
-                    and result.get("interfaces") == ["lo"]
-                    and result.get("connect_errno") in (errno.EPERM, errno.ENETUNREACH))
-    return prefix if enforced else None
+        return result.get("bind_errno") == result.get("connect_errno") == errno.EPERM
+    return _linux_enforced(result, namespace, uid)
+
+
+async def local_prefix(work_dir: Path, env: Mapping[str, str]) -> tuple[str, ...] | None:
+    """Return a verified launcher prefix, or None; never execute a check as fallback."""
+    if sys.platform == "darwin":
+        executable = _which("sandbox-exec", env)
+        if executable is None:
+            return None
+        prefix = (executable, "-p", MACOS_PROFILE)
+        return prefix if await _verified_prefix(prefix, "", os.getuid(), work_dir, env) else None
+    if sys.platform != "linux":
+        return None
+    try:
+        namespace = os.readlink("/proc/self/ns/net")
+    except OSError:
+        return None
+    uid = os.getuid()
+    for prefix in _linux_prefixes(env):
+        if await _verified_prefix(prefix, namespace, uid, work_dir, env):
+            return prefix
+    return None
+
+
+def _host_uid(euid: object, uid_map: object) -> int | None:
+    """The caller's uid outside this user namespace, or None when the map does not say."""
+    if isinstance(euid, bool) or not isinstance(euid, int) or euid < 0 or not isinstance(uid_map, str):
+        return None
+    for line in uid_map.splitlines():
+        parts = line.split()
+        if len(parts) != 3:
+            continue
+        try:
+            inside, outside, count = int(parts[0]), int(parts[1]), int(parts[2])
+        except ValueError:
+            continue
+        if count > 0 and inside <= euid < inside + count:
+            return outside + (euid - inside)
+    return None
+
+
+def _linux_enforced(result: Mapping[str, object], namespace: str, uid: int) -> bool:
+    """A new netns owned by ``uid`` that cannot connect, with only lo and down unlinked tunnels."""
+    interfaces = result.get("interfaces")
+    links = result.get("links")
+    if (_host_uid(result.get("euid"), result.get("uid_map")) != uid
+            or not isinstance(result.get("namespace"), str) or result["namespace"] == namespace
+            or result.get("connect_errno") not in (errno.EPERM, errno.ENETUNREACH)
+            or not isinstance(interfaces, list) or "lo" not in interfaces or not isinstance(links, dict)
+            or set(interfaces) != set(links)):
+        return False
+    for name in interfaces:
+        info = links.get(name)
+        if not isinstance(name, str) or not isinstance(info, dict):
+            return False
+        if name == "lo":
+            continue
+        if info.get("up") is not False or info.get("iflink") != 0 or info.get("addressed") is not False:
+            return False
+    return True

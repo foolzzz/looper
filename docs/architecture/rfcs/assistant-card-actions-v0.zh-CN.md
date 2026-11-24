@@ -73,7 +73,9 @@
 
 `cards.actions.enabled` 没有这一行或不是 `true`：不写 `card_actions`，回复不带 `cards`，关卡消息照旧发文字，确认只在内存里；飞书长连接对卡片点击回普通确认，Telegram 的点击不答复，都和以前一样（帧级测试比较了确认帧）。提示词、工具列表、命令行不变；开关打开时模型看到的确认提示、工具返回和下一轮的 `[Looper]` 提示也和关闭时逐字节相同（测试比较了两种情况）。唯一新增的模型可见文字是上面打字确认撞上已用按钮处理过的确认时的 `conflict` 说明，只在开关打开且按钮先被点的情况下出现。
 
-Dashboard 上还没有按钮开关，`cards.actions.enabled` 仍通过系统设置配置；账本自己的 `ledger.enabled` 已有 Settings → Chat 入口。
+Dashboard 不新增按钮开关，账本自己的 `ledger.enabled` 仍在 Settings → Chat。卡片开关使用独立的 operator-only `card_actions.get/update`（`POST /api/v1/card_actions/get`、`/update`），不加入 `chat_settings` 或模型工具。更新的 `enabled` 必填，只接受 `true`、`false`、`null`；`null` 删除系统设置行、恢复默认关闭，返回值均为 `{"enabled": boolean}`。更新按高风险设置操作处理；两项操作的 action level 都是 `inside`，只读取或保存 Looper 自己的设置，发卡和点击另行执行。
+
+生成的 CLI 是 `loopercli card-actions get` 和 `loopercli card-actions update --enabled true|false|null`，使用临时 operator 凭据（`--url`、`--operator-token-file`）。配置导出仅在存有有效布尔值时携带 `settings.system["cards.actions.enabled"]`，缺行不增加字段；导入接受布尔值或 `null`，预览不写库、应用后立即生效。API client 不能读写独立操作，携带此键的配置也必须由 operator 导入，包括关闭或清除；暂存后应用和确认时再次核对该规则。
 
 ## 7. 风险与监控
 
@@ -88,7 +90,7 @@ Dashboard 上还没有按钮开关，`cards.actions.enabled` 仍通过系统设�
 
 - 意图推送保留原文字，加「建 / 驳回」；按钮和「建 I-xxxx / 驳回 I-xxxx」共用业务服务。意图行锁、卡片 claim 和状态转换在一个事务内；失败回滚卡片 claim，缺项目或目录仍可走原有的编号回复或意图页。成功的打字操作也结算同一批卡片。卡片摘要绑定标题、摘要、来源和项目配置，内容变化的旧卡失效。意图的终态编辑保留卡片类型并移除按钮。
 - 账本里本人新增的决定已经确认，不再问一次；本人在私聊通过 `looper_ledger_update` 的 get/list 查看尚未确认的转述决定时，代码附上「确认」卡片。群聊、其他发送者不发这种卡片。按钮重新核对当前 operator 身份和账本开关，再走 `db.ledger.apply`；账本行锁保护摘要检查、确认事件和卡片结算。CLI 和工具里的打字确认结算同一记录，修改或撤销使旧卡失效。
-- 两类按钮都复用会话/消息绑定，以及从收到点击起 1.5 秒的授权期限；各自当前身份和功能状态的核对也在期限内。没有新增工具、设置或 v1 操作。开关关闭时不写卡片记录，原消息、调用参数、模型工具和启动命令保持不变。
+- 两类按钮都复用会话/消息绑定，以及从收到点击起 1.5 秒的授权期限；各自当前身份和功能状态的核对也在期限内。共用第 6 节的卡片开关和 operator 配置入口，不增加模型工具。开关关闭时不写卡片记录，原消息、调用参数、模型工具和启动命令保持不变。
 - Needs-you 的待操作确认由 `card_actions.pending_confirmations` 读取：开关打开时读持久化的 confirmation，内存只补未能持久化的确认；关闭时沿用内存。意图和账本仍列在自己的分类，不重复计入操作确认。
 
 ## 9. 不在本 PR

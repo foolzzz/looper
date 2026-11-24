@@ -17,17 +17,18 @@ def message(text):
     return {"version": 1, "kind": "message", "role": "user", "text": text}
 
 
-def test_append_load_preserves_neutral_order_and_originating_model():
+@pytest.mark.parametrize("protocol", ["openai-responses", "anthropic-messages"])
+def test_append_load_preserves_neutral_order_and_originating_model(protocol):
     from looper.db import api_sessions
 
     async def run(pool):
-        await api_sessions.create("session", PROTOCOL, pool=pool)
-        await api_sessions.append("session", 1, PROTOCOL, "first-model", [message("one"), message("two")], pool=pool)
-        await api_sessions.append("session", 2, PROTOCOL, "second-model", [message("three")], pool=pool)
+        await api_sessions.create("session", protocol, pool=pool)
+        await api_sessions.append("session", 1, protocol, "first-model", [message("one"), message("two")], pool=pool)
+        await api_sessions.append("session", 2, protocol, "second-model", [message("three")], pool=pool)
         rows = await api_sessions.load("session", pool=pool)
         assert [json.loads(row["item"]) for row in rows] == [message("one"), message("two"), message("three")]
         assert [(row["seq"], row["turn"], row["model"], row["protocol"]) for row in rows] == [
-            (1, 1, "first-model", PROTOCOL), (2, 1, "first-model", PROTOCOL), (3, 2, "second-model", PROTOCOL)]
+            (1, 1, "first-model", protocol), (2, 1, "first-model", protocol), (3, 2, "second-model", protocol)]
 
     run_db(run, timeout=15)
 
@@ -261,3 +262,132 @@ def test_failed_manager_deletion_rolls_back_api_history_and_pointer(monkeypatch,
         assert await api_sessions.load("review-session", pool=pool) == before
 
     run_db(run, monkeypatch, timeout=15)
+
+
+def test_messages_restart_resumes_neutral_history(tmp_path, monkeypatch):
+    from looper.agents.runtimes import ApiProtocol
+    from looper.agents.runtimes.api.adapter import Descriptor, KEY_ENV
+    from looper.agents.runtimes.api.loop import ToolOutcome
+    from looper.agents.runtimes.api.session import ApiSession, FORBIDDEN_ENV
+    from looper.db import api_sessions
+    from tests.fake_model_api import FakeModelAPI, ResponseScript, message_call_events, message_events
+
+    for key in FORBIDDEN_ENV:
+        monkeypatch.delenv(key, raising=False)
+    prompt = tmp_path / "prompt.md"
+    prompt.write_text("Reply concisely.")
+    protocol = ApiProtocol.ANTHROPIC_MESSAGES
+
+    class Tools:
+        async def specs(self):
+            return []
+
+        async def call(self, call):
+            return ToolOutcome("lookup unavailable", True, False)
+
+    async def run(pool):
+        async with FakeModelAPI([
+            ResponseScript(events=message_call_events(name="lookup")),
+            ResponseScript(events=message_events("First answer.")),
+            ResponseScript(events=message_events("Resumed answer.")),
+        ]) as model:
+            async def start(sid=None, selected_protocol=protocol):
+                session = ApiSession("Manager")
+                descriptor = Descriptor(selected_protocol, "test-model", model.base_url, None, None,
+                                        str(prompt), sid)
+                await session.start(descriptor.to_argv(), cwd=str(tmp_path), signature="test",
+                                    env={KEY_ENV: "test-key"})
+                session.set_turn_tools(Tools())
+                return session
+
+            async def emit(event):
+                pass
+
+            session = await start()
+            try:
+                result = await session.run_turn("First user text.", emit)
+                assert not result.result_event.get("is_error"), result.result_event
+                assert result.result_event["result"] == "First answer."
+                sid = result.result_event["session_id"]
+                rows = await api_sessions.load(sid)
+                assert [json.loads(row["item"])["kind"] for row in rows] == [
+                    "message", "tool_call", "tool_result", "message"]
+                assert [row["seq"] for row in rows] == [1, 2, 3, 4]
+                assert {row["turn"] for row in rows} == {1}
+            finally:
+                await session.stop()
+            restarted = await start(sid)
+            try:
+                result = await restarted.run_turn("Continue here.", emit)
+                assert result.result_event["result"] == "Resumed answer."
+                assert result.result_event["session_id"] == sid
+                sent = model.requests[-1].body["messages"]
+                assert sent[0] == {"role": "user", "content": [{"type": "text", "text": "First user text."}]}
+                blocks = [block for msg in sent for block in msg["content"]]
+                assert any(block.get("type") == "tool_result" and block["tool_use_id"] == "call_1"
+                           and block["is_error"] is True for block in blocks)
+                rows = await api_sessions.load(sid)
+                assert [row["turn"] for row in rows] == [1, 1, 1, 1, 2, 2]
+                assert all(row["protocol"] == protocol.value for row in rows)
+            finally:
+                await restarted.stop()
+            other_protocol = await start(sid, ApiProtocol.OPENAI_RESPONSES)
+            try:
+                rejected = await other_protocol.run_turn("Do not replay across protocols.", emit)
+                assert not rejected.session_started and not rejected.prompt_sent
+                assert len(model.requests) == 3
+            finally:
+                await other_protocol.stop()
+            assert await api_sessions.delete(sid) == 6
+            with pytest.raises(api_sessions.TranscriptMismatch, match="no longer exists"):
+                await api_sessions.append(sid, 3, protocol.value, "test-model", [message("late")])
+            assert await api_sessions.load(sid) == []
+            assert await pool.fetchval("SELECT count(*) FROM api_sessions WHERE session_id=$1", sid) == 0
+
+    run_db(run, monkeypatch, timeout=30)
+
+
+@pytest.mark.parametrize("ending", ["max_tokens", "eof"])
+def test_messages_unfinished_stream_persists_no_partial_batch(tmp_path, monkeypatch, ending):
+    from looper.agents.runtimes import ApiProtocol
+    from looper.agents.runtimes.api.adapter import Descriptor, KEY_ENV
+    from looper.agents.runtimes.api.loop import ToolSpec
+    from looper.agents.runtimes.api.session import ApiSession, FORBIDDEN_ENV
+    from tests.fake_model_api import FakeModelAPI, ResponseScript, message_call_events
+
+    for key in FORBIDDEN_ENV:
+        monkeypatch.delenv(key, raising=False)
+    prompt = tmp_path / "prompt.md"
+    prompt.write_text("Reply concisely.")
+
+    class Tools:
+        async def specs(self):
+            return [ToolSpec("lookup", "Synthetic lookup", {"type": "object"})]
+
+        async def call(self, call):
+            raise AssertionError("an incomplete request must never execute a tool")
+
+    async def run(pool):
+        events = message_call_events(stop_reason="max_tokens" if ending == "max_tokens" else "tool_use")
+        if ending == "eof":
+            events = events[:-1]
+        scripts = [ResponseScript(events=events) for _ in range(2 if ending == "eof" else 1)]
+        async with FakeModelAPI(scripts) as model:
+            session = ApiSession("Manager")
+            descriptor = Descriptor(ApiProtocol.ANTHROPIC_MESSAGES, "test-model", model.base_url,
+                                    None, None, str(prompt))
+            await session.start(descriptor.to_argv(), cwd=str(tmp_path), signature="test",
+                                env={KEY_ENV: "test-key"})
+            session.set_turn_tools(Tools())
+            try:
+                async def emit(event):
+                    pass
+                result = await session.run_turn("Do not run an unfinished tool batch.", emit)
+                assert result.result_event["is_error"] is True
+                assert len(model.requests) == len(scripts)
+                assert await pool.fetchval("SELECT count(*) FROM api_sessions") == 0
+                assert await pool.fetchval("SELECT count(*) FROM api_session_items") == 0
+            finally:
+                await session.stop()
+
+    run_db(run, monkeypatch, timeout=30)

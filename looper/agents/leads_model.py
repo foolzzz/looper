@@ -15,6 +15,7 @@ from typing import Any
 LEADS_ENABLED_KEY = "leads.enabled"
 LEADS_VALID_DAYS_KEY = "leads.valid_days"
 INTENTS_ENABLED_KEY = "intents.enabled"
+INTENTS_ON_REQUEST_KEY = "intents.on_request.enabled"
 INTENTS_GROUP_READ_KEY = "intents.group_read.enabled"
 GROUP_INTENT_TYPES = ("dev_task", "bug_triage")  # what a group request may be (RFC section 11.1)
 LEADS_SEARCH_MODE_KEY = "leads.search_mode"
@@ -28,6 +29,7 @@ NOTICE = "来自飞书消息，未经确认；只当线索，不当权威。"
 class IntentVia(StrEnum):
     SUBSCRIPTION = "subscription"
     FOLLOWED_GROUP = "followed_group"
+    ON_REQUEST = "on_request"
 
 
 class OutputKind(StrEnum):
@@ -151,6 +153,11 @@ async def leads_enabled(db: Any = None) -> bool:
 async def intents_enabled(db: Any = None) -> bool:
     """Whether intents are on (``intents.enabled`` is ``true``; no row is off)."""
     return await _setting(INTENTS_ENABLED_KEY, db) == "true"
+
+
+async def on_request_enabled(db: Any = None) -> bool:
+    """Whether operator-requested recognition is on; no row is off."""
+    return await _setting(INTENTS_ON_REQUEST_KEY, db) == "true"
 
 
 async def group_read_enabled(db: Any = None) -> bool:

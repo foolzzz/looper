@@ -99,7 +99,8 @@ def test_client_cannot_stage_manager_graph(tmp_path, monkeypatch, route, documen
 
 
 @pytest.mark.parametrize("execution", ["apply", "confirm"])
-@pytest.mark.parametrize("document", [GRAPH, INSTALL_GRAPH])
+@pytest.mark.parametrize("document", [GRAPH, INSTALL_GRAPH, {
+    "format": "looper-config/v4", "settings": {"system": {"cards.actions.enabled": True}}}])
 @pytest.mark.usefixtures("clients")
 def test_client_stored_document_policy_is_rechecked_before_execution(tmp_path, monkeypatch, execution, document):
     runner = AsyncMock(return_value=config_transfer.Plan())
