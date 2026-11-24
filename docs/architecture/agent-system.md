@@ -5321,7 +5321,12 @@ down, asleep, stalled, switched off or draining), and of each chat's missed ones
 hours is sent, with a line saying when it was due, unless a reminder on time goes to that chat in the same tick; the
 others become `missed`. A start, a sleep and two servers taking turns in an upgrade are judged alike. A refused send is tried at the next tick, three times in all;
 an unknown outcome is `uncertain` and never sent again. Reminders are never throttled: no quiet hours, cap or merge
-window. The time is the nearest future instant the wall time names in its zone: of the two when the clocks go back,
+window. With `delivery.enabled` on, a claimed reminder asks `proactive_delivery.decide` as
+`user_reminder` / `user_set`: `send` / `urgent`, uncounted, never deferred to the digest. The decision and
+channel receipt (`sent`, `rejected`, `unknown`) share `looper-reminder-<id>` in `proactive_deliveries`, with
+the reminder id as `source_ref`; refused-send retries retain that decision. A failed decision is logged and
+the reminder still sent; a failed receipt write does not retry the send. Off, the post and reminder writes
+are unchanged and no delivery record is added. The time is the nearest future instant the wall time names in its zone: of the two when the clocks go back,
 the first still ahead; one the clocks skip becomes the first valid minute after it; the confirmation says either.
 
 Continuing a task that failed at its spend cap needs a higher cap, which is
@@ -6746,8 +6751,8 @@ writes nothing.
 ### Proactive messages: the delivery layer
 
 A proactive message is one Looper sends without being asked in that moment (a
-gate reminder, a task notice; later a subscription's push, an intent, a
-completion turn, a reminder the user set). With the system setting
+gate reminder, a task notice, a subscription's push, an intent, a
+completion turn or a reminder the user set). With the system setting
 `delivery.enabled` on (operator-only `proactive_delivery.update`; off by
 default, and then no send point asks), a send point asks
 `proactive_delivery.decide` before the message goes out. The decision is the
@@ -6772,8 +6777,10 @@ send points. After the post the send point records the receipt (`outcome`
 `sent`, `rejected` or `unknown`, `sent_at`, `external_id`) on the same row as
 the metrics. A later try of the same message replaces a `rejected` receipt.
 Off, a send point that switch controls writes nothing. Wired so far: gate
-reminders, task notices to Lark and Telegram, subscription digest pushes, and
-initial and new-evidence intent pushes. A completed or failed task's code notice is `normal`; an opened, updated or resumed gate that needs the
+reminders, task notices to Lark and Telegram, subscription digest pushes,
+initial and new-evidence intent pushes, and user-set reminders. User-set reminders use `user_reminder` /
+`user_set` under `looper-reminder-<id>` and bypass quiet hours, the cap and the digest; decision failures
+fail open, and receipt failures only log. A completed or failed task's code notice is `normal`; an opened, updated or resumed gate that needs the
 user is `blocking`, like its reminders. The channel checks a task-end notice
 immediately before sending it, retaining its text and target; a completion
 fallback keeps the original notice's decision key. Recent user messages are
