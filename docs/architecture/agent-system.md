@@ -3336,6 +3336,22 @@ memory page shows their candidates for the operator to review.
   again afterwards, the writer checks the committed paths and bytes against
   the confirmed operations. A branch advance outside those paths can be
   rebased; touching a target requires new drafting and confirmation.
+- **Task source:** when memory writing is enabled with `sources.tasks`, the
+  project has a lesson or project target, and the operator has turned that
+  project's memory closeout on, an ended task's Planner proposes lesson and
+  project candidates instead of the vault closeout. The turn is `[MEMORY]`.
+  Its journal lines are numbered `J1`, `J2`, … for rows that have an id;
+  review rounds and rows the budget leaves out are not citable. A proposal
+  names its kind, statement, why, keywords and those journal ids. Items that
+  fail the shape, the kind, the evidence or a secret check are dropped and
+  counted; the task still ends. The activity line says what was proposed, or
+  the note when nothing was, and the drop counts when any were dropped. An
+  empty journal or a spent task cap skips the turn. Writing a confirmed
+  candidate that cites a task journal adds `Memory: M-… written to …` on that
+  task. The switch is operator-only (`memory_closeout.get` /
+  `memory_closeout.update`), default off, and omitted from project reads and
+  configuration export until it is on. While it is off, prompts, tool lists
+  and the vault closeout stay as they were.
 - **Failure and recovery:** a blocked write keeps its confirmation and waits
   for the operator's retry; a content conflict clears confirmation and
   requests redrafting once. No write stashes, resets or commits somebody

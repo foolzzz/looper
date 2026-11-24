@@ -101,6 +101,10 @@ async def authorize(data: dict[str, Any], policy: Literal["client", "operator"] 
            and "acceptance_checks" in project["execution"] for project in data.get("projects", [])):
         raise OpError(ErrorCode.FORBIDDEN, "Acceptance check permissions require operator identity; "
                       "upload this configuration with an operator token")
+    if any(isinstance(project, dict) and isinstance(project.get("execution"), dict)
+           and "memory_closeout" in project["execution"] for project in data.get("projects", [])):
+        raise OpError(ErrorCode.FORBIDDEN, "Memory closeout requires operator identity; "
+                      "upload this configuration with an operator token")
     if data.get("settings", {}).get("chat"):
         raise OpError(ErrorCode.FORBIDDEN, "Chat settings require operator identity; "
                       "upload this configuration with an operator token")

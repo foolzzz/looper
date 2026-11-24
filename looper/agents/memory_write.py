@@ -516,6 +516,8 @@ class MemoryWriteService:
                                "updated_at = now() WHERE id IN "
                                "(SELECT lead_id FROM memory_candidate_sources WHERE candidate_id = $1)",
                                row["id"], model.format_id(row["id"]))
+        from . import memory_closeout
+        await memory_closeout.note_written(conn, row, commit)
 
     async def _failure(self, conn, row, failure):
         action = {model.State.BLOCKED: "block", model.State.CONFLICT: "conflict"}[failure.state]

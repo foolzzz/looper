@@ -302,6 +302,8 @@ export interface Project extends ProjectExecution {
   schedule_count: number;
   /** Present only while agents may propose skills for the operator to confirm; absent means off. */
   skill_proposals?: "on";
+  /** Omitted while off. Ended tasks propose memories instead of writing vault notes. */
+  memory_closeout?: "on";
 }
 
 export interface ChatSendResponse {
@@ -1299,6 +1301,23 @@ export async function fetchAcceptanceChecks(projectId: string): Promise<Acceptan
 export async function updateAcceptanceChecks(projectId: string, mode: AcceptanceChecksMode): Promise<AcceptanceChecksSettings> {
   const result = await callV1<AcceptanceChecksSettings>("/api/v1/acceptance_checks/update",
     { project_id: projectId, acceptance_checks: mode });
+  if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
+  notifyProjectsChanged();
+  return result;
+}
+
+export type MemoryCloseoutMode = "off" | "on";
+export interface MemoryCloseoutSettings { memory_closeout: MemoryCloseoutMode }
+
+export async function getMemoryCloseout(projectId: string): Promise<MemoryCloseoutSettings> {
+  const result = await callV1<MemoryCloseoutSettings>("/api/v1/memory_closeout/get", { project_id: projectId });
+  if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
+  return result;
+}
+
+export async function updateMemoryCloseout(projectId: string, mode: MemoryCloseoutMode): Promise<MemoryCloseoutSettings> {
+  const result = await callV1<MemoryCloseoutSettings>("/api/v1/memory_closeout/update",
+    { project_id: projectId, memory_closeout: mode });
   if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
   notifyProjectsChanged();
   return result;
