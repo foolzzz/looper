@@ -8,9 +8,12 @@ import re
 import subprocess
 import sys
 import textwrap
+from itertools import product
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
+import yaml
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -98,21 +101,22 @@ def test_workflow_runs_six_shards_behind_stable_required_check() -> None:
     assert "fail-fast: false" in shards
     result = workflow.split("  agent-system-result:\n", 1)[1].split("\n  dashboard:", 1)[0]
     assert re.search(r"^    name: Agent system tests$", result, re.MULTILINE)
-    assert "needs: [agent-system, bridge-schema-pg18]" in result
+    assert "needs: [changes, agent-system, bridge-schema-pg18, provenance, dashboard]" in result
     assert "if: always()" in result
     assert "SHARDS_RESULT: ${{ needs.agent-system.result }}" in result
     assert 'test "$SHARDS_RESULT" = success' in result
-    assert 'test "$PG18_RESULT" = success' in result
 
 
 def test_workflow_keeps_docs_only_required_jobs_successful() -> None:
     workflow = (ROOT / ".github/workflows/python-tests.yml").read_text(encoding="utf-8")
     assert "paths-ignore:" not in workflow
     assert "docs_only: ${{ steps.filter.outputs.docs_only }}" in workflow
-    for job in ("agent-system", "bridge-schema-pg18", "dashboard"):
+    assert "web: ${{ steps.filter.outputs.web }}" in workflow
+    for job in ("agent-system", "bridge-schema-pg18", "provenance", "dashboard"):
         body = re.split(r"\n  (?=\S)", workflow.split(f"  {job}:\n", 1)[1])[0]
         assert "needs: changes" in body
-        assert not re.search(r"^    if:", body, re.MULTILINE)
+        if job == "agent-system":
+            assert not re.search(r"^    if:", body, re.MULTILINE)
         steps = body.split("    steps:\n", 1)[1].split("      - ")[1:]
         assert steps
         assert all("if: needs.changes.outputs.docs_only != 'true'" in step
@@ -186,4 +190,112 @@ def test_workflow_docs_filter_uses_actual_changed_paths(
         capture_output=True, text=True, timeout=30,
     )
     assert result.returncode == 0, result.stdout + result.stderr
-    assert output.read_text().strip() == f"docs_only={expected}"
+    assert dict(line.split("=", 1) for line in output.read_text().splitlines())["docs_only"] == expected
+
+
+def _workflow() -> dict:
+    # BaseLoader keeps GitHub's "on" key and boolean-looking outputs as strings.
+    return yaml.load((ROOT / ".github/workflows/python-tests.yml").read_text(), Loader=yaml.BaseLoader)
+
+
+def test_workflow_runs_on_main_pushes() -> None:
+    assert _workflow()["on"] == {
+        "push": {"branches": ["main"]}, "pull_request": "", "workflow_dispatch": "",
+    }
+
+
+@pytest.mark.parametrize("event,ref,head,web,docs,canary,dashboard", [
+    ("pull_request", "refs/pull/1/merge", "codex/backend", "false", "false", False, False),
+    ("pull_request", "refs/pull/1/merge", "codex/frontend", "true", "false", False, True),
+    ("pull_request", "refs/pull/1/merge", "codex/release-2.0", "false", "false", True, True),
+    ("pull_request", "refs/pull/1/merge", "feature/codex/release-2.0", "false", "false", False, False),
+    ("pull_request", "refs/pull/1/merge", "codex/release", "false", "false", False, False),
+    ("pull_request", "refs/pull/1/merge", "codex/docs", "true", "true", False, False),
+    ("pull_request", "refs/pull/1/merge", "codex/release-2.0", "false", "true", True, False),
+    ("push", "refs/heads/main", "", "false", "false", True, True),
+    ("push", "refs/heads/feature", "codex/release-2.0", "false", "false", False, False),
+    ("workflow_dispatch", "refs/heads/main", "", "false", "false", True, True),
+])
+def test_workflow_optional_job_conditions(event, ref, head, web, docs, canary, dashboard) -> None:
+    # Evaluate the workflow's own conditions, with all dependencies successful.
+    # The expressions use only comparisons, &&, || and startsWith.
+    context = {
+        "github": SimpleNamespace(event_name=event, ref=ref, head_ref=head),
+        "needs": SimpleNamespace(changes=SimpleNamespace(
+            outputs=SimpleNamespace(web=web, docs_only=docs))),
+        "startsWith": str.startswith,
+    }
+    jobs = _workflow()["jobs"]
+    for name, expected in (("bridge-schema-pg18", canary), ("provenance", canary), ("dashboard", dashboard)):
+        expression = jobs[name]["if"].replace("&&", " and ").replace("||", " or ")
+        assert eval(expression, {"__builtins__": {}}, context) is expected, name
+
+
+@pytest.mark.parametrize("results", [
+    dict(zip(("changes", "agent-system", "bridge-schema-pg18", "provenance", "dashboard"),
+             ("success", "success", *optional)))
+    for optional in product(("success", "skipped"), repeat=3)
+] + [
+    {name: result} for name in ("changes", "agent-system", "bridge-schema-pg18", "provenance", "dashboard")
+    for result in ("failure", "cancelled")
+] + [{name: "skipped"} for name in ("changes", "agent-system")])
+def test_required_check_uses_actual_needs_results(results) -> None:
+    job = _workflow()["jobs"]["agent-system-result"]
+    assert job["if"] == "always()"  # Still execute after a failed or skipped dependency.
+    all_results = {name: "success" for name in job["needs"]}
+    all_results.update(results)
+    step, = job["steps"]
+    env = os.environ.copy()
+    for name, expression in step["env"].items():
+        match = re.fullmatch(r"\$\{\{ needs\.([\w-]+)\.result \}\}", expression)
+        assert match, expression
+        env[name] = all_results[match[1]]
+    result = subprocess.run(["bash", "-e", "-o", "pipefail", "-c", step["run"]],
+                            env=env, capture_output=True, text=True, timeout=10)
+    expected = (all(all_results[name] == "success" for name in ("changes", "agent-system"))
+                and all(value in ("success", "skipped") for value in all_results.values()))
+    assert (result.returncode == 0) is expected, result.stdout + result.stderr
+
+
+@pytest.mark.parametrize("operation", ["add", "delete", "rename"])
+@pytest.mark.parametrize("path,expected", [
+    ("web/src/App.tsx", "true"), ("web/package-lock.json", "true"),
+    ("web/vite.config.ts", "true"), ("scripts/stage-dashboard.sh", "true"),
+    ("looper/components.py", "true"), ("looper/components.toml", "true"),
+    (".github/workflows/python-tests.yml", "true"), (".npmrc", "true"),
+    (".gitignore", "true"), ("looper/agents/serve.py", "false"),
+    ("tests/test_ci_shards.py", "false"), ("README.md", "false"),
+])
+def test_workflow_web_filter_scans_past_backend_changes(tmp_path, path, expected, operation) -> None:
+    def git(*args):
+        return subprocess.check_output(["git", *args], cwd=tmp_path, text=True).strip()
+
+    git("init", "-q")
+    git("config", "user.name", "CI Test")
+    git("config", "user.email", "ci@example.invalid")
+    (tmp_path / "app.py").write_text("base")
+    changed = tmp_path / path
+    changed.parent.mkdir(parents=True, exist_ok=True)
+    if operation != "add":
+        changed.write_text("original")
+    git("add", "--all")
+    git("commit", "-qm", "base")
+    base = git("rev-parse", "HEAD")
+    (tmp_path / "app.py").write_text("backend changes sort before web changes")
+    if operation == "delete":
+        changed.unlink()
+    elif operation == "rename":
+        # Moving a build input out of web/ must still enable the dashboard job.
+        git("mv", path, "moved-input.txt")
+    else:
+        changed.write_text("changed")
+    git("add", "--all")
+    git("commit", "-qm", "change")
+    script = _workflow()["jobs"]["changes"]["steps"][-1]["run"]
+    output = tmp_path / "output"
+    result = subprocess.run(["bash", "-e", "-o", "pipefail", "-c", script], cwd=tmp_path,
+        env={**os.environ, "GITHUB_EVENT_NAME": "pull_request", "BASE_SHA": base,
+             "HEAD_SHA": git("rev-parse", "HEAD"), "RUNNER_TEMP": str(tmp_path),
+             "GITHUB_OUTPUT": str(output)}, capture_output=True, text=True, timeout=10)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert dict(line.split("=", 1) for line in output.read_text().splitlines())["web"] == expected
