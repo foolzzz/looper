@@ -6809,7 +6809,16 @@ A Manager's confirmation, a user gate, an intent push and a relayed ledger
 decision can be answered with one press of a card's button
 ([Card buttons RFC](rfcs/assistant-card-actions-v0.zh-CN.md);
 `looper/agents/card_actions.py`). It is off until the system setting
-`cards.actions.enabled` is `true`; the dashboard has no switch yet. Off,
+`cards.actions.enabled` is `true`; the dashboard has no switch. Operator-only
+`card_actions.get/update` operations read or set it, separately from chat settings.
+The generated CLI uses `loopercli card-actions get` or
+`loopercli card-actions update --enabled true|false|null` with transient operator
+credentials (`--url`, `--operator-token-file`). Null deletes the stored row and
+restores off. Configuration export carries a stored boolean under
+`settings.system["cards.actions.enabled"]`; an absent row adds no field.
+Importing that key, including false or null, requires operator identity and
+applies immediately. These settings operations send no messages and have action
+level `inside`; update uses the high-risk confirmation contract. Off,
 nothing is stored, replies carry no cards, gate messages go as text, a Lark
 press gets the plain acknowledgement and a Telegram press no answer, as before;
 on or off, what the model sees of a confirmation is the same. Lark card writes
