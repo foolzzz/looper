@@ -93,6 +93,8 @@ def test_new_migration_file_upgrades_and_initializes_the_same_schema(tmp_path, m
     ("provider_limit_windows", "DROP TABLE provider_limit_windows CASCADE"),
     ("provider_admission", "DROP TABLE provider_admission, provider_admission_events CASCADE"),
     ("cost_holds", "DROP TABLE cost_holds"),
+    ("intent_recognitions", "ALTER TABLE intents DROP COLUMN recognition_id CASCADE; "
+                            "DROP TABLE intent_recognitions CASCADE"),
     ("schedule_equivalent_budget", "ALTER TABLE schedules DROP COLUMN daily_budget_equivalent_usd"),
     ("intent_group_reads", "DROP TABLE intent_group_reads, intent_group_read_days; "
                            "ALTER TABLE intents DROP COLUMN via"),
@@ -137,6 +139,72 @@ def test_room_delivery_resumes_validation_without_replacing_constraint(missing_m
             assert not await connection.schema_change_pending(conn)
 
     asyncio.run(test())
+
+
+@pytest.mark.parametrize("rollback", ["ALTER TABLE intents DROP CONSTRAINT intents_on_request",
+                                     "ALTER TABLE intents DROP COLUMN recognition_id CASCADE"])
+def test_recognition_repairs_incomplete_schema_with_its_marker_present(rollback):
+    async def check():
+        async with fresh_connection() as conn:
+            await connection.ensure_schema(conn)
+            await conn.execute("INSERT INTO schema_migrations(name) VALUES('intent_recognitions') "
+                               "ON CONFLICT DO NOTHING")
+            await conn.execute(rollback)
+            assert await connection.schema_change_pending(conn)
+            await connection.ensure_schema(conn)
+            assert not await connection.schema_change_pending(conn)
+            definition = await conn.fetchval("SELECT pg_get_constraintdef(oid) FROM pg_constraint "
+                "WHERE conrelid='intents'::regclass AND conname='intents_on_request'")
+            assert "on_request" in definition and "recognition_id IS NOT NULL" in definition
+    asyncio.run(check())
+
+
+def test_recognition_upgrade_preserves_existing_intent_via_values():
+    async def check():
+        async with fresh_connection() as conn:
+            await connection.ensure_schema(conn)
+            await conn.execute("ALTER TABLE intents DROP CONSTRAINT intents_via_check; "
+                "ALTER TABLE intents ADD CONSTRAINT intents_via_check "
+                "CHECK (via IN ('subscription', 'followed_group', 'future_source'))")
+            assert await connection.schema_change_pending(conn)
+            await connection.ensure_schema(conn)
+            definition = await conn.fetchval("SELECT pg_get_constraintdef(oid) FROM pg_constraint "
+                "WHERE conrelid='intents'::regclass AND conname='intents_via_check'")
+            for via in ("subscription", "followed_group", "future_source", "on_request"):
+                assert f"'{via}'" in definition
+            assert not await connection.schema_change_pending(conn)
+    asyncio.run(check())
+
+
+@pytest.mark.parametrize("replacement", [
+    "",
+    "CREATE INDEX idx_intent_recognitions_running ON intent_recognitions(source_id) WHERE state='running'",
+    "CREATE UNIQUE INDEX idx_intent_recognitions_running ON intent_recognitions(chat_id) WHERE state='running'",
+    "CREATE UNIQUE INDEX idx_intent_recognitions_running ON intent_recognitions(source_id) WHERE state='done'",
+    "CREATE UNIQUE INDEX idx_intent_recognitions_running ON intent_recognitions(source_id)",
+], ids=["missing", "not_unique", "wrong_column", "wrong_predicate", "not_partial"])
+def test_recognition_repairs_running_index_with_its_marker_present(replacement):
+    from looper.db.migrations import intent_recognitions
+
+    async def check():
+        async with fresh_connection() as conn:
+            await connection.ensure_schema(conn)
+            await conn.execute("INSERT INTO schema_migrations(name) VALUES('intent_recognitions') "
+                               "ON CONFLICT DO NOTHING")
+            assert not await intent_recognitions.pending(conn)
+            expected = await conn.fetchval("SELECT pg_get_indexdef('idx_intent_recognitions_running'::regclass)")
+            await conn.execute("DROP INDEX idx_intent_recognitions_running")
+            if replacement:
+                await conn.execute(replacement)
+            assert await conn.fetchval("SELECT EXISTS (SELECT 1 FROM schema_migrations "
+                                       "WHERE name='intent_recognitions')")
+            assert await intent_recognitions.pending(conn)
+            assert await connection.schema_change_pending(conn)
+            await connection.ensure_schema(conn)
+            assert await conn.fetchval("SELECT pg_get_indexdef('idx_intent_recognitions_running'::regclass)") == expected
+            assert not await intent_recognitions.pending(conn)
+            assert not await connection.schema_change_pending(conn)
+    asyncio.run(check())
 
 
 def test_equivalent_budget_migration_repairs_column_even_with_marker():
