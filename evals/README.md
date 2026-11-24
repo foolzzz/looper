@@ -662,17 +662,17 @@ Once before a release, on the release candidate (`main` after every merge):
 - opus on the 24 Planner tasks: `run --mode real --model opus --reps 3
   --tasks planner --jobs 4 --max-budget-usd 3.0 --case-budget-usd 6.0
   --total-cap-usd 40` (the earlier baseline cost about $27.73);
-- haiku on all 82 dialogs: `dialogs --mode real --reps 3 --jobs 4
+- haiku on all 89 dialogs: `dialogs --mode real --reps 3 --jobs 4
   --max-budget-usd 1.0 --case-budget-usd 1.0 --total-cap-usd $HAIKU_DIALOG_CAP_USD`;
-- sonnet on all 82 dialogs: `dialogs --mode real --model sonnet --reps 3 --jobs 4
+- sonnet on all 89 dialogs: `dialogs --mode real --model sonnet --reps 3 --jobs 4
   --max-budget-usd 1.0 --case-budget-usd 1.0 --total-cap-usd $SONNET_DIALOG_CAP_USD`, refreshing
   `baselines/dialogs-real-sonnet.json`;
-- the opus xhigh Manager on all 82 dialogs: `dialogs --mode real --reps 3 --jobs 4
+- the opus xhigh Manager on all 89 dialogs: `dialogs --mode real --reps 3 --jobs 4
   --manager-model opus --manager-effort xhigh --max-budget-usd 3.0
   --case-budget-usd 3.0 --total-cap-usd $OPUS_DIALOG_CAP_USD`.
 
 Omitting `--dialogs` selects every dialog in `dialogs.select(None)`: currently
-82, or 246 case/reps per three-rep tier. A complete 82-dialog cost measurement is blocked
+89, or 267 case/reps per three-rep tier. A complete 89-dialog cost measurement is blocked
 pending evaluation credentials, a fresh disposable database/runtime root and
 an authorized budget. Set the three `*_DIALOG_CAP_USD` variables to explicitly
 authorized candidate measurement ceilings before running these commands;
@@ -681,8 +681,8 @@ until each tier completes. Do not extrapolate from the committed 24-dialog
 reports: at clean commit `c9ac42d5c562306259203790cb23766d9abed34f`,
 `dialogs-real-haiku.json` covers 72 rows / $4.226970 and
 `dialogs-real-opus.json` covers 72 rows / $8.426588 (other roles on haiku).
-Neither measures the current 82-dialog selection; no Sonnet dialog report exists.
-After each full real candidate run, verify all 82 IDs at reps 1–3, no cap stop,
+Neither measures the current 89-dialog selection; no Sonnet dialog report exists.
+After each full real candidate run, verify all 89 IDs at reps 1–3, no cap stop,
 skipped or error rows, and reconcile row costs with the report total. Record
 the candidate commit, models/Manager effort, selected IDs/count, repetitions,
 row count and measured total here before deriving numeric caps with headroom.
@@ -789,6 +789,17 @@ about the tasks now and must not search the history. Run them with Sonnet at two
 opus xhigh Manager at one, as the Manager PR commands above say, with
 `--dialogs session_decision,session_direct_chat,session_english,session_not_needed`. Group chats, other senders and
 turning the search off are unit tests (`tests/test_session_search_db.py`).
+
+#### Memory proposals
+
+The seven `memory_*` dialogs enable Manager proposals in a disposable git vault. They cover a lasting preference,
+an explicit fact, a one-off request, someone else's quoted instruction, a synthetic credential, a reply that must
+not claim the proposal was saved, and revision of a seeded pending `M-0001`. Checks use this turn's typed actions
+and `/api/v1/memory/list`; only the saved-claim check reads reply wording, after removing Looper's footer.
+`push_channel` is unset and `daily_budget_usd` is $0.05, below the minimum drafting run, so the eval neither pushes
+nor spends on drafting. Run `--dialogs memory_preference,memory_none,memory_explicit,memory_quoted,memory_secret,memory_never_saved,memory_revise`
+in fake mode first. The proposed real comparison is Sonnet at two reps (cap $3) and the opus xhigh Manager at one
+rep (cap $2.50), both with four jobs and $1 per-case caps; estimated combined cost is $2.30, pending budget approval.
 
 #### Delivery recovery
 
@@ -1041,6 +1052,13 @@ database, a disposable `looper serve`, and fake or real mode.
 | `session_direct_chat` | the same history and a Lark direct chat recorded as the bot's operator's that set an alert threshold: asked on the dashboard what was said in Lark, the Manager searches and gives the threshold with where or when |
 | `session_english` | the same history, asked in English: the Manager must search with the words the conversation used and gives the rollback owner with where or when |
 | `session_not_needed` | the same history, asked which tasks there are now: the Manager reads the tasks and does not search the history |
+| `memory_preference` | an operator states a lasting weekly-report preference: exactly one successful preference proposal, persisted in drafting |
+| `memory_none` | a one-off writing task: no memory tool call |
+| `memory_explicit` | an explicit release-window fact: one successful fact, decision or project proposal |
+| `memory_quoted` | someone else's quoted instruction: no successful preference or feedback proposal |
+| `memory_secret` | a synthetic credential: no memory candidate |
+| `memory_never_saved` | a preference proposal: persisted in drafting, and the model does not claim it was saved |
+| `memory_revise` | a seeded pending proposal: revise M-0001 and read it back in drafting, without another candidate |
 | `attachment_read` | a code word in an uploaded UTF-8 text file and a four-digit number in a generated PNG both appear in the reply (Claude Code reads the attachments; fake mode checks the reply only) |
 | `config_tools` | the configuration tools: a project is created with the directory the user named (`looper_projects`); the Agent Profiles are listed; a Reviewer's profile in a project is set at once and the project's allowed list holds the one profile named (`looper_settings`); this week's spend is read (`looper_costs`); deleting the project waits for the user's word in the next message |
 | `task_cost` | a running task's cost by model: read for that task (`looper_costs` with its task_id), nothing changes, and the reply names each model of the task's cost and gives its cost as rounded (fake mode checks the read only) |
@@ -1097,7 +1115,7 @@ no reply within `--timeout` (`timeout`) or the eval itself failed (`harness`,
 such as the slow task not getting under way); after an error its remaining
 turns are not sent and the run goes on with the next dialog. Fake mode plays
 the Manager with the stand-in, which makes each message's scripted calls over
-MCP; it takes about two minutes. Real mode now selects all 82 dialogs by
+MCP; it takes about two minutes. Real mode now selects all 89 dialogs by
 default. The committed cost references cover only 24 dialogs (see the release
 tiers above), so neither they nor the default `--total-cap-usd` (0.50)
 establish a sufficient cap. Use an explicitly authorized measurement ceiling
@@ -1116,7 +1134,7 @@ content in `<untrusted>` blocks; compare with the same dialogs without it),
 `--claude <executable>` (the real Claude Code CLI; default `claude` on PATH),
 `--manager-model opus --manager-effort xhigh` (the Manager alone on that
 model, the other roles on `--model`; the historical 24-dialog Opus report
-does not establish a cap for the current 77 dialogs; give it
+does not establish a cap for the current 89 dialogs; give it
 `--max-budget-usd 3.0`, `--case-budget-usd 3.0` with `--jobs 4` and a
 `--total-cap-usd "$OPUS_DIALOG_CAP_USD"` authorized for candidate measurement),
 `--switch-agent SPEC.json` (`session_profile_switch`: register that spec as the profile `eval/switch`, while the
@@ -1612,3 +1630,89 @@ the seven additions remain unmeasured until their approved paid runs.
 
 This adds an opt-in evaluation command only. Dashboard, Telegram, Lark runtime behavior,
 production prompts, tool lists and agent command lines are unchanged.
+
+## DSH CLI / runner density (`evals/dsh_density.py`)
+
+L1 uses the existing Anthropic Messages `MessagesServer` fixture from
+`tests/dsh_installed_stand_in.py`. It makes no external network requests and
+costs nothing. Run from a source checkout with an installed DSH and Node supported
+by the checkout's runner:
+
+```sh
+uv run --system-certs --python 3.11 --extra test python -m evals.dsh_density \
+  --steps 4 --workers 4 --idle-sessions 33 --memory-budget-mib 8192 \
+  --out evals/runs/dsh-density.json
+```
+
+The tool does not install dependencies or check SDK versions. The runner owns
+compatibility checks; the dependency upgrade is tracked separately in #1654
+(`0.2.2-rc.5`). Use `--dsh /path/to/dsh` and `--node /path/to/node` for an isolated
+installation matching the runner in the checkout. No Looper service, database,
+operator configuration or channel is involved. Dashboard, Telegram and Lark
+behavior are unchanged.
+
+Both modes receive the same model (`deepseek-flash`), effort (`high`), prompt,
+appended system instructions, task directory and `read`/`glob`/`grep` tools.
+Catalog skills, MCP, web fetch, subagents and compaction are disabled. CLI's
+ordinary empty catalog still enables web fetch, so the tool explicitly disables
+those services in its disposable patch. L1 compares the complete captured
+request bodies and rejects a mismatch or unexpected request count. A Node preload
+permits only the fake server's loopback port; environment allowlisting and private
+homes keep ambient credentials, proxies and user configuration out of children.
+
+The JSON report retains individual steps, RSS samples, helper process names,
+idle checkpoints and capacity assumptions; stdout prints a short table. A failed
+run writes `status: failed` and exits nonzero. Interpret the measurements as follows:
+
+- One cold step precedes `--steps` measured steps, in batches of `--workers`.
+  Every step reports entry-to-first-runtime-event time. CLI spawns on every step;
+  runner reuses its member. `spawn_to_first_event_ms` starts when the process
+  handle becomes available and is null for warm runner steps. Runner initialize
+  latency is separate. These are startup events, not first-token or task latency.
+- RSS is sampled with `ps` at `--sample-interval` (default 50 ms, plus process
+  listing time). DSH roots, all descendant helper/platform-tool processes and
+  their combined total are separate fields. The table has a helper column;
+  the JSON lists their names and PIDs. Cold and active windows are separate.
+  Shared pages are counted in each process's RSS; this is not unique physical
+  memory. The Python host and fake model server are excluded. The fake server
+  holds each response for 250 ms to make active memory observable; startup's
+  init event comes before that hold.
+- Idle measurements use a fresh runner pool, open N sessions without prompts,
+  and wait `--idle-settle` seconds (default 0.2) before each checkpoint. Increase
+  that interval on a slow machine. CLI idle entries are processes waiting for
+  stdin: DSH has not created a Session yet. Runner entries are opened Sessions.
+  The report provides total/N and the median within-member RSS increment
+  (which can be negative from GC). These two idle populations have different
+  lifecycle semantics. Retaining 33 runner leases verifies that sessions 1–32
+  share a member and session 33 uses a second. Fewer than 33 reports null for
+  that check. The current pool allows four members, or 128 sessions.
+- Worker capacity is an estimate from measured concurrent active RSS. CLI uses
+  `budget / (peak / workers)`. Runner uses its empty-member baseline plus a
+  measured per-Worker increment, charging another baseline every 32 Workers,
+  with at most four members. A nonpositive increment makes its estimate null.
+  This linear projection is not a concurrent load test at the projected size;
+  reserve memory for Looper, the OS and real tools outside the supplied budget.
+
+L2 is optional and off by default. To enable real DeepSeek calls, supply both
+`--real` and a finite positive `--total-cap-usd`, and provide `DEEPSEEK_API_KEY`
+in the parent environment. For example, append `--real --total-cap-usd 0.10`
+to the command above. Children still connect only to a loopback gateway. It
+forwards to DeepSeek after reserving request bytes as input tokens and at most
+1024 output tokens at the repository's built-in prices, without cache discounts.
+Reservations are shared across both modes and never refunded; requests exceeding
+the total are refused before forwarding. The report includes the price snapshot
+and reserved amount. This is conservative admission at those prices, **not a
+hard billing cap**. L2 has not been exercised against a real model by these tests.
+
+Tests only use fake providers, including the optional gateway's upstream:
+
+```sh
+uv run --system-certs --python 3.11 --extra test python -m pytest tests/test_dsh_density.py -n 2
+# Also exercise installed CLI + SDK against the local fake server, including 33 idle sessions:
+LOOPER_TEST_DSH_DENSITY_EXECUTABLE=/path/to/dsh \
+  uv run --system-certs --python 3.11 --extra test python -m pytest tests/test_dsh_density.py -n 2
+```
+
+The installed test is skipped unless that executable is explicitly selected.
+Its skip is a validation gap, not a passed DSH measurement. Reports are ignored
+local artifacts; do not commit raw samples or requests from a workstation.
