@@ -249,7 +249,8 @@ class AgentClient:
         return payload
 
 
-def handle(message: dict[str, Any], client: Client) -> dict[str, Any] | None:
+def handle(message: dict[str, Any], client: Client, *, name: str = "looper",
+           instructions: str | None = None) -> dict[str, Any] | None:
     """The JSON-RPC response to one message, or None when it needs none (a notification or a response)."""
     if "id" not in message:
         return None
@@ -266,7 +267,8 @@ def handle(message: dict[str, Any], client: Client) -> dict[str, Any] | None:
         return _result(message_id, {
             "protocolVersion": version if isinstance(version, str) else DEFAULT_PROTOCOL_VERSION,
             "capabilities": {"tools": {"listChanged": False}},
-            "serverInfo": {"name": "looper", "version": __version__},
+            "serverInfo": {"name": name, "version": __version__},
+            **({"instructions": instructions} if instructions is not None else {}),
         })
     if method == "ping":
         return _result(message_id, {})
@@ -312,7 +314,8 @@ def _call_tool(message_id: Any, params: dict[str, Any], client: Client) -> dict[
     return _tool_result(message_id, json.dumps(answer, ensure_ascii=False), is_error=status == "error")
 
 
-def handle_line(line: str | bytes, client: Client) -> dict[str, Any] | None:
+def handle_line(line: str | bytes, client: Client, *, name: str = "looper",
+                instructions: str | None = None) -> dict[str, Any] | None:
     """The response to one line of stdin (UTF-8); a line that is not JSON, or not an object, gets ``"id": null``."""
     try:
         message = json.loads(line)
@@ -321,18 +324,19 @@ def handle_line(line: str | bytes, client: Client) -> dict[str, Any] | None:
     if not isinstance(message, dict):
         return _error(None, INVALID_REQUEST, "invalid request: a message must be a JSON object")
     try:
-        return handle(message, client)
+        return handle(message, client, name=name, instructions=instructions)
     except Exception as exc:  # a bug here must not end the Manager's tools
         logger.exception("handling %s failed", message.get("method"))
         return _error(message["id"], INTERNAL_ERROR, f"internal error: {exc}") if "id" in message else None
 
 
-def serve(client: Client, stdin: BinaryIO, stdout: BinaryIO) -> int:
+def serve(client: Client, stdin: BinaryIO, stdout: BinaryIO, *, name: str = "looper",
+          instructions: str | None = None) -> int:
     """Answer each line of ``stdin`` on ``stdout`` until EOF; returns the exit code."""
     for line in stdin:
         if not line.strip():
             continue
-        response = handle_line(line, client)
+        response = handle_line(line, client, name=name, instructions=instructions)
         if response is None:
             continue
         try:
