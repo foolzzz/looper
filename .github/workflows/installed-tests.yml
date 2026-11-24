@@ -70,9 +70,9 @@ jobs:
       - name: Try the pinned DSH installation
         shell: bash
         run: |
-          if ! npm install -g --ignore-scripts @deepseek-ai/dsh@0.2.1-rc.2; then
-            echo '::warning::DSH 0.2.1-rc.2 could not be installed; DSH tests will report the gap as skips.'
-            echo 'DSH 0.2.1-rc.2 could not be installed from npm.' >> "$GITHUB_STEP_SUMMARY"
+          if ! npm install -g --ignore-scripts @deepseek-ai/dsh@0.2.2-rc.5; then
+            echo '::warning::DSH 0.2.2-rc.5 could not be installed; DSH tests will report the gap as skips.'
+            echo 'DSH 0.2.2-rc.5 could not be installed from npm.' >> "$GITHUB_STEP_SUMMARY"
           fi
       - name: Build the dashboard
         run: scripts/stage-dashboard.sh

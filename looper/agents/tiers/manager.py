@@ -85,7 +85,7 @@ from ..gate_service import dashboard_target as gate_dashboard_target, gate_chat 
 from ..library import EMPTY_LIBRARY, load_installed
 from ..run_usage import Usage
 from ..reported_files import prompt_name
-from .. import leads_model, manager_persona_context, manager_turn_context, research_order, session_switch, untrusted as untrusted_text
+from .. import leads_model, manager_persona_context, manager_turn_context, operator_profile, research_order, session_switch, untrusted as untrusted_text
 from ..turn_context import TURN_CONTEXT_CONTRACT, render as render_turn_context
 from ..research_order import ResearchSources
 from ..runtimes import CLAUDE_CODE, ImageInput, InProcessTools, ReportsContext, ResidentSession
@@ -868,6 +868,7 @@ class ManagerAgent:
         self._has_templates = False  # from the last read of the Manager's task templates
         self._leads_on = False  # the default Manager's leads.enabled, from the last read; never another Manager's
         self._vault_on = False  # whether the default Manager reads the knowledge vault, from the last read
+        self._profile_enabled = False  # manager.profile.enabled; fail closed on each settings read
         self._stable_context = False  # manager.stable_context, from the last read
         self.on_turned_off: Callable[[str], None] | None = None
         self.stop_chat: Callable[..., Awaitable[ChatStopSummary]] | None = None
@@ -1104,6 +1105,11 @@ class ManagerAgent:
             self._stable_context = await state_view.enabled()
         except Exception:
             logger.debug("could not read manager.stable_context; keeping the last value", exc_info=True)
+        try:
+            self._profile_enabled = await operator_profile.enabled()
+        except Exception:
+            self._profile_enabled = False
+            logger.warning("could not read manager.profile.enabled; omitting profile", exc_info=True)
         if self.agent_id != DEFAULT_MANAGER_ID:
             try:
                 row = await db_managers.get_manager(self.agent_id)
@@ -1879,7 +1885,9 @@ class ManagerAgent:
             attachments = chat_attachments.from_payload(envelope.payload.get("attachments"), self._runtime_root)
             persona_scope = await token.step("build_user_message", manager_persona_context.scope(
                 self.agent_id, self._session_now().route, envelope,
-                shown=self._state_shown.lines if self._state_shown else ()))
+                shown=self._state_shown.lines if self._state_shown else (),
+                private=self._profile_enabled or bool(
+                    self._state_shown and operator_profile.HEADING in self._state_shown.lines)))
             if self._stable_context:  # the sections go in the turn's state block (``_start_turn``)
                 state = await token.step("build_user_message", self._sections(envelope, persona_scope=persona_scope))
             turn_text = await token.step("build_user_message", self._build_user_message(
@@ -3435,13 +3443,20 @@ class ManagerAgent:
 
     async def _sections(self, envelope: MessageEnvelope | None, *,
                         persona_scope: manager_persona_context.Scope | None = None) -> list[str]:
-        """What every user turn starts with: persona, projects, task templates, workflows, ready tasks, open gates
+        """What every user turn starts with: persona, operator profile, projects, task templates, workflows, ready tasks, open gates
         and active goals, each section ending with a blank line."""
         if persona_scope is None:
             persona_scope = await manager_persona_context.scope(
                 self.agent_id, self._session_now().route, envelope,
-                shown=self._state_shown.lines if self._state_shown else ())
+                shown=self._state_shown.lines if self._state_shown else (),
+                private=self._profile_enabled or bool(
+                    self._state_shown and operator_profile.HEADING in self._state_shown.lines))
         parts = manager_persona_context.section(self.agent_id, persona_scope)
+        if (self._profile_enabled and self.agent_id == DEFAULT_MANAGER_ID
+                and persona_scope is manager_persona_context.Scope.FULL):
+            profile = await operator_profile.resident_text()
+            if profile:
+                parts += [operator_profile.HEADING, *profile.split("\n"), ""]
         parts += await self._projects_section()
         parts += await self._templates_section()
         parts += await self._workflows_section()

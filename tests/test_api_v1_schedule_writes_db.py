@@ -603,3 +603,35 @@ def test_client_command_edit_shows_environment_file_and_effective_directory(tmp_
             assert status == 200
             assert ((await db_schedules.get_schedule(sid))[key] or "") == fields[key]
     run_db(run, monkeypatch, timeout=30)
+
+
+def test_equivalent_daily_budget_round_trips_and_can_be_cleared(tmp_path, monkeypatch):
+    async def run(pool):
+        _, sid = await _seed(pool)
+        async with _api(tmp_path, pool) as call:
+            status, result = await call('update', {'schedule_id': sid, 'fields': {'daily_budget_equivalent_usd': 5}})
+            assert status == 200, result
+            assert result['schedule']['daily_budget_equivalent_usd'] == 5
+            assert (await db_schedules.get_schedule(sid))['daily_budget_equivalent_usd'] == 5
+            status, result = await call('update', {'schedule_id': sid, 'fields': {'daily_budget_equivalent_usd': None}})
+            assert status == 200, result
+            assert 'daily_budget_equivalent_usd' not in result['schedule']
+    run_db(run, monkeypatch, timeout=30)
+
+
+@pytest.mark.parametrize('before,mixed,after,high', [(None, 1, 5, True), (5, 1, None, False),
+    (5, None, None, True), (1, 1, 5, True)])
+def test_equivalent_cap_confirmation_compares_the_effective_mixed_or_split_limit(
+        tmp_path, monkeypatch, before, mixed, after, high):
+    async def run(pool):
+        _, sid = await _seed(pool, daily_budget_usd=mixed, daily_budget_equivalent_usd=before)
+        async with _api(tmp_path, pool) as call:
+            status, answer = await call('update', {'schedule_id': sid,
+                'fields': {'daily_budget_equivalent_usd': after}}, client=True)
+            assert status == (202 if high else 200), answer
+            if high:
+                assert 'daily_budget_equivalent_usd' in answer['impact']
+                assert (await db_schedules.get_schedule(sid))['daily_budget_equivalent_usd'] == before
+                assert (await call('/api/v1/confirm', {'confirmation_id': answer['confirmation_id']}, client=True))[0] == 200
+            assert (await db_schedules.get_schedule(sid))['daily_budget_equivalent_usd'] == after
+    run_db(run, monkeypatch, timeout=30)

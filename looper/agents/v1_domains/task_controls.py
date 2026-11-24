@@ -1,6 +1,7 @@
 """Full dashboard projections beside the unchanged compact task Tools."""
 
 from .. import overview, projects
+from ..run_usage import CostStatus
 from ..api_v1 import Operation, STATUS, _array, _object, _STR, _NULL_STR, _INT, _BOOL
 from ..ops import ErrorCode, OpError
 from ..system_prompt import TASK_REQUIREMENT_LIMIT
@@ -45,7 +46,9 @@ _OVERVIEW = _object({
         "tasks": _object({"running": _INT, "ready": _INT}), "workers": _LOAD, "reviewers": _LOAD})),
     "idle_projects": _INT,
     "spend_today": _object({"since": _STR, "provider_priced_usd": _NUM, "equivalent_usd": _NUM,
-                            "runs": _INT, "running": _INT, "unpriced_runs": _INT}),
+                            "runs": _INT, "running": _INT, "unpriced_runs": _INT,
+                            "cost_status": {"type": "string", "enum": [state.value for state in CostStatus]}},
+                           ["since", "provider_priced_usd", "equivalent_usd", "runs", "running", "unpriced_runs"]),
     "health": _object({"unhealthy": _array(_object({"name": _STR,
         "state": {"type": "string", "enum": ["restarting", "crash_looping"]}, "up": _BOOL, "restart_count": _INT,
         "last_crash_at": _NULL_STR, "next_restart_at": _NULL_STR}))}),

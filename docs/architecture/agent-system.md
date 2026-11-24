@@ -365,28 +365,47 @@ Manager has no tool for it. The dashboard shows the task page's 指标 card and 
   rotations carry `metadata.session_bound` with the action, reason and before/after token counts.
   The budget also supplies a per-turn soft cap, including subscription runs priced from the model catalog;
   the existing process budget is unchanged. A capped turn gets the fixed `over_cap_reply`, and its next message
-  starts a process that resumes the session. An unpriced model gets no additional soft cap and logs a warning
-  once per profile/model; the Settings price warning and dashboard controls are not implemented yet.
+  starts a process that resumes the session. An unpriced configured model logs a warning once per profile/model;
+  unpriced usage from any actual event model stops a capped turn with an explicit budget error. This also catches
+  a runtime alias changing targets after preflight. The Settings price warning and dashboard controls are not implemented yet.
   Operator-only v1 operations `session_budget.get` and `session_budget.update` read or store a positive dollar
   budget (null unsets it; the recommended value is $4.00) and report invalid stored values. While unset, there
   is no additional recorder cap, session measurement write or maintenance check, and prompts, tools and
   command lines stay unchanged.
-- **Operator profile** (`operator_profile.py`, `manager.profile.source`, default unset): a deterministic compiler
-  reads `关于我.md` (or `记忆/关于我.md`, but not both) and `偏好/**/*.md` from the folder the operator names.
-  That folder must resolve, symlinks included, inside the configured knowledge vault; save and read both check.
-  Notes whose path has a part starting with `.` or `_` are skipped. It produces a typed profile — name, address,
-  reply language, time zone, working hours, communication preferences and standing rules. Heading fields cite the
-  note path, heading and line. A markdown bullet with inline `[kind:: …]` fields is one entry: `kind` chooses
-  the field, and the entry cites the note path and that line. A `summary` is not required for those notes.
-  Content inside a code fence is ignored, and backticks in the output are normalized. A single-value field with
-  a second value fails the compile. The rendered text is at most 1500 characters; lower-priority fields are
-  dropped first, and the last remaining field is truncated with `…` when it alone is still over the cap. `profile.get`
-  stores the result in `profile_blocks` and keeps the version when the compiled body is unchanged. The
-  operator-only v1 operations are `profile.get`, `profile_source.get` and `profile_source.update` (null clears
-  the folder and the cached block). They are not chat settings and not Manager tools. **Manager wiring is
-  pending:** with the folder unset nothing is compiled and nothing is written, and storing a folder changes no
-  prompt, tool list, record or channel call. See the
-  [operator profile RFC](rfcs/operator-profile-v0.zh-CN.md).
+- **Operator profile** (`operator_profile.py`): the deterministic compiler reads one Markdown file,
+  `knowledge_vault.profile_source`, relative to the configured vault root (default `关于我.md`). Settings →
+  Knowledge vault exposes the path; `knowledge_vault.get/update` are operator-only, as are the source aliases
+  `profile_source.get/update`. The aliases now take a relative file rather than an absolute directory; null
+  restores the default. The old `manager.profile.source` directory setting is no longer read. A replacement
+  knowledge-vault update without `profile_source` restores `关于我.md`. Existing vault settings without the key
+  remain valid even when that default note is absent. An explicitly saved source must be an existing regular
+  `.md` file whose resolved path, including symlinks, stays inside the vault. Every compilation checks again;
+  a missing, invalid or unreadable source logs a warning and yields no profile, without disabling other vault
+  tools or returning a previously cached profile.
+  The compiler preserves typed fields — name, address, reply language, time zone, working hours, communication
+  preferences and standing rules — with relative-path, heading and line citations. Inline `[kind:: …]` bullets
+  keep their existing classification and inactive-entry filtering. Frontmatter and fenced code are excluded;
+  backticks are normalized. Duplicate single-value fields fail compilation. The text stays within 1500 Unicode
+  characters, dropping lower-priority fields first and truncating a remaining oversized field with `…`.
+  `profile.get` caches the compiled block in `profile_blocks`, retaining its version when the body is unchanged.
+  Manager and CLI reads do not write that cache.
+  The independent operator-only `profile_settings.get/update` operations control `manager.profile.enabled`
+  (default off; null restores off). Settings → Knowledge vault exposes its confirmed switch. Off, the Manager
+  never compiles a profile and its model-facing bytes remain unchanged. On, the default Manager's own dashboard
+  and operator direct-chat turns include an `Operator profile` resident section. Group and other-sender turns,
+  routed non-main sessions and scenario Managers omit it. With `manager.stable_context` on it is inside the
+  stable block and follows its whole/change/unchanged rules; otherwise it is its own resident section before
+  Projects. Shared turns never receive private profile text in stable-state removal lines either. This does
+  not erase profile text already present in a shared resident session's history.
+  `looper profile show [--runtime-root …] [--config …]` reads the same file with the same compiler and prints
+  exactly the resident section's body, with no added newline, whether injection is on or off. It makes no model
+  call or schema/cache write. Its worker has a 1-second deadline covering imports, settings and file I/O;
+  missing settings, an unavailable database, an invalid profile or timeout prints nothing and exits 0.
+  Output is bounded by the compiler's 1500-character cap (at most 6000 UTF-8 bytes).
+  `looper claude-code profile` prints the same text for the operator's own Claude Code
+  ([session-start hook](#the-operators-own-claude-code-profile-at-session-start)). Lark and Telegram share the
+  Manager path and need no new configuration command. Real-model evaluation remains pending maintainer approval.
+  See the [operator profile RFC](rfcs/operator-profile-v0.zh-CN.md) for the original compiler design.
 - The reply is Claude's words, then what Looper itself writes to the user in
   that turn (`Turn.blocks`): a new task's configuration with the question
   whether to start it, and what an operation needing confirmation does. In a
@@ -1285,6 +1304,30 @@ another session (checked in Codex 0.162.0, whose multi-agent tools reach only
 the agents it spawns and whose message board is off; Grok 1.0.62, which Looper
 runs without the shared leader; OMP 18.4.3).
 
+### The operator's own Claude Code: profile at session start
+
+`looper claude-code profile` reuses `looper profile show` and the Manager's single compiler; it reads the
+configured vault note locally through the database, without an HTTP request, model call or cache write.
+`--hook` returns SessionStart JSON whose `additionalContext` is that same text, capped at 3000 characters.
+The shared reader has a 1-second deadline (within the 2-second hook budget); an unavailable or empty profile,
+errors and timeouts produce no stdout or stderr and exit 0. A stopped HTTP server alone does not prevent a read.
+Nothing is installed by default. `looper claude-code install hook --runtime-root <runtime root>` shows its
+user-settings path, added command and diff, asks for confirmation, backs up existing bytes and writes atomically.
+It preserves unrelated settings and symlinks, checks for concurrent edits, and reads the result back.
+`--dry-run` writes nothing; `--yes` skips confirmation after review. Organization-managed settings are never edited.
+`looper claude-code uninstall hook` previews and removes only Looper's entries; `looper claude-code status`
+reports the installed command, missing executables and whether the shared profile reader can return text.
+Looper's own Manager, Planner, Worker, Reviewer and consult launches exclude user settings with
+`--setting-sources project`; processor and other sealed or explicit-hook launches use `--setting-sources ""`.
+Both resident and one-shot commands use [the runtime's isolation flags](../../looper/agents/runtimes/claude_code.py)
+and [the shared isolation builder](../../looper/agents/claude_cli.py); consults reuse the one-shot command.
+Every [Launch.environment()](../../looper/agents/agent_settings.py) sets `LOOPER_AGENT_RUN`; hook mode and the shared
+`profile show` CLI also check that marker and silently exit 0 inside a Looper-started process.
+The Manager receives its profile through the server's resident-content path, independently of this hook.
+Managed hooks remain effective. A UserPromptSubmit hook's input does not contain SessionStart additional context,
+but it can read the session transcript; real-CLI verification of hook execution and transcript visibility is pending.
+The separately approved real-CLI check must also measure the injected profile's actual token count.
+
 ### What an agent may do
 
 The Manager, the Workers and the Reviewers have every tool but the ones that
@@ -1856,12 +1899,21 @@ Manager tools.
   `grok/sessions/<agent>`, `pi/sessions/<agent>`) of agents whose saved session (`agent_sessions`)
   is not of that runtime.
 - **DSH** (`looper/agents/runtimes/dsh.py`, DeepSeek Harness
-  `@deepseek-ai/dsh` **0.2.1-rc.2**; [RFC and validation status](rfcs/dsh-runtime-v0.zh-CN.md))
+  `@deepseek-ai/dsh` **0.2.2-rc.5**; [RFC and validation status](rfcs/dsh-runtime-v0.zh-CN.md))
   is available to Manager, Planner, Worker and Reviewer through the same Agent
   Profiles and role/project/task overrides. Put the supported `dsh` on the
   server's PATH, re-detect it in Settings → Agent Runtimes, then create an
   Agent Profile selecting a saved `anthropic-messages` model from an API-key
   provider with a matching endpoint.
+  The version gate is an exact match, on the `dsh` CLI probe and on the SDK
+  runner (`@deepseek-ai/dsh` and every `@deepseek-ai/dsh-*` package it loads must
+  be 0.2.2-rc.5, with `@deepseek-ai/cordis` 4.1.x). Any other version, older or
+  newer, is reported as unsupported and DSH steps fail the version check until
+  the installed package matches. Upgrade order: install
+  `npm install -g @deepseek-ai/dsh@0.2.2-rc.5` before or together with the Looper
+  release. To roll back, install the previous Looper release together with its
+  pinned `dsh` (for example `@deepseek-ai/dsh@0.2.1-rc.2` for Looper releases
+  before this one); the two must move together.
   Only `deepseek-flash`, `deepseek-flash[1m]`, `deepseek-v4-pro` and
   `deepseek-v4-pro[1m]` are accepted; the `[1m]` suffix is removed on the wire,
   after validating the saved model reference. Effort is `low`, `high`
@@ -2596,6 +2648,36 @@ cost. The task cap and "raise the cap and continue" sum the recorded costs, so
 they use the same basis. `GET /api/tasks/:id` counts the runs of each basis
 (`equivalent_runs`: a runtime's own login, `provider_price_runs`: an API key provider).
 
+**Unknown prices.** `run_usage.CostStatus` is the shared `known` / `unknown` state for model prices,
+usage, cap accounting, consults and cost metrics. The Claude Code alias table follows actual reported model ids
+(`model` and `modelUsage`), including `haiku` → `claude-haiku-5-5`. Haiku 5.5 has no authoritative token-rate
+source in this repository, so it stays unknown; the Haiku 4.5 price is not reused. Known model rates retain their
+existing sources in `runtimes/pricing.py`; provider/protocol catalog overrides still take precedence.
+
+Unknown prices never make a run free. With a per-run cap (including the Manager session budget), the recorder
+warns once per unpriced event model and stops further calls. An authoritative runtime-reported cost still counts
+for task, daily and guard totals; a missing catalog estimate is recorded separately as `catalog_cost_status` and
+`catalog_unknown_price_models`. When the bill itself is unknown, dollars remain null and the ended record carries
+`metadata.cost_status = unknown` (plus `unknown_price_models` when event models are available).
+This is a soft stop after usage arrives, not a hard billing ceiling. Consult, processor and spawned-run postflight
+checks reject unknown costs; their preflight model checks remain in place. Explorer parent budgets report unknown
+coverage rather than repricing multi-model usage as the parent model.
+
+Task and daily schedule caps keep their known subtotal and explicitly warn with the unknown model ids when the
+cap is checked; the Planner also records a task activity warning. They may continue on that incomplete subtotal.
+The cost guard in both observe and enforce modes reports unknown settled costs and restored history for task,
+global day, role day and schedule day scopes (separately per billing currency). Its API counters carry
+`cost_status` and `unknown_models`, and `problem` displays the accounting gap on the existing costs dashboard.
+Unknown history is excluded from price-based estimate samples. This alert policy does not introduce estimated
+prices or extend which scopes enforce mode stops. With the guard off it adds no guard I/O or reservations.
+
+Task/model, Manager, schedule, spend and metric API summaries always carry `cost_status = known | unknown`.
+Incomplete aggregate totals retain their known subtotal and unknown-run counts; an unknown individual turn cost
+is null. Subscription daily totals include every extraction attempt and the check through typed record links, and advisor booking preserves
+unknown costs for daily alerts. The existing dashboard shows these unpriced-run counts,
+model rows with unknown cost, and metric unknown counts; metrics exclude unknown cases from cost averages.
+CLI cost reads share the same API. Telegram and Lark share the recorder and cap behavior and need no new commands.
+
 The `llm_profiles` table and the role configs' `runtime` and `llm_profile_id`
 were never on a launch path; the one-time migration `llm_profiles_removed`
 drops them (with `/api/llm-profiles`), and a role config update naming them
@@ -3001,7 +3083,10 @@ The tools are Looper's MCP tools, the same on every runtime.
   checked when the setting is saved), `writable`
   (folders inside it, each an existing directory, neither a link nor below
   one, so a link is refused when the setting is saved; empty: read only), `rules_file` (a file inside it, optional)
-  and `manager_read` (true: the default Manager reads it in the user's own turns; stored only when true).
+  `manager_read` (true: the default Manager reads it in the user's own turns; stored only when true),
+  and `profile_source` (a Markdown file relative to the vault root, default `关于我.md`; see Operator profile).
+  The get/update API and the Manager's setting action are operator-only. Updates replace the configuration:
+  omitting `profile_source` restores its default, independently of the resident-injection switch.
   It is checked again whenever it is read: a vault that no longer holds (its
   directory removed, a folder turned into a link out of it) is `problem`, and
   every tool refuses with it. It is a local path, so the configuration export
@@ -4610,14 +4695,34 @@ Spend refusals take precedence over usage-window holds. After spend admission, r
 failures hold all runs, including operator-started work; 95% utilization holds only background roles and
 schedule firings. Holds end at the reset, or after a cooldown of at most five minutes from the signal when
 reset time is unknown. The operator Manager exception applies only to spend, not rejected windows.
-Background-role and schedule budget enforcement remains inactive.
+A server already in enforce also stops background roles at their own, schedule or global daily caps,
+and skips schedule firings at caps previously only observed. Default off preserves existing behavior.
+Subscription triggers check the processor role cap as well as the schedule and global cap. A task-linked
+background call inherits its schedule but not the interactive task scope, following RFC §6.1; an exhausted
+task cap cannot mask a background role or global cap. Denied background
+calls retain each caller's existing BUDGET failure handling; outbound review blocks the action and creates a
+review-budget hold. Raising that role cap permits a new review, never automatically resends the blocked action.
+
+The optional `schedule_admin.create/update` field `daily_budget_equivalent_usd` must be finite and positive
+(or null); command schedules reject it. It is effective only in enforce. When set, the guard checks
+`daily_budget_usd` against real spend and the equivalent field against subscription equivalents, with separate
+reservations. The legacy mixed scheduler check is replaced only for these enforce/split schedules. With the
+field unset, both currencies still share `daily_budget_usd`. Off and observe retain the legacy mixed check,
+and null is omitted from schedule views. The Manager schedule tools are unchanged.
+
+Enforce sends code-written 80% and limit alerts through the Advisor alert target, with quiet hours applied.
+Each scope instance, currency and kind is claimed once per scheduler-local day in `system_settings`.
+Scheduler alerts publish after the firing transaction commits. Duplicate claims increment process-local
+counters; the next day sends one summary and clears them. A restart loses these repeat counts, but persistent
+claims still prevent resending the initial alert. Accounting errors send one guard-error alert per day and
+preserve the review classifier and audit requirements.
 
 Existing holds keep their decisions, Needs you cost items, Settings list and 24-hour expiry in every mode,
 including after restart. Continuing wakes the Planner to dispatch the next saved step; stopping and expiry use
 the task stop path with a persisted reason. Startup reads whether hold recovery is needed; after a hold exists,
 recovery stays enabled until restart to avoid racing a new hold commit. Off installations without saved holds
 retain their no-I/O admission, reply-routing and scheduler paths. The `cost_holds` migration also adds the
-project `ask` action. Alerts and unanswered-push pauses follow the
+project `ask` action. Backup-profile fallback and unanswered-push pauses follow the
 [cost guard RFC's PR split](rfcs/cost-guard-v0.zh-CN.md#15-pr-拆分).
 
 ### Why a run failed (failure classes)

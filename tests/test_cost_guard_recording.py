@@ -170,7 +170,7 @@ def test_finished_record_replaces_reservation_only_after_its_cost_is_saved(monke
     recorder._record_id = 42
     asyncio.run(recorder._write_end({"status": "completed", "cost_usd": 0.25, "cost_source": "runtime"}))
     assert [event[0] for event in events] == ["record", "settle"]
-    assert events[-1][1:] == ((42,), {"cost_usd": 0.25, "cost_source": "runtime"})
+    assert events[-1][1:] == ((42,), {"cost_usd": 0.25, "cost_source": "runtime", "model": None, "unknown_models": ()})
 
 
 @pytest.mark.parametrize('failure', ['guard', 'reservation', 'audit', 'guard_audit', None])
@@ -247,3 +247,73 @@ def test_subscription_reservation_adds_an_in_run_cap_only_with_an_enforced_scope
             assert recorder._spend is None
     finally:
         recorder._untrack()
+
+
+@pytest.mark.parametrize('cap_owner', ['manager', 'guard'])
+@pytest.mark.parametrize('main_model', ['sonnet', 'opus'])
+def test_runtime_bill_survives_an_unknown_subagent_estimate(agent_db, tmp_path, monkeypatch, cap_owner, main_model, caplog):
+    from looper.agents import session_budget
+    from looper.agents.agent_settings import AgentSettings, AgentType, Launch
+    from looper.agents.cost_guard_settings import Config, Mode
+    from looper.agents.profile_registry import builtin_resolved_profile
+    from looper.agents.run_usage import Usage
+    from looper.agents.runtimes.pricing import usage_event
+    from looper.agents.tiers import manager_budget
+    from tests.runtime_model_helpers import with_model_name
+
+    launch = Launch(AgentSettings(profile=with_model_name(builtin_resolved_profile(), main_model)),
+                    role=AgentType.MANAGER)
+    config = Config(mode=Mode.ENFORCE if cap_owner == 'guard' else Mode.OBSERVE,
+                    daily_equivalent_usd=4)
+    guard = cost_guard.Guard(config, clock=lambda: datetime(2026, 11, 23, tzinfo=timezone.utc))
+    monkeypatch.setattr(cost_guard, '_guard', guard)
+    monkeypatch.setattr(guard, '_usage_hold', AsyncMock(return_value=(None, None)))
+    monkeypatch.setattr(cost_guard.store, 'history', AsyncMock(return_value=[]))
+    monkeypatch.setattr(cost_guard.store, 'limits', AsyncMock(return_value={}))
+    monkeypatch.setattr(cost_guard.store, 'context', AsyncMock(return_value={'tasks': {}, 'schedules': {}}))
+    monkeypatch.setattr(session_budget, 'turn_budget_usd', AsyncMock(return_value=4 if cap_owner == 'manager' else None))
+
+    async def run():
+        session = SimpleNamespace(budget=None, pending_switch=None)
+        options = await manager_budget.prepare(session, SimpleNamespace(), launch)
+        recorder = ClaudeRunRecorder(agent_id='manager', task_id=None, command=['claude'], cwd=str(tmp_path),
+                                     input_text='test', launch=launch, **options)
+        await recorder.start()
+        recorder.account(usage_event('claude-haiku-5-5', Usage(input_tokens=100)))
+        assert recorder.cap_stop is None
+        expected = 0.0002 if main_model == 'sonnet' else 0.0004
+        assert recorder._spend.budget_cost_usd == pytest.approx(expected)
+        assert not caplog.records
+        await recorder.finish(output_text='done', result_event={
+            'type': 'result', 'subtype': 'success', 'total_cost_usd': .05})
+
+    asyncio.run(run())
+    saved = agent_db.finish_record.await_args.kwargs
+    assert saved['cost_source'] == 'runtime'
+    assert saved['cost_usd'] == .05
+    assert 'catalog_cost_status' not in saved.get('metadata', {})
+    assert saved.get('metadata', {}).get('cost_status', 'known') == 'known'
+    assert not saved.get('metadata', {}).get('unknown_price_models')
+    counter = next(item for item in guard.snapshot()['counters'] if item['scope'] == 'global_day')
+    assert counter['spent_usd'] == .05 and counter['cost_status'] == 'known'
+    assert not caplog.records
+
+
+def test_unknown_event_model_reaches_guard_settlement(monkeypatch):
+    guard = cost_guard.Guard(cost_guard.settings.Config(mode=cost_guard.settings.Mode.OBSERVE))
+    guard.day = guard.day_start(guard.clock())
+    monkeypatch.setattr(cost_guard, '_guard', guard)
+    scope = cost_guard.Scope(cost_guard.BudgetScope.GLOBAL_DAY, 'global', 4)
+    reservation = guard._admit(cost_guard.RunKind.WORKER, (scope,), cost_guard.Currency.PROVIDER, .1,
+                               cost_guard.EstimateSource.RUN_CAP, True, None).reservation
+    guard.bind(reservation, 42)
+    monkeypatch.setattr(llm_records, 'finish_record', AsyncMock())
+    recorder = ClaudeRunRecorder(agent_id='worker-test', task_id=None, command=['claude'],
+                                 cwd='/synthetic', input_text='test')
+    recorder._record_id = 42
+    asyncio.run(recorder._write_end({'status': 'completed', 'cost_usd': None, 'cost_source': 'provider_price',
+                                     'model': 'sonnet', 'metadata': {
+                                         'unknown_price_models': ['claude-haiku-5-5']}}))
+    counter = guard.snapshot()['counters'][0]
+    assert counter['cost_status'] == 'unknown'
+    assert counter['unknown_models'] == ['claude-haiku-5-5']

@@ -240,6 +240,7 @@
         "created_at": "<timestamp>",
         "created_via": "dashboard",
         "cron": "7 * * * *",
+        "daily_budget_equivalent_usd": null,
         "daily_budget_usd": null,
         "deadline_alert_at": null,
         "enabled": false,
