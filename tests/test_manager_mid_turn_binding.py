@@ -3,11 +3,12 @@ from __future__ import annotations
 
 import asyncio
 import json
+from unittest.mock import AsyncMock
 
 import pytest
 
 from looper.agents.claude_cli import ResidentClaude
-from looper.agents import session_routing
+from looper.agents import admission, session_routing
 from looper.agents.ops import Risk, Tool
 from looper.agents.ops.service import MATCH_WAIT_SEC, ManagerOps, Platform
 from tests.db_support import DSN, run_db, until
@@ -46,10 +47,25 @@ sys.stdin.read()
 """
 
 
+def _account_admission(monkeypatch, *, active=True):
+    controller = admission.Controller()
+    controller.active = active
+    monkeypatch.setattr(admission, "_controller", controller)
+    monkeypatch.setattr(admission, "slot", controller.slot)
+    monkeypatch.setattr(controller, "_account", AsyncMock(return_value={
+        "name": "Synthetic", "max_concurrency": 1, "vendor_type": "anthropic"}))
+    acquire = AsyncMock(wraps=controller.acquire)
+    monkeypatch.setattr(controller, "acquire", acquire)
+    return controller, acquire
+
+
 @pytest.mark.parametrize("routing", [True, False])
-def test_native_input_binds_tools_before_claim_and_records_actual_prompt(enabled, tmp_path, routing):  # noqa: F811
+@pytest.mark.parametrize("account_admission", [False, True])
+def test_native_input_binds_tools_before_claim_and_records_actual_prompt(enabled, tmp_path, routing,
+                                                                       account_admission):  # noqa: F811
     enabled.setattr(session_routing, "_routing_enabled", routing)
     async def test(pool):
+        controller, acquire = _account_admission(enabled, active=account_admission)
         await pool.execute("INSERT INTO system_settings (key, value) VALUES ('manager.stable_context', 'true')")
         rig = _Rig(tmp_path)
         resident = ResidentClaude(label="synthetic-native-binding")
@@ -91,6 +107,9 @@ def test_native_input_binds_tools_before_claim_and_records_actual_prompt(enabled
             assert await rig.reply(first) == "answer A"
             await asyncio.wait_for(preparing_b.wait(), 10)
             await until(lambda: (tmp_path / "native-tool").exists())
+            if account_admission:
+                assert list(controller.running) == ["manager:main"]
+                assert acquire.await_count == 1
             # Longer than the real bridge's match window: B still cannot claim,
             # so a late replay cannot rescue a missing binding or expectation.
             await asyncio.sleep(MATCH_WAIT_SEC + 0.1)
@@ -100,9 +119,14 @@ def test_native_input_binds_tools_before_claim_and_records_actual_prompt(enabled
                 "status": "ok", "result": {"written": True}}
             assert effects == [second.message_id]
             assert not release_b.is_set()
-            (tmp_path / "finish-b").touch()
             release_b.set()
+            await until(lambda: second.message_id not in resident._output.queued)
+            if account_admission:
+                assert list(controller.running) == ["manager:main"]
+                assert acquire.await_count == 1  # claiming the native turn reuses its session's slot
+            (tmp_path / "finish-b").touch()
             assert await rig.reply(second) == "answer B"
+            assert not controller.running
             rows = await pool.fetch("SELECT input_text, metadata FROM llm_records WHERE output_text='answer B'")
             assert len(rows) == 1 and rows[0]["input_text"] == injected
             assert "looper_state" not in json.loads(rows[0]["metadata"])
@@ -114,6 +138,81 @@ def test_native_input_binds_tools_before_claim_and_records_actual_prompt(enabled
             (tmp_path / "finish-a").touch()
             (tmp_path / "finish-b").touch()
             await rig.close()
+
+    run_db(test, enabled, timeout=60)
+
+
+@pytest.mark.parametrize("ending", ["completed", "preparation_failure", "stopped", "shutdown", "disabled_before_claim"])
+def test_unclaimed_native_input_releases_account_slot(enabled, tmp_path, ending):  # noqa: F811
+    async def test(pool):
+        from looper.agents import claude_cli
+        enabled.setattr(claude_cli, "INTERRUPT_GRACE_SEC", 0.1)
+        controller, acquire = _account_admission(enabled)
+        rig = _Rig(tmp_path)
+        resident = ResidentClaude(label="synthetic-native-admission")
+        rig.manager._sessions["main"].claude = resident
+        rig.manager._config.claude_bin = _fake_claude(tmp_path, SCRIPT)
+        preparing_b, release_b = asyncio.Event(), asyncio.Event()
+        probes = 0
+
+        async def tools_problem():
+            nonlocal probes
+            probes += 1
+            if probes == 2:
+                preparing_b.set()
+                await release_b.wait()
+                if ending == "preparation_failure":
+                    return "synthetic preparation failure"
+            return None
+
+        enabled.setattr(rig.manager, "_tools_problem", tools_problem)
+        await rig.start()
+        closed = False
+        try:
+            first, second = _web("first"), _web("second")
+            await rig.bus.publish(first)
+            await until(lambda: (tmp_path / "ready").exists())
+            await rig.bus.publish(second)
+            await until(lambda: (tmp_path / "injected.txt").exists())
+            (tmp_path / "finish-a").touch()
+            assert await rig.reply(first) == "answer A"
+            await preparing_b.wait()
+            await until(lambda: (tmp_path / "native-tool").exists())
+            assert list(controller.running) == ["manager:main"]
+            assert acquire.await_count == 1
+            provider = controller.running["manager:main"].provider_id
+            if ending == "shutdown":
+                await rig.close()
+                closed = True
+            elif ending == "disabled_before_claim":
+                await controller.set_enabled(False)
+                release_b.set()
+                await until(lambda: second.message_id not in resident._output.queued)
+                (tmp_path / "finish-b").touch()
+                assert await rig.reply(second) == "answer B"
+                assert acquire.await_count == 1
+            else:
+                if ending == "stopped":
+                    from looper.agents.tiers.manager import StopResult
+                    assert await rig.manager.stop_turn(second.message_id, via="web") is StopResult.STOPPING
+                if ending == "completed":
+                    (tmp_path / "finish-b").touch()
+                    await until(lambda: not controller.running)
+                    await controller.transition(provider, admission.QuotaFailure(None, None))
+                release_b.set()
+                answer = await rig.reply(second)
+                await until(lambda: not controller.running)
+                assert (answer == "answer B") is (ending == "completed")
+                assert acquire.await_count == 1  # an already completed native result needs no new admission
+            assert not controller.running
+            assert not rig.manager._mid_turn._admissions
+        finally:
+            release_b.set()
+            (tmp_path / "finish-a").touch()
+            (tmp_path / "finish-b").touch()
+            if not closed:
+                await rig.close()
+            await controller.stop()
 
     run_db(test, enabled, timeout=60)
 

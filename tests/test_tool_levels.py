@@ -173,6 +173,7 @@ DECIDED_OPERATIONS: dict[str, ActionLevel] = {
     "memory.settings_get": INSIDE,  # reads and validates Looper's memory settings
     "memory.settings_put": INSIDE,  # stores settings; writes no vault files and sends nothing
     "memory.check": INSIDE,  # checks prerequisites without changing files or sending messages
+    "memory.propose_from_lead": INSIDE,  # stores a candidate inside Looper; writes no vault file
     "outbound_review.get": INSIDE,  # reads Looper's own review setting
     "outbound_review.update": INSIDE,  # changes Looper's own review setting
     "project_skills.context_budget": INSIDE,  # reads the displayed skill-description budget; sends nothing

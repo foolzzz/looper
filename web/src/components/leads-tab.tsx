@@ -10,8 +10,10 @@ import { CONFIDENCE_ZH, LEAD_KIND_ZH, LEAD_STATE_ZH, LEADS_NOTICE, label, relati
 import { errorText } from "@/lib/use-action";
 import { V1Error } from "@/lib/v1";
 import { SELECT } from "@/components/registry-ui";
+import { memoryProposeFromLead, memorySettingsGet } from "@/lib/memory";
 
 const KINDS = Object.keys(LEAD_KIND_ZH);
+const MEMORY_KINDS: Record<string, string> = { decision: "决定", commitment: "承诺", fact: "事实", person: "人物", project: "项目" };
 const STATES = ["active", "expired", "superseded", "promoted", "inaccurate", "all"];
 
 /** The 线索 tab: search leads, mark or delete one, and choose which chats are read. */
@@ -31,6 +33,15 @@ export function LeadsTab() {
   const [deleting, setDeleting] = useState<Lead | null>(null);
   const [busy, setBusy] = useState(false);
   const [attempt, setAttempt] = useState(0);
+  const [memoryEnabled, setMemoryEnabled] = useState(false);
+  const [proposing, setProposing] = useState<Lead | null>(null);
+  const [memoryKind, setMemoryKind] = useState("");
+  const [proposed, setProposed] = useState("");
+  useEffect(() => {
+    let live = true;
+    memorySettingsGet().then((view) => { if (live) setMemoryEnabled(Boolean(view.configured && view.enabled && view.settings?.sources?.leads)); }, () => {});
+    return () => { live = false; };
+  }, []);
 
   const dayCount = Number(days);
   const args = {
@@ -58,7 +69,7 @@ export function LeadsTab() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [query, chat, person, days, kind, state, attempt]);
 
-  const after = () => { setMarking(null); setDeleting(null); setNote(""); setAttempt((n) => n + 1); };
+  const after = () => { setMarking(null); setDeleting(null); setProposing(null); setNote(""); setAttempt((n) => n + 1); };
   const act = async (action: () => Promise<unknown>) => {
     setBusy(true);
     setError("");
@@ -89,8 +100,9 @@ export function LeadsTab() {
           {STATES.map((item) => <option key={item} value={item}>{label(LEAD_STATE_ZH, item)}</option>)}
         </select>
       </form>
-      {conflict && <p role="status" data-state="conflict" className="text-sm">{conflict}</p>}
-      {error && <p role="alert" className="text-sm text-destructive">{error} <Button type="button" variant="outline" size="sm" onClick={() => setAttempt((n) => n + 1)}>重试</Button></p>}
+      {proposed && <p role="status" className="text-sm"><a className="text-primary underline" href="#/memory">已提议 {proposed}，去记忆页确认</a></p>}
+      {!proposing && conflict && <p role="status" data-state="conflict" className="text-sm">{conflict}</p>}
+      {!proposing && error && <p role="alert" className="text-sm text-destructive">{error} <Button type="button" variant="outline" size="sm" onClick={() => setAttempt((n) => n + 1)}>重试</Button></p>}
       {!page && !error && !conflict && <p role="status" className="text-sm text-muted-foreground">加载中…</p>}
       {page && page.leads.length === 0 && !conflict && <p role="status" className="text-sm text-muted-foreground">没有符合条件的线索</p>}
       <ul className="space-y-3">
@@ -111,6 +123,7 @@ export function LeadsTab() {
             {lead.superseded_by && <p className="text-sm">已被推翻 → {lead.superseded_by}</p>}
             <div className="flex flex-wrap gap-2">
               {lead.detail && <Button type="button" variant="ghost" size="sm" onClick={() => setOpen(open === lead.id ? null : lead.id)}>{open === lead.id ? "收起" : "展开"}</Button>}
+              {memoryEnabled && ["decision", "commitment", "fact"].includes(lead.kind) && ["active", "expired"].includes(lead.state) && <Button type="button" variant="outline" size="sm" onClick={() => { setMemoryKind(lead.kind); setProposing(lead); setProposed(""); setConflict(""); setError(""); }}>提议记入记忆</Button>}
               <Button type="button" variant="outline" size="sm" onClick={() => { setNote(""); setMarking(lead); }}>标为不准确</Button>
               <Button type="button" variant="outline" size="sm" onClick={() => setDeleting(lead)}>删除</Button>
             </div>
@@ -119,6 +132,20 @@ export function LeadsTab() {
       </ul>
       {page != null && page.more > 0 && <p className="text-xs text-muted-foreground">另有 {page.more} 条</p>}
       <LeadsChats />
+      {proposing && (
+        <ConfirmDialog title={`提议记入记忆 ${proposing.id}`} onClose={() => setProposing(null)}>
+          <p className="text-sm">来自飞书消息，未经确认：写入前你还要确认一次</p>
+          {conflict && <p role="status" data-state="conflict" className="text-sm text-warning">{conflict}</p>}
+          {error && <p role="alert" className="text-sm text-destructive">{error}</p>}
+          <select aria-label="记忆类型" value={memoryKind} onChange={(e) => setMemoryKind(e.target.value)} className={SELECT}>
+            {Object.entries(MEMORY_KINDS).map(([value, name]) => <option key={value} value={value}>{name}</option>)}
+          </select>
+          <div className="flex justify-end gap-2">
+            <Button type="button" variant="outline" onClick={() => setProposing(null)}>取消</Button>
+            <Button type="button" disabled={busy} onClick={() => void act(async () => { const candidate = await memoryProposeFromLead(proposing.id, memoryKind); setProposed(candidate.id); })}>提议</Button>
+          </div>
+        </ConfirmDialog>
+      )}
       {marking && (
         <ConfirmDialog title={`标为不准确 ${marking.id}`} onClose={() => setMarking(null)}>
           <label htmlFor="lead-note" className="text-xs text-muted-foreground">备注（可选）</label>

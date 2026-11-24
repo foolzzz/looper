@@ -74,6 +74,8 @@ from ..claude_cli import (
     exit_note,
     user_stop_result,
 )
+from .. import admission, turn_admission
+from ..failures import FailureClass
 from .. import attention, chat_attachments, chat_commands, chat_settings, completion_events, gate_commands, memory_routing, outbound_hook, status_card, turn_metrics
 from ..turn_metrics import TurnDelivery, TurnTimes, AckKind, ChatKind, ProactiveSource
 from .. import delivery_guard_manager as delivery_guard
@@ -1201,11 +1203,11 @@ class ManagerAgent:
             if not chat_settings.stop_enabled():
                 await self._send_reply(envelope, chat_settings.STOP_DISABLED_REPLY, persist=False)
                 return
-            if not self.can_interrupt:
-                await self._send_reply(envelope, STOP_UNSUPPORTED_REPLY, persist=False)
-                return
             tokens = self.live_for_chat(origin["channel_id"] or channel, chat,
                 sender_id=origin["sender"] if not origin["group"] else None) if channel and chat else []
+            if not self.can_interrupt and not any(token.admission_waiting for token in tokens):
+                await self._send_reply(envelope, STOP_UNSUPPORTED_REPLY, persist=False)
+                return
             stopped = 0
             for token in tokens:
                 result = await self.stop_turn(token.message_id, via=channel)
@@ -2097,6 +2099,7 @@ class ManagerAgent:
         if self.ops is not None:
             self.ops.publish_binding(token.binding if token is not None else None, session_key=self._session_now().key)
 
+    @turn_admission.admitted_manager_turn
     @cost_manager.defer_maintenance
     async def _run_prepared(self, token: TurnToken, prepared: Prepared) -> str:
         """Start the prepared turn and run it; the turn's record ends however it ends."""
@@ -2152,7 +2155,7 @@ class ManagerAgent:
             return StopResult.NOT_RUNNING
         if token.phase is TurnPhase.STOPPING:
             return StopResult.ALREADY_STOPPING
-        if not self.can_interrupt:
+        if not self.can_interrupt and not token.admission_waiting:
             return StopResult.CANNOT_INTERRUPT
         # Before anything is awaited: the stop is for this turn, never for one that starts meanwhile.
         if not token.request_stop(via):
@@ -2375,7 +2378,7 @@ class ManagerAgent:
             await self._bus.publish(completion_events.wake(self.agent_address, target))
             return
         if rows:
-            if routed or lanes_settings.enabled():
+            if routed or lanes_settings.enabled() or admission.enabled():
                 self._router.dispatch_completion(envelope, rows, batch, operator)
             else:
                 await self._tell_completion(rows, batch)
@@ -2532,6 +2535,7 @@ class ManagerAgent:
         task_id = context_envelope.metadata.get("task_id")
         text_parts: list[str] = []
         streamed_partials = False
+        model_output = False  # Any text or tool call makes retrying the user turn unsafe.
         guard = GuardState(ops_turn.debt if ops_turn is not None else None)
 
         # The runtime hands its events on one at a time, reading the next once ``on_event`` returns. What a tool
@@ -2542,8 +2546,12 @@ class ManagerAgent:
         handling: asyncio.Task[None] | None = None
         session_unsaved = False
 
+        def quota_diagnostic(payload: dict[str, Any]) -> bool:
+            return (admission.probing() and payload.get("type") == "assistant"
+                    and payload.get("error") == "rate_limit")
+
         def observe(payload: dict[str, Any]) -> None:
-            nonlocal session_unsaved
+            nonlocal session_unsaved, model_output
             recorder.account(payload)
             if payload.get("type") == "system" and payload.get("subtype") == "compact_boundary":
                 self._context_changed("a compaction")
@@ -2556,7 +2564,17 @@ class ManagerAgent:
                 if session.session_runtime != "api" or not self._pending_handoff:
                     self._pending_switch = self._pending_handoff = None  # CLI sessions own the prompt at init
                 session_unsaved = True
+            if quota_diagnostic(payload):
+                return  # Claude's synthetic error text is quota evidence, not model output.
             message = payload.get("message") if payload.get("type") == "assistant" else None
+            if isinstance(message, dict):
+                model_output |= any(isinstance(block, dict) and (block.get("type") == "tool_use"
+                    or (block.get("type") == "text" and block.get("text")))
+                    for block in message.get("content") or [])
+            event = payload.get("event")
+            delta = event.get("delta") if isinstance(event, dict) else None
+            if isinstance(delta, dict) and delta.get("type") == "text_delta" and delta.get("text"):
+                model_output = True
             if self.ops is None or not isinstance(message, dict):
                 return
             for block in message.get("content") or []:
@@ -2620,6 +2638,8 @@ class ManagerAgent:
                 session_unsaved = False
                 await self._save_session_state()
 
+            if quota_diagnostic(payload):
+                return  # Keep a failed probe's diagnostic out of the user's streamed answer.
             event_type = payload.get("type")
             # Only the Manager's own turn is the reply; subagent output is internal.
             top_level = payload.get("parent_tool_use_id") is None
@@ -2669,6 +2689,19 @@ class ManagerAgent:
                             )
                         elif block_type == "thinking":
                             await show("thinking", phase=True, activity="thinking")
+
+        async def retry_quota_probe() -> None:
+            if model_output or token.partial or token.cancel.requested or not admission.probing():
+                return
+            if not admission.quota_probe_failed():
+                # Closing a record bounds its background writes. Classify the captured runtime evidence
+                # before settling even when the record's database writer has not finished yet.
+                cause = recorder.failure_signal()
+                if cause is not None and cause.cls is FailureClass.QUOTA:
+                    await recorder.report_admission(cause)
+                    raise turn_admission.RetryQuotaProbe()
+            if admission.quota_probe_failed():
+                raise turn_admission.RetryQuotaProbe()
 
         try:
             if run.state is not None and run.state_generation != self._state_generation:
@@ -2731,8 +2764,8 @@ class ManagerAgent:
             # cancels repeatedly. It also joins any resident cleanup already started by a read failure.
             raise
         except BaseException as exc:
-            if not isinstance(exc, TurnStopped):
-                self._settle(token)  # the turn failed: a stop that comes while it is cleaned up is too late
+            if not isinstance(exc, TurnStopped) and not admission.probing():
+                self._settle(token)  # a quota probe stays stoppable until its failure is classified
             try:
                 await abandon_handling()
                 if isinstance(exc, TurnStopped):
@@ -2749,6 +2782,9 @@ class ManagerAgent:
                 output_text="".join(text_parts) or None, result_event=None,
                 error=error, status=ended_by(exc),
             )
+            await retry_quota_probe()
+            if admission.probing():
+                self._settle(token)
             if isinstance(exc, TurnBlocked) and task_id:
                 try:
                     await db_activity.insert_activity(task_id=task_id, worker=self.agent_id, kind="error", summary=error)
@@ -2810,7 +2846,8 @@ class ManagerAgent:
             return await self._run_turn(message, context_envelope, ops_turn=ops_turn, note=note, retried=True,
                                         token=token, quoted=prepared.quoted)
 
-        if not delivery_guard.awaiting_followup(prepared, turn.result_event, text_parts):
+        settle_on_finish = not delivery_guard.awaiting_followup(prepared, turn.result_event, text_parts)
+        if settle_on_finish and not admission.probing():
             self._settle(token)
 
         result_event = turn.result_event
@@ -2841,6 +2878,9 @@ class ManagerAgent:
             )),
             usage=turn.usage,
         )
+        await retry_quota_probe()
+        if settle_on_finish and admission.probing():
+            self._settle(token)
         await self._link_turn_task(recorder, ops_turn)
         if over_cap and not token.abandoned:
             if session.budget is None:
@@ -3742,6 +3782,16 @@ class ManagerAgent:
         except Exception:
             logger.warning("%s: could not route %s to a gate; answering it", self._log, envelope.message_id, exc_info=True)
             return NOT_A_REPLY
+
+    async def _freeze_notice_once(self, envelope: MessageEnvelope, text: str) -> None:
+        assert self._bus is not None
+        try:
+            claimed = await self._bus.claim_message_notice(envelope, "admission_freeze")
+        except Exception:
+            logger.warning("could not checkpoint account freeze notice; message remains queued", exc_info=True)
+            return
+        if claimed:
+            await self._send_status(envelope, text)
 
     async def _send_status(
         self,
