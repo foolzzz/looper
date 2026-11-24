@@ -76,7 +76,7 @@ from ..claude_cli import (
 )
 from .. import admission, turn_admission
 from ..failures import FailureClass
-from .. import attention, chat_attachments, chat_commands, chat_settings, completion_events, gate_commands, memory_routing, outbound_hook, status_card, turn_metrics
+from .. import attention, chat_attachments, chat_commands, chat_settings, completion_events, gate_commands, ledger_routing, memory_routing, outbound_hook, status_card, turn_metrics
 from ..turn_metrics import TurnDelivery, TurnTimes, AckKind, ChatKind, ProactiveSource
 from .. import delivery_guard_manager as delivery_guard
 from ..delivery_guard import GuardState
@@ -109,7 +109,7 @@ from .manager_routing import SessionRouter
 from . import group_session
 from .. import session_routing, cost_guard, cost_hold_routing, cost_manager
 from ..mid_turn_input import MidTurnInputs
-from ..ops import Turn, TurnOrigin, leads as ops_leads, manager_vault as ops_vault
+from ..ops import Turn, TurnOrigin, intents_recognize as ops_recognize, leads as ops_leads, manager_vault as ops_vault
 from ..ops.service import _operator_turn, tools_down_reply
 from ..ops import session_search as ops_sessions
 from ..ops import memory_propose as ops_memory
@@ -410,7 +410,7 @@ QUOTE_READ_SEC = 80.0
 # case) starts a new session. Anything else, "/new foo" or "/news" too, is a message for Claude.
 NEW_SESSION_COMMAND = "/new"
 PREPARATION_STEPS: tuple[str, ...] = (
-    "persist_user_message", "attention_enabled", "route_to_gate", "route_memory", "route_intent", "read_quote", "resident_settlement", "status_thinking", "tools_probe", "turn_lock", "load_db_config",
+    "persist_user_message", "attention_enabled", "route_to_gate", "route_ledger", "route_memory", "route_intent", "read_quote", "resident_settlement", "status_thinking", "tools_probe", "turn_lock", "load_db_config",
     "load_session_state", "agent_settings", "templates", "library", "library_server", "outbound_review", "llmrec_attach",
     "build_user_message", "session_budget",
     "claude_command", "tool_listing", "switch_session", "claude_stop", "resident_admission", "resume_brief", "recorder_start", "claude_start", "recorder_finish",
@@ -1719,6 +1719,10 @@ class ManagerAgent:
             if gate.kind in (RouteKind.KEPT, RouteKind.REFUSED):
                 self._acting(token)
                 return Prepared(action=lambda: self._send_reply(envelope, gate.reply, persist=False))
+            if (ledger_reply := await token.step("route_ledger", ledger_routing.route(envelope))) is not None:
+                await token.keep("persist_user_message", self._persist_user(envelope, text), 10)
+                self._acting(token)
+                return Prepared(action=lambda: self._answer_intent(envelope, ledger_reply))
             if (memory := await token.step("route_memory", memory_routing.route(envelope))) is not None:
                 await token.keep("persist_user_message", self._persist_user(envelope, text), 10)
                 self._acting(token)
@@ -1820,6 +1824,7 @@ class ManagerAgent:
             ask.turn.runtime = launch.runtime.type  # named in what the turn binding logs
         # The turn's own tools: a change of them between turns (a group turn after the user's own) restarts the process.
         tools = await token.step("tool_listing", self.ops.current_listing(ask.turn)) if self.ops is not None else []
+        self._recognize_on = any(t["name"] == ops_recognize.TOOL_NAME for t in tools)
         self._memory_contract = ops_memory.contract_for(tools)
         self._research = self._research_sources(tools, launch)
         system_prompt = self._composed_prompt(agent_settings)
@@ -1844,7 +1849,8 @@ class ManagerAgent:
         has_sessions = any(t["name"] == ops_sessions.TOOL_NAME for t in tools)
         has_reminders = any(t["name"] in REMINDER_TOOLS for t in tools)
         if (self._has_templates or has_workflows or has_leads or has_ledger or has_sessions or has_reminders
-                or any(t["name"] == "looper_skill_propose" for t in tools) or self._memory_contract is not None or self.agent_id != DEFAULT_MANAGER_ID):
+                or self._recognize_on or any(t["name"] == "looper_skill_propose" for t in tools)
+                or self._memory_contract is not None or self.agent_id != DEFAULT_MANAGER_ID):
             # The MCP tool list is read when the process starts: a changed one restarts it.
             listing = json.dumps(tools, sort_keys=True) if self.ops is not None else ""
             signature += (hashlib.sha256(listing.encode("utf-8")).hexdigest(),)
@@ -2475,6 +2481,9 @@ class ManagerAgent:
         else:  # a Manager without the switches read has neither
             if getattr(self, "_leads_on", False):
                 contract_name, contract = contract_name + "+LEADS_CONTRACT", contract + "\n" + ops_leads.LEADS_CONTRACT
+            if getattr(self, "_recognize_on", False):
+                contract_name += "+INTENTS_RECOGNIZE_CONTRACT"
+                contract += "\n" + ops_recognize.CONTRACT
             if getattr(self, "_vault_on", False):
                 contract_name, contract = contract_name + "+VAULT_CONTRACT", contract + "\n" + ops_vault.VAULT_CONTRACT
             if (memory := getattr(self, "_memory_contract", None)):

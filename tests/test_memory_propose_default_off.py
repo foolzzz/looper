@@ -14,7 +14,7 @@ from looper.agents.bus import MessageBus
 from looper.agents.claude_cli import ResidentTurn
 from looper.agents.managers_api import ManagerDefinition
 from looper.agents.message import MessageEnvelope, MessageType, channel_address, manager_address
-from looper.agents.ops import memory_propose
+from looper.agents.ops import intents_recognize, memory_propose
 from looper.agents.ops.service import ManagerOps, Platform, scope_for
 from looper.agents.run_usage import Usage
 from looper.agents.serve import seed_channel_configs
@@ -181,5 +181,31 @@ def test_on_adds_exactly_one_tool_and_one_section_after_the_frozen_ones(monkeypa
         assert sections(system)[-1] == ("## Memory proposals (looper_memory_propose)", memory_propose.MEMORY_CONTRACT)
         assert len(view["signature"]) == 7
         assert view["signature"][-1] == hashlib.sha256(json.dumps(tools, sort_keys=True).encode()).hexdigest()
+
+    run_db(check, monkeypatch, timeout=40)
+
+
+@pytest.mark.parametrize("recognition,memory", [(False, False), (True, False), (False, True), (True, True)])
+def test_recognition_and_memory_keep_independent_tools_contracts_and_restart_signatures(
+        monkeypatch, tmp_path, recognition, memory):
+    async def check(pool):
+        await setup(pool, tmp_path)
+        if not memory:
+            raw = json.loads(await pool.fetchval("SELECT value FROM system_settings WHERE key='memory_write'"))
+            raw["enabled"] = False
+            await pool.execute("UPDATE system_settings SET value=$1 WHERE key='memory_write'", json.dumps(raw))
+        await pool.execute("INSERT INTO system_settings (key,value) VALUES "
+                           "('intents.enabled','true'),('intents.on_request.enabled',$1)",
+                           "true" if recognition else "false")
+        view = await _observe(tmp_path, monkeypatch)
+        assert_main_surfaces(view["tools"], view["system"], tmp_path)
+        expected = [*([intents_recognize.TOOL_NAME] if recognition else []),
+                    *([memory_propose.TOOL_NAME] if memory else [])]
+        assert [item["name"] for item in view["tools"]] == [*BASELINE["tools"]["order"], *expected]
+        assert (intents_recognize.CONTRACT in view["system"]) is recognition
+        assert (memory_propose.MEMORY_CONTRACT in view["system"]) is memory
+        assert len(view["signature"]) == (7 if expected else 6)
+        if expected:
+            assert view["signature"][-1] == hashlib.sha256(json.dumps(view["tools"], sort_keys=True).encode()).hexdigest()
 
     run_db(check, monkeypatch, timeout=40)

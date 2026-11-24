@@ -251,14 +251,17 @@ tasked、rejected、merged 是终态。
 
   ```text
   ## Requests in group chats
-  A chat marked 全部消息 gives every human sender's messages, including the user's own. In it, an intent is a
-  development request that anyone raises, even without mentioning the user: a new requirement, a change, a bug or
-  problem report, a scenario that needs support, or a request for access, addressed to the group, a team, a named
-  person or nobody in particular. A request or problem report addressed to a named person counts even if that
-  person has accepted it. Use dev_task for a requirement or a change and bug_triage for a bug or a problem.
-  Not an intent: small talk, answers to questions, +1s or echoes of someone else's request, and pure follow-ups,
-  status updates or decisions that carry no new ask. When several messages raise the same thing, make one intent
-  with all of them as its sources, or use same_as when a recent intent is that thing.
+  For chats marked 全部消息, messages that @-mention the user or were sent by the user still follow the scope
+  above and all enabled Intent types. Only the other human messages use the following group rule instead of
+  the user-only scope and type guidance above. Recognize development requests and bug reports in those messages
+  regardless of whom they address (the group, a team, a named person, or nobody) and whether someone has accepted
+  the work. Acceptance does not cancel the original request; do not make a separate intent for the acceptance.
+  Use dev_task for a concrete requirement, change, scenario needing support or access request. Use bug_triage
+  for reported broken behaviour, errors or incorrect data. A one-line bug report counts even with an @-mention
+  of someone else, no explicit request to investigate, no detail and no link.
+  Exclude small talk, Q&A answers, agreement or echoes, and follow-ups, status updates or decisions with no new
+  request or bug report. Merge messages raising the same matter into one intent with all their sources, or use
+  same_as for a recent intent about that matter.
   ```
 
 - **代码检查：** 持续识别中，只有「仅因名单才读到」的 `m` 出处受 `dev_task` / `bug_triage` 限制；第 12 节规则总开关打开后再允许 `mr_review`；引用它的意图若是其他类型，`parse` 丢弃并按 `group_type` 计数。原范围的消息（操作者本人发的、群里 @ 操作者的、私聊）保留所有已启用类型；其中满足名单条件的群消息也参与群开发需求识别，同一消息只读取一次、只走一次解析和入库。「识别一次」的出处仍按全部消息检查类型。回复契约不变。
@@ -294,7 +297,7 @@ tasked、rejected、merged 是终态。
   ```
 
   撤销就是删掉 `intent_group_reads` 的那一行；再加入是新的一行，开始时间是再加入的时刻。计数表只留 30 天：写计数的事务顺手删掉更早的行。
-- **迁移 `intent_recognitions`**（`order = 1510`），随第二个实现 PR：建 `intent_recognitions`（11.7），`intents` 加 `recognition_id BIGINT REFERENCES intent_recognitions(id) ON DELETE CASCADE`，把 `intents_via_check` 放宽到含 `on_request`，并加约束 `(via = 'on_request') = (recognition_id IS NOT NULL)`。
+- **迁移 `intent_recognitions`**（`order = 1810`、`pending_order = 1810`，在持续识别的 1800 之后），随第二个实现 PR：建 `intent_recognitions`（11.7），`intents` 加 `recognition_id BIGINT REFERENCES intent_recognitions(id) ON DELETE CASCADE`，从 `intents_via_check` 的当前值放宽到含 `on_request`，保留 `followed_group` 等已有值，并加约束 `(via = 'on_request') = (recognition_id IS NOT NULL)`。
 - **开关：** `intents.group_read.enabled`（持续识别）和 `intents.on_request.enabled`（识别一次），都只有字符串 `true` 是开，读法和 `intents.enabled` 一样；键名和读取函数放在 `leads_model`。两个都要 `intents.enabled` 开着才起作用。打开持续识别时，`delivery.enabled` 不是开就拒绝，并说明原因。开关只管读不读，不动名单；关着也能维护名单。
 - **能加什么：** `source_chats.kind` 为 `group` 或 `topic` 的会话（私聊本来就整段读；`unknown` 等采集认出类型再加），会话已在消息流里，并且没有被消息流或抽取排除。每个来源最多 10 个群。加入以后才被排除的，名单行留着但不读，列表里标出来。「识别一次」对会话的要求相同，不要求在名单上。
 - **不导出：** 配置导出（`config_transfer`）不含名单、开关和识别记录。
@@ -430,7 +433,7 @@ v1 操作都是 `operator_only`：只接受操作者身份（仪表盘），API 
 
 **评测**（模型可见：识别说明、类型检查之外的回复、Manager 工具和契约）：
 
-- **合成用例**（进仓库，`evals/processor`，sonnet `--reps 2`）：`intents_group_requests`（操作者在群里提出的需求、没 @ 的 bug 报告、点名交给别人且已应承的开发请求各一条，夹着闲聊、答疑、没有新请求的跟进与附和：认出三条，类型分别是 `dev_task`、`bug_triage` 和 `dev_task`）、`intents_group_requests_merge`（三个人报同一个问题：一条意图，出处三条）、`intents_group_requests_quiet`（只有不算的那几类：`NONE`）、`intents_group_requests_injection`（要助手建任务的消息：进 `instructions_seen`，没有只以它为出处的意图）。原有意图用例的输入和 prompt 不变，不重跑。
+- **合成用例**（进仓库，`evals/processor`，sonnet `--reps 2`）：`intents_group_requests`（操作者在群里提出的需求、没 @ 的 bug 报告、点名交给别人且已应承的开发请求各一条，夹着闲聊、答疑、没有新请求的跟进与附和：认出三条，类型分别是 `dev_task`、`bug_triage` 和 `dev_task`）、`intents_group_requests_short`（短 @ 故障报告和点名开发请求，含已应承的请求，夹着闲聊、答疑、附和、状态与决定：分别认作 `bug_triage` / `dev_task`，其余不认）、`intents_group_requests_original_types`（同一名单群里告警机器人 @ 操作者的请求仍认作 `alert_triage`；第三方转交给别人的告警请求认作 `bug_triage`）、`intents_group_requests_merge`（三个人报同一个问题：一条意图，出处三条）、`intents_group_requests_quiet`（只有不算的那几类：`NONE`）、`intents_group_requests_injection`（要助手建任务的消息：进 `instructions_seen`，没有只以它为出处的意图）。原有意图用例的输入和 prompt 不变，不重跑。
 - **本机标注集**（不进仓库）：用目标群已有的线索当标注：`request` 和 `issue` 两类当「应识别」，其余当「不应识别」。导出用 `looper leads eval-export` 新增的 `--chat`、`--days`、`--intents` 选项，写到被 git 忽略的路径（和现有导出一样，只能写到 `evals/runs/` 或仓库外）：这个群在这段时间里全部的人发消息（按意图运行的窗口切好），加上来源在这个群的线索和它们的标签。标签是模型整理出的线索，评测前由操作者在本机文件里核对一遍。`python -m evals.processor --intents-file FILE` 按「全部消息」的说明跑意图识别，只报告计数：应识别的召回、只以「不应识别」消息为出处的意图条数、每 100 条消息的意图数、合并率、每个窗口的花费；不打印消息和意图内容。
 - **Manager 对话评测**（第二个 PR）：`intents_recognize_once`（用户在私聊里问一个群最近一周有什么需求：先 `preview`、报条数和花费、等确认）、`intents_recognize_range_cap`（要 60 天：说明最多 30 天）；sonnet `--reps 2`，加 opus xhigh 的 Manager `--reps 1`。
 - **目标**（PR 里报告，达不到就先改说明再跑，不改用例迁就模型）：标注集召回不低于 80%；只以「不应识别」消息为出处的意图每 100 条消息不超过 3 条；合成用例全部通过。

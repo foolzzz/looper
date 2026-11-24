@@ -23,8 +23,8 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone as dt_timezone
 from typing import Any
 
-from ..db import connection, reminders as store, system_settings
-from . import cron
+from ..db import connection, proactive_deliveries as db_deliveries, reminders as store, system_settings
+from . import chat_settings, cron, proactive_delivery as delivery
 from .channels.base import PostOutcome
 from .operator_identity import operator_sender_id
 from .task_notice import NotifyTarget, TargetKind
@@ -280,9 +280,21 @@ class ReminderService:
             return
         if not await store.claim(conn, reminder_id, now):
             return  # cancelled meanwhile
+        key = f"looper-reminder-{reminder_id}"
+        decided = None
+        if chat_settings.delivery_enabled():
+            try:
+                # User-set reminders bypass quiet hours, the daily cap and the digest (reminders RFC §5).
+                decided = await delivery.decide(
+                    delivery.Delivery(delivery.DeliveryKind.USER_REMINDER, delivery.Urgency.USER_SET,
+                                      delivery.ChatKind.DIRECT),
+                    dedupe_key=key, channel_id=channel_id, chat=chat, source_ref=str(reminder_id),
+                    last_user_message_at=None, now=now)
+            except Exception:
+                logger.exception("reminder %s: decision failed; sending as with the layer off", reminder_id)
         try:
             receipt = await self._registry.post(channel_id, target(chat), message_text(reminder, now=now),
-                                                idempotency_key=f"looper-reminder-{reminder_id}")
+                                                idempotency_key=key)
             outcome, error = receipt.result, receipt.error
             external = receipt.external_ids[0] if receipt.external_ids else None
         except Exception as exc:
@@ -296,4 +308,10 @@ class ReminderService:
             await store.settle(conn, reminder_id, "failed", now=settled_at, detail=_clip(error))
         else:
             await store.settle(conn, reminder_id, "uncertain", now=settled_at, detail=_clip(error))
+        if decided is not None:
+            try:
+                await db_deliveries.record_receipt(key, outcome.value, external)
+            except Exception:
+                # A recording failure must not retry an accepted or uncertain channel send.
+                logger.exception("reminder %s: could not record the channel's receipt", reminder_id)
         logger.info("reminder %s: %s", reminder_id, outcome.value)
