@@ -1469,6 +1469,36 @@ def test_health_rpc_failure_is_bounded_and_recovered(runners, monkeypatch, caplo
     run(exercise())
 
 
+def test_health_eof_after_host_pauses_records_reason_before_recovery(runners, monkeypatch, caplog):
+    monkeypatch.setattr(s, "HEALTH_INTERVAL_SECONDS", 0.05)
+    monkeypatch.setattr(s, "HEALTH_TIMEOUT_SECONDS", 0.2)
+    original = RunnerBridge._write
+    pauses = []
+
+    async def stalled_write(self, message, entry=None, *, before_write=None):
+        await original(self, message, entry, before_write=before_write)
+        if getattr(message, "method", None) == "runner/health":
+            pauses.append(1)
+            time.sleep(0.35)
+
+    monkeypatch.setattr(RunnerBridge, "_write", stalled_write)
+
+    async def exercise():
+        async with runners(health_eof=True) as (owner, processes):
+            lease = await owner.acquire("fake")
+            generation = lease._generation
+            await until(lambda: generation.failed, timeout=5)
+            await asyncio.shield(generation.failure)
+            assert pauses and not lease.valid and processes[0].returncode is not None
+            assert len(owner._kinds["fake"].failures) == 1
+            failed = [r for r in caplog.records if "runner_health_failed" in r.getMessage()]
+            assert len(failed) == 1
+            assert failed[0].levelname == "WARNING"
+            assert "reason=protocol_error" in failed[0].getMessage()
+            assert f"runner_id={lease.runner_id}" in failed[0].getMessage()
+    run(exercise())
+
+
 @pytest.mark.parametrize("how", ["stop", "idle"])
 def test_dispose_joins_inflight_health_without_false_loss_or_restart(runners, monkeypatch, caplog, how):
     monkeypatch.setattr(s, "HEALTH_INTERVAL_SECONDS", 0.02)

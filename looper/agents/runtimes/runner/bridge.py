@@ -219,6 +219,10 @@ class RunnerBridge:
 
     async def _health_in_time(self, rpc_id, future, started, limit, lag) -> bool:
         """A reply processed after a host pause still meets the original deadline."""
+        # Report a known connection failure before yielding to recovery, which
+        # can cancel this probe. Host-lag accounting only applies to replies.
+        if self._error is not None:
+            raise self._error
         # Let a tick queued before the pause record it before the comparison.
         await asyncio.sleep(0)
         if not future.done() and self.health_reply_buffered():
