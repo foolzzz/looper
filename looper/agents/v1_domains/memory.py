@@ -4,7 +4,7 @@ Confirmation accepts the dashboard's displayed hash; DM confirmation is handled 
 
 from ...db import memory as db_memory
 from ..action_levels import ActionLevel
-from .. import memory, memory_actions, memory_model as model, memory_settings, memory_write
+from .. import memory, memory_actions, memory_leads, memory_model as model, memory_settings, memory_write
 from ..api_v1 import Operation, _array, _object, _STR, _NULL_STR, _INT, _BOOL, _OBJ, _NULL_OBJ
 from ..ops import ErrorCode, OpError
 from ..ops.service import _plain
@@ -102,6 +102,13 @@ OPERATIONS = (
         "Only a blocked candidate can be retried; its attempt count starts again at zero.",
         _object({"candidate": _ID}, closed=True), _WRITE_RESULT, risk="write", audit_operator=False,
         level=ActionLevel.MACHINE),
+    # Stores a candidate inside Looper; writes no vault file.
+    _op("propose_from_lead", "Propose a message lead as a memory candidate for review.",
+        "Code takes the lead's summary, detail, people and chat; decisions, commitments and facts only. "
+        "The drafted change still needs confirmation.",
+        _object({"lead": {"type": "string", "maxLength": 40},
+                 "kind": {"type": "string", "enum": [kind.value for kind in memory_leads.EXTERNAL_KINDS]}}, ["lead"], closed=True),
+        _WRITE_RESULT, risk="write", cli=False, audit_operator=False, level=ActionLevel.INSIDE),
     # Redrafting changes only a candidate inside Looper; it never confirms or writes a vault note.
     _op("redraft", "Queue fresh drafting of a conflicted or failed memory candidate.",
         "Only conflicts and draft_failed candidates can be drafted again; the result needs confirmation.",
@@ -147,6 +154,12 @@ async def run(server, operation, arguments, principal, headers):
             result = {"candidate": found}
         elif action in {"confirm", "confirm_many", "reject", "edit", "retry", "revive", "delete", "redraft"}:
             result = await _write(server, action, arguments)
+        elif action == "propose_from_lead":
+            result = await memory_leads.propose_from_lead(arguments["lead"], kind=arguments.get("kind"),
+                                                          actor=model.Actor.USER, via=model.Via.DASHBOARD)
+            drafter = getattr(server, "_memory_drafter", None)
+            if drafter is not None:
+                drafter.wake()
         elif action == "settings_get":
             result = await memory_settings.settings_view()
         elif action == "settings_put":

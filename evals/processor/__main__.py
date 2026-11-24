@@ -840,9 +840,9 @@ async def _record(record_id: int | None, batch: str, texts: list[str] | None = N
     kept = [json.dumps({k: v for k, v in event.items() if not (event.get("type") == "result" and k == "result")},
                        ensure_ascii=False) for event in events]
     # Each message's text (the part after "sender: "), as the record would hold it in JSON.
-    texts = ([json.dumps(text, ensure_ascii=False)[1:-1] for text in texts] if texts is not None else
-             [json.dumps(line.split(": ", 1)[1], ensure_ascii=False)[1:-1] for line in batch.splitlines()
-              if "》" in line and ": " in line])
+    if texts is None:
+        texts = [line.split(": ", 1)[1] for line in batch.splitlines() if "》" in line and ": " in line]
+    texts = [json.dumps(text, ensure_ascii=False)[1:-1] for text in texts if text.strip()]
     init = next((e for e in events if e.get("type") == "system" and e.get("subtype") == "init"), {})
 
     def count(value: Any) -> int | None:
