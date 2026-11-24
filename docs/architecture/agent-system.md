@@ -1956,8 +1956,22 @@ Manager tools.
   for each turn. File tools stay within the working directory and explicit
   added directories; bash is not confined to those paths and is not an OS
   sandbox. Bash uses the session's private HOME and environment, with a
-  ceiling of the run timeout (86,400 seconds when unset); a shorter tool
-  timeout is honored. An unset run request limit becomes 1,000 requests.
+  per-call deadline of 120 seconds, independent of the Worker's run deadline
+  (seeded at 86,400 seconds). A shorter model-requested timeout is honored;
+  longer requests are clamped to the session deadline and a hard 600-second
+  cap. No new operator setting is required. Timeout or abort sends TERM to the
+  shell group, KILL after two seconds, then drains output for at most 500 ms
+  before ending that call's executor. Timeout results keep the existing
+  `is_error=false` contract and include the timeout text; cancellation remains
+  an error. If the shell exits while a background process keeps its output
+  open, output drains for at most 500 ms before returning the exit code and an
+  explicit background-output note. A process that escaped the shell group can
+  survive; its session owner must manage its lifetime separately. Runner
+  diagnostics include tool span identifiers, deadlines, elapsed time and
+  cleanup phases, with a command hash rather than command text. These changes
+  affect only operators who select the opt-in DSH runtime; dashboard, channels
+  and CLI continue to show the paired tool result through their existing paths.
+  An unset run request limit becomes 1,000 requests.
   Spend and request caps are checked before every model request, including
   compaction, with no provider retry. Per-request token buckets use the saved
   model's effective prices (`cost_source=provider_price`); these reservations
