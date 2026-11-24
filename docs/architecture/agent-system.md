@@ -121,9 +121,24 @@ Manager has no tool for it. The dashboard shows the task page's 指标 card and 
     `.local/manager-sessions/<digest>/`. Its MCP entry carries a distinct
     credential: the server checks that a binding belongs to that credential's
     session, so learning another binding cannot authorize its calls. Only
-    tools granted by `session_visibility.NON_MAIN_ALLOWLIST` are available
-    (currently none): no local file or shell tools,
-    catalog MCP servers, plugins, skills or subagents. Claude Code and the
+    tools granted by `session_visibility.for_session()` are available. With
+    `manager.session_tools.enabled` off (the default), its
+    `NON_MAIN_ALLOWLIST` grants no tools. With it on, the following conversation-scoped
+    tools are granted by `SESSION_TOOL_RULES`:
+
+    | Tool | Access in this conversation |
+    | --- | --- |
+    | `looper_chat_tasks` | List or read owned tasks: title, status, timestamps, step/gate counts and the completion notice. |
+    | `looper_chat_task_create` | The operator creates a task in an existing project. |
+    | `looper_chat_task_control` | The operator starts, stops or restarts an owned task. Cancel and start-over are refused here. |
+    | `looper_chat_task_instruct` | The operator sends instructions to an owned task. |
+
+    Other senders can read owned tasks; their writes are refused with a fixed
+    operator-only explanation. The sender is read from the channel envelope and
+    compared with the bot's freshly read operator id; message text cannot confer
+    authority. A missing identity fails closed. No local file or shell tools,
+    catalog MCP servers, plugins, skills or subagents are available, including
+    when the operator speaks in a group. Claude Code and the
     in-process API runtime support this mode; other runtimes refuse a
     non-main turn without falling back to main. Main's launch is unchanged.
     Claude Code shares only its CLI login with the operator (the original
@@ -176,16 +191,37 @@ Manager has no tool for it. The dashboard shows the task page's 指标 card and 
     Operator-customized prompts, harness and profile text, projects, directories,
     templates, workflows, tasks, gates, goals, knowledge, leads, memory, intents,
     reminders, ledger, confirmations, settings and cost views are excluded.
-    New global sections and tools are excluded by default. Existing Manager tools
-    lack complete chat scopes, so none are registered or callable, including by
-    guessing a tool name or omitting a binding. Tasks cannot be created or controlled
-    from these model sessions. `/gates` and `/todo` return a fixed refusal;
+    New global sections and tools are excluded by default. Global Manager tools
+    are never registered or callable, including by guessing a tool name. Every
+    conversation tool call requires a binding for that credential's session.
+    Ownership is only `tasks.origin_session = SessionKey.text` together with the
+    current Manager id; notification targets, replies and threads grant no access.
+    A task's origin is written once at creation; main tasks keep null. Another
+    session's id, a main task id and an unknown id return the identical
+    `not_found: no such task in this chat`. Requirements, progress, plans, room
+    messages, projects, directories, profiles and costs are never returned.
+    The result text is exactly that task's completion notice for the chat kind.
+    `/gates` and `/todo` return a fixed refusal;
     `/profile` keeps its existing refusal. Operator command routers are bypassed.
     Completion events use their originating chat's code notices instead of a model
     turn that would read global project/cost facts. Old routed histories and handoffs
     are discarded once when their saved `context_policy_version` differs from the
     allowlist version; cost totals remain. Main and routing-off input/tool behavior
-    is unchanged. A reply out of a dm session goes
+    is unchanged. `session_tools.get/update` are separate operator-only operations;
+    null restores the tools switch to off, and turning it off restores the original
+    public prompt and zero tools without changing the context-policy version.
+    Keep the switch off until private approval support has also shipped.
+
+    Turning routing on hides pre-routing tasks from groups and other senders'
+    direct chats: they have no proven origin and are not backfilled. Their
+    notifications still deliver. The operator can control them from main or the
+    dashboard, or explicitly assign a particular unowned task once with
+    `loopercli manager-sessions assign-task --task-id <id> --session <key> --acknowledge`.
+    This operator-only, audited operation records the operator's ownership
+    acknowledgement and refuses tasks already assigned. All topics of a group
+    share ownership; a Telegram upgrade to supergroup changes its chat id, so the
+    new session loses access to the old chat's tasks (fail closed).
+    A reply out of a dm session goes
     through the group backstop (`ops.leads.for_group`), like a group's. With the untrusted
     fence enabled, stored user messages in this excerpt use the same typed group or direct-message
     fence as new messages, with chat and time provenance; assistant messages and handoffs stay unchanged.

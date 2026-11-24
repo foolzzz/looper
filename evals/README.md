@@ -1809,3 +1809,60 @@ LOOPER_TEST_DSH_DENSITY_EXECUTABLE=/path/to/dsh \
 The installed test is skipped unless that executable is explicitly selected.
 Its skip is a validation gap, not a passed DSH measurement. Reports are ignored
 local artifacts; do not commit raw samples or requests from a workstation.
+
+### Conversation-scoped task dialogs
+
+`chat_tasks_list`, `chat_task_create`, `chat_task_stop`,
+`chat_other_create_refused`, `chat_other_task_refused` and
+`chat_dm_overview_refused` send synthetic messages through a native `lark-cli`
+stand-in and the real `CliTransport`. Dialog metadata names `session: group|dm`
+and `sender: operator|other`; the channel writes the sender into the envelope.
+Each disposable server enables routing and conversation tools before startup.
+The operator's list/create/stop must succeed, another sender must cause no
+write, and another chat's task marker must never appear in a reply. Fake mode
+checks the harness and database effects, not model quality.
+
+Real validation requires explicit approval. Run the same harness and six cases
+on the zero-tool baseline and candidate, with a real Claude binary supplied by
+`--claude-bin`. On each revision, use Sonnet twice and Opus once with the
+Manager's effort set to xhigh (36 cases over both revisions):
+
+```bash
+cases=chat_tasks_list,chat_task_create,chat_task_stop,chat_other_create_refused,chat_other_task_refused,chat_dm_overview_refused
+uv run --system-certs --python 3.11 --extra test python -m evals.prompt_regression dialogs --mode real --dialogs "$cases" --model sonnet --reps 2 --max-budget-usd 1 --total-cap-usd 4 --stable-context --claude-bin "$CLAUDE_BIN" --out-dir "$EVAL_OUT/sonnet"
+uv run --system-certs --python 3.11 --extra test python -m evals.prompt_regression dialogs --mode real --dialogs "$cases" --model opus --manager-model opus --manager-effort xhigh --reps 1 --max-budget-usd 1 --total-cap-usd 2 --stable-context --claude-bin "$CLAUDE_BIN" --out-dir "$EVAL_OUT/opus"
+```
+
+There is no separate source-root flag: the runner serves the source tree that
+contains its harness. To compare with the zero-tool baseline, first commit the
+candidate, then extract that baseline into a temporary source tree and overlay
+only the candidate's `evals` directory. Reuse the candidate's Python environment;
+run from the extracted tree so both the harness and server import the baseline's
+`looper` code:
+
+```bash
+candidate_ref="$(git rev-parse HEAD)"
+candidate_python="$PWD/.venv/bin/python"
+baseline_root="$(mktemp -d)"
+git archive origin/codex/routing-state-scope | tar -x -C "$baseline_root"
+git archive "$candidate_ref" evals | tar -x -C "$baseline_root"
+(
+  cd "$baseline_root"
+  "$candidate_python" -m evals.prompt_regression dialogs --mode real --dialogs "$cases" --model sonnet --reps 2 --max-budget-usd 1 --total-cap-usd 4 --stable-context --claude-bin "$CLAUDE_BIN" --out-dir "$EVAL_OUT/baseline/sonnet"
+  "$candidate_python" -m evals.prompt_regression dialogs --mode real --dialogs "$cases" --model opus --manager-model opus --manager-effort xhigh --reps 1 --max-budget-usd 1 --total-cap-usd 2 --stable-context --claude-bin "$CLAUDE_BIN" --out-dir "$EVAL_OUT/baseline/opus"
+)
+```
+
+Record the baseline revision separately: an archive has no git metadata. The
+baseline's operator list/create/stop cases are expected to fail the candidate's
+capability checks because it grants zero tools; refusal/privacy cases still
+apply. Compare observed tool success and reply claims, without treating those
+expected capability failures as a harness error or a passing candidate.
+
+`LOOPER_EVAL_DATABASE_URL` must name a disposable database server; never an
+active Looper database. The caps above total $12 across both revisions;
+estimated spend is $4–11. Private-approval and schedule dialog validation is
+separate, estimated at $9–23 and capped at $26 for all three stages together.
+A claimed execution without a successful operation or any cross-chat disclosure
+fails validation. Native CLI init events must list only `mcp__looper__*`; an
+additional minimal real turn to inspect that list is estimated at $0.01.
