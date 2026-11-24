@@ -733,8 +733,9 @@ async def _run_agent_system_owned(
 ) -> None:
     """Start the full agent system with the ops settings ``ops`` and run until interrupted."""
 
-    from . import session_routing
+    from . import lanes_settings, session_routing
 
+    previous_lanes = lanes_settings.enabled()
     previous_routing = session_routing.routing_enabled()
     previous_max_resident = session_routing.max_resident()
     loop_watch = LoopWatch()
@@ -746,6 +747,7 @@ async def _run_agent_system_owned(
                                         exit_now=exit_now, loop_watch=loop_watch)
     finally:
         # Startup loads process-wide routing settings; keep later serves independent, even after a failed start.
+        lanes_settings.set_enabled(previous_lanes)
         session_routing.set_routing_enabled(previous_routing)
         session_routing.set_max_resident(previous_max_resident)
         await loop_watch.stop()
