@@ -604,8 +604,9 @@ print(json.dumps({"type": "result", "subtype": "success", "is_error": False, "re
 """
 
 
+@pytest.mark.parametrize("finish_during_inbox_query", [False, True])
 def test_a_run_in_a_room_has_its_tools_its_section_and_a_reminder_that_keeps_its_report(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, finish_during_inbox_query: bool,
 ) -> None:
     from looper.agents.bus import MessageBus
     from looper.agents.http_server import AgentHTTPServer
@@ -634,6 +635,19 @@ def test_a_run_in_a_room_has_its_tools_its_section_and_a_reminder_that_keeps_its
         await workers.start(bus)
         await asyncio.sleep(0)  # its listener subscribes
         inbox_wait = None
+        querying, release_query = asyncio.Event(), asyncio.Event()
+        from looper.db import room as db_room
+        messages = db_room.messages
+
+        async def delayed_messages(*args: Any, **kwargs: Any) -> list[dict[str, Any]]:
+            if finish_during_inbox_query and asyncio.current_task() is inbox_wait:
+                # The wait has read the old cursor. Let stdin delivery and run cleanup
+                # finish while its message query is in progress.
+                querying.set()
+                await release_query.wait()
+            return await messages(*args, **kwargs)
+
+        monkeypatch.setattr(db_room, "messages", delayed_messages)
         try:
             await bus.publish(MessageEnvelope.create(
                 source=planner_address("task-r"), target=worker_address("worker-2"), message_type=MessageType.WORK_ITEM,
@@ -647,6 +661,8 @@ def test_a_run_in_a_room_has_its_tools_its_section_and_a_reminder_that_keeps_its
                 # Pull consumers still wait; a pushed run receives stdin while its Read tool runs.
                 inbox_wait = asyncio.create_task(room.inbox("task-r", FE, wait_seconds=30))
                 await until(lambda: "task-r" in room._events, "the pull inbox wait")
+                if finish_during_inbox_query:
+                    await asyncio.wait_for(querying.wait(), 5)
             except AssertionError:
                 rows = await pool.fetch("SELECT kind, summary FROM activity WHERE task_id = 'task-r' ORDER BY seq")
                 raise AssertionError([dict(r) for r in rows] + [r.payload for r in results]) from None
@@ -654,9 +670,14 @@ def test_a_run_in_a_room_has_its_tools_its_section_and_a_reminder_that_keeps_its
             # post returns only after the stdin push is recorded. The stand-in reads its
             # inbox after that, so the delivered question is not still sitting there.
             (tmp_path / "inbox_after").write_text("1")
+            if finish_during_inbox_query:
+                await until(lambda: results, "the run's result", timeout=30)
+                assert "worker-2" not in workers._reminders
+                release_query.set()
             inbox = await asyncio.wait_for(inbox_wait, 5)  # delivery ends the 30 s pull wait too
             await until(lambda: results, "the run's result", timeout=30)
         finally:
+            release_query.set()
             if inbox_wait is not None:
                 inbox_wait.cancel()
                 await asyncio.gather(inbox_wait, return_exceptions=True)

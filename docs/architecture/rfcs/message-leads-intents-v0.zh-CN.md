@@ -211,3 +211,239 @@ tasked、rejected、merged 是终态。
 1. **复核器失败时：** 推荐放行，条目照常入库并计数，理由见上。备选是这次运行失败、游标不动、下一轮重来，但这样复核器一出故障，线索和意图就全停了。
 2. **复核器默认模型：** 推荐以 PR2 的实测为准，在 Haiku 5.5 和 Opus 5.5 之间取达到目标里最便宜的；两个都达不到就报告，不自动换别的。
 3. **被丢弃的条目要不要留：** 推荐留（`dropped` 状态），用来评测错丢；它们的出处被删时照样跟着删。
+
+## 11. 补充：从群消息里识别开发需求
+
+维护者 2026-11-23 定下要点（#1638 的两条评审意见和当面确认，见下面「已定」），本节写怎么落地。有两种用法：高频群**持续识别**（操作者点名的群名单），低频群**识别一次**（操作者要求时，对一个群的一段时间跑一次）。两种用法共用同一段识别说明、同一套入库与合并规则和同一个评测集。都默认关闭，关闭时行为和 `main` 逐字节一致。
+
+**已定（维护者）：**
+
+- **识别什么：** 开发需求，也就是群里任何人提出的、需要有人去开发或修的事：新需求、功能改动、bug 和问题报告、需要支持的场景、权限申请；对象是这个群、群里的团队或没有指明的人，没 @ 操作者也算。对应现有的 `dev_task` 和 `bug_triage`。不算：闲聊、答疑、已经有人接下的事的后续讨论、明确交给另一个人且对方已应承的事、对别人需求的附和。同一件事多人反复提，合并成一条。
+- **持续识别：** 群名单只有操作者能改，默认为空；每个群逐个点名，没有通配，也没有「机器人所在的全部群」。和项目绑定无关。只读人发的消息：机器人和应用发的、导入和回填的历史都不读。一个群加入名单后，只读从那一刻起的消息：加入时记下开始时间，更早的不读（「识别一次」是唯一的例外，见 11.7）。每个群可以单独撤销，撤销后立刻停止读取。
+- **识别一次：** 操作者本人的回合里的一个 Manager 工具，加上仪表盘的「识别一次」按钮；参数是会话和时间范围（默认最近 7 天，最多 30 天）。先给预览（消息条数、估算花费），确认后才跑。只读这段范围内已经采集到的人发消息，可以早于名单上的开始时间，但只限这一次；不改名单，不改任何游标。结果作为标明「识别一次」的意图入库，在发起的会话里用一条消息列出，不逐条推送。每次运行的消息条数和花费都有硬上限。
+- **推送：** 名单消息产生的意图走送达层，算非紧急类，受它的上限约束，超出的进晨报，不丢。推送只发操作者私聊，群永远不是推送目标（第 6 节和 `intent_push.target_for` 的检查不变）。
+- **确认：** 加群、撤销都不需要重新确认意图订阅：名单和开关不进 `config_version`，由加群时的确认框承担。
+- **量：** 保留每次运行的上限，并在这次加上每个群每天的额度。
+- **模型可见：** 识别说明在评测之前一直是草案；这是模型可见的改动，实现要有真实评测（11.11）。
+
+**本节另外的选择**（标 ⚑ 的列在 11.12，待维护者确认）：
+
+| 选择 | 理由 |
+|---|---|
+| 名单是一张表，每个群一行，带开始时间 | 开始时间、撤销、会话被删时跟着删都是行级的；按行加锁，撤销和入库能串行 |
+| 开始时间同时约束发送时间和入库时间；开关从关到开时，所有群的开始时间改为当时 | 排期之后加入的群、打开的开关不会让一次运行读到开始时间之前的消息；运行快照不用加字段 |
+| 只能识别成 `dev_task` 或 `bug_triage`，由代码检查：引用了名单消息或一次识别消息的条目，类型不在这两种里就丢弃 | 口径写在说明里只是建议；按类型拦下，模型说错了也进不了库 |
+| 每次运行最多 200 条名单消息，超出的推迟到紧接着的补跑；每个群每天最多 500 条，超出的当天跳过；名单最多 10 个群；去掉原来每个订阅每天 2,000 条的总额 | 按群的额度让一个热闹的群挤不掉别的群；10 个群乘以 500 条已经给出总的上限，不用再设一个总额 |
+| 跳过的消息按群、按天计数，显示在这个群的那一行，旁边是对这段时间「识别一次」的入口；不进晨报 | 跳过的消息还在库里，操作者想看时可以补识别；晨报只放推迟的意图，不放没读的消息 |
+| ⚑ 打开持续识别要求送达层（`delivery.enabled`）已经打开；送达层之后被关掉的话，名单消息的意图不推送，只留在意图页 | 推送上限和转进晨报都是送达层的；没有它，一个活跃的群就会刷屏 |
+| 「识别一次」用单独的开关 `intents.on_request.enabled` | 它会读开始时间之前的消息，还会加一个 Manager 工具（模型可见、进程签名会变）；和持续识别分开，可以只开其中一个、分别回滚，关闭时各自钉住 |
+| 「识别一次」用意图订阅的处理器 Profile 和项目，要求这个来源有一个已经确认的意图订阅 | 读操作者消息用哪个 Profile、本机 hooks 会看到什么，操作者是在确认订阅时同意的；不另开一套 |
+| 撤销只停止以后的读取；进行中的运行在入库时复查，引用了已撤销群的名单消息的条目丢弃；已经入库的意图不动 | 「立即停止」落到入库这一步才算数；要删用现有的「不整理并删除」 |
+| 前文跟着锚点走：锚在名单消息上的前文和父消息只取开始时间之后的，「识别一次」只取范围之内的；锚在原范围消息上的照旧 | 不让范围之外的消息进入处理器，也不减少原来 @ 消息的前文 |
+| 名单只对 `output_kind = 'intents'` 生效；线索和事件分流不变 | 改动只落在点名的功能上 |
+
+**用语：** 「名单消息」是只因名单才读到的消息；原范围里的消息（私聊、@ 操作者、操作者自己发的、白名单告警机器人）即使在名单上的群里，也不是名单消息，处理和今天一样。「一次识别消息」是「识别一次」读到的消息。两者在处理器面前都是「全部消息」。
+
+### 11.1 识别什么（两种用法共用）
+
+- **标记：** 含有全部消息的会话，标题写成 `《群名》（群 · 全部消息）`。
+- **说明（模型可见，草案）：** 这次窗口里有全部消息时，指令末尾（意图类型之后）追加下面一段，没有时一个字不加：
+
+  ```text
+  ## Requests in group chats
+  A chat marked 全部消息 gives every person's message, not only the ones to the user. In it, an intent is a
+  development request that anyone raises, even without mentioning the user: a new requirement, a change, a bug or
+  problem report, a scenario that needs support, or a request for access, addressed to the group, a team or nobody
+  in particular. Use dev_task for a requirement or a change and bug_triage for a bug or a problem. Not an intent:
+  small talk, answers to questions, follow-ups on something someone has already taken up, a request handed to a
+  named person who accepted it, and +1s or echoes of someone else's request. When several messages raise the same
+  thing, make one intent with all of them as its sources, or use same_as when a recent intent is that thing.
+  ```
+
+- **代码检查：** `parse` 读回复时，一个意图只要有一条 `m` 出处是全部消息，类型就必须是 `dev_task` 或 `bug_triage`，否则丢弃并按 `group_type` 计数。回复契约不变。
+- **合并：** 用第 4 节的规则：`same_as` 指向 6 小时内待处理或已建任务的，或 30 天内被驳回的，就合并；一条意图可以有多条出处。
+- **入库标记：** `intents.via`（`subscription` 默认、`followed_group`、`on_request`）。一个意图只要有一条 `m` 出处是名单消息，就是 `followed_group`；「识别一次」的都是 `on_request`。
+
+### 11.2 数据与开关
+
+- **迁移 `intent_group_reads`**（`order = 1800`、`pending_order = 1800`；在 #1540 的 1500、#1639 的 1600 和 #1641 的 1700/1701 之后；识别一次的迁移预留 1810），随第一个实现 PR：
+
+  ```sql
+  CREATE TABLE IF NOT EXISTS intent_group_reads (
+      source_id  TEXT NOT NULL,
+      chat_id    TEXT NOT NULL,
+      added_at   TIMESTAMPTZ NOT NULL DEFAULT now(),   -- 操作者点名的时刻，只用于显示
+      read_from  TIMESTAMPTZ NOT NULL DEFAULT now(),   -- 开始时间：加入时等于 added_at，开关从关到开时改为当时
+      PRIMARY KEY (source_id, chat_id),
+      FOREIGN KEY (source_id, chat_id) REFERENCES source_chats(source_id, chat_id) ON DELETE CASCADE,
+      CHECK (read_from >= added_at)
+  );
+  -- 每个群每个本地日（服务器时区，和每日预算同一个分界）交给处理器的、因额度跳过的名单消息
+  CREATE TABLE IF NOT EXISTS intent_group_read_days (
+      source_id  TEXT NOT NULL,
+      chat_id    TEXT NOT NULL,
+      day        DATE NOT NULL,
+      read       INTEGER NOT NULL DEFAULT 0 CHECK (read >= 0),
+      skipped    INTEGER NOT NULL DEFAULT 0 CHECK (skipped >= 0),
+      PRIMARY KEY (source_id, chat_id, day),
+      FOREIGN KEY (source_id, chat_id) REFERENCES source_chats(source_id, chat_id) ON DELETE CASCADE
+  );
+  ALTER TABLE intents ADD COLUMN IF NOT EXISTS via TEXT NOT NULL DEFAULT 'subscription';
+  ALTER TABLE intents ADD CONSTRAINT intents_via_check CHECK (via IN ('subscription', 'followed_group'));
+  ```
+
+  撤销就是删掉 `intent_group_reads` 的那一行；再加入是新的一行，开始时间是再加入的时刻。计数表只留 30 天：写计数的事务顺手删掉更早的行。
+- **迁移 `intent_recognitions`**（`order = 1510`），随第二个实现 PR：建 `intent_recognitions`（11.7），`intents` 加 `recognition_id BIGINT REFERENCES intent_recognitions(id) ON DELETE CASCADE`，把 `intents_via_check` 放宽到含 `on_request`，并加约束 `(via = 'on_request') = (recognition_id IS NOT NULL)`。
+- **开关：** `intents.group_read.enabled`（持续识别）和 `intents.on_request.enabled`（识别一次），都只有字符串 `true` 是开，读法和 `intents.enabled` 一样；键名和读取函数放在 `leads_model`。两个都要 `intents.enabled` 开着才起作用。打开持续识别时，`delivery.enabled` 不是开就拒绝，并说明原因。开关只管读不读，不动名单；关着也能维护名单。
+- **能加什么：** `source_chats.kind` 为 `group` 或 `topic` 的会话（私聊本来就整段读；`unknown` 等采集认出类型再加），会话已在消息流里，并且没有被消息流或抽取排除。每个来源最多 10 个群。加入以后才被排除的，名单行留着但不读，列表里标出来。「识别一次」对会话的要求相同，不要求在名单上。
+- **不导出：** 配置导出（`config_transfer`）不含名单、开关和识别记录。
+
+### 11.3 持续识别：读取路径
+
+开关打开、名单非空时，意图运行（只有 `output_kind = 'intents'`）在第 2 节的固定范围之外再读一项：
+
+```sql
+OR (e.sender_kind = 'user' AND e.origin = 'live' AND EXISTS (
+      SELECT 1 FROM intent_group_reads g
+      WHERE g.source_id = e.source_id AND g.chat_id = e.chat_id
+        AND e.sent_at >= g.read_from AND e.ingested_at >= g.read_from))
+```
+
+- **只读人发的，按类型化字段判断，不看文字：** `sender_kind = 'user'`（来自飞书的 `sender_type`，排除 `app` 和 `other`）；`origin = 'live'`（排除 `import`，也排除 `history`：首次拉会话或话题带出的更早消息、晚到 24 小时以上的桥接行）。Looper 自己的应用照旧排除。
+- **原有条件都还在：** 会话在消息流和抽取里都是 included、订阅的 `include_chats` 和 `exclude_chats`、`max_age_minutes`、不读导入。排除优先于名单。
+- 名单消息由一次独立的查询读出，带 `via_group` 和它的群的 `read_from`；原范围的查询一字不改。
+- **前文：** 一个会话的 `c` 前文锚在它窗口里的第一条消息上；第一条是名单消息时，前文只取发送时间不早于开始时间的；名单消息的父消息也一样。锚在原范围消息上的前文和父消息照旧。
+- **确认文字：** 开关开、名单非空时，意图订阅确认文字的读取范围后加一行「另读名单上的群：N 个（各自从开始时间起人发的实时消息；每次最多 200 条，每个群每天最多 500 条）」，24 小时估算也算上名单消息；否则不变。
+- **入库时复查：** 在第 4 节的入库事务里，锁住出处之后，再按会话 `FOR SHARE` 锁住名单行、读开关。一个条目只要有一条 `m` 出处是名单消息，而它的群已不在名单上、开始时间晚于这条消息的发送或入库时间，或者开关已关，整条丢弃，按 `group_revoked` 计数。撤销（删行）和入库因此串行：撤销先提交，入库读不到这一行就丢；入库先锁住，撤销等它提交，这一批算撤销之前读的，留下。
+- 读出来的意图：`chat_id` 是群，项目按 `message_chat_projects` 取，没绑定就列候选，`via = 'followed_group'`，推送见 11.6。
+
+### 11.4 开始时间、撤销与重新打开
+
+| 事件 | 结果 |
+|---|---|
+| 加入 | `added_at = read_from = now()`；发送或入库早于它的消息，持续识别永远不读 |
+| 已在名单上又加一次 | 不变 |
+| 撤销 | 删行。下一次读取（含重启后重读窗口）不再包含这个群；进行中的运行在入库时丢掉引用它名单消息的条目；已入库的意图和已发的推送不动，按原规则过期，操作者可以驳回；要删用 `leads.set_chat` 的「不整理并删除」 |
+| 撤销后再加入 | 新的开始时间；撤销期间的消息不读 |
+| 开关从关到开 | 所有群的 `read_from` 改为当时；关着期间的群消息不读 |
+| 开关从开到关 | 下一次读取起不读名单消息；进行中的运行在入库时丢掉引用名单消息的条目；名单保留 |
+| 会话被消息流或抽取排除 | 名单行留着、不读；排除时删除已整理内容的规则照旧 |
+| 会话被删 | 名单行和计数跟着删 |
+
+### 11.5 和游标、回看窗口的关系
+
+- 意图订阅只用游标（`window = cursor`）。加入时不回退游标、不补读：游标之前的消息不会因为加入而重读，游标之后、开始时间之前的消息由上面的时间条件排除。
+- 一次运行在排期时读一遍窗口，执行时（含重启后接管）按 `fired_at` 再读一遍。排期之后撤销的，执行时那一遍不再读到，入库时再查一次。排期之后加入的群、打开的开关，执行那一遍可能多读到它们开始时间之后的消息，但读不到更早的。所以运行快照（`execution_snapshot`）不加字段。
+- `max_age_minutes`（预设 7 天）、`max_events`（500）、输入 60,000 字、满窗口立刻补跑最多 6 次，都照样适用于名单消息。推送订阅的回看窗口（`window = lookback`）不涉及。
+- 「识别一次」不读也不动任何游标（11.7）。
+
+### 11.6 持续识别：量、花费与推送
+
+- **每次运行**最多 200 条名单消息（常量 `GROUP_READ_RUN_MAX`）。窗口按 seq 从旧到新取，遇到第 201 条名单消息就停在它之前，`more` 为真，游标停在最后取到的一条，调度器立刻补跑；原范围的消息不会因此被丢，只是挪到下一次。
+- **每个群每天**最多 500 条名单消息交给处理器（常量 `GROUP_READ_DAY_MAX`，按 `intent_group_read_days.read`）。到了额度，这个群当天剩下的名单消息跳过：游标越过它们，持续识别以后不再读，计入 `skipped`。它们还在 `source_events` 里：这个群那一行显示「今天超出额度 N 条」，旁边就是对这段时间「识别一次」的入口。原范围的消息和名单上别的群照常读。不推迟，是因为意图讲时效（24 小时过期），积压的群消息第二天再推已经没用，还会挤占私聊里的意图。
+- **跳过的运行**（`skipped`）不写计数：它读过的名单消息不占额度，花费照常计入每日预算。
+- **推测**（按第 8 节的单价）：每个群每天的名单消息最多约 $0.10；名单会让本来为空的 10 分钟窗口也调用一次处理器，最多 144 次 × $0.008 ≈ $1.15；10 个群满额时合计每天约 $2.2，加上原范围的 $0.3–1 可能碰到意图订阅每天 $3 的上限，到了上限当天的意图运行都停（现有行为）。真实流量上按计数再调，改动写进 PR。
+- **推送：** `via = 'followed_group'` 的意图只经送达层推送：`delivery.decide` 按非紧急类（`Urgency.NORMAL`）计入私聊每天的上限（默认 5 条）；超出的和安静时段的进当天的摘要，由晨报带出（`morning_brief.enabled` 关着时它们只留在意图页）；`via = 'subscription'` 的意图推送不变。`delivery.enabled` 关着时，`followed_group` 的意图不推送，只留在意图页，按原规则过期；打开持续识别本身就要求送达层开着（11.2）。
+
+### 11.7 识别一次
+
+- **入口：** Manager 工具 `looper_intents_recognize`（`Audience.OPERATOR`：只在控制台聊天和操作者本人的私聊回合可用；群聊、别人的私聊、场景 Manager、API 客户端都不行），以及仪表盘意图页的「识别一次」按钮。工具只在 `intents.enabled` 和 `intents.on_request.enabled` 都开着时装给默认 Manager，工具列表进进程签名；契约里加一小段说明（模型可见，草案）：用户问一个群一段时间里提了哪些需求或问题时，先 `preview`，把条数和花费告诉用户，用户同意后再 `start`，Looper 还会再请用户确认；结果是意图，在一条消息里列出，不逐条推送；不在群聊里用。
+- **动作：** `preview`（只读）、`start`（写：`escalate` 返回由代码写的确认文字，带会话名、范围、条数和估算花费，走 Manager 已有的确认流程；用户不确认就不会跑）、`status`（只读：识别记录的状态和它识别出的意图）。仪表盘用同样语义的 v1 操作（11.8），确认框由界面弹。
+- **参数：** 会话（id，或在群和话题群里唯一匹配的名字；匹配到多个时拒绝并列出最多 5 个候选名）、`since`、`until`（默认 `until` 为现在、`since` 为 7 天前；跨度最多 30 天；`until` 不晚于现在）。
+- **前提：** `intents.enabled`、`intents.on_request.enabled` 都开；这个来源有一个意图订阅，它的确认对现在的配置成立（用它的处理器 Profile、项目和最近的意图）；会话满足 11.2 的「能加什么」（不要求在名单上）；同一个来源同时只能有一个正在跑的识别。不满足就拒绝，说明原因。
+- **读什么：** 这个会话里、发送时间在 `[since, until)` 内、已经采集的人发消息：`sender_kind = 'user'`、`origin` 为 `live` 或 `history`（范围是操作者点的，首次拉取带出的历史也是这个群真实的消息），不读 `import` 和机器人。可以早于这个群在名单上的开始时间，只限这一次。前文只取范围之内的。不读、不改名单和任何游标。
+- **上限：** 每次最多 2,000 条消息、$1。范围内超过 2,000 条时只识别最新的 2,000 条，预览里写明实际的起点。按窗口（最多 500 条、60,000 字）从旧到新调用处理器，每次调用的花费上限是剩下的预算；花完就停，记 `truncated = 'budget'`，说明识别到了哪里。
+- **运行：** `start` 写一行 `intent_recognitions`（`running`），在服务进程里后台执行，立刻返回识别编号（`R-12`）。每个窗口走第 4 节同样的渲染、处理器契约、解析和第 11.1 节的类型检查，入库用 `store_intents`，`via = 'on_request'`、`recognition_id`、`schedule_id` 为那个意图订阅；`run_id` 为空。服务重启时，还在 `running` 的记为 `failed`（「被重启打断，请重新识别」），已入库的留着。
+- **结果：** 识别出的意图从不逐条推送（推送服务跳过 `via = 'on_request'`，合并产生的新进展也不推）。完成后由代码拼一条消息：会话、范围、读了多少条、识别出的意图（编号、类型、标题，最多 20 条，其余见意图页）、是否截断、怎么「建」和「驳回」。从操作者私聊发起的，发到那个私聊；这是对操作者请求的回答，不经送达层。从控制台聊天或仪表盘按钮发起的，结果在意图页的识别记录里；控制台聊天没有主动发消息的路径，Manager 可以用 `status` 读结果。之后的建任务、驳回、24 小时没处理就过期（过期的仍可以建），都和别的意图一样。
+- **花费：** 每次调用都记在 `llm_records`，识别记录汇总 `cost_usd`；不计入意图订阅的每日预算（每次都要操作者确认，且有 $1 的硬上限）。
+
+`intent_recognitions` 的列：`id`（显示成 `R-12`）、`source_id`、`chat_id`（外键到 `source_chats`，级联删除）、`schedule_id`、`range_from`、`range_to`、`requested_via`（`manager`、`dashboard`）、`reply_channel` 和 `reply_chat`（发结果的私聊；为空就是仪表盘）、`state`（`running`、`done`、`failed`）、`events_in_range`、`events_read`、`truncated`（`messages`、`budget` 或空）、`cost_usd`、`counts`、`error`、`created_at`、`finished_at`；约束 `range_from < range_to`、`(state = 'running') = (finished_at IS NULL)`，以及每个来源最多一行 `running`（部分唯一索引）。
+
+### 11.8 操作接口与入口
+
+v1 操作都是 `operator_only`：只接受操作者身份（仪表盘），API 客户端不能调；`tests/operation_levels.json` 里登记为 `inside`。写操作沿用 v1 写操作的操作记录。
+
+| 操作 | 请求 | 结果、拒绝 |
+|---|---|---|
+| `intent_group_reads.list` | `source_id`（只有一个来源时可省） | `{enabled, delivery_enabled, run_max, day_max, max_groups, groups: [{chat_id, name, kind, added_at, read_from, readable, read_today, skipped_today, messages_24h, intents_7d}]}`；`readable` 为假表示被排除、不读；`messages_24h` 只计数，供估算 |
+| `intent_group_reads.preview` | `source_id`、`chat_id` | `{group: {chat_id, name, kind, messages_24h, estimate_usd: [低, 高]}}`，只读；估算按第 8 节的单价，消息数取 `messages_24h` 和每天额度中较小的；拒绝同 `put` |
+| `intent_group_reads.put` | `source_id`、`chat_id` | 同 `list`；已在名单上的不改开始时间；会话不存在、不是群或话题群、被排除、名单已满 10 个时拒绝（`invalid`，说明原因） |
+| `intent_group_reads.delete` | `source_id`、`chat_id` | 同 `list`；不在名单上也算成功 |
+| `intent_group_reads.settings_put` | `enabled` | 同 `list`；从关到开时，在同一个事务里把所有群的 `read_from` 改为当时；`delivery.enabled` 不是开时拒绝打开（`conflict`） |
+| `intent_recognitions.preview` | `source_id`、`chat_id`、`since`、`until` | `{chat, range_from, range_to, effective_from, events, truncated, estimate_usd}`；拒绝见 11.7 的前提 |
+| `intent_recognitions.start` | 同上 | `{recognition}`（同 `list` 里的一项）；同一个来源已有在跑的，返回 `conflict` |
+| `intent_recognitions.list` | `source_id`、`limit` | `{enabled, recognitions: [...]}`：最近的识别记录，每条带它识别出的意图（编号、类型、标题、状态） |
+| `intent_recognitions.settings_put` | `enabled` | 同 `list` |
+
+`intents.settings_get`、`intents.settings_put` 的请求和结果不变。Manager 工具 `looper_intents_recognize` 在 `ops/levels.py` 里登记为 `OPERATOR`（结果只发操作者自己的私聊）。
+
+**仪表盘：** 意图页新增「群需求」标签：
+
+- 两个开关：持续识别（送达层没开时开关置灰，并说明原因），识别一次。
+- 名单：群名、类型、加入时间、开始时间、今天交给处理器和超出额度的条数、24 小时消息数、7 天意图数；每一行有「撤销」和「识别一次」，超出额度时「识别一次」默认填今天被跳过的那段时间。
+- 按名字或 id 搜会话（`leads.chats`，只列群和话题群）；每个结果有「关注」和「识别一次」。「关注」先调 `preview` 再弹确认框，写明：从现在起读这个群里人发的消息，加入之前的、机器人和导入的都不读；最近 24 小时 N 条，每天约 $X–Y；每个群每天最多 500 条；推送走送达层，只发你的私聊。「识别一次」弹框选范围（默认 7 天，最多 30 天），先预览条数和花费，确认后开始。
+- 识别记录：最近的识别，状态、范围、条数、花费、识别出的意图。
+
+飞书和 Telegram：持续识别的意图照常推到私聊（经送达层）；在私聊里对 Manager 说「看一下某个群最近有什么需求」会走识别一次。命令行不加。
+
+### 11.9 关闭时
+
+- `intents.group_read.enabled` 不是 `true` 或名单为空时：读取的 SQL、前文、渲染、指令和契约、运行快照、`extract_counts`、计数行、确认文字、`config_version`、推送都和 `main` 一样。
+- `intents.on_request.enabled` 不是 `true` 时：默认 Manager 的工具列表、契约和进程签名不变，v1 的识别操作拒绝（`conflict`），推送服务不变。
+- 迁移只建空表、给 `intents` 加一个有默认值的列；已有的行不改写。
+
+**钉住的方式：** 第一个实现 PR 的第一个提交只加测试和基线，不改生产代码：在当时的 `main` 上截取一次完整意图运行的 golden（`tests/fixtures/model_calls/intents-group-read-off.json`）：处理器的启动参数、system prompt 和输入，`llm_records`、`schedule_runs`、`subscriptions`、`subscription_runs`、`intents`、`intent_sources` 的行，确认文字和 24 小时估算；窗口所在的来源里有一个群，群里有一条普通的人发消息，以及机器人、导入、`history` 的消息。之后「名单上有这个群、开关没设」「名单上有这个群、开关为 false」「开关为 true、名单为空」三种情况都必须和这份 golden 逐字节相同。第二个 PR 在 `tests/test_intents_default_off.py` 的冻结目录（`fixtures/catalog_default_off.json`）上证明开关关闭时 Manager 的工具和契约不变。
+
+### 11.10 可观测
+
+- **每次运行的计数**（只在这次运行开着名单时才有这些键，关闭时 `extract_counts` 不变）：`group_read`、`group_over_cap`；`dropped.group_revoked`、`dropped.group_type`。计数行追加「；名单上的群 N 条」，有跳过时再加「，超出额度跳过 M 条」。每个群每天的数在 `intent_group_read_days`。
+- **识别记录**：`intent_recognitions` 的状态、条数、截断原因、花费、`counts`（新、合并、丢弃按原因）。
+- **日志**（info）：加入、撤销、两个开关（来源 id、会话 id、开始时间）；某个群当天到了额度；识别开始、结束、被打断（识别编号、条数、花费）。日志不写消息内容和群名。
+- 不加新告警：跳过不是失败；处理器失败照旧走订阅的失败告警，识别失败写在识别记录里。
+
+### 11.11 测试与评测
+
+按计划第 1 节第 4 条：一条规则一个测试，测在离入口最近的那一层，变体参数化。
+
+| 测试 | 断言 |
+|---|---|
+| `test_followed_group_reads_only_live_human_messages_since_read_from`（数据库，参数化） | 名单群里实时的、开始时间之后的人发消息读到且是名单消息；同一群里 @ 操作者的消息读到但不是；机器人、`other`、`import`、`history`、发送或入库早于开始时间、不在名单上的群，都读不到 |
+| `test_exclusions_win_over_a_followed_group`（数据库，参数化） | 抽取排除、消息流排除、订阅的 `exclude_chats`、不含它的 `include_chats`：都不读 |
+| `test_followed_rows_are_capped_per_run_and_per_group_per_day`（数据库） | 第 201 条名单消息之前停、`more` 为真；一个群当天到 500 条后它的名单消息跳过并计入 `skipped`，别的群和原范围照读 |
+| `test_revoking_stops_the_next_read_and_drops_what_a_running_run_read`（数据库） | 排期后撤销：执行时的重读不含它；读完后、入库前撤销或关开关：引用名单消息的条目丢弃并计 `group_revoked`，其余入库，游标照常前进；撤销前入库的意图还在 |
+| `test_re_adding_or_switching_on_starts_again_from_now`（数据库） | 撤销后再加入、开关关了再开：中间的消息都不读；开着时再设一次开不改开始时间 |
+| `test_context_anchored_on_a_group_row_stays_inside_its_range`（纯函数） | 锚在全部消息上的前文和父消息不早于开始时间（或范围起点）；锚在原范围消息上的照旧 |
+| `test_group_rows_are_labelled_and_the_note_is_added_only_with_them`（纯函数） | 只有含全部消息的会话标题带标记；没有时指令和输入逐字节不变 |
+| `test_a_group_row_intent_must_be_a_dev_task_or_a_bug`（纯函数） | 引用全部消息的条目是别的类型时丢弃并计 `group_type`；只引用原范围消息的条目不受限 |
+| `test_followed_group_intents_go_only_through_the_delivery_layer`（数据库） | `followed_group` 的意图：送达层开时按非紧急类决定、超出上限进摘要；送达层关时不推；只推到操作者私聊；`subscription` 的意图推送不变 |
+| `test_triage_and_leads_ignore_followed_groups`（数据库） | 开关开、名单非空时，线索和事件分流的窗口和估算不变 |
+| `test_group_reads_round_trip_and_refusals`（接口） | 五个操作的声明形状；`preview` 不写名单；私聊、`unknown`、被排除、不存在的会话、第 11 个群被拒；重复加入不改开始时间；送达层关时打开持续识别被拒（`conflict`）；API 客户端被拒 |
+| `test_recognize_once_reads_only_the_range_and_moves_nothing`（数据库） | 只读范围内的人发消息（含 `history`，不含 `import` 和机器人），可以早于名单开始时间；名单、订阅游标都不变；意图 `via = 'on_request'`、带识别编号；推送服务不推它们 |
+| `test_recognize_once_caps_and_refusals`（数据库） | 超过 2,000 条只识别最新的；花完 $1 停并记 `budget`；跨度超过 30 天、`until` 晚于现在、没有已确认的意图订阅、同一来源已有在跑的、开关关：都拒绝；重启后 `running` 变 `failed` |
+| `test_recognize_once_posts_one_result_message_to_the_asking_dm`（数据库） | 从私聊发起的，完成后只往那个私聊发一条消息，列出每个意图的编号；从仪表盘发起的不发 |
+| `test_recognize_tool_runs_only_in_the_operators_turns_and_asks_first`（Manager 工具） | 群聊、别人的私聊、API 客户端被拒（`forbidden`）；`start` 先要用户确认；开关关时工具不在列表里 |
+| `test_intents_off_path_matches_main`（golden，参数化） | 11.9 的三种情况和 `main` 的 golden 逐字节相同 |
+| 迁移 | 旧库升级后有新表和新列，已有意图的 `via` 是 `subscription`；会话被删时名单行、计数和识别记录跟着删 |
+| 界面（`intents.test.tsx`） | 「群需求」标签：预览后确认才关注、撤销、两个开关、识别一次的预览和确认、识别记录 |
+
+**评测**（模型可见：识别说明、类型检查之外的回复、Manager 工具和契约）：
+
+- **合成用例**（进仓库，`evals/processor`，sonnet `--reps 2`）：`intents_group_requests`（群里没 @ 的需求和 bug 报告各一条，夹着闲聊、答疑、已有人接下的后续、点名交给别人且已应承的事、附和：只认出前两条，类型分别是 `dev_task` 和 `bug_triage`）、`intents_group_requests_merge`（三个人报同一个问题：一条意图，出处三条）、`intents_group_requests_quiet`（只有不算的那几类：`NONE`）、`intents_group_requests_injection`（要助手建任务的消息：进 `instructions_seen`，没有只以它为出处的意图）。原有意图用例的输入和 prompt 不变，不重跑。
+- **本机标注集**（不进仓库）：用目标群已有的线索当标注：`request` 和 `issue` 两类当「应识别」，其余当「不应识别」。导出用 `looper leads eval-export` 新增的 `--chat`、`--days`、`--intents` 选项，写到被 git 忽略的路径（和现有导出一样，只能写到 `evals/runs/` 或仓库外）：这个群在这段时间里全部的人发消息（按意图运行的窗口切好），加上来源在这个群的线索和它们的标签。标签是模型整理出的线索，评测前由操作者在本机文件里核对一遍。`python -m evals.processor --intents-file FILE` 按「全部消息」的说明跑意图识别，只报告计数：应识别的召回、只以「不应识别」消息为出处的意图条数、每 100 条消息的意图数、合并率、每个窗口的花费；不打印消息和意图内容。
+- **Manager 对话评测**（第二个 PR）：`intents_recognize_once`（用户在私聊里问一个群最近一周有什么需求：先 `preview`、报条数和花费、等确认）、`intents_recognize_range_cap`（要 60 天：说明最多 30 天）；sonnet `--reps 2`，加 opus xhigh 的 Manager `--reps 1`。
+- **目标**（PR 里报告，达不到就先改说明再跑，不改用例迁就模型）：标注集召回不低于 80%；只以「不应识别」消息为出处的意图每 100 条消息不超过 3 条；合成用例全部通过。
+- **花费**（推测）：合成用例约 $0.2；标注集按 30 天、约 1,200 条消息、3 个窗口估，sonnet 每次约 $0.3，2 次加最多 2 轮改说明后重跑约 $1.2，处理器 Profile 用 Opus 时再跑 1 次约 $1.5；Manager 对话约 $1。合计约 $4，申请上限 $8（每个用例 `--case-budget-usd`，总额超出就停）。
+
+**真实路径：** 在工作树上对一次性数据库跑 `looper serve`（不用 8767），用桥接文件写入合成的群消息；加入一个群、Run now 意图订阅，核对意图行、计数和送达层的决定；对另一个群识别一次，核对识别记录和结果消息；截一张「群需求」标签的图。模型可见内容用真实 Claude CLI 跑一次。
+
+### 11.12 PR 与待定
+
+两个实现 PR，都默认关闭、可以独立回滚：
+
+1. `codex/intents-group-read`（以本节的 RFC 分支为基线）：共用的识别说明、类型检查和 `intents.via`，持续识别（迁移 `intent_group_reads`、读取与入库、额度、推送分流、操作接口、「群需求」标签的名单部分），标注集导出和合成评测用例，`agent-system.md` 的读取范围和接口两段。
+2. `codex/intents-recognize-once`（以 1 为基线）：识别一次（迁移 `intent_recognitions`、后台运行、Manager 工具和契约、v1 操作、「识别一次」按钮和识别记录、Manager 对话评测）。
+
+**待维护者确认：**
+
+1. **持续识别和送达层绑在一起：** 推荐打开持续识别前必须先开 `delivery.enabled`，送达层被关掉时名单消息的意图不推送。代价是送达层会同时管住所有主动消息（安静时段、每天 5 条的上限）。备选是送达层关着时照现有方式推送，不设上限，或者把同一次运行里名单消息的意图合成一条摘要推送（要新加一种推送）。
+2. **评测预算：** 约 $4，申请上限 $8（11.11）。

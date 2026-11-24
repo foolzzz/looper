@@ -296,3 +296,65 @@ def test_invalid_limit_precedes_enabled_check(tmp_path, database, enabled):
     if enabled:
         enable(database)
     assert run_cli(tmp_path, database, "search", "--limit", "0") == 2
+
+
+def test_intents_eval_export_is_anonymous_filters_messages_and_includes_all_label_states(tmp_path, database, capsys):
+    out = tmp_path / "intents.jsonl"
+    enable(database)
+
+    async def seed(conn):
+        now = datetime.now(UTC) - timedelta(minutes=1)
+        first = await stream.add(conn, "Private synthetic request", chat_id="oc_export", chat_name="Private group",
+                                 sender="ou_synthetic", sent_at=now - timedelta(minutes=1))
+        second = await stream.add(conn, "Private synthetic reply", chat_id="oc_export", sender="ou_other",
+                                  origin="history", sent_at=now)
+        external = await conn.fetchval("SELECT external_id FROM source_events WHERE seq=$1", first)
+        await conn.execute("UPDATE source_events SET parent_id=$2 WHERE seq=$1", second, external)
+        for options in ({"sender_kind": "app"}, {"origin": "import"}, {"sent_at": now - timedelta(days=8)},
+                        {"chat_id": "oc_other"}):
+            await stream.add(conn, "Excluded synthetic message", **{"chat_id": "oc_export", "sent_at": now, **options})
+        ids = []
+        for kind, state in (("request", "active"), ("issue", "inaccurate"), ("decision", "superseded"),
+                            ("fact", "active"), ("status", "active")):
+            ids.append(await sup.lead(conn, [first, second], kind=kind, state=state, summary="Private synthetic summary"))
+        await conn.execute("UPDATE message_leads SET state='promoted',promoted_kind='vault_proposal' WHERE id=$1", ids[3])
+        await conn.execute("UPDATE message_leads SET state='dropped',check_verdict='drop' WHERE id=$1", ids[4])
+        return ids
+
+    ids = db_call(database, seed)
+    capsys.readouterr()
+    assert run_cli(tmp_path, database, "eval-export", "--chat", "Private group", "--days", "7", "--intents",
+                   "--out", str(out)) == 0
+    said = capsys.readouterr().out
+    assert "1 个窗口，2 条消息；请求 1 条，问题 1 条，其他 3 条标签" in said
+    assert "Private" not in said and "oc_export" not in said
+    assert out.stat().st_mode & 0o777 == 0o600
+    serialized = out.read_text()
+    assert all(private not in serialized for private in ("ou_synthetic", "ou_other", "oc_export", "Private group",
+                                                         "Private synthetic summary", "Excluded synthetic message"))
+    window, *labels = [json.loads(line) for line in serialized.splitlines()]
+    assert [m["sender"] for m in window["messages"]] == ["P1", "P2"]
+    assert [m["ref"] for m in window["messages"]] == ["x1", "x2"]
+    assert window["messages"][1]["reply_to"] == "x1"
+    assert [label["lead"] for label in labels] == [f"lead-{number}" for number in ids]
+    assert [label["expected"] for label in labels] == ["intent", "intent", "none", "none", "none"]
+    assert all(label["sources"] == ["x1", "x2"] for label in labels)
+
+
+@pytest.mark.parametrize("boundary", ["messages", "characters"])
+def test_intents_eval_export_bounds_windows(tmp_path, database, boundary):
+    enable(database)
+
+    async def seed(conn):
+        now = datetime.now(UTC) - timedelta(minutes=1)
+        for _ in range(501 if boundary == "messages" else 3):
+            await stream.add(conn, "x" if boundary == "messages" else "x" * 30_000, sent_at=now,
+                             chat_id="oc_export")
+
+    db_call(database, seed)
+    out = tmp_path / "intents.jsonl"
+    assert run_cli(tmp_path, database, "eval-export", "--chat", "oc_export", "--days", "30", "--intents",
+                   "--out", str(out)) == 0
+    rows = [json.loads(line) for line in out.read_text().splitlines()]
+    assert [len(row["messages"]) for row in rows] == ([500, 1] if boundary == "messages" else [2, 1])
+    assert all(sum(len(m["text"]) for m in row["messages"]) <= 60_000 for row in rows)

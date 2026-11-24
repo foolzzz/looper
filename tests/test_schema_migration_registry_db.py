@@ -83,11 +83,19 @@ def test_new_migration_file_upgrades_and_initializes_the_same_schema(tmp_path, m
     ("failure_typing", "ALTER TABLE llm_records DROP COLUMN failure_class, DROP COLUMN failure_cause"),
     ("memory_candidates", "DROP TABLE memory_candidates, memory_candidate_revisions, memory_candidate_events, "
                           "memory_candidate_sources, memory_posts, memory_tombstones CASCADE"),
+    ("memory_draft_role", "ALTER TABLE agent_setting_layers DROP CONSTRAINT agent_setting_layers_role_check; "
+                          "ALTER TABLE agent_setting_layers ADD CONSTRAINT agent_setting_layers_role_check "
+                          "CHECK (role IN ('manager', 'planner', 'worker', 'reviewer', 'processor', 'advisor', "
+                          "'advice_check', 'leads_check', 'outbound_check', 'explorer'))"),
+    ("memory_draft_queue", "DROP TABLE memory_draft_waits, memory_draft_lease"),
     ("channel_outbox", "DROP TABLE channel_outbox CASCADE"),
     ("manager_sessions", "DROP TABLE manager_sessions CASCADE"),
     ("provider_limit_windows", "DROP TABLE provider_limit_windows CASCADE"),
+    ("provider_admission", "DROP TABLE provider_admission, provider_admission_events CASCADE"),
     ("cost_holds", "DROP TABLE cost_holds"),
     ("schedule_equivalent_budget", "ALTER TABLE schedules DROP COLUMN daily_budget_equivalent_usd"),
+    ("intent_group_reads", "DROP TABLE intent_group_reads, intent_group_read_days; "
+                           "ALTER TABLE intents DROP COLUMN via"),
 ])
 def test_merged_migrations_remain_discoverable_and_upgrade(migration_name, rollback):
     async def test():

@@ -46,6 +46,14 @@ _VERSION = _object({"version": _INT, "name": _STR, "guidance": _STR, "priority":
 _BINDING = _object({"chat_id": _STR, "chat_name": _STR, "chat_kind": _STR, "project": _PROJECT}, closed=True)
 _APP = {"app_id": _STR, "chats": {**_array(_STR), "maxItems": 3}, "messages_30d": _INT}
 _SENDER = _object({**_APP, "added_at": _STR}, closed=True)
+_GROUP = _object({"chat_id": _STR, "name": _STR, "kind": _STR, "added_at": _STR, "read_from": _STR,
+                  "readable": _BOOL, "read_today": _INT, "skipped_today": _INT, "messages_24h": _INT,
+                  "intents_7d": _INT}, closed=True)
+_GROUPS = _object({"enabled": _BOOL, "delivery_enabled": _BOOL, "run_max": _INT, "day_max": _INT,
+                   "max_groups": _INT, "groups": _array(_GROUP)}, closed=True)
+_PREVIEW = _object({"group": _object({"chat_id": _STR, "name": _STR, "kind": _STR, "messages_24h": _INT,
+    "estimate_usd": {**_array({"type": "number"}), "minItems": 2, "maxItems": 2}}, closed=True)}, closed=True)
+_CHAT = {"chat_id": {"type": "string", "minLength": 1}}
 _SETTINGS = _object({"enabled": _BOOL, "subscriptions": _array(_object({"schedule_id": _STR, "name": _STR,
     "enabled": _BOOL, "project_id": _STR, "target_ok": _BOOL}, closed=True))}, closed=True)
 _STAT = _object({"key": _STR, "name": _STR,
@@ -114,6 +122,12 @@ OPERATIONS = (
         _object({"senders": _array(_SENDER)}, closed=True), required=["app_id"], risk="write"),
     _op("intent_alert_senders", "delete", {**_SOURCE_ID, "app_id": _STR},
         _object({"senders": _array(_SENDER)}, closed=True), required=["app_id"], risk="write"),
+    _op("intent_group_reads", "list", _SOURCE_ID, _GROUPS, required=[]),
+    _op("intent_group_reads", "preview", {**_SOURCE_ID, **_CHAT}, _PREVIEW, required=["chat_id"]),
+    _op("intent_group_reads", "put", {**_SOURCE_ID, **_CHAT}, _GROUPS, required=["chat_id"], risk="write"),
+    _op("intent_group_reads", "delete", {**_SOURCE_ID, **_CHAT}, _GROUPS, required=["chat_id"], risk="write"),
+    _op("intent_group_reads", "settings_put", {**_SOURCE_ID, "enabled": _BOOL}, _GROUPS,
+        required=["enabled"], risk="write"),
 )
 
 
@@ -141,6 +155,9 @@ async def run(server, operation, arguments, principal, headers):
                         "set_project_template": "set_project_template"}[action]
         elif domain == "intent_bindings":
             function = {"list": "bindings_list", "put": "binding_put", "delete": "binding_delete"}[action]
+        elif domain == "intent_group_reads":
+            function = {"list": "group_reads_list", "preview": "group_read_preview", "put": "group_read_put",
+                        "delete": "group_read_delete", "settings_put": "group_read_settings_put"}[action]
         else:
             function = {"list": "alert_senders_list", "put": "alert_sender_put", "delete": "alert_sender_delete"}[action]
         return _plain(await getattr(service, function)(**values))

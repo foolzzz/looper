@@ -2320,7 +2320,8 @@ Manager tools.
   startup.
 - **Providers** (`llm_providers`) are accounts: `name`, typed `vendor_type`,
   `auth`, `oauth_runtime_type`, `env`, `max_concurrency` (`null` = no limit,
-  stored and checked only), and a separate API key in `llm_provider_secrets`.
+  enforced when `engine.admission.enabled` is on), and a separate API key in
+  `llm_provider_secrets`.
   The API returns the key as `***` or `null`; sending `***` keeps it and
   `null` removes it. The launch path and a model listing load it. Login accounts use their
   runtime's own login and never copy OAuth tokens. Vendor templates suggest
@@ -2872,8 +2873,16 @@ narrowed constraint, so its project page cannot store a project's limit.
 What bounds the load is now each task's limits and how many tasks start.
 Before, an unconfigured project ran at most 8 Planners, 16 Workers and 8
 Reviewers at once whatever its tasks; now N running tasks run N Planners and
-up to 16N Workers and 8N Reviewers, and nothing caps the total (an LLM
-provider's `max_concurrency` is stored, not enforced). The converted alarm-like
+up to 16N Workers and 8N Reviewers. By default nothing caps the total.
+With `engine.admission.enabled`, each account's `max_concurrency` also bounds
+Workers, Reviewers, consults, processors and nested runs; `null` is unlimited.
+The account queue uses the shared `Lane` enum, aging and quota freezes, with
+durable state and an operator-only `providers.limits_clear` override. Nested
+runs borrow a running parent's slot. Planner and Manager turns and platform
+explorers are not admitted yet. The switch defaults off and refuses activation
+while failure typing is off. The independent cost guard can still hold runs
+for spending; admission's 95% background pause does not change that policy.
+The converted alarm-like
 project (Planner 3, Worker 8, Reviewer 3) moves from at most 8 Workers and 3
 Reviewers across the project to its parallel schedule's 3 runs × (8, 3): 24
 Workers and 9 Reviewers. Bursts come from several schedules firing in the same
@@ -3035,9 +3044,9 @@ only the operator's confirmation of its exact content lets Looper write it
 into the vault's memory folder
 ([RFC](rfcs/memory-write-path-v0.zh-CN.md); a lesson that takes effect in
 PostgreSQL only is the [tiers RFC](rfcs/memory-tiers-v0.zh-CN.md)'s). This
-part includes the foundation, confirmed write path and operator DM delivery.
-Sources, drafting and the dashboard memory page follow separately.
-The write path adds no model-visible prompt, contract or tool.
+part includes the foundation, private drafting, the confirmed write path and
+operator DM delivery. Sources and the dashboard memory page follow separately.
+Drafting has its own contract; existing agents gain no prompt or tool.
 
 - **Tables** (migration `memory_candidates`): `memory_candidates` (shown as
   `M-0042`; its kind, state and reason, the least trusted class of its
@@ -3083,7 +3092,9 @@ The write path adds no model-visible prompt, contract or tool.
   found or a check failed, 2 usage, 3 not configured, 4 refused, 5 no such
   candidate, 6 database unusable).
 - **Operator actions:** `/api/v1/memory/confirm`, `confirm_many`, `reject`,
-  `edit`, `retry`, `revive` and `delete` are operator-only. Confirmation
+  `edit`, `retry`, `redraft`, `revive` and `delete` are operator-only.
+  Redrafting queues a conflict or a `draft_failed` candidate for a fresh revision;
+  it changes only Looper state (`inside`) and never confirms a write. Confirmation
   names the current content hash; a stale hash is a conflict. Batch
   confirmation returns a result for each selected item. Editing stores a
   new revision and clears confirmation; saving and confirming it is one
@@ -3094,6 +3105,38 @@ The write path adds no model-visible prompt, contract or tool.
   `confirm`; exit code 7 means the state does not allow the action. Deleting
   a candidate leaves its fingerprint as a tombstone and leaves vault notes
   alone.
+- **Drafting** (`memory_draft_service.py`, `memory_draft.py`, `memory_draft_role.py`):
+  the service polls every 10 seconds and PostgreSQL wakes it after a seed commits.
+  A short transaction uses an advisory lock and `SKIP LOCKED` to claim a `drafting`
+  vault candidate and a 180-second spend lease across servers. Input assembly and
+  the model call run after commit, with a 150-second outer deadline and no database
+  locks. A short transaction then checks the lease, candidate and saved settings
+  before persisting; a deleted/changed candidate or expired/replaced lease discards
+  the result. Deleting a seed does not release its live spend lease. Code searches only the kind's configured
+  folders (`vault.search`'s internal `under` argument), includes its rules, index,
+  entry pages and related open/rejected candidates, and bounds the escaped input
+  to 60,000 characters. The `memory_draft` role runs through `model_call.ChildCall`,
+  with its own built-in `claude-code/sonnet-5-5` profile, no harness or tools, a
+  replaced system prompt and an empty working directory. Its private `memory_draft`
+  record retains only input digest/length and typed events, never source or reply
+  bodies. The role is configurable in Settings → Roles. The deadline is at most
+  120 seconds; the existing drafting settings bound each call and the local day's
+  recorded spending. An unknown cost reserves a whole per-call cap. A depleted
+  allowance leaves candidates queued until the next day and records one daily
+  notice (sent to the configured operator DM when available).
+  Strict parsing resolves only supplied ids, checks paths, snapshots, frontmatter,
+  index updates, exact anchors and credentials, and saves a revision in `pending`.
+  Duplicate/rejected seeds are dropped; matching open candidates merge only source
+  classes their kind permits. A revision of a confirmed/writing/blocked/conflict
+  candidate stays in `drafting` with a durable `target_busy` wait naming that
+  candidate. Polls and restarts skip it without model calls until the target leaves
+  those states or is deleted; other seeds continue immediately. Runtime and malformed-JSON failures get two retries;
+  invalid changes and credentials are dropped immediately. `large_removal` and
+  `flagged` preserve review warnings. Off, the service performs no vault read,
+  model call or candidate write, and existing agent prompts/tools/launches stay
+  unchanged. The `memory_draft_role` migration (order 1830) widens role/run-kind checks with
+  `NOT VALID`, then validates online. The `memory_draft_queue` migration (order
+  1840) creates the durable target waits and spend lease tables.
 - **Writing** (`looper/agents/memory_write.py`): `looper serve` polls and
   wakes after confirmation or retry. With `memory_write` absent or disabled
   it writes nothing. A PostgreSQL session advisory lock per git repository
@@ -3433,9 +3476,21 @@ Empty checks
 and the disabled permission are omitted from existing responses and exports;
 while off, Planner contracts and prompts remain byte-identical, including plan
 views of previously enabled projects with saved checks. Definitions remain in
-the database for operator evidence reads. See the
-[executable acceptance RFC](rfcs/executable-acceptance-v0.zh-CN.md), sections 6
-and 13, for the protocol and remaining result or channel evidence summaries.
+the database for operator evidence reads. Once a task has current evidence rows,
+its completed or failed result includes a code-written `## Evidence` section:
+one line per check with its criterion, state and measured version's short hash,
+plus the number of criteria without a check. Missing results say `not run`;
+advisory failures remain labeled advisory. Existing evidence stays visible after
+checks are disabled. With no current evidence rows, results and notices are unchanged.
+Lark and Telegram end notices include one check-count line without commands,
+output or artifact names; group notices omit the full evidence section.
+Manager completion-turn replies do not yet include that count line. A summary
+read failure while checks are enabled adds an unavailable-evidence section,
+without counts, and logs a warning and activity. A completed result keeps its
+process record last; a failed result appends evidence after its closing note.
+The dashboard and CLI task reads show the stored result, including evidence.
+See the [executable acceptance RFC](rfcs/executable-acceptance-v0.zh-CN.md),
+sections 6 and 13, for the protocol and remaining work.
 
 A task can also have a spend cap of its own (`tasks.budget_usd`, a scheduled
 run's `run_budget_usd`), which replaces its project's `task_budget_usd` for it
@@ -5078,14 +5133,14 @@ its own refusal text, and its listing's hash is in the process signature. Until 
 conversation, the user's own turns are what keeps it to the session key `main`: it searches, of the default
 Manager's threads without an API client, the dashboard chat, the dashboard's chats with the Planners of the tasks it
 created, and the Lark and Telegram direct chats whose recorded sender is the bot's `operator_sender_id` now. While the
-switch is on, storing a direct chat's user message records who the chat is with (`chat_direct_threads`, the first
-record stays); a group chat, another sender's direct chat, a scenario Manager's or an API client's thread is never
-searched. Candidates come from `idx_chat_messages_search`, a GIN index on the messages' tokens
+switch or idle checks are on, storing a direct chat's user message records who the chat is with
+(`chat_direct_threads`, the first record stays); a group chat, another sender's direct chat, a scenario Manager's or
+an API client's thread is never searched. Candidates come from `idx_chat_messages_search`, a GIN index on the messages' tokens
 (`array_to_tsvector(looper_search_tokens(content))`, built online on upgrade): each word brings at most its 2,000
 newest messages in scope, and only those are read and scored, with JIT off for the query. Every passage it returns is
 fenced (`<untrusted source="chat_history" where=… who=… at=…>`, its own `<untrusted`/`</untrusted` escaped) and goes
 into the leads search's group backstop. Off, the tool list, the prompt, the signature and the command are what they
-were before, and nothing is recorded.
+were before; direct-chat provenance is recorded only if idle checks are on.
 
 **One-time reminders** ([reminders RFC](rfcs/reminders-v0.zh-CN.md)). With `reminders.enabled` on, `current_scope`
 adds the three reminder tools to the default Manager's tools; they are `RestrictedTool`s with `audience` `operator`,
@@ -6567,7 +6622,16 @@ ids, so a rejected Tuesday brief's digest is still in Wednesday's. A sender
 that stops before the record is `uncertain` on restart, and that recovery
 consumes exactly the stored ids: it does not scan by `decided_at`. A row whose
 insert had not committed is therefore still read once, on the next brief.
-`consumed_until` is the check time, not a watermark. Every section empty means
+`consumed_until` is the check time, not a watermark. With
+`subscriptions.triage.enabled` on, only the brief for `operator_dm_target()`
+adds “进摘要的事件”: up to ten newest owned digest or settled important fallback
+events, plus the remaining count. It uses the same first digest date's local
+midnight as its lower bound. `triage_ids` stores the exact read with the claim;
+`morning_brief_triage` consumes it in the sent/uncertain transaction or recovery.
+Refusals and released claims consume nothing. While triage is enabled, deferred
+`source = triage` rows are excluded from the ordinary deferred-message section.
+Event titles, chat names and summaries lose mention markup and escape Markdown;
+these fields are operator-visible text, never model input. Every section empty means
 nothing is sent. The switch, whether the
 channel is enabled and who the operator is are read again after the summary is
 collected and again immediately before the post. The switch is read again after
@@ -6735,8 +6799,11 @@ row is off), set only through the operator-only `idle_check_settings.get` and
   setting and stops. A tick that decides not to check writes nothing (it counts
   the reason and logs it at DEBUG). The advisory lock covers only "decide,
   insert, publish". Before bus replay starts, checks left `running` by an earlier
-  server fail as `restart`; recovery failure blocks startup.
+  server fail as `restart`; checks left `sending` become `uncertain`, count as
+  mentioned and are never sent again. Recovery records an `unknown` receipt;
+  recovery failure blocks startup.
 - Rows: `idle_checks` (kept 90 days; migration `idle_checks`). The migration
+  `idle_check_sending` adds the in-flight `sending` state without rewriting rows;
   `idle_check_source` adds `idle_check` to the source check of
   `proactive_deliveries`, built from the check's current values, so it composes
   with the morning brief's and triage's widenings.
@@ -6747,8 +6814,9 @@ row is off), set only through the operator-only `idle_check_settings.get` and
   if it is replaced. With all prerequisites on, enabling the switch takes effect
   on the next tick.
 - `ManagerAgent.idle_for()` reads only main's lock, running token, worker and
-  resident. Its clock is `ManagerSession.turn_ended_at`, written by that session's
-  worker (or the message loop for its own turns), falling back to service start.
+  resident. Its clock is `ManagerSession.turn_ended_at`, written when that session
+  handles a user message or runs a background turn, falling back to service start.
+  A wake that runs no turn leaves the clock unchanged.
   Group arrivals can update `last_activity` without resetting main's idle clock.
 - `IDLE_CHECK_DUE` runs on main's background lane through `tiers/background_turn.py`,
   sharing completion token registration, preparation, locking and bounded late
@@ -6760,6 +6828,11 @@ row is off), set only through the operator-only `idle_check_settings.get` and
   acknowledging their wakes. An interrupted running check also records `preempted`
   and leaves one stopped note for the next user turn; it sends nothing. Lark
   `/stop` matches the operator's sender id even though its DM has a different id.
+  A user message in the target direct chat after the check started also voids
+  its delivery as `preempted`, checked before the decision and again before sending.
+  Both channels look up the sender through `chat_direct_threads`, since a Lark DM's
+  chat id differs from its sender id; the same timestamp goes to the delivery layer.
+  Idle checks record this provenance even when session search is off.
 - A sent morning brief suppresses checks for two hours in that same channel and
   direct chat. Real-model idle and concurrent preemption evals remain pending;
   loopback runtimes cover the service and Manager paths.
@@ -7781,7 +7854,7 @@ PostgreSQL is a hard startup dependency. All data paths:
 | `manager_actions` | The Manager's tool calls (`looper/agents/ops`), one row each: `manager_id`, `channel`, `chat` and `message_id` of the turn (empty for a turn Claude ran on its own), `tool`, `arguments` (secret values masked), `risk` (`read`, `write`, `high`), `status` (`ok`, `needs_confirmation`, `error` with `error_code`), `result` (of a change; a read's is not kept), `confirmation_id` (the call that asked, on a confirmed one) and `task_id` (the task it acted on, no foreign key) |
 | `activity` | Execution trace events (SSE streaming to frontend) |
 | `chat_messages` | Chat conversation history of every channel: `session_id` (the web session or stable bot/chat/Manager thread described above; not Telegram groups), `message_id`, `role`, `content`, `channel` (`web`, `telegram`, `lark` or `lark_bot`; rows from before it read `web`), `delivery_failure` and `delivery_error` (a Lark or Telegram answer its channel did not deliver: `no_chat` or `send_failed`, and the channel's error; NULL otherwise); a new Manager session's resume brief reads the recent chats that are not a task's Planner thread (`planner-<task_id>`) |
-| `chat_direct_threads` | Who a stored Lark or Telegram direct chat (`session_id`) is with: its bot (`channel_id`) and `sender_id`, recorded when one of their messages is stored while the session search is in effect, the first record kept; the session search counts the chat as the user's own while the sender is the bot's `operator_sender_id` |
+| `chat_direct_threads` | Who a stored Lark or Telegram direct chat (`session_id`) is with: its bot (`channel_id`) and `sender_id`, recorded when one of their messages is stored while session search or idle checks are on, the first record kept; the session search counts the chat as the user's own while the sender is the bot's `operator_sender_id` |
 | `llm_records` | One row per agent run: input and output text, status (`running`, `completed`, `failed`, `interrupted`), the run's own `cost_usd` and its `cost_source` (`runtime` or `provider_price`), `input_tokens`, `output_tokens`, `cache_read_tokens` and `cache_creation_tokens`, its final `context_tokens` and its `compactions`; `metadata` holds the exact argv (`command`), `cwd`, the supplied `system_prompt`, its `system_prompt_mode` (`append` for old records without it), its `system_prompt_sha256`, its `prompt_layers`, the `profile` (`agent` on runs recorded before the rename), the `model_choice`, the Settings `env` names, the `library` items loaded, the `project_instructions` the runtime was given and a task agent's `project_skills`, and for a Worker's or Reviewer's run its `outcome` (`completed`, `reported_failed`, `files_mismatch`, `passed`, `not_passed`, `contract`, `run_failed`; `worker.RunOutcome`); `run_kind` (`manager`, `planner`, `worker`, `reviewer`, `processor`, `consult`, `advisor`, `advice_check`, `outbound_check`, `leads_check`: what the record's agent id says, or what a spawned run names; null on rows from before it, which no migration rewrites: readers take those rows' kind from their agent id, `llm_records.RUN_KIND`) and `parent_record_id` (the run that started it: a spawned run's parent) |
 | `role_configs` | Each role's own settings, keyed by `role` (`manager`, `planner`, `worker`, `reviewer`): display name, role prompt and its recommended `default_prompt`, turns, timeout, enabled |
 | `agent_setting_layers` | Agent settings by layer: `scope` (`system`, `role`, `project`, `role_project`), `role`, `project_id` (goes with its project), and the nullable `harness_prompt`, `profile_id` (the effort is the profile's), `env` (ordered `[{key, value}]`, `null` value = unset), `run_budget_usd`, `max_concurrency` (the `worker` or `reviewer` `role` layer only: the default for every task) and `system_prompt_mode` (`append` or `replace`, the `role` layers only, enforced by a CHECK; null: the role's built-in value); one row per layer and place |

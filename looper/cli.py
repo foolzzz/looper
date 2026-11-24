@@ -212,6 +212,9 @@ def _add_leads_parser(commands: argparse._SubParsersAction) -> None:
                     "be outside any git work tree or ignored by git (evals/runs/ is).")
     export.add_argument("--out", required=True, help="The JSONL file to write (mode 600).")
     export.add_argument("--sample", type=int, default=20, help="Active leads to add, 0 to 500 (default 20).")
+    export.add_argument("--chat", help="Chat id or a uniquely matching name; requires --days and --intents.")
+    export.add_argument("--days", type=int, help="1 to 30 days for intents (default horizon 30); requires --chat and --intents.")
+    export.add_argument("--intents", action="store_true", help="Export anonymous intent windows and labels; requires --chat and --days.")
     for command in (search, mark, delete, export):
         _add_location_flags(command)
 

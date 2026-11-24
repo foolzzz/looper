@@ -13,11 +13,12 @@ from tests import leads_support, subscription_support as stream
 UTC = timezone.utc
 # A database from before the memory candidates migration: none of its objects, and no marker. One from before an
 # earlier migration they point at (the leads) predates them too.
-DROP_MEMORY = ("DROP TABLE memory_posts, memory_candidate_sources, memory_candidate_revisions, memory_tombstones, "
+DROP_MEMORY = ("DROP TABLE IF EXISTS memory_draft_waits, memory_draft_lease; "
+               "DROP TABLE memory_posts, memory_candidate_sources, memory_candidate_revisions, memory_tombstones, "
                "memory_candidate_events, memory_candidates CASCADE; "
                "DROP TRIGGER projects_memory_lessons_drop ON projects; "
                "DROP FUNCTION memory_candidates_source_deleted(), memory_candidates_project_deleted(); "
-               "DELETE FROM schema_migrations WHERE name = 'memory_candidates'; ")
+               "DELETE FROM schema_migrations WHERE name IN ('memory_candidates', 'memory_draft_queue'); ")
 NOW = datetime(2026, 11, 21, 9, 0, tzinfo=UTC)
 NOTE = {"op": "create_note", "path": "mem/prefs/weekly.md", "content": "---\nkind: memory\n---\nConclusion first.\n"}
 INDEX = {"op": "append_line", "path": "mem/prefs/_index.md", "under": "## Index",
