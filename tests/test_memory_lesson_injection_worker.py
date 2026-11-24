@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+from datetime import datetime, timedelta, timezone
 from unittest.mock import AsyncMock
 
 import pytest
@@ -240,7 +241,7 @@ def test_disabled_prepare_matches_the_fixed_revision(tmp_path, monkeypatch, agen
     asyncio.run(scenario())
 
 
-@pytest.mark.parametrize("ending", ["refused", "cancelled", "error"])
+@pytest.mark.parametrize("ending", ["refused", "held", "cancelled", "error"])
 def test_admission_exit_abandons_the_prepared_delivery(tmp_path, monkeypatch, agent_db, ending):
     from contextlib import asynccontextmanager
     from looper.agents import memory_lesson_injection as lessons
@@ -257,6 +258,8 @@ def test_admission_exit_abandons_the_prepared_delivery(tmp_path, monkeypatch, ag
             return run
     monkeypatch.setitem(ADAPTERS, "claude-code", Runtime())
     failure = (worker.cost_guard.Denied("synthetic refusal") if ending == "refused" else
+               worker.cost_guard.Held(datetime.now(timezone.utc) + timedelta(minutes=5), "rejected")
+               if ending == "held" else
                asyncio.CancelledError() if ending == "cancelled" else RuntimeError("admission unavailable"))
     @asynccontextmanager
     async def slot(*args, **kwargs):
