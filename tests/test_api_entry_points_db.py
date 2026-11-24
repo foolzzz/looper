@@ -20,7 +20,7 @@ from looper.agents.message import MessageType, channel_address
 from looper.db import agent_sessions
 from tests.db_support import DSN, run_db
 from tests.api_manager_support import _profile
-from tests.fake_model_api import FakeModelAPI, ResponseScript, text_events
+from tests.fake_model_api import FakeModelAPI, ResponseScript, message_events, text_events
 from tests.test_agent_channels import OPEN_ID, _allowlist, _lark_event, _tg_update
 from tests.test_api_manager_turns_db import USAGE, _manager, _message
 from tests.test_api_v1_auth import _bearer, _send, _serving
@@ -29,6 +29,14 @@ from tests.test_cli_entry import _doctor_env, _run_looper
 from tests.test_operator_auth import TOKEN
 
 pytestmark = pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
+
+
+async def _use_protocol(pool: Any, protocol: str) -> None:
+    if protocol == "anthropic-messages":
+        await pool.execute("INSERT INTO llm_provider_endpoints (provider_id,protocol,base_url) "
+                           "SELECT provider_id,$1,base_url FROM llm_provider_endpoints "
+                           "WHERE provider_id='prov-api-test' AND protocol='openai-responses'", protocol)
+        await pool.execute("UPDATE llm_models SET protocol=$1 WHERE id='model-api-test'", protocol)
 
 
 @asynccontextmanager
@@ -83,16 +91,19 @@ def _replies(chat: Any, channel: str) -> list[dict[str, Any]]:
 
 
 @pytest.mark.parametrize("client", [False, True], ids=["dashboard", "loopercli"])
-def test_v1_registry_lists_api_as_in_process_manager_without_executable(tmp_path, monkeypatch, client):
+@pytest.mark.parametrize("protocol", ["openai-responses", "anthropic-messages"])
+def test_v1_registry_lists_api_as_in_process_manager_without_executable(tmp_path, monkeypatch, client, protocol):
     async def run(pool):
         async with FakeModelAPI([]) as model:
             await _profile(pool, model.base_url)
+            await _use_protocol(pool, protocol)
             async with _api(tmp_path, pool, monkeypatch) as call:
                 status, answer = await call("ops.agent_profiles.list" if client else "registry.view", client=client)
                 assert status == 200, answer
                 view = answer["result"]
                 kind = next(row for row in view["runtime_types"] if row["type"] == "api")
                 assert kind["in_process"] is True and kind["roles"] == ["manager"]
+                assert protocol in kind["protocols"]
                 runtime = next(row for row in view["runtimes"] if row["runtime_id"] == "rt-api-test")
                 if not client:
                     assert runtime["in_process"] is True and runtime["path"] is None
@@ -102,11 +113,12 @@ def test_v1_registry_lists_api_as_in_process_manager_without_executable(tmp_path
     run_db(run, monkeypatch, timeout=30)
 
 
-def test_v1_registry_explains_missing_package_without_registering_runtime(tmp_path, monkeypatch):
+@pytest.mark.parametrize("package", ["openai", "anthropic"])
+def test_v1_registry_explains_missing_package_without_registering_runtime(tmp_path, monkeypatch, package):
     original = importlib.metadata.version
 
     def version(name):
-        if name == "openai":
+        if name == package:
             raise importlib.metadata.PackageNotFoundError(name)
         return original(name)
 
@@ -119,16 +131,18 @@ def test_v1_registry_explains_missing_package_without_registering_runtime(tmp_pa
             view = answer["result"]
             kind = next(row for row in view["runtime_types"] if row["type"] == "api")
             assert kind["probe_error"] == (
-                "the openai Python package is not installed with this Looper; reinstall Looper")
+                f"the {package} Python package is not installed with this Looper; reinstall Looper")
             assert not any(row["type"] == "api" for row in view["runtimes"])
 
     run_db(run, monkeypatch, timeout=30)
 
 
 @pytest.mark.parametrize("channel", ["telegram", "lark"])
-def test_channel_profile_command_lists_and_selects_api_manager(tmp_path, monkeypatch, channel):
+@pytest.mark.parametrize("protocol", ["openai-responses", "anthropic-messages"])
+def test_channel_profile_command_lists_and_selects_api_manager(tmp_path, monkeypatch, channel, protocol):
     async def run(pool):
         async with _manager(pool, tmp_path, monkeypatch, []) as chat:
+            await _use_protocol(pool, protocol)
             async with _commands(chat, tmp_path, monkeypatch, channel) as send:
                 await chat.manager._handle(await send("/profile"))
                 view = await chat.manager.session_view()
@@ -144,12 +158,15 @@ def test_channel_profile_command_lists_and_selects_api_manager(tmp_path, monkeyp
 
 
 @pytest.mark.parametrize("channel", ["telegram", "lark"])
-def test_channel_stop_command_cancels_streaming_api_manager(tmp_path, monkeypatch, channel):
+@pytest.mark.parametrize("protocol", ["openai-responses", "anthropic-messages"])
+def test_channel_stop_command_cancels_streaming_api_manager(tmp_path, monkeypatch, channel, protocol):
     monkeypatch.setattr(chat_settings, "_stop_enabled", True)
 
     async def run(pool):
-        script = ResponseScript(events=text_events("Partial reply.", usage=USAGE), gate=asyncio.Event())
+        events = message_events("Partial reply.") if protocol == "anthropic-messages" else text_events("Partial reply.", usage=USAGE)
+        script = ResponseScript(events=events, gate=asyncio.Event())
         async with _manager(pool, tmp_path, monkeypatch, [script]) as chat:
+            await _use_protocol(pool, protocol)
             async with _commands(chat, tmp_path, monkeypatch, channel) as send:
                 message = await send("Answer briefly.")
                 answering = asyncio.create_task(chat.manager._handle(message))

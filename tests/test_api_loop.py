@@ -346,7 +346,7 @@ async def test_protocol_mismatch_fails_before_request():
         await turn(codec)
     assert not codec.requests
     for protocol in ApiProtocol:
-        if protocol != PROTOCOL:
+        if protocol not in (PROTOCOL, ApiProtocol.ANTHROPIC_MESSAGES):
             with pytest.raises(RuntimeUnsupported):
                 loop_for(protocol)
 

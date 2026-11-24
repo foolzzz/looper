@@ -100,7 +100,7 @@ class FakeModelAPI:
                 if script.disconnect_after is not None and count >= script.disconnect_after:
                     writer.transport.abort()
                     return
-                if isinstance(envelope, dict) and envelope.get("type") in {"response.completed", "response.failed", "response.incomplete"} and script.gate is not None:
+                if isinstance(envelope, dict) and envelope.get("type") in {"response.completed", "response.failed", "response.incomplete", "message_stop"} and script.gate is not None:
                     script.gate_reached.set()
                     opened, disconnected = asyncio.create_task(script.gate.wait()), asyncio.create_task(reader.read(1))
                     try:
@@ -115,7 +115,9 @@ class FakeModelAPI:
                 ending = script.sse_line_ending * 2
                 if count == len(script.events) - 1 and script.sse_final_ending is not None:
                     ending = script.sse_final_ending
-                chunk = f"data: {data}{ending}".encode()
+                event_name = (f"event: {envelope['type']}{script.sse_line_ending}"
+                              if lines[0].split()[1].endswith('/messages') and isinstance(envelope, dict) else "")
+                chunk = f"{event_name}data: {data}{ending}".encode()
                 writer.write(f"{len(chunk):x}\r\n".encode() + chunk + b"\r\n")
                 await writer.drain()
             if script.disconnect_after is not None and len(script.events) >= script.disconnect_after:
@@ -173,3 +175,49 @@ def text_events(text: str = "Hello", **completion):
 def call_events(arguments: str = '{}', **fields):
     item = call_item(arguments, **fields)
     return [event("response.output_item.added", output_index=0, item={**item, "arguments": ""}), *[event("response.function_call_arguments.delta", output_index=0, item_id=item["id"], delta=part) for part in (arguments[:1], arguments[1:])], event("response.output_item.done", output_index=0, item=item), completed([item])]
+
+
+# Messages scripts are separate from the existing Responses defaults.
+def message_start(usage=None, id: str = "msg_1"):
+    return event("message_start", message={"id": id, "type": "message", "role": "assistant",
+        "model": "test-model", "content": [], "stop_reason": None, "stop_sequence": None,
+        "usage": usage if usage is not None else {"input_tokens": 11, "output_tokens": 0,
+            "cache_read_input_tokens": 3, "cache_creation_input_tokens": 2}})
+
+
+def message_block_events(block, index=0, *, arguments=None):
+    kind = block["type"]
+    initial = dict(block)
+    if kind == "text":
+        initial["text"] = ""
+        deltas = [event("content_block_delta", index=index,
+            delta={"type": "text_delta", "text": block["text"]})]
+    elif kind == "tool_use":
+        initial["input"] = {}
+        raw = json.dumps(block.get("input", {})) if arguments is None else arguments
+        deltas = [event("content_block_delta", index=index,
+            delta={"type": "input_json_delta", "partial_json": piece}) for piece in (raw[:1], raw[1:])]
+    elif kind == "thinking":
+        initial.update(thinking="", signature="")
+        deltas = [event("content_block_delta", index=index, delta={"type": "thinking_delta", "thinking": block["thinking"]}),
+            event("content_block_delta", index=index, delta={"type": "signature_delta", "signature": block["signature"]})]
+    else:
+        deltas = []
+    return [event("content_block_start", index=index, content_block=initial), *deltas,
+        event("content_block_stop", index=index)]
+
+
+def message_events(text: str = "Hello", *, blocks=None, usage=None, output_tokens=5, stop_reason=None, id="msg_1"):
+    blocks = [{"type": "text", "text": text}] if blocks is None else blocks
+    stop_reason = stop_reason or ("tool_use" if any(b["type"] == "tool_use" for b in blocks) else "end_turn")
+    return [message_start(usage, id),
+        *(e for i, block in enumerate(blocks) for e in message_block_events(block, i)),
+        event("message_delta", delta={"stop_reason": stop_reason, "stop_sequence": None}, usage={"output_tokens": output_tokens}),
+        event("message_stop")]
+
+
+def message_call_events(arguments: str = '{}', name: str = "lookup", call_id: str = "call_1", **kw):
+    return [message_start(kw.pop("usage", None)),
+        *message_block_events({"type": "tool_use", "id": call_id, "name": name, "input": {}}, arguments=arguments),
+        event("message_delta", delta={"stop_reason": kw.pop("stop_reason", "tool_use"), "stop_sequence": None},
+            usage={"output_tokens": kw.pop("output_tokens", 5)}), event("message_stop")]
