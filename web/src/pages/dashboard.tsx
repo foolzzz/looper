@@ -20,6 +20,7 @@ import {
 } from "@/lib/api";
 import { fetchManagerMetrics, type ManagerMetrics as Metrics } from "@/lib/manager-metrics";
 import { historyHref } from "@/pages/agent-history";
+import { CostGuardSummary } from "@/components/cost-guard-summary";
 import { formatTpm, formatUsd } from "@/lib/usage";
 import { cn } from "@/lib/utils";
 
@@ -418,6 +419,7 @@ function Spend({ spend }: { spend: Overview["spend_today"] }) {
           Unpriced runs: {spend.unpriced_runs} (ended without a cost: no result, or no price for their model)
         </p>
       )}
+      <CostGuardSummary />
     </Section>
   );
 }

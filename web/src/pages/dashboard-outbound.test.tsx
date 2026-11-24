@@ -12,6 +12,13 @@ vi.mock("@/lib/api", async (original) => ({
 vi.mock("@/lib/manager-metrics", () => ({ fetchManagerMetrics: vi.fn() }));
 vi.mock("@/lib/use-waiting-gates", () => ({ useWaitingGates: () => null }));
 vi.mock("@/components/dashboard-gates", () => ({ DashboardGates: () => null }));
+vi.mock("@/lib/api-cost-guard", () => ({
+  fetchCostGuard: vi.fn(async () => ({
+    mode: "off", daily_usd: null, daily_equivalent_usd: null, roles: {}, counters: [], recent: [],
+    recommended_daily_usd: null, recommended_daily_equivalent_usd: null, problem: null,
+  })),
+  fetchCostHolds: vi.fn(async () => ({ holds: [] })),
+}));
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
 const channel = {
