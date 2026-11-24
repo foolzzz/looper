@@ -153,11 +153,15 @@ def test_unfolded_input_reservation(enabled, tmp_path, case):  # noqa: F811
 
 @pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
 @pytest.mark.parametrize("times_out", [False, True])
-def test_fifo_item_waits_for_native_input_without_repeating_effects(enabled, tmp_path, times_out):  # noqa: F811
+@pytest.mark.parametrize("routing", [False, True])
+def test_fifo_item_waits_for_native_input_without_repeating_effects(enabled, tmp_path, times_out, routing):  # noqa: F811
     from looper.agents import chat_settings, claude_cli, completion_events, lanes_settings, session_routing
+    from looper.agents.ops import Risk, Tool
+    from looper.agents.ops.service import ManagerOps, Platform
     from looper.db import manager_events, projects, tasks
 
-    enabled.setattr(session_routing, "_routing_enabled", False)
+    enabled.setattr(session_routing, "_routing_enabled", routing)
+    enabled.setattr(chat_settings, "_stop_enabled", False)
     enabled.setattr(lanes_settings, "_enabled", False)
     enabled.setattr(chat_settings, "_completion_turns", chat_settings.CompletionTurns.DM_ONLY)
     enabled.setattr(claude_cli, "RESERVED_INPUT_WAIT_SEC", 0.1 if times_out else 2, raising=False)
@@ -169,6 +173,9 @@ def test_fifo_item_waits_for_native_input_without_repeating_effects(enabled, tmp
 import select
 with open('transcript.jsonl', 'a') as log: log.write(json.dumps(second) + '\n')
 with open('effects', 'a') as log: log.write('B\n')
+print(json.dumps({'type':'assistant','message':{'content':[
+    {'type':'tool_use','id':call_id,'name':'mcp__looper__looper_native_write','input':{}}
+    for call_id in ['b-during-wait', 'b-after-timeout']]}}), flush=True)
 pathlib.Path('native-running').touch()
 while not pathlib.Path('finish-native').exists():
     if not select.select([sys.stdin], [], [], 0.01)[0]: continue
@@ -193,6 +200,25 @@ for line in sys.stdin:
 
     async def test(pool):
         rig, resident, _ = _manager_rig(tmp_path, script)
+        writes = []
+
+        async def write(call):
+            writes.append(call.turn.message_id)
+            return {"written": True}
+
+        ops = ManagerOps(Platform(bus=rig.bus, task_router=None), url="http://127.0.0.1:9",
+                         tools=[Tool("looper_native_write", "Record a synthetic effect", {"type": "object"},
+                                     Risk.WRITE, write)])
+        ops._working_at = ops._clock()  # synthetic tools; no HTTP bridge to probe
+        rig.manager.ops = ops
+        fallback_finished = asyncio.Event()
+        fallback = rig.manager._fall_back_completion
+
+        async def observed_fallback(*args, **kwargs):
+            await fallback(*args, **kwargs)
+            fallback_finished.set()
+
+        enabled.setattr(rig.manager, "_fall_back_completion", observed_fallback)
         project = await projects.create_project(name="synthetic", work_dir=str(tmp_path), pool=pool)
         await tasks.create_task(task_id="synthetic-completed", requirement="synthetic", project_id=project["id"],
                                 title="Synthetic task", status="completed", work_dir=str(tmp_path), pool=pool)
@@ -229,9 +255,18 @@ for line in sys.stdin:
             (tmp_path / "go").touch()
             await until(lambda: (tmp_path / "native-running").exists())
             await asyncio.wait_for(settling.wait(), 5)
+            binding = rig.manager._turns.find(second.message_id).binding
+            assert await ops.call("looper_native_write", {}, binding=binding, call_id="b-during-wait") == {
+                "status": "ok", "result": {"written": True}}
+            assert writes == [second.message_id]
 
             async def finish_native():
-                await asyncio.sleep(0.4)
+                if times_out:
+                    await asyncio.wait_for(fallback_finished.wait(), 5)
+                    # The failed completion's cleanup must leave B's active identity intact.
+                    assert await ops.call("looper_native_write", {}, binding=binding, call_id="b-after-timeout") == {
+                        "status": "ok", "result": {"written": True}}
+                    assert writes == [second.message_id, second.message_id]
                 (tmp_path / "finish-native").touch()
 
             release = asyncio.create_task(finish_native())
