@@ -43,6 +43,7 @@ NEW_PROJECT_FIELDS = _object({
     "distill_lessons": {"type": ["string", "boolean", "null"],
                         "enum": ["off", "draft", "write", "", True, False, None],
                         "description": "Lessons mode; true maps to write, false, null and empty string map to off."},
+    "memory_lessons": {"type": ["string", "null"], "enum": ["off", "on", None]},
     "step_workspaces": _choice("shared", "worktree"), "task_workspaces": _choice("in_place", "worktree"),
     **dict.fromkeys(("workspace_links", "verification_paths", "advisor_internal_domains"),
                     _inherit("array", items=_STR)),
@@ -132,6 +133,7 @@ def _execution_impact(execution: ProjectExecution, submitted: dict) -> str:
                                        if execution.supervise_interval_seconds is not None else "继承 Planner 配置"),
         "review_policy": ("步骤评审", "all（每步须通过评审）" if execution.review_all else "planner（由 Planner 决定）"),
         "distill_lessons": ("经验沉淀", execution.distill_lessons.value),
+        "memory_lessons": ("项目任务经验设置", execution.memory_lessons.value if execution.memory_lessons else "off"),
         "step_workspaces": ("并行步骤工作区", "worktree" if execution.isolate_steps else "shared"),
         "workspace_links": ("worktree 链接回原目录的相对路径", ", ".join(execution.link_paths) or "无"),
         "verification_paths": ("验证 checkout 额外复制的忽略路径", ", ".join(execution.verification_paths or ()) or "无"),
@@ -185,6 +187,8 @@ def _execution_impact(execution: ProjectExecution, submitted: dict) -> str:
         values[field] = (subagent_labels[field], default if value is None else value)
     lines = []
     for field in FIELDS:
+        if field == "memory_lessons" and field not in submitted:
+            continue
         if field in SUBAGENT_FIELDS and field not in submitted:
             continue
         label, value = values[field]

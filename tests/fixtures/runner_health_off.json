@@ -1,0 +1,31 @@
+{
+  "api_argv": [
+    "looper-api",
+    "--protocol",
+    "openai-responses",
+    "--model",
+    "fake-model",
+    "--base-url",
+    "https://example.invalid/v1",
+    "--effort",
+    "low",
+    "--context-window",
+    "100000",
+    "--system-prompt-file",
+    "prompt.md"
+  ],
+  "api_runtime_note_sha256": "f82ad224f65779ec1cafd7970ea7ba71d16c76169825fd79ade49df06189c211",
+  "cli_permission_args": ["--dangerously-skip-permissions"],
+  "cli_read_only_mode": ["--permission-mode", "manual", "--permission-prompts", "none"],
+  "cli_write_tools": ["Edit", "Write", "NotebookEdit"],
+  "cli_consult_tools": ["Read", "Glob", "Grep"],
+  "cli_read_only_allowed": ["Skill", "WebFetch", "WebSearch"],
+  "usage_fields": [
+    "cost_usd",
+    "input_tokens",
+    "output_tokens",
+    "cache_read_tokens",
+    "cache_creation_tokens",
+    "cache_creation_1h_tokens"
+  ]
+}

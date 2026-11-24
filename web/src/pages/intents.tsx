@@ -16,6 +16,8 @@ import {
   intentTypesSave, intentTypesSetProjectTemplate,
   intentGroupReadsDelete, intentGroupReadsList, intentGroupReadsPreview, intentGroupReadsPut,
   intentGroupReadsSettingsPut, leadsChats,
+  intentRecognitionsList, intentRecognitionsPreview, intentRecognitionsStart, intentRecognitionsSettingsPut,
+  type IntentRecognitions, type IntentRecognitionPreview,
   type FollowedGroups, type FollowedGroupPreview, type LeadChat,
   intentsBuild, intentsList, intentsReject, intentsSettingsGet, intentsStats, intentsUpdate,
   type AlertSender, type Intent, type IntentBinding, type IntentStatsType, type IntentType, type IntentTypeVersion,
@@ -90,7 +92,7 @@ export function IntentsPage() {
         {tab === "types" && <TypesTab />}
         {tab === "bindings" && <BindingsTab />}
         {tab === "alerts" && <AlertsTab />}
-        {tab === "groups" && <GroupsTab />}
+        {tab === "groups" && <GroupsTab intentsEnabled={enabled === true} />}
       </div>
     </div>
   );
@@ -689,7 +691,7 @@ function AlertsTab() {
   );
 }
 
-function GroupsTab() {
+function GroupsTab({ intentsEnabled }: { intentsEnabled: boolean }) {
   const returnFocus = useRef<HTMLElement | null>(null);
   const searchInput = useRef<HTMLInputElement>(null);
   const [page, setPage] = useState<FollowedGroups | null>(null);
@@ -702,6 +704,20 @@ function GroupsTab() {
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
   const [attempt, setAttempt] = useState(0);
+  const [recognitions, setRecognitions] = useState<IntentRecognitions | null>(null);
+  const [recognitionError, setRecognitionError] = useState("");
+  const [recognition, setRecognition] = useState<{ chat_id: string; name: string; since: string; until: string } | null>(null);
+  const [recognitionPreview, setRecognitionPreview] = useState<IntentRecognitionPreview | null>(null);
+  const running = recognitions?.recognitions.some((item) => item.state === "running") ?? false;
+  useEffect(() => {
+    let live = true;
+    const load = () => intentRecognitionsList().then((next) => {
+      if (live) { setRecognitions(next); setRecognitionError(""); }
+    }, (err: unknown) => { if (live) setRecognitionError(errorText(err)); });
+    void load();
+    const timer = running ? window.setInterval(() => void load(), 5000) : null;
+    return () => { live = false; if (timer !== null) window.clearInterval(timer); };
+  }, [attempt, running]);
   useEffect(() => {
     let live = true;
     intentGroupReadsList().then((next) => {
@@ -759,6 +775,52 @@ function GroupsTab() {
     setPending(null);
     returnFocus.current?.focus();
   };
+  const handleChooseRecognition = (chat: { chat_id: string; name: string }, until: Date, skipped = false) => {
+    returnFocus.current = document.activeElement as HTMLElement | null;
+    const since = new Date(until.getTime() - (skipped ? 0 : 7 * 86400000));
+    if (skipped) since.setHours(0, 0, 0, 0);
+    setRecognition({ ...chat, since: localDateTime(since), until: localDateTime(until) });
+    setRecognitionPreview(null);
+    setRecognitionError("");
+  };
+  const closeRecognition = () => {
+    if (busy) return;
+    setRecognition(null);
+    setRecognitionPreview(null);
+    returnFocus.current?.focus();
+  };
+  const recognize = async (start: boolean) => {
+    if (!recognition) return;
+    setBusy(true);
+    try {
+      if (start && recognitionPreview) {
+        const { recognition: record } = await intentRecognitionsStart({ chat_id: recognition.chat_id,
+          since: recognitionPreview.range_from, until: recognitionPreview.range_to });
+        setRecognitions((current) => current && { ...current, recognitions: [record, ...current.recognitions] });
+        setRecognition(null);
+        setRecognitionPreview(null);
+        returnFocus.current?.focus();
+      } else {
+        const since = new Date(recognition.since);
+        const until = new Date(recognition.until);
+        if (!Number.isFinite(since.getTime()) || !Number.isFinite(until.getTime()) || since >= until
+          || until.getTime() > Date.now() || until.getTime() - since.getTime() > 30 * 86400000) {
+          throw new Error("请选择不晚于现在、起点早于终点且跨度不超过 30 天的范围");
+        }
+        setRecognitionPreview(await intentRecognitionsPreview({ chat_id: recognition.chat_id,
+          since: since.toISOString(), until: until.toISOString() }));
+      }
+      setRecognitionError("");
+    } catch (err) { setRecognitionError(errorText(err)); }
+    finally { setBusy(false); }
+  };
+  const toggleRecognition = async (enabled: boolean) => {
+    setBusy(true);
+    try { setRecognitions(await intentRecognitionsSettingsPut({ enabled })); setRecognitionError(""); }
+    catch (err) { setRecognitionError(errorText(err)); }
+    finally { setBusy(false); }
+  };
+  const recognitionDisabled = busy || !recognitions?.enabled || !intentsEnabled;
   const followed = new Set(page?.groups.map((group) => group.chat_id));
   return (
     <div className="space-y-4">
@@ -773,6 +835,15 @@ function GroupsTab() {
             onChange={(enabled) => void change(() => intentGroupReadsSettingsPut({ enabled }))} />
         </div>
         {!page.delivery_enabled && <p className="text-sm text-muted-foreground">先在 Settings 打开送达层：名单上的群产生的意图要按非紧急类限量，超出的进晨报</p>}
+        <div className="flex items-center justify-between gap-3">
+          <div className="space-y-1">
+            <h2 className="text-sm font-medium">按请求识别一次</h2>
+            <p className="text-xs text-muted-foreground">先预览，再确认；默认最近 7 天，最多 30 天、2,000 条消息和 $1。结果留在识别记录，不逐条推送。</p>
+          </div>
+          <Switch label="启用识别一次" checked={recognitions?.enabled ?? false} disabled={busy || !recognitions}
+            onChange={(enabled) => void toggleRecognition(enabled)} />
+        </div>
+        {recognitionError && !recognition && <p role="alert" className="text-sm text-destructive">{recognitionError}<Button type="button" size="sm" variant="outline" onClick={() => setAttempt((n) => n + 1)}>重试</Button></p>}
         {page.groups.length === 0 && <p role="status" className="text-sm text-muted-foreground">还没有关注的群</p>}
         <ul className="space-y-2" aria-label="关注的群">
           {page.groups.map((group) => <li key={group.chat_id} className="flex flex-wrap items-center justify-between gap-3 rounded-md border border-border px-3 py-2 text-sm">
@@ -784,21 +855,67 @@ function GroupsTab() {
               <p className="text-xs text-muted-foreground">加入：{new Date(group.added_at).toLocaleString("zh-CN")} · 开始：{new Date(group.read_from).toLocaleString("zh-CN")}</p>
               <p className="text-xs text-muted-foreground tabular-nums">今天读了 {group.read_today} 条，跳过 {group.skipped_today} 条 · 24 小时 {group.messages_24h} 条消息 · 7 天 {group.intents_7d} 条意图</p>
             </div>
-            <Button type="button" size="sm" variant="ghost" disabled={busy}
+            <div className="flex gap-2">
+              <Button type="button" size="sm" variant="outline" disabled={recognitionDisabled || !group.readable}
+                onClick={() => handleChooseRecognition(group, new Date(), group.skipped_today > 0)}>识别一次</Button>
+              <Button type="button" size="sm" variant="ghost" disabled={busy}
               onClick={() => void change(() => intentGroupReadsDelete({ chat_id: group.chat_id }))}>撤销</Button>
+            </div>
           </li>)}
         </ul>
         <div className="space-y-2">
           <Input ref={searchInput} aria-label="搜索群" value={query} onChange={(event) => { setChats([]); setSearchError(""); setQuery(event.target.value); }} placeholder="搜索要关注的群" />
           {searchError && <p role="alert" className="text-sm text-destructive">{searchError}</p>}
           <ul className="space-y-2" aria-label="群搜索结果">
-            {chats.filter((chat) => !followed.has(chat.chat_id)).map((chat) => <li key={chat.chat_id} className="flex items-center justify-between gap-3 text-sm">
+            {chats.filter((chat) => !followed.has(chat.chat_id)).map((chat) => <li key={chat.chat_id} className="flex flex-wrap items-center justify-between gap-3 text-sm">
               <span className="min-w-0 break-words">{chat.name} · {chat.kind === "topic" ? "话题群" : "群"}</span>
-              <Button type="button" size="sm" variant="outline" disabled={busy || page.groups.length >= page.max_groups}
+              <div className="flex gap-2">
+                <Button type="button" size="sm" variant="outline" disabled={recognitionDisabled}
+                  onClick={() => handleChooseRecognition(chat, new Date())}>识别一次</Button>
+                <Button type="button" size="sm" variant="outline" disabled={busy || page.groups.length >= page.max_groups}
                 onClick={() => void preview(chat.chat_id)}>关注</Button>
+              </div>
             </li>)}
           </ul>
         </div>
+        <section className="space-y-2" aria-label="识别记录">
+          <h2 className="text-sm font-medium">识别记录</h2>
+          {recognitions?.recognitions.length === 0 && <p className="text-sm text-muted-foreground">还没有识别记录</p>}
+          {recognitions?.recognitions.map((record) => <article key={record.id} className="space-y-2 rounded-md border border-border p-3 text-sm">
+            <div className="flex flex-wrap items-center gap-2"><span className="font-mono">{record.id}</span><span>{record.name}</span>
+              <Badge variant="outline">{({ running: "识别中", done: "已完成", failed: "失败" })[record.state]}</Badge></div>
+            <p className="text-xs text-muted-foreground">{new Date(record.range_from).toLocaleString("zh-CN")} – {new Date(record.range_to).toLocaleString("zh-CN")} · 读了 {record.events_read} / {record.events_in_range} 条 · ${record.cost_usd.toFixed(4)}</p>
+            {record.truncated && <p className="text-xs text-muted-foreground">{record.truncated === "messages" ? "消息超过上限，只识别最新 2,000 条" : "已到 $1 花费上限，剩余消息未识别"}</p>}
+            {record.error && <p className="text-sm text-destructive">{record.error}</p>}
+            {record.state === "done" && record.intents.length === 0 && <p className="text-sm text-muted-foreground">没有识别出开发需求</p>}
+            <ul className="space-y-1">{record.intents.map((item) => <li key={item.id} className="break-words">
+              {item.id} · {item.type.name} · {item.title} · {label(INTENT_STATE_ZH, item.state)}
+            </li>)}</ul>
+          </article>)}
+        </section>
+        {recognition && <ConfirmDialog title={`识别一次：《${recognition.name}》`} onClose={closeRecognition}>
+          <p className="text-sm text-muted-foreground">只读范围内已采集的人发消息；不改关注名单和游标。</p>
+          <div className="grid gap-3 sm:grid-cols-2">
+            {(["since", "until"] as const).map((field) => <label key={field} className={LABEL}>
+              {field === "since" ? "范围起点" : "范围终点"}
+              <Input type="datetime-local" aria-label={field === "since" ? "范围起点" : "范围终点"} value={recognition[field]}
+                disabled={busy}
+                onChange={(event) => { setRecognition({ ...recognition, [field]: event.target.value }); setRecognitionPreview(null); }} />
+            </label>)}
+          </div>
+          {recognitionPreview && <div className="space-y-2 text-sm">
+            <p>{recognitionPreview.events} 条人发消息，约 ${recognitionPreview.estimate_usd[0]}–${recognitionPreview.estimate_usd[1]}，上限 $1。</p>
+            {recognitionPreview.truncated === "messages" && <p>超过 2,000 条，只识别最新 2,000 条；实际起点：{new Date(recognitionPreview.effective_from).toLocaleString("zh-CN")}。</p>}
+            <p>结果作为意图入库，完成后显示在下面的识别记录，不逐条推送。</p>
+          </div>}
+          {recognitionError && <p role="alert" className="text-sm text-destructive">{recognitionError}</p>}
+          <div className="flex justify-end gap-2">
+            <Button type="button" size="sm" variant="outline" disabled={busy} onClick={closeRecognition}>取消</Button>
+            <Button type="button" size="sm" disabled={busy} onClick={() => void recognize(!!recognitionPreview)}>
+              {recognitionPreview ? "确认识别" : "预览条数和花费"}
+            </Button>
+          </div>
+        </ConfirmDialog>}
         {pending && <ConfirmDialog title="关注这个群" onClose={closePreview}>
           <p className="text-sm">从现在起读「{pending.name}」里人发的消息；加入之前的、机器人和导入的都不读。最近 24 小时 {pending.messages_24h} 条，每天约 ${pending.estimate_usd[0]}–${pending.estimate_usd[1]}；每个群每天最多 {page.day_max} 条。推送走送达层，只发你的私聊。</p>
           {(error || conflict) && <p role="alert" className="text-sm text-destructive">{error || conflict}</p>}
@@ -810,4 +927,8 @@ function GroupsTab() {
       </>}
     </div>
   );
+}
+
+function localDateTime(date: Date): string {
+  return new Date(date.getTime() - date.getTimezoneOffset() * 60000).toISOString().slice(0, 16);
 }

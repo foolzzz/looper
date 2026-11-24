@@ -55,6 +55,13 @@ async def record(
     return await pool.fetchval(f"INSERT INTO manager_actions ({columns}) VALUES ({marks}) RETURNING id", *values)
 
 
+async def amend(action_id, *, status, error_code=None, result=None, pool=None) -> None:
+    """Complete a call whose effect needs its already recorded id, in the effect's transaction."""
+    await (pool or get_pool()).execute(
+        "UPDATE manager_actions SET status=$2, error_code=$3, result=$4::jsonb WHERE id=$1",
+        action_id, status, error_code, _json(result))
+
+
 async def for_task(task_id: str, *, limit: int = 20, pool: asyncpg.Pool | None = None) -> list[dict[str, Any]]:
     """The Manager's calls that acted on ``task_id`` (asked or done; not its errors), newest first, each with the
     API client it came through (``client_id`` and ``client_name``, None for none)."""

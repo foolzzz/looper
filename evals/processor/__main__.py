@@ -387,6 +387,35 @@ EXTRACTION_CASES.update({
         "exact_types": {"dev_task", "bug_triage"}, "chatter": {2, 4, 5, 6, 8, 9},
         "requests_from": {1: "dev_task", 3: "bug_triage", 7: "dev_task"},
     },
+    "intents_group_requests_short": {
+        "what": "one-line @-addressed bugs and named-person requests, including an accepted request: recognize each "
+                "with its expected type; no intent from chatter, answers, acceptance, status or decisions",
+        "kind": "intents",
+        "rows": [_row(1, "oc_product", "ou_zhao", "@钱七 头像保存后还是旧图", 1, group=True),
+                 _row(2, "oc_product", "ou_wang", "今天下午有点冷", 2, group=True),
+                 _row(3, "oc_product", "ou_zhang", "钱七，设置页加个重置按钮吧", 3, group=True),
+                 _row(4, "oc_product", "ou_qian", "好，我来加", 4, group=True),
+                 _row(5, "oc_product", "ou_wang", "预览地址在哪？", 5, group=True),
+                 _row(6, "oc_product", "ou_zhang", "群公告第一行", 6, group=True),
+                 _row(7, "oc_product", "ou_zhao", "@张三 批量下载又报 502 了", 7, group=True),
+                 _row(8, "oc_product", "ou_qian", "@张三 给搜索框加个清空按钮", 8, group=True),
+                 _row(9, "oc_product", "ou_wang", "+1", 9, group=True),
+                 _row(10, "oc_product", "ou_zhang", "昨天的改动还在测试", 10, group=True),
+                 _row(11, "oc_product", "ou_qian", "那就定周四发布", 11, group=True)],
+        "exact_types": {"bug_triage", "dev_task"}, "chatter": {2, 4, 5, 6, 9, 10, 11},
+        "requests_from": {1: "bug_triage", 3: "dev_task", 7: "bug_triage", 8: "dev_task"},
+    },
+    "intents_group_requests_original_types": {
+        "what": "a followed group: an alert bot's request @-mentioning the operator keeps alert_triage; "
+                "a third party's relayed alert request to someone else counts as bug_triage",
+        "kind": "intents",
+        "rows": [{**_row(1, "oc_product", "cli_alertbot", "@李四 监控告警：存储容量超过阈值，请看一下这条告警。",
+                        1, mentions_me=True, group=True), "original_scope": True},
+                 _row(2, "oc_product", "ou_wang", "@钱七 监控告警：内存使用率超过阈值，请看一下这条告警。",
+                      2, group=True)],
+        "exact_types": {"alert_triage", "bug_triage"}, "chatter": set(),
+        "requests_from": {1: "alert_triage", 2: "bug_triage"},
+    },
     "intents_group_requests_merge": {
         "what": "three people report the same failing upload: one bug_triage with all three as sources",
         "kind": "intents",
@@ -812,9 +841,9 @@ async def _record(record_id: int | None, batch: str, texts: list[str] | None = N
     kept = [json.dumps({k: v for k, v in event.items() if not (event.get("type") == "result" and k == "result")},
                        ensure_ascii=False) for event in events]
     # Each message's text (the part after "sender: "), as the record would hold it in JSON.
-    texts = ([json.dumps(text, ensure_ascii=False)[1:-1] for text in texts] if texts is not None else
-             [json.dumps(line.split(": ", 1)[1], ensure_ascii=False)[1:-1] for line in batch.splitlines()
-              if "》" in line and ": " in line])
+    if texts is None:
+        texts = [line.split(": ", 1)[1] for line in batch.splitlines() if "》" in line and ": " in line]
+    texts = [json.dumps(text, ensure_ascii=False)[1:-1] for text in texts if text.strip()]
     init = next((e for e in events if e.get("type") == "system" and e.get("subtype") == "init"), {})
 
     def count(value: Any) -> int | None:
@@ -940,7 +969,7 @@ async def _extract(args: argparse.Namespace, key: str, rep: int, root: Path) -> 
     parsed = None if done.reply is None else extraction.parse(
         kind, done.reply, refs, now=_BASE.replace(hour=3), valid_days=90, enabled_types={t["key"] for t in types},
         app_seqs={row["seq"] for row in (*rows, *context) if row["sender_kind"] == "app"},
-        group_seqs={row["seq"] for row in rows if row.get("via_group")})
+        group_seqs={row["seq"] for row in rows if row.get("via_group") and not row.get("original_scope")})
     run = {"case": key, "rep": rep, "reply": done.reply, "failure": done.failure and done.failure.value,
            "detail": done.detail, "cost_usd": done.cost_usd, "events": len(rows),
            "seconds": round(time.monotonic() - started, 1),
