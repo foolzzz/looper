@@ -9,13 +9,14 @@ import subprocess
 import sys
 import threading
 import time
-from contextlib import contextmanager
+from contextlib import closing, contextmanager
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from urllib.parse import urlsplit
 
 import pytest
 
 from looper import __version__, ops_config
-from looper.agents import claude_code_mcp as cc, mcp_server, operator_auth
+from looper.agents import claude_code_mcp as cc, mcp_server, operator_auth, server_address
 
 ANSWER = {"notice": "synthetic", "results": [], "matches": 0, "scanned": 0, "truncated": False}
 TOKEN = "op-token-for-tests"
@@ -199,7 +200,7 @@ def test_timeouts_do_not_suggest_a_write_may_have_run(runtime):
         assert len(calls) == 1
 
 
-@pytest.mark.parametrize("url", ["http://example.com:123", "https://127.0.0.1:123", "http://127.0.0.1:123/path"])
+@pytest.mark.parametrize("url", [None, "http://example.com:123", "https://127.0.0.1:123", "http://127.0.0.1:123/path"])
 def test_client_refuses_nonlocal_or_unexpected_urls(runtime, url):
     with pytest.raises(ValueError):
         cc.OperatorClient(url, runtime)
@@ -221,7 +222,8 @@ def test_mcp_refuses_to_start_inside_an_agent_run(runtime):
 
 
 def test_mcp_process_serves_stdio_end_to_end(runtime):
-    with server() as (url, calls):
+    with server() as (url, calls), closing(server_address.Publication(
+            runtime, "127.0.0.1", urlsplit(url).port)):
         ops_config.write_private(runtime / ops_config.FILE, f'[server]\nhost = "127.0.0.1"\nport = {url.rsplit(":", 1)[1]}\n')
         messages = [request("initialize", id=1), request("tools/list", id=2),
                     request("tools/call", {"name": "vault_search", "arguments": {"query": "Atlas"}}, id=3)]
@@ -236,9 +238,10 @@ def test_mcp_process_serves_stdio_end_to_end(runtime):
         assert TOKEN.encode() not in answer.stderr
 
 
-def test_mcp_main_refuses_nonloopback_configuration(runtime, capsys, monkeypatch):
-    monkeypatch.delenv("LOOPER_AGENT_RUN", raising=False)
-    ops_config.write_private(runtime / ops_config.FILE, '[server]\nhost = "0.0.0.0"\nport = 18767\n')
-    assert cc.main(str(runtime), None) == 2
-    captured = capsys.readouterr()
-    assert captured.out == "" and "not a loopback address" in captured.err
+def test_mcp_refuses_nonloopback_published_address(runtime):
+    with closing(server_address.Publication(runtime, "192.0.2.1", 18767)):
+        answer = _process(runtime, json.dumps(request("tools/call", {
+            "name": "vault_search", "arguments": {"query": "Atlas"}})).encode() + b"\n")
+    assert answer.returncode == 0, answer.stderr
+    result = json.loads(answer.stdout)["result"]
+    assert result["isError"] and "not a loopback address" in result["content"][0]["text"]

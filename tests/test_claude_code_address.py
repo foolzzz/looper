@@ -4,18 +4,76 @@ import asyncio
 import io
 import json
 import os
+import socket
 import subprocess
 import sys
 from dataclasses import replace
 from types import SimpleNamespace
+from unittest.mock import Mock
 from urllib.parse import urlsplit
+from urllib.request import OpenerDirector
 
 import pytest
 
 from looper import ops_config
-from looper.agents import api_v1, claude_code_entry, claude_code_mcp, operator_auth
+from looper.agents import api_v1, claude_code_entry, claude_code_mcp, operator_auth, server_address
 from looper.agents.http_server import AgentHTTPServer
 from tests.db_support import DSN, fresh_database_without_recording
+
+
+@pytest.mark.parametrize("client", ["mcp", "status"])
+@pytest.mark.parametrize("ops_port", [None, 18768])
+@pytest.mark.parametrize("deleted_while_locked", [False, True])
+def test_clients_refuse_missing_address_without_connecting(
+        tmp_path, monkeypatch, client, ops_port, deleted_while_locked):
+    monkeypatch.delenv("LOOPER_AGENT_RUN", raising=False)
+    ops_config.write_private(tmp_path / ops_config.FILE,
+                             "[server]\n" + (f"port = {ops_port}\n" if ops_port else "# port omitted\n"))
+    operator_auth.ensure_token(tmp_path)
+    publication = None
+    if deleted_while_locked:
+        publication = server_address.Publication(tmp_path, "127.0.0.1", 18769)
+        assert server_address.read(tmp_path) == ("127.0.0.1", 18769)
+        (tmp_path / server_address.FILE).unlink()
+        with pytest.raises(ValueError, match="already owns"):
+            server_address.Publication(tmp_path, "127.0.0.1", 18770)
+    connect = Mock(side_effect=AssertionError("unexpected socket connection"))
+    http = Mock(side_effect=AssertionError("unexpected HTTP request"))
+    monkeypatch.setattr(socket.socket, "connect", connect)
+    monkeypatch.setattr(OpenerDirector, "open", http)
+    output = io.StringIO()
+    try:
+        if client == "mcp":
+            messages = [{"jsonrpc": "2.0", "id": 1, "method": "initialize"},
+                        {"jsonrpc": "2.0", "id": 2, "method": "tools/list"},
+                        {"jsonrpc": "2.0", "id": 3, "method": "tools/call",
+                         "params": {"name": "vault_search", "arguments": {"query": "Atlas"}}}]
+            wire = io.BytesIO()
+            monkeypatch.setattr(claude_code_mcp.sys, "stdin", SimpleNamespace(
+                buffer=io.BytesIO("".join(json.dumps(item) + "\n" for item in messages).encode())))
+            monkeypatch.setattr(claude_code_mcp.sys, "stdout", SimpleNamespace(buffer=wire))
+            assert claude_code_mcp.main(str(tmp_path), None) == 0
+            replies = [json.loads(line)["result"] for line in wire.getvalue().splitlines()]
+            assert replies[0]["serverInfo"]["name"] == "looper-memory"
+            assert len(replies[1]["tools"]) == 3
+            assert replies[2]["isError"]
+            error = replies[2]["content"][0]["text"]
+        else:
+            monkeypatch.setattr(claude_code_entry, "settings_path", lambda: tmp_path / "settings.json")
+            monkeypatch.setattr(claude_code_entry, "fetch_profile",
+                                lambda *_: claude_code_entry.Fetched(claude_code_entry.OK, text="Name: Ada"))
+            monkeypatch.setattr(claude_code_entry, "_claude", lambda _: "claude")
+            monkeypatch.setattr(claude_code_entry, "_claude_mcp", lambda *_: SimpleNamespace(returncode=0))
+            args = SimpleNamespace(runtime_root=str(tmp_path), config=None)
+            assert claude_code_entry.status_command(args, out=output) == claude_code_entry.EMPTY
+            error = output.getvalue()
+        assert "Looper server for this runtime is not running or did not record its address" in error
+        assert "looper serve" in error
+    finally:
+        if publication is not None:
+            publication.close()
+        http.assert_not_called()
+        connect.assert_not_called()
 
 
 @pytest.mark.parametrize("client", ["mcp", "status"])

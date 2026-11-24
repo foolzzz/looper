@@ -78,13 +78,16 @@ _PATHS = {"vault_search": "/api/v1/manager_retrieval/vault_search",
 class OperatorClient:
     """A static MCP tool catalog and three requests carrying a read-only-scoped credential."""
 
-    def __init__(self, url: str, runtime_root: Path, *, timeout: float = REQUEST_TIMEOUT_SECONDS,
+    def __init__(self, url: str | None, runtime_root: Path, *, timeout: float = REQUEST_TIMEOUT_SECONDS,
                  ops: OpsConfig | None = None) -> None:
-        parsed = urlsplit(url)
-        if (parsed.scheme != "http" or _loopback(parsed.hostname or "") is None or parsed.username is not None
-                or parsed.password is not None or parsed.path not in ("", "/") or parsed.query or parsed.fragment):
-            raise ValueError("retrieval needs a loopback HTTP server URL")
-        self._url = url.rstrip("/")
+        if url is None and ops is None:
+            raise ValueError("retrieval needs runtime settings or a loopback HTTP server URL")
+        if url is not None:
+            parsed = urlsplit(url)
+            if (parsed.scheme != "http" or _loopback(parsed.hostname or "") is None or parsed.username is not None
+                    or parsed.password is not None or parsed.path not in ("", "/") or parsed.query or parsed.fragment):
+                raise ValueError("retrieval needs a loopback HTTP server URL")
+        self._url = url.rstrip("/") if url is not None else ""
         self._ops = ops
         self._runtime_root = runtime_root
         self._timeout = timeout
@@ -148,14 +151,5 @@ def main(runtime_root: str | None, config: str | None) -> int:
     except (ops_config.OpsConfigError, OSError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
-    address = _loopback(ops.host)
-    if address is None:
-        try:
-            url = _retrieval_url(ops)
-        except (ValueError, OSError) as exc:
-            print(f"error: {exc}", file=sys.stderr)
-            return 2
-    else:
-        url = f"http://{address}:{ops.port}"
-    return mcp_server.serve(OperatorClient(url, ops.runtime_root, ops=ops), sys.stdin.buffer,
+    return mcp_server.serve(OperatorClient(None, ops.runtime_root, ops=ops), sys.stdin.buffer,
                             sys.stdout.buffer, name=SERVER_NAME, instructions=INSTRUCTIONS)

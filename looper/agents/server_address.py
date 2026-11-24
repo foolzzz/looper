@@ -50,12 +50,12 @@ class Publication:
             self._fd = None
 
 
-def read(root: Path) -> tuple[str, int] | None:
-    """No record means a pre-discovery server; an existing but unlocked/broken record is never a fallback."""
+def read(root: Path) -> tuple[str, int]:
+    """Require a live published address; never fall back to deployment settings."""
     try:
         fd = os.open(root / FILE, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
     except FileNotFoundError:
-        return None
+        raise ValueError("Looper server for this runtime is not running or did not record its address; start it with looper serve") from None
     try:
         with os.fdopen(fd, "r", encoding="utf-8") as handle:
             try:

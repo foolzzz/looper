@@ -411,7 +411,7 @@ def test_install_without_parts_shows_and_confirms_each_part(sandbox, fake_claude
 
 @contextlib.contextmanager
 def _retrieval_server(runtime, *, readable=True):
-    from looper.agents import operator_auth
+    from looper.agents import operator_auth, server_address
     token = operator_auth.ensure_token(runtime)
     state = {"readable": readable, "paths": []}
 
@@ -431,6 +431,7 @@ def _retrieval_server(runtime, *, readable=True):
             self.wfile.write(body)
 
     server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    publication = server_address.Publication(runtime, "127.0.0.1", server.server_port)
     ops_config.write_private(runtime / ops_config.FILE, f"[server]\nport = {server.server_port}\n")
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
@@ -440,6 +441,7 @@ def _retrieval_server(runtime, *, readable=True):
         server.shutdown()
         thread.join(timeout=3)
         server.server_close()
+        publication.close()
 
 
 def test_status_reports_retrieval(sandbox, fake_claude, capsys):

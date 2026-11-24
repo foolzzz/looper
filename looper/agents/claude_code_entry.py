@@ -283,11 +283,9 @@ def edit_mcp(args, runtime_root: Path | None, *, confirm=None, out=None) -> int:
 def _retrieval_url(ops: OpsConfig) -> str:
     from . import server_address
 
-    bound = server_address.read(ops.runtime_root)
-    host, port = bound if bound is not None else (ops.host, ops.port)
+    host, port = server_address.read(ops.runtime_root)
     # A wildcard listener is reached locally through its loopback address.
-    if bound is not None:
-        host = {"0.0.0.0": "127.0.0.1", "::": "::1"}.get(host, host)
+    host = {"0.0.0.0": "127.0.0.1", "::": "::1"}.get(host, host)
     address = _loopback(host)
     if address is None:
         raise ValueError(f"server.host {host} is not a loopback address")
