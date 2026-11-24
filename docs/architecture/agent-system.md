@@ -1342,8 +1342,9 @@ The listening HTTP server atomically publishes its bound host and port in the ru
 `server-address.json`. MCP resolves it on each call; `status` uses the same resolver. This covers both
 `serve --port` and service-unit overrides without freezing the address into the MCP registration.
 The server holds a lock on the published record until its listener closes. Shutdown or a crash leaves
-an unlocked, stale record: clients report it and never fall back to another port. Only an installation
-with no address record falls back to the ops file. Wildcard listeners resolve to their loopback address;
+an unlocked, stale record: clients report it and never fall back to another port. A missing record,
+including one deleted while locked, also refuses retrieval and asks the operator to run `looper serve`;
+the ops file is never a fallback address. Wildcard listeners resolve to their loopback address;
 other non-loopback destinations remain refused.
 Each call rereads the local operator token and derives a domain-separated, read-only credential; the raw token
 is never sent by MCP or stored in its entry. The HTTP connection gate permits that credential only on direct

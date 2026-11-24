@@ -1217,8 +1217,6 @@ M7 先让计划状态有唯一来源（M7a），再在其上加任务记忆（M7
 
 ### 5.4 验证缺口
 
-- **操作者 Claude Code 的只读检索**：新增 MCP 入口复用 Manager 的知识库与消息线索答案，默认不安装；专用派生凭证由服务端限于三个检索读操作。真实 Claude Code 的工具发现、引用、注入拒绝、禁止查消息、越界、开关关闭、停服及画像共存检查仍待批准；不运行 Looper agent 的 prompt 评测，因其提示词和工具未改。
-
 - **ACP Reviewer 试点**：首次可启用路径包含独立 v1 channel、命令身份、操作者设置、进程写策略与服务端选择守卫，默认关闭。策略以文件系统身份检查保护集重叠，拒绝 Unix socket/其他回环端口与应用 IPC；配置预算上限时拒绝启动。替身服务闭环与 macOS 写保护测量见 [验证记录](../validation/acp-reviewer-real-path.md)；真实 Grok 握手、文档化计费用量来源和 RFC §8 四任务对照仍待后续验证，尚不具备推广结论。
 - **卡片按钮的意图 / 账本接入**（默认关）：复用 `card_actions` 的记录、会话 / 消息绑定和 1.5 秒授权期限；Needs-you 的操作确认也从共享入口读取。真实飞书 / Telegram 回调尚未验证；真实模型评测尚未获批，只跑 fake-mode。获批后在开关打开时跑 assistant experience 的 identity，以及 Manager 的 `ledger_tools`、`confirm_create_start`、`cancel_confirmation` 对话：Sonnet 两次，Opus xhigh Manager 一次；预计合计 $1–3，属估算，不是实测费用或执行授权。
 
