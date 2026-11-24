@@ -6,6 +6,7 @@ import hashlib
 import shlex
 import subprocess
 import sys
+import time
 from unittest.mock import AsyncMock
 
 import pytest
@@ -98,6 +99,27 @@ def test_resource_errors(tmp_path, monkeypatch, command, error):
         await seed(pool, tmp_path, [check])
         row = (await invoke(tmp_path, [check]))[-1]
         assert (row["state"], row["error_kind"]) == ("error", error)
+    run_db(run, monkeypatch)
+
+
+def test_process_snapshot_does_not_outrun_a_short_timeout(tmp_path, monkeypatch):
+    """A snapshot slower than the timeout must not record a still-running sleep as a normal exit."""
+    from looper.agents import proc_tree
+
+    real = proc_tree.track
+
+    def slow(process, *, label="agent"):
+        time.sleep(2)
+        return real(process, label=label)
+
+    monkeypatch.setattr(proc_tree, "track", slow)
+    check = CommandCheck("c1", 1, "sleep 3", timeout_seconds=1, network=True)
+
+    async def run(pool):
+        await seed(pool, tmp_path, [check])
+        row = (await invoke(tmp_path, [check]))[-1]
+        assert (row["state"], row["error_kind"]) == ("error", "timeout")
+
     run_db(run, monkeypatch)
 
 

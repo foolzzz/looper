@@ -113,3 +113,24 @@ def test_the_manager_launch_command_and_signature_equal_the_main_baseline(tmp_pa
         return signature
 
     assert assignments(preparation) == assignments(ast.parse(_MAIN_SIGNATURE))
+
+
+@pytest.mark.parametrize("setting", [None, "false"])
+def test_recognition_off_keeps_the_frozen_catalog_and_operator_tools(monkeypatch, setting):
+    from looper.agents import leads_model
+    from looper.agents.ops import Turn
+    from looper.agents.ops import intents_recognize
+    from tests.db_support import run_db
+
+    async def test(pool):
+        await pool.execute("INSERT INTO system_settings (key,value) VALUES ('intents.enabled','true')")
+        if setting is not None:
+            await pool.execute("INSERT INTO system_settings (key,value) VALUES ($1,$2)",
+                               leads_model.INTENTS_ON_REQUEST_KEY, setting)
+        ops = service.ManagerOps(service.Platform(bus=None, task_router=None), url="http://127.0.0.1:9/", token="tok")
+        listing = await ops.current_listing(Turn(channel="web", chat="c", message_id="m"))
+        assert intents_recognize.TOOL_NAME not in {tool["name"] for tool in listing}
+        assert not await intents_recognize.enabled()
+        assert_default_prompts_and_tools()
+
+    run_db(test, monkeypatch)

@@ -312,6 +312,8 @@ Manager has no tool for it. The dashboard shows the task page's 指标 card and 
   protocol supports UUID ownership, an unconfirmed addition reserves its next native turn and buffers
   output only through that native turn's own top-level result. Its queued caller claims it by message id
   without writing stdin again or restarting the resident, even when other queued work runs before claim.
+  With account admission enabled, the native reservation retains its session's existing slot until claim,
+  completion or withdrawal; claiming it transfers that slot instead of acquiring a second one.
   Its run records the injected input actually
   seen by the model. Native tool bindings and stream matches are published before claim, including while
   Manager prepares the queued turn. A stopped, failed or superseded owner withdraws its reservation;
@@ -2973,18 +2975,29 @@ Before, an unconfigured project ran at most 8 Planners, 16 Workers and 8
 Reviewers at once whatever its tasks; now N running tasks run N Planners and
 up to 16N Workers and 8N Reviewers. By default nothing caps the total.
 With `engine.admission.enabled`, each account's `max_concurrency` also bounds
-Workers, Reviewers, consults, processors, explorers and nested runs; `null` is unlimited.
+Workers, Reviewers, Planner exchanges, Manager turns, consults, processors,
+explorers and nested runs; `null` is unlimited.
 The account queue uses the shared `Lane` enum, aging and quota freezes, with
 durable state and an operator-only `providers.limits_clear` override. Nested
-runs borrow a running parent's slot. Explorers queue in their spawner's lane
-after a task-class pre-check, without holding the task lock. A blocking explorer
+runs borrow a running parent's slot. A frozen account sends each waiting user
+message one code-written reset-time status, keeps it pending and answers after
+recovery; `/stop` cancels the wait even on a runtime without interrupt support.
+The notice claim is saved with the pending message, so replay after restart does
+not repeat it. A quota probe prefers another waiting turn over a Manager user
+message. If a user probe fails on quota before producing text or tool calls, its
+failed run is recorded and the message requeues without an error reply. Turns
+waiting for a slot do not hold up draining; their messages remain pending.
+With admission on, model turns wait in their session worker even when lanes are
+off, preserving user order while the message loop delivers code-only notices.
+The status is not stored in conversation history or sent to the model.
+Explorers queue in their spawner's lane after a task-class pre-check, without
+holding the task lock. A blocking explorer
 wait lends one slot to its first queued child on the same account. If the wait
 ends first, that child keeps its slot and the parent reacquires with its original
 arrival order before the tool returns. Frozen accounts do not lend; queued tool
 results include `held: quota` and the known reset time. Kept explorers register
-their slots on adoption and release them on collection. Planner and Manager
-turns are not admitted yet. The switch defaults off and refuses activation
-while failure typing is off. The independent cost guard can still hold runs
+their slots on adoption and release them on collection. The switch defaults off
+and refuses activation while failure typing is off. The independent cost guard can still hold runs
 for spending; admission's 95% background pause does not change that policy.
 The converted alarm-like
 project (Planner 3, Worker 8, Reviewer 3) moves from at most 8 Workers and 3
@@ -3152,8 +3165,8 @@ into the vault's memory folder
 ([RFC](rfcs/memory-write-path-v0.zh-CN.md); a lesson that takes effect in
 PostgreSQL only is the [tiers RFC](rfcs/memory-tiers-v0.zh-CN.md)'s). This
 part includes the foundation, private drafting, the confirmed write path and
-operator DM delivery. Sources and the dashboard memory page follow separately.
-Drafting has its own contract; existing agents gain no prompt or tool.
+operator DM delivery. Sources are typed and each is off by default; the dashboard
+memory page shows their candidates for the operator to review.
 
 - **Tables** (migration `memory_candidates`): `memory_candidates` (shown as
   `M-0042`; its kind, state and reason, the least trusted class of its
@@ -3212,6 +3225,25 @@ Drafting has its own contract; existing agents gain no prompt or tool.
   `confirm`; exit code 7 means the state does not allow the action. Deleting
   a candidate leaves its fingerprint as a tombstone and leaves vault notes
   alone.
+- **Manager source** (`memory_propose.py`, `ops/memory_propose.py`): the default
+  Manager lists `looper_memory_propose` only in the operator's dashboard or direct-chat
+  turns, with memory writing and its Manager source enabled, valid settings and at
+  least one configured target kind. Its schema lists those kinds; its contract follows
+  the turn's listing, changes the resident signature, and is absent from a prompt preview
+  without a turn. Code checks the user's quote against this turn or the newest 200 user
+  messages in this session from the last 24 hours (NFKC and folded whitespace), rejects
+  credentials, and caps proposals at three per message and twenty per local day per
+  Manager. A transaction with a per-Manager advisory lock rechecks those caps after
+  the call is recorded; the new source names that `manager_actions` row. A failed
+  commit marks the call as an error and proposes nothing. `revise` reseeds only this
+  Manager's pending, trusted conversation proposal of the same kind, keeps its old
+  revisions and adds the new source, then returns it to drafting with a `propose`
+  event. Looper appends the proposal id and a mention-free, forty-character statement
+  after the reply; it never claims the memory is saved. The group backstop also
+  remembers proposed statements and uses a memory-specific withheld notice; this
+  in-memory protection is lost on restart. Before any drafting budget or model call,
+  an exact fingerprint twin of the same kind merges into an open candidate if its
+  combined source class is allowed, otherwise it is dropped as a duplicate.
 - **Drafting** (`memory_draft_service.py`, `memory_draft.py`, `memory_draft_role.py`):
   the service polls every 10 seconds and PostgreSQL wakes it after a seed commits.
   A short transaction uses an advisory lock and `SKIP LOCKED` to claim a `drafting`
@@ -3567,9 +3599,18 @@ Local checks on macOS use `sandbox-exec -p
 '(version 1)(allow default)(deny network*)(deny job-creation)' /bin/sh -c <check>`.
 Before execution, a fixed probe must prove both launch and network denial; missing
 or ineffective facilities record `error: sandbox_unavailable`, with no unsandboxed
-fallback. DNS, loopback and pathname Unix sockets are denied; file IO and pipes
-remain available. Linux uses `unshare -rn --` with the same fail-closed preflight
-and a distinct network-namespace check; this path has not been verified on Linux.
+fallback and no password prompt. DNS, loopback and pathname Unix sockets are
+denied; file IO and pipes remain available. Linux uses `unshare -rn --`, which
+needs an unprivileged user namespace. The same fail-closed preflight must show a new network namespace that
+cannot connect, containing only `lo` and down, unaddressed, unlinked tunnel
+fallbacks. An interface that is up, addressed, or linked to another device is
+not enforcement. If the kernel refuses the user namespace, the preflight records
+`error: sandbox_unavailable` and does not run the check. A process that is
+already root may use `unshare -n --` and must pass that preflight. The Python
+test workflow sets `kernel.apparmor_restrict_unprivileged_userns=0` before the
+tests, because Ubuntu 24.04 restricts unprivileged user namespaces through
+AppArmor; a missing key on other images is ignored. Each host still has to pass
+that preflight; there is no unsandboxed fallback.
 Only a check requesting `network: true` in a `network` project bypasses that launcher.
 Commands receive an OS-only subset of `child_env.inherited()`, without runtime
 credentials, proxies or SSH agents. This is not a file sandbox: commands retain the
@@ -6595,12 +6636,41 @@ The operator-only v1 operations (all POST) are:
   bind source chats to projects. `intent_alert_senders.list`, `put`, `delete`,
   under `/api/v1/intent_alert_senders/`, maintain the alert app allowlist;
   candidates exclude Looper's own apps.
+- `intent_group_reads.list`, `preview`, `put`, `delete`, `settings_put`, under
+  `/api/v1/intent_group_reads/`, maintain the followed groups while intents are
+  off or on. Preview is read-only; the dashboard confirms its message count,
+  estimated cost, scope and quotas before adding a group. The list shows each
+  group's start time, readability, today's read/skipped counts and recent
+  message/intent counts. These operator-only operations are also available in
+  the generated CLI; Lark and Telegram need no new control because group
+  management is on the dashboard, and existing private intent delivery is reused.
+  `looper leads eval-export --chat CHAT --days N --intents --out FILE` writes
+  anonymous human-message windows and all sourced lead labels to an ignored or
+  external file of mode 600, for local review and count-only intent evaluation.
+- `intent_recognitions.preview`, `start`, `list`, `settings_put`, under
+  `/api/v1/intent_recognitions/`, expose separately opt-in one-off recognition.
+  A confirmed intents subscription supplies the project and processor Profile.
+  Preview reports the collected human-message count and estimated cost; the
+  dashboard and Manager ask for confirmation before starting a background run.
+  The default range is seven days, at most thirty, with only the newest 2,000
+  live/history human messages and at most $1 allocated across processor calls.
+  Context is restricted to those messages. It may precede a followed group's
+  start time, without changing the list, daily allowances or any cursor.
+  Records retain state, counts, actual cost, truncation and linked `on_request`
+  intents, including partial results after failure. Restart fails unfinished
+  runs rather than replaying them. The asking Lark/Telegram direct chat gets one
+  result message, bypassing the delivery layer; dashboard runs remain in the
+  recognition list. These intents never get individual push/progress notices.
+  The operator v1 operations are available through the generated CLI; no new
+  dedicated CLI command is added.
 
-Only build and reject require intents to be enabled, so the operator can
-prepare configuration while it is off. Disabling also disables intents
-subscriptions in the same transaction; enabling does not restart them. No
-intent operation is a Manager tool. The dashboard page and extraction runs
-are delivered separately; CLI callers use the same operator API operations.
+Build, reject, previewing recognition and starting recognition require intents
+to be enabled. The operator can prepare configuration while it is off. Disabling
+also disables intents subscriptions in the same transaction; enabling does not
+restart them. The default Manager also has `looper_intents_recognize` only while
+both `intents.enabled` and `intents.on_request.enabled` are on, and only in the
+operator's own console or direct-chat turns. The dashboard page and extraction
+runs are delivered separately; CLI callers use the same operator API operations.
 
 ### The ledger
 

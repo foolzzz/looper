@@ -87,7 +87,7 @@ tasked、rejected、merged 是终态。
 - **解析：** 回复整体是 JSON 对象，或夹在文字、多个代码块中间、带本类键的唯一一个对象，都能读；读不了的再问一次（指令末尾加 `REFORMAT_REMINDER`），还读不了就跳过这一段（`skipped`，`skip_reason` 为 `invalid_reply`）；提示词被本机 hook 拦下的（`ProcessorFailure.BLOCKED`）直接跳过（`blocked_by_hook`）。读不了而预算或时限已用完的不再问，按 `budget`、`timeout` 失败，保留这一段。跳过的运行算完成，什么都不存，花费照计，和入库一样先复核确认（不成立就取消，游标不动），游标越过这一段；连续跳过达到订阅的失败告警阈值（默认 3 次）发一次 `skip_alert`，下一次没跳过的完成运行发 `skip_recovered`；其他处理器失败仍是失败，游标不动，沿用订阅的失败告警；逐条校验、不合格的丢弃并按原因计数；未知字段忽略；每条至少一个 `m` 出处；`valid_until` 夹在 [明天, 今天 + `leads.valid_days`]；意图的 `type` 必须是启用的类型，出处全是机器人消息的只能是 `alert_triage`，出处在 `instructions_seen` 里的意图标 `flagged`。
 - **入库：** 一个事务写线索或意图、处理 `supersedes` 和 `same_as`、写运行结束、前移游标。processor 的记录照旧不存消息和回复。
 - **启用要确认：** 线索和意图订阅读的是操作者全部的人发消息，所以启用、改时间规则、来源、会话范围或 processor 的 Profile 都要重新确认；确认文字列出范围、Profile 及来源、企业管理的 hooks、每日上限和按最近 24 小时消息量估算的花费。没确认时触发记为跳过、游标不动。
-- **回填：** `looper msgflow leads-backfill --days 30` 默认 dry-run，只报条数、窗口数和预计花费；`--run --budget-usd X` 由协调者在维护者同意后执行，从旧到新、可续跑、到上限就停；只做线索。
+- **回填：** `looper msgflow leads-backfill --days 30` 默认 dry-run，只报条数、窗口数和预计花费；`--run --budget-usd X` 由协调者在维护者同意后执行，从旧到新、可续跑、到上限就停；只做线索。`--retry-skipped` 默认只读预览被 hook 阻止的窗口，按会话拆成至多 500 条的子窗口，显示条数、序号范围和回填实测单条均价估算（没有实测时明确使用兜底估算）；加 `--run --budget-usd X` 才处理。沿用原抽取范围、渲染、处理器和 hook，不改写内容来绕过控制；某会话再次被 hook 阻止后，记录 `blocked_by_hook`、会话 id、序号范围及条数，剩余子窗口只记录、不再提交该会话。每个子窗口的线索和进度同事务提交，全部完成或记录阻止后才删除原跳过项，其他失败（含两次不可读回复）保留待续跑；重试与普通回填共用锁。旧进度没有日期范围，首次重试可用 `--days N` 指定，默认 30 天，首次检查点固定范围供续跑。`invalid_reply` 原跳过项不参与此重试。Dashboard、Lark、Telegram 无新入口。
 
 ## 5. 查线索
 
@@ -297,7 +297,7 @@ tasked、rejected、merged 是终态。
   ```
 
   撤销就是删掉 `intent_group_reads` 的那一行；再加入是新的一行，开始时间是再加入的时刻。计数表只留 30 天：写计数的事务顺手删掉更早的行。
-- **迁移 `intent_recognitions`**（`order = 1510`），随第二个实现 PR：建 `intent_recognitions`（11.7），`intents` 加 `recognition_id BIGINT REFERENCES intent_recognitions(id) ON DELETE CASCADE`，把 `intents_via_check` 放宽到含 `on_request`，并加约束 `(via = 'on_request') = (recognition_id IS NOT NULL)`。
+- **迁移 `intent_recognitions`**（`order = 1810`、`pending_order = 1810`，在持续识别的 1800 之后），随第二个实现 PR：建 `intent_recognitions`（11.7），`intents` 加 `recognition_id BIGINT REFERENCES intent_recognitions(id) ON DELETE CASCADE`，从 `intents_via_check` 的当前值放宽到含 `on_request`，保留 `followed_group` 等已有值，并加约束 `(via = 'on_request') = (recognition_id IS NOT NULL)`。
 - **开关：** `intents.group_read.enabled`（持续识别）和 `intents.on_request.enabled`（识别一次），都只有字符串 `true` 是开，读法和 `intents.enabled` 一样；键名和读取函数放在 `leads_model`。两个都要 `intents.enabled` 开着才起作用。打开持续识别时，`delivery.enabled` 不是开就拒绝，并说明原因。开关只管读不读，不动名单；关着也能维护名单。
 - **能加什么：** `source_chats.kind` 为 `group` 或 `topic` 的会话（私聊本来就整段读；`unknown` 等采集认出类型再加），会话已在消息流里，并且没有被消息流或抽取排除。每个来源最多 10 个群。加入以后才被排除的，名单行留着但不读，列表里标出来。「识别一次」对会话的要求相同，不要求在名单上。
 - **不导出：** 配置导出（`config_transfer`）不含名单、开关和识别记录。

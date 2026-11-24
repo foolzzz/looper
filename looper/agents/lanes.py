@@ -62,10 +62,11 @@ def preempt(session: ManagerSession, *, ops: ManagerOps | None, reason: str = "p
     """Stop the target's live background turn. Its worker still owes fallback and wake acknowledgement."""
     token = session.running_token
     if (token is None or not token.live or token.cancel.requested or token.ops_turn is None
-            or manager_lane(token.ops_turn.origin) is not Lane.BACKGROUND or not session.claude.can_interrupt):
+            or manager_lane(token.ops_turn.origin) is not Lane.BACKGROUND or not (session.claude.can_interrupt or token.admission_waiting)):
         return False
     # The cancel callback may start the interrupt immediately: require cleanup before requesting it.
-    token.cancel.cleanup = StopCleanup.REQUIRED
+    if not token.admission_waiting:
+        token.cancel.cleanup = StopCleanup.REQUIRED
     if not token.request_stop(reason):
         return False
     if ops is not None:
@@ -81,7 +82,7 @@ async def route_arrival(agent: ManagerAgent, session: ManagerSession, envelope: 
     token = session.running_token
     origin = token.ops_turn.origin if token is not None and token.live and token.ops_turn is not None else None
     merged = await agent._mid_turn.merge(session, envelope) if origin is TurnOrigin.USER else False
-    arrival = classify_arrival(origin, session.claude.can_interrupt, merged)
+    arrival = classify_arrival(origin, session.claude.can_interrupt or bool(token and token.admission_waiting), merged)
     if arrival is Arrival.PREEMPT and preempt(session, ops=agent.ops):
         token.preempted_by = envelope.message_id
     await agent._router.void_idle_checks(session)

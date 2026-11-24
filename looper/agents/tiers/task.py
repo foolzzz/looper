@@ -30,7 +30,7 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
-from .. import attempts, step_workspaces, task_workspaces
+from .. import admission, attempts, step_workspaces, task_workspaces
 from ..room import remove_run_sessions
 from ..kept_run import AdoptResult, RunHold
 from ..broadcast import Broadcaster
@@ -218,7 +218,8 @@ class TaskRouter:
         # Do not hold Planner turns or TASK_START: results must reach the database before a decision.
         # Restart drops Planner bus queues, so also wait through message handling before its turn lock.
         return {"planner_turns": [p.agent_id for p in self._planners.values()
-                                  if p._turn_lock.locked() or p._handling_message
+                                  if ((p._turn_lock.locked() or p._handling_message)
+                                      and not admission.waiting(p.agent_id))
                                   or (self._bus is not None and self._bus.pending_count(p.agent_id))],
                 "starting": int(self._handling_message or bool(
                     self._bus is not None and self._bus.pending_count(self.agent_id)))}
