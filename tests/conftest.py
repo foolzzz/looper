@@ -3,12 +3,13 @@ from __future__ import annotations
 import contextlib
 import copy
 import json
+import logging
 import math
 import os
 import re
 import sys
 from collections import Counter
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from datetime import datetime, timezone
 from pathlib import Path
 from statistics import median
@@ -505,6 +506,17 @@ async def _created_project(
 ) -> dict:
     return {"id": "proj-000000000000", "name": name, "description": description, "work_dir": work_dir,
             "background": background}
+
+
+@pytest.fixture(autouse=True)
+def _root_log_level() -> Iterator[None]:
+    """Every test starts with the root logger at WARNING, Python's default. serve, mcp-server and the claude-code
+    MCP entry set it to INFO in-process (log_redaction.log_to_stderr); without this, caplog in a later test of the
+    same worker sees INFO records or not depending on which tests ran before it."""
+    root = logging.getLogger()
+    root.setLevel(logging.WARNING)
+    yield
+    root.setLevel(logging.WARNING)
 
 
 @pytest.fixture(autouse=True)
