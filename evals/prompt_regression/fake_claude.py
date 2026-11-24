@@ -253,6 +253,34 @@ def _mcp(args: list[str]) -> Any:
     return rpc
 
 
+_JOURNAL_REF = re.compile(r"<J:([^>]+)>")
+
+
+def _journal_label(message: str, text: str) -> str:
+    """The ``J<n>`` of the first journal line containing ``text``; a continuation uses the entry above it."""
+    lines = message.splitlines()
+    for index, line in enumerate(lines):
+        if text not in line:
+            continue
+        while index >= 0 and not lines[index].startswith("- J"):
+            index -= 1
+        if index >= 0:
+            return lines[index][2:].split(" ", 1)[0]
+        break
+    return ""
+
+
+def _bind_journal_refs(value: Any, message: str) -> Any:
+    """Replace ``<J:text>`` in a scripted memory reply with the journal label that line belongs to."""
+    if isinstance(value, str):
+        return _JOURNAL_REF.sub(lambda match: _journal_label(message, match.group(1)) or match.group(0), value)
+    if isinstance(value, list):
+        return [_bind_journal_refs(item, message) for item in value]
+    if isinstance(value, dict):
+        return {key: _bind_journal_refs(item, message) for key, item in value.items()}
+    return value
+
+
 def _planner(script: dict[str, Any], args: list[str], stdin: _Stdin) -> None:
     cost = 0.0
     broken = 0
@@ -295,6 +323,9 @@ def _planner(script: dict[str, Any], args: list[str], stdin: _Stdin) -> None:
         elif message.startswith("[WAIT]"):
             reply = {"reply": "Going on without it.", "action": "none",
                      "wait": {"action": "proceed", "resolution": "the wait ended without what it waited for"}}
+        elif message.startswith("[MEMORY]"):
+            reply = _bind_journal_refs(
+                script.get("memory_reply") or {"memory": [], "note": "nothing worth keeping"}, message)
         elif message.startswith("[VAULT]"):
             vault_calls = script.get("vault_calls") or []
             if vault_calls and rpc is None:

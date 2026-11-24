@@ -175,6 +175,8 @@
  "memory.revive": "inside",
  "memory.settings_get": "inside",
  "memory.settings_put": "inside",
+ "memory_closeout.get": "inside",
+ "memory_closeout.update": "inside",
  "message_stream.chat_update": "inside",
  "message_stream.chats": "inside",
  "message_stream.configure": "inside",

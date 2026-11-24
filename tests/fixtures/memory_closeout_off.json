@@ -1,0 +1,11 @@
+{
+  "main_revision": "f747456affe6ccacaf28b21cc0d180a63c1bc2f6",
+  "sha256": {
+    "vault_message_completed": "c6477285319c7471eb632bb79747a2ae9482d0618f0a8b45351e2800d7a747d0",
+    "vault_message_failed": "1e3a5012c759a5cfcccb431739dad9b232881f2c63ed0d560e40d28c8369a951",
+    "lessons_journal_plain": "63ffb2d92900047a71ffe180960c1572a0c637d489f0179fdc1bedd30140058b",
+    "lessons_journal_fenced": "040c54f266bf69e62acadcd8b775779b253ecfe2b9ac385ed15ae6242de66050",
+    "project_view_off": "3ed3478ffd2198a8b0201b2bd85a15c13540cfa401e45c179f2e2846651b2daf",
+    "export_entry_off": "d436880365e503dcbf257f3009d84eef319a286be66d911cc089858b1e5821df"
+  }
+}

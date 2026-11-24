@@ -142,6 +142,7 @@ from .. import scheduler_settings
 from ..schedule_session import SessionBound, session_bound
 from ..llmrec import LlmrecRoute, control as llmrec
 from ..scheduler import continuing_run_preface
+from .. import memory_closeout
 from .. import vault
 from ..vault import VaultConfig
 from ..ops.vault import planner_guide
@@ -5848,6 +5849,8 @@ class PlannerAgent:
         """
         if self._vault_closed:
             return
+        if await memory_closeout.applies(self, plan):  # memory-write-path RFC D11: [MEMORY] replaces [VAULT]
+            return await memory_closeout.run(self, plan, ended)
         try:
             if self._ops is None or self._token is None or not (await self._read_execution()).vault_on:
                 return

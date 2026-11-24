@@ -152,6 +152,8 @@ def project_view(row: dict[str, Any]) -> dict[str, Any]:
         "schedule_count": row.get("schedule_count", 0),
         # Only a project that switched skill proposals on shows the key; every other view is as before.
         **({"skill_proposals": row["skill_proposals"]} if row.get("skill_proposals") else {}),
+        # Omitted while off. Operator-only; not an agent-writable execution field.
+        **({"memory_closeout": "on"} if row.get("memory_closeout") == "on" else {}),
     }
 
 
