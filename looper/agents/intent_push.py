@@ -196,7 +196,12 @@ class IntentPushService:
         row = await conn.fetchrow("SELECT * FROM intents WHERE id=$1", intent_id)
         if row is None:
             return
-        held = (row["via"] == "on_request"
+        from .intent_rule_delivery import confirmation_allowed
+
+        rule_held = not await confirmation_allowed(conn, intent_id)
+        if row["state"] == "merged" and row["merged_into"] is not None:
+            rule_held = rule_held or not await confirmation_allowed(conn, row["merged_into"])
+        held = (rule_held or row["via"] == "on_request"
                 or row["via"] == "followed_group" and not chat_settings.delivery_enabled())
         schedule = await db_schedules.get_schedule(row["schedule_id"], pool=conn) if row["schedule_id"] else None
         target = await target_for(schedule)
@@ -325,6 +330,14 @@ class IntentPushService:
             logger.warning("intent %s final notice: %s", intent["id"], reason)
 
     async def _deliver(self, conn: Any, intent: Mapping[str, Any], post: Mapping[str, Any], schedule: Any) -> None:
+        from .intent_rule_delivery import confirmation_allowed
+
+        if post["kind"] in ("push", "progress"):
+            if not await confirmation_allowed(conn, intent["id"]):
+                return
+            if (post["kind"] == "progress" and intent["merged_into"] is not None
+                    and not await confirmation_allowed(conn, intent["merged_into"])):
+                return
         # Re-read the schedule: confirmation, identity and allowlist may have changed since another post.
         schedule = await db_schedules.get_schedule(schedule["id"], pool=conn)
         if await target_for(schedule) != (post["channel_id"], post["chat"]):

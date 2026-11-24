@@ -7,6 +7,31 @@ from typing import Any
 from uuid import UUID, uuid4
 
 from looper.agents import intent_rules_model as model
+from .intent_rule_execution import (
+    claim_notices as claim_notices,
+    claim_starts as claim_starts,
+    claim_work as claim_work,
+    consume_project_day as consume_project_day,
+    create_discovery as create_discovery,
+    decide_work as decide_work,
+    enqueue_notice as enqueue_notice,
+    enqueue_start as enqueue_start,
+    enqueue_work as enqueue_work,
+    execution_view as execution_view,
+    finish_start as finish_start,
+    get_claim as get_claim,
+    get_discovery as get_discovery,
+    get_execution as get_execution,
+    get_notice as get_notice,
+    get_work as get_work,
+    insert_claim as insert_claim,
+    insert_execution as insert_execution,
+    link_hit_execution as link_hit_execution,
+    lock_mr_target as lock_mr_target,
+    lock_project_day as lock_project_day,
+    record_verification as record_verification,
+    update_notice as update_notice,
+)
 
 _RULE_FIELDS = ("id", "version", "enabled", "position", "intent_type", "scope", "conditions", "action",
                 "project_id", "template_key")
@@ -138,55 +163,92 @@ _HIT_SUMMARY = ("id,created_at,rule_id,rule_version,selection,action,reason,inte
 
 
 def _summary(row: Any) -> dict:
-    return {**_row(row), "task_id": None, "execution_state": None}
+    result = {"task_id": None, "execution_state": None, **_row(row)}
+    if result.get("reason") is not None and result["reason"] not in set(model.ExecutionReason):
+        result["reason"] = "unknown"
+    return result
 
 
 async def list_hits(conn: Any, *, rule_id: str | None = None, action: str | None = None, reason: str | None = None,
                     before_id: int | None = None, limit: int = 50) -> dict:
-    rows = await conn.fetch(f"SELECT {_HIT_SUMMARY} FROM intent_rule_hits "
-        "WHERE ($1::uuid IS NULL OR rule_id=$1) AND ($2::text IS NULL OR action=$2) "
-        "AND ($3::text IS NULL OR reason=$3) AND ($4::bigint IS NULL OR id<$4) ORDER BY id DESC LIMIT $5",
+    rows = await conn.fetch("SELECT " + ",".join("h." + key for key in _HIT_SUMMARY.split(",")) +
+        ",e.task_id,e.start_state AS execution_state FROM intent_rule_hits h "
+        "LEFT JOIN intent_rule_hit_executions x ON x.hit_id=h.id "
+        "LEFT JOIN intent_rule_executions e ON e.id=x.execution_id "
+        "WHERE ($1::uuid IS NULL OR h.rule_id=$1) AND ($2::text IS NULL OR h.action=$2) "
+        "AND ($3::text IS NULL OR h.reason=$3) AND ($4::bigint IS NULL OR h.id<$4) ORDER BY h.id DESC LIMIT $5",
         UUID(rule_id) if rule_id is not None else None, action, reason, before_id, limit + 1)
     return {"hits": [_summary(row) for row in rows[:limit]], "more": len(rows) > limit}
 
 
 async def get_hit(conn: Any, hit_id: int) -> dict | None:
-    hit = await conn.fetchrow(f"SELECT {_HIT_SUMMARY} FROM intent_rule_hits WHERE id=$1", hit_id)
+    hit = await conn.fetchrow(f"SELECT {_HIT_SUMMARY},attempts FROM intent_rule_hits WHERE id=$1", hit_id)
     if hit is None:
         return None
-    conditions = [_row(row) for row in await conn.fetch("SELECT rule_position,condition_position,rule_id,rule_version,"
+    hit = dict(hit)
+    attempts = hit.pop("attempts")
+    if isinstance(attempts, str):
+        attempts = json.loads(attempts)
+    conditions = [{**_row({key: value for key, value in dict(row).items() if key != "result"}),
+                   "result": row["result"]}
+                  for row in await conn.fetch("SELECT rule_position,condition_position,rule_id,rule_version,"
         "kind,result,reason,verified_at FROM intent_rule_condition_results WHERE hit_id=$1 "
         "ORDER BY rule_position,condition_position", hit_id)]
     sources = [dict(row) for row in await conn.fetch("SELECT s.event_seq,e.source_id,e.chat_id,e.external_id,e.sent_at "
         "FROM intent_rule_hit_sources s JOIN source_events e ON e.seq=s.event_seq WHERE s.hit_id=$1 "
         "ORDER BY e.sent_at,e.seq", hit_id)]
-    return {"hit": _summary(hit), "conditions": conditions, "sources": sources, "execution": None}
+    execution = await execution_view(conn, hit_id=hit_id)
+    summary = _summary(hit)
+    if execution is not None:
+        summary.update(task_id=execution["task_id"], execution_state=execution["start_state"])
+    return {"hit": summary, "conditions": conditions, "attempts": attempts, "sources": sources, "execution": execution}
 
 
 async def hit_stats(conn: Any, *, since: datetime, until: datetime, rule_id: str | None = None) -> dict:
-    rows = await conn.fetch("SELECT rule_id,rule_version AS version,count(*) AS hits "
-        "FROM intent_rule_hits WHERE created_at >= $1 AND created_at < $2 "
-        "AND ($3::uuid IS NULL OR rule_id=$3) GROUP BY rule_id,rule_version ORDER BY rule_id,rule_version",
+    rows = await conn.fetch("WITH window_hits AS (SELECT * FROM intent_rule_hits "
+        "WHERE created_at >= $1 AND created_at < $2), metrics AS ("
+        "SELECT h.rule_id,h.rule_version AS version,count(*) AS hits,"
+        "count(*) FILTER (WHERE h.reason IN ('verification_unavailable','adapter_missing','adapter_start_failed',"
+        "'verification_timeout','verification_output_limit','verification_exit','verification_protocol',"
+        "'authentication_failed','permission_denied','not_readable','cannot_decide','upstream_error') "
+        "AND NOT EXISTS (SELECT 1 FROM intent_rule_condition_results c WHERE c.hit_id=h.id "
+        "AND c.result='unavailable')) AS verification_unavailable,"
+        "count(DISTINCT e.id) FILTER (WHERE e.mode='auto' AND h.action='create_task' "
+        "AND h.reason IS DISTINCT FROM 'deduped') AS auto_created,"
+        "count(*) FILTER (WHERE h.reason='deduped') AS deduped,"
+        "count(*) FILTER (WHERE h.reason='daily_cap') AS daily_cap "
+        "FROM window_hits h LEFT JOIN intent_rule_hit_executions x ON x.hit_id=h.id "
+        "LEFT JOIN intent_rule_executions e ON e.id=x.execution_id "
+        "WHERE ($3::uuid IS NULL OR h.rule_id=$3) GROUP BY h.rule_id,h.rule_version "
+        "UNION ALL SELECT c.rule_id,c.rule_version AS version,0 AS hits,"
+        "count(DISTINCT h.id) AS verification_unavailable,0 AS auto_created,0 AS deduped,0 AS daily_cap "
+        "FROM window_hits h JOIN intent_rule_condition_results c ON c.hit_id=h.id "
+        "WHERE c.result='unavailable' AND ($3::uuid IS NULL OR c.rule_id=$3) "
+        "GROUP BY c.rule_id,c.rule_version) "
+        "SELECT rule_id,version,sum(hits)::bigint AS hits,"
+        "sum(verification_unavailable)::bigint AS verification_unavailable,"
+        "sum(auto_created)::bigint AS auto_created,sum(deduped)::bigint AS deduped,"
+        "sum(daily_cap)::bigint AS daily_cap FROM metrics GROUP BY rule_id,version ORDER BY rule_id,version",
         since, until, UUID(rule_id) if rule_id is not None else None)
-    return {"available": False, "range": {"since": since, "until": until},
-            "rules": [{**_row(row), "verification_unavailable": None, "auto_created": None,
-                       "deduped": None, "daily_cap": None} for row in rows],
-            "projects": []}
+    return {"available": True, "range": {"since": since, "until": until},
+            "rules": [_row(row) for row in rows], "projects": []}
 
 
-async def append_hit(conn: Any, hit: dict, *, conditions: list | tuple = (), sources: list | tuple = ()) -> int:
+async def append_hit(conn: Any, hit: dict, *, conditions: list | tuple = (), sources: list | tuple = (),
+                     attempts: list | tuple = ()) -> int:
     _writing(conn)
     hit = model.validate_hit(hit)
     conditions = [model.validate_condition_result(item) for item in conditions]
+    attempts = [model.validate_schema(item, model.ATTEMPT_RESULT_SCHEMA) for item in attempts]
     if any(isinstance(seq, bool) or not isinstance(seq, int) or seq <= 0 for seq in sources):
         raise ValueError("hit sources must be positive event sequence IDs")
     hit_id = await conn.fetchval("INSERT INTO intent_rule_hits(evaluation_key,intent_id,discovery_id,generation,"
-        "rule_id,rule_version,selection,action,reason,verified_at,mr_identity) "
-        "VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11::jsonb) ON CONFLICT (evaluation_key) DO NOTHING RETURNING id",
+        "rule_id,rule_version,selection,action,reason,verified_at,mr_identity,attempts) "
+        "VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11::jsonb,$12::jsonb) ON CONFLICT (evaluation_key) DO NOTHING RETURNING id",
         hit["evaluation_key"], hit["intent_id"], hit["discovery_id"], hit["generation"],
         UUID(hit["rule_id"]) if hit["rule_id"] is not None else None, hit["rule_version"], hit["selection"],
         hit["action"], hit["reason"], _time(hit["verified_at"]),
-        json.dumps(hit["mr_identity"]) if hit["mr_identity"] is not None else None)
+        json.dumps(hit["mr_identity"]) if hit["mr_identity"] is not None else None, json.dumps(attempts))
     if hit_id is None:
         return await conn.fetchval("SELECT id FROM intent_rule_hits WHERE evaluation_key=$1", hit["evaluation_key"])
     for item in conditions:

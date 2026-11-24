@@ -6736,10 +6736,67 @@ run after the Manager's final stop check. A stopped or timed-out preparation
 changes no intents or tasks; timeout and task-validation failures receive
 code-written replies. Task creation and the transition are one database
 transaction; task notices belong to the operator's direct chat, never the source
-conversation. The requirement
+conversation. With rules off, the requirement
 contains only the displayed title, summary and up to five source references,
 marked as background rather than instructions. Tasks created from the dashboard
 leave `origin_channel_id` empty, as other dashboard-created tasks do.
+
+With `intents.rules.enabled` on, newly extracted candidates have a durable rule
+work item before confirmation delivery. The ordered, typed AND rules select
+confirmation, record-only, or automatic MR review; unavailable verification
+immediately falls back to confirmation. The switch defaults off, does not scan
+old pending suggestions, and does not authorize an operator-requested recognition
+batch to create tasks. Record-only suggestions remain pending and can be built
+manually. Configuration, discovery submission, migration previews and revocation
+are operator-only v1 operations; rule editing adds no CLI or Manager tools.
+
+`IntentRuleService` verifies MR URLs through an explicitly configured read-only
+command adapter, outside row-locking transactions. Saving its configuration
+requires an absolute executable path; execution never searches PATH. It uses
+direct argv, a fresh empty working directory, a minimal explicit environment,
+a ten-second deadline and a 64 KiB stdout bound, and cleans up the process group
+after normal exits as well as failures. The request contains only the canonical MR URL and
+protocol version. A host integration can inject dedicated credential references
+with `intent_rule_verifier.configure_credentials`; a missing reference confirms
+instead of borrowing another provider's credentials. The empty directory is not
+a sandbox. The response is a closed schema, and its canonical target must match
+the requested system, repository route and MR. Reviewer IDs come from the API;
+DM targets, mentions and sender IDs come from the same real request event.
+
+Before creation the service verifies again and, under the shared admission lock,
+rechecks the switch, delivery, rule generation, project/workflow snapshots,
+source authorization and the original revision. The transaction atomically
+claims `(system_id, repository_id, mr_id, revision)`, creates the existing task
+lifecycle's ready task, transitions the candidate, consumes the shared operator /
+project / local-day quota, writes audit and queues start and notice outboxes.
+Messages, structured discoveries and manual MR builds share that claim. Existing
+or cancelled revisions link the same task without another quota charge. Manual
+builds do not consume automatic quota. An unknown historical revision blocks the
+MR until the operator resolves its ownership; migration preview/confirmation
+registers reliable existing ownership without switching an installation.
+
+Automatic and manual rule-bound MR requirements contain only a fixed review
+sentence and the verified URL, with an explicit project and workflow. Message
+titles, summaries and source text never become Worker instructions. Starts
+recover only their committed task ID and are acknowledged by the atomic
+`init → pending` transition, not by successful bus publication. Revocation
+serializes with that transition, cancels a ready task locally or asks the current
+TaskRouter to stop active work, and reports the observed state. Claims and quota
+survive revocation; posted review comments cannot be withdrawn by this action.
+
+Rule notices use normal proactive delivery to the current operator DM, with
+separate `rule-created:`, `rule-discovery:` and fault-episode references. Quiet
+hours and daily limits retain a digest; uncertain channel receipts do not blindly
+retry. Source deletion clears message audit while committed execution/start and
+minimal MR claims survive. Confirmation push, attention and morning-brief items
+are checked again at send time under the same candidate gate. Switching rules
+off holds notices without stopping committed starts or tasks; switching back on
+resumes the same notices and never creates again. Three consecutive unavailable
+checks produce one normal operator notice per fault episode. Execution readback
+includes start, quota, delivery and revocation facts, and statistics count unique
+automatic executions rather than multiplying tasks through deduplicated hits.
+The remote API and local commit cannot be atomic: the workflow must still read
+the current MR before working on it.
 
 The one state writer permits `pending → tasked | rejected | expired` and
 `expired → tasked`. A transition of an intent whose push was delivered (sent, with a

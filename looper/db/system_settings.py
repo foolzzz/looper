@@ -25,6 +25,9 @@ async def put_settings(values: Mapping[str, str | None], *, pool: asyncpg.Pool |
     """Store each value, in one transaction; None removes the key's row (its built-in default applies)."""
     pool = pool or get_pool()
     async with pool.acquire() as conn, conn.transaction():
+        if set(values) & {"intents.rules.enabled", "intents.enabled", "delivery.enabled", "user.timezone"}:
+            from .intent_rules import lock_admission
+            await lock_admission(conn)
         for key, value in values.items():
             if value is None:
                 await conn.execute("DELETE FROM system_settings WHERE key = $1", key)

@@ -545,6 +545,23 @@ async def start_ready_task(task_id: str, *, pool: asyncpg.Pool | None = None) ->
     """Move a ready task to ``pending`` (its Planner starting), once: its row, or None when there is no such task or
     it is not ready."""
     pool = pool or get_pool()
+    snapshot = await pool.fetchrow("SELECT config FROM tasks WHERE id=$1", task_id)
+    config = json.loads(snapshot["config"]) if snapshot and isinstance(snapshot["config"], str) else snapshot["config"] if snapshot else {}
+    if (config or {}).get("intent_rule_bound"):
+        from .connection import _connection
+        async with _connection(pool) as conn, conn.transaction():
+            await conn.fetchrow("SELECT id FROM tasks WHERE id=$1 FOR UPDATE", task_id)
+            execution = await conn.fetchrow("SELECT id,revoke_state FROM intent_rule_executions WHERE task_id=$1 FOR UPDATE", task_id)
+            if execution is None or execution["revoke_state"] != "none":
+                return None
+            start = await conn.fetchrow("SELECT state FROM intent_rule_task_starts WHERE task_id=$1 FOR UPDATE", task_id)
+            if start is None or start["state"] == "cancelled":
+                return None
+            row = await conn.fetchrow("UPDATE tasks SET status='pending',updated_at=now() WHERE id=$1 AND status=$2 RETURNING *", task_id, READY)
+            if row:
+                await conn.execute("UPDATE intent_rule_executions SET start_state='started',updated_at=now() WHERE id=$1", execution["id"])
+                await conn.execute("UPDATE intent_rule_task_starts SET state='acknowledged',lease_token=NULL,lease_until=NULL,updated_at=now() WHERE task_id=$1", task_id)
+            return _task(row) if row is not None else None
     row = await pool.fetchrow(
         "UPDATE tasks SET status = 'pending', updated_at = now() WHERE id = $1 AND status = $2 RETURNING *",
         task_id, READY,
@@ -626,7 +643,10 @@ async def update_task_config(
         args.append(work_dir)
         idx += 1
     if config is not None:
-        sets.append(f"config = ${idx}")
+        # Execution ownership is server metadata, retained under the same row
+        # update even when the caller replaces every editable config field.
+        sets.append(f"config = ${idx}::jsonb || CASE WHEN config->'intent_rule_bound'='true'::jsonb "
+                    "THEN '{\"intent_rule_bound\":true}'::jsonb ELSE '{}'::jsonb END")
         args.append(_config_json(config))
         idx += 1
     if not sets:
