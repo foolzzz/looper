@@ -147,7 +147,8 @@ jobs:
 
       - name: Run the tests
         if: needs.changes.outputs.docs_only != 'true'
-        run: uv run --extra test python -m pytest -q -n auto -rs --durations=25 --junitxml=agent-shard-junit.xml -o junit_family=xunit1 -o junit_duration_report=total -m "not installed and not provenance"
+        # Let idle workers take queued slow cases instead of leaving one worker with a long tail.
+        run: uv run --extra test python -m pytest -q -n auto --dist worksteal -rs --durations=25 --junitxml=agent-shard-junit.xml -o junit_family=xunit1 -o junit_duration_report=total -m "not installed and not provenance"
 
       - name: Upload shard durations
         if: always() && needs.changes.outputs.docs_only != 'true'

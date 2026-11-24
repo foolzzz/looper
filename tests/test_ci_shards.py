@@ -164,6 +164,7 @@ def test_workflow_runs_six_shards_behind_stable_required_check() -> None:
 def test_shards_upload_total_test_durations_even_on_failure() -> None:
     steps = _workflow()["jobs"]["agent-system"]["steps"]
     run = next(step for step in steps if step.get("name") == "Run the tests")["run"]
+    assert "--dist worksteal" in run
     assert "--durations=25" in run
     assert "--junitxml=agent-shard-junit.xml" in run
     assert "junit_family=xunit1" in run  # Preserve file paths in xdist JUnit reports.
