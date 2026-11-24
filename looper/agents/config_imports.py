@@ -78,6 +78,11 @@ async def authorize(data: dict[str, Any], policy: Literal["client", "operator"] 
     """Check the staging policy, including at confirmation; exclude a client's unchanged default from execution."""
     if policy != "client":
         return data
+    settings = data.get("settings", {})
+    if any(isinstance(entry, dict) and entry.get("role") == "outbound_check"
+           for section in ("roles", "layers") for entry in settings.get(section, [])):
+        raise OpError(ErrorCode.FORBIDDEN, "Outbound check settings require operator identity; "
+                      "upload this configuration with an operator token")
     if "cost_guard" in data.get("settings", {}):
         raise OpError(ErrorCode.FORBIDDEN, "Cost guard settings require operator identity; "
                       "upload this configuration with an operator token")
