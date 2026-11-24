@@ -29,7 +29,7 @@ class InputResident(_Resident):
         self.accept = True
         self.failure: Exception | None = None
 
-    async def write_mid_turn(self, text: str) -> bool:
+    async def write_mid_turn(self, text: str, *, message_id: str | None = None) -> bool:
         if self.failure:
             raise self.failure
         if not self.accept:
@@ -236,6 +236,35 @@ def test_shutdown_keeps_merged_message_for_replay(enabled, tmp_path):
     run_case(test, enabled, tmp_path)
 
 
+def test_disabling_input_keeps_pending_settlement_order(enabled, tmp_path):
+    async def test(rig, pool):
+        first = await start_turn(rig)
+        entered, release = asyncio.Event(), asyncio.Event()
+
+        async def pending(text, **kwargs):
+            entered.set()
+            await release.wait()
+            return False
+
+        enabled.setattr(rig.main, "write_mid_turn", pending)
+        second, third = _web("second"), _web("third")
+        try:
+            await rig.bus.publish(second)
+            await asyncio.wait_for(entered.wait(), 5)
+            enabled.setattr(chat_settings, "_mid_turn_input_enabled", False)
+            await rig.bus.publish(third)
+            await drained(rig)
+            release.set()
+            await until(lambda: not rig.manager._mid_turn._tasks)
+            rig.main.release.set()
+            await rig.reply(first)
+            assert (await rig.reply(second)).endswith("回复 2")
+            assert (await rig.reply(third)).endswith("回复 3")
+        finally:
+            release.set()
+    run_case(test, enabled, tmp_path)
+
+
 def test_a_queued_command_keeps_later_input_in_order(enabled, tmp_path):
     async def test(rig, pool):
         await start_turn(rig)
@@ -263,6 +292,7 @@ def test_real_manager_resident_path_with_scripted_cli(enabled, tmp_path):
             "print(json.dumps({'type':'system','subtype':'init','session_id':'synthetic-session'}), flush=True)\n"
             "open('ready', 'w').close()\n"
             "second = json.loads(sys.stdin.readline())\n"
+            "print(json.dumps(dict(second, isReplay=True)), flush=True)\n"
             "open('inputs.json', 'w').write(json.dumps([first, second]))\n"
             "print(json.dumps({'type':'result','subtype':'success','is_error':False,'session_id':'synthetic-session',"
             "'result':'handled first and second'}), flush=True)\n"
@@ -289,7 +319,8 @@ def test_real_manager_resident_path_with_scripted_cli(enabled, tmp_path):
     run_db(test, enabled, timeout=45)
 
 
-@pytest.mark.parametrize("timing", ["buffered", "drain", "kernel_before_write", "kernel_after_write"])
+@pytest.mark.parametrize("timing", ["buffered", "drain", "kernel_before_write", "kernel_after_write",
+                                   "generating", "assistant"])
 def test_buffered_result_queues_followup_once_without_merging_or_settling(enabled, tmp_path, timing):
     """Drive the real Manager/read loop while controlling exactly when stdout is consumed."""
     from looper.agents.claude_cli import ResidentClaude
@@ -297,7 +328,7 @@ def test_buffered_result_queues_followup_once_without_merging_or_settling(enable
 
     async def test(pool):
         kernel = timing.startswith("kernel_")
-        result_during_drain = timing in {"drain", "kernel_after_write"}
+        wrote_input = timing not in {"generating", "assistant"}
         read_end, write_end = socket.socketpair()
         loop = asyncio.get_running_loop()
         rig = _Rig(tmp_path)
@@ -335,10 +366,10 @@ def test_buffered_result_queues_followup_once_without_merging_or_settling(enable
                 await until(lambda: output._stdout._waiter is not None)
             release_result = asyncio.Event()
             dispatch_event = output._dispatch
-            async def dispatch(event):
+            async def dispatch(event, **kwargs):
                 if event["type"] == "result":
                     await release_result.wait()
-                await dispatch_event(event)
+                await dispatch_event(event, **kwargs)
             enabled.setattr(output, "_dispatch", dispatch)
             writer = process.stdin
             writes = []
@@ -363,7 +394,18 @@ def test_buffered_result_queues_followup_once_without_merging_or_settling(enable
                         assert not resumed  # short line: real drain did not yield
             process.stdin = Writer()
             write = resident.write_mid_turn
-            async def followup(text):
+            async def followup(text, **kwargs):
+                if not wrote_input:
+                    # Model generation has begun, but no result exists yet. The
+                    # events, rather than elapsed time, decide B's next-turn ownership.
+                    event = ({"type": "stream_event", "event": {"type": "message_start"}}
+                             if timing == "generating" else
+                             {"type": "assistant", "message": {"content": [{"type": "text", "text": "A only"}]}})
+                    await dispatch_event(event)
+                    accepted = await write(text, **kwargs)
+                    output._stdout.feed_data(result)
+                    release_result.set()
+                    return accepted
                 # The result is already in stdout before B's admission check. In
                 # the drain case the reader deliberately cannot finish until B writes.
                 if timing == "kernel_before_write":
@@ -373,7 +415,7 @@ def test_buffered_result_queues_followup_once_without_merging_or_settling(enable
                     output._stdout.feed_data(result)
                 if timing != "drain":
                     release_result.set()
-                return await write(text)
+                return await write(text, **kwargs)
             enabled.setattr(resident, "write_mid_turn", followup)
             queued = []
             dispatch_message = rig.manager._router.dispatch
@@ -408,14 +450,13 @@ def test_buffered_result_queues_followup_once_without_merging_or_settling(enable
             assert second.message_id not in rig.replies
             assert "已并入当前回复" not in statuses
             assert second.message_id in {e.message_id for e in rig.bus.journal.undelivered()}
-            assert len(writes) == int(result_during_drain)
-            if result_during_drain:
-                assert process.returncode is not None  # ambiguous pipe is gone before dispatch resumes
+            assert len(writes) == int(wrote_input)
+            assert process.returncode is None  # the queued UUID keeps the resident and its background work
             (tmp_path / "read-followup").touch()
             proceed.set()
             assert await rig.reply(second) == "handled queued followup"
             assert queued == [second.message_id]
-            assert (resident.pid != original_pid) is result_during_drain
+            assert resident.pid == original_pid
             consumed = [json.loads(line) for line in (tmp_path / "consumed.jsonl").read_text().splitlines()]
             assert len(consumed) == 2 and "race-followup" in consumed[1]["message"]["content"]
             await until(lambda: not [e for e in rig.bus.journal.undelivered() if e.target.agent_id == "manager"])
@@ -435,8 +476,8 @@ def test_stop_while_merged_write_is_draining_stops_original(enabled, tmp_path):
         first = await start_turn(rig)
         written, drain = asyncio.Event(), asyncio.Event()
         write = rig.main.write_mid_turn
-        async def blocked_write(text):
-            result = await write(text)
+        async def blocked_write(text, **kwargs):
+            result = await write(text, **kwargs)
             written.set()
             await drain.wait()
             return result

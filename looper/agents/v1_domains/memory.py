@@ -102,6 +102,11 @@ OPERATIONS = (
         "Only a blocked candidate can be retried; its attempt count starts again at zero.",
         _object({"candidate": _ID}, closed=True), _WRITE_RESULT, risk="write", audit_operator=False,
         level=ActionLevel.MACHINE),
+    # Redrafting changes only a candidate inside Looper; it never confirms or writes a vault note.
+    _op("redraft", "Queue fresh drafting of a conflicted or failed memory candidate.",
+        "Only conflicts and draft_failed candidates can be drafted again; the result needs confirmation.",
+        _object({"candidate": _ID}, closed=True), _WRITE_RESULT, risk="write", audit_operator=False,
+        level=ActionLevel.INSIDE),
     _op("revive", "Restore an expired memory candidate for review.",
         "Returns it to pending if its changes still apply, otherwise queues fresh drafting. Confirmation is required.",
         _object({"candidate": _ID}, closed=True), _WRITE_RESULT, risk="write", audit_operator=False),
@@ -140,7 +145,7 @@ async def run(server, operation, arguments, principal, headers):
             if found is None:
                 raise OpError(ErrorCode.NOT_FOUND, f"no memory candidate {arguments['candidate']}")
             result = {"candidate": found}
-        elif action in {"confirm", "confirm_many", "reject", "edit", "retry", "revive", "delete"}:
+        elif action in {"confirm", "confirm_many", "reject", "edit", "retry", "revive", "delete", "redraft"}:
             result = await _write(server, action, arguments)
         elif action == "settings_get":
             result = await memory_settings.settings_view()
@@ -180,6 +185,9 @@ async def _write(server, action, arguments):
         result = {"items": items}
     else:
         result = await memory_actions.act(action, **arguments, runtime_root=getattr(server, "_runtime_root", None))
+    drafter = getattr(server, "_memory_drafter", None)
+    if drafter is not None:
+        drafter.wake()
     writer = getattr(server, "_memory_writer", None)
     if writer is not None:
         writer.wake()

@@ -62,6 +62,7 @@ from .ledger_reconciler import LedgerReconciler
 from .source_service import SourceService, own_bot_app_ids
 from .intent_push import IntentPushService
 from .memory_write import MemoryWriteService
+from .memory_draft_service import MemoryDraftService
 from .memory_push import MemoryPushService
 from .reminders import ReminderService
 from .idle_checks import IdleCheckService, PostFn
@@ -379,6 +380,7 @@ async def seed_role_configs(pool: Any = None) -> None:
     from .leads_check import CHECK_TIMEOUT_SEC, LEADS_CHECK_ROLE_PROMPT
     from .explorer import EXPLORER_MAX_TURNS, EXPLORER_ROLE_PROMPT, EXPLORER_TIMEOUT_SEC
     from .outbound import OUTBOUND_ROLE_PROMPT, REVIEW_TIMEOUT_SEC as OUTBOUND_TIMEOUT_SEC
+    from .memory_draft_role import ROLE_PROMPT as MEMORY_DRAFT_ROLE_PROMPT, TIMEOUT_SEC as MEMORY_DRAFT_TIMEOUT_SEC
     from .processor import PROCESSOR_ROLE_PROMPT, PROCESSOR_TIMEOUT_SEC
     from .tiers.manager import DEFAULT_SYSTEM_PROMPT
     from .tiers.planner import DEFAULT_SYSTEM_PROMPT as PLANNER_SYSTEM_PROMPT
@@ -438,6 +440,13 @@ async def seed_role_configs(pool: Any = None) -> None:
             "timeout_seconds": CHECK_TIMEOUT_SEC,  # at most, per check
             # Its instructions and reply contract follow it.
             "system_prompt": LEADS_CHECK_ROLE_PROMPT,
+        },
+        {
+            "role": "memory_draft",
+            "display_name": "Memory draft",
+            "timeout_seconds": MEMORY_DRAFT_TIMEOUT_SEC,
+            "max_turns": 1,
+            "system_prompt": MEMORY_DRAFT_ROLE_PROMPT,
         },
         {
             "role": "explorer",
@@ -724,8 +733,9 @@ async def _run_agent_system_owned(
 ) -> None:
     """Start the full agent system with the ops settings ``ops`` and run until interrupted."""
 
-    from . import session_routing
+    from . import lanes_settings, session_routing
 
+    previous_lanes = lanes_settings.enabled()
     previous_routing = session_routing.routing_enabled()
     previous_max_resident = session_routing.max_resident()
     loop_watch = LoopWatch()
@@ -737,6 +747,7 @@ async def _run_agent_system_owned(
                                         exit_now=exit_now, loop_watch=loop_watch)
     finally:
         # Startup loads process-wide routing settings; keep later serves independent, even after a failed start.
+        lanes_settings.set_enabled(previous_lanes)
         session_routing.set_routing_enabled(previous_routing)
         session_routing.set_max_resident(previous_max_resident)
         await loop_watch.stop()
@@ -781,6 +792,7 @@ async def _run_agent_system_watched(
     http_server: AgentHTTPServer | None = None
     control = None
     memory_writer: MemoryWriteService | None = None
+    memory_drafter: MemoryDraftService | None = None
     memory_push_service: MemoryPushService | None = None
     mode = ShutdownMode.END_RUNS
     if ops.keeper_mode is KeeperMode.ON:
@@ -1003,7 +1015,8 @@ async def _run_agent_system_watched(
             intent_push_service = IntentPushService(registry, drain=drain)
             memory_writer = MemoryWriteService(runtime_root=runtime_root, drain=drain)
             memory_push_service = MemoryPushService(registry, drain=drain, dashboard_url=dashboard_url)
-            drain.add_source(lambda: {"starting": memory_writer.drain_waiting()})
+            memory_drafter = MemoryDraftService(runtime_root, drain=drain, claude_bin=claude_bin, sender=registry.notify)
+            drain.add_source(lambda: {"starting": memory_writer.drain_waiting() + memory_drafter.drain_waiting()})
             reminder_service = ReminderService(registry, drain=drain)
             ledger_reconciler = LedgerReconciler()
             supervisor.register(task_router)
@@ -1127,6 +1140,7 @@ async def _run_agent_system_watched(
                 loop_watch=loop_watch,
             )
             http_server._memory_writer = memory_writer
+            http_server._memory_drafter = memory_drafter
         fence.http_server = http_server
         with startup.measure("http"):
             await http_server.start()
@@ -1168,6 +1182,7 @@ async def _run_agent_system_watched(
         await source_service.start()
         await intent_push_service.start()
         await memory_writer.start()
+        await memory_drafter.start(dsn)
         await memory_push_service.start()
         await reminder_service.start()  # idle while reminders are off
         triage_background.configure(registry.post)
@@ -1244,6 +1259,7 @@ async def _run_agent_system_watched(
             await completion_service.stop()
             await source_service.stop()
             await intent_push_service.stop()
+            await memory_drafter.stop()
             await memory_push_service.stop()
             await memory_writer.stop()
             await reminder_service.stop()
@@ -1286,6 +1302,8 @@ async def _run_agent_system_watched(
             with contextlib.suppress(asyncio.CancelledError):
                 await advisory_checks
         try:
+            if memory_drafter is not None:
+                await memory_drafter.stop()
             if memory_push_service is not None:
                 await memory_push_service.stop()
             if memory_writer is not None:

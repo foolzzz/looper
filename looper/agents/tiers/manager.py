@@ -407,7 +407,7 @@ QUOTE_READ_SEC = 80.0
 # case) starts a new session. Anything else, "/new foo" or "/news" too, is a message for Claude.
 NEW_SESSION_COMMAND = "/new"
 PREPARATION_STEPS: tuple[str, ...] = (
-    "persist_user_message", "attention_enabled", "route_to_gate", "route_memory", "route_intent", "read_quote", "status_thinking", "tools_probe", "turn_lock", "load_db_config",
+    "persist_user_message", "attention_enabled", "route_to_gate", "route_memory", "route_intent", "read_quote", "resident_settlement", "status_thinking", "tools_probe", "turn_lock", "load_db_config",
     "load_session_state", "agent_settings", "templates", "library", "library_server", "outbound_review", "llmrec_attach",
     "build_user_message", "session_budget",
     "claude_command", "tool_listing", "switch_session", "claude_stop", "resident_admission", "resume_brief", "recorder_start", "claude_start", "recorder_finish",
@@ -1250,7 +1250,7 @@ class ManagerAgent:
             self._task = None
         try:
             async with asyncio.timeout(STOP_DRAIN_SEC):
-                await self._router.stop()  # the sessions' workers, with session routing on
+                await asyncio.gather(self._mid_turn.shutdown(), self._router.stop())
         except TimeoutError:
             logger.warning("%s: the sessions' turns did not end within %.1f s; proceeding with shutdown",
                            self._log, STOP_DRAIN_SEC)
@@ -1421,7 +1421,11 @@ class ManagerAgent:
                     raise
         finally:
             self._persisted.discard(envelope.message_id)
-            token.settle(token.outcome)
+            try:
+                if isinstance(self._claude, ResidentClaude):
+                    await self._claude.discard_reserved_input(token.message_id)
+            finally:
+                token.settle(token.outcome)
             self._last_activity = self._clock()
 
     async def _read_quote(self, envelope: MessageEnvelope, ref: lark_quote.QuoteRef) -> lark_quote.QuoteRead:
@@ -1662,6 +1666,10 @@ class ManagerAgent:
             return library
         return await self.ops.library_with_server(library, self._session_root(), session_key=self._session_now().key)
 
+    async def _settle_native_inputs(self, token: TurnToken) -> None:
+        if isinstance(self._claude, ResidentClaude):
+            await self._claude.settle_reserved_inputs(keep_message_id=token.message_id)
+
     async def _prepare_turn(self, token: TurnToken, envelope: MessageEnvelope, *, ask: Ask | None = None) -> Prepared:
         """Everything a turn needs before its process starts, every await a stoppable ``token.step`` or a
         ``token.keep`` that runs to its end: the message is classified (a command or a gate reply that Code answers
@@ -1721,10 +1729,12 @@ class ManagerAgent:
                 return Prepared()
             # Read here, in the message's turn: in order, stoppable, and again when a restart replays the message.
             quoted = await token.step("read_quote", self._read_quote(envelope, quote_ref)) if quote_ref else None
+            # Code-only replies do not claim the resident or replace its native tool binding.
+            await token.keep("resident_settlement", self._settle_native_inputs(token), 60)
             origin = _message_origin(envelope)
             client_id, client_name = _message_client(envelope)
             # The calls Claude makes while answering belong to this message and its chat (and its API client).
-            turn = Turn(channel=origin["channel"], chat=origin["chat"], channel_id=origin["channel_id"],
+            turn = token.ops_turn or Turn(channel=origin["channel"], chat=origin["chat"], channel_id=origin["channel_id"],
                         message_id=envelope.message_id,
                         envelope=envelope, sender=origin["sender"], group=origin["group"],
                         client_id=client_id, client_name=client_name,
@@ -1753,10 +1763,14 @@ class ManagerAgent:
                 token.times.queued_behind = turn_metrics.queued_behind(
                     self._session_now(), token.times.received_at)
             self._lock_owner = token
+            if self._mid_turn.native_started(token):
+                cost_manager.begin_turn(turn)  # the reader began the tools; this task now owns the turn context
             waiting = (self.ops.begin_turn(turn, binding=token.binding, session_key=self._session_now().key)
-                       if self.ops is not None else "")
+                       if self.ops is not None and not self._mid_turn.native_started(token) else "")
             ask = Ask(text, "\n".join(part for part in (waiting, gate.note, stopped_note) if part), turn,
                       quoted=quoted)
+        else:
+            await token.keep("resident_settlement", self._settle_native_inputs(token), 60)
         token.prepared_ask = ask
         await token.step("load_db_config", self._load_db_config())
         if self._turned_off:  # the fleet has not stopped this instance yet: it must not act as the Manager
@@ -1988,7 +2002,11 @@ class ManagerAgent:
             (self._claude.started or session.session_id or self._clean_start) and not self._pending_handoff)) \
             else await token.step("resume_brief", self._resume_brief(envelope, prepared.message))
         run.brief = brief
-        if prepared.state is not None:
+        native_text = (self._claude.reserved_input_text(token.message_id)
+                       if isinstance(self._claude, ResidentClaude) else None)
+        if native_text is not None:
+            run.state = None  # the native turn never received the state prepared at claim time
+        elif prepared.state is not None:
             run.state, run.state_generation = (self._render_state(
                 prepared.state, launch, prepared.switch, persona_scope=run.persona_scope),
                                                self._state_generation)
@@ -1998,7 +2016,7 @@ class ManagerAgent:
             task_id=envelope.metadata.get("task_id"),
             command=command,
             cwd=str(self._session_work_dir()),
-            input_text=f"{brief}\n\n{asked}" if brief else asked,
+            input_text=native_text if native_text is not None else (f"{brief}\n\n{asked}" if brief else asked),
             session_id=session.session_id,
             system_prompt=prepared.system_prompt,
             launch=launch,
@@ -2110,7 +2128,7 @@ class ManagerAgent:
                     await prepared.run.recorder.end_left_open(failure)
             finally:
                 if not token.abandoned:  # (a turn the Manager let go of: another may hold the binding by now)
-                    self._publish_binding(None)  # drained or boundedly abandoned, even if closing the record is cancelled
+                    self._mid_turn.release_binding(token)  # a queued native turn may already own the bridge
                 self._last_activity = self._clock()
 
     async def stop_turn(self, message_id: str, *, via: str) -> StopResult:
@@ -2534,8 +2552,9 @@ class ManagerAgent:
                     # Every tool call of the turn may come to the bridge, a subagent's too: each is expected,
                     # though only the Manager's own blocks are shown.
                     bare, arguments = _looper_call(block.get("name"), block.get("input"))
-                    self.ops.expect(token.binding, bare, arguments, call_id=block.get("id"),
-                                    parent_call_id=payload.get("parent_tool_use_id"))
+                    if not self._mid_turn.expected(token, block.get("id")):
+                        self.ops.expect(token.binding, bare, arguments, call_id=block.get("id"),
+                                        parent_call_id=payload.get("parent_tool_use_id"))
 
         async def on_event(payload: dict[str, Any]) -> None:
             if payload.get("type") == "system" and payload.get("subtype") == "transport" and not token.abandoned:

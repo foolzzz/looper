@@ -12,6 +12,8 @@ from typing import Any
 from ...db import agent_spawns
 from ...db.agent_spawns import CancelReason, FINISHED, SpawnState
 from ..run_usage import CostStatus, cost_status
+from ...db.tasks import ACTIVE_STATUSES
+from ..admission import Hold
 from ..spawn import SpawnParent
 from ..subagents import Delivery, Refused, RefusalReason, Spawner, SpawnService
 from . import ErrorCode, OpError, RetrySafety, Risk, Tool, check_arguments
@@ -162,9 +164,11 @@ class _PlannerParent:
                        unrecorded_usd=self.turn_cap_usd)
 
 
-def _view(row: Mapping[str, Any]) -> dict[str, Any]:
+def _view(row: Mapping[str, Any], *, hold: Hold | None = None) -> dict[str, Any]:
     value = {key: row[key] for key in ("id", "state", "budget_usd", "delivery")}
     value["profile"] = row.get("profile_id")
+    if row["state"] == "queued" and hold is not None:
+        value.update(held=hold.reason, resets_at=hold.resets_at.isoformat() if hold.resets_at else None)
     if SpawnState(row["state"]) in FINISHED:
         if row.get("result"):
             # Service accounting and raw runtime fields remain private to the service.
@@ -281,8 +285,10 @@ class WorkerSubagents:
                         del self._waiting[spawn_id]
             await self._fallback(ids)
             rows = await self._owned(parent, ids)
-            result = {"spawn": _view(rows[0])} if name == SPAWN else {
-                "spawns": [_view(row) for row in rows], "remaining": await self._remaining(parent)}
+            holds = await self._holds(rows)
+            result = {"spawn": _view(rows[0], hold=holds.get(rows[0]["profile_id"]))} if name == SPAWN else {
+                "spawns": [_view(row, hold=holds.get(row["profile_id"])) for row in rows],
+                "remaining": await self._remaining(parent)}
             return {"status": "ok", "result": result}
         except Refused as exc:
             return {"status": "refused", "reason": exc.reason.value, "detail": str(exc)}
@@ -303,6 +309,9 @@ class WorkerSubagents:
         return rows
 
     async def _wait(self, parent: _Parent | _PlannerParent, ids: list[int], seconds: int) -> list[dict]:
+        from .. import admission
+        if seconds > 0 and admission.enabled():
+            return await self._wait_admitted(parent, ids, seconds)
         deadline = asyncio.get_running_loop().time() + seconds
         while True:
             rows = await self._owned(parent, ids)
@@ -310,6 +319,47 @@ class WorkerSubagents:
             if all(SpawnState(row["state"]) in FINISHED for row in rows) or remaining <= 0:
                 return rows
             await asyncio.sleep(min(.1, remaining))
+
+    async def _wait_admitted(self, parent: _Parent | _PlannerParent, ids: list[int], seconds: int) -> list[dict]:
+        from contextlib import AsyncExitStack
+        from .. import admission
+        deadline = asyncio.get_running_loop().time() + seconds
+        lent = False
+        async with AsyncExitStack() as stack:
+            while True:
+                rows = await self._owned(parent, ids)
+                remaining = deadline - asyncio.get_running_loop().time()
+                if all(SpawnState(row["state"]) in FINISHED for row in rows) or remaining <= 0:
+                    return rows
+                # A newly scheduled spawn builds its identity asynchronously.
+                # Register once it exists, within the original wait deadline.
+                if not lent:
+                    owners = [owner for row in rows if row["state"] == "queued"
+                              if (owner := self.service.owner_of(row["id"])) is not None]
+                    preparing = any(row["state"] == "queued" and row["id"] in self._jobs
+                                    and self.service.owner_of(row["id"]) is None for row in rows)
+                    if owners and not preparing:
+                        owner, _ = await admission.parent_for(parent.caller().parent.record_id)
+                        await stack.enter_async_context(admission.lend(owner, owners))
+                        lent = True
+                await asyncio.sleep(min(.1, remaining))
+
+    async def _holds(self, rows: list[dict]) -> dict:
+        from .. import admission
+        if not admission.enabled():
+            return {}
+        from ...db import profile_registry
+        holds, providers = {}, {}
+        for row in rows:
+            profile_id = row.get("profile_id")
+            if row["state"] != "queued" or profile_id in holds:
+                continue
+            profile = await profile_registry.get_profile(profile_id, pool=self.service.pool) if profile_id else None
+            provider_id = profile["provider_id"] if profile else None
+            if provider_id not in providers:
+                providers[provider_id] = admission.hold(provider_id) if provider_id else None
+            holds[profile_id] = providers[provider_id]
+        return holds
 
     async def _remaining(self, parent: _Parent | _PlannerParent) -> dict:
         project = await self.service.pool.fetchrow("SELECT p.* FROM projects p JOIN tasks t ON t.project_id=p.id "
@@ -373,7 +423,7 @@ class WorkerSubagents:
                             await self.service.finish(row["id"])
                         elif row["spawner"] == "planner":
                             # A Planner's turn ending cancels nothing; its task ending cancels everything.
-                            if row["task_status"] != "running" and row["state"] in ("queued", "asking", "cancelling"):
+                            if row["task_status"] not in ACTIVE_STATUSES and row["state"] in ("queued", "asking", "cancelling"):
                                 await self.service.cancel(row["id"], reason=CancelReason.TASK_ENDED)
                             elif row["state"] == "queued":
                                 self.schedule(row["id"])

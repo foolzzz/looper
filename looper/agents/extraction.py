@@ -35,7 +35,7 @@ import time as time_
 from collections import Counter
 from collections.abc import Awaitable, Callable, Collection, Mapping, Sequence
 from dataclasses import dataclass, field, replace
-from datetime import datetime, time, timedelta
+from datetime import date, datetime, time, timedelta
 from enum import Enum
 from typing import Any
 
@@ -59,6 +59,21 @@ RECENT_INTENTS_MAX = 30
 SAME_MATTER_WITHIN = timedelta(hours=6)  # a pending or tasked intent a new one may merge into
 REJECTED_WITHIN = timedelta(days=30)  # a rejected one: the same request again is merged, not raised again
 ITEMS_MAX = 50
+# Followed groups (RFC section 11.6): at most this many of their messages per run (the rest wait for the immediate
+# catch-up run) and per group per local day (the rest are skipped and counted); at most this many groups per source.
+GROUP_READ_RUN_MAX = 200
+GROUP_READ_DAY_MAX = 500
+GROUP_READ_MAX_GROUPS = 10
+GROUP_LABEL = " · 全部消息"
+GROUP_REQUESTS_NOTE = """\
+## Requests in group chats
+A chat marked 全部消息 gives every person's message, not only the ones to the user. In it, an intent is a
+development request that anyone raises, even without mentioning the user: a new requirement, a change, a bug or
+problem report, a scenario that needs support, or a request for access, addressed to the group, a team or nobody
+in particular. Use dev_task for a requirement or a change and bug_triage for a bug or a problem. Not an intent:
+small talk, answers to questions, follow-ups on something someone has already taken up, a request handed to a
+named person who accepted it, and +1s or echoes of someone else's request. When several messages raise the same
+thing, make one intent with all of them as its sources, or use same_as when a recent intent is that thing."""
 SOURCES_MAX, ABOUT_MAX, SUPERSEDES_MAX = 10, 5, 3
 SUMMARY_MAX, DETAIL_MAX, TITLE_MAX, INTENT_SUMMARY_MAX = 200, 600, 60, 400
 # What a run costs the processor (Sonnet), measured on the real path and in the real-mode eval: a fixed part per run
@@ -187,6 +202,7 @@ def render(kind: str, rows: Sequence[Mapping[str, Any]], *, context: Sequence[Ma
     known leads (``leads``) or the recent intents (``intents``), newest first."""
     from .subscriptions import _js_slice, clock
 
+    group = {row["chat_id"] for row in rows if row.get("via_group")}
     window = {row["seq"] for row in rows}
     context = [row for row in context if row["seq"] not in window]
     chats: dict[str, list[list[Mapping[str, Any]]]] = {}
@@ -198,8 +214,8 @@ def render(kind: str, rows: Sequence[Mapping[str, Any]], *, context: Sequence[Ma
     refs: Refs = {}
     by_external: dict[str, str] = {}
     for before, inside in chats.values():
-        for letter, group in (("c", before), ("m", inside)):
-            for row in group:
+        for letter, messages in (("c", before), ("m", inside)):
+            for row in messages:
                 ref = f"{letter}{sum(1 for key in refs if key[0] == letter) + 1}"
                 refs[ref] = row["seq"]
                 if row.get("external_id"):
@@ -211,7 +227,7 @@ def render(kind: str, rows: Sequence[Mapping[str, Any]], *, context: Sequence[Ma
     for before, inside in chats.values():
         first = (inside or before)[0]
         label = _CHAT_LABEL.get(first.get("chat_kind") or "", "会话")
-        lines.append(f"《{_flat(first.get('chat_name')) or first['chat_id']}》（{label}）")
+        lines.append(f"《{_flat(first.get('chat_name')) or first['chat_id']}》（{label}{GROUP_LABEL if first['chat_id'] in group else ''}）")
         for row in (*before, *inside):
             sender = row.get("sender_id") or ""
             if sender not in people:
@@ -259,6 +275,18 @@ def select_context(rows: Sequence[Mapping[str, Any]], before: Sequence[Mapping[s
                    parents: Sequence[Mapping[str, Any]]) -> list[Mapping[str, Any]]:
     """The context of ``rows`` among the candidates: the messages before a chat's first window message of the chats
     still in ``rows``, and the parents of ``rows`` not in it; at most ``CONTEXT_MAX``, the oldest dropped first."""
+    floors = {row["chat_id"]: row["read_from"] for row in rows if row.get("via_group")}
+    if floors:
+        anchors: dict[str, Mapping[str, Any]] = {}
+        for row in _order(rows):
+            anchors.setdefault(row["chat_id"], row)
+        before = [row for row in before
+                  if not (anchors.get(row["chat_id"], {}).get("via_group") and row["chat_id"] in floors
+                          and row["sent_at"] < floors[row["chat_id"]])]
+        base_parents = {row["parent_id"] for row in rows if row.get("parent_id") and not row.get("via_group")}
+        parents = [row for row in parents
+                   if row["external_id"] in base_parents or row["chat_id"] not in floors
+                   or row["sent_at"] >= floors[row["chat_id"]]]
     chats = {row["chat_id"] for row in rows}
     inside = {row["seq"] for row in rows}
     wanted = {row["parent_id"] for row in rows if row.get("parent_id")}
@@ -370,7 +398,7 @@ def _lead(item: Mapping[str, Any], refs: Refs, *, now: datetime, valid_days: int
 
 
 def _intent(item: Mapping[str, Any], refs: Refs, *, enabled_types: Collection[str],
-            app_seqs: Collection[int]) -> dict[str, Any]:
+            app_seqs: Collection[int], group_seqs: Collection[int] = ()) -> dict[str, Any]:
     if not _member(item.get("type"), enabled_types):
         raise _Drop("unknown_type")
     if not _member(item.get("confidence"), _CONFIDENCES):
@@ -388,6 +416,8 @@ def _intent(item: Mapping[str, Any], refs: Refs, *, enabled_types: Collection[st
         raise _Drop("no_window_source")
     if all(seq in app_seqs for seq in sources) and item["type"] != leads_model.ALERT_TYPE:
         raise _Drop("app_only_not_alert")
+    if group_seqs and set(window) & set(group_seqs) and item["type"] not in leads_model.GROUP_INTENT_TYPES:
+        raise _Drop("group_type")
     return {"type": item["type"], "title": title, "summary": summary, "confidence": item["confidence"],
             "sources": sources, "window_sources": window, "same_as": same_as}
 
@@ -424,7 +454,7 @@ def _reply_object(kind: str, text: str) -> tuple[Any, str]:
 
 
 def parse(kind: str, reply: str, refs: Refs, *, now: datetime, valid_days: int, enabled_types: Collection[str],
-          app_seqs: Collection[int]) -> Parsed:
+          app_seqs: Collection[int], group_seqs: Collection[int] = ()) -> Parsed:
     """What ``reply`` says (the module's notes, step 4). ``now`` is in the schedule's zone: a lead's ``valid_until``
     is clamped to [tomorrow 00:00 there, now + ``valid_days``]. ``app_seqs`` are the input's alert-bot messages: an
     intent whose sources are all among them must be ``leads_model.ALERT_TYPE``."""
@@ -460,7 +490,8 @@ def parse(kind: str, reply: str, refs: Refs, *, now: datetime, valid_days: int, 
             if not isinstance(item, dict):
                 raise _Drop("unknown_kind" if kind == "leads" else "unknown_type")
             items.append(_lead(item, refs, now=now, valid_days=valid_days) if kind == "leads"
-                         else _intent(item, refs, enabled_types=enabled_types, app_seqs=app_seqs))
+                         else _intent(item, refs, enabled_types=enabled_types, app_seqs=app_seqs,
+                                      group_seqs=group_seqs))
         except _Drop as drop:
             dropped[str(drop)] += 1
         except (TypeError, ValueError, OverflowError):  # a shape no rule above foresaw: this item only
@@ -480,7 +511,7 @@ async def _lock_sources(conn: asyncpg.Connection, source_id: str,
     row, and deletes what was extracted from it, in one transaction; this takes that row ``FOR SHARE`` first, before
     any lead or intent is written. Either the exclusion committed first, and this reads it and writes nothing from
     the chat, or it waits for this transaction, and its delete then sees what this one wrote."""
-    rows = await conn.fetch("SELECT seq, chat_id, sender_id, sender_kind, mention_ids, sent_at FROM source_events "
+    rows = await conn.fetch("SELECT seq, chat_id, sender_id, sender_kind, mention_ids, sent_at, ingested_at FROM source_events "
                             "WHERE seq = ANY($1::bigint[]) FOR SHARE", sorted(set(seqs)))
     events = {row["seq"]: dict(row) for row in rows}
     chats = await conn.fetch(
@@ -569,8 +600,32 @@ async def store_leads(conn: asyncpg.Connection, parsed: Parsed, *, source_id: st
     return counts
 
 
+@dataclass(frozen=True)
+class GroupStore:
+    seqs: frozenset[int]
+    read: Mapping[str, int]
+    skipped: Mapping[str, int]
+    day: date
+    counts: Mapping[str, int]
+
+
+async def _lost_group_seqs(conn: asyncpg.Connection, source_id: str, seqs: Collection[int],
+                           events: Mapping[int, Any]) -> set[int]:
+    """Recheck the current list and range under row locks before storing group-derived intents."""
+    rows = await conn.fetch(
+        "SELECT chat_id, read_from FROM intent_group_reads WHERE source_id = $1 AND chat_id = ANY($2::text[]) "
+        "ORDER BY chat_id FOR SHARE", source_id, sorted({events[n]["chat_id"] for n in seqs if n in events}))
+    if not await leads_model.group_read_enabled(conn):
+        return set(seqs)
+    floors = {r["chat_id"]: r["read_from"] for r in rows}
+    return {n for n in seqs if n not in events or events[n]["chat_id"] not in floors
+            or events[n]["sent_at"] < floors[events[n]["chat_id"]]
+            or events[n]["ingested_at"] < floors[events[n]["chat_id"]]}
+
+
 async def store_intents(conn: asyncpg.Connection, parsed: Parsed, *, source_id: str, schedule_id: str,
-                        run_id: str | None, record_id: int | None, now: datetime, more: bool) -> dict[str, Any]:
+                        run_id: str | None, record_id: int | None, now: datetime, more: bool,
+                        group: GroupStore | None = None, via: str = "subscription") -> dict[str, Any]:
     """Write the parsed intents in the caller's transaction: ``pending``, or ``merged`` into the intent it is
     ``same_as`` when that one is pending or tasked within ``SAME_MATTER_WITHIN`` or rejected within
     ``REJECTED_WITHIN`` (a ``dropped`` one never: nothing is merged into it). One the check dropped is stored as
@@ -579,10 +634,18 @@ async def store_intents(conn: asyncpg.Connection, parsed: Parsed, *, source_id: 
     counts = _counts(parsed, more=more)
     versions = {row["key"]: row["version"] for row in await conn.fetch("SELECT key, version FROM intent_types")}
     events, revoked = await _lock_sources(conn, source_id, [seq for item in parsed.items for seq in item["sources"]])
+    lost = set()
+    if group is not None:
+        counts.update(group.counts)
+        await db_subs.count_group_day(conn, source_id, group.day, read=group.read, skipped=group.skipped)
+        lost = await _lost_group_seqs(conn, source_id, group.seqs, events)
     seen = set(parsed.instructions_seen_seqs)
     for item in parsed.items:
         sources = _live(item, events, revoked, counts)
         if sources is None or item["type"] not in versions:
+            continue
+        if lost & set(item["window_sources"]):
+            counts["dropped"]["group_revoked"] = counts["dropped"].get("group_revoked", 0) + 1
             continue
         chat_id = events[min(sources, key=lambda seq: (events[seq]["sent_at"], seq))]["chat_id"]
         project_id = await conn.fetchval("SELECT project_id FROM message_chat_projects WHERE source_id = $1 AND chat_id = $2",
@@ -598,12 +661,13 @@ async def store_intents(conn: asyncpg.Connection, parsed: Parsed, *, source_id: 
         intent_id = await conn.fetchval(
             "INSERT INTO intents (source_id, schedule_id, type_key, type_version, title, summary, confidence, state, "
             "chat_id, project_id, merged_into, flagged, run_id, record_id, handled_at, handled_via, check_verdict, "
-            "check_reason, check_record_id) "
-            "VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19) RETURNING id",
+            "check_reason, check_record_id, via) "
+            "VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20) RETURNING id",
             source_id, schedule_id, item["type"], versions[item["type"]], item["title"], item["summary"],
             item["confidence"], "dropped" if dropped else "merged" if target else "pending", chat_id, project_id,
             target, any(seq in seen for seq in sources), run_id, record_id, now if dropped else None,
-            "system" if dropped else None, verdict, reason, checked_by)
+            "system" if dropped else None, verdict, reason, checked_by,
+            leads_model.IntentVia.FOLLOWED_GROUP if group and group.seqs.intersection(item["window_sources"]) else via)
         # Only its own sources: the messages its text came from (a merged one's are not the target's).
         await conn.executemany("INSERT INTO intent_sources (intent_id, event_seq) VALUES ($1, $2) ON CONFLICT DO NOTHING",
                                [(intent_id, seq) for seq in sources])
@@ -630,6 +694,10 @@ def count_line(kind: str, counts: Mapping[str, Any]) -> str:
                  f"改置信度 {counts['check_fixed']}")
         if counts["check_failed"]:
             line += "；复核没有完成，其余条目未经复核入库"
+    if "group_read" in counts:
+        line += f"；名单上的群 {counts['group_read']} 条"
+        if counts.get("group_over_cap"):
+            line += f"，超出额度跳过 {counts['group_over_cap']} 条"
     return line + ("；还有消息没读完，接着读" if counts.get("more") else "")
 
 
@@ -707,7 +775,7 @@ async def intent_types(conn: Any) -> list[dict[str, Any]]:
     return [dict(row) for row in rows]
 
 
-def instructions(kind: str, requirement: str, types: Sequence[Mapping[str, Any]]) -> str:
+def instructions(kind: str, requirement: str, types: Sequence[Mapping[str, Any]], *, group: bool = False) -> str:
     """The processor's instructions: the subscription's requirement and, for intents, one line per enabled type."""
     if kind == "triage":
         from . import triage_run
@@ -716,7 +784,8 @@ def instructions(kind: str, requirement: str, types: Sequence[Mapping[str, Any]]
     if kind != "intents":
         return requirement
     lines = [f"- {row['key']} {_flat(row['name'])}: {_flat(row['guidance'])}" for row in types]
-    return f"{requirement.strip()}\n\n## Intent types\n" + "\n".join(lines)
+    return (f"{requirement.strip()}\n\n## Intent types\n" + "\n".join(lines)
+            + ("\n\n" + GROUP_REQUESTS_NOTE if group else ""))
 
 
 async def participants(conn: Any, source_id: str, people: Collection[str]) -> Participants:
@@ -790,14 +859,28 @@ async def batch(conn: Any, kind: str, sub: Mapping[str, Any], picked: Mapping[st
 # --- A run ---
 
 
+async def group_read(conn: Any, schedule: Mapping[str, Any], *, day: date) -> db_subs.GroupRead | None:
+    from . import subscriptions
+
+    sub = schedule["subscription"]
+    if subscriptions.output_kind(sub) != "intents" or not await leads_model.group_read_enabled(conn):
+        return None
+    left = await db_subs.group_read_left(conn, sub["source_id"], day, GROUP_READ_DAY_MAX)
+    return db_subs.GroupRead(GROUP_READ_RUN_MAX, left) if left else None
+
+
 async def plan(conn: asyncpg.Connection, schedule: Mapping[str, Any], *, now: datetime,
-               own_apps: Collection[str]) -> dict[str, Any] | None:
+               own_apps: Collection[str], day_start: datetime | None = None) -> dict[str, Any] | None:
     """The run's window (``SubscriptionRuns.plan``): a skip (``{"skip_reason": ...}``) while its kind's switch
     (``leads.enabled``, ``intents.enabled``) is off or the operator's confirmation does not hold for the configuration
     now (the cursor stays, no processor starts); None when nothing in the window is read (the cursor moves past it);
     else the window the run is recorded with."""
-    from . import subscriptions
+    from . import cron, subscriptions
 
+    if day_start is None:
+        zone = cron.zone(cron.local_zone_name())
+        day_start = datetime.combine(now.astimezone(zone).date(), datetime.min.time(), tzinfo=zone)
+    day = day_start.date()
     sub = schedule["subscription"]
     kind = subscriptions.output_kind(sub)
     if kind == "triage":
@@ -813,8 +896,12 @@ async def plan(conn: asyncpg.Connection, schedule: Mapping[str, Any], *, now: da
     if to_seq is None or to_seq <= from_seq:
         return None
     picked = await db_subs.extraction_window(conn, sub, output_kind=subscriptions.output_kind(sub), from_seq=from_seq,
-                                             to_seq=to_seq, now=now, own_apps=own_apps)
+                                             to_seq=to_seq, now=now, own_apps=own_apps,
+                                             group_read=await group_read(conn, schedule, day=day))
     if not picked["rows"]:
+        if skipped := picked.get("group_over_cap"):
+            await db_subs.count_group_day(conn, sub["source_id"], day, read={}, skipped=skipped)
+            logger.info("intents subscription %s group over cap: %s", schedule["id"], skipped)
         await db_subs.advance_cursor(conn, schedule["id"], from_seq=from_seq, to_seq=picked["last_seq"], at=now)
         return None
     snapshot = {"subscription": {name: sub[name] for name in PINNED}, "config_version": version,
@@ -1008,9 +1095,17 @@ async def execute(runs: Any, run_id: str, schedule: Mapping[str, Any], stream: M
         await end(status="cancelled", outcome="failed",
                   error=f"nothing was read: {problem}; the next confirmed run reads its window again")
         return False
-    if not picked["rows"]:  # every message of it was deleted since the run was planned
+    day = None
+    if "group_over_cap" in picked:
+        day = runs.day_start((await db_schedules.get_run(run_id))["fired_at"]).date()
+    if not picked["rows"]:  # deleted messages, or only quota-skipped group messages remain
+        async def store_empty(conn: asyncpg.Connection) -> Mapping[str, Any]:
+            await db_subs.count_group_day(conn, sub["source_id"], day, read={}, skipped=picked["group_over_cap"])
+            return {**_counts(Parsed("quiet"), more=False), "group_read": 0,
+                    "group_over_cap": sum(picked["group_over_cap"].values())}
         await end(status="completed", outcome="quiet", summary="the window's messages were deleted",
-                  advance_to=picked["last_seq"])
+                  advance_to=picked["last_seq"], store=store_empty if picked.get("group_over_cap") else None,
+                  held={"snapshot": snapshot} if picked.get("group_over_cap") else None)
         return False
     if runs._runtime_root is None:
         await end(status="failed", outcome="failed", error="this server cannot run a processor")
@@ -1023,6 +1118,17 @@ async def execute(runs: Any, run_id: str, schedule: Mapping[str, Any], stream: M
         return False
     found = await batch(pool, kind, sub, picked, zone_name=zone_name, now=now, own_apps=await runs._own_apps(),
                         to_seq=stream["to_seq"])
+    group = None
+    if "group_over_cap" in picked:
+        seqs = frozenset(r["seq"] for r in found.rows if r.get("via_group"))
+        read = Counter(r["chat_id"] for r in found.rows if r.get("via_group"))
+        skipped = picked["group_over_cap"]
+        if found.last_seq < picked["last_seq"]:
+            skipped = await db_subs.group_over_cap(pool, sub, from_seq=stream["from_seq"], to_seq=stream["to_seq"],
+                                                   now=(await db_schedules.get_run(run_id))["fired_at"],
+                                                   last_seq=found.last_seq, rows=found.rows)
+        group = GroupStore(seqs, read, skipped, day,
+                           {"group_read": len(seqs), "group_over_cap": sum(skipped.values())})
     timeout = (schedule["run_timeout_seconds"] if schedule["run_timeout_mode"] == "seconds"
                else processor.PROCESSOR_TIMEOUT_SEC)
     reference = {"kind": f"{kind}_window", "schedule_id": schedule["id"], "run_id": run_id,
@@ -1033,7 +1139,7 @@ async def execute(runs: Any, run_id: str, schedule: Mapping[str, Any], stream: M
 
     async def run(reminder: str, budget_usd: float, timeout_s: float) -> processor.ProcessorRun:
         done = model_call.processor_result(await model_call.call(model_call.ProcessorCall(
-            owner=schedule["id"], instructions=instructions(kind, schedule["requirement"], types)
+            owner=schedule["id"], instructions=instructions(kind, schedule["requirement"], types, group=bool(group and group.seqs))
             + (f"\n\n{reminder}" if reminder else ""), input_text=found.text, input_ref=reference,
             quiet_word=QUIET_WORD, budget_usd=budget_usd, timeout_s=timeout_s, runtime_root=runs._runtime_root,
             claude_bin=runs._claude_bin, project_id=schedule["project_id"], schedule_id=schedule["id"],
@@ -1044,7 +1150,8 @@ async def execute(runs: Any, run_id: str, schedule: Mapping[str, Any], stream: M
         return done
 
     asked = await ask(run, lambda reply: parse(kind, reply, found.refs, now=now.astimezone(_zone(zone_name)),
-                                               valid_days=valid_days, enabled_types=enabled, app_seqs=found.app_seqs),
+                                               valid_days=valid_days, enabled_types=enabled, app_seqs=found.app_seqs,
+                                               group_seqs=group.seqs if group else ()),
                       budget_usd=schedule["run_budget_usd"], timeout_s=float(timeout))
     result, parsed = asked.result, asked.parsed
     if asked.skipped is not None:
@@ -1081,7 +1188,7 @@ async def execute(runs: Any, run_id: str, schedule: Mapping[str, Any], stream: M
                                              window_rows=found.rows)).as_dict()
         else:
             counts = await store_intents(conn, parsed, source_id=sub["source_id"], schedule_id=schedule["id"],
-                                         run_id=run_id, record_id=result.record_id, now=now, more=found.more)
+                                         run_id=run_id, record_id=result.record_id, now=now, more=found.more, group=group)
         return {**counts, **checked.counts} if checked is not None else counts
 
     cost = asked.cost_usd

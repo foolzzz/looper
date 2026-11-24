@@ -205,6 +205,8 @@ BUILTIN_ROLE_PROFILES: Mapping[str, LegacyAgentProfile] = MappingProxyType({
     # than the extraction's, the cheapest that met the targets on the checker eval.
     "leads_check": LegacyAgentProfile("agent-claude-code-haiku-5-5", "claude-code/haiku-5-5", BUILTIN_RUNTIME,
                                       BUILTIN_PROVIDER, "claude-haiku-5-5"),
+    "memory_draft": LegacyAgentProfile("agent-claude-code-sonnet-5-5", "claude-code/sonnet-5-5", BUILTIN_RUNTIME,
+                                       BUILTIN_PROVIDER, "claude-sonnet-5-5"),
     "explorer": LegacyAgentProfile("agent-claude-code-sonnet-5-5", "claude-code/sonnet-5-5", BUILTIN_RUNTIME,
                                    BUILTIN_PROVIDER, "claude-sonnet-5-5"),
     "outbound_check": LegacyAgentProfile("agent-claude-code-sonnet-5-5", "claude-code/sonnet-5-5", BUILTIN_RUNTIME,

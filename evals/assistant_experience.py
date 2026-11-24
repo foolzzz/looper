@@ -105,21 +105,33 @@ def local_now(settings: dict[str, Any] | None = None) -> datetime:
 
 
 def times_in(text: str) -> set[int]:
-    result = {int(h) * 60 + int(m) for h, m in re.findall(r'(?<!\d)([01]?\d|2[0-3])[:：]([0-5]\d)(?!\d)', text)}
+    result = set()
     digits = '零一二三四五六七八九'
     numbers = {char: i for i, char in enumerate(digits)} | {'两': 2}
     numbers.update({'零' + digits[n]: n for n in range(1, 10)})
     numbers.update({('' if n < 20 else digits[n // 10]) + '十' +
                     (digits[n % 10] if n % 10 else ''): n for n in range(10, 60)})
     numeral = r'[零一二三四五六七八九十两]+'
-    for period, hour, quarter, minute, half in re.findall(
-            rf'(?<![\d零一二三四五六七八九十两])(上午|早上|下午|晚上)?\s*(\d+|{numeral})点'
-            rf'(?:(一|三)刻|({numeral}|\d+)分?|(半))?', text):
+    for period, hour, clock_minute, quarter, minute, half in re.findall(
+            rf'(?<![\d零一二三四五六七八九十两])(上午|早上|中午|下午|晚上|凌晨)?\s*(\d+|{numeral})'
+            rf'(?:[:：]([0-5]\d)(?!\d)|点(?:(一|三)刻|({numeral}|\d+)分?|(半))?)', text):
         h = int(hour) if hour.isdigit() else numbers.get(hour, -1)
+        minute = clock_minute or minute
         m = int(minute) if minute.isdigit() else numbers.get(minute, 0 if not minute else -1)
         if not 0 <= h <= (23 if hour.isdigit() else 12) or not 0 <= m < 60:
             continue
-        if period in ('下午', '晚上') and h < 12:
+        # These checks compare minutes of day, without tracking a reply's date.
+        # 晚上12点 means next-day midnight, which cannot be scored here.
+        if ((period in ('上午', '早上', '凌晨') and h > 12) or
+                (period == '下午' and h >= 18) or (period == '晚上' and 12 <= h < 18)):
+            continue
+        if period == '中午':
+            h = 13 if h == 1 else h
+            if not 11 <= h <= 13:
+                continue
+        elif period in ('上午', '早上', '凌晨') and h == 12:
+            h = 0
+        elif period in ('下午', '晚上') and h < 12:
             h += 12
         result.add(h * 60 + (numbers[quarter] * 15 if quarter else 30 if half else m))
     return result
@@ -127,15 +139,13 @@ def times_in(text: str) -> set[int]:
 
 def dates_in(text: str, today: date) -> set[date]:
     result = set()
-    pattern = r'(?:(\d{4})[-年](\d{1,2})[-月](\d{1,2})日?|(?:(\d{1,2})月)?(\d{1,2})[日号])'
+    pattern = (r'(?:(\d{4})\s*[-年]\s*(\d{1,2})\s*[-月]\s*(\d{1,2})\s*日?|'
+               r'(\d{1,2})\s*月\s*(\d{1,2})\s*[日号])')
     for match in re.finditer(pattern, text):
         year, month, day, short_month, short_day = match.groups()
-        y, m, d = int(year or today.year), int(month or short_month or today.month), int(day or short_day)
-        if not year:
-            if short_month and (m, d) < (today.month, today.day):
-                y += 1
-            elif not short_month and d < today.day:
-                y, m = (y + 1, 1) if m == 12 else (y, m + 1)
+        y, m, d = int(year or today.year), int(month or short_month), int(day or short_day)
+        if not year and (m, d) < (today.month, today.day):
+            y += 1
         try:
             result.add(date(y, m, d))
         except ValueError:

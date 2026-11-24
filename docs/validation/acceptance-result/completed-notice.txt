@@ -1,0 +1,13 @@
+✅ 任务完成 · 生成示例交付并记录验收证据
+## Delivered
+the task's files
+## Process record
+
+- Roles: planner → claude-code/fake; worker → claude-code/fake
+- Reviews: 未记录
+- Verification: 未记录
+- Escalations: 未记录
+
+Full record: task page / looper_tasks get
+Checks: 1 passed
+[https://dashboard.example.invalid/#tasks/task-bbdec0d71631](https://dashboard.example.invalid/#tasks/task-bbdec0d71631)

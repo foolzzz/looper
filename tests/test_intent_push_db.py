@@ -844,3 +844,35 @@ def test_expiry_backlog_drains_oldest_first_over_passes(monkeypatch):
             assert [row["id"] for row in done] == ids[:count]
         assert env.channels.posts == [] and env.channels.edits == []
     run_db(check, monkeypatch)
+
+
+@pytest.mark.parametrize("enabled", [False, True])
+def test_followed_group_intents_go_only_through_the_delivery_layer(monkeypatch, enabled):
+    async def check(pool):
+        monkeypatch.setattr(chat_settings, "_delivery_enabled", enabled)
+        monkeypatch.setattr(chat_settings, "_timezone", "UTC")
+        env = await setup(pool, monkeypatch)
+        now = NOW.replace(hour=14)
+        env.service._clock = lambda: now
+        ids = [await env.create(via="followed_group", created_at=now) for _ in range(6)]
+        await env.service.run_once()
+        if enabled:
+            assert len(env.channels.posts) == 5
+            decisions = await pool.fetch("SELECT urgency,decision,reason FROM proactive_deliveries ORDER BY id")
+            assert [tuple(r) for r in decisions] == [("normal", "send", "within_limits")] * 5 + [
+                ("normal", "digest", "daily_cap")]
+            assert all(target.id == DM for _, target, _, _ in env.channels.posts)
+            # A deferred pending push and progress must remain held if the delivery layer is later disabled.
+            monkeypatch.setattr(chat_settings, "_delivery_enabled", False)
+            await env.create(via="followed_group", state="merged", merged_into=ids[0], created_at=now)
+            await env.service.run_once()
+            assert len(env.channels.posts) == 5
+            assert await pool.fetchval("SELECT count(*) FROM intent_posts WHERE kind='progress'") == 0
+        else:
+            assert await pool.fetchval("SELECT count(*) FROM intent_posts") == 0
+            assert await pool.fetchval("SELECT count(*) FROM proactive_deliveries") == 0
+            assert await pool.fetchval("SELECT count(*) FROM intents WHERE expires_at IS NOT NULL") == 6
+            await env.create(via="subscription", created_at=now)
+            await env.service.run_once()
+            assert len(env.channels.posts) == 1 and env.channels.posts[0][1].id == DM
+    run_db(check, monkeypatch)
