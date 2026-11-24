@@ -242,7 +242,7 @@ async def run(server, operation, arguments, principal, headers):
             "message_id": current.message_id, "client_message_id": current.client_message_id,
             "channel": current.channel, "started_at": current.received_at.isoformat(), "state": current.phase.value,
             "method": getattr(current.method, "value", current.method), "stopping": current.stop is not None,
-            "can_interrupt": agent.can_interrupt}}
+            "can_interrupt": agent.can_interrupt or current.admission_waiting}}
     if not chat_settings.stop_enabled():
         raise OpError(ErrorCode.CONFLICT, "Stopping a reply is off (Settings → Chat; experimental).",
                       details={"state": "disabled"})

@@ -146,6 +146,14 @@ def test_turn_carries_the_envelope_id_and_the_pages_own_id() -> None:
     assert body["turn"]["message_id"] == "m1" and body["turn"]["client_message_id"] == "c1"
 
 
+def test_waiting_for_admission_can_stop_without_a_runtime_interrupt() -> None:
+    turn = _turn()
+    turn.admission_waiting = True
+    _, body = _call(_Manager(turn=turn, can_interrupt=False), "POST", "/api/v1/operator_chat/turn",
+                    query={"session_id": "s1"})
+    assert body["turn"]["can_interrupt"] is True
+
+
 def test_stop_reports_the_phase_it_found_the_turn_in() -> None:
     running = _turn()
     running.phase = TurnPhase.RUNNING

@@ -1,0 +1,533 @@
+{
+  "commit": "0d9e121c1eb124282c33b5e8352164f30d212425",
+  "items": {
+    "planner_plan": {
+      "system_prompt_sha256": "35b66a88bdf0b2c362962fea2e15b45603fcb5e064278cf83676c2df56b329bc",
+      "turn_text": "[PLAN] Inspect the synthetic task",
+      "command": [
+        "claude",
+        "--print",
+        "--verbose",
+        "--output-format",
+        "stream-json",
+        "--input-format",
+        "stream-json",
+        "--include-partial-messages",
+        "--replay-user-messages",
+        "--setting-sources",
+        "project",
+        "--strict-mcp-config",
+        "--settings",
+        "{\"autoMemoryEnabled\":false,\"claudeMdExcludes\":[\"/CLAUDE.md\",\"/.claude/CLAUDE.md\",\"/.claude/rules/**\",\"/AGENTS.md\",\"/.claude/AGENTS.md\",\"/home/operator/.claude/CLAUDE.md\",\"/home/operator/.claude/rules/**\",\"/home/operator/.claude/AGENTS.md\"],\"crossSessionInbound\":\"refuse\"}",
+        "--append-system-prompt-file",
+        "/runtime/planner.md",
+        "--system-prompt-snapshot",
+        "off",
+        "--permission-mode",
+        "manual",
+        "--permission-prompts",
+        "none",
+        "--disallowedTools",
+        "Bash,Edit,Write,NotebookEdit,EnterWorktree",
+        "--allowedTools",
+        "Read(//workspace/**),Glob(//workspace/**),Grep(//workspace/**),Skill,WebFetch,WebSearch",
+        "--disallowedTools",
+        "ListAgents,SendMessage",
+        "--model",
+        "opus",
+        "--max-turns",
+        "5"
+      ],
+      "metadata_keys": [
+        "command",
+        "cwd",
+        "llm_model",
+        "model_choice",
+        "pricing",
+        "profile",
+        "project_instructions",
+        "prompt_layers",
+        "read_only",
+        "settings_sources",
+        "system_prompt",
+        "system_prompt_mode",
+        "system_prompt_sha256"
+      ],
+      "envelopes": []
+    },
+    "planner_chat": {
+      "system_prompt_sha256": "35b66a88bdf0b2c362962fea2e15b45603fcb5e064278cf83676c2df56b329bc",
+      "turn_text": "[CHAT] Explain the result",
+      "command": [
+        "claude",
+        "--print",
+        "--verbose",
+        "--output-format",
+        "stream-json",
+        "--input-format",
+        "stream-json",
+        "--include-partial-messages",
+        "--replay-user-messages",
+        "--setting-sources",
+        "project",
+        "--strict-mcp-config",
+        "--settings",
+        "{\"autoMemoryEnabled\":false,\"claudeMdExcludes\":[\"/CLAUDE.md\",\"/.claude/CLAUDE.md\",\"/.claude/rules/**\",\"/AGENTS.md\",\"/.claude/AGENTS.md\",\"/home/operator/.claude/CLAUDE.md\",\"/home/operator/.claude/rules/**\",\"/home/operator/.claude/AGENTS.md\"],\"crossSessionInbound\":\"refuse\"}",
+        "--append-system-prompt-file",
+        "/runtime/planner.md",
+        "--system-prompt-snapshot",
+        "off",
+        "--permission-mode",
+        "manual",
+        "--permission-prompts",
+        "none",
+        "--disallowedTools",
+        "Bash,Edit,Write,NotebookEdit,EnterWorktree",
+        "--allowedTools",
+        "Read(//workspace/**),Glob(//workspace/**),Grep(//workspace/**),Skill,WebFetch,WebSearch",
+        "--disallowedTools",
+        "ListAgents,SendMessage",
+        "--model",
+        "opus",
+        "--max-turns",
+        "5"
+      ],
+      "metadata_keys": [
+        "command",
+        "cwd",
+        "llm_model",
+        "model_choice",
+        "pricing",
+        "profile",
+        "project_instructions",
+        "prompt_layers",
+        "read_only",
+        "settings_sources",
+        "system_prompt",
+        "system_prompt_mode",
+        "system_prompt_sha256"
+      ],
+      "envelopes": []
+    },
+    "planner_compact": {
+      "system_prompt_sha256": "35b66a88bdf0b2c362962fea2e15b45603fcb5e064278cf83676c2df56b329bc",
+      "turn_text": "/compact",
+      "command": [
+        "claude",
+        "--print",
+        "--verbose",
+        "--output-format",
+        "stream-json",
+        "--input-format",
+        "stream-json",
+        "--include-partial-messages",
+        "--replay-user-messages",
+        "--setting-sources",
+        "project",
+        "--strict-mcp-config",
+        "--settings",
+        "{\"autoMemoryEnabled\":false,\"claudeMdExcludes\":[\"/CLAUDE.md\",\"/.claude/CLAUDE.md\",\"/.claude/rules/**\",\"/AGENTS.md\",\"/.claude/AGENTS.md\",\"/home/operator/.claude/CLAUDE.md\",\"/home/operator/.claude/rules/**\",\"/home/operator/.claude/AGENTS.md\"],\"crossSessionInbound\":\"refuse\"}",
+        "--append-system-prompt-file",
+        "/runtime/planner.md",
+        "--system-prompt-snapshot",
+        "off",
+        "--permission-mode",
+        "manual",
+        "--permission-prompts",
+        "none",
+        "--disallowedTools",
+        "Bash,Edit,Write,NotebookEdit,EnterWorktree",
+        "--allowedTools",
+        "Read(//workspace/**),Glob(//workspace/**),Grep(//workspace/**),Skill,WebFetch,WebSearch",
+        "--disallowedTools",
+        "ListAgents,SendMessage",
+        "--model",
+        "opus",
+        "--max-turns",
+        "5"
+      ],
+      "metadata_keys": [
+        "command",
+        "cwd",
+        "llm_model",
+        "model_choice",
+        "pricing",
+        "profile",
+        "project_instructions",
+        "prompt_layers",
+        "read_only",
+        "settings_sources",
+        "system_prompt",
+        "system_prompt_mode",
+        "system_prompt_sha256"
+      ],
+      "envelopes": []
+    },
+    "manager_user": {
+      "system_prompt_sha256": "5872b0ea1d2e1cffaa0ff1e9669a58c0bba8886ab416582dd67941f7187b1df7",
+      "turn_text": "Inspect the synthetic task",
+      "command": [
+        "claude",
+        "--print",
+        "--verbose",
+        "--output-format",
+        "stream-json",
+        "--input-format",
+        "stream-json",
+        "--include-partial-messages",
+        "--replay-user-messages",
+        "--setting-sources",
+        "project",
+        "--strict-mcp-config",
+        "--settings",
+        "{\"autoMemoryEnabled\":false,\"claudeMdExcludes\":[\"/CLAUDE.md\",\"/.claude/CLAUDE.md\",\"/.claude/rules/**\",\"/AGENTS.md\",\"/.claude/AGENTS.md\",\"/home/operator/.claude/CLAUDE.md\",\"/home/operator/.claude/rules/**\",\"/home/operator/.claude/AGENTS.md\"],\"crossSessionInbound\":\"refuse\"}",
+        "--append-system-prompt-file",
+        "/runtime/manager.md",
+        "--system-prompt-snapshot",
+        "off",
+        "--dangerously-skip-permissions",
+        "--disallowedTools",
+        "ListAgents",
+        "--model",
+        "opus",
+        "--teammate-mode",
+        "in-process"
+      ],
+      "metadata_keys": [
+        "command",
+        "cwd",
+        "llm_model",
+        "model_choice",
+        "pricing",
+        "profile",
+        "project_instructions",
+        "prompt_layers",
+        "settings_sources",
+        "system_prompt",
+        "system_prompt_mode",
+        "system_prompt_sha256"
+      ],
+      "envelopes": [
+        {
+          "type": "status_update",
+          "source": "AgentAddress(agent_type='manager', agent_id='manager', channel=None)",
+          "target": "AgentAddress(agent_type='channel', agent_id='channel-web', channel='web')",
+          "payload": {
+            "text": "Thinking",
+            "delta": false,
+            "phase": true,
+            "activity": "thinking"
+          },
+          "metadata": {
+            "origin_channel_id": "channel-web"
+          },
+          "reply_to": "synthetic-message",
+          "correlation_id": "synthetic-correlation"
+        },
+        {
+          "type": "agent_reply",
+          "source": "AgentAddress(agent_type='manager', agent_id='manager', channel=None)",
+          "target": "AgentAddress(agent_type='channel', agent_id='channel-web', channel='web')",
+          "payload": {
+            "text": "synthetic reply"
+          },
+          "metadata": {},
+          "reply_to": "synthetic-message",
+          "correlation_id": "synthetic-correlation"
+        }
+      ]
+    },
+    "manager_completion": {
+      "system_prompt_sha256": "5872b0ea1d2e1cffaa0ff1e9669a58c0bba8886ab416582dd67941f7187b1df7",
+      "turn_text": "[COMPLETION] Looper reports tasks that ended.",
+      "command": [
+        "claude",
+        "--print",
+        "--verbose",
+        "--output-format",
+        "stream-json",
+        "--input-format",
+        "stream-json",
+        "--include-partial-messages",
+        "--replay-user-messages",
+        "--setting-sources",
+        "project",
+        "--strict-mcp-config",
+        "--settings",
+        "{\"autoMemoryEnabled\":false,\"claudeMdExcludes\":[\"/CLAUDE.md\",\"/.claude/CLAUDE.md\",\"/.claude/rules/**\",\"/AGENTS.md\",\"/.claude/AGENTS.md\",\"/home/operator/.claude/CLAUDE.md\",\"/home/operator/.claude/rules/**\",\"/home/operator/.claude/AGENTS.md\"],\"crossSessionInbound\":\"refuse\"}",
+        "--append-system-prompt-file",
+        "/runtime/manager.md",
+        "--system-prompt-snapshot",
+        "off",
+        "--dangerously-skip-permissions",
+        "--disallowedTools",
+        "ListAgents",
+        "--model",
+        "opus",
+        "--teammate-mode",
+        "in-process"
+      ],
+      "metadata_keys": [
+        "command",
+        "cwd",
+        "llm_model",
+        "model_choice",
+        "pricing",
+        "profile",
+        "project_instructions",
+        "prompt_layers",
+        "settings_sources",
+        "system_prompt",
+        "system_prompt_mode",
+        "system_prompt_sha256"
+      ],
+      "envelopes": [
+        {
+          "type": "status_update",
+          "source": "AgentAddress(agent_type='manager', agent_id='manager', channel=None)",
+          "target": "AgentAddress(agent_type='channel', agent_id='channel-web', channel='web')",
+          "payload": {
+            "text": "Thinking",
+            "delta": false,
+            "phase": true,
+            "activity": "thinking"
+          },
+          "metadata": {
+            "origin_channel_id": "channel-web"
+          },
+          "reply_to": "synthetic-message",
+          "correlation_id": "synthetic-correlation"
+        },
+        {
+          "type": "agent_reply",
+          "source": "AgentAddress(agent_type='manager', agent_id='manager', channel=None)",
+          "target": "AgentAddress(agent_type='channel', agent_id='channel-web', channel='web')",
+          "payload": {
+            "text": "synthetic reply"
+          },
+          "metadata": {},
+          "reply_to": "synthetic-message",
+          "correlation_id": "synthetic-correlation"
+        }
+      ]
+    },
+    "route_arrival": [
+      {
+        "origin": null,
+        "interrupt": false,
+        "merge": false,
+        "merged": false,
+        "stopped": false,
+        "cleanup": null,
+        "preempted_by": null
+      },
+      {
+        "origin": null,
+        "interrupt": false,
+        "merge": true,
+        "merged": false,
+        "stopped": false,
+        "cleanup": null,
+        "preempted_by": null
+      },
+      {
+        "origin": null,
+        "interrupt": true,
+        "merge": false,
+        "merged": false,
+        "stopped": false,
+        "cleanup": null,
+        "preempted_by": null
+      },
+      {
+        "origin": null,
+        "interrupt": true,
+        "merge": true,
+        "merged": false,
+        "stopped": false,
+        "cleanup": null,
+        "preempted_by": null
+      },
+      {
+        "origin": "user",
+        "interrupt": false,
+        "merge": false,
+        "merged": false,
+        "stopped": false,
+        "cleanup": "none",
+        "preempted_by": null
+      },
+      {
+        "origin": "user",
+        "interrupt": false,
+        "merge": true,
+        "merged": true,
+        "stopped": false,
+        "cleanup": "none",
+        "preempted_by": null
+      },
+      {
+        "origin": "user",
+        "interrupt": true,
+        "merge": false,
+        "merged": false,
+        "stopped": false,
+        "cleanup": "none",
+        "preempted_by": null
+      },
+      {
+        "origin": "user",
+        "interrupt": true,
+        "merge": true,
+        "merged": true,
+        "stopped": false,
+        "cleanup": "none",
+        "preempted_by": null
+      },
+      {
+        "origin": "own",
+        "interrupt": false,
+        "merge": false,
+        "merged": false,
+        "stopped": false,
+        "cleanup": "none",
+        "preempted_by": null
+      },
+      {
+        "origin": "own",
+        "interrupt": false,
+        "merge": true,
+        "merged": false,
+        "stopped": false,
+        "cleanup": "none",
+        "preempted_by": null
+      },
+      {
+        "origin": "own",
+        "interrupt": true,
+        "merge": false,
+        "merged": false,
+        "stopped": false,
+        "cleanup": "none",
+        "preempted_by": null
+      },
+      {
+        "origin": "own",
+        "interrupt": true,
+        "merge": true,
+        "merged": false,
+        "stopped": false,
+        "cleanup": "none",
+        "preempted_by": null
+      },
+      {
+        "origin": "completion",
+        "interrupt": false,
+        "merge": false,
+        "merged": false,
+        "stopped": false,
+        "cleanup": "none",
+        "preempted_by": null
+      },
+      {
+        "origin": "completion",
+        "interrupt": false,
+        "merge": true,
+        "merged": false,
+        "stopped": false,
+        "cleanup": "none",
+        "preempted_by": null
+      },
+      {
+        "origin": "completion",
+        "interrupt": true,
+        "merge": false,
+        "merged": false,
+        "stopped": true,
+        "cleanup": "required",
+        "preempted_by": "synthetic-message"
+      },
+      {
+        "origin": "completion",
+        "interrupt": true,
+        "merge": true,
+        "merged": false,
+        "stopped": true,
+        "cleanup": "required",
+        "preempted_by": "synthetic-message"
+      },
+      {
+        "origin": "idle_check",
+        "interrupt": false,
+        "merge": false,
+        "merged": false,
+        "stopped": false,
+        "cleanup": "none",
+        "preempted_by": null
+      },
+      {
+        "origin": "idle_check",
+        "interrupt": false,
+        "merge": true,
+        "merged": false,
+        "stopped": false,
+        "cleanup": "none",
+        "preempted_by": null
+      },
+      {
+        "origin": "idle_check",
+        "interrupt": true,
+        "merge": false,
+        "merged": false,
+        "stopped": true,
+        "cleanup": "required",
+        "preempted_by": "synthetic-message"
+      },
+      {
+        "origin": "idle_check",
+        "interrupt": true,
+        "merge": true,
+        "merged": false,
+        "stopped": true,
+        "cleanup": "required",
+        "preempted_by": "synthetic-message"
+      },
+      {
+        "origin": "triage",
+        "interrupt": false,
+        "merge": false,
+        "merged": false,
+        "stopped": false,
+        "cleanup": "none",
+        "preempted_by": null
+      },
+      {
+        "origin": "triage",
+        "interrupt": false,
+        "merge": true,
+        "merged": false,
+        "stopped": false,
+        "cleanup": "none",
+        "preempted_by": null
+      },
+      {
+        "origin": "triage",
+        "interrupt": true,
+        "merge": false,
+        "merged": false,
+        "stopped": true,
+        "cleanup": "required",
+        "preempted_by": "synthetic-message"
+      },
+      {
+        "origin": "triage",
+        "interrupt": true,
+        "merge": true,
+        "merged": false,
+        "stopped": true,
+        "cleanup": "required",
+        "preempted_by": "synthetic-message"
+      }
+    ]
+  }
+}
