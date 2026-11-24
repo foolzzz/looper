@@ -11,7 +11,9 @@ import pytest
 from looper.agents import extraction, intent_push, intent_recognition, processor, subscriptions
 from looper.agents.channels.base import PostOutcome, PostReceipt
 from looper.agents.serve import seed_role_configs
+from looper.db import connection
 from looper.db import intents as db_intents, schedules as db_schedules, subscriptions as db_subs
+from looper.db.migrations import intent_recognitions as migration
 from tests.db_support import DSN, run_db
 from tests.leads_support import intent
 from tests.subscription_support import DM, SOURCE, add, chat, processor_says, source
@@ -112,6 +114,44 @@ def test_recognize_once_reads_only_the_range_and_moves_nothing(monkeypatch, tmp_
     run_db(check, monkeypatch, setup=seed_role_configs)
 
 
+@pytest.mark.parametrize("guard", ["context_seqs", "read_from"])
+def test_recognize_once_range_guards_work_independently(monkeypatch, tmp_path, guard):
+    fake = processor_says(monkeypatch, "NONE")
+    batch = extraction.batch
+
+    async def with_one_guard(conn, kind, sub, picked, **kwargs):
+        # Leave the real batch renderer in place, disabling only the companion guard.
+        if guard == "context_seqs":
+            picked = {**picked, "rows": [{**row, "read_from": SINCE - timedelta(days=1)}
+                                        for row in picked["rows"]]}
+        else:
+            kwargs.pop("context_seqs", None)
+        return await batch(conn, kind, sub, picked, **kwargs)
+
+    monkeypatch.setattr(extraction, "batch", with_one_guard)
+
+    async def check(pool):
+        await configured(pool)
+        parent = await add(pool, "Outside parent", chat_id="g", sent_at=SINCE - timedelta(hours=1))
+        await add(pool, "Outside preceding context", chat_id="g", sent_at=SINCE - timedelta(seconds=1))
+        selected = await add(pool, "Selected request", chat_id="g", sent_at=SINCE)
+        await pool.execute("UPDATE source_events SET parent_id=(SELECT external_id FROM source_events WHERE seq=$1) "
+                           "WHERE seq=$2", parent, selected)
+        service = intent_recognition.IntentRecognitions(SimpleNamespace(), runtime_root=tmp_path,
+                                                        claude_bin="unused", clock=lambda: NOW)
+        await service.start()
+        try:
+            await service.begin(source_id=SOURCE, chat_id="g", requested_via="dashboard", reply=None)
+            record = await finished(service, pool)
+            assert record["state"] == "done" and record["events_read"] == 1
+            text = fake.calls[0]["input_text"]
+            assert "Selected request" in text
+            assert "Outside parent" not in text and "Outside preceding context" not in text
+        finally:
+            await service.stop()
+    run_db(check, monkeypatch, setup=seed_role_configs)
+
+
 @pytest.mark.parametrize("same_time", [False, True])
 def test_recognize_once_caps_at_the_latest_two_thousand_messages(monkeypatch, tmp_path, same_time):
     fake = processor_says(monkeypatch, "NONE")
@@ -180,7 +220,8 @@ def test_recognize_once_refuses_invalid_or_unconfirmed_requests(monkeypatch, rea
     run_db(check, monkeypatch, setup=seed_role_configs)
 
 
-def test_recognize_once_refuses_overlap_and_marks_interrupted_work_failed(monkeypatch, tmp_path):
+@pytest.mark.parametrize("repair_index", [False, True])
+def test_recognize_once_refuses_overlap_and_marks_interrupted_work_failed(monkeypatch, tmp_path, repair_index):
     fake = processor_says(monkeypatch, REPLY)
     entered, release = asyncio.Event(), asyncio.Event()
     async def during():
@@ -189,6 +230,16 @@ def test_recognize_once_refuses_overlap_and_marks_interrupted_work_failed(monkey
     fake.during = during
     async def check(pool):
         await configured(pool)
+        if repair_index:
+            await pool.execute("INSERT INTO schema_migrations(name) VALUES('intent_recognitions') "
+                               "ON CONFLICT DO NOTHING")
+            assert not await migration.pending(pool)
+            await pool.execute("DROP INDEX idx_intent_recognitions_running")
+            assert await pool.fetchval("SELECT EXISTS (SELECT 1 FROM schema_migrations "
+                                      "WHERE name='intent_recognitions')")
+            assert await migration.pending(pool)
+            await connection.ensure_schema(pool)
+            assert not await migration.pending(pool)
         await add(pool, "Synthetic request", chat_id="g", sent_at=NOW - timedelta(hours=1))
         service = intent_recognition.IntentRecognitions(SimpleNamespace(), runtime_root=tmp_path,
                                                         claude_bin="unused", clock=lambda: NOW)

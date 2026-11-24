@@ -1,12 +1,13 @@
 """Recognition is offered only to the operator and begins only after a confirmed preview."""
 
+from dataclasses import replace
 from datetime import datetime, timezone
 from types import SimpleNamespace
 
 import pytest
 
 from looper.agents import intent_recognition
-from looper.agents.ops import Turn
+from looper.agents.ops import Call, ErrorCode, OpError, Turn
 from looper.agents.ops import intents_recognize as tool
 from looper.agents.ops.service import ManagerOps, Platform
 from tests.db_support import run_with_channel_configs
@@ -72,6 +73,50 @@ def test_recognize_tool_runs_only_in_the_operators_turns_and_asks_first(monkeypa
             "reply": ("channel-lark", "oc_dm") if channel == "lark" else None}
         await pool.execute("UPDATE system_settings SET value='false' WHERE key='intents.on_request.enabled'")
         assert tool.TOOL_NAME not in {item["name"] for item in await ops.current_listing(own)}
+
+    run_with_channel_configs(test, monkeypatch)
+
+
+@pytest.mark.parametrize("guard", ["dispatch", "handler"])
+def test_recognize_tool_operator_guards_work_independently(monkeypatch, guard):
+    async def test(pool):
+        await pool.execute("INSERT INTO system_settings (key,value) VALUES "
+                           "('intents.enabled','true'),('intents.on_request.enabled','true')")
+        await pool.execute("UPDATE channel_configs SET config=$1::jsonb WHERE channel_id='channel-lark'",
+                           '{"operator_sender_id":"ou_synthetic"}')
+        result = {"recognition": {"id": "R-1"}}
+
+        async def status(recognition):
+            return result
+
+        async def unchecked_handler(call):
+            return result
+
+        monkeypatch.setattr(intent_recognition, "status", status)
+        if guard == "dispatch":
+            # Bypass the handler's check so only ManagerOps can refuse the call.
+            monkeypatch.setattr(tool, "TOOL", replace(tool.TOOL, run=unchecked_handler))
+        ops = ManagerOps(Platform(bus=None, task_router=None), url="http://127.0.0.1:9/", token="tok")
+        ops._working_at = ops._clock()
+        arguments = {"action": "status", "recognition": "R-1"}
+        for turn in (Turn(channel="lark", channel_id="channel-lark", chat="oc_group", sender="ou_synthetic",
+                          group=True, message_id="group"),
+                     Turn(channel="lark", channel_id="channel-lark", chat="oc_dm", sender="ou_other", message_id="other"),
+                     Turn(channel="web", chat="web", client_id="api-client", message_id="api"),
+                     Turn(channel="web", chat="web")):
+            if guard == "dispatch":
+                answer = await _call(ops, turn, tool.TOOL_NAME, arguments)
+                assert answer["error"]["code"] == "forbidden", answer
+            else:
+                # Direct execution models confirmation, which bypasses ManagerOps.call's audience check.
+                with pytest.raises(OpError) as refused:
+                    await tool.run(Call(arguments, turn, ops.platform))
+                assert refused.value.code is ErrorCode.FORBIDDEN
+        own = Turn(channel="web", chat="web", message_id="operator")
+        if guard == "dispatch":
+            assert await _call(ops, own, tool.TOOL_NAME, arguments) == {"status": "ok", "result": result}
+        else:
+            assert await tool.run(Call(arguments, own, ops.platform)) == result
 
     run_with_channel_configs(test, monkeypatch)
 

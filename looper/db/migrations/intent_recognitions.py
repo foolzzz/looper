@@ -46,15 +46,22 @@ async def pending(conn):
     # A repaired earlier migration may recreate via and remove its dependent checks.
     return not await conn.fetchval(
         "SELECT to_regclass('intent_recognitions') IS NOT NULL "
+        "AND EXISTS (SELECT 1 FROM pg_index WHERE indexrelid=to_regclass('idx_intent_recognitions_running') "
+        "AND indrelid=to_regclass('intent_recognitions') AND indisunique AND indisvalid AND indisready "
+        "AND indnkeyatts=1 AND indnatts=1 AND pg_get_indexdef(indexrelid,1,true)='source_id' "
+        "AND pg_get_expr(indpred,indrelid)=$2) "
         "AND EXISTS (SELECT 1 FROM pg_attribute WHERE attrelid=to_regclass('intents') "
         "AND attname='recognition_id' AND attnum>0 AND NOT attisdropped) "
         "AND EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid=to_regclass('intents') "
         "AND conname='intents_on_request') "
         "AND EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid=to_regclass('intents') "
-        "AND conname='intents_via_check' AND strpos(pg_get_constraintdef(oid), $1)>0)", "'on_request'")
+        "AND conname='intents_via_check' AND strpos(pg_get_constraintdef(oid), $1)>0)",
+        "'on_request'", "(state = 'running'::text)")
 
 
 async def apply(conn, *, sql, state):
     if await pending(conn):
+        # IF NOT EXISTS would retain a same-named index with the wrong definition.
+        await conn.execute("DROP INDEX IF EXISTS idx_intent_recognitions_running")
         await conn.execute(fresh_ddl)
         await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1) ON CONFLICT DO NOTHING", name)
