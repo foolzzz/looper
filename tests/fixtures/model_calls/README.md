@@ -45,3 +45,8 @@ in. Set `UPDATE_MODEL_CALL_GOLDENS=1` and run only those test modules against a
 disposable PostgreSQL database. The helper verifies the imported package path
 and that the production sources match the recorded baseline before writing.
 Never regenerate compatibility fixtures from the migrated implementation.
+
+`intents-group-read-off.json` was captured from unchanged production sources at
+`9912920e45b6519749547974e953716c0b6c7c32`. It pins the intents run while followed-group
+reading is off (including an absent switch or an empty list). Keep this fixture
+while the feature defaults off; it is excluded from the 2.16 harness removal.
