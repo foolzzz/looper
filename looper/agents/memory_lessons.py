@@ -1,14 +1,49 @@
-"""Operator lesson reads and settings. The foundation starts no lesson processing."""
+"""Operator lesson reads, lifecycle controls and independent settings."""
 from __future__ import annotations
 
 import json
 from typing import Any
 from collections.abc import Mapping
+from datetime import datetime, timezone
 
-from ..db import memory_lessons as store, projects, system_settings
+from ..db import memory_lessons as store, memory as db_memory, projects, system_settings, connection
 from . import memory, memory_lessons_model as model, memory_model
 from .memory_settings import _push_channel_problem
 from .ops import ErrorCode, OpError
+
+
+async def act(action: str, candidate: str, *, via: memory_model.Via = memory_model.Via.DASHBOARD,
+              reason: str | None = None, db: Any = None) -> dict[str, Any]:
+    """Operator controls work even while lessons are off; neither action activates content."""
+    if action not in {"revoke", "renew"} or via not in {memory_model.Via.DASHBOARD, memory_model.Via.CLI}:
+        raise db_memory.MemoryRefused("unsupported lesson control", code="forbidden")
+    number = memory_model.parse_id(candidate)
+    if reason is not None and (not isinstance(reason, str) or len(reason) > memory_model.NOTE_MAX_CHARS):
+        raise ValueError(f"reason has at most {memory_model.NOTE_MAX_CHARS} characters")
+    view = await settings_view(db)
+    settings = model.parse_settings(view["settings"])
+    async with db_memory.transaction(db) as conn:
+        row = await store.transition_lesson(conn, number,
+            memory_model.State.REVOKED if action == "revoke" else memory_model.State.IN_EFFECT,
+            action=memory_model.Action(action), actor=memory_model.Actor.USER, via=via,
+            now=datetime.now(timezone.utc), valid_days=settings.valid_days, note=reason,
+            expected_state=memory_model.State.IN_EFFECT)
+        row["sources_total"] = await conn.fetchval(
+            "SELECT count(*) FROM memory_candidate_sources WHERE candidate_id=$1", number)
+    return {"candidate": memory.candidate_view(row)}
+
+
+async def task_view(task_id: str, *, limit: int = 50, before: int | None = None,
+                    db: Any = None) -> dict[str, Any]:
+    from ..db import memory_lesson_injection
+
+    if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 200:
+        raise ValueError("limit must be a whole number from 1 to 200")
+    if before is not None and (isinstance(before, bool) or not isinstance(before, int) or not 1 <= before < 2**63):
+        raise ValueError("before must be a positive 64-bit injection id")
+    if not await (db or connection.get_pool()).fetchval("SELECT EXISTS(SELECT 1 FROM tasks WHERE id=$1)", task_id):
+        raise OpError(ErrorCode.NOT_FOUND, f"no task {task_id}")
+    return await memory_lesson_injection.task_view(task_id, limit=limit, before=before, db=db)
 
 
 async def list_view(*, project: str | None = None, state: str = "all", limit: int = 50,
@@ -72,5 +107,6 @@ async def confirmation_impact(body: Mapping[str, Any], *, db: Any = None) -> str
              settings.weekly.push_channel != old.weekly.push_channel)):
         return ("Allow future task lessons to affect later tasks in the same project without individual operator "
                 "review? Push channel: " + (settings.weekly.push_channel or "none") +
-                ". This stores settings only; retrospective processing, injection and delivery ship separately.")
+                ". Enabled projects may inject existing active lessons into later runs. "
+                "Retrospective generation and weekly delivery ship separately.")
     return None

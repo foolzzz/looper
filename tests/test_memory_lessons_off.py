@@ -16,13 +16,20 @@ FIXTURE = Path(__file__).parent / "fixtures" / "memory_lessons_off.json"
 ROOT = Path(__file__).resolve().parents[1]
 # Function bodies are separate freezes, guarding the real unchanged behavior as well as rendered constants.
 FUNCTIONS = {
-    "looper/agents/tiers/planner.py": ["PlannerAgent._plan_message", "PlannerAgent._resume_brief",
-        "PlannerAgent._capture_project_learnings", "PlannerAgent._distill_lessons", "PlannerAgent._lessons_message"],
-    "looper/agents/system_prompt.py": ["build_system_prompt", "build_role_prompt", "work_contract", "review_contract"],
+    "looper/agents/tiers/planner.py": ["PlannerAgent._capture_project_learnings", "PlannerAgent._distill_lessons",
+        "PlannerAgent._lessons_message"],
     "looper/agents/claude_cli.py": ["ResidentClaude.command", "budget_args", "system_prompt_args", "permission_args", "library_args", "knowledge_args"],
     "looper/agents/runtimes/codex.py": ["CodexRuntime._command", "CodexRuntime.resident_command", "CodexRuntime.run_command"],
     "looper/agents/task_notice.py": ["notice_text"],
     "looper/agents/memory_routing.py": ["route"],
+}
+# Optional lesson parameters change these sources; their concrete off outputs are frozen per item in
+# memory_lesson_injection_off.json, recorded from ad62143e7fc02afa840cd6771a730836d72fed89.
+OUTPUT_FROZEN = {
+    "function:looper/agents/tiers/planner.py:PlannerAgent._plan_message",
+    "function:looper/agents/tiers/planner.py:PlannerAgent._resume_brief",
+    *(f"function:looper/agents/system_prompt.py:{name}" for name in
+      ("build_system_prompt", "build_role_prompt", "work_contract", "review_contract")),
 }
 
 
@@ -110,6 +117,8 @@ def test_disabled_lessons_preserve_each_recorded_surface(monkeypatch, global_mod
     assert baseline["revision"] == REVISION
     current = recorded_surfaces()
     for key, expected in baseline["surfaces"].items():
+        if key in OUTPUT_FROZEN:
+            continue
         assert current[key] == expected, key
     from looper.agents import memory_lessons
     from looper.db import system_settings

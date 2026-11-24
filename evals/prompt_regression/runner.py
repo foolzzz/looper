@@ -430,6 +430,7 @@ def running_server(*, database_url: str, runtime_root: Path, bin_dir: Path, log_
     manager_dir = runtime_root / "manager"
     manager_dir.mkdir(parents=True, exist_ok=True)
     ops = ops_config.OpsConfig(runtime_root=runtime_root, path=runtime_root / ops_config.FILE,
+                               host="127.0.0.1", port=port,
                                database_url=database_url, operator_notes_root=str(notes_root) if notes_root else "",
                                projects_root=str(projects_root) if projects_root is not None else "",
                                pi_runtime=pi_runtime, dsh_runtime=dsh_runtime,
@@ -616,6 +617,37 @@ def _all_events(api: Api, record_id: int) -> list[dict[str, Any]]:
             return events
 
 
+def _seed_project_lessons(database_url: str, project_id: str, task: EvalTask) -> None:
+    """Synthetic journal-backed candidates, only in this eval's freshly created database."""
+    async def seed():
+        import asyncpg
+        from looper.agents.memory_model import fingerprint
+
+        conn = await asyncpg.connect(database_url, timeout=10)
+        try:
+            async with conn.transaction():
+                await conn.execute("INSERT INTO system_settings(key,value) VALUES ('memory_lessons',$1) "
+                                   "ON CONFLICT(key) DO UPDATE SET value=EXCLUDED.value", json.dumps({"enabled": True}))
+                await conn.execute("UPDATE projects SET memory_lessons=$2 WHERE id=$1", project_id, task.lesson_mode)
+                source = "lesson-evidence-" + uuid.uuid4().hex[:12]
+                await conn.execute("INSERT INTO tasks(id,requirement,project_id,status) "
+                                   "VALUES ($1,'Synthetic verified evidence',$2,'completed')", source, project_id)
+                journal = await conn.fetchval("INSERT INTO task_journal(task_id,step_id,kind,summary) "
+                    "VALUES ($1,'s1','step_accepted','Synthetic verification') RETURNING id", source)
+                for statement, why in task.lesson_seeds:
+                    candidate = await conn.fetchval("INSERT INTO memory_candidates(kind,source_kind,source_class,"
+                        "destination,state,statement,why,fingerprint,project_id,valid_until) VALUES "
+                        "('lesson','task','agent','looper','in_effect',$1,$2,$3,$4,now()+interval '90 days') RETURNING id",
+                        statement, why, fingerprint("lesson", statement), project_id)
+                    await conn.execute("INSERT INTO memory_candidate_sources(candidate_id,kind,journal_id) "
+                                       "VALUES ($1,'journal',$2)", candidate, journal)
+                    await conn.execute("INSERT INTO memory_candidate_events(candidate_id,action,actor_kind,via) "
+                                       "VALUES ($1,'activate','system','system')", candidate)
+        finally:
+            await conn.close()
+    asyncio.run(seed())
+
+
 def run_task(
     api: Api,
     task: EvalTask,
@@ -635,6 +667,7 @@ def run_task(
     vault_dir: Path | None = None,
     fake: bool = False,
     review_profile_id: str | None = None,
+    lesson_database_url: str | None = None,
 ) -> dict[str, Any]:
     """Create and start ``task`` in ``work_dir``, wait until it ends, and read back what it shows.
 
@@ -686,6 +719,10 @@ def run_task(
     created = api.post("/api/v1/tasks/create", {"requirement": task.requirement, "project": project, **workflow})["result"]
     task_id = created["task_id"]
     try:
+        if task.lesson_seeds:
+            if lesson_database_url is None:
+                raise EvalError("lesson scenarios need their disposable database URL")
+            _seed_project_lessons(lesson_database_url, created["project_id"], task)
         if task.planner_may_choose:
             if chosen_profile_id is None:
                 raise EvalError(f"{task.id} needs the profile its Planner may choose")
@@ -827,6 +864,18 @@ def run_task(
             record_completion_checks=record_completion_checks,
         )
         result.update(metrics.attempt_fields(attempts_view))
+        if task.lesson_seeds:
+            lessons = api.post("/api/v1/memory/task_lessons", {"task_id": task_id, "limit": 200})["result"]
+            result["lesson_readback"] = lessons
+            items = [item for injection in lessons["injections"] if injection["state"] == "delivered"
+                     for item in injection["items"]]
+            if task.lesson_mode == "off" and lessons["injections"]:
+                result["problems"].append("disabled lesson scenario wrote injection history")
+            if task.lesson_mode == "on":
+                flag = "cited" if task.id == "memory_lessons_use" else "wrong"
+                if not any(item[flag] for item in items):
+                    result["problems"].append(f"no delivered lesson item was reported as {flag}")
+            result["success"] = bool(result["success"] and not result["problems"])
         if step_workspaces:
             result["looper_commits"] = looper_commits(work_dir, task_id)
     except Exception as exc:
@@ -1290,6 +1339,7 @@ def run(
                                                      planner_roles=planner_roles,
                                                      record_completion_checks=planner_roles is not None or worker_agent is not None,
                                                      review_profile_id=review_profile_id,
+                                                     lesson_database_url=database_url,
                                                      notes_root=notes_root, vault_dir=vault_dir, fake=mode == "fake"),
                 total_cap_usd=total_cap_usd,
                 reps=reps,

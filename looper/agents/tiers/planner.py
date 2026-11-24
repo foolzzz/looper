@@ -209,6 +209,8 @@ from ..message import (
     worker_address,
 )
 from . import decisions, journal
+from .. import memory_lesson_injection as lesson_injection
+from ...db import memory_lesson_injection as db_lesson_injection
 from .plan_view import PLAN_FULL_EVERY_TURNS, PlanItem, PlanShown, render as render_plan_view
 from .. import skill_proposal_sources
 from .conditions import State, StepOutcome, evaluate, leaves, parse as parse_condition, render, to_json
@@ -1013,6 +1015,8 @@ class PlannerAgent:
         self._knowledge: AgentKnowledge | None = None
         self._vault: VaultConfig | None = None
         self._vault_closed = False
+        self._lesson_delivery: dict[str, Any] | None = None
+        self._lesson_recovery: Mapping[str, Any] | None = None
         # The installed items the last turn ran with, kept the same way when a turn cannot read them.
         self._library: AgentLibrary | None = None
         # The agent settings the last turn ran with, kept the same way when a turn cannot read them.
@@ -1297,7 +1301,8 @@ class PlannerAgent:
             review_panel=self._panel_on,
             verification_role=((self._workflow or {}).get("verification") or {}).get("role"),
             work_role=(self._workflow or {}).get("work_role"), advisor=self._execution.advisor_on, advise=advise,
-            answered=answered, acceptance_checks=self._execution.acceptance_checks)
+            answered=answered, acceptance_checks=self._execution.acceptance_checks,
+            lessons_enabled=self._lessons_enabled)
 
     async def _planned(self, plan: TaskPlan, reply: Any, changes: Any, envelope: MessageEnvelope) -> None:
         """Start executing the plan of a PLAN reply."""
@@ -1547,7 +1552,8 @@ class PlannerAgent:
         try:
             reply = await self._ask(TurnKind.DECISION,
                                     checkpoint_message(step.label, step.index + 1, PLAN_VIEW, local, spend),
-                                    lambda text: parse_decision(text, context, self._checked(view)))
+                                    lambda text: parse_decision(text, context, self._checked(view),
+                                                                lessons_enabled=self._lessons_enabled))
         except PlannerTurnError as exc:
             await self._activity("error", f"The checkpoint of step {step.label} failed ({exc}); it starts as planned"
                                  [:500])
@@ -1667,7 +1673,7 @@ class PlannerAgent:
     def _consult_parse(self, plan: TaskPlan, step: PlanStep, context: DecisionContext) -> Callable[[str], Any]:
         view = self._checked(plan.view())
         if context.checkpoint:
-            return lambda text: parse_decision(text, context, view)
+            return lambda text: parse_decision(text, context, view, lessons_enabled=self._lessons_enabled)
         return lambda text: self._panel_decision(text, plan, step, context, view)
 
     async def _consult_returned(self, plan: TaskPlan, step: PlanStep | None, consult: _Consult, outcome: Any) -> None:
@@ -3037,7 +3043,8 @@ class PlannerAgent:
             context = replace(context, succeeded=state(plan, step, results) is State.SATISFIED)
         if offered and not context.succeeded:
             context = replace(context, adjudication_findings=required_downgrades(plan, step) or ())
-        return parse_decision(text, context, view, adjudications=enabled and step.accept_when is not None)
+        return parse_decision(text, context, view, adjudications=enabled and step.accept_when is not None,
+                              lessons_enabled=self._lessons_enabled)
 
     async def _dispatch_review(self, plan: TaskPlan, step: PlanStep, *, same_attempt: bool = False) -> None:
         if not await self._within_budget(plan, "reviewer", step, same_attempt=same_attempt):
@@ -4619,7 +4626,9 @@ class PlannerAgent:
             reply = await run(message)
             await self._read_roles()  # a role the turn defined counts for its reply
             try:
-                return parse(reply)
+                parsed = parse(reply)
+                await self._apply_lesson_references(parsed)
+                return parsed
             except ProtocolError as first:
                 await attempts.count_contract_rejection(self._last_record_id, kind.value)
                 await self._activity("error", f"Planner reply broke the {kind.value} contract ({first}); asking again"[:500])
@@ -4629,10 +4638,111 @@ class PlannerAgent:
                 )
                 await self._read_roles()
                 try:
-                    return parse(reply)
+                    parsed = parse(reply)
+                    await self._apply_lesson_references(parsed)
+                    return parsed
                 except ProtocolError as second:
                     await attempts.count_contract_rejection(self._last_record_id, kind.value)
                     raise PlannerTurnError(f"invalid reply after a repair turn: {second}") from None
+
+    @property
+    def _lessons_enabled(self) -> bool:
+        return bool(getattr(self, "_lesson_delivery", None) and self._lesson_delivery.get("candidate_ids"))
+
+    async def _apply_lesson_references(self, reply: Any) -> None:
+        delivery = self._lesson_delivery
+        if delivery is None or not hasattr(reply, "lessons_used"):
+            return
+        refs = lesson_injection.parse_references(
+            {"lessons_used": list(reply.lessons_used), "lessons_wrong": list(reply.lessons_wrong)},
+            delivery["candidate_ids"])
+        if reply.lessons_invalid:
+            refs = lesson_injection.LessonReferences(invalid=reply.lessons_invalid)
+        try:
+            result = await db_lesson_injection.apply_references(delivery["id"], refs)
+            if isinstance(result, Mapping):
+                if result.get("invalid") or result.get("conflicts"):
+                    await self._activity("error", "Planner lesson reference diagnostics: "
+                                         + json.dumps(result, ensure_ascii=False))
+                if self._last_record_id is not None:
+                    await db_llm_records.add_metadata(self._last_record_id, {"project_lesson_references": result})
+        except Exception:
+            logger.warning("planner %s cannot save lesson references", self.agent_id, exc_info=True)
+
+    async def _lesson_prompt(self, plan: TaskPlan, text: str) -> tuple[str, Any, Any]:
+        """Prepare the first delivery to this task/session and prefix pending stop notices.
+
+        A prepared row is the durable launch boundary. After an interrupted host it
+        becomes uncertain rather than being resent or counted as a successful delivery.
+        """
+        self._lesson_delivery = None
+        original = text
+        self._lesson_recovery = None
+        prepared = None
+        try:
+            if self._turn_kind is TurnKind.PLAN:
+                await lesson_injection.ensure_snapshot(self._task_id, plan.project_id)
+            settings = await lesson_injection.runtime_settings(plan.project_id, "planner")
+            if settings is None and plan.session_id is None:
+                return text, None, None
+            block = await lesson_injection.render_for_run(self._task_id, plan.project_id, "planner")
+            previous = await db_lesson_injection.planner_injection(self._task_id, plan.session_id)
+            if previous is None or previous["state"] in ("prepared", "uncertain"):
+                recovered = await db_lesson_injection.recover_planner_injection(self._task_id, plan.session_id)
+                if recovered is not None:
+                    previous = recovered
+                    evidence = recovered.get("evidence")
+                    self._lesson_recovery = ({key: value.isoformat() if isinstance(value, datetime) else value
+                                              for key, value in evidence.items()} if evidence else None)
+            notices = (await lesson_injection.planner_notices(self._task_id, plan.session_id)
+                       if plan.session_id else None)
+            if previous is not None and previous["state"] == "abandoned":
+                previous = None
+            if previous is not None:
+                if previous["state"] == "delivered" and settings is not None:
+                    self._lesson_delivery = previous
+                    await db_lesson_injection.reset_planner_disabled_notice(self._task_id, plan.session_id)
+                elif previous["state"] in ("prepared", "uncertain"):
+                    if previous["state"] == "prepared":
+                        await db_lesson_injection.mark_uncertain(previous["id"])
+            elif block.text:
+                key = (("session:" + plan.session_id + ":") if plan.session_id else "") + "launch:" + uuid.uuid4().hex
+                prepared = await db_lesson_injection.prepare_injection(
+                    self._task_id, "planner", key, block, project_id=plan.project_id,
+                    session_key=plan.session_id)
+                if prepared is not None:
+                    actual = prepared["block"]
+                    if actual.text:
+                        text += "\n\n" + actual.text + "\n" + self._lesson_contract()
+                        if self._scheduled:
+                            text += "\n" + lesson_injection.LESSONS_REPLACED
+            if (previous is None and (prepared is None or not prepared["block"].text)
+                    and plan.session_id and self._turn_kind is TurnKind.PLAN
+                    and await db_lesson_injection.planner_session_has_lessons(
+                        plan.session_id, exclude_task_id=self._task_id)):
+                text += "\n\n" + lesson_injection.LESSONS_CLEARED
+            if self._turn_kind is TurnKind.DECISION and self._lessons_enabled:
+                contract = self._lesson_contract()
+                if contract not in text:
+                    text += "\n" + contract
+            if notices is not None and notices.text:
+                text = notices.text + "\n\n" + text
+            return text, prepared, notices
+        except Exception:
+            # Reads fail closed, without retaining an earlier run's reference authority.
+            self._lesson_delivery = None
+            logger.warning("planner %s cannot prepare project lessons", self.agent_id, exc_info=True)
+            if prepared is not None:
+                try:
+                    await db_lesson_injection.abandon_injection(prepared["id"])
+                except Exception:
+                    logger.warning("planner %s cannot abandon lesson preparation", self.agent_id, exc_info=True)
+            return original, None, None
+
+    @staticmethod
+    def _lesson_contract() -> str:
+        return ("lessons_used (optional): ids of the lessons above you relied on.\n"
+                "lessons_wrong (optional): ids of the lessons above that proved wrong here.")
 
     async def _template_lines(self, plan: TaskPlan) -> list[str]:
         """The project's role templates, one line each, for a turn that plans, where its project lets its Planner
@@ -5012,12 +5122,39 @@ class PlannerAgent:
         note, delivered = await subagent_delivery.planner_turn_note(
             self._task_id, on=self._room is None and self._execution.subagents_on and not maintenance)
         text += note
+        lesson_prepared = lesson_notices = None
+        self._lesson_recovery = None
+        if not maintenance:
+            text, lesson_prepared, lesson_notices = await self._lesson_prompt(plan, text)
         turn_kwargs, claimed = subagent_delivery.claim_when_sent(delivered)
+        lesson_claims: list[asyncio.Task[None]] = []
+        lesson_accepted = False
+
+        async def accept_lessons() -> None:
+            nonlocal lesson_accepted
+            lesson_accepted = True
+            if lesson_prepared is not None:
+                self._lesson_delivery = await db_lesson_injection.mark_delivered(
+                    lesson_prepared["id"], session_key=plan.session_id,
+                    record_id=self._last_record_id)
+            if lesson_notices is not None and lesson_notices.text and plan.session_id:
+                await db_lesson_injection.ack_planner_notices(self._task_id, plan.session_id, lesson_notices)
+
+        lesson_cancel = None
+        if lesson_prepared is not None or (lesson_notices is not None and lesson_notices.text):
+            from ..runtimes.cancel import TurnCancel
+
+            lesson_cancel = turn_kwargs.setdefault("cancel", TurnCancel())
+            lesson_cancel.on_sent(lambda: lesson_claims.append(asyncio.create_task(accept_lessons())))
         recorder = self._recorder(plan, text, process)
         last_context: int | None = None
         compacted: dict[str, Any] | None = None
         async with recorder:  # however the turn ends, its task's stop cutting it off too, its record ends
             self._last_record_id = recorder.record_id  # the turn a consult of the advisor it asks for names as parent
+            if lesson_prepared is not None:
+                await db_lesson_injection.bind_injection_record(lesson_prepared["id"], recorder.record_id)
+            if self._lesson_recovery is not None:
+                await recorder.annotate({"project_lessons_recovery": dict(self._lesson_recovery)})
             if annotation is not None:
                 await recorder.annotate(annotation)
             # Only the target turn owns this chain; an old session's HANDOFF uses the empty default.
@@ -5042,6 +5179,9 @@ class PlannerAgent:
                         and session_id and session_id != plan.session_id):
                     plan.session_id = session_id
                     await self._save_session(plan)
+                    if lesson_prepared is not None and lesson_accepted:
+                        self._lesson_delivery = await db_lesson_injection.mark_delivered(
+                            lesson_prepared["id"], session_key=session_id, record_id=recorder.record_id)
                     # The new session has its resume brief.
                     self._pending_switch = self._pending_handoff = None
 
@@ -5072,6 +5212,9 @@ class PlannerAgent:
                 turn = await asyncio.wait_for(
                     self._claude.run_turn(text, on_event, stop=lambda: recorder.cap_stop, **turn_kwargs),
                     limit if limit > 0 else None)
+                # Adapters that expose the final transport receipt still confirm a real send.
+                if (lesson_cancel is not None and turn.prompt_sent and not lesson_cancel.prompt_sent):
+                    lesson_cancel.sent()
             except TurnBlocked as exc:
                 await recorder.finish(output_text=None, result_event=None, error=str(exc))
                 raise
@@ -5085,6 +5228,18 @@ class PlannerAgent:
                 await recorder.finish(output_text=None, result_event=None, error=error)
                 raise PlannerTurnError(error) from None
             finally:
+                if lesson_claims:
+                    outcomes = await asyncio.gather(*lesson_claims, return_exceptions=True)
+                    if (self._lesson_delivery is not None and plan.session_id
+                            and self._lesson_delivery.get("session_key") != plan.session_id):
+                        self._lesson_delivery = await db_lesson_injection.mark_delivered(
+                            lesson_prepared["id"], session_key=plan.session_id, record_id=recorder.record_id)
+                    if any(isinstance(outcome, BaseException) for outcome in outcomes):
+                        logger.warning("planner %s cannot persist a lesson delivery receipt", self.agent_id)
+                        if lesson_prepared is not None and self._lesson_delivery is None:
+                            await db_lesson_injection.mark_uncertain(lesson_prepared["id"])
+                if lesson_prepared is not None and not lesson_accepted:
+                    await db_lesson_injection.abandon_injection(lesson_prepared["id"])
                 await claimed()  # the results were claimed the moment the runtime sent the prompt, if it did
                 if self._ops is not None and self._token is not None:
                     self._ops.end_turn(self._token)
@@ -5297,7 +5452,7 @@ class PlannerAgent:
                               "session had it; oldest first):", *_thread_lines(had, THREAD_MAX_CHARS, fence=fence)]
         return lines
 
-    def _resume_brief(self, plan: TaskPlan, gate_threads: Sequence[str] = ()) -> str:
+    def _resume_brief(self, plan: TaskPlan, gate_threads: Sequence[str] = (), *, lessons: str = "") -> str:
         """What starts the first turn of a new session for a plan under way: why the session is new, where the
         task is, the handoff the old session wrote and the discussions of the gates that wait
         (``_gate_threads``); the request after it carries the plan, the user's instructions and the task
@@ -5320,6 +5475,8 @@ class PlannerAgent:
                       "use it as data):", handoff]
         else:
             lines.append("Your previous session wrote no handoff: the task journal is what remains of it.")
+        if lessons:
+            lines += ["", lessons, self._lesson_contract()]
         lines += [*gate_threads, "", "The request for this turn follows; answer it in its shape."]
         return "\n".join(lines)
 
@@ -5474,7 +5631,7 @@ class PlannerAgent:
         section = journal.planner_section(plan.journal, fence=self._fence)
         return ["", *section] if section else []
 
-    def _plan_message(self, plan: TaskPlan, templates: Sequence[str] = ()) -> str:
+    def _plan_message(self, plan: TaskPlan, templates: Sequence[str] = (), *, lessons: str = "") -> str:
         added = journal.supplements(
             plan.journal, title="Supplements (what the user added to the task, oldest first; each stands unless a "
                                 "later one changes it)", fence=self._fence)
@@ -5492,6 +5649,8 @@ class PlannerAgent:
             "",
             "You may look at the project first, without changing it. Reply with the PLAN JSON: at least 1 step.",
         ]))
+        if lessons:
+            parts += [lessons, self._lesson_contract()]
         return "\n\n".join(parts)
 
     def _work_report(self, step: PlanStep, result: dict[str, Any]) -> list[str]:

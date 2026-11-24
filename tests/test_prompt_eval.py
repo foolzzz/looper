@@ -1501,10 +1501,10 @@ def test_eval_server_projects_root_preserves_default_ops(tmp_path, monkeypatch, 
         assert tomllib.loads(text)["projects"]["root"] == str(root)
     else:
         assert "projects" not in tomllib.loads(text)
-        # The configuration written before projects_root was added, byte for byte.
+        # The default configuration, with this server's isolated port explicitly pinned.
         assert text == ops_config.render(ops_config.OpsConfig(
             runtime_root=runtime, path=runtime / ops_config.FILE, database_url="unused",
-            pi_runtime="cli", dsh_runtime="cli", keeper_mode=ops_config.KeeperMode.OFF))
+            host="127.0.0.1", port=49152, pi_runtime="cli", dsh_runtime="cli", keeper_mode=ops_config.KeeperMode.OFF))
 
 
 @pytest.mark.parametrize("task_id", ["wait_pr_rereview", "wait_not_needed"])

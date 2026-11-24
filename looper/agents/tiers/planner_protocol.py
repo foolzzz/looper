@@ -252,6 +252,9 @@ class PlanReply:
     advice_request: Mapping[str, Any] | None = None
     advice_bindings: Any = None
     adoption: Mapping[str, Any] | None = None
+    lessons_used: tuple[str, ...] = ()
+    lessons_wrong: tuple[str, ...] = ()
+    lessons_invalid: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -339,6 +342,9 @@ class DecisionReply:
     advice_bindings: Any = None  # advise only: what the request's aliases stand for, kept local
     adoption: Mapping[str, Any] | None = None  # the decision after the advisor's answer: what it takes of it
     skill_proposals: tuple[SkillProposal | ProposalResult, ...] = ()
+    lessons_used: tuple[str, ...] = ()
+    lessons_wrong: tuple[str, ...] = ()
+    lessons_invalid: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -545,25 +551,47 @@ def extract_reply(text: str) -> dict[str, Any]:
     return value
 
 
+def _lesson_fields(data: Mapping[str, Any], enabled: bool) -> dict[str, tuple[str, ...]]:
+    """Optional reference errors do not invalidate an otherwise usable task reply."""
+    if not enabled:
+        return {}
+    values: dict[str, tuple[str, ...]] = {}
+    invalid = []
+    for key in ("lessons_used", "lessons_wrong"):
+        raw = data.get(key)
+        if raw is None:
+            values[key] = ()
+        elif isinstance(raw, list) and all(isinstance(item, str) for item in raw):
+            values[key] = tuple(dict.fromkeys(raw))
+        else:
+            values[key] = ()
+            invalid.append(key)
+    return {**values, "lessons_invalid": tuple(invalid)}
+
+
 def parse_plan(text: str, roles: Mapping[str, RoleKind] | None = None, *,
                gate_policy: GatePolicy = GatePolicy.OFF, wait_policy: WaitPolicy = WaitPolicy(),
                conditions: bool = False, isolate_steps: bool = False, review_panel: bool = False,
                verification_role: str | None = None, work_role: str | None = None, advisor: bool = False,
                advise: bool = False, answered: bool = False,
-               acceptance_checks: AcceptanceChecksMode = AcceptanceChecksMode.OFF) -> PlanReply:
+               acceptance_checks: AcceptanceChecksMode = AcceptanceChecksMode.OFF,
+               lessons_enabled: bool = False) -> PlanReply:
     """A PLAN reply. With the advisor on, ``advise`` lets it ask the advisor instead
     (``{"advise": {"advice_request": ..., "advice_bindings": ...}}``), and after its answer (``answered``) the plan
     must carry ``advice_adoption``."""
     data = extract_reply(text)
+    lesson_fields = _lesson_fields(data, lessons_enabled)
+    lesson_keys = {"lessons_used", "lessons_wrong"} if lessons_enabled else set()
     if advise and not answered and "advise" in data:
-        _only_keys(data, {"advise"}, "the PLAN reply that asks the advisor")
+        _only_keys(data, {"advise", *lesson_keys}, "the PLAN reply that asks the advisor")
         ask = data["advise"]
         if not isinstance(ask, dict) or not isinstance(ask.get("advice_request"), dict):
             raise ProtocolError('advise needs {"advice_request": {...}}: the request, an object in the AdviceRequest '
                                 'v1 shape, with "advice_bindings" optional')
         _only_keys(ask, {"advice_request", "advice_bindings"}, "advise")
-        return PlanReply((), advice_request=ask["advice_request"], advice_bindings=ask.get("advice_bindings"))
-    _only_keys(data, {"steps", "advice_adoption"} if answered else {"steps"}, "the PLAN reply")
+        return PlanReply((), advice_request=ask["advice_request"], advice_bindings=ask.get("advice_bindings"),
+                         **lesson_fields)
+    _only_keys(data, ({"steps", "advice_adoption"} if answered else {"steps"}) | lesson_keys, "the PLAN reply")
     adoption = None
     if answered:
         if "advice_adoption" not in data:
@@ -580,17 +608,19 @@ def parse_plan(text: str, roles: Mapping[str, RoleKind] | None = None, *,
                                                verification_role=verification_role,
                                                work_role=work_role, advisor=advisor,
                                                acceptance_checks=acceptance_checks), replace_pending=True)
-    return PlanReply(steps, adoption=adoption)
+    return PlanReply(steps, adoption=adoption, **lesson_fields)
 
 
 def parse_decision(text: str, context: DecisionContext, plan: PlanView, *, adjudications: bool = False,
-                   skill_proposals: bool = False) -> DecisionReply:
+                   skill_proposals: bool = False, lessons_enabled: bool = False) -> DecisionReply:
     data = extract_reply(text)
+    lesson_fields = _lesson_fields(data, lessons_enabled)
+    lesson_keys = {"lessons_used", "lessons_wrong"} if lessons_enabled else set()
     proposal_keys = {"skill_proposals"} if skill_proposals or plan.skill_proposals else set()
     judgments = data.pop("adjudications", ()) if adjudications else ()
     advisor_keys = {"advice_request", "advice_bindings", "advice_adoption"} if plan.advisor else set()
     _only_keys(data, {"decision", "reason", "feedback", "steps", "summary", "progress", "final", "gates", "waits", *proposal_keys,
-                      *advisor_keys}, "the DECISION reply")
+                      *advisor_keys, *lesson_keys}, "the DECISION reply")
     raw = data.get("decision")
     known = [d for d in Decision if plan.advisor or d not in ADVISOR_DECISIONS]
     decision = next((d for d in known if d.value == raw), None)
@@ -622,7 +652,8 @@ def parse_decision(text: str, context: DecisionContext, plan: PlanView, *, adjud
             raise ProtocolError('advise needs "advice_request": the request, an object in the AdviceRequest v1 shape')
         progress = _progress(data)
         return DecisionReply(decision, reason, "", (), summary, progress, None, (), (), (),
-                             advice_request=data["advice_request"], advice_bindings=data.get("advice_bindings"))
+                             advice_request=data["advice_request"], advice_bindings=data.get("advice_bindings"),
+                             **lesson_fields)
     gates = _gate_changes(data, plan)
     waits = _wait_changes(data, plan)
     plan = _after_waits(_after_gates(plan, gates), waits)
@@ -659,7 +690,7 @@ def parse_decision(text: str, context: DecisionContext, plan: PlanView, *, adjud
                             + ", ".join(FINAL_FIELDS))
     # Only the decision that completes the task keeps a final summary.
     return DecisionReply(decision, reason, feedback, steps, summary, progress, final if completes else None, gates, waits,
-                         tuple(judgments), adoption=adoption, skill_proposals=_skill_proposals(data, completes))
+                         tuple(judgments), adoption=adoption, skill_proposals=_skill_proposals(data, completes), **lesson_fields)
 
 
 def parse_adoption(raw: Any) -> dict[str, Any]:
