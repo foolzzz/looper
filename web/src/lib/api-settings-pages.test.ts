@@ -3,6 +3,15 @@ import { afterEach, expect, it, vi } from "vitest";
 import { fetchSchedulerSettings, updateSchedulerSettings, getWaitSettings, updateWaitSettings,
   fetchVaultSettings, updateVaultSettings } from "@/lib/api";
 import { installSessionGuard, resetSessionGuard, SessionEndedError } from "@/lib/session";
+import { SETTINGS_PAGES, isSettingsPage, settingsHref } from "@/lib/settings-pages";
+
+it("restores security, audit and the classifier role through existing Settings routes", () => {
+  expect(SETTINGS_PAGES.filter((p) => p.id === "security")).toHaveLength(1);
+  expect(isSettingsPage("security")).toBe(true);
+  expect(settingsHref("security")).toBe("#settings/security");
+  expect(settingsHref("security", "audit")).toBe("#settings/security/audit");
+  expect(settingsHref("roles", "outbound_check")).toBe("#settings/roles/outbound_check");
+});
 
 const scheduler = {
   min_interval_seconds: { value: 300, source: "built-in", built_in: 300, minimum: 1, gated_value: 60 },

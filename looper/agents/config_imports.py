@@ -83,6 +83,11 @@ async def authorize(data: dict[str, Any], policy: Literal["client", "operator"] 
                                   "set to off or observe, then enable enforce through cost_guard.update "
                                   "with operator confirmation.")
         return data
+    settings = data.get("settings", {})
+    if any(isinstance(entry, dict) and entry.get("role") == "outbound_check"
+           for section in ("roles", "layers") for entry in settings.get(section, [])):
+        raise OpError(ErrorCode.FORBIDDEN, "Outbound check settings require operator identity; "
+                      "upload this configuration with an operator token")
     if "cards.actions.enabled" in data.get("settings", {}).get("system", {}):
         raise OpError(ErrorCode.FORBIDDEN, "Card button settings require operator identity; "
                       "upload this configuration with an operator token")

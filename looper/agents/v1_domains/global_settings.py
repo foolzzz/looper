@@ -135,7 +135,15 @@ async def layer_impact(place, values):
     return "\n".join(lines)
 
 
+def _require_outbound_operator(operation, arguments, principal):
+    if (operation.operation_id in ("roles.update", "roles.reset_prompt", "agent_settings.update_role")
+            and arguments.get("role") == agent_settings.AgentType.OUTBOUND_CHECK.value
+            and principal.kind != "operator"):
+        raise OpError(ErrorCode.FORBIDDEN, "Outbound check settings require operator identity")
+
+
 async def impact(server, operation, arguments, principal, headers):
+    _require_outbound_operator(operation, arguments, principal)
     if not operation.operation_id.startswith("agent_settings.update_"):
         return None
     await refuse_client_selection(principal, operation.operation_id, profile_id=arguments["values"].get("profile_id"))
@@ -145,6 +153,7 @@ async def impact(server, operation, arguments, principal, headers):
 
 
 async def run(server, operation, arguments, principal, headers):
+    _require_outbound_operator(operation, arguments, principal)
     name = operation.operation_id
     if name == "roles.list":
         return {"configs": await role_configs.list_configs()}

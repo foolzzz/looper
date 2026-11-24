@@ -10,6 +10,8 @@ An own item keeps its status. A sourced item (a gate, a confirmation, a task) ha
 
 from __future__ import annotations
 
+import base64
+import binascii
 import hashlib
 import json
 import logging
@@ -39,6 +41,7 @@ OWNER_KINDS = ("user", "manager", "task", "chat")
 ENABLED_KEY = "ledger.enabled"
 LIST_MAX = 50
 LIST_DEFAULT = 20
+PAGE_SECTIONS = ("attention", "work", "recent_decisions", "all")
 REFS_MAX = 10
 # A Manager's confirmation lapses this long after it was asked (``agents.ops.service.CONFIRMATION_SECONDS``, which a
 # test keeps equal to this).
@@ -344,6 +347,115 @@ async def counts(*, db: Db | None = None) -> dict[str, int]:
         result[status] = await _db(db).fetchval(
             "SELECT count(*) FROM (" + _SELECT + " WHERE " + _status_clause(status, args) + ") AS n", *args)
     return result
+
+
+def _attention_clause(args: list[Any]) -> str:
+    """The page and its badge count the same effective open pending items and unconfirmed decisions."""
+    return (_status_clause("open", args)
+            + " AND (i.kind = 'pending' OR (i.kind = 'decision' AND i.confirmed_event_id IS NULL))")
+
+
+async def attention_count(*, db: Db | None = None) -> int:
+    args: list[Any] = []
+    return await _db(db).fetchval("SELECT count(*) FROM (" + _SELECT + " WHERE " + _attention_clause(args)
+                                  + ") AS waiting", *args)
+
+
+def _page_cursor(cursor: str, section: str, filters: Mapping[str, Any]) -> dict[str, Any]:
+    """A cursor is bounded data, never SQL, and belongs to exactly one normalized set of filters."""
+    try:
+        if not isinstance(cursor, str) or not 1 <= len(cursor) <= 2048 or not re.fullmatch(r"[A-Za-z0-9_-]+={0,2}", cursor):
+            raise ValueError
+        value = json.loads(base64.b64decode(cursor + "=" * (-len(cursor) % 4), altchars=b"-_", validate=True))
+        keys = {"version", "section", "filters", "number", "ceiling"} | ({"due_at"} if section == "attention" else set())
+        if (not isinstance(value, dict) or set(value) != keys or type(value["version"]) is not int
+                or value["version"] != 1 or value["section"] != section or value["filters"] != filters
+                or type(value["number"]) is not int or type(value["ceiling"]) is not int
+                or not 1 <= value["number"] <= value["ceiling"] <= 2 ** 63 - 1):
+            raise ValueError
+        if section == "attention" and value["due_at"] is not None:
+            if not isinstance(value["due_at"], str):
+                raise ValueError
+            due = datetime.fromisoformat(value["due_at"])
+            if due.tzinfo is None:
+                raise ValueError
+            value["due_at"] = due
+        return value
+    except (ValueError, TypeError, KeyError, UnicodeError, binascii.Error):
+        raise LedgerRefused("invalid", "cursor is invalid or belongs to different ledger filters") from None
+
+
+async def page_items(*, section: str = "attention", status: str = "open", kind: str | None = None,
+                     owner: str | None = None, project_id: str | None = None, limit: int = 10,
+                     cursor: str | None = None, db: Db | None = None) -> tuple[list[dict[str, Any]], int, str | None]:
+    """One section, ordered and keyset-paged in the database; counts remain independent of the page size.
+
+    A first-page id ceiling keeps new items out of subsequent pages, including attention items whose later due
+    date would otherwise sort after the cursor. Source state and due changes remain live between requests.
+    """
+    if section not in PAGE_SECTIONS or status not in ("all", *STATUSES) or kind is not None and kind not in KINDS:
+        raise LedgerRefused("invalid", "unknown ledger section, status or kind")
+    if type(limit) is not int or not 1 <= limit <= LIST_MAX:
+        raise LedgerRefused("invalid", f"limit is 1 to {LIST_MAX}")
+    pool = _db(db)
+    args: list[Any] = []
+    where = []
+    if section == "attention":
+        where.append(_attention_clause(args))
+    elif section == "work":
+        where += [_status_clause("open", args), "i.kind = 'work_item'"]
+    elif section == "recent_decisions":
+        where += ["i.kind = 'decision'", "i.created_at >= now() - interval '30 days'",
+                  "NOT (i.status = 'open' AND i.confirmed_event_id IS NULL)"]
+    elif status != "all":
+        where.append(_status_clause(status, args))
+    if kind is not None:
+        args.append(kind)
+        where.append(f"i.kind = ${len(args)}")
+    if owner is not None:
+        owner_kind, _, owner_ref = owner.partition(":")
+        if owner_kind not in OWNER_KINDS:
+            raise LedgerRefused("invalid", f"owner is one of {', '.join(OWNER_KINDS)}")
+        args.append(owner_kind)
+        where.append(f"i.owner_kind = ${len(args)}")
+        if owner_ref:
+            args.append(owner_ref)
+            where.append(f"i.owner_ref = ${len(args)}")
+    if project_id is not None:
+        if not await pool.fetchval("SELECT EXISTS (SELECT 1 FROM projects WHERE id = $1)", project_id):
+            raise LedgerRefused("invalid", "project_id must name an existing project")
+        args.append(project_id)
+        where.append(f"COALESCE(i.project_id, t.project_id) = ${len(args)}")
+    filters = {"status": status, "kind": kind, "owner": owner, "project_id": project_id}
+    last = _page_cursor(cursor, section, filters) if cursor is not None else None
+    ceiling = last["ceiling"] if last else await pool.fetchval("SELECT COALESCE(max(id), 0) FROM ledger_items")
+    args.append(ceiling)
+    where.append(f"i.id <= ${len(args)}")
+    if last:
+        args.append(last["number"])
+        number = f"${len(args)}"
+        if section != "attention":
+            where.append(f"i.id < {number}")
+        elif last["due_at"] is None:
+            where.append(f"(i.due_at IS NULL AND i.id < {number})")
+        else:
+            args.append(last["due_at"])
+            due = f"${len(args)}::timestamptz"
+            where.append(f"(i.due_at > {due} OR i.due_at IS NULL OR (i.due_at = {due} AND i.id < {number}))")
+    order = "due_at ASC NULLS LAST, id DESC" if section == "attention" else "id DESC"
+    args.append(limit + 1)
+    rows = await pool.fetch("SELECT *, count(*) OVER () AS matching FROM (" + _SELECT + " WHERE "
+                            + " AND ".join(where) + f") AS found ORDER BY {order} LIMIT ${len(args)}", *args)
+    shown = rows[:limit]
+    more = rows[0]["matching"] - len(shown) if rows else 0
+    next_cursor = None
+    if more:
+        tail = shown[-1]
+        value = {"version": 1, "section": section, "filters": filters, "number": tail["id"], "ceiling": ceiling}
+        if section == "attention":
+            value["due_at"] = tail["due_at"].isoformat() if tail["due_at"] else None
+        next_cursor = base64.urlsafe_b64encode(json.dumps(value, separators=(",", ":")).encode()).decode().rstrip("=")
+    return [item_view(row) for row in shown], more, next_cursor
 
 
 # --- the one writer ----------------------------------------------------------------------------------------------

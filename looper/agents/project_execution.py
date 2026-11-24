@@ -158,7 +158,8 @@ SUBAGENT_FIELDS = ("subagents", *SUBAGENT_BUDGETS, *SUBAGENT_COUNTS)
 
 def omit_unset_subagents(values: Mapping[str, Any]) -> dict[str, Any]:
     """Keep legacy project reads and configuration files unchanged until a new field is set."""
-    return {key: value for key, value in values.items() if key not in SUBAGENT_FIELDS or value is not None}
+    return {key: value for key, value in values.items()
+            if key not in (*SUBAGENT_FIELDS, "memory_lessons") or value is not None}
 
 
 _DOMAIN = re.compile(r"(?=.{1,253}$)[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+")
@@ -267,6 +268,11 @@ class LessonsMode(str, Enum):
     WRITE = "write"
 
 
+class MemoryLessonsMode(str, Enum):
+    OFF = "off"
+    ON = "on"
+
+
 @dataclass(frozen=True)
 class ProjectExecution:
     task_budget_usd: float | None = None
@@ -274,6 +280,7 @@ class ProjectExecution:
     supervise_interval_seconds: int | None = None
     review_policy: ReviewPolicy | None = None
     distill_lessons: LessonsMode = LessonsMode.OFF
+    memory_lessons: MemoryLessonsMode | None = None
     step_workspaces: StepWorkspaces | None = None
     workspace_links: tuple[str, ...] | None = None
     verification_paths: tuple[str, ...] | None = None
@@ -441,7 +448,8 @@ class ProjectExecution:
 
     def view(self) -> dict[str, Any]:
         """Plain JSON fields; unset explorer fields and disabled acceptance checks stay absent."""
-        return omit_unset_subagents({field: _stored(getattr(self, field)) for field in FIELDS}) | (
+        return omit_unset_subagents({field: _stored(getattr(self, field)) for field in FIELDS
+                                    if field != "memory_lessons" or self.memory_lessons is MemoryLessonsMode.ON}) | (
             {"acceptance_checks": self.acceptance_checks.value} if self.acceptance_checks is not AcceptanceChecksMode.OFF else {})
 
 
@@ -467,6 +475,8 @@ def format_usd(amount: float) -> str:
 def _parse(field: str, raw: Any) -> Any:
     if field == "distill_lessons":
         return _lessons_mode(raw)
+    if field == "memory_lessons":
+        return None if raw is None else _choice(field, raw, MemoryLessonsMode)
     if raw is None or raw == "":
         return None
     if field == "task_budget_usd":
