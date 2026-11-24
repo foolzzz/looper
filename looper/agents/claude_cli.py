@@ -1875,6 +1875,8 @@ class ClaudeRunRecorder:
         # What its stream said about how it may fail, and what its close classifies (``failures``).
         self._evidence = failures.Evidence()
         self._failure_basis: tuple[dict[str, Any] | None, str | None, failures.Failure | None] | None = None
+        self._finished_status: str | None = None
+        self._finished_outcome: str | None = None
         self._admission_reported = False
         self._admission_quota_reported = False
         self._admission_report_version = 0
@@ -2262,6 +2264,23 @@ class ClaudeRunRecorder:
         result, outcome, given = self._failure_basis or (self._result, None, None)
         return failures.classify(self._runtime(), result, self._evidence, outcome=outcome, given=given)
 
+    def execution_signal(self) -> dict[str, Any] | None:
+        """The finished execution's typed facts; callers must first check act mode.
+
+        This reads the same evidence as recording, without a record readback or a
+        second admission report. Detached and interrupted runs have no result.
+        """
+        if self._detached or self._finished_status in (None, "interrupted"):
+            return None
+        outcome = self._finished_outcome or "run_failed"
+        failed = self._finished_status == "failed" or outcome in failures.REPORT_OUTCOMES
+        found = self.failure_signal() if failed else None
+        return {"record_id": self.record_id,
+                "provider_id": self._launch.profile.provider.id if self._launch is not None else None,
+                "outcome": outcome,
+                "failure": ({"class": found.cls.value, "cause": found.cause.value,
+                             **found.metadata()} if found is not None else None)}
+
     async def report_admission(self, found: failures.Failure | None, *, interrupted: bool = False) -> None:
         """Apply one run's signal once, allowing a probe's quota evidence to upgrade an untyped result.
 
@@ -2336,6 +2355,8 @@ class ClaudeRunRecorder:
         stopped). Waiting is bounded by ``CLOSE_TIMEOUT_SEC`` even if the database
         ignores cancellation; a failed write is logged.
         """
+        if self._finished_status is None:
+            self._finished_status, self._finished_outcome = status.value, outcome
         self._untrack()
         if self._record_id is None or self._closed:
             return

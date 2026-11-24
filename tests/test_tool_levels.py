@@ -28,6 +28,7 @@ RFC_TABLE: dict[str, ActionLevel | str] = {
     "looper_ledger_add": INSIDE, "looper_ledger_update": INSIDE, "looper_leads_search": INSIDE,
     "looper_skill_propose": INSIDE, "looper_intents_recognize": OPERATOR,
     "looper_memory_propose": INSIDE,
+    "looper_task_hold": INSIDE,
     "looper_session_search": INSIDE,  # reads earlier conversations stored by Looper
     "looper_reminder_list": INSIDE, "looper_reminder_create": OPERATOR, "looper_reminder_cancel": OPERATOR,
     "looper_task_pipeline": INSIDE, "looper_gates": "args",
@@ -196,6 +197,8 @@ DECIDED_OPERATIONS: dict[str, ActionLevel] = {
     "project_skills.proposals.reject": INSIDE,  # marks a stored proposal rejected; sends nothing
     "project_skills.proposals.restore": INSIDE,  # marks an expired stored proposal pending; sends nothing
     "project_skills.proposals.set_mode": INSIDE,  # stores a project's proposal switch; sends nothing
+    "memory_closeout.get": INSIDE,  # reads a project's memory closeout switch; sends nothing
+    "memory_closeout.update": INSIDE,  # stores a project flag; candidates still need the operator's confirmation
     "mcp_tool_levels.get": INSIDE,  # reads stored MCP trust declarations
     "mcp_tool_levels.put": INSIDE,  # stores MCP trust declarations; runs no MCP call
 

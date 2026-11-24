@@ -56,7 +56,9 @@ from looper.agents.provider_presets import api_models
 from . import metrics
 from . import tasks as task_list
 from .fake_claude import REAL_CLAUDE_ENV
-from .tasks import CHOSEN_PROFILE, DEFAULT_GATE_SCRIPT, END_DISCUSSION, EVAL_VAULT, EvalTask
+from .tasks import (
+    CHOSEN_PROFILE, DEFAULT_GATE_SCRIPT, END_DISCUSSION, EVAL_VAULT, MEMORY_VAULT, MEMORY_WRITE, EvalTask,
+)
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 FAKE_CLAUDE = Path(__file__).resolve().with_name("fake_claude.py")
@@ -325,7 +327,7 @@ def uses_role_shim(tasks: Iterable[EvalTask]) -> bool:
 
 def install_claude(bin_dir: Path, *, mode: str, scenarios: Path | None = None,
                    max_budget_usd: float | None = None, real_claude: str | None = None,
-                   real_reviewer: bool = False) -> Path | None:
+                   real_reviewer: bool = False, failure_injection: bool = False) -> Path | None:
     """Put the ``claude`` the server runs in ``bin_dir``: the stand-in, or real Claude Code with a budget (none when
     no agent runs it: ``real_claude`` None). With ``real_reviewer`` installs the role-selective stand-in in real
     mode. Each task script chooses real Reviewers, a real Planner, or a scripted Planner
@@ -343,6 +345,9 @@ def install_claude(bin_dir: Path, *, mode: str, scenarios: Path | None = None,
             assert scenarios is not None
             target = [sys.executable, str(FAKE_CLAUDE), str(scenarios)]
             prefix = f"{REAL_CLAUDE_ENV}={shlex.quote(real_claude)} "
+    if failure_injection:
+        assert scenarios is not None
+        target = [sys.executable, str(Path(__file__).with_name("failure_cli.py")), str(scenarios), json.dumps(target)]
     extra = ["--max-budget-usd", f"{max_budget_usd:g}"] if mode == "real" and max_budget_usd else []
     script = bin_dir / "claude"
     run = prefix + "exec " + " ".join(shlex.quote(part) for part in target) + ' "$@"'
@@ -418,6 +423,25 @@ def _set_true(database_url: str, key: str) -> None:
         try:
             await conn.execute("INSERT INTO system_settings (key, value) VALUES ($1, 'true') "
                                "ON CONFLICT (key) DO UPDATE SET value = 'true'", key)
+        finally:
+            await conn.close()
+
+    asyncio.run(write())
+
+
+def _set_json(database_url: str, key: str, value: str) -> None:
+    """Store ``value`` as the system setting ``key`` (the memory-write setting is read from the database)."""
+    import asyncio
+
+    import asyncpg
+
+    async def write() -> None:
+        conn = await asyncpg.connect(database_url, timeout=10)
+        try:
+            await conn.execute(
+                "INSERT INTO system_settings (key, value) VALUES ($1, $2) "
+                "ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now()",
+                key, value)
         finally:
             await conn.close()
 
@@ -700,37 +724,51 @@ def run_task(
         workflow = {"workflow": definition["key"]}
     created = api.post("/api/v1/tasks/create", {"requirement": task.requirement, "project": project, **workflow})["result"]
     task_id = created["task_id"]
+    # Older harness doubles returned only task_id. That shape is enough unless a case below configures the project.
+    project_id = created.get("project_id")
+
+    def require_project() -> str:
+        if not isinstance(project_id, str) or not project_id:
+            raise EvalError(f"{task.id} needs the created task's project_id")
+        return project_id
+
     try:
+        if task.failure_handling:
+            _confirmed(api, "/api/v1/engine_settings/update", {"failure_typing": "act"})
         if task.planner_may_choose:
             if chosen_profile_id is None:
                 raise EvalError(f"{task.id} needs the profile its Planner may choose")
             api.post("/api/v1/allowed_profiles/replace",
-                     {"project_id": created["project_id"], "profile_ids": [chosen_profile_id]})
+                     {"project_id": require_project(), "profile_ids": [chosen_profile_id]})
         if task.skill_proposals:
-            api.post("/api/v1/project_skills/proposals/set_mode", {"project_id": created["project_id"], "mode": "on"})
+            api.post("/api/v1/project_skills/proposals/set_mode", {"project_id": require_project(), "mode": "on"})
+        if task.memory_closeout:
+            if vault_dir is None:
+                raise EvalError(f"{task.id} needs the knowledge vault, and the server has no eval vault")
+            api.post("/api/v1/memory_closeout/update", {"project_id": require_project(), "memory_closeout": "on"})
         if task.dependency_conditions:
             api.post("/api/v1/project_admin/update", {
-                "project_id": created["project_id"], "fields": {"dependency_conditions": "on"}})["result"]["project"]
+                "project_id": require_project(), "fields": {"dependency_conditions": "on"}})["result"]["project"]
         roles = planner_roles if planner_roles is not None else ("on" if task.roles_on else None)
         if roles is not None:
-            api.post("/api/v1/project_admin/update", {"project_id": created['project_id'], "fields": {"planner_roles": roles}})["result"]["project"]
+            api.post("/api/v1/project_admin/update", {"project_id": require_project(), "fields": {"planner_roles": roles}})["result"]["project"]
         for template in task.role_templates:
             fields = {"description": "", "harness": None, "profile_id": None, "items": [], **template}
-            api.post("/api/v1/role_templates/put", {**fields, "project_id": created["project_id"]})
+            api.post("/api/v1/role_templates/put", {**fields, "project_id": require_project()})
         gates = _project_user_gates(task, user_gates)
         if gates is not None:
-            api.post("/api/v1/project_admin/update", {"project_id": created['project_id'], "fields": {"user_gates": gates}})["result"]["project"]
+            api.post("/api/v1/project_admin/update", {"project_id": require_project(), "fields": {"user_gates": gates}})["result"]["project"]
         if task.acceptance_checks:
             _confirmed(api, "/api/v1/acceptance_checks/update",
-                       {"project_id": created["project_id"], "acceptance_checks": task.acceptance_checks})
+                       {"project_id": require_project(), "acceptance_checks": task.acceptance_checks})
         if task.schedule_template:
             owner_key = "eval-" + uuid.uuid4().hex[:8]
             api.post("/api/v1/managers/create", {"key": owner_key, "name": "Public reports " + owner_key,
                 "system_prompt": "Handle the public source report scenario.", "task_policy": "templates_only"})
             owner = "manager-" + owner_key
             api.post("/api/v1/manager_templates/put", {"manager_id": owner, "key": "report",
-                "project_id": created["project_id"], **task.schedule_template})
-            schedule = api.post("/api/v1/schedule_admin/create", {"project_id": created["project_id"], "fields": {
+                "project_id": require_project(), **task.schedule_template})
+            schedule = api.post("/api/v1/schedule_admin/create", {"project_id": require_project(), "fields": {
                 "name": "Public report", "cron": "0 9 * * *", "timezone": "UTC", "manager_id": owner,
                 "template_key": "report", "template_inputs": {"source_url": "https://example.org/report"},
                 "requirement": task.requirement}})["result"]["schedule"]
@@ -813,7 +851,14 @@ def run_task(
             attempts_view = None
         if task.skill_proposals:
             detail = {**detail, "skill_proposals": api.post("/api/v1/project_skills/proposals/list",
-                      {"project_id": created["project_id"]})["result"]["proposals"]}
+                      {"project_id": require_project()})["result"]["proposals"]}
+        if task.memory_closeout:
+            owned = require_project()
+            listed = api.post("/api/v1/memory/list", {"state": "all"})["result"]["candidates"]
+            candidates = [api.post("/api/v1/memory/get", {"candidate": row["id"]})["result"]["candidate"]
+                          for row in listed if row.get("project_id") == owned]
+            detail = {**detail, "memory_candidates": candidates,
+                      "activity_summaries": [str(row.get("summary") or "") for row in _all_activity(api, task_id)]}
         acceptance = None
         if any(step.get("checks") for step in (detail.get("steps") or [])):
             evidence = api.post("/api/v1/task_evidence/get", {"task": task_id})["result"]
@@ -1198,6 +1243,8 @@ def run(
     profile for the Worker role alone. Either option records completion/check evidence for grouped scoring;
     without them the report retains its existing fields.
     """
+    if any(task.failure_handling for task in tasks) and len(tasks) != 1:
+        raise EvalError("failure-handling cases each require a separate run and disposable database; select one task")
     if mode not in ("fake", "real"):
         raise EvalError(f"mode must be fake or real, not {mode!r}")
     if planner_roles not in (None, "on", "off"):
@@ -1236,15 +1283,23 @@ def run(
                                          for (task_id, _), path in work_dirs.items()}), encoding="utf-8")
         install_claude(root / "bin", mode=mode, scenarios=scenarios,
                        max_budget_usd=None if provider is not None or register is not None else max_budget_usd,
-                       real_claude=real_claude, real_reviewer=uses_role_shim(tasks))
+                       real_claude=real_claude, real_reviewer=uses_role_shim(tasks),
+                       **({"failure_injection": True} if any(task.failure_handling for task in tasks) else {}))
         (root / "runtime").mkdir(mode=0o700)
         home = root / "home" if mode == "fake" else None
         if home is not None:
             home.mkdir()
         notes_root = root / "operator-notes"
-        vault_dir = root / "vault" if any(task.vault for task in tasks) else None
+        wants_vault = any(task.vault for task in tasks)
+        wants_memory = any(task.memory_closeout for task in tasks)
+        vault_dir = root / "vault" if wants_vault or wants_memory else None
         if vault_dir is not None:
-            for name, content in EVAL_VAULT.items():
+            files = {}
+            if wants_vault:
+                files.update(EVAL_VAULT)
+            if wants_memory:
+                files.update(MEMORY_VAULT)
+            for name, content in files.items():
                 path = vault_dir / name
                 path.parent.mkdir(parents=True, exist_ok=True)
                 path.write_text(content, encoding="utf-8")
@@ -1260,8 +1315,13 @@ def run(
             if untrusted_fence:
                 _set_true(database_url, "untrusted_fence.enabled")
             if vault_dir is not None:
-                api.post("/api/v1/knowledge_vault/update", {"path": str(vault_dir), "writable": ["codex-mem"],
-                                                  "rules_file": "codex-mem/AGENTS.md"})
+                api.post("/api/v1/knowledge_vault/update", {
+                    "path": str(vault_dir),
+                    "writable": ["codex-mem"] if wants_vault else [],
+                    "rules_file": "codex-mem/AGENTS.md" if wants_vault else "mem/AGENTS.md"})
+            if wants_memory:
+                from looper.agents.memory_model import SETTING_KEY
+                _set_json(database_url, SETTING_KEY, json.dumps(MEMORY_WRITE, ensure_ascii=False))
             if register is not None:
                 agent = register_agent(api, register)["name"]
             chosen = select_agent(api, agent=agent, model=model, provider=provider, run_budget_usd=max_budget_usd)

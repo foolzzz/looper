@@ -1,3 +1,4 @@
+import { EngineSettingsSection } from "@/components/engine-settings";
 import { CostGuardSettingsSection } from "@/components/cost-guard-settings";
 import { WorkflowsSection } from "@/components/workflows";
 import { LlmrecSettingsSection } from "@/components/llmrec-settings";
@@ -75,7 +76,7 @@ export function SettingsPage({ sub }: { sub: string }) {
         <h1 className="text-2xl font-bold">{settingsPageLabel(page)}</h1>
         {page !== "roles" && <p className="mt-1 max-w-3xl text-sm text-muted-foreground">{DESCRIPTIONS[page]}</p>}
       </div>
-      {page === "providers" && <ProvidersSection adding={inner === "new"} />}
+      {page === "providers" && <><EngineSettingsSection /><ProvidersSection adding={inner === "new"} /></>}
       {page === "runtimes" && <><AcpReviewerSettingsSection /><RuntimesSection /></>}
       {page === AGENT_PROFILE.slug && <AgentProfilesSection />}
       {page === "roles" && <RolesSection sub={inner} />}

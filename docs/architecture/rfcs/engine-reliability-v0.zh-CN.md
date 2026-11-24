@@ -1,6 +1,6 @@
 # RFC：任务引擎可靠性 v0（失败分型、全局准入、用量与限流信号、降级规则）
 
-- **状态：** 已定，等实现。第 3 节的 D1–D8 来自维护者的产品设计（第 4 期「引擎更稳」和「模型接入层」两节）。第 15 节的 Q1–Q11 维护者已在 2026-11-20 全部按推荐答复，记为 D9–D19。实现按第 13 节的 PR 顺序，还没有开工。
+- **状态：** 已定，等实现。第 3 节的 D1–D8 来自维护者的产品设计（第 4 期「引擎更稳」和「模型接入层」两节）。第 15 节的 Q1–Q11 维护者已在 2026-11-20 全部按推荐答复，记为 D9–D19。失败分类、信号与准入已实现；步骤处理、恢复、操作者入口与历史读回随本次实现，默认仍关闭，真实模型评测待授权。降级规则仍按第 13 节后续交付。
 - **需求：** 四件事。(1) **失败分型**：步骤失败先由代码分成四类：额度不足（等重置）、瞬时故障（有限次重试）、环境问题（带类型进你的关卡）、需要判断（进 Planner 的 `[DECISION]`）；同一步骤连续失败 3 次熔断。(2) **全局准入和公平队列**：按账号设并发槽位；你发起的优先，重试和恢复其次，等得最久的定期提前；遇到 429 冻结这个账号的槽位，直到额度重置。(3) **用量和限流信号**：按账号汇总 token、429 次数和额度重置时间，调度器读这份数据做准入。(4) **降级规则类型化**：备用 Profile 的触发条件分成额度不足和供应商故障两类；后台角色可以自动切换，管家和 Planner 切换前先告诉你。
 - **相关：** [Agent 系统架构](../agent-system.md)（「Concurrency limits」「Runtimes, LLM providers and Agent Profiles」「What a run spent」「Model request recording」「How a task runs」）；[Advisor RFC](advisor-v0.zh-CN.md)（`ChildFailure.RATE_LIMITED`，本文把它推广到所有运行）；[用户关卡 RFC](user-gate-v0.zh-CN.md)；[热升级 RFC](hot-upgrade-v0.zh-CN.md)（保留运行和排空）。
 - **核对基线：** `main` `26d1b3a82`。第 2 节的「现状」读代码得出，每项标了出处；第 2.5 节的数字来自一个长期运行的实例，只用只读接口（`runs.list`、`runs.events`、`tasks.page`、`tasks.detail`、`llmrec_settings.get`）汇总，不含任何内容。
@@ -223,16 +223,19 @@ class Failure:
 |---|---|---|---|
 | Planner 规划、决定、`[CHAT]` 等回合 | 回合挂起，重置后在同一会话里重发同一条消息；定时任务建出的任务最多等 6 小时或这个定时任务的一个周期，取小的，超过就以 `fail_kind = quota_exhausted` 结束（D12） | 按 4.3 的退避重发同一回合；连续 3 次失败走今天的失败路径（规划失败让任务失败，决定失败退回步骤结论） | 规划回合：任务失败，`fail_kind = environment`；其他回合：今天的路径 |
 | Manager 回合 | 代码回一句：「<账号> 的额度已用完（<窗口>），<本地时间> 重置。」有备用 Profile 时问要不要换（第 7 节）；消息留在队列里，重置后照常回答（D11） | 不自动重试（用户在等，Claude Code 已经重试过 3 分钟），回一句带类型的说明 | 回一句带类型的说明 |
-| processor（订阅、抽取、判别） | 这次运行挂起，最多等 6 小时，超过记失败（带类） | 退避后重试，最多 2 次 | 记失败（带类） |
+| processor（订阅、抽取、判别） | 这次运行挂起，最多等 6 小时且不超过调用方总时限（取小），超过记失败（带类）；所有尝试花费计入原单次/批次预算并累计返回 | 退避后重试，最多 2 次 | 记失败（带类） |
 
-Planner 和 Manager 的回合挂起只在内存里；服务重启时，任务按现有的恢复路径继续，准入会重新挂起它。
+Planner 和 Manager 的回合挂起只在内存里；服务重启时任务走现有恢复路径。定时任务的首次 quota 等待/截止另持久化，首次准入 frozen、尚无模型调用也起计，重启不延长。手动任务不添加 6 小时终止上限。
 
 ### 4.5 熔断
 
-- **连续失败数（`streak`）：** 一个步骤从它最近一次「运行本身成功」（结局不是 `run_failed`）之后，失败的运行有几次，四类都算，自动重试和 Planner 的重试都算；挂起期间没有启动的运行不算。
-- **熔断：** `streak` 到 3，这个步骤的自动处理停掉，下一次失败（不论类）直接进 Planner 的 `[DECISION]`，消息里列出这几次失败的类和原因。Planner 的选项和重试次数照旧（`max_step_retries`）。步骤再有一次运行本身成功，熔断解除。
-- Planner、Manager、processor 的回合用同一个阈值（4.4 节的「连续 3 次」）。
-- 阈值第一期是常量 3，不做设置（AGENTS.md：不为还不存在的调用方加选项）。
+- **连续失败数（`streak`）：** 一个工作步骤一个持久计数，Worker、内置 Reviewer、顺序审查角色和 panel 席位合计。四类失败都计入，包括 `reported_failed`、`contract`、`files_mismatch`；自动、人工和 Planner 重试的实际失败都不能绕过。挂起或准入等待没有启动运行时不计数。
+- **精确边界：** 第 3 次连续失败立即熔断，交 Planner `[DECISION]`，不自动跑第 4 次。失败历史保留每次的类、原因、角色、运行、时间和动作；Planner 的决定和 `max_step_retries` 上限照旧。熔断 hold 在决定期间可见，进入「需要你处理」（attention 开启时），沿任务原来源通知；有效 Planner 决定或操作者 release/restart 可以解除。
+- **重置：** 成功执行才清零。Reviewer 的 `NOT_PASSED` 是正常审查结论，既不计数也不清零；连续不通过仍受 `DecisionContext.offered` / `planner_protocol.parse_decision` 的步骤重试上限约束。一个步骤的成功 reset 不能释放其他尚未恢复的 panel 席位。
+- **跨恢复：** 显式 `step_failure_state` 与运行去重证据在事务内更新，不靠扫描历史推断。Planner replan、服务重启和自动恢复不清零。经现有身份鉴权与用户确认的操作者 restart/start_over 清零并审计操作者、时间、步骤和原次数；请求参数不能伪造操作者身份。
+- **历史：** 任务存在期间跨 replan/start_over 保留。可空 step/record 外键删除后保留身份快照；清当前 hold 不改历史 action。
+- Planner、processor 的瞬时回合最多 2 次重试（共 3 次运行）；协议修复与运行重试共用逻辑回合上下文，不形成乘法循环。
+- 阈值是常量 3，不做设置。现有度量按角色、失败类和 streak 统计分布与熔断次数。
 
 ### 4.6 记录
 
@@ -401,7 +404,14 @@ CREATE TABLE IF NOT EXISTS provider_admission_events (
 CREATE TABLE IF NOT EXISTS step_failures (
     id             BIGSERIAL PRIMARY KEY,
     task_id        TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
-    step_id        TEXT NOT NULL REFERENCES task_steps(id) ON DELETE CASCADE,
+    step_id        TEXT REFERENCES task_steps(id) ON DELETE SET NULL,
+    step_identity  TEXT NOT NULL,
+    step_key       TEXT NOT NULL,
+    run_id         TEXT NOT NULL,
+    attempt        TEXT,
+    epoch          INTEGER NOT NULL DEFAULT 0,
+    target         JSONB NOT NULL DEFAULT '{}',
+    result         JSONB NOT NULL DEFAULT '{}',
     record_id      BIGINT REFERENCES llm_records(id) ON DELETE SET NULL,
     role           TEXT NOT NULL CHECK (role IN ('worker', 'reviewer')),
     failure_class  TEXT NOT NULL CHECK (failure_class IN ('quota', 'transient', 'environment', 'judgment')),
@@ -414,13 +424,15 @@ CREATE INDEX IF NOT EXISTS idx_step_failures_step ON step_failures (step_id, id)
 CREATE TABLE IF NOT EXISTS step_holds (
     step_id      TEXT PRIMARY KEY REFERENCES task_steps(id) ON DELETE CASCADE,
     task_id      TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
-    kind         TEXT NOT NULL CHECK (kind IN ('quota', 'transient', 'environment')),
+    kind         TEXT NOT NULL CHECK (kind IN ('quota', 'transient', 'environment', 'breaker')),
     cause        TEXT NOT NULL,
     provider_id  TEXT REFERENCES llm_providers(id) ON DELETE SET NULL,
     until        TIMESTAMPTZ,
     failure_id   BIGINT NOT NULL REFERENCES step_failures(id) ON DELETE CASCADE,
+    targets      JSONB NOT NULL DEFAULT '[]',
+    reminded_at  TIMESTAMPTZ,
     created_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
-    CHECK ((kind = 'environment') = (until IS NULL))
+    CHECK ((kind IN ('environment', 'breaker')) = (until IS NULL))
 );
 CREATE INDEX IF NOT EXISTS idx_step_holds_task ON step_holds (task_id);
 
@@ -430,7 +442,7 @@ ALTER TABLE agent_profiles ADD COLUMN IF NOT EXISTS fallback_on TEXT[] NOT NULL 
     CHECK (fallback_on <@ ARRAY['launch_failure', 'quota', 'provider_fault'] AND cardinality(fallback_on) >= 1);
 ```
 
-- 表名、列名以实现 PR 为准；`schema.sql` 是冲突热点，每个 PR 的迁移都有名字，主干先合了别的迁移就合并主干、重新排序，不 rebase。
+- 失败处理迁移是 `step_failure_handling`（1920），由迁移自动发现；不重排历史、不修改 `schema.sql` 历史块。它还包含 `step_failure_state`（task + step key 的 streak/epoch）、`step_failure_runs`（运行去重）、`step_failure_releases`（Planner 消费确认之前保留恢复事件）及 `task_quota_waits`（首次等待/截止）。实际对象、约束与索引定义以该迁移为准；fresh、对象级修复和在线校验一致。
 - `llm_records` 加的是可空列，不重写；约束用 `NOT VALID` 加 `VALIDATE`；表达式索引在线建。
 - 配置导出（`looper-config`）带上 `fallback_on`；导入旧文件时缺省为 `{launch_failure}`。
 
@@ -444,7 +456,7 @@ ALTER TABLE agent_profiles ADD COLUMN IF NOT EXISTS fallback_on TEXT[] NOT NULL 
 | `llm_providers.max_concurrency` | NULL（已有） | 1 及以上 | 账号的槽位上限，准入打开时才生效 | PR3 |
 | `agent_profiles.fallback_on` | `{launch_failure}` | 见第 7 节 | 备用 Profile 的触发条件 | PR5 |
 
-- 前三个是系统设置（`system_settings`），在 Settings 和 Manager 的 `looper_settings`（`view` 能读；改动要你确认）里，和其他系统设置一样；后两个是账号和 Profile 上的字段，在 Settings → LLM Providers 和 Agent Profiles 里改，随配置导出导入。
+- 前三个是独立的操作者系统设置（`system_settings`）。失败处理在 Settings → LLM Providers 和 `engine_settings.get/update` 配置，写入须确认，null 回 built-in off。Manager 的 `looper_settings` 仅 act 打开后动态扩展 engine 读写，首次打开走 API/UI/CLI；off 的旧工具定义不变。后两个是账号和 Profile 上的字段，在相应 Settings 页配置，随配置导出导入。
 - 阈值第一期是常量，不做设置：熔断 3、退避 2/10 分钟、冻结余量 60 秒、无重置时间时的退避 5→60 分钟、提前间隔 5 分钟、`INTERACTIVE` 保护 2 分钟、后台最长等待 6 小时（定时任务建出的任务取它和一个周期中小的）、后台收紧 `utilization ≥ 0.95`、供应商故障 5 次/3 个运行/10 分钟。
 - **关闭时：** 提示词、工具列表、命令行、运行记录的内容和任务行为逐字节不变；新列为 NULL，新表为空。每个 PR 有测试证明。
 - **运行中关掉：** 准入关掉时立即放行所有等待者；失败处理从 `act` 改回别的值时，已有的挂起立即解除并按今天的路径交给 Planner（不会有步骤永远挂着）。
