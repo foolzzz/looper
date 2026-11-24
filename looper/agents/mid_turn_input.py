@@ -333,7 +333,7 @@ class MidTurnInputs:
                     native = self._native.pop(envelope.message_id, None)
                     if native is not None and self.agent.ops is not None:
                         self.agent.ops.end_turn(native.token.ops_turn)
-                        self.agent.ops.publish_binding(None, session_key=session.key)
+                        self.agent.ops.clear_binding(native.token.binding, session_key=session.key)
                     return
                 native = self._native.get(envelope.message_id)
                 if native is None:
