@@ -14,7 +14,7 @@ import math
 from collections.abc import Mapping
 from typing import Any
 
-from .runner import Outcome
+from .runner import EvalError, Outcome
 
 SKIPPED = "skipped"  # a row past the spending cap: it never ran
 
@@ -406,4 +406,85 @@ def markdown(new: Mapping[str, Any], base: Mapping[str, Any] | None = None) -> s
         lines += ["", *notes]
     if problems := _problems(new):
         lines += ["", "Problems in the new run:", *problems]
+    return "\n".join(lines)
+
+
+def _group_scoring(group: list[Mapping[str, Any]], *, ignore_flow_assertions: bool) -> list[Mapping[str, Any]]:
+    """Rejudge only scored tasks with explicit completion/check evidence; never infer it from problem text."""
+    if not ignore_flow_assertions:
+        return group
+    judged = []
+    for row in group:
+        if outcome(row) not in (Outcome.PASS, Outcome.FAIL):
+            judged.append(row)
+            continue
+        passed = row.get("completion_checks_passed")
+        if not isinstance(passed, bool):
+            if outcome(row) != Outcome.PASS:
+                raise EvalError(f"{row['id']}: no completion/check evidence; rerun with --planner-roles "
+                                "or --worker-agent before using --ignore-flow-assertions")
+            passed = True  # An original pass already satisfied all checks.
+        judged.append({**row, "outcome": (Outcome.PASS if passed else Outcome.FAIL).value, "success": passed})
+    return judged
+
+
+def _group_sum(group: list[Mapping[str, Any]], key: str) -> float | None:
+    """A total only when every row supplies the metric; missing data is not zero."""
+    values = []
+    for row in group:
+        value = row.get(key)
+        if key == "planner_turns" and isinstance(value, Mapping):
+            counts = list(value.values())
+            value = sum(counts) if all(isinstance(n, int) and not isinstance(n, bool) for n in counts) else None
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
+            return None
+        values.append(value)
+    return sum(values) if values else None
+
+
+def _group_first_pass(group: list[Mapping[str, Any]]) -> str:
+    scored = _scored(group)
+    if not scored:
+        return "–"
+    for row in scored:
+        first, accepted = row.get("first_pass_steps"), row.get("accepted_steps")
+        if (not isinstance(first, int) or isinstance(first, bool) or not isinstance(accepted, int)
+                or isinstance(accepted, bool) or not 0 <= first <= accepted):
+            return "–"
+    return _rate_text(sum(row["first_pass_steps"] for row in scored), sum(row["accepted_steps"] for row in scored))
+
+
+def groups_markdown(groups: Mapping[str, Mapping[str, Any]], *, ignore_flow_assertions: bool = False) -> str:
+    """Pool each labelled task run's repetitions into one row, without changing the saved reports."""
+    columns = ("group", "success", "first-pass rate", "rework count", "cost (USD)", "duration (s)",
+               "Planner turns", "role adoption (cases)", "roles defined", "role runs", "errors", "skipped")
+    lines = ["| " + " | ".join(columns) + " |", "|---" * len(columns) + "|"]
+    schedules: set[tuple[tuple[str, int], ...]] = set()
+    for label, run in groups.items():
+        if "dialogs" in run:
+            raise EvalError("groups accepts task result files, not Manager dialogs")
+        original = rows(run)
+        group = _group_scoring(original, ignore_flow_assertions=ignore_flow_assertions)
+        ran = _ran(group)
+        passed, scored, errors = _tally(group)
+        role_counts = [row.get("role_runs") for row in ran]
+        adoption = (f"{sum(count > 0 for count in role_counts)}/{len(role_counts)}"
+                    if role_counts and all(isinstance(count, int) and not isinstance(count, bool) and count >= 0
+                                           for count in role_counts) else "–")
+        cells = [str(label).replace("|", "\\|").replace("\n", " "), _rate_text(passed, scored),
+                 _group_first_pass(group)]
+        cells.extend(_text(_group_sum(ran, key), key) for key in ("retries", "cost_usd", "duration_s", "planner_turns"))
+        cells.extend([adoption, _text(_group_sum(ran, "roles_defined"), "roles_defined"),
+                      _text(_group_sum(ran, "role_runs"), "role_runs"), str(sum(errors.values())),
+                      str(len(group) - len(ran))])
+        lines.append("| " + " | ".join(cells) + " |")
+        schedules.add(tuple(sorted((str(row["id"]), int(row.get("rep", 1))) for row in original)))
+    lines += ["", "First-pass rate pools accepted steps in scored cases (Wilson 95% interval). Rework is extra "
+              "Worker runs (retries). Cost, duration, turns and role counts sum all started cases, including errors; "
+              "a missing metric makes its total unavailable. Role adoption counts cases with role_runs > 0."]
+    if ignore_flow_assertions:
+        lines.append("Success uses task completion and checks only; flow assertions are ignored. Errors and skipped "
+                     "cases remain unscored.")
+    if len(schedules) > 1:
+        lines.append("Warning: groups have different task/rep sets; their totals are not directly comparable.")
     return "\n".join(lines)
