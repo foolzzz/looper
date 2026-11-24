@@ -3,6 +3,8 @@ import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { LeadsTab } from "@/components/leads-tab";
+import { memoryProposeFromLead, memorySettingsGet, type MemoryDetail } from "@/lib/memory";
+import { V1Error } from "@/lib/v1";
 import {
   leadsChats, leadsDelete, leadsMark, leadsSearch, leadsSetChat, type Lead,
 } from "@/lib/api-leads";
@@ -10,6 +12,7 @@ import {
 vi.mock("@/lib/api-leads", () => ({
   leadsSearch: vi.fn(), leadsMark: vi.fn(), leadsDelete: vi.fn(), leadsChats: vi.fn(), leadsSetChat: vi.fn(),
 }));
+vi.mock("@/lib/memory", () => ({ memorySettingsGet: vi.fn(), memoryProposeFromLead: vi.fn() }));
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
 const source = {
@@ -25,6 +28,8 @@ describe("Leads tab", () => {
   let container: HTMLDivElement;
   let root: Root;
   beforeEach(() => {
+    vi.mocked(memorySettingsGet).mockResolvedValue({ configured: true, enabled: true, settings: { sources: { manager: false, tasks: false, leads: true } }, problem: null });
+    vi.mocked(memoryProposeFromLead).mockResolvedValue({ id: "M-0042", state: "drafting" } as MemoryDetail);
     vi.mocked(leadsSearch).mockResolvedValue({
       notice: "来自飞书消息，未经确认；只当线索，不当权威。", leads: [lead], more: 0,
     });
@@ -131,4 +136,65 @@ describe("Leads tab", () => {
     expect(container.textContent).toContain("已删除 3 条线索、2 条意图。");
     expect(container.textContent).toContain("另有 4 条合并进来的意图已改回待处理");
   });
+
+  it.each([
+    { configured: false, enabled: false, settings: null, problem: null },
+    { configured: true, enabled: false, settings: { sources: { manager: false, tasks: false, leads: true } }, problem: null },
+    { configured: true, enabled: true, settings: { sources: { manager: false, tasks: false, leads: false } }, problem: null },
+  ])("hides memory proposals when their source is off: %j", async (view) => {
+    vi.mocked(memorySettingsGet).mockResolvedValue(view);
+    await show();
+    expect(button(container, "提议记入记忆")).toBeUndefined();
+    expect(memoryProposeFromLead).not.toHaveBeenCalled();
+  });
+
+  it.each(["decision", "commitment", "fact"])("offers an active or expired %s lead with its mapped kind", async (kind) => {
+    vi.mocked(leadsSearch).mockResolvedValue({ notice: "", leads: [{ ...lead, kind, state: "expired" }], more: 0 });
+    await show();
+    await act(async () => button(container, "提议记入记忆")!.click());
+    const dialog = container.querySelector('[role="dialog"]')!;
+    expect(dialog.textContent).toContain("来自飞书消息，未经确认：写入前你还要确认一次");
+    const select = dialog.querySelector("select")!;
+    expect(select.value).toBe(kind);
+    expect([...select.options].map((option) => option.value)).toEqual(["decision", "commitment", "fact", "person", "project"]);
+    await act(async () => button(dialog, "取消")!.click());
+    expect(container.querySelector('[role="dialog"]')).toBeNull();
+    expect(memoryProposeFromLead).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["request", "active"], ["status", "active"], ["issue", "active"],
+    ["decision", "superseded"], ["decision", "inaccurate"], ["decision", "dropped"], ["decision", "promoted"],
+  ])("hides memory proposals for %s in %s", async (kind, state) => {
+    vi.mocked(leadsSearch).mockResolvedValue({ notice: "", leads: [{ ...lead, kind, state }], more: 0 });
+    await show();
+    expect(button(container, "提议记入记忆")).toBeUndefined();
+  });
+
+  it("proposes a chosen external kind and links to memory confirmation", async () => {
+    await show();
+    await act(async () => button(container, "提议记入记忆")!.click());
+    const dialog = container.querySelector('[role="dialog"]')!;
+    await act(async () => setValue(dialog.querySelector("select")!, "person"));
+    await act(async () => button(dialog, "提议")!.click());
+    expect(memoryProposeFromLead).toHaveBeenCalledExactlyOnceWith("lead-1", "person");
+    expect(container.querySelector('[role="dialog"]')).toBeNull();
+    const link = container.querySelector<HTMLAnchorElement>('a[href="#/memory"]')!;
+    expect(link.textContent).toBe("已提议 M-0042，去记忆页确认");
+    expect(memorySettingsGet).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([
+    [new V1Error(409, "conflict", "lead-1 is already proposed as M-0042"), '[data-state="conflict"]'],
+    [new V1Error(400, "invalid", "kind person has no target in the memory_write setting"), '[role="alert"]'],
+  ])("shows a refusal without claiming a proposal succeeded", async (error, selector) => {
+    vi.mocked(memoryProposeFromLead).mockRejectedValue(error);
+    await show();
+    await act(async () => button(container, "提议记入记忆")!.click());
+    await act(async () => button(container.querySelector('[role="dialog"]')!, "提议")!.click());
+    expect(container.querySelector('[role="dialog"]')?.querySelector(selector)?.textContent).toContain(error.message);
+    expect(container.querySelector('a[href="#/memory"]')).toBeNull();
+    expect(container.querySelector('[role="dialog"]')).not.toBeNull();
+  });
+
 });
