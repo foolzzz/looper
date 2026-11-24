@@ -34,9 +34,10 @@ command against a PostgreSQL service on every pull request. Which tests a
 change needs is described in section 1 of the development plan.
 
 PR agent tests use six whole-file shards balanced by the recorded seconds in
-`tests/shard_durations.json`. New files use their item count times the median
-seconds per item of the collected, recorded files. CI uploads each shard's JUnit
-report (including setup and teardown) for seven days, even when tests fail.
+`tests/shard_durations.json`, with xdist work stealing within each shard so idle
+workers can take queued cases from busy workers. New files use their item count
+times the median seconds per item of the collected, recorded files. CI uploads
+each shard's JUnit report (including setup and teardown) for seven days, even when tests fail.
 After a completed run, refresh the committed weights with an authenticated `gh`:
 
 ```bash
