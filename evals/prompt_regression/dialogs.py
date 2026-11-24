@@ -198,6 +198,7 @@ class Dialog:
     research: bool = False  # the Manager's research order is on (Settings → Chat, ``research_order``)
     # The session search is on, and the database holds the synthetic history (``_seed_sessions``).
     sessions: bool = False
+    failure_hold: bool = False  # create an act-mode environment hold before the first Manager turn
     memory: bool = False  # an enabled synthetic memory vault, without a drafting budget or push channel
 
 
@@ -2903,6 +2904,55 @@ def _tools_only_replied(look: Look) -> str | None:
     return None
 
 
+
+_FAILURE_DIALOG_SCRIPT = {
+    "_engine_failures": {"worker": ["authentication_error"]},
+    "plan": [{"id": "s1", "instruction": "Create done.txt containing done.",
+              "acceptance_criteria": ["done.txt contains done"], "depends_on": [], "review": False}],
+    "attempts": {"s1": [{"files": {"done.txt": "done\n"}, "status": "completed"}]},
+}
+
+
+def _hold_waits_for_confirmation(look: Look) -> str | None:
+    holds = look.api.post("/api/v1/tasks/holds", {"task_id": look.task})["result"]["holds"]
+    if len(holds) != 1:
+        return "the environment hold changed before confirmation"
+    if not any(row["tool"] == "looper_task_hold" and row["status"] == "needs_confirmation" for row in look.actions()):
+        return "the Manager did not request a versioned hold confirmation"
+    return None
+
+
+def _hold_released_as(action):
+    def check(look: Look):
+        holds = look.api.post("/api/v1/tasks/holds", {"task_id": look.task})["result"]["holds"]
+        if holds:
+            return "the confirmed hold is still present"
+        if not any(row["tool"] == "looper_task_hold" and row["status"] == "ok"
+                   and row["arguments"].get("action") == action for row in look.actions()):
+            return "the hold was not released by the confirmed Manager action"
+        return None
+    return check
+
+
+def _hold_operator_boundary(look: Look):
+    holds = look.api.post("/api/v1/tasks/holds", {"task_id": look.task})["result"]["holds"]
+    if len(holds) != 1:
+        return "an unprivileged caller changed the operator hold"
+    if any(row["tool"] == "looper_task_hold" and row["status"] in ("ok", "needs_confirmation") for row in look.actions()):
+        return "an unprivileged caller acquired a hold control or confirmation"
+    return None
+
+
+def _hold_dialog(action):
+    words = {"retry": "环境已修好，请只重试失败的执行单元", "planner": "把这个失败交给 Planner 判断，不要直接重跑", "stop": "停止整个任务"}
+    arguments = {"action": action, "task_id": "<task>", "step_id": "<hold_step>", "failure_id": "<hold_failure>"}
+    return Dialog("task_hold_" + action, (
+        Say(words[action] + "。任务 <task>，步骤 <hold_step>，失败 <hold_failure>。", _hold_waits_for_confirmation,
+            (("looper_task_hold", arguments),)),
+        Say("确认", _hold_released_as(action), (("looper_confirm", {"confirmation_id": "<confirmation>"}),)),
+    ), failure_hold=True, fake_task=_FAILURE_DIALOG_SCRIPT, tags=("manager", "failure_handling", "confirmation"))
+
+
 DIALOGS: tuple[Dialog, ...] = (
     Dialog("tools_only_no_text", (
         Say("现在有哪些项目？请查一下并给出结果。", _tools_only_replied,
@@ -3457,6 +3507,15 @@ DIALOGS: tuple[Dialog, ...] = (
 
 
 # Context measurements are scripted here, so these cases are selected explicitly in fake mode only.
+FAILURE_DIALOGS = tuple(_hold_dialog(action) for action in ("retry", "planner", "stop")) + (
+    Dialog("task_hold_operator_boundary", (
+        Say("环境已修好，帮我重试任务 <task>、步骤 <hold_step> 的失败 <hold_failure>。", _hold_operator_boundary),
+        Say("确认，马上重试。", _hold_operator_boundary),
+    ), failure_hold=True, client=True, fake_task=_FAILURE_DIALOG_SCRIPT,
+       tags=("manager", "failure_handling", "operator_boundary")),
+)
+
+
 FAKE_DIALOGS: tuple[Dialog, ...] = (
     Dialog("session_bound_rotate", (
         Say("先记住这一轮。", lambda look: None,
@@ -3481,7 +3540,7 @@ def select(ids: list[str] | None) -> tuple[Dialog, ...]:
     cannot run here."""
     if not ids:
         return tuple(dialog for dialog in DIALOGS if _runnable(dialog))
-    cases = (*DIALOGS, *FAKE_DIALOGS)
+    cases = (*DIALOGS, *FAKE_DIALOGS, *FAILURE_DIALOGS)
     known = {dialog.id for dialog in cases}
     unknown = sorted(set(ids) - known)
     if unknown:
@@ -3609,6 +3668,25 @@ def _newest_run(api: Api, agent: str) -> int:
     return max((record["id"] for record in records), default=0)
 
 
+async def _send_withdrawn(api: Api, body: dict[str, Any], database_url: str, timeout: float) -> None:
+    """Hold context preparation until the stop is accepted, before the model can receive this message."""
+    import asyncpg
+
+    conn = await asyncpg.connect(database_url, timeout=10, command_timeout=timeout)
+    try:
+        async with conn.transaction():
+            # Sending persists chat, but preparing the model's context reads projects. A warmed resident may
+            # otherwise receive (or even answer) the message between these separate HTTP requests.
+            await conn.execute("LOCK TABLE projects IN ACCESS EXCLUSIVE MODE")
+            api.post("/api/v1/operator_chat/send", body)
+            turn = api.post("/api/v1/operator_chat/turn", {"session_id": body["session_id"]})["result"].get("turn")
+            if not turn:
+                raise EvalError("no turn to withdraw: the message is not live")
+            api.post("/api/v1/operator_chat/stop", {"message_id": turn["message_id"]})
+    finally:
+        await conn.close()
+
+
 def _ask(api: Api, session: str, text: str, *, timeout: float,
          check_budget: Callable[[], None] | None = None, stop: bool = False, withdraw: bool = False,
          database_url: str | None = None, manager: str | None = None,
@@ -3629,12 +3707,12 @@ def _ask(api: Api, session: str, text: str, *, timeout: float,
     owner = {"manager": agent} if manager else {}  # a thread of a scenario Manager is read naming it
     if manager:
         body["target"] = {"kind": "manager", "id": agent}
-    api.post("/api/v1/operator_chat/send", body)
-    if withdraw:  # the message has its turn from its delivery on: the stop finds it wherever it is
-        turn = api.post("/api/v1/operator_chat/turn", {"session_id": session})["result"].get("turn")
-        if not turn:
-            raise EvalError("no turn to withdraw: the message is not live")
-        api.post("/api/v1/operator_chat/stop", {"message_id": turn["message_id"]})
+    if withdraw:
+        if database_url is None:
+            raise EvalError("withdrawing a message needs the dialog's disposable database")
+        asyncio.run(_send_withdrawn(api, body, database_url, timeout))
+    else:
+        api.post("/api/v1/operator_chat/send", body)
     deadline = time.monotonic() + timeout
     stopped = not stop
     while time.monotonic() < deadline:
@@ -3923,7 +4001,24 @@ def run_dialog(api: Api, dialog: Dialog, *, database_url: str, project_id: str, 
     try:
         if dialog.client and any(say.stop or say.withdraw for say in dialog.says):
             raise EvalError("stop and withdraw are not supported in client dialogs")
-        if dialog.id == "task_cost":
+        fixture_hold = None
+        if dialog.failure_hold:
+            from .runner import _confirmed
+            _confirmed(api, "/api/v1/engine_settings/update", {"failure_typing": "act"})
+            task = api.post("/api/v1/tasks/create", {"project_id": project_id,
+                "requirement": "In one work step create done.txt containing done. Do not use child agents."})["result"]["task_id"]
+            api.post("/api/v1/ops/task_control/start", {"task_id": task})
+            deadline = time.monotonic() + timeout
+            while time.monotonic() < deadline:
+                check_budget()
+                holds = api.post("/api/v1/tasks/holds", {"task_id": task})["result"]["holds"]
+                if holds:
+                    fixture_hold = holds[0]
+                    break
+                time.sleep(.2)
+            if fixture_hold is None:
+                raise EvalError("the environment failure fixture did not produce a hold")
+        elif dialog.id == "task_cost":
             task = _make_cost_task(database_url, project_id)
         elif dialog.ready_task:
             task = api.post("/api/v1/tasks/create", {"requirement": SLOW_TASK, "project_id": project_id})["result"]["task_id"]
@@ -3993,11 +4088,16 @@ def run_dialog(api: Api, dialog: Dialog, *, database_url: str, project_id: str, 
             turn_now = REMINDER_NOW if mode == "fake" and dialog.id == "reminder_tools" else datetime.now(timezone.utc)
             text = say.text_from(previous) if say.text_from and previous else say.text
             text = text.replace("<task>", task or "")
+            if fixture_hold:
+                text = text.replace("<hold_step>", fixture_hold["step_id"]).replace("<hold_failure>", str(fixture_hold["failure_id"]))
             if mode == "fake":
                 data = json.loads(scenarios.read_text(encoding="utf-8"))
                 scripted = []
                 for name, arguments in say.fake:
                     rendered = json.dumps(arguments).replace("<task>", task or "")
+                    if fixture_hold:
+                        rendered = rendered.replace("<hold_step>", fixture_hold["step_id"]).replace(
+                            '"<hold_failure>"', str(fixture_hold["failure_id"]))
                     if "<lead>" in rendered:
                         kind = "request" if dialog.id == "memory_from_lead_request" else "decision"
                         rendered = rendered.replace("<lead>", _memory_lead(previous, kind)["id"])
@@ -4204,7 +4304,7 @@ def run(
                                  encoding="utf-8")
             install_claude(case / "bin", mode=mode, scenarios=scenarios,
                            max_budget_usd=None if register is not None else max_budget_usd,
-                           real_claude=real_claude)
+                           real_claude=real_claude, **({"failure_injection": True} if dialog.failure_hold else {}))
             (case / "runtime").mkdir(mode=0o700)
             home = case / "home" if mode == "fake" else None
             if home is not None:

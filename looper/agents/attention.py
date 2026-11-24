@@ -46,7 +46,7 @@ from .message import MessageEnvelope, is_lark, parse_channel_id
 logger = logging.getLogger(__name__)
 
 ENABLED_KEY = "attention.enabled"
-KINDS = ("gates", "confirmations", "schedules", "logins", "intents", "ledger", "deliveries", "cost")
+KINDS = ("gates", "confirmations", "schedules", "logins", "intents", "ledger", "deliveries", "cost", "failure_holds")
 SHOWN = 20
 DELIVERY_WINDOW = timedelta(hours=72)
 # The checks the dashboard's banner shows as a login that fails (web/src/components/claude-check-banner.tsx).
@@ -199,7 +199,9 @@ def _intent_item(row: Mapping[str, Any]) -> dict[str, Any]:
 async def _intents(_: Any) -> Read:
     if not await leads_model.intents_enabled():
         return NotRead.OFF
-    rows, count = await store.pending_intents(SHOWN)
+    rules_on = await leads_model.rules_enabled()
+    rows, count = (await store.pending_intents(SHOWN, rules_on=True) if rules_on
+                   else await store.pending_intents(SHOWN))
     return [_intent_item(row) for row in rows], count
 
 
@@ -221,10 +223,16 @@ def _channel_type(channel: str | None) -> str | None:
     return parsed.channel_type if parsed is not None else channel
 
 
-_DELIVERY_HREF = {"subscription": "#schedules/{ref}", "intent": "#intents", "task_end": "#tasks/{ref}"}
+_DELIVERY_HREF = {"subscription": "#schedules/{ref}", "intent": "#intents", "task_end": "#tasks/{ref}",
+                  "intent_rule": "#intents"}
 
 
 def _delivery_item(row: Mapping[str, Any]) -> dict[str, Any]:
+    if row["source"] == "intent_rule":
+        task = row["ref"] if row["ref"] and row["ref"].startswith("task-") else None
+        return _item(f"delivery:intent_rule:{row['key']}", row["title"], since=row["at"],
+                     href=f"#tasks/{task}" if task else "#intents", ref=task,
+                     source="intent_rule", channel=_channel_type(row["channel"]), reason=row.get("reason"))
     title = _task_name(row, row["ref"]) if row["source"] == "task_end" else row["title"]
     if row.get("reason") == "final_notice_retry_exhausted":
         title += "（最终状态通知重试已耗尽）"
@@ -237,7 +245,9 @@ def _delivery_item(row: Mapping[str, Any]) -> dict[str, Any]:
 
 
 async def _deliveries(_: Any) -> Read:
-    rows, count = await store.uncertain_deliveries(datetime.now(timezone.utc) - DELIVERY_WINDOW, SHOWN)
+    since = datetime.now(timezone.utc) - DELIVERY_WINDOW
+    rows, count = (await store.uncertain_deliveries(since, SHOWN, rules_on=True)
+                   if await leads_model.rules_enabled() else await store.uncertain_deliveries(since, SHOWN))
     catchup = await _catchup_items()
     source_items, source_count = await _source_stream_items()
     return [*catchup, *source_items, *(_delivery_item(row) for row in rows)][:SHOWN], count + len(catchup) + source_count
@@ -323,7 +333,9 @@ async def _earliest_logins(_: Any) -> dict[str, Any] | None:
 async def _earliest_intents(_: Any) -> dict[str, Any] | None:
     if not await leads_model.intents_enabled():
         return None
-    row = await store.earliest_pending_intent()
+    rules_on = await leads_model.rules_enabled()
+    row = (await store.earliest_pending_intent(rules_on=True) if rules_on
+           else await store.earliest_pending_intent())
     return None if row is None else _intent_item(row)
 
 
@@ -337,17 +349,37 @@ async def _earliest_ledger(_: Any) -> dict[str, Any] | None:
 async def _earliest_deliveries(_: Any) -> dict[str, Any] | None:
     from .message_stream_alerts import earliest_active
 
-    row = await store.earliest_uncertain_delivery(datetime.now(timezone.utc) - DELIVERY_WINDOW)
-    source = await earliest_active(since=datetime.now(timezone.utc) - DELIVERY_WINDOW)
+    since = datetime.now(timezone.utc) - DELIVERY_WINDOW
+    row = (await store.earliest_uncertain_delivery(since, rules_on=True)
+           if await leads_model.rules_enabled() else await store.earliest_uncertain_delivery(since))
+    source = await earliest_active(since=since)
     return _oldest([*([] if row is None else [_delivery_item(row)]), *await _catchup_items(),
                     *([] if source is None else [source])])
 
 
+async def _failure_holds(_: Any) -> Read:
+    from . import failures
+    from ..db import step_failures
+    if await failures.typing_mode() is not failures.FailureTyping.ACT:
+        return NotRead.OFF
+    rows = [row for row in await step_failures.list_holds() if row["kind"] in ("environment", "breaker")]
+    items = [_item(f"failure:{row['failure_id']}", f"{row['step_key'] or row['step_id']}：{row['cause']}",
+                   context=row["task_id"], since=row["created_at"], href=f"#tasks/{row['task_id']}",
+                   failure_id=row["failure_id"], step_id=row["step_id"], kind=row["kind"], streak=row["streak"])
+             for row in rows]
+    return items[:SHOWN], len(items)
+
+
+async def _earliest_failure_holds(_: Any) -> dict[str, Any] | None:
+    read = await _failure_holds(None)
+    return _oldest(read[0]) if isinstance(read, tuple) else None
+
+
 _READERS = {"gates": _gates, "confirmations": _confirmations, "schedules": _schedules, "logins": _logins,
-            "intents": _intents, "ledger": _ledger, "deliveries": _deliveries, "cost": _cost}
+            "intents": _intents, "ledger": _ledger, "deliveries": _deliveries, "cost": _cost, "failure_holds": _failure_holds}
 _EARLIEST = {"gates": _earliest_gates, "confirmations": _earliest_confirmations, "schedules": _earliest_schedules,
              "logins": _earliest_logins, "intents": _earliest_intents, "ledger": _earliest_ledger,
-             "deliveries": _earliest_deliveries, "cost": _earliest_cost}
+             "deliveries": _earliest_deliveries, "cost": _earliest_cost, "failure_holds": _earliest_failure_holds}
 
 
 async def earliest(kind: str, *, managers: Any = None) -> dict[str, Any] | None:
@@ -394,13 +426,13 @@ FORBIDDEN = "「需要你处理」只给你本人看：在你和机器人的私�
 NOTHING = "现在没有需要你处理的事。"
 _TITLES = {"gates": "等你回复的关卡", "confirmations": "等你确认的操作", "schedules": "失败的定时任务",
            "logins": "登录失效", "intents": "待处理的意图", "ledger": "账本里等你的事",
-           "deliveries": "可能没送到的消息", "cost": "花费等你决定"}
+           "deliveries": "可能没送到的消息", "cost": "花费等你决定", "failure_holds": "运行失败等你处理"}
 _CHANNELS = {"web": "控制台聊天", "lark": "飞书", "lark_bot": "飞书", "telegram": "Telegram"}
 _ALERTS = {"failures": "连续失败告警", "stale": "太久没成功", "deadline": "没在截止时间前成功", "overlap": "运行重叠",
            "unanswered": "没人回，已自动暂停"}
 _LEDGER_KINDS = {"pending": "待办", "decision": "待确认的决定", "work_item": "在做的事"}
 _DELIVERY_SOURCES = {"subscription": "订阅推送", "intent": "意图消息", "task_end": "任务结束通知", "catchup": "飞书消息补收失败",
-                     "message_stream": "消息流采集/对账需处理"}
+                     "intent_rule": "规则执行通知", "message_stream": "消息流采集/对账需处理"}
 _HINTS = {"gates": "发 /gates 看编号，再用 /gate N <回答> 回答。",
           "confirmations": "在提问的那个聊天里回复「确认」，或回复别的放弃。",
           "cost": "回复「继续 {ref} <新上限美元>」提高上限并继续，或「停 {ref}」。",
@@ -436,6 +468,8 @@ def _plain(text: Any) -> str:
 def _line(kind: str, item: Mapping[str, Any], now: datetime) -> str:
     facts = item["facts"]
     title, context, waited = _plain(item["title"]), _plain(item["context"]), _ago(item["since"], now)
+    if kind == "failure_holds":
+        return f"- 【{context}】{title}（连续失败 {facts['streak']} 次），在任务页选择重试、交给 Planner 或停止。"
     if kind == "gates":
         return f"- 【{context}】{facts['step']} {title}" + (f"（已等 {waited}）" if waited else "")
     if kind == "confirmations":

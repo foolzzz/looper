@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "looper"
-version = "2.15.33"
+version = "2.15.34"
 description = "A self-hosted three-tier multi-agent system that runs Claude Code on your tasks, with a real-time web dashboard."
 readme = "README.md"
 requires-python = ">=3.11"
@@ -53,7 +53,7 @@ include = ["looper*"]
 "looper.db" = ["*.sql"]
 "looper.agents.runtimes.api" = ["THIRD_PARTY_NOTICES.txt"]
 "looper.agents.runtimes" = ["*.mjs", "pi_extension/looper.ts"]
-"looper.agents.runtimes.runner" = ["pi_runner/package.json", "pi_runner/src/*.ts", "common/package.json", "common/*.ts", "dsh_runner/package.json", "dsh_runner/src/*.ts", "fake_runner/*.py", "protocol_data/*.json"]
+"looper.agents.runtimes.runner" = ["pi_runner/package.json", "pi_runner/src/*.ts", "common/package.json", "common/*.ts", "dsh_runner/package.json", "dsh_runner/src/*.ts", "dsh_runner/src/tool-deadlines.json", "fake_runner/*.py", "protocol_data/*.json"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

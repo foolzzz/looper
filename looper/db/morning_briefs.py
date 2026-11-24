@@ -2,12 +2,14 @@
 
 ``sending`` is claimed and committed before the channel is asked. ``sent`` went out. ``skipped`` had nothing to
 say, or there was no operator chat. ``uncertain`` may have gone out (the sender stopped, or the channel's answer
-was lost) and is never sent again. ``failed`` is a refusal, tried again while ``attempts`` is under the limit.
+was lost) and is never sent again. ``failed`` is retryable while ``attempts`` is under the limit (a refusal or a
+recovered claim whose send never started).
 The delivery (``agents.morning_brief``) is the only writer. Weekends write nothing. A claim stores the digest
 ids that read returned, on the row, in that same write. A sent or uncertain brief copies those ids into
-``morning_brief_consumed``, in the same transaction as its status. A sender that stops before then is
-``uncertain`` and consumes exactly the stored ids; it does not scan ``proactive_deliveries`` by time. The next
-brief reads the first attempt's dates through its own day, except those ids. A refusal records none and clears
+``morning_brief_consumed``, in the same transaction as its status. ``send_started_at`` is committed immediately
+before the channel call. Recovery returns claims without it to ``failed``, refunding that attempt and consuming
+nothing; claims with it become ``uncertain`` and consume exactly the stored ids, without scanning by time.
+The next brief reads the first attempt's dates through its own day, except those ids. A refusal records none and clears
 the stored ids, so the retry reads the same digests. ``consumed_until`` is that brief's check time, not a
 watermark: a row whose insert had not committed is absent from the ids, and a later brief still reads it.
 Triage events mirror the digest policy: the claim stores ``triage_ids`` and a sent or uncertain brief records
@@ -34,12 +36,15 @@ async def get(conn: Any, local_date: date, channel_id: str, chat: str) -> dict[s
 
 
 async def orphans_uncertain(conn: Any, now: datetime) -> int:
-    """Settle as ``uncertain`` what a sender claimed and never settled. Under the delivery lock no claim is live,
-    so a ``sending`` row is one whose sender stopped: it may have been sent, and is never sent again.
+    """Recover stranded claims under the delivery lock, where no claim is live. Refund an attempt whose send
+    never started, keeping its first date for later digest reads. Only a started send becomes ``uncertain``.
 
     Consume exactly the digest ids stored with that claim. Do not scan by ``decided_at``: a row that commits
     after the read is not in the set, and a later brief still reads it."""
     async with conn.transaction():
+        await conn.execute(
+            "UPDATE morning_briefs SET status = 'failed', attempts = attempts - 1, read_ids = '{}', "
+            "triage_ids = '{}', updated_at = $1 WHERE status = 'sending' AND send_started_at IS NULL", now)
         claimed = await conn.fetch(
             "SELECT local_date, channel_id, chat, read_ids, triage_ids FROM morning_briefs WHERE status = 'sending'")
         for row in claimed:
@@ -72,8 +77,8 @@ async def claim(conn: Any, local_date: date, channel_id: str, chat: str, now: da
     """Take this date's brief for one send (committed before the channel is asked).
 
     ``read_ids`` are the digest rows this attempt's read returned; ``triage_ids`` are its triage events. They are written by the same statement as
-    the claim. Recovery consumes that set and does not read the table again. A refusal under ``attempts_limit``
-    is taken again and keeps its detail, so releasing the claim can put that refusal back; anything else is
+    the claim. Recovery consumes that set only after the send boundary and does not read the table again.
+    A refusal under ``attempts_limit`` is taken again and keeps its detail, so releasing the claim can put that refusal back; anything else is
     left as it is."""
     ids = read_ids or []
     row = await get(conn, local_date, channel_id, chat)
@@ -86,11 +91,19 @@ async def claim(conn: Any, local_date: date, channel_id: str, chat: str, now: da
     if row["status"] == "failed" and row["attempts"] < attempts_limit:
         return await conn.fetchval(
             "UPDATE morning_briefs SET status = 'sending', attempts = attempts + 1, updated_at = $4, "
-            "read_ids = $6::bigint[], triage_ids = $7::bigint[] "
+            "read_ids = $6::bigint[], triage_ids = $7::bigint[], send_started_at = NULL "
             "WHERE local_date = $1 AND channel_id = $2 AND chat = $3 AND status = 'failed' AND attempts < $5 "
             "RETURNING true",
             local_date, channel_id, chat, now, attempts_limit, ids, triage_ids or []) is True
     return False
+
+
+async def mark_send_started(conn: Any, local_date: date, channel_id: str, chat: str, now: datetime) -> bool:
+    """Commit the send boundary before asking the channel; a failed write must not be followed by a post."""
+    return await conn.fetchval(
+        "UPDATE morning_briefs SET send_started_at = $4 "
+        "WHERE local_date = $1 AND channel_id = $2 AND chat = $3 AND status = 'sending' "
+        "AND send_started_at IS NULL RETURNING true", local_date, channel_id, chat, now) is True
 
 
 async def release(conn: Any, local_date: date, channel_id: str, chat: str) -> None:
@@ -101,13 +114,15 @@ async def release(conn: Any, local_date: date, channel_id: str, chat: str) -> No
     first attempt, and the next day would no longer read that attempt's digests."""
     restored = await conn.fetchval(
         "UPDATE morning_briefs SET status = 'failed', attempts = attempts - 1, read_ids = '{}', triage_ids = '{}' "
-        "WHERE local_date = $1 AND channel_id = $2 AND chat = $3 AND status = 'sending' AND attempts > 1 "
+        "WHERE local_date = $1 AND channel_id = $2 AND chat = $3 AND status = 'sending' "
+        "AND send_started_at IS NULL AND attempts > 1 "
         "RETURNING true",
         local_date, channel_id, chat)
     if restored:
         return
     await conn.execute(
-        "DELETE FROM morning_briefs WHERE local_date = $1 AND channel_id = $2 AND chat = $3 AND status = 'sending'",
+        "DELETE FROM morning_briefs WHERE local_date = $1 AND channel_id = $2 AND chat = $3 "
+        "AND status = 'sending' AND send_started_at IS NULL",
         local_date, channel_id, chat)
 
 
@@ -183,12 +198,55 @@ async def digests(conn: Any, *, channel_id: str, chat: str, until: datetime,
     in ``morning_brief_consumed`` is not read again. A morning brief is not one of them. ``source`` is what the
     metrics call the send point. There is no lower bound on ``decided_at``: a row that commits after this read,
     with an earlier ``decided_at``, is still here next time."""
+    from ..agents import leads_model
+
     triage_filter = "AND source <> 'triage' " if await triage_settings.enabled(db=conn) else ""
+    rules_on = await leads_model.rules_enabled(db=conn)
+    # Disabled execution never reads a rule table. Its committed notices must also
+    # stay deferred here, rather than escaping through the independent brief switch.
+    rule_filter = ("" if rules_on else "AND NOT (source='intent' AND COALESCE(source_ref,'') "
+                   "~ '^rule-(created|discovery|fault):[0-9]+$') ")
+    reference = ",source_ref" if rules_on else ""
     rows = await conn.fetch(
-        "SELECT id, source AS kind, reason, decided_at, task_id, schedule_id FROM proactive_deliveries "
+        "SELECT id, source AS kind, reason, decided_at, task_id, schedule_id" + reference + " FROM proactive_deliveries "
         "WHERE decision = 'digest' AND channel_id = $1 AND chat = $2 AND source <> 'morning_brief' "
-        + triage_filter + "AND decided_at <= $3 AND digest_date = ANY($4::date[]) "
+        + triage_filter + rule_filter + "AND decided_at <= $3 AND digest_date = ANY($4::date[]) "
         "AND NOT EXISTS (SELECT 1 FROM morning_brief_consumed c WHERE c.delivery_id = proactive_deliveries.id) "
         "ORDER BY decided_at, id",
         channel_id, chat, until, dates or [])
-    return [dict(row) for row in rows]
+    result = [dict(row) for row in rows]
+    return await filter_rule_digests(conn, result, channel_id=channel_id, chat=chat) if rules_on else result
+
+
+async def filter_rule_digests(conn: Any, rows: list[dict[str, Any]], *, channel_id: str,
+                              chat: str) -> list[dict[str, Any]]:
+    """Recheck the exact previously read rows immediately before a brief is posted."""
+    from ..agents.intent_rule_delivery import (confirmation_allowed, is_rule_reference, notice_context,
+                                                notice_target, notice_visible)
+    from ..agents import leads_model
+
+    rules_on = await leads_model.rules_enabled(db=conn)
+    kept: list[dict[str, Any]] = []
+    for row in rows:
+        ref = row.get('source_ref')
+        if row['kind'] != 'intent' or not ref:
+            kept.append(row)
+        elif is_rule_reference(ref):
+            if not rules_on:
+                continue
+            context = await notice_context(conn, ref)
+            if (context and context['state'] == 'digest' and await notice_visible(conn, context)
+                    and await notice_target(conn, context) == (channel_id, chat)):
+                kept.append({**row, 'rule_notice': context})
+        elif rules_on and ref.isdecimal():
+            intent = await conn.fetchrow('SELECT id,state,merged_into FROM intents WHERE id=$1', int(ref))
+            if intent is None or not await confirmation_allowed(conn, intent['id'], rules_on=True):
+                continue
+            if intent['state'] == 'pending':
+                kept.append(row)
+            elif (intent['state'] == 'merged' and intent['merged_into'] is not None
+                  and await confirmation_allowed(conn, intent['merged_into'], rules_on=True)):
+                kept.append(row)
+        else:
+            kept.append(row)
+    return kept

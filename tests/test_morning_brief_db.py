@@ -10,6 +10,7 @@ import asyncio
 import json
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 from zoneinfo import ZoneInfo
 
@@ -87,13 +88,21 @@ async def _reminder(text: str, due_at: datetime, *, chat: str = OP, channel_id: 
 
 
 async def _digest(pool: Any, key: str, day: date, *, channel: str = "channel-lark", chat: str = OP,
-                  kind: str = "task_notice", reason: str = "quiet_hours", hour: int = 23, minute: int = 0) -> None:
+                  kind: str = "task_notice", reason: str = "quiet_hours", hour: int = 23, minute: int = 0,
+                  schedule_id: str | None = None) -> int:
     when = datetime(day.year, day.month, day.day, hour, minute, tzinfo=ZONE)
-    await pool.execute(
+    return await pool.fetchval(
         "INSERT INTO proactive_deliveries (dedupe_key, source, urgency, channel_id, chat, chat_kind, decision, "
-        "reason, counted, local_date, digest_date, decided_at) "
-        "VALUES ($1, $2, 'normal', $3, $4, 'direct', 'digest', $5, false, $6, $6, $7)",
-        key, kind, channel, chat, reason, day, when)
+        "reason, counted, local_date, digest_date, decided_at, schedule_id) "
+        "VALUES ($1, $2, 'normal', $3, $4, 'direct', 'digest', $5, false, $6, $6, $7, $8) RETURNING id",
+        key, kind, channel, chat, reason, day, when, schedule_id)
+
+
+async def _schedule(pool: Any, schedule_id: str, name: str, project_id: str, failures: int) -> None:
+    await pool.execute(
+        "INSERT INTO schedules (id, project_id, name, cron, timezone, requirement, consecutive_failures) "
+        "VALUES ($1, $2, $3, '0 9 * * *', 'UTC', 'Check it', $4)",
+        schedule_id, project_id, name, failures)
 
 
 def _service(channel: _Channel, when: datetime, *, managers: Any = None) -> morning_brief.MorningBriefService:
@@ -346,19 +355,172 @@ def test_the_second_server_waits_and_neither_sends_twice(monkeypatch: pytest.Mon
     run_with_channel_configs(test, monkeypatch, )
 
 
-def test_a_restart_mid_send_does_not_send_again(monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize("crash_at", ["claimed", "send-started", "sent"])
+@pytest.mark.parametrize("previous_attempts", [0, 2], ids=["first-attempt", "last-retry"])
+def test_restart_retries_only_a_claim_whose_send_never_started(
+        monkeypatch: pytest.MonkeyPatch, tmp_path: Path, lark_cli_stand_in: Path,
+        crash_at: str, previous_attempts: int) -> None:
+    from looper.agents.channels.allowlist import SenderAllowlist
+    from looper.agents.channels.lark import LarkChannelAdapter
+    from looper.agents.channels.registry import ChannelRegistry
+
+    def sends() -> list[Any]:
+        calls = ([json.loads(line) for line in lark_cli_stand_in.read_text().splitlines()]
+                 if lark_cli_stand_in.exists() else [])
+        return [call for call in calls if "+messages-send" in call]
+
     async def test(pool: Any) -> None:
         await _zone(pool)
+        who = "ou_x"  # Keep this transport test independent of long-key normalization.
+        await _operator(pool, who=who)
+        monkeypatch.setattr(attention, "collect", _collect(_summary("ok")))
+        await _digest(pool, "restart-digest", MONDAY.date(), chat=who, hour=7)
+        digest_id = await pool.fetchval("SELECT id FROM proactive_deliveries")
+        if previous_attempts:
+            await pool.execute("INSERT INTO morning_briefs (local_date, channel_id, chat, status, attempts, detail, "
+                               "send_started_at) VALUES ($1, 'channel-lark', $2, 'failed', $3, 'refused', $4)",
+                               MONDAY.date(), who, previous_attempts, MONDAY - timedelta(minutes=1))
+        adapter = LarkChannelAdapter(runtime_root=tmp_path,
+                                     allowlist=SenderAllowlist("channel-lark", frozenset({who})))
+        registry = ChannelRegistry(SimpleNamespace())
+        registry._channels[adapter.channel_id] = adapter
+        real_post = registry.post
+        observed_markers = []
+
+        async def post(*args: Any, **kwargs: Any) -> PostReceipt:
+            # Read on another connection: the marker must be committed before even entering the channel call.
+            observed_markers.append(await pool.fetchval("SELECT send_started_at FROM morning_briefs"))
+            return await real_post(*args, **kwargs)
+
+        monkeypatch.setattr(registry, "post", post)
+        real_claim = morning_brief.store.claim
+        real_mark = morning_brief.store.mark_send_started
+
+        async def stop_after_claim(*args: Any, **kwargs: Any) -> bool:
+            assert await real_claim(*args, **kwargs)
+            raise RuntimeError("sender stopped after claim")
+
+        async def stop_after_marker(*args: Any, **kwargs: Any) -> bool:
+            assert await real_mark(*args, **kwargs)
+            raise RuntimeError("sender stopped after marker")
+
+        async def stop_before_settle(*args: Any, **kwargs: Any) -> bool:
+            raise RuntimeError("sender stopped after send")
+
+        with monkeypatch.context() as crash:
+            method, stop = {"claimed": ("claim", stop_after_claim),
+                            "send-started": ("mark_send_started", stop_after_marker),
+                            "sent": ("settle", stop_before_settle)}[crash_at]
+            crash.setattr(morning_brief.store, method, stop)
+            with pytest.raises(RuntimeError, match="sender stopped"):
+                await _service(registry, MONDAY).run_once()
+        assert len(sends()) == int(crash_at == "sent")
+        claimed = dict(await pool.fetchrow("SELECT * FROM morning_briefs"))
+        assert claimed["status"] == "sending" and claimed["attempts"] == previous_attempts + 1
+        assert claimed["send_started_at"] == (None if crash_at == "claimed" else MONDAY)
+        assert claimed["read_ids"] == [digest_id]
+        assert await pool.fetchval("SELECT count(*) FROM morning_brief_consumed") == 0
+
+        # Off remains a no-op even with a stranded claim; turning it on recovers on the next tick.
+        chat_settings.set_morning_brief_enabled(False)
+        restarted = morning_brief.MorningBriefService(registry, clock=lambda: MONDAY)
+        await restarted.run_once()
+        assert dict(await pool.fetchrow("SELECT * FROM morning_briefs")) == claimed
+        assert len(sends()) == int(crash_at == "sent")
+        chat_settings.set_morning_brief_enabled(True)
+        await restarted.run_once()
+        expected_sends = int(crash_at != "send-started")
+        assert len(sends()) == expected_sends
+        assert await pool.fetchval("SELECT status FROM morning_briefs") == (
+            "sent" if crash_at == "claimed" else "uncertain")
+        assert await pool.fetchval("SELECT attempts FROM morning_briefs") == previous_attempts + 1
+        for _ in range(3):
+            await morning_brief.MorningBriefService(registry, clock=lambda: MONDAY).run_once()
+        assert len(sends()) == expected_sends
+        assert observed_markers == [MONDAY] * expected_sends
+        assert [row["delivery_id"] for row in await pool.fetch("SELECT * FROM morning_brief_consumed")] == [digest_id]
+        delivered = Path(str(lark_cli_stand_in) + ".delivered.jsonl")
+        assert (len(delivered.read_text().splitlines()) if delivered.exists() else 0) == expected_sends
+
+    run_with_channel_configs(test, monkeypatch)
+
+
+@pytest.mark.parametrize("marked", [False, True])
+def test_upgrade_preserves_ambiguous_sends_and_repairs_a_missing_send_marker(monkeypatch, marked):
+    from looper.db.migrations import morning_brief_send_started as migration
+
+    async def test(pool):
+        await _zone(pool)
+        digest_id = await _digest(pool, "legacy-digest", MONDAY.date(), hour=7)
+        await pool.execute("ALTER TABLE morning_briefs DROP COLUMN send_started_at")
+        if marked:
+            await pool.execute("INSERT INTO schema_migrations (name) VALUES ($1)", migration.name)
+        await pool.execute("INSERT INTO morning_briefs (local_date, channel_id, chat, status, attempts, updated_at, read_ids) "
+                           "VALUES ($1, 'channel-lark', $2, 'sending', 1, $3, $4::bigint[])",
+                           MONDAY.date(), OP, MONDAY, [digest_id])
+        assert await migration.pending(pool)
+        async with pool.acquire() as conn:
+            assert await connection.schema_change_pending(conn)
+        await connection.ensure_schema(pool)
+        assert not await migration.pending(pool)
+        assert await pool.fetchval("SELECT send_started_at FROM morning_briefs") == MONDAY
+        async with pool.acquire() as conn:
+            assert await morning_brief.store.orphans_uncertain(conn, MONDAY) == 1
+        before = dict(await pool.fetchrow("SELECT * FROM morning_briefs"))
+        assert before["status"] == "uncertain"
+        assert await pool.fetchval("SELECT delivery_id FROM morning_brief_consumed") == digest_id
+        assert not await morning_brief.store.claim(pool, MONDAY.date(), "channel-lark", OP, MONDAY,
+                                                   attempts_limit=3)
+        assert await morning_brief.store.claim(pool, MONDAY.date(), "channel-lark", "ou_new", MONDAY,
+                                               attempts_limit=3)
+        await connection.ensure_schema(pool)
+        # Repeated schema checks must not turn a new, unsent claim into an ambiguous send.
+        assert await pool.fetchval("SELECT send_started_at FROM morning_briefs WHERE chat = 'ou_new'") is None
+        assert dict(await pool.fetchrow("SELECT * FROM morning_briefs WHERE chat = $1", OP)) == before
+
+    run_db(test, monkeypatch)
+
+
+def test_an_unsent_first_brief_keeps_its_digest_window_after_a_later_day_restart(monkeypatch):
+    async def test(pool):
+        await _zone(pool)
         await _operator(pool)
-        monkeypatch.setattr(attention, "collect", _collect(_summary("error", "db down")))
-        await pool.execute("INSERT INTO morning_briefs (local_date, channel_id, chat, status, attempts) "
-                           "VALUES ($1, 'channel-lark', $2, 'sending', 1)", MONDAY.date(), OP)
+        monkeypatch.setattr(attention, "collect", _collect(_summary("ok")))
+        await _digest(pool, "before-restart", MONDAY.date(), hour=7)
+        digest_id = await pool.fetchval("SELECT id FROM proactive_deliveries")
+        assert await morning_brief.store.claim(pool, MONDAY.date(), "channel-lark", OP, MONDAY,
+                                               attempts_limit=3, read_ids=[digest_id])
         channel = _Channel()
-        await _service(channel, MONDAY).run_once()
-        await _service(channel, MONDAY).run_once()
+        await _service(channel, MONDAY + timedelta(days=1)).run_once()
+        assert len(channel.posts) == 1 and "11-23 07:00" in channel.posts[0]["text"]
+        row = await pool.fetchrow("SELECT status, attempts FROM morning_briefs WHERE local_date = $1", MONDAY.date())
+        assert dict(row) == {"status": "failed", "attempts": 0}
+        assert await pool.fetchval("SELECT count(*) FROM morning_brief_consumed") == 1
+
+    run_with_channel_configs(test, monkeypatch)
+
+
+def test_a_send_marker_write_failure_never_calls_the_channel_or_consumes_digests(monkeypatch):
+    async def test(pool):
+        await _zone(pool)
+        await _operator(pool)
+        monkeypatch.setattr(attention, "collect", _collect(_summary("ok")))
+        await _digest(pool, "marker-failure", MONDAY.date(), hour=7)
+
+        async def fail(*args):
+            raise RuntimeError("send marker write failed")
+
+        channel = _Channel()
+        with monkeypatch.context() as failed_write:
+            failed_write.setattr(morning_brief.store, "mark_send_started", fail)
+            with pytest.raises(RuntimeError, match="send marker write failed"):
+                await _service(channel, MONDAY).run_once()
         assert channel.posts == []
-        assert await _rows(pool) == [{"local_date": MONDAY.date(), "channel_id": "channel-lark", "chat": OP,
-                                      "status": "uncertain", "attempts": 1}]
+        assert await pool.fetchval("SELECT send_started_at FROM morning_briefs") is None
+        assert await pool.fetchval("SELECT count(*) FROM morning_brief_consumed") == 0
+        await _service(channel, MONDAY).run_once()
+        assert len(channel.posts) == 1
+        assert await pool.fetchval("SELECT count(*) FROM morning_brief_consumed") == 1
 
     run_with_channel_configs(test, monkeypatch)
 
@@ -998,3 +1160,87 @@ def test_the_source_check_is_found_by_its_column(monkeypatch: pytest.MonkeyPatch
         assert decoy is not None and "gate_reminder" in decoy
 
     run_db(test, monkeypatch)
+
+
+@pytest.mark.parametrize("rules_on, referenced_digest", [(False, False), (True, False), (True, True)])
+def test_a_failed_schedule_lists_its_deferred_push_once(
+        monkeypatch: pytest.MonkeyPatch, rules_on: bool, referenced_digest: bool) -> None:
+    """A digest row whose schedule is already a failing line joins that line. The digest section drops it, and
+    the brief still consumes its id. A healthy schedule's row stays in the digest section. Two failing schedules
+    do not take each other's count. The next brief does not list those rows again."""
+
+    async def test(pool: Any) -> None:
+        await _zone(pool)
+        await _operator(pool)
+        if rules_on:
+            await pool.execute("INSERT INTO system_settings (key, value) VALUES ('intents.rules.enabled', 'true')")
+        await pool.execute("INSERT INTO projects (id, name) VALUES ('proj', 'Demo'), ('other', 'Other')")
+        await _schedule(pool, "sched-beta", "Beta report", "other", 1 if rules_on else 2)
+        await _schedule(pool, "sched-alpha", "Alpha report", "proj", 1)
+        await _schedule(pool, "sched-delta", "Delta report", "proj", 1)
+        await _schedule(pool, "sched-gamma", "Gamma report", "proj", 0)
+        sunday = date(2026, 11, 22)
+        ids = [
+            await _digest(pool, "beta-a", sunday, kind="subscription", hour=23, minute=0, schedule_id="sched-beta"),
+            await _digest(pool, "beta-b", sunday, kind="subscription", hour=23, minute=5, schedule_id="sched-beta"),
+            await _digest(pool, "alpha", sunday, kind="subscription", hour=23, minute=10, schedule_id="sched-alpha"),
+            await _digest(pool, "gamma", sunday, kind="subscription", hour=23, minute=20, schedule_id="sched-gamma"),
+            await _digest(pool, "notice", sunday, hour=23, minute=40),
+        ]
+        if referenced_digest:
+            await pool.execute("UPDATE proactive_deliveries SET source_ref = 'synthetic-subscription' WHERE id = $1",
+                               ids[0])
+        if rules_on:
+            collect = attention.collect
+
+            async def fail_again(*, managers: Any = None) -> dict[str, Any]:
+                summary = await collect(managers=managers)
+                await pool.execute("UPDATE schedules SET consecutive_failures = 2 WHERE id = 'sched-beta'")
+                return summary
+
+            monkeypatch.setattr(attention, "collect", fail_again)
+        channel = _Channel()
+        await _service(channel, MONDAY).run_once()
+        (post,) = channel.posts
+        needs, digest = post["text"].split("推迟到这份晨报的消息\n", 1)
+        assert "- Beta report（Other；连续失败 2 次，另有 2 条推迟的推送）" in needs
+        assert "- Alpha report（Demo；连续失败 1 次，另有 1 条推迟的推送）" in needs
+        assert post["text"].count("Alpha report") == 1 and "sched-alpha" not in post["text"]
+        assert "- Delta report（Demo；连续失败 1 次）" in needs
+        assert "另有 2 条推迟的推送" not in needs.split("Alpha report", 1)[1]
+        assert "sched-gamma" not in needs and "sched-alpha" not in needs and "sched-beta" not in needs
+        assert digest == (
+            "- 订阅推送（免打扰，11-22 23:20，定时 sched-gamma）\n"
+            "- 任务通知（免打扰，11-22 23:40）")
+        assert await pool.fetchval("SELECT read_ids FROM morning_briefs") == ids
+        assert [row["delivery_id"] for row in await pool.fetch(
+            "SELECT delivery_id FROM morning_brief_consumed ORDER BY delivery_id")] == sorted(ids)
+        tuesday = datetime(2026, 11, 24, 9, 15, tzinfo=ZONE)
+        await _service(channel, tuesday).run_once()
+        later = channel.posts[1]["text"]
+        assert "推迟到这份晨报的消息" not in later and "另有" not in later
+        assert "- Beta report（Other；连续失败 2 次）" in later
+        assert "- Alpha report（Demo；连续失败 1 次）" in later
+        assert await pool.fetchval("SELECT count(*) FROM morning_brief_consumed") == len(ids)
+
+    run_with_channel_configs(test, monkeypatch)
+
+
+def test_the_brief_off_leaves_a_failed_schedules_deferred_push(monkeypatch: pytest.MonkeyPatch) -> None:
+    """While the brief is off, a tick does not send and does not consume a deferred push for a failing schedule."""
+
+    async def test(pool: Any) -> None:
+        await _zone(pool)
+        await _operator(pool)
+        await pool.execute("INSERT INTO projects (id, name) VALUES ('proj', 'Demo')")
+        await _schedule(pool, "sched-alpha", "Alpha report", "proj", 1)
+        delivery_id = await _digest(pool, "alpha", date(2026, 11, 22), kind="subscription", schedule_id="sched-alpha")
+        chat_settings.set_morning_brief_enabled(False)
+        channel = _Channel()
+        await morning_brief.MorningBriefService(channel, clock=_Clock(MONDAY)).run_once()
+        assert channel.posts == []
+        assert await pool.fetchval("SELECT count(*) FROM morning_briefs") == 0
+        assert await pool.fetchval("SELECT count(*) FROM morning_brief_consumed") == 0
+        assert await pool.fetchval("SELECT id FROM proactive_deliveries WHERE decision = 'digest'") == delivery_id
+
+    run_with_channel_configs(test, monkeypatch)

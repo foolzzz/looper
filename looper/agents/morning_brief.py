@@ -6,9 +6,13 @@ that local day, and proactive messages held for the digest. Every brief reads fr
 dates (Monday also Saturday and Sunday) through the day being sent, except digest rows already recorded by id.
 The claim stores the ids that read returned, in that same write. A sent or uncertain brief records those ids,
 in the same transaction as its row. A refusal records none and clears the stored ids, so a Tuesday brief that
-was rejected is still in Wednesday's. If the sender stops before that record, recovery consumes exactly the
-stored ids and does not scan by time: a row whose insert had not committed is still read once, on the next
-brief. With triage enabled, the operator DM also gets owned digest and important fallback events, using
+was rejected is still in Wednesday's. Immediately before the channel call, the sender commits ``send_started_at``.
+If it stops before that boundary, recovery refunds the attempt and consumes nothing. After that boundary,
+recovery consumes exactly the stored ids and does not scan by time: a row whose insert had not committed is
+still read once, on the next brief. A digest row whose schedule is already a line in that needs section is not
+listed again: the line gains how many deferred pushes that schedule has, the row is left out of the digest section, and its id is still
+one of the ids the read returned, so it is claimed and consumed with the rest. With triage enabled, the operator
+DM also gets owned digest and important fallback events, using
 the same window and exact-id claim/settlement/recovery policy. No model sees those rendered fields.
 Nothing in any section means
 nothing is sent. The switch, the channel and the operator are read again after the summary and again
@@ -96,7 +100,10 @@ def _reminder_line(row: Mapping[str, Any], tz: ZoneInfo) -> str:
     return f"- {local:%H:%M} {_plain(row['text'])}"
 
 
-def _digest_line(row: Mapping[str, Any], tz: ZoneInfo) -> str:
+def _digest_line(row: Mapping[str, Any], tz: ZoneInfo, *, dashboard_url: str = "") -> str:
+    if row.get("rule_notice"):
+        from .intent_rule_delivery import notice_text
+        return "- " + notice_text(row["rule_notice"], dashboard_url=dashboard_url).replace("\n", "；")
     kind = _KIND_LABELS.get(row["kind"], row["kind"])
     reason = _REASON_LABELS.get(row["reason"], row["reason"])
     when = row["decided_at"].astimezone(tz)
@@ -108,17 +115,87 @@ def _digest_line(row: Mapping[str, Any], tz: ZoneInfo) -> str:
     return f"- {kind}（{'，'.join(bits)}）"
 
 
+def _schedule_id(item: Mapping[str, Any]) -> str | None:
+    key = item.get("key")
+    prefix = "schedule:"
+    if isinstance(key, str) and key.startswith(prefix):
+        return key[len(prefix):]
+    return None
+
+
+def _with_deferred_note(line: str, count: int) -> str:
+    note = f"，另有 {count} 条推迟的推送"
+    if line.endswith("）"):
+        return f"{line[:-1]}{note}）"
+    return f"{line}{note}"
+
+
+def _replace_line_once(text: str, line: str, replacement: str) -> str | None:
+    lines = text.split("\n")
+    for index, current in enumerate(lines):
+        if current == line:
+            lines[index] = replacement
+            return "\n".join(lines)
+    return None
+
+
+def _fold_same_source(needs: str | None, digests: list[Mapping[str, Any]], summary: Mapping[str, Any]
+                      ) -> tuple[str | None, list[Mapping[str, Any]]]:
+    """One schedule, one line: deferred rows for a schedule the needs section lists join that line.
+
+    Any other row stays in the digest section, in the same order. A row whose schedule line is not in ``needs``
+    stays too. This does not decide which ids are consumed."""
+    if not needs or needs == attention.NOTHING or not digests:
+        return needs, digests
+    items: list[Mapping[str, Any]] = []
+    for section in summary.get("sections") or ():
+        if section.get("kind") == "schedules" and section.get("state") == "ok":
+            items.extend(section.get("items") or ())
+    listed: set[str] = set()
+    for item in items:
+        schedule_id = _schedule_id(item)
+        if schedule_id:
+            listed.add(schedule_id)
+    counts: dict[str, int] = {}
+    for row in digests:
+        schedule_id = row.get("schedule_id")
+        if schedule_id in listed:
+            counts[schedule_id] = counts.get(schedule_id, 0) + 1
+    if not counts:
+        return needs, list(digests)
+    text = needs
+    folded: set[str] = set()
+    now = datetime.now(timezone.utc)
+    for item in items:
+        schedule_id = _schedule_id(item)
+        count = counts.get(schedule_id or "")
+        if not schedule_id or not count:
+            continue
+        line = attention._line("schedules", item, now)
+        updated = _replace_line_once(text, line, _with_deferred_note(line, count))
+        if updated is None:
+            continue
+        text = updated
+        folded.add(schedule_id)
+    if not folded:
+        return needs, list(digests)
+    return text, [row for row in digests if row.get("schedule_id") not in folded]
+
+
 def render(*, day: date, needs: str | None, reminders: list[Mapping[str, Any]], digests: list[Mapping[str, Any]],
-           tz: ZoneInfo, triage: list[BriefEvent] = (), triage_more: int = 0) -> str | None:
+           tz: ZoneInfo, triage: list[BriefEvent] = (), triage_more: int = 0,
+           summary: Mapping[str, Any] | None = None, dashboard_url: str = "") -> str | None:
     """The brief, or None when every section is empty. ``needs`` is the needs-you summary; the empty summary is
-    not a section."""
+    not a section. With ``summary``, a digest row for a schedule that summary lists is folded into that line."""
+    if summary is not None:
+        needs, digests = _fold_same_source(needs, digests, summary)
     sections: list[str] = []
     if needs and needs != attention.NOTHING:
         sections.append(needs)
     if reminders:
         sections.append("今天的提醒\n" + "\n".join(_reminder_line(row, tz) for row in reminders))
     if digests:
-        sections.append("推迟到这份晨报的消息\n" + "\n".join(_digest_line(row, tz) for row in digests))
+        sections.append("推迟到这份晨报的消息\n" + "\n".join(_digest_line(row, tz, dashboard_url=dashboard_url) for row in digests))
     if triage:
         lines = [_triage_line(event, tz) for event in triage]
         if triage_more > 0:
@@ -183,8 +260,9 @@ class MorningBriefService:
     tick while it is off), and not while the server drains."""
 
     def __init__(self, registry: Any, *, drain: Any = None, clock: Callable[[], datetime] | None = None,
-                 managers: Any = None, interval: float = TICK_SECONDS) -> None:
+                 managers: Any = None, interval: float = TICK_SECONDS, dashboard_url: str = "") -> None:
         self._registry = registry
+        self._dashboard_url = dashboard_url
         self._drain = drain
         self._clock = clock or (lambda: datetime.now(timezone.utc))
         self._managers = managers
@@ -278,10 +356,50 @@ class MorningBriefService:
                 return
             if not await _pending(conn, day, channel_id, chat):
                 continue
-            await self._one(conn, policy, now, day, start, needs, channel_id, chat)
+            await self._one(conn, policy, now, day, start, needs, summary, channel_id, chat)
 
     async def _one(self, conn: Any, policy: Any, now: datetime, day: date, start: datetime, needs: str,
-                   channel_id: str, chat: str) -> None:
+                   summary: Mapping[str, Any], channel_id: str, chat: str) -> None:
+        from . import leads_model
+
+        if not await leads_model.rules_enabled(db=conn):
+            await self._one_current(conn, policy, now, day, start, needs, summary, channel_id, chat)
+            return
+        from ..db import attention as attention_store
+        from .intent_rule_delivery import confirmation_locks, discovery_locks
+
+        rows, _ = await attention_store.pending_intents(attention.SHOWN, db=conn, rules_on=True)
+        intent_ids = [row['id'] for row in rows]
+        # Digest progress may refer to a merged intent. Protect that parent too.
+        origin = await store.first_attempt_date(conn, channel_id, chat) or day
+        deferred = await store.digests(conn, channel_id=channel_id, chat=chat, until=now,
+                                       dates=list(digest_dates_through(origin, day)))
+        refs = [int(row['source_ref']) for row in deferred
+                if row.get('kind') == 'intent' and str(row.get('source_ref', '')).isdecimal()]
+        if refs:
+            sources = await conn.fetch('SELECT id,merged_into FROM intents WHERE id=ANY($1::bigint[])', refs)
+            intent_ids.extend(row['id'] for row in sources)
+            intent_ids.extend(row['merged_into'] for row in sources if row['merged_into'] is not None)
+        discovery_ids = [row['rule_notice']['discovery_id'] for row in deferred
+                         if row.get('rule_notice', {}).get('kind') == 'discovery_confirmation']
+        async with confirmation_locks(conn, intent_ids), discovery_locks(conn, discovery_ids):
+            # Keep all non-intent sections current too. The final refresh cannot
+            # reintroduce a handled candidate while its execution gate is held.
+            summary = await attention.collect(managers=self._managers)
+            intent_section = next((section for section in summary['sections'] if section['kind'] == 'intents'), None)
+            if intent_section and intent_section.get('state') == 'ok':
+                intent_section['items'] = [item for item in intent_section['items']
+                                           if item['key'] in {f'intent:{iid}' for iid in intent_ids}]
+                intent_section['count'] = len(intent_section['items'])
+                summary['total'] = sum(section.get('count', 0) for section in summary['sections'])
+            await self._one_current(conn, policy, now, day, start, attention.summary_text(summary), summary,
+                                    channel_id, chat,
+                                    protected_intents=set(intent_ids), protected_discoveries=set(discovery_ids))
+
+    async def _one_current(self, conn: Any, policy: Any, now: datetime, day: date, start: datetime, needs: str,
+                           summary: Mapping[str, Any], channel_id: str, chat: str, *,
+                           protected_intents: set[int] | None = None,
+                           protected_discoveries: set[int] | None = None) -> None:
         if not await self._accepts(channel_id, chat):
             return
         if not await _pending(conn, day, channel_id, chat):
@@ -296,6 +414,14 @@ class MorningBriefService:
         dates = list(digest_dates_through(origin, day))
         deferred = await store.digests(
             conn, channel_id=channel_id, chat=chat, until=now, dates=dates)
+        if protected_intents is not None:
+            # A row committed after the protected read remains for the next brief.
+            deferred = [row for row in deferred if not (
+                row.get('kind') == 'intent' and str(row.get('source_ref', '')).isdecimal()
+                and int(row['source_ref']) not in protected_intents)]
+            deferred = [row for row in deferred if not (
+                row.get('rule_notice', {}).get('kind') == 'discovery_confirmation'
+                and row['rule_notice']['discovery_id'] not in (protected_discoveries or set()))]
         triage: list[BriefEvent] = []
         triage_more = 0
         if await triage_settings.enabled(db=conn):
@@ -304,7 +430,7 @@ class MorningBriefService:
                 dates_start = datetime.combine(min(dates), time.min, tzinfo=policy.timezone)
                 triage, triage_more = await triage_events.for_brief(conn, dates_start=dates_start)
         text = render(day=day, needs=needs, reminders=reminders, digests=deferred, tz=policy.timezone,
-                      triage=triage, triage_more=triage_more)
+                      triage=triage, triage_more=triage_more, summary=summary, dashboard_url=self._dashboard_url)
         delivery = Delivery(DeliveryKind.MORNING_BRIEF, Urgency.NORMAL, ChatKind.DIRECT, silent=text is None)
         decision = proactive_delivery.deliver(delivery, policy, DeliveryState(now))
         if not await self._accepts(channel_id, chat):
@@ -312,6 +438,8 @@ class MorningBriefService:
         if text is None or decision.outcome is not Outcome.SEND:
             await store.skip(conn, day, channel_id, chat, now, "nothing to say")
             return
+        # Folding a row into its schedule's needs line drops it from the digest section only. The id is still
+        # one this read returned, so a sent or uncertain brief consumes it and it does not come back.
         read_ids = [row["id"] for row in deferred]
         triage_ids = [event.id for event in triage]
         if not await store.claim(conn, day, channel_id, chat, now, attempts_limit=ATTEMPTS, read_ids=read_ids,
@@ -328,6 +456,19 @@ class MorningBriefService:
                 logger.warning("morning brief delivery decision failed; sending anyway", exc_info=True)
         if not await self._accepts(channel_id, chat):
             await store.release(conn, day, channel_id, chat)
+            return
+        if any(row.get('source_ref') for row in deferred):
+            deferred = await store.filter_rule_digests(conn, deferred, channel_id=channel_id, chat=chat)
+            text = render(day=day, needs=needs, reminders=reminders, digests=deferred, tz=policy.timezone,
+                          triage=triage, triage_more=triage_more, summary=summary, dashboard_url=self._dashboard_url)
+            read_ids = [row['id'] for row in deferred]
+            if text is None:
+                await store.release(conn, day, channel_id, chat)
+                return
+            # Recovery consumes exactly what is still present in this final rendering.
+            await conn.execute('UPDATE morning_briefs SET read_ids=$4::bigint[] WHERE local_date=$1 '
+                               "AND channel_id=$2 AND chat=$3 AND status='sending'", day, channel_id, chat, read_ids)
+        if not await store.mark_send_started(conn, day, channel_id, chat, self._clock()):
             return
         external: str | None = None
         try:

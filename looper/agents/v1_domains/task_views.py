@@ -122,6 +122,9 @@ TASK_DETAIL = _object({
         "summary": _STR, "learnings": _array(_STR), "created_at": _STR})),
     "progress": _array(_object(dict.fromkeys(("done", "now", "next", "risks", "estimate", "at"), _STR)))},
     closed=True)
+from .task_failures import HOLD
+TASK_DETAIL["properties"]["fail_kind"] = {"type": ["string", "null"], "enum": [*[kind.value for kind in tasks.FailKind], None]}
+TASK_DETAIL["properties"]["holds"] = _array(HOLD)
 TASK_DETAIL["properties"]["run_roles"] = {"type": "object", "additionalProperties": _object({
     "id": _STR, "kind": _STR, "version": _INT})}
 # Its Planner's consults of the advisor, in a task with some.

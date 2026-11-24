@@ -272,9 +272,45 @@ jobs:
         if: needs.changes.outputs.docs_only == 'true'
         run: echo "Docs-only pull request; test steps skipped."
 
+  wheel-smoke:
+    name: Installed runtime wheel smoke
+    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "24"
+      - name: Install uv
+        run: python -m pip install uv
+      - name: Build the dashboard
+        run: scripts/stage-dashboard.sh
+      # Reuse the release check: build, install without extras in a fresh venv,
+      # then start the installed service against this job's disposable database.
+      - name: Check that the installed wheel runs looper serve
+        env:
+          LOOPER_TEST_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/postgres
+        run: uv run python examples/release/agent-serve-wheel-smoke.py
+
   agent-system-result:
     name: Agent system tests
-    needs: [changes, agent-system, bridge-schema-pg18, provenance, dashboard]
+    needs: [changes, agent-system, bridge-schema-pg18, provenance, dashboard, wheel-smoke]
     if: always()
     runs-on: ubuntu-24.04
     steps:
@@ -285,12 +321,13 @@ jobs:
           PG18_RESULT: ${{ needs.bridge-schema-pg18.result }}
           PROVENANCE_RESULT: ${{ needs.provenance.result }}
           DASHBOARD_RESULT: ${{ needs.dashboard.result }}
+          WHEEL_RESULT: ${{ needs.wheel-smoke.result }}
         run: |
           echo "Agent system shards: $SHARDS_RESULT"
           test "$CHANGES_RESULT" = success
           test "$SHARDS_RESULT" = success
           # Optional jobs may be skipped by their job conditions, but never fail silently.
-          for result in "$PG18_RESULT" "$PROVENANCE_RESULT" "$DASHBOARD_RESULT"; do
+          for result in "$PG18_RESULT" "$PROVENANCE_RESULT" "$DASHBOARD_RESULT" "$WHEEL_RESULT"; do
             case "$result" in
               success|skipped) ;;
               *) echo "Enabled check did not succeed: $result"; exit 1 ;;

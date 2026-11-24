@@ -107,6 +107,18 @@ def test_a_dispatch_keeps_only_what_readiness_reads():
     assert "do s1" not in json.dumps(inputs) and "report" not in json.dumps(inputs)
 
 
+@pytest.mark.parametrize("hold", [{}, {"kind": "environment", "reason": "private failure details"}])
+def test_a_dispatch_replays_held_steps_without_failure_details(hold):
+    plan = TaskPlan("p", "g", "r", "/w", steps=[
+        _step("s1", failure_hold=hold), _step("s2")])
+    row = _dispatched(plan)
+    assert row["decision"]["start"] == ["id-s2"]
+    assert row["inputs"]["steps"][0]["failure_hold"] is True
+    assert "failure_hold" not in row["inputs"]["steps"][1]
+    assert "private failure details" not in json.dumps(row)
+    assert replay(row).same
+
+
 @pytest.mark.parametrize("change", ["start", "ready", "round", "version", "malformed"])
 def test_a_dispatch_that_does_not_replay_says_so(change):
     row = _dispatched(TaskPlan("p", "g", "r", "/w", steps=[_step("s1", "dispatched"), _step("s2"), _step("s3")]),

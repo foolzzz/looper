@@ -1985,8 +1985,22 @@ Manager tools.
   for each turn. File tools stay within the working directory and explicit
   added directories; bash is not confined to those paths and is not an OS
   sandbox. Bash uses the session's private HOME and environment, with a
-  ceiling of the run timeout (86,400 seconds when unset); a shorter tool
-  timeout is honored. An unset run request limit becomes 1,000 requests.
+  per-call deadline of 120 seconds, independent of the Worker's run deadline
+  (seeded at 86,400 seconds). A shorter model-requested timeout is honored;
+  longer requests are clamped to the session deadline and a hard 600-second
+  cap. No new operator setting is required. Timeout or abort sends TERM to the
+  shell group, KILL after two seconds, then drains output for at most 500 ms
+  before ending that call's executor. Timeout results keep the existing
+  `is_error=false` contract and include the timeout text; cancellation remains
+  an error. If the shell exits while a background process keeps its output
+  open, output drains for at most 500 ms before returning the exit code and an
+  explicit background-output note. A process that escaped the shell group can
+  survive; its session owner must manage its lifetime separately. Runner
+  diagnostics include tool span identifiers, deadlines, elapsed time and
+  cleanup phases, with a command hash rather than command text. These changes
+  affect only operators who select the opt-in DSH runtime; dashboard, channels
+  and CLI continue to show the paired tool result through their existing paths.
+  An unset run request limit becomes 1,000 requests.
   Spend and request caps are checked before every model request, including
   compaction, with no provider retry. Per-request token buckets use the saved
   model's effective prices (`cost_source=provider_price`); these reservations
@@ -3322,6 +3336,22 @@ memory page shows their candidates for the operator to review.
   again afterwards, the writer checks the committed paths and bytes against
   the confirmed operations. A branch advance outside those paths can be
   rebased; touching a target requires new drafting and confirmation.
+- **Task source:** when memory writing is enabled with `sources.tasks`, the
+  project has a lesson or project target, and the operator has turned that
+  project's memory closeout on, an ended task's Planner proposes lesson and
+  project candidates instead of the vault closeout. The turn is `[MEMORY]`.
+  Its journal lines are numbered `J1`, `J2`, … for rows that have an id;
+  review rounds and rows the budget leaves out are not citable. A proposal
+  names its kind, statement, why, keywords and those journal ids. Items that
+  fail the shape, the kind, the evidence or a secret check are dropped and
+  counted; the task still ends. The activity line says what was proposed, or
+  the note when nothing was, and the drop counts when any were dropped. An
+  empty journal or a spent task cap skips the turn. Writing a confirmed
+  candidate that cites a task journal adds `Memory: M-… written to …` on that
+  task. The switch is operator-only (`memory_closeout.get` /
+  `memory_closeout.update`), default off, and omitted from project reads and
+  configuration export until it is on. While it is off, prompts, tool lists
+  and the vault closeout stay as they were.
 - **Failure and recovery:** a blocked write keeps its confirmation and waits
   for the operator's retry; a content conflict clears confirmation and
   requests redrafting once. No write stashes, resets or commits somebody
@@ -3368,6 +3398,38 @@ memory page shows their candidates for the operator to review.
   editor save can overwrite it; the content hash and commit trailers allow
   checking what was written. An agent with a shell has the same system-user
   access to the vault; this supported write path does not isolate that user.
+
+### Project lesson retrospectives
+
+`memory_lessons` is independent of vault writing and defaults off. Both its `enabled` field and the project's
+`memory_lessons = 'on'` are required. On, project-scoped learnings still enter the task journal, but the old
+project-document drafts and `[LESSONS]` turn stop. Vault closeout keeps its separate setting and path. Empty
+lesson snapshots do not disable retrospectives; context injection is a separate feature.
+The server loads the validated switch before recovering tasks, and successful settings updates refresh it in
+memory. While off, retrospective ticks and terminal callbacks read only that switch, without database reads.
+Turning it on at runtime resumes processing within the next 10-second interval.
+
+After TaskRouter forwards the final completed/failed status and tears down the Planner, an independent terminal
+listener enqueues the newly observed journal range. Scheduler and retrospective callbacks cannot block one
+another on failure. `MemoryRetroService` recovers post-activation terminal tasks, claims a short database lease,
+then invokes the private `memory_retro` role without holding a connection or transaction. Migration 1980 widens
+the role/run-kind checks online; 1990 adds durable cursors, activation high-water, attempt leases, independent
+spend reservations, range output references and distinct-task reinforcement records. Retrying once consumes
+another reservation; missing costs consume the full reserved cap. The default cap is $0.10 per attempt and
+$0.50 per local day. The existing global cost guard still applies.
+
+The role uses `model_call.ChildCall`, one turn, an empty working directory, replaced prompt, no tools, MCP or
+harness, and at most 90 seconds. Its private records retain metadata and input digests, never journal or reply
+bodies. A built-in model awaits the approved real comparison; operators must select an explicit role profile.
+Escaped input includes only this range's displayed numbered journal evidence, up to 60 active project lessons
+and 20 held lessons. Strict JSON parsing drops unsafe items and records typed counts. A short transaction
+rechecks configuration, project, task, evidence, trust, lease, tombstones and replacement targets before saving
+candidates, sources, events, spending and the task activity. Shadow mode creates held lessons; external tasks
+always create independent held candidates and cannot reinforce trusted lessons. Later distinct tasks can renew
+an active lesson once each; replacement reuses the conservative protected-token gate. The existing operator-only
+lesson list and task activity expose results. Task deletion confirmation counts sourced active lessons once.
+Three distinct failed tasks claim one durable operator-only warning, at most once per local day; without an operator DM destination the
+warning stays in logs. This feature adds no channel completion footer, injection, weekly delivery or vault write.
 
 ### Project skills: skills a project writes
 
@@ -4826,13 +4888,13 @@ project `ask` action. Backup-profile fallback and unanswered-push pauses follow 
 
 ### Why a run failed (failure classes)
 
-While the system setting `engine.failure_typing` is `record` (`off` by default; [engine reliability
+While the system setting `engine.failure_typing` is `record` or `act` (`off` by default; [engine reliability
 RFC](rfcs/engine-reliability-v0.zh-CN.md), section 4), the close of a failed run records why it failed as a type
 (`looper/agents/failures.py`): `llm_records.failure_class` (`quota`, `transient`, `environment` or `judgment`),
 `failure_cause` (each cause has one class, and a check constraint holds the pair: `usage_limit`, `rate_limit`;
 `connection_failed`, `provider_overloaded`, `start_timeout`; `runtime_missing`, `login`, `tls`, `profile`; `timeout`,
 `context`, `budget`, `report`, `unknown`), and `metadata.failure` (`signal`: `typed` or `text`, and `resets_at` for a
-used-up window). This step only records: what happens to a failed run, its step and its task is unchanged.
+used-up window). `record` leaves the task's existing control flow unchanged; `act` also handles failures below.
 
 - **Which runs.** A record that ends `failed`, and a Worker's or Reviewer's run whose own report says the step failed
   (`metadata.outcome` `reported_failed`, `contract` or `files_mismatch`: `judgment`, `report`). A Reviewer's
@@ -4852,9 +4914,10 @@ used-up window). This step only records: what happens to a failed run, its step 
     at capacity and a broken stream (`signal: text`).
   - The API runtime: its loop's error kind, which a failed result now carries (`error_kind`, `error_status`).
   - Other runtimes give no signal yet: their failures are `unknown`.
-- **Settings.** `engine_settings.get` and `engine_settings.update` (`{"failure_typing": "off" | "record" | null}`,
-  null for the built-in `off`; operator only; `act`, failure handling, is refused until it exists), and the generated
-  `loopercli engine-settings` commands. Not a Manager tool: nothing changes for the Manager, Telegram or Lark.
+- **Settings.** `engine_settings.get` and `engine_settings.update` (`{"failure_typing": "off" | "record" | "act" | null}`,
+  null for the built-in `off`; operator only, changes require confirmation), the generated
+  `loopercli engine-settings` commands, and Settings → LLM Providers. The Manager's `looper_settings` gains engine
+  read/write actions only while act is active. Initial activation uses the API, CLI or dashboard.
 - **Counts.** `runs.failures` (`{"days"}`, 1 to 90, 7 when omitted): the classified runs by UTC day, run kind,
   runtime, class and cause, the total by class, and `steps`: of the Workers' and Reviewers' classified runs, how
   many were not a judgment (the failures that reach a Planner without needing one).
@@ -4863,6 +4926,48 @@ used-up window). This step only records: what happens to a failed run, its step 
 - **Off.** No class and no `metadata.failure`: a record's close writes exactly what it wrote before. The migration
   `failure_typing` adds the two columns without a rewrite; its check is validated and its index
   (`idx_llm_records_failures`) built online.
+
+### Recovering failed executions
+
+With `engine.failure_typing=act`, a current Worker or Reviewer result is routed before a decision or review vote.
+Quota failures hold the step until reset plus 60 seconds, or an unknown-reset backoff of 5, 10, 20, 40, then 60
+minutes. Transient failures wait 120 and 600 seconds, each with ±20% jitter. Environment failures wait for the
+operator, independently of project user gates. Other ready steps keep running. Recovery releases task and account
+slots while waiting, re-enters account admission in the recovery lane, and dispatches only the failed execution
+unit. A review retry preserves the Worker's output and the review role, seat and round. The dynamic input warns
+that an incomplete run may have left changes; the original instruction remains intact.
+
+All four failure classes share one durable counter per work step, including its reviewers and panel seats. The
+third consecutive failure immediately opens the breaker and goes to Planner DECISION with the entire current
+sequence of typed failures. Successful execution resets the counter; `not_passed` neither increments nor resets
+it. Repeated negative verdicts retain the existing `max_step_retries` limit (`DecisionContext.offered` and
+`planner_protocol.parse_decision`). Replans and automatic recovery preserve the counter; an authenticated
+operator's confirmed restart/start-over resets it with an audit entry. History retains the original step/run
+identities for the task's lifetime, even after a step or run record is removed.
+
+An environment or breaker hold projects `waiting_user`, appears in Needs you when attention is enabled, and
+notifies the task's recorded source. The task's Pipeline shows holds, versioned actions and paginated history.
+Operator-only operations `tasks.failure_history`, `tasks.holds` and `tasks.hold_release` use the corresponding
+`POST /api/v1/tasks/...` paths. Release requires the exact `failure_id` and confirmation: retry only the failed
+unit, send the saved failure to the Planner, or stop the entire task. The act-only Manager tool `looper_task_hold`
+offers the same actions in the console and authenticated operator direct chats. The generated CLI uses these
+same operations. Old versions conflict; releases are persisted until the Planner acknowledges recovery.
+
+Planner runtime retries reuse the same prepared message, launch and session outside account slots. Transient
+turns allow at most three executions. A scheduled task's quota wait starts at its first frozen admission or quota
+failure, with a durable deadline of six hours or one schedule period, whichever is shorter; expiration uses
+`quota_exhausted`. A planning environment failure uses `environment`. Other turn failures retain their original
+fallback. Processor retries share the caller's total deadline and spend cap, report the sum of all attempts' cost,
+and preserve private batch filtering. Manager transient/environment errors produce fixed typed replies without
+automatic replay of tools. Leaving act wakes waits and drains step holds to the previous decision path; existing
+gates, waits and cost holds remain independent.
+
+Migration `step_failure_handling` (1920) adds explicit state, idempotent run evidence, append-only failures,
+current holds, a recovery outbox and scheduled quota deadlines. Existing checks widen without dropping other
+values. Task outcome metrics add act-only hold counts, longest wait, automatic retries, breaker counts and
+role/class/streak distributions; self-check warns above five breakers per UTC day. Environment holds have one
+durable reminder after an hour. See [validation](../validation/failure-handling.md) for measured coverage and
+pending real-model evaluations.
 
 ### Translated models (local gateway)
 
@@ -6697,10 +6802,67 @@ run after the Manager's final stop check. A stopped or timed-out preparation
 changes no intents or tasks; timeout and task-validation failures receive
 code-written replies. Task creation and the transition are one database
 transaction; task notices belong to the operator's direct chat, never the source
-conversation. The requirement
+conversation. With rules off, the requirement
 contains only the displayed title, summary and up to five source references,
 marked as background rather than instructions. Tasks created from the dashboard
 leave `origin_channel_id` empty, as other dashboard-created tasks do.
+
+With `intents.rules.enabled` on, newly extracted candidates have a durable rule
+work item before confirmation delivery. The ordered, typed AND rules select
+confirmation, record-only, or automatic MR review; unavailable verification
+immediately falls back to confirmation. The switch defaults off, does not scan
+old pending suggestions, and does not authorize an operator-requested recognition
+batch to create tasks. Record-only suggestions remain pending and can be built
+manually. Configuration, discovery submission, migration previews and revocation
+are operator-only v1 operations; rule editing adds no CLI or Manager tools.
+
+`IntentRuleService` verifies MR URLs through an explicitly configured read-only
+command adapter, outside row-locking transactions. Saving its configuration
+requires an absolute executable path; execution never searches PATH. It uses
+direct argv, a fresh empty working directory, a minimal explicit environment,
+a ten-second deadline and a 64 KiB stdout bound, and cleans up the process group
+after normal exits as well as failures. The request contains only the canonical MR URL and
+protocol version. A host integration can inject dedicated credential references
+with `intent_rule_verifier.configure_credentials`; a missing reference confirms
+instead of borrowing another provider's credentials. The empty directory is not
+a sandbox. The response is a closed schema, and its canonical target must match
+the requested system, repository route and MR. Reviewer IDs come from the API;
+DM targets, mentions and sender IDs come from the same real request event.
+
+Before creation the service verifies again and, under the shared admission lock,
+rechecks the switch, delivery, rule generation, project/workflow snapshots,
+source authorization and the original revision. The transaction atomically
+claims `(system_id, repository_id, mr_id, revision)`, creates the existing task
+lifecycle's ready task, transitions the candidate, consumes the shared operator /
+project / local-day quota, writes audit and queues start and notice outboxes.
+Messages, structured discoveries and manual MR builds share that claim. Existing
+or cancelled revisions link the same task without another quota charge. Manual
+builds do not consume automatic quota. An unknown historical revision blocks the
+MR until the operator resolves its ownership; migration preview/confirmation
+registers reliable existing ownership without switching an installation.
+
+Automatic and manual rule-bound MR requirements contain only a fixed review
+sentence and the verified URL, with an explicit project and workflow. Message
+titles, summaries and source text never become Worker instructions. Starts
+recover only their committed task ID and are acknowledged by the atomic
+`init → pending` transition, not by successful bus publication. Revocation
+serializes with that transition, cancels a ready task locally or asks the current
+TaskRouter to stop active work, and reports the observed state. Claims and quota
+survive revocation; posted review comments cannot be withdrawn by this action.
+
+Rule notices use normal proactive delivery to the current operator DM, with
+separate `rule-created:`, `rule-discovery:` and fault-episode references. Quiet
+hours and daily limits retain a digest; uncertain channel receipts do not blindly
+retry. Source deletion clears message audit while committed execution/start and
+minimal MR claims survive. Confirmation push, attention and morning-brief items
+are checked again at send time under the same candidate gate. Switching rules
+off holds notices without stopping committed starts or tasks; switching back on
+resumes the same notices and never creates again. Three consecutive unavailable
+checks produce one normal operator notice per fault episode. Execution readback
+includes start, quota, delivery and revocation facts, and statistics count unique
+automatic executions rather than multiplying tasks through deduplicated hits.
+The remote API and local commit cannot be atomic: the workflow must still read
+the current MR before working on it.
 
 The one state writer permits `pending → tasked | rejected | expired` and
 `expired → tasked`. A transition of an intent whose push was delivered (sent, with a
@@ -6940,11 +7102,17 @@ direct chat. It names what waits (the needs-you summary), reminders due that
 local day, and proactive messages deferred into the digest (`decision`
 `digest`). Every brief reads from the first attempt's dates (Monday also
 Saturday and Sunday) through the day being sent, except digest rows already
-recorded by id in `morning_brief_consumed`. The claim stores the ids that
-read returned, in that same write. A sent or uncertain brief records them in
+recorded by id in `morning_brief_consumed`. A row whose `schedule_id`
+is a schedule the needs section lists is left out of the deferred-message
+section; that schedule's line says how many deferred pushes it has
+(「，另有 N 条推迟的推送」). The claim stores the ids that
+read returned, including those rows, in that same write. A sent or uncertain brief records them in
 the same transaction as its row. A refusal records none and clears the stored
-ids, so a rejected Tuesday brief's digest is still in Wednesday's. A sender
-that stops before the record is `uncertain` on restart, and that recovery
+ids, so a rejected Tuesday brief's digest is still in Wednesday's. Immediately
+before the channel call, the sender commits `send_started_at`. A claim without
+that marker becomes retryable on recovery: its attempt is refunded, its first
+date is kept, and no digest or triage ids are consumed. A sender that stops
+after that marker is `uncertain` on restart, and that recovery
 consumes exactly the stored ids: it does not scan by `decided_at`. A row whose
 insert had not committed is therefore still read once, on the next brief.
 `consumed_until` is the check time, not a watermark. With
@@ -6968,7 +7136,9 @@ it had. The switch
 (`morning_brief.get`, `morning_brief.update`); off, a tick reads the in-memory
 switch and does nothing else. One `morning_briefs` row per local date and chat
 makes a restart and a second server send it at most once. A send that stops
-mid-way is `uncertain` and is not sent again. With `delivery.enabled` on, the
+mid-way is `uncertain` and is not sent again. Upgrades conservatively mark old
+`sending` rows as started because they cannot prove that no send occurred.
+With `delivery.enabled` on, the
 decision and the channel receipt share one `proactive_deliveries` row. A later
 successful try replaces a rejected receipt on that row (`outcome`, `sent_at`,
 `external_id`). A receipt already recorded as `sent` or `unknown` keeps those
