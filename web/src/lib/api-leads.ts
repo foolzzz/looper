@@ -208,6 +208,46 @@ export interface FollowedGroupPreview {
   group: { chat_id: string; name: string; kind: string; messages_24h: number; estimate_usd: [number, number] };
 }
 
+export interface IntentRecognitionPreview {
+  chat: { chat_id: string; name: string };
+  range_from: string;
+  range_to: string;
+  effective_from: string;
+  events: number;
+  truncated: "messages" | "budget" | null;
+  estimate_usd: [number, number];
+  schedule_id: string;
+}
+
+export interface IntentRecognition {
+  id: string;
+  chat_id: string;
+  name: string;
+  range_from: string;
+  range_to: string;
+  state: "running" | "done" | "failed";
+  events_in_range: number;
+  events_read: number;
+  truncated: "messages" | "budget" | null;
+  cost_usd: number;
+  error: string | null;
+  created_at: string;
+  finished_at: string | null;
+  intents: { id: string; type: { key: string; name: string }; title: string; state: string }[];
+}
+
+export interface IntentRecognitions {
+  enabled: boolean;
+  recognitions: IntentRecognition[];
+}
+
+export interface IntentRecognitionRange {
+  source_id?: string;
+  chat_id: string;
+  since?: string;
+  until?: string;
+}
+
 export interface SubscriptionPresetFields {
   kind: "subscription";
   name: string;
@@ -388,4 +428,20 @@ export function intentGroupReadsDelete(args: { source_id?: string; chat_id: stri
 
 export function intentGroupReadsSettingsPut(args: { source_id?: string; enabled: boolean }): Promise<FollowedGroups> {
   return call("/api/v1/intent_group_reads/settings_put", args);
+}
+
+export function intentRecognitionsPreview(args: IntentRecognitionRange): Promise<IntentRecognitionPreview> {
+  return call("/api/v1/intent_recognitions/preview", args);
+}
+
+export function intentRecognitionsStart(args: IntentRecognitionRange): Promise<{ recognition: IntentRecognition }> {
+  return call("/api/v1/intent_recognitions/start", args);
+}
+
+export function intentRecognitionsList(args: { source_id?: string; limit?: number } = {}): Promise<IntentRecognitions> {
+  return call("/api/v1/intent_recognitions/list", args);
+}
+
+export function intentRecognitionsSettingsPut(args: { enabled: boolean }): Promise<IntentRecognitions> {
+  return call("/api/v1/intent_recognitions/settings_put", args);
 }
