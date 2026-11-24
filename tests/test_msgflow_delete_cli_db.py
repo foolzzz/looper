@@ -22,7 +22,7 @@ def test_cli_previews_cancels_and_then_deletes_one_message(tmp_path, monkeypatch
     async def seed(url):
         conn = await asyncpg.connect(url)
         try:
-            source = await store.save_source("synthetic", {"bridge_dir": str(directory), "bridge_start_from": "beginning"}, db=conn)
+            source = await store.save_source("synthetic", {"ingest_mode": "bridge", "bridge_dir": str(directory), "bridge_start_from": "beginning"}, db=conn)
         finally:
             await conn.close()
         from looper.db.connection import init_pool, close_pool

@@ -1026,7 +1026,10 @@ async def _run_agent_system_watched(
             wait_service = WaitService(bus=bus, has_planner=task_router.has_planner, dashboard_url=dashboard_url, drain=drain)
             from . import completion_events
             completion_events.set_scheduler(scheduler)
-            source_service = SourceService(drain=drain, own_apps=own_bot_app_ids)
+            from .message_collect_lark import LarkUserCollector
+            from .message_stream_alerts import SourceAlerts
+            source_service = SourceService(drain=drain, own_apps=own_bot_app_ids,
+                collector_backend=LarkUserCollector(), alerts=SourceAlerts(registry.post))
             intent_push_service = IntentPushService(registry, drain=drain)
             recognition_service = intent_recognition.IntentRecognitions(
                 registry, runtime_root=runtime_root, claude_bin=claude_bin, drain=drain)
@@ -1165,6 +1168,7 @@ async def _run_agent_system_watched(
                 loop_watch=loop_watch,
             )
             http_server._memory_writer = memory_writer
+            http_server._source_service = source_service
             http_server._memory_drafter = memory_drafter
         fence.http_server = http_server
         with startup.measure("http"):

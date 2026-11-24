@@ -35,8 +35,22 @@ vi.mock("@/pages/agent-history", async (original) => ({
 }));
 vi.mock("@/pages/tasks", () => ({ TasksPage: ({ query }: { query: string }) => <div>Tasks {query}</div> }));
 vi.mock("@/pages/settings", () => ({ SettingsPage: ({ sub }: { sub: string }) => <div>Settings {sub}</div> }));
+vi.mock("@/pages/message-stream", () => ({ MessageStreamPage: ({ query }: { query?: string }) => <div>Messages {query ?? ""}</div> }));
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
+
+it("opens explicit collection query without changing the default messages page", async () => {
+  const host = document.createElement("div");
+  const root = createRoot(host);
+  try {
+    window.history.replaceState(null, "", "#messages?collection=synthetic-source");
+    await act(async () => root.render(<App />));
+    expect(host.textContent).toContain("Messages collection=synthetic-source");
+    await act(async () => { window.location.hash = "#messages"; window.dispatchEvent(new Event("hashchange")); });
+    expect(host.textContent).toContain("Messages ");
+    expect(host.textContent).not.toContain("collection=");
+  } finally { act(() => root.unmount()); }
+});
 
 it("opens #todo directly with attention off without requesting a summary", async () => {
   let resolveSettings!: (settings: { enabled: boolean }) => void;
