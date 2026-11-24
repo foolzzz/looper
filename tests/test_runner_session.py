@@ -3,6 +3,7 @@ import asyncio
 from dataclasses import replace
 from types import SimpleNamespace
 from typing import get_args
+from unittest.mock import Mock
 
 import pytest
 
@@ -37,7 +38,7 @@ async def opened(tmp_path, bridge, reader, writer, *, changes=None, env=None, re
         if not bridge._error and lease.session_id in bridge.sessions:
             await bridge.close_session(lease.session_id)
     lease = SimpleNamespace(bridge=bridge, runner_id="fake-1", valid=True, session_id="s",
-                            release=release)
+                            release=release, wake_tree=Mock())
     async def open_session(params):
         return await bridge.open_session({**params, "session_key": "private", "home": str(tmp_path), "state_dir": str(tmp_path)})
     lease.open_session = open_session
@@ -111,6 +112,7 @@ def test_multiturn_charge_trace_and_cleared_context(tmp_path):
             events, traces = [], []
             for index in (1, 2):
                 task, turn = await begin(session, reader, writer, events)
+                assert session._lease.wake_tree.call_count == index
                 traces.append(turn["trace_id"])
                 await charged(reader, writer, turn, index)
                 await settle(writer, turn)
