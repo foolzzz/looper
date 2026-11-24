@@ -112,6 +112,9 @@ def _run_view(row):
 
 
 async def _source_view(source):
+    if source["ingest_mode"] == "collect":
+        from ...db.message_collection import collector_source
+        source = await collector_source(source["id"])
     stats = await store.status_row(source["id"])
     runs = await store.list_runs(source["id"], limit=1)
     last = runs[0] if runs else None
@@ -296,7 +299,11 @@ async def run(server, operation, arguments, principal, headers):
         return await confirm_deletion(source_id, target, arguments["confirmation_token"], **kwargs)
     fields = _check_configuration(arguments, existing)
     fields.setdefault("name", existing["name"] if existing else "Lark messages")
-    return await _source_view(await store.save_source(source_id, fields))
+    from ...db.message_collection import CollectionConflict
+    try:
+        return await _source_view(await store.save_source(source_id, fields))
+    except CollectionConflict as exc:
+        raise OpError(ErrorCode.CONFLICT, str(exc)) from None
 
 
 async def impact(server, operation, arguments, principal, headers):

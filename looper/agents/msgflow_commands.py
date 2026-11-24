@@ -87,7 +87,11 @@ async def _import(database_url: str, *, source_id: str | None, days: int, dry_ru
         source = found[0]
         if not source["bridge_dir"]:
             return 1, f"source {source['id']} has no bridge directory to import from"
-        report = await run_bridge_pass(source, days=days, dry_run=dry_run, own_apps=await own_bot_app_ids())
+        from ..db.message_collection import CollectionConflict
+        try:
+            report = await run_bridge_pass(source, days=days, dry_run=dry_run, own_apps=await own_bot_app_ids())
+        except CollectionConflict:
+            return 1, f"source {source['id']} is in collect mode; switch to bridge before importing"
         if report.status == "skipped_busy":
             return 1, f"source {source['id']} is being written by another pass; try again in a moment"
         return (0 if report.status in ("ok", "partial") else 1), format_report(report, days=days, dry_run=dry_run, per_file=per_file)
@@ -571,6 +575,9 @@ def why_message(args: Any, load_ops: Any) -> int:
 
 
 def run(args: Any, load_ops: Any) -> int:
+    if args.msgflow_command == "parity":
+        from .message_stream_parity import run_cli
+        return run_cli(args, load_ops)
     if args.msgflow_command == "why":
         return why_message(args, load_ops)
     if args.msgflow_command == "delete":

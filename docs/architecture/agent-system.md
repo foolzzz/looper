@@ -5942,14 +5942,14 @@ See the [wait-step RFC](rfcs/plan-wait-step-v0.zh-CN.md).
 
 ### Message stream
 
-Looper can keep the messages of an outside collector in its own database
-([RFC](rfcs/message-stream-v0.zh-CN.md), `ingest_mode = bridge`). Only
-[subscriptions](#subscriptions-a-message-stream-on-a-time-rule) read them: no
-agent tool or prompt mentions the stream. With no source (the default), the server
-does one query per tick. Existing sources run daily retention even when off.
+Looper can bridge an outside collector's files or explicitly collect user messages
+into the same event sequence ([RFC](rfcs/message-stream-v0.zh-CN.md)). Existing
+[subscriptions](#subscriptions-a-message-stream-on-a-time-rule) and extraction consumers read them: no
+agent tool or prompt mentions the stream. With no source (the default), no
+collector task or metadata is created and no user CLI runs. Existing sources run daily retention even when off.
 
 - **Source** (`event_sources`): one row per account. `ingest_mode` is `off`,
-  `bridge` or `collect` (`collect` is not written yet); a bridged source names
+  `bridge` or `collect`; a bridged source names
   the collector's directory (`bridge_dir`, holding `chats/<chat_id>.ndjson`, with
   `chats.json` and `users.json` for names) and a time rule (default every two
   minutes). `user_open_id` is the user whose mentions are marked `mentions_me`;
@@ -6031,8 +6031,55 @@ does one query per tick. Existing sources run daily retention even when off.
   That suffix cannot match a schema-change dump (`looper-<database>-<stamp>.dump`),
   so each rotation deletes only its own files. Stopping the service terminates
   the daily `pg_dump`, kills it if it is still running, and reaps it.
-- **Not yet:** the collector. Lark and Telegram commands do not change; this
-  management surface is operator-only and adds no model-visible tools or prompts.
+- **Collection** (`message_collect.py`, migration `message_collection`, order
+  1950) is opt-in. Its own default ten-minute cron has a persistent fire slot
+  and generation, independent of the bridge rule. Each source runs in a background
+  task, with the same writer lock, serial read-only CLI calls, a 420-second
+  deadline and at most 20 seconds per call. Auth and bound identity are checked
+  before message reads. Search uses hourly slices; complete chat/thread reads
+  atomically commit events, inclusive timestamp/id cursors and independent
+  observations. A rotating sweep retries missed replies and failed chats; a
+  daily listing refreshes discovery. Partial work retains debt and never jumps
+  its watermark past a failed slice. Bot catch-up's SQLite debt is separate.
+- **Operator controls** are `message_collection.get`, `update`, `mode_update`
+  and `run_now`, also available through the generated CLI. Settings alone never
+  enable collection. Switching requires an explicit profile, a bound identity,
+  the expected generation and `bridge_stopped=true`. While holding the writer
+  lock it freezes a stopped bridge directory's previous 24 hours, verifies all
+  reference IDs were already committed, and changes mode and reference in one
+  transaction. Off/bridge rollback changes only `ingest_mode`, retaining file
+  offsets, canonical events and every consumer cursor. Imports and stale bridge
+  passes cannot write after collection takes ownership. Lark/Telegram receive
+  commands and model-visible tools/prompts stay unchanged.
+- **Independent parity** stores identities and container coverage in
+  `source_parity_sessions`, `source_parity_members` and `source_parity_coverage`;
+  it stores no message text, names or body hashes. Duplicate canonical events
+  still contribute collect observations. Complete coverage and zero identity/set
+  differences yield `matched`; complete differences yield `drift`; missing or
+  invalid evidence yields `incomplete`. Empty matches are explicitly unproven.
+  Deletes remove both sides' evidence in the deletion transaction and invalidate
+  affected sessions. Unresolved drift survives retention and rollback.
+  `looper msgflow parity --source ID [--session ID] [--json] [--limit N]
+  [--cursor TOKEN]` reads a consistent stored snapshot only; it never reads an
+  account, repairs data or changes an alert. IDs and sequence boundaries are
+  decimal strings; buckets page by chat and UTC hour while totals cover the
+  whole window. Exit codes: 0 matched, 1 drift, 2 usage, 3 pending/incomplete,
+  6 unavailable database or migration.
+- **Source alerts** require `alerts_enabled`. Durable episodes cover drift,
+  collection failure, stale at 60 minutes, missing/expired or changed identity,
+  expiry within 48 hours and three consecutive partial runs. Open and recovery
+  have independent stable keys and claimed send states. Notices use the existing
+  channel registry as the bot, only to a confirmed operator DM. With delivery
+  policy enabled they use `message_stream_alert` / normal urgency, respecting
+  quiet hours and the cap; deferred notices use the existing morning digest.
+  Unknown sends are never automatically retried. Needs you merges active source
+  problems into deliveries, retaining old catch-up items. Active episodes do not
+  age out at 72 hours; recovered unknown sends do. A rollback link opens
+  `#messages?collection=ID`; ordinary off/bridge pages make no collection request.
+  Rolling-24-hour sweep ratios count newly inserted IDs; a zero denominator is
+  unknown. The CLI flags were checked against offline help; live user-interface
+  envelopes, limits, scope and real cutover remain unverified. Validation uses
+  local CLI/channel/model stand-ins only.
 
 ### Subscriptions: a message stream on a time rule
 
@@ -8149,7 +8196,8 @@ PostgreSQL is a hard startup dependency. All data paths:
 | `task_user_gate_messages` | A gate's discussion, oldest first: the user's messages (`message`, `end`), the Planner's replies and code's notes (`opened`, `updated`, `reminder`, `cancelled`, `closed`, `resumed`, `error`), with `via`, the option a button chose, in a group chat the author, and for a user's message `from_operator` (whether the operator wrote it in their own turn, decided by code as it is stored; NULL: not known) |
 | `task_plans` | A task's plan, one row per task: `plan_id`, `status` (`planning`, `executing`, `verifying`, `stopping`, `completed`, `failed`), `correlation_id`, `origin_channel_id`, `final_summary`, `fail_reason`, and with step workspaces `start_branch` and `start_commit` (where the branch was when the task dispatched its first step; `''` otherwise); replaced when the task is planned again |
 | `subscriptions`, `subscription_runs` | A subscription's stream and what each of its runs read and made ([Subscriptions](#subscriptions-a-message-stream-on-a-time-rule)): the schedule's source, filter, window limits, rendering, quiet word, header, `cursor_seq` and `target_confirmed_at`; per run, the window (`from_seq`, `to_seq`), the counts, the processor's record, the `outcome`, the output and its notification |
-| `event_sources`, `source_chats`, `source_threads`, `source_people`, `source_runs`, `source_events`, `source_deletions` | The message stream ([Message stream](#message-stream)): a source and its ingest mode, directory, rule and `committed_seq`; its chats (kind, name, inclusion, `bridge_*` file state); thread cursors and people names (not used yet); one row per ingest run with its counts; and the events, each unique per source by `external_id`, with its `seq`, send time, `text`, raw `body` and `origin` |
+| `event_sources`, `source_chats`, `source_threads`, `source_people`, `source_runs`, `source_events`, `source_deletions` | The message stream ([Message stream](#message-stream)): a source and its ingest mode, directory, rule and `committed_seq`; chats, bridge offsets, chat/thread cursors, people names and ingest-run counts; unique events per source and `external_id`, with their `seq`, send time, `text`, raw `body` and `origin` |
+| `source_collection_settings`, `source_parity_sessions`, `source_parity_members`, `source_parity_coverage`, `source_stream_alerts` | Opt-in collector settings/fire slots, frozen reference windows and independent identity/coverage evidence, and durable alert episodes with separate open/recovery delivery claims |
 | `step_workspaces` | A step's git worktree ([Step workspaces](#step-workspaces)): `task_id`, `step_id` (both going with the task or step), `repo_dir` and `subdir` (the task directory in it), `target_branch`, `path`, `branch`, `base_commit`, `checkpoint`, `result_commit`, `merge_commit`, `state` (`active`, `merging`, `merged`, `unmerged`, `discarded`), `merge_error` (required when `unmerged`) with `merge_files`, `detail`, `links` (the paths linked back to the task directory's), `removed_at` (its directory and branch are gone); one in use (`active` or `merging`) per step |
 | `agent_sessions` | The session each resident agent resumes: `manager` or `planner-<task_id>`, its `session_id`, `session_totals`, the `runtime_type` and `provider_id` it belongs to and the `profile_id` that ran it last (`NULL` runtime: before Agent Profiles, Claude Code; `NULL` provider: before providers were recorded, Claude Code's own login), and `clean_start` (the user dropped the session with `/new`: the next one starts without a resume brief) |
 | `manager_sessions` | The default Manager's group (`group:`) and other-sender direct-chat (`dm:`) sessions with [session routing](#manager-session-routing) on, keyed by `(manager_id, session_key)` (`session_key` = `kind:channel_id:chat`): the same session fields as `agent_sessions`, `context_tokens` and `last_turn_cost_usd` (for session budgets), and `last_active_at`. `main` stays in `agent_sessions` |

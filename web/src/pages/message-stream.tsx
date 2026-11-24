@@ -6,6 +6,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Switch } from "@/components/ui/switch";
 import { LeadsTab } from "@/components/leads-tab";
+import { MessageCollectionStatus } from "@/components/message-collection-status";
 import { TabStrip } from "@/components/tab-strip";
 import { LABEL, SELECT } from "@/components/registry-ui";
 import { leadsSettingsGet } from "@/lib/api-leads";
@@ -116,7 +117,8 @@ function StatusCard({ source, busy, onSwitch }: { source: MessageStreamSource; b
       </CardHeader>
       <CardContent className="space-y-4">
         <p className="text-sm text-muted-foreground">
-          {health.note} Mode: {source.ingest_mode}, every pass on <span className="font-mono">{source.cron}</span> ({source.timezone}).
+          {source.ingest_mode === "collect" ? "进程内用户消息采集已启用；登录、运行时间规则和完整性见采集与对账面板。" :
+            <>{health.note} Mode: {source.ingest_mode}, every pass on <span className="font-mono">{source.cron}</span> ({source.timezone}).</>}
         </p>
         <dl className="grid grid-cols-2 gap-x-6 gap-y-4 sm:grid-cols-4">
           <Fact label="Messages stored" value={source.events.toLocaleString()} hint={`${source.events_last_hour.toLocaleString()} in the last hour`} />
@@ -125,7 +127,7 @@ function StatusCard({ source, busy, onSwitch }: { source: MessageStreamSource; b
           <Fact label="Chats" value={source.chats.toLocaleString()}
             hint={`${source.chats_excluded} excluded · ${source.chats_failing} failing`} />
         </dl>
-        <p className="break-all font-mono text-xs text-muted-foreground">{source.bridge_dir}</p>
+        {source.ingest_mode !== "collect" && <p className="break-all font-mono text-xs text-muted-foreground">{source.bridge_dir}</p>}
         <dl className="grid grid-cols-2 gap-x-6 gap-y-4 sm:grid-cols-4">
           <Fact label="Raw storage" value={formatBytes(source.body_bytes)} hint={`${formatBytes(source.body_bytes_last_day)} added in 24 h`} />
           <Fact label="Daily events" value={source.events_last_day.toLocaleString()} hint="Ingested in the last 24 h" />
@@ -443,7 +445,7 @@ function WhyLookup() {
 }
 
 /** The message stream: one source, whether it is being read, how current it is, and its recent passes. */
-export function MessageStreamPage() {
+export function MessageStreamPage({ query = "" }: { query?: string }) {
   const [sources, setSources] = useState<MessageStreamSource[] | null>(null);
   const [runs, setRuns] = useState<MessageStreamRun[]>([]);
   const [error, setError] = useState("");
@@ -489,6 +491,7 @@ export function MessageStreamPage() {
   }, []);
 
   const source = sources?.[0] ?? null;
+  const collection = new URLSearchParams(query).get("collection") || (source?.ingest_mode === "collect" ? source.source_id : null);
   return (
     <div className="mx-auto max-w-4xl space-y-5">
       <div className="space-y-1">
@@ -505,6 +508,7 @@ export function MessageStreamPage() {
         </TabStrip>
       )}
       {leadsOn && tab === "leads" ? <LeadsTab /> : null}
+      {collection && <MessageCollectionStatus sourceId={collection} />}
       {(!leadsOn || tab === "stream") && error && (
         <div role="alert" className="flex flex-wrap items-center gap-3 text-sm text-destructive [overflow-wrap:anywhere]">
           <span>{sources ? "The last action failed" : "Cannot load the message stream"} ({error})</span>
