@@ -2882,6 +2882,13 @@ durable state and an operator-only `providers.limits_clear` override. Nested
 runs borrow a running parent's slot. A frozen account sends each waiting user
 message one code-written reset-time status, keeps it pending and answers after
 recovery; `/stop` cancels the wait even on a runtime without interrupt support.
+The notice claim is saved with the pending message, so replay after restart does
+not repeat it. A quota probe prefers another waiting turn over a Manager user
+message. If a user probe fails on quota before producing text or tool calls, its
+failed run is recorded and the message requeues without an error reply. Turns
+waiting for a slot do not hold up draining; their messages remain pending.
+With admission on, model turns wait in their session worker even when lanes are
+off, preserving user order while the message loop delivers code-only notices.
 The status is not stored in conversation history or sent to the model. Platform
 explorers are not admitted yet. The switch defaults off and refuses activation
 while failure typing is off. The independent cost guard can still hold runs
