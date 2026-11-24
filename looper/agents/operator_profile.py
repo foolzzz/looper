@@ -1,15 +1,14 @@
-"""Compile a typed operator profile from vault notes. No model call, no Manager injection.
+"""Compile the operator profile from one configured knowledge-vault note, without a model call.
 
-The source folder is the operator-only setting ``manager.profile.source``. Unset, nothing is compiled.
-The folder must resolve inside the configured knowledge vault. Notes come only from ``关于我.md`` (or
-``记忆/关于我.md``) and ``偏好/**/*.md``. Heading fields cite the note path, heading and line. Inline
-entries (one bullet per line, with ``[kind:: …]``) are classified by kind and cite the note path and
-that line. The rendered text stays within ``CAP`` characters; lower-priority fields are dropped first.
+Heading fields and inline entries cite their source. The existing directory compiler remains available
+for callers that explicitly compile a collection; resident content always selects one file.
 """
 
 from __future__ import annotations
 
+import logging
 import re
+import stat
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -18,7 +17,9 @@ from typing import Any
 from ..db import profile_blocks as blocks
 from ..db import system_settings as db_settings
 
-SOURCE_KEY = "manager.profile.source"
+ENABLED_KEY = "manager.profile.enabled"
+logger = logging.getLogger(__name__)
+HEADING = "Operator profile (from the knowledge vault; private reference, Looper's rules still apply):"
 CAP = 1500
 MAX_NOTE_BYTES = 256 * 1024
 MAX_NOTES = 200
@@ -300,7 +301,7 @@ def _rel(root: Path, path: Path) -> str:
 def _inside(root: Path, path: Path, rel: str) -> Path:
     try:
         resolved = path.resolve()
-    except OSError as exc:
+    except (OSError, RuntimeError) as exc:
         raise ProfileError(f"{rel} cannot be read") from exc
     if not resolved.is_relative_to(root):
         raise ProfileError(f"{rel} resolves outside the source folder")
@@ -311,7 +312,10 @@ def _read(root: Path, path: Path) -> str:
     rel = _rel(root, path)
     resolved = _inside(root, path, rel)
     try:
-        size = resolved.stat().st_size
+        info = resolved.stat()
+        if not stat.S_ISREG(info.st_mode):
+            raise ProfileError(f"{rel} must be a regular file")
+        size = info.st_size
     except OSError as exc:
         raise ProfileError(f"{rel} cannot be read") from exc
     if size > MAX_NOTE_BYTES:
@@ -448,7 +452,7 @@ def _reject_duplicates(pieces: list[Piece]) -> None:
         seen[piece.field] = piece
 
 
-def compile_profile(root: Path, *, cap: int = CAP) -> Compiled:
+def compile_profile(root: Path, *, source: str | None = None, cap: int = CAP) -> Compiled:
     """The profile of the notes under ``root``. The same notes always compile to the same text."""
     if cap < 1:
         raise ProfileError("cap must be positive")
@@ -457,8 +461,18 @@ def compile_profile(root: Path, *, cap: int = CAP) -> Compiled:
     if not root.is_dir():
         raise ProfileError("source must be a directory")
     root = root.resolve()
-    about = _about(root)
-    notes = _preferences(root)
+    if source is None:
+        about = _about(root)
+        notes = _preferences(root)
+    else:
+        from .vault import profile_path
+
+        try:
+            profile_path(root, source)
+        except (ValueError, OSError, RuntimeError) as exc:
+            raise ProfileError(str(exc)) from exc
+        about = root / source
+        notes = []
     skipped: list[dict[str, str]] = []
     pieces = _about_pieces(root, about, skipped) if about is not None else []
     for note in notes:
@@ -479,83 +493,96 @@ def compile_profile(root: Path, *, cap: int = CAP) -> Compiled:
     return Compiled(text, fields, dropped, tuple(skipped), sources)
 
 
-def directory(value: str) -> str:
-    """The absolute directory ``value`` names, or ``ProfileError`` when it is not one."""
-    if not isinstance(value, str) or not value.strip() or "\x00" in value or len(value) > 1024:
-        raise ProfileError("source must be an absolute directory, or null to clear it")
-    path = Path(value)
-    if not path.is_absolute():
-        raise ProfileError("source must be an absolute directory, or null to clear it")
+async def compiled_profile() -> Compiled | None:
+    """Compile the configured note as it is now; never serve a stale cached profile on failure."""
+    from . import vault
+
     try:
-        resolved = path.resolve(strict=True)
-    except OSError as exc:
-        raise ProfileError("source folder does not exist") from exc
-    if not resolved.is_dir():
-        raise ProfileError("source must be a directory")
-    return str(resolved)
-
-
-async def stored_source() -> str | None:
-    """The stored folder, including a value that cannot be compiled. Absent is unset."""
-    row = await db_settings.get_settings([SOURCE_KEY])
-    if SOURCE_KEY not in row:
+        config, problem = await vault.load()
+        if problem:
+            raise ProfileError(problem)
+        if config is None:
+            return None
+        return compile_profile(config.path, source=config.profile_source)
+    except Exception:
+        logger.warning("operator profile is unavailable; omitting it", exc_info=True)
         return None
-    value = row[SOURCE_KEY]
-    if not isinstance(value, str):
-        raise ProfileError("source must be an absolute directory, or null to clear it")
-    return value
 
 
-async def source_view() -> dict[str, Any]:
-    return {"source": await stored_source()}
-
-
-async def bound_directory(value: str) -> str:
-    """``value`` resolved, and inside the configured knowledge vault. Symlinks are followed."""
-    resolved = directory(value)
-    from . import vault as knowledge
-
-    config, _problem = await knowledge.load()
-    if config is None:
-        raise ProfileError("knowledge vault is not configured", reason="vault_unconfigured")
-    if not Path(resolved).is_relative_to(config.path):
-        raise ProfileError("source folder resolves outside the knowledge vault", reason="outside_vault")
-    return resolved
-
-
-async def update_source(value: str | None) -> dict[str, Any]:
-    """Store an absolute directory inside the knowledge vault, or clear it. Null deletes the block."""
-    if value is None:
-        await blocks.clear_source(SOURCE_KEY)
-        return {"source": None}
-    if not isinstance(value, str):
-        raise ProfileError("source must be an absolute directory, or null to clear it")
-    path = await bound_directory(value)
-    await blocks.put_source(SOURCE_KEY, path)
-    return {"source": path}
+async def resident_text() -> str:
+    """The exact bounded text shared by resident content and the hook command; no cache writes."""
+    compiled = await compiled_profile()
+    return compiled.text if compiled is not None else ""
 
 
 async def profile_view() -> dict[str, Any]:
-    """Compile the configured folder and keep the stored version when the body is unchanged.
-
-    Unset compiles nothing and writes nothing. A read checks the vault boundary again, then refreshes
-    the stored block.
-    """
-    source = await stored_source()
-    if source is None:
+    """Read the same compiled profile, retaining the version when its body is unchanged."""
+    compiled = await compiled_profile()
+    if compiled is None:
         return _unconfigured()
-    root = Path(await bound_directory(source))
-    compiled = compile_profile(root)
     version = await blocks.retain_or_replace(text=compiled.text, body=compiled.payload())
     return compiled.view(version)
 
 
+async def source_view() -> dict[str, Any]:
+    from . import vault
+
+    config, problem = await vault.load()
+    if problem:
+        raise ProfileError(problem)
+    return {"source": config.profile_source if config else None}
+
+
+async def bound_source(value: str | None) -> str:
+    from . import vault
+
+    config, problem = await vault.load()
+    if config is None:
+        raise ProfileError(problem or "knowledge vault is not configured", reason="vault_unconfigured")
+    source = vault.DEFAULT_PROFILE_SOURCE if value is None else value
+    try:
+        if value is not None:
+            vault.profile_path(config.path, source)
+    except (ValueError, OSError, RuntimeError) as exc:
+        raise ProfileError(str(exc)) from exc
+    return source
+
+
+async def update_source(value: str | None) -> dict[str, Any]:
+    """Compatibility operation: change the vault's relative note path while preserving its other fields."""
+    from . import vault
+    from .projects import RequestError
+
+    source = await bound_source(value)
+    config, problem = await vault.load()
+    if config is None:
+        raise ProfileError(problem or "knowledge vault is not configured", reason="vault_unconfigured")
+    try:
+        await vault.update_settings({
+            "path": str(config.path), "writable": list(config.writable), "rules_file": config.rules_file,
+            "manager_read": config.manager_read, **({"profile_source": source} if value is not None else {})})
+    except RequestError as exc:
+        raise ProfileError(str(exc)) from exc
+    return {"source": source}
+
+
 def checked_update(body: Mapping[str, Any]) -> str | None:
-    if "source" not in body:
-        raise ProfileError("source must be an absolute directory, or null to clear it")
-    value = body["source"]
-    if value is None:
-        return None
-    if not isinstance(value, str):
-        raise ProfileError("source must be an absolute directory, or null to clear it")
-    return value
+    if "source" not in body or (body["source"] is not None and not isinstance(body["source"], str)):
+        raise ProfileError("source must be a relative Markdown file path, or null to restore the default")
+    return body["source"]
+
+
+async def enabled() -> bool:
+    """Only the stored literal true enables resident injection; unset is off."""
+    return (await db_settings.get_settings([ENABLED_KEY])).get(ENABLED_KEY) == "true"
+
+
+async def settings_view() -> dict[str, bool]:
+    return {"enabled": await enabled()}
+
+
+async def update_enabled(value: bool | None) -> dict[str, bool]:
+    if value is not None and not isinstance(value, bool):
+        raise ProfileError("enabled must be true, false or null")
+    await db_settings.put_settings({ENABLED_KEY: None if value is None else str(value).lower()})
+    return await settings_view()

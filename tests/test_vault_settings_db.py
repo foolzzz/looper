@@ -25,7 +25,7 @@ def test_vault_settings_store_read_back_and_clear(tmp_path: Path, monkeypatch: p
         view = await vault.update_settings({"path": str(tmp_path), "writable": ["codex-mem/"],
                                             "rules_file": "rules.md"})
         assert view == {"configured": True, "path": str(tmp_path.resolve()), "writable": ["codex-mem"],
-                        "rules_file": "rules.md", "manager_read": False, "git": False, "problem": None}
+                        "rules_file": "rules.md", "manager_read": False, "profile_source": "关于我.md", "git": False, "problem": None}
         assert (await system_settings.get_settings([vault.SETTING_KEY]))[vault.SETTING_KEY]
         assert await vault.settings_view() == view
         cleared = await vault.update_settings({"path": None})
