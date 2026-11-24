@@ -6,7 +6,8 @@ import { Sidebar } from "@/components/sidebar";
 import { WaitingGatesProvider } from "@/lib/use-waiting-gates";
 import { fetchGates, fetchOverview, fetchProjectsList, type GateList } from "@/lib/api";
 import { intentsSettingsGet } from "@/lib/api-leads";
-import { attentionSettingsGet, fetchAttention } from "@/lib/api-attention";
+import { attentionSettingsGet, fetchAttention, type AttentionSummary } from "@/lib/api-attention";
+import { V1Error } from "@/lib/v1";
 import { useLedger } from "@/lib/use-ledger";
 
 vi.mock("@/lib/api", async (original) => ({
@@ -14,7 +15,8 @@ vi.mock("@/lib/api", async (original) => ({
   fetchGates: vi.fn(), fetchProjectsList: vi.fn(), fetchOverview: vi.fn(),
 }));
 vi.mock("@/lib/api-leads", () => ({ intentsSettingsGet: vi.fn() }));
-vi.mock("@/lib/api-attention", () => ({ attentionSettingsGet: vi.fn(), fetchAttention: vi.fn() }));
+vi.mock("@/lib/api-attention", () => ({ attentionSettingsGet: vi.fn(), fetchAttention: vi.fn(),
+  isAttentionOff: (err: unknown) => err instanceof V1Error && err.status === 409 }));
 vi.mock("@/lib/use-ledger", () => ({ useLedger: vi.fn() }));
 vi.mock("@/components/sign-out", () => ({ SignOut: () => null }));
 vi.mock("@/components/project-dialog", () => ({ ProjectDialog: () => <div role="dialog" /> }));
@@ -41,6 +43,12 @@ async function render() {
     );
   });
 }
+const attentionSummary = (total: number): AttentionSummary => ({
+  read_at: "2026-11-24T00:00:00Z", total,
+  sections: [{ kind: "gates", state: "ok", count: total, items: [], error: null }],
+});
+const todoButton = () => [...host.querySelectorAll("nav button")].find((b) => b.textContent?.includes("Needs you"));
+const todoBadge = () => todoButton()?.querySelector("[aria-label]");
 const gatesButton = () => [...host.querySelectorAll("nav button")].find((b) => b.textContent?.includes("User Gates"))!;
 
 beforeEach(() => {
@@ -143,21 +151,101 @@ describe("Sidebar Intents item", () => {
 });
 
 describe("Sidebar Needs you item", () => {
-  it("reads the setting without requesting the summary, and opens the enabled page", async () => {
+  it("skips the summary while off, and opens the enabled page", async () => {
     await render();
     expect(host.textContent).not.toContain("Needs you");
     expect(attentionSettingsGet).toHaveBeenCalledTimes(1);
     expect(fetchAttention).not.toHaveBeenCalled();
     vi.mocked(attentionSettingsGet).mockResolvedValue({ enabled: true });
+    vi.mocked(fetchAttention).mockResolvedValue(attentionSummary(0));
     act(() => root.unmount());
     root = createRoot(host);
     await render();
     const labels = [...host.querySelectorAll("nav")[0].querySelectorAll("button")].map((b) => b.textContent ?? "");
     expect(labels.slice(0, 3)).toEqual(["Dashboard", "Needs you", "Chat"]);
-    expect(fetchAttention).not.toHaveBeenCalled();
+    expect(fetchAttention).toHaveBeenCalledTimes(1);
     const button = [...host.querySelectorAll("nav button")].find((item) => item.textContent === "Needs you")!;
     act(() => (button as HTMLButtonElement).click());
     expect(onNavigate).toHaveBeenCalledWith("todo");
+  });
+
+  it.each([0, 1, 7, 150])("shows the summary total %s, hiding zero and capping large counts", async (total) => {
+    vi.mocked(attentionSettingsGet).mockResolvedValue({ enabled: true });
+    vi.mocked(fetchAttention).mockResolvedValue(attentionSummary(total));
+    await render();
+    if (total === 0) expect(todoBadge()).toBeNull();
+    else {
+      expect(todoBadge()?.textContent).toBe(total > 99 ? "99+" : String(total));
+      expect(todoBadge()?.getAttribute("aria-label")).toBe(`${total} 项待你处理`);
+    }
+  });
+
+  it("shows an unknown count while loading or when the summary fails", async () => {
+    vi.mocked(attentionSettingsGet).mockResolvedValue({ enabled: true });
+    let reject!: (err: Error) => void;
+    vi.mocked(fetchAttention).mockReturnValue(new Promise((_, fail) => { reject = fail; }));
+    await render();
+    expect(todoBadge()?.textContent).toBe("?");
+    await act(async () => { reject(new Error("unavailable")); });
+    expect(todoBadge()?.textContent).toBe("?");
+  });
+
+  it.each(["error", "unknown"] as const)("shows ? for an incomplete summary with a %s section", async (state) => {
+    vi.mocked(attentionSettingsGet).mockResolvedValue({ enabled: true });
+    const summary = attentionSummary(3);
+    summary.sections.push({ kind: "logins", state, count: 0, items: [], error: null });
+    vi.mocked(fetchAttention).mockResolvedValue(summary);
+    await render();
+    expect(todoBadge()?.textContent).toBe("?");
+  });
+
+  it("refreshes every 30 s, clears failed counts, recovers and observes the switch", async () => {
+    vi.mocked(attentionSettingsGet).mockResolvedValue({ enabled: true });
+    vi.mocked(fetchAttention).mockResolvedValue(attentionSummary(3));
+    await render();
+    expect(todoBadge()?.textContent).toBe("3");
+    vi.mocked(fetchAttention).mockRejectedValue(new Error("down"));
+    await act(async () => { await vi.advanceTimersByTimeAsync(30_000); });
+    expect(todoBadge()?.textContent).toBe("?");
+    vi.mocked(fetchAttention).mockResolvedValue(attentionSummary(7));
+    await act(async () => { await vi.advanceTimersByTimeAsync(30_000); });
+    expect(todoBadge()?.textContent).toBe("7");
+    vi.mocked(attentionSettingsGet).mockResolvedValue({ enabled: false });
+    await act(async () => { await vi.advanceTimersByTimeAsync(30_000); });
+    expect(todoButton()).toBeUndefined();
+    expect(fetchAttention).toHaveBeenCalledTimes(3);
+    vi.mocked(attentionSettingsGet).mockResolvedValue({ enabled: true });
+    await act(async () => { await vi.advanceTimersByTimeAsync(30_000); });
+    expect(todoBadge()?.textContent).toBe("7");
+    const calls = vi.mocked(fetchAttention).mock.calls.length;
+    act(() => root.unmount());
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(fetchAttention).toHaveBeenCalledTimes(calls);
+    root = createRoot(host);
+  });
+
+  it("aborts the pending summary on unmount and ignores a late setting read", async () => {
+    vi.mocked(attentionSettingsGet).mockResolvedValue({ enabled: true });
+    vi.mocked(fetchAttention).mockReturnValue(new Promise(() => {}));
+    await render();
+    const signal = vi.mocked(fetchAttention).mock.calls[0][0]!;
+    act(() => root.unmount());
+    expect(signal.aborted).toBe(true);
+    root = createRoot(host);
+    let finish!: (settings: { enabled: boolean }) => void;
+    vi.mocked(attentionSettingsGet).mockReturnValue(new Promise((resolve) => { finish = resolve; }));
+    await render();
+    act(() => root.unmount());
+    await act(async () => { finish({ enabled: true }); });
+    expect(fetchAttention).toHaveBeenCalledTimes(1);
+    root = createRoot(host);
+  });
+
+  it("hides the entry if the switch turns off between the setting and summary reads", async () => {
+    vi.mocked(attentionSettingsGet).mockResolvedValue({ enabled: true });
+    vi.mocked(fetchAttention).mockRejectedValue(new V1Error(409, "conflict", "off"));
+    await render();
+    expect(todoButton()).toBeUndefined();
   });
 
   it("keeps the page hidden when its setting cannot be read", async () => {

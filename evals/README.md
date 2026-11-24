@@ -1303,6 +1303,34 @@ threads is outside it.
 
 ## The processor (`evals/processor`)
 
+### Direct Messages comparison
+
+`--engine messages` runs the intents cases or `--intents-file` against an Anthropic-compatible HTTP endpoint,
+without an agent runtime. It reuses the processor's default system-prompt builder, input wrapper (including
+`--untrusted-fence`), extraction renderer, parser and scoring. The request omits `tools` entirely; no tools execute.
+A disposable PostgreSQL database still supplies the same seeded intent types and role instructions.
+
+```bash
+uv run --python 3.11 --extra test python -m evals.processor --engine messages \
+  --base-url "$MESSAGES_BASE_URL" --model deepseek-flash --api-key-env DEEPSEEK_API_KEY \
+  --pg-url "$LOOPER_EVAL_DATABASE_URL" --cases 'intents_*' --reps 2 \
+  --case-budget-usd 0.10 --total-budget-usd 1.00 --out evals/runs/messages-intents.json
+```
+
+The base URL includes the endpoint's prefix (for example `/anthropic/v1`); the engine appends `/messages`.
+Replace `--cases 'intents_*'` with `--intents-file anonymous.jsonl` for reviewed labels; its windows share the
+case cap and retain counts only. Keys come only from the named environment variable and never enter run files.
+Usage and the frozen prices are recorded using Looper's exact model price entry, or `--prices-file prices.json`
+(a JSON object keyed by model ID, with `input_usd_per_mtok`, `output_usd_per_mtok`, `cache_read_usd_per_mtok`,
+`cache_write_usd_per_mtok`; optional `cache_write_1h_usd_per_mtok`). Unknown prices fail before a request.
+Each request reserves UTF-8 bytes plus 1024 framing tokens at the highest input/cache rate and
+`--max-output-tokens` (default 4096) at the output rate. This conservative bound assumes a byte-fallback tokenizer
+and a server honoring `max_tokens`; insufficient remaining case/total budget stops before sending.
+HTTP errors, timeouts, malformed/partial replies and unknown usage fail the case and stop further calls;
+there are no retries or redirects. This comparison validates model behavior, not a runtime's isolation.
+
+### Runtime comparison
+
 What the [processor](../docs/architecture/agent-system.md#the-processor-runs-with-no-tools) makes of a batch of chat
 messages, on the real path: `looper.agents.processor.run` with the real runtime on a disposable database. The Agent
 Profile comes from a flag: `--register-agent SPEC.json` registers runtime → provider → model → profile from a spec

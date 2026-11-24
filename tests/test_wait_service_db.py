@@ -681,6 +681,7 @@ def test_serve_loads_wait_settings_and_owns_wait_service_lifecycle(
         scheduler_settings, serve, step_workspaces, task_workspaces,
     )
     from looper.agents.ops import planner as planner_ops, room as room_ops, service as manager_ops
+    from looper.agents.llmrec.control import ProxyControl
     from looper.agents.runtimes import codex_login, grok_login
     from looper.db import channel_configs, llm_records, room as db_room, system_settings
     from looper.ops_config import OpsConfig
@@ -767,6 +768,8 @@ def test_serve_loads_wait_settings_and_owns_wait_service_lifecycle(
             (grok_login, "inspect_at_start", None), (read_only_copies, "reclaim_unused", None),
             (db_room, "tasks_keeping_sessions", []), (channel_configs, "get_config", None),
             (serve, "carry_on_tasks", None), (cost_guard, "initialize", None),
+            # Recorder startup owns a real child; this test only checks wait-service composition.
+            (ProxyControl, "at_start", None),
         ):
             monkeypatch.setattr(module, name, AsyncMock(return_value=result))
         monkeypatch.setattr(room, "sweep_run_sessions", lambda *args: None)
@@ -794,15 +797,30 @@ def test_serve_loads_wait_settings_and_owns_wait_service_lifecycle(
         monkeypatch.setattr(waits, "load", load_waits)
         monkeypatch.setattr(scheduler_settings, "load", load_scheduler)
         loop = asyncio.get_running_loop()
-        monkeypatch.setattr(loop, "add_signal_handler", lambda sig, callback: (
-            loop.call_soon(callback) if sig == serve.signal.SIGINT else None))
+        signals: dict[int, Any] = {}
+        ready = asyncio.Event()
+
+        def add_signal_handler(sig: int, callback: Any) -> None:
+            signals[sig] = callback
+            if sig == serve.signal.SIGTERM:
+                ready.set()
+
+        monkeypatch.setattr(loop, "add_signal_handler", add_signal_handler)
         # Keep the Pi and DSH runners off, so this composition starts no runner child.
         ops = OpsConfig(runtime_root=tmp_path, path=tmp_path / "ops.toml",
                         host="127.0.0.1", port=9876, public_url="https://looper.example.com",
                         operator_notes_root=str(tmp_path), database_url=DSN,
                         pi_runtime="cli", dsh_runtime="cli")
-        await asyncio.wait_for(serve._run_agent_system(ops=ops, runtime_root=tmp_path,
-                                                      work_dir=tmp_path), 3)
+        serving = asyncio.create_task(serve._run_agent_system(ops=ops, runtime_root=tmp_path,
+                                                              work_dir=tmp_path))
+        try:
+            # Signal only once startup has installed both handlers; bound each lifecycle phase.
+            await asyncio.wait_for(ready.wait(), 3)
+            signals[serve.signal.SIGINT]()
+            await asyncio.wait_for(serving, 3)
+        finally:
+            serving.cancel()
+            await asyncio.gather(serving, return_exceptions=True)
         assert events[:3] == ["scheduler.load", "waits.load", "waits.created"]
         assert events[events.index("gates.start") + 1] == "waits.start"
         assert events[events.index("gates.stop") + 1] == "waits.stop"
