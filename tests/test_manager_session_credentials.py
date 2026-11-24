@@ -9,6 +9,7 @@ from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock
 
+import httpx
 import pytest
 
 from looper.agents import chat_settings, session_routing
@@ -71,6 +72,58 @@ def test_session_entries_have_distinct_stable_credentials(tmp_path: Path) -> Non
     assert group == ops.server_config(session_key=GROUP)["env"][service.TOKEN_ENV]
     assert ops.authorized(f"Bearer {group}")
     assert ops.server_config()["env"][service.TOKEN_ENV] == "main-token"
+
+
+@pytest.mark.parametrize("session_key", [GROUP, "dm:synthetic-bot:synthetic-sender"])
+def test_session_credentials_cannot_read_operator_v1_domains(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, session_key: str,
+) -> None:
+    from looper.agents.v1_domains import intent_rules, manager_retrieval, message_collection
+
+    private = "PRIVATE_OPERATOR_V1_SENTINEL"
+    reads = []
+    for domain in (manager_retrieval, intent_rules, message_collection):
+        read = AsyncMock(return_value={"private": private})
+        monkeypatch.setattr(domain, "run", read)
+        reads.append(read)
+    operations = (
+        ("manager_retrieval/vault_search", {"query": "synthetic"}),
+        ("manager_retrieval/vault_read", {"path": "synthetic.md"}),
+        ("manager_retrieval/leads_search", {"query": "synthetic"}),
+        ("intent_rules/list", {}),
+        ("intent_rule_hits/list", {}),
+        ("message_collection/get", {"source_id": "synthetic"}),
+    )
+
+    async def run() -> None:
+        ops, _ = _ops(tmp_path)
+        credential = ops.server_config(session_key=session_key)["env"][service.TOKEN_ENV]
+        server = AgentHTTPServer(host="127.0.0.1", port=0, operator_token="synthetic-operator-token",
+                                 runtime_root=tmp_path, manager_ops=ops, web_adapter=SimpleNamespace(),
+                                 supervisor=SimpleNamespace(), task_router=SimpleNamespace())
+        await server.start()
+        try:
+            assert server._port not in (0, 8767)
+            async with httpx.AsyncClient(base_url=f"http://127.0.0.1:{server._port}", trust_env=False) as client:
+                # Each read is reachable with the operator credential, proving the routes are live.
+                for path, arguments in operations:
+                    response = await client.post(f"/api/v1/{path}", json=arguments,
+                                                 headers={"Authorization": "Bearer synthetic-operator-token"})
+                    assert response.status_code == 200, response.text
+                    assert response.json()["result"]["private"] == private
+                before = [read.await_count for read in reads]
+                assert before == [3, 2, 1]
+                for path, arguments in operations:
+                    response = await client.post(f"/api/v1/{path}", json=arguments,
+                                                 headers={"Authorization": f"Bearer {credential}"})
+                    assert response.status_code == 401, (path, response.text)
+                    assert response.json()["error"]["code"] == "unauthorized"
+                    assert private not in response.text
+                assert [read.await_count for read in reads] == before
+        finally:
+            await server.stop()
+
+    asyncio.run(run())
 
 
 @pytest.mark.parametrize("forged", [False, True])

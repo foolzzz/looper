@@ -76,7 +76,6 @@ from ..claude_cli import (
 )
 from .. import admission, turn_admission, session_visibility
 from ..session_visibility import Input as SessionInput
-from ..failures import FailureClass
 from .. import attention, chat_attachments, chat_commands, chat_settings, completion_events, gate_commands, ledger_routing, memory_routing, outbound_hook, status_card, turn_metrics
 from ..turn_metrics import TurnDelivery, TurnTimes, AckKind, ChatKind, ProactiveSource
 from .. import delivery_guard_manager as delivery_guard
@@ -2590,10 +2589,6 @@ class ManagerAgent:
         handling: asyncio.Task[None] | None = None
         session_unsaved = False
 
-        def quota_diagnostic(payload: dict[str, Any]) -> bool:
-            return (admission.probing() and payload.get("type") == "assistant"
-                    and payload.get("error") == "rate_limit")
-
         def observe(payload: dict[str, Any]) -> None:
             nonlocal session_unsaved, model_output
             recorder.account(payload)
@@ -2608,7 +2603,7 @@ class ManagerAgent:
                 if session.session_runtime != "api" or not self._pending_handoff:
                     self._pending_switch = self._pending_handoff = None  # CLI sessions own the prompt at init
                 session_unsaved = True
-            if quota_diagnostic(payload):
+            if turn_admission.quota_diagnostic(payload):
                 return  # Claude's synthetic error text is quota evidence, not model output.
             message = payload.get("message") if payload.get("type") == "assistant" else None
             if isinstance(message, dict):
@@ -2682,7 +2677,7 @@ class ManagerAgent:
                 session_unsaved = False
                 await self._save_session_state()
 
-            if quota_diagnostic(payload):
+            if turn_admission.quota_diagnostic(payload):
                 return  # Keep a failed probe's diagnostic out of the user's streamed answer.
             event_type = payload.get("type")
             # Only the Manager's own turn is the reply; subagent output is internal.
@@ -2733,19 +2728,6 @@ class ManagerAgent:
                             )
                         elif block_type == "thinking":
                             await show("thinking", phase=True, activity="thinking")
-
-        async def retry_quota_probe() -> None:
-            if model_output or token.partial or token.cancel.requested or not admission.probing():
-                return
-            if not admission.quota_probe_failed():
-                # Closing a record bounds its background writes. Classify the captured runtime evidence
-                # before settling even when the record's database writer has not finished yet.
-                cause = recorder.failure_signal()
-                if cause is not None and cause.cls is FailureClass.QUOTA:
-                    await recorder.report_admission(cause)
-                    raise turn_admission.RetryQuotaProbe()
-            if admission.quota_probe_failed():
-                raise turn_admission.RetryQuotaProbe()
 
         try:
             if run.state is not None and run.state_generation != self._state_generation:
@@ -2826,7 +2808,7 @@ class ManagerAgent:
                 output_text="".join(text_parts) or None, result_event=None,
                 error=error, status=ended_by(exc),
             )
-            await retry_quota_probe()
+            await turn_admission.retry_quota_probe(token, recorder, model_output=model_output)
             if admission.probing():
                 self._settle(token)
             if isinstance(exc, TurnBlocked) and task_id:
@@ -2922,7 +2904,7 @@ class ManagerAgent:
             )),
             usage=turn.usage,
         )
-        await retry_quota_probe()
+        await turn_admission.retry_quota_probe(token, recorder, model_output=model_output)
         if settle_on_finish and admission.probing():
             self._settle(token)
         await self._link_turn_task(recorder, ops_turn)
