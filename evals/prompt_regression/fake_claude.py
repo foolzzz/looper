@@ -92,6 +92,7 @@ import select
 import subprocess
 import sys
 import time
+from pathlib import Path
 from typing import Any
 
 # Names the real Claude Code in real mode (``main``).
@@ -576,6 +577,9 @@ def _manager(scenarios_path: str, args: list[str], stdin: _Stdin) -> None:
         for name, arguments in calls:
             if name == "__reply__":
                 reply = arguments["text"]
+                continue
+            if name == "__capture_context__":
+                Path(scenarios_path).with_suffix(".context.txt").write_text(content, encoding="utf-8")
                 continue
             if name == "__context__":
                 request_usage = {"usage": {"input_tokens": arguments["tokens"]}}
