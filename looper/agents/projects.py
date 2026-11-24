@@ -145,6 +145,7 @@ def project_view(row: dict[str, Any]) -> dict[str, Any]:
         "background": row["background"],
         "default_workflow": row.get("default_workflow"),
         **ProjectExecution.from_row(row).view(),
+        **({"memory_lessons": row["memory_lessons"]} if row.get("memory_lessons") is not None else {}),
         "created_at": row["created_at"],
         "updated_at": row["updated_at"],
         "task_count": row.get("task_count", 0),
