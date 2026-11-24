@@ -300,7 +300,8 @@ def _usage_hold(schedule_id: str) -> dict[str, Any] | None:
 
 
 def schedule_view(row: Mapping[str, Any], last_run: dict[str, Any] | None = None, *,
-                  spent_today: float = 0.0, default_timeout: int | None = None) -> dict[str, Any]:
+                  spent_today: float = 0.0, cost_status: str = "known",
+                  default_timeout: int | None = None) -> dict[str, Any]:
     """``default_timeout``: the system default run timeout, for a schedule that follows it."""
     target = {"channel": row["notify_channel"], "chat": row["notify_chat"]} if row.get("notify_channel") else None
     from .schedule_notify import alert_policy
@@ -333,12 +334,14 @@ def schedule_view(row: Mapping[str, Any], last_run: dict[str, Any] | None = None
         "last_success_at": row["last_success_at"], "consecutive_failures": row["consecutive_failures"],
         "created_via": row["created_via"], "created_at": row["created_at"], "updated_at": row["updated_at"],
         "gate_command": row.get("gate_command"), "gate_timeout_seconds": row.get("gate_timeout_seconds"),
-        "daily_budget_usd": row.get("daily_budget_usd"), "notify": row.get("notify") or Notify.FAILURES.value,
+        "daily_budget_usd": row.get("daily_budget_usd"),
+        **({"daily_budget_equivalent_usd": row["daily_budget_equivalent_usd"]}
+           if row.get("daily_budget_equivalent_usd") is not None else {}), "notify": row.get("notify") or Notify.FAILURES.value,
         "notify_format": row.get("notify_format") or NotifyFormat.REPORT.value,
         "user_gates": row.get("user_gates", UserGates.OFF.value),
         "active_hours": row.get("active_hours"), "idle_only": bool(row.get("idle_only")),
         "throttle": schedule_throttle.ScheduleThrottle.of(row).view(),
-        "notify_target": target, "spent_today_usd": round(spent_today, 6),
+        "notify_target": target, "spent_today_usd": round(spent_today, 6), "cost_status": cost_status,
         "alerts": {"failures_since": row.get("failures_alert_at"), "stale_since": row.get("stale_alert_at"),
                    "deadline_since": row.get("deadline_alert_at"), "overlap_since": row.get("overlap_alert_at")},
         "planner_session": {
@@ -582,7 +585,8 @@ _PARSERS = {
     "catch_up": lambda raw: _choice("catch_up", raw, CatchUp),
     "run_budget_usd": _budget("run_budget_usd"),
     "gate_command": _gate_command, "gate_timeout_seconds": _gate_timeout,
-    "daily_budget_usd": _budget("daily_budget_usd"), "notify": lambda raw: _choice("notify", raw, Notify),
+    "daily_budget_usd": _budget("daily_budget_usd"),
+    "daily_budget_equivalent_usd": _budget("daily_budget_equivalent_usd"), "notify": lambda raw: _choice("notify", raw, Notify),
     "notify_format": lambda raw: _choice("notify_format", raw, NotifyFormat),
     "user_gates": lambda raw: _choice("user_gates", raw, UserGates),
     "kind": lambda raw: _choice("kind", raw, Kind), "command": _command, "env": _env,
@@ -679,7 +683,7 @@ def _check_kind_fields(kind: str, merged: Mapping[str, Any]) -> None:
         if not merged.get("command"):
             raise RequestError(HTTP_400, "command is required: a nonempty shell command")
         for field in ("requirement", "template_key", "template_inputs", "gate_command", "gate_timeout_seconds",
-                      "run_budget_usd", "daily_budget_usd", "profile_overrides", "task_limits"):
+                      "run_budget_usd", "daily_budget_usd", "daily_budget_equivalent_usd", "profile_overrides", "task_limits"):
             if merged.get(field):
                 raise RequestError(HTTP_400, f"{field} does not apply to a command schedule")
         if merged.get("user_gates") == UserGates.ON.value:
@@ -754,10 +758,12 @@ async def _schedule_views(rows: list[dict[str, Any]], *, runtime_root: Path | No
     ids = [row["id"] for row in rows]
     latest = await db_schedules.latest_runs(ids)
     views = dict(zip(latest, await _run_views(list(latest.values()), runtime_root=runtime_root)))
-    spent = await db_schedules.spent_since_each(db_connection.get_pool(), ids, local_midnight())
+    statuses: dict[str, str] = {}
+    spent = await db_schedules.spent_since_each(db_connection.get_pool(), ids, local_midnight(), statuses=statuses)
     default = await default_run_timeout()
     targets = {(target["channel"], target["chat"]) for target in await notify_targets()}
-    found = [{**schedule_view(row, views.get(row["id"]), spent_today=spent[row["id"]], default_timeout=default),
+    found = [{**schedule_view(row, views.get(row["id"]), spent_today=spent[row["id"]],
+                             cost_status=statuses[row["id"]], default_timeout=default),
               "notify_target_available": not row.get("notify_channel") or
                   (row["notify_channel"], row["notify_chat"]) in targets}
              for row in rows]

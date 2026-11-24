@@ -37,6 +37,8 @@ from looper.agents.projects import HTTP_400, RequestError
     ({"run_timeout_seconds": 1.5}, "run_timeout_seconds must be"),
     ({"run_budget_usd": -1}, "run_budget_usd must be"),
     ({"daily_budget_usd": 0}, "daily_budget_usd must be"),
+    *[({"daily_budget_equivalent_usd": value}, "daily_budget_equivalent_usd must be")
+      for value in (0, -1, float("inf"), float("nan"))],
     ({"gate_timeout_seconds": 601}, "gate_timeout_seconds must be"),
     ({"gate_command": "x" * 2001}, "at most 2000 characters"),
     ({"work_dir": "relative/dir"}, "absolute path"),
@@ -69,7 +71,7 @@ def test_a_bad_schedule_is_refused_with_the_reason(monkeypatch: pytest.MonkeyPat
     *[({"command": "true", field: value}, field) for field, value in (
         ("requirement", "Read reports"), ("template_key", "report"), ("template_inputs", {"x": "y"}),
         ("gate_command", "true"), ("gate_timeout_seconds", 5), ("run_budget_usd", 1),
-        ("daily_budget_usd", 1), ("profile_overrides", {"worker": "missing-profile"}),
+        ("daily_budget_usd", 1), ("daily_budget_equivalent_usd", 1), ("profile_overrides", {"worker": "missing-profile"}),
         ("task_limits", {"worker": 1}), ("user_gates", "on"),
     )],
     ({"command": "true", "run_timeout_seconds": "default"}, "run_timeout_seconds"),

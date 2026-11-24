@@ -16,6 +16,7 @@ from functools import cached_property
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
+from .run_usage import CostStatus, cost_status
 from ..db import metrics as db_metrics
 from .attempts import Decision, FailureKind, Trigger, TaskOutcome, StopCause
 
@@ -87,7 +88,7 @@ class Cost:
     def add(self, record: Mapping[str, Any]) -> None:
         basis = "equivalent" if record["equivalent"] else "provider_priced"
         self.runs[basis] += 1
-        if record["cost_usd"] is None:
+        if cost_status(record["cost_usd"]) is CostStatus.UNKNOWN:
             self.unknown[basis] += 1
         else:
             self.usd[basis] += float(record["cost_usd"])
@@ -102,7 +103,9 @@ class Cost:
         """Per basis ``usd`` (null when every run of it is unknown, never 0), ``runs`` and ``unknown_runs``."""
         return {basis: {"usd": None if self.runs[basis] and self.unknown[basis] == self.runs[basis]
                         else round(self.usd[basis], 6),
-                        "runs": self.runs[basis], "unknown_runs": self.unknown[basis]} for basis in self.usd}
+                        "runs": self.runs[basis], "unknown_runs": self.unknown[basis],
+                        "cost_status": (CostStatus.UNKNOWN if self.unknown[basis] else CostStatus.KNOWN).value}
+                for basis in self.usd}
 
 
 def _group() -> dict[str, Cost]:
@@ -260,7 +263,8 @@ def _mean(values: Sequence[float]) -> float | None:
 def _average_cost(rows: Sequence[tuple[Mapping[str, Any], Mapping[str, Any]]]) -> dict[str, Any]:
     """The mean of (usd, unknown_runs) pairs: a case with an unknown cost is counted apart, never as 0."""
     known = [usd for usd, unknown in rows if not unknown]
-    return {"mean_usd": _mean(known), "n_known": len(known), "unknown": len(rows) - len(known)}
+    return {"mean_usd": _mean(known), "n_known": len(known), "unknown": len(rows) - len(known),
+            "cost_status": (CostStatus.UNKNOWN if len(known) < len(rows) else CostStatus.KNOWN).value}
 
 
 def task_success_rate(d: Data) -> dict[str, Any]:

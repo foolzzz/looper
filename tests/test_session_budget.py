@@ -7,7 +7,7 @@ import pytest
 
 from looper.agents import session_budget as budget
 from looper.agents.schedule_session import BoundReason
-from looper.agents.session_budget import Action, Compaction, Decision, Outcome, TurnCap
+from looper.agents.session_budget import Action, Compaction, Decision, Outcome
 
 MAX = 100_000
 
@@ -52,12 +52,6 @@ def test_the_record_of_a_bound():
         budget.bound_metadata(Outcome.ROTATED, budget.KEEP, None)
 
 
-@pytest.mark.parametrize("budget_usd,priced,expected", [
-    (None, True, TurnCap.OFF), (4.0, True, TurnCap.CAPPED), (4.0, False, TurnCap.NO_PRICE)])
-def test_the_per_turn_cap(budget_usd, priced, expected):
-    assert budget.turn_cap(budget_usd, priced=priced) is expected
-
-
 @pytest.mark.parametrize("budget_usd,amount", [(4.0, "4"), (0.004, "0.004")])
 def test_the_over_cap_reply_is_the_rfc_text_with_the_budget(budget_usd, amount):
     assert budget.over_cap_reply(budget_usd) == (f"这一轮的花费到了单轮上限 ${amount}，已经停下。已经做了的工具调用没有撤销。"
@@ -97,3 +91,18 @@ def test_no_agent_tool_or_default_prompt_mentions_it():
     for name in ("session_budget.get", "session_budget.update"):
         operation = next(op for op in api_v1.operations() if op.operation_id == name)
         assert operation.operator_only and operation.tool is None
+
+
+def test_unknown_price_stop_explains_why_the_budget_cannot_be_verified():
+    from types import SimpleNamespace
+    from looper.agents.run_usage import Usage
+    from looper.agents.runtimes.pricing import RunSpend, usage_event
+    from looper.agents.tiers import manager_budget
+    from looper.agents.tiers.manager import OverCap
+
+    spend = RunSpend(lambda model, usage: None, 'haiku', 4)
+    spend.add(usage_event('claude-haiku-5-5', Usage(input_tokens=10)))
+    session = SimpleNamespace(budget=SimpleNamespace(usd=4, spend=spend))
+    reply = manager_budget.cap_reply(session, OverCap('stopped'))
+    assert 'claude-haiku-5-5' in reply and '无法核实' in reply
+    assert '花费到了' not in reply

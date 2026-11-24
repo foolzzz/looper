@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from collections.abc import Collection, Sequence
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
@@ -11,7 +12,10 @@ from typing import Any
 
 import asyncpg
 
+from ..agents.run_usage import CostStatus
 from .connection import get_pool
+
+logger = logging.getLogger(__name__)
 
 
 class RecordStatus(str, Enum):
@@ -438,9 +442,10 @@ async def manager_spend(
     pool: asyncpg.Pool | None = None,
 ) -> dict[str, dict[str, Any]]:
     """Per Manager, its spend since ``since`` (today's start), over the last 7 days and its runs since ``since``;
-    unpriced runs (NULL cost) count as 0 dollars and as runs. Every id is answered, with zeros when it never ran."""
+    amounts are known subtotals; cost_status and unpriced_runs expose missing costs. Every id is answered."""
     pool = pool or get_pool()
-    result = {m: {"today_usd": 0.0, "last_7d_usd": 0.0, "runs_today": 0} for m in manager_ids}
+    result = {m: {"today_usd": 0.0, "last_7d_usd": 0.0, "runs_today": 0, "unpriced_runs": 0,
+                  "cost_status": CostStatus.KNOWN.value} for m in manager_ids}
     if not result:
         return result
     # A Manager's runs, and the outbound reviews of its calls that no task owns (``outbound_reviews.record_id``).
@@ -449,11 +454,12 @@ async def manager_spend(
         SELECT agent_id,
                COALESCE(sum(cost_usd) FILTER (WHERE created_at >= $2), 0)::float8 AS today_usd,
                COALESCE(sum(cost_usd) FILTER (WHERE created_at >= $3), 0)::float8 AS last_7d_usd,
-               count(*) FILTER (WHERE created_at >= $2) AS runs_today
+               count(*) FILTER (WHERE created_at >= $2) AS runs_today,
+               count(*) FILTER (WHERE cost_usd IS NULL AND status <> 'running') AS unpriced_runs
         FROM (
-            SELECT agent_id, cost_usd, created_at FROM llm_records WHERE agent_id = ANY($1::text[])
+            SELECT agent_id, cost_usd, created_at, status FROM llm_records WHERE agent_id = ANY($1::text[])
             UNION ALL
-            SELECT o.agent_id, r.cost_usd, r.created_at FROM outbound_reviews o JOIN llm_records r ON r.id = o.record_id
+            SELECT o.agent_id, r.cost_usd, r.created_at, r.status FROM outbound_reviews o JOIN llm_records r ON r.id = o.record_id
             WHERE o.agent_id = ANY($1::text[]) AND o.task_id IS NULL
               AND o.created_at >= LEAST($2::timestamptz, $3::timestamptz)
         ) runs
@@ -464,7 +470,8 @@ async def manager_spend(
     )
     for row in rows:
         result[row["agent_id"]] = {"today_usd": row["today_usd"], "last_7d_usd": row["last_7d_usd"],
-                                   "runs_today": row["runs_today"]}
+                                   "runs_today": row["runs_today"], "unpriced_runs": row["unpriced_runs"],
+                                   "cost_status": (CostStatus.UNKNOWN if row["unpriced_runs"] else CostStatus.KNOWN).value}
     return result
 
 
@@ -639,6 +646,8 @@ async def task_costs(
     whose cost is what a subscription's usage would cost at API prices
     (``EQUIVALENT``), and ``provider_price_runs`` the others Looper priced at
     their provider's prices.
+    An ended run without a cost adds ``cost_status=unknown``;
+    ``cost_usd`` remains the known subtotal. ``by_model`` uses the same status for its unknown groups.
     ``by_model`` splits those runs and tokens by model, with costs adding up to ``cost_usd``.
     ``cache_reported_runs`` and ``cache_missing_runs`` count complete and incomplete prompt usage;
     ``cache_hit_read_tokens`` / ``cache_hit_prompt_tokens`` uses only the complete runs, unlike token totals.
@@ -655,6 +664,17 @@ async def task_costs(
                model, count(*) AS runs,
                count(*) FILTER (WHERE status = 'running') AS running,
                count(*) FILTER (WHERE status <> 'running' AND cost_usd IS NULL) AS unpriced_runs,
+               array_agg(DISTINCT CASE
+                   WHEN jsonb_typeof(metadata->'unknown_price_models') = 'array'
+                        AND metadata->'unknown_price_models' <> '[]'::jsonb
+                   THEN metadata->'unknown_price_models'
+                   ELSE jsonb_build_array(COALESCE(metadata->>'model_reported', model, 'unknown model')) END)
+                   FILTER (WHERE status <> 'running' AND cost_usd IS NULL AND (
+                       COALESCE(input_tokens, 0) + COALESCE(output_tokens, 0) + COALESCE(cache_read_tokens, 0)
+                           + COALESCE(cache_creation_tokens, 0) > 0
+                       OR metadata->>'cost_status' = 'unknown'
+                       OR (jsonb_typeof(metadata->'unknown_price_models') = 'array'
+                           AND metadata->'unknown_price_models' <> '[]'::jsonb))) AS unknown_models,
                count(*) FILTER (WHERE status = $2) AS interrupted_runs,
                count(*) FILTER (WHERE cost_usd IS NOT NULL AND {EQUIVALENT}) AS equivalent_runs,
                count(*) FILTER (WHERE cost_usd IS NOT NULL AND cost_source = 'provider_price' AND NOT {EQUIVALENT})
@@ -684,7 +704,7 @@ async def task_costs(
     # Consult is a key only for a task that has consult rows, not for every task.
     consult_tasks = {row["task_id"] for row in rows if row["role"] == "consult"}
     costs = {
-        task_id: {"cost_usd": Decimal(0), "runs": 0, "running": 0, "unpriced_runs": 0, "equivalent_runs": 0,
+        task_id: {"cost_usd": Decimal(0), "unknown_models": set(), "runs": 0, "running": 0, "unpriced_runs": 0, "equivalent_runs": 0,
                   "provider_price_runs": 0, "by_role": {role: {"cost_usd": Decimal(0), "runs": 0}
                                                       for role in TASK_ROLES
                                                       + (("explorer",) if task_id in explorer_tasks else ())
@@ -699,6 +719,8 @@ async def task_costs(
             for key in ("runs", "running", "unpriced_runs", "equivalent_runs", "provider_price_runs"):
                 cost[key] += row[key]
             cost["cost_usd"] += row["cost_usd"] or Decimal(0)
+            for models in row["unknown_models"] or ():
+                cost["unknown_models"].update(json.loads(models) if isinstance(models, str) else models)
             role = cost["by_role"][row["role"]]
             role["cost_usd"] += row["cost_usd"] or Decimal(0)
             role["runs"] += row["runs"]
@@ -712,7 +734,9 @@ async def task_costs(
             model[key] += row[key]
         if row["cost_usd"] is not None:
             model["cost_usd"] = (model["cost_usd"] or Decimal(0)) + row["cost_usd"]
-    for cost in costs.values():
+    for task_id, cost in costs.items():
+        cost["unknown_models"] = sorted(cost["unknown_models"])
+        cost["cost_status"] = (CostStatus.UNKNOWN if cost["unpriced_runs"] else CostStatus.KNOWN).value
         cost["cost_usd"] = float(cost["cost_usd"])
         for role in cost["by_role"].values():
             role["cost_usd"] = float(role["cost_usd"])
@@ -721,6 +745,7 @@ async def task_costs(
                 model["cost_usd"] is None, -(model["cost_usd"] or Decimal(0)), -model["runs"],
                 model["model"] is None, model["model"] or ""))
             for model in cost[key]:
+                model["cost_status"] = (CostStatus.UNKNOWN if model["unpriced_runs"] else CostStatus.KNOWN).value
                 if model["cost_usd"] is not None:
                     model["cost_usd"] = float(model["cost_usd"])
     return costs
@@ -790,7 +815,9 @@ async def spend_since(since: datetime | None, *, until: datetime | None = None, 
         f"SELECT {_SPEND} FROM llm_records r LEFT JOIN tasks t ON t.id = r.task_id WHERE {_IN_RANGE}{by_manager}",
         since, until, project_id, *args,
     )
-    return dict(row)
+    result = dict(row)
+    result["cost_status"] = (CostStatus.UNKNOWN if result["unpriced_runs"] else CostStatus.KNOWN).value
+    return result
 
 
 async def task_spend(since: datetime | None, until: datetime | None = None, *, project_id: str | None = None,
@@ -814,7 +841,8 @@ async def task_spend(since: datetime | None, until: datetime | None = None, *, p
         """,
         since, until, project_id, *args,
     )
-    return [{"task_id": row["task_id"], "name": task_name(title=row["title"], goal_id=row["goal_id"],
+    return [{"cost_status": (CostStatus.UNKNOWN if row["unpriced_runs"] else CostStatus.KNOWN).value,
+             "task_id": row["task_id"], "name": task_name(title=row["title"], goal_id=row["goal_id"],
                                                           requirement=row["requirement"], task_id=row["task_id"]),
              **{key: row[key] for key in row.keys() if key not in ("task_id", "title", "goal_id", "requirement")}}
             for row in rows]

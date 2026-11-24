@@ -120,6 +120,7 @@ def test_restart_keeps_wait_and_todo_lists_cost_then_expiry_stops_with_note(monk
             async with v1_api(tmp_path, pool) as call:
                 status, response = await call('cost_holds.list')
                 assert status == 200 and response['result']['holds'][0]['id'] == hold['id']
+                assert response['result']['holds'][0]['task_ids'] == ['t-flow']
             await pool.execute("UPDATE cost_holds SET created_at=now()-interval '30 hours'")
             await cost_guard.refresh_day()
             assert (await store.get(hold['id'], pool=pool))['state'] == 'expired'

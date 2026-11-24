@@ -64,9 +64,9 @@ def test_manager_spend_sums_per_manager(monkeypatch: pytest.MonkeyPatch) -> None
         await _record(pool, "manager-review", 4.0, ago=timedelta(days=1) + (datetime.now(timezone.utc) - since))
         await _record(pool, "manager-review", 8.0, ago=timedelta(days=8))
         spend = await llm_records.manager_spend(["manager", "manager-review", "manager-none"], since=since, pool=pool)
-        assert spend["manager"] == {"today_usd": 1.0, "last_7d_usd": 1.0, "runs_today": 2}
-        assert spend["manager-review"] == {"today_usd": 2.0, "last_7d_usd": 6.0, "runs_today": 1}
-        assert spend["manager-none"] == {"today_usd": 0.0, "last_7d_usd": 0.0, "runs_today": 0}
+        assert spend["manager"] == {"today_usd": 1.0, "last_7d_usd": 1.0, "runs_today": 2, "cost_status": "unknown", "unpriced_runs": 1}
+        assert spend["manager-review"] == {"today_usd": 2.0, "last_7d_usd": 6.0, "runs_today": 1, "cost_status": "known", "unpriced_runs": 0}
+        assert spend["manager-none"] == {"today_usd": 0.0, "last_7d_usd": 0.0, "runs_today": 0, "cost_status": "known", "unpriced_runs": 0}
 
     run_db(test, monkeypatch)
 
@@ -79,7 +79,7 @@ def test_api_managers_has_spend(monkeypatch: pytest.MonkeyPatch) -> None:
         status, answer = await _call("managers.list")
         assert status == 200
         by_id = {m["id"]: m for m in answer["managers"]}
-        assert by_id["manager-review"]["spend"] == {"today_usd": 2.5, "last_7d_usd": 2.5, "runs_today": 1}
-        assert by_id["manager"]["spend"] == {"today_usd": 0.0, "last_7d_usd": 0.0, "runs_today": 0}
+        assert by_id["manager-review"]["spend"] == {"today_usd": 2.5, "last_7d_usd": 2.5, "runs_today": 1, "cost_status": "known", "unpriced_runs": 0}
+        assert by_id["manager"]["spend"] == {"today_usd": 0.0, "last_7d_usd": 0.0, "runs_today": 0, "cost_status": "known", "unpriced_runs": 0}
 
     run_db(test, monkeypatch)
