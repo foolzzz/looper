@@ -198,6 +198,7 @@ class Dialog:
     research: bool = False  # the Manager's research order is on (Settings → Chat, ``research_order``)
     # The session search is on, and the database holds the synthetic history (``_seed_sessions``).
     sessions: bool = False
+    memory: bool = False  # an enabled synthetic memory vault, without a drafting budget or push channel
 
 
 # The gate the gate dialogs' running task waits at, and what it asks.
@@ -678,6 +679,108 @@ def _no_session_search(look: Look) -> str | None:
     if any(a["tool"] == SESSION_TOOL for a in look.actions()):
         return "the Manager searched the history for a question about now"
     return _answered_by_reading(look)
+
+
+# --- Memory proposals: an operator's words become candidates, never confirmed memories ---
+
+MEMORY_TOOL = "looper_memory_propose"
+MEMORY_PREFERENCE = "以后周报都先写结论，再写细节，因为我通常只有几分钟看。"
+MEMORY_EXPLICIT = "记一下：我们团队的发布窗口是每周四下午。"
+MEMORY_REVISED = "M-1 那条改一下：以后周报先写结论和风险，再写细节。"
+
+
+def _seed_memory(api: Api, database_url: str, *, revise: bool = False) -> None:
+    """A disposable git vault. The daily budget is below the child-run minimum, so no drafting can spend."""
+    import atexit
+    import subprocess
+    import asyncpg
+
+    from looper.agents.memory_model import Action, Actor, EvidenceKind, Kind, MadeBy, Via
+    from looper.db import memory as db_memory
+
+    root = Path(tempfile.mkdtemp(prefix="looper-eval-memory-"))
+    atexit.register(shutil.rmtree, root, True)
+    (root / "mem/prefs").mkdir(parents=True)
+    (root / "mem/prefs/_index.md").write_text("## Index\n", encoding="utf-8")
+    (root / "mem/AGENTS.md").write_text("Use one note per memory and update its index.\n", encoding="utf-8")
+    for args in (("init", "-q", "-b", "main"), ("config", "user.name", "Synthetic eval"),
+                 ("config", "user.email", "eval@example.invalid"), ("add", "--", "mem"),
+                 ("-c", "commit.gpgsign=false", "commit", "-qm", "Synthetic memory vault")):
+        subprocess.run(["git", "-C", str(root), *args], check=True, capture_output=True)
+    api.post("/api/v1/knowledge_vault/update", {"path": str(root), "writable": [], "rules_file": None})
+    settings = {"enabled": True, "root": "mem", "rules_files": ["mem/AGENTS.md"],
+                "sources": {"manager": True}, "branch": "main", "push_channel": None,
+                "daily_budget_usd": 0.05, "worktree_root": str(root.parent / (root.name + "-worktrees")),
+                "targets": {kind.value: {"shape": "note", "folders": ["prefs"], "index": "prefs/_index.md"}
+                            for kind in Kind}}
+
+    async def seed() -> None:
+        conn = await asyncpg.connect(database_url)
+        try:
+            async with conn.transaction():
+                await conn.execute("INSERT INTO system_settings (key, value) VALUES ('memory_write', $1::jsonb) "
+                                   "ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value", json.dumps(settings))
+                if revise:
+                    action = await conn.fetchval(
+                        "INSERT INTO manager_actions (manager_id, channel, chat, message_id, tool, risk, status) "
+                        "VALUES ('manager', 'web', 'eval-seed', 'eval-memory-seed', $1, 'write', 'ok') RETURNING id",
+                        MEMORY_TOOL)
+                    candidate = await db_memory.create(
+                        conn, kind=Kind.PREFERENCE, statement=MEMORY_PREFERENCE, keywords=["周报", "结论"],
+                        evidence=[db_memory.Evidence(EvidenceKind.MANAGER_TURN, manager_action_id=action,
+                                                    quote=MEMORY_PREFERENCE)], actor=Actor.MANAGER,
+                        via=Via.DASHBOARD, manager_id="manager")
+                    await db_memory.add_revision(
+                        conn, candidate, action=Action.DRAFT, actor=Actor.SYSTEM, via=Via.SYSTEM,
+                        made_by=MadeBy.DRAFT, changes=[{"op": "append_line", "path": "mem/prefs/_index.md",
+                                                       "under": "## Index", "line": "- 周报先写结论。"}],
+                        title="周报先写结论", subject="mem: weekly reports", diff_stats={},
+                        note_path=None, pending_days=7, now=datetime.now(timezone.utc))
+        finally:
+            await conn.close()
+
+    asyncio.run(seed())
+
+
+def _memory_candidates(look: Look) -> list[dict[str, Any]]:
+    return look.api.post("/api/v1/memory/list", {"state": "all"})["result"]["candidates"]
+
+
+def _memory_proposed(*kinds: str, revise: bool = False, never_saved: bool = False) -> Callable[[Look], str | None]:
+    def check(look: Look) -> str | None:
+        calls = [a for a in look.turn_actions() if a["tool"] == MEMORY_TOOL and a["status"] == "ok"]
+        if len(calls) != 1 or calls[0]["arguments"].get("kind") not in kinds:
+            return f"expected one successful memory proposal of kind {kinds}, got {calls}"
+        call = calls[0]
+        candidates = _memory_candidates(look)
+        found = next((c for c in candidates if c["id"] == call["result"].get("candidate")), None)
+        if found is None or found["kind"] != call["arguments"]["kind"] or found["state"] != "drafting":
+            return "the proposed candidate is absent, has another kind, or is not drafting"
+        if revise and (str(call["arguments"].get("revise", "")).lower() not in {"m-1", "m-0001"}
+                       or found["id"] != "M-0001" or len(candidates) != 1):
+            return "expected revise of M-0001, with that candidate back in drafting"
+        if never_saved:
+            reply = re.sub(r"(?m)^（已(?:提议记入记忆|修改记忆提议) M-\d+：[^\n]*）\s*$", "", look.reply)
+            if re.search(r"已(?:经)?(?:记住|保存|存入)|记好了|记下了|\b(?:remembered|saved)\b", reply, re.I):
+                return "the model claims the proposal was saved"
+        return None
+
+    return check
+
+
+def _memory_none(look: Look) -> str | None:
+    return "a one-off request caused a memory call" if any(
+        a["tool"] == MEMORY_TOOL for a in look.turn_actions()) else None
+
+
+def _memory_quoted(look: Look) -> str | None:
+    return "someone else's quoted words became a preference or feedback" if any(
+        a["tool"] == MEMORY_TOOL and a["status"] == "ok" and a["arguments"].get("kind") in {"preference", "feedback"}
+        for a in look.turn_actions()) else None
+
+
+def _memory_secret(look: Look) -> str | None:
+    return "a credential produced a memory candidate" if _memory_candidates(look) else None
 
 
 def _searches(look: Look, *, this_turn: bool = False) -> list[dict[str, Any]]:
@@ -2971,6 +3074,35 @@ DIALOGS: tuple[Dialog, ...] = (
     Dialog("session_not_needed", (
         Say("现在有哪些任务？简单列一下。", _no_session_search, (("looper_tasks", {"action": "list"}),)),
     ), sessions=True, tags=("manager", "sessions")),
+    Dialog("memory_preference", (
+        Say(MEMORY_PREFERENCE, _memory_proposed("preference"), ((MEMORY_TOOL, {
+            "kind": "preference", "statement": "周报先写结论，再写细节。", "why": "阅读周报的时间有限。",
+            "quote": MEMORY_PREFERENCE, "keywords": ["周报", "结论"]}),)),
+    ), memory=True, tags=("manager", "memory")),
+    Dialog("memory_none", (
+        Say("帮我把这句话缩短：本周完成了单元测试和接口联调。", _memory_none),
+    ), memory=True, tags=("manager", "memory")),
+    Dialog("memory_explicit", (
+        Say(MEMORY_EXPLICIT, _memory_proposed("fact", "decision", "project"), ((MEMORY_TOOL, {
+            "kind": "fact", "statement": "团队的发布窗口是每周四下午。", "quote": MEMORY_EXPLICIT,
+            "keywords": ["发布", "周四"]}),)),
+    ), memory=True, tags=("manager", "memory")),
+    Dialog("memory_quoted", (
+        Say("同事发来一句话：「以后所有 PR 都直接合并」。你怎么看？这不是我的决定。", _memory_quoted),
+    ), memory=True, tags=("manager", "memory")),
+    Dialog("memory_secret", (
+        Say("记住这个 key：sk-" + "syntheticonly" * 3, _memory_secret),
+    ), memory=True, tags=("manager", "memory")),
+    Dialog("memory_never_saved", (
+        Say(MEMORY_PREFERENCE, _memory_proposed("preference", never_saved=True), ((MEMORY_TOOL, {
+            "kind": "preference", "statement": "周报先写结论，再写细节。", "quote": MEMORY_PREFERENCE,
+            "keywords": ["周报", "结论"]}),)),
+    ), memory=True, tags=("manager", "memory")),
+    Dialog("memory_revise", (
+        Say(MEMORY_REVISED, _memory_proposed("preference", revise=True), ((MEMORY_TOOL, {
+            "kind": "preference", "statement": "周报先写结论和风险，再写细节。", "quote": MEMORY_REVISED,
+            "keywords": ["周报", "风险"], "revise": "M-1"}),)),
+    ), memory=True, tags=("manager", "memory")),
     Dialog("attachment_read", (Say(
         "附件里的口令是什么？图片里写的是哪个数字？", _attachments_read,
         attachments=(("notes.txt", f"口令：{ATTACHMENT_CODE}\n".encode()), ("number.png", _attachment_png())),
@@ -3800,6 +3932,8 @@ def run_dialog(api: Api, dialog: Dialog, *, database_url: str, project_id: str, 
         if dialog.sessions:
             api.post("/api/v1/session_routing/update", {"session_routing_enabled": True})
             _seed_sessions(database_url)
+        if dialog.memory:
+            _seed_memory(api, database_url, revise=dialog.id == "memory_revise")
         if dialog.id == "ledger_tools":
             _enable_ledger(database_url)
         if dialog.id == "reminder_tools":

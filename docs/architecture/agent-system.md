@@ -3165,8 +3165,8 @@ into the vault's memory folder
 ([RFC](rfcs/memory-write-path-v0.zh-CN.md); a lesson that takes effect in
 PostgreSQL only is the [tiers RFC](rfcs/memory-tiers-v0.zh-CN.md)'s). This
 part includes the foundation, private drafting, the confirmed write path and
-operator DM delivery. Sources and the dashboard memory page follow separately.
-Drafting has its own contract; existing agents gain no prompt or tool.
+operator DM delivery. Sources are typed and each is off by default; the dashboard
+memory page shows their candidates for the operator to review.
 
 - **Tables** (migration `memory_candidates`): `memory_candidates` (shown as
   `M-0042`; its kind, state and reason, the least trusted class of its
@@ -3225,6 +3225,25 @@ Drafting has its own contract; existing agents gain no prompt or tool.
   `confirm`; exit code 7 means the state does not allow the action. Deleting
   a candidate leaves its fingerprint as a tombstone and leaves vault notes
   alone.
+- **Manager source** (`memory_propose.py`, `ops/memory_propose.py`): the default
+  Manager lists `looper_memory_propose` only in the operator's dashboard or direct-chat
+  turns, with memory writing and its Manager source enabled, valid settings and at
+  least one configured target kind. Its schema lists those kinds; its contract follows
+  the turn's listing, changes the resident signature, and is absent from a prompt preview
+  without a turn. Code checks the user's quote against this turn or the newest 200 user
+  messages in this session from the last 24 hours (NFKC and folded whitespace), rejects
+  credentials, and caps proposals at three per message and twenty per local day per
+  Manager. A transaction with a per-Manager advisory lock rechecks those caps after
+  the call is recorded; the new source names that `manager_actions` row. A failed
+  commit marks the call as an error and proposes nothing. `revise` reseeds only this
+  Manager's pending, trusted conversation proposal of the same kind, keeps its old
+  revisions and adds the new source, then returns it to drafting with a `propose`
+  event. Looper appends the proposal id and a mention-free, forty-character statement
+  after the reply; it never claims the memory is saved. The group backstop also
+  remembers proposed statements and uses a memory-specific withheld notice; this
+  in-memory protection is lost on restart. Before any drafting budget or model call,
+  an exact fingerprint twin of the same kind merges into an open candidate if its
+  combined source class is allowed, otherwise it is dropped as a duplicate.
 - **Drafting** (`memory_draft_service.py`, `memory_draft.py`, `memory_draft_role.py`):
   the service polls every 10 seconds and PostgreSQL wakes it after a seed commits.
   A short transaction uses an advisory lock and `SKIP LOCKED` to claim a `drafting`

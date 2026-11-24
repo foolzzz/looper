@@ -74,6 +74,7 @@ from . import intents_recognize
 from . import ledger as ledger_tools
 from . import reminders as reminder_tools
 from . import skill_proposals as skill_proposal_tools
+from . import memory_propose as memory_tools
 from .config import TOOLS as CONFIG_TOOLS, project_tool
 from .leads import LEADS_TOOL, TOOL as LEADS_SEARCH, leads_tool
 from .manager_vault import TOOLS as VAULT_READ_TOOLS, manager_vault
@@ -168,7 +169,7 @@ READ_ONLY_TASKS = frozenset({"looper_projects"})
 # (``ManagerOps._with_operator_tools``).
 _MANAGER_TOOL_NAMES = {tool.name: tool for tool in (*MANAGER_TOOLS, LEADS_SEARCH, *VAULT_READ_TOOLS, SESSION_SEARCH,
                                                     *reminder_tools.TOOLS, intents_recognize.TOOL,
-                                                    skill_proposal_tools.TOOL)}
+                                                    skill_proposal_tools.TOOL, memory_tools.TOOL)}
 # The default Manager's tools that only the user's own turns run, each behind its own switch.
 _OPERATOR_TOOLS = {tool.name: tool for tool in (LEADS_SEARCH, *VAULT_READ_TOOLS, SESSION_SEARCH, *reminder_tools.TOOLS,
                                               intents_recognize.TOOL)}
@@ -357,6 +358,7 @@ class ManagerOps:
         scope = await self._with_ledger_tools(scope)
         scope = await self._with_operator_tools(scope)
         scope = await self._with_skill_proposal_tool(scope)
+        scope = await self._with_memory_tool(scope)
         if scope.revision < 0 or scope.manager_id == DEFAULT_MANAGER_ID:
             return scope
         try:
@@ -430,6 +432,18 @@ class ManagerOps:
             return scope
         kept = [tool for tool in scope.tools.values() if tool.name != skill_proposal_tools.TOOL_NAME]
         adjusted = replace(scope, tools=_tool_map([*kept, *((skill_proposal_tools.TOOL,) if wanted else ())]))
+        if self._scope is scope:
+            self._scope = adjusted
+        return adjusted
+
+    async def _with_memory_tool(self, scope: OpsScope) -> OpsScope:
+        if scope.manager_id != DEFAULT_MANAGER_ID:
+            return scope
+        wanted = await memory_tools.memory_tool()
+        if wanted is scope.tools.get(memory_tools.TOOL_NAME):
+            return scope
+        kept = [tool for tool in scope.tools.values() if tool.name != memory_tools.TOOL_NAME]
+        adjusted = replace(scope, tools=_tool_map([*kept, *((wanted,) if wanted is not None else ())]))
         if self._scope is scope:
             self._scope = adjusted
         return adjusted
@@ -563,6 +577,8 @@ class ManagerOps:
                     raise OpError(ErrorCode.NEEDS_USER_TURN, "a skill proposal needs the operator's own turn")
                 if not await _operator_turn(turn):
                     raise _OperatorOnly(turn)
+            if tool.name == memory_tools.TOOL_NAME and turn.autonomous:
+                raise OpError(ErrorCode.NEEDS_USER_TURN, "a memory proposal needs the user's own turn")
             if _audience(tool) is Audience.OPERATOR and not await _operator_turn(turn):
                 raise OpError(ErrorCode.FORBIDDEN, cast(RestrictedTool, tool).refusal)
             _check_answering(turn)
@@ -625,8 +641,13 @@ class ManagerOps:
                                result={"message": f"{type(exc).__name__}: {exc}"}, watch=watch)
             return _error(ErrorCode.UNAVAILABLE, f"Looper could not do it now ({type(exc).__name__}: {exc}); tell "
                                                  "the user, and try again later", watch.shown)
-        await self._record(turn, tool, arguments, risk, "ok",
+        action_id = await self._record(turn, tool, arguments, risk, "ok",
                            result=audit if audited else None if risk is Risk.READ else result, watch=watch)
+        if tool.name == memory_tools.TOOL_NAME:  # the candidate source names this call's audit row
+            try:
+                result = await memory_tools.commit(call, answer, action_id)
+            except OpError as exc:
+                return _error(exc.code, str(exc), watch.shown)
         if watch.shown is not None and isinstance(result, dict):
             result.setdefault("shown_to_user", watch.shown)  # after the record: the trail keeps the tool's own result
         return {"status": "ok", "result": result}
