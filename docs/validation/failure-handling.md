@@ -39,21 +39,18 @@ Deterministic actor/database regressions also deliver a release before startup's
 Reviewer each dispatch once, duplicate outbox events are ignored, and the replacement result remains current.
 A release blocked by independent spend admission retains its exact execution target and unacknowledged outbox
 until that wait can resume; it does not fall through to an ordinary Worker dispatch.
+An unconsumed breaker also restores DECISION from its committed failure snapshot, whether the restart preceded
+or followed the step's decision projection. Worker, built-in Reviewer and panel cases retain all three failures;
+repeated resume events and another actor restart do not repeat the consumed decision.
 
 The process check uses real local timing for the first transient wait. Minute/hour deadline boundaries use
 controlled clocks in unit/database tests; no claim is made that a six-hour wait was observed in real time.
-Frontend checks use Vitest, a production build and headless Chromium against the isolated service. Screenshots
-contain synthetic data only. The hold panel was read from the actual isolated service at 1280 × 960,
+Frontend checks use Vitest, a production build and headless Chromium against the isolated service.
+The hold panel was read from the actual isolated service at 1280 × 960,
 768 × 1024, 390 × 844, and 844 × 390; all four widths had no document-level horizontal overflow.
 The live Needs you section and engine settings were also checked in Chromium. The history empty state and
 503 unavailable state used controlled HTTP responses in that same page; these do not claim a real database outage.
-The published images crop the new component and contain no local paths, tokens or private tasks.
-
-| Actual isolated API, desktop | Actual isolated API, phone |
-|---|---|
-| ![Environment hold with versioned operator actions](failure-handling/holds-desktop.png) | ![Environment hold on a narrow screen](failure-handling/holds-phone.png) |
-
-![Controlled unavailable history response; the existing hold stays visible](failure-handling/history-unavailable.png)
+Screenshots are kept outside the tracked tree; the PR describes these visual checks.
 
 Reproduction (supply a disposable PostgreSQL URL):
 
