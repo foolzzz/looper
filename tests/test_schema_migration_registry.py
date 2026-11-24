@@ -132,3 +132,12 @@ def test_drafting_migrations_use_their_reserved_orders(name, order):
     assert (migration.order, migration.pending_order) == (order, order)
     if getattr(migration, "online", ()):
         assert migration.online_order == order
+
+
+@pytest.mark.parametrize("name,order", [("memory_retro_role", 1980), ("memory_retro_queue", 1990)])
+def test_retrospective_migrations_use_their_reserved_orders(name, order):
+    discovered = migrations.discover()
+    migration = next(item for item in discovered if item.name == name)
+    for field in ("order", "pending_order", "online_order"):
+        assert getattr(migration, field) == order
+        assert sum(getattr(item, field, None) == order for item in discovered) == 1

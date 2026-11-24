@@ -3792,6 +3792,19 @@ class PlannerAgent:
         """What ``step``'s last result was, in a line: what a retry or a failure is about."""
         return result_outcome(step.result or {})
 
+    async def _project_lessons_enabled(self) -> bool:
+        """The independent project retrospective switch also replaces legacy drafts in shadow mode."""
+        if self._execution.memory_lessons != "on":
+            return False
+        from .. import memory_lessons
+
+        try:
+            settings = await memory_lessons.settings_view()
+        except Exception:
+            logger.warning("planner %s cannot read project retrospective settings", self.agent_id, exc_info=True)
+            return False
+        return settings["enabled"] is True and not settings.get("problem")
+
     async def _capture_project_learnings(self, plan: TaskPlan, step: PlanStep, value: Any, who: str) -> None:
         """Save the learnings ``who`` (the step's Worker or Reviewer) reported as holding for the whole project as
         a draft of the project's knowledge, as they arrive, when the project distills lessons (``draft`` or
@@ -3799,6 +3812,8 @@ class PlannerAgent:
         task's. A draft that cannot be saved is a warning in the activity."""
         items = [text for text in journal.project_learnings(value) if text not in self._drafted]
         if not items or not plan.project_id or not self._execution.lessons_on:
+            return
+        if await self._project_lessons_enabled():
             return
         self._drafted.update(items)
         where = f"step {step.label} of task {self._task_id}"
@@ -5777,7 +5792,7 @@ class PlannerAgent:
         await update_task_phase(self._task_id, "completed")
         await self._activity("phase", "All steps verified — task completed")
         await self._remove_workspaces()
-        if self._execution.lessons_on:
+        if self._execution.lessons_on and not await self._project_lessons_enabled():
             # Before the final status: the TaskRouter ends the Planner when it gets it.
             await self._distill_lessons(plan)
         await self._vault_closeout(plan, "completed")
@@ -6330,6 +6345,19 @@ class PlannerAgent:
         only to this write and does not change the loop's check columns. A failed write is logged and the task
         goes on from memory; only a restart would miss it.
         """
+        if entries and await self._project_lessons_enabled():
+            marked = []
+            for entry in entries:
+                step = plan.step(entry.step_id)
+                result = (step.result or {}) if step is not None else {}
+                project = set(journal.project_learnings(result.get("learnings")))
+                project.update(journal.project_learnings(result.get("verify_learnings")))
+                for review in _role_reviews(result):
+                    project.update(journal.project_learnings(review.get("learnings")))
+                marked.append(replace(entry, learnings=tuple(
+                    f"(holds for the whole project) {text}" if text in project else text
+                    for text in entry.learnings)))
+            entries = marked
         plan.journal.extend(entries)
         unique = list({id(step): step for step in steps}.values())
         gates = [step.gate.row(step.step_id) for step in unique if step.gate is not None]

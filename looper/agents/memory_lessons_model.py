@@ -108,7 +108,7 @@ class LessonSettings:
     valid_days: int = 90
     wrong_threshold: int = 2
     min_journal_entries: int = 3
-    retro_budget_usd: float = 0.05
+    retro_budget_usd: float = 0.10
     daily_budget_usd: float = 0.50
     weekly: WeeklySettings = field(default_factory=WeeklySettings)
 
