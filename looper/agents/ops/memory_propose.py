@@ -8,9 +8,9 @@ from datetime import datetime, timezone
 from typing import Any
 
 from ...db import connection, manager_actions as db_actions, memory as db_memory
-from .. import advice_lint, memory_propose as domain, memory_settings
-from ..memory_model import Kind, format_id, parse_id
-from . import Audience, Call, ErrorCode, OpError, RestrictedTool, Risk
+from .. import advice_lint, memory_leads, memory_propose as domain, memory_settings
+from ..memory_model import Actor, Kind, format_id, parse_id
+from . import Audience, Call, ErrorCode, OpError, RestrictedTool, Risk, check_arguments
 from . import leads as ops_leads, session_search
 
 logger = logging.getLogger(__name__)
@@ -33,7 +33,12 @@ You cannot confirm or reject a proposal: the user does that on the memory page, 
 
 
 def contract_for(listing: Sequence[Mapping[str, Any]]) -> str | None:
-    return MEMORY_CONTRACT if any(item.get("name") == TOOL_NAME for item in listing) else None
+    for item in listing:
+        if item.get("name") == TOOL_NAME:
+            return MEMORY_CONTRACT + ("To keep a message lead the user points at, pass from_lead with its id "
+                                      "instead of restating it.\n" if "from_lead" in item.get(
+                                          "inputSchema", {}).get("properties", {}) else "")
+    return None
 
 
 async def memory_tool() -> RestrictedTool | None:
@@ -48,16 +53,17 @@ async def memory_tool() -> RestrictedTool | None:
         if problem or settings is None:
             return None
         kinds = tuple(kind.value for kind in Kind if kind in settings.targets)
-        return _tool_for(kinds) if kinds else None
+        return (_tool_for(kinds, True) if settings.sources.leads else _tool_for(kinds)) if kinds else None
     except Exception:
         logger.debug("could not read memory settings; proposals count as off", exc_info=True)
         return None
 
 
 class Prepared(dict):
-    def __init__(self, seed: domain.Seed):
+    def __init__(self, seed: domain.Seed | None = None, *, lead: tuple[str, str | None] | None = None):
         super().__init__()
         self.seed = seed
+        self.lead = lead
 
 
 async def _check_caps(conn, call, now):
@@ -68,9 +74,16 @@ async def _check_caps(conn, call, now):
 
 
 async def _run(call: Call) -> Prepared:
-    if await memory_tool() is None:
+    current = await memory_tool()
+    if current is None:
         raise OpError(ErrorCode.CONFLICT, "memory proposals are turned off")
     args = call.arguments
+    check_arguments(current.schema, args)
+    if "from_lead" in args:
+        if args.keys() - {"from_lead", "kind"}:
+            raise OpError(ErrorCode.INVALID, "with from_lead give only kind, if any")
+        return Prepared(lead=(args["from_lead"], args.get("kind")))
+    check_arguments(TOOL.schema, args)
     try:
         revise = parse_id(args["revise"]) if "revise" in args else None
     except ValueError as exc:
@@ -104,6 +117,8 @@ async def _run(call: Call) -> Prepared:
 
 
 def _audit(answer) -> dict:
+    if answer.lead is not None:
+        return {"from_lead": answer.lead[0], "kind": answer.lead[1]}
     seed = answer.seed
     return {"kind": seed.kind, "revise": format_id(seed.revise) if seed.revise is not None else None}
 
@@ -117,8 +132,15 @@ async def commit(call, answer, action_id) -> dict:
             await conn.execute("SELECT pg_advisory_xact_lock(hashtextextended('memory_propose:' || $1::text, 0))",
                                call.manager_id)
             await _check_caps(conn, call, now)
-            ident, revised = await domain.create_or_reseed(conn, seed, manager_id=call.manager_id,
-                action_id=action_id, quote=seed.quote, via=domain.via_of(call.turn.channel), now=now)
+            if answer.lead is not None:
+                candidate = (await memory_leads.propose_from_lead(answer.lead[0], kind=answer.lead[1],
+                    actor=Actor.MANAGER, via=domain.via_of(call.turn.channel), manager_id=call.manager_id,
+                    db=conn))["candidate"]
+                ident, revised, statement = parse_id(candidate["id"]), False, candidate["statement"]
+            else:
+                ident, revised = await domain.create_or_reseed(conn, seed, manager_id=call.manager_id,
+                    action_id=action_id, quote=seed.quote, via=domain.via_of(call.turn.channel), now=now)
+                statement = seed.statement
             result = {"candidate": format_id(ident), "state": "drafting"}
             await db_actions.amend(action_id, status="ok", result=result, pool=conn)
     except Exception as exc:
@@ -137,14 +159,14 @@ async def commit(call, answer, action_id) -> dict:
         except Exception:
             logger.exception("could not amend the failed memory proposal's call")
         raise error from None
-    call.turn.blocks.append(domain.footer(ident, seed.statement, revised=revised))
-    ops_leads.remember_memory(call.manager_id, ident, seed.statement)
+    call.turn.blocks.append(domain.footer(ident, statement, revised=revised))
+    ops_leads.remember_memory(call.manager_id, ident, statement)
     return {**result, "shown_to_user": "Looper adds the proposal's id after your reply. It is not saved until the "
                                       "user confirms it: do not say it is remembered."}
 
 
 @functools.lru_cache
-def _tool_for(kinds: tuple[str, ...]) -> RestrictedTool:
+def _tool_for(kinds: tuple[str, ...], from_lead: bool = False) -> RestrictedTool:
     return RestrictedTool(
         name=TOOL_NAME, risk=Risk.WRITE, audience=Audience.OPERATOR, refusal=REFUSAL, audit_result=_audit, run=_run,
         description='Propose keeping something the user said in this conversation in their knowledge vault: a preference '
@@ -153,15 +175,18 @@ def _tool_for(kinds: tuple[str, ...]) -> RestrictedTool:
                     'words here that say it (Looper checks them); keywords: 1 to 6 short search words. This stores only '
                     'a proposal: Looper drafts the change and the user confirms it later on the memory page or in their '
                     'direct chat; nothing is saved until then. revise: the id of a pending proposal of yours to change. '
-                    "Only in the user's own direct chat or on the dashboard.",
+                    "Only in the user's own direct chat or on the dashboard." + (
+                        " from_lead: the id of a message lead the user points at (lead-123), instead of a statement "
+                        "and quote; Looper takes its words from the lead." if from_lead else ""),
         schema={"type": "object", "additionalProperties": False,
-            "required": ["kind", "statement", "quote", "keywords"], "properties": {
+            "required": [] if from_lead else ["kind", "statement", "quote", "keywords"], "properties": {
                 "kind": {"type": "string", "enum": [*kinds]},
                 "statement": {"type": "string", "minLength": 1, "maxLength": 300},
                 "why": {"type": "string", "maxLength": 300},
                 "quote": {"type": "string", "minLength": 1, "maxLength": 500},
                 "keywords": {"type": "array", "items": {"type": "string", "minLength": 1, "maxLength": 40}},
-                "revise": {"type": "string", "maxLength": 24}}})
+                "revise": {"type": "string", "maxLength": 24},
+                **({"from_lead": {"type": "string", "maxLength": 40}} if from_lead else {})}})
 
 
 TOOL = _tool_for(tuple(k.value for k in Kind))

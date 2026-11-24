@@ -3351,8 +3351,12 @@ memory page shows their candidates for the operator to review.
   promoted (`vault_proposal`, the M-id); rejection leaves it unchanged. Deleting
   a lead or its source chat removes unwritten candidates and purges written
   candidate text while leaving vault notes intact. The source defaults off;
-  production enablement waits for outbound review. Manager `from_lead` support
-  follows separately.
+  production enablement waits for outbound review. With both Manager and lead
+  sources enabled, the operator can also name a lead in dashboard chat or their
+  direct chat: `looper_memory_propose(from_lead="lead-123", kind=...)` accepts
+  only an optional kind alongside the id. The candidate keeps only its lead
+  source; the Manager call is audited separately. The tool's schema and final
+  contract line expose this form only while the lead source is enabled.
 - **Known limits:** unsaved editor buffers do not block a write and a later
   editor save can overwrite it; the content hash and commit trailers allow
   checking what was written. An agent with a shell has the same system-user
