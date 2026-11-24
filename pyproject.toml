@@ -21,6 +21,7 @@ dependencies = [
   "python-telegram-bot>=22,<23",
   "websockets>=15,<16",
   "PyYAML>=6,<7",
+  "jsonschema>=4.23,<5",
 ]
 
 [project.urls]
