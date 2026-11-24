@@ -59,6 +59,7 @@ const ROLE_LABELS: Record<string, string> = {
   advisor: "Advisor",
   advice_check: "Advice check",
   leads_check: "Leads check",
+  outbound_check: "对外动作审查",
 };
 
 export function roleLabel(role: string): string {

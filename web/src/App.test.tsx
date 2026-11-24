@@ -1,5 +1,5 @@
 // @vitest-environment happy-dom
-import { act } from "react";
+import { act, useEffect, type ReactNode } from "react";
 import { createRoot } from "react-dom/client";
 import { expect, it, vi } from "vitest";
 import App from "./App";
@@ -19,7 +19,15 @@ vi.mock("@/components/sidebar", () => ({ Sidebar: () => null, SIDEBAR_ID: "sideb
 vi.mock("@/components/claude-check-banner", () => ({ ClaudeCheckBanner: () => null }));
 vi.mock("@/components/drain-banner", () => ({ DrainBanner: () => null }));
 vi.mock("@/lib/session", () => ({ useSessionEnded: () => false }));
-vi.mock("@/pages/chat", () => ({ ChatPage: () => null }));
+const chatMounted = vi.hoisted(() => vi.fn());
+vi.mock("@/pages/chat", () => ({ ChatPage: () => {
+  useEffect(() => { chatMounted(); }, []);
+  return <div data-chat-mounted />;
+} }));
+vi.mock("@/lib/use-ledger", () => ({ LedgerProvider: ({ children }: { children: ReactNode }) => children }));
+vi.mock("@/pages/ledger", () => ({ LedgerPage: ({ query, onQuery }: {
+  query: string; onQuery: (query: string, replace?: boolean) => void;
+}) => <div>账本 {query}<button onClick={() => onQuery("status=done")}>关闭详情</button></div> }));
 vi.mock("@/pages/dashboard", () => ({ DashboardPage: () => <div>Dashboard view</div> }));
 vi.mock("@/pages/agent-history", async (original) => ({
   ...await original<typeof import("@/pages/agent-history")>(),
@@ -70,6 +78,36 @@ it.each([
   } finally {
     act(() => root.unmount());
   }
+});
+
+it("opens ledger links without changing Needs you or unmounting chat", async () => {
+  vi.mocked(attentionSettingsGet).mockResolvedValue({ enabled: false });
+  chatMounted.mockClear();
+  window.history.replaceState(null, "", "#ledger?status=done&item=L-0012");
+  const container = document.createElement("div");
+  const root = createRoot(container);
+  try {
+    await act(async () => root.render(<App />));
+    expect(container.textContent).toContain("账本 status=done&item=L-0012");
+    const chat = container.querySelector("[data-chat-mounted]");
+    expect(chatMounted).toHaveBeenCalledOnce();
+    await act(async () => container.querySelector<HTMLButtonElement>("button:last-child")!.click());
+    expect(window.location.hash).toBe("#ledger?status=done");
+    expect(container.querySelector("[data-chat-mounted]")).toBe(chat);
+    await act(async () => {
+      window.location.hash = "todo";
+      window.dispatchEvent(new Event("hashchange"));
+    });
+    expect(container.textContent).toContain("This summary is off");
+    expect(window.location.hash).toBe("#todo");
+    expect(container.querySelector("[data-chat-mounted]")).toBe(chat);
+    expect(chatMounted).toHaveBeenCalledOnce();
+    await act(async () => {
+      window.location.hash = "ledger?status=done&item=L-0012";
+      window.dispatchEvent(new Event("hashchange"));
+    });
+    expect(container.textContent).toContain("账本 status=done&item=L-0012");
+  } finally { act(() => root.unmount()); }
 });
 
 it.each([

@@ -4,10 +4,49 @@ before the action may go ahead. ``agents/outbound.py`` writes them; the values a
 from __future__ import annotations
 
 from collections.abc import Sequence
+from datetime import datetime
+import math
+from typing import Any
 
 import asyncpg
 
 from .connection import get_pool
+
+
+async def list_reviews(*, verdict: str | None = None, task_id: str | None = None,
+                       before: tuple[datetime, int] | None = None, limit: int = 50,
+                       pool: asyncpg.Pool | None = None) -> list[dict[str, Any]]:
+    """At most ``limit + 1`` audit facts, newest first; never join or return the action's private content."""
+    if type(limit) is not int or not 1 <= limit <= 100:
+        raise ValueError("limit must be an integer from 1 to 100")
+    pool = pool or get_pool()
+    values: list[Any] = []
+    filters = []
+    for column, value in (("verdict", verdict), ("task_id", task_id)):
+        if value is not None:
+            values.append(value)
+            filters.append(f"{column} = ${len(values)}")
+    if before is not None:
+        values.extend(before)
+        filters.append(f"(created_at, id) < (${len(values) - 1}, ${len(values)})")
+    values.append(limit + 1)
+    where = " WHERE " + " AND ".join(filters) if filters else ""
+    rows = await pool.fetch(
+        "SELECT id, created_at, agent_id, task_id, parent_record_id, record_id, source, tool, action, level, "
+        "target_kind, target, summary, verdict, failure, reason, signals, profile_id, model, cost_usd, latency_ms "
+        f"FROM outbound_reviews{where} ORDER BY created_at DESC, id DESC LIMIT ${len(values)}", *values)
+    result = []
+    for record in rows:
+        row = dict(record)
+        for key in ("id", "parent_record_id", "record_id"):
+            row[key] = str(row[key]) if row[key] is not None else None
+        row["created_at"] = row["created_at"].isoformat()
+        if row["cost_usd"] is not None:
+            row["cost_usd"] = float(row["cost_usd"])
+            if not math.isfinite(row["cost_usd"]):
+                raise ValueError("review cost is not finite")
+        result.append(row)
+    return result
 
 
 async def insert(*, agent_id: str, source: str, tool: str, level: str, target_kind: str, target: str, summary: str,
