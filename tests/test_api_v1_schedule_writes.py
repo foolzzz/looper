@@ -18,6 +18,8 @@ from looper.agents.v1_domains import schedule_writes
      {"project_id": "project-a", "fields": {"name": "Hourly", "cron": "0 * * * *", "requirement": "Read reports", "manager_id": "manager-reports"}}),
     ("update", ["--schedule-id", "sched-a", "--fields", '{"enabled":true}'],
      {"schedule_id": "sched-a", "fields": {"enabled": True}}),
+    ("update", ["--schedule-id", "sched-a", "--fields", '{"daily_budget_equivalent_usd":5}'],
+     {"schedule_id": "sched-a", "fields": {"daily_budget_equivalent_usd": 5}}),
     *[(action, ["--schedule-id", "sched-a"], {"schedule_id": "sched-a"})
       for action in ("delete", "run", "reset_planner_session")],
 ])

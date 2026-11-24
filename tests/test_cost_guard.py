@@ -89,20 +89,25 @@ def test_restart_recovers_running_reservations_and_ignores_finished_reservations
     asyncio.run(check())
 
 
-def test_scheduler_day_boundary_is_reused_and_daily_p95_refreshed(monkeypatch):
+@pytest.mark.parametrize('mode', [Mode.OBSERVE, Mode.ENFORCE])
+def test_scheduler_day_boundary_is_reused_and_daily_p95_refreshed(monkeypatch, mode):
     from looper.agents.scheduler import Scheduler
     async def check():
         now = [datetime(2026, 11, 23, 7, 59, tzinfo=timezone.utc)]
         scheduler = Scheduler(bus=SimpleNamespace(), day_zone="America/Los_Angeles")
         g = guard(monkeypatch)
+        g.config = Config(mode=mode)
         g.clock = lambda: now[0]
         g.day_start = scheduler.day_start
         await g.rebuild()
         assert g.day == datetime(2026, 11, 22, tzinfo=ZoneInfo("America/Los_Angeles"))
         await g.admit(cg.RunKind.WORKER, (), cg.Currency.PROVIDER, 1)
+        await g.admit(cg.RunKind.WORKER, (), cg.Currency.PROVIDER, 1)
+        assert len(g.snapshot()['recent']) == 2
         now[0] += timedelta(minutes=2)
         await g.admit(cg.RunKind.WORKER, (), cg.Currency.PROVIDER, 1)
-        assert cg.store.history.await_count == 2
+        assert cg.store.history.await_count == (4 if mode is Mode.ENFORCE else 2)
+        assert len(g.snapshot()['recent']) == 1
         assert g.day == datetime(2026, 11, 23, tzinfo=ZoneInfo("America/Los_Angeles"))
     asyncio.run(check())
 
@@ -231,7 +236,7 @@ def test_schedule_observes_its_existing_shared_daily_cap_without_combining_globa
                 for i, c in enumerate(cg.Currency, 1)]
         g = guard(monkeypatch, rows=rows, cap=10)
         g.config = Config(mode=Mode.OBSERVE, daily_usd=10, daily_equivalent_usd=10)
-        cg.store.limits.return_value = {'schedules': {'schedule-a': 10}}
+        cg.store.limits.return_value = {'schedules': {'schedule-a': {'usd': 10, 'equivalent_usd': None}}}
         await g.rebuild()
         scopes = g.scopes(cg.RunKind.SCHEDULE, None, 'schedule-a', currency)
         result = await g.admit(cg.RunKind.SCHEDULE, scopes, currency, 1, reserve=False)
@@ -256,14 +261,14 @@ def test_unknown_spend_warns_once_for_each_affected_cap(monkeypatch, caplog, mod
         g = guard(monkeypatch, rows=rows)
         g.config = Config(mode=mode, daily_usd=10, roles={'processor': RoleLimits(daily_usd=10)})
         cg.store.limits.return_value = {'tasks': {'task-a': {'cap': 10, 'schedule_id': 'schedule-a'}},
-                                       'schedules': {'schedule-a': 10}}
+                                       'schedules': {'schedule-a': {'usd': 10, 'equivalent_usd': None}}}
         await g.rebuild()
         snapshot = g.snapshot()
         assert 'claude-haiku-5-5' in snapshot['problem']
         assert all(row['cost_status'] == 'unknown' and row['unknown_models'] == ['claude-haiku-5-5']
                    for row in snapshot['counters'])
         assert {row['scope'] for row in snapshot['counters']} == (
-            {'task', 'schedule_day', 'global_day', 'role_day'} if kind is cg.RunKind.PROCESSOR else
+            {'schedule_day', 'global_day', 'role_day'} if kind is cg.RunKind.PROCESSOR else
             {'task', 'schedule_day', 'global_day'})
         assert 'claude-haiku-5-5' in caplog.text and 'cannot verify' in caplog.text
         assert len(caplog.records) == len(snapshot['counters'])
