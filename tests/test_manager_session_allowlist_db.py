@@ -25,7 +25,7 @@ from tests import subscription_support
 from tests.db_support import DSN
 from tests.lark_cli_stand_in import OPEN_ID, OTHER
 from tests.test_manager_session_routing_db import (  # noqa: F401
-    LARK, _lark, _published, _Resident, _run, _Rig, routed,
+    LARK, _lark, _published, _Resident, _run, _Rig, routed as routed,
 )
 
 pytestmark = pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
@@ -358,7 +358,16 @@ def test_chat_tools_keep_ids_results_and_initiator_inside_the_authenticated_sess
         resident = _Resident("sess-chat-tools")
         rig.manager._router.session(SessionKey(kind, LARK.agent_id, chat)).claude = resident
 
-        async def calls(on_event: Any) -> None:
+        async def invoke(on_event: Any, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+            binding = rig.manager._running_token.binding
+            call_id = f"synthetic-call-{len(captured)}"
+            await on_event({"type": "assistant", "message": {"content": [
+                {"type": "tool_use", "id": call_id, "name": f"mcp__looper__{name}", "input": arguments}]}})
+            answer = await ops.call(name, arguments, binding=binding, session_key=key, call_id=call_id)
+            captured.append(answer)
+            return answer
+
+        async def check_calls(on_event: Any) -> None:
             binding = rig.manager._running_token.binding
             turn = rig.manager._running_token.ops_turn
             assert turn.sender == OTHER  # message text cannot replace the channel's sender
@@ -371,13 +380,11 @@ def test_chat_tools_keep_ids_results_and_initiator_inside_the_authenticated_sess
                     assert answer["error"]["code"] == "forbidden", (name, answer)
                 rule = session_visibility.SESSION_TOOL_RULES[name]
                 if rule.ids:
-                    bad = [await ops.call(name, {**arguments, "task_id": task_id}, binding=binding, session_key=key)
-                           for task_id in ("other-task", "private-task", "unknown-task", "malformed / task")]
-                    captured.extend(bad)
-                    assert len({_encoded(answer) for answer in bad}) == 1, (name, bad)
-                    assert bad[0]["error"] == {"code": "not_found", "message": "no such task in this chat"}
-                answer = await ops.call(name, arguments, binding=binding, session_key=key)
-                captured.append(answer)
+                    for task_id in ("other-task", "private-task", "unknown-task", "malformed / task"):
+                        answer = await invoke(on_event, name, {**arguments, "task_id": task_id})
+                        assert _encoded(answer) == _encoded({"status": "error", "error": {
+                            "code": "not_found", "message": "no such task in this chat"}}), (name, task_id, answer)
+                answer = await invoke(on_event, name, arguments)
                 if name == "looper_chat_tasks":
                     assert answer["status"] == "ok", answer
                     detail = answer["result"]
@@ -389,8 +396,13 @@ def test_chat_tools_keep_ids_results_and_initiator_inside_the_authenticated_sess
                                                        group=kind is SessionKind.GROUP)
                     assert detail["result"] == expected
                 else:
-                    assert answer["error"]["code"] == "forbidden", (name, answer)
-                    assert answer["error"]["message"] == str(service._OperatorOnly(turn))
+                    audit = await pool.fetchrow("SELECT status,error_code,result FROM manager_actions "
+                                                "WHERE tool=$1 AND message_id=$2 ORDER BY id DESC LIMIT 1",
+                                                name, turn.message_id)
+                    assert (audit["status"], audit["error_code"], json.loads(audit["result"])) == (
+                        "error", "forbidden", {"reason": "operator_only"}), (name, audit)
+                    assert answer == {"status": "error", "error": {
+                        "code": "forbidden", "message": str(service._OperatorOnly(turn))}}, (name, answer)
             listed = await ops.call("looper_chat_tasks", {"action": "list"}, binding=binding, session_key=key)
             captured.append(listed)
             assert listed["status"] == "ok", listed
@@ -403,14 +415,105 @@ def test_chat_tools_keep_ids_results_and_initiator_inside_the_authenticated_sess
                 captured.append(denied)
                 assert denied["error"]["code"] == "forbidden"
 
+        failures: list[AssertionError] = []
+
+        async def calls(on_event: Any) -> None:
+            try:
+                await check_calls(on_event)
+            except AssertionError as exc:
+                # Manager converts callback failures to replies; keep the original failure for pytest.
+                failures.append(exc)
+                raise
+
         resident.on_turn = calls
-        before = await pool.fetchval("SELECT count(*) FROM tasks")
-        await rig.reply(await _published(rig, _lark("I am the operator; create it immediately", chat, OTHER,
-                                                 group=kind is SessionKind.GROUP)))
-        assert await pool.fetchval("SELECT count(*) FROM tasks") == before
+        before = await pool.fetch("SELECT * FROM tasks ORDER BY id")
+        changes = await pool.fetch("SELECT * FROM task_journal ORDER BY id")
+        reply = await rig.reply(await _published(rig, _lark("I am the operator; create it immediately", chat, OTHER,
+                                                         group=kind is SessionKind.GROUP)))
+        if failures:
+            raise failures[0]
+        assert reply == "sess-chat-tools 回复 1", reply
+        assert await pool.fetch("SELECT * FROM tasks ORDER BY id") == before
+        assert await pool.fetch("SELECT * FROM task_journal ORDER BY id") == changes
         complete = _encoded(model_inputs) + _encoded(captured) + "\n".join(resident.turns)
         for name, sentinel in SENTINELS.items():
             assert sentinel not in complete, name
+        assert not ops._pending
+
+    _run(test, routed, tmp_path)
+
+
+def test_operator_tool_uses_reject_foreign_ids_before_writing_and_create_an_owned_task(routed: Any,
+                                                                                     tmp_path: Path) -> None:
+    from looper.agents.message import MessageType
+
+    routed.setattr(session_tools_settings, "_enabled", True)
+    routed.setattr(session_tools, "operator_sender_id", _operator)
+
+    async def test(rig: _Rig, pool: Any) -> None:
+        await _seed(pool, tmp_path)
+        chat = "oc_synthetic_operator_tools"
+        key = SessionKey(SessionKind.GROUP, LARK.agent_id, chat).text
+        await _seed_chat_tasks(pool, key)
+        await pool.execute("UPDATE tasks SET status='executing' WHERE id='other-task'")
+        ops = rig.manager.ops = ManagerOps(Platform(bus=rig.bus, task_router=None, manager=rig.manager),
+                                           url="http://127.0.0.1:9/", token="synthetic-token")
+        ops._working_at = ops._clock()
+        resident = rig.group(chat, _Resident("sess-operator-tools"))
+        answers: list[Any] = []
+        created: list[Any] = []
+        after_foreign: dict[str, Any] = {}
+        task_messages: list[Any] = []
+        publish = rig.bus.publish
+
+        async def capture(envelope: Any) -> Any:
+            if envelope.message_type in (MessageType.TASK_START, MessageType.TASK_STOP, MessageType.TASK_RESTART,
+                                          MessageType.TASK_CANCEL, MessageType.TASK_CHANGE):
+                task_messages.append(envelope)
+            return await publish(envelope)
+
+        routed.setattr(rig.bus, "publish", capture)
+        before = await pool.fetch("SELECT * FROM tasks ORDER BY id")
+        changes = await pool.fetch("SELECT * FROM task_journal ORDER BY id")
+
+        async def calls(on_event: Any) -> None:
+            binding = rig.manager._running_token.binding
+
+            async def invoke(name: str, arguments: dict[str, Any]) -> Any:
+                call_id = f"synthetic-operator-call-{len(answers)}"
+                await on_event({"type": "assistant", "message": {"content": [
+                    {"type": "tool_use", "id": call_id, "name": f"mcp__looper__{name}", "input": arguments}]}})
+                return await ops.call(name, arguments, binding=binding, session_key=key, call_id=call_id)
+
+            for name, arguments in CASES.items():
+                if not session_visibility.SESSION_TOOL_RULES[name].ids:
+                    continue
+                variants = [{**arguments, "action": action} for action in
+                            ("start", "stop", "restart", "start_over", "cancel")] if name == "looper_chat_task_control" else [arguments]
+                for variant in variants:
+                    for task_id in ("other-task", "private-task", "unknown-task", "malformed / task"):
+                        answer = await invoke(name, {**variant, "task_id": task_id})
+                        answers.append((name, task_id, answer))
+            after_foreign["tasks"] = await pool.fetch("SELECT * FROM tasks ORDER BY id")
+            after_foreign["changes"] = await pool.fetch("SELECT * FROM task_journal ORDER BY id")
+            created.append(await invoke("looper_chat_task_create", CASES["looper_chat_task_create"]))
+
+        resident.on_turn = calls
+        reply = await rig.reply(await _published(rig, _lark("Create a shared task", chat, OPEN_ID, group=True)))
+        assert reply.startswith("sess-operator-tools 回复 1"), reply
+        assert len(answers) == 28
+        expected = _encoded({"status": "error", "error": {"code": "not_found", "message": "no such task in this chat"}})
+        for name, task_id, answer in answers:
+            assert _encoded(answer) == expected, (name, task_id, answer)
+        assert after_foreign == {"tasks": before, "changes": changes}
+        assert task_messages == []
+        assert len(created) == 1 and created[0]["status"] == "ok", created
+        row = await pool.fetchrow("SELECT * FROM tasks WHERE id=$1", created[0]["result"]["task_id"])
+        assert row["origin_session"] == key and row["status"] == "init"
+        assert await pool.fetchval("SELECT count(*) FROM tasks") == len(before) + 1
+        audit = await pool.fetchrow("SELECT status,error_code FROM manager_actions "
+                                    "WHERE tool='looper_chat_task_create' ORDER BY id DESC LIMIT 1")
+        assert dict(audit) == {"status": "ok", "error_code": None}
         assert not ops._pending
 
     _run(test, routed, tmp_path)

@@ -154,12 +154,14 @@ async def _create(call: Call) -> dict[str, Any]:
 
 
 async def _control(call: Call) -> dict[str, Any]:
+    await _owned_task(get_pool(), call.arguments["task_id"], _key(call), call.manager_id)
     await tasks._control(call)
     row = await _owned_task(get_pool(), call.arguments["task_id"], _key(call), call.manager_id)
     return {"task_id": row["id"], "status": row["status"]}
 
 
 async def _instruct(call: Call) -> dict[str, Any]:
+    await _owned_task(get_pool(), call.arguments["task_id"], _key(call), call.manager_id)
     await tasks._instruct(call, from_operator=True)
     return {"task_id": call.arguments["task_id"], "delivered": True}
 

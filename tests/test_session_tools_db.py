@@ -147,3 +147,32 @@ def test_task_result_reuses_the_exact_code_notice_with_delivery_evidence(monkeyp
                                 binding="synthetic-binding", session_key=KEY)
         assert "result" not in active["result"]
     run_db(test, monkeypatch)
+
+
+@pytest.mark.parametrize("name", ["looper_chat_task_control", "looper_chat_task_instruct"])
+def test_write_implementation_rejects_unowned_tasks_before_shared_service(monkeypatch, name):
+    from looper.agents.ops import Call, ErrorCode, OpError
+
+    async def test(pool):
+        await pool.execute("INSERT INTO projects(id,name) VALUES ('foreign-project','Foreign project')")
+        await pool.execute("INSERT INTO tasks(id,requirement,status,project_id) "
+                           "VALUES ('foreign-task','Foreign request','executing','foreign-project')")
+        invoked = []
+
+        async def write(call, **kwargs):
+            invoked.append(call.arguments["task_id"])
+            return {}
+
+        monkeypatch.setattr(session_tools.tasks, "_control", write)
+        monkeypatch.setattr(session_tools.tasks, "_instruct", write)
+        tool = next(tool for tool in session_tools.TOOLS if tool.name == name)
+        turn = Turn(channel="lark", channel_id="channel-lark", chat="synthetic-team", group=True,
+                    message_id="synthetic-message", sender="synthetic-operator")
+        for task_id in ("foreign-task", "unknown-task", "malformed / task"):
+            call = Call({"task_id": task_id, "action": "stop", "text": "A supplement"}, turn,
+                        Platform(bus=None, task_router=None), confirmation={"session_key": KEY})
+            with pytest.raises(OpError) as error:
+                await tool.run(call)
+            assert error.value.code is ErrorCode.NOT_FOUND
+        assert invoked == []
+    run_db(test, monkeypatch)
