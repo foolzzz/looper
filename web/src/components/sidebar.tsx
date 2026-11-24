@@ -24,11 +24,12 @@ import { SignOut } from "@/components/sign-out";
 import { ProjectDialog } from "@/components/project-dialog";
 import { SETTINGS_PAGES, type SettingsPageId } from "@/lib/settings-pages";
 import { fetchOverview } from "@/lib/api";
-import { attentionSettingsGet } from "@/lib/api-attention";
+import { attentionSettingsGet, fetchAttention, isAttentionOff } from "@/lib/api-attention";
 import { intentsSettingsGet } from "@/lib/api-leads";
 import { useProjects } from "@/lib/use-projects";
 import { useWaitingGates } from "@/lib/use-waiting-gates";
 import { useLedger } from "@/lib/use-ledger";
+import { startPolling } from "@/lib/polling";
 import { cn } from "@/lib/utils";
 
 /** "history" is one agent's session, or every run of one role; "projects" is one project, from the
@@ -83,16 +84,25 @@ export function Sidebar({
     );
     return () => { live = false; };
   }, []);
-  // Read the switch without collecting a summary (which correctly returns 409 while off).
   const [todoOn, setTodoOn] = useState(false);
-  useEffect(() => {
-    let live = true;
-    attentionSettingsGet().then(
-      (settings) => { if (live) setTodoOn(settings.enabled === true); },
-      () => { if (live) setTodoOn(false); },
-    );
-    return () => { live = false; };
-  }, []);
+  const [todoCount, setTodoCount] = useState<number | null>(null);
+  useEffect(() => startPolling(async (signal) => {
+    try {
+      // Check the switch before collecting a summary: off must not provoke a 409.
+      const settings = await attentionSettingsGet();
+      if (signal.aborted) return;
+      setTodoOn(settings.enabled === true);
+      if (!settings.enabled) { setTodoCount(null); return; }
+      const summary = await fetchAttention(signal);
+      if (signal.aborted) return;
+      // total counts only readable sections; an incomplete total is not an exact count.
+      setTodoCount(summary.sections.every((section) => section.state === "ok") ? summary.total : null);
+    } catch (err) {
+      if (signal.aborted) return;
+      setTodoCount(null);
+      if (isAttentionOff(err)) setTodoOn(false);
+    }
+  }, 30_000), []);
   const navItems = [
     ...NAV_ITEMS.slice(0, 1),
     ...(todoOn ? [{ page: "todo" as const, label: "Needs you", icon: BellRing }] : []),
@@ -161,6 +171,14 @@ export function Sidebar({
             <span className="min-w-0 text-left">{label}
               {page === "ledger" && ledger.stale && <span className="block text-xs">暂无法刷新</span>}
             </span>
+            {page === "todo" && todoCount === null && (
+              <span className="ml-auto" aria-label="待处理数量未知">?</span>
+            )}
+            {page === "todo" && todoCount !== null && todoCount > 0 && (
+              <Badge variant="warning" aria-label={`${todoCount} 项待你处理`} className="ml-auto tabular-nums">
+                {todoCount > 99 ? "99+" : todoCount}
+              </Badge>
+            )}
             {page === "ledger" && ledger.count === null && (
               <span className="ml-auto" aria-label="待处理数量未知">?</span>
             )}
