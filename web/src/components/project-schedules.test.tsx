@@ -999,11 +999,12 @@ describe("subscription schedules", () => {
       Object.getOwnPropertyDescriptor(prototype, "value")!.set!.call(input, value);
       input.dispatchEvent(new Event("input", { bubbles: true }));
     };
-    await act(async () => { type("name", "Gossip"); type("cron", "5 * * * *"); type("requirement", "Pick the funny ones"); type("source", "stream"); type("budget", "0.5"); });
+    await act(async () => { type("name", "Gossip"); type("cron", "5 * * * *"); type("requirement", "Pick the funny ones"); type("source", "stream"); type("budget", "0.5"); type("daily-equivalent", "5"); });
     await act(async () => button("Create").click());
     expect(writes).toHaveLength(1);
     expect(writes[0]).toMatchObject({
       kind: "subscription", name: "Gossip", cron: "5 * * * *", requirement: "Pick the funny ones", run_budget_usd: 0.5,
+      daily_budget_equivalent_usd: 5,
       subscription: { source_id: "stream", chat_kinds: ["group", "topic"], sender_kinds: ["user", "app"], exclude_mentions_me: true,
         include_history: false, max_age_minutes: 180, max_events: 500, text_max_chars: 200, quiet_word: "SKIP" },
     });

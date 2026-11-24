@@ -35,6 +35,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass, fields, replace
+from enum import Enum
 from typing import Any
 
 # The facts of a compaction kept with a run; the rest of compact_metadata stays in the transcript.
@@ -60,6 +61,17 @@ def _dollars(value: Any) -> float | None:
     return float(value)
 
 
+class CostStatus(str, Enum):
+    """Shared price/cost coverage state; unknown dollars are never a free run."""
+
+    KNOWN = "known"
+    UNKNOWN = "unknown"
+
+
+def cost_status(cost: float | None) -> CostStatus:
+    return CostStatus.UNKNOWN if cost is None else CostStatus.KNOWN
+
+
 @dataclass(frozen=True)
 class Usage:
     """Dollars and tokens: a run's own share, or a session's running totals.
@@ -76,6 +88,10 @@ class Usage:
     # The part of ``cache_creation_tokens`` written for an hour rather than five minutes (a request's
     # ``cache_creation.ephemeral_1h_input_tokens``); None when the split is not reported.
     cache_creation_1h_tokens: int | None = None
+
+    @property
+    def cost_status(self) -> CostStatus:
+        return cost_status(self.cost_usd)
 
     def since(self, earlier: Usage) -> Usage:
         """What was spent between ``earlier`` totals and these.

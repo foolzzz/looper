@@ -376,7 +376,7 @@ def test_events_older_than_thirty_days_are_pruned_and_the_summary_counts_a_day(m
         await pool.execute("UPDATE manager_events SET created_at = now() - interval '31 days' "
                            "WHERE dedupe_key = 'month-old'")
         assert await store.summary() == {"window_hours": 24, "total": 1, "by_state": {"skipped": 1},
-                                         "by_reason": {"off": 1}, "turn_cost_usd": 0.0, "pending": 0,
+                                         "by_reason": {"off": 1}, "turn_cost_usd": 0.0, "pending": 0, "cost_status": "known", "unpriced_runs": 0,
                                          "oldest_pending_seconds": None, "failing": False}
         cutoff = datetime.now(timezone.utc) - timedelta(days=store.RETENTION_DAYS)
         assert await store.prune(pool, cutoff) == 1
@@ -395,7 +395,7 @@ def test_the_summary_is_an_operator_operation(monkeypatch, tmp_path):
             status, answer = await call("manager_events.summary")
             assert (status, answer["result"]) == (200, {"window_hours": 24, "total": 1,
                                                         "by_state": {"skipped": 1}, "by_reason": {"off": 1},
-                                                        "turn_cost_usd": 0.0, "pending": 0,
+                                                        "turn_cost_usd": 0.0, "pending": 0, "cost_status": "known", "unpriced_runs": 0,
                                                         "oldest_pending_seconds": None, "failing": False})
 
     run_db(check, monkeypatch, timeout=30)

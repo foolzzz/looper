@@ -570,3 +570,68 @@ def test_the_advisors_alerts_tell_the_operator_once_each(monkeypatch: pytest.Mon
             advisor_alerts.configure(None)
 
     run_db(test, monkeypatch, setup=_setup)
+
+
+def test_unknown_advisor_cost_does_not_retry_with_a_full_budget(monkeypatch, tmp_path, caplog):
+    from unittest.mock import AsyncMock
+    from looper.agents import advisor
+    from looper.agents.model_call import CallFailed, CallFailure, Execution
+    from looper.agents.spawn import ChildRun, SpawnKind
+
+    failed = CallFailed(execution=Execution(None, record_id=1, models=("claude-haiku-5-5",)),
+                        failure=CallFailure.RUNTIME, reason="runtime failed")
+    called = AsyncMock(return_value=failed)
+    monkeypatch.setattr(advisor, "call", called)
+    child = ChildRun(SpawnKind.ADVISOR, "system", "input", timeout_s=30)
+    result, spent = asyncio.run(advisor._run(child, spawn_id=1,
+        brief=advisor.Brief("task", None, 1, advisor.Source.OPTIONAL), settings=None, cap_usd=.5,
+        runtime_root=tmp_path, claude_bin="claude", parse=lambda text: text))
+    assert called.await_count == 1
+    assert result.failure is CallFailure.BUDGET and spent is None
+    assert "claude-haiku-5-5" in caplog.text and "budget" in caplog.text
+
+
+@pytest.mark.parametrize("phase", ["previous_run", "judge", "advisor"])
+def test_unknown_cost_uses_existing_planner_failure_text(monkeypatch, tmp_path, phase):
+    from unittest.mock import AsyncMock
+
+    from looper.agents import advisor
+    from looper.agents.agent_settings import AgentType
+    from looper.agents.model_call import CallFailed, CallFailure, Execution
+    from looper.agents.tiers.planner_advice import ended_lines, ended_message
+    from looper.db import agent_spawns, llm_records
+
+    async def check(pool):
+        spawn, _ = await _consult(pool)
+        record = await llm_records.start_record(agent_id="advisor-unknown", task_id="task-a", pool=pool)
+        await llm_records.finish_record(record, status="completed", model="claude-haiku-5-5", input_tokens=10,
+                                       pool=pool)
+        await agent_spawns.note_run(spawn, record)
+        original_call = advisor.call
+
+        async def failed_call(request, **kwargs):
+            if phase == "advisor" and request.child.role is AgentType.ADVICE_CHECK:
+                return await original_call(request, **kwargs)
+            await advisor._book(spawn, Execution(None, record_id=record))
+            return CallFailed(execution=Execution(None, record_id=record, models=("claude-haiku-5-5",)),
+                              failure=CallFailure.RUNTIME, reason="runtime failed")
+
+        called = AsyncMock(side_effect=failed_call)
+        monkeypatch.setattr(advisor, "call", called)
+        if phase == "previous_run":
+            await advisor._book(spawn, Execution(None, record_id=record))
+        ended = await _submit(tmp_path, spawn, _request())
+        assert called.await_count == {"previous_run": 0, "judge": 1, "advisor": 2}[phase]
+        assert ended_lines(ended.failure, ended.detail) == ended_lines("budget") == [
+            "The consult gave no answer: budget, it reached its spend cap.",
+            "Decide without it; advise is offered again for this once something new is known.",
+        ]
+        assert ended_message("Rewrite", 1, ended.failure, ended.detail, "proceed, replan") == ended_message(
+            "Rewrite", 1, "budget", "", "proceed, replan")
+        row = await agent_spawns.get(spawn)
+        assert row["state"] == "over_budget"
+        assert "its cost is unknown" in row["detail"]
+        assert row["cost_status"] == "unknown"
+        assert row["result"]["unpriced_runs"] == [record]
+
+    run_db(check, monkeypatch, setup=_setup)

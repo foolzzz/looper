@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from typing import Any
@@ -872,7 +873,8 @@ def test_three_failed_checks_in_a_row_alert_once_and_a_checked_run_recovers(monk
     scenario(check, monkeypatch, tmp_path)
 
 
-def test_the_check_is_bounded_by_what_is_left_of_the_days_budget(monkeypatch, tmp_path):
+@pytest.mark.parametrize("retry, first_cost", [(False, 0.01), (True, 0.01), (True, None)])
+def test_the_check_is_bounded_by_what_is_left_of_the_days_budget(monkeypatch, tmp_path, retry, first_cost):
     async def check(env, poster, fake):
         sid = await _checked_window(env, fake)
         fake.check_reply = VERDICTS
@@ -881,8 +883,41 @@ def test_the_check_is_bounded_by_what_is_left_of_the_days_budget(monkeypatch, tm
             "INSERT INTO schedule_runs (id, schedule_id, scheduled_for, trigger, status, fired_at, finished_at, "
             "cost_usd) VALUES ('earlier-run', $1, $2, 'manual', 'completed', $2, $2, 0.2)", sid,
             minutes_ago(env, 1))
+        from looper.db import llm_records, schedules
+
+        if retry:
+            fake.outcomes = [("Here are the leads.", None), (FOUR_LEADS, None)]
+        records = []
+
+        async def recorded(**kwargs):
+            result = await fake(**kwargs)
+            if kwargs.get("role", AgentType.PROCESSOR) is AgentType.LEADS_CHECK:
+                await llm_records.finish_record(result.record_id, status="completed", cost_usd=result.cost_usd,
+                                               input_tokens=1, model="sonnet", pool=env.pool)
+                return result
+            cost = first_cost if not records else fake.cost
+            rid = await llm_records.start_record(agent_id=f"processor:{sid}", metadata=kwargs["metadata"], pool=env.pool)
+            await llm_records.finish_record(rid, status="completed", cost_usd=cost, input_tokens=1,
+                                           model="sonnet" if cost is not None else "claude-haiku-5-5", pool=env.pool)
+            records.append(rid)
+            return replace(result, record_id=rid, cost_usd=cost)
+
+        monkeypatch.setattr(processor, "run", recorded)
         await fire(env, sid)
-        assert fake.calls[1]["budget_usd"] == pytest.approx(0.3 - 0.2 - fake.cost)
+        run = dict(await env.pool.fetchrow("SELECT r.* FROM schedule_runs r JOIN subscription_runs sr "
+                                           "ON sr.run_id = r.id WHERE r.schedule_id = $1", sid))
+        run["stream"] = await db_subs.get_run(run["id"], db=env.pool)
+        extraction_spent = (first_cost or 0) + (fake.cost if retry else 0)
+        assert fake.calls[-1]["budget_usd"] == pytest.approx(0.3 - 0.2 - extraction_spent)
+        assert run["stream"]["record_id"] == records[-1]
+        if retry:
+            assert run["stream"]["retry_record_id"] == records[0]
+        statuses = {}
+        assert (await schedules.spent_since_each(env.pool, [sid], env.scheduler.day_start(env.clock.now),
+                                                 statuses=statuses))[sid] == pytest.approx(
+            0.2 + extraction_spent + fake.check_cost)
+        assert statuses == {sid: "known" if first_cost is not None else "unknown"}
+        assert (run["cost_usd"] is None) == (first_cost is None)
 
     scenario(check, monkeypatch, tmp_path, reply=FOUR_LEADS)
 
