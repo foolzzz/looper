@@ -18,6 +18,19 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.15.31] - 2026-11-24
+
+### Added
+
+- **The Manager's resident profile stays off.** ([#1658](https://github.com/foolzzz/looper/pull/1658)) `manager.profile.enabled` is on only when the stored value is the string `true`. An absent row means off. `null` deletes the row. `false` stores `false`. The source is `knowledge_vault.profile_source`, relative to the vault root, default `关于我.md`. The old `manager.profile.source` directory setting is no longer read. While the switch is off, a Manager turn does not compile or inject a profile, and nothing is written to `profile_blocks`. No seed row, no migration and no new export key. `web/` changed, so the dashboard bundle is rebuilt by the release workflow as usual.
+- **An opt-in Claude Code SessionStart profile hook. Not installed by default.** ([#1659](https://github.com/foolzzz/looper/pull/1659)) `looper claude-code install hook` shows the user-settings path and a diff, asks `Write these changes to {path}? [y/N]`, backs up the original bytes and reads the file back. Startup does not edit Claude Code settings. Looper-started processes set `LOOPER_AGENT_RUN` and do not load user settings, so they never trigger the hook.
+
+### Changed
+
+- **DSH requires `@deepseek-ai/dsh` 0.2.2-rc.5.** ([#1654](https://github.com/foolzzz/looper/pull/1654)) The CLI probe and the SDK runner both require that exact version, on Node 22.19+, with `@deepseek-ai/cordis` 4.1.x. Any other version fails the version check. Installations that do not run DSH are unchanged. `[runtimes] dsh` still defaults to `"runner"`. The runner overlay no longer sets `tools.mode` to `native` and does not disable `tool-executor-native`, so that plugin stays enabled. Rollback needs the previous Looper release together with `@deepseek-ai/dsh@0.2.1-rc.2`. No new setting and no migration.
+- **Docs only.** ([#1660](https://github.com/foolzzz/looper/pull/1660)) The intent-rules RFC records the design. No runtime, prompt, UI or configuration change.
+- **Tests only.** ([#1653](https://github.com/foolzzz/looper/pull/1653)) The Manager idle-close regression no longer depends on lane routing. No production code changes. The v2.15.30 release pull request ([#1664](https://github.com/foolzzz/looper/pull/1664)) is not a product change in this release.
+
 ## [2.15.30] - 2026-11-23
 
 ### Added
