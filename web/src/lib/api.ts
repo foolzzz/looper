@@ -2608,7 +2608,9 @@ export interface TaskDetail extends TaskInfo {
   } | null;
   error: string | null;
   /** "task_budget": the task failed at its project's task spend cap and can continue with a higher one. */
-  fail_kind: "task_budget" | null;
+  fail_kind: "task_budget" | "quota_exhausted" | "environment" | null;
+  /** Present only with active failure handling or retained failure history. */
+  holds?: import("./api-task-failures").FailureHold[];
   /** The task's spend cap (USD): its own, else its project's per task; null for none. */
   task_budget_usd: number | null;
   /** The task's own cap (a scheduled run's), raised alone when it continues at its cap; null for none. */
@@ -3132,6 +3134,7 @@ export type JournalKind =
   | "gate_opened"
   | "gate_updated"
   | "gate_cancelled"
+  | "failure_hold"
   | "gate_closed";
 
 /** Where a task stood, as its Planner said with a decision or a periodic check. */

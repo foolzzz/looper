@@ -109,6 +109,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import random
 import time
 import uuid
 from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
@@ -403,7 +404,19 @@ async def load_settings() -> PlannerSettings:
 
 
 class PlannerTurnError(Exception):
-    """A Planner turn produced no valid reply; the message says why."""
+    """A Planner turn produced no valid reply, retaining its runtime's typed cause."""
+
+    def __init__(self, message: str, *, failure: failures.Failure | None = None,
+                 fail_kind: FailKind | None = None) -> None:
+        super().__init__(message)
+        self.failure = failure
+        self.fail_kind = fail_kind
+
+
+@dataclass
+class _TurnFailureContext:
+    # Shared by the original request and its one protocol repair, rather than a retry loop at each layer.
+    failures: int = 0
 
 
 class _SessionNotResumed(Exception):
@@ -498,6 +511,10 @@ class PlanStep:
     attempt_trigger: attempts.Trigger | None = None
     attempt_loaded: bool = False
     checks: tuple[Check, ...] = ()
+    # Current system hold and the next execution's recovery facts; populated only in act mode.
+    failure_hold: dict[str, Any] | None = None
+    failure_retry: dict[str, Any] | None = None
+    failure_history: list[dict[str, Any]] = field(default_factory=list)
 
     @property
     def kind(self) -> str:
@@ -517,6 +534,8 @@ class PlanStep:
     @property
     def started(self) -> bool:
         """A work step started when its first Worker did, a gate when it opened, a wait when it left pending."""
+        if self.failure_hold is not None:
+            return False
         if self.wait is not None:
             return self.wait.state is not WaitState.PENDING
         if self.gate is not None:
@@ -576,7 +595,7 @@ class TaskPlan:
         done = {s.step_id for s in self.steps if s.status == "verified"}
         return [
             s for s in self.steps
-            if s.status == "pending" and (all(d in done for d in s.depends_on) if s.ready_when is None
+            if s.status == "pending" and s.failure_hold is None and (all(d in done for d in s.depends_on) if s.ready_when is None
                                           else self.ready_state(s, isolate_steps=isolate_steps) is State.SATISFIED)
         ]
 
@@ -899,7 +918,8 @@ def _reported_status(plan: TaskPlan) -> str:
     in flight, else the plan's own status."""
     if plan.status not in _LIVE:
         return plan.status
-    if plan.waiting_gates():
+    if plan.waiting_gates() or any(s.failure_hold and s.failure_hold.get("kind") in ("environment", "breaker")
+                                    for s in plan.steps):
         return WAITING_USER
     if plan.open_waits() and not any(step.status in _IN_FLIGHT for step in plan.steps):
         return waits.WAITING
@@ -1282,7 +1302,9 @@ class PlannerAgent:
             reply = await self._ask(TurnKind.PLAN, self._plan_message(plan, [*await self._template_lines(plan), *offer]),
                                     await self._asking(plan, None, self._plan_parser(advise=spend is not None)))
         except PlannerTurnError as exc:
-            await self._fail_plan(plan, reason=f"Planning failed: {exc}")
+            if exc.fail_kind is FailKind.QUOTA_EXHAUSTED and plan.status == "failed":
+                return
+            await self._fail_plan(plan, reason=f"Planning failed: {exc}", fail_kind=exc.fail_kind)
             return
         if reply.advice_request is not None:
             await self._start_consult(plan, None, reply.advice_request, reply.advice_bindings,
@@ -1549,6 +1571,8 @@ class PlannerAgent:
                                     checkpoint_message(step.label, step.index + 1, PLAN_VIEW, local, spend),
                                     lambda text: parse_decision(text, context, self._checked(view)))
         except PlannerTurnError as exc:
+            if exc.fail_kind is FailKind.QUOTA_EXHAUSTED and plan.status == "failed":
+                return
             await self._activity("error", f"The checkpoint of step {step.label} failed ({exc}); it starts as planned"
                                  [:500])
             return
@@ -1703,6 +1727,8 @@ class PlannerAgent:
                 "DECISION", outcome.problems, outcome.returns_left, _allowed_text(context), label=step.label,
                 notes=self._final_notes(step, context)), self._consult_parse(plan, step, context))
         except PlannerTurnError as exc:
+            if exc.fail_kind is FailKind.QUOTA_EXHAUSTED and plan.status == "failed":
+                return
             self._consults.pop(consult.spawn_id, None)
             ended = await advisor.withdraw(consult.spawn_id, "the Planner's turn about it failed")
             await self._consult_ended(plan, step, consult, ended or advisor.Ended(SpawnState.FAILED,
@@ -1729,6 +1755,8 @@ class PlannerAgent:
                 step.label if step else "the plan", int((row or {}).get("rounds") or 1), advisor.ROUNDS_MAX,
                 outcome.response.needs_info), self._advice_parser(row, outcome.response.needs_info))
         except PlannerTurnError as exc:
+            if exc.fail_kind is FailKind.QUOTA_EXHAUSTED and plan.status == "failed":
+                return
             self._consults.pop(consult.spawn_id, None)
             ended = await advisor.withdraw(consult.spawn_id, "the Planner's turn about it failed")
             await self._consult_ended(plan, step, consult, ended or advisor.Ended(SpawnState.FAILED,
@@ -1773,7 +1801,9 @@ class PlannerAgent:
                 reply = await self._ask(TurnKind.PLAN, self._plan_message(
                     plan, [*await self._template_lines(plan), "", *lines]), self._plan_parser(answered=answered))
             except PlannerTurnError as exc:
-                await self._fail_plan(plan, reason=f"Planning failed: {exc}")
+                if exc.fail_kind is FailKind.QUOTA_EXHAUSTED and plan.status == "failed":
+                    return
+                await self._fail_plan(plan, reason=f"Planning failed: {exc}", fail_kind=exc.fail_kind)
                 return
             if answered:
                 await self._adopted(consult, reply.adoption, what)
@@ -1789,6 +1819,8 @@ class PlannerAgent:
                         step.label, step.index + 1, advice, _allowed_text(context), checkpoint=True),
                         self._consult_parse(plan, step, context))
                 except PlannerTurnError as exc:
+                    if exc.fail_kind is FailKind.QUOTA_EXHAUSTED and plan.status == "failed":
+                        return
                     await self._activity("error", f"The decision after step {step.label}'s checkpoint failed ({exc})"
                                          [:500])
             await self._checkpoint_decided(plan, step, consult, reply)
@@ -1809,6 +1841,8 @@ class PlannerAgent:
         try:
             reply = await self._ask(TurnKind.DECISION, message, self._consult_parse(plan, step, context))
         except PlannerTurnError as exc:
+            if exc.fail_kind is FailKind.QUOTA_EXHAUSTED and plan.status == "failed":
+                return
             step.status = "deciding"
             await self._undecided(plan, step, context, exc)
             return
@@ -2053,6 +2087,8 @@ class PlannerAgent:
                                                                       fence=await untrusted.enabled()),
                                     lambda text: parse_gate(text, context, view))
         except PlannerTurnError as exc:
+            if exc.fail_kind is FailKind.QUOTA_EXHAUSTED and plan.status == "failed":
+                return
             # The same messages again (an automatic retry) count on; a newer one starts the count again.
             gate.failures = gate.failures + 1 if newest <= gate.failed_through else 1
             gate.failed_through, gate.failed_at = newest, datetime.now(timezone.utc)
@@ -2302,6 +2338,8 @@ class PlannerAgent:
                                                                       fence=await untrusted.enabled()),
                                     lambda text: parse_wait(text, context, view))
         except PlannerTurnError as exc:
+            if exc.fail_kind is FailKind.QUOTA_EXHAUSTED and plan.status == "failed":
+                return
             wait.failures += 1
             wait.failed_at = datetime.now(timezone.utc)
             await self._activity("error", f"Planner could not decide on wait {step.label} "
@@ -2579,6 +2617,8 @@ class PlannerAgent:
         a merge that failed gets a new one), else in the task directory; as the current version of its role when
         it has one (the version it ran with, for the ``same_attempt`` a restart runs again)."""
         assert self._bus is not None
+        if step.failure_hold is not None:
+            return
         if not await self._within_budget(plan, "worker", step, same_attempt=same_attempt):
             return
         worker_id = f"worker-{uuid.uuid4().hex[:12]}"
@@ -2651,6 +2691,7 @@ class PlannerAgent:
                 "feedback": list(step.feedback),
                 "attempt": step.retries + 1,
                 "attempt_id": step.attempt_id,
+                **({"failure_retry": step.failure_retry, "recovery": True} if step.failure_retry else {}),
                 **({"verification": True} if self._is_verification(step) else {}),
                 # Its first user turn: what the steps it depends on reported, and the task journal's findings.
                 "dependencies": self._dependency_reports(plan, step),
@@ -2906,6 +2947,188 @@ class PlannerAgent:
 
     # --- Results and decisions ---
 
+    async def _handle_engine_result(self, plan: TaskPlan, unit: PlanStep, envelope: MessageEnvelope, *,
+                                    review: bool) -> bool:
+        """Handle a current execution before its result becomes a review verdict or decision.
+
+        The caller has already rejected stale sources. A panel seat shares the
+        work step's counter, but retains its own dispatch identity and snapshot.
+        """
+        from .. import failure_handling, failures
+
+        if await failures.typing_mode() is not failures.FailureTyping.ACT:
+            return False
+        result = envelope.payload
+        if result.get("prompt_blocked") or result.get("refused"):
+            return False
+        signal = result.get("engine_run") or {}
+        unit.failure_retry = None
+        if signal.get("quota_exhausted"):
+            await self._fail_plan(plan, reason="Scheduled task exhausted its quota wait deadline",
+                                  fail_kind=FailKind.QUOTA_EXHAUSTED)
+            return True
+        outcome = signal.get("outcome")
+        scope = plan.step(unit.reviews) if unit.reviews else unit
+        if scope is None:
+            return False
+        target = {"kind": "panel" if unit.reviews else "reviewer" if review else "worker",
+                  "unit_step_id": unit.step_id, "source": envelope.source.agent_id,
+                  "unit_label": unit.label,
+                  "role_name": unit.role or "builtin", "role_version": unit.role_version,
+                  "review_stage": unit.review_stage.value if unit.review_stage else None,
+                  "review_position": unit.review_position, "round": scope.retries}
+        if review and (item := self._reviewing_role(unit)) is not None:
+            target.update(role_name=item.role, role_version=item.version)
+        service = failure_handling.get_service()
+        handling = None
+        try:
+            identity = dict(task_id=self._task_id, step_id=scope.step_id, run_id=envelope.source.agent_id,
+                            attempt=await self._attempt(scope), role="reviewer" if review else "worker",
+                            target=target, record_id=signal.get("record_id"))
+            if outcome in ("completed", "passed", "not_passed"):
+                await service.note_success(**identity, outcome=outcome)
+                if outcome != "not_passed":
+                    scope.failure_history.clear()
+                return False
+            found = signal.get("failure") or {}
+            failure = failures.Failure(failures.FailureCause(found.get("cause", "unknown")),
+                failures.Signal(found.get("signal", "typed")),
+                datetime.fromisoformat(found["resets_at"]) if found.get("resets_at") else None)
+            handling = await service.handle_step_result(**identity, failure=failure,
+                provider_id=signal.get("provider_id"), result=result)
+            if handling.action in ("duplicate", "ignored"):
+                return True
+            if handling.hold is not None:
+                scope.failure_hold = dict(handling.hold)
+                unit.failure_hold = dict(handling.hold)
+            await self._read_failure_journal(plan)
+            if handling.action == "hold":
+                if not review:
+                    unit.result = result
+                unit.status = "pending"
+                await self._save(plan, unit)
+                await self._activity("phase", f"Step {scope.label} waits: {failure.cls.value} ({failure.cause.value})",
+                                     worker=envelope.source.agent_id)
+                await self._report_progress(plan)
+                await self._dispatch_ready(plan)
+                return True
+            scope.failure_history = await service.continuous_failures(self._task_id, scope.step_id)
+            if review and handling.action in ("planner", "breaker"):
+                # Running failures must never become panel votes or advance advisory roles.
+                if unit.reviews:
+                    unit.result, unit.status = result, "pending"
+                scope.result = {**(scope.result or {}), "verify_passed": False,
+                                "verify_summary": result.get("summary") or result.get("error") or
+                                                  "Review execution did not complete"}
+                context = DecisionContext(scope.label, ResultKind.REVIEW, False, True,
+                                          scope.retries, self._execution.step_retries)
+                await self._decide(plan, scope, context, self._review_report(scope, result))
+                return True
+            return False
+        except Exception:
+            logger.exception("failure routing unavailable for task %s step %s run %s; using the decision path",
+                             self._task_id, scope.step_id, envelope.source.agent_id)
+            if handling is not None and handling.hold is not None:
+                await self._activity("error", "Failure hold is saved; recovery notification is unavailable")
+                return True
+            await self._activity("error", "Failure recovery is unavailable; the Planner will handle the result")
+            return False
+
+    async def _read_failure_journal(self, plan: TaskPlan) -> None:
+        from ...db import journal as db_journal
+
+        plan.journal = [JournalEntry.from_row(row) for row in await db_journal.list_entries(self._task_id)]
+
+    async def _restore_failure_holds(self, plan: TaskPlan) -> None:
+        from .. import failure_handling
+        from ...db import step_failures
+
+        for unit in plan.steps:
+            unit.failure_hold = None
+        for hold in await step_failures.list_holds(self._task_id):
+            scope = plan.step(hold["step_id"])
+            if scope is not None:
+                scope.failure_hold = dict(hold)
+            for item in hold.get("targets") or [hold.get("target") or {}]:
+                target = item.get("target", item)
+                unit = plan.step(target.get("unit_step_id", hold["step_id"]))
+                if unit is not None:
+                    unit.failure_hold = dict(hold)
+        # A release is durable until this actor applies it. Pending reviewer
+        # recoveries must not fall into the ordinary pending Worker dispatch.
+        for pending in await step_failures.pending_releases(self._task_id):
+            payload = pending["payload"]
+            scope = plan.step(payload["step_id"])
+            if scope is not None and scope.failure_hold is None:
+                scope.failure_hold = {"kind": "recovery", "failure_id": payload["failure_id"]}
+            for item in payload.get("targets") or []:
+                target = item.get("target", item)
+                unit = plan.step(target.get("unit_step_id", payload["step_id"]))
+                if unit is not None and unit.failure_hold is None:
+                    unit.failure_hold = {"kind": "recovery", "failure_id": payload["failure_id"]}
+        await failure_handling.get_service().restore_task(self._task_id)
+
+    async def _failure_hold_event(self, plan: TaskPlan, payload: Mapping[str, Any]) -> None:
+        from .. import failure_handling, failures
+        from ...db import step_failures
+
+        if plan.status not in _LIVE:
+            return
+        task = await db_tasks.get_task(self._task_id)
+        if task is None or task["status"] not in db_tasks.ACTIVE_STATUSES or task.get("completed_at") is not None:
+            return
+        scope = plan.step(str(payload.get("step_id") or ""))
+        if scope is None:
+            return
+        # A stale wake cannot release or redispatch a more recent failure.
+        holds = await step_failures.list_holds(self._task_id)
+        if any(h["step_id"] == scope.step_id for h in holds):
+            return
+        action = str(payload.get("action") or "retry")
+        active = await failures.typing_mode() is failures.FailureTyping.ACT
+        await self._read_failure_journal(plan)
+        scope.failure_hold = None
+        for item in payload.get("targets") or [payload.get("target") or {}]:
+            target = item.get("target", item)
+            unit = plan.step(target.get("unit_step_id", scope.step_id))
+            if unit is None or unit.status in ("verified", "skipped", "failed"):
+                continue
+            source = unit.reviewer_id if target.get("kind") in ("reviewer", "panel") else unit.worker_id
+            if target.get("source") and source != target["source"]:
+                continue
+            unit.failure_hold = None
+            result = item.get("result", payload.get("result") or {})
+            if action == "retry" and active:
+                unit.failure_retry = ({"class": item["failure_class"], "cause": item["failure_cause"]}
+                    if item.get("failure_cause") else payload.get("failure") or
+                    {"class": payload.get("kind"), "cause": payload.get("cause")})
+                if target.get("kind") == "panel":
+                    await self._dispatch_review(plan, unit, same_attempt=True)
+                elif target.get("kind") == "reviewer":
+                    unit.status = "completed"
+                    if target.get("review_stage"):
+                        unit.review_stage = ReviewStage(target["review_stage"])
+                    unit.review_position = target.get("review_position")
+                    await self._spawn_reviewer(plan, unit, same_attempt=True)
+                else:
+                    await self._dispatch_step(plan, unit, same_attempt=True)
+            else:
+                scope.failure_history = await failure_handling.get_service().continuous_failures(self._task_id, scope.step_id)
+                review = target.get("kind") in ("reviewer", "panel")
+                if review:
+                    scope.result = {**(scope.result or {}), "verify_passed": False,
+                                    "verify_summary": result.get("summary") or result.get("error")}
+                else:
+                    scope.result = result
+                context = DecisionContext(scope.label, ResultKind.REVIEW if review else ResultKind.WORK, False,
+                    self._needs_review(scope), scope.retries, self._execution.step_retries)
+                await self._decide(plan, scope, context,
+                    self._review_report(scope, result) if review else self._work_report(scope, result))
+                break  # all failures in this step are represented in this single decision
+        await self._report_progress(plan)
+        if payload.get("failure_id") is not None:
+            await failure_handling.get_service().ack_release(payload["failure_id"])
+
     async def _attempt(self, step: PlanStep) -> int | None:
         if not step.attempt_loaded:
             step.attempt_id = await attempts.resolve_attempt(self._task_id, step.label)
@@ -2928,6 +3151,9 @@ class PlannerAgent:
         step = plan.step(result.get("task_id", ""))
         if step is None or step.status != "dispatched" or envelope.source.agent_id != step.worker_id:
             logger.info("planner %s ignores a result that is not for a running step", self.agent_id)
+            return
+
+        if "engine_run" in result and await self._handle_engine_result(plan, step, envelope, review=False):
             return
 
         await self._record_profile_fallbacks(plan, step.role or "worker", result.get("fallback") or [], step)
@@ -2963,6 +3189,8 @@ class PlannerAgent:
         """Start the review ``step`` waits for (``review_stage``): the built-in Reviewer's, or that of its review
         role at ``review_position`` (the version it ran with, for the ``same_attempt`` a restart runs again)."""
         assert self._bus is not None
+        if step.failure_hold is not None:
+            return
         if not await self._within_budget(plan, "reviewer", step, same_attempt=same_attempt):
             return
         evidence = await acceptance_decisions.reviewer_payload(self, plan, step)
@@ -3005,6 +3233,7 @@ class PlannerAgent:
                 "work_result": step.result or {},
                 **evidence,
                 "attempt_id": await self._attempt(step),
+                **({"failure_retry": step.failure_retry, "recovery": True} if step.failure_retry else {}),
                 "acceptance_criteria": step.acceptance_criteria,
                 # The notes the step was retried with: the Planner's changes to it, which its Worker had too.
                 **({"feedback": list(step.feedback)} if step.feedback else {}),
@@ -3040,6 +3269,8 @@ class PlannerAgent:
         return parse_decision(text, context, view, adjudications=enabled and step.accept_when is not None)
 
     async def _dispatch_review(self, plan: TaskPlan, step: PlanStep, *, same_attempt: bool = False) -> None:
+        if step.failure_hold is not None:
+            return
         if not await self._within_budget(plan, "reviewer", step, same_attempt=same_attempt):
             return
         target = plan.step(step.reviews)
@@ -3087,6 +3318,7 @@ class PlannerAgent:
                      "step_key": target.label, "instruction": target.instruction,
                      "work_result": target.result or {}, "acceptance_criteria": target.acceptance_criteria,
                      "attempt_id": await self._attempt(target),
+                     **({"failure_retry": step.failure_retry, "recovery": True} if step.failure_retry else {}),
                      **({"feedback": list(target.feedback)} if target.feedback else {}), "context": context,
                      "severity": True, "head": head,
                      "worker_id": target.worker_id,
@@ -3177,10 +3409,15 @@ class PlannerAgent:
         step = plan.step(result.get("task_id", ""))
         if step is not None and step.reviews:
             if step.status == "dispatched" and envelope.source.agent_id == step.reviewer_id:
+                if "engine_run" in result and await self._handle_engine_result(plan, step, envelope, review=True):
+                    return
                 await self._review_done(plan, step, result)
             return
         if step is None or step.status != "completed" or envelope.source.agent_id != step.reviewer_id:
             logger.info("planner %s ignores a review that is not for a step in review", self.agent_id)
+            return
+
+        if "engine_run" in result and await self._handle_engine_result(plan, step, envelope, review=True):
             return
 
         item = self._reviewing_role(step)
@@ -3368,6 +3605,8 @@ class PlannerAgent:
                                           _Consult.about(step, context, report))
                 return
         except PlannerTurnError as exc:
+            if exc.fail_kind is FailKind.QUOTA_EXHAUSTED and plan.status == "failed":
+                return
             await self._undecided(plan, step, context, exc)
             return
         await self._apply_decision(plan, step, context, reply,
@@ -3376,6 +3615,11 @@ class PlannerAgent:
     async def _undecided(self, plan: TaskPlan, step: PlanStep, context: DecisionContext, exc: Exception) -> None:
         """No valid decision on ``step``'s result came: a mandatory review still runs, else the step's own verdict
         decides."""
+        if plan.status not in _LIVE:
+            return
+        if getattr(exc, "fail_kind", None) is FailKind.QUOTA_EXHAUSTED:
+            await self._fail_plan(plan, reason=str(exc), fail_kind=FailKind.QUOTA_EXHAUSTED)
+            return
         context = await acceptance_decisions.fallback_context(self, plan, step, context)
         if context is None:
             return
@@ -3432,6 +3676,13 @@ class PlannerAgent:
     async def _decided(
         self, plan: TaskPlan, step: PlanStep, context: DecisionContext, reply: DecisionReply,
     ) -> None:
+        if step.failure_hold and step.failure_hold.get("kind") == "breaker":
+            from .. import failure_handling
+            await failure_handling.get_service().consume_breaker_hold(self._task_id, step.step_id,
+                                                                      step.failure_hold["failure_id"])
+            for unit in plan.steps:
+                if unit is step or unit.reviews == step.step_id:
+                    unit.failure_hold = None
         if reply.adjudications:
             from .review_adjudication import adjudicate
             from .review_panel import merged
@@ -3615,7 +3866,22 @@ class PlannerAgent:
         """Replace every step that has not started with ``specs``; saved with the ``decided`` step and the
         decision's journal entry at once."""
         keep = {spec.id for spec in specs}
-        dropped = [s for s in plan.steps if s.status == "pending" and not s.reviews and s.label not in keep]
+        dropped = [s for s in plan.steps if (s.status == "pending" or s.failure_hold is not None)
+                   and not s.reviews and s.label not in keep]
+        replaced_holds = [s for s in plan.steps if s.failure_hold is not None and not s.reviews and s.label in keep]
+        held = [s for s in [*dropped, *replaced_holds] if s.failure_hold is not None]
+        if held:
+            from .. import failure_handling
+            await failure_handling.get_service().cancel_task(self._task_id,
+                step_ids=[s.step_id for s in held], reason="replan replaced execution")
+            for step in held:
+                await self._reset_reviews(plan, step, drop=True)
+                step.failure_hold = step.failure_retry = None
+                if step in replaced_holds:
+                    step.status, step.result = "pending", None
+                    step.worker_id = step.reviewer_id = None
+                    step.review_stage = step.review_position = None
+                    step.attempt_trigger = attempts.Trigger.REPLANNED
         for step in dropped:
             self._skip(step)
             await self._drop_workspace(step)
@@ -3732,6 +3998,8 @@ class PlannerAgent:
                 reply = await self._ask(TurnKind.CHAT, "[CHAT] " + message + "\n" + PLAN_VIEW
                                         + "\nAllowed actions: none (skip this step), add_steps, replan.", check)
             except PlannerTurnError as exc:
+                if exc.fail_kind is FailKind.QUOTA_EXHAUSTED and plan.status == "failed":
+                    return
                 await self._activity("error", f"Planner could not resolve condition for {blocked.label}: {exc}"[:500])
                 if not any(s.status in _IN_FLIGHT for s in plan.steps):
                     await self._fail_plan(plan, reason=f"Planner could not resolve condition for {blocked.label}: {exc}",
@@ -3851,7 +4119,12 @@ class PlannerAgent:
             await self._fail_plan(plan, reason=f"Cannot resume after a server restart: the plan was {plan.status}")
             return
         await self._activity("phase", f"Planner resumed after a server restart ({plan.progress_summary()})")
+        from .. import failure_handling, failures
+        service = failure_handling.get_service()
+        if await failures.typing_mode() is failures.FailureTyping.ACT or service is not None and service.recovering:
+            await self._restore_failure_holds(plan)
         cut_off = [(step, step.status) for step in plan.steps if step.status in ("dispatched", "completed", "deciding")]
+        cut_off = [(step, status) for step, status in cut_off if step.failure_hold is None]
         if ended_run_id := envelope.payload.get("ended_run_id"):
             # Expiry releases one held step; other steps may already be running on this control plane.
             cut_off = [(step, status) for step, status in cut_off
@@ -3955,7 +4228,9 @@ class PlannerAgent:
                 plan, [*await self._template_lines(plan), "", *ended_lines("interrupted", "a server restart")]),
                 self._plan_parser())
         except PlannerTurnError as exc:
-            await self._fail_plan(plan, reason=f"Planning failed: {exc}")
+            if exc.fail_kind is FailKind.QUOTA_EXHAUSTED and plan.status == "failed":
+                return
+            await self._fail_plan(plan, reason=f"Planning failed: {exc}", fail_kind=exc.fail_kind)
             return
         await self._planned(plan, reply, changes, envelope)
 
@@ -4066,6 +4341,8 @@ class PlannerAgent:
             reply: ChatReply | None = await self._ask(TurnKind.RESTART, message,
                                                       lambda answer: parse_chat(answer, self._checked(view)))
         except PlannerTurnError as exc:
+            if exc.fail_kind is FailKind.QUOTA_EXHAUSTED and plan.status == "failed":
+                return
             await self._activity("error", f"Warning: the Planner could not take the restart: {exc}. The steps not "
                                           "started run as they are."[:500])
             reply = None
@@ -4110,10 +4387,17 @@ class PlannerAgent:
 
     async def _handle_cancel(self, envelope: MessageEnvelope) -> None:
         logger.info("planner %s received cancel", self.agent_id)
+        await self._clear_failure_holds()
         if self._plan:
             self._plan.status = "failed"
             await self._save(self._plan, plan_row=True)
         self._running = False
+
+    async def _clear_failure_holds(self) -> None:
+        from .. import failure_handling, failures
+
+        if await failures.typing_mode() is failures.FailureTyping.ACT:
+            await failure_handling.get_service().cancel_task(self._task_id)
 
     async def _handle_user_message(self, envelope: MessageEnvelope) -> None:
         """Answer a chat message through the Planner's Claude, and do what it decides."""
@@ -4201,6 +4485,8 @@ class PlannerAgent:
         try:
             reply = await self._ask(TurnKind.CHAT, message, lambda answer: parse_chat(answer, self._checked(view)))
         except PlannerTurnError as exc:
+            if exc.fail_kind is FailKind.QUOTA_EXHAUSTED and plan.status == "failed":
+                return
             await self._activity("error", f"Planner could not take a change to the task: {exc}"[:500])
             return f"Planner 出错，没能处理这次变更（会在下一轮重试）：{exc}"
         gates_cancelled = await self._apply_gate_changes(plan, reply.gates, "a change to the task")
@@ -4254,6 +4540,8 @@ class PlannerAgent:
             reply = await self._ask(TurnKind.ROOM, message,
                                     lambda answer: parse_chat(answer, self._checked(view)))
         except PlannerTurnError as exc:
+            if exc.fail_kind is FailKind.QUOTA_EXHAUSTED and plan.status == "failed":
+                return
             self._room_failed = (newest, time.monotonic())
             room.wake_planner_after(self._task_id, ROOM_RETRY_SEC)
             await self._activity("error", f"Planner could not take its room messages: {exc}"[:500])
@@ -4433,7 +4721,9 @@ class PlannerAgent:
 
     async def _handle_system_event(self, envelope: MessageEnvelope) -> None:
         event_type = envelope.payload.get("type", "")
-        if event_type == "pause":
+        if envelope.payload.get("event") == "failure_hold_released" and self._plan is not None:
+            await self._failure_hold_event(self._plan, envelope.payload)
+        elif event_type == "pause":
             scope = envelope.payload.get("scope", "")
             logger.info("planner %s pausing work related to %s", self.agent_id, scope)
         elif event_type == "supervise":
@@ -4501,6 +4791,8 @@ class PlannerAgent:
                 lambda text: parse_supervise(text, running_labels),
             )
         except PlannerTurnError as exc:
+            if exc.fail_kind is FailKind.QUOTA_EXHAUSTED and plan.status == "failed":
+                return
             await self._activity("error", f"Planner could not supervise the running steps: {exc}"[:500])
             return
         if reply.progress is not None:
@@ -4603,6 +4895,29 @@ class PlannerAgent:
     # --- Turns on the Planner's Claude ---
 
     async def _ask(
+        self, kind: TurnKind, message: str, parse: Callable[[str], T],
+        run: Callable[[str], Awaitable[str]] | None = None,
+    ) -> T:
+        """One logical protocol request, sharing runtime-retry bounds with its one repair turn."""
+        self._turn_kind = kind
+        previous = getattr(self, "_failure_retry", None)
+        self._failure_retry = previous or _TurnFailureContext()
+        try:
+            return await self._ask_once(kind, message, parse, run)
+        except PlannerTurnError as exc:
+            if (exc.fail_kind is FailKind.QUOTA_EXHAUSTED and self._plan is not None
+                    and self._plan.status in (*_LIVE, "stopping")):
+                await self._fail_plan(self._plan, reason="The scheduled task reached its quota waiting deadline",
+                                      fail_kind=FailKind.QUOTA_EXHAUSTED, model_closeout=False)
+            if (kind is TurnKind.PLAN and exc.failure is not None
+                    and exc.failure.cls is failures.FailureClass.ENVIRONMENT
+                    and await failures.typing_mode() is failures.FailureTyping.ACT):
+                exc.fail_kind = FailKind.ENVIRONMENT
+            raise
+        finally:
+            self._failure_retry = previous
+
+    async def _ask_once(
         self, kind: TurnKind, message: str, parse: Callable[[str], T],
         run: Callable[[str], Awaitable[str]] | None = None,
     ) -> T:
@@ -4726,6 +5041,8 @@ class PlannerAgent:
     @planner_budget.turn
     async def _turn(self, message: str) -> str:
         async with self._turn_lock:
+            retry_context = getattr(self, "_failure_retry", None)
+            self._failure_retry = retry_context or _TurnFailureContext()
             try:
                 reply = await self._run_turn(message)
                 if self._plan_staged is not None:
@@ -4740,6 +5057,7 @@ class PlannerAgent:
                 self._plan_compacted = False
                 raise
             finally:
+                self._failure_retry = retry_context
                 self._last_turn_at = time.monotonic()
 
     def _claude_command(self, prompt_file: Path, settings: PlannerSettings, launch: Launch, work_dir: str) -> list[str]:
@@ -4778,7 +5096,8 @@ class PlannerAgent:
             agent_settings = following
         await self._record_profile_fallbacks(plan, "planner", changes)
         if agent_settings.profile_error:
-            raise PlannerTurnError(agent_settings.profile_error)
+            raise PlannerTurnError(agent_settings.profile_error,
+                                   failure=failures.Failure(failures.FailureCause.PROFILE))
         try:
             self._vault = await vault.active() if self._execution.vault_on else None
         except Exception:
@@ -4798,7 +5117,8 @@ class PlannerAgent:
         try:
             prompt_file = system_prompt.write_file(self._runtime_root)
         except OSError as exc:
-            raise PlannerTurnError(f"cannot write the system prompt file: {exc}") from None
+            raise PlannerTurnError(f"cannot write the system prompt file: {exc}",
+                                   failure=failures.start_failure(exc)) from None
         try:
             from ..llmrec.gateway import translated
 
@@ -4814,7 +5134,7 @@ class PlannerAgent:
                 await recorder.annotate({"fallback_from": changes[-1]["from"], "fallback": changes})
             await recorder.finish(output_text=None, result_event=None, error=error,
                                   failure=failures.start_failure(exc))
-            raise PlannerTurnError(error) from None
+            raise PlannerTurnError(error, failure=failures.start_failure(exc)) from None
         # The command carries the model, the effort, the installed items' directories (each named by its
         # content's hash) and the knowledge's; the file is named by its content's hash (the knowledge
         # index included), kept beside it all the same; the environment and the installed items are
@@ -4901,10 +5221,12 @@ class PlannerAgent:
             command = base + (launch.runtime.resume_args(plan.session_id) if plan.session_id else [])
             process = _Process(command, signature, system_prompt, launch)
             try:
-                await self._claude.start(command, cwd=plan.work_dir, signature=signature, env=launch.environment(),
-                                         totals=plan.session_totals if plan.session_id else None,
-                                         autonomous=self._autonomous_turns(plan, command, system_prompt, launch),
-                                         price=launch.price)
+                await self._start_for_turn(command, plan=plan, text=f"{brief}\n\n{message}" if brief else message,
+                                           process=process, fallbacks=changes,
+                                           cwd=plan.work_dir, signature=signature, env=launch.environment(),
+                                           totals=plan.session_totals if plan.session_id else None,
+                                           autonomous=self._autonomous_turns(plan, command, system_prompt, launch),
+                                           price=launch.price)
                 started_process = True
             except (OSError, RuntimeUnsupported, RunnerProtocolError, RpcFailure) as exc:
                 error = f"cannot start {launch.runtime.label}: {exc}"
@@ -4914,7 +5236,7 @@ class PlannerAgent:
                     await recorder.annotate({"fallback_from": changes[-1]["from"], "fallback": changes})
                 await recorder.finish(output_text=None, result_event=None, error=error,
                                       failure=failures.start_failure(exc))
-                raise PlannerTurnError(error) from None
+                raise PlannerTurnError(error, failure=failures.start_failure(exc)) from None
             self._process = process
             details = [f"pid {self._claude.pid}"] if self._claude.pid is not None else []
             if plan.session_id:
@@ -4926,7 +5248,9 @@ class PlannerAgent:
             bound = self._schedule_bound
             try:
                 await self._exchange("/compact", process, settings.timeout_seconds, maintenance=True)
-            except PlannerTurnError:
+            except PlannerTurnError as exc:
+                if exc.fail_kind is FailKind.QUOTA_EXHAUSTED:
+                    raise
                 logger.warning("schedule %s: compaction failed; rotating the Planner session", self._schedule_id,
                                exc_info=True)
                 await self._rotate_schedule_session(plan)
@@ -4999,19 +5323,127 @@ class PlannerAgent:
             pid_of=lambda: self._claude.pid,
         )
 
+    async def _start_for_turn(self, command: list[str], *, plan: TaskPlan, text: str, process: _Process,
+                              fallbacks: Sequence[Mapping[str, Any]] = (), **kwargs: Any) -> None:
+        """Recover a local startup timeout with the frozen command; each failure still gets its own record."""
+        from .. import failure_handling
+        from ..runtimes.channel import RunStartError
+
+        context = getattr(self, "_failure_retry", None) or _TurnFailureContext()
+        while True:
+            try:
+                await self._claude.start(command, **kwargs)
+                return
+            except (RunStartError, OSError, RuntimeUnsupported, RunnerProtocolError, RpcFailure) as exc:
+                if await failures.typing_mode() is not failures.FailureTyping.ACT:
+                    raise
+                found = failures.start_failure(exc)
+                error = f"cannot start {process.launch.runtime.label}: {exc}"
+                recorder = self._recorder(plan, text, process)
+                await recorder.start()
+                if fallbacks:
+                    await recorder.annotate({"fallback_from": fallbacks[-1]["from"], "fallback": list(fallbacks)})
+                await recorder.finish(output_text=None, result_event=None, error=error, failure=found)
+                context.failures += 1
+                service = failure_handling.get_service()
+                if (found.cls is not failures.FailureClass.TRANSIENT or context.failures >= 3
+                        or service is None or service.known_mode() is not failures.FailureTyping.ACT):
+                    raise PlannerTurnError(error, failure=found) from None
+                delay = (120 if context.failures == 1 else 600) * random.uniform(.8, 1.2)
+                if not await service.wait_turn(delay, task_id=self._task_id):
+                    raise PlannerTurnError(error, failure=found) from None
+                self._admission_recovered = True
+
+    async def _exchange(self, text: str, process: _Process, limit: int, **kwargs: Any) -> str:
+        """Retry a failed runtime exchange outside admission, preserving the prepared message and process."""
+        if await failures.typing_mode() is not failures.FailureTyping.ACT:
+            return await self._exchange_once(text, process, limit, **kwargs)
+        from .. import failure_handling
+
+        maintenance = bool(kwargs.get("maintenance"))
+        note, delivered = await subagent_delivery.planner_turn_note(
+            self._task_id, on=self._room is None and self._execution.subagents_on and not maintenance)
+        text += note
+        kwargs = {**kwargs, "_delivery": delivered}
+        context = getattr(self, "_failure_retry", None) or _TurnFailureContext()
+        while True:
+            try:
+                result = await self._exchange_once(text, process, limit, **kwargs)
+                return result
+            except PlannerTurnError as exc:
+                found = exc.failure
+                if found is None or exc.fail_kind is FailKind.QUOTA_EXHAUSTED:
+                    raise
+                exc.fail_kind = (FailKind.ENVIRONMENT if found.cls is failures.FailureClass.ENVIRONMENT
+                                 and self._turn_kind is TurnKind.PLAN else exc.fail_kind)
+                context.failures += 1
+                if (context.failures >= 3 or found.cls not in
+                        (failures.FailureClass.QUOTA, failures.FailureClass.TRANSIENT)):
+                    raise
+                service = failure_handling.get_service()
+                if service is None or service.known_mode() is not failures.FailureTyping.ACT:
+                    raise
+                if found.cls is failures.FailureClass.TRANSIENT:
+                    delay = (120 if context.failures == 1 else 600) * random.uniform(0.8, 1.2)
+                    deadline = None
+                else:
+                    delay = service.quota_delay(found, context.failures)
+                    deadline = await self._quota_failure_deadline()
+                    if deadline is not None:
+                        left = (deadline - datetime.now(timezone.utc)).total_seconds()
+                        if left <= 0:
+                            exc.fail_kind = FailKind.QUOTA_EXHAUSTED
+                            raise
+                        delay = min(delay, left)
+                if not await service.wait_turn(delay, task_id=self._task_id):
+                    raise
+                if deadline is not None and datetime.now(timezone.utc) >= deadline:
+                    exc.fail_kind = FailKind.QUOTA_EXHAUSTED
+                    raise
+                self._admission_recovered = True
+                await self._activity("phase", f"Planner retry after {found.cls.value}/{found.cause.value}")
+                # A disconnected resident resumes the same session with the already-frozen launch and prompt.
+                if not self._claude.started:
+                    plan = self._plan
+                    assert plan is not None
+                    command = process.command
+                    runtime = process.launch.runtime
+                    resume = runtime.resume_args(plan.session_id) if plan.session_id else []
+                    if resume and command[-len(resume):] != resume:
+                        command = [*command, *resume]
+                    await self._start_for_turn(command, plan=plan, text=text, process=process,
+                                               cwd=plan.work_dir, signature=process.signature,
+                                               env=process.launch.environment(), totals=plan.session_totals,
+                                               price=process.launch.price)
+
+    async def _quota_failure_deadline(self) -> datetime | None:
+        """The first quota wait's durable deadline for a scheduled task; manual tasks have none."""
+        if not self._scheduled:
+            return None
+        from .. import failure_handling
+
+        service = failure_handling.get_service()
+        if service is None:
+            return None
+        return await turn_admission.scheduled_quota_deadline(self._task_id, self._schedule_id, service)
+
     @turn_admission.admitted_planner_exchange
-    async def _exchange(self, text: str, process: _Process, limit: int, *, resuming: str | None = None,
+    async def _exchange_once(self, text: str, process: _Process, limit: int, *, resuming: str | None = None,
                         fallbacks: Sequence[Mapping[str, Any]] = (),
-                        annotation: Mapping[str, Any] | None = None, maintenance: bool = False) -> str:
+                        annotation: Mapping[str, Any] | None = None, maintenance: bool = False,
+                        _delivery: Sequence[int] | None = None) -> str:
         """Run ``text`` as one turn on the running Claude (started with ``process``) and return its final
         message, recorded as one run; raises ``PlannerTurnError``, or ``_SessionNotResumed`` when Claude never
         started ``resuming``, the session it was told to resume."""
         plan = self._plan
         assert plan is not None
         # With the room off, finished explorer results ride the next turn (none: no change to the text).
-        note, delivered = await subagent_delivery.planner_turn_note(
-            self._task_id, on=self._room is None and self._execution.subagents_on and not maintenance)
-        text += note
+        if _delivery is None:
+            note, delivered = await subagent_delivery.planner_turn_note(
+                self._task_id, on=self._room is None and self._execution.subagents_on and not maintenance)
+            text += note
+        else:
+            delivered = _delivery
         turn_kwargs, claimed = subagent_delivery.claim_when_sent(delivered)
         recorder = self._recorder(plan, text, process)
         last_context: int | None = None
@@ -5079,11 +5511,11 @@ class PlannerAgent:
                 # The turn was cancelled, which killed Claude; the next turn resumes the session.
                 error = f"the turn ran longer than the {limit} s limit (timeout_seconds)"
                 await recorder.finish(output_text=None, result_event=None, error=error, failure=failures.TIMED_OUT)
-                raise PlannerTurnError(error) from None
+                raise PlannerTurnError(error, failure=failures.TIMED_OUT) from None
             except Exception as exc:
                 error = f"reading Claude failed: {type(exc).__name__}: {exc}"
                 await recorder.finish(output_text=None, result_event=None, error=error)
-                raise PlannerTurnError(error) from None
+                raise PlannerTurnError(error, failure=recorder.failure_signal() if _delivery is not None else None) from None
             finally:
                 await claimed()  # the results were claimed the moment the runtime sent the prompt, if it did
                 if self._ops is not None and self._token is not None:
@@ -5170,7 +5602,7 @@ class PlannerAgent:
                 except Exception:
                     logger.exception("cannot record schedule Planner usage for %s", self._task_id)
             if error:
-                raise PlannerTurnError(error)
+                raise PlannerTurnError(error, failure=recorder.failure_signal() if _delivery is not None else None)
             return final_text
 
     # --- The Planner changes no file ---
@@ -5237,6 +5669,8 @@ class PlannerAgent:
                 handoff = await self._ask(TurnKind.HANDOFF, self._handoff_message(plan, switch), parse_handoff,
                                           run=lambda text: self._exchange(text, process, limit))
             except PlannerTurnError as exc:
+                if exc.fail_kind is FailKind.QUOTA_EXHAUSTED:
+                    raise
                 await self._activity("error",
                                      f"Warning: the Planner's previous session wrote no handoff: {exc}"[:500])
         await self._claude.stop()
@@ -5637,6 +6071,14 @@ class PlannerAgent:
         if step.missed_messages:
             lines += ["", "The user sent this to the step's Worker through you; delivery not confirmed; the Worker may already have acted on it:"]
             lines += [f"- {_clip(m, 500)}" for m in step.missed_messages]
+        if step.failure_history:
+            lines += ["", "Consecutive execution failures (since the last successful execution):"]
+            for failure in step.failure_history:
+                target = failure.get("target") or {}
+                role = f"{failure['role']} ({target.get('role_name', 'builtin')}, {target.get('unit_label', step.label)})"
+                lines.append(f"- {role}: {failure['failure_class']} ({failure['failure_cause']}); "
+                             f"run={failure['run_id']}, record={failure.get('record_id')}, "
+                             f"at={failure['created_at']}, action={failure['action']}, streak={failure['streak']}")
         if context.result is ResultKind.WORK and context.succeeded and context.review_required:
             lines += ["", "This step needs a passing review before it can be accepted."]
         if step.accept_when is not None and context.result is ResultKind.REVIEW:
@@ -5773,6 +6215,7 @@ class PlannerAgent:
         if await self._late_messages_taken(plan):
             return  # its steps run, and their decisions complete the task
         plan.status = "completed"
+        await self._clear_failure_holds()
         await self._save(plan, plan_row=True)
         await update_task_phase(self._task_id, "completed")
         await self._activity("phase", "All steps verified — task completed")
@@ -5879,6 +6322,8 @@ class PlannerAgent:
                 self._fence = await untrusted.enabled()
                 line = await self._ask(TurnKind.VAULT, self._vault_message(plan, ended, config, rules), parse_vault)
             except PlannerTurnError as exc:
+                if exc.fail_kind is FailKind.QUOTA_EXHAUSTED and plan.status == "failed":
+                    return
                 await self._activity("error", f"Warning: the Planner's vault closeout failed: {exc}"[:500])
                 return
             await self._activity("phase", f"Vault closeout: {line}"[:500])
@@ -5927,6 +6372,8 @@ class PlannerAgent:
             self._fence = await untrusted.enabled()
             lessons = await self._ask(TurnKind.LESSONS, self._lessons_message(plan), parse_lessons)
         except PlannerTurnError as exc:
+            if exc.fail_kind is FailKind.QUOTA_EXHAUSTED and plan.status == "failed":
+                return
             await self._activity("error", f"Warning: the Planner could not write the task's lessons: {exc}"[:500])
             return
         title = f"Lessons: {_clip(plan.requirement, project_knowledge.TITLE_MAX_CHARS - 12)}"
@@ -5967,6 +6414,7 @@ class PlannerAgent:
                          model_closeout: bool = True) -> None:
         assert self._bus is not None
         plan.status = "failed"
+        await self._clear_failure_holds()
         plan.fail_reason = reason or plan.fail_reason
         await self._save(plan, plan_row=True)
         await update_task_phase(self._task_id, "failed")
@@ -6165,6 +6613,8 @@ class PlannerAgent:
             try:
                 summary = await self._ask(TurnKind.DECISION, self._wrap_up_message(plan, reason), parse_wrap_up)
             except PlannerTurnError as exc:
+                if exc.fail_kind is FailKind.QUOTA_EXHAUSTED and plan.status == "failed":
+                    return
                 summary = f"(the Planner could not sum up: {exc})"
             reason = f"{reason}. Planner's wrap-up: {summary}"
         plan.fail_reason = reason

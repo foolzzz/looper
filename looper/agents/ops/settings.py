@@ -350,8 +350,11 @@ async def _gateway_set(call: Call) -> dict[str, Any]:
 
 
 async def _confirming(call: Call) -> str | None:
-    """What a change of the vault, the shared defaults, a limit, or one raising a spend cap does, for the user to confirm;
-    None for any other call (``write``), or another action."""
+    """What a settings change does for the user to confirm; None for an ordinary write or a read."""
+    if call.arguments["action"] == "engine":
+        await _engine_operator(call)
+        from ..v1_domains import engine_settings
+        return await engine_settings.impact(None, None, call.arguments.get("engine") or {}, None, {})
     if call.arguments["action"] == "scheduler":
         return await _scheduler_confirming(call)
     if call.arguments["action"] == "llmrec":
@@ -557,6 +560,11 @@ async def _view(call: Call) -> dict[str, Any]:
                                     ("configured", "path", "writable", "rules_file", "problem")}}
         if call.arguments.get("role") == AgentType.MANAGER.value and (session := await _manager_session(profiles, call.manager_id)):
             answer["manager_session"] = session
+        from ..failures import FailureTyping, typing_mode
+        from .service import operator_call
+        if await typing_mode() is FailureTyping.ACT and await operator_call(call.turn):
+            from ..v1_domains import engine_settings
+            answer["engine"] = await engine_settings.settings()
         return answer
     project = await project_named(call.arguments["project"])
     view = await _read(_Place(Layer.PROJECT, None, project))
@@ -595,6 +603,15 @@ async def _allowed(call: Call) -> dict[str, Any]:
 
 async def _settings(call: Call) -> dict[str, Any]:
     action = call.arguments["action"]
+    if action == "engine":
+        await _engine_operator(call)
+        from types import SimpleNamespace
+        from ..v1_domains import engine_settings
+        fields = call.arguments.get("engine")
+        if not isinstance(fields, Mapping) or "failure_typing" not in fields:
+            raise OpError(ErrorCode.INVALID, "engine.failure_typing is required")
+        operation = next(op for op in engine_settings.OPERATIONS if op.operation_id == "engine_settings.update")
+        return await engine_settings.run(None, operation, fields, SimpleNamespace(kind="operator"), {})
     if action == "view":
         return await _view(call)
     if action == "allowed_profiles":
@@ -685,3 +702,30 @@ TOOLS: tuple[Tool, ...] = (
         risk=Risk.WRITE, run=_settings, escalate=_confirming, read_actions=frozenset({"view"}),
     ),
 )
+
+
+async def _engine_operator(call: Call) -> None:
+    from ..failures import FailureTyping, typing_mode
+    from .service import operator_call
+    if await typing_mode() is not FailureTyping.ACT:
+        raise OpError(ErrorCode.CONFLICT, "engine settings in the Manager are available only while act is enabled")
+    if not await operator_call(call.turn):
+        raise OpError(ErrorCode.FORBIDDEN, "engine settings are operator-only")
+
+
+def engine_tool() -> Tool:
+    """A separate catalog value leaves the default-off definition byte-for-byte intact."""
+    from copy import deepcopy
+    from dataclasses import replace
+    original = TOOLS[0]
+    schema = deepcopy(original.schema)
+    schema["properties"]["action"]["enum"].append("engine")
+    schema["properties"]["engine"] = {
+        "type": "object", "additionalProperties": False, "required": ["failure_typing"],
+        "properties": {"failure_typing": {"type": ["string", "null"], "enum": ["off", "record", "act", None]}}}
+    return replace(original, description=original.description +
+        " engine: operator-only failure_typing (off, record, act, or null for built-in off); view includes engine. "
+        "Every engine change requires confirmation and leaving act drains failure waits to the Planner.", schema=schema)
+
+
+ENGINE_TOOL = engine_tool()

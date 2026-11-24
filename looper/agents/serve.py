@@ -73,7 +73,7 @@ from .http_server import AgentHTTPServer
 from .loop_watch import LoopWatch
 from .log_redaction import log_to_stderr
 from .scheduler import Scheduler
-from .message import MessageType
+from .message import MessageEnvelope, MessageType, TASK_ROUTER_ADDRESS, planner_address
 from .runtimes.runner.supervisor import RunnerSupervisor
 from .supervisor import AgentSupervisor
 from .tiers import triage_background
@@ -1010,6 +1010,24 @@ async def _run_agent_system_watched(
             gate_courier = GateCourier(registry.post, dashboard_url=dashboard_url, post_card=registry.post_card)
             task_router = TaskRouter(runtime_root=runtime_root, broadcaster=broadcaster, claude_bin=claude_bin,
                                      on_task_end=scheduler.task_ended, dashboard_url=dashboard_url)
+            from . import failure_handling, failure_notices, failures
+
+            async def failure_event(task_id, payload):
+                if payload.get("event") == "failure_hold_released" and payload.get("action") == "stop":
+                    await bus.publish(MessageEnvelope.create(source=TASK_ROUTER_ADDRESS,
+                        target=TASK_ROUTER_ADDRESS, message_type=MessageType.TASK_STOP,
+                        payload={"task_id": task_id}))
+                    return
+                await bus.publish(MessageEnvelope.create(source=TASK_ROUTER_ADDRESS,
+                    target=planner_address(task_id), message_type=MessageType.SYSTEM_EVENT, payload=payload))
+                if payload.get("event") in ("failure_hold_opened", "failure_hold_reminder"):
+                    await failure_notices.notify(task_id, payload, post=registry.post)
+
+            failure_service = failure_handling.FailureHandlingService(pool=pool, publish=failure_event,
+                mode=await failures.typing_mode(pool=pool))
+            failure_handling.configure(failure_service)
+            await failure_service.prepare_restore()
+            admission.configure_recovery_recheck(failure_service.recheck)
             wait_service = WaitService(bus=bus, has_planner=task_router.has_planner, dashboard_url=dashboard_url, drain=drain)
             from . import completion_events
             completion_events.set_scheduler(scheduler)
@@ -1176,6 +1194,7 @@ async def _run_agent_system_watched(
             await supervisor.start_all()
             await fleet.sweep()
             await carry_on_tasks(task_router, left_running)
+            await failure_service.restore()
             if lease is not None:
                 worker_pool.schedule_candidate_expiry()
         except BaseException:
@@ -1287,6 +1306,9 @@ async def _run_agent_system_watched(
             for runner_supervisor in runner_supervisors:
                 await runner_supervisor.stop()
             await admission.stop()
+            await failure_service.close()
+            admission.configure_recovery_recheck(None)
+            failure_handling.configure(None)
             await registry.stop_all()
             await bus.shutdown()
             if control is not None:
@@ -1344,6 +1366,10 @@ def _pending_advisory_checks() -> list[list[self_check.Check]]:
     )
     if admission.enabled():
         groups += ((("admission", "Account admission"),),)
+    from . import failure_handling, failures
+    service = failure_handling.get_service()
+    if service is not None and service.mode is failures.FailureTyping.ACT:
+        groups += ((("failure_handling", "Execution recovery"),),)
     return [[self_check.Check(id, label, self_check.PENDING, "Startup check in progress") for id, label in group]
             for group in groups]
 
@@ -1381,6 +1407,10 @@ async def _advisory_startup_checks(snapshot: list[dict[str, str]], database: sel
         # Keep the disabled path's checks unchanged; every enabled probe needs its own slots.
         if admission.enabled():
             probes += (self_check.admission_checks(),)
+        from . import failure_handling, failures
+        service = failure_handling.get_service()
+        if service is not None and service.mode is failures.FailureTyping.ACT:
+            probes += (self_check.failure_handling_checks(),)
         await asyncio.gather(*(record(index, probe) for index, probe in enumerate(probes)))
         self_check.log_problems([database, *(check for group in groups for check in group)])
     except Exception:

@@ -1,12 +1,13 @@
 """Account slots for Looper-started Manager turns and Planner exchanges."""
 from __future__ import annotations
 
+import asyncio
 import logging
 import sys
 from collections.abc import Sequence
 from contextlib import AsyncExitStack
 from dataclasses import dataclass, replace
-from datetime import datetime, tzinfo
+from datetime import datetime, timezone, tzinfo
 from functools import wraps
 from types import TracebackType
 
@@ -78,6 +79,24 @@ def freeze_reply(account: str, windows: Sequence[str], resets_at: datetime | Non
     names = f"（{'、'.join(windows)}）" if windows else ""
     return (f"{account} 的额度已用完{names}，{resets_at.astimezone(zone):%m-%d %H:%M} 重置。"
             "你的消息已保留，额度恢复后自动回答；发 /stop 可取消。")
+
+
+async def scheduled_quota_deadline(task_id: str, schedule_id: str | None, service) -> datetime:
+    """Persist the first quota wait, capped at six hours or one schedule period, whichever is shorter."""
+    from ..db import schedules
+    from . import cron
+
+    maximum = 6 * 3600.0
+    if schedule_id:
+        row = await schedules.get_schedule(schedule_id)
+        if row is not None:
+            now = datetime.now(timezone.utc)
+            rule, zone = cron.parse(row["cron"]), cron.zone(row["timezone"])
+            first = cron.next_fire(rule, zone, now)
+            following = cron.next_fire(rule, zone, first) if first else None
+            if first is not None and following is not None:
+                maximum = min(maximum, (following - first).total_seconds())
+    return await service.quota_deadline(task_id, maximum)
 
 
 def admitted_manager_turn(method):
@@ -173,8 +192,58 @@ def admitted_planner_exchange(method):
         except Exception:
             logger.exception("Planner exchange admission lookup failed; admitting turn")
             return await method(agent, text, process, limit, maintenance=maintenance, **kwargs)
-        async with admission.slot(process.launch.profile.provider.id, lane, owner=agent.agent_id,
-                                  on_wait=lambda message: agent._activity("phase", message)):
-            agent._admission_recovered = False
-            return await method(agent, text, process, limit, maintenance=maintenance, **kwargs)
+        from . import failure_handling, failures
+
+        service = failure_handling.get_service()
+        if service is None or service.known_mode() is not failures.FailureTyping.ACT:
+            async with admission.slot(process.launch.profile.provider.id, lane, owner=agent.agent_id,
+                                      on_wait=lambda message: agent._activity("phase", message)):
+                agent._admission_recovered = False
+                return await method(agent, text, process, limit, maintenance=maintenance, **kwargs)
+        frozen = asyncio.Event()
+        deadline = None
+
+        async def on_frozen(found):
+            nonlocal deadline
+            # This callback runs on the first admission refusal, before any model call can exist.
+            deadline = await agent._quota_failure_deadline()
+            frozen.set()
+
+        async def waiting():
+            await frozen.wait()
+            delay = (max(0.0, (deadline - datetime.now(timezone.utc)).total_seconds()) if deadline is not None
+                     else 365 * 24 * 3600.0)
+            elapsed = await service.wait_turn(delay, task_id=agent._task_id)
+            return elapsed and deadline is not None
+
+        async with AsyncExitStack() as stack:
+            acquire = asyncio.create_task(stack.enter_async_context(admission.slot(
+                process.launch.profile.provider.id, lane, owner=agent.agent_id,
+                on_wait=lambda message: agent._activity("phase", message), on_frozen=on_frozen)))
+            wake = asyncio.create_task(waiting())
+            try:
+                done, _ = await asyncio.wait((acquire, wake), return_when=asyncio.FIRST_COMPLETED)
+                if wake in done:
+                    from .tiers.planner import PlannerTurnError
+                    from ..db.tasks import FailKind
+
+                    expired = await wake
+                    raise PlannerTurnError(
+                        "the scheduled task reached its quota waiting deadline" if expired else
+                        "failure handling ended while the Planner waited for quota",
+                        failure=failures.Failure(failures.FailureCause.USAGE_LIMIT),
+                        fail_kind=FailKind.QUOTA_EXHAUSTED if expired else None)
+                await acquire
+            finally:
+                for job in (acquire, wake):
+                    if not job.done():
+                        job.cancel()
+                await asyncio.gather(acquire, wake, return_exceptions=True)
+            # acquire ran in a child task. This task owns its recorder and any nested tool runs.
+            owner = _current_owner.set(agent.agent_id)
+            try:
+                agent._admission_recovered = False
+                return await method(agent, text, process, limit, maintenance=maintenance, **kwargs)
+            finally:
+                _current_owner.reset(owner)
     return run

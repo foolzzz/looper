@@ -75,6 +75,7 @@ from ..claude_cli import (
     user_stop_result,
 )
 from .. import admission, turn_admission
+from .. import failures
 from ..failures import FailureClass
 from .. import attention, chat_attachments, chat_commands, chat_settings, completion_events, gate_commands, memory_routing, outbound_hook, status_card, turn_metrics
 from ..turn_metrics import TurnDelivery, TurnTimes, AckKind, ChatKind, ProactiveSource
@@ -751,6 +752,14 @@ class OverCap(RuntimeError):
 
 class NoReply(RuntimeError):
     """The runtime ended the turn without a word of reply (not an exit, a cap or an error)."""
+
+
+def _typed_failure_reply(found: failures.Failure) -> str | None:
+    if found.cls is FailureClass.TRANSIENT:
+        return f"Manager 遇到瞬时故障（{found.cause.value}），这次回复没有完成；不会自动重试已执行的操作。"
+    if found.cls is FailureClass.ENVIRONMENT:
+        return f"Manager 遇到环境问题（{found.cause.value}），请检查运行时、登录或配置后再继续。"
+    return None
 
 
 class _CompletionNotTaken(Exception):
@@ -1644,6 +1653,13 @@ class ManagerAgent:
                 # Always answer: the chat stream waits for a final reply. What a tool did before is still shown.
                 cause = str(exc) or type(exc).__name__
                 logger.exception("%s failed to answer %s: %s", self._log, envelope.message_id, cause)
+                if await failures.typing_mode() is failures.FailureTyping.ACT:
+                    found = (failures.Failure(failures.FailureCause.PROFILE) if isinstance(exc, ProfileUnavailable)
+                             else failures.start_failure(exc) if isinstance(exc, OSError) else None)
+                    if found is not None and (typed_reply := _typed_failure_reply(found)) is not None:
+                        await self._send_reply(envelope, _with_blocks(typed_reply, turn.blocks),
+                                               error=f"{found.cls.value}/{found.cause.value}")
+                        return
                 hint = exc.hint() if isinstance(exc, ProfileUnavailable) else ""
                 await self._send_reply(
                     envelope, _with_blocks(f"Manager 出错，没能完成这次回复：{cause}{hint}", turn.blocks), error=cause)
@@ -2796,6 +2812,10 @@ class ManagerAgent:
                 except Exception:
                     logger.debug("failed to record manager activity", exc_info=True)
             await self._link_turn_task(recorder, ops_turn)
+            if await failures.typing_mode() is failures.FailureTyping.ACT:
+                found = recorder.failure_signal()
+                if reply := _typed_failure_reply(found):
+                    raise TurnFailed(reply, f"{found.cls.value}/{found.cause.value}") from None
             raise
 
         context_overflow = isinstance(self._claude, ReportsContext) and self._claude.context_full
@@ -2911,6 +2931,10 @@ class ManagerAgent:
 
         if over_cap:
             raise OverCap(over_cap)
+        if not replied and await failures.typing_mode() is failures.FailureTyping.ACT:
+            found = recorder.failure_signal()
+            if reply := _typed_failure_reply(found):
+                raise TurnFailed(reply, f"{found.cls.value}/{found.cause.value}")
         if failed:
             raise RuntimeError(failed)
         if not replied:

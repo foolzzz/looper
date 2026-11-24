@@ -664,6 +664,10 @@ class ConsumeStart(StrEnum):
     ADOPTED = "adopted"
 
 
+class _QuotaWaitExpired(RuntimeError):
+    pass
+
+
 @dataclass
 class RunContext:
     worker_id: str
@@ -1103,6 +1107,7 @@ class WorkerPool:
         # The channel of each running worker, open until its result: more user turns go here.
         self._inputs: dict[str, RunChannel] = {}
         self._recorders: dict[str, ClaudeRunRecorder] = {}
+        self._engine_runs: dict[str, dict[str, Any]] = {}
         # The Planner exposes a dispatched step before its run has an input channel.
         # Corrections in that window must wait for startup rather than look like a finished run.
         self._input_ready: dict[str, asyncio.Event] = {}
@@ -2023,6 +2028,7 @@ class WorkerPool:
             except asyncio.TimeoutError as exc:
                 wp.status = "failed"
                 wp.result = {"status": "failed", "error": str(exc) or "worker timeout"}
+                wp.result = await self._control_failure(wp.result, failures.TIMED_OUT)
                 logger.warning("worker %s timed out on task %s: %s", worker_id, task_id, exc)
             except cost_guard.Held as exc:
                 await cost_dispatch.window_held(self, wp, reply, exc)
@@ -2033,6 +2039,7 @@ class WorkerPool:
             except Exception as exc:
                 wp.status = "failed"
                 wp.result = {"status": "failed", "error": str(exc)}
+                wp.result = await self._control_failure(wp.result, failures.start_failure(exc))
                 logger.exception("worker %s failed on task %s", worker_id, task_id)
             finally:
                 if isinstance(wp.handle, KeptRun) and wp.handle.state is KeptRunState.DETACHED:
@@ -2048,6 +2055,9 @@ class WorkerPool:
 
             if is_verify and severity:
                 wp.result = _severity_verdict(wp.result or {})
+            signal = self._engine_runs.pop(worker_id, None)
+            if signal is not None:
+                wp.result = {**(wp.result or {}), "engine_run": signal}
             result_type = MessageType.VERIFY_RESULT if is_verify else MessageType.WORK_RESULT
             await self._bus.publish(MessageEnvelope.create(
                 source=worker_address(worker_id),
@@ -2063,6 +2073,7 @@ class WorkerPool:
                 metadata=reply.metadata,
             ))
         finally:
+            self._engine_runs.pop(worker_id, None)
             # _execute has waited for or ended the run before its logs can be released.
             if isinstance(wp.handle, KeptRun) and wp.handle.state is not KeptRunState.DETACHED:
                 await asyncio.to_thread(wp.handle.release)
@@ -2075,6 +2086,19 @@ class WorkerPool:
                 yield
         finally:
             self._recorders.pop(worker_id, None)
+            if await failures.typing_mode() is failures.FailureTyping.ACT:
+                signal = recorder.execution_signal()
+                if signal is not None:
+                    self._engine_runs[worker_id] = signal
+
+    @staticmethod
+    async def _control_failure(result: dict[str, Any], found: failures.Failure, *,
+                               provider_id: str | None = None) -> dict[str, Any]:
+        if await failures.typing_mode() is not failures.FailureTyping.ACT:
+            return result
+        return {**result, "engine_run": {"outcome": "run_failed", "record_id": None,
+                "provider_id": provider_id, "failure": {"class": found.cls.value,
+                "cause": found.cause.value, **found.metadata()}}}
 
     async def _prepare(
         self,
@@ -2104,9 +2128,8 @@ class WorkerPool:
                 problem = f"Cannot create work directory {reported_files.prompt_name(work_dir)}: {exc}"
         if problem:
             logger.error("worker %s: %s", worker_id, problem)
-            if is_verify:
-                return {"passed": False, "findings": [problem], "summary": problem}
-            return {"status": "failed", "error": problem}
+            result = (_verify_failed(problem) if is_verify else {"status": "failed", "error": problem})
+            return await self._control_failure(result, failures.Failure(failures.FailureCause.RUNTIME_MISSING))
 
         # Runtime inputs are project-owned configuration, never a model-supplied copy list.
         project = await self._task_project(parent_task_id, worker_id)
@@ -2195,10 +2218,10 @@ class WorkerPool:
             logger.error("worker %s: %s", worker_id, agent_settings.profile_error)
             if parent_task_id:
                 await self._activity(parent_task_id, worker_id, "error", agent_settings.profile_error[:500])
-            if is_verify:
-                return {"passed": False, "findings": [agent_settings.profile_error],
-                        "summary": agent_settings.profile_error}
-            return {"status": "failed", "error": agent_settings.profile_error}
+            result = (_verify_failed(agent_settings.profile_error) if is_verify
+                      else {"status": "failed", "error": agent_settings.profile_error})
+            return await self._control_failure(result, failures.Failure(failures.FailureCause.PROFILE),
+                                               provider_id=agent_settings.profile.provider.id)
         worker_runtime_id = payload.get("worker_runtime_id")
         if is_verify and not worker_runtime_id and payload.get("worker_id") and parent_task_id:
             # Results saved before review panels did not include their developer's runtime.
@@ -2463,6 +2486,9 @@ class WorkerPool:
                 return _verify_failed(str(exc)) if is_verify else _work_failed(str(exc))
             if isinstance(ctx, dict):
                 result = ctx
+                if "engine_run" not in result and not result.get("prompt_blocked") and not result.get("refused"):
+                    cause = failures.FailureCause.REPORT if result.get("failure") else failures.FailureCause.PROFILE
+                    result = await self._control_failure(result, failures.Failure(cause))
                 break
             if ctx.verification is not None:
                 verification = verification if verification is not None else ctx.verification
@@ -2475,17 +2501,25 @@ class WorkerPool:
             try:
                 if lane is None:
                     lane = await admission.worker_lane(ctx.parent_task_id, envelope.payload, role=ctx.launch.role)
+                    if envelope.payload.get("failure_retry"):
+                        lane = admission.Lane.RECOVERY
                 if admission.enabled():
                     self._admission_waiting.add(ctx.worker_id)
-                async with admission.slot(ctx.launch.profile.provider.id, lane, owner=ctx.worker_id,
-                        on_wait=lambda text: self._activity(ctx.parent_task_id, ctx.worker_id, "phase", text),
-                        draining=lambda: self._drain is not None and self._drain.draining):
+                async with self._account_slot(ctx, lane):
                     self._admission_waiting.discard(ctx.worker_id)
                     if admission.enabled():
                         ctx.started_at = datetime.now(timezone.utc)
                         if isinstance(ctx.handle, KeptRun):
                             ctx.handle.manifest["started_at"] = ctx.started_at.isoformat()
                     result = await self._execute_once(ctx, fallbacks)
+            except _QuotaWaitExpired as exc:
+                if ctx.handle is not None:
+                    await ctx.handle.end()
+                result = await self._control_failure(
+                    _verify_failed(str(exc)) if is_verify else _work_failed(str(exc)),
+                    failures.Failure(failures.FailureCause.USAGE_LIMIT), provider_id=ctx.launch.profile.provider.id)
+                result["engine_run"]["quota_exhausted"] = True
+                break
             except asyncio.TimeoutError as exc:
                 ctx.run_failure = attempts.RunFailure.TIMEOUT
                 timeout = exc
@@ -2538,7 +2572,60 @@ class WorkerPool:
             result = await self._verification_result(verification_ctx, result)
         if missed_input:
             result = {**result, "missed_input": missed_input + result.get("missed_input", [])}
+        if signal := self._engine_runs.get(envelope.target.agent_id):
+            result = {**result, "engine_run": signal}
         return {**result, "fallback": fallbacks} if fallbacks else result
+
+    @contextlib.asynccontextmanager
+    async def _account_slot(self, ctx: RunContext, lane):
+        from .. import failure_handling
+        from ..turn_admission import scheduled_quota_deadline
+
+        service = failure_handling.get_service()
+        act = service is not None and service.mode is failures.FailureTyping.ACT
+        task = await db_tasks.get_task(ctx.parent_task_id) if act and ctx.parent_task_id else None
+        schedule = (task or {}).get("schedule_id")
+        timeout = None
+
+        async def frozen(_):
+            if act and schedule:
+                deadline = await scheduled_quota_deadline(ctx.parent_task_id, schedule, service)
+                timeout.reschedule(asyncio.get_running_loop().time() +
+                    max(0, (deadline - datetime.now(timezone.utc)).total_seconds()))
+
+        async def enter():
+            slot = admission.slot(ctx.launch.profile.provider.id, lane, owner=ctx.worker_id,
+                on_wait=lambda text: self._activity(ctx.parent_task_id, ctx.worker_id, "phase", text),
+                draining=lambda: self._drain is not None and self._drain.draining,
+                **({"on_frozen": frozen} if act and schedule else {}))
+            await stack.enter_async_context(slot)
+
+        async with contextlib.AsyncExitStack() as stack:
+            if not act:
+                await enter()
+                yield
+                return
+            owner = asyncio.current_task()
+
+            async def cancel_on_change():
+                await service.wait_turn(365 * 86400, task_id=ctx.parent_task_id)
+                owner.cancel()
+
+            changed = asyncio.create_task(cancel_on_change())
+            try:
+                async with asyncio.timeout(None) as timeout:
+                    await enter()
+            except TimeoutError as exc:
+                raise _QuotaWaitExpired("Scheduled task exhausted its quota wait deadline") from exc
+            except asyncio.CancelledError:
+                if service.mode is not failures.FailureTyping.ACT:
+                    owner.uncancel()
+                    raise RuntimeError("Failure handling mode changed while waiting for the account") from None
+                raise
+            finally:
+                changed.cancel()
+                await asyncio.gather(changed, return_exceptions=True)
+            yield  # admission timeout covers the wait, never the actual run
 
     async def _fallback_profile(self, settings: AgentSettings, role: AgentType,
                                 fallbacks: list[dict[str, str]], reason: str,
@@ -3371,6 +3458,8 @@ class WorkerPool:
         findings = str(payload.get("findings") or "")
         if findings:
             parts += ["", findings]
+        if retry := payload.get("failure_retry"):
+            parts += ["", self._retry_notice(retry)]
         return "\n".join(parts)
 
     def _build_verify_prompt(self, payload: dict[str, Any]) -> str:
@@ -3400,7 +3489,16 @@ class WorkerPool:
         elsewhere = reported_files.render(work_result.get("found_elsewhere"))
         if elsewhere:
             parts += ["", elsewhere]
+        if retry := payload.get("failure_retry"):
+            parts += ["", self._retry_notice(retry)]
         return "\n".join(parts)
+
+    @staticmethod
+    def _retry_notice(retry: Mapping[str, Any]) -> str:
+        # Only code-owned enum values enter this context, never runtime error text.
+        cause = failures.FailureCause(retry.get("cause", "unknown"))
+        return (f"上一次运行没有完成：{failures.CAUSE_CLASS[cause].value}（{cause.value}）。"
+                "工作目录里可能有它留下的改动。")
 
     async def _task_project(self, task_id: str, worker_id: str) -> dict[str, Any] | None:
         """The task's project row, read now; None without one.
