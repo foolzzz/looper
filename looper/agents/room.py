@@ -44,6 +44,7 @@ import logging
 import re
 import subprocess
 from collections.abc import Iterable, Mapping, Sequence
+from contextlib import nullcontext
 from dataclasses import dataclass, field, replace
 from datetime import datetime
 from enum import Enum
@@ -979,35 +980,36 @@ class RoomService:
                 # INSERT is visible before stdin delivery finishes. Join the run's serialized reminder
                 # send before deciding whether these rows still belong in its pull inbox.
                 await self.worker_pool.remind(seat.run)
-            if wait and delivery_state is not None:
-                # Cleanup can remove the run while its last push is still awaiting acceptance.
-                async with delivery_state.lock:
-                    through = delivery_state.through
-            else:
-                through = self._in_flight(seat)
-            delivered = [r["id"] for r in rows if wait and r["id"] <= through
-                         and r["sender_seat"] != seat.key and visible(r, seat) and _ends_wait(r, seat)]
-            waited = waited or bool(delivered)
-            rows = [r for r in rows if r["id"] > max(read, through)]
-            unread = [r for r in rows if r["sender_seat"] != seat.key and visible(r, seat)]
-            remaining = deadline - loop.time()
-            if delivered or any(_ends_wait(r, seat) for r in unread) or remaining <= 0:
-                break
+            # Serialize both pull modes with push acceptance through the read commit, even after cleanup.
+            async with delivery_state.lock if delivery_state is not None else nullcontext():
+                through = delivery_state.through if delivery_state is not None else self._in_flight(seat)
+                delivered = [r["id"] for r in rows if wait and r["id"] <= through
+                             and r["sender_seat"] != seat.key and visible(r, seat) and _ends_wait(r, seat)]
+                waited = waited or bool(delivered)
+                rows = [r for r in rows if r["id"] > max(read, through)]
+                unread = [r for r in rows if r["sender_seat"] != seat.key and visible(r, seat)]
+                remaining = deadline - loop.time()
+                if delivered or any(_ends_wait(r, seat) for r in unread) or remaining <= 0:
+                    taken: list[dict[str, Any]] = []
+                    size = 0
+                    for row in unread:
+                        if taken and (len(taken) >= INBOX_MAX_MESSAGES or size + _message_chars(row) > INBOX_MAX_CHARS):
+                            break
+                        taken.append(row)
+                        size += _message_chars(row)
+                    more = len(taken) < len(unread)
+                    # A later row must not consume an unconfirmed push belonging to a finished run.
+                    detached_push = (delivery_state is not None and through > read
+                                     and pool.room_delivery_state(seat.run) is not delivery_state)
+                    if not peek and rows and not detached_push:
+                        await db_room.mark_read(task_id, seat.key, taken[-1]["id"] if more else rows[-1]["id"])
+                    break
+            # Never hold the send lock while waiting for a post that may need to be pushed.
             waited = True
             try:
                 await asyncio.wait_for(event.wait(), timeout=remaining)
             except asyncio.TimeoutError:
                 pass
-        taken: list[dict[str, Any]] = []
-        size = 0
-        for row in unread:
-            if taken and (len(taken) >= INBOX_MAX_MESSAGES or size + _message_chars(row) > INBOX_MAX_CHARS):
-                break
-            taken.append(row)
-            size += _message_chars(row)
-        more = len(taken) < len(unread)
-        if not peek and rows:
-            await db_room.mark_read(task_id, seat.key, taken[-1]["id"] if more else rows[-1]["id"])
         result: dict[str, Any] = {"messages": [message_view(r, seat) for r in taken], "more": more,
                                   "unread": await self._unread(task_id, seat)}
         if waited:
