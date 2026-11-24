@@ -17,7 +17,7 @@ from ...db import agent_sessions, connection
 from .. import scheduler_settings, session_budget as policy, session_switch
 from ..claude_cli import ClaudeRunRecorder
 from ..run_usage import compaction
-from ..runtimes import Capability
+from ..runtimes import Capability, CostSource
 from ..runtimes.cancel import TurnCancel
 from ..runtimes.pricing import RunSpend, pricer
 from ..session_switch import SwitchReason
@@ -63,7 +63,7 @@ async def prepare(session: ManagerSession, token: TurnToken, launch: Launch) -> 
         return {}
     price = launch.price or pricer(launch.settings.resolved_model, catalog=launch.settings.pricing_catalog)
     cap = min(usd, launch.max_budget_usd) if launch.max_budget_usd is not None else usd
-    spend = RunSpend(price, launch.model, cap)
+    spend = RunSpend(price, launch.model, cap, runtime_billed=launch.cost_source is CostSource.RUNTIME)
     session.budget = BudgetTurn(token, usd, spend, switch=pending(session))
     if (scope := _reply_scope.get()) is not None:
         scope.budget = session.budget

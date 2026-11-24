@@ -862,3 +862,39 @@ def test_unknown_price_warnings_require_a_cap_and_are_deduplicated(caplog, cap, 
     for _ in range(50):
         spend.add(usage_event("claude-haiku-5-5", Usage(input_tokens=1)))
     assert len(caplog.records) == warnings
+
+
+@pytest.mark.parametrize("main_model", ["sonnet", "haiku"])
+def test_runtime_cap_estimates_auxiliary_usage_only_with_a_known_main_price(main_model, caplog):
+    from looper.agents.profile_registry import BUILTIN_PROVIDER
+
+    spend = RunSpend(BUILTIN_PROVIDER, main_model, cap=1, runtime_billed=True)
+    spend.add(usage_event("claude-haiku-5-5", Usage(input_tokens=100)))
+    if main_model == "sonnet":
+        assert spend.budget_cost_usd == pytest.approx(0.0002)
+        assert not spend.budget_unverifiable and not caplog.records
+        # An estimate still enforces the configured dollar limit.
+        spend.cap = 0.0003
+        assert spend.add(usage_event("claude-haiku-5-5", Usage(input_tokens=100)))
+    else:
+        assert spend.budget_unverifiable and "price unknown" in caplog.text
+
+
+@pytest.mark.parametrize("requested", [False, True])
+def test_recorder_only_marks_unknown_cost_after_a_request(agent_db, tmp_path, requested):
+    from looper.agents.claude_cli import ClaudeRunRecorder
+    from tests.runtime_model_helpers import builtin_launch
+
+    async def run():
+        recorder = ClaudeRunRecorder(agent_id="planner-test", task_id="task-test", command=["claude"],
+                                     cwd=str(tmp_path), input_text="synthetic", launch=builtin_launch())
+        await recorder.start()
+        recorder.account({"type": "system", "subtype": "init", "model": "claude-opus-5-5"})
+        if requested:
+            recorder.account({"type": "assistant", "message": {"model": "claude-opus-5-5",
+                                                                "content": [{"type": "text", "text": "answer"}]}})
+        await recorder.finish(output_text=None, result_event=None, error="synthetic failure")
+
+    asyncio.run(run())
+    saved = agent_db.finish_record.await_args.kwargs
+    assert (saved.get("metadata", {}).get("cost_status") == "unknown") is requested

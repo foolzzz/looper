@@ -17,7 +17,7 @@ from tests.runtime_model_helpers import with_model_name
 pytestmark = pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
 
 
-def test_runtime_bill_counts_for_task_daily_and_guard_after_unknown_catalog_event(monkeypatch, tmp_path):
+def test_runtime_bill_counts_for_task_daily_and_guard_after_unknown_catalog_event(monkeypatch, tmp_path, caplog):
     async def check(pool):
         launch = Launch(AgentSettings(profile=with_model_name(builtin_resolved_profile(), "sonnet")),
                         role=AgentType.WORKER)
@@ -27,7 +27,9 @@ def test_runtime_bill_counts_for_task_daily_and_guard_after_unknown_catalog_even
                                      cwd=str(tmp_path), input_text="synthetic", launch=launch)
         await recorder.start()
         recorder.account(usage_event("claude-haiku-5-5", Usage(input_tokens=100)))
-        assert recorder.cap_stop is not None
+        assert recorder.cap_stop is None
+        assert recorder._spend.budget_cost_usd == pytest.approx(0.0002)
+        assert not caplog.records
         await recorder.finish(output_text="done", result_event={
             "type": "result", "subtype": "success", "total_cost_usd": 0.05})
         saved = await pool.fetchrow("SELECT cost_usd, cost_source, metadata FROM llm_records WHERE id=$1",
@@ -46,3 +48,4 @@ def test_runtime_bill_counts_for_task_daily_and_guard_after_unknown_catalog_even
             assert all(row["spent_usd"] == 0.05 and row["cost_status"] == "known" for row in counters)
 
     run_db(check, monkeypatch, timeout=30)
+    assert not caplog.records

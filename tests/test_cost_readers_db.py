@@ -51,20 +51,22 @@ def test_advisor_unknown_booking_is_durable_idempotent_and_alerts(monkeypatch):
         await llm_records.finish_record(record, status="completed", model="claude-haiku-5-5", pool=pool)
         await agent_spawns.note_run(spawn["id"], record)
         await advisor._book(spawn["id"], Execution("answer", record_id=record, cost_usd=None))
-        await advisor.reconcile(spawn["id"])
         row = await agent_spawns.get(spawn["id"])
         assert row["cost_status"] == "unknown"
         assert row["result"]["booked"] == [record]
         assert row["result"]["unpriced_runs"] == [record]
         from looper.db import advisor_advice
         assert (await advisor_advice.consults_view("task", pool=pool))[0]["cost_status"] == "unknown"
-        assert "花费未知" in await advisor_advice.summary_line("task", pool=pool)
+        assert await advisor_advice.summary_line("task", pool=pool) == (
+            "请教 advisor 1 次，花费 0.00 美元，采纳 0 条，其中 0 条帮步骤通过")
         due = await advisor_alerts._due("task")
         assert any(kind == "spend" and "未知" in text for kind, text in due)
         known = await llm_records.start_record(agent_id="advisor-known", task_id="task", pool=pool)
         await advisor._book(spawn["id"], Execution("answer", record_id=known, cost_usd=0.05))
         row = await agent_spawns.get(spawn["id"])
         assert row["spent_usd"] == 0.05 and row["cost_status"] == "unknown"
+        await advisor._book(spawn["id"], Execution("answer", record_id=known, cost_usd=0.05))
+        assert await agent_spawns.get(spawn["id"]) == row
     run_db(check)
 
 

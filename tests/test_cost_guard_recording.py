@@ -250,7 +250,8 @@ def test_subscription_reservation_adds_an_in_run_cap_only_with_an_enforced_scope
 
 
 @pytest.mark.parametrize('cap_owner', ['manager', 'guard'])
-def test_runtime_bill_survives_an_unknown_subagent_estimate(agent_db, tmp_path, monkeypatch, cap_owner):
+@pytest.mark.parametrize('main_model', ['sonnet', 'opus'])
+def test_runtime_bill_survives_an_unknown_subagent_estimate(agent_db, tmp_path, monkeypatch, cap_owner, main_model, caplog):
     from looper.agents import session_budget
     from looper.agents.agent_settings import AgentSettings, AgentType, Launch
     from looper.agents.cost_guard_settings import Config, Mode
@@ -260,7 +261,7 @@ def test_runtime_bill_survives_an_unknown_subagent_estimate(agent_db, tmp_path, 
     from looper.agents.tiers import manager_budget
     from tests.runtime_model_helpers import with_model_name
 
-    launch = Launch(AgentSettings(profile=with_model_name(builtin_resolved_profile(), 'sonnet')),
+    launch = Launch(AgentSettings(profile=with_model_name(builtin_resolved_profile(), main_model)),
                     role=AgentType.MANAGER)
     config = Config(mode=Mode.ENFORCE if cap_owner == 'guard' else Mode.OBSERVE,
                     daily_equivalent_usd=4)
@@ -279,7 +280,10 @@ def test_runtime_bill_survives_an_unknown_subagent_estimate(agent_db, tmp_path, 
                                      input_text='test', launch=launch, **options)
         await recorder.start()
         recorder.account(usage_event('claude-haiku-5-5', Usage(input_tokens=100)))
-        assert recorder.cap_stop is not None
+        assert recorder.cap_stop is None
+        expected = 0.0002 if main_model == 'sonnet' else 0.0004
+        assert recorder._spend.budget_cost_usd == pytest.approx(expected)
+        assert not caplog.records
         await recorder.finish(output_text='done', result_event={
             'type': 'result', 'subtype': 'success', 'total_cost_usd': .05})
 
@@ -287,12 +291,12 @@ def test_runtime_bill_survives_an_unknown_subagent_estimate(agent_db, tmp_path, 
     saved = agent_db.finish_record.await_args.kwargs
     assert saved['cost_source'] == 'runtime'
     assert saved['cost_usd'] == .05
-    assert saved['metadata']['catalog_cost_status'] == 'unknown'
-    assert saved['metadata']['catalog_unknown_price_models'] == ['claude-haiku-5-5']
-    assert saved['metadata'].get('cost_status', 'known') == 'known'
-    assert not saved['metadata'].get('unknown_price_models')
+    assert 'catalog_cost_status' not in saved.get('metadata', {})
+    assert saved.get('metadata', {}).get('cost_status', 'known') == 'known'
+    assert not saved.get('metadata', {}).get('unknown_price_models')
     counter = next(item for item in guard.snapshot()['counters'] if item['scope'] == 'global_day')
     assert counter['spent_usd'] == .05 and counter['cost_status'] == 'known'
+    assert not caplog.records
 
 
 def test_unknown_event_model_reaches_guard_settlement(monkeypatch):

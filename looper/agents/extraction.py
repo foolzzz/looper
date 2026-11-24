@@ -1066,6 +1066,7 @@ async def execute(runs: Any, run_id: str, schedule: Mapping[str, Any], stream: M
         checked = await _check(runs, kind, parsed, found, schedule, run_id=run_id, types=types,
                                extracted_usd=asked.cost_usd or 0.0, record_id=result.record_id, now=now,
                                left_s=float(timeout) - (time_.monotonic() - started))
+        await db_subs.update_run(pool, run_id, check_record_id=checked.record_id)
 
     async def store(conn: asyncpg.Connection) -> Mapping[str, Any]:
         if kind == "leads":

@@ -292,6 +292,8 @@ class RunSpend:
     ``usage`` sums the events' tokens and their cost; its ``cost_usd`` is None
     once one event cannot be priced. Unknown event prices make a configured cap
     unverifiable, which stops further calls, and log the actual model at WARNING.
+    Runtime-billed runs estimate unpriced auxiliary requests at the main model's
+    price for cap checks; the runtime bill settles the run.
     An explicit ``usage_complete=False`` also keeps the total unknown. With
     ``cost_basis=observed``, the soft cap instead checks reported complete root
     steps' cost. ``budget_verifiable`` is false when a root step is missing or
@@ -299,7 +301,8 @@ class RunSpend:
     """
 
     def __init__(self, provider: LegacyProviderSpec | ProviderSpec | ResolvedModel | Price,
-                 model: str, cap: float | None) -> None:
+                 model: str, cap: float | None, *, runtime_billed: bool = False) -> None:
+        self._runtime_billed = runtime_billed
         self._price = provider if callable(provider) else pricer(provider)
         self._model = model
         self.cap = cap
@@ -319,6 +322,9 @@ class RunSpend:
         was = self.exceeded
         actual_model = model or self._model
         cost = self._price(actual_model, usage)
+        if cost is None and self._runtime_billed:
+            # Auxiliary catalog gaps must not interrupt an authoritative runtime bill.
+            cost = self._price(self._model, usage)
         # Check event models, not only the configured alias: auxiliary models and alias targets can change.
         if cost_status(cost) is CostStatus.UNKNOWN and usage != Usage():
             if self.cap is not None and actual_model not in self.unknown_models:
