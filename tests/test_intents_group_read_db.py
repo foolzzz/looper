@@ -107,6 +107,8 @@ def test_followed_group_rules_preserve_original_types_without_duplicate_intents(
             *([] if dropped else [("Named request", "followed_group")]), ("Direct alert", "subscription")]
         assert await pool.fetchval("SELECT count(*) FROM intent_sources WHERE event_seq=$1", group) == (0 if dropped else 1)
         assert extraction.GROUP_REQUESTS_NOTE in fake.calls[0]["instructions"]
+        assert "MR review requests" not in fake.calls[0]["instructions"]
+        assert "rules_type" not in result["extract_counts"]["dropped"]
         assert "OLD_CONTEXT_SENTINEL" not in fake.calls[0]["input_text"]
         assert "群 · 全部消息" in fake.calls[0]["input_text"]
     run_db(check, monkeypatch, setup=seed_role_configs)
@@ -122,6 +124,8 @@ def test_operator_dm_alone_keeps_original_instructions_with_group_read_on(monkey
         result = await run_once(pool, tmp_path, row)
         assert result["extract_counts"]["group_read"] == 0
         assert extraction.GROUP_REQUESTS_NOTE not in fake.calls[0]["instructions"]
+        assert "MR review requests" not in fake.calls[0]["instructions"]
+        assert "rules_type" not in result["extract_counts"]["dropped"]
         assert extraction.GROUP_LABEL not in fake.calls[0]["input_text"]
     run_db(check, monkeypatch, setup=seed_role_configs)
 
