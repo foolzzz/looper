@@ -33,7 +33,7 @@ def install(root: Path) -> tuple[Path, Path]:
     # Discovery is a fixed fixture response, independent of a cold Python import
     # taking longer than the production probe's deadline on a loaded test host.
     dsh.write_text("#!/bin/sh\ncase \"$1\" in\n"
-                   "--version) printf '%s\\n' '0.2.1-rc.2';;\n"
+                   "--version) printf '%s\\n' '0.2.2-rc.5';;\n"
                    "--help) printf '%s\\n' '--profile --patch --json --session-id';;\n"
                    f"*) exec {shlex.quote(sys.executable)} {shlex.quote(str(driver))} \"$@\";;\n"
                    "esac\n", encoding="utf-8")
@@ -83,7 +83,7 @@ def _platform_call(server: dict, tool: str) -> dict:
 def main(state: Path) -> None:
     args = sys.argv[1:]
     if args == ["--version"]:
-        print("0.2.1-rc.2")
+        print("0.2.2-rc.5")
         return
     if args == ["--help"] or "--help" in args:
         print("--profile --patch --json --session-id")

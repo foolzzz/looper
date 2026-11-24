@@ -43,7 +43,7 @@ _PROVIDER_ENV = ("the DSH runner cannot apply a provider's environment variables
 # Per-member cap; the supervisor starts another runner when existing members are full.
 SESSION_CAP = 32
 _DSH_PACKAGE = "@deepseek-ai/dsh"
-_DSH_VERSION = "0.2.1-rc.2"
+_DSH_VERSION = "0.2.2-rc.5"
 
 
 def _prompt_text(looper_prompt: str, launch: Launch, *, cwd: str | Path | None = None) -> str:

@@ -1208,7 +1208,7 @@ console.log(JSON.stringify(parse(process.argv[3])));
         assert parsed.returncode == 0, parsed.stderr
         entries = json.loads(parsed.stdout)
         by_id = {row["id"]: row for row in entries}
-        for name in ("tool-web", "tools", "skill-filesystem", "compaction-basic", "llm-deepseek"):
+        for name in ("tool-web", "skill-filesystem", "compaction-basic", "llm-deepseek"):
             assert by_id[name]["config"] == configs[name]
         for name in ("hmr", "settings", "config-editor", "plugin-manager", "tool-plugin-manager", "credentials",
                      "authorization", "deepseek-account", "llm-deepseek-account", "llm-pi-ai", "otel",
@@ -1838,9 +1838,9 @@ def test_dsh_channel_timeout_or_cancel_reaps_process(tmp_path, cancel):
     asyncio.run(asyncio.wait_for(run(), 15))
 
 
-@pytest.mark.parametrize("version,code,help_code", [("0.2.1-rc.2", 0, 0), ("0.2.1-rc.3", 0, 0),
-                                                  ("unreadable", 0, 0), ("0.2.1-rc.2", 3, 0),
-                                                  ("0.2.1-rc.2", 0, 2)])
+@pytest.mark.parametrize("version,code,help_code", [("0.2.2-rc.5", 0, 0), ("0.2.1-rc.3", 0, 0),
+                                                  ("unreadable", 0, 0), ("0.2.2-rc.5", 3, 0),
+                                                  ("0.2.2-rc.5", 0, 2)])
 def test_dsh_probe_is_isolated_and_pins_the_verified_version(tmp_path, monkeypatch, version, code, help_code):
     from fake_claude import fake_claude
 
@@ -1862,7 +1862,7 @@ print('--profile --patch --json --session-id')
 sys.exit({help_code})
 ''')
     probe = runtimes.adapter("dsh").probe(executable)
-    supported = version == "0.2.1-rc.2" and code == 0 and help_code == 0
+    supported = version == "0.2.2-rc.5" and code == 0 and help_code == 0
     assert (probe.error is None) is supported
     assert bool(probe.capabilities) is supported
     if supported:
@@ -1890,7 +1890,7 @@ for name in ('HOME', 'DSH_HOME', 'DSH_AGENTS_HOME', 'XDG_CONFIG_HOME', 'XDG_DATA
     assert pathlib.Path(os.environ[name]) == root / name.lower()
 with open({str(seen)!r}, 'a') as f:
     f.write(json.dumps({{'argv': sys.argv[1:], 'root': str(root)}}) + '\\n')
-print('dsh 0.2.1-rc.2' if sys.argv[1:] == ['--version'] else 'dsh --profile headless --json')
+print('dsh 0.2.2-rc.5' if sys.argv[1:] == ['--version'] else 'dsh --profile headless --json')
 ''')
     # Reproduce /var -> /private/var even on hosts without that system alias.
     monkeypatch.setattr(dsh.tempfile, "tempdir", str(alias))
@@ -1930,8 +1930,8 @@ def test_installed_dsh_probe_and_patch_composition_without_boot(tmp_path):
         pytest.skip("Installed DSH is required for composition validation")
     runtime = runtimes.adapter("dsh")
     probe = runtime.probe(executable)
-    if probe.version != "0.2.1-rc.2":
-        pytest.skip("Composition is verified only against DSH 0.2.1-rc.2")
+    if probe.version != "0.2.2-rc.5":
+        pytest.skip("Composition is verified only against DSH 0.2.2-rc.5")
     assert probe.error is None
     launch = _run_launch(tmp_path)
     command = runtime.run_command(executable, cwd=tmp_path, prompt_file=_run_prompt_file(tmp_path), launch=launch)
@@ -1947,7 +1947,7 @@ def test_installed_dsh_probe_and_patch_composition_without_boot(tmp_path):
     disabled = {row["id"] for row in patch if row.get("disabled")}
     assert configs["agent-default-model"] == {"provider": "deepseek-official", "model": "deepseek-flash"}
     assert configs["llm-deepseek"]["baseURL"] == PROVIDER.base_url
-    assert configs["tools"] == {"mode": "native"}
+    assert "tools" not in configs
     assert configs["sandbox-policy"] == {"mode": "danger-full-access", "workspaceRoot": str(tmp_path)}
     assert configs["approval"] == {"policy": "never"}
     assert "@deepseek-ai/dsh-fs-sandbox" in done.stdout and "@deepseek-ai/dsh-bash-sandbox" in done.stdout
@@ -2468,7 +2468,8 @@ await ctx.plugin((await load('dsh-session')).default).await();
 await ctx.plugin((await load('dsh-session-projection')).default).await();
 provide('workingDirectory', {get() {return process.cwd();}, async ensure() {return process.cwd();}});
 await ctx.plugin((await load('dsh-system-prompt')).default, {}).await();
-await ctx.plugin((await load('dsh-tools')).default, {mode: 'native'}).await();
+await ctx.plugin((await load('dsh-tools')).default, {}).await();
+await ctx.plugin(await load('dsh-tool-executor-native'), {}).await();
 await ctx.plugin((await load('dsh-sandbox-policy')).default,
   {mode: 'danger-full-access', workspaceRoot: process.cwd()}).await();
 await ctx.plugin((await load('dsh-fs-sandbox')).default, {}).await();
@@ -2499,8 +2500,8 @@ if (options.consult) {
   (await load('dsh-sandbox-policy')).setSandboxMode(session, 'danger-full-access');
   agent = {id: session.id, session, ctx};
 }
-const call = (name, args = {}) => ctx.tools.execute({callId: `call-${name}`, name,
-  arguments: args, agent, signal: new AbortController().signal});
+const call = async (name, args = {}) => (await ctx.tools.execute({calls: [{type: 'tool-call', id: `call-${name}`,
+  name, arguments: JSON.stringify(args)}], agent, signal: new AbortController().signal})).results[0].result;
 try {
   // Positive control: the very same official write definition really creates a file before policy.
   const args = {file_path: 'control.txt', content: 'positive control'};
@@ -2546,14 +2547,11 @@ try {
       ['write', {file_path: 'control.txt', content: 'positive control'}],
       ['edit', {file_path: 'source.txt', old_string: 'needle', new_string: 'changed'}],
       ['bash', {command: 'touch escaped.txt', description: 'mutation'}],
-      ['run_code', {code: 'return await tools.write({file_path:"escaped.txt",content:"x"})', description: 'mutation'}],
       ['subagent', {prompt: 'write escaped.txt'}],
       ['workflow', {script: 'return 1', meta: {name: 'mutation'}}],
       ['job_list', {}], ['job_output', {job_id: 'job'}], ['job_kill', {job_id: 'job'}],
       ['mcp__looper__read', {}], ['mcp__catalog__read', {}], ['mcp__looper__unexpected', {}],
       ['future_mutator', {}]]) {
-    // Even a presentation switch must not bypass the execution guard.
-    ctx.tools.defaultMode = name === 'run_code' ? 'ptc' : 'native';
     // Prove these are registered tools, so UNKNOWN_TOOL cannot masquerade as a guard pass.
     assert.ok(ctx.tools.get(name), name);
     const result = await call(name, args);
@@ -2631,7 +2629,7 @@ for line in sys.stdin:
         stream.translate(record)
     denials = runtimes.adapter("dsh").permission_denials(stream._result(0))
     assert len(denials) == len(records) // 2
-    assert {d["tool"] for d in denials} >= {"write", "edit", "bash", "run_code", "subagent", "workflow"}
+    assert {d["tool"] for d in denials} >= {"write", "edit", "bash", "subagent", "workflow"}
 
 
 def test_dsh_read_only_omits_external_mcp_and_records_reason_without_its_secrets(tmp_path):
@@ -2731,7 +2729,7 @@ def test_dsh_disposable_serve_reads_back_all_four_roles_and_resident_owners(tmp_
             assert channels and all(not channel["enabled"] for channel in channels)
             registry = api.post("/api/v1/registry/view", {})["result"]
             detected = [row for row in registry["runtimes"] if row["type"] == "dsh"]
-            assert len(detected) == 1 and detected[0]["version"] == "0.2.1-rc.2"
+            assert len(detected) == 1 and detected[0]["version"] == "0.2.2-rc.5"
             api.post("/api/v1/runtimes/probe", {"runtime_id": "rt-dsh"})["result"]
             provider = api.post("/api/v1/provider_accounts/create", {
                 "name": "disposable-messages", "vendor_type": "custom",
