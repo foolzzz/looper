@@ -24,6 +24,8 @@ from http.client import HTTPException
 from urllib.error import URLError
 from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_opener
 
+from ..ops_config import OpsConfig
+
 MAX_CONTEXT_CHARS = 3000
 HOOK_TIMEOUT_SECONDS = 5
 HOOK_ARGS = ("claude-code", "profile", "--hook")
@@ -278,21 +280,33 @@ def edit_mcp(args, runtime_root: Path | None, *, confirm=None, out=None) -> int:
         return EMPTY
 
 
+def _retrieval_url(ops: OpsConfig) -> str:
+    from . import server_address
+
+    bound = server_address.read(ops.runtime_root)
+    host, port = bound if bound is not None else (ops.host, ops.port)
+    # A wildcard listener is reached locally through its loopback address.
+    if bound is not None:
+        host = {"0.0.0.0": "127.0.0.1", "::": "::1"}.get(host, host)
+    address = _loopback(host)
+    if address is None:
+        raise ValueError(f"server.host {host} is not a loopback address")
+    return f"http://{address}:{port}"
+
+
 def _retrieval_settings(args) -> tuple[dict, dict]:
     from .. import ops_config
     from . import operator_auth
 
     ops = ops_config.load(ops_config.Flags(runtime_root=args.runtime_root, config=args.config), require_database=False)
-    address = _loopback(ops.host)
-    if address is None:
-        raise ValueError(f"server.host {ops.host} is not a loopback address")
+    url = _retrieval_url(ops)
     token = operator_auth.read_token(ops.runtime_root)
     if not token:
         raise ValueError("no operator token: start Looper once (looper serve)")
     opener = build_opener(ProxyHandler({}), _NoRedirect())
     answers = []
     for path in ("knowledge_vault/get", "leads/settings_get"):
-        request = Request(f"http://{address}:{ops.port}/api/v1/{path}", data=b"{}", method="POST",
+        request = Request(f"{url}/api/v1/{path}", data=b"{}", method="POST",
                           headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json",
                                    "Accept": "application/json"})
         with opener.open(request, timeout=2) as response:

@@ -19,9 +19,10 @@ from urllib.parse import urlsplit
 from urllib.request import ProxyHandler, Request, build_opener
 
 from . import mcp_server, operator_auth
-from .claude_code_entry import _loopback, _NoRedirect
+from .claude_code_entry import _loopback, _NoRedirect, _retrieval_url
 from .log_redaction import log_to_stderr
 from .mcp_server import LooperUnavailable
+from ..ops_config import OpsConfig
 
 SERVER_NAME = "looper-memory"
 REQUEST_TIMEOUT_SECONDS = 15.0
@@ -77,15 +78,24 @@ _PATHS = {"vault_search": "/api/v1/manager_retrieval/vault_search",
 class OperatorClient:
     """A static MCP tool catalog and three requests carrying a read-only-scoped credential."""
 
-    def __init__(self, url: str, runtime_root: Path, *, timeout: float = REQUEST_TIMEOUT_SECONDS) -> None:
+    def __init__(self, url: str, runtime_root: Path, *, timeout: float = REQUEST_TIMEOUT_SECONDS,
+                 ops: OpsConfig | None = None) -> None:
         parsed = urlsplit(url)
         if (parsed.scheme != "http" or _loopback(parsed.hostname or "") is None or parsed.username is not None
                 or parsed.password is not None or parsed.path not in ("", "/") or parsed.query or parsed.fragment):
             raise ValueError("retrieval needs a loopback HTTP server URL")
-        self.url = url.rstrip("/")
+        self._url = url.rstrip("/")
+        self._ops = ops
         self._runtime_root = runtime_root
         self._timeout = timeout
         self._opener = build_opener(ProxyHandler({}), _NoRedirect())
+
+    @property
+    def url(self) -> str:
+        try:
+            return _retrieval_url(self._ops) if self._ops is not None else self._url
+        except (ValueError, OSError) as exc:
+            raise LooperUnavailable(str(exc)) from None
 
     def list_tools(self) -> list[dict[str, Any]]:
         return deepcopy(TOOLS)
@@ -140,7 +150,12 @@ def main(runtime_root: str | None, config: str | None) -> int:
         return 2
     address = _loopback(ops.host)
     if address is None:
-        print(f"error: server.host {ops.host!r} is not a loopback address", file=sys.stderr)
-        return 2
-    return mcp_server.serve(OperatorClient(f"http://{address}:{ops.port}", ops.runtime_root), sys.stdin.buffer,
+        try:
+            url = _retrieval_url(ops)
+        except (ValueError, OSError) as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 2
+    else:
+        url = f"http://{address}:{ops.port}"
+    return mcp_server.serve(OperatorClient(url, ops.runtime_root, ops=ops), sys.stdin.buffer,
                             sys.stdout.buffer, name=SERVER_NAME, instructions=INSTRUCTIONS)

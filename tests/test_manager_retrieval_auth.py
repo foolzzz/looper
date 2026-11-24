@@ -11,6 +11,38 @@ from tests.test_operator_auth import TOKEN
 PATHS = {f"/api/v1/manager_retrieval/{name}" for name in ("vault_search", "vault_read", "leads_search")}
 
 
+@pytest.fixture(autouse=True)
+def current_operator_token(tmp_path):
+    operator_auth.token_path(tmp_path).write_text(TOKEN)
+
+
+def test_rotation_revokes_the_old_credential_without_restarting(tmp_path, monkeypatch):
+    from looper.agents.v1_domains import manager_retrieval
+
+    async def answer(*_args):
+        return {"read": True}
+
+    monkeypatch.setattr(manager_retrieval, "run", answer)
+
+    async def run():
+        async with _serving(tmp_path) as server:
+            async def read(token):
+                status, _, _ = await _send(server, "POST /api/v1/manager_retrieval/vault_search",
+                                          _bearer(operator_auth.retrieval_token(token)), '{"query":"Atlas"}')
+                return status
+
+            assert await read(TOKEN) == 200
+            # Replace the on-disk token, exactly as an operator rotation does.
+            replacement = tmp_path / "new-token"
+            replacement.write_text(TOKEN + "rotated")
+            replacement.replace(operator_auth.token_path(tmp_path))
+            assert await read(TOKEN) == 401
+            assert await read(TOKEN + "rotated") == 200
+            operator_auth.token_path(tmp_path).unlink()
+            assert await read(TOKEN + "rotated") == 401
+    asyncio.run(run())
+
+
 def test_retrieval_credential_is_domain_separated_and_rotates():
     token = operator_auth.retrieval_token(TOKEN)
     assert token.startswith("lmr_") and TOKEN not in token
