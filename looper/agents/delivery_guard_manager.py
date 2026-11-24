@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+import logging
 from dataclasses import replace
 from typing import TYPE_CHECKING, Any
 
@@ -17,6 +19,17 @@ if TYPE_CHECKING:
     from .ops import Turn
     from .tiers.manager import ManagerAgent, Prepared
     from .tiers.turn_token import TurnToken
+
+logger = logging.getLogger(__name__)
+_reminders: dict[TurnToken, set[asyncio.Task[None]]] = {}
+
+
+async def finish(token: TurnToken) -> None:
+    """Withdraw unfinished advisory inputs when their owning model turn ends."""
+    tasks = _reminders.pop(token, set())
+    for task in tasks:
+        task.cancel()
+    await asyncio.gather(*tasks, return_exceptions=True)
 
 
 def initialize(turn: Turn) -> None:
@@ -52,6 +65,8 @@ async def run(manager: ManagerAgent, token: TurnToken, prepared: Prepared) -> st
         if (turn is None or turn.refused or not token.live or followup_action(
                 turn.debt, ending=TurnEnding.EMPTY, followups=0) is not FollowupAction.FOLLOWUP):
             raise
+    finally:
+        await finish(token)
     followups = 0
     ending = TurnEnding.EMPTY
     while followup_action(turn.debt, ending=ending, followups=followups) is FollowupAction.FOLLOWUP:
@@ -69,6 +84,8 @@ async def run(manager: ManagerAgent, token: TurnToken, prepared: Prepared) -> st
             if isinstance(exc, OverCap) and prepared.session.budget is not None:
                 raise
             ending = ending_for(exc)
+        finally:
+            await finish(token)
     token.check()
     token.settle()
     raise TurnFailed(FAILURE_NOTICE, "no reply after follow-ups")
@@ -87,7 +104,29 @@ async def observe(state: GuardState, block: dict[str, Any], *, prepared: Prepare
     if prepared.turn is not None:
         prepared.turn.debt = state.debt
     if reminder is not None and Capability.MID_TURN_INPUT in capabilities:
-        written = await token.step("delivery_reminder", resident.write_mid_turn(reminder))
-        if written:
-            await prepared.run.recorder.annotate(metadata(prepared, reminders=state.reminders))
+        async def remind() -> None:
+            from .tiers.turn_token import TurnStopped
+
+            try:
+                if token.live:
+                    written = await token.step("delivery_reminder", resident.write_mid_turn(reminder))
+                    if written:
+                        await prepared.run.recorder.annotate(metadata(prepared, reminders=state.reminders))
+            except TurnStopped:
+                pass
+            except Exception:
+                logger.warning("manager: delivery reminder failed", exc_info=True)
+
+        # The stream observer must keep draining tool/text/result events while
+        # Claude decides whether to fold this advisory input into its reply.
+        task = asyncio.create_task(remind())
+        tasks = _reminders.setdefault(token, set())
+        tasks.add(task)
+
+        def done(task: asyncio.Task[None]) -> None:
+            tasks.discard(task)
+            if not tasks and _reminders.get(token) is tasks:
+                _reminders.pop(token, None)
+
+        task.add_done_callback(done)
     return state

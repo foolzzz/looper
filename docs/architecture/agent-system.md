@@ -301,17 +301,31 @@ Manager has no tool for it. The dashboard shows the task page's 指标 card and 
   non-hosted Claude Code resident). Both inputs must resolve to the operator; other sessions, API clients,
   commands, gate/intent replies, attachments, quotes and chats with pending confirmations retain their queue
   path. With routing off, merging also requires the same chat. Earlier queued messages keep their order.
-  Admission lets OS read callbacks and the output reader run, then rechecks before and after writing,
-  even when a short line's drain returns immediately. A failed or late write queues the message.
-  If a result arrives after the write, the resident process is retired before queue
-  fallback, so the old pipe cannot consume the addition beside its queued turn. It is neither reported as
+  A typed input phase closes admission when top-level model generation begins, an addition is folded,
+  or a top-level tool result arrives, before event callbacks; the next assistant tool call reopens the
+  tool-wait window. Subagent generation does not close that window.
+  Each addition carries a UUID. Writing stdin or receiving a queued lifecycle is not acceptance: the resident
+  waits for its native replay within the original turn, or its UUID in that turn's result, before confirming
+  the merge. A session-ordered background task waits for that receipt outside the admission lock, keeping
+  the inbox available to other sessions and non-user events. Later messages in that session wait for
+  settlement before admission or queue dispatch. A failed or late write queues the message. When the
+  protocol supports UUID ownership, an unconfirmed addition reserves its next native turn and buffers
+  output only through that native turn's own top-level result. Its queued caller claims it by message id
+  without writing stdin again or restarting the resident, even when other queued work runs before claim.
+  Its run records the injected input actually
+  seen by the model. Native tool bindings and stream matches are published before claim, including while
+  Manager prepares the queued turn. A stopped, failed or superseded owner withdraws its reservation;
+  another caller settles existing reservations before starting on the resident. Otherwise the resident
+  first tries per-UUID cancellation, then a bounded gentle interrupt that spares background work, and
+  retires the process only when safe withdrawal is impossible. The addition is neither reported as
   merged nor settled with the original result. Unexpected admission failures are logged and retain the queue
-  path. The original tool binding stays in place. The final reply goes to
+  path. Folded additions keep the original tool binding. The final reply goes to
   the original chat and each addition from another chat; same-chat web additions get a terminal acknowledgement,
   while same-chat Lark/Telegram additions need no duplicate reply. Any participating chat can stop the turn.
   Additions settle only after reply handoff; shutdown before handoff leaves them replayable. Explicit stop
-  follows the existing withdrawal rule and settles all associated messages immediately, preventing replay of
-  stopped work. Typed additions record `metadata.merged` (kind, message id, chat, receipt time), plus each
+  first requests `cancel_async_message` for pending UUIDs, then uses the normal control interrupt,
+  killing only when graceful shutdown fails. It settles all associated messages immediately, preventing
+  replay of stopped work. Typed additions record `metadata.merged` (kind, message id, chat, receipt time), plus each
   addition's ack and first-reply metrics when metrics are on. A failed resume carries accepted additions into
   its retry even if the switch has since been turned off. Off, prompt/system text, tools, command and process
   signature retain their main-baseline bytes, and later messages remain separate turns. Dashboard controls and
@@ -324,7 +338,9 @@ Manager has no tool for it. The dashboard shows the task page's 指标 card and 
   Six consecutive top-level tool calls select a same-turn reminder, at most twice per turn, only when
   the configured runtime declares `MID_TURN_INPUT` and the active session is a direct resident stream-json
   process. Keeper and runner-hosted sessions are excluded. Only Claude Code declares this verified
-  capability. Reminders are model input, with no separate interim channel message.
+  capability. Reminders wait for consumption in background tasks, so event handling continues;
+  unfinished advisory inputs are withdrawn when their model turn ends. Reminders are model input,
+  with no separate interim channel message.
   The operator-only v1 operations `delivery_guard.get` and `delivery_guard.update` read or store the
   switch (`enabled`, null restores off); existing chat settings responses and Manager tools stay unchanged.
   Hidden turns send only the fixed follow-up message in the same session, without user-turn context,
@@ -2875,11 +2891,17 @@ Before, an unconfigured project ran at most 8 Planners, 16 Workers and 8
 Reviewers at once whatever its tasks; now N running tasks run N Planners and
 up to 16N Workers and 8N Reviewers. By default nothing caps the total.
 With `engine.admission.enabled`, each account's `max_concurrency` also bounds
-Workers, Reviewers, consults, processors and nested runs; `null` is unlimited.
+Workers, Reviewers, consults, processors, explorers and nested runs; `null` is unlimited.
 The account queue uses the shared `Lane` enum, aging and quota freezes, with
 durable state and an operator-only `providers.limits_clear` override. Nested
-runs borrow a running parent's slot. Planner and Manager turns and platform
-explorers are not admitted yet. The switch defaults off and refuses activation
+runs borrow a running parent's slot. Explorers queue in their spawner's lane
+after a task-class pre-check, without holding the task lock. A blocking explorer
+wait lends one slot to its first queued child on the same account. If the wait
+ends first, that child keeps its slot and the parent reacquires with its original
+arrival order before the tool returns. Frozen accounts do not lend; queued tool
+results include `held: quota` and the known reset time. Kept explorers register
+their slots on adoption and release them on collection. Planner and Manager
+turns are not admitted yet. The switch defaults off and refuses activation
 while failure typing is off. The independent cost guard can still hold runs
 for spending; admission's 95% background pause does not change that policy.
 The converted alarm-like
@@ -3044,9 +3066,9 @@ only the operator's confirmation of its exact content lets Looper write it
 into the vault's memory folder
 ([RFC](rfcs/memory-write-path-v0.zh-CN.md); a lesson that takes effect in
 PostgreSQL only is the [tiers RFC](rfcs/memory-tiers-v0.zh-CN.md)'s). This
-part includes the foundation, confirmed write path and operator DM delivery.
-Sources, drafting and the dashboard memory page follow separately.
-The write path adds no model-visible prompt, contract or tool.
+part includes the foundation, private drafting, the confirmed write path and
+operator DM delivery. Sources and the dashboard memory page follow separately.
+Drafting has its own contract; existing agents gain no prompt or tool.
 
 - **Tables** (migration `memory_candidates`): `memory_candidates` (shown as
   `M-0042`; its kind, state and reason, the least trusted class of its
@@ -3092,7 +3114,9 @@ The write path adds no model-visible prompt, contract or tool.
   found or a check failed, 2 usage, 3 not configured, 4 refused, 5 no such
   candidate, 6 database unusable).
 - **Operator actions:** `/api/v1/memory/confirm`, `confirm_many`, `reject`,
-  `edit`, `retry`, `revive` and `delete` are operator-only. Confirmation
+  `edit`, `retry`, `redraft`, `revive` and `delete` are operator-only.
+  Redrafting queues a conflict or a `draft_failed` candidate for a fresh revision;
+  it changes only Looper state (`inside`) and never confirms a write. Confirmation
   names the current content hash; a stale hash is a conflict. Batch
   confirmation returns a result for each selected item. Editing stores a
   new revision and clears confirmation; saving and confirming it is one
@@ -3103,6 +3127,38 @@ The write path adds no model-visible prompt, contract or tool.
   `confirm`; exit code 7 means the state does not allow the action. Deleting
   a candidate leaves its fingerprint as a tombstone and leaves vault notes
   alone.
+- **Drafting** (`memory_draft_service.py`, `memory_draft.py`, `memory_draft_role.py`):
+  the service polls every 10 seconds and PostgreSQL wakes it after a seed commits.
+  A short transaction uses an advisory lock and `SKIP LOCKED` to claim a `drafting`
+  vault candidate and a 180-second spend lease across servers. Input assembly and
+  the model call run after commit, with a 150-second outer deadline and no database
+  locks. A short transaction then checks the lease, candidate and saved settings
+  before persisting; a deleted/changed candidate or expired/replaced lease discards
+  the result. Deleting a seed does not release its live spend lease. Code searches only the kind's configured
+  folders (`vault.search`'s internal `under` argument), includes its rules, index,
+  entry pages and related open/rejected candidates, and bounds the escaped input
+  to 60,000 characters. The `memory_draft` role runs through `model_call.ChildCall`,
+  with its own built-in `claude-code/sonnet-5-5` profile, no harness or tools, a
+  replaced system prompt and an empty working directory. Its private `memory_draft`
+  record retains only input digest/length and typed events, never source or reply
+  bodies. The role is configurable in Settings → Roles. The deadline is at most
+  120 seconds; the existing drafting settings bound each call and the local day's
+  recorded spending. An unknown cost reserves a whole per-call cap. A depleted
+  allowance leaves candidates queued until the next day and records one daily
+  notice (sent to the configured operator DM when available).
+  Strict parsing resolves only supplied ids, checks paths, snapshots, frontmatter,
+  index updates, exact anchors and credentials, and saves a revision in `pending`.
+  Duplicate/rejected seeds are dropped; matching open candidates merge only source
+  classes their kind permits. A revision of a confirmed/writing/blocked/conflict
+  candidate stays in `drafting` with a durable `target_busy` wait naming that
+  candidate. Polls and restarts skip it without model calls until the target leaves
+  those states or is deleted; other seeds continue immediately. Runtime and malformed-JSON failures get two retries;
+  invalid changes and credentials are dropped immediately. `large_removal` and
+  `flagged` preserve review warnings. Off, the service performs no vault read,
+  model call or candidate write, and existing agent prompts/tools/launches stay
+  unchanged. The `memory_draft_role` migration (order 1830) widens role/run-kind checks with
+  `NOT VALID`, then validates online. The `memory_draft_queue` migration (order
+  1840) creates the durable target waits and spend lease tables.
 - **Writing** (`looper/agents/memory_write.py`): `looper serve` polls and
   wakes after confirmation or retry. With `memory_write` absent or disabled
   it writes nothing. A PostgreSQL session advisory lock per git repository

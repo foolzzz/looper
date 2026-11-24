@@ -270,6 +270,8 @@ ROLE_CAPABILITIES: Mapping[str, frozenset[Capability]] = {
     "leads_check": frozenset({Capability.RUN, Capability.NO_TOOLS}),
     # The outbound review runs once with no tools, over an action another run proposed (the outbound-review RFC).
     "outbound_check": frozenset({Capability.RUN, Capability.NO_TOOLS}),
+    # Vault text is read only in a private run with no tool.
+    "memory_draft": frozenset({Capability.RUN, Capability.NO_TOOLS}),
 }
 # The roles whose runs have tools: every role but the processor. A profile chosen for all of them at once (the
 # shared defaults) or as another profile's fallback is checked against these; a profile is checked for the processor
@@ -349,12 +351,15 @@ class ReportsContext(Protocol):
 class MidTurnInput(Protocol):
     """A verified resident transport that can admit input to its running user turn.
 
-    Check ``Capability.MID_TURN_INPUT`` too. False means no input was written;
-    a write failure propagates so the owner can retain the message for a later turn.
+    Check ``Capability.MID_TURN_INPUT`` too. True confirms consumption by the
+    current turn. False leaves the normal queue in charge. A written input can
+    reserve its native next turn by ``message_id``; that caller must claim it
+    without writing a second prompt. Otherwise withdraw or isolate it before
+    retrying. Write failures propagate.
     Keeper- and runner-hosted sessions have not verified this contract.
     """
 
-    async def write_mid_turn(self, text: str) -> bool: ...
+    async def write_mid_turn(self, text: str, *, message_id: str | None = None) -> bool: ...
 
 
 class ResidentSession(Protocol):

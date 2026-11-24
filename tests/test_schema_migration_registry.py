@@ -86,7 +86,8 @@ def test_new_fresh_ddl_is_appended_without_changing_the_baseline_bytes():
 
 def test_current_baseline_additions_have_upgrade_and_admission_migrations():
     discovered = migrations.discover()
-    expected = {"mcp_tool_levels", "failure_typing", "memory_candidates", "channel_outbox"}
+    expected = {"mcp_tool_levels", "failure_typing", "memory_candidates", "channel_outbox",
+                "memory_draft_role", "memory_draft_queue"}
     assert expected <= {migration.name for migration in discovered}
     assert expected <= {migration.name for migration in migrations.pending_migrations(discovered)}
     steps = migrations.online_steps(discovered)
@@ -102,3 +103,11 @@ def test_intent_migration_uses_its_reserved_order(name, order):
     discovered = migrations.discover()
     migration = next(migration for migration in discovered if migration.name == name)
     assert (migration.order, migration.pending_order) == (order, order)
+
+
+@pytest.mark.parametrize("name,order", [("memory_draft_role", 1830), ("memory_draft_queue", 1840)])
+def test_drafting_migrations_use_their_reserved_orders(name, order):
+    migration = next(item for item in migrations.discover() if item.name == name)
+    assert (migration.order, migration.pending_order) == (order, order)
+    if getattr(migration, "online", ()):
+        assert migration.online_order == order
