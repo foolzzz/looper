@@ -68,6 +68,189 @@ def test_breaker_single_probe_and_recovery():
     assert breaker.state == 'closed'
 
 
+@pytest.mark.parametrize('app_id', ['synthetic-app', 'telegram:10001'])
+def test_sibling_channels_share_breaker_and_single_recovery_probe(app_id, monkeypatch):
+    from looper.agents.channels import outbound_metrics as metrics
+    events = metrics.EventBuffer()
+    monkeypatch.setattr(metrics, 'events', events)
+
+    async def run():
+        clock = Clock()
+        first, sibling = [Gateway(channel, clock, clock.sleep, app_id=app_id)
+                          for channel in ('first', 'sibling')]
+        calls = []
+
+        async def failure():
+            calls.append('failure')
+            raise LarkCliError('lost response', error_type=TIMEOUT)
+
+        async def success():
+            calls.append('success')
+            return 'sent'
+
+        # Match the real-path failure: three CLI edits and two Bot edits.
+        for index, gateway in enumerate([first] * 3 + [sibling] * 2):
+            with pytest.raises(LarkCliError):
+                await gateway.edit(str(index), failure)
+        assert first.breaker.state == sibling.breaker.state == 'open'
+        for gateway in (first, sibling):
+            with pytest.raises(CircuitOpen):
+                await gateway.write('send', success)
+        assert calls == ['failure'] * 5
+        assert first.counters.breaker_opens == sibling.counters.breaker_opens == 1
+
+        clock.now = 60
+        probing, release = asyncio.Event(), asyncio.Event()
+
+        async def probe():
+            probing.set()
+            await release.wait()
+            return await failure()
+
+        task = asyncio.create_task(sibling.write('send', probe, retry=False))
+        await probing.wait()
+        assert first.breaker.state == 'half_open'
+        with pytest.raises(CircuitOpen):
+            await first.write('send', success)
+        release.set()
+        with pytest.raises(LarkCliError):
+            await task
+        assert first.breaker.state == sibling.breaker.state == 'open'
+        assert first.breaker.open_until == 120
+        clock.now = 120
+        assert await first.write('send', success) == 'sent'
+        assert sibling.breaker.state == 'closed'
+        assert await sibling.write('send', success) == 'sent'
+        assert calls == ['failure'] * 6 + ['success'] * 2
+        for gateway in (first, sibling):
+            counts = events.counts(gateway.channel_id)
+            assert counts[metrics.EventKind.BREAKER_OPEN] == 2
+            assert counts[metrics.EventKind.BREAKER_HALF_OPEN] == 2
+            assert counts[metrics.EventKind.BREAKER_RECOVERED] == 1
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize('exit_kind', ['expired', 'state_error', 'cancelled', 'timeout'])
+def test_half_open_probe_exit_keeps_sibling_writes_usable(exit_kind, monkeypatch):
+    from looper.agents.channels import outbound
+    delivery_deadline = outbound.DELIVERY_DEADLINE
+    if exit_kind == 'timeout':
+        monkeypatch.setattr(outbound, 'DELIVERY_DEADLINE', .05)
+
+    async def run():
+        clock = Clock()
+        first, sibling = [Gateway(channel, clock, clock.sleep, app_id='synthetic-probe-exit')
+                          for channel in ('first', 'sibling')]
+        for _ in range(5):
+            first.breaker.record(ErrorClass.UNKNOWN)
+        clock.now = 60
+        entered = asyncio.Event()
+
+        async def probe():
+            entered.set()
+            if exit_kind == 'expired':
+                raise outbound.DeliveryExpired('expired before I/O')
+            if exit_kind == 'state_error':
+                raise outbound.StateWriteUnavailable('state unavailable before I/O')
+            await asyncio.Event().wait()
+
+        task = asyncio.create_task(first.write('send', probe, retry=False))
+        await asyncio.wait_for(entered.wait(), 1)
+        if exit_kind == 'cancelled':
+            task.cancel()
+        expected = {'expired': outbound.DeliveryExpired, 'state_error': outbound.StateWriteUnavailable,
+                    'cancelled': asyncio.CancelledError, 'timeout': TimeoutError}[exit_kind]
+        with pytest.raises(expected):
+            await task
+        monkeypatch.setattr(outbound, 'DELIVERY_DEADLINE', delivery_deadline)
+
+        entered.clear()
+        release = asyncio.Event()
+        calls = []
+
+        async def replacement():
+            calls.append('probe')
+            entered.set()
+            await release.wait()
+            return 'sent'
+
+        if exit_kind != 'cancelled':
+            assert first.breaker.state == 'open'
+            assert 0 < first.breaker.open_until - clock.now <= outbound.BREAKER_OPEN
+            with pytest.raises(CircuitOpen):
+                await sibling.write('send', replacement, retry=False)
+            clock.now = first.breaker.open_until
+        task = asyncio.create_task(sibling.write('send', replacement, retry=False))
+        try:
+            await asyncio.wait_for(entered.wait(), 1)
+            # All simultaneous siblings must leave the sole replacement probe alone.
+            results = await asyncio.gather(*(first.write('react', replacement, retry=False)
+                                            for _ in range(3)), return_exceptions=True)
+            assert all(isinstance(result, CircuitOpen) for result in results)
+            assert calls == ['probe']
+            release.set()
+            assert await task == 'sent'
+            assert first.breaker.state == 'closed'
+        finally:
+            release.set()
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize('other_app', ['different-app', 'telegram:synthetic-app', ''])
+def test_breaker_different_or_unknown_apps_stay_independent(other_app):
+    async def run():
+        clock = Clock()
+        first = Gateway('first', clock, clock.sleep, app_id='synthetic-app' if other_app else '')
+        other = Gateway('other', clock, clock.sleep, app_id=other_app)
+
+        async def failure():
+            raise LarkCliError('lost response', error_type=TIMEOUT)
+
+        async def success():
+            return 'sent'
+
+        for _ in range(5):
+            with pytest.raises(LarkCliError):
+                await first.write('edit', failure, retry=False)
+        assert first.breaker.state == 'open'
+        assert await other.write('send', success) == 'sent'
+        assert other.breaker.state == 'closed'
+        assert first.breaker.state == 'open'
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize('reset', ['success', 'rejected', 'window'])
+def test_sibling_breaker_failure_sequence_resets(reset):
+    async def run():
+        clock = Clock()
+        first, sibling = [Gateway(channel, clock, clock.sleep, app_id='synthetic-app')
+                          for channel in ('first', 'sibling')]
+
+        async def failure():
+            raise LarkCliError('lost response', error_type=TIMEOUT)
+
+        async def reset_call():
+            if reset == 'rejected':
+                raise LarkCliError('rejected', code=123)
+
+        for _ in range(4):
+            with pytest.raises(LarkCliError):
+                await first.write('edit', failure, retry=False)
+        if reset == 'window':
+            clock.now = 31
+        elif reset == 'rejected':
+            with pytest.raises(LarkCliError):
+                await sibling.write('edit', reset_call, retry=False)
+        else:
+            await sibling.write('edit', reset_call)
+        with pytest.raises(LarkCliError):
+            await first.write('edit', failure, retry=False)
+        assert first.breaker.state == sibling.breaker.state == 'closed'
+    asyncio.run(run())
+
+
 def test_backoff_retry_after_and_unknown_key():
     async def run():
         clock = Clock()

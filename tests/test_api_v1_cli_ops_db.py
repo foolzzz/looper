@@ -94,6 +94,7 @@ def test_cli_commands_against_disposable_serve(tmp_path, monkeypatch, capsys):
     with socket.socket() as sock:
         sock.bind(("127.0.0.1", 0))
         port = sock.getsockname()[1]
+    assert port != 8767
     root = tmp_path / "runtime"
     home = tmp_path / "home"
     home.mkdir()
@@ -138,13 +139,18 @@ def test_cli_commands_against_disposable_serve(tmp_path, monkeypatch, capsys):
             capsys.readouterr()
             document = json.loads(exported.read_text())
             assert document["format"] == "looper-config/v4" and not document.get("managers")
-            assert loopercli.main([*base, "config", "import", str(exported)]) == 0
+            assert any(role["role"] == "outbound_check" for role in document["settings"]["roles"])
+            # Full exports include the security role, whose import requires the operator even when unchanged.
+            assert loopercli.main([*base, "config", "import", str(exported)]) == 1
+            refused = json.loads(capsys.readouterr().out)
+            assert refused["error"]["code"] == "forbidden" and "confirmation_id" not in refused
+            credentials = ["--url", api.url, "--operator-token-file", str(root / operator_auth.TOKEN_FILE)]
+            assert loopercli.main([*base, "config", "import", str(exported), *credentials]) == 0
             roundtrip = json.loads(capsys.readouterr().out)["result"]
             assert roundtrip["plan"]["changes"] == []
-            assert loopercli.main([*base, "config", "import", "--apply", roundtrip["import_id"]]) == 3
-            confirmation = json.loads(capsys.readouterr().out)["confirmation_id"]
-            assert loopercli.main([*base, "confirm", confirmation]) == 0
-            assert json.loads(capsys.readouterr().out)["result"]["plan"]["applied"]
+            assert loopercli.main([*base, "config", "import", "--apply", roundtrip["import_id"], *credentials]) == 0
+            applied = json.loads(capsys.readouterr().out)["result"]["plan"]
+            assert applied["applied"] and applied["changes"] == []
             assert api.call("POST", "/api/v1/config/import_preview", {"document": document})[0] == 200
             portable = tmp_path / "client-import.json"
             portable.write_text(json.dumps({"format": "looper-config/v4", "projects": [{"name": "Smoke portable"}]}))

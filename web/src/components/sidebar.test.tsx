@@ -7,6 +7,7 @@ import { WaitingGatesProvider } from "@/lib/use-waiting-gates";
 import { fetchGates, fetchOverview, fetchProjectsList, type GateList } from "@/lib/api";
 import { intentsSettingsGet } from "@/lib/api-leads";
 import { attentionSettingsGet, fetchAttention } from "@/lib/api-attention";
+import { useLedger } from "@/lib/use-ledger";
 
 vi.mock("@/lib/api", async (original) => ({
   ...await original<typeof import("@/lib/api")>(),
@@ -14,6 +15,7 @@ vi.mock("@/lib/api", async (original) => ({
 }));
 vi.mock("@/lib/api-leads", () => ({ intentsSettingsGet: vi.fn() }));
 vi.mock("@/lib/api-attention", () => ({ attentionSettingsGet: vi.fn(), fetchAttention: vi.fn() }));
+vi.mock("@/lib/use-ledger", () => ({ useLedger: vi.fn() }));
 vi.mock("@/components/sign-out", () => ({ SignOut: () => null }));
 vi.mock("@/components/project-dialog", () => ({ ProjectDialog: () => <div role="dialog" /> }));
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
@@ -48,6 +50,8 @@ beforeEach(() => {
   vi.mocked(intentsSettingsGet).mockResolvedValue({ enabled: false, subscriptions: [] });
   vi.mocked(attentionSettingsGet).mockResolvedValue({ enabled: false });
   vi.mocked(fetchAttention).mockRejectedValue(new Error("summary is off"));
+  vi.mocked(useLedger).mockReturnValue({ enabled: false, count: null, stale: false, error: null,
+    revision: 0, refresh: vi.fn(), changed: vi.fn() });
   onNavigate.mockClear();
   vi.mocked(fetchOverview).mockResolvedValue({} as never);
   activePage = "gates";
@@ -208,4 +212,31 @@ describe("Sidebar Memory item", () => {
     act(() => (button as HTMLButtonElement).click());
     expect(onNavigate).toHaveBeenCalledWith("memory");
   });
+});
+
+it("shows the ledger after Tasks only when enabled with its actual waiting count", async () => {
+  await render();
+  expect(host.textContent).not.toContain("Ledger 账本");
+  for (const count of [0, 3, 150, null]) {
+    vi.mocked(useLedger).mockReturnValue({ enabled: true, count, stale: false, error: null,
+      revision: 0, refresh: vi.fn(), changed: vi.fn() });
+    await render();
+    const buttons = [...host.querySelectorAll("nav")[0].querySelectorAll("button")];
+    const index = buttons.findIndex((b) => b.textContent?.includes("Ledger 账本"));
+    expect(index).toBe(buttons.findIndex((b) => b.textContent === "Tasks") + 1);
+    const badge = buttons[index].querySelector("[aria-label]");
+    if (count === 0) expect(badge).toBeNull();
+    else if (count === null) expect(buttons[index].textContent).toContain("?");
+    else {
+      expect(badge?.getAttribute("aria-label")).toBe(`${count} 项待你处理`);
+      expect(badge?.textContent).toBe(count > 99 ? "99+" : String(count));
+    }
+    act(() => (buttons[index] as HTMLButtonElement).click());
+    expect(onNavigate).toHaveBeenLastCalledWith("ledger");
+  }
+  vi.mocked(useLedger).mockReturnValue({ enabled: true, count: 3, stale: true, error: "unavailable",
+    revision: 0, refresh: vi.fn(), changed: vi.fn() });
+  await render();
+  expect(host.textContent).toContain("暂无法刷新");
+  expect(host.querySelector('[aria-label="3 项待你处理"]')?.textContent).toBe("3");
 });
