@@ -458,7 +458,8 @@ def _seed_recognition(api: Api, database_url: str, project_id: str, *, capped: b
             await conn.execute("UPDATE channel_configs SET enabled=true, config=config || $1::jsonb "
                                "WHERE channel_id='channel-lark'", json.dumps({"operator_sender_id": REMINDER_OPERATOR,
                                    "allowed_open_ids": [REMINDER_OPERATOR]}))
-            await conn.execute("INSERT INTO event_sources(id,kind,name) VALUES('eval','lark_user','Synthetic source')")
+            await conn.execute("INSERT INTO event_sources(id,kind,name,user_open_id) "
+                               "VALUES('eval','lark_user','Synthetic source',$1)", REMINDER_OPERATOR)
             await conn.execute("INSERT INTO source_chats(source_id,chat_id,kind,name) VALUES('eval',$1,'group',$2)",
                                RECOGNITION_CHAT_ID, RECOGNITION_CHAT)
             at = (datetime(2026, 10, 31, 12, tzinfo=timezone.utc) if capped else

@@ -134,7 +134,7 @@ async def run(call: Call) -> dict[str, Any]:
 
 TOOL = RestrictedTool(
     name=TOOL_NAME, audience=Audience.OPERATOR, risk=Risk.WRITE, run=run, escalate=_confirm,
-    refusal="只能在你和我的私聊或控制台里用，不能在群里或替别人用。",
+    refusal="intents are recognized on request only in the user's own direct chat or on the dashboard",
     read_actions=frozenset({"preview", "status"}),
     description="Recognize development requests in one group's collected messages once: preview the count and "
                 "estimated cost first, then start only after the user agrees (Looper asks for confirmation too). "
