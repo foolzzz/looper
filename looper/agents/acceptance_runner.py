@@ -97,15 +97,23 @@ async def _execute(check: Check, work_dir: Path, env: dict[str, str], prefix: tu
         return {**_error(runs.ErrorKind.EVIDENCE_UNAVAILABLE), **output.fields()}
     tree = None
     result: dict[str, Any] = {}
+    # The process table snapshot is synchronous. Taking it before the deadline starts lets a command
+    # longer than the timeout exit during that snapshot and then be recorded as a normal exit.
+    observed: asyncio.Task[None] | None = None
     try:
-        tree = proc_tree.track(process, label="acceptance check")
-        tree.start_ticker()
-        await tree.begin_end()
         async def capture():
             assert process.stdout is not None
             while data := await process.stdout.read(65536):
                 output.consume(data)
             await process.wait()
+
+        async def observe() -> None:
+            nonlocal tree
+            tree = await asyncio.to_thread(proc_tree.track, process, label="acceptance check")
+            tree.start_ticker()
+            await tree.begin_end()
+
+        observed = asyncio.create_task(observe())
         try:
             await asyncio.wait_for(capture(), max(0, timeout))
             result = {"state": runs.CheckState.PASSED if process.returncode == 0 else runs.CheckState.FAILED}
@@ -114,10 +122,14 @@ async def _execute(check: Check, work_dir: Path, env: dict[str, str], prefix: tu
         except _OutputLimit:
             result = _error(runs.ErrorKind.OUTPUT_LIMIT)
     finally:
-        if tree is not None:
-            await tree.end()
-        else:
-            await proc_tree.end(process, label="acceptance check")
+        try:
+            if observed is not None:
+                await observed
+        finally:
+            if tree is not None:
+                await tree.end()
+            else:
+                await proc_tree.end(process, label="acceptance check")
     return {**result, "exit_code": process.returncode, **output.fields()}
 
 

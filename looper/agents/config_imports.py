@@ -78,6 +78,9 @@ async def authorize(data: dict[str, Any], policy: Literal["client", "operator"] 
     """Check the staging policy, including at confirmation; exclude a client's unchanged default from execution."""
     if policy != "client":
         return data
+    if "cards.actions.enabled" in data.get("settings", {}).get("system", {}):
+        raise OpError(ErrorCode.FORBIDDEN, "Card button settings require operator identity; "
+                      "upload this configuration with an operator token")
     if "cost_guard" in data.get("settings", {}):
         raise OpError(ErrorCode.FORBIDDEN, "Cost guard settings require operator identity; "
                       "upload this configuration with an operator token")

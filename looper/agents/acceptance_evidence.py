@@ -23,6 +23,10 @@ def _output(check: Check, row: Mapping[str, Any]) -> list[str]:
             fence(str(row["output_tail"]), source=Source.ACCEPTANCE_OUTPUT, provenance={"check": check.id})]
 
 
+# The prefix render_evidence writes. The version and the closing words stay in the f-string.
+EVIDENCE_HEADING = "## Acceptance evidence (measured by Looper at "
+
+
 def render_evidence(criteria: Sequence[str], checks: Sequence[Check], current: Sequence[Mapping[str, Any]],
                     head: tuple[str | None, str | None] | None = None) -> str:
     """One measured section for all review seats, with uncovered criteria stated explicitly."""
@@ -30,7 +34,7 @@ def render_evidence(criteria: Sequence[str], checks: Sequence[Check], current: S
         return ""
     rows = _rows(current)
     version = (head[0] or "report_only")[:12] if head is not None else "unavailable"
-    lines = [f"## Acceptance evidence (measured by Looper at {version}, not by you)"]
+    lines = [f"{EVIDENCE_HEADING}{version}, not by you)"]
     for index, criterion in enumerate(criteria, 1):
         bound = [check for check in checks if check.criterion == index]
         if not bound:

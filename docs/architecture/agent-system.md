@@ -3603,9 +3603,18 @@ Local checks on macOS use `sandbox-exec -p
 '(version 1)(allow default)(deny network*)(deny job-creation)' /bin/sh -c <check>`.
 Before execution, a fixed probe must prove both launch and network denial; missing
 or ineffective facilities record `error: sandbox_unavailable`, with no unsandboxed
-fallback. DNS, loopback and pathname Unix sockets are denied; file IO and pipes
-remain available. Linux uses `unshare -rn --` with the same fail-closed preflight
-and a distinct network-namespace check; this path has not been verified on Linux.
+fallback and no password prompt. DNS, loopback and pathname Unix sockets are
+denied; file IO and pipes remain available. Linux uses `unshare -rn --`, which
+needs an unprivileged user namespace. The same fail-closed preflight must show a new network namespace that
+cannot connect, containing only `lo` and down, unaddressed, unlinked tunnel
+fallbacks. An interface that is up, addressed, or linked to another device is
+not enforcement. If the kernel refuses the user namespace, the preflight records
+`error: sandbox_unavailable` and does not run the check. A process that is
+already root may use `unshare -n --` and must pass that preflight. The Python
+test workflow sets `kernel.apparmor_restrict_unprivileged_userns=0` before the
+tests, because Ubuntu 24.04 restricts unprivileged user namespaces through
+AppArmor; a missing key on other images is ignored. Each host still has to pass
+that preflight; there is no unsandboxed fallback.
 Only a check requesting `network: true` in a `network` project bypasses that launcher.
 Commands receive an OS-only subset of `child_env.inherited()`, without runtime
 credentials, proxies or SSH agents. This is not a file sandbox: commands retain the
@@ -5316,7 +5325,12 @@ down, asleep, stalled, switched off or draining), and of each chat's missed ones
 hours is sent, with a line saying when it was due, unless a reminder on time goes to that chat in the same tick; the
 others become `missed`. A start, a sleep and two servers taking turns in an upgrade are judged alike. A refused send is tried at the next tick, three times in all;
 an unknown outcome is `uncertain` and never sent again. Reminders are never throttled: no quiet hours, cap or merge
-window. The time is the nearest future instant the wall time names in its zone: of the two when the clocks go back,
+window. With `delivery.enabled` on, a claimed reminder asks `proactive_delivery.decide` as
+`user_reminder` / `user_set`: `send` / `urgent`, uncounted, never deferred to the digest. The decision and
+channel receipt (`sent`, `rejected`, `unknown`) share `looper-reminder-<id>` in `proactive_deliveries`, with
+the reminder id as `source_ref`; refused-send retries retain that decision. A failed decision is logged and
+the reminder still sent; a failed receipt write does not retry the send. Off, the post and reminder writes
+are unchanged and no delivery record is added. The time is the nearest future instant the wall time names in its zone: of the two when the clocks go back,
 the first still ahead; one the clocks skip becomes the first valid minute after it; the confirmation says either.
 
 Continuing a task that failed at its spend cap needs a higher cap, which is
@@ -6631,12 +6645,41 @@ The operator-only v1 operations (all POST) are:
   bind source chats to projects. `intent_alert_senders.list`, `put`, `delete`,
   under `/api/v1/intent_alert_senders/`, maintain the alert app allowlist;
   candidates exclude Looper's own apps.
+- `intent_group_reads.list`, `preview`, `put`, `delete`, `settings_put`, under
+  `/api/v1/intent_group_reads/`, maintain the followed groups while intents are
+  off or on. Preview is read-only; the dashboard confirms its message count,
+  estimated cost, scope and quotas before adding a group. The list shows each
+  group's start time, readability, today's read/skipped counts and recent
+  message/intent counts. These operator-only operations are also available in
+  the generated CLI; Lark and Telegram need no new control because group
+  management is on the dashboard, and existing private intent delivery is reused.
+  `looper leads eval-export --chat CHAT --days N --intents --out FILE` writes
+  anonymous human-message windows and all sourced lead labels to an ignored or
+  external file of mode 600, for local review and count-only intent evaluation.
+- `intent_recognitions.preview`, `start`, `list`, `settings_put`, under
+  `/api/v1/intent_recognitions/`, expose separately opt-in one-off recognition.
+  A confirmed intents subscription supplies the project and processor Profile.
+  Preview reports the collected human-message count and estimated cost; the
+  dashboard and Manager ask for confirmation before starting a background run.
+  The default range is seven days, at most thirty, with only the newest 2,000
+  live/history human messages and at most $1 allocated across processor calls.
+  Context is restricted to those messages. It may precede a followed group's
+  start time, without changing the list, daily allowances or any cursor.
+  Records retain state, counts, actual cost, truncation and linked `on_request`
+  intents, including partial results after failure. Restart fails unfinished
+  runs rather than replaying them. The asking Lark/Telegram direct chat gets one
+  result message, bypassing the delivery layer; dashboard runs remain in the
+  recognition list. These intents never get individual push/progress notices.
+  The operator v1 operations are available through the generated CLI; no new
+  dedicated CLI command is added.
 
-Only build and reject require intents to be enabled, so the operator can
-prepare configuration while it is off. Disabling also disables intents
-subscriptions in the same transaction; enabling does not restart them. No
-intent operation is a Manager tool. The dashboard page and extraction runs
-are delivered separately; CLI callers use the same operator API operations.
+Build, reject, previewing recognition and starting recognition require intents
+to be enabled. The operator can prepare configuration while it is off. Disabling
+also disables intents subscriptions in the same transaction; enabling does not
+restart them. The default Manager also has `looper_intents_recognize` only while
+both `intents.enabled` and `intents.on_request.enabled` are on, and only in the
+operator's own console or direct-chat turns. The dashboard page and extraction
+runs are delivered separately; CLI callers use the same operator API operations.
 
 ### The ledger
 
@@ -6712,8 +6755,8 @@ writes nothing.
 ### Proactive messages: the delivery layer
 
 A proactive message is one Looper sends without being asked in that moment (a
-gate reminder, a task notice; later a subscription's push, an intent, a
-completion turn, a reminder the user set). With the system setting
+gate reminder, a task notice, a subscription's push, an intent, a
+completion turn or a reminder the user set). With the system setting
 `delivery.enabled` on (operator-only `proactive_delivery.update`; off by
 default, and then no send point asks), a send point asks
 `proactive_delivery.decide` before the message goes out. The decision is the
@@ -6738,8 +6781,10 @@ send points. After the post the send point records the receipt (`outcome`
 `sent`, `rejected` or `unknown`, `sent_at`, `external_id`) on the same row as
 the metrics. A later try of the same message replaces a `rejected` receipt.
 Off, a send point that switch controls writes nothing. Wired so far: gate
-reminders, task notices to Lark and Telegram, subscription digest pushes, and
-initial and new-evidence intent pushes. A completed or failed task's code notice is `normal`; an opened, updated or resumed gate that needs the
+reminders, task notices to Lark and Telegram, subscription digest pushes,
+initial and new-evidence intent pushes, and user-set reminders. User-set reminders use `user_reminder` /
+`user_set` under `looper-reminder-<id>` and bypass quiet hours, the cap and the digest; decision failures
+fail open, and receipt failures only log. A completed or failed task's code notice is `normal`; an opened, updated or resumed gate that needs the
 user is `blocking`, like its reminders. The channel checks a task-end notice
 immediately before sending it, retaining its text and target; a completion
 fallback keeps the original notice's decision key. Recent user messages are
@@ -6813,7 +6858,16 @@ A Manager's confirmation, a user gate, an intent push and a relayed ledger
 decision can be answered with one press of a card's button
 ([Card buttons RFC](rfcs/assistant-card-actions-v0.zh-CN.md);
 `looper/agents/card_actions.py`). It is off until the system setting
-`cards.actions.enabled` is `true`; the dashboard has no switch yet. Off,
+`cards.actions.enabled` is `true`; the dashboard has no switch. Operator-only
+`card_actions.get/update` operations read or set it, separately from chat settings.
+The generated CLI uses `loopercli card-actions get` or
+`loopercli card-actions update --enabled true|false|null` with transient operator
+credentials (`--url`, `--operator-token-file`). Null deletes the stored row and
+restores off. Configuration export carries a stored boolean under
+`settings.system["cards.actions.enabled"]`; an absent row adds no field.
+Importing that key, including false or null, requires operator identity and
+applies immediately. These settings operations send no messages and have action
+level `inside`; update uses the high-risk confirmation contract. Off,
 nothing is stored, replies carry no cards, gate messages go as text, a Lark
 press gets the plain acknowledgement and a Telegram press no answer, as before;
 on or off, what the model sees of a confirmation is the same. Lark card writes

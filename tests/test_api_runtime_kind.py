@@ -51,7 +51,7 @@ def test_api_type_view_exposes_manager_only_contract(runtime):
     view = registry.type_view(runtime)
     assert view["roles"] == ["manager"]
     assert view["in_process"] is True
-    assert view["protocols"] == ["openai-responses"]
+    assert view["protocols"] == ["anthropic-messages", "openai-responses"]
     assert view["auth_kinds"] == ["api_key"]
     assert view["can_interrupt"] is True
     assert view["can_replace_system_prompt"] is True
@@ -81,7 +81,7 @@ def test_servable_roles_preserves_capabilities_and_applies_runtime_restriction(r
      "the api runtime takes an API key provider; 'Test account' is a login"),
     ({"protocols": frozenset({ApiProtocol.OPENAI_RESPONSES, ApiProtocol.OPENAI_CHAT}), "catalog": (),
       "api_key": None},
-     "the api runtime speaks openai-responses; provider 'Test account' must supply that exact protocol"),
+     "the api runtime requires one supported protocol; provider 'Test account' must supply exactly one of anthropic-messages, openai-responses"),
     ({"catalog": (), "api_key": None}, "the api runtime requires one resolved model matching the launch model"),
     ({"catalog": (CatalogModel("other"),)}, "the api runtime requires one resolved model matching the launch model"),
     ({"api_key": None}, "provider 'Test account' has no API key: set one in Settings"),
@@ -163,20 +163,42 @@ def test_bad_binding_fails_before_prompt_file_access(runtime, tmp_path):
             operation()
 
 
-@pytest.mark.parametrize("installed", [True, False])
-def test_probe_reads_package_metadata_without_importing_sdk(runtime, monkeypatch, installed):
+@pytest.mark.parametrize("missing", [None, "openai", "anthropic"])
+def test_probe_reads_package_metadata_without_importing_sdk(runtime, monkeypatch, missing):
     def version(name):
-        assert name == "openai"
-        if not installed:
+        assert name in {"openai", "anthropic"}
+        if name == missing:
             raise importlib.metadata.PackageNotFoundError(name)
-        return "3.37.0"
+        return {"openai": "3.37.0", "anthropic": "2.3.0"}[name]
     monkeypatch.setattr(importlib.metadata, "version", version)
     probe = runtime.probe("unused")
-    if installed:
-        assert probe == runtimes.Probe("openai 3.37.0", runtime.capabilities)
+    if missing is None:
+        assert probe == runtimes.Probe("openai 3.37.0 / anthropic 2.3.0", runtime.capabilities)
     else:
         assert probe == runtimes.Probe(None, frozenset(),
-                                     "the openai Python package is not installed with this Looper; reinstall Looper")
+            f"the {missing} Python package is not installed with this Looper; reinstall Looper")
+
+
+@pytest.mark.parametrize("protocol,wire_name", [
+    (ApiProtocol.ANTHROPIC_MESSAGES, "test-model"),
+    (ApiProtocol.OPENAI_RESPONSES, "test-model[1m]"),
+])
+def test_resolved_protocol_controls_descriptor_and_record(runtime, tmp_path, protocol, wire_name):
+    provider = replace(PROVIDER, protocols=frozenset({protocol}),
+                       catalog=(CatalogModel("test-model[1m]", context_window=1_000_000),))
+    profile = resolved_profile("profile-protocol", "Protocol profile", launch_for(runtime).profile.runtime,
+                               provider, "test-model[1m]", "high")
+    launch = Launch(AgentSettings(profile=profile), role=AgentType.MANAGER)
+    source = tmp_path / ".local" / "prompts" / "source.md"
+    source.parent.mkdir(parents=True)
+    source.write_text("Instructions", encoding="utf-8")
+    descriptor = Descriptor.parse(runtime.resident_command("", cwd=tmp_path, prompt_file=source, launch=launch))
+    assert descriptor.protocol is protocol
+    assert descriptor.model == wire_name
+    assert descriptor.context_window == 1_000_000
+    assert descriptor.base_url == provider.base_url
+    assert runtime.launch_record(launch)["api"]["protocol"] == protocol.value
+    assert runtime.bind_provider(provider, "test-model[1m]", "high").env == ((KEY_ENV, "test-key"),)
 
 
 def test_launch_record_lists_omitted_names_without_values(runtime):
@@ -206,3 +228,37 @@ def test_api_runtime_cannot_start_or_drive_a_process(runtime, tmp_path):
             operation()
     assert isinstance(runtime.resident_session("Manager"), ApiSession)
     assert runtime.instruction_files(tmp_path) == ()
+
+
+def test_messages_profile_is_manager_only_and_never_falls_back(runtime):
+    provider = replace(PROVIDER, protocols=frozenset({ApiProtocol.ANTHROPIC_MESSAGES}))
+    profile = resolved_profile("messages-profile", "Messages Manager", launch_for(runtime).profile.runtime,
+                               provider, "test-model")
+    registry.check_roles(profile, ["manager"])
+    for role in ("planner", "worker", "reviewer"):
+        with pytest.raises(registry.RegistryError, match="runs only the manager"):
+            registry.check_roles(profile, [role])
+    with pytest.raises(RuntimeUnsupported, match="takes an API key provider"):
+        runtime.bind_provider(replace(provider, auth=AuthKind.OAUTH), "test-model", None)
+    for unsupported in (frozenset(), frozenset({ApiProtocol.OPENAI_CHAT}),
+                        frozenset({ApiProtocol.ANTHROPIC_MESSAGES, ApiProtocol.OPENAI_RESPONSES})):
+        with pytest.raises(RuntimeUnsupported, match="requires one supported protocol"):
+            runtime.bind_provider(replace(provider, protocols=unsupported), "test-model", None)
+    with pytest.raises(RuntimeUnsupported, match="matching the launch model"):
+        runtime.bind_provider(provider, "other-model", None)
+    with pytest.raises(RuntimeUnsupported, match="has no API key"):
+        runtime.bind_provider(replace(provider, api_key=None), "test-model", None)
+
+
+@pytest.mark.parametrize("efforts,expected", [((), None), (("high",), "high"), (None, "high")])
+def test_messages_catalog_can_disable_reasoning(runtime, tmp_path, efforts, expected):
+    provider = replace(PROVIDER, protocols=frozenset({ApiProtocol.ANTHROPIC_MESSAGES}),
+                       catalog=(CatalogModel("test-model", efforts=efforts),))
+    profile = resolved_profile("messages-effort", "Messages effort", launch_for(runtime).profile.runtime,
+                               provider, "test-model", "high")
+    source = tmp_path / ".local" / "prompts" / "source.md"
+    source.parent.mkdir(parents=True)
+    source.write_text("Instructions", encoding="utf-8")
+    command = runtime.resident_command("", cwd=tmp_path, prompt_file=source,
+                                       launch=Launch(AgentSettings(profile=profile), role=AgentType.MANAGER))
+    assert Descriptor.parse(command).effort == expected
