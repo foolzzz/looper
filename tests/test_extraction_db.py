@@ -1187,3 +1187,211 @@ def test_the_backfill_skips_a_blocked_window_and_an_unreadable_one_and_goes_on(t
         fake.calls.clear()
         assert _cli(tmp_path, url, "--days", "30", "--run", "--budget-usd", "1") == 0
         assert fake.calls == []
+
+
+async def _retry_setup(url, work_dir, chats=("oc_a", "oc_b", "oc_a"), *, split=False, extras=False):
+    from looper.agents import schedules
+    from looper.db import connection, projects
+
+    pool = await connection.init_pool(url, min_size=1, max_size=3)
+    try:
+        await stream(pool)
+        at = datetime.now(UTC) - timedelta(days=1)
+        seqs = [await add(pool, f"message {i} of {cid}", chat_id=cid, chat_name=cid, sent_at=at)
+                for i, cid in enumerate(chats)]
+        if extras:
+            await add(pool, "old", chat_id="oc_old", sent_at=at - timedelta(days=40))
+            await add(pool, "bot", chat_id="oc_bot", sender="cli_bot", sender_kind="app", sent_at=at)
+            await add(pool, "excluded", chat_id="oc_excluded", sent_at=at)
+            await pool.execute("UPDATE source_chats SET extraction = 'excluded', extraction_excluded_at = now() WHERE chat_id = 'oc_excluded'")
+            await add(pool, "subscription excluded", chat_id="oc_left", sent_at=at)
+            await add(pool, "stream excluded", chat_id="oc_off", sent_at=at)
+            await pool.execute("UPDATE source_chats SET inclusion = 'excluded', exclusion_reason = 'operator' WHERE chat_id = 'oc_off'")
+            seqs.append(await add(pool, "imported", chat_id="oc_a", origin="import", sent_at=at))
+        project = await projects.create_project(name="retry", work_dir=work_dir, pool=pool)
+        fields = subscriptions.preset("leads", source_id=SOURCE, zone_name=ZONE)
+        fields["subscription"]["exclude_chats"] = ["oc_left"]
+        schedule = await schedules.create_schedule(project["id"], fields)
+        sid = schedule["schedule"]["schedule_id"]
+        end = await committed(pool)
+        windows = [{"from_seq": seqs[i - 1] if i else 0, "to_seq": seq, "events": 1,
+                    "reason": "blocked_by_hook"} for i, seq in enumerate(seqs)] if split else [
+                        {"from_seq": 0, "to_seq": end, "events": len(seqs), "reason": "blocked_by_hook"}]
+        # An unrelated skip must survive every retry checkpoint.
+        windows.append({"from_seq": end, "to_seq": end + 1, "events": 1, "reason": "invalid_reply"})
+        await pool.execute("INSERT INTO system_settings (key, value) VALUES ($1, $2)", f"leads.backfill.{sid}",
+                           json.dumps({"done_seq": end, "spent_usd": 0.1, "windows": len(windows), "skipped": windows}))
+        # A measured original attempt, with a reformat attempt: cost / events = .004 / 2 = .002.
+        for reminded in (False, True):
+            await pool.execute("INSERT INTO llm_records (agent_id, cost_usd, metadata) VALUES ($1, .002, $2::jsonb)",
+                               f"processor:{sid}:backfill", json.dumps({"backfill": {
+                                   "schedule_id": sid, "from_seq": 100, "to_seq": 102,
+                                   "events": 2, "reminded": reminded}}))
+        return sid, seqs
+    finally:
+        await connection.close_pool()
+
+
+def _retry_progress(url):
+    return json.loads(asyncio.run(_rows(url, "SELECT value FROM system_settings WHERE key LIKE 'leads.backfill.%'"))
+                      [0]["value"])
+
+
+def test_retry_skipped_dry_run_groups_scope_and_writes_nothing(tmp_path, capsys, monkeypatch):
+    fake = processor_says(monkeypatch, "NONE")
+    with fresh_database_without_recording(DSN) as (url, _):
+        sid, _ = asyncio.run(_retry_setup(url, str(tmp_path), extras=True))
+        settings = asyncio.run(_rows(url, "SELECT * FROM system_settings ORDER BY key"))
+        records = asyncio.run(_rows(url, "SELECT * FROM llm_records ORDER BY id"))
+        assert _cli(tmp_path, url, "--retry-skipped", "--schedule", sid) == 0
+        out = capsys.readouterr().out
+        assert "chat oc_a: 3 in-scope events" in out and "chat oc_b: 1 in-scope events" in out
+        assert "estimate: $0.008 (backfill measured rate 0.002000 USD per event)" in out
+        assert all(f"chat {cid}:" not in out for cid in ("oc_old", "oc_bot", "oc_excluded", "oc_left", "oc_off"))
+        assert fake.calls == []
+        assert asyncio.run(_rows(url, "SELECT * FROM system_settings ORDER BY key")) == settings
+        assert asyncio.run(_rows(url, "SELECT * FROM llm_records ORDER BY id")) == records
+        assert not asyncio.run(_rows(url, "SELECT id FROM message_leads"))
+
+
+def test_retry_skipped_never_mixes_chats_and_chunks_at_500(tmp_path, capsys, monkeypatch):
+    fake = processor_says(monkeypatch, "NONE")
+    # Keep this test about the event cap; input-size splitting is covered separately.
+    monkeypatch.setattr(extraction, "INPUT_MAX_CHARS", 1_000_000)
+    with fresh_database_without_recording(DSN) as (url, _):
+        asyncio.run(_retry_setup(url, str(tmp_path), chats=("oc_a",) * 501 + ("oc_b", "oc_a")))
+        assert _cli(tmp_path, url, "--retry-skipped") == 0
+        out = capsys.readouterr().out
+        assert "]: 500 events" in out and "]: 2 events" in out
+        assert _cli(tmp_path, url, "--retry-skipped", "--run", "--budget-usd", "3") == 0
+        refs = [call["metadata"]["backfill"] for call in fake.calls]
+        assert [(r["chat_id"], r["events"]) for r in refs] == [("oc_a", 500), ("oc_a", 2), ("oc_b", 1)]
+        for call, ref in zip(fake.calls, refs):
+            other = "oc_b" if ref["chat_id"] == "oc_a" else "oc_a"
+            assert f"of {other}" not in call["input_text"]
+        assert [s["reason"] for s in _retry_progress(url)["skipped"]] == ["invalid_reply"]
+        assert _retry_progress(url)["spent_usd"] == 0.1
+        assert _retry_progress(url)["retry_skipped"]["spent_usd"] == 0.03
+
+
+def test_retry_skipped_records_reblocked_chat_across_windows_and_never_resubmits(tmp_path, capsys, monkeypatch):
+    fake = processor_says(monkeypatch, "NONE")
+    fake.outcomes = [(None, processor.ProcessorFailure.BLOCKED), ("NONE", None)]
+    with fresh_database_without_recording(DSN) as (url, _):
+        asyncio.run(_retry_setup(url, str(tmp_path), split=True))
+        assert _cli(tmp_path, url, "--retry-skipped", "--run", "--budget-usd", "1") == 0
+        progress = _retry_progress(url)
+        assert [c["metadata"]["backfill"]["chat_id"] for c in fake.calls] == ["oc_a", "oc_b"]
+        blocked = progress["retry_skipped"]["blocked"]
+        assert len(blocked) == 2 and sum(row["events"] for row in blocked) == 2
+        assert all(row["reason"] == "blocked_by_hook" and row["chat_id"] == "oc_a"
+                   and row["from_seq"] < row["to_seq"] for row in blocked)
+        assert "oc_a: 2 events (blocked_by_hook)" in capsys.readouterr().out
+        assert [s["reason"] for s in progress["skipped"]] == ["invalid_reply"]
+        fake.calls.clear()
+        assert _cli(tmp_path, url, "--retry-skipped", "--run", "--budget-usd", "1") == 0
+        assert fake.calls == []
+
+
+@pytest.mark.parametrize("stop", ["budget", "failure", "invalid_reply"])
+def test_retry_skipped_resumes_only_unsettled_chats_and_keeps_parent_until_done(stop, tmp_path, capsys, monkeypatch):
+    fake = processor_says(monkeypatch, "NONE")
+    if stop == "failure":
+        fake.outcomes = [("NONE", None), (None, processor.ProcessorFailure.TIMEOUT)]
+    if stop == "invalid_reply":
+        fake.outcomes = [("NONE", None), ("unreadable", None), ("still unreadable", None)]
+    with fresh_database_without_recording(DSN) as (url, _):
+        _, seqs = asyncio.run(_retry_setup(url, str(tmp_path)))
+        budget = "0.011" if stop == "budget" else "1"
+        assert _cli(tmp_path, url, "--retry-skipped", "--run", "--budget-usd", budget) == (stop != "budget")
+        progress = _retry_progress(url)
+        assert progress["skipped"][0]["retry_done"] == {"oc_a": seqs[-1]}
+        assert len(progress["skipped"]) == 2  # the parent and unrelated invalid reply
+        if stop == "budget":
+            assert len(fake.calls) == 1 and fake.calls[0]["budget_usd"] == 0.011
+            assert "would pass the budget" in capsys.readouterr().out
+        as_of = progress["retry_skipped"]["as_of"]
+        fake.calls.clear()
+        assert _cli(tmp_path, url, "--retry-skipped", "--run", "--budget-usd", "1", "--days", "1") == 0
+        assert [c["metadata"]["backfill"]["chat_id"] for c in fake.calls] == ["oc_b"]
+        progress = _retry_progress(url)
+        assert [s["reason"] for s in progress["skipped"]] == ["invalid_reply"]
+        assert progress["retry_skipped"]["as_of"] == as_of and progress["retry_skipped"]["days"] == 30
+
+
+def test_retry_skipped_tracks_input_size_split_and_preserves_state_in_ordinary_backfill(tmp_path, capsys, monkeypatch):
+    fake = processor_says(monkeypatch, "NONE")
+    monkeypatch.setattr(extraction, "INPUT_MAX_CHARS", 1000)
+    with fresh_database_without_recording(DSN) as (url, _):
+        _, seqs = asyncio.run(_retry_setup(url, str(tmp_path), chats=("oc_a",) * 3))
+        asyncio.run(_rows(url, "UPDATE source_events SET text = repeat('x', 500) RETURNING seq"))
+        assert _cli(tmp_path, url, "--retry-skipped", "--run", "--budget-usd", "0.011") == 0
+        assert _retry_progress(url)["skipped"][0]["retry_done"] == {"oc_a": seqs[0]}
+        retry_state = _retry_progress(url)["retry_skipped"]
+        # Make ordinary backfill actually write a checkpoint after retry's first sub-window.
+        async def rewind():
+            conn = await asyncpg.connect(url)
+            try:
+                await conn.execute("UPDATE system_settings SET value = jsonb_set(value::jsonb, '{done_seq}', '0')::text "
+                                   "WHERE key LIKE 'leads.backfill.%'")
+            finally:
+                await conn.close()
+        asyncio.run(rewind())
+        assert _cli(tmp_path, url, "--days", "30", "--run", "--budget-usd", "1") == 0
+        assert _retry_progress(url)["retry_skipped"] == retry_state
+        assert _retry_progress(url)["skipped"][0]["retry_done"] == {"oc_a": seqs[0]}
+        fake.calls.clear()
+        assert _cli(tmp_path, url, "--retry-skipped", "--run", "--budget-usd", "1") == 0
+        assert [c["metadata"]["backfill"]["to_seq"] for c in fake.calls] == seqs[1:]
+        assert [s["reason"] for s in _retry_progress(url)["skipped"]] == ["invalid_reply"]
+
+
+def test_retry_skipped_uses_the_ordinary_backfill_lock(tmp_path, capsys, monkeypatch):
+    fake = processor_says(monkeypatch, "NONE")
+    with fresh_database_without_recording(DSN) as (url, _):
+        sid, _ = asyncio.run(_retry_setup(url, str(tmp_path)))
+        before = _retry_progress(url)
+        thread, release = _held_lock(url, f"looper.leads.backfill:{sid}")
+        try:
+            assert _cli(tmp_path, url, "--retry-skipped", "--run", "--budget-usd", "1") == 1
+            assert "another `looper msgflow leads-backfill --run`" in capsys.readouterr().err
+            assert fake.calls == [] and _retry_progress(url) == before
+        finally:
+            release.set()
+            thread.join(10)
+
+
+def test_retry_skipped_stores_leads_and_reports_new_merged_superseded_and_dropped(tmp_path, capsys, monkeypatch):
+    item = {"kind": "decision", "summary": "Synthetic release decision", "confidence": "high", "sources": ["m1"]}
+    fake = processor_says(monkeypatch)
+    fake.outcomes = [(json.dumps({"leads": [item]}), None),
+                     (json.dumps({"leads": [{**item, "same_as": "L1"}]}), None),
+                     (json.dumps({"leads": [{**item, "supersedes": ["L1"]},
+                                           {**item, "kind": "unknown"}]}), None)]
+    with fresh_database_without_recording(DSN) as (url, _):
+        asyncio.run(_retry_setup(url, str(tmp_path), chats=("oc_a",) * 3, split=True))
+        assert _cli(tmp_path, url, "--retry-skipped", "--run", "--budget-usd", "1") == 0
+        assert "2 new leads, 1 merged, 1 superseded, 1 dropped; spent $0.030" in capsys.readouterr().out
+        rows = asyncio.run(_rows(url, "SELECT state, backfill FROM message_leads ORDER BY id"))
+        assert [tuple(row) for row in rows] == [("superseded", True), ("active", True)]
+        assert asyncio.run(_rows(url, "SELECT count(*) AS n FROM message_lead_sources"))[0]["n"] == 3
+
+
+def test_retry_skipped_never_renders_cross_chat_parent_context(tmp_path, capsys, monkeypatch):
+    fake = processor_says(monkeypatch, "NONE")
+    with fresh_database_without_recording(DSN) as (url, _):
+        _, seqs = asyncio.run(_retry_setup(url, str(tmp_path), chats=("oc_a", "oc_b")))
+        async def link():
+            conn = await asyncpg.connect(url)
+            try:
+                await conn.execute("UPDATE source_events SET parent_id = (SELECT external_id FROM source_events "
+                                   "WHERE seq = $1) WHERE seq = $2", seqs[1], seqs[0])
+            finally:
+                await conn.close()
+        asyncio.run(link())
+        assert _cli(tmp_path, url, "--retry-skipped", "--run", "--budget-usd", "1") == 0
+        assert len(fake.calls) == 2
+        for call in fake.calls:
+            cid = call["metadata"]["backfill"]["chat_id"]
+            other = "oc_b" if cid == "oc_a" else "oc_a"
+            assert f"of {other}" not in call["input_text"]

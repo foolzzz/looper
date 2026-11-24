@@ -12,6 +12,12 @@ them oldest first through the subscription's own rendering, processor, parsing a
 would pass the budget; run again, it resumes. A window a prompt hook blocks, or whose reply cannot be read when asked
 twice (``extraction.ask``), is skipped, listed with the progress, and the backfill goes on; any other processor
 failure stops it there.
+
+``--retry-skipped`` previews only hook-skipped windows, split per chat into at most 500 events. With ``--run``
+(and a budget), each sub-window's leads and progress commit together. A chat blocked again is recorded and never
+submitted again by retry; other failures leave its sub-window pending. The original skip is removed only after
+all its chats are settled. Legacy progress has no day range: ``--days`` defaults to 30 for retry and is frozen
+on its first checkpoint. The processor, input rendering and hooks are unchanged.
 """
 
 from __future__ import annotations
@@ -167,7 +173,7 @@ def _usd(value: float) -> str:
 
 
 async def _backfill(database_url: str, *, days: int, schedule_id: str | None, run: bool, budget_usd: float | None,
-                    claude_bin: str, runtime_root: Any) -> tuple[int, str]:
+                    claude_bin: str, runtime_root: Any, retry_skipped: bool = False) -> tuple[int, str]:
     import json
     import math
     from collections import Counter
@@ -201,6 +207,9 @@ async def _backfill(database_url: str, *, days: int, schedule_id: str | None, ru
         key = BACKFILL_KEY.format(sid)
         stored = (await system_settings.get_settings([key], pool=pool)).get(key)
         progress = {"done_seq": 0, "spent_usd": 0.0, "windows": 0, **(json.loads(stored) if stored else {})}
+        if retry_skipped:
+            return await _retry_skipped(pool, schedule, progress, days=days, run=run, budget_usd=budget_usd,
+                                        claude_bin=claude_bin, runtime_root=runtime_root)
         now = datetime.now(timezone.utc)
         scope = {**sub, "max_age_minutes": days * 1440, "max_events": BACKFILL_WINDOW}
         own_apps = await own_bot_app_ids()
@@ -297,7 +306,7 @@ async def _backfill(database_url: str, *, days: int, schedule_id: str | None, ru
                 await conn.execute(
                     "INSERT INTO system_settings (key, value) VALUES ($1, $2) "
                     "ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now()", key,
-                    json.dumps({"done_seq": done, "spent_usd": round(total, 6), "windows": windows,
+                    json.dumps({**progress, "done_seq": done, "spent_usd": round(total, 6), "windows": windows,
                                 "skipped": skipped}))
             if stopped or not found.more and done >= start:
                 break
@@ -320,24 +329,193 @@ async def _backfill(database_url: str, *, days: int, schedule_id: str | None, ru
         await connection.close_pool()
 
 
+async def _retry_skipped(pool: Any, schedule: dict[str, Any], progress: dict[str, Any], *, days: int,
+                         run: bool, budget_usd: float | None, claude_bin: str, runtime_root: Any) -> tuple[int, str]:
+    """Settle hook-skipped windows without ever resubmitting a chat that was blocked on retry.
+
+    Cursors stay inside each original window until every chat is settled. Lead writes and the retry checkpoint
+    share a transaction; the caller holds the ordinary backfill lock throughout a writing run.
+    """
+    from collections import Counter
+
+    from ..db import connection, subscriptions as db_subs
+    from . import extraction, leads_model, model_call, processor
+    from .agent_settings import AgentType
+    from .source_service import own_bot_app_ids
+
+    sid, sub, zone_name = schedule["id"], schedule["subscription"], schedule["timezone"]
+    key = BACKFILL_KEY.format(sid)
+    now = datetime.now(timezone.utc)
+    retry = progress.setdefault("retry_skipped", {"days": days, "as_of": now.isoformat(), "spent_usd": 0.0,
+                                                 "blocked": []})
+    # Legacy backfills did not retain their day range. Freeze the requested range on the first writing retry.
+    scope = {**sub, "max_age_minutes": retry["days"] * 1440, "max_events": BACKFILL_WINDOW}
+    as_of = datetime.fromisoformat(retry["as_of"])
+    own_apps = await own_bot_app_ids()
+    skipped = progress.setdefault("skipped", [])
+    originals = [window for window in skipped if window["reason"] == extraction.SkipReason.BLOCKED_BY_HOOK.value]
+    blocked_chats = {row["chat_id"] for row in retry["blocked"]}
+    pending: list[dict[str, Any]] = []
+    lines = [f"{'' if run else 'dry run: '}retry skipped leads backfill of {schedule['name']} ({sid})",
+             f"  scope: last {retry['days']} days as of {retry['as_of']}"]
+    for window in originals:
+        chats: dict[str, list[dict[str, Any]]] = {}
+        cursor = window["from_seq"]
+        while cursor < window["to_seq"]:
+            picked = await db_subs.extraction_window(
+                pool, scope, output_kind="leads", from_seq=cursor, to_seq=window["to_seq"], now=as_of,
+                own_apps=own_apps, include_import=True)
+            for row in picked["rows"]:
+                chats.setdefault(row["chat_id"], []).append(row)
+            cursor = picked["last_seq"]
+        lines.append(f"  skipped window ({window['from_seq']}, {window['to_seq']}]:")
+        for chat_id, rows in chats.items():
+            done = window.get("retry_done", {}).get(chat_id, window["from_seq"])
+            left = [row for row in rows if row["seq"] > done]
+            lines.append(f"    chat {chat_id}: {len(rows)} in-scope events, {len(left)} unsettled"
+                         + (", blocked_by_hook; will not be submitted" if chat_id in blocked_chats else ""))
+            for offset in range(0, len(left), BACKFILL_WINDOW):
+                chunk = left[offset:offset + BACKFILL_WINDOW]
+                pending.append({"window": window, "chat_id": chat_id, "from_seq": done, "rows": chunk})
+                lines.append(f"      sub-window ({done}, {chunk[-1]['seq']}]: {len(chunk)} events")
+                done = chunk[-1]["seq"]
+        if not chats:
+            lines.append("    no in-scope events")
+
+    # Count each billed attempt's cost, but its events only once when extraction.ask asked for a reformat.
+    measured = await pool.fetchrow(
+        "SELECT sum(cost_usd) AS cost, sum(CASE WHEN metadata->'backfill'->>'reminded' = 'true' THEN 0 "
+        "ELSE (metadata->'backfill'->>'events')::bigint END) AS events FROM llm_records "
+        "WHERE agent_id = $1 AND metadata->'backfill'->>'schedule_id' = $2 "
+        "AND status = 'completed' AND cost_usd > 0", f"processor:{sid}:backfill", sid)
+    rate = float(measured["cost"]) / float(measured["events"]) if measured["events"] else None
+    eligible = [item for item in pending if item["chat_id"] not in blocked_chats]
+    count = sum(len(item["rows"]) for item in eligible)
+    if rate is not None:
+        lines.append(f"  estimate: {_usd(count * rate)} (backfill measured rate {rate:.6f} USD per event)")
+    else:
+        lines.append(f"  estimate: {_usd(extraction.estimate(count, len(eligible))[1])} "
+                     "(fallback: no measured backfill per-event rate)")
+    if not run:
+        return 0, "\n".join(lines)
+
+    assert budget_usd is not None
+    totals = {"new": 0, "merged": 0, "superseded": 0, "dropped": 0}
+    spent, ran, stopped, code = 0.0, 0, "", 0
+    valid_days = await leads_model.valid_days(pool)
+
+    async def checkpoint(conn: Any) -> None:
+        # Empty or excluded windows are settled too. Other skip reasons remain untouched.
+        progress["skipped"] = [window for window in skipped if window not in originals
+                               or any(item["window"] is window for item in pending)]
+        await conn.execute(
+            "INSERT INTO system_settings (key, value) VALUES ($1, $2) "
+            "ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now()", key, json.dumps(progress))
+
+    while pending:
+        pending.sort(key=lambda item: item["rows"][0]["seq"])
+        item = pending[0]
+        window, chat_id, rows = item["window"], item["chat_id"], item["rows"]
+        already_blocked = chat_id in blocked_chats
+        if already_blocked:
+            last_seq, used = rows[-1]["seq"], rows
+            reason = extraction.SkipReason.BLOCKED_BY_HOOK
+        else:
+            picked = {"rows": rows, "last_seq": rows[-1]["seq"], "more": False}
+            found = await extraction.batch(pool, "leads", scope, picked, zone_name=zone_name, now=now,
+                                           own_apps=own_apps, to_seq=window["to_seq"],
+                                           known_since=max(row["sent_at"] for row in rows))
+            used, last_seq = found.rows, found.last_seq
+            estimate = len(used) * rate if rate is not None else extraction.estimate(len(used), 1)[1]
+            if spent + estimate > budget_usd:
+                stopped = f"stopped before a sub-window of {len(used)} events would pass the budget"
+                break
+            reference = {"kind": "leads_backfill", "schedule_id": sid, "chat_id": chat_id,
+                         "from_seq": item["from_seq"], "to_seq": last_seq, "events": len(used),
+                         "context": found.context, "known": found.known}
+
+            async def ask(reminder: str, budget: float, timeout_s: float) -> processor.ProcessorRun:
+                return model_call.processor_result(await model_call.call(model_call.ProcessorCall(
+                    owner=f"{sid}:backfill",
+                    instructions=schedule["requirement"] + (f"\n\n{reminder}" if reminder else ""),
+                    input_text=found.text, input_ref=reference, quiet_word=extraction.QUIET_WORD, budget_usd=budget,
+                    timeout_s=timeout_s, runtime_root=runtime_root, claude_bin=claude_bin,
+                    project_id=schedule["project_id"], schedule_id=sid, contract=extraction.LEADS_CONTRACT,
+                    metadata={"backfill": {**reference, "reminded": bool(reminder)}}, role=AgentType.PROCESSOR),
+                    parse=str))
+
+            asked = await extraction.ask(
+                ask, lambda reply: extraction.parse(
+                    "leads", reply, found.refs, now=now.astimezone(extraction._zone(zone_name)),
+                    valid_days=valid_days, enabled_types=(), app_seqs=found.app_seqs),
+                budget_usd=min(schedule["run_budget_usd"], budget_usd - spent),
+                timeout_s=float(processor.PROCESSOR_TIMEOUT_SEC))
+            ran += 1
+            spent += asked.cost_usd or 0.0
+            retry["spent_usd"] = round(retry["spent_usd"] + (asked.cost_usd or 0.0), 6)
+            reason = asked.skipped
+            if reason is extraction.SkipReason.INVALID_REPLY or asked.parsed is None and reason is None:
+                stopped = ("the processor reply was invalid after reformatting" if reason is not None else
+                           f"the processor gave no reply ({asked.result.failure.value}): {asked.result.detail}")
+                code = 0 if asked.result.failure is processor.ProcessorFailure.BUDGET else 1
+                async with connection.transaction() as conn:
+                    await checkpoint(conn)
+                break
+        async with connection.transaction() as conn:
+            if reason is extraction.SkipReason.BLOCKED_BY_HOOK:
+                blocked_chats.add(chat_id)
+                retry["blocked"].append({"chat_id": chat_id, "from_seq": item["from_seq"], "to_seq": last_seq,
+                                         "events": len(used), "reason": reason.value})
+            else:
+                counts = await extraction.store_leads(conn, asked.parsed, source_id=sub["source_id"], run_id=None,
+                                                      record_id=asked.result.record_id, backfill=True, more=found.more)
+                for name in ("new", "merged", "superseded"):
+                    totals[name] += counts[name]
+                totals["dropped"] += sum(counts["dropped"].values())
+            window.setdefault("retry_done", {})[chat_id] = last_seq
+            pending.pop(0)
+            if len(used) < len(rows):
+                pending.append({**item, "from_seq": last_seq, "rows": rows[len(used):]})
+            await checkpoint(conn)
+    if not pending:
+        async with connection.transaction() as conn:
+            await checkpoint(conn)
+    blocked = Counter()
+    for row in retry["blocked"]:
+        blocked[row["chat_id"]] += row["events"]
+    lines.append(f"ran {ran} sub-windows: {totals['new']} new leads, {totals['merged']} merged, "
+                 f"{totals['superseded']} superseded, {totals['dropped']} dropped; spent {_usd(spent)} of "
+                 f"{_usd(budget_usd)} ({_usd(retry['spent_usd'])} in all on retries)")
+    lines.append(f"  still-blocked chats: {len(blocked)}")
+    lines.extend(f"    {chat_id}: {count} events (blocked_by_hook)" for chat_id, count in sorted(blocked.items()))
+    if stopped:
+        lines.append(f"  {stopped}; run it again to resume")
+    return code, "\n".join(lines)
+
+
 def backfill_lock(schedule_id: str) -> str:
     """The advisory lock's key (``hashtextextended``) that one backfill runner of a subscription holds."""
     return f"looper.leads.backfill:{schedule_id}"
 
 
 def leads_backfill(args: Any, load_ops: Any) -> int:
-    if not 1 <= args.days <= BACKFILL_MAX_DAYS:
+    if args.days is None and not args.retry_skipped:
+        print("error: --days is required unless --retry-skipped is used", file=sys.stderr)
+        return 2
+    days = args.days if args.days is not None else 30
+    if not 1 <= days <= BACKFILL_MAX_DAYS:
         print(f"error: --days is a whole number from 1 to {BACKFILL_MAX_DAYS}", file=sys.stderr)
         return 2
-    if args.run and not (args.budget_usd and args.budget_usd > 0):
+    if args.run and not (args.budget_usd and args.budget_usd > 0
+                         and (not args.retry_skipped or args.budget_usd < float("inf"))):
         print("error: --run needs --budget-usd: the most the backfill may spend", file=sys.stderr)
         return 2
     ops = load_ops(args)
     if ops is None:
         return 1
-    code, text = asyncio.run(_backfill(ops.database_url, days=args.days, schedule_id=args.schedule, run=args.run,
+    code, text = asyncio.run(_backfill(ops.database_url, days=days, schedule_id=args.schedule, run=args.run,
                                        budget_usd=args.budget_usd, claude_bin=args.claude or "claude",
-                                       runtime_root=ops.runtime_root))
+                                       runtime_root=ops.runtime_root, retry_skipped=args.retry_skipped))
     print(text, file=sys.stderr if code else sys.stdout)
     return code
 

@@ -122,7 +122,9 @@ def _add_msgflow_parser(commands: argparse._SubParsersAction) -> None:
                     "X runs them oldest first through the subscription's processor and stores the leads, keeping its "
                     "progress after each window and stopping before a window would pass the budget; run again, it "
                     "resumes.")
-    backfill.add_argument("--days", type=int, required=True, help="How many days back (1 to 365).")
+    backfill.add_argument("--days", type=int, help="How many days back (1 to 365; retry default: 30).")
+    backfill.add_argument("--retry-skipped", action="store_true",
+                          help="Retry hook-skipped windows per chat; never resubmit a chat blocked again.")
     backfill.add_argument("--schedule", help="The leads subscription's schedule id (default: the only one).")
     backfill.add_argument("--run", action="store_true", help="Run the windows (needs --budget-usd).")
     backfill.add_argument("--budget-usd", type=float, help="With --run: the most the backfill may spend.")
