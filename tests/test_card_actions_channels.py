@@ -11,6 +11,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock
+from weakref import WeakSet
 
 import pytest
 
@@ -268,6 +269,7 @@ def test_lark_a_press_is_admitted_as_a_message_in_that_chat_would_be(
 class _Gateway:
     def __init__(self) -> None:
         self.calls: list[tuple[str, Any]] = []
+        self._outbox_wakes: WeakSet[asyncio.Event] = WeakSet()
 
     async def write(self, kind: str, call: Any, *, keyed: bool = False) -> Any:
         self.calls.append((kind, keyed))
