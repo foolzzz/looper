@@ -29,7 +29,7 @@ class InputResident(_Resident):
         self.accept = True
         self.failure: Exception | None = None
 
-    async def write_mid_turn(self, text: str) -> bool:
+    async def write_mid_turn(self, text: str, *, message_id: str | None = None) -> bool:
         if self.failure:
             raise self.failure
         if not self.accept:
@@ -337,10 +337,10 @@ def test_buffered_result_queues_followup_once_without_merging_or_settling(enable
                 await until(lambda: output._stdout._waiter is not None)
             release_result = asyncio.Event()
             dispatch_event = output._dispatch
-            async def dispatch(event):
+            async def dispatch(event, **kwargs):
                 if event["type"] == "result":
                     await release_result.wait()
-                await dispatch_event(event)
+                await dispatch_event(event, **kwargs)
             enabled.setattr(output, "_dispatch", dispatch)
             writer = process.stdin
             writes = []
@@ -365,7 +365,7 @@ def test_buffered_result_queues_followup_once_without_merging_or_settling(enable
                         assert not resumed  # short line: real drain did not yield
             process.stdin = Writer()
             write = resident.write_mid_turn
-            async def followup(text):
+            async def followup(text, **kwargs):
                 if not wrote_input:
                     # Model generation has begun, but no result exists yet. The
                     # events, rather than elapsed time, decide B's next-turn ownership.
@@ -373,7 +373,7 @@ def test_buffered_result_queues_followup_once_without_merging_or_settling(enable
                              if timing == "generating" else
                              {"type": "assistant", "message": {"content": [{"type": "text", "text": "A only"}]}})
                     await dispatch_event(event)
-                    accepted = await write(text)
+                    accepted = await write(text, **kwargs)
                     output._stdout.feed_data(result)
                     release_result.set()
                     return accepted
@@ -386,7 +386,7 @@ def test_buffered_result_queues_followup_once_without_merging_or_settling(enable
                     output._stdout.feed_data(result)
                 if timing != "drain":
                     release_result.set()
-                return await write(text)
+                return await write(text, **kwargs)
             enabled.setattr(resident, "write_mid_turn", followup)
             queued = []
             dispatch_message = rig.manager._router.dispatch
@@ -422,13 +422,12 @@ def test_buffered_result_queues_followup_once_without_merging_or_settling(enable
             assert "已并入当前回复" not in statuses
             assert second.message_id in {e.message_id for e in rig.bus.journal.undelivered()}
             assert len(writes) == int(wrote_input)
-            if wrote_input:
-                assert process.returncode is not None  # ambiguous pipe is gone before dispatch resumes
+            assert process.returncode is None  # the queued UUID keeps the resident and its background work
             (tmp_path / "read-followup").touch()
             proceed.set()
             assert await rig.reply(second) == "handled queued followup"
             assert queued == [second.message_id]
-            assert (resident.pid != original_pid) is wrote_input
+            assert resident.pid == original_pid
             consumed = [json.loads(line) for line in (tmp_path / "consumed.jsonl").read_text().splitlines()]
             assert len(consumed) == 2 and "race-followup" in consumed[1]["message"]["content"]
             await until(lambda: not [e for e in rig.bus.journal.undelivered() if e.target.agent_id == "manager"])
@@ -448,8 +447,8 @@ def test_stop_while_merged_write_is_draining_stops_original(enabled, tmp_path):
         first = await start_turn(rig)
         written, drain = asyncio.Event(), asyncio.Event()
         write = rig.main.write_mid_turn
-        async def blocked_write(text):
-            result = await write(text)
+        async def blocked_write(text, **kwargs):
+            result = await write(text, **kwargs)
             written.set()
             await drain.wait()
             return result

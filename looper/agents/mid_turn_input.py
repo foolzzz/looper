@@ -40,6 +40,19 @@ class MergedKind(str, Enum):
     OPERATOR_MESSAGE = "operator_message"
 
 
+class InputState(str, Enum):
+    PENDING_CONFIRMATION = "pending_confirmation"
+    CONFIRMED = "confirmed"
+    QUEUED = "queued"
+
+
+@dataclass
+class PendingInput:
+    item: MergedInput
+    state: InputState = InputState.PENDING_CONFIRMATION
+    settled: asyncio.Event = field(default_factory=asyncio.Event)
+
+
 @dataclass
 class MergedInput:
     envelope: MessageEnvelope
@@ -77,6 +90,7 @@ class RunningInput:
     session: ManagerSession
     accepting: bool = True
     inputs: list[MergedInput] = field(default_factory=list)
+    pending: dict[str, PendingInput] = field(default_factory=dict)
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 
 
@@ -85,6 +99,8 @@ class MidTurnInputs:
         self.agent = agent
         self._turns: dict[str, RunningInput] = {}
         self._parents: dict[str, str] = {}
+        self._settlers: dict[str, asyncio.Task[None]] = {}
+        self._tasks: set[asyncio.Task[None]] = set()
 
     def open(self, token: TurnToken, prepared: Prepared, text: str) -> str:
         accepts = (enabled(self.agent.agent_id) and prepared.turn is not None
@@ -102,9 +118,15 @@ class MidTurnInputs:
 
     async def close(self, token: TurnToken) -> None:
         if (running := self._turns.get(token.message_id)) is not None:
-            running.accepting = False  # before awaiting a write already in flight
-            async with running.lock:
-                pass
+            running.accepting = False
+            # Only the turn owner waits for its receipts, outside the admission lock.
+            await asyncio.gather(*(item.settled.wait() for item in running.pending.values()))
+
+    async def shutdown(self) -> None:
+        tasks = tuple(self._tasks)
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
 
     def parent(self, message_id: str) -> str:
         return self._parents.get(message_id, message_id)
@@ -140,6 +162,36 @@ class MidTurnInputs:
         return self.agent.ops is not None and self.agent.ops.has_confirmation(self._chat(envelope))
 
     async def merge(self, session: ManagerSession, envelope: MessageEnvelope) -> bool:
+        """Hand admission to a session's ordered settler; never await a fold in the inbox loop."""
+        if not enabled(self.agent.agent_id) or envelope.message_type is not MessageType.USER_MESSAGE:
+            return False
+        previous = self._settlers.get(session.key)
+        token = session.running_token
+        if previous is None and (token is None or token.message_id not in self._turns):
+            return False
+
+        async def settle() -> None:
+            if previous is not None:
+                await asyncio.shield(previous)
+            if not await self._try_merge(session, envelope) and self.agent._running:
+                self.agent._router.dispatch(session, envelope)
+
+        task = asyncio.create_task(settle())
+        self._settlers[session.key] = task
+        self._tasks.add(task)
+
+        def finished(done: asyncio.Task[None]) -> None:
+            self._tasks.discard(done)
+            if self._settlers.get(session.key) is done:
+                self._settlers.pop(session.key)
+            if not done.cancelled() and (exc := done.exception()) is not None:
+                logger.error("mid-turn settlement failed for %s", envelope.message_id,
+                             exc_info=(type(exc), exc, exc.__traceback__))
+
+        task.add_done_callback(finished)
+        return True  # this task now owns dispatch or merged delivery
+
+    async def _try_merge(self, session: ManagerSession, envelope: MessageEnvelope) -> bool:
         try:
             return await self._merge(session, envelope)
         except Exception:
@@ -193,20 +245,15 @@ class MidTurnInputs:
             merged_token = self.agent._turns.find(envelope.message_id) or self.agent._register_turn(envelope)
             # A stop from the addition's chat must reach the original even while stdin drains.
             self._parents[envelope.message_id] = token.message_id
-            written = False
-            try:
-                written = await session.claude.write_mid_turn(message)
-                if not written:
-                    return False
-            except (OSError, TimeoutError):
-                logger.warning("mid-turn input write failed; keeping message queued")
-                return False
-            finally:
-                if not written:
-                    self._parents.pop(envelope.message_id, None)
-                    if token.cancel.requested:
-                        merged_token.request_stop(token.stop.via if token.stop else "chat")
             item = MergedInput(envelope, merged_token, self._chat(envelope)[2] or "", message)
+            pending = PendingInput(item)
+            running.pending[envelope.message_id] = pending
+        written = False
+        try:
+            written = await session.claude.write_mid_turn(message, message_id=envelope.message_id)
+            if not written:
+                return False
+            pending.state = InputState.CONFIRMED
             running.inputs.append(item)
             # After confirmed consumption, never queue a duplicate because a chat/metrics write failed.
             try:
@@ -218,6 +265,14 @@ class MidTurnInputs:
             if chat_settings.metrics_enabled():
                 turn_metrics.background(self.agent._mark_metrics_replied(envelope))
             return True
+        finally:
+            if not written:
+                pending.state = InputState.QUEUED
+                self._parents.pop(envelope.message_id, None)
+                if token.cancel.requested:
+                    merged_token.request_stop(token.stop.via if token.stop else "chat")
+            pending.settled.set()
+            running.pending.pop(envelope.message_id, None)
 
     async def reply(self, original: MessageEnvelope, text: str, *, error: str | None,
                     outcome: ReplyOutcome) -> None:

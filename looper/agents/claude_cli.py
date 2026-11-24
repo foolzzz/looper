@@ -662,6 +662,17 @@ class _InputPhase(Enum):
     COMPLETE = "complete"
 
 
+@dataclass
+class _QueuedInput:
+    uuid: str
+    message_id: str
+    text: str
+    events: deque[dict[str, Any]] = field(default_factory=deque)
+    buffering: bool = False
+    withdrawn: bool = False
+    completed: asyncio.Event = field(default_factory=asyncio.Event)
+
+
 @dataclass(eq=False)
 class _UserTurn:
     """A user message written to Claude, and its turn once Claude starts it."""
@@ -681,15 +692,23 @@ class _UserTurn:
     result_received: bool = False  # before on_event awaits: its input window has already closed
     input_phase: _InputPhase = _InputPhase.OPEN
     input_receipts: dict[str, asyncio.Future[bool]] = field(default_factory=dict)
+    input_owners: dict[str, _QueuedInput] = field(default_factory=dict)
 
     def observe_input(self, event: dict[str, Any]) -> bool:
-        """Observe native input ownership before callbacks; return whether an unconsumed write must be discarded."""
+        """Observe native input ownership before callbacks; close admission at every fold boundary."""
         if event.get("parent_tool_use_id") is not None:
             return False
         kind = event.get("type")
         if self.input_receipts and _is_replay(event) and (receipt := self.input_receipts.get(event.get("uuid"))) is not None:
             if not receipt.done():
                 receipt.set_result(True)
+            self.input_phase = _InputPhase.GENERATING
+        if kind == "user":
+            message = event.get("message")
+            content = message.get("content") if isinstance(message, dict) else None
+            if isinstance(content, list) and any(
+                    isinstance(block, dict) and block.get("type") == "tool_result" for block in content):
+                self.input_phase = _InputPhase.GENERATING
         if kind == "stream_event":
             inner = event.get("event") if isinstance(event.get("event"), dict) else {}
             if inner.get("type") in {"message_start", "content_block_start", "content_block_delta"}:
@@ -704,12 +723,9 @@ class _UserTurn:
             self.input_phase = _InputPhase.COMPLETE
             consumed = event.get("user_message_uuids")
             consumed = {uuid for uuid in consumed if isinstance(uuid, str)} if isinstance(consumed, list) else set()
-            discard = False
             for uuid, receipt in self.input_receipts.items():
                 if not receipt.done():
                     receipt.set_result(uuid in consumed)
-                    discard |= uuid not in consumed
-            return discard
         return False
 
     def starts_with(self, event: dict[str, Any]) -> bool:
@@ -749,6 +765,8 @@ class _Output:
         self._seen_result = False
         self._capped = False  # a user turn was ended at its soft cap: the rest of the output belongs to no turn
         self.discard = False  # Claude was killed mid-turn: what it writes as it dies belongs to no turn
+        self.queued: dict[str, _QueuedInput] = {}  # written inputs reserved for the next caller by message id
+        self._buffering: _QueuedInput | None = None
 
     def read(self) -> None:
         """Start reading, once."""
@@ -773,12 +791,33 @@ class _Output:
                 turn.done.set_result(None)  # Claude's output ended before the turn's result
         await self.close_own("Claude Code's output ended")
 
-    async def _dispatch(self, event: dict[str, Any]) -> None:
+    async def _dispatch(self, event: dict[str, Any], *, replaying: bool = False) -> None:
         if self._capped or self.discard:
             return  # what Claude writes before it is killed: the turn has ended
-        self._track_jobs(event)
+        if not replaying:
+            self._track_jobs(event)
         if event.get("type") == "control_response":
             logger.debug("%s: control response: %s", self._claude.label, event)
+            response = event.get("response")
+            if isinstance(response, dict):
+                waiter = self._claude._controls.get(response.get("request_id"))
+                if waiter is not None and not waiter.done():
+                    waiter.set_result(response)
+            return
+        if not replaying and self._buffering is None:
+            for queued in self.queued.values():
+                if ((_is_replay(event) and event.get("uuid") == queued.uuid)
+                        or (event.get("type") == "command_lifecycle"
+                            and event.get("command_uuid") == queued.uuid and event.get("state") == "started")):
+                    self._buffering = queued
+                    queued.buffering = True
+                    break
+        if not replaying and self._buffering is not None:
+            # The next native turn can start before Manager has delivered A.
+            # Reserve its output for B, rather than treating it as autonomous.
+            self._buffering.events.append(event)
+            if event.get("type") == "result":
+                self._buffering.completed.set()
             return
         if event.get("type") == "command_lifecycle" or _is_replay(event):
             self._marks_turns = True
@@ -801,10 +840,11 @@ class _Output:
                     await turn.on_event(event)  # "queued", maybe while Claude runs a turn of its own
                 return
         if turn is not None and turn.started:
-            if turn.observe_input(event):
-                # Unconfirmed input may already be queued inside Claude. None of
-                # its subsequent output belongs to an autonomous Manager turn.
-                self.discard = True
+            turn.observe_input(event)
+            if event.get("type") == "result" and self._marks_turns:
+                for uuid, owner in turn.input_owners.items():
+                    if not turn.input_receipts[uuid].result() and not owner.withdrawn:
+                        self.queued[owner.message_id] = owner
             if _is_init(event):
                 turn.session_started = True
             if event.get("type") == "result":
@@ -830,7 +870,7 @@ class _Output:
     def idle(self) -> bool:
         """No admitted turn, autonomous turn, unhandled output or unfinished job."""
         return (self._seen_result and not self.ended and self.turn is None and not self._own_open
-                and not self._between and not self._pending_jobs and not self._untracked_jobs
+                and not self._between and not self.queued and not self._pending_jobs and not self._untracked_jobs
                 and not self._idle_unknown)
 
     def _track_jobs(self, event: dict[str, Any]) -> None:
@@ -1001,6 +1041,8 @@ class ResidentClaude:
         self._price: Price | None = None  # prices the totals at the provider's prices, if Looper prices them
         self._idle_stopping = False
         self._cwd = ""
+        self._controls: dict[str, asyncio.Future[dict[str, Any]]] = {}
+        self._withdrawals: dict[str, asyncio.Task[bool]] = {}
 
     @property
     def label(self) -> str:
@@ -1118,7 +1160,13 @@ class ResidentClaude:
         process, output = self._process, self._output
         assert process is not None and process.stdin is not None and output is not None
         cancel = cancel or TurnCancel.never()
-        if cancel.requested:  # stopped before anything was written: the process is untouched
+        if cancel.requested:
+            if (queued := output.queued.get(getattr(tag, "message_id", None))) is not None:
+                # This message may already be running natively, though its owner
+                # has not claimed the reserved result yet.
+                pending = _UserTurn(queued.uuid, text, tag, on_event,
+                                    asyncio.get_running_loop().create_future())
+                await self._withdraw_mid_turn(queued, pending, output)
             return ResidentTurn(user_stop_result(), stopped=StopMethod.KILL, prompt_sent=False, usage=Usage())
         checkpoint: frozenset[int] | None = None
         checkpoint_taken = False
@@ -1131,7 +1179,8 @@ class ResidentClaude:
                 checkpoint = await self._tree.checkpoint() if self._tree is not None else None
             await on_event(event)
 
-        turn = _UserTurn(uuid=str(uuid4()), text=text, tag=tag,
+        queued = output.queued.get(getattr(tag, "message_id", None))
+        turn = _UserTurn(uuid=queued.uuid if queued is not None else str(uuid4()), text=text, tag=tag,
                          on_event=on_event if cancel.cleanup is StopCleanup.NONE else tracked_event,
                          done=asyncio.get_running_loop().create_future(), stop=stop)
         input_lost = False
@@ -1143,7 +1192,15 @@ class ResidentClaude:
                 output.drop_turn()  # nothing more will come
             output.read()
             try:
-                await write_user_turn(process.stdin, text, uuid=turn.uuid)
+                if queued is None:
+                    await write_user_turn(process.stdin, text, uuid=turn.uuid)
+                else:
+                    # Already sent once as mid-turn input; consume its reserved output.
+                    # New events stay buffered while callbacks replay the earlier ones.
+                    while queued.events:
+                        await output._dispatch(queued.events.popleft(), replaying=True)
+                    output._buffering = None
+                    output.queued.pop(queued.message_id, None)
                 cancel.sent()
             except (BrokenPipeError, ConnectionResetError):
                 # Claude closed its stdin, so it is exiting; what it already wrote decides the turn.
@@ -1201,62 +1258,153 @@ class ResidentClaude:
             prompt_sent=sent,
         )
 
-    async def write_mid_turn(self, text: str) -> bool:
-        """Write another input into the current user turn, without starting a new one.
+    async def write_mid_turn(self, text: str, *, message_id: str | None = None) -> bool:
+        """Wait for native consumption; optionally reserve an unfurled next turn for its caller.
 
-        Generation closes admission. A write alone cannot prove ownership: wait
-        for its native replay or its UUID in this turn's result. Otherwise retire
-        the pipe before queue fallback, so it cannot consume a queued retry too.
+        A keyed input that misses this turn keeps its UUID and resident: the next
+        ``run_turn(tag=envelope)`` claims it without writing the message twice.
+        Unkeyed advisory inputs are withdrawn instead of becoming user turns.
         """
         process, output, turn, cancel = self._process, self._output, self._user_turn, self._cancel
-        def accepting() -> bool:
-            return (process is not None and self._process is process and process.returncode is None
-                    and process.stdin is not None and not process.stdin.is_closing()
-                    and output is not None and not output.ended and not output.discard
-                    and turn is not None and self._user_turn is turn and output.turn is turn
-                    and turn.started and not turn.result_received and not turn.done.done()
-                    and turn.input_phase is _InputPhase.OPEN
-                    and not turn.stopping and cancel is not None and cancel.prompt_sent and not cancel.requested)
-
-        if not accepting():
+        if not (process is not None and process.returncode is None and process.stdin is not None
+                and not process.stdin.is_closing() and output is not None and not output.ended
+                and not output.discard and turn is not None and output.turn is turn and turn.started
+                and not turn.result_received and not turn.done.done() and turn.input_phase is _InputPhase.OPEN
+                and not turn.stopping and cancel is not None and cancel.prompt_sent and not cancel.requested):
             return False
         uuid = str(uuid4())
         receipt = asyncio.get_running_loop().create_future()
         turn.input_receipts[uuid] = receipt
-
-        def stopped() -> None:
-            if not receipt.done():
-                receipt.set_result(False)
-
-        unregister = cancel.on_request(stopped)
-        merged = False
+        owner = _QueuedInput(uuid, message_id or uuid, text)
+        turn.input_owners[uuid] = owner
+        written = merged = False
         try:
             try:
                 async with asyncio.timeout(5):
                     await write_user_turn(process.stdin, text, uuid=uuid)
+                written = True
             except (OSError, TimeoutError):
-                # A native receipt is authoritative even if drain then fails.
-                # Queueing that already-consumed input would duplicate it.
+                if receipt.done() and receipt.result():
+                    merged = True
+                    return True
+                # drain can fail after stdin.write succeeded. Retrying without
+                # withdrawing this UUID would leave the original queued too.
+                await self._withdraw_mid_turn(owner, turn, output)
                 if receipt.done() and receipt.result():
                     merged = True
                     return True
                 raise
-            # A tool may run for a long time before Claude consumes this input.
-            # Stop and output termination wake this wait without a timing guess.
             await asyncio.wait({receipt, turn.done}, return_when=asyncio.FIRST_COMPLETED)
             merged = receipt.done() and receipt.result()
             if not merged and turn.result_received:
-                # Keep A's result: its observer must finish before stop drops
-                # the turn. Output already discards any queued extra turn.
                 await asyncio.shield(turn.done)
-            return merged
-        finally:
-            unregister()
-            turn.input_receipts.pop(uuid, None)
             if not merged:
-                output.discard = True
-                if self._process is process:
-                    await self.stop(kill=True)
+                if cancel.requested:
+                    if (interrupting := self._interrupting) is not None:
+                        await asyncio.shield(interrupting)
+                    if output.queued.get(owner.message_id) is owner:
+                        await self._withdraw_mid_turn(owner, turn, output)
+                elif message_id is not None and message_id in output.queued:
+                    logger.info("%s: binding unconfirmed input %s to its next turn", self._label, uuid)
+                elif written:
+                    await self._withdraw_mid_turn(owner, turn, output)
+            return merged
+        except asyncio.CancelledError:
+            if not receipt.done() or not receipt.result():
+                await self._withdraw_mid_turn(owner, turn, output)
+            raise
+        finally:
+            turn.input_receipts.pop(uuid, None)
+            turn.input_owners.pop(uuid, None)
+            if (withdrawal := self._withdrawals.get(uuid)) is not None and withdrawal.done():
+                self._withdrawals.pop(uuid, None)
+
+    async def _withdraw_mid_turn(self, owner: _QueuedInput, turn: _UserTurn, output: _Output) -> None:
+        if await self._cancel_async_input(owner.uuid, turn):
+            owner.withdrawn = True
+            output.queued.pop(owner.message_id, None)
+            return
+        receipt = turn.input_receipts.get(owner.uuid)
+        if receipt is not None and receipt.done() and receipt.result():
+            return  # folded while cancellation was in flight: it belongs to A
+        process = self._process
+        if process is None or process.stdin is None:
+            return
+        request_id: str | None = None
+        completed: asyncio.Task[bool] | None = None
+        try:
+            async with asyncio.timeout(INTERRUPT_GRACE_SEC):
+                # A cancellation can lose the dequeue race. Interrupt the active
+                # native turn gently and clear anything it put back in its queue.
+                request_id = write_control(process.stdin, {"subtype": "interrupt", "cancel_queued": True})
+                receipt = asyncio.get_running_loop().create_future()
+                self._controls[request_id] = receipt
+                await process.stdin.drain()
+                if owner.buffering:
+                    await owner.completed.wait()
+                elif not turn.done.done():
+                    await asyncio.shield(turn.done)
+                else:
+                    # A's completed result does not settle B. The interrupt's
+                    # explicit cancelled list or B's own result must do that.
+                    completed = asyncio.create_task(owner.completed.wait())
+                    await asyncio.wait({receipt, completed}, return_when=asyncio.FIRST_COMPLETED)
+                    if not completed.done():
+                        response = receipt.result()
+                        body = response.get("response")
+                        cancelled = body.get("cancelled") if isinstance(body, dict) else None
+                        if not (response.get("subtype") == "success" and isinstance(cancelled, list)
+                                and owner.uuid in cancelled):
+                            await completed
+            output.queued.pop(owner.message_id, None)
+            if output._buffering is owner:
+                output._buffering = None
+            return
+        except (OSError, TimeoutError):
+            logger.warning("%s: cannot bind, withdraw or interrupt input %s; retiring resident", self._label, owner.uuid)
+            if self._process is process:
+                await self.stop(kill=True)
+        finally:
+            if request_id is not None:
+                self._controls.pop(request_id, None)
+            if completed is not None and not completed.done():
+                completed.cancel()
+                await asyncio.gather(completed, return_exceptions=True)
+
+    async def _cancel_async_input(self, uuid: str, turn: _UserTurn) -> bool:
+        # A guard's finally may cancel a caller already waiting on withdrawal.
+        # Keep that exact request alive and reuse it during cancellation cleanup.
+        pending = self._withdrawals.get(uuid)
+        if pending is None:
+            pending = asyncio.create_task(self._request_cancel_input(uuid))
+            self._withdrawals[uuid] = pending
+        return await asyncio.shield(pending)
+
+    async def _request_cancel_input(self, uuid: str) -> bool:
+        """Claude Code's stream-json per-UUID withdrawal (2.1.331), bounded by the control grace."""
+        process = self._process
+        if process is None or process.stdin is None or process.returncode is not None:
+            return False
+        try:
+            request_id = write_control(process.stdin, {"subtype": "cancel_async_message", "message_uuid": uuid})
+        except OSError:
+            return False
+        waiter = asyncio.get_running_loop().create_future()
+        self._controls[request_id] = waiter
+        try:
+            async with asyncio.timeout(INTERRUPT_GRACE_SEC):
+                await process.stdin.drain()
+                await asyncio.shield(waiter)
+                if waiter.done():
+                    response = waiter.result()
+                    body = response.get("response")
+                    return (response.get("subtype") == "success" and isinstance(body, dict)
+                            and body.get("cancelled") is True)
+        except (OSError, TimeoutError):
+            pass
+        finally:
+            self._controls.pop(request_id, None)
+        return False
 
     async def _stopped_by_user(self) -> StopMethod | None:
         """How the user's stop of the running turn ended it, once it has (bounded); None when none was asked."""
@@ -1265,7 +1413,7 @@ class ResidentClaude:
         task = self._interrupting
         if task is None:
             return None
-        bound = INTERRUPT_GRACE_SEC + proc_tree.TERM_GRACE_SEC + proc_tree.REAP_SEC + _DRAIN_SEC
+        bound = (2 * INTERRUPT_GRACE_SEC + proc_tree.TERM_GRACE_SEC + proc_tree.REAP_SEC + _DRAIN_SEC)
         await asyncio.wait({task}, timeout=bound)
         if task.done() and not task.cancelled() and task.exception() is None:
             return task.result()
@@ -1304,17 +1452,36 @@ class ResidentClaude:
         from .runtimes import StopMethod
 
         assert process.stdin is not None
-        if (turn.done.done() and not turn.done.cancelled() and turn.done.exception() is None
-                and turn.done.result() is not None):
-            # Its result came before the stop: the turn is over, nothing is left to interrupt.
-            turn.answered = True
-            return StopMethod.CONTROL
+        answered = (turn.done.done() and not turn.done.cancelled() and turn.done.exception() is None
+                    and turn.done.result() is not None)
+        # A result can settle receipts before /stop gets scheduled; false is
+        # still an outstanding native write, unlike a confirmed fold (true).
+        pending_inputs = [(uuid, turn.input_owners.get(uuid)) for uuid, receipt in turn.input_receipts.items()
+                          if not receipt.done() or not receipt.result()]
+        withdrawals = await asyncio.gather(*(self._cancel_async_input(uuid, turn) for uuid, _ in pending_inputs))
+        clear_queued = not all(withdrawals)
+        for (_, owner), withdrawn in zip(pending_inputs, withdrawals):
+            if withdrawn and owner is not None:
+                owner.withdrawn = True
+                output.queued.pop(owner.message_id, None)
+        if turn.done.done() and not turn.done.cancelled() and turn.done.exception() is None:
+            for (_, owner), withdrawn in zip(pending_inputs, withdrawals):
+                if not withdrawn and owner is not None and output.queued.get(owner.message_id) is owner:
+                    await self._withdraw_mid_turn(owner, turn, output)
+            turn.answered = answered
+            return StopMethod.CONTROL if self._process is process else StopMethod.KILL
         try:
             async with asyncio.timeout(INTERRUPT_GRACE_SEC):  # the write, the drain and the wait share one grace
-                write_control(process.stdin, {"subtype": "interrupt"})
+                request: dict[str, Any] = {"subtype": "interrupt"}
+                if clear_queued:
+                    request["cancel_queued"] = True
+                write_control(process.stdin, request)
                 await process.stdin.drain()
                 await asyncio.wait({turn.done})
             if not turn.done.cancelled() and turn.done.exception() is None and turn.done.result() is not None:
+                for _, owner in pending_inputs:
+                    if owner is not None:
+                        output.queued.pop(owner.message_id, None)
                 return StopMethod.CONTROL
         except (BrokenPipeError, ConnectionResetError):
             logger.warning("%s: Claude closed stdin before the interrupt was sent", self._label)

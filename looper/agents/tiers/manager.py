@@ -1250,7 +1250,7 @@ class ManagerAgent:
             self._task = None
         try:
             async with asyncio.timeout(STOP_DRAIN_SEC):
-                await self._router.stop()  # the sessions' workers, with session routing on
+                await asyncio.gather(self._mid_turn.shutdown(), self._router.stop())
         except TimeoutError:
             logger.warning("%s: the sessions' turns did not end within %.1f s; proceeding with shutdown",
                            self._log, STOP_DRAIN_SEC)

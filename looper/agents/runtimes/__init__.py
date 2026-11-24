@@ -350,12 +350,14 @@ class MidTurnInput(Protocol):
     """A verified resident transport that can admit input to its running user turn.
 
     Check ``Capability.MID_TURN_INPUT`` too. True confirms consumption by the
-    current turn. False leaves the normal queue in charge; any unconfirmed write
-    must be isolated from that retry before returning. Write failures propagate.
+    current turn. False leaves the normal queue in charge. A written input can
+    reserve its native next turn by ``message_id``; that caller must claim it
+    without writing a second prompt. Otherwise withdraw or isolate it before
+    retrying. Write failures propagate.
     Keeper- and runner-hosted sessions have not verified this contract.
     """
 
-    async def write_mid_turn(self, text: str) -> bool: ...
+    async def write_mid_turn(self, text: str, *, message_id: str | None = None) -> bool: ...
 
 
 class ResidentSession(Protocol):
