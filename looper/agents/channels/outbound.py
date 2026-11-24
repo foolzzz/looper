@@ -31,6 +31,7 @@ MAX_RETRIES = 5
 BREAKER_FAILURES = 5
 BREAKER_WINDOW = 30
 BREAKER_OPEN = 60
+BREAKER_RECHECK_SECONDS = 1
 SEND_WAIT_SECONDS = 30
 KEYED_DEDUPE_WINDOW = 3600
 MAX_BACKOFF = 60
@@ -132,6 +133,7 @@ class Breaker:
         self._state = BreakerState.CLOSED
         self._on_transition = on_transition
         self.open_until = 0.0
+        self.probe_in_flight = False
         self._failures = deque()
 
     @property
@@ -148,12 +150,20 @@ class Breaker:
     def allow(self) -> bool:
         if self.state == 'closed':
             return True
-        if self.state == 'open' and self.clock() >= self.open_until:
+        if self.state == 'open' and self.clock() < self.open_until:
+            return False
+        if not self.probe_in_flight:
+            self.probe_in_flight = True
             self.state = 'half_open'
             return True
         return False
 
+    def release_probe(self):
+        # Cancellation says nothing about platform health; another caller may probe now.
+        self.probe_in_flight = False
+
     def record(self, result: bool | ErrorClass):
+        self.probe_in_flight = False
         if result is True:
             if self.state != 'closed':
                 logger.info('outbound circuit recovered')
@@ -217,6 +227,11 @@ class _AppLimits:
     def _breaker_transition(self, state: BreakerState):
         for gateway in self.gateways:
             gateway._breaker_transition(state)
+
+    def _wake_outboxes(self):
+        for gateway in self.gateways:
+            for wake in gateway._outbox_wakes:
+                wake.set()
 
     def _configure(self):
         limits = self.settings()
@@ -305,6 +320,7 @@ class Gateway:
             remaining = DELIVERY_DEADLINE - (self.clock() - started)
             if remaining <= 0:
                 raise DeliveryExpired('delivery deadline expired')
+            probe = cancelled = False
             try:
                 async with asyncio.timeout(remaining), self._app._slot():
                     self._app._configure()
@@ -313,13 +329,18 @@ class Gateway:
                     await self.bucket.acquire()
                     if not self.breaker.allow():
                         raise CircuitOpen('outbound circuit is open')
+                    probe = self.breaker.state == 'half_open'
                     result = await call()
+            except asyncio.CancelledError:
+                cancelled = True
+                raise
             except (CircuitOpen, DeliveryExpired, StateWriteUnavailable):
                 raise
             except Exception as exc:
                 error_class, retry_after = classify(exc)
                 self.counters.failures[error_class] += 1
                 self.breaker.record(error_class)
+                probe = False
                 retryable = error_class in {ErrorClass.RATE_LIMITED, ErrorClass.TRANSIENT} or (
                     error_class == ErrorClass.UNKNOWN and keyed)
                 if not retry or not retryable or attempt == MAX_RETRIES:
@@ -333,7 +354,17 @@ class Gateway:
                 await self.sleep(delay)
             else:
                 self.breaker.record(True)
+                probe = False
                 return result
+            finally:
+                if probe:
+                    if cancelled:
+                        self.breaker.release_probe()
+                        self._app._wake_outboxes()
+                    else:
+                        # Expiry/state errors (and any other unrecorded exit) must not
+                        # leave the application waiting forever for a missing probe.
+                        self.breaker.record(ErrorClass.TRANSIENT)
 
     async def stop(self):
         tasks = [item.task for item in self._edits.values() if item.task is not None and not item.task.done()]
@@ -343,7 +374,7 @@ class Gateway:
         self._edits.clear()
 
     async def edit(self, message_id: str, call_with_text):
-        if self.breaker.state == 'half_open' or (self.breaker.state == 'open' and
+        if self.breaker.probe_in_flight or (self.breaker.state == 'open' and
                                                   self.clock() < self.breaker.open_until):
             raise CircuitOpen('outbound circuit is open')
         item = self._edits.get(message_id)
@@ -522,7 +553,7 @@ class Outbox:
                         await self._complete(row)
                         continue
                     breaker = self.gateway.breaker
-                    if breaker.state == 'half_open':
+                    if breaker.probe_in_flight:
                         break
                     remaining = breaker.open_until - self.gateway.clock()
                     if breaker.state == 'open' and remaining > 0:
@@ -536,7 +567,11 @@ class Outbox:
                     self._workers.add(task)
                     task.add_done_callback(self._finished)
                 at = await self.db.next_attempt(self.channel_id, delivery_deadline=DELIVERY_DEADLINE)
-                if at is not None and self.gateway.breaker.state != 'half_open':
+                if self.gateway.breaker.probe_in_flight:
+                    # Notifications normally wake siblings; bound this wait so a
+                    # missed wake cannot stall delivery or expiry processing.
+                    delay = BREAKER_RECHECK_SECONDS
+                elif at is not None:
                     delay = max(.01, (at - self.clock()).total_seconds())
             except Exception:
                 logger.exception('outbound outbox scan failed')

@@ -130,6 +130,74 @@ def test_sibling_channels_share_breaker_and_single_recovery_probe(app_id, monkey
     asyncio.run(run())
 
 
+@pytest.mark.parametrize('exit_kind', ['expired', 'state_error', 'cancelled', 'timeout'])
+def test_half_open_probe_exit_keeps_sibling_writes_usable(exit_kind, monkeypatch):
+    from looper.agents.channels import outbound
+    delivery_deadline = outbound.DELIVERY_DEADLINE
+    if exit_kind == 'timeout':
+        monkeypatch.setattr(outbound, 'DELIVERY_DEADLINE', .05)
+
+    async def run():
+        clock = Clock()
+        first, sibling = [Gateway(channel, clock, clock.sleep, app_id='synthetic-probe-exit')
+                          for channel in ('first', 'sibling')]
+        for _ in range(5):
+            first.breaker.record(ErrorClass.UNKNOWN)
+        clock.now = 60
+        entered = asyncio.Event()
+
+        async def probe():
+            entered.set()
+            if exit_kind == 'expired':
+                raise outbound.DeliveryExpired('expired before I/O')
+            if exit_kind == 'state_error':
+                raise outbound.StateWriteUnavailable('state unavailable before I/O')
+            await asyncio.Event().wait()
+
+        task = asyncio.create_task(first.write('send', probe, retry=False))
+        await asyncio.wait_for(entered.wait(), 1)
+        if exit_kind == 'cancelled':
+            task.cancel()
+        expected = {'expired': outbound.DeliveryExpired, 'state_error': outbound.StateWriteUnavailable,
+                    'cancelled': asyncio.CancelledError, 'timeout': TimeoutError}[exit_kind]
+        with pytest.raises(expected):
+            await task
+        monkeypatch.setattr(outbound, 'DELIVERY_DEADLINE', delivery_deadline)
+
+        entered.clear()
+        release = asyncio.Event()
+        calls = []
+
+        async def replacement():
+            calls.append('probe')
+            entered.set()
+            await release.wait()
+            return 'sent'
+
+        if exit_kind != 'cancelled':
+            assert first.breaker.state == 'open'
+            assert 0 < first.breaker.open_until - clock.now <= outbound.BREAKER_OPEN
+            with pytest.raises(CircuitOpen):
+                await sibling.write('send', replacement, retry=False)
+            clock.now = first.breaker.open_until
+        task = asyncio.create_task(sibling.write('send', replacement, retry=False))
+        try:
+            await asyncio.wait_for(entered.wait(), 1)
+            # All simultaneous siblings must leave the sole replacement probe alone.
+            results = await asyncio.gather(*(first.write('react', replacement, retry=False)
+                                            for _ in range(3)), return_exceptions=True)
+            assert all(isinstance(result, CircuitOpen) for result in results)
+            assert calls == ['probe']
+            release.set()
+            assert await task == 'sent'
+            assert first.breaker.state == 'closed'
+        finally:
+            release.set()
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+    asyncio.run(run())
+
+
 @pytest.mark.parametrize('other_app', ['different-app', 'telegram:synthetic-app', ''])
 def test_breaker_different_or_unknown_apps_stay_independent(other_app):
     async def run():

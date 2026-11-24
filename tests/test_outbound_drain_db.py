@@ -9,7 +9,8 @@ from tests.db_support import DSN, run_db
 pytestmark = pytest.mark.skipif(not DSN, reason='disposable PostgreSQL required')
 
 
-def test_sibling_outbox_holds_sends_and_wakes_after_another_channels_probe(monkeypatch):
+@pytest.mark.parametrize('wake_on_recovery', [True, False])
+def test_sibling_outbox_holds_sends_and_wakes_after_another_channels_probe(monkeypatch, wake_on_recovery):
     from looper.agents.channels import outbound
     from looper.db import channel_outbox as db
 
@@ -41,7 +42,7 @@ def test_sibling_outbox_holds_sends_and_wakes_after_another_channels_probe(monke
             saved.set()
 
         async def wait_for_work():
-            if sibling.breaker.state == 'half_open':
+            if sibling.breaker.state == 'half_open' and not box._wake.is_set():
                 parked.set()
             await wait()
 
@@ -66,6 +67,9 @@ def test_sibling_outbox_holds_sends_and_wakes_after_another_channels_probe(monke
             await pool.execute('UPDATE channel_outbox SET next_attempt_at=now() WHERE id=$1', row['id'])
             box._wake.set()
             await asyncio.wait_for(parked.wait(), 2)
+            if not wake_on_recovery:
+                # Recovery must still be observed if the transition notification is lost.
+                monkeypatch.setattr(first.breaker, '_on_transition', None)
             release.set()
             assert await asyncio.wait_for(task, 2) == 'om_probe'
             await asyncio.wait_for(saved.wait(), 2)
@@ -78,6 +82,69 @@ def test_sibling_outbox_holds_sends_and_wakes_after_another_channels_probe(monke
                 await asyncio.gather(task, return_exceptions=True)
             await box.stop()
     run_db(check, monkeypatch)
+
+
+def test_stopping_probing_channel_releases_sibling_outbox(monkeypatch):
+    from looper.agents import chat_settings
+    from looper.agents.channels import outbound
+    from looper.agents.channels.allowlist import SenderAllowlist
+    from looper.agents.channels.lark import LarkChannelAdapter
+    from looper.agents.channels.lark_transport import LarkTransportKind
+    from looper.db import channel_outbox as db
+
+    async def check(pool):
+        monkeypatch.setattr(chat_settings, '_outbound_enabled', True)
+        probing, parked, sent = [asyncio.Event() for _ in range(3)]
+        transport = AsyncMock()
+        transport.kind = LarkTransportKind.BOT
+        transport.consumer_started = None
+
+        async def hold(**kwargs):
+            probing.set()
+            await asyncio.Event().wait()
+
+        transport.send.side_effect = hold
+        adapter = LarkChannelAdapter(bot_app_id='synthetic-stop-probe', transport=transport,
+            allowlist=SenderAllowlist('channel-lark', frozenset({'ou_synthetic'})))
+        gateway = adapter._gateway
+        for _ in range(5):
+            gateway.breaker.record(outbound.ErrorClass.UNKNOWN)
+        gateway.breaker.open_until = gateway.clock()
+        sibling = outbound.Gateway('sibling', app_id='synthetic-stop-probe')
+        other_transport = AsyncMock()
+        other_transport.send.return_value = 'om_sibling'
+        box = outbound.Outbox('sibling', other_transport, sibling)
+        wait, mark_sent = box._wake.wait, db.mark_sent
+
+        async def waiting():
+            if sibling.breaker.state == 'half_open' and not box._wake.is_set():
+                parked.set()
+            await wait()
+
+        async def saved(*args):
+            await mark_sent(*args)
+            sent.set()
+
+        monkeypatch.setattr(box._wake, 'wait', waiting)
+        monkeypatch.setattr(db, 'mark_sent', saved)
+        sending = asyncio.create_task(adapter._transport.send(chat_id='synthetic', text='probe'))
+        try:
+            await asyncio.wait_for(probing.wait(), 2)
+            row = await db.insert_or_get(dict(channel_id='sibling', idempotency_key='sibling', kind='send',
+                chat='synthetic', body={'text': 'after stop'}, source='answer'))
+            await box.start()
+            await asyncio.wait_for(parked.wait(), 2)
+            await asyncio.wait_for(adapter.stop(), 2)
+            await asyncio.wait_for(sent.wait(), 2)
+            assert (await db.get(row['id']))['state'] == 'sent'
+            assert other_transport.send.await_count == 1
+            assert sibling.breaker.state == 'closed'
+        finally:
+            await adapter.stop()
+            sending.cancel()
+            await asyncio.gather(sending, return_exceptions=True)
+            await box.stop()
+    run_db(check, monkeypatch, timeout=10)
 
 
 def test_switch_off_still_drains_pending_and_retries(monkeypatch):
