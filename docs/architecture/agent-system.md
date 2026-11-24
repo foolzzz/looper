@@ -1338,10 +1338,18 @@ chat. No tool writes, and nothing is installed by default. Dashboard, Telegram a
 `claude mcp add-json --scope user`; `uninstall mcp` previews and confirms removal. With no part specified,
 installation and removal process the hook and MCP separately, in that order. `status` checks installed parts,
 including the current vault root and message-lead switch.
+The listening HTTP server atomically publishes its bound host and port in the runtime root's
+`server-address.json`. MCP resolves it on each call; `status` uses the same resolver. This covers both
+`serve --port` and service-unit overrides without freezing the address into the MCP registration.
+The server holds a lock on the published record until its listener closes. Shutdown or a crash leaves
+an unlocked, stale record: clients report it and never fall back to another port. Only an installation
+with no address record falls back to the ops file. Wildcard listeners resolve to their loopback address;
+other non-loopback destinations remain refused.
 Each call rereads the local operator token and derives a domain-separated, read-only credential; the raw token
 is never sent by MCP or stored in its entry. The HTTP connection gate permits that credential only on direct
 loopback connections and only for the three POST retrieval paths, before body reads, uploads or dispatch.
-Every other v1 operation returns 403; operator rotation invalidates the derived credential too.
+Every other v1 operation returns 403. The retrieval gate also rereads the current token on every retrieval
+request: operator rotation immediately invalidates the old derived credential without restarting serve.
 Tools still list when Looper is stopped; calls return the reason without retrying. Managed `PreToolUse` and
 `PostToolUse` hooks can see the calls and results. Real-model checks of this integration remain pending approval.
 
