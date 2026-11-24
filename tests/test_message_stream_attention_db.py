@@ -54,6 +54,33 @@ def test_disabled_alerts_do_not_read_source_event_tables(monkeypatch):
     run_db(check, monkeypatch, timeout=30)
 
 
+@pytest.mark.parametrize("rules_on", [False, True])
+@pytest.mark.parametrize("rule_age", [1, 3])
+def test_rule_notices_and_source_alerts_share_counts_and_earliest(monkeypatch, rules_on, rule_age):
+    async def check(pool):
+        await stream.source(pool)
+        await pool.execute("INSERT INTO source_collection_settings (source_id, alerts_enabled) VALUES ($1,true)", stream.SOURCE)
+        await pool.execute("INSERT INTO system_settings (key,value) VALUES ('intents.rules.enabled',$1)",
+                           "true" if rules_on else "false")
+        now = datetime.now(timezone.utc)
+        async with pool.acquire() as conn:
+            await alerts.open_episode(conn, stream.SOURCE, "auth", now=now - timedelta(hours=2))
+        await pool.execute("INSERT INTO intent_rule_notices (kind,dedupe_key,state,updated_at) "
+                           "VALUES ('verification_fault','synthetic-fault','uncertain',$1)",
+                           now - timedelta(hours=rule_age))
+        monkeypatch.setattr(attention, "_catchup_checks", None)
+        items, count = await attention._deliveries(None)
+        assert count == len(items) == 1 + int(rules_on)
+        assert {item["facts"]["source"] for item in items} == (
+            {"message_stream", "intent_rule"} if rules_on else {"message_stream"})
+        assert all(label in "\n".join(attention._line("deliveries", item, now) for item in items)
+                   for label in (["消息流采集/对账需处理", "规则执行通知"] if rules_on else ["消息流采集/对账需处理"]))
+        earliest = await attention._earliest_deliveries(None)
+        assert earliest["facts"]["source"] == ("intent_rule" if rules_on and rule_age == 3 else "message_stream")
+
+    run_db(check, monkeypatch, timeout=30)
+
+
 def test_source_alert_read_failure_is_an_error_not_empty(monkeypatch):
     async def check(pool):
         await stream.source(pool)

@@ -61,8 +61,8 @@ def _account_admission(monkeypatch, *, active=True):
 
 @pytest.mark.parametrize("routing", [True, False])
 @pytest.mark.parametrize("account_admission", [False, True])
-def test_native_input_binds_tools_before_claim_and_records_actual_prompt(enabled, tmp_path, routing,
-                                                                       account_admission):  # noqa: F811
+def test_native_input_binds_tools_before_claim_and_records_actual_prompt(enabled, tmp_path, routing,  # noqa: F811
+                                                                       account_admission):
     enabled.setattr(session_routing, "_routing_enabled", routing)
     async def test(pool):
         controller, acquire = _account_admission(enabled, active=account_admission)
@@ -84,6 +84,17 @@ def test_native_input_binds_tools_before_claim_and_records_actual_prompt(enabled
         rig.manager.ops = ops
         preparing_b, release_b = asyncio.Event(), asyncio.Event()
         probes = 0
+        wrapping_a, release_a = asyncio.Event(), asyncio.Event()
+        converse = rig.manager._converse
+
+        async def hold_wrapup(token, prepared, **kwargs):
+            result = await converse(token, prepared, **kwargs)
+            if token.message_id == first.message_id:
+                wrapping_a.set()
+                await release_a.wait()
+            return result
+
+        enabled.setattr(rig.manager, "_converse", hold_wrapup)
 
         async def tools_problem():
             nonlocal probes
@@ -104,9 +115,15 @@ def test_native_input_binds_tools_before_claim_and_records_actual_prompt(enabled
             await until(lambda: (tmp_path / "injected.txt").exists())
             injected = (tmp_path / "injected.txt").read_text()
             (tmp_path / "finish-a").touch()
+            await asyncio.wait_for(wrapping_a.wait(), 10)
+            await until(lambda: (tmp_path / "native-tool").exists())
+            # A has not reached release_binding yet: only unfolded can publish B.
+            early_binding = json.loads(bridge_file.read_text())["turn"]
+            assert early_binding == rig.manager._turns.find(second.message_id).binding
+            assert not release_a.is_set()
+            release_a.set()
             assert await rig.reply(first) == "answer A"
             await asyncio.wait_for(preparing_b.wait(), 10)
-            await until(lambda: (tmp_path / "native-tool").exists())
             if account_admission:
                 assert list(controller.running) == ["manager:main"]
                 assert acquire.await_count == 1
@@ -134,6 +151,7 @@ def test_native_input_binds_tools_before_claim_and_records_actual_prompt(enabled
             assert "looper_state" in json.loads(first_metadata)
             assert not ops._expected.get(binding)  # buffered tool_use is not matched twice on claim
         finally:
+            release_a.set()
             release_b.set()
             (tmp_path / "finish-a").touch()
             (tmp_path / "finish-b").touch()
@@ -171,7 +189,8 @@ def test_unclaimed_native_input_releases_account_slot(enabled, tmp_path, ending)
         try:
             first, second = _web("first"), _web("second")
             await rig.bus.publish(first)
-            await until(lambda: (tmp_path / "ready").exists())
+            await until(lambda: (tmp_path / "ready").exists() and resident._user_turn is not None
+                        and resident._user_turn.started)
             await rig.bus.publish(second)
             await until(lambda: (tmp_path / "injected.txt").exists())
             (tmp_path / "finish-a").touch()
@@ -291,3 +310,59 @@ for line in sys.stdin:
             await rig.close()
 
     run_db(test, enabled, timeout=60)
+
+
+@pytest.mark.parametrize("replacement", [False, True])
+def test_discarded_reservation_clears_only_its_own_binding(enabled, tmp_path, replacement):  # noqa: F811
+    async def test(pool):
+        from looper.agents.ops import Turn
+
+        rig = _Rig(tmp_path)
+        resident = ResidentClaude(label="synthetic-discard-binding")
+        rig.manager._sessions["main"].claude = resident
+        rig.manager._config.claude_bin = _fake_claude(tmp_path, SCRIPT)
+        bridge_file = tmp_path / "turn.json"
+        ops = rig.manager.ops = ManagerOps(Platform(bus=rig.bus, task_router=None),
+                                           url="http://127.0.0.1:9", turn_file=bridge_file)
+        enabled.setattr(rig.manager, "_tools_problem", AsyncMock(return_value=None))
+        release_a = asyncio.Event()
+        converse = rig.manager._converse
+
+        async def hold_wrapup(token, prepared, **kwargs):
+            result = await converse(token, prepared, **kwargs)
+            await release_a.wait()
+            return result
+
+        enabled.setattr(rig.manager, "_converse", hold_wrapup)
+        await rig.start()
+        try:
+            first, second = _web("first"), _web("second")
+            await rig.bus.publish(first)
+            await until(lambda: (tmp_path / "ready").exists() and resident._user_turn is not None
+                        and resident._user_turn.started)
+            await rig.bus.publish(second)
+            await until(lambda: (tmp_path / "injected.txt").exists())
+            owner = next(owner for owner in resident._user_turn.input_owners.values()
+                         if owner.message_id == second.message_id)
+            (tmp_path / "finish-a").touch()
+            await until(lambda: (tmp_path / "native-tool").exists())
+            # The child marker can precede the parent's processing of A's result and B's start.
+            await until(lambda: owner.buffering, "native input to start buffering")
+            assert resident._output.queued.get(second.message_id) is owner
+            binding = rig.manager._turns.find(second.message_id).binding
+            assert json.loads(bridge_file.read_text())["turn"] == binding
+            (tmp_path / "finish-b").touch()
+            await asyncio.wait_for(owner.completed.wait(), 3)
+            if replacement:
+                binding = "synthetic-replacement"
+                ops.register(Turn(channel="web", chat="replacement"), binding)
+                ops.publish_binding(binding)
+            await resident.discard_reserved_input(second.message_id)
+            assert json.loads(bridge_file.read_text())["turn"] == (binding if replacement else None)
+        finally:
+            release_a.set()
+            (tmp_path / "finish-a").touch()
+            (tmp_path / "finish-b").touch()
+            await rig.close()
+
+    run_db(test, enabled, timeout=45)

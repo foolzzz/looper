@@ -1516,9 +1516,10 @@ def test_eval_server_projects_root_preserves_default_ops(tmp_path, monkeypatch, 
         assert tomllib.loads(text)["projects"]["root"] == str(root)
     else:
         assert "projects" not in tomllib.loads(text)
-        # The configuration written before projects_root was added, byte for byte.
+        # Other defaults stay byte-identical; the address names the isolated listener.
         assert text == ops_config.render(ops_config.OpsConfig(
             runtime_root=runtime, path=runtime / ops_config.FILE, database_url="unused",
+            host="127.0.0.1", port=49152,
             pi_runtime="cli", dsh_runtime="cli", keeper_mode=ops_config.KeeperMode.OFF))
 
 
@@ -3217,9 +3218,20 @@ def test_the_withdraw_dialog_withdraws_its_second_say_only() -> None:
 
 
 @pytest.mark.skipif(not os.environ.get("LOOPER_TEST_DATABASE_URL"), reason="disposable PostgreSQL unavailable")
-def test_the_fake_withdraw_dialog_passes(tmp_path: Path) -> None:
+@pytest.mark.parametrize("send_delay", [0, 1])
+def test_the_fake_withdraw_dialog_passes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, send_delay: int) -> None:
     from evals.prompt_regression import dialogs
 
+    post = dialogs.Api.post
+
+    def delayed_send(api: Any, path: str, body: Any) -> Any:
+        answer = post(api, path, body)
+        if path == "/api/v1/operator_chat/send" and body.get("text") == dialogs.WITHDRAWN_ASK:
+            # The warmed Manager can prepare this turn before the send response reaches the eval client.
+            time.sleep(send_delay)
+        return answer
+
+    monkeypatch.setattr(dialogs.Api, "post", delayed_send)
     result, _ = dialogs.run(mode="fake", dialogs=dialogs.select(["withdraw_then_continue"]),
                             admin_url=os.environ["LOOPER_TEST_DATABASE_URL"], out_dir=tmp_path, timeout=30)
     assert result["aborted"] is None, result

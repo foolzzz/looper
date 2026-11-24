@@ -93,6 +93,15 @@ class EvalError(RuntimeError):
     """The eval could not run (no database, the server did not start, an API call failed)."""
 
 
+class ApiError(EvalError):
+    """An HTTP refusal with its status and parsed response body preserved for callers."""
+
+    def __init__(self, message: str, *, status: int, body: Any) -> None:
+        super().__init__(message)
+        self.status = status
+        self.body = body
+
+
 class TaskError(EvalError):
     """A task the harness could not follow to its end; it was cancelled, and it had cost ``cost_usd``."""
 
@@ -241,8 +250,13 @@ class Api:
             with urllib.request.urlopen(request, timeout=self.timeout) as response:
                 return json.loads(response.read() or b"null")
         except urllib.error.HTTPError as exc:
-            detail = exc.read().decode("utf-8", errors="replace")[:300]
-            raise EvalError(f"{method} {path} answered {exc.code}: {detail}") from None
+            detail = exc.read().decode("utf-8", errors="replace")
+            try:
+                error_body = json.loads(detail)
+            except json.JSONDecodeError:
+                error_body = None
+            raise ApiError(f"{method} {path} answered {exc.code}: {detail[:300]}",
+                           status=exc.code, body=error_body) from None
 
     def get(self, path: str, **query: Any) -> Any:
         return self.request("GET", path, **query)
@@ -451,7 +465,8 @@ def running_server(*, database_url: str, runtime_root: Path, bin_dir: Path, log_
     manager_dir = runtime_root / "manager"
     manager_dir.mkdir(parents=True, exist_ok=True)
     ops = ops_config.OpsConfig(runtime_root=runtime_root, path=runtime_root / ops_config.FILE,
-                               database_url=database_url, operator_notes_root=str(notes_root) if notes_root else "",
+                               database_url=database_url, host="127.0.0.1", port=port,
+                               operator_notes_root=str(notes_root) if notes_root else "",
                                projects_root=str(projects_root) if projects_root is not None else "",
                                pi_runtime=pi_runtime, dsh_runtime=dsh_runtime,
                                keeper_mode=ops_config.KeeperMode(keeper_mode))

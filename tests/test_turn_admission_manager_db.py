@@ -311,3 +311,72 @@ for line in sys.stdin:
         await bus.shutdown()
 
     run_db(run, monkeypatch, timeout=45)
+
+
+def test_quota_probe_exception_stays_stoppable_until_classified(monkeypatch, tmp_path):
+    """A probe that raises after the quota diagnostic stays registered until the failure is classified."""
+    from looper.agents.claude_cli import ResidentClaude
+    from fake_claude import fake_claude
+
+    _env(monkeypatch)
+    counter = tmp_path / "claude-turns"
+    body = "import json,sys,time\nfrom pathlib import Path\ncounter=Path(" + repr(str(counter)) + ")\n" + r"""
+for line in sys.stdin:
+    turn = int(counter.read_text()) + 1 if counter.exists() else 1
+    counter.write_text(str(turn))
+    print(json.dumps(dict(type="system", subtype="init", session_id="claude-quota-probe")), flush=True)
+    print(json.dumps(dict(type="assistant", error="rate_limit", message=dict(role="assistant",
+        content=[dict(type="text", text="Synthetic quota diagnostic.")]))), flush=True)
+    time.sleep(30)
+"""
+    binary = fake_claude(tmp_path / "claude-stand-in", body)
+    original = ResidentClaude.run_turn
+
+    async def failing_run(self, text, on_event, **kwargs):
+        async def failing(event):
+            await on_event(event)
+            if event.get("type") == "assistant" and event.get("error") == "rate_limit":
+                raise RuntimeError("quota probe reader failed after the diagnostic")
+        return await original(self, text, failing, **kwargs)
+
+    monkeypatch.setattr(ResidentClaude, "run_turn", failing_run)
+
+    async def run(pool):
+        c = _controller(monkeypatch)
+        provider = await pool.fetchval("SELECT model.provider_id FROM agent_profiles profile "
+            "JOIN llm_models model ON model.id=profile.model_id WHERE profile.id='agent-claude-code-opus'")
+        await pool.execute("INSERT INTO system_settings (key,value) VALUES ('engine.failure_typing','record')")
+        await c.transition(provider, admission.QuotaFailure(None, None))
+        bus = MessageBus(runtime_root=tmp_path)
+        manager = ManagerAgent(config=ManagerConfig(work_dir=tmp_path, claude_bin=binary), runtime_root=tmp_path)
+        manager._bus = bus
+        user = _message("Stay stoppable if the probe reader fails.")
+        async with manager_endpoint(manager, bus, SimpleNamespace(has_planner=lambda _: False), tmp_path):
+            await bus.start()
+            await manager.start(bus)
+            await bus.publish(user)
+            try:
+                await until(lambda: len(c.waiters) == 1, "CLI user waits frozen")
+                c.now = lambda: datetime.now(timezone.utc) + timedelta(minutes=6)
+                await c.wake()
+                await until(lambda: counter.exists(), "quota probe invoked the resident subprocess")
+                await until(lambda: len(c.waiters) == 1 and not c.running, "exception probe requeued")
+                found = manager._turns.find(user.message_id)
+                assert found is not None and found.admission_waiting and found.live
+                queue = bus.get_queue(WEB.agent_id)
+                assert not any("Synthetic quota diagnostic." in str(e.payload) for e in queue._queue)
+                assert not any(e.message_type is MessageType.AGENT_REPLY for e in queue._queue)
+                assert user.message_id in [e.message_id for e in bus.journal.undelivered()]
+                assert [tuple(row) for row in await pool.fetch("SELECT status,failure_class FROM llm_records")] == [
+                    ("failed", "quota")]
+                result = await manager.stop_turn(user.message_id, via="test")
+                assert result.value == "stopping"
+                await until(lambda: any("已停止" in str(e.payload.get("text"))
+                            for e in queue._queue if e.message_type is MessageType.AGENT_REPLY),
+                            "stopped probe replies")
+            finally:
+                await manager.stop()
+                await c.stop()
+        await bus.shutdown()
+
+    run_db(run, monkeypatch, timeout=45)

@@ -1,5 +1,5 @@
 """Shared loopback API Manager and registry setup for integration tests."""
-from contextlib import asynccontextmanager
+from contextlib import AsyncExitStack, asynccontextmanager
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -75,8 +75,11 @@ async def _manager(pool: Any, root: Path, monkeypatch: pytest.MonkeyPatch,
         manager = ManagerAgent(config=ManagerConfig(work_dir=root), runtime_root=root)
         manager._bus = bus
         try:
-            async with manager_endpoint(manager, bus, SimpleNamespace(has_planner=lambda _: False), root) as ops:
-                yield SimpleNamespace(manager=manager, model=model, bus=bus, ops=ops)
+            async with AsyncExitStack() as endpoint:
+                ops = await endpoint.enter_async_context(
+                    manager_endpoint(manager, bus, SimpleNamespace(has_planner=lambda _: False), root))
+                yield SimpleNamespace(manager=manager, model=model, bus=bus, ops=ops,
+                                      stop_endpoint=endpoint.aclose)
         finally:
             await manager.stop()
             await bus.shutdown()

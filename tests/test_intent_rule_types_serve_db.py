@@ -1,4 +1,4 @@
-"""One real looper serve path for the MR review type: list, a refused enable, then classification."""
+"""One real looper serve path for the MR review type: list, explicit rule activation, then classification."""
 from __future__ import annotations
 
 import asyncio
@@ -165,12 +165,12 @@ sys.exit(main(['serve','--host','127.0.0.1','--port',sys.argv[1],'--runtime-root
             with pytest.raises(runner.EvalError, match="404") as archived:
                 api.post("/api/v1/intent_types/archive", {"key": "mr_review"})
             assert "unknown intent type" in str(archived.value)
-            with pytest.raises(runner.EvalError, match="409") as unavailable:
-                api.post("/api/v1/intent_rules/preview", {"expected_generation": 0,
-                    "change": {"kind": "settings", "enabled": True}})
-            assert "runtime_ready" in str(unavailable.value)
+            assert post("intent_rules/settings_get", {})["runtime_ready"] is True
+            activation = post("intent_rules/preview", {"expected_generation": 0,
+                "change": {"kind": "settings", "enabled": True}})
             assert sql("SELECT value FROM system_settings WHERE key='intents.rules.enabled'", fetch=True) == []
-            sql("INSERT INTO system_settings(key,value) VALUES('intents.rules.enabled','true')")
+            post("intent_rules/confirm", {"preview_id": activation["preview_id"],
+                "acceptance": activation["required_acceptance"]})
             shown = post("intent_types/list", {})
             assert "mr_review" in [row["key"] for row in shown["types"]]
             with pytest.raises(runner.EvalError, match="409") as builtin:
