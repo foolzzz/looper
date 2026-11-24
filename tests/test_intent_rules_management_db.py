@@ -17,7 +17,11 @@ async def change(service, conn, command, *, generation=None):
     if generation is None:
         generation = (await service.settings_get(principal=OPERATOR, db=conn))["generation"]
     preview = await service.preview(generation, command, principal=OPERATOR, db=conn)
+    from looper.agents import intent_rules_model as model
+    from looper.agents.v1_domains.intent_rules import OPERATIONS
+    model.validate_schema(preview, next(op.result for op in OPERATIONS if op.operation_id == "intent_rules.preview"))
     result = await service.confirm(preview["preview_id"], preview["required_acceptance"], principal=OPERATOR, db=conn)
+    model.validate_schema(result, next(op.result for op in OPERATIONS if op.operation_id == "intent_rules.confirm"))
     return result, preview
 
 
@@ -88,18 +92,32 @@ def test_rule_changes_require_operator_bound_preview_and_fresh_versions(monkeypa
     run_db(check, monkeypatch)
 
 
-def test_rule_management_audit_failure_rolls_back(monkeypatch):
+@pytest.mark.parametrize("kind", ["rule_create", "settings", "project_cap", "template_contract"])
+def test_rule_management_audit_failure_rolls_back(monkeypatch, kind):
     async def check(pool):
         from looper.agents import intent_rules as service
         from looper.agents.api_v1 import OPERATOR
         async with pool.acquire() as conn:
-            preview = await service.preview(0, {"kind": "rule_create", "rule": rule()}, principal=OPERATOR, db=conn)
+            await conn.execute("INSERT INTO projects(id,name) VALUES('audit-project','Audit project')")
+            await conn.execute("INSERT INTO workflows(key,name,definition) VALUES('audit-review','Audit review','{}')")
+            command = {"rule_create": {"kind": "rule_create", "rule": rule()},
+                "settings": {"kind": "settings", "enabled": False},
+                "project_cap": {"kind": "project_cap", "project_id": "audit-project", "expected_config_version": 0,
+                    "auto_task_daily_cap": 50},
+                "template_contract": {"kind": "template_contract", "workflow_key": "audit-review",
+                    "expected_contract_version": 0, "contract": {"input_kind": "verified_mr", "comment_mode": "direct",
+                        "approve_requires_confirmation": True, "withdraw_requires_confirmation": True,
+                        "allow_merge": False, "allow_reviewer_changes": False}}}[kind]
+            preview = await service.preview(0, command, principal=OPERATOR, db=conn)
             await conn.execute("CREATE FUNCTION reject_rule_audit() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'audit unavailable'; END $$; CREATE TRIGGER reject_audit BEFORE INSERT ON intent_rule_config_audit FOR EACH ROW EXECUTE FUNCTION reject_rule_audit()")
             with pytest.raises(Exception, match="audit unavailable"):
                 await service.confirm(preview["preview_id"], [], principal=OPERATOR, db=conn)
             for table in ("intent_rules", "intent_rule_versions", "intent_rule_config", "intent_rule_config_audit"):
                 assert await conn.fetchval(f"SELECT count(*) FROM {table}") == 0
             assert await conn.fetchval("SELECT consumed_at FROM intent_rule_previews") is None
+            assert await conn.fetchval("SELECT count(*) FROM intent_rule_template_contracts") == 0
+            assert tuple(await conn.fetchrow("SELECT auto_task_daily_cap,auto_task_config_version FROM projects")) == (None, 0)
+            assert await conn.fetchval("SELECT value FROM system_settings WHERE key='intents.rules.enabled'") is None
     run_db(check, monkeypatch)
 
 
@@ -116,6 +134,8 @@ def test_project_auto_cap_has_one_versioned_owner(monkeypatch):
             assert "auto_task_daily_cap" not in old and "auto_task_config_version" not in old
             command = {"kind": "project_cap", "project_id": "review", "expected_config_version": 0, "auto_task_daily_cap": 50}
             preview = await service.preview(0, command, principal=OPERATOR, db=conn)
+            assert preview["diff"]["reference_before"]["auto_task_daily_cap"] is None
+            assert preview["diff"]["reference_after"]["auto_task_daily_cap"] == 50
             await conn.execute("UPDATE projects SET auto_task_config_version=1 WHERE id='review'")
             with pytest.raises(OpError) as conflict:
                 await service.confirm(preview["preview_id"], [], principal=OPERATOR, db=conn)
@@ -123,6 +143,13 @@ def test_project_auto_cap_has_one_versioned_owner(monkeypatch):
             await change(service, conn, {**command, "expected_config_version": 1})
             view = await service.list_rules(principal=OPERATOR, db=conn)
             assert view["projects"] == [{"id": "review", "name": "Review", "auto_task_daily_cap": 50, "config_version": 2}]
+            from datetime import datetime, timezone
+            from looper.agents import chat_settings
+            monkeypatch.setattr(chat_settings, "_timezone", "Pacific/Honolulu")
+            monkeypatch.setattr(service, "_now", lambda: datetime(2026, 11, 23, 5, tzinfo=timezone.utc))
+            stats = await service.hit_stats(principal=OPERATOR, db=conn)
+            assert stats["projects"] == [{"project_id": "review", "local_day": "2026-11-22",
+                "timezone": "Pacific/Honolulu", "used": None, "cap": 50}]
             with pytest.raises(ValueError):
                 await projects.update_project("review", execution={"auto_task_daily_cap": 99}, pool=conn)
     run_db(check, monkeypatch)
@@ -149,7 +176,6 @@ def test_rule_enable_preconditions_and_external_action_acceptance(monkeypatch):
 
 def test_every_rule_operation_rejects_client_and_declares_inside(monkeypatch, tmp_path):
     async def check(pool):
-        from looper.agents import api_v1
         from looper.agents.action_levels import ActionLevel
         from looper.agents.v1_domains.intent_rules import OPERATIONS
         async with v1_api(tmp_path, pool) as call:
@@ -186,7 +212,9 @@ def test_template_definition_and_source_authorization_are_fresh_references(monke
             command = {"kind": "template_contract", "workflow_key": "review", "expected_contract_version": 0,
                        "contract": contract}
             preview = await service.preview(0, command, principal=OPERATOR, db=conn)
-            await conn.execute("UPDATE workflows SET definition='{\"requirement\":\"changed\"}' WHERE key='review'")
+            assert preview["diff"]["reference_before"] is None
+            assert preview["diff"]["reference_after"]["comment_mode"] == "direct"
+            await conn.execute("UPDATE workflows SET definition='{\"planner_instructions\":\"changed\"}' WHERE key='review'")
             with pytest.raises(OpError) as refused:
                 await service.confirm(preview["preview_id"], preview["required_acceptance"], principal=OPERATOR, db=conn)
             assert refused.value.code.value == "conflict"
@@ -204,7 +232,7 @@ def test_template_definition_and_source_authorization_are_fresh_references(monke
     {"kind": "rule_create", "rule": rule(template_key="missing")},
     {"kind": "rule_create", "rule": rule(scope={"kind": "named_chats", "chats": [{"source_id": "missing", "chat_id": "missing"}]})},
     {"kind": "rule_create", "rule": rule(intent_type="mr_review", action="create_task", project_id="missing", template_key="missing", conditions=[{"kind": "internal_mr_open", "allowed_domains": ["review.example.invalid"]}])},
-    {"kind": "rule_reorder", "ids": []},
+    {"kind": "rule_reorder", "ids": ["00112233-4455-4677-8899-aabbccddeeff"]},
     {"kind": "settings", "runtime_ready": True},
 ])
 def test_rule_schema_rejects_unsafe_or_unresolved_configuration(monkeypatch, invalid):
@@ -267,11 +295,11 @@ def test_discovery_targets_and_chat_references_are_bound_to_current_authorizatio
         await stream.source(pool)
         await stream.lark_targets(pool)
         await stream.chat(pool, "oc_rule_review")
-        await pool.execute("UPDATE channel_configs SET config=config || jsonb_build_object('operator_sender_id',$1::text) WHERE channel_id='channel-lark'", stream.DM)
+        await pool.execute("UPDATE channel_configs SET enabled=true,config=config || jsonb_build_object('operator_sender_id',$1::text) WHERE channel_id='channel-lark'", stream.DM)
         command = {"kind": "rule_create", "rule": rule(scope={"kind": "named_chats", "chats": [
             {"source_id": stream.SOURCE, "chat_id": "oc_rule_review"}]})}
         preview = await service.preview(0, command, principal=OPERATOR, db=pool)
-        await pool.execute("UPDATE source_chats SET extraction='excluded' WHERE source_id=$1 AND chat_id='oc_rule_review'", stream.SOURCE)
+        await pool.execute("UPDATE source_chats SET extraction='excluded',extraction_excluded_at=now() WHERE source_id=$1 AND chat_id='oc_rule_review'", stream.SOURCE)
         with pytest.raises(OpError) as conflict:
             await service.confirm(preview["preview_id"], [], principal=OPERATOR, db=pool)
         assert conflict.value.code.value == "conflict"
@@ -282,8 +310,135 @@ def test_discovery_targets_and_chat_references_are_bound_to_current_authorizatio
         assert invalid.value.code.value == "invalid"
         discovery["private_target"]["chat"] = stream.DM
         preview = await service.preview(0, {"kind": "settings", "discovery_sources": [discovery]}, principal=OPERATOR, db=pool)
-        await pool.execute("UPDATE channel_configs SET config=config || '{\"operator_sender_id\":\"different-operator\"}' WHERE channel_id='channel-lark'")
+        await pool.execute("UPDATE channel_configs SET enabled=true,config=config || '{\"operator_sender_id\":\"different-operator\"}' WHERE channel_id='channel-lark'")
         with pytest.raises(OpError) as conflict:
             await service.confirm(preview["preview_id"], preview["required_acceptance"], principal=OPERATOR, db=pool)
         assert conflict.value.code.value == "conflict"
+    run_db(check, monkeypatch)
+
+
+def test_group_id_cannot_be_declared_as_discovery_operator_private_target(monkeypatch):
+    async def check(pool):
+        from looper.agents import intent_rules as service
+        from looper.agents.api_v1 import OPERATOR
+        from looper.agents.ops import OpError
+        from tests import subscription_support as stream
+        await stream.lark_targets(pool)
+        await pool.execute("UPDATE channel_configs SET enabled=true,config=config || '{\"operator_sender_id\":\"oc_group\"}' WHERE channel_id='channel-lark'")
+        source = {"id": "source-one", "system_id": "review", "enabled": True,
+            "private_target": {"channel_id": "channel-lark", "chat": "oc_group"}, "migration_state": "old_disabled"}
+        with pytest.raises(OpError) as invalid:
+            await service.preview(0, {"kind": "settings", "discovery_sources": [source]}, principal=OPERATOR, db=pool)
+        assert invalid.value.code.value == "invalid"
+    run_db(check, monkeypatch)
+
+
+def test_unknown_workflow_definition_cannot_be_attested_as_verified_input(monkeypatch):
+    async def check(pool):
+        from looper.agents import intent_rules as service
+        from looper.agents.api_v1 import OPERATOR
+        from looper.agents.ops import OpError
+        await pool.execute("INSERT INTO workflows(key,name,definition) VALUES('bad-review','Bad review','{\"inputs\":\"arbitrary expression\"}')")
+        contract = {"input_kind": "verified_mr", "comment_mode": "direct", "approve_requires_confirmation": True,
+                    "withdraw_requires_confirmation": True, "allow_merge": False, "allow_reviewer_changes": False}
+        with pytest.raises(OpError) as invalid:
+            await service.preview(0, {"kind": "template_contract", "workflow_key": "bad-review",
+                "expected_contract_version": 0, "contract": contract}, principal=OPERATOR, db=pool)
+        assert invalid.value.code.value == "invalid"
+    run_db(check, monkeypatch)
+
+
+def test_prepared_mr_rules_share_project_cap_and_require_current_external_action_acceptance(monkeypatch):
+    async def check(pool):
+        from looper.agents import extraction, intent_rules as service, leads_model
+        from looper.agents.api_v1 import OPERATOR
+        from looper.agents.ops import OpError
+        from tests import subscription_support as stream
+        await stream.source(pool)
+        await stream.chat(pool, "oc_review_authorized")
+        await stream.lark_targets(pool)
+        await pool.execute("UPDATE channel_configs SET enabled=true,config=config || jsonb_build_object('operator_sender_id',$1::text) WHERE channel_id='channel-lark'", stream.DM)
+        await pool.execute("INSERT INTO projects(id,name,work_dir) VALUES('review','Review','/synthetic/review')")
+        await pool.execute("INSERT INTO workflows(key,name,definition) VALUES('review','Review','{}')")
+        await pool.execute("INSERT INTO system_settings(key,value) VALUES('intents.enabled','true'),('delivery.enabled','true')")
+        await change(service, pool, {"kind": "project_cap", "project_id": "review", "expected_config_version": 0,
+                                     "auto_task_daily_cap": 50})
+        await change(service, pool, {"kind": "template_contract", "workflow_key": "review", "expected_contract_version": 0,
+            "contract": {"input_kind": "verified_mr", "comment_mode": "direct", "approve_requires_confirmation": True,
+                         "withdraw_requires_confirmation": True, "allow_merge": False, "allow_reviewer_changes": False}})
+        base = [{"kind": "internal_mr_open", "allowed_domains": ["review.example.invalid"]},
+                {"kind": "mr_repository_in_allowlist", "repository_ids": ["repository-one"]}]
+        for position, condition in enumerate(("operator_is_reviewer", "addressed_to_operator", None), 1):
+            scope = {"kind": "all"} if condition else {"kind": "named_chats", "chats": [
+                {"source_id": stream.SOURCE, "chat_id": "oc_review_authorized"}]}
+            await change(service, pool, {"kind": "rule_create", "rule": rule(position=position, intent_type="mr_review",
+                action="create_task", project_id="review", template_key="review", scope=scope,
+                conditions=base + ([{"kind": condition}] if condition else []))})
+        assert "mr_review" not in [row["key"] for row in await extraction.intent_types(pool)]
+        view = await service.list_rules(principal=OPERATOR, db=pool)
+        assert [row["position"] for row in view["rules"]] == [1, 2, 3]
+        assert view["projects"][0]["auto_task_daily_cap"] == 50
+        assert {row["project_id"] for row in view["rules"]} == {"review"}
+        assert next(row for row in view["configurable_types"] if row["key"] == "mr_review")["available_when_rules_on"]
+        assert all("guidance" not in row for row in view["configurable_types"])
+        monkeypatch.setattr(leads_model, "RULE_CLASSIFICATION_AVAILABLE", True)
+        source = {"id": "discovery", "system_id": "review", "enabled": True,
+            "private_target": {"channel_id": "channel-lark", "chat": stream.DM}, "migration_state": "unconfigured"}
+        with pytest.raises(OpError, match="discovery_migrated"):
+            await service.preview(5, {"kind": "settings", "enabled": True, "discovery_sources": [source]},
+                principal=OPERATOR, db=pool, executor_available=True)
+        # Seven more enabled custom types would leave no room for the prepared built-in.
+        for n in range(7):
+            await pool.execute("INSERT INTO intent_types(key,version) VALUES($1,1)", f"capacity_{n}")
+            await pool.execute("INSERT INTO intent_type_versions(type_key,version,name,guidance,priority,edited_via) "
+                               "VALUES($1,1,'Capacity','Synthetic request','normal','api')", f"capacity_{n}")
+        with pytest.raises(OpError, match="type_capacity"):
+            await service.preview(5, {"kind": "settings", "enabled": True},
+                principal=OPERATOR, db=pool, executor_available=True)
+        await pool.execute("UPDATE intent_types SET enabled=false WHERE key LIKE 'capacity_%'")
+        preview = await service.preview(5, {"kind": "settings", "enabled": True},
+            principal=OPERATOR, db=pool, executor_available=True)
+        assert "external_comments" in preview["required_acceptance"]
+        assert preview["impact"]["ordered_rules"] == view["rules"]
+        assert preview["impact"]["projects"] == [{"id": "review", "auto_task_daily_cap": 50}]
+        assert preview["impact"]["verification"] == "verification_unavailable"
+        with pytest.raises(OpError):
+            await service.confirm(preview["preview_id"], ["reviewer_can_be_added"],
+                principal=OPERATOR, db=pool, executor_available=True)
+        result = await service.confirm(preview["preview_id"], preview["required_acceptance"],
+            principal=OPERATOR, db=pool, executor_available=True)
+        assert result["generation"] == 6 and result["settings"]["enabled"] is True
+        # Missing objects must never prevent the operator from stopping automatic admission.
+        await pool.execute("DELETE FROM workflows WHERE key='review'")
+        stopped = await service.preview(6, {"kind": "settings", "enabled": False}, principal=OPERATOR, db=pool)
+        result = await service.confirm(stopped["preview_id"], [], principal=OPERATOR, db=pool)
+        assert result["settings"]["enabled"] is False
+    run_db(check, monkeypatch)
+
+
+def test_generic_configuration_surfaces_cannot_write_or_export_rule_settings(monkeypatch, tmp_path):
+    async def check(pool):
+        import json
+        from looper.agents import config_transfer, intent_rules as service
+        await pool.execute("INSERT INTO projects(id,name) VALUES('review','Review')")
+        await change(service, pool, {"kind": "project_cap", "project_id": "review", "expected_config_version": 0,
+                                     "auto_task_daily_cap": 50})
+        async with v1_api(tmp_path, pool) as call:
+            for action, body in (("project_admin.update", {"project_id": "review", "fields": {"auto_task_daily_cap": 99}}),
+                    ("/api/v1/ops/settings/set", {"values": {"intents.rules.enabled": True}})):
+                status, answer = await call(action, body)
+                assert status == 400 and answer["error"]["code"] == "invalid"
+        async with pool.acquire() as conn, conn.transaction():
+            exported = json.loads("".join([part async for part in config_transfer.export_chunks(
+                conn, include_projects=True, include_secrets=False)]))
+            serialized = json.dumps(exported)
+            assert "auto_task_daily_cap" not in serialized and "auto_task_config_version" not in serialized
+            assert "intents.rules.enabled" not in serialized and "intent_rule_previews" not in serialized
+            await config_transfer.import_config(conn, {"format": "looper-config/v4", "settings": {
+                "system": {"intents.rules.enabled": "true", "intent_rule_config.adapter": {"executable": "bad"}}},
+                "projects": [{"name": "Review", "auto_task_daily_cap": 99,
+                              "execution": {"auto_task_daily_cap": 99}}]}, apply=True)
+        assert tuple(await pool.fetchrow("SELECT auto_task_daily_cap,auto_task_config_version FROM projects")) == (50, 1)
+        assert await pool.fetchval("SELECT value FROM system_settings WHERE key='intents.rules.enabled'") is None
+        assert await pool.fetchval("SELECT generation FROM intent_rule_config") == 1
     run_db(check, monkeypatch)

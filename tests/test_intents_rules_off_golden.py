@@ -16,16 +16,17 @@ from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock
 
+import asyncpg
 import pytest
 
-from looper.agents import (agent_settings, chat_settings, extraction, intent_push, intent_routing,
-                           intents, processor, projects, subscription_runs, subscriptions)
+from looper.agents import (chat_settings, extraction, intent_push, intent_routing,
+                           intents, projects, subscription_runs, subscriptions)
 from looper.agents.channels.base import PostOutcome, PostReceipt
 from looper.agents.message import AgentAddress, MessageEnvelope, MessageType, manager_address
 from looper.agents.ops import service
 from looper.agents.serve import seed_role_configs
 from looper.agents.tiers import manager
-from looper.db import intents as intent_store, schedules as db_schedules, subscriptions as db_subs
+from looper.db import schedules as db_schedules, subscriptions as db_subs
 from tests.db_support import DSN, run_db
 from tests.leads_support import intent
 from tests.model_call_support import assert_golden, frozen_columns, golden_cli, read_launches, table_rows
@@ -133,6 +134,28 @@ def test_rules_off_path_matches_fixed_main_per_item(rule_setting: str | None, gr
         await db_subs.update(pool, "schedule-golden", {"target_confirmed_at": _NOW, "target_confirmed_version": version})
         schedule = await db_schedules.get_schedule("schedule-golden")
         confirmation = await subscriptions.confirmation_text(schedule, now=_NOW, action="确认")
+        rules_installed = await pool.fetchval("SELECT to_regclass('intent_rules') IS NOT NULL")
+        if rules_installed:
+            adapter = tmp_path / "unused-adapter"
+            adapter.write_text("#!/usr/bin/env python3\nfrom pathlib import Path\nPath(__file__).with_suffix('.called').touch()\n")
+            adapter.chmod(0o755)
+            await pool.execute("INSERT INTO intent_rule_config(id,generation,adapter) VALUES(true,1,$1::jsonb)",
+                json.dumps({"system_id": "synthetic", "executable": str(tmp_path / "unused-adapter"), "args": [],
+                    "allowed_domains": ["review.example.invalid"], "route": [], "operator_id": "synthetic-operator",
+                    "credential_env": {}, "env": {}}))
+            await pool.execute("INSERT INTO intent_rules(id,version,position) "
+                "VALUES('00000000-0000-0000-0000-000000000001',1,1)")
+            await pool.execute("INSERT INTO intent_rule_versions(rule_id,version,enabled,position,intent_type,scope,"
+                "conditions,action,edited_by) VALUES('00000000-0000-0000-0000-000000000001',1,true,1,'any',"
+                "'{\"kind\":\"all\"}','[]','record_only','synthetic-operator')")
+        guarded_methods = {}
+        for name in ("fetch", "fetchrow", "fetchval", "execute", "executemany"):
+            original = getattr(asyncpg.Connection, name)
+            guarded_methods[name] = original
+            async def guarded(conn, query, *args, _original=original, **kwargs):
+                assert "intent_rule" not in query.lower(), "the off runtime accessed rule storage"
+                return await _original(conn, query, *args, **kwargs)
+            monkeypatch.setattr(asyncpg.Connection, name, guarded)
         reader = PlanReader(pool)
         window = await extraction.plan(reader, schedule, now=_NOW, own_apps=())
         assert window is not None and window["rows"]
@@ -156,7 +179,7 @@ def test_rules_off_path_matches_fixed_main_per_item(rule_setting: str | None, gr
         push = intent_push.IntentPushService(channels, clock=lambda: _NOW)
         await push.run_once()
         assert len(channels.posts) == 1
-        merged = await intent(pool, [1], schedule_id="schedule-golden", state="merged", merged_into=iid, created_at=_NOW)
+        await intent(pool, [1], schedule_id="schedule-golden", state="merged", merged_into=iid, created_at=_NOW)
         await push.run_once()
         assert len(channels.posts) == 2
         await pool.execute("UPDATE intents SET project_id='project-golden' WHERE id=$1", iid)
@@ -174,6 +197,8 @@ def test_rules_off_path_matches_fixed_main_per_item(rule_setting: str | None, gr
         assert repeated is not None and repeated.action is not None
         repeated_reply = await repeated.action()
         await push.run_once()
+        for name, original in guarded_methods.items():
+            monkeypatch.setattr(asyncpg.Connection, name, original)
         tables = await table_rows(pool, ("llm_records", "llm_record_events", "schedules", "schedule_runs", "subscriptions",
             "subscription_runs", "intents", "intent_sources", "intent_posts", "tasks"))
         payload = {"window": window, "window_queries": reader.queries, "confirmation": confirmation, "config_version": version, "launches": read_launches(tmp_path),
@@ -197,6 +222,9 @@ def test_rules_off_path_matches_fixed_main_per_item(rule_setting: str | None, gr
         if await pool.fetchval("SELECT EXISTS(SELECT 1 FROM information_schema.columns WHERE table_schema=current_schema() "
                                "AND table_name='projects' AND column_name='auto_task_daily_cap')"):
             assert [tuple(row) for row in await pool.fetch("SELECT auto_task_daily_cap,auto_task_config_version FROM projects")] == [(None, 0)]
+            assert not (tmp_path / "unused-adapter.called").exists()
+            assert await pool.fetchval("SELECT generation FROM intent_rule_config") == 1
+            assert await pool.fetchval("SELECT count(*) FROM intent_rules") == 1
             for table in ("intent_rule_hits", "intent_rule_condition_results", "intent_rule_hit_sources", "intent_rule_config_audit"):
                 assert await pool.fetchval(f"SELECT count(*) FROM {table}") == 0
 

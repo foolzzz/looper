@@ -56,6 +56,8 @@ def test_intent_rule_migration_fresh_upgrade_and_reentry(monkeypatch):
     "ALTER TABLE projects DROP COLUMN auto_task_daily_cap",
     "ALTER TABLE projects DROP CONSTRAINT projects_auto_task_config_version_check",
     "ALTER TABLE intent_rules DROP CONSTRAINT intent_rules_position_key",
+    "ALTER TABLE intent_rule_versions DROP CONSTRAINT intent_rule_versions_pkey",
+    "DROP INDEX idx_intent_rule_hits_created",
     "DROP TRIGGER intent_rule_hit_sources_drop ON intent_rule_hit_sources",
 ])
 def test_rule_migration_detects_missing_objects_even_with_a_marker(damage):

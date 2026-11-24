@@ -28,7 +28,7 @@ def adapter(**changes):
 @pytest.mark.parametrize("changes", [
     {"unknown": True}, {"action": "merge"}, {"conditions": []}, {"intent_type": "any"},
     {"intent_type": "dev_task"}, {"project_id": None}, {"template_key": None}, {"position": 0},
-    {"version": True}, {"enabled": 1}, {"id": "fallback"},
+    {"version": True}, {"enabled": 1}, {"id": "fallback"}, {"project_id": "project\n"},
     {"scope": {"kind": "all", "chats": []}},
     {"scope": {"kind": "named_chats", "chats": []}},
     {"scope": {"kind": "named_chats", "chats": [{"source_id": "source", "chat_id": "*"}]}},
@@ -82,7 +82,8 @@ def test_fallback_is_code_owned_and_cannot_be_mutated():
 @pytest.mark.parametrize("changes", [
     {"shell": True}, {"executable": "verify --command"}, {"executable": "/bin/sh"},
     {"allowed_domains": []}, {"allowed_domains": ["review.example.invalid:443"]},
-    {"allowed_domains": ["Review.example.invalid"]}, {"operator_id": ""},
+    {"allowed_domains": ["Review.example.invalid"]}, {"allowed_domains": ["review.example.invalid\n"]},
+    {"operator_id": ""}, {"operator_id": "operator\n"},
     {"route": [{"kind": "regex", "value": ".*"}]},
     {"route": [{"kind": "literal", "value": "repos/other"}, {"kind": "id", "name": "mr_id"}]},
     {"route": [{"kind": "id", "name": "repository"}]},
@@ -90,6 +91,8 @@ def test_fallback_is_code_owned_and_cannot_be_mutated():
                {"kind": "id", "name": "mr_id"}]},
     {"credential_env": {"REVIEW_TOKEN": "raw-secret-value"}},
     {"credential_env": {"invalid-key": "secret:review-readonly"}},
+    {"credential_env": {"REVIEW_TOKEN\n": "secret:review-readonly"}},
+    {"credential_env": {"REVIEW_TOKEN": "secret:review-readonly\n"}},
     {"env": {"REVIEW_TOKEN": "raw-secret-value"}}, {"args": ["verify", None]},
 ])
 def test_adapter_configuration_is_closed_and_credentials_are_references(changes):
@@ -219,3 +222,73 @@ def test_rule_set_rejects_duplicate_identity_and_order():
     for value in ([first, first], [first, second | {"position": 1}]):
         with pytest.raises(ValueError):
             model.validate_rules(value)
+
+
+@pytest.mark.parametrize("value", [
+    {"limit": 0}, {"limit": 101}, {"before_id": 0}, {"rule_id": "fallback"},
+    {"action": "merge"}, {"limit": True}, {"unknown": "field"},
+])
+def test_hit_list_filters_are_closed_and_bounded(value):
+    with pytest.raises(ValueError):
+        model.validate_schema(value, model.HITS_LIST_REQUEST_SCHEMA)
+
+
+def test_hit_list_filter_schema_is_shared_by_management_and_transport():
+    from looper.agents.v1_domains.intent_rules import OPERATIONS
+
+    operation = next(item for item in OPERATIONS if item.operation_id == "intent_rule_hits.list")
+    assert operation.request is model.HITS_LIST_REQUEST_SCHEMA
+    assert model.validate_schema({}, model.HITS_LIST_REQUEST_SCHEMA) == {}
+    filters = {"rule_id": "00112233-4455-4677-8899-aabbccddeeff", "action": "record_only",
+               "reason": "verification_unavailable", "before_id": 50, "limit": 100}
+    assert model.validate_schema(filters, model.HITS_LIST_REQUEST_SCHEMA) == filters
+
+
+def test_preview_response_describes_each_configuration_and_impact_field():
+    from looper.agents.v1_domains.intent_rules import OPERATIONS
+
+    operation = next(item for item in OPERATIONS if item.operation_id == "intent_rules.preview")
+    config = {"generation": 0, "adapter": None, "discovery_sources": [], "activation_acceptance": None}
+    state = {"rules": [], "config": config, "enabled": False}
+    reference = {"id": "review-project", "name": "Review", "auto_task_daily_cap": 50,
+                 "auto_task_config_version": 1}
+    value = {"preview_id": "00112233-4455-4677-8899-aabbccddeeff", "expires_at": "2026-01-01T00:10:00Z",
+             "generation": 0, "diff": {"kind": "project_cap", "before": state, "after": state,
+                                       "reference_after": reference},
+             "impact": {"ordered_rules": [], "projects": [{"id": "review-project", "auto_task_daily_cap": 50}],
+                        "templates": [], "verification": "verification_unavailable", "warnings": []},
+             "required_acceptance": [], "reference_fingerprints": {
+                 **dict.fromkeys(("projects", "templates", "contracts", "types", "chats", "sources", "channels",
+                                  "dependencies"), "a" * 64), "runtime_ready": False}}
+    assert model.validate_schema(value, operation.result) == value
+    for path in (("diff",), ("diff", "before"), ("diff", "after", "config"), ("diff", "reference_after"),
+                 ("impact",), ("reference_fingerprints",)):
+        invalid = deepcopy(value)
+        target = invalid
+        for part in path:
+            target = target[part]
+        target["unexpected"] = "value"
+        with pytest.raises(ValueError):
+            model.validate_schema(invalid, operation.result)
+    invalid = deepcopy(value)
+    invalid["diff"]["kind"] = "execute"
+    with pytest.raises(ValueError):
+        model.validate_schema(invalid, operation.result)
+    invalid = deepcopy(value)
+    invalid["reference_fingerprints"]["projects"] = "moving-reference"
+    with pytest.raises(ValueError):
+        model.validate_schema(invalid, operation.result)
+
+
+@pytest.mark.parametrize("value", [1.0, 2**31])
+def test_rule_positions_and_versions_are_database_integers(value):
+    for field in ("position", "version"):
+        with pytest.raises(ValueError):
+            model.validate_rule(rule(**{field: value}))
+
+
+@pytest.mark.parametrize("value", [50.0, 2**31])
+def test_project_cap_rejects_non_integer_or_overflow_before_preview(value):
+    with pytest.raises(ValueError):
+        model.validate_change({"kind": "project_cap", "project_id": "review", "expected_config_version": 0,
+                               "auto_task_daily_cap": value})
