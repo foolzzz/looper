@@ -24,6 +24,27 @@ export interface Binding {
   manager_name: string;
   manager_enabled: boolean;
   manager_deleted: boolean;
+  /** Stored group default; null is the system default `chat_only`. */
+  default_scope: string | null;
+  effective_default_scope: string;
+  legacy_allowed: boolean;
+  suggested_scope: string | null;
+}
+
+export interface CapabilitySet {
+  id: string;
+  name: string;
+  builtin: boolean;
+  current_version: number;
+  items: unknown[];
+}
+
+export interface ScopeOverride {
+  principal_id: string;
+  principal_kind: "person" | "bot";
+  sender_ids: string[];
+  scope_id: string;
+  created_at: string;
 }
 
 export interface UnboundChat {
@@ -100,5 +121,45 @@ export async function setBoundChatsOnly(channelId: string, boundChatsOnly: boole
   const result = await callV1<{ channel_id: string; bound_chats_only: boolean }>("/api/v1/channel_chats/set_policy",
     { channel_id: channelId, bound_chats_only: boundChatsOnly });
   if ("status" in result) throw new V1Error(202, "needs_confirmation", result.impact);
+  return result;
+}
+
+function address(binding: Pick<Binding, "channel_id" | "chat_id">) {
+  return { channel_id: binding.channel_id, chat_id: binding.chat_id };
+}
+
+export async function listCapabilitySets(signal?: AbortSignal): Promise<CapabilitySet[]> {
+  const result = await callV1<{ sets: CapabilitySet[] }>("/api/v1/capability_sets/list", {}, { signal });
+  if ("status" in result) throw new V1Error(202, "needs_confirmation", result.impact);
+  return result.sets;
+}
+
+/** Keeps the binding's current Manager. Null scope is the system default. */
+export async function putDefaultScope(binding: Binding, scope: string | null, stopNow: boolean): Promise<{ binding: Binding }> {
+  const result = await callV1<{ binding: Binding }>("/api/v1/manager_chat_bindings/put",
+    { ...address(binding), manager_id: binding.manager_id, default_scope: scope, stop_now: stopNow });
+  if ("status" in result) throw new ChatBindingConfirmation(result);
+  return result;
+}
+
+export async function listOverrides(binding: Pick<Binding, "channel_id" | "chat_id">, signal?: AbortSignal): Promise<ScopeOverride[]> {
+  const result = await callV1<{ overrides: ScopeOverride[] }>("/api/v1/chat_scope_overrides/list", address(binding), { signal });
+  if ("status" in result) throw new V1Error(202, "needs_confirmation", result.impact);
+  return result.overrides;
+}
+
+export async function putOverride(binding: Pick<Binding, "channel_id" | "chat_id">, body: {
+  principal_kind: "person" | "bot"; sender_ids: string[]; scope_id: string; stop_now: boolean;
+}): Promise<ScopeOverride> {
+  const result = await callV1<ScopeOverride>("/api/v1/chat_scope_overrides/put", { ...address(binding), ...body });
+  if ("status" in result) throw new ChatBindingConfirmation(result);
+  return result;
+}
+
+export async function deleteOverride(binding: Pick<Binding, "channel_id" | "chat_id">, principalId: string,
+  stopNow: boolean): Promise<{ deleted: boolean }> {
+  const result = await callV1<{ deleted: boolean }>("/api/v1/chat_scope_overrides/delete",
+    { ...address(binding), principal_id: principalId, stop_now: stopNow });
+  if ("status" in result) throw new ChatBindingConfirmation(result);
   return result;
 }

@@ -3,8 +3,9 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { FormFooter, LABEL, Row, SELECT } from "@/components/registry-ui";
 import type { ManagerInfo } from "@/lib/api";
-import { ChatBindingConfirmation, confirmChatBinding, deleteChatBinding, fetchChannelChats, fetchChatBindings, putChatBinding,
-  type Binding, type ChannelChats, type SenderPolicy } from "@/lib/chat-bindings-api";
+import { ChatBindingConfirmation, confirmChatBinding, deleteChatBinding, deleteOverride, fetchChannelChats, fetchChatBindings,
+  listCapabilitySets, listOverrides, putChatBinding, putDefaultScope, putOverride,
+  type Binding, type CapabilitySet, type ChannelChats, type ScopeOverride, type SenderPolicy } from "@/lib/chat-bindings-api";
 import { errorText } from "@/lib/use-action";
 import { V1Error, type V1PendingConfirmation } from "@/lib/v1";
 
@@ -84,12 +85,26 @@ export function ManagerChatBindings({ manager, managers, bindings, snapshot, rel
   snapshot: Snapshot; reload: () => Promise<void>;
 }) {
   const id = useId();
+  const [sets, setSets] = useState<CapabilitySet[]>([]);
+  const [setsError, setSetsError] = useState("");
+  useEffect(() => {
+    if (!bindings.length) return;
+    const controller = new AbortController();
+    listCapabilitySets(controller.signal).then((rows) => {
+      if (!controller.signal.aborted) setSets(rows);
+    }).catch((err: unknown) => {
+      if (!controller.signal.aborted) setSetsError(bindingError(err));
+    });
+    return () => controller.abort();
+  }, [bindings.length]);
   return (
     <section role="region" aria-label={`Chats for ${manager.name}`} className="mt-2 rounded-md border border-border">
       <h4 id={id} tabIndex={-1} className="px-3 py-2 text-sm font-medium">Chats</h4>
+      <p className="px-3 pb-2 text-[11px] text-muted-foreground">Scope applies once scoped routing is on for this Manager.</p>
+      {setsError && <p role="alert" className="px-3 pb-2 text-xs text-destructive">{setsError}</p>}
       {bindings.length ? <ul aria-labelledby={id} className="divide-y divide-border border-t border-border">
         {bindings.map((b) => <ChatBindingRow key={JSON.stringify([b.channel_id, b.chat_id])}
-          binding={b} managers={managers} snapshot={snapshot} reload={reload}
+          binding={b} managers={managers} sets={sets} snapshot={snapshot} reload={reload}
           onRemoved={() => document.getElementById(id)?.focus()} />)}
       </ul> : <p className="px-3 pb-3 text-xs text-muted-foreground">
         {!snapshot.loaded ? "Explicit chat bindings have not loaded." : "No explicit chat bindings."}
@@ -98,13 +113,16 @@ export function ManagerChatBindings({ manager, managers, bindings, snapshot, rel
   );
 }
 
-function ChatBindingRow({ binding: b, managers, snapshot, reload, onRemoved }: {
-  binding: Binding; managers: ManagerInfo[]; snapshot: Snapshot;
+function ChatBindingRow({ binding: b, managers, sets, snapshot, reload, onRemoved }: {
+  binding: Binding; managers: ManagerInfo[]; sets: CapabilitySet[]; snapshot: Snapshot;
   reload: () => Promise<void>; onRemoved: () => void;
 }) {
   const id = useId();
   const senderId = useId();
   const senderPolicyId = useId();
+  const scopeId = useId();
+  const overrideKindId = useId();
+  const overrideScopeId = useId();
   const [target, setTarget] = useState(b.manager_id);
   const [senderPolicy, setSenderPolicy] = useState<SenderPolicy>(b.sender_policy);
   const [confirmation, setConfirmation] = useState<V1PendingConfirmation | null>(null);
@@ -117,12 +135,34 @@ function ChatBindingRow({ binding: b, managers, snapshot, reload, onRemoved }: {
   const [policy, setPolicy] = useState<ChannelChats | null>(null);
   const [preparing, setPreparing] = useState(false);
   const [error, setError] = useState("");
+  const [scopeValue, setScopeValue] = useState(b.default_scope ?? "");
+  const [scopeAsk, setScopeAsk] = useState<{ scope: string | null } | null>(null);
+  const [stopNow, setStopNow] = useState(false);
+  const [scopeConfirmation, setScopeConfirmation] = useState<V1PendingConfirmation | null>(null);
+  const [overrides, setOverrides] = useState<ScopeOverride[] | null>(null);
+  const [kind, setKind] = useState<"person" | "bot">("person");
+  const [primaryId, setPrimaryId] = useState("");
+  const [secondaryId, setSecondaryId] = useState("");
+  const [overrideScope, setOverrideScope] = useState("chat_only");
+  const [overrideError, setOverrideError] = useState("");
+  const [overrideConfirm, setOverrideConfirm] = useState<V1PendingConfirmation | null>(null);
+  const overrideGeneration = useRef(0);
+  useEffect(() => { setScopeValue(b.default_scope ?? ""); }, [b.default_scope]);
   const active = useRef(true);
   const request = useRef<AbortController | null>(null);
   useEffect(() => {
     active.current = true;
-    return () => { active.current = false; request.current?.abort(); };
+    return () => { active.current = false; request.current?.abort(); overrideGeneration.current++; };
   }, []);
+  useEffect(() => {
+    const current = ++overrideGeneration.current;
+    listOverrides(b).then((rows) => {
+      if (active.current && current === overrideGeneration.current) setOverrides(rows);
+    }).catch((err: unknown) => {
+      if (active.current && current === overrideGeneration.current) setOverrideError(bindingError(err));
+    });
+    return () => { overrideGeneration.current++; };
+  }, [b]);
   const busy = snapshot.busy || preparing;
   const name = b.chat_name || b.chat_id;
   const options = managers.filter((m) => !snapshot.deleted.has(m.id));
@@ -153,6 +193,45 @@ function ChatBindingRow({ binding: b, managers, snapshot, reload, onRemoved }: {
       if (active.current) setPreparing(false);
     }
   };
+  const groupScopes = sets.filter((set) => set.id !== "full" && (set.id !== "legacy" || b.legacy_allowed));
+  const overrideScopes = sets.filter((set) => set.id !== "full" && set.id !== "legacy");
+  const openScope = (scope: string | null) => {
+    setStopNow(false); setScopeAsk({ scope }); setScopeConfirmation(null); setError("");
+  };
+  const wrote = async (write: () => Promise<unknown>, done: () => Promise<void> | void,
+    setPending: (value: V1PendingConfirmation | null) => void, setLocal: (value: string) => void) => {
+    setLocal("");
+    try {
+      await snapshot.mutate(write);
+      if (active.current) await done();
+    } catch (err) {
+      if (!active.current) return;
+      if (err instanceof ChatBindingConfirmation) setPending(err.confirmation);
+      else setLocal(bindingError(err));
+    }
+  };
+  const reloadOverrides = async () => {
+    const current = ++overrideGeneration.current;
+    const rows = await listOverrides(b);
+    if (active.current && current === overrideGeneration.current) setOverrides(rows);
+  };
+  const saveScope = () => scopeAsk && wrote(() => putDefaultScope(b, scopeAsk.scope, stopNow), () => setScopeAsk(null),
+    (pending) => { setScopeAsk(null); setScopeConfirmation(pending); }, setError);
+  const confirmSavedScope = () => scopeConfirmation && wrote(() => confirmChatBinding(scopeConfirmation),
+    () => setScopeConfirmation(null), setScopeConfirmation, setError);
+  const addOverride = () => {
+    const senderIds = [primaryId.trim(), ...(kind === "bot" ? [secondaryId.trim()] : [])].filter(Boolean);
+    setOverrideConfirm(null);
+    return wrote(() => putOverride(b, { principal_kind: kind, sender_ids: senderIds, scope_id: overrideScope, stop_now: false }),
+      async () => { setPrimaryId(""); setSecondaryId(""); await reloadOverrides(); }, setOverrideConfirm, setOverrideError);
+  };
+  const removeOverride = (principalId: string) => {
+    setOverrideConfirm(null);
+    return wrote(() => deleteOverride(b, principalId, false), reloadOverrides, setOverrideConfirm, setOverrideError);
+  };
+  const confirmOverride = () => overrideConfirm && wrote(() => confirmChatBinding(overrideConfirm), async () => {
+    setOverrideConfirm(null); setPrimaryId(""); setSecondaryId(""); await reloadOverrides();
+  }, setOverrideConfirm, setOverrideError);
   const fallback = policy && managers.find((m) => m.id === policy.bot_manager_id);
   return <Row title={<span className="break-all text-sm font-medium">{name}</span>}
     actions={<Button size="sm" variant="outline" disabled={busy} onClick={() => void prepareUnbind()}>Unbind</Button>}
@@ -201,6 +280,70 @@ function ChatBindingRow({ binding: b, managers, snapshot, reload, onRemoved }: {
             onSubmit={() => void run(() => confirmChatBinding(confirmation))} />
         </div>}
       </div>
+      <div className="space-y-2">
+        <label htmlFor={scopeId} className={LABEL}>Group default scope</label>
+        <select id={scopeId} aria-label={`Scope for ${name}`} className={SELECT} value={scopeValue} disabled={busy}
+          onChange={(event) => { setScopeValue(event.target.value); setScopeAsk(null); setScopeConfirmation(null); }}>
+          <option value="">System default (chat only)</option>
+          {groupScopes.map((set) => <option key={set.id} value={set.id}>{set.name}</option>)}
+        </select>
+        <Button size="sm" variant="outline" disabled={busy || scopeValue === (b.default_scope ?? "")}
+          onClick={() => openScope(scopeValue === "" ? null : scopeValue)}>Save scope</Button>
+        {scopeAsk && <div className="space-y-2">
+          <label className="flex items-center gap-2 text-xs pointer-coarse:min-h-11">
+            <input type="checkbox" className="h-4 w-4 accent-primary pointer-coarse:h-11 pointer-coarse:w-11"
+              aria-label="Apply now, interrupting a running reply" checked={stopNow} disabled={busy}
+              onChange={(event) => setStopNow(event.target.checked)} />
+            Apply now, interrupting a running reply
+          </label>
+          <FormFooter error="" busy={busy} submit="Confirm scope" onCancel={() => setScopeAsk(null)} onSubmit={() => void saveScope()} />
+        </div>}
+        {scopeConfirmation && <div className="space-y-2">
+          <p className="text-xs text-warning">{scopeConfirmation.impact}</p>
+          <FormFooter error="" busy={busy} submit="Confirm" onCancel={() => setScopeConfirmation(null)} onSubmit={() => void confirmSavedScope()} />
+        </div>}
+        {b.default_scope === "legacy" && <div className="space-y-2">
+          <p className="text-xs text-warning">Legacy: everyone admitted here shares a session that can run commands with this machine's account.</p>
+          {b.suggested_scope && <Button size="sm" variant="outline" disabled={busy} onClick={() => openScope(b.suggested_scope)}>Adopt {b.suggested_scope}</Button>}
+        </div>}
+        <div className="space-y-2">
+          <p className={LABEL}>Scope overrides</p>
+          <ul className="space-y-1">
+            {overrides?.map((row) => <li key={row.principal_id} className="flex flex-wrap items-center gap-2 text-xs">
+              <span>{row.principal_kind}</span>
+              <span className="break-all">{row.sender_ids.join(", ")}</span>
+              <span>{row.scope_id}</span>
+              <Button size="sm" variant="outline" disabled={busy} aria-label={`Remove override ${row.principal_id}`}
+                onClick={() => void removeOverride(row.principal_id)}>Remove</Button>
+            </li>)}
+          </ul>
+          <div className="flex flex-wrap items-center gap-2">
+            <label htmlFor={overrideKindId} className="sr-only">Override kind</label>
+            <select id={overrideKindId} aria-label={`Override kind for ${name}`} className={SELECT} value={kind} disabled={busy}
+              onChange={(event) => setKind(event.target.value as "person" | "bot")}>
+              <option value="person">Person</option>
+              <option value="bot">Bot</option>
+            </select>
+            <Input aria-label={`Override id for ${name}`} value={primaryId} disabled={busy} placeholder="id"
+              onChange={(event) => setPrimaryId(event.target.value)} />
+            {kind === "bot" && <Input aria-label={`Override second id for ${name}`} value={secondaryId} disabled={busy}
+              placeholder="second id" onChange={(event) => setSecondaryId(event.target.value)} />}
+            <label htmlFor={overrideScopeId} className="sr-only">Override scope</label>
+            <select id={overrideScopeId} aria-label={`Override scope for ${name}`} className={SELECT} value={overrideScope} disabled={busy}
+              onChange={(event) => setOverrideScope(event.target.value)}>
+              {overrideScopes.map((set) => <option key={set.id} value={set.id}>{set.name}</option>)}
+            </select>
+            <Button size="sm" variant="outline" disabled={busy || !primaryId.trim() || !overrideScope}
+              onClick={() => void addOverride()}>Add override</Button>
+          </div>
+          {overrideConfirm && <div className="space-y-2">
+            <p className="text-xs text-warning">{overrideConfirm.impact}</p>
+            <FormFooter error="" busy={busy} submit="Confirm override" onCancel={() => setOverrideConfirm(null)}
+              onSubmit={() => void confirmOverride()} />
+          </div>}
+          {overrideError && <p role="alert" className="break-words text-xs text-destructive">{overrideError}</p>}
+        </div>
+      </div>
       {policy && <div className="space-y-2">
         <p className="text-xs text-muted-foreground">{policy.bound_chats_only
           ? "After unbinding, this bot will stay silent in this chat (bound chats only)."
@@ -213,6 +356,6 @@ function ChatBindingRow({ binding: b, managers, snapshot, reload, onRemoved }: {
     <p className="break-all text-xs text-muted-foreground">
       {{ telegram: "Telegram", lark: "Lark", lark_bot: "Lark Bot" }[b.channel_type]} · {b.bot_name} · {b.channel_id}
     </p>
-    <p className="break-all text-xs text-muted-foreground">Chat ID: {b.chat_id} · Bound to {b.manager_name}{b.manager_deleted ? " · Deleted" : !b.manager_enabled ? " · Off" : ""}{b.allowed_senders.length > 0 ? ` · ${b.allowed_senders.length} extra sender${b.allowed_senders.length === 1 ? "" : "s"}` : ""}{b.sender_policy === "chat" ? " · Everyone in this chat" : ""}</p>
+    <p className="break-all text-xs text-muted-foreground">Chat ID: {b.chat_id} · Bound to {b.manager_name}{b.manager_deleted ? " · Deleted" : !b.manager_enabled ? " · Off" : ""}{b.allowed_senders.length > 0 ? ` · ${b.allowed_senders.length} extra sender${b.allowed_senders.length === 1 ? "" : "s"}` : ""}{b.sender_policy === "chat" ? " · Everyone in this chat" : ""}{` · Scope: ${b.effective_default_scope}`}{overrides ? ` · ${overrides.length} override${overrides.length === 1 ? "" : "s"}` : ""}</p>
   </Row>;
 }
