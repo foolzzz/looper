@@ -520,12 +520,15 @@ def test_a_stop_after_the_runtime_answered_ends_the_turn_stopped(agent_db: Any) 
             ops = _with_ops(manager)
             envelope = _web("删掉它", 0)
 
+            stop_results = []
+
             async def ask_then_stop() -> None:
                 await ops.call("t_write", {})
-                assert await manager.stop_turn(envelope.message_id, via="web") is StopResult.STOPPING
+                stop_results.append(await manager.stop_turn(envelope.message_id, via="web"))
 
             session.on_turn = ask_then_stop
             await manager._handle(envelope)
+            assert stop_results == [StopResult.STOPPING]
             (reply,) = _replies(queue)
             assert reply["outcome"] == "stopped" and "error" not in reply and "需要你确认" not in reply["text"]
             assert not ops.asks_in(envelope.message_id)
@@ -627,14 +630,17 @@ def test_a_stop_while_the_process_fails_to_start_ends_the_turn_stopped(agent_db:
             envelope = _web("你好")
             holder: dict[str, ManagerAgent] = {}
 
+            stop_results = []
+
             async def stop_then_fail() -> None:
-                assert await holder["manager"].stop_turn(envelope.message_id, via="web") is StopResult.STOPPING
+                stop_results.append(await holder["manager"].stop_turn(envelope.message_id, via="web"))
                 raise OSError("no such executable")
 
             session = _Session(on_start=stop_then_fail)
             manager, bus, queue = _manager(Path(tmp), session)
             holder["manager"] = manager
             await manager._handle(envelope)
+            assert stop_results == [StopResult.STOPPING]
             assert session.turns == []
             (reply,) = _replies(queue)
             assert reply["outcome"] == "stopped" and reply["text"] == "已停止，这次没有回复。"
@@ -777,11 +783,14 @@ def test_a_stop_between_the_runtimes_answer_and_the_end_is_stopped_and_after_it_
             manager, bus, queue = _manager(Path(tmp), session)
             first = _web("你好")
 
+            stop_results = []
+
             async def stop_it() -> None:
-                assert await manager.stop_turn(first.message_id, via="web") is StopResult.STOPPING
+                stop_results.append(await manager.stop_turn(first.message_id, via="web"))
 
             session.on_turn = stop_it
             await manager._handle(first)
+            assert stop_results == [StopResult.STOPPING]
             (reply,) = _replies(queue)
             assert reply["outcome"] == "stopped"
             assert "stop lost" in caplog.text

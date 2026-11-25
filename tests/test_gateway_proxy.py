@@ -67,11 +67,12 @@ async def gateway(tmp_path, *, stream=False, record=True, status=200, headers=No
                       api='openai-chat', dialect='openai', models={'client': 'upstream'},
                       created_at='2026-01-01T00:00:00+00:00', agent_id='test')
     route.write(tmp_path / ROUTES_DIR / f'{route.id}.json')
+    provider_reads = []
     class Registry:
         target = dict(base_url=route.upstream, api_key='upstream-secret', enabled=True, auth='api_key')
 
         async def fetchrow(self, query, provider_id):
-            assert provider_id == route.provider_id
+            provider_reads.append(provider_id)
             return self.target
 
     sink.pool = Registry()
@@ -86,6 +87,7 @@ async def gateway(tmp_path, *, stream=False, record=True, status=200, headers=No
         server.close()
         await server.wait_closed()
         await asyncio.gather(*handlers, return_exceptions=True)
+        assert all(provider_id == route.provider_id for provider_id in provider_reads), provider_reads
 
 
 def run(check):

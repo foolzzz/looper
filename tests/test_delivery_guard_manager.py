@@ -1,6 +1,7 @@
 """Delivery guard on the Manager's real resident stream, with database writes observed."""
 
 import asyncio
+import json
 import sys
 from datetime import datetime, timezone
 from types import SimpleNamespace
@@ -44,11 +45,14 @@ def test_pending_reminder_does_not_block_event_handling(tmp_path, ending):
                     if block.get("type") == "text":
                         progress.set()
 
-        script = """
+        script = r"""
 import json, sys
 import pathlib, subprocess
 def out(event):
     print(json.dumps(event), flush=True)
+def observe(name, value):
+    with open('guard-observations.jsonl', 'a') as log:
+        log.write(json.dumps([name, value]) + '\n')
 first = json.loads(sys.stdin.readline())
 out(dict(first, isReplay=True))
 out({'type':'assistant','message':{'content':[{'type':'tool_use','id':str(i)} for i in range(6)]}})
@@ -65,17 +69,17 @@ if ENDING != 'consumed':
         out({'type':'command_lifecycle','command_uuid':reminder['uuid'],'state':'started'})
         out(dict(reminder, isReplay=True))
     control = json.loads(sys.stdin.readline())
-    assert control['request'] == {'subtype':'cancel_async_message', 'message_uuid':reminder['uuid']}
+    observe('cancel_request', [control['request'], reminder['uuid']])
     out({'type':'control_response','response':{'subtype':'success','request_id':control['request_id'],
          'response':{'cancelled':ENDING == 'cancelled','message_uuid':reminder['uuid']}}})
     if ENDING == 'dequeued':
         control = json.loads(sys.stdin.readline())
         request = control['request']
-        assert request['subtype'] == 'interrupt' and request['cancel_queued'] is True
+        observe('interrupt_request', request)
         if not request.get('spare_background_tasks'):
             child.terminate()
             child.wait()
-        assert child.poll() is None, 'interrupt ended background work'
+        observe('background_running', child.poll() is None)
         pathlib.Path('background-survived').touch()
         out({'type':'control_response','response':{'subtype':'success','request_id':control['request_id'],
              'response':{'cancelled':[]}}})
@@ -100,6 +104,18 @@ sys.stdin.read()
             await events.put(None)
             await handling
             await finish(token)
+            path = tmp_path / "guard-observations.jsonl"
+            observed = [json.loads(line) for line in path.read_text().splitlines()] if path.exists() else []
+            assert len(observed) == {"consumed": 0, "cancelled": 1, "dequeued": 3}[ending]
+            if ending != "consumed":
+                name, (request, message_uuid) = observed[0]
+                assert name == "cancel_request"
+                assert request == {"subtype": "cancel_async_message", "message_uuid": message_uuid}
+            if ending == "dequeued":
+                assert observed[1][0] == "interrupt_request"
+                request = observed[1][1]
+                assert request["subtype"] == "interrupt" and request["cancel_queued"] is True
+                assert observed[2] == ["background_running", True]
             assert result.result_event["result"] == "Done."
             assert resident._process is process and process.returncode is None
             if ending == "dequeued":
@@ -163,9 +179,13 @@ def test_errors_do_not_retry_and_followup_errors_use_the_fixed_notice(agent_db, 
     assert agent_db.start_record.await_count == (1 if first else 2)
 
 
-def test_reminders_join_one_resident_turn_and_text_resets_the_streak(agent_db):
+def test_reminders_join_one_resident_turn_and_text_resets_the_streak(agent_db, tmp_path):
     # The fake waits for each queued input and echoes it as a replay while the original turn is running.
-    body = """
+    observations = tmp_path / "reminder-observations.jsonl"
+    body = r"""
+def observe(name, value):
+    with open(OBSERVATIONS, 'a') as log:
+        log.write(json.dumps([name, value]) + '\n')
 raw = json.loads(sys.stdin.readline())
 def out(event):
     print(json.dumps(event), flush=True)
@@ -174,9 +194,12 @@ def tools(count):
         out({'type':'assistant','message':{'content':[{'type':'tool_use','id':str(i),'name':'Read','input':{}}]}})
 def reminder():
     import select
-    assert select.select([sys.stdin], [], [], 5)[0], 'no reminder received'
+    ready = bool(select.select([sys.stdin], [], [], 5)[0])
+    observe('reminder_ready', ready)
+    if not ready:
+        sys.exit(1)
     queued = json.loads(sys.stdin.readline())
-    assert queued['message']['content'] == REMINDER
+    observe('reminder_content', queued['message']['content'])
     out({'type':'user','isReplay':True,'uuid':queued.get('uuid'),'message':queued['message']})
 out({'type':'user','isReplay':True,'uuid':raw['uuid'],'message':raw['message']})
 out({'type':'system','subtype':'init','session_id':'s'})
@@ -185,7 +208,7 @@ out({'type':'assistant','parent_tool_use_id':'nested','message':{'content':[{'ty
 out({'type':'assistant','message':{'content':[{'type':'text','text':'Progress.'}]}})
 tools(5)
 import select
-assert not select.select([sys.stdin], [], [], 0.1)[0], 'text did not reset the streak'
+observe('reset_pending', bool(select.select([sys.stdin], [], [], 0.1)[0]))
 tools(1)
 reminder()
 tools(6)
@@ -193,7 +216,12 @@ reminder()
 tools(12)
 out({'type':'result','subtype':'success','is_error':False,'result':'Done.'})
 """
-    answer = _ask("REMINDER = " + repr(REMINDER_MESSAGE) + "\n" + body)
+    answer = _ask("OBSERVATIONS = " + repr(str(observations)) + "\n" + body)
+    assert [json.loads(line) for line in observations.read_text().splitlines()] == [
+        ["reset_pending", False],
+        ["reminder_ready", True], ["reminder_content", REMINDER_MESSAGE],
+        ["reminder_ready", True], ["reminder_content", REMINDER_MESSAGE],
+    ]
     assert answer["text"] == "Done."
     assert agent_db.start_record.await_count == agent_db.finish_record.await_count == 1
     guards = [call.args[1]["delivery_guard"] for call in agent_db.add_metadata.await_args_list

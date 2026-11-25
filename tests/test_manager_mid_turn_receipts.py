@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import socket
 from contextlib import suppress
 from pathlib import Path
@@ -40,9 +41,9 @@ SCRIPT = (
     "pathlib.Path('ready').touch()\n"
     "second = json.loads(sys.stdin.readline())\n"
     "pathlib.Path('got-second').touch()\n"
-    "assert gate.recv(32) == b'fold'\n"
+    "with open('gate-actions.jsonl','a') as log: log.write(json.dumps(gate.recv(32).decode()) + '\\n')\n"
     "emit(dict(second, isReplay=True))\n"
-    "assert gate.recv(32) == b'answer'\n"
+    "with open('gate-actions.jsonl','a') as log: log.write(json.dumps(gate.recv(32).decode()) + '\\n')\n"
     "emit({'type':'stream_event','event':{'type':'message_start'}})\n"
     "answer('answer A and B', [first['uuid'], second['uuid']])\n"
     "for line in sys.stdin:\n"
@@ -133,6 +134,7 @@ def test_pending_fold_keeps_other_session_and_inbox_events_available(enabled, tm
             _gate(tmp_path, b"answer")
             assert await rig.reply(first) == "answer A and B"
             assert await rig.reply(second) == MERGED_REPLY
+            assert [json.loads(line) for line in (tmp_path / "gate-actions.jsonl").read_text().splitlines()] == ["fold", "answer"]
         finally:
             with suppress(OSError):
                 _gate(tmp_path, b"fold")
@@ -184,6 +186,7 @@ def test_same_chat_waits_for_fold_then_queues_without_restarting_resident(enable
             _gate(tmp_path, b"answer")
             assert await rig.reply(first) == "answer A and B"
             assert await rig.reply(second) == MERGED_REPLY
+            assert [json.loads(line) for line in (tmp_path / "gate-actions.jsonl").read_text().splitlines()] == ["fold", "answer"]
             assert await rig.reply(third) == "answer C"
             await until(lambda: not [e for e in rig.bus.journal.undelivered()
                                     if e.target.agent_id == "manager"])

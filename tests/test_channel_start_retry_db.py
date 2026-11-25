@@ -43,9 +43,11 @@ def test_channel_start_recovers_or_reports_failure(monkeypatch, tmp_path, caplog
             await resume.wait()
             resume.clear()
 
+        startup_routes = []
+
         async def start(adapter, bus):
             # This is the normal adapter start boundary: routing was loaded before start.
-            assert adapter._resolve_chat(adapter.channel_id, "oc_synthetic").manager_id == "manager"
+            startup_routes.append(adapter._resolve_chat(adapter.channel_id, "oc_synthetic").manager_id)
             adapter._running = True
             started.set()
 
@@ -75,6 +77,7 @@ def test_channel_start_recovers_or_reports_failure(monkeypatch, tmp_path, caplog
                 assert await asyncio.wait_for(waits.get(), 1) == (600 if failure == "credentials" else 60)
                 resume.set()
             await asyncio.wait_for(started.wait(), 1)
+            assert startup_routes == ["manager"]
             assert registry.get("channel-lark") is not None
             assert (await view())["runtime"] == {"state": "running", "last_error": None, "next_attempt_at": None}
             assert await AgentHTTPServer._checks_now(server) == []
@@ -195,6 +198,7 @@ def test_retry_backoff_caps_and_cleans_partial_start(monkeypatch, tmp_path):
         identity = lark_cli.Identity("", "cli_synthetic", "Synthetic", "ou_bot000000001")
         monkeypatch.setattr(lark_cli, "identity", AsyncMock(return_value=identity))
         attempts, delays, listeners = [], [], []
+        listener_states = []
         done = asyncio.Event()
 
         async def start(adapter, bus):
@@ -208,7 +212,7 @@ def test_retry_backoff_caps_and_cleans_partial_start(monkeypatch, tmp_path):
 
         async def wait(delay):
             delays.append(delay)
-            assert all(task.cancelled() for task in listeners)
+            listener_states.append([task.cancelled() for task in listeners])
 
         registry = ChannelRegistry(MessageBus(runtime_root=tmp_path))
         monkeypatch.setattr(LarkChannelAdapter, "start", start)
@@ -218,6 +222,7 @@ def test_retry_backoff_caps_and_cleans_partial_start(monkeypatch, tmp_path):
             await serve._register_bots(registry, [{**row, "secret": "", "app_id": None}], tmp_path,
                                        lambda _: True, ("lark",))
             await asyncio.wait_for(done.wait(), 3)
+            assert listener_states and all(all(states) for states in listener_states), listener_states
             assert delays == [30, 60, 120, 240, 480, 600, 600]
             assert registry.get("channel-lark") is attempts[-1]
             assert registry.start_checks() == []
