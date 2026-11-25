@@ -283,6 +283,37 @@ describe("Work attention links and actions", () => {
 describe("Work attention polling", () => {
   beforeEach(() => { vi.useFakeTimers(); });
 
+  it.each(["settings", "summary"])("stops polling when the %s operation is missing", async (operation) => {
+    const read = operation === "settings" ? attentionSettingsGet : fetchAttention;
+    vi.mocked(read).mockRejectedValue(new V1Error(404, "not_found", "no POST /api/v1/attention/summary"));
+    await render();
+    expect(read).toHaveBeenCalledTimes(1);
+    expect(host.textContent).toContain("此服务器尚不支持待办汇总");
+    await act(async () => { await vi.advanceTimersByTimeAsync(60_000); });
+    await act(async () => { visibility("hidden"); visibility("visible"); });
+    expect(attentionSettingsGet).toHaveBeenCalledTimes(1);
+    expect(fetchAttention).toHaveBeenCalledTimes(operation === "settings" ? 0 : 1);
+  });
+
+  it("polls only settings after an off summary and resumes when enabled", async () => {
+    vi.mocked(fetchAttention).mockRejectedValueOnce(new V1Error(409, "conflict", "summary is off"));
+    await render();
+    expect(fetchAttention).toHaveBeenCalledTimes(1);
+    expect(host.textContent).toContain("待办汇总未开启");
+
+    vi.mocked(attentionSettingsGet).mockResolvedValue({ enabled: false });
+    await act(async () => { await vi.advanceTimersByTimeAsync(60_000); });
+    expect(attentionSettingsGet).toHaveBeenCalledTimes(5);
+    expect(fetchAttention).toHaveBeenCalledTimes(1);
+    expect(host.textContent).toContain("待办汇总未开启");
+
+    vi.mocked(attentionSettingsGet).mockResolvedValue({ enabled: true });
+    await act(async () => { await vi.advanceTimersByTimeAsync(15_000); });
+    expect(attentionSettingsGet).toHaveBeenCalledTimes(6);
+    expect(fetchAttention).toHaveBeenCalledTimes(2);
+    expect(host.textContent).not.toContain("待办汇总未开启");
+  });
+
   it("polls once while visible, pauses while hidden, and stops after unmount", async () => {
     vi.mocked(fetchAttention).mockResolvedValue(summary([
       section({ kind: "gates", state: "ok", count: 1, items: [item({ key: "g1", title: "Pick a database" })] }),

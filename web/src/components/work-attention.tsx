@@ -194,7 +194,7 @@ export function WorkAttention() {
         setPhase("unsupported");
         setSummary(null);
         setError("");
-        return;
+        return true;
       }
       setPhase("error");
       setError(errorText(err));
