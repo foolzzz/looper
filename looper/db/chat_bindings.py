@@ -170,6 +170,9 @@ async def put_binding(channel_id: str, chat_id: str, manager_id: str, *,
     await _channel(channel_id, conn, lock=True)
     if before_write is not None:
         await before_write()
+    previous_owner = await conn.fetchval(
+        "SELECT manager_id FROM manager_chat_bindings WHERE channel_id = $1 AND chat_id = $2 FOR UPDATE",
+        channel_id, chat_id)
     row = await conn.fetchrow(
         "INSERT INTO manager_chat_bindings (channel_id, chat_id, manager_id, allowed_senders, sender_policy) "
         "VALUES ($1, $2, $3, coalesce($4::text[], '{}'), coalesce($5::text, 'listed')) "
@@ -178,8 +181,17 @@ async def put_binding(channel_id: str, chat_id: str, manager_id: str, *,
         "WHEN manager_chat_bindings.manager_id = EXCLUDED.manager_id THEN manager_chat_bindings.allowed_senders "
         "ELSE '{}' END, sender_policy = CASE WHEN $5::text IS NOT NULL THEN $5::text "
         "WHEN manager_chat_bindings.manager_id = EXCLUDED.manager_id THEN manager_chat_bindings.sender_policy "
-        "ELSE 'listed' END RETURNING channel_id, chat_id, manager_id, created_at, allowed_senders, sender_policy",
+        "ELSE 'listed' END, "
+        "default_scope = CASE WHEN manager_chat_bindings.manager_id = EXCLUDED.manager_id "
+        "THEN manager_chat_bindings.default_scope ELSE NULL END, "
+        "legacy_allowed = manager_chat_bindings.legacy_allowed AND manager_chat_bindings.manager_id = EXCLUDED.manager_id, "
+        "suggested_scope = CASE WHEN manager_chat_bindings.manager_id = EXCLUDED.manager_id "
+        "THEN manager_chat_bindings.suggested_scope ELSE NULL END "
+        "RETURNING channel_id, chat_id, manager_id, created_at, allowed_senders, sender_policy",
         channel_id, chat_id, manager_id, allowed_senders, policy)
+    if previous_owner is not None and previous_owner != manager_id:
+        await conn.execute("DELETE FROM binding_principal_scopes WHERE channel_id = $1 AND chat_id = $2",
+                           channel_id, chat_id)
     return ChatBinding(**dict(row))
 
 
