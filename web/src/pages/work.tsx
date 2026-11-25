@@ -2,7 +2,9 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { WorkList } from "@/components/work-list";
 import { WorkSwitcher } from "@/components/work-switcher";
-import { fetchTaskDetail, TaskDetailError, type TaskDetail } from "@/lib/api";
+import { fetchTaskDetail, TaskDetailError, type TaskDetail, type TaskStep } from "@/lib/api";
+import { WorkSteps } from "@/components/work-steps";
+import { gateAnchor } from "@/lib/gates";
 import { callV1, V1Error } from "@/lib/v1";
 import { errorText } from "@/lib/use-action";
 import { PlannerWorkConversation } from "@/components/work-conversation";
@@ -75,6 +77,15 @@ export function WorkPage({
     workStorage.setSelection(selection.kind === "manager" ? "manager" : taskId);
   }, [sub, selection.kind, taskId]);
 
+  const openGate = useCallback((step: TaskStep) => {
+    const place = document.getElementById(gateAnchor(step.step_key));
+    if (!place) return;
+    if (place instanceof HTMLDetailsElement) place.open = true;
+    place.scrollIntoView({ block: "start" });
+    const focus = place instanceof HTMLDetailsElement ? place.querySelector("summary") : place;
+    if (focus instanceof HTMLElement) focus.focus({ preventScroll: true });
+  }, []);
+
   const openTask = useCallback((id: string) => {
     setPane("detail");
     onNavigate(`task/${encodeURIComponent(id)}`);
@@ -146,7 +157,14 @@ export function WorkPage({
                 {selected.project_name && <p className="text-sm text-muted-foreground">{selected.project_name}</p>}
                 <a className={LINK} href={`#tasks/${encodeURIComponent(taskId)}`}>Open the task page</a>
               </header>
-              <PlannerWorkConversation key={taskId} taskId={taskId} detail={selected} />
+              <div className="flex min-h-0 min-w-0 flex-1 flex-col lg:flex-row">
+                <div className="flex min-h-0 min-w-0 flex-1 flex-col">
+                  <PlannerWorkConversation key={taskId} taskId={taskId} detail={selected} />
+                </div>
+                <div className="min-h-0 min-w-0 overflow-y-auto border-t border-border max-lg:max-h-[40dvh] lg:w-80 lg:shrink-0 lg:border-l lg:border-t-0">
+                  <WorkSteps task={selected} onOpenGate={openGate} />
+                </div>
+              </div>
             </>
           )}
         </div>
