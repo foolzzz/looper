@@ -579,7 +579,14 @@ def _manager(scenarios_path: str, args: list[str], stdin: _Stdin) -> None:
         message = content[channel.end():] if channel else content
         named = re.search(r"confirmation_id (c-[0-9a-f]+)", content)
         with open(scenarios_path, encoding="utf-8") as handle:
-            calls = (json.load(handle).get("manager") or {}).get(message.strip(), [])
+            scenarios = json.load(handle)
+        calls = (scenarios.get("manager") or {}).get(message.strip())
+        if calls is None:
+            matches = [script for prefix, script in (scenarios.get("manager_prefix") or {}).items()
+                       if message.startswith(prefix)]
+            if len(matches) > 1:
+                raise ValueError("ambiguous scripted Manager prefixes")
+            calls = matches[0] if matches else []
         answers, held, reply, request_usage = [], False, None, None
         for name, arguments in calls:
             if name == "__reply__":
