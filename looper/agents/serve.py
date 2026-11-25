@@ -1009,8 +1009,9 @@ async def _run_agent_system_watched(
             await cost_guard.initialize(day_start=scheduler.day_start, pool=pool)
             bus.subscribe_topic(MessageType.USER_MESSAGE, scheduler.observe_user)
             # The advisor's alerts go to the operator's chat through the same channels.
-            from . import advisor_alerts, outbound_hook, usage_windows
+            from . import advisor_alerts, chat_scope_alerts, outbound_hook, usage_windows
             advisor_alerts.configure(registry.notify)
+            chat_scope_alerts.configure(registry.notify)
             from . import admission_notices
             admission_notices.configure(registry.notify)
             # So does the daily note that skill proposals wait for the operator (names and reasons, never content).

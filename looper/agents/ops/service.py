@@ -913,6 +913,13 @@ class ManagerOps:
                 manager_id=self._scope.manager_id, client_id=turn.client_id)
         except Exception:
             logger.warning("could not record scoped tool refusal", exc_info=True)
+        try:
+            from .. import chat_scope_alerts
+
+            await chat_scope_alerts.out_of_scope(
+                self._scope.manager_id, channel_id=turn.channel_id, chat=turn.chat, scope=result["scope"])
+        except Exception:
+            logger.warning("could not alert a scoped tool refusal", exc_info=True)
         logger.info("scoped tool refused", extra={
             "manager_id": self._scope.manager_id, "chat_digest": session_routing.key_digest(key),
             "capability": capability, "reason": "out_of_scope", "principal_kind": result["principal_kind"]})
