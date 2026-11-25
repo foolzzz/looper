@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { Fragment, useEffect, useRef, useState } from "react";
 import { Markdown } from "@/components/markdown";
 import { TaskGates } from "@/components/task-gates";
 import { Button } from "@/components/ui/button";
@@ -7,6 +7,7 @@ import { formatTime } from "@/lib/activity";
 import { gateAnchor, isGateShown } from "@/lib/gates";
 import { cn } from "@/lib/utils";
 import type { WorkIdentity, WorkPaneMessage } from "./work-conversation";
+import { useWorkConversationStore, workConversationKey } from "@/lib/use-work-conversation-state";
 
 /** Presentation records only. The task-thread adapter owns decoding server events. */
 export type WorkFeedRecord =
@@ -56,13 +57,21 @@ export function WorkMessageRow({ message }: { message: WorkPaneMessage }) {
 }
 
 /** Work's single time-ordered stream. It shares the page's detail and owns only activity reads. */
-export function WorkActivityFeed({ identity, messages, task, onGateChanged, records = [] }: {
+export function WorkSinceAway() {
+  return <p role="separator" className="my-3 border-t border-border pt-2 text-center text-xs text-muted-foreground">你离开之后</p>;
+}
+
+export function WorkActivityFeed({ identity, messages, task, onGateChanged, records = [], dividerBefore }: {
   identity: WorkIdentity;
   messages: WorkPaneMessage[];
   task?: TaskDetail;
   onGateChanged?: (gate: UserGate) => void;
   records?: WorkFeedRecord[];
+  dividerBefore?: string | null;
 }) {
+  const store = useWorkConversationStore();
+  const cacheKey = workConversationKey(identity);
+  const cached = store.cached(cacheKey);
   const owner = identity.kind === "planner" ? `planner:${identity.taskId}` : `manager:${identity.sessionId ?? ""}`;
   const taskId = identity.kind === "planner" ? identity.taskId : "";
   const shared = task?.task_id === taskId ? task : undefined;
@@ -70,11 +79,14 @@ export function WorkActivityFeed({ identity, messages, task, onGateChanged, reco
   const current = useRef(owner);
   current.current = owner;
   const [retry, setRetry] = useState(0);
-  const [state, setState] = useState({ owner, events: [] as ActivityEvent[], loading: true, earlier: false,
-    hasMore: false, error: "" as "" | "latest" | "earlier" | "live" });
+  const [state, setState] = useState({ owner, events: cached?.activity ?? [] as ActivityEvent[], loading: true, earlier: false,
+    hasMore: cached?.hasMore ?? false, error: "" as "" | "latest" | "earlier" | "live" });
   const loaded = useRef(state);
   loaded.current = state;
   const earlierRequest = useRef<(() => void) | null>(null);
+  useEffect(() => {
+    if (state.owner === owner && !state.loading) store.cache(cacheKey, { activity: state.events, hasMore: state.hasMore });
+  }, [state, owner, store, cacheKey]);
 
   useEffect(() => {
     if (!taskId) return;
@@ -147,7 +159,7 @@ export function WorkActivityFeed({ identity, messages, task, onGateChanged, reco
 
   return (
     <>
-      {taskId && view.loading && <p role="status" className="text-xs text-muted-foreground">正在加载活动…</p>}
+      {taskId && view.loading && <p role="status" data-work-rows-loading className="text-xs text-muted-foreground">正在加载活动…</p>}
       {taskId && !view.loading && !view.error && !view.events.length && <p role="status" className="text-xs text-muted-foreground">暂无活动</p>}
       {view.error && <p role="alert" className="flex flex-wrap items-center gap-2 text-sm text-destructive">
         活动读取失败<Button variant="outline" onClick={() => view.error === "earlier" ? earlierRequest.current?.() : setRetry(n => n + 1)}>重试</Button>
@@ -156,7 +168,9 @@ export function WorkActivityFeed({ identity, messages, task, onGateChanged, reco
         {view.earlier ? "正在加载活动…" : "加载更早活动"}
       </Button>}
       {rows.map(row => {
-        if (row.source === "tool") return <details key={row.key} data-feed-key={row.key} className="shrink-0 rounded-lg border border-border text-xs">
+        if (row.source === "tool") return <Fragment key={row.key}>
+          {dividerBefore === row.key && <WorkSinceAway />}
+          <details data-feed-key={row.key} data-row-time={Number.isFinite(row.time) ? row.time : undefined} className="shrink-0 rounded-lg border border-border text-xs">
           <summary className="min-h-11 cursor-pointer break-words px-3 py-2 focus-visible:ring-2 focus-visible:ring-ring">
             工具 · {row.name} · {row.isError ? "失败" : row.result === undefined ? "进行中" : "完成"}
           </summary>
@@ -164,9 +178,10 @@ export function WorkActivityFeed({ identity, messages, task, onGateChanged, reco
             {row.args !== undefined && <pre className="whitespace-pre-wrap [overflow-wrap:anywhere]">{text(row.args)}</pre>}
             {row.result !== undefined && <pre className="whitespace-pre-wrap [overflow-wrap:anywhere]">{text(row.result)}</pre>}
           </div>
-        </details>;
+        </details></Fragment>;
         // Contain TaskGates' absolute sr-only label inside the row, even far down a long feed.
-        return <div key={row.key} data-feed-key={row.key} data-activity-seq={row.source === "activity" ? row.id : undefined} className="relative min-w-0 shrink-0">
+        return <div key={row.key} data-feed-key={row.key} data-row-time={Number.isFinite(row.time) ? row.time : undefined} data-activity-seq={row.source === "activity" ? row.id : undefined} className="relative min-w-0 shrink-0">
+          {dividerBefore === row.key && <WorkSinceAway />}
           {row.source === "message" ? <WorkMessageRow message={row.message} />
             : row.source === "gates" ? <TaskGates task={shared!} onChanged={onGateChanged!} />
               : row.source === "task-event" ? <p className="text-xs text-muted-foreground whitespace-pre-wrap [overflow-wrap:anywhere]">事件 · {row.kind} · {row.text}</p>

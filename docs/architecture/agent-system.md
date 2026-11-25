@@ -8868,6 +8868,18 @@ built by `scripts/stage-dashboard.sh` at release time), and it carries
   replies invalidate older reads. Summaries can focus its existing
   anchor with `openWorkGate`. Tool presentation records update by stable id and stay folded by default;
   the task-thread adapter owns their decoding. Unknown activity and task events remain neutral text.
+- **Work conversation state**: a store owned by the mounted Work page keeps up to 20 conversation
+  caches, with at most 1,000 loaded message/activity rows per conversation. The selected conversation
+  and its reading anchor take priority; eviction leaves unsent drafts and queues intact. Versioned
+  session storage contains only unsent input, view geometry and the departure row/sequence watermark;
+  message content and input history stay in memory and are read from the server after reload. Task
+  cache hits render before revalidation. Manager cache hits still wait for a scoped ownership read;
+  unconfirmed or foreign threads cannot display cached content, watch or send. A refresh failure keeps
+  content whose ownership is already confirmed and shows its reason. Returning restores the stable
+  row anchor and offset after layout is available, including a previously hidden narrow pane. Earlier
+  activity pages and growing tool results preserve that anchor; live updates follow the bottom only
+  when the reader is there. One “你离开之后” separator precedes the first row after the departure
+  watermark. This client watermark is independent of `tasks.mark_seen`, which still sends only a sequence.
 
 
 ### Hash Routing

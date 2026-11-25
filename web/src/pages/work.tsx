@@ -13,6 +13,7 @@ import { ManagerWorkConversation, PlannerWorkConversation } from "@/components/w
 import { TaskStatusMark } from "@/pages/tasks";
 import { isMissingOperation, markSeen, taskTitle, workSelection, workStorage } from "@/lib/work";
 import { isGateShown } from "@/lib/gates";
+import { WorkConversationStateProvider, useWorkConversationStore, workConversationKey } from "@/lib/use-work-conversation-state";
 
 const LINK = "text-sm text-primary underline-offset-2 hover:underline focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring";
 
@@ -33,12 +34,19 @@ function useMedia(query: string): boolean {
 
 /** Centre is the default Manager or the selected task’s Planner conversation. */
 export function WorkPage({
+  sub, onNavigate,
+}: { sub: string; onNavigate: (sub: string, replace?: boolean) => void }) {
+  return <WorkConversationStateProvider><WorkPageContent sub={sub} onNavigate={onNavigate} /></WorkConversationStateProvider>;
+}
+
+function WorkPageContent({
   sub,
   onNavigate,
 }: {
   sub: string;
   onNavigate: (sub: string, replace?: boolean) => void;
 }) {
+  const conversations = useWorkConversationStore();
   const [detail, setDetail] = useState<{ id: string; task?: TaskDetail; error?: string; missing?: boolean }>({ id: "" });
   const [retry, setRetry] = useState(0);
   const [pane, setPane] = useState<"list" | "detail">(sub === "" ? "list" : "detail");
@@ -72,7 +80,9 @@ export function WorkPage({
   const explicit = workSelection(sub);
   const selection = explicit ?? { kind: "manager" as const };
   const taskId = selection.kind === "task" ? selection.taskId : "";
-  const selected = detail.id === taskId && detail.task?.task_id === taskId ? detail.task : undefined;
+  const cacheKey = workConversationKey({ kind: "planner", taskId });
+  const candidate = detail.id === taskId && detail.task ? detail.task : conversations.cached(cacheKey)?.task;
+  const selected = candidate?.task_id === taskId ? candidate : undefined;
   useEffect(() => {
     const media = window.matchMedia("(min-width: 1280px)");
     const update = () => { setWide(media.matches); setPanel(false); };
@@ -118,6 +128,7 @@ export function WorkPage({
         const task = await fetchTaskDetail(taskId, signal);
         if (signal.aborted || revision !== detailRevision.current) return;
         if (task.task_id !== taskId) throw new Error("任务详情与当前任务不匹配，请刷新");
+        conversations.cache(cacheKey, { task });
         setDetail(current => current.id === taskId ? { id: taskId, task } : current);
         return !isActiveTask(task);
       } catch (err) {
@@ -129,7 +140,7 @@ export function WorkPage({
   useEffect(() => {
     if (!taskId) return;
     const ctrl = new AbortController();
-    setDetail({ id: taskId });
+    setDetail({ id: taskId, task: conversations.cached(cacheKey)?.task });
     // Read the latest event, not the first forward page (which can be over 1,000 events behind).
     Promise.all([
       fetchTaskDetail(taskId, ctrl.signal),
@@ -139,6 +150,7 @@ export function WorkPage({
       if (task.task_id !== taskId) throw new Error("任务详情与当前任务不匹配，请刷新");
       if ("status" in activity) throw new Error("Task activity is unavailable");
       setDetail({ id: taskId, task });
+      conversations.cache(cacheKey, { task });
       const seq = Math.max(0, ...activity.activity.map(event => event.seq));
       const key = `${taskId}:${seq}`;
       if (seen.current !== key) {
@@ -147,8 +159,8 @@ export function WorkPage({
       }
     }).catch((err: unknown) => {
       if (ctrl.signal.aborted) return;
-      setDetail({ id: taskId, missing: (err instanceof TaskDetailError || err instanceof V1Error) && err.status === 404 && !isMissingOperation(err),
-        error: errorText(err) });
+      setDetail(current => ({ id: taskId, task: current.id === taskId ? current.task : undefined,
+        missing: (err instanceof TaskDetailError || err instanceof V1Error) && err.status === 404 && !isMissingOperation(err), error: errorText(err) }));
     });
     return () => ctrl.abort();
   }, [taskId, retry]);
