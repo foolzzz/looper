@@ -18,6 +18,18 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.15.35] - 2026-11-24
+
+Cut from the v2.15.34 tag with #1724 and #1727 applied on top. Upgrade from v2.15.34. No migration, no online step, and no feature setting turns itself on; `web/` is unchanged. Installations older than the bridge must upgrade to v2.13.165 first. #1707, #1686 and the other pulls merged into main after v2.15.34 ship next.
+
+### Changed
+
+- **API-client turns no longer receive the operator profile.** ([#1727](https://github.com/foolzzz/looper/pull/1727)) With `manager.profile.enabled` on, a turn sent with an API client credential (`POST /api/v1/chat/send`, used by `loopercli chat` and agent tools) omits the `Operator profile` section; the dashboard chat and the operator's own direct chat keep it. With stable context on, such a turn neither diffs against nor overwrites the operator's last shown state. API clients keep the full persona.
+
+### Added
+
+- **Operator-only writes for five capability settings.** ([#1724](https://github.com/foolzzz/looper/pull/1724)) `attention.settings_update`, `reminders_settings.update`, `stable_context_settings.update`, `decision_snapshots_settings.update` and `leads_search_settings.update`, with the matching `*.get` reads where none existed. Typed values, `null` restores the default, high-risk confirmation, operator action audit, readback through each capability's reader, and generated CLI commands such as `loopercli attention settings-update`. Defaults and stored values are unchanged.
+
 ## [2.15.34] - 2026-11-24
 
 Cut from main at `a73719f67`. Later main pulls ship next. Upgrade from v2.15.33. No new feature setting turns itself on, and an upgrade does not insert a feature-setting row. From a database that has finished v2.15.33, startup applies six migrations and three online steps with every product switch off. `web/` changed, so the release workflow rebuilds the dashboard bundle. Installations older than the bridge must upgrade to v2.13.165 first. The heads of #1703, #1706 and #1709 are already in the v2.15.33 tag. #1713 is the previous release pull request. #1707 ships next.

@@ -277,6 +277,18 @@ def test_in_a_group_turn_a_push_to_the_speakers_direct_chat_is_external(monkeypa
 MANIFEST = Path(__file__).with_name("operation_levels.json")
 
 
+@pytest.mark.parametrize("operation_id", [
+    "attention.settings_update", "reminders_settings.get", "reminders_settings.update",
+    "stable_context_settings.get", "stable_context_settings.update", "decision_snapshots_settings.get",
+    "decision_snapshots_settings.update", "leads_search_settings.get", "leads_search_settings.update",
+])
+def test_operator_switch_settings_only_change_looper_state(operation_id):
+    from looper.agents import api_v1
+
+    operation = api_v1.find("POST", "/api/v1/" + operation_id.replace(".", "/"))
+    assert operation is not None and operation.level is INSIDE and operation.level_of is None
+
+
 def _declared(operations: Any) -> dict[str, str]:
     return {op.operation_id: "args" if op.level_of is not None else op.level.value for op in operations}
 
