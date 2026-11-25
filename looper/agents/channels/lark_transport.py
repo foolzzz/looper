@@ -14,8 +14,10 @@ from enum import Enum
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from uuid import uuid4
 
+from .. import chat_settings
 from . import lark_cli
 from .lark_content import ResourceRef
 
@@ -324,6 +326,7 @@ class CliTransport:
         stopped = False
         try:
             async for raw_line in process.stdout:
+                read_at = datetime.now(timezone.utc).isoformat() if chat_settings.metrics_enabled() else None
                 line = raw_line.decode("utf-8", errors="replace").strip()
                 if not line:
                     continue
@@ -332,6 +335,8 @@ class CliTransport:
                     # Older CLIs may omit the ready marker; a live event also proves subscription.
                     if isinstance(event, dict) and event.get("type") == lark_cli.RECEIVE_EVENT:
                         self.consumer_started.set()
+                        if read_at is not None:
+                            event["_lark_stdout_read_at"] = read_at
                     yield event
                 except Exception:
                     logger.debug("skipping non-JSON lark event line")
