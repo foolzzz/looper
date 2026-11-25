@@ -57,6 +57,10 @@ beforeEach(() => {
         init?.signal?.addEventListener("abort", () => reject(new DOMException("aborted", "AbortError")));
       });
     }
+    if (String(url).includes("tasks/detail")) return Promise.resolve(Response.json({ status: "ok", result: {
+      task_id: body.task_id, title: `Selected ${body.task_id}`, project_id: "p-beta", project_name: "Beta", status: "running", group: "in_progress",
+    } }));
+    if (String(url).includes("tasks/activity")) return Promise.resolve(Response.json({ status: "ok", result: { activity: [{ seq: 901 }] } }));
     const answer: Answer = method === "GET"
       ? { status: 405, body: { status: "error", error: { code: "invalid", message: "use POST" } } }
       : String(url).includes("tasks/select")
@@ -85,6 +89,43 @@ afterEach(() => {
 });
 
 describe("Work quick switcher", () => {
+  it("cannot choose results from an earlier query while a new query is pending", async () => {
+    await act(async () => { root.render(<Harness />); });
+    await settle();
+    await act(async () => { window.dispatchEvent(new KeyboardEvent("keydown", { key: "k", ctrlKey: true })); });
+    await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+    const dialog = () => host.querySelector('[role="dialog"]') as HTMLElement;
+    const input = () => dialog().querySelector("input") as HTMLInputElement;
+    const enter = async () => {
+      await act(async () => { input().dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true })); });
+    };
+
+    await act(async () => { type(input(), "pay"); });
+    await act(async () => { await vi.advanceTimersByTimeAsync(SELECT_DEBOUNCE_MS); });
+    expect(dialog().querySelectorAll('[role="option"]')).toHaveLength(2);
+
+    // The new query invalidates visible rows before its debounce or request completes.
+    await act(async () => { type(input(), "p"); });
+    await enter();
+    expect(navigated).toEqual([]);
+    expect(dialog().querySelectorAll('[role="option"]')).toHaveLength(0);
+    expect(dialog().querySelector('[role="status"]')?.textContent).toContain("Loading");
+    await act(async () => { await vi.advanceTimersByTimeAsync(SELECT_DEBOUNCE_MS); });
+    await enter();
+    expect(navigated).toEqual([]);
+
+    const slow = calls.find((call) => call.url.includes("tasks/select") && call.body.selection === "p")!;
+    await act(async () => { type(input(), "different"); });
+    expect(slow.signal?.aborted).toBe(true);
+    await enter();
+    expect(navigated).toEqual([]);
+    selectResult = { kind: "one", task: { task_id: "fresh", title: "Different", project_name: "Beta", status: "running", group: "in_progress", last_activity_at: null } };
+    await act(async () => { await vi.advanceTimersByTimeAsync(SELECT_DEBOUNCE_MS); });
+    expect(dialog().querySelector('[role="status"]')).toBeNull();
+    await enter();
+    expect(navigated).toEqual(["task/fresh"]);
+  });
+
   it("quick switcher", async () => {
     await act(async () => { root.render(<Harness />); });
     await settle();
@@ -129,6 +170,9 @@ describe("Work quick switcher", () => {
     await act(async () => { input().dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true })); });
     expect(navigated).toContain("task/c2");
     expect(window.location.hash).toBe("#work/task/c2");
+    await settle();
+    expect(host.querySelector("h1")?.textContent).toBe("Selected c2");
+    expect(calls.some(call => call.url.includes("mark_seen") && call.body.task_id === "c2" && call.body.seq === 901)).toBe(true);
 
     selectResult = { kind: "one", task: { task_id: "only", title: "Only one", project_name: "Beta", status: "running", group: "in_progress", last_activity_at: null } };
     opener.focus();

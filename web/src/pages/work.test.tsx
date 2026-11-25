@@ -84,6 +84,8 @@ function workHandler(url: string, method: string, body: Record<string, unknown>)
   if (url.includes("tasks/work_list")) {
     return { status: 200, body: { status: "ok", result: body.section === "open" ? { items: OPEN, next_cursor: null } : { items: [], schedules: [], next_cursor: null } } };
   }
+  if (url.includes("tasks/detail")) return { status: 200, body: { status: "ok", result: OPEN.find(task => task.task_id === body.task_id) } };
+  if (url.includes("tasks/activity")) return { status: 200, body: { status: "ok", result: { activity: [{ seq: 7 }] } } };
   if (url.includes("tasks/mark_seen")) return { status: 200, body: { status: "ok", result: {} } };
   if (url.includes("tasks/select")) return { status: 200, body: { status: "ok", result: { kind: "none", searched: {} } } };
   return { status: 200, body: { status: "ok", result: {} } };

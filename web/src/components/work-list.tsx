@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { LABEL } from "@/components/registry-ui";
@@ -41,7 +41,6 @@ export function WorkList({
   preferredProjectId,
   onOpenTask,
   onOpenManager,
-  onTasks,
   onFinder,
   onFind,
 }: {
@@ -49,7 +48,6 @@ export function WorkList({
   preferredProjectId: string | null;
   onOpenTask: (taskId: string) => void;
   onOpenManager: () => void;
-  onTasks: (tasks: WorkTask[]) => void;
   onFinder: (available: boolean) => void;
   onFind: () => void;
 }) {
@@ -57,8 +55,8 @@ export function WorkList({
   const open = useWorkSection<WorkTask>("open", true);
   const schedules = useWorkSection<WorkSchedule>("schedules", true);
   const [endedOpen, setEndedOpen] = useState(() => workStorage.endedOpen());
-  const [projectFilter, setProjectFilter] = useState("");
-  const [statusFilter, setStatusFilter] = useState("");
+  const [projectFilter, setProjectFilter] = useState(() => workStorage.filters().project);
+  const [statusFilter, setStatusFilter] = useState(() => workStorage.filters().status);
   const ended = useWorkSection<WorkTask>("ended", endedOpen, projectFilter, statusFilter);
   const [collapsed, setCollapsed] = useState<string[]>(() => workStorage.collapsed());
   const [drafts, setDrafts] = useState<boolean | null>(null);
@@ -66,7 +64,13 @@ export function WorkList({
   const [draftError, setDraftError] = useState("");
   const [creating, setCreating] = useState(false);
   const scroller = useRef<HTMLDivElement>(null);
+  const newButton = useRef<HTMLButtonElement>(null);
   const restored = useRef(false);
+  const scrollTarget = useRef(workStorage.scroll());
+  const [restoredSchedules, setRestoredSchedules] = useState<string[]>([]);
+  const scheduleRestored = useCallback((id: string) => {
+    setRestoredSchedules(ids => ids.includes(id) ? ids : [...ids, id]);
+  }, []);
 
   useEffect(() => {
     const ctrl = new AbortController();
@@ -83,20 +87,21 @@ export function WorkList({
   }, []);
 
   useEffect(() => { onFinder(finder !== false); }, [finder, onFinder]);
-  useEffect(() => { onTasks([...open.items, ...ended.items]); }, [open.items, ended.items, onTasks]);
+  useEffect(() => { workStorage.setFilters(projectFilter, statusFilter); }, [projectFilter, statusFilter]);
   useEffect(() => {
     if (preferredProjectId) workStorage.setLastProject(preferredProjectId);
   }, [preferredProjectId]);
 
   useLayoutEffect(() => {
     const el = scroller.current;
-    if (!el || restored.current || (open.loading && open.items.length === 0)) return;
-    el.scrollTop = workStorage.scroll();
+    if (!el || restored.current || !open.ready || !schedules.ready || (endedOpen && !ended.ready)) return;
+    if (schedules.items.some(schedule => workStorage.expanded().includes(schedule.schedule_id) && !restoredSchedules.includes(schedule.schedule_id))) return;
+    el.scrollTop = scrollTarget.current;
     restored.current = true;
-  }, [open.loading, open.items.length]);
+  }, [open.ready, schedules.ready, schedules.items, endedOpen, ended.ready, restoredSchedules]);
 
   const saveScroll = () => {
-    if (scroller.current) workStorage.setScroll(scroller.current.scrollTop);
+    if (scroller.current && restored.current) workStorage.setScroll(scroller.current.scrollTop);
   };
   const projectId = preferredProjectId || workStorage.lastProject() || projects?.[0]?.project_id || "";
   const draftReason = drafts === false
@@ -123,6 +128,19 @@ export function WorkList({
     }
   };
 
+  useEffect(() => {
+    const onKey = (event: KeyboardEvent) => {
+      if (event.repeat || event.defaultPrevented || event.ctrlKey || event.metaKey || event.altKey || event.key.toLowerCase() !== "n") return;
+      const target = document.activeElement;
+      if (target instanceof HTMLElement && (target.isContentEditable || target.closest('input, textarea, select, [contenteditable]:not([contenteditable="false"]), [role="textbox"]'))) return;
+      if (document.querySelector('[role="dialog"]') || newButton.current?.disabled) return;
+      event.preventDefault();
+      newButton.current?.click();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, []);
+
   const toggleGroup = (id: string) => {
     const next = collapsed.includes(id) ? collapsed.filter((item) => item !== id) : [...collapsed, id];
     setCollapsed(next);
@@ -142,7 +160,7 @@ export function WorkList({
   return (
     <div className="flex h-full min-h-0 flex-col">
       <div className="shrink-0 space-y-2 border-b border-border p-3">
-        <Button type="button" className="w-full" disabled={drafts === false || !projectId || creating} onClick={() => void onNew()}
+        <Button ref={newButton} type="button" className="w-full" disabled={drafts === false || !projectId || creating} onClick={() => void onNew()}
           aria-describedby={draftReason ? "work-draft-reason" : undefined}>
           New task
         </Button>
@@ -153,7 +171,9 @@ export function WorkList({
           aria-label="Find a task"
           placeholder="Find a task"
           aria-describedby={finder === false ? "work-find-reason" : undefined}
-          onFocus={() => { if (finder !== false) onFind(); }}
+          onKeyDown={(event) => {
+            if (finder !== false && (event.key === "Enter" || event.key === " ")) { event.preventDefault(); onFind(); }
+          }}
           onClick={() => { if (finder !== false) onFind(); }}
         />
         {finder === false && <p id="work-find-reason" className="text-xs text-muted-foreground">{FIND_UNAVAILABLE}</p>}
@@ -196,7 +216,7 @@ export function WorkList({
           <h2 className="px-3 pt-3 text-xs font-medium text-muted-foreground">Schedules</h2>
           <SectionState section="schedules" state={schedules} empty="No schedules" />
           {schedules.items.map((schedule) => (
-            <WorkScheduleRow key={schedule.schedule_id} schedule={schedule} onOpenTask={(id) => { saveScroll(); onOpenTask(id); }} />
+            <WorkScheduleRow key={schedule.schedule_id} schedule={schedule} onRestored={scheduleRestored} onOpenTask={(id) => { saveScroll(); onOpenTask(id); }} />
           ))}
           {schedules.next && <More loading={schedules.loading} onClick={schedules.loadMore} />}
         </section>

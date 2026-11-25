@@ -19,17 +19,15 @@ export function WorkSwitcher({
   restore: () => void;
 }) {
   const [query, setQuery] = useState("");
-  const [result, setResult] = useState<SelectResult | null>(null);
+  const [answer, setAnswer] = useState<{ query: string; result: SelectResult | null; error: string } | null>(null);
   const [index, setIndex] = useState(0);
-  const [error, setError] = useState("");
   const inputRef = useRef<HTMLInputElement>(null);
   const panelRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     if (!open) return;
     setQuery("");
-    setResult(null);
-    setError("");
+    setAnswer(null);
     setIndex(0);
     const timer = window.setTimeout(() => inputRef.current?.focus(), 0);
     return () => window.clearTimeout(timer);
@@ -52,21 +50,18 @@ export function WorkSwitcher({
   useEffect(() => {
     if (!open) return;
     if (!query.trim()) {
-      setResult(null);
-      setError("");
+      setAnswer(null);
       return;
     }
     const ctrl = new AbortController();
     const timer = window.setTimeout(() => {
       tasksSelect({ selection: query }, ctrl.signal).then((answer) => {
         if (ctrl.signal.aborted) return;
-        setResult(answer);
-        setError("");
+        setAnswer({ query, result: answer, error: "" });
         setIndex(0);
       }).catch((err: unknown) => {
         if (ctrl.signal.aborted) return;
-        setError(errorText(err));
-        setResult(null);
+        setAnswer({ query, result: null, error: errorText(err) });
       });
     }, SELECT_DEBOUNCE_MS);
     return () => {
@@ -76,6 +71,10 @@ export function WorkSwitcher({
   }, [open, query]);
 
   if (!open) return null;
+  const current = answer?.query === query ? answer : null;
+  const result = current?.result;
+  const error = current?.error;
+  const loading = !!query.trim() && !current;
   const rows: SelectCandidate[] = result?.kind === "one" && result.task
     ? [result.task]
     : result?.kind === "candidates" ? result.candidates ?? [] : [];
@@ -136,8 +135,12 @@ export function WorkSwitcher({
         <h2 id="work-find-title" className="px-3 pt-3 text-sm font-medium">Find a task</h2>
         <div className="p-3">
           <Input ref={inputRef} value={query} aria-label="Task selection" placeholder="Find a task"
-            onChange={(event) => setQuery(event.target.value)} />
+            onChange={(event) => {
+              setQuery(event.target.value);
+              setAnswer(null);
+            }} />
         </div>
+        {loading && <p role="status" className="px-3 pb-3 text-sm text-muted-foreground">Loading…</p>}
         {error && <p role="alert" className="px-3 pb-3 text-sm text-destructive">{error}</p>}
         {result?.kind === "none" && (
           <div className="space-y-2 px-3 pb-3 text-sm">

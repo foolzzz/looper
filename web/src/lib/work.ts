@@ -44,7 +44,7 @@ export interface WorkListResult {
 
 export interface SelectCandidate {
   task_id: string;
-  title: string;
+  title: string | null;
   project_name: string | null;
   status: string;
   group: string;
@@ -83,7 +83,25 @@ function writeStore(store: Storage, key: string, value: string | null) {
   }
 }
 
+// Remember view shape, not task data: reload re-reads each cursor from the server.
+function viewValue<T>(key: string, fallback: T): T {
+  try { return JSON.parse(readStore(sessionStorage, `looper.work.${key}`) ?? "null") ?? fallback; }
+  catch { return fallback; }
+}
+
 export const workStorage = {
+  pages: (key: string): number => Math.max(1, Number(viewValue(`pages.${key}`, 1)) || 1),
+  setPages: (key: string, count: number) => writeStore(sessionStorage, `looper.work.pages.${key}`, String(count)),
+  expanded: (): string[] => {
+    const value = viewValue<unknown>("expanded", []);
+    return Array.isArray(value) ? value.filter((id): id is string => typeof id === "string") : [];
+  },
+  setExpanded: (ids: string[]) => writeStore(sessionStorage, "looper.work.expanded", JSON.stringify(ids)),
+  filters: (): { project: string; status: string } => {
+    const value = viewValue("filters", { project: "", status: "" });
+    return { project: typeof value.project === "string" ? value.project : "", status: typeof value.status === "string" ? value.status : "" };
+  },
+  setFilters: (project: string, status: string) => writeStore(sessionStorage, "looper.work.filters", JSON.stringify({ project, status })),
   lastProject: () => readStore(localStorage, LAST_PROJECT),
   setLastProject: (id: string) => writeStore(localStorage, LAST_PROJECT, id),
   scroll: () => Number(readStore(sessionStorage, SCROLL_KEY) ?? "0") || 0,
@@ -216,6 +234,7 @@ export interface WorkSection<T> {
   error: string | null;
   missing: boolean;
   loading: boolean;
+  ready: boolean;
   retry: () => void;
   loadMore: () => void;
 }
@@ -230,7 +249,10 @@ export function useWorkSection<T>(
   const [next, setNext] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [missing, setMissing] = useState(false);
-  const [loading, setLoading] = useState(false);
+  const [loading, setLoading] = useState(active);
+  const [ready, setReady] = useState(false);
+  const pageCount = useRef(0);
+  const storageKey = `${section}:${projectId}:${status}`;
   const [generation, setGeneration] = useState(0);
   const nextRef = useRef<string | null>(null);
   const seq = useRef(0);
@@ -244,36 +266,45 @@ export function useWorkSection<T>(
     setLoading(true);
     setError(null);
     setMissing(false);
-    workList({
-      section,
-      ...(section === "ended" ? {} : { limit: 100 }),
-      ...(section === "ended" && projectId ? { project_id: projectId } : {}),
-      ...(section === "ended" && status ? { statuses: [status] } : {}),
-    }, ctrl.signal).then((page) => {
-      if (token !== seq.current) return;
-      const rows = (section === "schedules" ? page.schedules : page.items) ?? [];
-      setItems(rows as T[]);
-      nextRef.current = page.next_cursor;
-      setNext(page.next_cursor);
-      setLoading(false);
-      loadingRef.current = false;
-    }).catch((err: unknown) => {
+    setReady(false);
+    const request = async () => {
+      const rows: T[] = [];
+      let cursor: string | null = null;
+      const wanted = workStorage.pages(storageKey);
+      pageCount.current = 0;
+      do {
+        const page = await workList({ section,
+          ...(section === "ended" ? {} : { limit: 100 }),
+          ...(projectId ? { project_id: projectId } : {}),
+          ...(status ? { statuses: [status] } : {}),
+          ...(cursor ? { cursor } : {}),
+        }, ctrl.signal);
+        if (token !== seq.current) return;
+        rows.push(...((section === "schedules" ? page.schedules : page.items) ?? []) as T[]);
+        cursor = page.next_cursor;
+        pageCount.current++;
+      } while (cursor && pageCount.current < wanted);
+      setItems(rows);
+      nextRef.current = cursor;
+      setNext(cursor);
+      workStorage.setPages(storageKey, pageCount.current);
+    };
+    request().catch((err: unknown) => {
+      if (token !== seq.current || ctrl.signal.aborted) return;
+      if (isMissingOperation(err)) { setMissing(true); setItems([]); }
+      else setError(errorText(err));
+    }).finally(() => {
       if (token !== seq.current || ctrl.signal.aborted) return;
       setLoading(false);
       loadingRef.current = false;
-      if (isMissingOperation(err)) {
-        setMissing(true);
-        setItems([]);
-        return;
-      }
-      setError(errorText(err));
+      setReady(true);
     });
     return () => {
       ctrl.abort();
       seq.current += 1;
       loadingRef.current = false;
     };
-  }, [active, section, projectId, status, generation]);
+  }, [active, section, projectId, status, generation, storageKey]);
 
   const loadMore = useCallback(() => {
     if (!nextRef.current || loadingRef.current) return;
@@ -293,6 +324,7 @@ export function useWorkSection<T>(
       if (token !== seq.current) return;
       const rows = (section === "schedules" ? page.schedules : page.items) ?? [];
       setItems((prev) => [...prev, ...(rows as T[])]);
+      workStorage.setPages(storageKey, ++pageCount.current);
       nextRef.current = page.next_cursor;
       setNext(page.next_cursor);
       setLoading(false);
@@ -303,8 +335,8 @@ export function useWorkSection<T>(
       loadingRef.current = false;
       if (!isMissingOperation(err)) setError(errorText(err));
     });
-  }, [section, projectId, status]);
+  }, [section, projectId, status, storageKey]);
 
   const retry = useCallback(() => setGeneration((n) => n + 1), []);
-  return { items, next, error, missing, loading, retry, loadMore };
+  return { items, next, error, missing, loading, ready, retry, loadMore };
 }

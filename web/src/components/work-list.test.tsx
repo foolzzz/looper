@@ -93,7 +93,7 @@ async function show() {
   await act(async () => {
     root.render(
       <WorkList selection={{ kind: "manager" }} preferredProjectId={null} onOpenTask={vi.fn()} onOpenManager={vi.fn()}
-        onTasks={vi.fn()} onFinder={vi.fn()} onFind={vi.fn()} />,
+        onFinder={vi.fn()} onFind={vi.fn()} />,
     );
   });
   await settle();

@@ -1,10 +1,11 @@
-import { useEffect, useState, type MouseEvent } from "react";
+import { useEffect, useRef, useState, type MouseEvent } from "react";
+import { Button } from "@/components/ui/button";
 import { Loader2 } from "lucide-react";
 import { RunStatusBadge } from "@/components/project-schedules";
 import { TaskStatusMark } from "@/pages/tasks";
 import { fetchTasks, type ScheduleRunStatus } from "@/lib/api";
 import { errorText } from "@/lib/use-action";
-import { formatWhen, taskTitle, type WorkSchedule, type WorkTask } from "@/lib/work";
+import { formatWhen, taskTitle, workStorage, type WorkSchedule, type WorkTask } from "@/lib/work";
 
 const ROW = "flex w-full flex-wrap items-center gap-x-2 gap-y-1 rounded-md px-3 py-2 text-left text-sm transition-colors duration-150 motion-reduce:transition-none pointer-coarse:min-h-11 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring";
 
@@ -48,30 +49,76 @@ export function WorkTaskLink({
 export function WorkScheduleRow({
   schedule,
   onOpenTask,
+  onRestored,
 }: {
   schedule: WorkSchedule;
   onOpenTask: (taskId: string) => void;
+  onRestored?: (id: string) => void;
 }) {
-  const [open, setOpen] = useState(false);
-  const [runs, setRuns] = useState<{ task_id: string; name: string; status: string }[] | null>(null);
+  const [open, setOpen] = useState(() => workStorage.expanded().includes(schedule.schedule_id));
+  const [runs, setRuns] = useState<{ task_id: string; name: string; status: string }[]>([]);
+  const [next, setNext] = useState<string | null>(null);
   const [error, setError] = useState("");
+  const [loading, setLoading] = useState(false);
+  const [ready, setReady] = useState(false);
+  const [retry, setRetry] = useState(0);
+  const pages = useRef(0);
+  const busy = useRef(false);
+  const key = `schedule:${schedule.schedule_id}`;
   useEffect(() => {
-    if (!open) return;
+    if (!open || ready) return;
     let live = true;
-    fetchTasks({ scheduleId: schedule.schedule_id, limit: 10 })
-      .then((page) => {
-        if (live) setRuns(page.tasks.map((task) => ({ task_id: task.task_id, name: task.name, status: task.status })));
-      })
-      .catch((err: unknown) => { if (live) setError(errorText(err)); });
+    busy.current = true;
+    setLoading(true);
+    setError("");
+    (async () => {
+      const rows: typeof runs = [];
+      let before: string | null = null;
+      let count = 0;
+      do {
+        const page = await fetchTasks({ scheduleId: schedule.schedule_id, limit: 10, before });
+        if (!live) return;
+        rows.push(...page.tasks);
+        before = page.next_before;
+        count++;
+      } while (before && count < workStorage.pages(key));
+      if (!live) return;
+      pages.current = count;
+      setRuns(rows);
+      setNext(before);
+      setReady(true);
+    })().catch((err: unknown) => { if (live) setError(errorText(err)); })
+      .finally(() => { if (live) { setLoading(false); busy.current = false; } });
     return () => { live = false; };
-  }, [open, schedule.schedule_id]);
+  }, [open, ready, schedule.schedule_id, key, retry]);
+  useEffect(() => {
+    if (!open || ready || error) onRestored?.(schedule.schedule_id);
+  }, [open, ready, error, onRestored, schedule.schedule_id]);
+  const more = async () => {
+    if (!next || busy.current) return;
+    busy.current = true;
+    setLoading(true);
+    setError("");
+    try {
+      const page = await fetchTasks({ scheduleId: schedule.schedule_id, limit: 10, before: next });
+      setRuns(rows => [...rows, ...page.tasks]);
+      setNext(page.next_before);
+      workStorage.setPages(key, ++pages.current);
+    } catch (err) { setError(errorText(err)); }
+    finally { setLoading(false); busy.current = false; }
+  };
 
   return (
     <div className="border-b border-border">
       <button
         type="button"
         aria-expanded={open}
-        onClick={() => setOpen((value) => !value)}
+        onClick={() => {
+          const expanded = workStorage.expanded().filter(id => id !== schedule.schedule_id);
+          if (!open) expanded.push(schedule.schedule_id);
+          workStorage.setExpanded(expanded);
+          setOpen(!open);
+        }}
         className={`${ROW} hover:bg-accent`}
       >
         <span className="min-w-[7rem] flex-1 truncate text-left font-medium">{schedule.name}</span>
@@ -92,7 +139,9 @@ export function WorkScheduleRow({
       </button>
       {open && (
         <div className="space-y-1 px-3 pb-2">
-          {error && <p role="alert" className="text-xs text-destructive">{error}</p>}
+          {error && <div role="alert"><p className="text-xs text-destructive">{error}</p>
+            <Button variant="outline" onClick={() => ready ? void more() : setRetry(n => n + 1)}>Retry</Button></div>}
+          {loading && <p role="status" className="text-xs text-muted-foreground">Loading…</p>}
           {runs?.map((run) => (
             <a
               key={run.task_id}
@@ -108,7 +157,8 @@ export function WorkScheduleRow({
               <TaskStatusMark status={run.status} />
             </a>
           ))}
-          {runs && runs.length === 0 && <p className="text-xs text-muted-foreground">No runs yet</p>}
+          {next && <Button variant="outline" disabled={loading} onClick={() => void more()}>Load more</Button>}
+          {ready && runs.length === 0 && <p className="text-xs text-muted-foreground">No runs yet</p>}
         </div>
       )}
     </div>
