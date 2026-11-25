@@ -4825,7 +4825,10 @@ So:
   previous server that was killed, crashed or stopped did not see end. It keeps
   the persisted usage checkpoint and the same partial/unreported marker.
   A keeper adoption replays usage into a fresh accumulator, and successful final
-  settlement replaces that same row without setting interruption fields. Task
+  settlement replaces that same still-running row and clears interruption markers.
+  Checkpoints and terminal writes use SQL guards requiring `running`, returning
+  whether they applied. The first terminal write wins across connections; skipped
+  writes log the record id, stored status and requested status at info level. Task
   costs, daily spend, metrics and cost-cap reads include the partial row through
   the existing `cost_usd` column; replay and final settlement add no second bill.
   A second startup close changes nothing.
