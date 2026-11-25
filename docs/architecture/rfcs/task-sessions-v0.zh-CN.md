@@ -80,11 +80,11 @@
 ### 3.3 它怎么启动
 
 - **工作目录：** 任务的工作区（原地任务是 `work_dir`；worktree 任务是任务 worktree 里的位置，第一次需要时由 `task_workspaces.prepare` 建好，`task_workspaces.py:324-385`）。
-- **权限：** 直接模式给全部工具、跳过权限确认（同执行者，`agent_settings.py:1031`）；编排模式下写权限在后台，任务管家用只读启动（`claude_cli.py:355-365`）续同一条会话（用不同工具集续同一会话有先例：会诊，`consult.py:19-21`）。模式一变，启动签名就变，停掉进程、按同一个会话 id 续上。
+- **权限：** 直接模式给全部工具、跳过权限确认（同执行者，`agent_settings.py:1031`）；编排模式下写权限在后台，任务管家改用 Looper 自己的隔离加只读启动（`isolation_args` 加 `read_only_args`，`claude_cli.py:142-195`、`:377-407`）续同一条会话：不载入操作者的设置，操作者的 allow 规则和 MCP 服务就放宽不了它（用不同工具集续同一会话有先例：会诊，`consult.py:19-21`）。模式一变，启动签名就变，停掉进程、按同一个会话 id 续上。
 - **操作者本人的环境：** 不用 Looper 给 agent 的隔离参数（`--setting-sources project` 那一组，`claude_cli.py:142-170`），让操作者的用户设置、全局指令、记忆和 skill 都生效，行为最接近操作者在终端里用的那个。三处仍由 Looper 加上（经只属于这次启动的 `--settings`）：拒绝别的会话发来的消息（`crossSessionInbound: refuse`，否则操作者别的 Claude Code 会话能往这里塞消息）；对外动作审查的 PreToolUse 钩子（`outbound_hook.py:220-232`，推送、发评论仍要过审查）；禁掉和 Looper 撞名的内置工具（系统提示词 append 调研的做法 (b)）。不设 `LOOPER_AGENT_RUN`，改设 `LOOPER_TASK_MANAGER=<task_id>`：它是操作者的代理，操作者专属的本机命令在它里面只能作用于这个任务，碰不到别的任务，也碰不到系统级的操作（部署和服务管理、改设置、动别的任务），每一类都有负向测试（第 18 节）。
-- **前置条件：** `--settings` 里的 PreToolUse 钩子（对外动作审查）和用户设置里的钩子要能同时执行。第 1 步开工前先验证（任务卡 1.0）：用真实的 Claude Code CLI 接本地的假模型服务，返回固定的工具调用，在临时的 `HOME` 和 `CLAUDE_CONFIG_DIR` 里放一份合成的用户设置，不调用真实模型、不碰操作者的 `~/.claude`（做法同能力范围 RFC 第 10 节的离线探针）。只有必须真跑一轮模型才能证明时，才先估价、并进评测预算，由协调者去问维护者。验证不过，任务管家就不能用操作者本人的环境启动，这算推翻性的问题，要立刻报告。
+- **前置条件：** `--settings` 里的 PreToolUse 钩子（对外动作审查）和用户设置里的钩子要能同时执行。第 1 步开工前先验证（任务卡 1.0）：用真实的 Claude Code CLI 接本地的假模型服务，返回固定的工具调用，在临时的 `HOME` 和 `CLAUDE_CONFIG_DIR` 里放一份合成的用户设置，不调用真实模型、不碰操作者的 `~/.claude`（做法同能力范围 RFC 第 10 节的离线探针）。只有必须真跑一轮模型才能证明时，才先估价、并进评测预算，由协调者去问维护者。验证不过，任务管家就不能用操作者本人的环境启动，这算推翻性的问题，要立刻报告。同一张卡还要测：用户设置、仓库里提交的 `.claude/settings.json`、模型在会话里写出的 `.claude/settings.json` 带 `disableAllHooks` 时，审查钩子还执行不执行（今天的隔离正是为此不载入设置文件，`claude_cli.py:142-170`）。
 - **提示词：** `APPEND`：保留 Claude Code 自带的提示，追加任务简报（第 14 节的 `compose`，别人写的内容围起来）和一小段 Looper 说明（这个任务是什么、怎么交给后台、怎么看后台的进展、哪些工具绑定在这个任务上）。这是新的会话类型；现有管家仍用 `REPLACE`。
-- **运行时：** v0 只在 Claude Code 上（能中断常驻回合，`runtimes/claude_code.py:169`）；Codex 和普通 DSH 不能中断常驻回合（`runtimes/__init__.py:534-538`），DSH runner 未验证。任务管家的 Profile 是 Claude Code 的 Agent Profile（默认内置的那个）。
+- **运行时：** v0 只在 Claude Code 上（能中断常驻回合，`runtimes/claude_code.py:169`）；Codex 和普通 DSH 不能中断常驻回合（`runtimes/__init__.py:534-538`），DSH runner 未验证。任务管家用这个任务所属管家的 Agent Profile（模型、effort、provider）；它的运行时不是 Claude Code 时，类型化地拒绝并写明，不悄悄换。
 
 ### 3.4 它的工具
 
@@ -111,7 +111,7 @@
 | D3 | 任务管家是独立的一层，建在 `ResidentClaude` 上，会话存在 `agent_sessions`，不走管家的会话路由、不用 `manager_sessions`；不等能力范围 1b，不改它的文件 | 3.2、第 19 节 |
 | D4 | 启动：在任务的工作区里，直接模式全部工具、编排模式只读；操作者本人的环境，加上拒绝跨会话消息、对外动作审查和禁掉撞名的工具；`APPEND` 加任务简报；v0 只在 Claude Code 上 | 3.3 |
 | D5 | 消息：直接模式由任务管家自己做；编排模式仍先到任务管家，进展问题它读任务状态回答，要改计划时用 `task_supplement`，原话由代码附上；关卡回答由代码送到关卡；控制由代码执行 | 第 5 节 |
-| D6 | 新状态 `draft`（从没交给过后台）和新字段 `tasks.interaction_mode`（`direct`、`orchestrated`）；结束后模式回到直接，再交给后台就是又一次运行 | 第 7 节 |
+| D6 | 新状态 `draft`（从没交给过后台）；模式（`direct`、`orchestrated`）由状态推出，不另存一列；结束后模式回到直接，再交给后台就是又一次运行 | 第 7 节 |
 | D7 | 交给后台和接手都是类型化的转换，由代码执行交接、检查点和写权限的移交 | 第 6 节 |
 | D8 | 写权限：同一个任务同一时间只有任务管家或后台一方能写，由模式和 checkout 租约保证；两个任务共用一个原地目录时照 W5 只提醒 | 第 8 节、22 |
 | D9 | 任务管家全机最多同时 6 个，闲置 30 分钟回收；满了先回收最久没用的空闲的，都在忙时排队并显示；和管家会话的上限分开 | 第 9 节 |
@@ -148,11 +148,11 @@
   3. 检查点：worktree 任务把剩下的改动提交到任务分支 T；原地任务不替操作者提交，只记下 HEAD 和未提交的文件，有未提交的改动时在对话里提醒。
   4. 写权限：任务管家用只读启动重起（续同一条会话）；后台拿到 checkout 的共享锁（第 8 节）。
   5. 记一行 `task_handoffs`（方向、需求的版本、交接文字、操作者原话的摘录、工作区状态）；交接文字和原话摘录存成一条 `via = handoff` 的补充说明，执行者和评审者都看得到。
-  6. 状态 → `pending`，`interaction_mode` → `orchestrated`；TaskRouter 照今天起规划者，规划者在**它自己的新会话**里按需求和交接规划（规划者不变）。这个任务以前跑过时，这是又一次运行：`run_no` 加一，规划者走 `_restart_plan` 的续接（6.3）。
+  6. 状态 → `pending`（模式随之是 `orchestrated`）；TaskRouter 照今天起规划者，规划者在**它自己的新会话**里按需求和交接规划（规划者不变）。这个任务以前跑过时，这是又一次运行：`run_no` 加一，规划者走 `_restart_plan` 的续接（6.3）。
 
 ### 6.2 编排 → 直接
 
-- **自动转回：** 后台跑完、失败或停止时，`interaction_mode` → `direct`。任务管家拿到一段代码生成的摘要（做完了哪些步骤、结果、改了什么、哪些关卡开着），下一句话就用全部工具接着做。
+- **自动转回：** 后台跑完、失败或停止时，状态到终态，模式随之是 `direct`。任务管家拿到一段代码生成的摘要（做完了哪些步骤、结果、改了什么、哪些关卡开着），下一句话就用全部工具接着做。
 - **中途接手**（`/takeover`、按钮，或任务管家的 `task_take_over`），由代码执行，两种方式：
   - `finish`（默认）：不再派新步骤，正在跑的步骤做完并按今天的规则验收；这期间状态是 `handing_back`。最后一个步骤结束后 → 直接。
   - `stop`：立刻停掉正在跑的执行者和评审者（今天停任务的路径），没做完的步骤回到未开始 → 直接。
@@ -176,7 +176,7 @@
 | 已结束 | `completed`、`failed`、`stopped`、`cancelled` | `direct` | 任务管家 |
 
 - `draft` 还需要：它的意思是「从没交给过后台」。现有的 `init` 意思是「有需求、没开始、只能由用户开始」（`db/tasks.py:21-23`），建任务要求有需求（`projects.py:572-574`），表达不了一个还没有需求的任务。
-- `tasks.interaction_mode`（新列，`direct` 或 `orchestrated`，默认 `orchestrated`，已有的行和旧路径建的任务不变）由代码在转换里写。旧路径建的任务（`tasks.create`、管家、定时任务）在第一次有人打开它的对话之前没有任务管家（第 9 节）。
+- 模式不存列，由状态推出：`ACTIVE_STATUSES` 里的是 `orchestrated`，其余是 `direct`（`db/tasks.py` 里一个函数，任务卡 1.2）。上表每个状态正好对应一个模式，另存一列只会和状态不一致（两次写之间崩溃、旧行要回填）。`handing_back` 和它唯一的写入方、服务启动时怎么处理它，一起在第 3 步加。旧路径建的任务（`tasks.create`、管家、定时任务）在第一次有人打开它的对话之前没有任务管家（第 9 节）。
 
 ### 7.2 转换
 
@@ -213,13 +213,13 @@ draft、init ──删除──→ （删除）
 | `memory_retro_service.py:70`、`db/memory_retro.py:19` | 完成、失败的任务做复盘 | 第二次结束按游标只看新的部分 |
 | `db/room.py:185-186` | 按 `completed_at` 留最近的房间 | 再交给后台时清掉，确认房间不被清掉 |
 | `intent_rule_engine.py:765-783` | 规则执行看任务是否结束 | 绑了规则的任务不能再交给后台 |
-| `task_workspaces.py:402-461` | 完成就提交并删 worktree；清扫只认 `active` | 新状态 `kept`（第 10 节） |
+| `task_workspaces.py:402-461` | 完成就提交并删 worktree；清扫只认 `active` | 不加新状态：建回后是 `active`，启动清扫照今天把完成任务的 worktree 提交到分支再删，下一句话再建回（第 10 节） |
 | `tiers/task.py:794-828` | 结束收尾只跑一次 | `/done` 走同一条收尾；按运行号再跑；`db.tasks._task_ended`（`db/tasks.py:542`）只通知 listener |
 | Tasks 页、侧栏计数、晨报、「需要你处理」 | 按状态分组 | `draft` 单独成组，不算进行中；超过 14 天没动的草稿在「需要你处理」里提一次 |
 
 ## 8. 工作区和写权限
 
-- **一个任务，一方写：** 直接模式下任务管家写，编排模式下后台写，由 `interaction_mode` 和 6.1、6.2 的转换保证；任务管家在编排模式下是只读启动，不只是不该写。
+- **一个任务，一方写：** 直接模式下任务管家写，编排模式下后台写，由模式（从状态推出）和 6.1、6.2 的转换保证；第 1 步里，任务管家在回合中时「开始」被拒（409），编排中的回合只读启动；任务管家在编排模式下是只读启动，不只是不该写。
 - **checkout 租约：** 键是目录所在 checkout 的真实路径（`git rev-parse --show-toplevel` 再取 `realpath`；worktree 任务用任务 worktree 的路径）。锁文件在用户级状态目录 `${XDG_STATE_HOME:-~/.local/state}/looper/checkout-leases/`，不放在 runtime root 下；测试用 `LOOPER_LEASE_DIR`；不在本地文件系统上时拒绝（`lease_unsupported`）。任务管家的直接回合和后台运行都持共享锁；交接时按 6.1、6.2 的顺序由代码移交。被拒时说明持有者，没有强行接管。
 - **两个任务共用一个原地目录：** 维持 W5，只提醒、不阻止；「同一时间只有一方写」只在同一个任务内部强制。任务面板上显示「这个目录还有另一个任务在用」（`others_active_in`，`db/tasks.py:96-102`）。
 - **检查点：** worktree 任务交给后台时自动提交到任务分支 T（Looper 的身份、不跑钩子、尾注 `Looper-Task`，`step_workspaces.commit_pending`，`step_workspaces.py:690`），方便回退；原地任务不替操作者提交，只记录当时的状态，有未提交的改动时提醒。直接模式里 worktree 任务每个改了文件的回合也提交一次，可以「撤回上一轮」（只撤最后一轮，`git reset --keep`）；原地任务每轮列出改了哪些文件。
@@ -237,8 +237,8 @@ draft、init ──删除──→ （删除）
 
 - 同一个工作区路径、同一个运行时和 provider、会话记录还在时，`--resume` 原会话。
 - 续不上时开新会话，第一轮带简报和对话线程的摘录，并在对话里插一行类型化的事件 `session_fresh`：「原会话续不上，已用摘要重开」，带原因。不悄悄换会话。
-- **完成的 worktree 任务**（worktree 在完成时删了，`task_workspaces.py:402-440`），操作者回来说话时：分支 T 还在 → `rebuild`：按 T 在原路径建回（`prepare` 的 `:353`），`task_worktrees.state` 记成新值 `kept`，续原会话；T 没了或正检出在别处 → `read_only_open`：任务管家在工作区 W 里只读回答（新会话，插 `session_fresh`），不能再交给后台（`branch_gone`）。
-- `kept` 要改的地方：CHECK（`schema.sql:509`）和 `WorktreeState`（`task_workspaces.py:63-65`）；启动清扫只认 `list_active`（`db/task_worktrees.py:40-47`），改成也认 `kept`，干净的 `kept` 目录照完成的做法删，有改动的留着，删之前先试 checkout 的锁；`finish` 对不是 `active` 的行直接返回（`:413`），加删除任务的分支；任务管家闲置回收时干净的 `kept` 目录一起删；再交给后台时改回 `active`。
+- **完成的 worktree 任务**（worktree 在完成时删了，`task_workspaces.py:402-440`），操作者回来说话时：由 `task_workspaces.reopen` 决定（任务卡 1.2）：分支 T 还在、没有别处检出 → `prepare` 按 T 在原路径建回（`task_workspaces.py:351-356` 已有这条路），行回到 `active`，续原会话；T 没了或正检出在别处 → 只读打开：任务管家在工作区 W 里只读回答（新会话，插 `session_fresh`，原因 `branch_gone` 或 `branch_checked_out`），不能再交给后台。先查再调 `prepare`，因为分支没了时 `prepare` 会从基点悄悄开一个新分支。
+- 不加 `kept` 状态：建回的 worktree 是 `active`；服务启动时 `sweep` 照今天把完成任务的 worktree 里的东西提交到分支再删（`task_workspaces.py:442-461`），下一句话再建回。直接模式下每个改了文件的回合都提交，所以由 Looper 代提交的最多是最后一轮没提交的部分；被忽略的文件和今天完成时一样不保留。
 - 需要验证：Claude Code 换了工作目录后 `--resume` 能不能找到原会话；它自己会不会清理很久以前的会话记录。
 
 ## 11. 第 1 步：任务管家的直接会话
@@ -249,7 +249,7 @@ draft、init ──删除──→ （删除）
 |---|---|---|
 | 1.0 | 前置验证（排在最前）：`--settings` 里的 PreToolUse 钩子和用户设置里的钩子能否同时执行，以及 `--settings` 里的 SessionStart 钩子能否注入；真实 CLI 接假模型服务，临时 `HOME` 和 `CLAUDE_CONFIG_DIR`，不调用模型、不碰操作者的配置 | 0.5–1 |
 | 1.1 | 草稿状态和工作模式的开关（已写成任务卡）：`draft`、`tasks.create_draft`、草稿的开始和删除、费用拦截的排除、`tasks_draft_shape` 约束（迁移 2050）、`tasks.conversations.enabled` 和它的两个操作 | 1.5–2 |
-| 1.2 | `tasks.interaction_mode` 和 `handing_back`（迁移 2070）；7.2 里不涉及后台的转换（新建、`/done`）；7.3 里本步涉及的检查 | 0.5–1 |
+| 1.2 | 模式由状态推出的函数；`/done`（`tasks.done`）；`task_workspaces.reopen`（建回或只读打开）；7.3 里本步涉及的检查。无迁移，2070 留着 | 0.5–1 |
 | 1.3 | `TaskManagerAgent`：生命周期、上限和回收、`ResidentClaude`、3.3 的启动（工作区、全部工具、操作者环境加三处、`APPEND` 和简报、禁掉的工具、`LOOPER_TASK_MANAGER`）、会话存进 `agent_sessions`、续接和 `session_fresh`、中断、排队、delta 和 `agent.tool` 事件、回合小结和 worktree 的每轮提交、预算检查、运行时不支持时的类型化拒绝 | 3–4 |
 | 1.4 | 任务对话的地址：`operator_chat.send` 的目标 `kind: task`、对话线程 `task-chat:<task_id>`（`chat_threads` 归任务的管家，`chat_messages.channel` 记入口）、停止的入口、固定命令 | 1–1.5 |
 | 1.5 | 任务管家能用什么、碰不到什么：绑定任务的 MCP 凭据和第一批工具（`task_status`、`task_requirement_set`）；`LOOPER_TASK_MANAGER` 下 `looper` 命令的白名单和负向测试 | 0.5–1 |
@@ -357,7 +357,7 @@ draft、init ──删除──→ （删除）
 
 - 任务管家不走管家的会话路由（3.2），所以本文**不改**能力范围 1b 拥有的任何代码：`session_routing`（`SessionKind`、`SessionKey`、`session_key_for`、`resident_label`、`routes`）、`tiers/manager_routing.py`（`SessionRouter`、常驻上限）、`manager_sessions` 和 `db/manager_sessions.py`、`tiers/manager.py` 的会话启动和输入、`tiers/group_session.py`、`ops/service.py` 的授权、`ops/__init__.py` 的待确认、运行时的启动模式声明、渠道写 `sender_kind`、`db/chat.py` 的 `save_message`、`save_channel_message`、`activity_since`、`latest_id`（任务对话线程用一个新的读写模块，写入时调用 `save_message` 但不改它）。#1747 和本文不改同一批文件。
 - 那一步原先计划留给本文的扩展点（内置集合 `task_session`、放宽「受众是操作者当且仅当范围是 `full`」、`SessionKey` 加 `TASK`）都不需要。
-- 本文拥有：`db/tasks.py` 的状态分组；`projects` 的建任务、`check_task_control`、`start_ready_task`、`control_task`、`store_chat_supplement`、`EDITABLE_STATUSES`；`tiers/task.py` 的开始、重启、收尾和恢复；`tiers/planner.py` 的 `_restart_plan`、`_restart_message`；新的 `tiers/task_manager.py`；`chat_targets.py` 的 `kind: task`；`channels/web.py` 的 `agent.tool` 事件；`v1_domains/operator_chat_streams.py` 的 `run`；`v1_domains/task_create.py`、`task_views.py` 和新的几个操作；`ops/tasks.py`；`task_workspaces` 的 `WorktreeState`、`prepare`、`sweep`、`finish`；`db/cost_holds.py` 的状态排除；`web/src/pages/work.tsx` 和新组件（从 `chat.tsx`、`task-detail.tsx` 只抽出，不改行为）；`cli.py` 的 `task` 命令组。
+- 本文拥有：`db/tasks.py` 的状态分组；`projects` 的建任务、`check_task_control`、`start_ready_task`、`control_task`、`store_chat_supplement`、`EDITABLE_STATUSES`；`tiers/task.py` 的开始、重启、收尾和恢复；`tiers/planner.py` 的 `_restart_plan`、`_restart_message`；新的 `tiers/task_manager.py`；`chat_targets.py` 的 `kind: task`；`channels/web.py` 的 `agent.tool` 事件；`v1_domains/operator_chat_streams.py` 的 `run`；`v1_domains/task_create.py`、`task_views.py` 和新的几个操作；`ops/tasks.py`；`task_workspaces` 的 `reopen` 和它对 `prepare` 的调用；`db/cost_holds.py` 的状态排除；`web/src/pages/work.tsx` 和新组件（从 `chat.tsx`、`task-detail.tsx` 只抽出，不改行为）；`cli.py` 的 `task` 命令组。
 - 共用：`untrusted.Source` 加一个值 `TASK_REQUIREMENT`，只加不改；迁移序号本文用 2050（任务卡 1.1）和 2060（任务卡 2.1），1b 用 2040，互不修改对方的表。
 
 ## 20. 分步计划
@@ -411,6 +411,8 @@ draft、init ──删除──→ （删除）
 | 任务管家用操作者本人的环境：用户设置、钩子、MCP、全局指令、自动记忆都生效，而且不设 `LOOPER_AGENT_RUN` | 已定：用 `LOOPER_TASK_MANAGER` 把操作者专属的本机命令限定在这个任务上，系统级操作一律拒绝，有负向测试（第 18 节）。这是减速带：它以操作者的系统账号运行，能读操作者能读的文件，绕开 `looper` 命令直接调接口的做法挡不住 |
 | `--settings` 里的钩子和用户设置里的钩子是否都执行（对外动作审查靠它） | 前置条件，任务卡 1.0 先验证，不调用模型。不过就不能用操作者本人的环境启动，这是推翻性的问题，要立刻报告 |
 | 同一目录同一时间只有一方写 | 已定：只在同一个任务内部强制；两个任务共用一个原地目录时维持 W5，只提醒，任务面板上写明 |
+| 设置里的 `disableAllHooks` 可能关掉审查钩子：任务管家载入设置文件，模型能在工作区写一个 | 任务卡 1.0 测四种情况（用户设置、提交的、会话中写出的、只载入用户设置时）；能关掉就报告，由维护者定缓解办法，再开第 1 步的启动卡 |
+| 任务管家的真实评测会载入操作者真实的 Claude Code 配置 | 评测给服务一份临时的 `HOME` 和 `CLAUDE_CONFIG_DIR`（固定的设置，没有钩子和 MCP）；这样就没有操作者的登录，真实运行用哪种凭据（`CLAUDE_CODE_OAUTH_TOKEN` 或 API key）**需要维护者确认** |
 | 任务管家只在 Claude Code 上 | 任务管家的 Profile 不是 Claude Code 时写明原因；Codex 能中断常驻回合、DSH runner 验证后再开 |
 | 编排模式下，要改计划的话经任务管家交给规划者，多一跳 | 原话由代码原样附上；进展问题任务管家自己读状态回答；只有改计划才多走这一步 |
 | 管家交互机制在任务管家里另写了一份消息循环 | 只写单会话、单入口的那一小部分，底层部件复用；1b 合入后可以评估合并 |
