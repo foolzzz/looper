@@ -1,4 +1,4 @@
-"""What a group's or another sender's direct-chat session of the default Manager starts with (session routing,
+"""What a routed group session (or the default Manager's other-sender direct-chat session) starts with (session routing,
 RFC 5.3.4): only its own chat.
 
 A brand-new session's first turn starts with its opening: what the session is, that it sees none of the operator's

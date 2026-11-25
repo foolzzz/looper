@@ -79,7 +79,8 @@ Manager has no tool for it. The dashboard shows the task page's 指标 card and 
   (`looper/agents/tiers/manager_session.py`). Every Manager has `main`; by
   default it is the only one, and a group chat's turns run in the operator's
   session. [Session routing](#manager-session-routing) gives the default
-  Manager more. `session_routing.group_isolation` tells a feature that must
+  Manager more; a scenario Manager can independently opt into one session per group.
+  `session_routing.group_isolation` tells a feature that must
   not reach a group through the operator's context how far a group's turns
   are kept apart: `shared`, or `isolated` while routing is on. `ManagerFleet` (`looper/agents/managers.py`) runs the enabled ones, at most
   8 at once. A scenario Manager has its own system prompt, Agent Profile and
@@ -103,6 +104,26 @@ Manager has no tool for it. The dashboard shows the task page's 指标 card and 
     dashboard and generated CLI use these operations; `chat_settings` keeps
     only reply stopping, completion turns, research order and the ledger.
     Lark and Telegram need no new configuration command.
+  - A scenario Manager's independent `managers.session_routing` setting is
+    `off` by default, or `per_chat`. The operator-only
+    `scenario_session_routing.get` operation takes `{"manager_id": "manager-example"}`;
+    `scenario_session_routing.update` also requires `session_routing` (`"off"`,
+    `"per_chat"` or `null`, which restores off). Both return `manager_id` and
+    `session_routing`. Update is high risk, declares confirmation and records
+    an operator action; API clients and Manager turns cannot use either operation.
+    The generated CLI exposes `scenario-session-routing get/update`. These
+    operations leave `chat_settings` unchanged; the dashboard uses the existing
+    session list and needs no new chat command for Lark or Telegram.
+    With `per_chat`, every group bound to that Manager uses
+    `group:<channel id>:<chat>`; every non-group turn stays in main, including
+    another sender's direct chat. `group_isolation()` reports `isolated` for its groups.
+    All its sessions retain that scenario Manager's own system prompt and
+    scope contract, Agent Profile, installed capabilities and tools. The
+    default Manager's global switch and its non-main tool boundary stay unchanged.
+    Off, scenario message bytes, session keys and process signatures are unchanged.
+    Enabling does not migrate history: the existing session stays main and
+    each group's next turn starts fresh. Disabling sends new turns back to
+    main; in-flight turns finish and group sessions remain for idle reclaim.
   - Sessions run in parallel; inside one, messages run in order. The message
     loop hands each user message to its session's worker. Completion wake-ups
     resolve the bot's identity before claiming events, then use the event
@@ -118,9 +139,10 @@ Manager has no tool for it. The dashboard shows the task page's 指标 card and 
   - Each non-main resident has its own label (`manager.<kind>.<digest>`,
     for its logs and session directory), workspace, runtime state, caches, prompts,
     MCP configuration and binding file under
-    `.local/manager-sessions/<digest>/`. Its MCP entry carries a distinct
+    `.local/manager-sessions/<digest>/` (scenario digests include the Manager id,
+    so two Managers cannot share runtime files). Its MCP entry carries a distinct
     credential: the server checks that a binding belongs to that credential's
-    session, so learning another binding cannot authorize its calls. Only
+    session, so learning another binding cannot authorize its calls. For the default Manager, only
     Looper's platform tools are available: no local file or shell tools,
     catalog MCP servers, plugins, skills or subagents. Claude Code and the
     in-process API runtime support this mode; other runtimes refuse a
@@ -134,9 +156,12 @@ Manager has no tool for it. The dashboard shows the task page's 指标 card and 
     server's OS user; it does not sandbox a compromised runtime executable.
     Calls remain bound until the routed turns end, even after routing is
     switched off, whatever `chat.stop_enabled` says.
-  - At most `manager.sessions.max_resident` sessions (1–16, default 2) keep a
+  - Per Manager, at most `manager.sessions.max_resident` sessions (1–16, default 2) keep a
     process. Starts reserve capacity atomically, including saved-session
     restores; successful, failed and cancelled starts release their reservation.
+    The shared setting applies independently to each routed Manager: count
+    its main process, its group/DM processes and starts with a reservation,
+    never another Manager's residents.
     A session other than main that would start one at the cap stops
     the least recently active idle one other than main; its session id stays
     saved and resumes on its next message. When none is idle, the message
@@ -146,8 +171,9 @@ Manager has no tool for it. The dashboard shows the task page's 指标 card and 
     stops it once the turn is over.
   - `/new` resets only the session it was sent in. In a group or dm session
     it leaves main's pending confirmations and remembered leads alone. The
-    profile chosen for the session (`/profile`, `select_session_profile`) is
-    main's: another session follows the settings and refuses `/profile`.
+    profile is chosen in main (`/profile`, `select_session_profile`): a default
+    Manager's other sessions follow Settings, and a scenario Manager's group
+    sessions share its main profile choice. Non-main sessions refuse `/profile`.
     The dashboard's Manager section lists these sessions (name, kind, whether
     a process is running, last activity, cost) and can reset one. That reset
     clears the session the same way `/new` does and does not post into the
@@ -445,7 +471,10 @@ Manager has no tool for it. The dashboard shows the task page's 指标 card and 
   types are rejected, and member wording follows the chat kind. **Manager integration is pending:** saving these
   settings does not yet replace the `Channel:` line, inject the contract or set a turn's speaker. The dashboard, Lark, Telegram and API-client
   turns therefore retain their current prompt and authorization behavior until that integration lands.
-- The dashboard chat, Lark and Telegram share the default Manager's one session (a scenario Manager's session serves its own dashboard chat threads; with [session routing](#manager-session-routing) on, groups and other senders' direct chats have their own), so
+- Without routing, the dashboard chat, Lark and Telegram share their Manager's
+  main session. With [session routing](#manager-session-routing), the default
+  Manager separates groups and other senders' direct chats; a scenario Manager
+  with `per_chat` separates groups only. In every mode,
   every message ends with a code-written line saying where it came from, just
   before the message: `Channel: the Looper dashboard chat`, `Channel: a Lark
   direct message`, `Channel: a Lark group chat, from <sender>` (the name the
