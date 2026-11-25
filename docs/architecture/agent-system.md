@@ -1033,9 +1033,22 @@ Manager has no tool for it. The dashboard shows the task page's 指标 card and 
   activity; the task stays completed. `off` (the default) writes nothing.
 - After a server restart (`TASK_RESUME`), a new Planner reads its plan and
   session back and carries on without planning again: a step whose Worker was
-  running runs again as the same attempt with its feedback, a step in review
-  gets a new Reviewer, a decision the stop cut off is taken again from the
-  step's saved result, and Claude resumes its session from its saved totals.
+  running and cannot be adopted runs again as the same attempt with its feedback
+  and workspace kept. With `worker.interrupted_hint.enabled` on (default off),
+  only when that attempt's latest Worker record ended `interrupted`, its new
+  Worker's first user message adds one fixed English line immediately after
+  "Start your step": it names a typed, short reason (`deploy drain`,
+  `restart not adopted` or `run stopped`), warns about partial workspace changes,
+  asks it to inspect git status and the files it will touch, and to check whether
+  external side effects already happened before repeating them. Free-form errors
+  never reach this line. First runs, normal failures, new attempts and other
+  roles' prompts stay unchanged. The operator-only `worker_interrupted_hint.get`
+  and `worker_interrupted_hint.update` operations read/store the switch; null
+  restores off. These operations also provide the generated CLI control;
+  dashboard and channel task entry points need no companion changes because
+  they share Worker dispatch. A step in review gets a new Reviewer, a decision
+  the stop cut off is taken again from the step's saved result, and Claude
+  resumes its session from its saved totals.
   Continuing a task that failed at its spend cap reads the same rows.
 - Each turn is one `llm_records` row with agent_id `planner-<task_id>`, the
   `task_id`, its own cost and tokens, its context at the end, `metadata.pid` and the system prompt's record
@@ -1118,7 +1131,8 @@ answer to an edit on the task page goes.
   Claude's own, each with a result: the Worker reads the output to
   its end, and the run's last result is its outcome, its report and its cost
   ("Worker finished" goes to the task's activity once, from it)
-- The step is the system prompt; only other agents' output is the user turn:
+- The step is in the system prompt; other agents' output and, when enabled,
+  the fixed interruption guidance above are in the first user turn:
   - system prompt: the harness (resolved for the Worker or Reviewer in its
     project; a Reviewer without its own takes the Workers'), the
     role prompt of the `worker` or `reviewer` row (the default when the

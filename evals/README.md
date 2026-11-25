@@ -307,6 +307,15 @@ uv run --extra test python -m evals.prompt_regression run --mode fake \
 `tests/test_prompt_eval.py` runs it as part of the test suite when
 `LOOPER_TEST_DATABASE_URL` is set.
 
+The separate `worker_interrupted` case is fake-only. It seeds an interrupted
+Worker record, dispatches a new run of the same attempt through the real Worker
+launch and recorder, and reads back the received prompt and preserved partial
+file. It checks exactly one recovery line, not model compliance. Run it against
+a disposable PostgreSQL server with
+`python -m evals.prompt_regression.worker_interrupted --mode fake --pg-url <admin-url>`.
+It is also covered by `tests/test_worker_interrupted_hint.py`; no real model is
+called, and model behavior validation remains separate.
+
 A script may also give the Planner's retry notes (`retry_feedback`: a step's
 Nth retry gets its Nth note), recheck an errored check (`decision_rechecks`:
 a step id to a count; the stand-in answers `recheck` while that decision is
