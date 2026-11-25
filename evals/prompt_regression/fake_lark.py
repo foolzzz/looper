@@ -51,6 +51,14 @@ def main(root: Path) -> None:
                     ready, _, _ = select.select([0], [], [], 0.05)
                     if ready and os.read(0, 1) == b"":
                         break
+    elif args[:2] == ["im", "+messages-resources-download"]:
+        key = args[args.index("--file-key") + 1]
+        output = Path(args[args.index("--output") + 1])
+        source = root / "resources" / key
+        if source.parent != root / "resources" or output.name != str(output):
+            raise SystemExit("eval downloads require a synthetic key and a bare output filename")
+        output.write_bytes(source.read_bytes())
+        ok({"saved_path": str(output)})
     elif args[:2] in (["im", "+messages-reply"], ["im", "+messages-send"], ["im", "+messages-edit"]):
         flag = "--markdown" if "--markdown" in args else "--text"
         text = args[args.index(flag) + 1]
