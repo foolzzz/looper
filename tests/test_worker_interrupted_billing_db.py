@@ -1,6 +1,7 @@
 """Reported Worker usage survives interruption and keeper replay on the same row."""
 import asyncio
 import json
+import logging
 from dataclasses import replace
 from datetime import datetime, timezone
 
@@ -225,4 +226,153 @@ def test_normal_settlement_is_identical_with_and_without_checkpoints(monkeypatch
             rows.append(await pool.fetchval("SELECT (to_jsonb(r) - ARRAY['id','created_at','finished_at',"
                                            "'last_output_at'])::text FROM llm_records r WHERE id=$1", recorder.record_id))
         assert rows[0] == rows[1]
+    run_db(body, monkeypatch)
+
+
+@pytest.mark.parametrize("late_write", ["finish", "interrupt", "checkpoint"])
+def test_ended_bill_rejects_late_writes(monkeypatch, caplog, late_write):
+    caplog.set_level(logging.INFO, logger=llm_records.__name__)
+
+    async def body(pool):
+        record_id = await llm_records.start_record(agent_id="worker-billing", pool=pool)
+        checkpoint = await llm_records.checkpoint_usage(
+            record_id, Usage(input_tokens=100_000, cost_usd=.4), "provider_price", pool=pool)
+        if late_write == "finish":
+            ended = await llm_records.end_record_interrupted(record_id, "private reason", pool=pool)
+            target, current = "completed", "interrupted"
+        else:
+            ended = await llm_records.finish_record(record_id, status="completed", input_tokens=1,
+                cost_usd=9.9, cost_source="runtime", metadata={"kept": True}, pool=pool)
+            target, current = ("interrupted" if late_write == "interrupt" else "running"), "completed"
+        before = await pool.fetchrow("SELECT * FROM llm_records WHERE id=$1", record_id)
+        if late_write == "finish":
+            applied = await llm_records.finish_record(record_id, status="completed", input_tokens=1,
+                cost_usd=9.9, cost_source="runtime", error="private error", pool=pool)
+        elif late_write == "interrupt":
+            applied = await llm_records.end_record_interrupted(record_id, "private reason", pool=pool)
+        else:
+            applied = await llm_records.checkpoint_usage(
+                record_id, Usage(input_tokens=5, cost_usd=2), "provider_price", pool=pool)
+        assert await pool.fetchrow("SELECT * FROM llm_records WHERE id=$1", record_id) == before
+        assert checkpoint is True and ended is True and applied is False
+        assert f"record {record_id}" in caplog.text
+        assert f"{current} -> {target}" in caplog.text
+        assert "private reason" not in caplog.text and "private error" not in caplog.text
+    run_db(body, monkeypatch)
+
+
+@pytest.mark.parametrize("metadata", [None, {"usage_status": "partial", "usage_reason": "stale", "new": True}])
+def test_adopted_completion_clears_partial_markers_and_settles_once(monkeypatch, metadata):
+    from looper.agents import cost_guard as cg
+    from looper.agents.cost_guard_settings import Config, Mode
+
+    async def body(pool):
+        await pool.execute("INSERT INTO projects(id,name) VALUES ('billing-project','Billing test')")
+        await pool.execute("INSERT INTO tasks(id,project_id,requirement) "
+                           "VALUES ('billing-task','billing-project','test')")
+        recorder = _recorder(_claude_launch())
+        await recorder.start()
+        await recorder.record(usage_event("claude-opus-5-5", Usage(input_tokens=100_000)))
+        recorder.detach()
+        await ClaudeRunRecorder.resume(recorder.record_id, agent_id="worker-billing", task_id="billing-task",
+            command=["stand-in"], cwd=".", step_id=None, launch=_claude_launch(), max_budget_usd=None)
+        # Kept records remain running; tolerate interruption markers already in their metadata.
+        await llm_records.add_metadata(recorder.record_id,
+            {"usage_status": "partial", "usage_reason": "stale", "kept": True}, pool=pool)
+        applied = await llm_records.finish_record(recorder.record_id, status="completed", input_tokens=200,
+            cost_usd=.125, cost_source="runtime", metadata=metadata, pool=pool)
+        duplicate = await llm_records.finish_record(recorder.record_id, status="completed", cost_usd=9.9, pool=pool)
+        row = await llm_records.get_record(recorder.record_id, pool=pool)
+        assert row["cost_usd"] == .125 and row["input_tokens"] == 200
+        assert "usage_status" not in row["metadata"] and "usage_reason" not in row["metadata"]
+        assert row["metadata"]["kept"] is True
+        assert applied is True and duplicate is False
+        assert await pool.fetchval("SELECT count(*) FROM llm_records") == 1
+        since = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
+        assert (await llm_records.spend_since(since, pool=pool))["equivalent_usd"] == .125
+        assert (await llm_records.task_costs(["billing-task"], pool=pool))["billing-task"]["cost_usd"] == .125
+        for limit, decision in ((.2, cg.Decision.ADMIT), (.1, cg.Decision.ASK)):
+            guard = cg.Guard(Config(mode=Mode.ENFORCE, daily_equivalent_usd=limit), pool=pool)
+            await guard.rebuild()
+            scopes = guard.scopes(cg.RunKind.WORKER, "billing-task", None, cg.Currency.EQUIVALENT)
+            admission = await guard.admit(cg.RunKind.WORKER, scopes, cg.Currency.EQUIVALENT, .01)
+            assert admission.decision is decision
+            if decision is cg.Decision.ASK:
+                assert admission.spent_usd == .125
+    run_db(body, monkeypatch)
+
+
+@pytest.mark.parametrize("first,second", [("interrupt", "finish"), ("finish", "interrupt"),
+                                         ("finish", "checkpoint"), ("finish", "finish")])
+def test_concurrent_record_writers_recheck_status_after_row_lock(monkeypatch, first, second):
+    async def write(conn, record_id, kind):
+        if kind == "interrupt":
+            return await llm_records.end_record_interrupted(record_id, "stopped", pool=conn)
+        if kind == "checkpoint":
+            return await llm_records.checkpoint_usage(record_id, Usage(input_tokens=5, cost_usd=2),
+                                                      "provider_price", pool=conn)
+        return await llm_records.finish_record(record_id, status="completed", input_tokens=1,
+                                               cost_usd=9.9, cost_source="runtime", pool=conn)
+
+    async def body(pool):
+        record_id = await llm_records.start_record(agent_id="worker-billing", pool=pool)
+        await llm_records.checkpoint_usage(record_id, Usage(input_tokens=100_000, cost_usd=.4),
+                                           "provider_price", pool=pool)
+        async with pool.acquire() as one, pool.acquire() as two:
+            async with one.transaction():
+                won = await write(one, record_id, first)
+                before = await one.fetchrow("SELECT * FROM llm_records WHERE id=$1", record_id)
+                waiting = asyncio.create_task(write(two, record_id, second))
+                try:
+                    # Verify a second backend is actually blocked inside its UPDATE before releasing the lock.
+                    async with asyncio.timeout(5):
+                        while await pool.fetchval("SELECT wait_event_type FROM pg_stat_activity WHERE pid=$1",
+                                                  two.get_server_pid()) != "Lock":
+                            if waiting.done():
+                                await waiting
+                                pytest.fail("second writer did not wait for the row lock")
+                            await asyncio.sleep(.01)
+                except BaseException:
+                    waiting.cancel()
+                    await asyncio.gather(waiting, return_exceptions=True)
+                    raise
+            lost = await asyncio.wait_for(waiting, 5)
+        assert await pool.fetchrow("SELECT * FROM llm_records WHERE id=$1", record_id) == before
+        assert won is True and lost is False
+    run_db(body, monkeypatch, timeout=15)
+
+
+@pytest.mark.parametrize("status", ["running", "unknown"])
+def test_finish_rejects_nonterminal_status(monkeypatch, status):
+    async def body(pool):
+        record_id = await llm_records.start_record(agent_id="worker-billing", pool=pool)
+        with pytest.raises(ValueError):
+            await llm_records.finish_record(record_id, status=status, pool=pool)
+        assert (await llm_records.record_state(record_id, pool=pool))["status"] == "running"
+    run_db(body, monkeypatch)
+
+
+def test_cursor_checkpoint_does_not_add_cumulative_result_snapshots(monkeypatch):
+    from looper.agents.runtimes.cursor_agent import CursorStream
+    from tests.test_cursor_agent import _launch
+
+    async def body(pool):
+        launch = replace(_launch(model_name="gpt-6.1-sol"), role=AgentType.WORKER)
+        recorder = _recorder(launch)
+        stream = CursorStream(model=launch.model)
+        await recorder.start()
+        for total in (100, 300):
+            events = stream.translate({"type": "result", "subtype": "success", "usage": {
+                "inputTokens": total, "outputTokens": 40, "cacheReadTokens": 70, "cacheWriteTokens": 10}})
+            for event in events:
+                await recorder.record(event)
+                # Also check between the internal usage event and its authoritative result.
+                row = await llm_records.get_record(recorder.record_id)
+                assert row["input_tokens"] == total
+                expected = Usage(input_tokens=total, output_tokens=40, cache_read_tokens=70,
+                                 cache_creation_tokens=10)
+                assert row["cost_usd"] == pytest.approx(launch.price(launch.model, expected))
+        recorder.detach()
+        await llm_records.end_record_interrupted(recorder.record_id, "stopped")
+        assert (await llm_records.get_record(recorder.record_id))["input_tokens"] == 300
     run_db(body, monkeypatch)
