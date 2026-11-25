@@ -3,7 +3,8 @@
 The Manager is global. Each task has one Planner for its whole life, and
 every step of the task runs in its own Worker (plus a Reviewer when the step
 is verified). All of them stay listed after they finish so their messages
-can be read; only the Manager and a running task's Planner take messages.
+can be read. The Manager and a running task's Planner take messages. With
+tasks.conversations.enabled, a task takes messages too, on its own thread.
 """
 
 from __future__ import annotations
@@ -12,7 +13,8 @@ import logging
 from typing import Any
 
 from ..db import llm_records, managers as db_managers, steps as db_steps, tasks as db_tasks
-from .message import MANAGER_ADDRESS, AgentAddress, manager_address, planner_address
+from . import task_conversations_settings
+from .message import MANAGER_ADDRESS, AgentAddress, manager_address, planner_address, task_manager_address
 from .task_roles import run_role
 from .tiers.task import TaskRouter
 
@@ -54,7 +56,14 @@ async def resolve_chat_target(raw: Any, task_router: TaskRouter, fleet: Any = No
         if not task_router.has_planner(task_id):
             raise ChatTargetError(HTTP_409, f"task '{task_id}' has no running planner")
         return planner_address(task_id)
-    raise ChatTargetError(HTTP_400, "target.kind must be 'manager' or 'planner'")
+    if kind == "task":
+        if not task_conversations_settings.enabled():
+            raise ChatTargetError(HTTP_409, "work mode is off (tasks.conversations.enabled)")
+        task_id = str(target.get("task_id") or "")
+        if await db_tasks.get_task(task_id) is None:
+            raise ChatTargetError(HTTP_400, f"no task {task_id}")
+        return task_manager_address(task_id)
+    raise ChatTargetError(HTTP_400, "target.kind must be 'manager', 'planner' or 'task'")
 
 
 def build_chat_targets(

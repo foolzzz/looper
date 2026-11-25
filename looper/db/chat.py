@@ -104,8 +104,14 @@ async def list_messages(
 # The web chat keeps each task's Planner thread under that Planner's agent id, ``planner-<task_id>``
 # (web/src/pages/chat.tsx ``sessionFor``); every other chat session is a conversation with the Manager.
 PLANNER_THREAD_PREFIX = "planner-"
+# One task conversation, ``task-chat:<task_id>``. It is not a Manager conversation.
+TASK_THREAD_PREFIX = "task-chat:"
 # What a session's listing keeps of its last message.
 LAST_MESSAGE_MAX_CHARS = 200
+
+
+def task_thread(task_id: str) -> str:
+    return f"{TASK_THREAD_PREFIX}{task_id}"
 
 
 async def list_sessions(
@@ -117,8 +123,9 @@ async def list_sessions(
 ) -> list[dict[str, Any]]:
     """Manager ``manager_id``'s (default: the default Manager's) conversations on every channel, the most recently active first: each session's channel,
     message count, first and last message times, and its last message's role and start (``last_role``,
-    ``last_content``, up to ``LAST_MESSAGE_MAX_CHARS``). Planner threads are left out. With ``session_id``, only
-    that session, however long ago it was active (none when it has no messages). A session without a
+    ``last_content``, up to ``LAST_MESSAGE_MAX_CHARS``). Planner threads and task conversations (``task-chat:``)
+    are left out. With ``session_id``, only that session, however long ago it was active (none when it has no
+    messages). A session without a
     ``chat_threads`` row is the default Manager's; a deleted Manager's threads keep their row, so they are in no list."""
     pool = pool or get_pool()
     rows = await pool.fetch(
@@ -133,7 +140,8 @@ async def list_sessions(
             FROM chat_messages m
             LEFT JOIN chat_threads t USING (session_id)
             LEFT JOIN api_clients c ON c.id = t.client_id
-            WHERE NOT starts_with(session_id, $2) AND ($4::text IS NULL OR session_id = $4)
+            WHERE NOT starts_with(session_id, $2) AND NOT starts_with(session_id, $6)
+              AND ($4::text IS NULL OR session_id = $4)
               AND coalesce(t.manager_id, 'manager') = $5
             GROUP BY session_id, t.client_id, c.name
             ORDER BY max(m.created_at) DESC, max(m.id) DESC
@@ -142,7 +150,7 @@ async def list_sessions(
         JOIN chat_messages last ON last.id = s.last_id
         ORDER BY s.last_message_at DESC, s.last_id DESC
         """,
-        limit, PLANNER_THREAD_PREFIX, LAST_MESSAGE_MAX_CHARS, session_id, manager_id,
+        limit, PLANNER_THREAD_PREFIX, LAST_MESSAGE_MAX_CHARS, session_id, manager_id, TASK_THREAD_PREFIX,
     )
     return [dict(r) for r in rows]
 
@@ -172,7 +180,8 @@ async def recent_conversations(
     """Manager ``manager_id``'s (default: the default Manager's; a thread without a ``chat_threads`` row is the
     default's) most recently active chat sessions, newest first, each with its last ``messages``
     messages, oldest first: ``[{"session_id", "messages": [{"role", "content", "created_at", "delivery_failure"}]}]``
-    (``delivery_failure`` set for an answer its channel could not send)."""
+    (``delivery_failure`` set for an answer its channel could not send). Planner threads and task conversations
+    are left out."""
     pool = pool or get_pool()
     rows = await pool.fetch(
         """
@@ -180,7 +189,8 @@ async def recent_conversations(
         FROM (
             SELECT c.session_id, max(c.id) AS last_id FROM chat_messages c
             LEFT JOIN chat_threads t ON t.session_id = c.session_id
-            WHERE NOT starts_with(c.session_id, $3) AND coalesce(t.manager_id, 'manager') = $4
+            WHERE NOT starts_with(c.session_id, $3) AND NOT starts_with(c.session_id, $5)
+              AND coalesce(t.manager_id, 'manager') = $4
             GROUP BY c.session_id ORDER BY max(c.id) DESC LIMIT $1
         ) r
         CROSS JOIN LATERAL (
@@ -189,7 +199,7 @@ async def recent_conversations(
         ) m
         ORDER BY r.last_id DESC, m.id ASC
         """,
-        sessions, messages, PLANNER_THREAD_PREFIX, manager_id,
+        sessions, messages, PLANNER_THREAD_PREFIX, manager_id, TASK_THREAD_PREFIX,
     )
     conversations: dict[str, list[dict[str, Any]]] = {}
     for row in rows:

@@ -1503,11 +1503,70 @@ class AgentHTTPServer:
                 **({"client": client} if client is not None else {}),
             )
 
+        if target.agent_type == "task_manager":
+            return await self._deliver_task_chat(text=text, target=target, session_id=session_id,
+                                                 message_id=message_id)
         if target.agent_type == "planner":
             return await projects.add_task_supplement(
                 target.agent_id.removeprefix("planner-"), text, via=projects.VIA_CHAT,
                 wake=deliver, best_effort=True, from_operator=client is None)  # the dashboard's, not a client's
         return await deliver(None)
+
+    async def _deliver_task_chat(self, *, text: str, target: AgentAddress, session_id: str | None,
+                                 message_id: str | None) -> dict[str, Any]:
+        """Save a task message and stream the task Manager's answer, or a code-written command answer."""
+        from ..db.chat import save_message, task_thread
+        from ..db import task_chat as db_task_chat
+        from . import task_commands
+        from .channels.web_task_sink import WebTaskSink
+        from .tiers.task_manager import current_pool
+
+        task_id = target.agent_id.removeprefix("task-manager-")
+        thread = task_thread(task_id)
+        if session_id not in (None, thread):
+            raise OpError(ErrorCode.INVALID, "a task's conversation is its own thread")
+        if not message_id:
+            raise OpError(ErrorCode.INVALID, "a task message needs a message_id")
+        adapter = self._web_adapter
+        if adapter is None or getattr(adapter, "_bus", None) is None:
+            raise OpError(ErrorCode.UNAVAILABLE, "the web channel is not running")
+        command = task_commands.parse(text)
+        pool = current_pool()
+        if command is None and pool is None:
+            raise OpError(ErrorCode.UNAVAILABLE, "the task Manager is not running")
+        await save_message(session_id=thread, message_id=message_id, role="user", content=text, channel="web")
+        correlation_id = await adapter.begin_reply(thread, message_id)
+        sink = WebTaskSink(adapter._bus, adapter._address, correlation_id, task_id, thread, message_id)
+        if command is not None:
+            await self._answer_task_command(task_id, command, sink)
+        else:
+            await pool.submit(task_id, text, message_id=message_id, sink=sink,
+                              history=await db_task_chat.recent(task_id, 20))
+        return {"correlation_id": correlation_id}
+
+    async def _answer_task_command(self, task_id: str, command: Any, sink: Any) -> None:
+        """Answer a fixed command in the task thread. The model is not called."""
+        from .task_commands import TaskCommand
+        from .tiers.task_manager import current_pool
+
+        later = "这个命令要等「交给后台」上线后才能用"
+        if command is TaskCommand.STOP:
+            pool = current_pool()
+            stopped = pool is not None and await pool.stop_current(task_id)
+            text = "已停止这一轮" if stopped else "现在没有在进行的回合"
+        elif command is TaskCommand.DONE:
+            try:
+                done = await self._task_router.complete_direct(task_id)
+            except projects.RequestError as exc:
+                text = str(exc)
+            else:
+                text = "任务已完成" if done.changed else "任务已经是完成状态"
+                if done.warning:
+                    text = f"{text}\n{done.warning}"
+        else:
+            text = later
+        await sink.event("command", {"command": command.value})
+        await sink.final(text, "command")
 
     async def _foreign_thread_error(self, owner: str) -> OpError:
         from ..db import managers as db_managers

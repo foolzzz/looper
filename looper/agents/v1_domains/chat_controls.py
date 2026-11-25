@@ -1,6 +1,6 @@
 """Manager session profiles and operator chat controls, backed by the existing services."""
 
-from .. import api_v1, chat_settings, profile_registry
+from .. import api_v1, chat_settings, profile_registry, task_conversations_settings
 from ..action_levels import ActionLevel
 from ..api_v1 import Operation, _array, _object, _STR, _NULL_STR, _INT, _BOOL
 from ..ops import ErrorCode, OpError
@@ -243,6 +243,11 @@ async def run(server, operation, arguments, principal, headers):
             "channel": current.channel, "started_at": current.received_at.isoformat(), "state": current.phase.value,
             "method": getattr(current.method, "value", current.method), "stopping": current.stop is not None,
             "can_interrupt": agent.can_interrupt or current.admission_waiting}}
+    if name == "operator_chat.stop" and task_conversations_settings.enabled():
+        from ..tiers.task_manager import current_pool
+        pool = current_pool()
+        if pool is not None and await pool.stop_by_message(arguments["message_id"]):
+            return {"state": "stopping", "phase": None, "method": None}
     if not chat_settings.stop_enabled():
         raise OpError(ErrorCode.CONFLICT, "Stopping a reply is off (Settings → Chat; experimental).",
                       details={"state": "disabled"})

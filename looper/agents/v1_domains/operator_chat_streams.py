@@ -18,12 +18,16 @@ _ID = {"type": "string", "minLength": 1}
 CHAT_TARGET = {"oneOf": [
     _object({"kind": {"const": "manager"}, "id": _STR}, ["kind"], closed=True),
     _object({"kind": {"const": "planner"}, "task_id": _ID}, closed=True),
+    _object({"kind": {"const": "task"}, "task_id": _ID}, closed=True),
 ]}
 SCHEMAS = {
     "OperatorChatAnswerDelta": _object({"text": _STR}, closed=True),
     "OperatorChatAnswerFinal": _object({"text": _STR,
         "response": _object({"message": _STR}, closed=True), "outcome": _STR}, closed=True),
     "OperatorChatAgentPhase": _object({"label": _STR, "activity": _STR, "tool": _STR}, ["label"], closed=True),
+    "OperatorChatAgentTool": _object({"tool_use_id": _STR, "name": _STR, "args": _STR, "result": _STR,
+        "is_error": {"type": "boolean"}}, closed=True),
+    "OperatorChatTaskEvent": _object({"kind": _STR}, closed=True),
     "OperatorChatMessage": _object({"message_id": _STR, "role": {"const": "assistant"},
         "content": _STR, "created_at": _STR}, closed=True),
     "OperatorChatHeartbeat": _object({}, closed=True),
@@ -32,6 +36,7 @@ SCHEMAS = {
 }
 _EVENTS = {kind: {"data": {"$ref": "#/components/schemas/OperatorChat" + name}} for kind, name in (
     ("answer.delta", "AnswerDelta"), ("answer.final", "AnswerFinal"), ("agent.phase", "AgentPhase"),
+    ("agent.tool", "AgentTool"), ("task.event", "TaskEvent"),
     ("chat.message", "Message"), ("heartbeat", "Heartbeat"), ("system.event", "SystemEvent"))}
 RESULTS = {}
 
@@ -60,7 +65,7 @@ OPERATIONS = (
         risk="write", operator_only=True),
     _stream("reply_events", {"correlation_id": _ID}, ["correlation_id"],
         "Follow one dashboard reply until its final answer or timeout; unknown correlations end immediately.",
-        ("answer.delta", "answer.final", "agent.phase", "heartbeat", "system.event")),
+        ("answer.delta", "answer.final", "agent.phase", "heartbeat", "system.event", "agent.tool", "task.event")),
     _stream("thread_events", {"session_id": _ID, "manager": _STR}, ["session_id"],
         "Follow saved answers and autonomous messages in an open dashboard thread, checking its Manager owner.",
         ("chat.message", "heartbeat")),
@@ -84,6 +89,13 @@ async def run(server, operation, arguments, principal, headers):
         except profile_registry.RegistryError as exc:
             raise OpError(ErrorCode.INVALID, str(exc)) from None
     session_id = arguments.get("session_id")
+    if target.agent_type == "task_manager":
+        from ...db.chat import task_thread
+        thread = task_thread(target.agent_id.removeprefix("task-manager-"))
+        if session_id not in (None, thread):
+            raise OpError(ErrorCode.INVALID, "a task's conversation is its own thread")
+        if not arguments.get("message_id"):
+            raise OpError(ErrorCode.INVALID, "a task message needs a message_id")
     if target.agent_type == "manager" and session_id and server._managers is not None:
         owner = await server._thread_owner_for_send(session_id, target.agent_id)
         if owner != target.agent_id:

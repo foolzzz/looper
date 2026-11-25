@@ -420,6 +420,23 @@ class TaskManagerPool:
                 self._active.pop(request.task_id, None)
                 await self._dispatch()
 
+    async def stop_current(self, task_id: str) -> bool:
+        """Stop the turn running for ``task_id``. A turn that is only queued stays queued."""
+        active = self._active.get(task_id)
+        if active is None:
+            return False
+        return await self.stop_turn(task_id, active.message_id)
+
+    async def stop_by_message(self, message_id: str) -> bool:
+        """Stop the running or queued turn whose message id this is."""
+        for task_id, active in list(self._active.items()):
+            if active.message_id == message_id:
+                return await self.stop_turn(task_id, message_id)
+        queued = next((request for request in self._pending if request.message_id == message_id), None)
+        if queued is None:
+            return False
+        return await self.stop_turn(queued.task_id, message_id)
+
     async def stop_turn(self, task_id: str, message_id: str) -> bool:
         active = self._active.get(task_id)
         if active and active.message_id == message_id:

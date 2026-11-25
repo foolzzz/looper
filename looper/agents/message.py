@@ -283,6 +283,10 @@ def planner_address(task_id: str) -> AgentAddress:
     return AgentAddress(agent_type="planner", agent_id=f"planner-{task_id}")
 
 
+def task_manager_address(task_id: str) -> AgentAddress:
+    return AgentAddress(agent_type="task_manager", agent_id=f"task-manager-{task_id}")
+
+
 def channel_address(channel: str, channel_id: str | None = None) -> AgentAddress:
     return AgentAddress(
         agent_type="channel",

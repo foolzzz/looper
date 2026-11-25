@@ -64,7 +64,9 @@ async def run(server, operation, arguments, principal, headers):
     session_id = arguments.get("session_id") or None
     if action == "sessions" and manager_id != "manager" and await db_managers.get_manager(manager_id) is None:
         raise OpError(ErrorCode.NOT_FOUND, f"no Manager '{manager_id}'")
-    if session_id and (owner := await server._thread_owner_elsewhere(session_id, manager_id)):
+    # A task conversation belongs to its task. The operation is already operator-only.
+    task_thread = action == "messages" and bool(session_id) and session_id.startswith(chat.TASK_THREAD_PREFIX)
+    if session_id and not task_thread and (owner := await server._thread_owner_elsewhere(session_id, manager_id)):
         raise await server._foreign_thread_error(owner)
     if action == "sessions":
         sessions = await chat.list_sessions(session_id=session_id, manager_id=manager_id)
