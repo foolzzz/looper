@@ -30,14 +30,18 @@ server still runs is left alone.
 from __future__ import annotations
 
 import asyncio
+import ctypes
+import errno
 import json
 import logging
 import os
 import signal
 import subprocess
+import sys
 import time
 from collections import defaultdict
 from collections.abc import Callable, Iterable, Mapping
+from functools import lru_cache
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -50,6 +54,8 @@ REAP_SEC = 2.0  # how long the agent has to be reaped after SIGKILL before ``end
 _REFRESH_MIN_SEC = 0.1
 _POLL_SEC = 0.05
 _PS_TIMEOUT_SEC = 5.0
+_TREE_IDLE_SEC = 5.0
+_TREE_IDLE_INTERVAL_SEC = 5.0
 RECORDS_DIR = Path(".local") / "agent-processes"  # under the runtime root: one ``<pid>.json`` per running agent
 
 # Set by ``sweep``: where this server records its agents, and the server (pid, start time) each record names.
@@ -106,7 +112,7 @@ class _Agent(Protocol):
 
 class _Orphan:
     """A previous server's process, signalled by pid and never reaped. A start-time check just before SIGTERM
-    and SIGKILL limits the pid-reuse window to one ``ps`` call."""
+    and SIGKILL limits the pid-reuse window to one identity lookup."""
 
     returncode = None
 
@@ -395,8 +401,66 @@ async def end_owned(*, deadline: float) -> None:
 # --- Recording agents for the next server's sweep ---
 
 
+class _ProcBsdInfo(ctypes.Structure):
+    """Darwin's proc_bsdinfo (sys/proc_info.h), for PROC_PIDTBSDINFO."""
+
+    _fields_ = [
+        (name, ctypes.c_uint32) for name in (
+            "pbi_flags", "pbi_status", "pbi_xstatus", "pbi_pid", "pbi_ppid", "pbi_uid", "pbi_gid",
+            "pbi_ruid", "pbi_rgid", "pbi_svuid", "pbi_svgid", "rfu_1")
+    ] + [
+        ("pbi_comm", ctypes.c_char * 16), ("pbi_name", ctypes.c_char * 32),
+        ("pbi_nfiles", ctypes.c_uint32), ("pbi_pgid", ctypes.c_uint32),
+        ("pbi_pjobc", ctypes.c_uint32), ("e_tdev", ctypes.c_uint32),
+        ("e_tpgid", ctypes.c_uint32), ("pbi_nice", ctypes.c_int32),
+        ("pbi_start_tvsec", ctypes.c_uint64), ("pbi_start_tvusec", ctypes.c_uint64),
+    ]
+
+
+@lru_cache(maxsize=1)
+def _proc_pidinfo() -> Any:
+    libproc = ctypes.CDLL("/usr/lib/libproc.dylib", use_errno=True)
+    read = libproc.proc_pidinfo
+    read.argtypes = [ctypes.c_int, ctypes.c_int, ctypes.c_uint64, ctypes.c_void_p, ctypes.c_int]
+    read.restype = ctypes.c_int
+    return read
+
+
+def _native_start_times(pids: Iterable[int]) -> dict[int, str] | None:
+    """Read Darwin identities without a child; None asks the caller to use ps instead.
+
+    Linux and other platforms retain ps. An exited pid is absent, rather than a failed lookup.
+    """
+    if sys.platform != "darwin":
+        return None
+    try:
+        read = _proc_pidinfo()
+        started = {}
+        for pid in pids:
+            info = _ProcBsdInfo()
+            ctypes.set_errno(0)
+            size = read(pid, 3, 0, ctypes.byref(info), ctypes.sizeof(info))  # PROC_PIDTBSDINFO
+            if size != ctypes.sizeof(info):
+                if size <= 0 and ctypes.get_errno() == errno.ESRCH:
+                    continue
+                return None
+            # Match the existing whitespace-normalized LC_ALL=C, TZ=UTC ps identity. strftime's
+            # day/month names depend on the server's locale, so spell them out explicitly.
+            date = time.gmtime(info.pbi_start_tvsec)
+            weekday = ("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")[date.tm_wday]
+            month = ("Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec")[date.tm_mon - 1]
+            started[pid] = (f"{weekday} {month} {date.tm_mday} "
+                            f"{date.tm_hour:02}:{date.tm_min:02}:{date.tm_sec:02} {date.tm_year}")
+        return started
+    except (OSError, AttributeError, OverflowError, ValueError):
+        return None
+
+
 def _start_time(pid: int) -> str | None:
     """When ``pid`` started, as ``ps -o lstart=`` prints it in UTC; None when no such process runs."""
+    native = _native_start_times([pid])
+    if native is not None:
+        return native.get(pid)
     try:
         listed = subprocess.run(["ps", "-o", "lstart=", "-p", str(pid)], capture_output=True, text=True,
                                 timeout=_PS_TIMEOUT_SEC, check=False, env={**child_env.inherited(), "LC_ALL": "C", "TZ": "UTC"})
@@ -407,9 +471,13 @@ def _start_time(pid: int) -> str | None:
 
 def _start_times(pids: Iterable[int]) -> dict[int, str] | None:
     """The start times ``ps`` lists for ``pids``, in UTC; None when ``ps`` fails."""
-    selected = ",".join(map(str, pids))
-    if not selected:
+    pids = list(pids)
+    if not pids:
         return {}
+    native = _native_start_times(pids)
+    if native is not None:
+        return native
+    selected = ",".join(map(str, pids))
     try:
         listed = subprocess.run(["ps", "-o", "pid=,lstart=", "-p", selected], capture_output=True, text=True,
                                 timeout=_PS_TIMEOUT_SEC, check=False, env={**child_env.inherited(), "LC_ALL": "C", "TZ": "UTC"})
@@ -606,11 +674,15 @@ class TurnTree:
         self._refreshed = float("-inf")
         self._lock = asyncio.Lock()
         self._ticker: asyncio.Task[None] | None = None
+        self._current: Tree = {}
+        self._changed = time.monotonic()
+        self._wake = asyncio.Event()
 
     @classmethod
     def track(cls, process: Any, *, label: str) -> TurnTree:
         tree = cls(process, label)
         tree._merge(_tree(process, _snapshot(), {}))
+        tree._current = dict(tree._groups)
         tree.seen.update(_start_times(tree.seen) or {})
         return tree
 
@@ -624,6 +696,8 @@ class TurnTree:
     async def refresh(self, *, force: bool = False, skip: frozenset[int] = frozenset()) -> None:
         """Merge the current tree into ``seen``; at most once per ``_REFRESH_MIN_SEC`` unless ``force``."""
         async with self._lock:
+            if force:
+                self.wake()
             if not force and time.monotonic() - self._refreshed < _REFRESH_MIN_SEC:
                 return
             table = await asyncio.to_thread(_snapshot)
@@ -639,6 +713,9 @@ class TurnTree:
             # A stopped ticker can be cancelled at either lookup. Publish new pids with their identities
             # together, so a cancelled refresh cannot leave them permanently excluded as unknown.
             self._groups = groups
+            if observed != self._current:
+                self._current = dict(observed)
+                self._changed = time.monotonic()
             self._merge(observed)
             for pid in unread:
                 if pid in starts:
@@ -716,17 +793,34 @@ class TurnTree:
                 return False
         return True
 
+    def wake(self) -> None:
+        """Resume fast sampling when a resident starts a new turn."""
+        self._changed = time.monotonic()
+        self._wake.set()
+
     def start_ticker(self, interval: float = 0.5) -> None:
+        """Poll quickly, then every five seconds after five seconds without a tree change.
+
+        Forced refreshes (including a new turn's checkpoint) wake the ticker and reset its idle age.
+        End paths always force a refresh, independent of the periodic discovery interval.
+        """
         if self._ticker is None or self._ticker.done():
             self._ticker = asyncio.get_running_loop().create_task(self._tick(interval))
 
     async def _tick(self, interval: float) -> None:
         while True:
+            self._wake.clear()
             try:
                 await self.refresh()
             except Exception:
                 logger.warning("%s: cannot refresh the process tree", self.label, exc_info=True)
-            await asyncio.sleep(interval)
+            delay = (max(interval, _TREE_IDLE_INTERVAL_SEC)
+                     if time.monotonic() - self._changed >= _TREE_IDLE_SEC else interval)
+            try:
+                async with asyncio.timeout(delay):
+                    await self._wake.wait()
+            except asyncio.TimeoutError:
+                pass
 
     async def stop_ticker(self) -> None:
         ticker, self._ticker = self._ticker, None
