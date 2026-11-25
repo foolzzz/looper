@@ -10,7 +10,7 @@ from unittest.mock import AsyncMock
 import pytest
 
 from looper.agents import session_routing
-from looper.agents.agent_settings import AgentSettings, Launch
+from looper.agents.agent_settings import Access, AgentSettings, Launch
 from looper.agents.profile_registry import builtin_resolved_profile
 from looper.agents.ops.service import ManagerOps, Platform
 from looper.agents.library import AgentLibrary
@@ -19,7 +19,7 @@ from looper.agents.session_routing import SessionKey, SessionKind
 from looper.agents.tiers import manager as manager_module
 from looper.agents.tiers.manager import ManagerAgent, ManagerConfig
 from tests.db_support import DSN, run_db
-from tests.test_manager_session_routing_db import GROUP_A, GROUP_B, OTHER, _lark, _published, _Resident, _Rig
+from tests.test_manager_session_routing_db import GROUP_A, GROUP_B, OPEN_ID, OTHER, _lark, _published, _Resident, _Rig
 
 
 class CapturedResident(_Resident):
@@ -57,6 +57,9 @@ def test_routed_launches_have_only_platform_tools_and_separate_files(monkeypatch
             command = resident.starts[0]
             assert "--tools" in command, "a routed session still has local Read/Bash tools"
             assert command[command.index("--tools") + 1] == ""
+            assert "--dangerously-skip-permissions" not in command
+            assert command.count("--allowedTools") == 1
+            assert command[command.index("--allowedTools") + 1] == "mcp__looper__*"
             assert "--disable-slash-commands" in command and "--plugin-dir" not in command
             cwd = Path(resident.launch["cwd"])
             assert cwd != tmp_path
@@ -132,3 +135,88 @@ def test_isolated_config_reuses_the_login_namespace_not_its_histories(monkeypatc
             # With the default keychain namespace, Claude's refresh lock is HOME/.claude. Sessions sharing that
             # login must also share its lock, while their actual Claude state stays in CLAUDE_CONFIG_DIR.
             assert Path(environment["HOME"]) == original_home
+
+
+def test_platform_tools_argv_excludes_builtin_tools_without_a_database() -> None:
+    launch = Launch(AgentSettings(profile=builtin_resolved_profile()), access=Access.PLATFORM_TOOLS)
+    argv = CLAUDE_CODE.launch_args(launch)
+    assert argv.count("--tools") == 1 and argv[argv.index("--tools") + 1] == ""
+    assert "--dangerously-skip-permissions" not in argv
+    assert argv.count("--allowedTools") == 1
+    assert argv[argv.index("--allowedTools") + 1] == "mcp__looper__*"
+    assert "--disable-slash-commands" in argv
+
+
+def test_unverified_platform_restriction_refuses_launch_without_a_database(monkeypatch: pytest.MonkeyPatch) -> None:
+    from looper.agents.runtimes import RuntimeUnsupported
+
+    launch = Launch(AgentSettings(profile=builtin_resolved_profile()), access=Access.PLATFORM_TOOLS)
+    monkeypatch.setattr(CLAUDE_CODE, "supports_platform_tools_only", False)
+    with pytest.raises(RuntimeUnsupported, match="cannot restrict a routed Manager session"):
+        launch.args()
+
+
+def test_routing_on_with_chat_tools_off_keeps_the_empty_tools_public_prompt(monkeypatch: pytest.MonkeyPatch,
+                                                                           tmp_path: Path) -> None:
+    import asyncio
+
+    from looper.agents import session_tools_settings, session_visibility
+
+    monkeypatch.setattr(session_routing, "_routing_enabled", True)
+    monkeypatch.setattr(session_tools_settings, "_enabled", True)
+    manager = ManagerAgent(config=ManagerConfig(work_dir=tmp_path), runtime_root=tmp_path)
+    session = manager._router.session(SessionKey(SessionKind.GROUP, "channel-lark", "oc_synthetic_freeze"))
+    manager._current.set(session)
+    manager._stable_context = False
+    version = session_visibility.for_session(session.key, manager_id=manager.agent_id).version
+    ops = ManagerOps(Platform(bus=None, task_router=None), url="http://127.0.0.1:9", token="synthetic-token")
+    assert {tool["name"] for tool in asyncio.run(ops.current_listing(session_key=session.key))} == set(
+        session_visibility.SESSION_TOOL_RULES)
+    assert session_visibility.PUBLIC_PROMPT_TOOLS in manager._composed_prompt(
+        AgentSettings(profile=builtin_resolved_profile())).text
+    monkeypatch.setattr(session_tools_settings, "_enabled", False)
+    assert session_visibility.for_session(session.key, manager_id=manager.agent_id).version == version
+    expected = (
+        "You are Looper's chat assistant for this conversation. Answer the current message using only this chat. "
+        "You have no access to the operator's projects, tasks, settings, memories or other conversations, and no "
+        "platform tools. Do not claim to read or change them. Ask the operator to use their own chat for those actions."
+    )
+    assert session_visibility.for_session(session.key, manager_id=manager.agent_id) is session_visibility.NON_MAIN_ALLOWLIST
+    assert manager._composed_prompt(AgentSettings(profile=builtin_resolved_profile())).text.encode() == expected.encode()
+    assert asyncio.run(ops.current_listing(session_key=session.key)) == []
+
+
+@pytest.mark.parametrize("guard,code", [("unmatched", "not_this_turn"), ("stopped", "stopped"), ("ended", "expired")])
+def test_chat_write_refuses_an_unmatched_or_finished_turn(monkeypatch: pytest.MonkeyPatch,
+                                                         guard: str, code: str) -> None:
+    import asyncio
+    from dataclasses import replace
+
+    from looper.agents import session_tools_settings
+    from looper.agents.ops import Turn, TurnState
+    from looper.agents.ops import session_tools
+
+    monkeypatch.setattr(session_tools_settings, "_enabled", True)
+    operator = AsyncMock(return_value=OPEN_ID)
+    monkeypatch.setattr(session_tools, "operator_sender_id", operator)
+    run = AsyncMock(return_value={"task_id": "unexpected", "title": "Unexpected", "status": "ready"})
+    monkeypatch.setattr(session_tools, "TOOLS", tuple(replace(tool, run=run) for tool in session_tools.TOOLS))
+    ops = ManagerOps(Platform(bus=None, task_router=None), url="http://127.0.0.1:9", token="synthetic-token")
+    monkeypatch.setattr(ops, "_record", AsyncMock())
+    matched = AsyncMock(return_value=False)
+    monkeypatch.setattr(ops, "_matched", matched)
+    key = "group:channel-lark:oc_synthetic_turn_guard"
+    turn = Turn(channel="lark", channel_id="channel-lark", chat="oc_synthetic_turn_guard", sender=OPEN_ID,
+                message_id="turn-guard", group=True, require_match=True)
+    ops.begin_turn(turn, binding="turn-guard", session_key=key)
+    if guard != "unmatched":
+        turn.state = TurnState.STOPPED if guard == "stopped" else TurnState.ENDED
+    result = asyncio.run(ops.call("looper_chat_task_create",
+                                 {"title": "Chat request", "requirement": "A public request", "project": "Chat project"},
+                                 binding="turn-guard", call_id="synthetic-call", session_key=key))
+    assert result["error"]["code"] == code
+    run.assert_not_awaited()
+    if guard == "unmatched":
+        matched.assert_awaited_once_with("turn-guard", "looper_chat_task_create",
+                                        {"title": "Chat request", "requirement": "A public request", "project": "Chat project"},
+                                        "synthetic-call")
