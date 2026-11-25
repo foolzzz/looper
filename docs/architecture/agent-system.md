@@ -9296,8 +9296,12 @@ separate tokens and is not exported to API clients. No unversioned operator rout
   `branch_missing`, `branch_changed` or `git_error`, rather than claiming a clean workspace. Missing tasks
   return 404; API clients receive 403 before git runs. Git failures never return raw local diagnostics.
   The operation uses read-only git with optional locks disabled and never prepares or reopens worktrees.
-  The generated CLI exposes this operation; there is no new agent tool. Dashboard integration and channel
-  controls are separate work; existing dashboard, Lark and Telegram requests remain unchanged.
+  The generated CLI exposes this operation; there is no new agent tool. Inside the default-off Work page,
+  the task details section reads 100 entries when opened or explicitly refreshed, cancels on close or task
+  change, and never polls. It shows scope, file status, rename paths, truncation and readable failure reasons;
+  paths are plain text. A failed refresh marks retained files as stale, and file-read failures leave the
+  conversation available. Wide screens place the section on the right; narrow screens use a closable drawer
+  with focus return. Existing task pages, Lark and Telegram requests remain unchanged.
 - **Run tree.** The operator-only `runs.tree {task_id}` reads every persisted run of one task, following only
   that task's `parent_record_id` edges. It returns creator, reason, model, status, summary and failure details,
   with own and subtree costs split into subscription equivalents and API spend; unknown amounts remain null.
