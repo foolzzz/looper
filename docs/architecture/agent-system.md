@@ -157,6 +157,17 @@ Manager has no tool for it. The dashboard shows the task page's 指标 card and 
     and mode. A launch invariant rejects permission bypasses in non-full modes, or wider access / installed
     capabilities in platform-tools mode, fails the turn with `scope_invariant` and logs a critical event.
     Retirement revokes the session's MCP credential before removing its registered scope grant.
+    Inputs are typed by audience and mode: operator `full` sessions use `OPERATOR_GROUP_INPUTS`
+    (harness, Agent Profile and role prompts, tool/scope/group contracts, projects, templates, workflows
+    and this chat's input and stable block; no operator profile, ledger, other-chat confirmations,
+    ready tasks, open gates or goals). `legacy` preserves the per-chat assembly with the shared-speaker
+    note; `LEGACY_SHARED_INPUTS` names only that note and group activity. Platform-tools `chat_only`
+    uses `SCOPED_CHAT_ALLOWLIST`: the public chat inputs plus the scenario role prompt, shared-speaker
+    note and group activity, without handoffs. Each allowlist's version feeds the scope fingerprint.
+    In every scoped session the untrusted fence is always on, regardless of its global setting;
+    the operator's own message remains a direct request. A platform-tools attachments section ends
+    with "This session cannot open attachments; if the message needs one, say so." File-capable
+    sessions retain their existing file-reading instructions. Attachment payloads and paths are unchanged.
   - Sessions run in parallel; inside one, messages run in order. The message
     loop hands each user message to its session's worker. Completion wake-ups
     resolve the bot's identity before claiming events, then use the event
@@ -229,14 +240,17 @@ Manager has no tool for it. The dashboard shows the task page's 指标 card and 
     own handoff and the same excerpt, never other chats. `main`'s brief is
     unchanged. The typed, module-level `session_visibility.NON_MAIN_ALLOWLIST`
     governs both model inputs and tool registration/calls for the default Manager's
-    non-main sessions, and registered scoped `chat_only` sessions. Its complete input
+    non-main sessions. Its complete input
     grant is a fixed public chat prompt, the Manager's name only, this chat's
     opening/history/handoff, current message and provenance, quotes and attachments,
     session stop notices, and a session-local stable block containing only the name.
     Operator-customized prompts, harness and profile text, projects, directories,
     templates, workflows, tasks, gates, goals, knowledge, leads, memory, intents,
     reminders, ledger, confirmations, settings and cost views are excluded.
-    New global sections and tools are excluded by default. Existing Manager tools
+    Scoped `chat_only` sessions use the same allowlist plus the scenario role prompt, the shared-speaker
+    note and group activity, without handoffs (`SCOPED_CHAT_ALLOWLIST`). Their stable block contains only
+    the persona name, which is empty for a scenario Manager. New global sections and tools are excluded
+    by default. Existing Manager tools
     lack complete chat scopes, so none are registered or callable, including by
     guessing a tool name or omitting a binding. Tasks cannot be created or controlled
     from these model sessions. `/gates` and `/todo` return a fixed refusal;
