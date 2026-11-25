@@ -110,7 +110,8 @@ class Probe:
             subprocess.run(["git", *args], cwd=directory, env=self.env, check=True, capture_output=True)
         return directory
 
-    def command(self, cwd, *, read_only=False, resume=None, user_only=False):
+    def command(self, cwd, *, read_only=False, resume=None, user_only=False, extra_args=(),
+                permission_mode=None):
         runtime = ClaudeCodeRuntime()
         launch = Launch(AgentSettings(profile=builtin_resolved_profile()))
         prompt = self.root / "prompt.md"
@@ -132,12 +133,16 @@ class Probe:
             settings = json.loads(self.settings.read_text())
             settings["claudeMdExcludes"] = claude_cli._outside_memory(Path(cwd))
             self.settings.write_text(json.dumps(settings))
-            command += claude_cli.permission_args() + ["--settings", str(self.settings)]
+            permissions = claude_cli.permission_args() if permission_mode is None else [
+                "--permission-mode", permission_mode, "--permission-prompts", "none",
+                "--allowedTools", "Bash(*)"]
+            command += permissions + ["--settings", str(self.settings)]
             if user_only:
                 command += ["--setting-sources", "user"]
         command += claude_cli.peer_args(False)
         if resume:
             command += runtime.resume_args(resume)
+        command += extra_args
         return command
 
     def run(self, script, *, cwd=None, **kwargs):
@@ -261,6 +266,113 @@ def test_d_hook_settings(probe, case):
     first = next(request for request in run["requests"] if request["has_tools"])
     probe.observations.update(settings_hook_survived=bool(probe.lines("settings")),
                               project_memory="PROJECT-MEMORY-7f3a" in json.dumps(first))
+
+
+# Candidates found in the installed 2.1.332 help, embedded settings schema and hook gates.
+# Keep source-specific cases: managed-only keys need not work in ordinary settings.
+HOOK_SETTING_CANDIDATES = [
+    pytest.param(source, {key: value}, id=f"{source}-{key}")
+    for source in ("user", "project", "local", "flag", "managed", "parent")
+    for key, value in (("disableAllHooks", True), ("allowManagedHooksOnly", True),
+                       ("strictPluginOnlyCustomization", ["hooks"]))
+    if (source, key) not in (("user", "disableAllHooks"), ("project", "disableAllHooks"))
+] + [
+    pytest.param(source, {"hooks": hooks}, id=f"{source}-hooks-{shape}")
+    for source in ("user", "project", "local", "managed", "parent")
+    for shape, hooks in (("empty-object", {}), ("empty-event", {"PreToolUse": []}))
+] + [
+    pytest.param(source, {"env": {name: "1"}}, id=f"{source}-env-{name}")
+    for source in ("user", "project", "local", "flag", "managed", "parent")
+    for name in ("CLAUDE_CODE_SAFE_MODE", "CLAUDE_CODE_SIMPLE")
+]
+
+
+def candidate_settings(probe, source, settings):
+    if source in ("user", "flag"):
+        path = probe.user_settings if source == "user" else probe.settings
+        path.write_text(json.dumps({**json.loads(path.read_text()), **settings}))
+    elif source in ("project", "local"):
+        directory = probe.cwd / ".claude"
+        directory.mkdir(exist_ok=True)
+        name = "settings.json" if source == "project" else "settings.local.json"
+        (directory / name).write_text(json.dumps(settings))
+    elif source == "managed":
+        directory = probe.root / "managed"
+        directory.mkdir(exist_ok=True)
+        probe.env["CLAUDE_CODE_MANAGED_SETTINGS_PATH"] = str(directory)
+        path = directory / "managed-settings.json"
+        path.write_text(json.dumps(settings))
+    else:
+        assert source == "parent"
+        # The SDK parent tier is distinct from the machine's managed settings source.
+        return ["--managed-settings", json.dumps(settings)]
+    return []
+
+
+def record_hook_candidate(probe, *, read_only_command=False, **kwargs):
+    command = "pwd" if read_only_command else "echo observed > candidate.txt"
+    run = probe.run([tool_use("Bash", {"command": command}), text("done")],
+                    **kwargs)
+    probe.success(run)
+    # A missing marker is meaningful only after the fake model's tool actually executes.
+    if read_only_command:
+        results = [block for block in probe.results(run) if block["tool_use_id"] == run["script"][0]["id"]]
+        assert any(not block.get("is_error") and str(probe.cwd) in json.dumps(block) for block in results)
+    else:
+        assert (probe.cwd / "candidate.txt").read_text().strip() == "observed"
+    probe.observations.update(settings_hook_survived=bool(probe.lines("settings")),
+                              user_hook_survived=bool(probe.lines("user")), tool_executed=True,
+                              permission_mode=next(event["permissionMode"] for event in run["events"]
+                                                   if event.get("subtype") == "init"))
+
+
+@pytest.mark.installed
+@pytest.mark.parametrize("source", ["managed", "parent"])
+def test_policy_hook_source_control(probe, source):
+    args = candidate_settings(probe, source, {"hooks": probe.hooks("managed")})
+    record_hook_candidate(probe, extra_args=args)
+    # Record the positive control rather than mistaking an ignored source for an ineffective switch.
+    probe.observations.update(source=source, source_control_hook_ran=bool(probe.lines("managed")))
+
+
+@pytest.mark.installed
+@pytest.mark.parametrize("source,settings", HOOK_SETTING_CANDIDATES)
+def test_hook_setting_candidates(probe, source, settings):
+    probe.observations.update(source=source, candidate=settings)
+    record_hook_candidate(probe, extra_args=candidate_settings(probe, source, settings))
+
+
+@pytest.mark.installed
+@pytest.mark.parametrize("flag", ["--safe-mode", "--bare", "--restricted",
+    "--disable-slash-commands", "--setting-sources", "--ignore-persisted-trust"])
+def test_hook_flag_candidates(probe, flag):
+    args = [flag, ""] if flag == "--setting-sources" else [flag]
+    # Restricted mode removes Bash and forbids bypassPermissions; explicitly admit the scripted tool.
+    kwargs = {"permission_mode": "manual"} if flag == "--restricted" else {}
+    if flag == "--restricted":
+        args += ["--tools", "Bash"]
+    probe.observations.update(candidate=args)
+    record_hook_candidate(probe, extra_args=args, **kwargs)
+
+
+@pytest.mark.installed
+@pytest.mark.parametrize("name", ["CLAUDE_CODE_SAFE_MODE", "CLAUDE_CODE_SIMPLE",
+    "CLAUDE_CODE_PERSONAL_HOOKS_OFF", "CLAUDE_CODE_RESTRICT_PERSONAL_CONFIG", "CLAUDE_CODE_RESTRICTED",
+    "CLAUDE_CODE_IGNORE_PERSISTED_TRUST",
+    "CLAUDE_CODE_DISABLE_HOOK_FORWARDING", "CLAUDE_CODE_DISABLE_PERMISSION_PROMPT_NOTIFY_HOOKS"])
+def test_hook_environment_candidates(probe, name):
+    probe.env[name] = "1"
+    probe.observations.update(candidate={name: "1"})
+    kwargs = {"permission_mode": "manual", "extra_args": ["--tools", "Bash"]} \
+        if name == "CLAUDE_CODE_RESTRICTED" else {}
+    record_hook_candidate(probe, **kwargs)
+
+
+@pytest.mark.installed
+@pytest.mark.parametrize("mode", ["acceptEdits", "auto", "bypassPermissions", "manual", "dontAsk", "plan"])
+def test_hook_permission_candidates(probe, mode):
+    probe.observations.update(candidate={"permission_mode": mode})
+    record_hook_candidate(probe, permission_mode=mode, read_only_command=mode == "plan")
 
 
 @pytest.mark.installed
