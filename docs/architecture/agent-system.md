@@ -168,8 +168,9 @@ Manager has no tool for it. The dashboard shows the task page's 指标 card and 
     messages, excluding this session's rows and the current message; a new or reopened session starts after
     the opening excerpt instead of repeating it as activity. Activity shows the newest 8 rows oldest first,
     clips each body to 300 characters, reports the omitted count and wraps every row with `untrusted.fence`;
-    read failures warn and leave the cursor unchanged for retry. Telegram groups store no messages, so they
-    receive no activity block and their scoped opening says so.
+    the cursor advances only after a successful reply. Resume retries keep the rendered activity and pending
+    cursor; preparation or runtime failures leave the cursor unchanged for the next turn. Read failures warn.
+    Telegram groups store no messages, so they receive no activity block and their scoped opening says so.
     In every scoped session the untrusted fence is always on, regardless of its global setting;
     the operator's own message remains a direct request. A platform-tools attachments section ends
     with "This session cannot open attachments; if the message needs one, say so." File-capable
