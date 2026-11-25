@@ -4,6 +4,7 @@ import { WorkList } from "@/components/work-list";
 import { WorkSwitcher } from "@/components/work-switcher";
 import { WorkChanges } from "@/components/work-changes";
 import { WorkGates } from "@/components/work-gates";
+import { WorkRequirement } from "@/components/work-requirement";
 import { WorkSteps } from "@/components/work-steps";
 import { WorkTaskManagerModel } from "@/components/work-task-manager-model";
 import { WorkCost } from "@/components/work-cost";
@@ -19,6 +20,17 @@ import { isGateShown } from "@/lib/gates";
 import { WorkConversationStateProvider, useWorkConversationStore, workConversationKey } from "@/lib/use-work-conversation-state";
 
 const LINK = "text-sm text-primary underline-offset-2 hover:underline focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring";
+
+/** Next generation for one task's shared detail. A late result from an older number is dropped. */
+function takeDetailEpoch(epochs: Map<string, number>, id: string): number {
+  const next = (epochs.get(id) ?? 0) + 1;
+  epochs.set(id, next);
+  return next;
+}
+
+function detailEpochOf(epochs: Map<string, number>, id: string): number {
+  return epochs.get(id) ?? 0;
+}
 
 /** Short screens scroll the conversation and composer together; details use the dismissible panel. */
 const SHORT_COLUMN = "(max-height: 32rem) and (max-width: 1023px)";
@@ -113,29 +125,55 @@ function WorkPageContent({
     setPanel(false); setGateTarget({ taskId, step });
   }, [taskId]);
   const closePanel = () => { restorePanelFocus.current = true; setPanel(false); };
-  const detailRevision = useRef(0);
+  // One generation per task, shared by the initial read, the requirement readback, the poll and a gate update.
+  const detailEpoch = useRef(new Map<string, number>());
+  const selectionRef = useRef(taskId);
+  selectionRef.current = taskId;
+  const pageLive = useRef(true);
+  useEffect(() => {
+    pageLive.current = true;
+    return () => { pageLive.current = false; };
+  }, []);
   // Gate replies already return the new gate. Update the one shared detail without remounting its editor.
   const onGateChanged = useCallback((gate: UserGate) => {
-    detailRevision.current += 1;
-    setDetail(current => current.id !== taskId || !current.task ? current : {
-      ...current, task: { ...current.task, gates: current.task.gates?.map(item => item.step_id === gate.step_id ? gate : item) },
-    });
-  }, [taskId]);
+    if (!pageLive.current || !taskId || selectionRef.current !== taskId) return;
+    const current = conversations.cached(cacheKey)?.task;
+    if (!current || current.task_id !== taskId) return;
+    takeDetailEpoch(detailEpoch.current, taskId);
+    const task = { ...current, gates: current.gates?.map(item => item.step_id === gate.step_id ? gate : item) };
+    conversations.cache(cacheKey, { task });
+    setDetail(current => current.id === taskId ? { ...current, task } : current);
+  }, [taskId, conversations, cacheKey]);
+  // Requirement edits read this task back through the shared detail. A newer read, another task, or a page that has gone, is dropped.
+  const refreshDetail = useCallback(async () => {
+    const id = taskId;
+    if (!pageLive.current || !id || selectionRef.current !== id) return;
+    const token = takeDetailEpoch(detailEpoch.current, id);
+    const task = await fetchTaskDetail(id);
+    if (!pageLive.current || selectionRef.current !== id || detailEpochOf(detailEpoch.current, id) !== token) return;
+    if (task.task_id !== id) throw new Error("任务详情与当前任务不匹配，请刷新");
+    conversations.cache(workConversationKey({ kind: "planner", taskId: id }), { task });
+    setDetail(current => (
+      current.id === id && detailEpochOf(detailEpoch.current, id) === token ? { id, task } : current
+    ));
+  }, [taskId, conversations]);
   const active = !!selected && isActiveTask(selected);
   useEffect(() => {
     if (!taskId || !active) return;
     // One shared reader observes gates opened/closed by the Planner, not one poller per feed row.
     return startPolling(async signal => {
-      const revision = detailRevision.current;
+      const revision = takeDetailEpoch(detailEpoch.current, taskId);
       try {
         const task = await fetchTaskDetail(taskId, signal);
-        if (signal.aborted || revision !== detailRevision.current) return;
+        if (signal.aborted || detailEpochOf(detailEpoch.current, taskId) !== revision) return;
         if (task.task_id !== taskId) throw new Error("任务详情与当前任务不匹配，请刷新");
         conversations.cache(cacheKey, { task });
-        setDetail(current => current.id === taskId ? { id: taskId, task } : current);
+        setDetail(current => (
+          current.id === taskId && detailEpochOf(detailEpoch.current, taskId) === revision ? { id: taskId, task } : current
+        ));
         return !isActiveTask(task);
       } catch (err) {
-        if (!signal.aborted && revision === detailRevision.current)
+        if (!signal.aborted && detailEpochOf(detailEpoch.current, taskId) === revision)
           setDetail(current => current.id === taskId ? { ...current, error: errorText(err) } : current);
       }
     }, 2000);
@@ -143,6 +181,8 @@ function WorkPageContent({
   useEffect(() => {
     if (!taskId) return;
     const ctrl = new AbortController();
+    // This read takes the task's next generation. A newer poll, gate update or requirement readback drops it.
+    const token = takeDetailEpoch(detailEpoch.current, taskId);
     setDetail({ id: taskId, task: conversations.cached(cacheKey)?.task });
     // Read the latest event, not the first forward page (which can be over 1,000 events behind).
     Promise.all([
@@ -152,16 +192,17 @@ function WorkPageContent({
       if (ctrl.signal.aborted) return;
       if (task.task_id !== taskId) throw new Error("任务详情与当前任务不匹配，请刷新");
       if ("status" in activity) throw new Error("Task activity is unavailable");
-      setDetail({ id: taskId, task });
-      conversations.cache(cacheKey, { task });
       const seq = Math.max(0, ...activity.activity.map(event => event.seq));
       const key = `${taskId}:${seq}`;
       if (seen.current !== key) {
         seen.current = key;
         markSeen(taskId, seq).catch((err: unknown) => console.error(err));
       }
+      if (detailEpochOf(detailEpoch.current, taskId) !== token) return;
+      setDetail({ id: taskId, task });
+      conversations.cache(cacheKey, { task });
     }).catch((err: unknown) => {
-      if (ctrl.signal.aborted) return;
+      if (ctrl.signal.aborted || detailEpochOf(detailEpoch.current, taskId) !== token) return;
       setDetail(current => ({ id: taskId, task: current.id === taskId ? current.task : undefined,
         missing: (err instanceof TaskDetailError || err instanceof V1Error) && err.status === 404 && !isMissingOperation(err), error: errorText(err) }));
     });
@@ -271,6 +312,7 @@ function WorkPageContent({
         className={wide ? "min-h-0 w-72 shrink-0 overflow-y-auto border-l border-border"
           : "fixed inset-0 z-50 overflow-y-auto bg-background"}>
         {!wide && <div className="border-b border-border p-3"><Button variant="outline" onClick={closePanel}>关闭任务详情</Button></div>}
+        <WorkRequirement task={selected} onRefresh={refreshDetail} />
         <WorkTaskManagerModel
           mode="task"
           taskId={taskId}
