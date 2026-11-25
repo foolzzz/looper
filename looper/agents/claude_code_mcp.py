@@ -142,6 +142,10 @@ class OperatorClient:
 def main(runtime_root: str | None, config: str | None) -> int:
     from .. import child_env, ops_config
 
+    from ..cli import task_manager_guard
+
+    if (code := task_manager_guard("claude-code", "mcp")) is not None:
+        return code
     log_to_stderr(logging.INFO, "looper claude-code mcp %(levelname)s %(message)s")
     if os.environ.get(child_env.AGENT_RUN_ENV):
         print("error: looper claude-code mcp is the operator's own; refused inside a Looper agent run", file=sys.stderr)

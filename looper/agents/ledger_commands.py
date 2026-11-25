@@ -150,6 +150,10 @@ async def _command(pool: asyncpg.Pool, args: Any) -> tuple[int, str]:
 
 
 def run(args: Any, load_ops: Any) -> int:
+    from ..cli import task_manager_guard
+
+    if (code := task_manager_guard("ledger", args.ledger_command)) is not None:
+        return code
     if args.ledger_command in WRITES:
         if os.environ.get(child_env.AGENT_RUN_ENV):
             logger.warning("ledger cli refused reason=agent_run")

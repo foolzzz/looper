@@ -13,14 +13,13 @@ from looper import child_env, cli
 
 
 # Keep the intended classification independent of the implementation's table.
-ALLOW = [
-    ("version", None, []), ("profile", "show", []),
+ALLOW = [("version", None, [])]
+OWN_TASK = [("mcp-server", None, [])]
+REFUSE = [
+    ("profile", "show", []),
     ("claude-code", "profile", []), ("claude-code", "mcp", []), ("claude-code", "status", []),
     ("ledger", "list", []), ("ledger", "show", ["L-1"]), ("leads", "search", []),
     ("memory", "list", []), ("memory", "show", ["M-1"]), ("memory", "lessons", []),
-    ("mcp-server", None, []),
-]
-REFUSE = [
     ("serve", None, []), ("doctor", None, []), ("config", "init-ops", []),
     ("auth", "set-password", []), ("auth", "clear-password", []),
     *(("service", sub, []) for sub in ("install", "probe", "restart", "upgrade", "status", "uninstall")),
@@ -35,8 +34,14 @@ REFUSE = [
     ("msgflow", "delete", ["--message", "synthetic-message"]), ("msgflow", "leads-backfill", []),
     ("msgflow", "why", ["synthetic-message"]), ("decisions", "replay", ["task-x"]),
 ]
-CASES = [(command, sub, extra, allowed) for allowed, entries in ((True, ALLOW), (False, REFUSE))
+CASES = [(command, sub, extra, allowed) for allowed, entries in ((True, ALLOW + OWN_TASK), (False, REFUSE))
          for command, sub, extra in entries]
+
+
+@pytest.fixture(autouse=True)
+def isolated_home(monkeypatch, tmp_path):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "claude"))
 
 
 def _subparsers(parser):
@@ -89,13 +94,19 @@ def test_scope_refusals(monkeypatch, capsys, dispatches, command, sub, extra, al
         monkeypatch.setenv(child_env.TASK_MANAGER_ENV, "task-x")
     else:
         monkeypatch.delenv(child_env.TASK_MANAGER_ENV, raising=False)
-    scope = cli.CommandScope.ALLOW if allowed else cli.CommandScope.REFUSE
+    scope = (cli.CommandScope.OWN_TASK if command == "mcp-server" else
+             cli.CommandScope.ALLOW if allowed else cli.CommandScope.REFUSE)
+    monkeypatch.setenv("LOOPER_AGENT_TOKEN", "taskmgr.synthetic")
     assert cli.TASK_MANAGER_SCOPE.get((command, sub)) is scope
     argv = [command, *([sub] if sub else []), *extra]
     refused = in_manager and not allowed
-    assert cli.main(argv) == (4 if refused else 0)
+    assert cli.main(argv) == (4 if refused and command != "profile" else 0)
     output = capsys.readouterr()
-    if refused:
+    if refused and command == "profile":
+        assert output.out == output.err == ""
+        assert all(mock.call_count == 0 for mock in dispatches.values())
+    elif refused:
+        assert output.out == ""
         name = " ".join(filter(None, (command, sub)))
         assert output.err == (f"error: looper {name} is the operator's own; inside a task Manager it is refused. "
                               "Run it in your own terminal.\n")
@@ -126,10 +137,11 @@ def test_scope_refusals_unlisted(monkeypatch, capsys, dispatches, group):
     assert all(mock.call_count == 0 for mock in dispatches.values())
 
 
-def test_scope_allows_session_start_hook(monkeypatch, dispatches):
+def test_scope_silences_session_start_hook(monkeypatch, capsys, dispatches):
     monkeypatch.setenv(child_env.TASK_MANAGER_ENV, "task-x")
     assert cli.main(["claude-code", "profile", "--hook"]) == 0
-    assert dispatches["claude-code"].call_args.args[0].hook is True
+    assert capsys.readouterr() == ("", "")
+    dispatches["claude-code"].assert_not_called()
 
 
 @pytest.mark.parametrize("task", ["task-x", "another-task"])
@@ -158,3 +170,162 @@ def test_agent_run_unchanged(monkeypatch, capsys, argv, message):
     assert cli.main(argv) == 4
     assert capsys.readouterr().err == message
     load.assert_not_called()
+
+
+@pytest.mark.parametrize("command,sub,extra", [case for case in REFUSE if case[0] in {
+    "profile", "claude-code", "ledger", "leads", "memory", "knowledge"}])
+def test_callable_entries_refuse(monkeypatch, capsys, tmp_path, command, sub, extra):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "claude"))
+    monkeypatch.delenv(child_env.AGENT_RUN_ENV, raising=False)
+    monkeypatch.setenv(child_env.TASK_MANAGER_ENV, "task-x")
+    args = cli.build_parser().parse_args([command, sub, *extra])
+    args.runtime_root = str(tmp_path / "runtime")
+    args.config = str(tmp_path / "missing.toml")
+    load = Mock(return_value=None)
+    if command == "profile":
+        module = importlib.import_module("looper.agents.profile_commands")
+        reader = Mock(return_value=SimpleNamespace(returncode=0, stdout=b"private profile"))
+        monkeypatch.setattr(module.subprocess, "run", reader)
+        code = module.show(args)
+        reader.assert_not_called()
+    elif command == "claude-code":
+        module = importlib.import_module("looper.agents.claude_code_entry")
+        reader = Mock(return_value="private profile")
+        monkeypatch.setattr("looper.agents.profile_commands.read_text", reader)
+        code = module.run(args)
+        reader.assert_not_called()
+    else:
+        module = importlib.import_module(f"looper.agents.{command}_commands")
+        code = module.run(args, load)
+    assert code == (0 if command == "profile" else 4)
+    output = capsys.readouterr()
+    assert output.out == ""
+    if command == "profile":
+        assert output.err == ""
+    else:
+        assert output.err == (f"error: looper {command} {sub} is the operator's own; "
+                              "inside a task Manager it is refused. Run it in your own terminal.\n")
+    load.assert_not_called()
+
+
+def test_callable_profile_hook_silent(monkeypatch, capsys):
+    from looper.agents import claude_code_entry
+
+    monkeypatch.setenv(child_env.TASK_MANAGER_ENV, "task-x")
+    reader = Mock(return_value="private profile")
+    monkeypatch.setattr("looper.agents.profile_commands.read_text", reader)
+    args = cli.build_parser().parse_args(["claude-code", "profile", "--hook"])
+    assert claude_code_entry.profile_command(args) == 0
+    assert claude_code_entry.run(args) == 0
+    assert capsys.readouterr() == ("", "")
+    reader.assert_not_called()
+
+
+def test_fetch_profile_refuses_explicit_environment(monkeypatch, capsys):
+    from looper.agents import claude_code_entry
+
+    reader = Mock(return_value="private profile")
+    monkeypatch.setattr("looper.agents.profile_commands.read_text", reader)
+    result = claude_code_entry.fetch_profile(None, None, environ={child_env.TASK_MANAGER_ENV: "task-x"})
+    assert result.code == 4 and result.text == ""
+    reader.assert_not_called()
+    assert capsys.readouterr() == ("", "")
+
+
+def test_retrieval_mcp_entry_refuses(monkeypatch, capsys):
+    from looper.agents import claude_code_mcp
+
+    monkeypatch.setenv(child_env.TASK_MANAGER_ENV, "task-x")
+    load = Mock()
+    monkeypatch.setattr("looper.ops_config.load", load)
+    assert claude_code_mcp.main(None, None) == 4
+    assert capsys.readouterr().out == ""
+    load.assert_not_called()
+
+
+@pytest.mark.parametrize("token", ["operator-secret", "planner.synthetic", "run.synthetic", "", "taskmgr."])
+@pytest.mark.parametrize("entry", ["cli", "callable"])
+def test_mcp_server_rejects_other_credentials(monkeypatch, capsys, token, entry):
+    from looper.agents import mcp_server
+
+    monkeypatch.setenv(child_env.TASK_MANAGER_ENV, "task-x")
+    monkeypatch.setenv("LOOPER_AGENT_URL", "http://127.0.0.1:19999")
+    monkeypatch.setenv("LOOPER_AGENT_TOKEN", token)
+    serve = Mock(return_value=0)
+    monkeypatch.setattr(mcp_server, "serve", serve)
+    assert (cli.main(["mcp-server"]) if entry == "cli" else mcp_server.main()) == 4
+    output = capsys.readouterr()
+    assert output.out == ""
+    assert "task Manager credential" in output.err
+    if token:
+        assert token not in output.err
+    serve.assert_not_called()
+
+
+def test_mcp_server_accepts_task_credentials(monkeypatch):
+    from looper.agents import mcp_server
+
+    monkeypatch.setenv(child_env.TASK_MANAGER_ENV, "task-x")
+    monkeypatch.setenv("LOOPER_AGENT_URL", "http://127.0.0.1:19999")
+    monkeypatch.setenv("LOOPER_AGENT_TOKEN", "taskmgr.synthetic")
+    serve = Mock(return_value=0)
+    monkeypatch.setattr(mcp_server, "serve", serve)
+    assert cli.main(["mcp-server"]) == 0
+    assert serve.call_args.args[0]._token == "taskmgr.synthetic"
+
+
+@pytest.mark.parametrize("argv,message", [
+    (["ledger", "add", "--kind", "pending", "--title", "A task"],
+     "error: a ledger write is the user's own; run it in your own terminal, not from an agent\n"),
+    (["leads", "search"], "消息线索只供操作者查询和修改，请在自己的终端运行\n"),
+    (["memory", "list"], "记忆候选只供操作者查看，请在自己的终端运行\n"),
+])
+def test_agent_run_precedes_task_manager(monkeypatch, capsys, argv, message):
+    monkeypatch.setenv(child_env.TASK_MANAGER_ENV, "task-x")
+    monkeypatch.setenv(child_env.AGENT_RUN_ENV, "synthetic-run")
+    assert cli.main(argv) == 4
+    assert capsys.readouterr().err == message
+
+
+@pytest.mark.parametrize("entry", ["profile", "status", "settings"])
+def test_claude_code_callable_guards(monkeypatch, capsys, tmp_path, entry):
+    from looper.agents import claude_code_entry as cc
+
+    monkeypatch.setenv(child_env.TASK_MANAGER_ENV, "task-x")
+    reader = Mock(return_value=cc.Fetched(cc.OK, text="private profile"))
+    monkeypatch.setattr(cc, "fetch_profile", reader)
+    args = cli.build_parser().parse_args(["claude-code", "profile", "--hook"])
+    args.runtime_root = str(tmp_path)
+    if entry == "profile":
+        assert cc.profile_command(args) == 0
+        assert capsys.readouterr() == ("", "")
+    elif entry == "status":
+        assert cc.status_command(args) == 4
+        assert capsys.readouterr().out == ""
+    else:
+        change = Mock()
+        assert cc.edit_settings(change, yes=True, dry_run=True,
+                                environ={child_env.TASK_MANAGER_ENV: "task-x"}) == 4
+        change.assert_not_called()
+    reader.assert_not_called()
+
+
+@pytest.mark.parametrize("argv,code", [
+    (["profile", "show"], 0), (["claude-code", "profile", "--hook"], 0),
+    (["claude-code", "profile"], 4), (["mcp-server"], 4),
+])
+def test_process_boundary(tmp_path, argv, code):
+    import os
+    import subprocess
+    import sys
+
+    environment = {**os.environ, "HOME": str(tmp_path), "CLAUDE_CONFIG_DIR": str(tmp_path / "claude"),
+                   child_env.TASK_MANAGER_ENV: "task-x", "LOOPER_AGENT_TOKEN": "operator-secret"}
+    environment.pop(child_env.AGENT_RUN_ENV, None)
+    result = subprocess.run([sys.executable, "-c", "from looper.cli import main; raise SystemExit(main())", *argv], env=environment,
+                            input="", text=True, capture_output=True, timeout=10)
+    assert result.returncode == code
+    assert result.stdout == ""
+    assert bool(result.stderr) == bool(code)
+    assert "operator-secret" not in result.stderr
