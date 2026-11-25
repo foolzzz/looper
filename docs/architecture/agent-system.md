@@ -789,14 +789,17 @@ private hook file is removed on revocation and unanswered checks fail closed.
 With task conversations off, no credential is issued and no tool is served.
 
 **Local commands.** With `LOOPER_TASK_MANAGER` set, the CLI checks a typed table
-before dispatch. Allowed commands are `version`, `profile show`, `claude-code
-profile` (including `--hook`), `claude-code mcp/status`, `ledger list/show`, `leads
-search`, `memory list/show/lessons`, and `mcp-server` (the server checks its token).
-Service management, authentication and configuration writes, probes, installers,
-ledger writes, leads mutations/export, memory mutations/check, knowledge migration,
-message-flow commands and decision replay are refused with exit 4. Unlisted
-commands are refused too; no own-task CLI commands are added yet. Existing
-`LOOPER_AGENT_RUN` refusals are unchanged. This guard is a speed bump: the task
+before dispatch and repeats the policy at callable entries, following
+[RFC section 18](rfcs/task-sessions-v0.zh-CN.md#18-安全). Only `version` is globally
+allowed. `mcp-server` is own-task only: it requires a task Manager credential,
+never falls back to the operator token, and the server checks the task binding
+on every tool call. All other leaves, including global profile, ledger, leads,
+and memory reads and `claude-code status/mcp`, are refused with exit 4.
+`profile show` instead returns empty output with exit 0; `claude-code profile
+--hook` also prints nothing and exits 0, so SessionStart cannot inject the
+operator's profile. Unlisted commands are refused too; no `task` command group
+is added yet. Existing `LOOPER_AGENT_RUN` refusals take precedence when both
+markers are set. This guard is a speed bump: the task
 Manager shares the operator's account and can read its token file or call HTTP
 directly. It is not an isolation boundary.
 
