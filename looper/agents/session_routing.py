@@ -18,6 +18,7 @@ Until loaded, routing is off.
 from __future__ import annotations
 
 import hashlib
+import logging
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -32,10 +33,18 @@ DEFAULT_ROUTING_ENABLED = False
 MAX_RESIDENT_KEY = "manager.sessions.max_resident"
 DEFAULT_MAX_RESIDENT = 2  # RFC 4.2: a resident session costs about 240-310 MB; resuming on demand is 1-2 s slower
 MAX_RESIDENT_RANGE = (1, 16)
+MAX_RESIDENT_TOTAL_KEY = "manager.sessions.max_resident_total"
+DEFAULT_MAX_RESIDENT_TOTAL = 6
+MAX_RESIDENT_TOTAL_RANGE = (1, 32)
+IDLE_RECLAIM_KEY = "manager.sessions.idle_reclaim_seconds"
+DEFAULT_IDLE_RECLAIM_SECONDS = 1800
 
 _routing_enabled = DEFAULT_ROUTING_ENABLED
 _max_resident = DEFAULT_MAX_RESIDENT
+_max_resident_total = DEFAULT_MAX_RESIDENT_TOTAL
+_idle_reclaim_seconds = DEFAULT_IDLE_RECLAIM_SECONDS
 _scenario_routing: dict[str, str] = {}
+logger = logging.getLogger(__name__)
 
 
 class GroupIsolation(str, Enum):
@@ -143,6 +152,39 @@ def checked_max_resident(value: Any) -> int:
     return value
 
 
+def max_resident_total() -> int:
+    return _max_resident_total
+
+
+def checked_max_resident_total(value: Any) -> int:
+    low, high = MAX_RESIDENT_TOTAL_RANGE
+    if type(value) is not int or not low <= value <= high:
+        raise ValueError(f"max_resident_total must be an integer from {low} to {high}")
+    return value
+
+
+def set_max_resident_total(value: int) -> None:
+    """Apply the machine cap in memory; resident_limits.update stores it first."""
+    global _max_resident_total
+    _max_resident_total = checked_max_resident_total(value)
+
+
+def idle_reclaim_seconds() -> int:
+    return _idle_reclaim_seconds
+
+
+def checked_idle_reclaim_seconds(value: Any) -> int:
+    if type(value) is not int or not (value == 0 or 60 <= value <= 86400):
+        raise ValueError("idle_reclaim_seconds must be an integer: 0 (off), or 60 to 86400 seconds")
+    return value
+
+
+def set_idle_reclaim_seconds(value: int) -> None:
+    """Apply the idle timeout in memory; resident_limits.update stores it first."""
+    global _idle_reclaim_seconds
+    _idle_reclaim_seconds = checked_idle_reclaim_seconds(value)
+
+
 def routes(manager_id: str) -> bool:
     """Default Manager: global switch. Scenario Manager: its independent typed definition setting."""
     from .managers_api import DEFAULT_MANAGER_ID  # here: the Managers' definitions import the chat settings
@@ -176,6 +218,15 @@ def apply_stored(stored: Mapping[str, str]) -> None:
         set_max_resident(int(stored.get(MAX_RESIDENT_KEY, DEFAULT_MAX_RESIDENT)))
     except ValueError:
         set_max_resident(DEFAULT_MAX_RESIDENT)
+    for key, default, setter in (
+        (MAX_RESIDENT_TOTAL_KEY, DEFAULT_MAX_RESIDENT_TOTAL, set_max_resident_total),
+        (IDLE_RECLAIM_KEY, DEFAULT_IDLE_RECLAIM_SECONDS, set_idle_reclaim_seconds),
+    ):
+        try:
+            setter(int(stored.get(key, default)))
+        except (TypeError, ValueError):
+            logger.warning("Invalid stored %s; using default %s", key, default)
+            setter(default)
 
 
 def group_isolation(manager_id: str) -> GroupIsolation:
