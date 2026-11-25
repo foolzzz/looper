@@ -555,7 +555,7 @@ def test_operator_only(monkeypatch, tmp_path):
     async def check(pool):
         operation = domain.OPERATIONS[0]
         assert operation.operator_only is True and operation.tool is None
-        assert operation.risk == "read" and operation.level is ActionLevel.INSIDE and operation.cli is False
+        assert operation.risk == "read" and operation.level is ActionLevel.INSIDE and operation.cli is True
         async with v1_api(tmp_path, pool) as call:
             status, body = await call("tasks.select", {"selection": "alpha"}, client=True)
         assert status == 403 and body["error"]["code"] == "forbidden"
