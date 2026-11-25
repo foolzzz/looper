@@ -139,7 +139,8 @@ class Sender:
         self.sent: list[tuple[str, str, str]] = []
         self.fail_with: str | None = None
 
-    async def __call__(self, channel: str, chat: str, text: str) -> tuple[bool, str | None]:
+    async def __call__(self, channel: str, chat: str, text: str, *,
+                       proactive: Any = None, group: bool = False) -> tuple[bool, str | None]:
         if self.fail_with:
             return False, self.fail_with
         self.sent.append((channel, chat, text))

@@ -43,7 +43,7 @@ from .. import chat_settings
 from .allowlist import SenderAllowlist
 from .base import ChannelAdapter, DeliveryFailure, DeliveryReceipt, PostOutcome, PostReceipt
 from .chat_history import record_reply
-from .proactive import record_delivery
+from .proactive import record_delivery, store_envelope_body
 from .chat_routing import ChatResolver, RouteAction, RouteDecision, SenderPolicy, observe_chat, log_route
 from . import lark_content, lark_quote
 from .lark_cli import MESSAGE_GONE_CODES, RECEIVE_EVENT, LarkCliError, LarkCliOutputError, mention
@@ -386,9 +386,9 @@ class LarkChannelAdapter(ChannelAdapter):
             notice = Notice.from_payload(envelope.payload)
             if notice is None:
                 return DeliveryReceipt(channel=self.channel_type, success=False, error="a notice without a Lark target")
-            return await self._send_notice(notice.target,
-                                           for_group(notice.text) if notice.target.group else notice.text,
-                                           **receipt_kwargs)
+            text = for_group(notice.text) if notice.target.group else notice.text
+            await store_envelope_body(self.channel_id, envelope, text)
+            return await self._send_notice(notice.target, text, **receipt_kwargs)
         corr_id = envelope.correlation_id
         chat_id = self._correlation_chat.get(corr_id)
         if chat_id is None and envelope.target == self._address:
@@ -399,6 +399,8 @@ class LarkChannelAdapter(ChannelAdapter):
                         and status_kind(envelope.payload) is StatusKind.PROGRESS
                         and isinstance(route.get("reply_to"), str) and route["reply_to"]):
                     # A recovered task report answers its original message without changing live routing.
+                    await store_envelope_body(self.channel_id, envelope, str(envelope.payload["text"]),
+                                              chat=route["chat_id"], group=True)
                     try:
                         await self._reply(route["reply_to"], markdown=str(envelope.payload["text"]))
                     except LarkCliError as exc:
@@ -428,6 +430,8 @@ class LarkChannelAdapter(ChannelAdapter):
                     await self._status.update(corr_id, corr_id, envelope.payload)
                 case StatusKind.PROGRESS:
                     # Task progress leaves the status line alone.
+                    await store_envelope_body(self.channel_id, envelope, str(envelope.payload["text"]),
+                                              chat=chat_id, group=corr_id in self._group_message)
                     return await self._send_message(chat_id, str(envelope.payload["text"]), **receipt_kwargs)
             return DeliveryReceipt(channel=self.channel_type, success=True)
 
@@ -438,6 +442,9 @@ class LarkChannelAdapter(ChannelAdapter):
         cards: list[card_actions.Card] = []
         if self._cards is not None and envelope.metadata.get("cards"):
             text, cards = card_actions.shown(text, envelope.metadata["cards"])
+        if text:
+            await store_envelope_body(self.channel_id, envelope, text, chat=chat_id,
+                                      group=corr_id in self._group_message)
         receipt = DeliveryReceipt(channel=self.channel_type, success=True)
         if text and corr_id in self._group_message:
             receipt = await self._send_reply(corr_id, text, **receipt_kwargs)
@@ -1527,7 +1534,7 @@ class LarkChannelAdapter(ChannelAdapter):
                 # An answer is stored once it was sent, or as not delivered (the Manager names its record).
                 receipt = await self.deliver(envelope)
                 self.record_envelope_delivery(envelope, receipt)
-                if chat_settings.metrics_enabled() and envelope.metadata.get("proactive"):
+                if envelope.metadata.get("proactive"):
                     route = envelope.metadata.get("reply_route")
                     route = route if isinstance(route, dict) else {}
                     chat = str(route.get("chat_id") or self._correlation_chat.get(envelope.correlation_id) or "")

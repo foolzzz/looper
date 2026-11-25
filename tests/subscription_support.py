@@ -42,7 +42,7 @@ class Poster:
         self.break_after: int | None = None  # raise after this many messages were sent: a crash in the push
 
     async def __call__(self, channel_id: str, target: Any, text: str, *, reply_to: str | None = None,
-                       idempotency_key: str | None = None) -> PostReceipt:
+                       idempotency_key: str | None = None, proactive: Any = None) -> PostReceipt:
         self.calls += 1
         if self.fail_with:
             return PostReceipt(False, error=self.fail_with, outcome=PostOutcome.REJECTED)

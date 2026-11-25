@@ -15,24 +15,51 @@ With `manager.metrics.enabled` on (default off, operator only), model user turns
 record `metadata.turn_metrics`: version, origin, chat kind, receipt time, ack kind
 and latency, first-reply latency, top-level tool calls, delivery and replay status.
 Completion turns record origin, tool calls and delivery. Proactive sends record
-their typed source and receipt in `proactive_deliveries`; an operator message
-marks deliveries in that chat from the preceding 30 minutes. All writes run in
-bounded background tasks and failures leave replies unaffected. The read-only
+their typed source, rendered body and receipt in `proactive_deliveries`, independently
+of the metrics switch; an operator message marks deliveries in that chat from
+the preceding 30 minutes. Turn metrics and receipts use bounded background tasks;
+failures leave replies unaffected. The read-only
 `manager_metrics.get` operation (also available through the CLI) returns delivery
 counts, P50/P95 latencies excluding replayed and completion turns, daily proactive
 counts in the server timezone and mature, successfully sent delivery reply rates
 for 1–30 days. Housekeeping retains proactive rows for 90 days whether or not
 metrics are on, because delivery writes the same table while that switch is off.
-Proactive delivery recording owns the table's single named migration:
-one row per message, with the send receipt in `outcome`. `source` includes
+Proactive delivery recording keeps one row per message, with the send receipt in `outcome`. `source` includes
 `completion`, `user_reminder` and `morning_brief` (the digest itself); `chat_kind`
 is `direct` or `group`.
 Unsent decisions leave both `outcome` and `sent_at` null. Registry sends reuse
-idempotency keys and bus sends reuse envelope ids as `dedupe_key`; retries update
-only the receipt, preserving the first decision. Nullable `decision`, `reason`,
-cap and digest fields are reserved for the delivery layer's future `decide()`
-write point.
-Off, turns have no metrics key and sends add no writes.
+idempotency keys and bus sends reuse envelope ids as `dedupe_key`; retries preserve
+the first decision. The delivery layer's `decide()` fills the nullable `decision`,
+`reason`, cap and digest fields; body capture does not change those decisions.
+Off, turns have no metrics key; proactive body and receipt recording still runs.
+
+Before handing a proactive message to its channel, the sender saves the rendered
+text as `body`, bounded to 32 KiB of UTF-8 without splitting a character;
+`body_truncated` identifies a stored prefix. The text sent is unchanged. Registry
+posts (including subscriptions and digests), bus notices and completion replies,
+morning briefs and user reminders share this storage. The existing morning-brief
+key (`morning_brief:<local date>:<channel id>:<chat>`) and reminder key
+(`looper-reminder-<id>`) link the text to their `morning_briefs` and `reminders`
+records, including when delivery policy is off. Retries reuse the delivery row
+and replace its stored text with the latest attempted channel input.
+`body_stored_at` records that attempt; a missing receipt may mean a send is still
+running or was interrupted. Storage has a one-second timeout; failures warn and
+leave sending unaffected. No body is injected into agent context.
+
+The fixed `BODY_RETENTION_DAYS = 14` in `looper/db/proactive_deliveries.py` governs
+body retention. The existing hourly housekeeping pass, first scheduled at service
+startup, clears expired bodies to `NULL` in batches while keeping rows, receipts,
+timestamps and truncation flags. The separate 90-day delivery-row retention is
+unchanged. Historical rows have no backfilled body.
+The operator-only `proactive_sends.list` operation
+(`POST /api/v1/proactive_sends/list`) reads these records with optional `source`
+and `local_date` filters (the operator timezone), `limit` (1–100, default 50) and
+`before`; `next_before` pages backward by delivery id. Each record includes its
+body, truncation flag and receipt. API clients receive 403 before validation or
+storage access. The generated operator CLI exposes `proactive-sends list`, for
+example `proactive-sends list --source morning_brief --limit 10`. No Manager tool
+is added. Dashboard, Telegram and Lark controls need no change: this is an
+operator diagnostic read, and their sent text and switches remain unchanged.
 
 With metrics enabled, Lark turns also store `metadata.turn_metrics.lark_ingress`:
 UTC ISO timestamps `platform_sent_at` (the event's millisecond `create_time`),

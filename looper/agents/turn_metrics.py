@@ -1,9 +1,11 @@
-"""Default-off, best-effort observations of turns and proactive deliveries."""
+"""Default-off turn metrics and best-effort receipts of typed proactive sends."""
 from __future__ import annotations
 
 import asyncio
 from collections import OrderedDict
-from collections.abc import Coroutine
+from collections.abc import Coroutine, Iterator
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from enum import Enum
@@ -171,6 +173,25 @@ class ProactiveRef:
     dedupe_key: str | None = None
 
 
+_proactive_send: ContextVar[tuple[ProactiveRef | None, bool]] = ContextVar('proactive_send', default=(None, False))
+
+
+def current_proactive() -> tuple[ProactiveRef | None, bool]:
+    return _proactive_send.get()
+
+
+@contextmanager
+def proactive_send(source: ProactiveSource, source_ref: str | None = None,
+                   manager_id: str | None = None, *, dedupe_key: str | None = None,
+                   group: bool = False) -> Iterator[None]:
+    """Carry observation to the registry without changing sender arguments or serialized messages."""
+    token = _proactive_send.set((ProactiveRef(source, source_ref, manager_id, dedupe_key), group))
+    try:
+        yield
+    finally:
+        _proactive_send.reset(token)
+
+
 PENDING_MAX = 2000
 _pending: set[asyncio.Task[None]] = set()
 _last_warning = float('-inf')
@@ -211,8 +232,6 @@ def background(work: Coroutine[Any, Any, Any]) -> asyncio.Task[None] | None:
 
 def record_proactive(ref: ProactiveRef, *, channel_id: str, chat: str, group: bool,
                      external_id: str | None, outcome: Any, dedupe_key: str | None = None) -> None:
-    if not chat_settings.metrics_enabled():
-        return
     from ..db import proactive_deliveries
 
     background(proactive_deliveries.insert({

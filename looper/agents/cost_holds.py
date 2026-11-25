@@ -123,7 +123,7 @@ async def _schedule_name(row) -> str:
 async def _send_hold(row, text, *, urgency, dedupe_key, source_ref=None, proactive_dedupe=None) -> bool:
     from . import chat_settings, proactive_delivery as delivery
     from .gate_service import dashboard_target
-    from .turn_metrics import ProactiveSource, proactive_kwargs
+    from .turn_metrics import ProactiveSource, proactive_send
 
     target = await dashboard_target()
     if target is None or _sender is None:
@@ -136,10 +136,10 @@ async def _send_hold(row, text, *, urgency, dedupe_key, source_ref=None, proacti
             task_id=row['scope_ref'] if row['scope'] == 'task' else None)
         if decision.outcome is not delivery.Outcome.SEND:
             return False
-    proactive = proactive_kwargs(ProactiveSource.ADVISOR_ALERT,
-                                 row['scope_ref'] if row['scope'] == 'task' else None, dedupe_key=proactive_dedupe)
-    sent, error = await _sender(target.channel_id, target.target.id, text, idempotency_key=dedupe_key,
-                                 group=target.target.group, **proactive)
+    with proactive_send(ProactiveSource.ADVISOR_ALERT,
+                        row['scope_ref'] if row['scope'] == 'task' else None, dedupe_key=proactive_dedupe):
+        sent, error = await _sender(target.channel_id, target.target.id, text, idempotency_key=dedupe_key,
+                                   group=target.target.group)
     if not sent:
         logger.warning('cannot send spend hold %s: %s', dedupe_key, error)
     return bool(sent)

@@ -91,10 +91,8 @@ async def notify_pending(*, now: datetime | None = None) -> Notice:
     if not await system_settings.claim(SENT_KEY, today):
         return Notice.ALREADY_SENT
     # Counted with the advisor's alerts: a new source needs a schema change this note does not justify.
-    proactive = turn_metrics.proactive_kwargs(turn_metrics.ProactiveSource.ADVISOR_ALERT, None)
-    sent, error = await _sender(
-        chat.channel_id, chat.target.id, message(rows, _dashboard_url),
-        **({**proactive, "group": chat.target.group} if proactive else {}))
+    with turn_metrics.proactive_send(turn_metrics.ProactiveSource.ADVISOR_ALERT, group=chat.target.group):
+        sent, error = await _sender(chat.channel_id, chat.target.id, message(rows, _dashboard_url))
     if not sent:
         logger.warning("cannot send the skill proposal notice to %s: %s", chat.channel_id, error)
         return Notice.SEND_FAILED
