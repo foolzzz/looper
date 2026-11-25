@@ -230,7 +230,8 @@ def test_error_details_are_optional_and_typed():
     details = error["properties"]["details"]
     assert details["additionalProperties"] is False and "required" not in details
     assert details["properties"] == {"manager_id": {"type": "string"}, "state": {"type": "string"},
-        "phase": {"type": ["string", "null"]}, "method": {"type": ["string", "null"]}}
+        "phase": {"type": ["string", "null"]}, "method": {"type": ["string", "null"]},
+        "requested_runtime": {"type": "string"}, "supported": {"type": "string"}}
 
 
 def test_acceptance_permission_has_only_operator_operations():

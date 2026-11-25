@@ -80,7 +80,7 @@ def test_profile_changes_are_durable_and_keep_session_selection_separate(monkeyp
 
 def test_profile_switch_refuses_busy_then_closes_idle_resident(monkeypatch):
     from looper.agents.tiers import task_manager
-    from looper.agents.projects import RequestError
+    from looper.agents.ops import ErrorCode, OpError
 
     stop = AsyncMock()
     pool = SimpleNamespace(_lock=asyncio.Lock(), in_turn=lambda _: True,
@@ -91,9 +91,9 @@ def test_profile_switch_refuses_busy_then_closes_idle_resident(monkeypatch):
     monkeypatch.setattr(settings, "check_selection", AsyncMock(return_value=SimpleNamespace(
         runtime=SimpleNamespace(type="claude-code"))))
     async def check():
-        with pytest.raises(RequestError, match="stop its turn first") as failure:
+        with pytest.raises(OpError, match="stop its turn first") as failure:
             await settings.set_task_manager_profile("task-a", "agent-claude-code-opus")
-        assert failure.value.status == "409 Conflict"
+        assert failure.value.code is ErrorCode.TASK_MANAGER_BUSY
         write.assert_not_awaited()
         stop.assert_not_awaited()
         pool.in_turn = lambda _: False
@@ -104,7 +104,7 @@ def test_profile_switch_refuses_busy_then_closes_idle_resident(monkeypatch):
 
 
 def test_profile_switch_refuses_non_claude_runtime(monkeypatch):
-    from looper.agents.runtimes import RuntimeUnsupported
+    from looper.agents.ops import ErrorCode, OpError
     from looper.agents.tiers import task_manager
 
     monkeypatch.setattr(task_manager, "current_pool", lambda: None)
@@ -113,10 +113,13 @@ def test_profile_switch_refuses_non_claude_runtime(monkeypatch):
     write = AsyncMock()
     monkeypatch.setattr(settings.db_layers, "set_task_layer", write)
     async def check():
-        with pytest.raises(RuntimeUnsupported, match="Claude Code"):
+        with pytest.raises(OpError, match="Claude Code") as failure:
             await settings.set_task_manager_profile("task-a", "other-profile")
+        assert failure.value.code is ErrorCode.TASK_MANAGER_RUNTIME_UNSUPPORTED
         write.assert_not_awaited()
     asyncio.run(check())
+
+
 def test_stored_profile_effort_reaches_native_task_manager_launch(monkeypatch, tmp_path):
     from looper.agents.tiers.task_manager import TaskManagerPool
     from tests.task_manager_support import NativeTaskManager, submit_and_wait
