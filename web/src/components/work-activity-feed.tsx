@@ -29,12 +29,15 @@ const bySeq = (events: ActivityEvent[]) => [...new Map(events.map(event => [even
 const text = (value: unknown) => typeof value === "string" ? value : JSON.stringify(value, null, 2);
 
 /** Right-column summaries locate the existing editor; they never mount a second gate. */
-export function openWorkGate(step: string): void {
-  const anchor = document.getElementById(gateAnchor(step));
-  if (!anchor) return;
+export function openWorkGate(step: string, scope: ParentNode = document): boolean {
+  const anchor = [...scope.querySelectorAll<HTMLElement>("[id]")].find(node => node.id === gateAnchor(step));
+  if (!anchor) return false;
   if (anchor instanceof HTMLDetailsElement) anchor.open = true;
   anchor.scrollIntoView?.({ block: "nearest" });
-  (anchor.querySelector<HTMLElement>("textarea, summary") ?? anchor).focus();
+  const target = anchor.querySelector<HTMLElement>("textarea") ?? anchor.querySelector<HTMLElement>("summary, h2") ?? anchor;
+  if (target.tagName === "H2") target.tabIndex = -1;
+  target.focus();
+  return true;
 }
 
 export function WorkMessageRow({ message }: { message: WorkPaneMessage }) {

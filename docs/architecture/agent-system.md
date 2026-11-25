@@ -8814,6 +8814,16 @@ is not done.
 
 ## Web Dashboard
 
+In Work, one task details column lists the plan and gate summaries from the
+selected task's shared detail. Both gate entry points locate the conversation's
+existing gate card; only that card owns the editor and discussion reads. Narrow
+layouts open details in a scrollable dialog, while short screens scroll the
+conversation and composer together. Dismissing details restores its opener;
+choosing a gate closes it before focusing the gate. States without a conversation
+card (pending, skipped or unknown) have disabled summaries with an explanation.
+A missing expected card asks the operator to refresh and restores the opener,
+instead of locating a same-named gate outside the selected conversation.
+
 Single-page React app served from `web/dist/` via the built-in HTTP server
 (`looper/agents/http_server.py`). Default port: 8767. An installed wheel has no
 `web/`; it serves the copy staged into the package (`looper/web/dashboard`,

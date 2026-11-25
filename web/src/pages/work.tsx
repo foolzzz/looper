@@ -3,20 +3,22 @@ import { Button } from "@/components/ui/button";
 import { WorkList } from "@/components/work-list";
 import { WorkSwitcher } from "@/components/work-switcher";
 import { WorkChanges } from "@/components/work-changes";
-import { fetchTaskDetail, isActiveTask, TaskDetailError, type TaskDetail, type TaskStep, type UserGate } from "@/lib/api";
+import { WorkGates } from "@/components/work-gates";
 import { WorkSteps } from "@/components/work-steps";
 import { openWorkGate } from "@/components/work-activity-feed";
+import { fetchTaskDetail, isActiveTask, TaskDetailError, type TaskDetail, type UserGate } from "@/lib/api";
 import { startPolling } from "@/lib/polling";
 import { callV1, V1Error } from "@/lib/v1";
 import { errorText } from "@/lib/use-action";
 import { ManagerWorkConversation, PlannerWorkConversation } from "@/components/work-conversation";
 import { TaskStatusMark } from "@/pages/tasks";
 import { isMissingOperation, markSeen, taskTitle, workSelection, workStorage } from "@/lib/work";
+import { isGateShown } from "@/lib/gates";
 import { WorkConversationStateProvider, useWorkConversationStore, workConversationKey } from "@/lib/use-work-conversation-state";
 
 const LINK = "text-sm text-primary underline-offset-2 hover:underline focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring";
 
-/** Below this height a stacked Work column cannot reserve a composer and a 40dvh plan without one painting over the other. */
+/** Short screens scroll the conversation and composer together; details use the dismissible panel. */
 const SHORT_COLUMN = "(max-height: 32rem) and (max-width: 1023px)";
 
 function useMedia(query: string): boolean {
@@ -51,11 +53,14 @@ function WorkPageContent({
   const [pane, setPane] = useState<"list" | "detail">(sub === "" ? "list" : "detail");
   const [switcher, setSwitcher] = useState(false);
   const [finder, setFinder] = useState(true);
-  const [widePanel, setWidePanel] = useState(() => window.matchMedia("(min-width: 1280px)").matches);
-  const [panelOpen, setPanelOpen] = useState(widePanel);
+  const [panel, setPanel] = useState(false);
+  const [wide, setWide] = useState(false);
+  const [gateTarget, setGateTarget] = useState<{ taskId: string; step: string } | null>(null);
+  const [gateError, setGateError] = useState("");
+  const conversation = useRef<HTMLDivElement>(null);
   const panelRef = useRef<HTMLElement>(null);
   const panelOpener = useRef<HTMLButtonElement>(null);
-  const focusPanel = useRef(false);
+  const restorePanelFocus = useRef(false);
   const opener = useRef<HTMLElement | null>(null);
   const seen = useRef("");
   const restored = useRef(false);
@@ -77,7 +82,35 @@ function WorkPageContent({
   const selection = explicit ?? { kind: "manager" as const };
   const taskId = selection.kind === "task" ? selection.taskId : "";
   const cacheKey = workConversationKey({ kind: "planner", taskId });
-  const selected = detail.id === taskId && detail.task ? detail.task : conversations.cached(cacheKey)?.task;
+  const candidate = detail.id === taskId && detail.task ? detail.task : conversations.cached(cacheKey)?.task;
+  const selected = candidate?.task_id === taskId ? candidate : undefined;
+  useEffect(() => {
+    const media = window.matchMedia("(min-width: 1280px)");
+    const update = () => { setWide(media.matches); setPanel(false); };
+    update(); media.addEventListener("change", update);
+    return () => media.removeEventListener("change", update);
+  }, []);
+  useEffect(() => { setPanel(false); setGateError(""); setGateTarget(null); }, [taskId]);
+  useEffect(() => {
+    if (panel && !wide) panelRef.current?.querySelector<HTMLButtonElement>("button")?.focus();
+    else if (restorePanelFocus.current) { restorePanelFocus.current = false; panelOpener.current?.focus(); }
+  }, [panel, wide]);
+  // Dismiss the mobile panel before scrolling/focusing the one conversation owner.
+  useEffect(() => {
+    if (!gateTarget || panel) return;
+    if (gateTarget.taskId === taskId && selected?.task_id === taskId) {
+      const gate = selected.gates?.find(gate => gate.step === gateTarget.step);
+      const located = gate && isGateShown(gate) && conversation.current && openWorkGate(gateTarget.step, conversation.current);
+      setGateError(located ? "" : gate && !isGateShown(gate)
+        ? "此状态没有对话卡片，无法定位" : "关卡已更新，请刷新");
+      if (!located && !wide) panelOpener.current?.focus();
+    }
+    setGateTarget(null);
+  }, [gateTarget, panel, selected, taskId, wide]);
+  const openGate = useCallback((step: string) => {
+    setPanel(false); setGateTarget({ taskId, step });
+  }, [taskId]);
+  const closePanel = () => { restorePanelFocus.current = true; setPanel(false); };
   const detailRevision = useRef(0);
   // Gate replies already return the new gate. Update the one shared detail without remounting its editor.
   const onGateChanged = useCallback((gate: UserGate) => {
@@ -95,6 +128,7 @@ function WorkPageContent({
       try {
         const task = await fetchTaskDetail(taskId, signal);
         if (signal.aborted || revision !== detailRevision.current) return;
+        if (task.task_id !== taskId) throw new Error("任务详情与当前任务不匹配，请刷新");
         conversations.cache(cacheKey, { task });
         setDetail(current => current.id === taskId ? { id: taskId, task } : current);
         return !isActiveTask(task);
@@ -105,25 +139,6 @@ function WorkPageContent({
     }, 2000);
   }, [taskId, active]);
   useEffect(() => {
-    const media = window.matchMedia("(min-width: 1280px)");
-    const resize = () => setWidePanel(media.matches);
-    media.addEventListener("change", resize);
-    return () => media.removeEventListener("change", resize);
-  }, []);
-  useEffect(() => {
-    if (panelOpen && selected) {
-      const panel = panelRef.current;
-      if (panel instanceof HTMLDialogElement && !panel.open) panel.showModal();
-      if (focusPanel.current) { panel?.focus(); focusPanel.current = false; }
-    }
-  }, [panelOpen, selected, widePanel]);
-  const closePanel = () => {
-    if (panelRef.current instanceof HTMLDialogElement) panelRef.current.close();
-    setPanelOpen(false);
-    panelOpener.current?.focus();
-  };
-  const Panel = widePanel ? "aside" : "dialog";
-  useEffect(() => {
     if (!taskId) return;
     const ctrl = new AbortController();
     setDetail({ id: taskId, task: conversations.cached(cacheKey)?.task });
@@ -133,6 +148,7 @@ function WorkPageContent({
       callV1<{ activity: { seq: number }[] }>("/api/v1/tasks/activity", { task_id: taskId, limit: 1 }, { signal: ctrl.signal }),
     ]).then(([task, activity]) => {
       if (ctrl.signal.aborted) return;
+      if (task.task_id !== taskId) throw new Error("任务详情与当前任务不匹配，请刷新");
       if ("status" in activity) throw new Error("Task activity is unavailable");
       setDetail({ id: taskId, task });
       conversations.cache(cacheKey, { task });
@@ -154,11 +170,6 @@ function WorkPageContent({
     if (sub === "") return;
     workStorage.setSelection(selection.kind === "manager" ? "manager" : taskId);
   }, [sub, selection.kind, taskId]);
-
-  // The activity feed owns the only gate editor. This locates it; it does not mount another.
-  const openGate = useCallback((step: TaskStep) => {
-    openWorkGate(step.step_key);
-  }, []);
 
   const openTask = useCallback((id: string) => {
     setPane("detail");
@@ -193,7 +204,7 @@ function WorkPageContent({
 
   return (
     <div className="flex h-full min-h-0 w-full">
-      <div className={`h-full min-h-0 w-full flex-col border-border md:flex md:w-80 md:shrink-0 md:border-r ${pane === "list" ? "flex" : "hidden"}`}>
+      <div inert={panel && !wide} className={`h-full min-h-0 w-full flex-col border-border md:flex md:w-80 md:shrink-0 md:border-r ${pane === "list" ? "flex" : "hidden"}`}>
         <WorkList
           selection={selection}
           preferredProjectId={selected?.project_id ?? null}
@@ -204,9 +215,9 @@ function WorkPageContent({
         />
       </div>
       <div className={`h-full min-h-0 min-w-0 flex-1 flex-col ${pane === "detail" ? "flex" : "hidden md:flex"} ${shortColumn ? "overflow-y-auto" : ""}`} data-work-scroll={shortColumn ? "" : undefined}>
-        <div className={shortColumn ? "flex h-auto min-h-full shrink-0 flex-col" : "flex h-full min-h-0 flex-col"}>
+        <div inert={panel && !wide} className={shortColumn ? "flex h-auto min-h-full shrink-0 flex-col" : "flex h-full min-h-0 flex-col"}>
           <div className="shrink-0 border-b border-border p-3 md:hidden">
-            <Button type="button" variant="outline" onClick={() => { setPane("list"); setPanelOpen(false); }}>Back to the list</Button>
+            <Button type="button" variant="outline" onClick={() => setPane("list")}>Back to the list</Button>
           </div>
           {selection.kind === "manager" ? (
             <>
@@ -230,33 +241,38 @@ function WorkPageContent({
                 <TaskStatusMark status={selected.status} />
                 {selected.project_name && <p className="text-sm text-muted-foreground">{selected.project_name}</p>}
                 <a className={LINK} href={`#tasks/${encodeURIComponent(taskId)}`}>Open the task page</a>
-                <Button ref={panelOpener} type="button" variant="outline" aria-expanded={panelOpen} aria-controls="work-task-details"
-                  onClick={() => {
-                    if (panelOpen) closePanel();
-                    else { focusPanel.current = true; setPanelOpen(true); }
-                  }}>任务详情</Button>
+                {!wide && <Button ref={panelOpener} variant="outline" aria-haspopup="dialog" aria-expanded={panel}
+                  onClick={() => setPanel(true)}>任务详情</Button>}
+                {gateError && <p role="alert" className="text-sm text-destructive">{gateError}</p>}
                 {detail.error && <p role="alert" className="text-sm text-destructive">Task refresh failed: {detail.error}</p>}
               </header>
-              <div data-work-detail="" data-layout={shortColumn ? "scroll" : "split"}
-                className={shortColumn ? "block" : "flex min-h-0 flex-1 flex-col xl:flex-row"}>
-                <div className={shortColumn ? "work-short-conversation block" : "flex min-h-0 min-w-0 flex-1 flex-col"}>
-                  <PlannerWorkConversation key={taskId} taskId={taskId} detail={selected} task={selected} onGateChanged={onGateChanged} />
-                </div>
-                {panelOpen && <Panel id="work-task-details" ref={node => { panelRef.current = node; }} tabIndex={-1} aria-label="任务详情"
-                  className={`min-h-0 min-w-0 space-y-3 overflow-y-auto border-border bg-background p-4 text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring ${widePanel
-                    ? "w-72 shrink-0 border-l"
-                    : "fixed inset-y-0 right-0 left-auto m-0 h-dvh max-h-dvh w-full max-w-sm border-l backdrop:bg-black/50"}`}
-                  onCancel={event => { event.preventDefault(); closePanel(); }}
-                  onKeyDown={event => { if (event.key === "Escape") { event.preventDefault(); event.stopPropagation(); closePanel(); } }}>
-                  <Button type="button" variant="outline" size="sm" onClick={closePanel}>关闭详情</Button>
-                  <WorkSteps task={selected} onOpenGate={openGate} />
-                  <WorkChanges taskId={taskId} visible />
-                </Panel>}
+              <div ref={conversation} data-work-detail="" data-layout={shortColumn ? "scroll" : "split"}
+                className={shortColumn ? "work-short-conversation block" : "flex min-h-0 min-w-0 flex-1 flex-col"}>
+                <PlannerWorkConversation key={taskId} taskId={taskId} detail={selected} task={selected} onGateChanged={onGateChanged} />
               </div>
             </>
           )}
         </div>
       </div>
+      {selected && (wide || panel) && <aside ref={panelRef} aria-label="任务详情"
+        role={wide ? undefined : "dialog"} aria-modal={wide ? undefined : true}
+        onKeyDown={event => {
+          if (wide) return;
+          if (event.key === "Escape") { event.preventDefault(); event.stopPropagation(); closePanel(); }
+          if (event.key === "Tab") {
+            const buttons = [...(panelRef.current?.querySelectorAll<HTMLElement>("button:not(:disabled), a[href], summary") ?? [])];
+            const first = buttons[0], last = buttons[buttons.length - 1];
+            if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last?.focus(); }
+            else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first?.focus(); }
+          }
+        }}
+        className={wide ? "min-h-0 w-72 shrink-0 overflow-y-auto border-l border-border"
+          : "fixed inset-0 z-50 overflow-y-auto bg-background"}>
+        {!wide && <div className="border-b border-border p-3"><Button variant="outline" onClick={closePanel}>关闭任务详情</Button></div>}
+        <WorkSteps task={selected} onOpenGate={step => openGate(step.step_key)} />
+        <WorkGates task={selected} onOpenGate={openGate} />
+        <div className="p-4"><WorkChanges taskId={taskId} visible /></div>
+      </aside>}
       <WorkSwitcher open={switcher && finder} onClose={closeSwitcher} onOpen={openTask} restore={restore} />
     </div>
   );

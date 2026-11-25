@@ -193,7 +193,7 @@ it("keeps the selected task and composer usable when the files section fails, wi
   await act(async () => { document.activeElement!.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true })); }); await settle();
   expect(document.activeElement).toBe(opener);
   expect(host.querySelector('[aria-label="改动文件"]')).toBeNull();
-  await click("任务详情"); await click("关闭详情");
+  await click("任务详情"); await click("关闭任务详情");
   expect(document.activeElement).toBe(opener);
   expect(calls.filter(c => c.path.endsWith("/changes"))).toHaveLength(2);
 });
