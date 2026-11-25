@@ -112,6 +112,35 @@ def test_body_migration_is_additive_and_repeatable(upgrade, monkeypatch):
     run_db(check, monkeypatch)
 
 
+def test_operator_read_filters_pages_and_reports_cleared_bodies(monkeypatch):
+    from looper.agents import api_v1
+    from looper.agents.ops.proactive_sends import recent
+    from looper.agents import proactive_delivery
+    from zoneinfo import ZoneInfo
+
+    monkeypatch.setattr(proactive_delivery, "load_policy", lambda: SimpleNamespace(timezone=ZoneInfo("Pacific/Kiritimati")))
+
+    async def check(pool):
+        instant = datetime(2026, 11, 24, 12, tzinfo=timezone.utc)
+        for number, source in enumerate(("subscription", "morning_brief", "morning_brief")):
+            await store.store_body({"dedupe_key": str(number), "source": source, "channel_id": "synthetic-channel",
+                "chat": "synthetic-chat", "chat_kind": "direct"}, f"Text {number}")
+        await pool.execute("UPDATE proactive_deliveries SET body_stored_at=$1", instant)
+        page = await recent({"source": "morning_brief", "local_date": "2026-11-25", "limit": 1})
+        assert [row["body"] for row in page["deliveries"]] == ["Text 2"]
+        assert page["deliveries"][0]["local_date"] == "2026-11-25"
+        assert page["next_before"] == page["deliveries"][0]["id"]
+        last = await recent({"source": "morning_brief", "local_date": "2026-11-25", "limit": 1,
+                             "before": page["next_before"]})
+        assert [row["body"] for row in last["deliveries"]] == ["Text 1"] and last["next_before"] is None
+        assert not (await recent({"local_date": "2026-11-24"}))["deliveries"]
+        assert await store.clear_bodies(instant + timedelta(days=14)) == 3
+        cleared = await recent({})
+        assert len(cleared["deliveries"]) == 3 and all(row["body"] is None for row in cleared["deliveries"])
+        api_v1.validate_arguments(api_v1.find("POST", "/api/v1/proactive_sends/list").result, cleared)
+    run_db(check, monkeypatch)
+
+
 def test_a_slow_earlier_receipt_does_not_replace_a_later_send(monkeypatch):
     async def check(pool):
         now = datetime.now(timezone.utc)
