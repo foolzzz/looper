@@ -259,6 +259,18 @@ PostgreSQL 是启动的硬性依赖。空库只运行一次 `looper/db/schema.sq
 | **Agent history** | 单个 agent 的启动命令、完整记录（文本、思考、工具调用及结果）和活动；跟随运行中的 agent，2 分钟没有输出会标出 |
 | **Settings** | 侧栏底部可折叠的分组，每项一页：**LLM Providers**；**Agent Runtimes**（只读：每种运行时类型，在服务的 PATH 上找到与否，可 Re-detect，以及规划中的类型）；**Agent Profiles**（运行时、提供方和模型，各自能跑的角色和被谁使用）；**Roles**（可折叠的列表：先是共享默认值 Shared defaults，再是每个角色一行，含它的覆盖项、prompt 和限制）；**Workflows**；**Managers**；**API clients**；**Skills & MCP**；**Channels**；**Chat**；**Scheduler**；**Knowledge vault**；**Request recording**；**Local gateway**；**Import / Export** |
 
+#### 安装为应用
+
+在 macOS 或 Windows 上，用 Chrome 或 Edge 打开控制台，地址须为 HTTPS
+（在服务器本机也可用 `localhost` / `127.0.0.1`）。Chrome 点击地址栏的
+**安装**图标，或 **⋮ → 投放、保存和分享 → 将网页安装为应用**；Edge 点击地址栏的
+**应用可用 → 安装**。Looper 会在独立窗口打开，可将图标固定到 macOS Dock 或 Windows
+任务栏以便再次打开。仍按原方式登录；服务器需要保持运行，应用不提供离线模式。
+升级 Looper 后刷新窗口即可加载新版控制台。
+
+卸载时，在 Chrome 应用窗口的菜单中选择 **卸载 Looper**；Edge 打开 `edge://apps`，
+找到 Looper，选择 **详细信息 → 卸载**。这只移除浏览器应用，不会删除 Looper 服务或已存任务。
+
 ### HTTP API
 
 控制台使用操作者认证：本机浏览器自动登录，其他地方的浏览器用 `looper auth set-password` 设置的账号和密码登录。程序使用操作者或 API 客户端的 Bearer token；客户端管理仅限操作者。下列已迁移的 v1 操作用 POST 和 JSON 请求体，成功返回 200 `{status: "ok", result: ...}`（`OpOk`），失败返回类型化错误；客户端确认规则见参考文档。主要的路由分组：

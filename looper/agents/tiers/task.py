@@ -26,7 +26,9 @@ import logging
 import os
 import uuid
 from collections.abc import Awaitable, Callable
+from contextlib import asynccontextmanager
 from dataclasses import dataclass, field, replace
+from enum import StrEnum
 from pathlib import Path
 from typing import Any
 
@@ -129,6 +131,108 @@ class Task:
             "planner_id": self.planner_id,
             "correlation_id": self.correlation_id,
         }
+
+
+@dataclass(frozen=True)
+class DirectDone:
+    """A task completed in direct mode: ``changed`` is false when it was already completed."""
+
+    status: str
+    changed: bool
+    branch_line: str | None = None
+    warning: str | None = None
+
+
+class RestartRefusal(StrEnum):
+    """Why a restart left the task unchanged.
+
+    ``completed`` is a ``/done`` that won the task row. The restart waited for
+    that write, then left the workspace and the plan alone.
+    """
+
+    COMPLETED = "completed"
+    NOT_RESTARTABLE = "not_restartable"
+    NOT_FOUND = "not_found"
+    ACTIVE = "active"
+    LOST = "lost"
+
+
+class _RestartClaimLost(Exception):
+    """The conditional restart write matched no row. The transaction rolls back."""
+
+
+# The statuses a restart may claim. ``completed`` is refused on its own, before this check.
+_RESTART_STATUSES = (*db_tasks.RESTARTABLE_STATUSES, "running", "executing", "waiting_user", "waiting",
+                     "assigned", db_tasks.READY)
+
+
+def _restart_refusal(row: dict[str, Any] | None) -> RestartRefusal | None:
+    """Why ``row`` cannot be restarted, or None when a restart may claim it."""
+    if row is None:
+        return RestartRefusal.NOT_FOUND
+    status = row["status"]
+    if status == "completed":
+        return RestartRefusal.COMPLETED
+    if status not in _RESTART_STATUSES:
+        return RestartRefusal.NOT_RESTARTABLE
+    return None
+
+
+def _log_restart_refusal(task_id: str, row: dict[str, Any] | None, refusal: RestartRefusal) -> None:
+    if refusal is RestartRefusal.NOT_FOUND:
+        logger.warning("task %s not found in DB, ignoring restart", task_id)
+    elif refusal is RestartRefusal.COMPLETED:
+        logger.info("task %s is completed; not restarting it", task_id)
+    elif refusal is RestartRefusal.ACTIVE:
+        logger.warning("task %s already active, ignoring restart", task_id)
+    else:
+        logger.warning("task %s status=%s not restartable", task_id, None if row is None else row.get("status"))
+
+
+async def _close_restart_attempts(task_id: str, conn: Any) -> None:
+    """Close this run's attempts before the restart increments ``run_no``.
+
+    On the caller's transaction the write is a savepoint: a failure is logged and does not abort the claim.
+    Without a connection (the in-memory stand-in) it is the same best-effort call as before.
+    """
+    if conn is None:
+        await attempts.close_attempts(task_id, failure_kind=attempts.FailureKind.STOPPED)
+        return
+    from ...db import step_attempts as db_step_attempts
+
+    try:
+        async with conn.transaction():
+            await db_step_attempts.close_attempts(
+                task_id, attempts.Decision.TASK_ENDED.value, attempts.FailureKind.STOPPED.value, pool=conn)
+    except Exception:
+        logger.exception("Attempt observation failed: close_attempts")
+
+
+@asynccontextmanager
+async def _task_transaction():
+    """A transaction on the process pool, held across a restart's re-read, cleanup and claim.
+
+    The pool is taken directly. ``connection.transaction`` is only the fallback when no pool is open
+    (agent tests mock that helper). A project move replaces ``connection.transaction`` for the whole
+    move, including after the move has released its barrier, so the restart must not call it again.
+    """
+    from ...db import connection as db_connection
+
+    try:
+        pool = db_connection.get_pool()
+    except db_connection.PoolNotInitializedError:
+        async with db_connection.transaction() as conn:
+            yield conn
+        return
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            yield conn
+
+
+@dataclass(frozen=True)
+class _WorkspaceFinish:
+    branch_line: str | None = None
+    warning: str | None = None
 
 
 class TaskRouter:
@@ -595,28 +699,73 @@ class TaskRouter:
 
     async def _finish_workspace(self, task: Task) -> str | None:
         """A completed task's worktree goes, its branch stays: the notice's line about the branch, None without one."""
+        finished = await self._finish_task_workspace(task.task_id, task.workspace_mode)
+        return finished.branch_line
+
+    async def _finish_task_workspace(self, task_id: str, workspace_mode: str | None, *,
+                                     pool: Any = None) -> _WorkspaceFinish:
+        """Commit a worktree task's leftovers and remove its worktree, as a Planner completion does.
+
+        A ``TaskWorkspaceError`` is an error activity (and ``warning``); the task still ends and ``sweep`` finishes
+        the worktree later. Any other failure is logged and returns neither line nor warning. ``pool`` keeps the
+        writes on the caller's connection, so a row lock stays held across the finish.
+        """
         from ..project_execution import TaskWorkspaces
 
-        if task.workspace_mode != TaskWorkspaces.WORKTREE.value:
-            return None
-        task_id = task.task_id
+        if workspace_mode != TaskWorkspaces.WORKTREE.value:
+            return _WorkspaceFinish()
         try:
-            worktree = await task_workspaces.finish(task_id, completed=True)
+            worktree = await task_workspaces.finish(task_id, completed=True, pool=pool)
         except task_workspaces.TaskWorkspaceError as exc:
             await db_activity.insert_activity(task_id=task_id, worker="planner", kind="error",
-                                              summary=f"Warning: {exc}"[:500])
-            return None
+                                              summary=f"Warning: {exc}"[:500], pool=pool)
+            return _WorkspaceFinish(warning=str(exc))
         except Exception:
             logger.exception("cannot finish the worktree of task %s", task_id)
-            return None
+            return _WorkspaceFinish()
         if worktree is None or worktree.state is not task_workspaces.WorktreeState.REMOVED:
-            return None
+            return _WorkspaceFinish()
         await db_activity.insert_activity(
             task_id=task_id, worker="planner", kind="phase",
             summary=f"The task's work is on branch {worktree.branch} of {worktree.repo_dir}, "
                     f"at {(worktree.result_commit or '')[:12]}; its worktree is removed. Merge the branch "
-                    "when you are ready: Looper does not"[:500])
-        return task_workspaces.notice_line(worktree)
+                    "when you are ready: Looper does not"[:500], pool=pool)
+        return _WorkspaceFinish(branch_line=task_workspaces.notice_line(worktree))
+
+    async def complete_direct(self, task_id: str) -> DirectDone:
+        """Complete a task the background is not working on. Does not run the task-end listener.
+
+        The re-read, the worktree finish and the status write hold the task row (``FOR NO KEY UPDATE``). A start
+        waits on that same lock when it updates the row. A restart takes it before re-reading eligibility,
+        cleaning up or claiming the row, so neither can change the task while its worktree is being removed.
+        A second call cannot commit again.
+        """
+        from .. import cost_guard, projects
+        from ...db import connection as db_connection
+
+        async with db_connection.transaction() as conn:
+            task = await db_tasks.get_task(task_id, pool=conn, for_update=True)
+            if task is None:
+                raise projects.RequestError(projects.HTTP_404, "task not found")
+            if db_tasks.interaction_mode(task["status"]) is db_tasks.InteractionMode.ORCHESTRATED:
+                raise projects.RequestError(
+                    projects.HTTP_409,
+                    f"the background is working on task {task_id}: stop it or wait for it to end first")
+            if task["status"] == "completed":
+                return DirectDone("completed", changed=False)
+            finished = await self._finish_task_workspace(task_id, task.get("workspace_mode"), pool=conn)
+            await db_tasks.update_task_status(task_id, "completed", pool=conn, notify=False)
+            summary = "Completed by the operator in direct mode"
+            await db_activity.insert_activity(task_id=task_id, worker="operator", kind="phase", summary=summary,
+                                              pool=conn)
+        loaded = self._tasks.get(task_id)
+        if loaded is not None:
+            loaded.status = "completed"
+        await db_tasks._task_ended(task_id)
+        if self._broadcaster is not None:
+            self._broadcaster.publish(task_id, {"kind": "phase", "summary": summary, "worker": "operator"})
+        await cost_guard.release_queued(task_id)
+        return DirectDone("completed", True, branch_line=finished.branch_line, warning=finished.warning)
 
     async def _handle_cancel(self, envelope: MessageEnvelope) -> None:
         assert self._bus is not None
@@ -723,9 +872,15 @@ class TaskRouter:
         return closing_note(why, ((str(s.get("step_key") or s.get("id")), str(s.get("status")), s.get("result"))
                                   for s in steps))
 
-    async def _handle_restart(self, envelope: MessageEnvelope) -> None:
+    async def _handle_restart(self, envelope: MessageEnvelope) -> RestartRefusal | None:
         """Run a task again as its ``RestartMode`` says: continued from its saved plan (the default), planned anew,
-        or continued at a raised spend cap."""
+        or continued at a raised spend cap.
+
+        Eligibility, cleanup and the status claim hold the task row, the same lock ``/done`` holds across its
+        worktree finish. A restart that waits out a winning ``/done`` reads ``completed`` and returns
+        ``RestartRefusal.COMPLETED`` without changing the workspace or the plan. None means the restart claimed
+        the task and started its Planner.
+        """
         from ..scheduler import project_dispatch
 
         assert self._bus is not None
@@ -734,60 +889,40 @@ class TaskRouter:
             mode = RestartMode(envelope.payload.get("mode") or RestartMode.CONTINUE)
         except ValueError:
             logger.warning("task %s: unknown restart mode %r, not restarting it", task_id, envelope.payload.get("mode"))
-            return
+            return None
 
         existing = self._tasks.get(task_id)
         if existing and existing.status in ("running", "assigned"):
             logger.warning("task %s already active, ignoring restart", task_id)
-            return
+            return RestartRefusal.ACTIVE
 
         try:
-            db_row = await db_tasks.get_task(task_id)
+            snapshot = await db_tasks.get_task(task_id)
         except Exception:
             logger.exception("failed to read task %s for restart", task_id)
-            return
+            return None
 
-        if not db_row:
+        if not snapshot:
             logger.warning("task %s not found in DB, ignoring restart", task_id)
-            return
-
-        restartable = (*db_tasks.RESTARTABLE_STATUSES, "running", "executing", "waiting_user", "waiting",
-                       "assigned", db_tasks.READY)
-        if db_row["status"] not in restartable:
-            logger.warning("task %s status=%s not restartable", task_id, db_row["status"])
-            return
+            return RestartRefusal.NOT_FOUND
 
         # Keep restart cleanup and Planner startup inside the same barrier as a ready start.
-        async with project_dispatch(db_row["project_id"], wait_for_delete=False) as allowed:
+        async with project_dispatch(snapshot["project_id"], wait_for_delete=False) as allowed:
             if not allowed:
-                return
-            # Cleanup may have removed the task or updated its checkout paths while we waited.
-            db_row = await db_tasks.get_task(task_id)
-            if db_row is None or db_row["status"] not in restartable:
-                return
-            start_over = mode is RestartMode.START_OVER
-            if start_over:
-                # Planned anew: the steps go, and so do their worktrees and branches.
-                try:
-                    await step_workspaces.remove_task(task_id)
-                except Exception:
-                    logger.warning("could not remove the step worktrees of task %s", task_id, exc_info=True)
-                # And the sessions its runs kept for the room (its room goes with the steps).
-                await asyncio.to_thread(remove_run_sessions, self._runtime_root, task_id)
-            await attempts.close_attempts(task_id, failure_kind=attempts.FailureKind.STOPPED)
+                return None
             try:
-                if not await db_tasks.reset_task_for_restart(task_id, keep_steps=not start_over):
-                    return
+                claimed = await self._claim_restart(task_id, mode)
             except Exception:
                 logger.exception("failed to reset task %s for restart", task_id)
-                return
-
-            task = Task.from_row(task_id, db_row)
+                return None
+            if isinstance(claimed, RestartRefusal):
+                return claimed
+            task, ended = claimed
             self._tasks[task_id] = task
 
             # The Planner plans the request, unless it carries on with the plan (``restart``) of a task that ran before
             # and ended as ``ended`` says.
-            carry_on = not start_over and db_row["status"] != db_tasks.READY
+            carry_on = mode is not RestartMode.START_OVER and ended != db_tasks.READY
             restart_envelope = MessageEnvelope.create(
                 source=TASK_ROUTER_ADDRESS,
                 target=TASK_ROUTER_ADDRESS,
@@ -797,11 +932,45 @@ class TaskRouter:
                     "goal_id": task.goal_id,
                     "work_dir": task.work_dir,
                     "project_id": task.project_id,
-                    **({"restart": mode.value, "ended": db_row["status"]} if carry_on else {}),
+                    **({"restart": mode.value, "ended": ended} if carry_on else {}),
                 },
                 correlation_id=task.correlation_id,
             )
             await self._start(task, restart_envelope)
+            return None
+
+    async def _claim_restart(self, task_id: str, mode: RestartMode) -> tuple[Task, str] | RestartRefusal:
+        """Re-read, clean up and claim ``task_id`` under its row lock. The ended status is the one that was claimed."""
+        start_over = mode is RestartMode.START_OVER
+        try:
+            async with _task_transaction() as conn:
+                row = await db_tasks.get_task(task_id, pool=conn, for_update=True)
+                refusal = _restart_refusal(row)
+                if refusal is not None:
+                    _log_restart_refusal(task_id, row, refusal)
+                    return refusal
+                assert row is not None
+                if start_over:
+                    # Planned anew: the steps go, and so do their worktrees and branches, before the claim commits.
+                    try:
+                        await step_workspaces.remove_task(task_id, pool=conn)
+                    except Exception:
+                        logger.warning("could not remove the step worktrees of task %s", task_id, exc_info=True)
+                    # And the sessions its runs kept for the room (its room goes with the steps).
+                    await asyncio.to_thread(remove_run_sessions, self._runtime_root, task_id)
+                await _close_restart_attempts(task_id, conn)
+                claimed = await db_tasks.reset_task_for_restart(
+                    task_id, keep_steps=not start_over, expected_status=str(row["status"]),
+                    notify=False, pool=conn)
+                if not claimed:
+                    raise _RestartClaimLost()
+                task = Task.from_row(task_id, row)
+                ended = str(row["status"])
+        except _RestartClaimLost:
+            logger.info("task %s changed before its restart claimed it", task_id)
+            return RestartRefusal.LOST
+        await db_tasks._task_ended(task_id)
+        return task, ended
 
     async def _teardown_task(self, task_id: str) -> None:
         planner = self._planners.get(task_id)

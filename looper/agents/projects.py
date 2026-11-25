@@ -564,15 +564,22 @@ async def create_task_core(
     template_name: str | None = None, lock_manager: bool = False, named: bool | None = None,
     visible_to: str | None = None, task_filter: db_tasks.TaskFilter | None = None, show_configuration: bool = False,
     template_display: tuple[str, Sequence[tuple[str, str]]] | None = None,
-    conn: Any = None,
+    conn: Any = None, draft: bool = False,
 ) -> dict[str, Any]:
     """Place, check and store a ready task for either entry point. Adapters supply channel/template metadata;
     console config, project fields and role overrides share the same persistence path."""
     requirement = data.get("requirement")
     requirement = requirement.strip() if isinstance(requirement, str) else ""
-    if not requirement:
+    if not requirement and not draft:
         raise RequestError(HTTP_400, "requirement is required")
-    check_requirement(requirement)
+    if requirement:
+        check_requirement(requirement)
+
+    if draft and (workflow is not None or data.get("workflow") is not None or template_name is not None
+                  or (task_fields or {}).get("template") is not None
+                  or (task_fields or {}).get("schedule_id") is not None
+                  or (isinstance(data.get("config"), dict) and data["config"].get("intent_rule_bound"))):
+        raise RequestError(HTTP_400, "a draft has no workflow, template, schedule or rule")
 
     project_id = data.get("project_id") or None  # "" counts as absent
     new_project = data.get("project")
@@ -621,7 +628,7 @@ async def create_task_core(
             "goal_id": data.get("goal_id") or "",
             "work_dir": work_dir,
             "config": config or {},
-            "status": "init",
+            "status": db_tasks.DRAFT if draft else "init",
             "workspace_dir": work_dir,
             "workspace_mode": workspace["mode"],
             "workspace_base": workspace["base"],
@@ -630,7 +637,8 @@ async def create_task_core(
         }
         selected_profiles, selected_roles = dict(profiles or {}), list(roles)
         selected_workflow = workflow
-        if selected_workflow is None and not template_name and not task.get("schedule_id") and not task.get("template"):
+        if (not draft and selected_workflow is None and not template_name
+                and not task.get("schedule_id") and not task.get("template")):
             selected_workflow = project.get("default_workflow")
         source, source_name = "template", template_name
         if selected_workflow and selected_workflow != "none":
@@ -681,7 +689,8 @@ async def create_task_core(
         raise _name_taken(new_fields["name"]) from None
     except asyncpg.ForeignKeyViolationError:
         raise RequestError(HTTP_400, "an Agent Profile the task chose was removed meanwhile; choose again") from None
-    await db_ledger.register_task(task["task_id"], db=conn)
+    if not draft:
+        await db_ledger.register_task(task["task_id"], db=conn)
     work_dir = task["work_dir"]
     shown = task["title"] or task["goal_id"] or task["task_id"]
     block = (await configuration_block(task["task_id"], shown, project, work_dir, new_project is not None,
@@ -690,7 +699,7 @@ async def create_task_core(
              if show_configuration else None)
     return {
         "task_id": task["task_id"],
-        "status": "init",
+        "status": db_tasks.DRAFT if draft else "init",
         "created_at": created["created_at"],
         "project_id": project["id"],
         # How it runs in its workspace, and what to know before starting it (task_workspaces.check).
@@ -1220,9 +1229,14 @@ async def start_ready_task(task_id: str, bus: MessageBus, source: AgentAddress, 
     task = await db_tasks.get_task(task_id, **({"pool": pool} if pool is not None else {}))
     if task is None:
         raise RequestError(HTTP_404, "task not found")
-    if task["status"] != db_tasks.READY:
+    if task["status"] not in (db_tasks.READY, db_tasks.DRAFT):
         raise RequestError(HTTP_400, f"the task is {task['status']}, not ready: only a task that was created and "
                                      "never started can be started")
+    if task["status"] == db_tasks.DRAFT:
+        if not (task.get("requirement") or "").strip():
+            raise RequestError(HTTP_400, "a draft needs a requirement before it starts")
+        if not (task.get("work_dir") or "").strip():
+            raise RequestError(HTTP_400, f"task {task_id} has no directory: set one with looper_task_update first")
     if (task.get("config") or {}).get("intent_rule_bound"):
         from ..db import intent_rule_execution
         from ..db.connection import _connection
@@ -1238,6 +1252,8 @@ async def start_ready_task(task_id: str, bus: MessageBus, source: AgentAddress, 
         await bus.publish(MessageEnvelope.create(
             source=source, target=TASK_ROUTER_ADDRESS, message_type=MessageType.TASK_START, payload={"task_id": task_id},
         ))
+    if task["status"] == db_tasks.DRAFT:
+        await db_ledger.register_task(task_id, db=pool)
     return {"started": task_id, "project_id": task["project_id"]}
 
 
@@ -1288,7 +1304,7 @@ async def control_task(task_id: str, action: str, bus: MessageBus, source: Agent
 VIA_TASK_PAGE = "task_page"
 VIA_CHAT = "chat"
 # The statuses a task's requirement can be edited in: not started, or started (whatever its Planner is doing).
-EDITABLE_STATUSES = (db_tasks.READY, *db_tasks.ACTIVE_STATUSES)
+EDITABLE_STATUSES = (db_tasks.READY, db_tasks.DRAFT, *db_tasks.ACTIVE_STATUSES)
 # The statuses a task's own agents can change in: those its requirement can, and those of a task that ended without
 # completing, which a restart runs again with its new agents. Only a completed task's agents are final.
 AGENTS_EDITABLE_STATUSES = (*EDITABLE_STATUSES, *db_tasks.RESTARTABLE_STATUSES)
@@ -1350,7 +1366,7 @@ async def edit_requirement(
                                      "start it again to run the requirement it has")
     if requirement == task["requirement"]:
         raise RequestError(HTTP_400, "the requirement is unchanged")
-    not_started = task["status"] == db_tasks.READY
+    not_started = task["status"] in (db_tasks.READY, db_tasks.DRAFT)
     version = await task_changes.edit_requirement(task_id, requirement, via=via, delivered=not_started)
     if version is None:
         raise RequestError(HTTP_404, "task not found")

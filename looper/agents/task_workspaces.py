@@ -53,6 +53,14 @@ class TaskWorkspaceError(Exception):
     """A task's worktree cannot be made or used; the message says why."""
 
 
+class BranchUnavailable(Exception):
+    """A removed worktree's branch cannot be checked out. ``reason`` is ``branch_gone`` or ``branch_checked_out``."""
+
+    def __init__(self, reason: str) -> None:
+        self.reason = reason
+        super().__init__(reason)
+
+
 class WarningKind(str, Enum):
     NOT_GIT = "not_git"  # a worktree (asked for, or the default) cannot be made: the workspace is not in git
     UNCOMMITTED = "uncommitted"  # the workspace has changes its worktree will not have
@@ -63,6 +71,18 @@ class WarningKind(str, Enum):
 class WorktreeState(str, Enum):
     ACTIVE = "active"
     REMOVED = "removed"  # its directory is gone; its branch stays
+
+
+class ReopenMode(str, Enum):
+    WRITE = "write"          # the task Manager may write here
+    READ_ONLY = "read_only"  # only reading: the work cannot be brought back
+
+
+@dataclass(frozen=True)
+class Reopened:
+    mode: ReopenMode
+    work_dir: str
+    reason: str | None = None  # "branch_gone", "branch_checked_out", "workspace_missing"
 
 
 def task_branch(task_id: str) -> str:
@@ -321,9 +341,14 @@ def _link(worktree: TaskWorktree, relative: str) -> str:
                         missing="the workspace has none")
 
 
-async def prepare(task: Mapping[str, Any], *, runtime_root: Path, links: Sequence[str], note: Note) -> str:
+async def prepare(task: Mapping[str, Any], *, runtime_root: Path, links: Sequence[str], note: Note,
+                  create_branch: bool = True) -> str:
     """Where the task runs from now on (its ``work_dir``): for a worktree task its worktree, made now the first time
-    and again from its branch when its directory was lost. Raises ``TaskWorkspaceError``."""
+    and again from its branch when its directory was lost. Raises ``TaskWorkspaceError``.
+
+    ``create_branch`` is false when a removed worktree is reopened. The branch must already exist: a missing or
+    checked-out branch raises ``BranchUnavailable`` and is not replaced from the base.
+    """
     from ..db import task_worktrees as db_task_worktrees, tasks as db_tasks
 
     task_id, work_dir = str(task["id"]), str(task.get("work_dir") or "")
@@ -346,15 +371,26 @@ async def prepare(task: Mapping[str, Any], *, runtime_root: Path, links: Sequenc
     base = await _base_commit(repo, str(task.get("workspace_base") or ""))
     branch = task_branch(task_id)
     path = _worktree_path(runtime_root, task_id)
+    refused: str | None = None
     try:
         await ws._git(repo.toplevel, "worktree", "remove", "--force", str(path), check=False)  # a stale record
         path.parent.mkdir(parents=True, exist_ok=True)
         if await ws.branch_exists(repo.toplevel, branch):  # made before a restart cut this off
             await ws._git(repo.toplevel, "worktree", "add", "-q", str(path), branch)
-        else:
+        elif create_branch:
             await ws._git(repo.toplevel, "worktree", "add", "-q", "-b", branch, str(path), base)
+        else:
+            refused = "branch_gone"  # reopen checks out the branch it had; it does not start another from the base
     except (ws.GitError, OSError) as exc:
-        raise TaskWorkspaceError(f"cannot make the task's worktree of {workspace}: {exc}") from None
+        if not create_branch:
+            refused = await _refused_checkout(repo.toplevel, branch)
+        if refused is None:
+            raise TaskWorkspaceError(f"cannot make the task's worktree of {workspace}: {exc}") from None
+    if refused is not None:
+        await ws._git(repo.toplevel, "worktree", "remove", "--force", str(path), check=False)
+        if path.exists():
+            await asyncio.to_thread(shutil.rmtree, path, True)
+        raise BranchUnavailable(refused)
     worktree = TaskWorktree(task_id=task_id, repo_dir=repo.toplevel, subdir=repo.subdir, path=str(path),
                             branch=branch, base_commit=base)
     await _save(worktree)
@@ -485,3 +521,58 @@ async def sweep(runtime_root: Path) -> int:
             ws._remove_empty(path.parent)
             removed += 1
     return removed
+
+
+def _nearest_existing(path: Path) -> Path:
+    current = path
+    while not current.exists():
+        parent = current.parent
+        if parent == current:
+            return current
+        current = parent
+    return current
+
+
+async def _refused_checkout(repo: str, branch: str) -> str | None:
+    """Why checking out ``branch`` must not start a new one, or None when the failure is something else."""
+    try:
+        if not await ws.branch_exists(repo, branch):
+            return "branch_gone"
+        if await ws.branch_checked_out(repo, branch):
+            return "branch_checked_out"
+    except ws.GitError:
+        return None
+    return None
+
+
+async def reopen(task: Mapping[str, Any], *, runtime_root: Path, links: Sequence[str], note: Note) -> Reopened:
+    """The directory the task Manager works in. Never changes ``tasks.status``.
+
+    A removed worktree is rebuilt only by checking out its existing branch. A branch that is gone or checked out
+    elsewhere, including when that changes after the pre-check, is read-only. Reopen does not start a new branch
+    from the base.
+    """
+    if task.get("workspace_mode") != TaskWorkspaces.WORKTREE.value:
+        work_dir = str(task.get("work_dir") or "")
+        if work_dir and Path(work_dir).exists():
+            return Reopened(ReopenMode.WRITE, work_dir)
+        place = Path(work_dir) if work_dir else Path(".")
+        return Reopened(ReopenMode.READ_ONLY, str(_nearest_existing(place)), "workspace_missing")
+
+    from ..db import task_worktrees as db_task_worktrees
+
+    task_id = str(task["id"])
+    row = await db_task_worktrees.get(task_id)
+    if row is None or row["state"] == WorktreeState.ACTIVE.value:
+        return Reopened(ReopenMode.WRITE, await prepare(task, runtime_root=runtime_root, links=links, note=note))
+    repo = str(task.get("workspace_dir") or row["repo_dir"])
+    branch = str(row["branch"])
+    if not await ws.branch_exists(repo, branch):
+        return Reopened(ReopenMode.READ_ONLY, repo, "branch_gone")
+    if await ws.branch_checked_out(repo, branch):
+        return Reopened(ReopenMode.READ_ONLY, repo, "branch_checked_out")
+    try:
+        work_dir = await prepare(task, runtime_root=runtime_root, links=links, note=note, create_branch=False)
+    except BranchUnavailable as exc:
+        return Reopened(ReopenMode.READ_ONLY, repo, exc.reason)
+    return Reopened(ReopenMode.WRITE, work_dir)
