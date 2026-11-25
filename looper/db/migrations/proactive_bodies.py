@@ -2,8 +2,8 @@
 import asyncpg
 
 name = "proactive_bodies"
-order = 2090
-pending_order = 2090
+order = 2110
+pending_order = 2110
 fresh_ddl = """
 ALTER TABLE proactive_deliveries ADD COLUMN IF NOT EXISTS body TEXT;
 ALTER TABLE proactive_deliveries ADD COLUMN IF NOT EXISTS body_truncated BOOLEAN NOT NULL DEFAULT false;
