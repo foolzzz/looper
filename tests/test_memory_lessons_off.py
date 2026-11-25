@@ -11,7 +11,7 @@ from pathlib import Path
 
 import pytest
 
-REVISION = "5f03d2929d14d21c6cc69ec053e0230370829f44"
+REVISION = "189fbcc490e76e294fe86a10f8d993bb4a1673c4"
 FIXTURE = Path(__file__).parent / "fixtures" / "memory_lessons_off.json"
 ROOT = Path(__file__).resolve().parents[1]
 # Function bodies are separate freezes, guarding the real unchanged behavior as well as rendered constants.
