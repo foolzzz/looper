@@ -206,9 +206,8 @@ async def digests(conn: Any, *, channel_id: str, chat: str, until: datetime,
     # stay deferred here, rather than escaping through the independent brief switch.
     rule_filter = ("" if rules_on else "AND NOT (source='intent' AND COALESCE(source_ref,'') "
                    "~ '^rule-(created|discovery|fault):[0-9]+$') ")
-    reference = ",source_ref" if rules_on else ""
     rows = await conn.fetch(
-        "SELECT id, source AS kind, reason, decided_at, task_id, schedule_id" + reference + " FROM proactive_deliveries "
+        "SELECT id, source AS kind, reason, decided_at, task_id, schedule_id, source_ref FROM proactive_deliveries "
         "WHERE decision = 'digest' AND channel_id = $1 AND chat = $2 AND source <> 'morning_brief' "
         + triage_filter + rule_filter + "AND decided_at <= $3 AND digest_date = ANY($4::date[]) "
         "AND NOT EXISTS (SELECT 1 FROM morning_brief_consumed c WHERE c.delivery_id = proactive_deliveries.id) "

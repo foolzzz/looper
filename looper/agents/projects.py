@@ -136,7 +136,7 @@ def json_object(body: bytes) -> dict[str, Any]:
     return data
 
 
-def project_view(row: dict[str, Any]) -> dict[str, Any]:
+def project_view(row: dict[str, Any], *, include_knowledge_dir: bool = False) -> dict[str, Any]:
     return {
         "project_id": row["id"],
         "name": row["name"],
@@ -144,6 +144,7 @@ def project_view(row: dict[str, Any]) -> dict[str, Any]:
         "work_dir": row["work_dir"],
         "background": row["background"],
         "default_workflow": row.get("default_workflow"),
+        **({"knowledge_dir": row["knowledge_dir"]} if include_knowledge_dir and row.get("knowledge_dir") is not None else {}),
         **ProjectExecution.from_row(row).view(),
         **({"memory_lessons": row["memory_lessons"]} if row.get("memory_lessons") is not None else {}),
         "created_at": row["created_at"],
@@ -182,6 +183,12 @@ def _project_fields(data: dict[str, Any], *, update: bool) -> dict[str, Any]:
             if key is not None and (not isinstance(key, str) or not re.fullmatch(KEY_PATTERN, key) or key == "none"):
                 raise ValueError("default_workflow must be a workflow key or null")
             fields["default_workflow"] = key
+        if "knowledge_dir" in data:
+            from .vault import _path_problem
+            value = data["knowledge_dir"]
+            if value is not None and (problem := _path_problem(value)):
+                raise ValueError(f"knowledge_dir {problem}")
+            fields["knowledge_dir"] = value
         if execution := execution_fields(data):
             fields["execution"] = execution
     except ValueError as exc:
@@ -210,8 +217,9 @@ async def _existing_project(project_id: str, *, manager_id: str | None = None, p
     return project
 
 
-async def list_projects(*, manager_id: str | None = None, project_ids: Sequence[str] | None = None) -> dict[str, Any]:
-    return {"projects": [project_view(row) for row in await db_projects.list_projects(manager_id=manager_id, project_ids=project_ids)],
+async def list_projects(*, manager_id: str | None = None, project_ids: Sequence[str] | None = None,
+                        include_knowledge_dir: bool = False) -> dict[str, Any]:
+    return {"projects": [project_view(row, include_knowledge_dir=include_knowledge_dir) for row in await db_projects.list_projects(manager_id=manager_id, project_ids=project_ids)],
             "projects_root": projects_root()}
 
 
@@ -281,8 +289,23 @@ async def _create_project_row(fields: dict[str, Any], *, pool: Any = None,
         return row
 
 
-async def create_project(data: dict[str, Any]) -> dict[str, Any]:
+async def _validate_knowledge_dir(fields: dict[str, Any]) -> None:
+    if fields.get("knowledge_dir") is None:
+        return
+    from . import knowledge_directory, vault
+
+    config, problem = await vault.load()
+    if config is None:
+        raise RequestError(HTTP_400, problem or "the knowledge vault is not configured")
+    try:
+        knowledge_directory.validate(config, fields["knowledge_dir"])
+    except (ValueError, OSError, RuntimeError) as exc:
+        raise RequestError(HTTP_400, f"invalid knowledge_dir: {exc}") from None
+
+
+async def create_project(data: dict[str, Any], *, include_knowledge_dir: bool = False) -> dict[str, Any]:
     fields = _project_fields(data, update=False)
+    await _validate_knowledge_dir(fields)
     try:
         if projects_root() and not fields.get("work_dir"):
             with project_directories() as created:
@@ -294,7 +317,7 @@ async def create_project(data: dict[str, Any]) -> dict[str, Any]:
         raise _name_taken(fields["name"]) from None
     except asyncpg.ForeignKeyViolationError:
         raise RequestError(HTTP_400, "default_workflow must name an existing workflow") from None
-    return project_view(row)
+    return project_view(row, include_knowledge_dir=include_knowledge_dir)
 
 
 DIRECTORY_CHANGED = ("the project's directory or the command schedules that run in it changed; run the tool again "
@@ -325,8 +348,10 @@ async def directory_change(project: Mapping[str, Any], raw: Any, *, db: Any = No
 
 
 async def update_project(project_id: str, data: dict[str, Any], *, manager_id: str | None = None,
-                         expected_directory_version: str | None = None) -> dict[str, Any]:
+                         expected_directory_version: str | None = None,
+                         include_knowledge_dir: bool = False) -> dict[str, Any]:
     fields = _project_fields(data, update=True)
+    await _validate_knowledge_dir(fields)
     if not fields:
         raise RequestError(
             HTTP_400, "give at least one of " + ", ".join(("name", "description", "work_dir", "background",
@@ -349,7 +374,7 @@ async def update_project(project_id: str, data: dict[str, Any], *, manager_id: s
         raise RequestError(HTTP_400, "default_workflow must name an existing workflow") from None
     if not updated:
         raise RequestError(HTTP_404, f"project {project_id!r} not found")
-    return project_view(await _existing_project(project_id, manager_id=manager_id))
+    return project_view(await _existing_project(project_id, manager_id=manager_id), include_knowledge_dir=include_knowledge_dir)
 
 
 async def preview_project_move(project: Mapping[str, Any], data: Mapping[str, Any], *, db: Any = None):

@@ -35,7 +35,7 @@ OPERATIONS = (
               "Read what needs the operator now.",
               "Read what needs the operator now. The sections: user gates waiting for an answer, a Manager's "
               "operations waiting for confirmation, failing schedules, failing runtime logins, pending intents, the "
-              "ledger's items that wait for the user, and messages that may not have arrived. Each section is ok, error (its source "
+              "ledger's items that wait for the user, terminal reminder failures, and messages that may not have arrived. Each section is ok, error (its source "
               "could not be read) or unknown, with its count and up to 20 items; a feature that is off leaves its "
               "section out. Read-only: nothing is stored and no model runs. Answers conflict while "
               "attention.enabled is off.",

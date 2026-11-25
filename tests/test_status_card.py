@@ -39,6 +39,12 @@ def _sha(text: str) -> str:
     return hashlib.sha256(text.encode()).hexdigest()[:16]
 
 
+def test_waiting_card_names_blocked_vault_commits():
+    text = status_card._waiting_text({"kinds": [
+        {"kind": "vault_commits", "state": "ok", "count": 1}]})
+    assert "知识库提交受阻 1" in text and "/todo" in text
+
+
 def _tools_sha(tools: Any) -> str:
     payload = [{"name": tool.name, "description": tool.description, "schema": tool.schema} for tool in tools]
     return _sha(json.dumps(payload, sort_keys=True, ensure_ascii=False))
