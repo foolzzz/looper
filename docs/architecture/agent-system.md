@@ -7174,16 +7174,26 @@ intent edits and fallback replies, subscription alerts and failure notices,
 task progress, completion turns, the dashboard chat and other senders retain
 their existing paths. The delivery settings UI is not delivered here.
 Design: [proactive delivery RFC](rfcs/proactive-delivery-v0.zh-CN.md).
-A morning brief (`source` `morning_brief`) is sent uncounted and is never
-deferred: it is the digest. The brief has its own switch and still calls `deliver`
-while the delivery switch is off.
+A morning brief (`source` `morning_brief`) is a scheduled delivery: quiet hours
+apply even after a recent reply, while the daily cap neither blocks nor counts it.
+A quiet brief waits for an eligible tick before its catch-up cutoff; otherwise its
+unconsumed digest stays for the next workday. The brief has its own switch and
+still calls `deliver` while the delivery switch is off.
 
 ### Morning brief
 
 On a workday (Monday to Friday; a weekday holiday still sends), at
 `morning_brief.time` (09:15 by default) in `user.timezone` (else the server's
 zone, `turn_context.zone()`), one brief goes to each enabled bot's operator
-direct chat. It names what waits (the needs-you summary), reminders due that
+direct chat. A missed send can catch up only before `morning_brief.cutoff`
+(12:00 local by default); the cutoff itself is excluded. Quiet hours always
+block the brief. It can resume when they end only if still before the cutoff.
+The sender rechecks the current local date, time window and quiet hours before
+posting, so collection that crosses a boundary cannot cause a late send.
+A quiet or expired tick preserves the first unread date without consuming digest
+or triage ids or spending a send attempt. The next eligible workday reads from
+that same boundary, and consumes only the ids it actually sends. It names what
+waits (the needs-you summary), reminders due that
 local day, and proactive messages deferred into the digest (`decision`
 `digest`). Every brief reads from the first attempt's dates (Monday also
 Saturday and Sunday) through the day being sent, except digest rows already
@@ -7215,10 +7225,13 @@ channel is enabled and who the operator is are read again after the summary is
 collected and again immediately before the post. The switch is read again after
 the operator
 query returns. A fresh claim that then fails that check is deleted; a claim
-that continued a refusal is put back as that refusal, with the attempt count
-it had. The switch
+that continued a refusal or a zero-attempt deferral is restored with its prior
+attempt count and first unread date. The switch
 `morning_brief.enabled` is off by default and operator-only
-(`morning_brief.get`, `morning_brief.update`); off, a tick reads the in-memory
+(`morning_brief.get`, `morning_brief.update`). Those operations, the generated
+CLI and Settings → Chat expose `enabled`, `time` and `cutoff`; times use `HH:MM`,
+cutoff must be later than send time, and null restores the field's default.
+An invalid update changes nothing. Off, a tick reads the in-memory
 switch and does nothing else. One `morning_briefs` row per local date and chat
 makes a restart and a second server send it at most once. A send that stops
 mid-way is `uncertain` and is not sent again. Upgrades conservatively mark old
