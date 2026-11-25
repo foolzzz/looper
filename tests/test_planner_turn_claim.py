@@ -49,11 +49,13 @@ def test_results_are_claimed_when_the_prompt_is_sent_and_only_then(
     monkeypatch.setattr(planner.subagent_delivery, "planner_turn_note", AsyncMock(return_value=("\nNOTE", [7])))
     monkeypatch.setattr(planner.subagent_delivery, "mark_turn_delivered", marked)
 
+    prompts = []
+
     class Claude:
         command, started, pid, stderr, totals = ["claude"], True, 1, "", {}
 
         async def run_turn(self, text: str, on_event: Any, stop: Any = None, cancel: Any = None):
-            assert text.endswith("NOTE")
+            prompts.append(text)
             if sends:
                 cancel.sent()  # what every runtime does at the moment it sends the prompt
             return await script(cancel)
@@ -75,6 +77,7 @@ def test_results_are_claimed_when_the_prompt_is_sent_and_only_then(
             await agent._exchange("hello", process, limit)
 
     asyncio.run(asyncio.wait_for(run(), 10))
+    assert len(prompts) == 1 and prompts[0].endswith("NOTE")
     assert marked.await_count == (1 if claimed else 0)
     if claimed:
         marked.assert_awaited_once_with([7])

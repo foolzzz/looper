@@ -41,7 +41,7 @@ def test_completion_reply_and_maintenance_hold_the_same_session_lock(monkeypatch
         await session_budget.update({"turn_budget_usd": 4})
         await task(pool, tmp_path, status="completed")
         async with manager(pool, tmp_path, monkeypatch, compact="missing") as chat:
-            order = []
+            order, observed = [], []
             send = completion_events.send_reply
             bound = chat.manager._bound_session
             annotate = llm_records.add_metadata
@@ -49,12 +49,11 @@ def test_completion_reply_and_maintenance_hold_the_same_session_lock(monkeypatch
             async def write_metrics(record_id, metadata, **kwargs):
                 await annotate(record_id, metadata, **kwargs)
                 if "turn_metrics" in metadata:
-                    assert chat.manager._turn_lock.locked()
+                    observed.append(("metrics", chat.manager._turn_lock.locked()))
                     order.append("metrics")
 
             async def send_reply(*args, **kwargs):
-                assert chat.manager._turn_lock.locked()
-                assert chat.manager._pending_switch is None
+                observed.append(("reply", chat.manager._turn_lock.locked(), chat.manager._pending_switch))
                 result = await send(*args, **kwargs)
                 order.append("reply")
                 return result
@@ -77,6 +76,7 @@ def test_completion_reply_and_maintenance_hold_the_same_session_lock(monkeypatch
             assert [event.message_type for event in due] == [MessageType.COMPLETION_DUE]
             await chat.manager._handle_completion_due(due[0])
             assert order == ["reply", "metrics", "bound"]
+            assert observed == [("reply", True, None), ("metrics", True)]
             assert not chat.manager._turn_lock.locked()
             assert chat.manager._pending_switch.reason is SwitchReason.SESSION_BOUND
             assert not chat.manager._claude.started
