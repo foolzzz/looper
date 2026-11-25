@@ -242,7 +242,7 @@ def test_draft_delete(monkeypatch, tmp_path):
 
 
 def test_draft_shape_check(monkeypatch, tmp_path):
-    from looper.db import connection
+    from looper.db import bridge_upgrade, connection
     from looper.db.migrations import task_drafts
     async def check(pool):
         owner = await project(pool, tmp_path)
@@ -250,6 +250,12 @@ def test_draft_shape_check(monkeypatch, tmp_path):
             await tasks.create_task(task_id=f"legacy-{status}", requirement="", status=status,
                                     project_id=owner["id"], pool=pool)
         async with pool.acquire() as conn:
+            assert await task_drafts.pending(conn) is False
+            assert await conn.fetchval("SELECT convalidated FROM pg_constraint WHERE conrelid='tasks'::regclass "
+                                      "AND conname='tasks_draft_shape'") is True
+            await connection.ensure_schema(conn)
+            assert {row["name"] for row in await conn.fetch("SELECT name FROM schema_migrations")} == {
+                bridge_upgrade.BASELINE}
             await conn.execute("ALTER TABLE tasks DROP CONSTRAINT tasks_draft_shape")
             await conn.execute("DELETE FROM schema_migrations WHERE name=ANY($1::text[])",
                                ["task_drafts", "task_drafts_online"])
@@ -262,7 +268,8 @@ def test_draft_shape_check(monkeypatch, tmp_path):
             await connection._finish_online(conn)
             assert await conn.fetchval("SELECT convalidated FROM pg_constraint WHERE conrelid='tasks'::regclass "
                                       "AND conname='tasks_draft_shape'") is True
-            assert await conn.fetchval("SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE name='task_drafts_online')")
+            assert {row["name"] for row in await conn.fetch("SELECT name FROM schema_migrations")} == {
+                bridge_upgrade.BASELINE, "task_drafts", "task_drafts_online"}
         for column, value in (("schedule_id", "fixture-schedule"), ("completed_at", "2026-01-01T00:00:00Z")):
             with pytest.raises(asyncpg.CheckViolationError) as caught:
                 await pool.execute(f"INSERT INTO tasks(id,project_id,status,requirement,{column}) "

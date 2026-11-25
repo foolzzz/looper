@@ -18,7 +18,11 @@ online = (OnlineStep(name, "task_drafts_online", validate=(("tasks", "tasks_draf
 
 
 async def pending(conn):
-    return not await conn.fetchval("SELECT EXISTS (SELECT 1 FROM schema_migrations WHERE name=$1)", name)
+    if await conn.fetchval("SELECT EXISTS (SELECT 1 FROM schema_migrations WHERE name=$1)", name):
+        return False
+    return not await conn.fetchval(
+        "SELECT EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid='tasks'::regclass "
+        "AND conname='tasks_draft_shape')")
 
 
 async def apply(conn, *, sql, state):
