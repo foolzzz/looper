@@ -22,6 +22,13 @@ function settled<T>(rows: T[]): RemoteRead<T> {
   return rows.length ? { status: "ready", rows } : { status: "empty" };
 }
 
+function scopeHoldText(read: RemoteRead<unknown>): string {
+  if (read.status === "loading") return "Loading capability sets…";
+  if (read.status === "empty") return "No capability sets.";
+  if (read.status === "failed") return "Capability sets could not be loaded.";
+  return "This scope is not in the loaded capability sets.";
+}
+
 /** One section-wide snapshot; a write invalidates every earlier read before it starts. */
 export function useManagerChatBindings() {
   const [bindings, setBindings] = useState<Binding[] | null>(null);
@@ -236,7 +243,9 @@ function ChatBindingRow({ binding: b, managers, snapshot, reload, onRemoved }: {
   const catalog = snapshot.setsRead.status === "ready" ? snapshot.setsRead.rows : [];
   const groupScopes = catalog.filter((set) => set.id !== "full" && (set.id !== "legacy" || b.legacy_allowed));
   const overrideScopes = catalog.filter((set) => set.id !== "full" && set.id !== "legacy");
-  const scopeOffered = setsReady && (scopeValue === "" || groupScopes.some((set) => set.id === scopeValue));
+  const scopeAvailable = (scope: string | null) =>
+    setsReady && (scope === null || groupScopes.some((set) => set.id === scope));
+  const scopeOffered = scopeAvailable(scopeValue === "" ? null : scopeValue);
   const overridePicked = overrideScopes.some((set) => set.id === overrideScope);
   const overrideCount = overrides.status === "ready" ? overrides.rows.length : overrides.status === "empty" ? 0 : null;
   const openScope = (scope: string | null) => {
@@ -266,8 +275,11 @@ function ChatBindingRow({ binding: b, managers, snapshot, reload, onRemoved }: {
       throw err;
     }
   };
-  const saveScope = () => scopeAsk && wrote(() => putDefaultScope(b, scopeAsk.scope, stopNow), () => setScopeAsk(null),
-    (pending) => { setScopeAsk(null); setScopeConfirmation(pending); }, setError);
+  const saveScope = () => {
+    if (!scopeAsk || !scopeAvailable(scopeAsk.scope)) return;
+    return wrote(() => putDefaultScope(b, scopeAsk.scope, stopNow), () => setScopeAsk(null),
+      (pending) => { setScopeAsk(null); setScopeConfirmation(pending); }, setError);
+  };
   const confirmSavedScope = () => scopeConfirmation && wrote(() => confirmChatBinding(scopeConfirmation),
     () => setScopeConfirmation(null), setScopeConfirmation, setError);
   const addOverride = () => {
@@ -351,7 +363,11 @@ function ChatBindingRow({ binding: b, managers, snapshot, reload, onRemoved }: {
               onChange={(event) => setStopNow(event.target.checked)} />
             Apply now, interrupting a running reply
           </label>
-          <FormFooter error="" busy={busy} submit="Confirm scope" onCancel={() => setScopeAsk(null)} onSubmit={() => void saveScope()} />
+          {!scopeAvailable(scopeAsk.scope) && (
+            <p className="text-xs text-muted-foreground">{scopeHoldText(snapshot.setsRead)}</p>
+          )}
+          <FormFooter error="" busy={busy} submitDisabled={!scopeAvailable(scopeAsk.scope)} submit="Confirm scope"
+            onCancel={() => setScopeAsk(null)} onSubmit={() => void saveScope()} />
         </div>}
         {scopeConfirmation && <div className="space-y-2">
           <p className="text-xs text-warning">{scopeConfirmation.impact}</p>
@@ -359,7 +375,15 @@ function ChatBindingRow({ binding: b, managers, snapshot, reload, onRemoved }: {
         </div>}
         {b.default_scope === "legacy" && <div className="space-y-2">
           <p className="text-xs text-warning">Legacy: everyone admitted here shares a session that can run commands with this machine's account.</p>
-          {b.suggested_scope && <Button size="sm" variant="outline" disabled={busy} onClick={() => openScope(b.suggested_scope)}>Adopt {b.suggested_scope}</Button>}
+          {b.suggested_scope && <>
+            {!scopeAvailable(b.suggested_scope) && (
+              <p className="text-xs text-muted-foreground">{scopeHoldText(snapshot.setsRead)}</p>
+            )}
+            <Button size="sm" variant="outline" disabled={busy || !scopeAvailable(b.suggested_scope)}
+              onClick={() => { if (scopeAvailable(b.suggested_scope)) openScope(b.suggested_scope); }}>
+              Adopt {b.suggested_scope}
+            </Button>
+          </>}
         </div>}
         <div className="space-y-2">
           <p className={LABEL}>Scope overrides</p>

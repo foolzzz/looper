@@ -242,6 +242,117 @@ describe("Manager explicit chats", () => {
     expect(scopeSelect().disabled).toBe(false);
     expect(button("Save scope", region()).disabled).toBe(true);
   });
+  const legacyRow = () => {
+    rows = [binding({ default_scope: "legacy", effective_default_scope: "legacy", legacy_allowed: true, suggested_scope: "chat_only" })];
+  };
+  const adopt = () => button("Adopt chat_only", region());
+  const confirmScope = () => button("Confirm scope", region());
+  const holdText = {
+    loading: "Loading capability sets…",
+    empty: "No capability sets.",
+    failed: "Capability sets could not be loaded.",
+  } as const;
+  const bindingWritesStay = async () => {
+    expect(button("Unbind", region()).disabled).toBe(false);
+    await select("review");
+    expect(button("Move", region()).disabled).toBe(false);
+  };
+  const recoverSets = async (kind: keyof typeof holdText, pending: ReturnType<typeof deferred<bindingsApi.CapabilitySet[]>> | null) => {
+    if (kind === "loading") await act(async () => pending!.resolve(sets()));
+    else if (kind === "empty") {
+      b.listCapabilitySets.mockResolvedValue(sets());
+      await click(button("Refresh chats"));
+    } else await click(button("Retry capability sets"));
+  };
+  it.each(["loading", "empty", "failed"] as const)("does not adopt a suggested scope while capability sets are %s", async (kind) => {
+    legacyRow();
+    const pending = kind === "loading" ? deferred<bindingsApi.CapabilitySet[]>() : null;
+    if (kind === "loading") b.listCapabilitySets.mockReturnValue(pending!.promise);
+    else if (kind === "empty") b.listCapabilitySets.mockResolvedValue([]);
+    else b.listCapabilitySets.mockRejectedValueOnce(new V1Error(503, "unavailable", "sets down")).mockResolvedValue(sets());
+    await render();
+    expect(adopt().disabled).toBe(true);
+    expect(adopt().textContent).toBe("Adopt chat_only");
+    expect(adopt().previousElementSibling?.textContent).toBe(holdText[kind]);
+    adopt().disabled = false;
+    await click(adopt());
+    expect(confirmScope()).toBeUndefined();
+    expect(b.putDefaultScope).not.toHaveBeenCalled();
+    await bindingWritesStay();
+    await recoverSets(kind, pending);
+    expect(adopt().disabled).toBe(false);
+    expect(adopt().previousElementSibling?.textContent).not.toBe(holdText[kind]);
+    await click(adopt());
+    await click(confirmScope());
+    expect(b.putDefaultScope).toHaveBeenCalledTimes(1);
+    expect(b.putDefaultScope).toHaveBeenCalledWith(expect.anything(), "chat_only", false);
+  });
+  it.each(["loading", "empty", "failed"] as const)("does not submit an open scope confirmation while capability sets are %s", async (kind) => {
+    await render();
+    await setControl('[aria-label="Scope for Design"]', "chat_only");
+    await click(button("Save scope", region()));
+    expect(confirmScope().disabled).toBe(false);
+    const pending = kind === "loading" ? deferred<bindingsApi.CapabilitySet[]>() : null;
+    if (kind === "loading") b.listCapabilitySets.mockReturnValueOnce(pending!.promise);
+    else if (kind === "empty") b.listCapabilitySets.mockResolvedValueOnce([]);
+    else b.listCapabilitySets.mockRejectedValueOnce(new V1Error(503, "unavailable", "sets down"));
+    await click(button("Refresh chats"));
+    const confirm = confirmScope();
+    expect(confirm.disabled).toBe(true);
+    expect(confirm.textContent).toBe("Confirm scope");
+    expect(confirm.parentElement?.previousElementSibling?.textContent).toBe(holdText[kind]);
+    expect(button("Cancel", region()).disabled).toBe(false);
+    await bindingWritesStay();
+    confirm.disabled = false;
+    await click(confirm);
+    expect(b.putDefaultScope).not.toHaveBeenCalled();
+    await recoverSets(kind, pending);
+    expect(confirmScope().disabled).toBe(false);
+    expect(confirmScope().parentElement?.previousElementSibling?.textContent).not.toBe(holdText[kind]);
+    await click(confirmScope());
+    expect(b.putDefaultScope).toHaveBeenCalledTimes(1);
+    expect(b.putDefaultScope).toHaveBeenCalledWith(expect.objectContaining({
+      channel_id: "bot-one", chat_id: "42", manager_id: "manager" }), "chat_only", false);
+  });
+  it("does not adopt or confirm a scope that is outside the ready set", async () => {
+    legacyRow();
+    const fullOnly = [{ id: "full", name: "Full", builtin: true, current_version: 1, items: [] as unknown[] }];
+    b.listCapabilitySets.mockResolvedValue(fullOnly);
+    await render();
+    expect(adopt().disabled).toBe(true);
+    expect(adopt().previousElementSibling?.textContent).toBe("This scope is not in the loaded capability sets.");
+    adopt().disabled = false;
+    await click(adopt());
+    expect(confirmScope()).toBeUndefined();
+    expect(b.putDefaultScope).not.toHaveBeenCalled();
+    expect(button("Unbind", region()).disabled).toBe(false);
+    b.listCapabilitySets.mockResolvedValue(sets());
+    await click(button("Refresh chats"));
+    expect(adopt().disabled).toBe(false);
+    await click(adopt());
+    await click(confirmScope());
+    expect(b.putDefaultScope).toHaveBeenCalledTimes(1);
+    rows = [binding()];
+    b.listCapabilitySets.mockResolvedValue(sets());
+    b.putDefaultScope.mockClear();
+    await click(button("Refresh chats"));
+    await setControl('[aria-label="Scope for Design"]', "chat_only");
+    await click(button("Save scope", region()));
+    b.listCapabilitySets.mockResolvedValueOnce(fullOnly);
+    await click(button("Refresh chats"));
+    const confirm = confirmScope();
+    expect(confirm.disabled).toBe(true);
+    expect(confirm.parentElement?.previousElementSibling?.textContent).toBe("This scope is not in the loaded capability sets.");
+    expect(button("Unbind", region()).disabled).toBe(false);
+    confirm.disabled = false;
+    await click(confirm);
+    expect(b.putDefaultScope).not.toHaveBeenCalled();
+    b.listCapabilitySets.mockResolvedValue(sets());
+    await click(button("Refresh chats"));
+    expect(confirmScope().disabled).toBe(false);
+    await click(confirmScope());
+    expect(b.putDefaultScope).toHaveBeenCalledWith(expect.anything(), "chat_only", false);
+  });
   it("shows override loading, empty and failed text, and recovers without blocking binding writes", async () => {
     const pending = deferred<bindingsApi.ScopeOverride[]>();
     b.listOverrides.mockReturnValueOnce(pending.promise);
