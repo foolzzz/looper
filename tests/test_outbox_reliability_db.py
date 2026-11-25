@@ -87,27 +87,36 @@ def test_sent_state_failure_retries_only_persistence_and_releases_chat(monkeypat
     run_db(check, monkeypatch, timeout=6)
 
 
-def test_total_deadline_releases_unsent_chat_head(monkeypatch):
+def test_total_deadline_releases_unsent_chat_head(monkeypatch, fixed_clock):
     from looper.agents.channels import outbound
     from looper.db import channel_outbox as db
 
     async def check(pool):
-        now = datetime.now(timezone.utc) + timedelta(seconds=1)
+        now = fixed_clock()
         item = await db.insert_or_get(dict(channel_id='app', idempotency_key='old', kind='send',
                                           chat='chat', body={'text': 'old'}, source='answer'))
         await pool.execute('UPDATE channel_outbox SET created_at=$1, next_attempt_at=$2 WHERE id=$3',
                            now - timedelta(days=1), now + timedelta(days=1000), item['id'])
+        following = await db.insert_or_get(dict(channel_id='app', idempotency_key='new', kind='send',
+                                               chat='chat', body={'text': 'new'}, source='answer'))
+        # SQL defaults use the real clock; make the following row due on the injected clock.
+        await pool.execute('UPDATE channel_outbox SET created_at=$1, next_attempt_at=$1 WHERE id=$2',
+                           now, following['id'])
         transport = AsyncMock()
         transport.send.return_value = 'om_new'
-        box = outbound.Outbox('app', transport, outbound.Gateway('app'), clock=lambda: now)
+        box = outbound.Outbox('app', transport, outbound.Gateway('app'), clock=fixed_clock)
         try:
-            result = await box.send('send', 'chat', {'text': 'new'}, None, 'new', 'answer')
+            # Bound delivery, not schema migration or cleanup on a loaded runner.
+            result = await asyncio.wait_for(box.send('send', 'chat', {'text': 'new'}, None, 'new', 'answer'), 5)
             assert result.success
-            assert (await db.get(item['id']))['state'] == 'failed'
-            assert transport.send.await_count == 1
+            expired = await db.get(item['id'])
+            assert expired['state'] == 'failed' and expired['error'] == 'delivery deadline expired'
+            assert expired['attempts'] == 0 and expired['first_possible_at'] is None
+            assert (await db.get(following['id']))['state'] == 'sent'
+            transport.send.assert_awaited_once_with(text='new', chat_id='chat', idempotency_key='new', return_id=True)
         finally:
             await box.stop()
-    run_db(check, monkeypatch, timeout=5)
+    run_db(check, monkeypatch)
 
 
 def test_lost_claim_acknowledgement_does_not_strand_chat(monkeypatch):
