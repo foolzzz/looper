@@ -122,7 +122,7 @@ Manager has no tool for it. The dashboard shows the task page's 指标 card and 
     only reply stopping, completion turns, research order and the ledger.
     Lark and Telegram need no new configuration command.
   - A scenario Manager's independent `managers.session_routing` setting is
-    `off` by default, or `per_chat`. The operator-only
+    `off` by default, `per_chat` or `scoped` (stored but not yet selectable through the operation). The operator-only
     `scenario_session_routing.get` operation takes `{"manager_id": "manager-example"}`;
     `scenario_session_routing.update` also requires `session_routing` (`"off"`,
     `"per_chat"` or `null`, which restores off). Both return `manager_id` and
@@ -141,6 +141,13 @@ Manager has no tool for it. The dashboard shows the task page's 指标 card and 
     Enabling does not migrate history: the existing session stays main and
     each group's next turn starts fresh. Disabling sends new turns back to
     main; in-flight turns finish and group sessions remain for idle reclaim.
+  - With stored `scoped`, trusted routing fields resolve operator, override, bot default, group default,
+    then `chat_only`, in that order. Sessions use `group:<channel id>:<chat>~<fingerprint>`;
+    the fingerprint covers the set/version, effective capabilities and Manager ceiling, audience,
+    input version and launch mode. The operator has a separate `full` session in each group;
+    others share one per scope. An unreachable fingerprint retires its session: its current turn finishes,
+    then the whole process tree stops; queued messages resolve again and move, and a later return to that
+    key opens fresh, without resuming or carrying a handoff. Read failures retry without falling back.
   - Sessions run in parallel; inside one, messages run in order. The message
     loop hands each user message to its session's worker. Completion wake-ups
     resolve the bot's identity before claiming events, then use the event
