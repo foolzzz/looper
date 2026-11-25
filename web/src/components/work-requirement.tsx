@@ -75,21 +75,21 @@ export function WorkRequirement({ task, onRefresh }: { task: TaskDetail; onRefre
   }, []);
 
   const begin = () => {
-    if (unavailable) return;
+    if (unavailable || !editable) return;
     setText(body);
     setError("");
     setEditing(true);
   };
   const cancel = () => {
+    // A click while the write is in flight must not drop the lock or open another edit.
+    if (savingRef.current) return;
     ticket.current += 1;
-    savingRef.current = false;
-    setSaving(false);
     setEditing(false);
     setText(body);
     setError("");
   };
   const save = () => {
-    if (unavailable || savingRef.current) return;
+    if (unavailable || savingRef.current || !editable) return;
     const requirement = text;
     if (!requirement.trim() || requirement === body) return;
     const id = task.task_id;
@@ -98,18 +98,20 @@ export function WorkRequirement({ task, onRefresh }: { task: TaskDetail; onRefre
     savingRef.current = true;
     setSaving(true);
     setError("");
+    const ownsEdit = () => mounted.current && taskIdRef.current === id && ticket.current === generation;
     void (async () => {
       try {
         await editTaskRequirement(id, requirement);
-        if (taskIdRef.current !== id) return;
+        // Mount, this edit, and the task still on screen. A late save must not read another task or a newer edit.
+        if (!ownsEdit()) return;
         try {
           await refresh();
         } catch (err) {
-          if (!mounted.current || taskIdRef.current !== id || ticket.current !== generation) return;
+          if (!ownsEdit()) return;
           setError(errorText(err));
           return;
         }
-        if (!mounted.current || taskIdRef.current !== id || ticket.current !== generation) return;
+        if (!ownsEdit()) return;
         setEditing(false);
       } catch (err) {
         if (!mounted.current) return;
@@ -138,7 +140,7 @@ export function WorkRequirement({ task, onRefresh }: { task: TaskDetail; onRefre
         </p>
       )}
       {editing ? (
-        <textarea aria-label="需求正文" value={text} rows={4} onChange={(event) => setText(event.target.value)} className={FIELD} />
+        <textarea aria-label="需求正文" value={text} readOnly={!editable} rows={4} onChange={(event) => setText(event.target.value)} className={FIELD} />
       ) : body === "" ? (
         <p className="mt-2 text-sm text-muted-foreground">尚未填写需求</p>
       ) : (
@@ -149,10 +151,10 @@ export function WorkRequirement({ task, onRefresh }: { task: TaskDetail; onRefre
       )}
       {editing && (
         <div className="mt-2 flex flex-wrap gap-2">
-          <Button type="button" variant="outline" onClick={save} disabled={saving || unavailable || !text.trim() || text === body}>
+          <Button type="button" variant="outline" onClick={save} disabled={saving || unavailable || !editable || !text.trim() || text === body}>
             {saving ? "保存中…" : "保存"}
           </Button>
-          <Button type="button" variant="outline" onClick={cancel}>取消</Button>
+          <Button type="button" variant="outline" onClick={cancel} disabled={saving}>取消</Button>
         </div>
       )}
       {unavailable && <p role="status" className="mt-2 text-sm text-muted-foreground">需求编辑暂不可用</p>}

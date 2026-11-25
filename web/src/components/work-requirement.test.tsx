@@ -345,9 +345,85 @@ describe("Work requirement editing", () => {
     expect(api.editTaskRequirement).not.toHaveBeenCalled();
     expect(fetches).toEqual([]);
   });
+
+  it("makes the open editor read-only when the same task becomes terminal or unknown", async () => {
+    api.editTaskRequirement.mockResolvedValue(undefined);
+    show(task({ status: "running", requirement: "Ship the parser." }));
+    await click("编辑");
+    await typeInto("Ship the parser.\nMore.");
+    expect(button("保存")!.disabled).toBe(false);
+
+    for (const status of ["completed", "mystery", ""]) {
+      show(task({ task_id: "task-a", status, requirement: "Ship the parser." }));
+      const area = host.querySelector('[aria-label="需求正文"]') as HTMLTextAreaElement | null;
+      expect(area, status).toBeTruthy();
+      expect(area!.readOnly).toBe(true);
+      const save = button("保存");
+      expect(save, status).toBeTruthy();
+      expect(save!.disabled).toBe(true);
+      expect(button("编辑")).toBeUndefined();
+      await act(async () => { save!.dispatchEvent(new MouseEvent("click", { bubbles: true })); });
+      expect(api.editTaskRequirement).not.toHaveBeenCalled();
+    }
+  });
+
+  it("keeps cancel and reopening locked until both the save and readback settle", async () => {
+    const first = deferred<void>();
+    const readback = deferred<void>();
+    api.editTaskRequirement.mockImplementationOnce(() => first.promise);
+    api.editTaskRequirement.mockImplementationOnce(() => Promise.resolve());
+    const refresh = vi.fn(() => readback.promise);
+    show(task(), refresh);
+    await click("编辑");
+    await typeInto("first edit");
+    await click("保存");
+    expect(api.editTaskRequirement).toHaveBeenCalledTimes(1);
+
+    const cancel = button("取消")!;
+    expect(cancel.disabled).toBe(true);
+    await act(async () => { cancel.dispatchEvent(new MouseEvent("click", { bubbles: true })); });
+    expect(button("保存中…")).toBeTruthy();
+    expect(button("编辑")).toBeUndefined();
+    expect((host.querySelector('[aria-label="需求正文"]') as HTMLTextAreaElement).value).toBe("first edit");
+    await click("保存中…");
+    expect(api.editTaskRequirement).toHaveBeenCalledTimes(1);
+
+    first.resolve();
+    await act(async () => { await first.promise; });
+    await settle();
+    expect(refresh).toHaveBeenCalledTimes(1);
+    expect(button("取消")!.disabled).toBe(true);
+    expect(button("保存中…")!.disabled).toBe(true);
+    readback.resolve();
+    await settle();
+    expect(host.querySelector("textarea")).toBeNull();
+    await click("编辑");
+    await typeInto("second edit");
+    await click("保存");
+    expect(api.editTaskRequirement).toHaveBeenCalledTimes(2);
+  });
 });
 
 describe("Work requirement task switches", () => {
+  it("does not refresh a newer edit when the same task is selected again before its old save returns", async () => {
+    const oldSave = deferred<void>();
+    api.editTaskRequirement.mockReturnValue(oldSave.promise);
+    const refresh = vi.fn(() => Promise.resolve());
+    show(task(), refresh);
+    await click("编辑");
+    await typeInto("old edit");
+    await click("保存");
+    show(task({ task_id: "B" }), refresh);
+    show(task(), refresh);
+    await click("编辑");
+    await typeInto("new edit");
+    oldSave.resolve();
+    await settle();
+    expect(refresh).not.toHaveBeenCalled();
+    expect((host.querySelector("textarea") as HTMLTextAreaElement).value).toBe("new edit");
+    expect(button("保存")!.disabled).toBe(false);
+  });
+
   it("drops task A's late edit before it can change task B", async () => {
     const gate = deferred<void>();
     const refresh = vi.fn(() => Promise.resolve());
