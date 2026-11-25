@@ -165,6 +165,9 @@ async def run(server, operation, arguments, principal, headers):
             fields = arguments["fields"]
             await _check_fields(fields, source)
             await store.save_settings(source_id, fields)
+            service = getattr(server, "_source_service", None)
+            if "alerts_enabled" in fields and service is not None:
+                await service.refresh_alerts()
             return await _view(source_id)
         if action == "mode_update":
             from ..source_service import own_bot_app_ids

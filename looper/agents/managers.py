@@ -421,6 +421,9 @@ class ManagerFleet:
             # Running and still enabled: the definition (tools, task scope, task policy, templates) may have changed.
             agent = self._agents[manager_id]
             agent._definition = dataclasses.replace(agent._definition, idle_timeout_seconds=row["idle_timeout_seconds"])
+            from . import session_routing
+
+            session_routing.set_scenario_routing(manager_id, row.get("session_routing", "off"))
             ops = self._ops.get(manager_id)
             if ops is not None and ops.scope.revision != row.get("revision"):
                 ops.set_scope(scope_for(ManagerDefinition.from_row(row), await self._read_template_keys(manager_id)))

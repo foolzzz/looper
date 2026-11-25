@@ -38,6 +38,7 @@ from pathlib import Path
 from typing import Any
 
 from .memory_draft import CASES as DRAFT_CASES
+from .memory_retro import CASES as RETRO_CASES
 
 HERE = Path(__file__).resolve().parents[2]
 SCHEMA = "looper-processor/v1"
@@ -878,7 +879,7 @@ async def _prepare(args: argparse.Namespace) -> None:
         raise SystemExit(f"the leads check cannot run its profile: {problem}")
 
 
-async def _prepare_drafts(args: argparse.Namespace) -> None:
+async def _prepare_drafts(args: argparse.Namespace, *, role: str = "memory_draft") -> None:
     """Select the eval profile for the drafting role in the disposable database."""
     from evals.prompt_regression import runner
     from looper.agents import agent_settings
@@ -896,15 +897,19 @@ async def _prepare_drafts(args: argparse.Namespace) -> None:
         if row is None:
             raise SystemExit(f"no Agent Profile {args.profile!r} in the eval's database")
         profile_id = row["id"]
-    await agent_settings.update_role("memory_draft", {"profile_id": profile_id})
+    await agent_settings.update_role(role, {"profile_id": profile_id})
 
 
 async def _drafts(args: argparse.Namespace, root: Path) -> list[dict[str, Any]]:
-    from .memory_draft import evaluate_case
+    from . import memory_draft, memory_retro
 
-    return [await evaluate_case(key, rep, root / f"{key}-{rep}", mode=args.mode,
-                                cap_usd=args.budget_usd, claude_bin=args.claude or "claude", timeout_s=args.timeout)
-            for rep in range(1, args.reps + 1) for key in args.cases if key in DRAFT_CASES]
+    runs = []
+    for rep in range(1, args.reps + 1):
+        for key in args.cases:
+            module = memory_retro if key in RETRO_CASES else memory_draft
+            runs.append(await module.evaluate_case(key, rep, root / f"{key}-{rep}", mode=args.mode,
+                cap_usd=args.budget_usd, claude_bin=args.claude or "claude", timeout_s=args.timeout))
+    return runs
 
 
 async def _record(record_id: int | None, batch: str, texts: list[str] | None = None) -> dict[str, Any]:
@@ -957,10 +962,12 @@ async def evaluate(args: argparse.Namespace, database_url: str, root: Path) -> l
         if engine is not None:
             from looper.agents.serve import seed_role_configs
             await seed_role_configs()
-        elif any(key not in DRAFT_CASES for key in args.cases) or args.cases_file or getattr(args, "intents_file", None):
+        elif any(key not in DRAFT_CASES and key not in RETRO_CASES for key in args.cases) or args.cases_file or getattr(args, "intents_file", None):
             await _prepare(args)
         if any(key in DRAFT_CASES for key in args.cases):
             await _prepare_drafts(args)
+        if any(key in RETRO_CASES for key in args.cases):
+            await _prepare_drafts(args, role="memory_retro")
         if engine is None and not getattr(args, "intents_file", None):
             print("processor runs " + json.dumps(await processor.chosen_profile(), ensure_ascii=False), flush=True)
             from looper.agents.agent_settings import AgentType
@@ -993,6 +1000,14 @@ async def evaluate(args: argparse.Namespace, database_url: str, root: Path) -> l
             for key in args.cases:
                 if not allow():
                     return runs
+                if key in RETRO_CASES:
+                    # Reserve a full attempt before starting; a short remainder cannot fund this case.
+                    if args.budget_usd < case_budget:
+                        return runs
+                    from .memory_retro import evaluate_case
+                    runs.append(await evaluate_case(key, rep, root / f"{key}-{rep}", mode="real",
+                        cap_usd=args.budget_usd, claude_bin=args.claude or "claude", timeout_s=args.timeout))
+                    continue
                 if key in DRAFT_CASES:
                     from .memory_draft import evaluate_case
                     runs.append(await evaluate_case(key, rep, root / f"{key}-{rep}", mode="real",
@@ -1441,7 +1456,7 @@ def table(run: dict[str, Any], base: dict[str, Any] | None) -> str:
         return f"{sum(mine)}/{len(mine)}" if mine else "—"
 
     lines = ["| case | this run |" + (" base |" if base else ""), "|---|---|" + ("---|" if base else "")]
-    every = {**CASES, **EXTRACTION_CASES, **CHECK_CASES, **TRIAGE_CASES, **DRAFT_CASES}
+    every = {**CASES, **EXTRACTION_CASES, **CHECK_CASES, **TRIAGE_CASES, **DRAFT_CASES, **RETRO_CASES}
     lines += [f"| {key}: {every[key]['what']} | {passes(run, key)} |" + (f" {passes(base, key)} |" if base else "")
               for key in every if any(r["case"] == key for r in run["runs"])]
     cost = sum(r["cost_usd"] or 0 for r in run["runs"])
@@ -1528,7 +1543,7 @@ def main() -> int:
     parser.add_argument("--reps", type=int, default=1)
     parser.add_argument("--cases", default=None,
                         help="comma-separated names or globs, of "
-                             f"{', '.join([*CASES, *EXTRACTION_CASES, *CHECK_CASES, *TRIAGE_CASES, *DRAFT_CASES])} "
+                             f"{', '.join([*CASES, *EXTRACTION_CASES, *CHECK_CASES, *TRIAGE_CASES, *DRAFT_CASES, *RETRO_CASES])} "
                              "(default: the digest ones, or none with --cases-file)")
     checker = parser.add_mutually_exclusive_group()
     checker.add_argument("--check-register-agent", help="a spec to register and run as the leads check")
@@ -1556,7 +1571,7 @@ def main() -> int:
         args.cases = "memory_draft" if args.mode == "fake" else (
             "" if args.cases_file or args.intents_file else ("intents_*" if args.engine == "messages" else ",".join(CASES)))
     patterns = [key.strip() for key in args.cases.split(",") if key.strip()]
-    known = {**CASES, **EXTRACTION_CASES, **CHECK_CASES, **TRIAGE_CASES, **DRAFT_CASES}
+    known = {**CASES, **EXTRACTION_CASES, **CHECK_CASES, **TRIAGE_CASES, **DRAFT_CASES, **RETRO_CASES}
     args.cases = []
     for pattern in patterns:
         pattern = "memory_draft_*" if pattern == "memory_draft" else pattern
@@ -1565,8 +1580,10 @@ def main() -> int:
             parser.error(f"unknown case {pattern!r}; the cases are {', '.join(known)}")
         args.cases.extend(key for key in matched if key not in args.cases)
     _require_intent_rules_cases(parser, args)
-    if args.mode == "fake" and (args.cases_file or args.intents_file or any(key not in DRAFT_CASES for key in args.cases)):
-        parser.error("fake mode accepts only memory_draft cases")
+    if args.mode == "fake" and (args.cases_file or args.intents_file or any(key not in DRAFT_CASES and key not in RETRO_CASES for key in args.cases)):
+        parser.error("fake mode accepts only memory_draft and memory_retro cases")
+    if args.mode == "real" and any(key in RETRO_CASES for key in args.cases) and args.total_budget_usd is None:
+        parser.error("real memory_retro cases require --total-budget-usd to reserve each attempt")
     if args.engine == "messages":
         if any(not math.isfinite(value) or value <= 0 for value in
                (args.budget_usd, args.timeout, *([args.total_budget_usd] if args.total_budget_usd is not None else []))):

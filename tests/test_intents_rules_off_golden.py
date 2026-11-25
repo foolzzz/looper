@@ -230,3 +230,98 @@ def test_rules_off_path_matches_fixed_main_per_item(rule_setting: str | None, gr
                 assert await pool.fetchval(f"SELECT count(*) FROM {table}") == 0
 
     run_db(test, monkeypatch, setup=seed_role_configs)
+
+
+@pytest.mark.parametrize("rule_setting", [None, "false", "invalid"])
+def test_rules_off_companion_outputs_match_main_per_item(monkeypatch, tmp_path, rule_setting):
+    """Freeze each companion's bytes, with nonempty controls.
+
+    The fixture was captured by running this test against production sources
+    exported with ``git archive`` at its recorded main commit, then replayed on
+    both that source tree and the feature branch. No feature output seeds it.
+    """
+    from looper.agents import attention, morning_brief, mid_turn_input, session_routing
+    from looper.agents.ops import TurnOrigin
+    from looper.agents.tiers.turn_token import TurnToken, TurnPhase
+
+    monkeypatch.setattr(attention, "datetime", FixedDatetime)
+    monkeypatch.setattr(attention, "_status_checks", None)
+    monkeypatch.setattr(attention, "_catchup_checks", None)
+    monkeypatch.setattr(chat_settings, "_timezone", "UTC")
+    monkeypatch.setattr(chat_settings, "_delivery_enabled", False)
+    monkeypatch.setattr(chat_settings, "_morning_brief_enabled", True)
+    monkeypatch.setattr(chat_settings, "_mid_turn_input_enabled", True)
+    monkeypatch.setattr(chat_settings, "_metrics_enabled", False)
+    monkeypatch.setattr(session_routing, "_routing_enabled", False)
+
+    async def check(pool):
+        await source(pool)
+        await lark_targets(pool)
+        await pool.execute("UPDATE channel_configs SET enabled=true,config=config || "
+                           "jsonb_build_object('operator_sender_id',$1::text) WHERE channel_id='channel-lark'", DM)
+        await pool.execute("INSERT INTO system_settings(key,value) VALUES('intents.enabled','true')")
+        if rule_setting is not None:
+            await pool.execute("INSERT INTO system_settings(key,value) VALUES('intents.rules.enabled',$1)", rule_setting)
+        await pool.execute("INSERT INTO projects(id,name) VALUES('project-freeze','Frozen project')")
+        await pool.execute("INSERT INTO schedules(id,project_id,name,cron,timezone,requirement,kind,notify_channel,notify_chat) "
+                           "VALUES('schedule-freeze','project-freeze','Frozen requests','*/10 * * * *','UTC','Read',"
+                           "'subscription','lark',$1)", DM)
+        await pool.execute("INSERT INTO subscriptions(schedule_id,source_id,output_kind,target_confirmed_at,"
+                           "target_confirmed_version,chat_kinds,sender_kinds,max_age_minutes,max_events,text_max_chars) "
+                           "VALUES('schedule-freeze','stream','intents',$1,'frozen-version',ARRAY['p2p'],ARRAY['user'],180,500,200)", _NOW)
+        async def version(_schedule):
+            return "frozen-version"
+        monkeypatch.setattr(subscriptions, "config_version", version)
+        seq = await add(pool, "Synthetic companion request", sent_at=_NOW, kind="p2p", chat_id="synthetic-dm")
+        iid = await intent(pool, [seq], schedule_id="schedule-freeze", project_id="project-freeze", created_at=_NOW)
+        await pool.execute("INSERT INTO proactive_deliveries(dedupe_key,source,source_ref,channel_id,chat,chat_kind,"
+                           "decision,reason,digest_date,decided_at) VALUES('frozen-digest','intent',$1,'channel-lark',"
+                           "$2,'direct','digest','quiet_hours',$3,$4)", str(iid), DM, _NOW.date(), _NOW)
+        summary = await attention.collect()
+        needs = attention.summary_text(summary)
+        assert "Fix the login page" in needs
+        brief_channels = Channels()
+        await morning_brief.MorningBriefService(brief_channels, clock=lambda: _NOW).run_once()
+        assert len(brief_channels.posts) == 1
+        assert await pool.fetchval('SELECT count(*) FROM morning_brief_consumed') == 1
+        channels = Channels()
+        await intent_push.IntentPushService(channels, clock=lambda: _NOW).run_once()
+        assert len(channels.posts) == 1
+
+        def envelope(text, message_id):
+            return MessageEnvelope(source=AgentAddress("channel", "web", "web"),
+                target=manager_address("manager"), message_type=MessageType.USER_MESSAGE,
+                message_id=message_id, correlation_id="frozen-correlation", timestamp=_NOW.isoformat(),
+                payload={"text": text, "channel_context": {"session_id": "web-freeze"}})
+
+        original = envelope("First synthetic request", "first-frozen")
+        first_token = TurnToken(original.message_id, None, "web", "web-freeze", _NOW, phase=TurnPhase.RUNNING)
+        resident = SimpleNamespace(write_mid_turn=AsyncMock(return_value=True))
+        session = SimpleNamespace(claude=resident)
+        agent = SimpleNamespace(agent_id="manager", ops=None, _router=SimpleNamespace(queued=lambda _: False),
+            _turns=SimpleNamespace(find=lambda _: None), _persist_user=AsyncMock(), _send_status=AsyncMock(),
+            _register_turn=lambda env: TurnToken(env.message_id, None, "web", "web-freeze", _NOW))
+        mid = mid_turn_input.MidTurnInputs(agent)
+        prepared = SimpleNamespace(envelope=original, turn=SimpleNamespace(origin=TurnOrigin.USER))
+        session.running_token = first_token
+        mid._turns[first_token.message_id] = mid_turn_input.RunningInput(first_token, prepared, session)
+        for text, mid_id in [("Additional synthetic request", "addition-frozen"),
+                             ("撤销 task-unbound-synthetic", "revoke-frozen")]:
+            assert await mid._merge(session, envelope(text, mid_id))
+        assert resident.write_mid_turn.await_count == 2
+        payload = {
+            "attention": needs,
+            "morning_brief": brief_channels.posts[0][2],
+            "intent_push": channels.posts[0][2],
+            "mid_turn": [call.args[0] for call in resident.write_mid_turn.await_args_list],
+        }
+        fixture = Path(__file__).parent / "fixtures/intent_rules_companions_off.json"
+        actual = json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
+        capture = tmp_path / "intent_rules_companions_off.json"
+        capture.write_text(actual)
+        assert fixture.exists(), f"Baseline capture: {capture}"
+        frozen = json.loads(fixture.read_text())
+        for name, value in payload.items():
+            assert json.dumps(value, ensure_ascii=False).encode() == json.dumps(frozen["outputs"][name], ensure_ascii=False).encode(), name
+
+    run_db(check, monkeypatch)

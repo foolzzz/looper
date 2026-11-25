@@ -1,6 +1,7 @@
 """Task deletion and workspace management, beside the unchanged Manager services."""
 
 from ...db import step_workspaces, tasks
+from ...db.connection import get_pool
 from ..api_v1 import Operation, _array, _object, _STR, _NULL_STR, _INT, _BOOL
 from ..ops import ErrorCode, OpError
 from ..ops.config import answered
@@ -41,8 +42,17 @@ async def impact(server, operation, arguments, principal, headers):
     if task is None:
         raise OpError(ErrorCode.NOT_FOUND, "task not found")
     if operation.operation_id == "tasks.delete":
-        return (f"Delete task {task_id} ({task['status']}), its step worktrees, task checkout, "
+        text = (f"Delete task {task_id} ({task['status']}), its step worktrees, task checkout, "
                 "saved sessions and database records. The task's result branch stays.")
+        lessons = await get_pool().fetchval(
+            "SELECT count(DISTINCT c.id) FROM task_journal j "
+            "JOIN memory_candidate_sources s ON s.journal_id=j.id "
+            "JOIN memory_candidates c ON c.id=s.candidate_id "
+            "WHERE j.task_id=$1 AND c.destination='looper' AND c.state='in_effect'", task_id)
+        if lessons:
+            text += (f" This also deletes {lessons} in-effect project lesson(s) sourced from this task's "
+                     "journal. Promote lessons you want to keep to the vault first.")
+        return text
     workspace = await step_workspaces.get(arguments["workspace_id"])
     if workspace is None or workspace["task_id"] != task_id:
         raise OpError(ErrorCode.NOT_FOUND, "no such step worktree in this task")

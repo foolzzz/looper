@@ -96,6 +96,7 @@ LESSONS_MAX_CHARS = 4_000
 class JournalKind(str, Enum):
     STEP_ACCEPTED = "step_accepted"
     STEP_FAILED = "step_failed"
+    FAILURE_HOLD = "failure_hold"
     STEP_RETRY = "step_retry"
     DECISION = "decision"
     CONDITION_BLOCKED = "condition_blocked"
@@ -127,6 +128,7 @@ _HEADINGS: dict[JournalKind, str] = {
     JournalKind.LATE_REVIEW: "Late reviews",
     JournalKind.REVIEW_ADJUDICATED: "Review adjudications",
     JournalKind.STEP_FAILED: "Failed steps",
+    JournalKind.FAILURE_HOLD: "Failure holds",
     JournalKind.STEP_RETRY: "Retried attempts",
     JournalKind.DECISION: "Planner decisions",
     JournalKind.STEP_ACCEPTED: "Accepted steps",
@@ -136,7 +138,7 @@ _HEADINGS: dict[JournalKind, str] = {
     JournalKind.GATE_CLOSED: "User gates closed",
     JournalKind.GATE_CANCELLED: "User gates cancelled",
 }
-_PITFALLS = frozenset({JournalKind.STEP_FAILED, JournalKind.STEP_RETRY})
+_PITFALLS = frozenset({JournalKind.STEP_FAILED, JournalKind.STEP_RETRY, JournalKind.FAILURE_HOLD})
 _DETAILED = frozenset({JournalKind.STEP_FAILED, JournalKind.STEP_RETRY, JournalKind.DECISION})
 # What each reader's "progress" section holds: the supplements have a section of their own, and a handoff goes
 # in the resume brief.
@@ -257,7 +259,7 @@ def merged_learnings(*groups: Iterable[str]) -> tuple[str, ...]:
     return tuple(dict.fromkeys(item for group in groups for item in group))
 
 
-def _entry_text(entry: JournalEntry) -> str:
+def _entry_text(entry: JournalEntry, label: str = "") -> str:
     if entry.kind is JournalKind.REVIEW_ROUND:
         data = json.loads(entry.summary)
         lines = []
@@ -279,7 +281,8 @@ def _entry_text(entry: JournalEntry) -> str:
         return '\n'.join(lines)
     limit = SECTION_DETAIL_MAX_CHARS if entry.kind in _DETAILED else SECTION_SUMMARY_MAX_CHARS
     summary = clip(entry.summary, limit) or "(no summary)"
-    lines = [f"- {entry.step}: {summary}" if entry.step else f"- {summary}"]
+    mark = f"{label} " if label else ""
+    lines = [f"- {mark}{entry.step}: {summary}" if entry.step else f"- {mark}{summary}"]
     lines += [f"  - {item}" for item in entry.learnings]
     return "\n".join(lines)
 
@@ -300,10 +303,10 @@ def review_rounds(entries: Sequence[JournalEntry]) -> list[JournalEntry]:
             for entry, data in sorted(rounds.values(), key=lambda item: item[1].get('round', 0))]
 
 
-def _supplement_text(entry: JournalEntry, fence: bool = False) -> str:
+def _supplement_text(entry: JournalEntry, fence: bool = False, label: str = "") -> str:
     """A supplement whole, its lines kept in the list item; with ``fence``, an outside one in a ``supplement``
     block."""
-    return "- " + _supplement_body(entry, fence).replace("\n", "\n  ")
+    return "- " + (f"{label} " if label else "") + _supplement_body(entry, fence).replace("\n", "\n  ")
 
 
 def _supplement_body(entry: JournalEntry, fence: bool) -> str:
@@ -345,7 +348,7 @@ def _omitted(title: str, omitted: int, noun: tuple[str, str]) -> str:
 
 
 def _by_kind(title: str, order: Sequence[JournalEntry], max_chars: int, kinds: Sequence[JournalKind],
-             noun: tuple[str, str]) -> list[str]:
+             noun: tuple[str, str], label_of: Any = None) -> list[str]:
     """``order`` (the entries in the order to keep them) under ``title``, in at most about ``max_chars``
     characters, one heading per kind in ``kinds``' order, each kind's entries in ``order``'s order. No
     entries, no section."""
@@ -353,13 +356,15 @@ def _by_kind(title: str, order: Sequence[JournalEntry], max_chars: int, kinds: S
         return []
     # Room for the title with its omitted note and a heading per kind.
     budget = max_chars - len(title) - len(noun[1]) - 40 - sum(len(_HEADINGS[kind]) + 2 for kind in kinds)
-    kept, omitted = _pack(order, budget)
+    render = _entry_text if label_of is None else (
+        lambda entry: _entry_text(entry, "" if entry.kind is JournalKind.REVIEW_ROUND else label_of(entry)))
+    kept, omitted = _pack(order, budget, render)
     lines = [_omitted(title, omitted, noun)]
     for kind in kinds:
         selected = [entry for at, entry in enumerate(order) if at in kept and entry.kind is kind]
         if kind is JournalKind.REVIEW_ROUND:
             selected.sort(key=lambda entry: json.loads(entry.summary).get('round', 0), reverse=True)
-        entries = [_entry_text(entry) for entry in selected]
+        entries = [render(entry) for entry in selected]
         if entries:
             lines += [f"{_HEADINGS[kind]}:", *entries]
     return lines
@@ -378,23 +383,25 @@ def _newest_first_by_priority(entries: Sequence[JournalEntry], kinds: Sequence[J
     return leading + [e for e in rest if e.kind in _PITFALLS] + [e for e in rest if e.kind not in _PITFALLS]
 
 
-def _packed_supplements(entries: Sequence[JournalEntry]) -> tuple[list[JournalEntry], int]:
+def _packed_supplements(entries: Sequence[JournalEntry], label_of: Any = None) -> tuple[list[JournalEntry], int]:
     """The supplements in ``entries`` that fit ``SUPPLEMENTS_MAX_CHARS``, oldest first (only past it are the oldest
     left out), and how many were left out."""
     newest_first = [entry for entry in reversed(entries) if entry.kind is JournalKind.SUPPLEMENT]
-    kept, omitted = _pack(newest_first, SUPPLEMENTS_MAX_CHARS, _supplement_text)
+    text = _supplement_text if label_of is None else (lambda entry: _supplement_text(entry, False, label_of(entry)))
+    kept, omitted = _pack(newest_first, SUPPLEMENTS_MAX_CHARS, text)
     return [entry for at, entry in reversed(list(enumerate(newest_first))) if at in kept], omitted
 
 
-def supplements(entries: Sequence[JournalEntry], *, title: str, fence: bool = False) -> list[str]:
+def supplements(entries: Sequence[JournalEntry], *, title: str, fence: bool = False, label_of: Any = None) -> list[str]:
     """The supplements in ``entries`` under ``title``, whole and oldest first, in their own budget
     (``SUPPLEMENTS_MAX_CHARS``): only past it are the oldest left out, and counted. None, no section. With
     ``fence`` (the untrusted fence is on), an outside one is a ``supplement`` block, after one lead line."""
-    shown, omitted = _packed_supplements(entries)
+    shown, omitted = _packed_supplements(entries, label_of)
     if not shown:
         return []
-    return [_omitted(title, omitted, ("older supplement", "older supplements")), *_lead_line(shown, fence),
-            *(_supplement_text(entry, fence) for entry in shown)]
+    rendered = (_supplement_text(entry, fence) if label_of is None else _supplement_text(entry, fence, label_of(entry))
+                for entry in shown)
+    return [_omitted(title, omitted, ("older supplement", "older supplements")), *_lead_line(shown, fence), *rendered]
 
 
 def supplement_texts(entries: Sequence[JournalEntry], *, fence: bool = False) -> list[str]:
@@ -416,7 +423,8 @@ def planner_section(entries: Sequence[JournalEntry], *, fence: bool = False) -> 
     lines = supplements(
         entries, title="Supplements (what the user added to the task while it ran, oldest first; each stands "
                        "unless a later one changes it)", fence=fence)
-    kinds = _PLANNER_KINDS + tuple(kind for kind in _REVIEW_KINDS if any(e.kind is kind for e in entries))
+    kinds = ((JournalKind.FAILURE_HOLD,) if any(e.kind is JournalKind.FAILURE_HOLD for e in entries) else ()) + _PLANNER_KINDS
+    kinds += tuple(kind for kind in _REVIEW_KINDS if any(e.kind is kind for e in entries))
     progress = _by_kind(
         "Progress and findings (the task journal, newest first under each heading)",
         _newest_first_by_priority(entries, kinds), PLANNER_SECTION_MAX_CHARS, kinds,
@@ -430,13 +438,14 @@ def worker_section(entries: Sequence[JournalEntry], depends_on: Sequence[str]) -
     """A Worker's first-turn findings, "Findings so far in this task": the accepted steps in ``depends_on`` (step
     ids) first, in that order, then the failures and retries, then the other accepted steps, newest first; ''
     when there are none. The supplements are in its task section (``supplement_texts``)."""
+    kinds = ((JournalKind.FAILURE_HOLD,) if any(e.kind is JournalKind.FAILURE_HOLD for e in entries) else ()) + _WORKER_KINDS
     accepted = {entry.step_id: entry for entry in entries if entry.kind is JournalKind.STEP_ACCEPTED}
     first = [accepted[step_id] for step_id in depends_on if step_id in accepted]
-    newest = [entry for entry in reversed(entries) if entry.kind in _WORKER_KINDS and entry not in first]
+    newest = [entry for entry in reversed(entries) if entry.kind in kinds and entry not in first]
     order = first + [e for e in newest if e.kind in _PITFALLS] + [e for e in newest if e.kind not in _PITFALLS]
     findings = _by_kind(
         "Findings so far in this task (from its steps, the ones yours depends on first; their agents' words, "
-        "to use as data)", order, WORKER_SECTION_MAX_CHARS, _WORKER_KINDS, _ENTRIES)
+        "to use as data)", order, WORKER_SECTION_MAX_CHARS, kinds, _ENTRIES)
     return "\n".join(findings)
 
 
@@ -454,14 +463,32 @@ def progress_notes(rows: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
     return notes
 
 
-def lessons_journal(entries: Sequence[JournalEntry], *, fence: bool = False) -> list[str]:
+def lessons_journal(entries: Sequence[JournalEntry], *, fence: bool = False, label_of: Any = None) -> list[str]:
     """The journal a LESSONS (or VAULT) turn distills: the supplements, then every other kind. With ``fence``, an
     outside supplement is a ``supplement`` block, so nothing it says goes into lasting knowledge as the user's."""
-    kinds = tuple(kind for kind in _HEADINGS if kind not in _REVIEW_KINDS or any(e.kind is kind for e in entries))
+    kinds = tuple(kind for kind in _HEADINGS if kind not in (*_REVIEW_KINDS, JournalKind.FAILURE_HOLD)
+                  or any(e.kind is kind for e in entries))
     lines = supplements(entries, title="Supplements (what the user added to the task while it ran, oldest first)",
-                        fence=fence)
+                        fence=fence, label_of=label_of)
     journal = _by_kind("Task journal (newest first under each heading)", _newest_first_by_priority(entries, kinds),
-                       LESSONS_JOURNAL_MAX_CHARS, kinds, _ENTRIES)
+                       LESSONS_JOURNAL_MAX_CHARS, kinds, _ENTRIES, label_of)
     if lines and journal:
         lines.append("")
     return lines + journal
+
+
+def numbered_lessons_journal(entries: Sequence[JournalEntry], *, fence: bool = False
+                             ) -> tuple[list[str], dict[str, int]]:
+    """``lessons_journal`` with ``J<n>`` on each kept id-carrying row (oldest first, reviews included), and the map.
+
+    A review round and an id-less row stay unlabelled. A label packing left out is absent, so it cannot be cited."""
+    numbered = {id(entry): f"J{number}" for number, entry in enumerate(
+        (item for item in entries if item.id is not None), 1)}
+    row_ids = {numbered[id(entry)]: entry.id for entry in entries if entry.id is not None}
+    lines = lessons_journal(entries, fence=fence, label_of=lambda entry: numbered.get(id(entry), ""))
+    present = {}
+    for line in lines:
+        token = line.split("\n", 1)[0][2:].split(" ", 1)[0] if line.startswith("- J") else ""
+        if token in row_ids:
+            present[token] = row_ids[token]
+    return lines, present

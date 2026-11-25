@@ -2,6 +2,7 @@
 
 import asyncio
 import uuid
+from dataclasses import replace
 from unittest.mock import AsyncMock
 
 import pytest
@@ -9,7 +10,8 @@ import pytest
 from looper.agents import completion_events
 from looper.agents.session_routing import SessionKey, SessionKind
 from looper.agents.tiers import background_turn
-from looper.agents.tiers.manager import ManagerAgent, ManagerConfig
+from looper.agents.tiers.manager import ManagerAgent, ManagerConfig, default_definition
+from looper.agents.managers_api import ScenarioSessionRouting
 from looper.agents.tiers.manager import Ask, _CompletionNotTaken
 from looper.agents.ops import Turn, TurnOrigin
 
@@ -39,9 +41,15 @@ def test_non_main_completion_falls_back_before_building_model_input(monkeypatch,
     asyncio.run(check())
 
 
-def test_main_completion_still_runs_the_model_path_and_its_existing_fallback(monkeypatch, tmp_path):
+@pytest.mark.parametrize("scenario", [False, True])
+def test_unrestricted_completion_still_runs_the_model_path_and_its_existing_fallback(monkeypatch, tmp_path, scenario):
     async def check():
-        manager = ManagerAgent(config=ManagerConfig(work_dir=tmp_path), runtime_root=tmp_path)
+        definition = (replace(default_definition(), id="manager-synthetic", system_prompt="Synthetic scenario",
+                              session_routing=ScenarioSessionRouting.PER_CHAT) if scenario else None)
+        manager = ManagerAgent(config=ManagerConfig(work_dir=tmp_path), runtime_root=tmp_path, definition=definition)
+        if scenario:
+            session = manager._router.session(SessionKey(SessionKind.GROUP, "channel-lark", "oc_synthetic_background"))
+            manager._current.set(session)
         manager._bus = object()
         row = {"id": 1, "task_id": "synthetic-task", "payload": {}, "fallback": [],
                "target_kind": "web", "chat": "synthetic-web", "channel_id": "channel-web"}

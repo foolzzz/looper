@@ -23,7 +23,7 @@ DEFAULT_MANAGER_ID = "manager"
 
 # The columns update_manager and insert_manager write.
 _FIELDS = ("name", "description", "system_prompt", "profile_id", "tools", "task_scope", "task_policy", "enabled",
-           "idle_timeout_seconds", "scope_project_ids")
+           "idle_timeout_seconds", "scope_project_ids", "session_routing")
 _TEMPLATE_FIELDS = ("name", "description", "project_id", "work_dir", "workspace_mode", "requirement",
                     "planner_instructions", "planner_profile_id", "worker_profile_id", "reviewer_profile_id",
                     "role_templates", "inputs")

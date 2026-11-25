@@ -77,7 +77,7 @@
 | D16 | 写入时目标笔记变了：自动重新起草一次，之后照样要重新确认；再冲突就等操作者；不自动三方合并整篇内容 | 维护者（Q6）：合并的结果是操作者没看过的内容 |
 | D17 | v0 不定期批量回看对话，只靠对话里的工具 | 维护者（Q8） |
 | D18 | `knowledge_vault.path` 保持指向记忆区（`root = ""`）；vault 级规则里约束写入的几条由代码执行 | 维护者（Q9）：改指 vault 根目录会让任务的 agent 也读到个人笔记 |
-| D19 | worktree 默认放在 `<runtime_root>/vault-worktrees`；`worktree_root` 可以设成 vault 规则要求的位置 | 维护者（Q10） |
+| D19 | worktree 默认放在 `~/worktrees/looper-vault`；`worktree_root` 可以设成 vault 规则要求的位置 | 维护者（Q10） |
 | D20 | 推送只发操作者私聊（`push_channel`，必须填了「我的 ID」）；没设置就只进记忆页 | 维护者（Q11），同意图 |
 | D21 | 账本里确认过的决定不自动变成候选 | 维护者（Q13）：账本是「现在要处理什么」，记忆是长期的 |
 | D22 | 私聊里的确认命令是「记」（「记 M-0042」），不用「确认」 | 维护者（Q14）：不和 Manager 的高影响确认、账本的「确认 L-…」混淆 |
@@ -639,7 +639,7 @@ vault 规则允许的是「用户确认后由代码提交」。只有当确认�
 ### 6.2 步骤
 
 1. `base = git rev-parse <branch>`。
-2. 建 worktree：`git worktree add -b looper/memory/M-0042-a<attempts> <worktree_root>/M-0042-a<attempts>/<vault 仓库目录名> <base>`。`worktree_root` 默认 `<runtime_root>/vault-worktrees`，可以设成 vault 规则要求的位置（第 9.1 节）；一律在 vault 仓库之外，分支名带尝试次数，不和上一次失败的撞名。
+2. 建 worktree：`git worktree add -b looper/memory/M-0042-a<attempts> <worktree_root>/M-0042-a<attempts>/<vault 仓库目录名> <base>`。`worktree_root` 默认 `~/worktrees/looper-vault`，可以设成 vault 规则要求的位置（第 9.1 节）；一律在 vault 仓库和 runtime 目录之外，分支名带尝试次数，不和上一次失败的撞名。
 3. 在 worktree 里按顺序执行改动，文件操作沿用 `vault.write` 的做法（从目录 fd 逐层打开、不跟随符号链接、临时文件 fsync 后 `os.replace`、保留原权限），根换成 worktree 里对应的目录：
    - `create_note`：路径不存在，否则 `conflict`（`base_changed`）；缺的上级目录只能在允许的目录里建；
    - `replace_note`：当前 sha256 等于 `base_sha256`，否则 `conflict`（`base_changed`）；
@@ -650,13 +650,13 @@ vault 规则允许的是「用户确认后由代码提交」。只有当确认�
 4. 核对结果（第 5.5 节第 4 条）。
 5. `git -C <worktree> add -- <路径…>`，`git -C <worktree> -c commit.gpgsign=false commit -F <信息文件> -- <路径…>`：只暂存、只提交这些路径；照常运行 vault 自己的 hook（不加 `--no-verify`），hook 拒绝是 `blocked`（`hook_rejected`）。
 6. 核对提交：`git diff-tree --no-commit-id --name-only -r -z <commit>` 正好是这些路径，每个路径在提交里的内容符合第 4 步（hook 改过文件也会被发现）；不符是 `blocked`（`commit_mismatch`）。
-7. 主分支动过（`rev-parse <branch>` 不等于 `base`）：`git diff --quiet <base> <branch> -- <路径…>`：新提交没碰这些路径就在 worktree 里 `git rebase <branch>` 后回到第 6 步再核对一次；碰过就 `conflict`（`target_changed`）。这就是 vault 规则的「在 worktree 里 rebase main 后再合」。
+7. 主分支动过（`rev-parse <branch>` 不等于 `base`）：`git diff --quiet <base> <branch> -- <路径…>`：新提交没碰这些路径就基于新主分支重建本次自有 worktree、重新执行并校验改动；碰过就 `conflict`（`target_changed`）。不执行 rebase，不改写操作者的分支历史。
 8. 合并前再查一次第 6.1 节的最后两条，然后在主检出 `git merge --ff-only looper/memory/M-0042-a<n>`。失败时主检出不变（实测，第 15 节）：因为重叠的未提交或未跟踪文件是 `blocked`（`dirty_target`），其他是 `blocked`（`git_failed`）。
 9. 核对主检出：`rev-parse HEAD` 等于这次的提交，每个路径的 `git show HEAD:<路径>` 符合第 4 步。
 10. 清理：`git worktree remove <worktree>`、`git branch -d <分支>`（已合并，安全删除）。清理失败只记警告，housekeeping 之后再删（第 6.5 节）。
 11. 一个事务：候选 `written`（`commit_sha`、`written_at`），记 `write` 事件；线索来源的线索改成 `promoted`；发结果（第 5.3 节）。
 
-任何一步失败：删掉这次的 worktree 和分支（都是这次尝试自己建的、记在事件里的；没合并的分支用 `branch -D`），主检出不动，候选进上表对应的状态。
+合并前检查或 ff-only 合并受阻：保留已校验的提交、自有 worktree 和分支，候选进 `blocked`，并持久记录到「需要你处理」；操作者处理并合入或删除保留分支后，该提醒不再显示。其他合并前失败才清理本次自有 worktree 和分支，主检出不动，候选进上表对应的状态。
 
 ### 6.3 提交信息
 
@@ -693,7 +693,7 @@ Looper-Content-Sha256: 3f9a…（64 位）
 ### 6.5 启动时的核对和清理
 
 - **`writing` 的候选：** 在主分支最近 500 个提交里找 trailer `Looper-Candidate: M-0042` 和 `Looper-Attempt: <n>`（`git log --format=%H%x00%B`，代码解析 trailer，不用 `--grep` 的子串匹配）。找到：核对第 6.2 节第 9 步，通过就 `written`。没找到：删掉这次尝试的 worktree 和分支；`attempts < 3` 回 `confirmed` 再写一次（内容和确认都没变），否则 `blocked`（`interrupted`）。
-- **housekeeping：** `worktree_root` 下没有对应 `writing` 候选的目录，用 `git worktree remove --force` 删掉（只删 Looper 自己建的：目录在 `worktree_root` 下、分支以 `looper/memory/` 开头），再 `git worktree prune`；以 `looper/memory/` 开头、没有对应候选的分支用 `branch -D` 删。
+- **housekeeping：** 未合入的受阻提交带保留标记，不自动删除；其余 `worktree_root` 下没有对应 `writing` 或 `blocked` 候选的目录，用 `git worktree remove --force` 删掉（只删 Looper 自己建的：目录在 `worktree_root` 下、分支以 `looper/memory/` 开头），再 `git worktree prune`；以 `looper/memory/` 开头、没有对应候选的分支用 `branch -D` 删。
 
 ### 6.6 已知限制
 
@@ -735,7 +735,7 @@ Looper-Content-Sha256: 3f9a…（64 位）
 | `required_frontmatter` | `[]` | 新笔记必须有的 frontmatter 键 |
 | `sources` | 全关 | `{"manager": false, "tasks": false, "leads": false}` |
 | `branch` | 保存时主检出的分支 | 分离 HEAD 时拒绝保存 |
-| `worktree_root` | `<runtime_root>/vault-worktrees` | 绝对路径，在 vault 仓库之外，服务的用户可写 |
+| `worktree_root` | `~/worktrees/looper-vault` | 绝对路径，在 vault 仓库和 runtime 目录之外，服务的用户可写 |
 | `commit_prefix` | 记忆区的第一级目录名 | 一行，最多 40 字 |
 | `push_channel` | 无（只进记忆页） | 一个填了「我的 ID」的飞书或 Telegram 机器人；改它要重新确认 |
 | `pending_days` | 7 | 1–90 |
@@ -808,7 +808,7 @@ looper memory eval-export --out FILE      # 驳回的候选和理由，只能写
 - 路由：记忆路由在意图之前，「驳回 M-0042」引用意图推送时也不碰那条意图；群聊、非操作者回代码的拒绝；
 - 种子：`quote` 不在操作者消息里被拒；类型和来源的组合；密钥命中；
 - 起草校验：编号不存在、路径出界（`..`、`mine/`、规则文件、没配的目录、符号链接）、新笔记缺 frontmatter 键、新笔记没更新索引、锚点不唯一、长度；
-- 写入（真实 git）：成功路径和提交信息、只提交这些路径；主检出不相关文件脏时照常、目标脏或未跟踪时 `blocked` 且主检出不变；主分支前进但没碰目标时 rebase 后合并、碰了时 `conflict`；hook 拒绝；hook 改了文件 → `commit_mismatch`；分离 HEAD、分支不对、合并进行中；`index.lock` 重试；超时；中途退出后按 trailer 核对；清理残留的 worktree 和分支；两条候选同时往一个索引加行，先后都写入；
+- 写入（真实 git）：成功路径和提交信息、只提交这些路径；主检出不相关文件脏时照常、目标脏或未跟踪时 `blocked` 且主检出不变；主分支前进但没碰目标时重放校验后合并、碰了时 `conflict`；hook 拒绝；hook 改了文件 → `commit_mismatch`；分离 HEAD、分支不对、合并进行中；`index.lock` 重试；超时；中途退出后按 trailer 核对；清理残留的 worktree 和分支；两条候选同时往一个索引加行，先后都写入；
 - 出处被删：未写入的候选删除、已写入的清文字留元数据；
 - 删除和墓碑：删除后只剩墓碑；同指纹的 `agent`、`external` 种子被拒绝且不入库；`operator` 种子收下并清掉墓碑；
 - 出处类别：生成列的映射；合并后取最不可信的类别；线索并进偏好时不并；
@@ -864,7 +864,7 @@ looper memory eval-export --out FILE      # 驳回的候选和理由，只能写
 | Q7 | 打开 `memory_closeout` 的项目还跑不跑 `[VAULT]` | **不跑**，换成 `[MEMORY]`；记忆区不能同时是直接可写的目录（设置校验拒绝重叠） | D11 |
 | Q8 | 要不要定期批量回看对话、自动找出该记的 | **v0 不做**，只靠对话里的工具；先看一段时间的采纳率和漏记的情况再决定。批量回看要读全部对话，花费和隐私面都更大 | D17 |
 | Q9 | `knowledge_vault.path` 保持指向记忆区，还是改指 vault 根目录 | **保持现状**（`root = ""`）：vault 级规则里约束写入的几条由代码执行；改指根目录会让任务的 agent 也读到个人笔记 | D18 |
-| Q10 | worktree 放哪里 | **默认 `<runtime_root>/vault-worktrees`**；vault 规则写明了 worktree 位置的，把 `worktree_root` 设成它（目录结构 `<worktree_root>/<候选>/<仓库名>` 已经和常见约定一致） | D19 |
+| Q10 | worktree 放哪里 | **默认 `~/worktrees/looper-vault`**；vault 规则写明了 worktree 位置的，把 `worktree_root` 设成它（目录结构 `<worktree_root>/<候选>/<仓库名>` 已经和常见约定一致） | D19 |
 | Q11 | 推送发到哪里 | **和意图一样只发操作者私聊**（`push_channel`，必须填了「我的 ID」）；没设置就只进记忆页 | D20 |
 | Q12 | 已写入的候选，出处被删时 | **vault 里的笔记不动，PG 只留元数据**（D14）；要改由操作者自己改 | D14 |
 | Q13 | 账本里操作者确认过的决定要不要自动变成记忆候选 | **不自动**；以后在待办页的决定上加「提议记入记忆」按钮（记为非核心待办）。账本是「现在要处理什么」，记忆是长期的，两者的有效期不同 | D21 |

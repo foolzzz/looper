@@ -62,6 +62,11 @@ def test_settings_are_confirmed_and_clients_are_refused(monkeypatch, tmp_path):
             assert answer["result"]["settings"]["max_lessons"] == 12
             status, answer = await call("memory_lessons.settings_put", {"enabled": True})
             assert status == 200 and answer["result"]["enabled"], answer
+            epoch = await pool.fetchval("SELECT enabled_at FROM memory_retro_activation")
+            assert epoch is not None
+            assert answer["result"]["settings"]["retro_budget_usd"] == .10
+            await call("memory_lessons.settings_put", {"enabled": True})
+            assert await pool.fetchval("SELECT enabled_at FROM memory_retro_activation") == epoch
             saved = await pool.fetchval("SELECT value FROM system_settings WHERE key='memory_lessons'")
             for body in ({"max_lessons": True}, {"unknown": True}, {"weekly": {"time": "9:30"}}):
                 status, answer = await call("memory_lessons.settings_put", body)

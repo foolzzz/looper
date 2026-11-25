@@ -1,5 +1,5 @@
 {
-  "baseline": "ec373aa0c",
+  "baseline": "e574e70dd",
   "description": "Per-input and per-tool baseline captured from the implementation before routed-session allowlists. All seeded data is synthetic.",
   "cases": {
     "true:operator": {
@@ -132,8 +132,8 @@
         "looper_vault_read": "a28033c51c0ccd3cda9cf6752871f817429aeac016f43cdb474003a7633b94f8",
         "looper_session_search": "5beb1f2b60322dde5a56983fada64be29c3fb00e1c75d058a04aad33606297ff",
         "looper_reminder_create": "7d4970d9b326ac03c5bed1e5d21e3f8a4a15ffcc33cdbd4f70e4d1942d3375f5",
-        "looper_reminder_list": "d5ec0cf3479456f62587437ef5356e6047ce9c1f3eec2c19d07522ee31d8c694",
-        "looper_reminder_cancel": "9c7ae83502a9cb6a1a79b237e5f324f203f02a479a4517369308f5452fc40ad4"
+        "looper_reminder_list": "e6cb50f2b4ac917489b72ab112f38a6c929ab078826ae903d3fdf9cc76060ab1",
+        "looper_reminder_cancel": "329076d475b5b1810b52844839e2bfcc2c7582c11c2631c18ed730954bc5a42e"
       }
     },
     "false:operator": {
@@ -264,8 +264,8 @@
         "looper_vault_search": "e1293dd8d284237e250b0f00c4e33c8058a10c32b9cd400c007dd56f874cc408",
         "looper_vault_read": "a28033c51c0ccd3cda9cf6752871f817429aeac016f43cdb474003a7633b94f8",
         "looper_reminder_create": "7d4970d9b326ac03c5bed1e5d21e3f8a4a15ffcc33cdbd4f70e4d1942d3375f5",
-        "looper_reminder_list": "d5ec0cf3479456f62587437ef5356e6047ce9c1f3eec2c19d07522ee31d8c694",
-        "looper_reminder_cancel": "9c7ae83502a9cb6a1a79b237e5f324f203f02a479a4517369308f5452fc40ad4"
+        "looper_reminder_list": "e6cb50f2b4ac917489b72ab112f38a6c929ab078826ae903d3fdf9cc76060ab1",
+        "looper_reminder_cancel": "329076d475b5b1810b52844839e2bfcc2c7582c11c2631c18ed730954bc5a42e"
       }
     },
     "false:group": {

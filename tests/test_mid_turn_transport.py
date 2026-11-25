@@ -740,12 +740,13 @@ def test_consumption_during_failed_drain_cleanup_prevents_a_duplicate_retry() ->
     asyncio.run(run())
 
 
-@pytest.mark.parametrize("superseded,respond", [(False, True), (True, True), (True, False)])
-def test_unclaimed_native_turn_is_settled_before_resident_reuse(tmp_path, monkeypatch, superseded, respond):
-    """An unfinished B must be interrupted, or boundedly retired, before C is written."""
+@pytest.mark.parametrize("superseded,respond", [(False, True), (False, False), (True, False)])
+def test_unclaimed_native_turn_is_settled_before_resident_reuse(tmp_path, monkeypatch, caplog, superseded, respond):
+    """Abandonment withdraws B; a different caller waits without rewriting it."""
     from looper.agents import claude_cli
 
     monkeypatch.setattr(claude_cli, "INTERRUPT_GRACE_SEC", 0.3)
+    monkeypatch.setattr(claude_cli, "RESERVED_INPUT_WAIT_SEC", 0.1, raising=False)
 
     async def run():
         resident = ResidentClaude(label="synthetic-unclaimed")
@@ -797,16 +798,19 @@ def test_unclaimed_native_turn_is_settled_before_resident_reuse(tmp_path, monkey
             assert output._buffering is not None and not output.queued["B"].completed.is_set()
             if superseded:
                 next_turn = resident.run_turn("C", observe, tag=SimpleNamespace(message_id="C"))
-                if respond:
-                    result = await asyncio.wait_for(next_turn, 3)
-                    assert result.result_event["result"] == "C"
-                else:
-                    with pytest.raises(RuntimeError, match="settling an unclaimed input"):
-                        await asyncio.wait_for(next_turn, 3)
+                with pytest.raises(RuntimeError, match="native input B did not complete") as raised:
+                    await asyncio.wait_for(next_turn, 3)
+                assert type(raised.value).__name__ == "ReservedInputTimeout"
+                assert "refusing to interrupt or rewrite it" in caplog.text
+                assert resident._process is process and process.returncode is None
+                assert output.queued["B"].text == "B" and output._buffering is not None
+                assert not (tmp_path / "controls.jsonl").exists()
+                return  # neither C nor a duplicate B was written; B retains its native output
             else:
                 await asyncio.wait_for(resident.discard_reserved_input("B"), 3)
-                result = await asyncio.wait_for(resident.run_turn("C", observe), 3)
-                assert result.result_event["result"] == "C"
+                if respond:
+                    result = await asyncio.wait_for(resident.run_turn("C", observe), 3)
+                    assert result.result_event["result"] == "C"
             assert output.queued == {} and output._buffering is None
             if respond:
                 assert resident._process is process and process.returncode is None

@@ -1,7 +1,7 @@
 """``attention.summary``: what needs the operator now (``agents.attention``), for the dashboard's Needs you page.
 
-Read-only and the operator's alone: it lists intents and the Manager's confirmations, which an API client does not
-see. While ``attention.enabled`` is off it answers ``conflict`` (the dashboard's 409).
+The summary is read-only and the operator's alone: it lists intents and the Manager's confirmations, which an API
+client does not see. The operator can change its default-off switch through ``attention.settings_update``.
 """
 
 from .. import attention
@@ -24,11 +24,18 @@ OPERATIONS = (
               "Read whether the needs-you summary is enabled. Disabled by default; reads no summary sources.",
               _object({}, closed=True), _object({"enabled": _BOOL}, closed=True), operator_only=True,
               level=ActionLevel.INSIDE),  # reads only Looper's own feature setting
+    Operation("attention.settings_update", "POST", "/api/v1/attention/settings_update",
+              "Turn the needs-you summary on or off.",
+              "Turn the needs-you summary on or off. Null restores the default, off. On, the dashboard's Needs you "
+              "page and the operator's /todo read the summary assembled by code, without a model call.",
+              _object({"enabled": {"type": ["boolean", "null"]}}, closed=True),
+              _object({"enabled": _BOOL}, closed=True), risk="high", confirms=True, operator_only=True,
+              level=ActionLevel.INSIDE),  # stores only Looper's own feature switch
     Operation("attention.summary", "POST", "/api/v1/attention/summary",
               "Read what needs the operator now.",
               "Read what needs the operator now. The sections: user gates waiting for an answer, a Manager's "
               "operations waiting for confirmation, failing schedules, failing runtime logins, pending intents, the "
-              "ledger's items that wait for the user, and messages that may not have arrived. Each section is ok, error (its source "
+              "ledger's items that wait for the user, terminal reminder failures, and messages that may not have arrived. Each section is ok, error (its source "
               "could not be read) or unknown, with its count and up to 20 items; a feature that is off leaves its "
               "section out. Read-only: nothing is stored and no model runs. Answers conflict while "
               "attention.enabled is off.",
@@ -36,9 +43,20 @@ OPERATIONS = (
 )
 
 
+async def impact(server, operation, arguments, principal, headers):
+    if operation.operation_id != "attention.settings_update":
+        return None
+    value = arguments["enabled"]
+    return (f"Set attention.enabled to {str(value is True).lower()}"
+            f"{' (built-in default)' if value is None else ''}? "
+            "This controls the Needs you page, attention.summary and the operator's code-only /todo reply.")
+
+
 async def run(server, operation, arguments, principal, headers):
     if operation.operation_id == "attention.settings_get":
         return {"enabled": await attention.enabled()}
+    if operation.operation_id == "attention.settings_update":
+        return await attention.update(arguments["enabled"])
     if not await attention.enabled():
         raise OpError(ErrorCode.CONFLICT, "the needs-you summary is not enabled (system setting attention.enabled)")
     return _plain(await attention.collect(managers=getattr(server, "_managers", None)))

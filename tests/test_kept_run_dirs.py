@@ -279,7 +279,8 @@ def test_startup_retries_keeper_start_times_before_deciding_liveness(tmp_path, m
     monkeypatch.setattr(proc_tree, "_start_times", starts)
     monkeypatch.setattr(kept_dirs, "asyncio", Mock(wraps=asyncio, sleep=sleep))
     monkeypatch.setattr(kept_dirs, "end_keeper", end)
-    scan = asyncio.run(kept_dirs.scan_at_start(tmp_path))
+    with caplog.at_level("WARNING", logger=kept_dirs.__name__):
+        scan = asyncio.run(kept_dirs.scan_at_start(tmp_path))
     assert calls == [[123]] * (failures + 1)
     assert [call.args[0] for call in sleep.await_args_list] == [1, 2][:failures]
     assert [record.getMessage() for record in caplog.records if record.name == kept_dirs.__name__] == [

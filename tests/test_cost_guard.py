@@ -1,5 +1,6 @@
 """Admission observes reservations without changing the execution contract."""
 import asyncio
+import logging
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -249,10 +250,17 @@ def test_schedule_observes_its_existing_shared_daily_cap_without_combining_globa
     asyncio.run(check())
 
 
+def _cost_warnings(caplog):
+    # Admission observations are INFO; only guard warnings mean a cap cannot be verified.
+    return [r for r in caplog.records if r.name == cg.__name__ and r.levelno >= logging.WARNING]
+
+
+@pytest.mark.parametrize('root_log_level', [logging.WARNING, logging.INFO], ids=['warning', 'info'])
 @pytest.mark.parametrize('mode', [Mode.OBSERVE, Mode.ENFORCE])
 @pytest.mark.parametrize('kind', [cg.RunKind.WORKER, cg.RunKind.PROCESSOR])
-def test_unknown_spend_warns_once_for_each_affected_cap(monkeypatch, caplog, mode, kind):
+def test_unknown_spend_warns_once_for_each_affected_cap(monkeypatch, caplog, mode, kind, root_log_level):
     from looper.agents.cost_guard_settings import RoleLimits
+    caplog.set_level(root_log_level)
 
     async def check():
         rows = [dict(id=1, run_kind=kind.value, task_id='task-a', schedule_id='schedule-a', created_at=NOW,
@@ -271,13 +279,13 @@ def test_unknown_spend_warns_once_for_each_affected_cap(monkeypatch, caplog, mod
             {'schedule_day', 'global_day', 'role_day'} if kind is cg.RunKind.PROCESSOR else
             {'task', 'schedule_day', 'global_day'})
         assert 'claude-haiku-5-5' in caplog.text and 'cannot verify' in caplog.text
-        assert len(caplog.records) == len(snapshot['counters'])
-        assert all(record.levelname == 'WARNING' for record in caplog.records)
+        assert len(_cost_warnings(caplog)) == len(snapshot['counters'])
+        assert all(record.levelname == 'WARNING' for record in _cost_warnings(caplog))
         caplog.clear()
         await g.admit(kind, g.scopes(kind, 'task-a', 'schedule-a', cg.Currency.PROVIDER),
                       cg.Currency.PROVIDER, .1)
         await g.rebuild()
-        assert not caplog.records
+        assert not _cost_warnings(caplog)
     asyncio.run(check())
 
 
@@ -301,7 +309,10 @@ def test_unknown_settlement_retains_visible_gap_until_rebuild(monkeypatch, caplo
     asyncio.run(check())
 
 
-def test_unknown_equivalent_cost_does_not_warn_for_separate_provider_daily_cap(monkeypatch, caplog):
+@pytest.mark.parametrize('root_log_level', [logging.WARNING, logging.INFO], ids=['warning', 'info'])
+def test_unknown_equivalent_cost_does_not_warn_for_separate_provider_daily_cap(monkeypatch, caplog, root_log_level):
+    caplog.set_level(root_log_level)
+
     async def check():
         rows = [dict(id=1, run_kind='worker', task_id=None, schedule_id=None, created_at=NOW,
                      model='unpriced-subscription', status='completed', cost_usd=None,
@@ -311,7 +322,7 @@ def test_unknown_equivalent_cost_does_not_warn_for_separate_provider_daily_cap(m
         caplog.clear()
         scopes = g.scopes(cg.RunKind.WORKER, None, None, cg.Currency.PROVIDER)
         await g.admit(cg.RunKind.WORKER, scopes, cg.Currency.PROVIDER, .1)
-        assert not caplog.records
+        assert not _cost_warnings(caplog)
         assert next(row for row in g.snapshot()['counters'] if row['currency'] == cg.Currency.PROVIDER.value)[
             'cost_status'] == 'known'
     asyncio.run(check())

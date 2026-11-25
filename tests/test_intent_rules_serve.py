@@ -10,7 +10,13 @@ from tests.fake_claude import fake_claude
 pytestmark = pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
 
 
-def test_rule_management_round_trip_on_fresh_serve(tmp_path):
+def test_rule_management_round_trip_on_fresh_serve(tmp_path, monkeypatch):
+    monkeypatch.setattr(runner, "_SERVE", """import sys
+from looper import ops_config
+config = ops_config.load(ops_config.Flags(runtime_root=sys.argv[2], port=int(sys.argv[1])))
+assert config.port != 8767
+ops_config.write_private(config.path, ops_config.render(config))
+""" + runner._SERVE)
     runtime, bins = tmp_path / "runtime", tmp_path / "bin"
     bins.mkdir()
     fake_claude(bins / "claude", "import sys\nprint('2.1.0')\nsys.exit(0)\n")
@@ -21,7 +27,7 @@ def test_rule_management_round_trip_on_fresh_serve(tmp_path):
                 return api.post("/api/v1/intent_rules/" + action, body or {})["result"]
             initial = call("list")
             assert initial["generation"] == 0 and initial["rules"] == []
-            assert initial["runtime_ready"] is False
+            assert initial["runtime_ready"] is True
             command = {"kind": "rule_create", "rule": {"enabled": True, "position": 1,
                 "intent_type": "any", "scope": {"kind": "all"}, "conditions": [],
                 "action": "push_for_confirmation", "project_id": None, "template_key": None}}
@@ -68,6 +74,10 @@ from looper.agents import serve
 from looper.agents.channels.base import PostReceipt
 from looper.agents.message import MessageType
 from looper.cli import main
+from looper import ops_config
+config = ops_config.load(ops_config.Flags(runtime_root=sys.argv[2], port=int(sys.argv[1])))
+assert config.port != 8767
+ops_config.write_private(config.path, ops_config.render(config))
 trace = Path(sys.argv[2]) / 'offline-events.jsonl'
 class OfflineRegistry(serve.ChannelRegistry):
     async def post(self, channel, target, text, **kwargs):

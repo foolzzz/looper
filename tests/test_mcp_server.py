@@ -585,7 +585,7 @@ for (const dep of [...official.inject, ...runner.inject, 'systemPrompt']) {
 if (new Set(plugin.inject).size !== plugin.inject.length) throw new Error('duplicate dependency');
 const entries = [
   {id:'system-prompt', name:pathToFileURL(require.resolve('@deepseek-ai/dsh-system-prompt')).href},
-  {id:'tools', name:pathToFileURL(require.resolve('@deepseek-ai/dsh-tools')).href, config:{mode:'native'}},
+  {id:'tools', name:pathToFileURL(require.resolve('@deepseek-ai/dsh-tools')).href},
   {id:'headless-runner', name:moduleUrl, config:{task:'exercise the bridge'}},
 ];
 writeFileSync(configPath, JSON.stringify(entries));

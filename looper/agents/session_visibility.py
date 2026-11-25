@@ -1,8 +1,8 @@
-"""Fail-closed model boundary for routed group and other-sender DM sessions.
+"""Fail-closed model boundary for the default Manager's routed group and DM sessions.
 
 NON_MAIN_ALLOWLIST is the complete grant, for both inputs and tools. New global
 sections, contracts and tools do not inherit permission. Main (including every
-turn while routing is off) keeps its existing assembly and authorization.
+turn while routing is off) and scenario Managers keep their existing assembly and authorization.
 """
 
 from dataclasses import dataclass
@@ -47,6 +47,8 @@ PUBLIC_PROMPT = (
 )
 
 
-def for_session(key: str) -> SessionAllowlist | None:
-    """An already routed turn stays restricted even if routing is switched off."""
-    return None if key == "main" else NON_MAIN_ALLOWLIST
+def for_session(key: str, *, manager_id: str) -> SessionAllowlist | None:
+    """Only the default Manager's routed turns are restricted, including while routing drains."""
+    from .managers_api import DEFAULT_MANAGER_ID
+
+    return NON_MAIN_ALLOWLIST if manager_id == DEFAULT_MANAGER_ID and key != "main" else None
