@@ -119,7 +119,7 @@ async def _stored(db, count: int) -> None:
 
 @asynccontextmanager
 async def _pools(db, tmp_path, monkeypatch, *, timeout=0, cap=None, rooms=False, fallback=False, review=False,
-                 run_prefix='.k'):
+                 run_prefix='.k', before_dispatch=None):
     run_dir = _short_directory(run_prefix)
     run_id = run_dir.name
     saved = {}
@@ -197,6 +197,8 @@ async def _pools(db, tmp_path, monkeypatch, *, timeout=0, cap=None, rooms=False,
     try:
         for pool in pools:
             await pool.start(bus)
+        if before_dispatch is not None:
+            await before_dispatch()
         await pools[0]._dispatch(envelope)
         await _stored(db, 3)
         case.original = pools[0]._active[run_id].handle
@@ -253,6 +255,59 @@ async def _finished(case):
     assert result.payload['plan_id'] == 'plan-adopt'
     assert not case.b._inputs and not case.b._slots
     return result
+
+
+@pytest.mark.parametrize('confirmed', [False, True])
+def test_adoption_replay_preserves_lesson_delivery_confirmation(tmp_path, monkeypatch, confirmed):
+    from looper.agents import memory_lesson_injection as lessons
+    from looper.agents.memory_model import Action, Actor, State, Via, parse_id
+    from looper.db import memory, memory_lessons, projects
+    from looper.db import memory_lesson_injection as store
+    from tests.memory_lessons_support import lesson
+
+    async def run(db):
+        candidate = None
+        mark_delivered = store.mark_delivered
+
+        async def prepare_lessons():
+            nonlocal candidate
+            await db.execute("UPDATE projects SET memory_lessons='on' WHERE id='project-adopt'")
+            await db.execute("INSERT INTO system_settings(key,value) VALUES ('memory_lessons','{\"enabled\":true}')")
+            candidate = parse_id(await lesson(db, 'project-adopt', 'Check synthetic evidence'))
+            async with memory.transaction(db) as conn:
+                await memory_lessons.transition_lesson(conn, candidate, State.IN_EFFECT, action=Action.ACTIVATE,
+                    actor=Actor.USER, via=Via.DASHBOARD, now=datetime.now(timezone.utc), valid_days=90)
+            await lessons.ensure_snapshot('task-adopt', 'project-adopt')
+            project = await projects.get_project('project-adopt')
+            monkeypatch.setattr(worker.WorkerPool, '_task_project', AsyncMock(return_value=project))
+            if not confirmed:
+                # Preserve the durable crash window: record and input exist, but no delivery commit survived.
+                monkeypatch.setattr(store, 'mark_delivered', AsyncMock())
+
+        async with _pools(db, tmp_path, monkeypatch, before_dispatch=prepare_lessons) as case:
+            record = (await llm_records.list_records())[0]
+            delivery = await store.injection_for_record(record['id'])
+            assert delivery is not None
+            assert delivery['state'] == ('delivered' if confirmed else 'prepared')
+            before = await db.fetchval('SELECT COALESCE(sum(injected),0) FROM memory_lesson_stats')
+            assert before == int(confirmed)
+            assert record['metadata']['lesson_injection_id'] == delivery['id']
+            await _detach(case)
+            receipt = AsyncMock(wraps=mark_delivered)
+            monkeypatch.setattr(store, 'mark_delivered', receipt)
+            handle = await _adopt(case)
+            (tmp_path / 'release').touch()
+            result = await _finished(case)
+            assert result.payload['status'] == 'completed'
+            assert handle.replay_until > 0 and handle.replay_finished.is_set()
+            recovered = await store.get_injection(delivery['id'])
+            assert recovered['state'] == ('delivered' if confirmed else 'uncertain')
+            assert await db.fetchval('SELECT COALESCE(sum(injected),0) FROM memory_lesson_stats') == before
+            assert await db.fetchval('SELECT count(*) FROM memory_injection_items WHERE candidate_id=$1',
+                                     candidate) == int(confirmed)
+            receipt.assert_not_awaited()
+
+    run_db(run, monkeypatch, timeout=35)
 
 
 @pytest.mark.parametrize('review', [False, True])

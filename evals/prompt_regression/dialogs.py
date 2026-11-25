@@ -200,6 +200,7 @@ class Dialog:
     sessions: bool = False
     failure_hold: bool = False  # create an act-mode environment hold before the first Manager turn
     memory: bool = False  # an enabled synthetic memory vault, without a drafting budget or push channel
+    resident_profile: Literal["present-off", "present-on", "absent-off", "absent-on"] | None = None
 
 
 # The gate the gate dialogs' running task waits at, and what it asks.
@@ -4035,6 +4036,11 @@ def run_dialog(api: Api, dialog: Dialog, *, database_url: str, project_id: str, 
                                                   manager_profile=manager_profile)
         elif dialog.seed is not None:
             dialog.seed(api, project_id)
+        if dialog.resident_profile is not None:
+            from .resident_profile import seed
+            if runtime_root is None:
+                raise EvalError("resident-profile dialogs need a disposable runtime root")
+            seed(api, runtime_root, dialog.resident_profile)
         api_manager = (manager_profile or {}).get("runtime_type") == "api"
         api_turn = api_manager
         last_model_api = api_manager
@@ -4357,6 +4363,9 @@ def run(
                     if mode == "real" and register is not None and register.get("runtime", {}).get("type") == "dsh":
                         row["runtime_evidence"] = runtime_evidence(api)
                 cost, models = _usage(database_url)
+                if dialog.resident_profile is not None:
+                    from .resident_profile import reported_models
+                    row["resolved_models"] = reported_models(database_url)
                 if stable_context:
                     row["state_views"] = _state_views(database_url)
                 if "runtime_evidence" in row:

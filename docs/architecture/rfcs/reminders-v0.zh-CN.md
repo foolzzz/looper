@@ -59,9 +59,9 @@ CREATE TABLE IF NOT EXISTS reminders (
 | `sending` | 已认领，正在问渠道；认领先提交再发 | 投递 |
 | `delivered` | 已投递 | 投递 |
 | `failed` | 渠道拒收 3 次，或 bot 的操作者已经不是这个人 | 投递 |
-| `uncertain` | 可能已发出（超时、断连、发送中进程停了）；不再发 | 投递 |
+| `uncertain` | 可能未送达（超时、断连、发送中进程停了）；不再发 | 投递 |
 | `missed` | 到点时 Looper 没在发提醒，而且不是要补发的那一条 | 投递 |
-| `cancelled` | 用户取消，只能从 `pending` 进入 | 工具 |
+| `cancelled` | 用户取消待投递提醒，或处理 `uncertain` / `failed` / `missed` 的终态提醒 | 工具 |
 
 `settled_at` 为空当且仅当状态是 `pending` 或 `sending`，由表约束保证。
 
@@ -79,7 +79,7 @@ CREATE TABLE IF NOT EXISTS reminders (
 |---|---|---|
 | `looper_reminder_create` | `text`（用户的原话）加上 `at`（`HH:MM`：下一个这个时刻，今天或明天；或 `YYYY-MM-DD HH:MM`）和 `timezone`（IANA，默认服务器所在时区），或者 `in_minutes`。时间由代码解析，取这个钟点在时区里最近的、还没到的那个时刻：夏令时结束那天一个钟点有两次，取还没过的第一次；夏令时开始那天被跳过的钟点，改为跳过之后的第一分钟。这两种情况都在确认里说明（「注意：11-01 01:30 在 America/Los_Angeles 有两次（夏令时结束），记的是第二次（PST）。」「注意：03-14 02:30 在 America/Los_Angeles 不存在（夏令时开始），改为 03-14 03:00。」），答复里也带 `clock_change`。已经过去、超过一年或格式不对的拒绝，并说明该怎么改。存进表以后按 id 读回来再返回，Looper 在回复后面加一行代码写的确认：「已记下提醒 #3：今天 11-20（周五）15:00（America/Los_Angeles），到时发到这个私聊：看 PR」 | write |
 | `looper_reminder_list` | 现在的时间，加上待投递的提醒（最近的在前），或指定状态的（`all`：全部，最新的在前），每条有 id、原话、到点时间和时区、状态、原因 | read |
-| `looper_reminder_cancel` | 按 id 取消一条待投递的提醒；不是 `pending` 的答 `conflict`，没有的答 `not_found`。Looper 在回复后面加一行「已取消提醒 #3（原定 ……）：……」 | write |
+| `looper_reminder_cancel` | 按 id 取消 `pending` 提醒，或将 `uncertain` / `failed` / `missed` 终态提醒标为 `cancelled`，从需要处理的列表中移除；其他状态答 `conflict`，没有的答 `not_found`。重新安排时先取消，再新建。Looper 在回复后面加一行「已取消提醒 #3（原定 ……）：……」 | write |
 
 **送到哪里：**
 
@@ -94,7 +94,7 @@ CREATE TABLE IF NOT EXISTS reminders (
 
 每一次：
 
-1. **收拾半途停下的：** 还在 `sending` 的，说明上一个发送者在问渠道的途中停了（持锁的才发，所以持锁时看到的 `sending` 一定不是活的）：记为 `uncertain`，不再发。
+1. **收拾半途停下的：** 还在 `sending` 的属于上一个发送者（持锁的才发，所以持锁时看到的 `sending` 一定不是活的）。没有 `post_started_at` 的放回 `pending`，保留原幂等键；在调用渠道之前独立提交 `post_started_at`，有该标记的记为 `uncertain`，不再发。恢复状态和已有决策回执在同一事务中结算；旧协议的 `sending` 行在升级时补标记，保守地记为 `uncertain`。
 2. **决定发哪些**（纯函数 `plan`）：取 `due_at <= now` 的 `pending`：
    - 到点不超过 2 分钟的照常发，同一时刻到点的几条都发（2 分钟是 12 次检查，重启、热升级交接、慢一拍都在里面）；
    - 到点超过 2 分钟的算错过（Looper 停机、睡眠、卡住、开关关着或在排空）。按投递目标分组，每组只发最新的一条，前提是它到点不超过 36 小时，而且这一次没有按时的提醒发往同一个私聊（按时那条更新）；其余记为 `missed`，原因写明是超过 36 小时，还是有更新的一条发了。例如同一个私聊里有 60、9、1 分钟前到点的三条，只发 1 分钟前的那条。
@@ -103,6 +103,10 @@ CREATE TABLE IF NOT EXISTS reminders (
    - 发出：`delivered`，记下消息 id；
    - 渠道明确拒收：放回 `pending`，下一次再试，第 3 次还拒收就 `failed`；
    - 结果不明：`uncertain`，不再发。
+
+`uncertain`、`failed`、`missed` 在终态结算后的 7 天内，每条提醒在 needs-you 的 `reminders` 分类中占一项，包含原文、原定时间和时区、状态；`uncertain` 只说「可能未送达」。用户用现有取消工具处理后立即移除；不增加 dismiss 工具或迁移。重新安排走取消旧提醒后新建。7 天从结算时间开始，使停机后刚被判定为错过的提醒也有完整的处理窗口。
+
+晨报开启 attention 时复用该项；关闭时仍在独立的短行中列出。相同 reminder id 的 digest 行折叠到这一项，但仍随晨报记录和消费原 digest id。终态提醒不参与空闲巡检候选，不单独主动发送。
 
 **文字由代码拼：**
 

@@ -88,6 +88,7 @@ export function VaultSettingsSection() {
             ...(profileSource.trim() && profileSource.trim() !== "关于我.md"
               ? { profile_source: profileSource.trim() } : {}),
             ...(settings.manager_read ? { manager_read: true } : {}),
+            ...(path.trim() && settings.worktree_root ? { worktree_root: settings.worktree_root } : {}),
           });
         }}>
           <p role={settings.problem ? "alert" : "status"}

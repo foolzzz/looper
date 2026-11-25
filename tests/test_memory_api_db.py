@@ -12,8 +12,9 @@ from tests import memory_support as sup
 from tests.db_support import DSN, run_db, v1_api
 
 pytestmark = pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
-_WRITES = ("confirm", "confirm_many", "reject", "edit", "retry", "revive", "delete", "redraft", "propose_from_lead")
-_OPERATIONS = ("list", "lessons_list", "get", "settings_get", "settings_put", "check", *_WRITES)
+_WRITES = ("confirm", "confirm_many", "reject", "edit", "retry", "revive", "delete", "redraft", "propose_from_lead",
+           "revoke", "renew")
+_OPERATIONS = ("list", "lessons_list", "task_lessons", "get", "settings_get", "settings_put", "check", *_WRITES)
 
 
 def test_the_operations_are_the_operators_and_add_no_tool():

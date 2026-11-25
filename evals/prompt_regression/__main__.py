@@ -10,7 +10,7 @@ from typing import Any
 
 from looper import env
 
-from . import compare, dialogs, runner
+from . import compare, dialogs, resident_profile, runner
 
 
 def _reps(text: str) -> int:
@@ -168,6 +168,17 @@ def _parser() -> argparse.ArgumentParser:
     talk.add_argument("--dsh-cli", action="store_true",
                       help='run every DSH role on the DSH CLI ([runtimes] dsh = "cli")')
 
+    profile = sub.add_parser("resident-profile", help="Compare the synthetic Manager profile off/on in fresh sessions.")
+    profile.add_argument("--mode", choices=("fake", "real"), default="fake")
+    profile.add_argument("--claude", help="absolute path to the approved real Claude Code executable")
+    profile.add_argument("--reps", default="2,1", help="Sonnet,Opus repetitions (default 2,1; Opus must be 1)")
+    profile.add_argument("--total-cap-usd", type=_case_budget, default=12)
+    profile.add_argument("--sonnet-cap-usd", type=_case_budget, default=.5)
+    profile.add_argument("--opus-cap-usd", type=_case_budget, default=1)
+    profile.add_argument("--pg-url", default=env.get("LOOPER_EVAL_DATABASE_URL"))
+    profile.add_argument("--out-dir", type=Path, default=runner.DEFAULT_OUT_DIR / "resident-profile")
+    profile.add_argument("--timeout", type=_case_budget)
+
     cmp = sub.add_parser("compare", help="Print the comparison table of two run files.")
     cmp.add_argument("new", type=Path)
     cmp.add_argument("base", type=Path, nargs="?")
@@ -238,6 +249,19 @@ def main(argv: list[str] | None = None) -> int:
     if not args.pg_url:
         print("error: give --pg-url (or set LOOPER_EVAL_DATABASE_URL)", file=sys.stderr)
         return 2
+    if args.command == "resident-profile":
+        try:
+            if args.mode == "real" and not args.claude:
+                raise ValueError("resident-profile real mode requires an explicit --claude executable")
+            result, path = resident_profile.run(
+                mode=args.mode, admin_url=args.pg_url, out_dir=args.out_dir, claude_bin=args.claude,
+                reps=tuple(int(n) for n in args.reps.split(",")), total_cap_usd=args.total_cap_usd,
+                sonnet_cap_usd=args.sonnet_cap_usd, opus_cap_usd=args.opus_cap_usd, timeout=args.timeout)
+        except (ValueError, runner.EvalError, OSError) as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 2
+        print(f"Run written to {path}\nTotal cost: {result['total_cost_usd']:.4f} USD")
+        return 2 if result["stopped_by_cap"] else exit_code(result)
     if args.command == "dialogs":
         return _dialogs(args)
     try:

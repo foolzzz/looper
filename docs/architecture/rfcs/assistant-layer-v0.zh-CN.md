@@ -378,7 +378,7 @@ Persona (set by the operator: your name, how you address them, your tone; Looper
 
 ### 5.3 1.3 会话路由（第一版）
 
-**开关：** `manager.session_routing.enabled`（默认关）、`manager.sessions.max_resident`（整数 1–16，默认 2，依据第 4.2 节的实测：按需恢复只比常驻慢 1–2 秒；1 表示只有 `main` 常驻）。只对默认管家生效；场景管家仍是一个会话。
+**开关：** `manager.session_routing.enabled`（默认关）、`manager.sessions.max_resident`（整数 1–16，默认 2，依据第 4.2 节的实测：按需恢复只比常驻慢 1–2 秒；1 表示只有 `main` 常驻）。只对默认管家生效。场景管家默认只有一个会话；打开它自己的按聊天会话路由（#1733，`managers.session_routing = per_chat`，默认 `off`）后，每个绑定的群各有一条会话。[群聊能力范围 RFC](chat-scopes-v0.zh-CN.md) 在此基础上按范围分会话。
 
 #### 5.3.1 会话键
 
