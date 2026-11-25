@@ -75,7 +75,8 @@ def test_off_keeps_exact_envelope_and_channel_calls(tmp_path, monkeypatch, chann
         decide = AsyncMock(side_effect=RuntimeError("off must not decide"))
         monkeypatch.setattr(delivery, "decide", decide)
         assert queued.payload == notice.payload()
-        assert queued.metadata == {"origin_channel_id": notice.channel_id}
+        assert queued.metadata == {"origin_channel_id": notice.channel_id,
+                                   "proactive": {"source": "task_notice", "source_ref": "task-notice", "manager_id": "manager"}}
         assert (await adapter.deliver(queued)).success
         decide.assert_not_awaited()
         [call] = sender.await_args_list
@@ -87,7 +88,8 @@ def test_off_keeps_exact_envelope_and_channel_calls(tmp_path, monkeypatch, chann
             assert call.kwargs["message_id"].startswith(queued.message_id)
         else:
             assert call.kwargs == {}
-        assert await pool.fetchval("SELECT count(*) FROM proactive_deliveries") == 0
+        [row] = await pool.fetch("SELECT * FROM proactive_deliveries")
+        assert row["body"] == notice.text and row["decision"] is None
     run_db(check, monkeypatch)
 
 
@@ -128,7 +130,7 @@ def test_outbound_metrics_share_the_notice_decision(tmp_path, monkeypatch, chann
         sender.assert_awaited_once()
         assert sender.await_args.args == (int(notice.target.id) if channel == "telegram" else notice.target, notice.text)
         rows = await pool.fetch("SELECT * FROM proactive_deliveries")
-        assert len(rows) == int(metrics_enabled or delivery_enabled)
+        assert len(rows) == 1
         if rows:
             [row] = rows
             assert row["dedupe_key"] == (f"task_notice:{status.message_id}" if delivery_enabled else queued.message_id)
@@ -224,7 +226,9 @@ def test_completion_reply_and_other_chat_notices_do_not_use_task_delivery(tmp_pa
         assert (await adapter.deliver(queued)).success
         assert sender.await_count == 2
         decide.assert_not_awaited()
-        assert await pool.fetchval("SELECT count(*) FROM proactive_deliveries") == 0
+        rows = await pool.fetch("SELECT source, body, decision FROM proactive_deliveries ORDER BY id")
+        assert [tuple(row) for row in rows] == [
+            ("completion", "Synthetic completion", None), ("task_notice", queued.payload["text"], None)]
     run_db(check, monkeypatch)
 
 

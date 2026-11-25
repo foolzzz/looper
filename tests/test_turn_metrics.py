@@ -33,6 +33,20 @@ def test_turn_metadata_contract():
         'delivery': 'reply', 'replayed': True}
 
 
+@pytest.mark.parametrize("ack_delta,expected", [(-80, 0), (0, 0), (80, 80)])
+def test_ack_latency_is_nonnegative_without_changing_other_metrics(ack_delta, expected):
+    from looper.agents.ops import TurnOrigin
+    from looper.agents.turn_metrics import AckKind, TurnDelivery, TurnTimes
+
+    received = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    times = TurnTimes(received, ack_at=received + timedelta(milliseconds=ack_delta), ack=AckKind.REACTION,
+                      first_reply_at=received + timedelta(milliseconds=125))
+    metadata = times.to_metadata(TurnDelivery.REPLY, TurnOrigin.USER, False)
+    assert metadata["ack_ms"] == expected
+    assert metadata["first_reply_ms"] == 125
+    assert metadata["received_at"] == "2026-01-01T00:00:00Z"
+
+
 def test_queued_behind_counts_turns_that_ended_at_or_after_arrival():
     from types import SimpleNamespace
     from looper.agents.turn_metrics import QueuedBehind, queued_behind
