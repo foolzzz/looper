@@ -856,6 +856,75 @@ Manager's turns start with the "Looper state" block (`looper/agents/tiers/state_
 and each row lists what its Manager turns started with (`state_views`: `whole`, `unchanged` or `changes`). Run the
 Manager PR commands above with `--stable-context`, and compare them with the same dialogs without it.
 
+#### Manager resident profile
+
+`resident-profile` implements the comparison planned in #1658. It creates only
+the fictional Mira Vale / Lantern Atlas profile, with a 22:00–08:00 proactive
+message restriction in `Pacific/Honolulu`. Each question gets its own fresh
+database, server, runtime directory and session. The source is explicitly set
+to `synthetic-operator.md` beneath that runtime, never an existing vault.
+The questions are “Who am I?”, “What am I working on?” and “When may proactive
+messages not be sent?”. Each runs with the source present/absent and injection
+off/on: 12 cases per repetition. Only present/on should know the answers.
+
+Free wiring check (also covered by `tests/test_resident_profile_eval.py`):
+
+```sh
+uv run --system-certs --python 3.11 --extra test python -m evals.prompt_regression resident-profile \
+  --mode fake --reps 2,1 --pg-url "$LOOPER_EVAL_DATABASE_URL" \
+  --total-cap-usd 12 --sonnet-cap-usd 0.50 --opus-cap-usd 1 \
+  --out-dir evals/runs/resident-profile-fake
+```
+
+Fake mode uses the existing scripted Claude stand-in. In addition to checking
+the replies, it captures the actual stdin and verifies the compiled profile is
+inside the whole stable block only for present/on, with no profile text in the
+other states. API readbacks verify source selection, presence and the switch.
+These checks prove wiring, not model comprehension or delivery enforcement.
+
+Run real mode **only after budget approval**, with an explicit Claude executable
+and an administrative URL on a disposable PostgreSQL server:
+
+```sh
+uv run --system-certs --python 3.11 --extra test python -m evals.prompt_regression resident-profile \
+  --mode real --claude "$CLAUDE_BIN" --reps 2,1 \
+  --pg-url "$LOOPER_EVAL_DATABASE_URL" \
+  --total-cap-usd 12 --sonnet-cap-usd 0.50 --opus-cap-usd 1 \
+  --out-dir evals/runs/resident-profile-real
+```
+
+The harness selects configured Claude Code Agent Profiles in each disposable
+database: Sonnet twice, then Opus with xhigh effort once, for 36 planned calls.
+Only failed Opus cases get a second attempt (at most 12 extra calls); harness
+errors are not retried. The original failure remains in the report, so a passing
+retry never hides it. The same $12 aggregate ledger covers both models and all
+retries; no next call starts at or beyond it. Per-call soft caps are $0.50 for
+Sonnet and $1 for Opus. Observed costs can overshoot while a call is in flight;
+these are not hard billing guarantees. Lower caps are allowed, higher caps are
+rejected. Expected spend is $5–7, a planning allowance based on the historical
+Manager-dialog proxy of about $0.117 per dialog, with room for Opus and retries;
+it is not a measured result for this suite.
+
+The aggregate JSON records every case's outcome, reply, cost, requested model,
+effort, repetition and attempt, plus the resolved model versions from Manager
+run records, total cost, completed/planned counts, aborts and cap stops. The
+ordinary per-model dialog reports retain the selected Agent Profile names.
+Exit status is 0 only for a complete passing run, 1 for failures, 2 for an abort
+or cap stop. Fake costs/model names are scripted, not measurements of real models.
+
+Checks use deterministic English/Chinese assertion and abstention patterns,
+without a judge model. Affirmative answers must name the synthetic identity or
+project; restriction answers must prohibit proactive messages, preserve the
+22:00 → 08:00 direction and name the time zone. Abstentions match the whole
+reply, rejecting a disclaimer followed by invented facts. Supported wording is
+deliberately conservative: valid paraphrases, translations, equivalent clock
+formats or time-zone conversions may fail. Patterns cannot establish general
+truthfulness or exclude every contradictory extra clause; review failed replies
+and keep the original verdicts. This is a recall/abstention eval, not a privacy
+boundary or proactive-message scheduling test. Dashboard, Telegram and Lark
+share the Manager implementation; this suite exercises dashboard HTTP chat,
+and adds only an eval CLI command, with no product UI/channel changes.
+
 #### Manager capability installs
 
 `manager_capability_installed`, `manager_capability_isolated` and

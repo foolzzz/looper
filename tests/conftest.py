@@ -548,7 +548,9 @@ def _no_live_runs(monkeypatch: pytest.MonkeyPatch) -> None:
 def _chat_stop_default_off(monkeypatch: pytest.MonkeyPatch) -> None:
     """Every test starts with the chat's settings at their defaults (``chat_settings``: stopping a reply, completion
     turns, the delivery layer and the morning brief off), whatever an earlier one set."""
-    from looper.agents import chat_settings, persona
+    from looper.agents import chat_settings, persona, session_routing
+
+    monkeypatch.setattr(session_routing, "_scenario_routing", {})
 
     monkeypatch.setattr(chat_settings, "_stop_enabled", chat_settings.DEFAULT_STOP_ENABLED)
     monkeypatch.setattr(chat_settings, "_completion_turns", chat_settings.DEFAULT_COMPLETION_TURNS)

@@ -1,6 +1,6 @@
 # RFC：分层记忆 v0（任务级经验在 Looper 里自动生效）
 
-- **状态：** 第 14 节①已合入。②实现异步任务日志复盘、独立预算账、租约恢复、来源校验与 D15 切换，默认关闭；真实模型比较与内置 Profile 选择仍待批准。注入、每周卡片、私聊写操作和 Dashboard 专属页由后续切片交付。第 2 节的产品决定和第 15 节的维护者答复保持不变。
+- **状态：** 第 14 节①已合入。②实现异步任务日志复盘、独立预算账、租约恢复、来源校验与 D15 切换，默认关闭；真实模型比较与内置 Profile 选择仍待批准。③实现固定正文任务快照、Planner/Worker 与可选 Reviewer 注入、类型化引用、错报停用、投递日志，以及操作者 API/CLI 撤销、续期和读回，默认关闭且真实模型评测待批准。每周卡片、私聊写操作和 Dashboard 专属页由后续切片交付。第 2 节的产品决定和第 15 节的维护者答复保持不变。
 - **需求：** 记忆分两层。偏好、硬规则和跨项目结论照 [记忆写入路径 RFC](memory-write-path-v0.zh-CN.md)（#1476）的做法：操作者确认后才写进 vault。**任务级经验**（第一版只做从 `task_journal` 提炼的）不进 vault，在 Looper 的 PostgreSQL 里自动生效：每条带出处和 90 天有效期，随时可以撤销，每周给操作者一张卡片批量复核。本文设计这一层：经验怎么产生、怎么生效、注入哪些 agent 的上下文、怎么撤销、每周怎么复核、怎么晋升进 vault、怎么度量。
 - **相关：** [记忆写入路径 RFC](memory-write-path-v0.zh-CN.md)（#1476：共用的 `memory_candidates` 表、出处类别、指纹和墓碑、第 4.4 节为本文留的位置、私聊的回复路由）；[对外动作审查 RFC](outbound-review-v0.zh-CN.md)（任务的来源标记 `tasks.untrusted_inputs`）；[消息线索与意图 RFC](message-leads-intents-v0.zh-CN.md)（意图建出的任务）；[Manager 收尾、账本与晨报 RFC](manager-completion-ledger-v0.zh-CN.md)（晨报的节奏、只推私聊）；[Agent 系统架构](../agent-system.md) 的 "Project knowledge"、"A task's Planner's tools"。
 - **核对基线：** `main` `26d1b3a82`；#1476 还在合入队列里，本文按它的第 4 节的表写。
@@ -340,6 +340,14 @@ proved wrong here, list it in lessons_wrong and say why in your summary.
 - **撤销立刻生效：** 渲染时去掉快照里已经不是 `in_effect` 的经验，所以撤销之后启动的运行就看不到它（这会让那之后的字节变一次）。Planner 的会话里已经有这一节，代码在它下一个 Looper 发出的回合消息开头加一行：「Lesson M-0123 was revoked by the operator: do not rely on it.」，每条只说一次。
 - **记日志：** 每次注入写一行 `memory_injections` 和它的明细；Planner 每个会话记一次（第一个回合或续接简报）。
 
+实现补充：迁移 `memory_lesson_injection`（1940）保存快照集合，空集合也有初始化标记；条目的单行正文、首次激活日期、排序和字符上限冻结。只过滤失效项，不补位、不重排。运行准备事务持候选锁，与撤销串行；准备事务提交是该运行开始使用经验的边界，已经发送的上下文无法撤回。
+
+投递分为 `prepared`、`delivered`、`abandoned` 和 `uncertain`。只有运行时确认接收输入才原子写明细、增加累计注入数；宿主中断后未确认的投递转为 `uncertain`，读原会话或运行记录恢复，不重发、不直接算成功。引用只认该次已交付的明细，重复或反向声明不二次计数；不同任务报错的去重表独立于日志保留。任务删除后保留历史累计报错数，任务编号不可复用。
+
+2026-11-24 维护者补充决定：共用会话先前收到过其他任务经验时，新任务空快照发送清除说明；从未收到经验的空会话仍逐字节不变。关闭总开关或项目开关后，已有 Planner 会话下一回合收到一次固定说明：`Project lessons are now turned off for this session: lessons shown earlier no longer apply, so do not rely on them.`。逐字节兼容性适用于从未开启过经验的会话。
+
+保留期的保守实现：仅清理超过 90 天且任务已结束的注入日志，活跃任务的唯一投递与引用依据继续保留；活跃任务的保留期例外仍待维护者确认。真实模型的经验使用质量、缓存与费用效果仍待授权评测。
+
 ### 5.4 引用
 
 - 代码读回复里的 `lessons_used`、`lessons_wrong`：只认这次注入里的编号，其余忽略；同一编号两边都有时都不算。更新明细的 `cited`、`wrong` 和 `memory_lesson_stats`。
@@ -491,7 +499,7 @@ proved wrong here, list it in lessons_wrong and say why in your summary.
 |---|---|---|---|
 | ① 表和类型（已合入） | 迁移 `memory_lessons`（1910）补六张表、项目列和私聊墓碑来源；`memory_lessons_model` 独占经验转换、覆盖闸和设置类型，复用 `memory_model` 的枚举；独立操作者 `memory_lessons.settings_get/settings_put`、项目开关和只读 `memory.lessons_list`，均可由生成 CLI 使用。已有 vault 生命周期及模型可见内容保持原样 | #1476 PR2 | 否 |
 | ② 复盘（实现，真实模型验证 pending） | `memory_retro` 角色、内置 Profile、契约、输入组装、解析和第 3.4 节的检查、`memory_retro_runs` 和记忆服务的队列、任务动态一行、D15 的切换；复盘评测 | ① | 是：复盘评测 |
-| ③ 生效和注入 | 快照、Planner 的一节和续接简报、Worker 和 Reviewer 的 `lessons` 层、契约的两个字段、引用的读取、`flagged_wrong`、撤销时给 Planner 的一行、注入日志和计数 | ① | 是：注入评测，加 Planner、Worker 契约的 prompt 评测对比 |
+| ③ 生效和注入（本分支实现；真实评测待批准） | 固定快照、Planner 消息和续接简报、Worker 和可选 Reviewer 的 `lessons` 层、可选引用字段、`flagged_wrong`、停用说明、投递日志和累计计数；最小操作者读回/撤销/续期 API 与 CLI | ① | 是：注入评测，加 Planner、Worker 契约的 prompt 评测对比 |
 | ④ 每周卡片和私聊 | 卡片的拼装和发送、四种回复（接进 #1476 的记忆路由）、任务结束通知末尾的一行、晋升生成候选和写入后的 `superseded`（依赖 #1476 PR3、PR4） | ①、#1476 PR6 | 否（代码在模型之前处理） |
 | ⑤ Dashboard | 「经验」标签、任务页两个小节、设置一节、项目开关；截图 | ① 的 JSON；②③④ 的接口 | 否 |
 | ⑥ 指标和告警 | 第 10 节的口径、`memory.lessons_metrics`、告警 | ②③ | 否 |
