@@ -432,6 +432,7 @@ class Ask:
     quoted: lark_quote.QuoteRead | None = None  # what the message quotes, read once (``_read_quote``)
     stop_notice: str = ""  # session-owned code notice; generic notes are not a routed input grant
     activity: tuple[str, ...] = ()  # keep the same activity when a failed resume retries preparation
+    activity_cursor: int | None = None  # commit the read watermark only after a successful reply
 
 
 @dataclass
@@ -1815,6 +1816,7 @@ class ManagerAgent:
         message) only the second half runs."""
         restricted = session_visibility.for_session(self._session_now().key, manager_id=self.agent_id) is not None
         activity = list(ask.activity) if ask is not None else []
+        activity_cursor = None
         if restricted and ask is not None and ask.turn is not None and (
                 lanes.manager_lane(ask.turn.origin) is lanes.Lane.BACKGROUND):
             raise _CompletionNotTaken()  # no background model input is on the allowlist
@@ -1916,14 +1918,13 @@ class ManagerAgent:
                     if session.activity_cursor is None:
                         # Read before storing this turn: the opening excerpt covers the existing rows.
                         # Zero marks an initialized cursor even when this chat has no stored messages yet.
-                        session.activity_cursor = await token.step("group_activity", db_chat.latest_id(thread)) or 0
+                        activity_cursor = await token.step("group_activity", db_chat.latest_id(thread)) or 0
                     else:
                         result = await token.step("group_activity", db_chat.activity_since(
                             thread, after_id=session.activity_cursor, exclude_session=session.key,
                             exclude_message_id=envelope.message_id, limit=group_session.EXCERPT_MESSAGES))
                         activity = group_session.activity(result.rows, result.hidden)
-                        if result.last_id is not None:
-                            session.activity_cursor = result.last_id
+                        activity_cursor = result.last_id
                 except TurnStopped:
                     raise
                 except Exception:
@@ -1954,7 +1955,8 @@ class ManagerAgent:
             waiting = (self.ops.begin_turn(turn, binding=token.binding, session_key=self._session_now().key)
                        if self.ops is not None and not self._mid_turn.native_started(token) else "")
             ask = Ask(text, "\n".join(part for part in (waiting, gate.note, stopped_note) if part), turn,
-                      quoted=quoted, stop_notice=stopped_note, activity=tuple(activity))
+                      quoted=quoted, stop_notice=stopped_note, activity=tuple(activity),
+                      activity_cursor=activity_cursor)
         else:
             await token.keep("resident_settlement", self._settle_native_inputs(token), 60)
         if restricted:
@@ -2807,8 +2809,11 @@ class ManagerAgent:
         """Prepare, start and run one turn for ``message`` (a caller outside a chat message has no token of its
         own; the resume retry has the turn's)."""
         token = token or self._running_token or self._detached_token(context_envelope)
-        prepared = await self._prepare_turn(
-            token, context_envelope, ask=Ask(message, note, ops_turn, retried, quoted))
+        ask = Ask(message, note, ops_turn, retried, quoted)
+        if retried and token.prepared_ask is not None:
+            ask = replace(ask, activity=token.prepared_ask.activity,
+                          activity_cursor=token.prepared_ask.activity_cursor)
+        prepared = await self._prepare_turn(token, context_envelope, ask=ask)
         return await self._run_prepared(token, prepared)
 
     def _detached_token(self, envelope: MessageEnvelope) -> TurnToken:
@@ -3170,6 +3175,8 @@ class ManagerAgent:
                 # The reply and context maintenance finish before the capped process is closed.
                 session.budget.over_cap = True
         if not exited and not token.abandoned:
+            if replied and token.prepared_ask is not None and token.prepared_ask.activity_cursor is not None:
+                session.activity_cursor = token.prepared_ask.activity_cursor
             self._session_totals = self._claude.totals
             await self._save_session_state()
 

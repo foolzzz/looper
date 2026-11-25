@@ -9,6 +9,7 @@ from typing import Any
 
 import pytest
 
+from looper.agents.claude_cli import ResidentTurn
 from looper.agents.message import channel_address, channel_thread_id
 from looper.agents.channels.base import DeliveryReceipt
 from looper.agents.channels.chat_history import record_reply
@@ -112,26 +113,81 @@ def test_empty_chat_initializes_cursor_and_reopened_session_skips_activity(monke
     run_db(body, monkeypatch, timeout=90)
 
 
-def test_activity_is_kept_when_resume_retries_preparation(monkeypatch, tmp_path) -> None:
+def test_activity_is_kept_when_resume_fails_until_retry_succeeds(monkeypatch, tmp_path) -> None:
     async def body(pool):
         rig, _ = await _setup(pool, tmp_path, monkeypatch)
-        prepare = ManagerAgent._prepare_turn
-        captured = []
-        async def retry(self, token, envelope, **kwargs):
-            prepared = await prepare(self, token, envelope, **kwargs)
-            if envelope.payload.get("text") == "retry preparation":
-                again = await prepare(self, token, envelope, ask=token.prepared_ask)
-                captured.append((prepared.turn_text, again.turn_text))
-            return prepared
-        monkeypatch.setattr(ManagerAgent, "_prepare_turn", retry)
         await rig.start()
         try:
             await _send(rig, "first", OPERATOR)
+            session = _session(rig)
+            cursor = session.activity_cursor
             await _send(rig, "MEMBER_BEFORE_RETRY")
-            await _send(rig, "retry preparation", OPERATOR)
-            assert len(captured) == 1
-            first, retried = captured[0]
-            assert HEADER in first and "MEMBER_BEFORE_RETRY" in first and first == retried
+            expected = await chat.latest_id(THREAD)
+            resident = session.claude
+            await resident.stop()  # the next start must resume the saved session
+            run = resident.run_turn
+            attempts, cursors = [], []
+            async def retry(text, on_event, **kwargs):
+                attempts.append(text)
+                saved = await manager_sessions.get(MANAGER, session.key)
+                cursors.append((session.activity_cursor, saved["activity_cursor"]))
+                if len(attempts) == 1:
+                    return ResidentTurn(None, session_started=False)
+                return await run(text, on_event, **kwargs)
+            monkeypatch.setattr(resident, "run_turn", retry)
+            await _send(rig, "retry resume", OPERATOR)
+            assert len(attempts) == 2 and any("--resume" in args for args in resident.starts)
+            assert all(HEADER in text and "MEMBER_BEFORE_RETRY" in text for text in attempts)
+            assert attempts[0][attempts[0].index(HEADER):] == attempts[1][attempts[1].index(HEADER):]
+            assert cursors == [(cursor, cursor), (cursor, cursor)]
+            assert session.activity_cursor == expected
+            assert (await manager_sessions.get(MANAGER, session.key))["activity_cursor"] == expected
+            await _send(rig, "after successful retry", OPERATOR)
+            assert HEADER not in resident.turns[-1]
+        finally:
+            await rig.close()
+    run_db(body, monkeypatch, timeout=90)
+
+
+def test_tool_probe_failure_leaves_activity_for_next_turn(monkeypatch, tmp_path) -> None:
+    async def body(pool):
+        rig, _ = await _setup(pool, tmp_path, monkeypatch)
+        await rig.start()
+        try:
+            await _send(rig, "first", OPERATOR)
+            session = _session(rig)
+            cursor, turns = session.activity_cursor, len(session.claude.turns)
+            await _send(rig, "UNSEEN_DURING_PROBE_FAILURE")
+            async def failed(self):
+                return "synthetic tool probe failure"
+            with monkeypatch.context() as patch:
+                patch.setattr(ManagerAgent, "_tools_problem", failed)
+                await _send(rig, "probe fails", OPERATOR)
+            assert len(session.claude.turns) == turns
+            assert session.activity_cursor == cursor
+            assert (await manager_sessions.get(MANAGER, session.key))["activity_cursor"] == cursor
+            await _send(rig, "probe recovered", OPERATOR)
+            text = session.claude.turns[-1]
+            assert HEADER in text and "UNSEEN_DURING_PROBE_FAILURE" in text
+        finally:
+            await rig.close()
+    run_db(body, monkeypatch, timeout=90)
+
+
+def test_two_successful_turns_do_not_repeat_activity(monkeypatch, tmp_path) -> None:
+    async def body(pool):
+        rig, _ = await _setup(pool, tmp_path, monkeypatch)
+        await rig.start()
+        try:
+            await _send(rig, "first", OPERATOR)
+            await _send(rig, "FIRST_ACTIVITY")
+            await _send(rig, "second", OPERATOR)
+            session = _session(rig)
+            assert HEADER in session.claude.turns[-1] and "FIRST_ACTIVITY" in session.claude.turns[-1]
+            await _send(rig, "SECOND_ACTIVITY")
+            await _send(rig, "third", OPERATOR)
+            text = session.claude.turns[-1]
+            assert HEADER in text and "SECOND_ACTIVITY" in text and "FIRST_ACTIVITY" not in text
         finally:
             await rig.close()
     run_db(body, monkeypatch, timeout=90)
