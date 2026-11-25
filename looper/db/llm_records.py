@@ -12,7 +12,7 @@ from typing import Any
 
 import asyncpg
 
-from ..agents.run_usage import CostStatus
+from ..agents.run_usage import CostStatus, Usage
 from .connection import get_pool
 
 logger = logging.getLogger(__name__)
@@ -27,6 +27,23 @@ class RecordStatus(str, Enum):
     # Looper stopped it before it ended (a kill, its task stopped or cancelled, the server stopping), or the server
     # running it died (``end_unfinished_records``): how it would have ended is not known.
     INTERRUPTED = "interrupted"
+
+
+class UsageStatus(str, Enum):
+    """Coverage of an interrupted bill (``metadata.usage_status``); absent on ordinary completed runs."""
+
+    PARTIAL = "partial"
+    UNREPORTED = "unreported"
+
+
+NO_INTERRUPTED_USAGE = "no_usage_reported_before_interruption"
+_BILL_FIELDS = ("input_tokens", "output_tokens", "cache_read_tokens", "cache_creation_tokens", "cost_usd")
+_NO_USAGE = " AND ".join(f"{field} IS NULL" for field in _BILL_FIELDS)
+_INTERRUPTED_USAGE_METADATA = (
+    "COALESCE(metadata, '{}'::jsonb) || jsonb_build_object('usage_status', "
+    f"CASE WHEN {_NO_USAGE} THEN '{UsageStatus.UNREPORTED.value}' ELSE '{UsageStatus.PARTIAL.value}' END) "
+    f"|| CASE WHEN {_NO_USAGE} THEN jsonb_build_object('usage_reason', '{NO_INTERRUPTED_USAGE}') "
+    "ELSE '{}'::jsonb END")
 
 
 # Why a record found running at startup ended.
@@ -199,13 +216,35 @@ async def max_event_seq(record_id: int, *, pool: asyncpg.Pool | None = None) -> 
     )
 
 
-async def end_record_interrupted(record_id: int, reason: str, *, pool: asyncpg.Pool | None = None) -> None:
-    """Interrupt an abandoned run, preserving a record that has already ended."""
+async def _write_applied(result: str, record_id: int, target: RecordStatus, pool: asyncpg.Pool) -> bool:
+    if result == "UPDATE 1":
+        return True
+    current = await pool.fetchval("SELECT status FROM llm_records WHERE id = $1", record_id)
+    if current is not None:
+        logger.info("skipped llm record %s write: %s -> %s (requires %s)",
+                    record_id, current, target.value, RecordStatus.RUNNING.value)
+    return False
+
+
+async def end_record_interrupted(record_id: int, reason: str, *, pool: asyncpg.Pool | None = None) -> bool:
+    """Interrupt a running record with its last checkpoint; return whether it transitioned."""
     pool = pool or get_pool()
-    await pool.execute(
+    result = await pool.execute(
         "UPDATE llm_records SET status = 'interrupted', finished_at = COALESCE(last_output_at, created_at), "
-        "error = $2 WHERE id = $1 AND status = 'running'", record_id, reason,
+        f"error = $2, metadata = {_INTERRUPTED_USAGE_METADATA} WHERE id = $1 AND status = 'running'", record_id, reason,
     )
+    return await _write_applied(result, record_id, RecordStatus.INTERRUPTED, pool)
+
+
+async def checkpoint_usage(record_id: int, usage: Usage, cost_source: str, *,
+                           pool: asyncpg.Pool | None = None) -> bool:
+    """Replace a running record's cumulative bill; return whether the checkpoint applied."""
+    pool = pool or get_pool()
+    result = await pool.execute(
+        "UPDATE llm_records SET input_tokens=$2, output_tokens=$3, cache_read_tokens=$4, "
+        "cache_creation_tokens=$5, cost_usd=$6, cost_source=$7 WHERE id=$1 AND status='running'",
+        record_id, *(getattr(usage, field) for field in _BILL_FIELDS), cost_source)
+    return await _write_applied(result, record_id, RecordStatus.RUNNING, pool)
 
 
 async def end_unfinished_records(*, keep: Collection[int] = (), pool: asyncpg.Pool | None = None) -> int:
@@ -214,13 +253,13 @@ async def end_unfinished_records(*, keep: Collection[int] = (), pool: asyncpg.Po
     Called at startup before any agent runs, when each such record is a run the
     previous server did not see end: it was killed, crashed or stopped first.
     It ended at its last output as far as anyone knows (its start without
-    one). What the run had recorded stays; its usage, kept in memory until a
-    run ends, is not known. Running it again changes nothing.
+    one). Reported usage checkpoints stay, marked partial; runs without one
+    retain NULL usage and say why. Running it again changes nothing.
     """
     pool = pool or get_pool()
     statement = (
         "UPDATE llm_records SET status = $1, finished_at = COALESCE(last_output_at, created_at), "
-        "error = COALESCE(error, $2) WHERE status = $3")
+        f"error = COALESCE(error, $2), metadata = {_INTERRUPTED_USAGE_METADATA} WHERE status = $3")
     args = [RecordStatus.INTERRUPTED.value, UNFINISHED_AT_START, RecordStatus.RUNNING.value]
     if keep:
         statement += " AND NOT (id = ANY($4::bigint[]))"
@@ -290,7 +329,7 @@ async def touch_record(record_id: int, *, pool: asyncpg.Pool | None = None) -> N
 async def finish_record(
     record_id: int,
     *,
-    status: str,
+    status: RecordStatus | str,
     output_text: str | None = None,
     session_id: str | None = None,
     input_tokens: int | None = None,
@@ -309,14 +348,24 @@ async def finish_record(
     failure_class: str | None = None,
     failure_cause: str | None = None,
     pool: asyncpg.Pool | None = None,
-) -> None:
+) -> bool:
     """Close a record with the run's outcome, its own usage and cost (and where the cost comes from), its final
     context and its compactions; a Worker's or Reviewer's run also keeps how its report or verdict read
     (``metadata.outcome``, ``worker.RunOutcome``), and ``metadata``'s keys are added to the record's (a run's
     refused tool calls, ``permission_denials``). A failed run's class and cause (``failures``) are NULL while
-    failure typing is off."""
+    failure typing is off. Only a running record can settle; returns whether it did."""
+    status = RecordStatus(status)
+    if status is RecordStatus.RUNNING:
+        raise ValueError("finish_record requires a terminal status")
+    if status is RecordStatus.INTERRUPTED:
+        reported = any(value is not None for value in
+                       (input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens, cost_usd))
+        metadata = {**(metadata or {}), "usage_status": (
+            UsageStatus.PARTIAL if reported else UsageStatus.UNREPORTED).value}
+        if not reported:
+            metadata["usage_reason"] = NO_INTERRUPTED_USAGE
     pool = pool or get_pool()
-    await pool.execute(
+    result = await pool.execute(
         """
         UPDATE llm_records SET
             status = $2,
@@ -334,23 +383,26 @@ async def finish_record(
             context_tokens = $14,
             compactions = $15::jsonb,
             cost_source = $16,
-            metadata = CASE WHEN $17::text IS NULL AND $18::jsonb IS NULL THEN metadata
+            metadata = (CASE WHEN $17::text IS NULL AND $18::jsonb IS NULL THEN metadata
                             ELSE COALESCE(metadata, '{}'::jsonb)
                                  || CASE WHEN $17::text IS NULL THEN '{}'::jsonb
                                          ELSE jsonb_build_object('outcome', $17::text) END
-                                 || COALESCE($18::jsonb, '{}'::jsonb) END,
+                                 || COALESCE($18::jsonb, '{}'::jsonb) END)
+                       - CASE WHEN $2 = 'interrupted' THEN ARRAY[]::text[]
+                              ELSE ARRAY['usage_status', 'usage_reason'] END,
             finished_at = now(),
             last_output_at = COALESCE(last_output_at, now()),
             failure_class = $19,
             failure_cause = $20
-        WHERE id = $1
+        WHERE id = $1 AND status = 'running'
         """,
-        record_id, status, output_text, output_text[:500] if output_text else None,
+        record_id, status.value, output_text, output_text[:500] if output_text else None,
         session_id, input_tokens, output_tokens, cost_usd, duration_ms, model, error,
         cache_read_tokens, cache_creation_tokens, context_tokens,
         json.dumps(compactions) if compactions is not None else None, cost_source, outcome,
         json.dumps(metadata, ensure_ascii=False) if metadata else None, failure_class, failure_cause,
     )
+    return await _write_applied(result, record_id, status, pool)
 
 
 async def add_metadata(record_id: int, metadata: dict[str, Any], *, pool: asyncpg.Pool | None = None) -> None:
@@ -640,7 +692,7 @@ async def task_costs(
     """Each task's cost: the sum of its Planner's, Workers' and Reviewers' runs and its room consults, in total and by role.
 
     Every given task id gets an entry. ``runs`` counts every run; ``running``
-    those still going, whose cost is not known yet; ``unpriced_runs`` the
+    those still going, whose reported usage may already have a cost checkpoint; ``unpriced_runs`` the
     ended ones without a cost (Claude exited or was interrupted before it
     reported one, or their model has no price); ``equivalent_runs`` those
     whose cost is what a subscription's usage would cost at API prices

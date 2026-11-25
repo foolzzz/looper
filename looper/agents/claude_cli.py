@@ -31,7 +31,7 @@ if TYPE_CHECKING:
     from .agent_settings import Launch
     from .knowledge import AgentKnowledge
     from .library import AgentLibrary
-    from .runtimes import RuntimeAdapter, StopMethod
+    from .runtimes import RunCost, RuntimeAdapter, StopMethod
     from .runtimes.cancel import TurnCancel
     from .runtimes.pricing import RunSpend
     from .system_prompt import SystemPrompt
@@ -1900,6 +1900,17 @@ class ClaudeRunRecorder:
                                    launch.max_budget_usd if launch is not None else None)
         if spend is not None:
             self._spend = spend
+        # Worker processes can outlive their controller. Keep their reported bill on the same DB row,
+        # independently of the final settlement and its per-run soft cap.
+        self._checkpoint_spend: RunSpend | None = None
+        self._checkpoint_result: tuple[Usage, Usage] | None = None
+        self._checkpoint_runtime_cost = False
+        if whole_process and launch is not None and launch.role in ("worker", "reviewer"):
+            from .runtimes.pricing import RunSpend, pricer
+
+            self._checkpoint_spend = RunSpend(
+                launch.price or pricer(launch.settings.resolved_model, catalog=launch.settings.pricing_catalog),
+                launch.model, None)
 
     @classmethod
     async def resume(
@@ -2018,6 +2029,8 @@ class ClaudeRunRecorder:
 
     async def record(self, event: dict[str, Any]) -> None:
         self.account(event)
+        if self._checkpoint_spend is not None and event.get("type") in ("usage", "result"):
+            await self._checkpoint_usage()
         await self.persist(event)
 
     def account(self, event: dict[str, Any], *, replayed: bool = False) -> None:
@@ -2051,11 +2064,19 @@ class ClaudeRunRecorder:
                 self._spend.add(event)
             elif found is not None:
                 self._streamed = self._streamed.plus(found[1])
+            if self._checkpoint_spend is not None and found is not None and found[1] != Usage():
+                # A partial bill prices reported requests even when the stream cannot cover the whole run.
+                self._checkpoint_spend.add({**event, "usage_complete": True})
             return
         if event.get("type") == "stream_event":
             return
         if self._whole_process and event.get("type") == "result":
             self._result = event
+            if (self._checkpoint_spend is not None and not self._inherited_session
+                    and not event.get(SOFT_CAP) and not event.get(USER_STOP)):
+                totals = run_usage(event, price=self._launch.price)
+                self._checkpoint_result = totals, self._checkpoint_spend.usage
+                self._checkpoint_runtime_cost = self._launch.price is None and totals.cost_usd is not None
         if event.get("type") == "system" and event.get("subtype") == "init":
             self._model = event.get("model") or self._model
             self._model_display = event.get("model_display") or self._model_display
@@ -2198,6 +2219,30 @@ class ClaudeRunRecorder:
             # The stream is only a lower bound; the result includes inherited spend, so neither is a bill.
             return replace(usage, cost_usd=None)
         return usage
+
+    def _interrupted_bill(self) -> RunCost:
+        """The last reported totals plus requests since them, using the existing frozen price scope."""
+        from .runtimes import CostSource, RunCost
+
+        assert self._checkpoint_spend is not None
+        usage = self._checkpoint_spend.usage
+        if self._checkpoint_result is not None:
+            totals, baseline = self._checkpoint_result
+            usage = totals.filled_from(baseline).plus(usage.since(baseline))
+        return RunCost(usage, CostSource.RUNTIME if self._checkpoint_runtime_cost else CostSource.PROVIDER_PRICE)
+
+    async def _checkpoint_usage(self) -> None:
+        from ..db import llm_records
+
+        if self._record_id is None or self._closed:
+            return
+        bill = self._interrupted_bill()
+        if bill.usage == Usage():
+            return
+        try:
+            await llm_records.checkpoint_usage(self._record_id, bill.usage, bill.source.value)
+        except Exception:
+            logger.warning("could not checkpoint llm usage for %s", self._agent_id, exc_info=True)
 
     async def finish(
         self,
@@ -2373,7 +2418,8 @@ class ClaudeRunRecorder:
 
         release(self._record_id, end_route=self._whole_process)
         try:
-            cost = self._runtime().cost(usage, self._provider())
+            cost = (self._interrupted_bill() if status is RecordStatus.INTERRUPTED and self._checkpoint_spend is not None
+                    else self._runtime().cost(usage, self._provider()))
             if self._inherited_session:
                 from .runtimes import CostSource
 
