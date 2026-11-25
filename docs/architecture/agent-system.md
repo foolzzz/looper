@@ -4613,6 +4613,29 @@ With none of these the backup fails before any DDL. The upgraded schema must
 not be opened by an older binary: the forward guard in this binary does not
 protect an older one.
 
+For other schema changes, `looper service upgrade --backup-before-stop`
+optionally takes that same verified dump while the old service is still serving,
+after preparation and preflight but before drain. The default remains a dump at
+startup, inside the outage. The option requires the service's database and backup
+settings in its ops file. A failed online dump stops the upgrade before drain or
+stop; dry-run, NOOP and WEB_ONLY plans take no online dump.
+
+The new process reuses an online dump only for the recorded target package version
+and control-plane fingerprint, the same database and unchanged schema fingerprint,
+registry version and migration markers. Private metadata records the snapshot's
+start and verification times; reuse expires 15 minutes after the start, requires
+the same archive file and a successful archive listing, and consumes the metadata
+once. Missing, stale, mismatched or unreadable metadata or archives fall back to
+the startup dump. The log names the reused archive; the upgrade report includes
+`online_backup` and `online_backup_seconds` only when the option ran a backup.
+Registry upgrades always take the startup dump, even with this option.
+
+An online dump omits writes after its snapshot, including those during the dump,
+drain and stop, and any delay before migration. The reuse deadline bounds age,
+not acceptable data loss. Keep the default for strict recovery-point requirements,
+long drains, registry upgrades, or workloads that cannot lose those writes; an
+independently managed WAL/PITR setup is another recovery strategy.
+
 A migration of a large table holds the table's lock only for statements that
 neither scan nor rewrite it. The run tree columns of `llm_records`, for
 example, are added without a default, with their constraints `NOT VALID`, and
