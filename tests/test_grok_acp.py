@@ -12,6 +12,7 @@ import dataclasses
 import json
 import os
 import signal
+import time
 from pathlib import Path
 from typing import Any
 
@@ -217,7 +218,10 @@ def test_one_process_serves_every_turn_and_a_restart_loads_the_session(
         assert isinstance(session, AcpGrok)
         await session.start(_command(root, grok), cwd=str(tmp_path), signature="a", env=_launch().environment())
         assert session.started and session.pid is None  # nothing runs before the first turn
-        one, two = await _turns(session, "hello", "again", events=events)
+        (one,) = await _turns(session, "hello", events=events)
+        session._tree._changed = time.monotonic() - 60
+        (two,) = await _turns(session, "again", events=events)
+        assert time.monotonic() - session._tree._changed < 5
         pid = session.pid
         saved, session_id = session.totals, events.seen[0]["session_id"]
         # The prompt changes: the owner starts over, loading the saved session with its totals.

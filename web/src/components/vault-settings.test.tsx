@@ -71,6 +71,13 @@ describe("Knowledge vault settings", () => {
   const button = (label: string) => [...container.querySelectorAll("button")].find((node) => node.textContent === label)!;
   const sent = () => fetchMock.mock.calls.find(([input]) => String(input) === "/api/v1/knowledge_vault/update")![1] as RequestInit;
 
+  it("preserves an operator-configured worktree root when saving vault fields", async () => {
+    settings = { ...CONFIGURED, worktree_root: "/srv/worktrees" };
+    await render();
+    await submit();
+    expect(JSON.parse(String(sent().body))).toMatchObject({ worktree_root: "/srv/worktrees" });
+  });
+
   it("shows loading until the request finishes", async () => {
     let finish!: (value: Response) => void;
     fetchMock.mockImplementationOnce(() => new Promise<Response>((resolve) => { finish = resolve; }));

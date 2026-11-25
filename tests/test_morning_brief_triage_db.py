@@ -47,6 +47,8 @@ async def baseline_digest(pool):
 
 async def observation(pool, text, claimed, settled):
     for row in (claimed, settled):
+        # The send boundary is covered by the restart tests; compare the original payload and fields here.
+        row.pop("send_started_at", None)
         if "triage_ids" in row:
             assert row.pop("triage_ids") == []
     return json.loads(json.dumps({"text": text, "claimed": claimed, "settled": settled,
@@ -120,7 +122,7 @@ async def events(pool, count=2):
     return ids
 
 
-@pytest.mark.parametrize("status", ["failed", "sent", "uncertain", "recovery"])
+@pytest.mark.parametrize("status", ["failed", "sent", "uncertain", "recovery", "unstarted"])
 def test_claim_outcomes_record_exactly_the_read_ids(monkeypatch, status):
     async def check(pool):
         [first] = await events(pool, 1)
@@ -135,17 +137,19 @@ def test_claim_outcomes_record_exactly_the_read_ids(monkeypatch, status):
                 "'Later event', summary, reason, reason_kind, confidence, first_sent_at, last_sent_at, created_at "
                 "FROM triage_events WHERE id = $1 RETURNING id", first)
             await pool.execute("INSERT INTO triage_event_sources (event_id, event_seq) VALUES ($1, $2)", later, seq)
-            if status == "recovery":
-                assert await store.orphans_uncertain(conn, NOW) == 1
+            if status in {"recovery", "unstarted"}:
+                if status == "recovery":
+                    assert await store.mark_send_started(conn, DAY, CHANNEL, DM, NOW)
+                assert await store.orphans_uncertain(conn, NOW) == int(status == "recovery")
             else:
                 assert await store.settle(conn, DAY, CHANNEL, DM, status, now=NOW,
                                           triage_ids=[first])
             consumed = await conn.fetch("SELECT event_id, local_date, channel_id, chat FROM morning_brief_triage")
-            assert [dict(r) for r in consumed] == ([] if status == "failed" else [
+            assert [dict(r) for r in consumed] == ([] if status in {"failed", "unstarted"} else [
                 {"event_id": first, "local_date": DAY, "channel_id": CHANNEL, "chat": DM}])
             remaining, _ = await triage_events.for_brief(conn, dates_start=NOW - timedelta(days=2))
-            assert {e.id for e in remaining} == ({first, later} if status == "failed" else {later})
-            if status == "failed":
+            assert {e.id for e in remaining} == ({first, later} if status in {"failed", "unstarted"} else {later})
+            if status in {"failed", "unstarted"}:
                 assert await conn.fetchval("SELECT triage_ids FROM morning_briefs") == []
     run_db(check, monkeypatch)
 
@@ -257,6 +261,7 @@ def test_deferred_triage_exclusion_requires_the_switch_for_read_and_consumption(
         async with pool.acquire() as conn:
             assert await store.claim(conn, DAY, CHANNEL, DM, NOW, attempts_limit=3, read_ids=[row_id])
             if settlement == "recovery":
+                assert await store.mark_send_started(conn, DAY, CHANNEL, DM, NOW)
                 assert await store.orphans_uncertain(conn, NOW) == 1
             else:
                 await store.settle(conn, DAY, CHANNEL, DM, "sent", now=NOW, read_ids=[row_id])

@@ -1,12 +1,10 @@
 """Operator-only switches of the task engine's reliability layer (the engine reliability RFC, section 9).
 
-``failure_typing`` (``engine.failure_typing``): ``off`` (the default) or ``record``, which classifies failed runs and
-records the class (``failures``) without changing what happens to them. ``act`` belongs to the failure handling that
-comes later, and is refused until then.
+``off`` is the default; ``record`` classifies only; ``act`` enables bounded recovery and operator holds.
 """
 
 from looper.db import system_settings
-from .. import failures
+from .. import failures, failure_handling
 from ..action_levels import ActionLevel
 from ..api_v1 import Operation, _object
 from ..ops import ErrorCode, OpError
@@ -19,13 +17,13 @@ SETTINGS = _object({"failure_typing": _object({
 SCHEMAS = {"EngineSettings": SETTINGS}
 RESULTS = {}
 _UPDATE = _object({"failure_typing": {"type": ["string", "null"], "enum": [*_MODE["enum"], None],
-                                      "description": "off or record; null restores the built-in off"}},
+                                      "description": "off, record, or act; null restores the built-in off"}},
                   closed=True)
 
 
 def _operation(name, summary, request, risk):
     return Operation(name, "POST", "/api/v1/" + name.replace(".", "/"), summary, summary, request, SETTINGS,
-                     risk=risk, operator_only=True,
+                     risk=risk, operator_only=True, confirms=risk != "read",
                      level=ActionLevel.INSIDE)  # reads or changes only Looper's own engine settings
 
 
@@ -45,13 +43,26 @@ async def settings():
 async def run(server, operation, arguments, principal, headers):
     if operation.operation_id == "engine_settings.update":
         if "failure_typing" not in arguments:
-            raise OpError(ErrorCode.INVALID, "provide failure_typing (off, record, or null for the built-in off)")
+            raise OpError(ErrorCode.INVALID, "provide failure_typing (off, record, act, or null for the built-in off)")
         value = arguments["failure_typing"]
-        if value == failures.FailureTyping.ACT.value:
-            raise OpError(ErrorCode.INVALID, "failure_typing act is not available yet: failures are only recorded "
-                                             "(use record)")
-        await system_settings.put_settings({failures.SETTING_KEY: value})
+        service = failure_handling.get_service()
+        if service is None:
+            raise OpError(ErrorCode.UNAVAILABLE, "failure handling is not ready")
+        try:
+            await service.set_mode(value)
+        except failure_handling.FailureHandlingError as exc:
+            raise OpError(ErrorCode(exc.code), str(exc)) from None
+        except Exception:
+            raise OpError(ErrorCode.UNAVAILABLE, "engine mode changed but recovery could not complete; retry the operation") from None
     try:
         return _plain(await settings())
     except Exception:
         raise OpError(ErrorCode.UNAVAILABLE, "engine settings database unavailable") from None
+
+
+async def impact(server, operation, arguments, principal, headers):
+    before = (await settings())["failure_typing"]["value"]
+    after = arguments.get("failure_typing") or "off"
+    return (f"Change engine failure handling from {before} to {after}? "
+            "Act enables automatic bounded retries and operator holds. Leaving act releases existing "
+            "failure waits to their original Planner failure path; failure history is retained.")

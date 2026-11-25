@@ -1858,3 +1858,109 @@ def test_checkout_untracked_fingerprinted_files_refused_before_drain(
         assert path in capsys.readouterr().err
     else:
         assert "install" in deployment.events
+
+
+@pytest.mark.parametrize("enabled", [False, True])
+def test_online_backup_preserves_default_steps_and_precedes_drain(deployment, monkeypatch, enabled):
+    from looper.agents import db_backup
+    from looper.ops_config import OpsConfig
+
+    ops = OpsConfig(deployment.root, deployment.root / "ops/server.toml", database_url="postgresql://test/test")
+    service.manager(deployment.host, "test").ops = lambda: ops
+    seen = []
+
+    async def backup(config, root, target):
+        seen.append((config, root, target))
+        deployment.events.append("backup")
+        deployment.elapsed[0] += 5
+        return root / "backups/online.dump"
+
+    monkeypatch.setattr(db_backup, "online_upgrade_backup", backup, raising=False)
+    flags = ["--backup-before-stop"] if enabled else []
+    assert cli.main(["service", "upgrade", *flags]) == 0
+    steps = ["drain", "drain_status", "stop", "install", "start"]
+    assert deployment.events == (["backup"] if enabled else []) + steps
+    assert seen == ([(ops, deployment.root, deployment.scenario.target)] if enabled else [])
+    data = report(deployment)
+    if enabled:
+        assert data["online_backup_seconds"] == 5
+        assert data["online_backup"].endswith("online.dump")
+    else:
+        assert "online_backup" not in data and "online_backup_seconds" not in data
+
+
+@pytest.mark.parametrize("reason", ["dump failed", "archive verification failed", "schema changed during backup"])
+def test_failed_online_backup_never_drains_or_stops(deployment, monkeypatch, capsys, reason):
+    from looper.agents import db_backup
+    from looper.ops_config import OpsConfig
+
+    service.manager(deployment.host, "test").ops = lambda: OpsConfig(
+        deployment.root, deployment.root / "ops/server.toml", database_url="postgresql://test/test")
+    backup = AsyncMock(side_effect=db_backup.BackupFailed(reason))
+    monkeypatch.setattr(db_backup, "online_upgrade_backup", backup, raising=False)
+    assert cli.main(["service", "upgrade", "--backup-before-stop"]) == 1
+    assert backup.await_count == 1
+    assert deployment.events == []
+    assert deployment.state.running
+    assert reason in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("mode", ["dry_run", "noop", "web"])
+def test_online_backup_only_runs_for_a_real_restart(deployment, monkeypatch, mode):
+    from looper.agents import db_backup
+
+    backup = AsyncMock()
+    monkeypatch.setattr(db_backup, "online_upgrade_backup", backup, raising=False)
+    if mode == "noop":
+        deployment.scenario.target = deployment.scenario.current
+        monkeypatch.setattr(service, "_install_target", lambda *args, **kwargs: None)
+    elif mode == "web":
+        deployment.scenario.target = manifest("web", "1.0.1")
+        monkeypatch.setattr(service, "_prepare_checkout_dashboard", lambda *args: nullcontext())
+
+        def install(*args, **kwargs):
+            deployment.scenario.current = deployment.scenario.target
+            return b"dashboard", "f" * 64
+
+        monkeypatch.setattr(service, "_install_target", install)
+        deployment.host.get_index = lambda *args, **kwargs: b"dashboard"
+    assert cli.main(["service", "upgrade", "--backup-before-stop", *(["--dry-run"] if mode == "dry_run" else [])]) == 0
+    assert backup.await_count == 0
+    assert "stop" not in deployment.events and "drain" not in deployment.events
+
+
+def test_online_backup_missing_ops_file_fails_before_drain(deployment, capsys):
+    assert cli.main(["service", "upgrade", "--backup-before-stop"]) == 1
+    assert deployment.events == []
+    assert deployment.state.running
+    assert "ops file" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("blocked", [False, True])
+def test_online_backup_waits_for_preflight_admission(deployment, monkeypatch, blocked):
+    from looper.agents import db_backup
+    from looper.ops_config import OpsConfig
+
+    deployment.responses.status["keepers"] = {"mode": "on", "pending": 0}
+    service.manager(deployment.host, "test").ops = lambda: OpsConfig(
+        deployment.root, deployment.root / "ops/server.toml", database_url="postgresql://test/test")
+    operation = deployment.host.system_operation
+    observed = []
+
+    def preflight(port, token, name, args, **kwargs):
+        if name == "drain_status" and "drain" not in deployment.events:
+            deployment.events.append("preflight")
+            return {"phase": "serving", "waiting": {"runs": [
+                {"worker_id": "busy", "keepable": False}] if blocked else []}}
+        return operation(port, token, name, args, **kwargs)
+
+    async def backup(*args):
+        observed.append(list(deployment.events))
+        return deployment.root / "backups/online.dump"
+
+    deployment.host.system_operation = preflight
+    monkeypatch.setattr(db_backup, "online_upgrade_backup", backup, raising=False)
+    assert cli.main(["service", "upgrade", "--backup-before-stop", "--no-force", "--preflight-wait", "1"]) == int(blocked)
+    assert observed == ([] if blocked else [["preflight"]])
+    if blocked:
+        assert set(deployment.events) == {"preflight"} and deployment.state.running

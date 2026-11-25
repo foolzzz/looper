@@ -75,12 +75,13 @@ from . import ledger as ledger_tools
 from . import reminders as reminder_tools
 from . import skill_proposals as skill_proposal_tools
 from . import memory_propose as memory_tools
+from . import task_hold as task_hold_tools
 from .config import TOOLS as CONFIG_TOOLS, project_tool
 from .leads import LEADS_TOOL, TOOL as LEADS_SEARCH, leads_tool
 from .manager_vault import TOOLS as VAULT_READ_TOOLS, manager_vault
 from .schedules import TOOLS as SCHEDULE_TOOLS
 from .session_search import TOOL as SESSION_SEARCH, enabled as session_search_on
-from .settings import TOOLS as SETTINGS_TOOLS
+from .settings import TOOLS as SETTINGS_TOOLS, engine_tool
 from .tasks import TOOLS as TASK_TOOLS, task_create_tool, task_directory_tool, task_workflow_tool
 
 logger = logging.getLogger(__name__)
@@ -169,10 +170,10 @@ READ_ONLY_TASKS = frozenset({"looper_projects"})
 # (``ManagerOps._with_operator_tools``).
 _MANAGER_TOOL_NAMES = {tool.name: tool for tool in (*MANAGER_TOOLS, LEADS_SEARCH, *VAULT_READ_TOOLS, SESSION_SEARCH,
                                                     *reminder_tools.TOOLS, intents_recognize.TOOL,
-                                                    skill_proposal_tools.TOOL, memory_tools.TOOL)}
+                                                    skill_proposal_tools.TOOL, memory_tools.TOOL, task_hold_tools.TOOL)}
 # The default Manager's tools that only the user's own turns run, each behind its own switch.
 _OPERATOR_TOOLS = {tool.name: tool for tool in (LEADS_SEARCH, *VAULT_READ_TOOLS, SESSION_SEARCH, *reminder_tools.TOOLS,
-                                              intents_recognize.TOOL)}
+                                              intents_recognize.TOOL, task_hold_tools.TOOL)}
 _LEDGER_TOOLS = {tool.name: tool for tool in ledger_tools.TOOLS}
 
 
@@ -248,6 +249,7 @@ class ManagerOps:
         self._epoch = 0
         self._bindings: OrderedDict[str, Turn] = OrderedDict()  # the last BINDINGS_KEPT turns, ended ones too
         self._binding_sessions: dict[str, str] = {}
+        self._published_bindings: dict[str, str | None] = {}
         self._session_turns: dict[str, Turn] = {}
         self._routed_turns: dict[int, Turn] = {}  # enforcement survives a switch-off until end_turn
         self._pending: dict[tuple[str | None, str | None, str | None], _Pending] = {}
@@ -410,12 +412,19 @@ class ManagerOps:
         default Manager's is what it was before them."""
         if scope.manager_id != DEFAULT_MANAGER_ID:
             return scope
+        from ..failures import FailureTyping, typing_mode
+        act = await typing_mode() is FailureTyping.ACT
+        chosen_settings = engine_tool() if act else SETTINGS_TOOLS[0]
+        if "looper_settings" in scope.tools and scope.tools["looper_settings"] is not chosen_settings:
+            scope = replace(scope, tools=_tool_map([chosen_settings if tool.name == "looper_settings" else tool
+                                                  for tool in scope.tools.values()]))
         leads = await leads_tool()
         wanted = [*((leads,) if leads is not None else ()),
                   *(VAULT_READ_TOOLS if await manager_vault() is not None else ()),
                   *((SESSION_SEARCH,) if await session_search_on() else ()),
                   *(reminder_tools.TOOLS if await reminders_on() else ()),
-                  *((intents_recognize.TOOL,) if await intents_recognize.enabled() else ())]
+                  *((intents_recognize.TOOL,) if await intents_recognize.enabled() else ()),
+                  *((task_hold_tools.TOOL,) if act and scope.tool_scope is ManagerTools.ALL else ())]
         current = [tool for tool in scope.tools.values() if tool.name in _OPERATOR_TOOLS]
         if len(wanted) == len(current) and all(new is old for new, old in zip(wanted, current)):
             return scope
@@ -1043,7 +1052,7 @@ class ManagerOps:
             raise ValueError("a Manager session needs a key")
         if session_key == MAIN_SESSION or self._turn_file is None:
             return self._turn_file
-        return (self._turn_file.parent / "manager-sessions" / session_routing.key_digest(session_key)
+        return (self._turn_file.parent / "manager-sessions" / session_routing.session_digest(self._scope.manager_id, session_key)
                 / ".local" / "manager-turn.json")
 
     def publish_binding(self, binding: str | None, *, session_key: str = MAIN_SESSION) -> None:
@@ -1057,6 +1066,7 @@ class ManagerOps:
                 self._routed_turns[id(turn)] = turn
         path = self.turn_file_for(session_key)
         if path is None:
+            self._published_bindings[session_key] = binding
             return
         self._epoch += 1
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -1066,9 +1076,15 @@ class ManagerOps:
             with os.fdopen(fd, "w", encoding="utf-8") as handle:
                 handle.write(json.dumps({"epoch": self._epoch, "turn": binding}))
             os.replace(tmp, path)
+            self._published_bindings[session_key] = binding
         except BaseException:
             tmp.unlink(missing_ok=True)
             raise
+
+    def clear_binding(self, binding: str, *, session_key: str = MAIN_SESSION) -> None:
+        """Clear only this turn's published binding; a later turn may already own the bridge."""
+        if self._published_bindings.get(session_key) == binding:
+            self.publish_binding(None, session_key=session_key)
 
     def begin_turn(self, turn: Turn, binding: str | None = None, *, session_key: str = MAIN_SESSION) -> str:
         """``turn`` runs now; the note its message starts with (``_begin_turn``), then, in a user turn, what the

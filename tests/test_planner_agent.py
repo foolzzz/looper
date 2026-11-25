@@ -71,7 +71,8 @@ def test_every_shipped_runtime_keeps_a_planner_read_only(runtime: str, read_only
     assert adapter(runtime).read_only is not ReadOnly.CHECK
 
 
-def test_exchange_binds_in_process_tools_and_runner_caps(agent_db, monkeypatch, tmp_path):
+@pytest.mark.parametrize("read_only", [False, True])
+def test_exchange_binds_in_process_tools_and_runner_caps(agent_db, monkeypatch, tmp_path, read_only):
     from types import SimpleNamespace
     from unittest.mock import Mock
     from looper.agents.agent_settings import AgentSettings, Launch
@@ -84,6 +85,7 @@ def test_exchange_binds_in_process_tools_and_runner_caps(agent_db, monkeypatch, 
         agent = PlannerAgent(task_id="cap-task", runtime_root=tmp_path)
         agent._plan = module.TaskPlan("plan", "goal", "Inspect", str(tmp_path))
         agent._token = "host-task-token"
+        agent._turn_read_only = read_only
         agent._ops = SimpleNamespace(begin_turn=Mock(), end_turn=Mock())
         agent._claude = SimpleNamespace(set_turn_tools=Mock(), set_turn_budget=Mock(), totals=Usage(), started=False, pid=None,
             run_turn=AsyncMock(return_value=ResidentTurn({"subtype": "success", "result": "Inspected"})))
@@ -100,7 +102,10 @@ def test_exchange_binds_in_process_tools_and_runner_caps(agent_db, monkeypatch, 
         assert budget["provider_id"] == launch.profile.provider.id and budget["price"] is launch.price
         assert await budget["limits"]() == {"run_cap": 2, "task_cap": 8, "task_spent": 3}
         assert await budget["limits"]() == {"run_cap": 1, "task_cap": 8, "task_spent": 3}
-        agent._ops.begin_turn.assert_called_once_with(agent._token)
+        if read_only:
+            agent._ops.begin_turn.assert_called_once_with(agent._token, read_only=True)
+        else:
+            agent._ops.begin_turn.assert_called_once_with(agent._token)
         agent._ops.end_turn.assert_called_once_with(agent._token)
     asyncio.run(run())
 

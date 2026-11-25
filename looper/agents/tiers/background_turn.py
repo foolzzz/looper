@@ -132,6 +132,8 @@ async def turn(self: ManagerAgent, *, origin_kind: TurnOrigin, message: Message,
         await token.step("turn_lock", self._turn_lock.acquire())
         self._lock_owner = token
         self._running_token = token
+        # Native input still owns its tools while this background turn waits.
+        await token.keep("resident_settlement", self._settle_native_inputs(token), 60)
         if self.ops is not None:
             self.ops.begin_turn(turn, binding=token.binding, session_key=self._session_now().key)
         prepared = await self._prepare_turn(token, context, ask=Ask(text, "", turn))

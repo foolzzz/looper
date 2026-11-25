@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 import signal
 import subprocess
+import sys
 import zipfile
 
 import pytest
@@ -248,9 +249,9 @@ def test_wheel_contains_the_dsh_runner(tmp_path):
     with zipfile.ZipFile(wheel) as archive:
         names = archive.namelist()
         assert {prefix + name for name in ("dsh_runner/package.json", "dsh_runner/src/main.ts",
-                "common/package.json", "common/rpc.ts")} <= set(names)
+                "dsh_runner/src/tool-deadlines.json", "common/package.json", "common/rpc.ts")} <= set(names)
         assert not any(name.startswith("runners/") for name in names)
-        assert all(name == prefix + "dsh_runner/package.json" or
+        assert all(name in {prefix + "dsh_runner/package.json", prefix + "dsh_runner/src/tool-deadlines.json"} or
                    (name.startswith(prefix + "dsh_runner/src/") and name.endswith(".ts"))
                    for name in names if name.startswith(prefix + "dsh_runner/"))
 
@@ -425,6 +426,30 @@ def test_entry_reports_an_incomplete_installation(tmp_path, monkeypatch):
     monkeypatch.setattr(dsh_command, "files", lambda _: tmp_path)
     with pytest.raises(RuntimeUnsupported, match="DSH runner is missing"):
         dsh_command.entry()
+
+
+def test_an_installation_without_the_runner_still_imports_the_dsh_runtime():
+    # serve imports dsh_runner while it registers runtimes; a missing runner makes DSH unavailable, not serve.
+    code = ("from looper.agents.runtimes import RuntimeUnsupported\n"
+            "from looper.agents.runtimes.runner import dsh_command\n"
+            "def missing():\n"
+            "    raise RuntimeUnsupported('the DSH runner is missing from this installation; reinstall Looper')\n"
+            "dsh_command.entry = missing\n"
+            "from looper.agents.runtimes import dsh_runner\n"
+            "try:\n"
+            "    dsh_runner.tool_deadlines()\n"
+            "except RuntimeUnsupported as exc:\n"
+            "    print('unavailable:', exc)\n")
+    done = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, timeout=120)
+    assert done.returncode == 0, done.stderr[-2000:]
+    assert done.stdout.strip() == "unavailable: the DSH runner is missing from this installation; reinstall Looper"
+
+
+def test_tool_deadlines_are_read_from_the_packaged_runner():
+    from looper.agents.runtimes import dsh_runner
+
+    shipped = json.loads(dsh_command.entry().with_name("tool-deadlines.json").read_text(encoding="utf-8"))
+    assert dsh_runner.tool_deadlines() == shipped and shipped["default_s"] > 0
 
 
 @pytest.mark.parametrize("failure", ["exception", "missing-service"])

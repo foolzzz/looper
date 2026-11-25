@@ -80,6 +80,7 @@ def build_parser() -> argparse.ArgumentParser:
     _add_ledger_parser(commands)
     _add_leads_parser(commands)
     _add_memory_parser(commands)
+    _add_knowledge_parser(commands)
     _add_decisions_parser(commands)
     _add_claude_code_parser(commands)
     profile = commands.add_parser("profile", allow_abbrev=False, help="Read the operator profile locally.")
@@ -268,6 +269,16 @@ def _add_leads_parser(commands: argparse._SubParsersAction) -> None:
         _add_location_flags(command)
 
 
+def _add_knowledge_parser(commands: argparse._SubParsersAction) -> None:
+    knowledge = commands.add_parser("knowledge", allow_abbrev=False, help="Migrate project documents to the vault.")
+    sub = knowledge.add_subparsers(dest="knowledge_command", required=True)
+    migrate = sub.add_parser("migrate", allow_abbrev=False,
+                             help="Preview a project knowledge export; --execute backs up and writes it.")
+    migrate.add_argument("--project", required=True, help="Project name.")
+    migrate.add_argument("--execute", action="store_true", help="Back up the source rows and commit the export.")
+    _add_location_flags(migrate)
+
+
 def _add_memory_parser(commands: argparse._SubParsersAction) -> None:
     memory = commands.add_parser(
         "memory", allow_abbrev=False, help="Read and manage memory candidates; check what a write needs.",
@@ -290,16 +301,24 @@ def _add_memory_parser(commands: argparse._SubParsersAction) -> None:
     check = sub.add_parser("check", allow_abbrev=False,
                            help="Check what a write needs now (setting, git, branch, worktree folder); changes nothing.")
     check.add_argument("--json", action="store_true")
+    lessons = sub.add_parser("lessons", allow_abbrev=False, help="List project lessons and their counters.")
+    lessons.add_argument("--project")
+    lessons.add_argument("--state", default="all")
+    lessons.add_argument("--limit", type=int, default=50)
+    lessons.add_argument("--before", help="Continue before this M-id.")
+    lessons.add_argument("--json", action="store_true")
     writes = []
     for name, help_text in (("reject", "Reject an unwritten memory candidate."),
                             ("retry", "Retry a blocked write, preserving its confirmed content."),
+                            ("revoke", "Revoke an active project lesson and retain its fingerprint tombstone."),
+                            ("renew", "Renew an active project lesson's validity."),
                             ("delete", "Delete a candidate, leaving its fingerprint tombstone and vault notes.")):
         command = sub.add_parser(name, allow_abbrev=False, help=help_text)
         command.add_argument("candidate", help="M-0042 or M-42.")
-        if name == "reject":
+        if name in {"reject", "revoke"}:
             command.add_argument("--reason", help="Why this memory is not useful (at most 300 characters).")
         writes.append(command)
-    for command in (listing, show, check, *writes):
+    for command in (listing, show, check, lessons, *writes):
         _add_location_flags(command)
 
 
@@ -368,6 +387,9 @@ def _add_service_parser(commands: argparse._SubParsersAction) -> None:
     upgrade = service_commands.add_parser(
         "upgrade", allow_abbrev=False, help="Plan, drain, install and restart the changed components.")
     upgrade.add_argument("--dry-run", action="store_true", help="Print the upgrade plan only.")
+    upgrade.add_argument("--backup-before-stop", action="store_true",
+                         help="Take a verified migration backup before draining (default off). Writes after its "
+                              "snapshot are absent; reuse expires after 15 minutes. Registry upgrades still back up at startup.")
     upgrade.add_argument("--to", metavar="REF_OR_WHEEL", help="Target Git ref (default origin/main) or wheel path.")
     upgrade.add_argument("--start-timeout", "--timeout", dest="timeout", type=float, default=300.0,
                          metavar="SECONDS", help="Seconds to wait for the restarted service to answer (default 300).")
@@ -431,6 +453,10 @@ def main(argv: list[str] | None = None) -> int:
         from .agents import leads_commands
 
         return leads_commands.run(args, _load_ops)
+    if args.command == "knowledge":
+        from .agents import knowledge_commands
+
+        return knowledge_commands.run(args, _load_ops)
     if args.command == "memory":
         from .agents import memory_commands
 
@@ -522,7 +548,7 @@ def _service(args: argparse.Namespace) -> int:
             print(service.upgrade(host, label=args.label, to=args.to, dry_run=args.dry_run,
                                   timeout=args.timeout, drain_timeout=args.drain_timeout,
                                   turns_timeout=args.turns_timeout, no_force=args.no_force,
-                                  preflight_wait=args.preflight_wait))
+                                  preflight_wait=args.preflight_wait, backup_before_stop=args.backup_before_stop))
         elif args.service_command == "restart":
             print(service.restart(host, label=args.label, timeout=args.timeout, drain=args.drain,
                                   drain_timeout=args.drain_timeout, no_force=args.no_force))

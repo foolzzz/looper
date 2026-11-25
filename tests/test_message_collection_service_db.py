@@ -2,6 +2,8 @@
 
 import asyncio
 from datetime import timedelta
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -25,6 +27,65 @@ async def source(pool, source_id="synthetic"):
     await pool.execute(
         "INSERT INTO source_collection_settings(source_id,collect_enabled_at) VALUES($1,$2)", source_id, sup.NOW
     )
+
+
+@pytest.mark.parametrize("initially_enabled", [False, True])
+def test_alert_polling_tracks_runtime_switch_without_reads_while_off(monkeypatch, initially_enabled):
+    from looper.agents.message_stream_alerts import SourceAlerts
+    from looper.agents.v1_domains import message_collection as api
+    from looper.db import message_stream_alerts
+
+    async def check(pool):
+        await source(pool)
+        await pool.execute("UPDATE source_collection_settings SET alerts_enabled=$1", initially_enabled)
+        configured = AsyncMock(wraps=message_stream_alerts.configured)
+        monkeypatch.setattr(message_stream_alerts, "configured", configured)
+        ticks = asyncio.Queue()
+
+        async def list_sources():
+            ticks.put_nowait(None)
+            return []
+
+        monkeypatch.setattr(store, "list_sources", list_sources)
+        alerts = SourceAlerts()
+        monkeypatch.setattr(alerts, "evaluate", AsyncMock())
+        monkeypatch.setattr(alerts, "flush", AsyncMock())
+        service = SourceService(interval=0.001, alerts=alerts)
+
+        async def tick(count=1):
+            for _ in range(count):
+                await asyncio.wait_for(ticks.get(), 2)
+                await asyncio.sleep(0)
+
+        async def update(enabled):
+            await api.run(SimpleNamespace(_source_service=service),
+                          SimpleNamespace(operation_id="message_collection.update"),
+                          {"source_id": "synthetic", "fields": {"alerts_enabled": enabled}}, None, {})
+            while not ticks.empty():
+                ticks.get_nowait()
+
+        try:
+            await service.start()
+            await tick(5)
+            assert bool(alerts.evaluate.await_count) is initially_enabled
+            assert alerts.flush.await_count == alerts.evaluate.await_count
+            assert configured.await_count == 1
+            await update(False)
+            before = (alerts.evaluate.await_count, alerts.flush.await_count, configured.await_count)
+            await tick(5)
+            assert (alerts.evaluate.await_count, alerts.flush.await_count, configured.await_count) == before
+            await update(True)
+            before = alerts.evaluate.await_count
+            await tick()
+            assert alerts.evaluate.await_count > before
+            await update(False)
+            before = (alerts.evaluate.await_count, alerts.flush.await_count, configured.await_count)
+            await tick(5)
+            assert (alerts.evaluate.await_count, alerts.flush.await_count, configured.await_count) == before
+        finally:
+            await service.stop()
+
+    run_db(check, monkeypatch, timeout=30)
 
 
 def test_collect_does_not_block_bridge_ticks_alerts_or_other_sources(monkeypatch, tmp_path):
@@ -58,6 +119,8 @@ def test_collect_does_not_block_bridge_ticks_alerts_or_other_sources(monkeypatch
 
         alerts = Alerts()
         service = SourceService(collector_backend=Blocked(), alerts=alerts)
+        await pool.execute("UPDATE source_collection_settings SET alerts_enabled=true")
+        await service.refresh_alerts()
         try:
             assert await asyncio.wait_for(service.run_once(clock=lambda: sup.NOW), 2) == 3
             assert len(service._collect_tasks) == 2
