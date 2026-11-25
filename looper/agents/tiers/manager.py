@@ -1206,6 +1206,9 @@ class ManagerAgent:
             else:
                 kind = ChatKind.GROUP if origin["group"] else ChatKind.DIRECT
             token.times = TurnTimes(received_at=received, chat=kind)
+            if is_lark(origin["channel"]) and isinstance(ingress := envelope.metadata.get("lark_ingress"), dict):
+                if ack_received := ingress.get("received_at"):
+                    token.times.ack_received_at = datetime.fromisoformat(ack_received)
         return token
 
     async def _stop_from_chat(self, envelope: MessageEnvelope) -> None:
@@ -2395,8 +2398,6 @@ class ManagerAgent:
                 await self._task_progress(envelope, progress_text)
 
     def _proactive_metadata(self, source: ProactiveSource, source_ref: str | None = None) -> dict[str, Any]:
-        if not chat_settings.metrics_enabled():
-            return {}
         return {"proactive": {"source": source.value, "source_ref": source_ref, "manager_id": self.agent_id}}
 
     async def _task_progress(self, envelope: MessageEnvelope, text: str) -> None:

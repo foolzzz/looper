@@ -13,23 +13,24 @@ from typing import Any
 import asyncpg
 
 from .connection import get_pool
+from .directories import canonical_directory
 
 _COLUMNS = ("task_id", "repo_dir", "subdir", "path", "branch", "base_commit", "links", "state", "result_commit",
             "removed_at")
 
 _SAVE = f"""
-INSERT INTO task_worktrees ({", ".join(_COLUMNS)})
-VALUES ({", ".join(f"${i}" for i in range(1, len(_COLUMNS) + 1))})
+INSERT INTO task_worktrees ({", ".join(_COLUMNS)}, path_real)
+VALUES ({", ".join(f"${i}" for i in range(1, len(_COLUMNS) + 1))}, ${len(_COLUMNS) + 1})
 ON CONFLICT (task_id) DO UPDATE
 SET links = EXCLUDED.links, state = EXCLUDED.state, result_commit = EXCLUDED.result_commit,
-    removed_at = EXCLUDED.removed_at
+    removed_at = EXCLUDED.removed_at, path_real = EXCLUDED.path_real
 """
 
 
 async def save(row: Mapping[str, Any], *, pool: asyncpg.Pool | asyncpg.Connection | None = None) -> None:
     """Write a task's worktree (``TaskWorktree.row``): its row the first time, then what changes."""
     pool = pool or get_pool()
-    await pool.execute(_SAVE, *(row.get(column) for column in _COLUMNS))
+    await pool.execute(_SAVE, *(row.get(column) for column in _COLUMNS), canonical_directory(row.get("path") or ""))
 
 
 async def get(task_id: str, *, pool: asyncpg.Pool | asyncpg.Connection | None = None) -> dict[str, Any] | None:

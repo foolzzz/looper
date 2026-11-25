@@ -1,4 +1,4 @@
-"""Native CLI stand-in used only by routed dialogs; never contacts a network."""
+"""Native CLI stand-in used only by Lark dialogs; never contacts a network."""
 
 from __future__ import annotations
 
@@ -11,6 +11,7 @@ import time
 
 OPERATOR = "ou_evaloperator01"
 OTHER = "ou_evalother0001"
+BOT_SENDER = "ou_evalpeerbot01"
 BOT = "ou_evalbot000001"
 APP = "cli_evalsession"
 CHAT = "oc_evalsession"
@@ -37,7 +38,8 @@ def main(root: Path) -> None:
     elif args[:2] == ["contact", "+search-user"]:
         ok({"has_more": False, "users": [
             {"open_id": OPERATOR, "localized_name": "Eval operator", "email": "operator@example.test"},
-            {"open_id": OTHER, "localized_name": "Eval member", "email": "member@example.test"}]})
+            {"open_id": OTHER, "localized_name": "Eval member", "email": "member@example.test"},
+            {"open_id": BOT_SENDER, "localized_name": "Eval peer bot"}]})
     elif args[:3] == ["event", "consume", "im.message.receive_v1"]:
         # Keep one consumer alive; the driver appends events only after its model is configured.
         with (root / "events.jsonl").open() as events:
@@ -49,6 +51,14 @@ def main(root: Path) -> None:
                     ready, _, _ = select.select([0], [], [], 0.05)
                     if ready and os.read(0, 1) == b"":
                         break
+    elif args[:2] == ["im", "+messages-resources-download"]:
+        key = args[args.index("--file-key") + 1]
+        output = Path(args[args.index("--output") + 1])
+        source = root / "resources" / key
+        if source.parent != root / "resources" or output.name != str(output):
+            raise SystemExit("eval downloads require a synthetic key and a bare output filename")
+        output.write_bytes(source.read_bytes())
+        ok({"saved_path": str(output)})
     elif args[:2] in (["im", "+messages-reply"], ["im", "+messages-send"], ["im", "+messages-edit"]):
         flag = "--markdown" if "--markdown" in args else "--text"
         text = args[args.index(flag) + 1]

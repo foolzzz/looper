@@ -10,7 +10,7 @@ from tests.db_support import DSN, run_db
 pytestmark = pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
 
 
-def test_default_off_preserves_metadata_and_proactive_bus(monkeypatch, tmp_path):
+def test_default_off_preserves_model_metadata_and_tags_only_proactive_bus_sends(monkeypatch, tmp_path):
     from looper.agents import chat_settings
     from looper.agents.bus import MessageBus
     from looper.agents.message import MessageEnvelope, MessageType, channel_address, manager_address
@@ -31,8 +31,15 @@ def test_default_off_preserves_metadata_and_proactive_bus(monkeypatch, tmp_path)
         assert "turn_metrics" not in metadata
         assert set(metadata) == {'command', 'cwd', 'system_prompt', 'system_prompt_sha256', 'prompt_layers', 'profile', 'model_choice', 'settings_sources', 'system_prompt_mode', 'llm_model', 'pricing', 'project_instructions', 'library'}, sorted(metadata)
         assert await pool.fetchval("SELECT count(*) FROM proactive_deliveries") == 0
-        queue = bus.get_queue("web")
+        queue = bus.get_queue(channel_address("web").agent_id)
+        proactive = []
         while not queue.empty():
-            assert "proactive" not in queue.get_nowait().metadata
+            envelope = queue.get_nowait()
+            if envelope.payload.get("autonomous"):
+                proactive.append(envelope.metadata["proactive"])
+                assert envelope.payload["text"] == "autonomous"
+            else:
+                assert "proactive" not in envelope.metadata
+        assert proactive == [{"source": "autonomous", "source_ref": None, "manager_id": "manager"}]
         await bus.shutdown()
     run_db(test, monkeypatch, timeout=90)
