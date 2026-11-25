@@ -129,18 +129,20 @@ export function WorkTaskManagerModel(props: Props) {
 
   const requested = selection === "" ? null : selection;
   const selectedChoice = view?.choices.find((choice) => choice.profile_id === selection);
-  const submittable = phase === "ready" && !!view && pending === null && (
+  const unconfirmed = outcome?.kind === "uncertain" || outcome?.kind === "readback-failed";
+  const writesLocked = pending !== null || unconfirmed;
+  const submittable = phase === "ready" && !!view && !writesLocked && (
     (requested === null && view.inherit) || (!!selectedChoice && !blockReason(selectedChoice))
   );
 
   function pick(profileId: string | null, blocked: boolean) {
-    if (pending || blocked) return;
+    if (writesLocked || blocked) return;
     setSelection(profileId ?? "");
     if (props.mode === "create") props.onChange(profileId);
   }
 
   function save() {
-    if (props.mode !== "task" || !submittable || writingRef.current) return;
+    if (props.mode !== "task" || !submittable || writesLocked || writingRef.current) return;
     const currentTask = props.taskId;
     const wanted = requested;
     const token = epoch.current;
@@ -245,7 +247,7 @@ export function WorkTaskManagerModel(props: Props) {
         <>
           {phase === "empty" && <p className="text-sm">没有可用的任务管家模型</p>}
           {phase === "ready" && (
-            <fieldset disabled={pending !== null} className="min-w-0 space-y-2 border-0 p-0">
+            <fieldset disabled={writesLocked} className="min-w-0 space-y-2 border-0 p-0">
               <legend className="sr-only">任务管家 Profile</legend>
               {view.inherit && (
                 <label data-choice="inherit" className="block rounded-md border border-border p-3 text-sm pointer-coarse:min-h-11 has-[:focus-visible]:ring-2 has-[:focus-visible]:ring-ring">
@@ -255,6 +257,7 @@ export function WorkTaskManagerModel(props: Props) {
                       name={group}
                       value=""
                       checked={selection === ""}
+                      disabled={writesLocked}
                       onChange={() => pick(null, false)}
                       className="focus-visible:outline-none"
                     />
@@ -272,7 +275,7 @@ export function WorkTaskManagerModel(props: Props) {
                         name={group}
                         value={choice.profile_id}
                         checked={selection === choice.profile_id}
-                        disabled={!!reason}
+                        disabled={!!reason || writesLocked}
                         onChange={() => pick(choice.profile_id, !!reason)}
                         className="mt-1 focus-visible:outline-none"
                       />

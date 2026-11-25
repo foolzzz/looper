@@ -287,6 +287,58 @@ describe("task manager model writes", () => {
     }
   });
 
+  it("sends exactly one set when the switch is used again after an unknown result", async () => {
+    handle = (url) => {
+      if (url.includes(TASK_MANAGER_PROFILE_SET_PATH)) throw new TypeError("network down");
+      return ok(view());
+    };
+    await show(<WorkTaskManagerModel mode="task" taskId="A" />);
+    await choose(OPUS.profile_id);
+    await click("切换模型");
+    expect(sets()).toHaveLength(1);
+    const save = button("切换模型") as HTMLButtonElement;
+    expect(save.disabled).toBe(true);
+    const radios = [...host.querySelectorAll("input[type='radio']")] as HTMLInputElement[];
+    expect(radios.length).toBeGreaterThan(0);
+    expect(radios.every((input) => input.disabled)).toBe(true);
+    expect((button("重新读取") as HTMLButtonElement).disabled).toBe(false);
+    await act(async () => { save.click(); });
+    await settle();
+    expect(sets()).toHaveLength(1);
+  });
+
+  it("disables writes after an unknown result or a failed readback and offers only re-read", async () => {
+    handle = (url) => {
+      if (url.includes(TASK_MANAGER_PROFILE_SET_PATH)) throw new TypeError("network down");
+      return ok(view());
+    };
+    await show(<WorkTaskManagerModel mode="task" taskId="A" />);
+    await choose(OPUS.profile_id);
+    await click("切换模型");
+    expect(host.textContent).toContain("切换结果尚未确认");
+    expect((button("切换模型") as HTMLButtonElement).disabled).toBe(true);
+    expect(([...host.querySelectorAll("input[type='radio']")] as HTMLInputElement[]).every((input) => input.disabled)).toBe(true);
+    expect((button("重新读取") as HTMLButtonElement).disabled).toBe(false);
+
+    calls.length = 0;
+    handle = (url, body) => {
+      if (url.includes(TASK_MANAGER_PROFILE_SET_PATH)) return ok({ task_id: body.task_id, profile_id: body.profile_id });
+      if (sets().length) return fail(500, "unavailable", "readback down");
+      return ok(view());
+    };
+    await show(<WorkTaskManagerModel mode="task" taskId="readback" />);
+    await choose(OPUS.profile_id);
+    await click("切换模型");
+    expect(host.textContent).toContain("模型读取失败");
+    const save = button("切换模型") as HTMLButtonElement;
+    expect(save.disabled).toBe(true);
+    expect(([...host.querySelectorAll("input[type='radio']")] as HTMLInputElement[]).every((input) => input.disabled)).toBe(true);
+    expect((button("重新读取") as HTMLButtonElement).disabled).toBe(false);
+    await act(async () => { save.click(); });
+    await settle();
+    expect(sets()).toHaveLength(1);
+  });
+
   it("retries an uncertain write by reading, without posting again", async () => {
     let writes = 0;
     handle = (url) => {
