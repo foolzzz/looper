@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import shutil
+from datetime import datetime
 from collections.abc import AsyncIterator, Iterable
 from pathlib import Path
 from typing import Any
@@ -102,6 +104,76 @@ def _envelope(correlation_id: str, message_type: MessageType = MessageType.AGENT
               **payload: Any) -> MessageEnvelope:
     return MessageEnvelope.create(source=MANAGER_ADDRESS, target=channel_address("lark_bot"), message_type=message_type,
                                   correlation_id=correlation_id, payload=payload)
+
+
+def test_ingress_attributes_download_and_lock_wait_to_the_right_message(tmp_path, monkeypatch, caplog):
+    from looper.agents import chat_settings
+
+    monkeypatch.setattr(chat_settings, "_metrics_enabled", True)
+    clock = [100.0]
+    monkeypatch.setattr("looper.agents.channels.lark.monotonic", lambda: clock[0])
+    caplog.set_level("INFO", logger="looper.agents.channels.lark")
+
+    async def main():
+        downloading, release = asyncio.Event(), asyncio.Event()
+        transport = StubTransport()
+
+        async def download(message_id, ref, part, *, max_bytes):
+            downloading.set()
+            await release.wait()
+            part.write_bytes(b"\x89PNG\r\n\x1a\n")
+
+        async def names(ids):
+            clock[0] += 0.5
+            return {OPEN_ID: "Synthetic Sender"}
+
+        transport.download, transport.names = download, names
+        adapter = _adapter(tmp_path, transport)
+        bus = MessageBus(runtime_root=tmp_path)
+        adapter._bus = bus
+        first = asyncio.create_task(adapter._handle_lark_event(_event(
+            message_id="om_first", chat_type="group", mentions=[BOT_MENTION],
+            message_type="image", content="[Image: img_synthetic]")))
+        second = None
+        try:
+            await asyncio.wait_for(downloading.wait(), 2)
+            clock[0] = 101.0
+            second = asyncio.create_task(adapter._handle_lark_event(_event(
+                message_id="om_second", chat_type="group", mentions=[BOT_MENTION])))
+            await asyncio.sleep(0)
+            assert not second.done()
+            clock[0] = 103.0
+            release.set()
+            assert await asyncio.gather(first, second) == ["handled", "handled"]
+            messages = bus.journal.undelivered()
+            assert [m.payload["channel_context"]["message_id"] for m in messages] == ["om_first", "om_second"]
+            one, two = [m.metadata["lark_ingress"] for m in messages]
+            assert one["attachment_download_ms"] == 3000
+            assert two["attachment_download_ms"] == 0
+            assert one["lock_wait_ms"] == 0
+            assert two["lock_wait_ms"] == 2500
+            assert one["sender_name_lookup_ms"] == two["sender_name_lookup_ms"] == 500
+            for metrics in (one, two):
+                assert "platform_sent_at" not in metrics
+                assert "platform_to_stdout_ms" not in metrics
+                assert "stdout_read_at" not in metrics
+                assert datetime.fromisoformat(metrics["lock_acquired_at"]).tzinfo is not None
+                assert datetime.fromisoformat(metrics["route_decided_at"]).tzinfo is not None
+            lines = [r.message for r in caplog.records if r.message.startswith("lark_ingress ")]
+            assert len(lines) == 2
+            for line, message in zip(lines, messages):
+                record = json.loads(line.removeprefix("lark_ingress "))
+                assert record == {"channel_id": adapter.channel_id,
+                                  "message_id": message.payload["channel_context"]["message_id"],
+                                  **message.metadata["lark_ingress"]}
+                assert "hello" not in line and "Synthetic Sender" not in line
+        finally:
+            release.set()
+            await asyncio.gather(first, *([second] if second else []), return_exceptions=True)
+            await adapter.stop()
+            await bus.shutdown()
+
+    asyncio.run(main())
 
 
 @pytest.mark.parametrize("route", ["admitted", "silent", "off"])

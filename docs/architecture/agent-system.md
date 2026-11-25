@@ -33,6 +33,23 @@ only the receipt, preserving the first decision. Nullable `decision`, `reason`,
 cap and digest fields are reserved for the delivery layer's future `decide()`
 write point.
 Off, turns have no metrics key and sends add no writes.
+
+With metrics enabled, Lark turns also store `metadata.turn_metrics.lark_ingress`:
+UTC ISO timestamps `platform_sent_at` (the event's millisecond `create_time`),
+`stdout_read_at` (CLI consumer stdout read), `lock_acquired_at` and
+`route_decided_at` (at the routing log), plus `lock_wait_ms`,
+`sender_name_lookup_ms` and `attachment_download_ms` measured with a monotonic
+clock inside the existing ingress path. Unused lookup/download stages are zero;
+unavailable timestamps are omitted, including missing or invalid platform time.
+`platform_to_stdout_ms` exists only when both timestamps are available and includes
+upstream delivery and any time buffered before the serial consumer reads stdout;
+it is subject to platform/server clock skew. Catch-up and non-CLI events have no
+stdout timestamp. One `lark_ingress` JSON log per inbound message carries the
+available measurements and channel/message ids, without message text or names;
+messages that do not reach routing have no route timestamp or stored model turn.
+Ordering, locking, retries and outbound messages are unchanged. These fields are
+queryable in the existing stored turn metrics; no new operation is required.
+
 The operator-only operations `manager_metrics_settings.get` (body `{}`) and
 `manager_metrics_settings.update` (body `{"enabled": true}`, `false` or `null`)
 read and store the switch; null restores off. Update is high risk and declares
