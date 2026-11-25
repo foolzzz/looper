@@ -252,9 +252,9 @@ class CliTransport:
         """Remember successful thread sends without turning a bookkeeping error into a send retry."""
         if return_id or self.on_thread_activity is not None:
             answer = await lark_cli.run_json(argv)
+            data = answer.get("data", answer)
             if self.on_thread_activity is not None:
                 try:
-                    data = answer.get("data", answer)
                     # Some shortcut versions return only the sent id and chat, omitting thread metadata.
                     if (resolve_thread and not (data.get("thread_id") and data.get("chat_id"))
                             and (sent_id := lark_cli.sent_message_id(answer))):
@@ -265,6 +265,10 @@ class CliTransport:
                         await self.on_thread_activity(data["chat_id"], data["thread_id"])
                 except Exception:
                     logger.warning("could not remember sent Lark thread", exc_info=True)
+            from .lark_quote import capture_sent
+
+            if isinstance(data, dict) and data.get("message_id") == lark_cli.sent_message_id(answer):
+                capture_sent(data)
             return lark_cli.sent_message_id(answer) if return_id else None
         await lark_cli.run(argv)
         return None

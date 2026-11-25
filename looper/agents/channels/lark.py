@@ -242,6 +242,8 @@ class LarkChannelAdapter(ChannelAdapter):
         # The bot's own open_id: a group message is handled only when it @-mentions this; none, none is.
         self._bot_open_id = bot_open_id
         self._bot_app_id = bot_app_id
+        # Delivery records are resident-only and bounded. Restart/eviction safely restores normal reads.
+        self._quote_deliveries: dict[str, lark_quote.OwnDelivery] = {}
         self._bot_turns: dict[str, deque[float]] = {}
         self._bot_refusals: dict[tuple[str, str], float] = {}
         # One status message per message answered, edited in place (``status_line``), keyed by correlation id:
@@ -354,7 +356,20 @@ class LarkChannelAdapter(ChannelAdapter):
         route = raw_route if isinstance(raw_route, dict) else {}
         chat = self._correlation_chat.get(envelope.correlation_id) or route.get("chat_id")
         with self._transport.message_scope(envelope.message_id, source=source, chat=chat):
-            return await task_notice_delivery.send(envelope, self._deliver)
+            with lark_quote.capture_delivery() as items:
+                receipt = await task_notice_delivery.send(envelope, self._deliver)
+            session = lark_quote.QuoteSession.from_payload(envelope.metadata.get("quote_session"))
+            if (receipt.success and session is not None and session.manager_id == envelope.source.agent_id
+                    and envelope.source.agent_type == "manager" and envelope.message_type is MessageType.AGENT_REPLY
+                    and not envelope.metadata.get("cards") and len(items) == 1):
+                group = envelope.correlation_id in self._group_message or bool(route.get("reply_to"))
+                delivery = lark_quote.own_delivery(session, items[0], own=(self._bot_open_id, self._bot_app_id),
+                                                   group=group)
+                if delivery is not None and delivery.chat_id == chat:
+                    self._quote_deliveries[delivery.message_id] = delivery
+                    while len(self._quote_deliveries) > _THREAD_MESSAGES_KEPT:
+                        del self._quote_deliveries[next(iter(self._quote_deliveries))]
+            return receipt
 
     async def _deliver(self, envelope: MessageEnvelope) -> DeliveryReceipt:
         """Show a phase on the message's status line, send task progress or a task's end notice as a message of
@@ -725,6 +740,7 @@ class LarkChannelAdapter(ChannelAdapter):
         return PostReceipt(True, external_ids=(external_id,))
 
     async def edit(self, target: NotifyTarget, external_id: str, text: str) -> PostReceipt:
+        self._quote_deliveries.pop(external_id, None)  # even an uncertain edit invalidates the stored copy
         text = files.redact(text, self._runtime_root)
         try:
             await self._transport.edit(external_id, markdown=text)
@@ -1342,6 +1358,12 @@ class LarkChannelAdapter(ChannelAdapter):
         names included; a read that fails becomes a line saying why. The images and files in it are saved beside
         the message's own, numbered after its ``after`` and within its limits (``_collect``). The Manager calls it
         while it prepares the message's turn (``lark_quote.QuoteReader``)."""
+        delivery = self._quote_deliveries.get(ref.parent_id)
+        if (ref.kind is QuoteKind.REPLY and not ref.thread_id and delivery is not None
+                and ref.session is not None and delivery.session == ref.session and delivery.chat_id == ref.chat_id):
+            quote, _ = lark_quote.build(QuoteKind.REPLY, ref.parent_id, [delivery.item],
+                                        own=(self._bot_open_id, self._bot_app_id), after=after)
+            return QuoteRead((quote,), decision=lark_quote.QuoteDecision.SKIP_OWN_IN_SESSION)
         read = self._transport.get_message  # type: ignore[attr-defined]
         wanted = ref.targets()
         started = monotonic()

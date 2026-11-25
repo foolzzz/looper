@@ -79,7 +79,7 @@ def test_stop_from_the_same_chat_stops_the_turn(agent_db: Any) -> None:
     asyncio.run(run())
 
 
-def test_stop_while_the_quote_is_read_stops_the_message_before_the_model(agent_db: Any) -> None:
+def test_stop_while_the_quote_is_read_stops_the_message_before_the_model(agent_db: Any, caplog) -> None:
     """A Lark message that quotes another is read in its turn (``read_quote``): a /stop from its chat cancels the
     read, the model never sees the message, and the next turn is told the user withdrew it."""
     lark = channel_address("lark", "channel-lark")
@@ -115,7 +115,11 @@ def test_stop_while_the_quote_is_read_stops_the_message_before_the_model(agent_d
                                               '"这条说了什么？"). Do not act on it unless they ask again.']
             await bus.shutdown()
 
-    asyncio.run(run())
+    with caplog.at_level("INFO"):
+        asyncio.run(run())
+    decisions = [r.message for r in caplog.records if r.message.startswith("lark_quote ")]
+    assert len(decisions) == 1
+    assert "decision=read" in decisions[0] and "outcome=cancelled" in decisions[0]
 
 
 def test_stop_from_another_chat_or_idle(agent_db: Any) -> None:

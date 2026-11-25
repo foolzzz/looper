@@ -9,10 +9,14 @@ as quoted content and not as instructions."""
 
 from __future__ import annotations
 
+import json
 import re
 import unicodedata
-from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
-from dataclasses import dataclass
+from collections.abc import Awaitable, Callable, Iterable, Iterator, Mapping, Sequence
+from contextlib import contextmanager
+from contextvars import ContextVar
+from copy import deepcopy
+from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
 from typing import Any, Protocol, runtime_checkable
@@ -40,6 +44,45 @@ class QuoteKind(str, Enum):
     THREAD = "thread"  # the first message of this one's thread and its latest replies
 
 
+class QuoteDecision(str, Enum):
+    READ = "read"
+    SKIP_OWN_IN_SESSION = "skip_own_in_session"
+
+
+@dataclass(frozen=True)
+class QuoteSession:
+    manager_id: str
+    key: str
+    session_id: str
+
+    @classmethod
+    def from_payload(cls, value: Any) -> QuoteSession | None:
+        if isinstance(value, dict) and all(isinstance(value.get(k), str) and value[k]
+                                           for k in ("manager_id", "key", "session_id")):
+            return cls(value["manager_id"], value["key"], value["session_id"])
+        return None
+
+
+# A send can already return a raw item (including the CLI's existing thread-activity lookup).
+# Capture only within that delivery's task; never prefetch or synthesize a platform message from Markdown.
+_sent_items: ContextVar[list[dict[str, Any]] | None] = ContextVar("lark_quote_sent_items", default=None)
+
+
+@contextmanager
+def capture_delivery() -> Iterator[list[dict[str, Any]]]:
+    items: list[dict[str, Any]] = []
+    token = _sent_items.set(items)
+    try:
+        yield items
+    finally:
+        _sent_items.reset(token)
+
+
+def capture_sent(item: dict[str, Any]) -> None:
+    if (items := _sent_items.get()) is not None:
+        items.append(deepcopy(item))
+
+
 @dataclass(frozen=True)
 class QuoteRef:
     """What a received message points to, for the Manager to read (``payload["quote_ref"]``): the message itself
@@ -54,6 +97,8 @@ class QuoteRef:
     parent_id: str = ""
     root_id: str = ""
     thread_id: str = ""
+    # Local proof from the Manager, never trusted from the journaled/channel payload.
+    session: QuoteSession | None = field(default=None, compare=False, repr=False)
 
     @classmethod
     def received(cls, channel_id: str, event: Mapping[str, Any], *, forward: bool) -> QuoteRef | None:
@@ -117,6 +162,48 @@ class QuoteRead:
     read_seconds: float = 0.0
     names_seconds: float = 0.0
     files_seconds: float = 0.0
+    decision: QuoteDecision = QuoteDecision.READ
+
+
+@dataclass(frozen=True)
+class OwnDelivery:
+    session: QuoteSession
+    chat_id: str
+    message_id: str
+    item: Mapping[str, Any]
+
+
+def own_delivery(session: QuoteSession, item: Mapping[str, Any], *, own: Sequence[str],
+                 group: bool) -> OwnDelivery | None:
+    """Accept only a complete raw, attachment-free message with explicit non-thread state."""
+    sender = item.get("sender")
+    body = item.get("body")
+    if (not isinstance(sender, Mapping) or not isinstance(sender.get("id"), str)
+            or not sender["id"] or sender["id"] not in own
+            or sender.get("sender_type") not in ("app", "bot")
+            or item.get("msg_type") not in ("text", "post") or item.get("deleted")
+            or "rendered" in item or item.get("thread_id") != ""
+            or (group and (not isinstance(item.get("parent_id"), str) or not item["parent_id"]
+                           or not isinstance(item.get("root_id"), str) or not item["root_id"]
+                           or item["root_id"] == item.get("message_id")))
+            or not isinstance(item.get("message_id"), str) or not item["message_id"]
+            or not isinstance(item.get("chat_id"), str) or not item["chat_id"]
+            or _time(item.get("create_time")) == "?" or not isinstance(body, Mapping)
+            or not isinstance(body.get("content"), str)):
+        return None
+    try:
+        content = json.loads(body["content"])
+    except ValueError:
+        return None
+    if not isinstance(content, dict):
+        return None
+    if item["msg_type"] == "text" and not isinstance(content.get("text"), str):
+        return None
+    try:
+        _, resources = build(QuoteKind.REPLY, item["message_id"], [item], own=own)
+    except (ValueError, TypeError, KeyError, AttributeError):
+        return None
+    return None if resources else OwnDelivery(session, item["chat_id"], item["message_id"], item)
 
 
 class QuoteUnavailable(RuntimeError):
