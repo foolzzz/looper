@@ -394,11 +394,12 @@ Manager has no tool for it. The dashboard shows the task page's 指标 card and 
   The independent operator-only `profile_settings.get/update` operations control `manager.profile.enabled`
   (default off; null restores off). Settings → Knowledge vault exposes its confirmed switch. Off, the Manager
   never compiles a profile and its model-facing bytes remain unchanged. On, the default Manager's own dashboard
-  and operator direct-chat turns include an `Operator profile` resident section. Group and other-sender turns,
-  routed non-main sessions and scenario Managers omit it. With `manager.stable_context` on it is inside the
-  stable block and follows its whole/change/unchanged rules; otherwise it is its own resident section before
-  Projects. Shared turns never receive private profile text in stable-state removal lines either. This does
-  not erase profile text already present in a shared resident session's history.
+  (without an API client) and operator direct-chat turns include an `Operator profile` resident section.
+  API-client turns, group and other-sender turns, routed non-main sessions and scenario Managers omit it.
+  With `manager.stable_context` on it is inside the stable block and follows its whole/change/unchanged rules;
+  otherwise it is its own resident section before Projects. Shared and API-client turns never receive private
+  profile text in stable-state removal lines either. This does not erase profile text already present in a
+  shared resident session's history.
   `looper profile show [--runtime-root …] [--config …]` reads the same file with the same compiler and prints
   exactly the resident section's body, with no added newline, whether injection is on or off. It makes no model
   call or schema/cache write. Its worker has a 1-second deadline covering imports, settings and file I/O;
