@@ -6,6 +6,7 @@ import asyncio
 import hashlib
 import logging
 import re
+import time
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -465,6 +466,7 @@ async def _finish_online(conn: asyncpg.Connection) -> None:
         for step in _ONLINE_STEPS:
             if step.migration not in done or step.marker in done:
                 continue
+            started = time.monotonic()
             for table, constraint in step.validate:
                 await conn.execute(f"ALTER TABLE {table} VALIDATE CONSTRAINT {constraint}")
             indexes = [(name, definition, False) for name, definition in step.indexes]
@@ -477,6 +479,8 @@ async def _finish_online(conn: asyncpg.Connection) -> None:
                 await conn.execute(f"DROP INDEX CONCURRENTLY IF EXISTS {name}")
                 await conn.execute(f"CREATE {'UNIQUE ' if unique else ''}INDEX CONCURRENTLY IF NOT EXISTS {name} {definition}")
             await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1) ON CONFLICT DO NOTHING", step.marker)
+            logger.info("online schema step applied: %s order=%d in %.3fs",
+                        step.marker, _ONLINE_ORDERS[step.migration], time.monotonic() - started)
     finally:
         await conn.execute("SELECT pg_advisory_unlock($1)", _ONLINE_LOCK)
 
@@ -1496,7 +1500,12 @@ async def ensure_schema(pool: asyncpg.Pool | asyncpg.Connection | None = None) -
         elif state == "bridge":
             await upgrade_from_bridge(conn)
         for migration in _MIGRATIONS:
+            will_apply = await migration.pending(conn)
+            started = time.monotonic()
             await migration.apply(conn, sql=sql, state=state)
+            if will_apply:
+                logger.info("migration applied: %s order=%d in %.3fs",
+                            migration.name, migration.order, time.monotonic() - started)
         # Current databases never replay initialization DDL. Missing builtins
         # are inserted without changing any saved choice or creation time.
         await conn.execute(SEEDS_PATH.read_text(encoding="utf-8"))
@@ -1542,3 +1551,6 @@ async def schema_change_pending(conn: asyncpg.Connection) -> bool:
 _MIGRATIONS = migrations.discover()
 _PENDING_MIGRATIONS = migrations.pending_migrations(_MIGRATIONS)
 _ONLINE_STEPS = migrations.online_steps(_MIGRATIONS)
+# The online order a step logs belongs to the module that owns it; steps themselves stay order-free.
+_ONLINE_ORDERS = {module.name: module.online_order
+                  for module in _MIGRATIONS if getattr(module, "online", ())}
