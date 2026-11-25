@@ -48,7 +48,7 @@ from .allowlist import SenderAllowlist
 from .. import card_actions, chat_attachments, chat_commands, chat_settings
 from .base import ChannelAdapter, DeliveryFailure, DeliveryReceipt, PostOutcome, PostReceipt
 from .chat_history import record_reply
-from .proactive import record_delivery
+from .proactive import record_delivery, store_envelope_body
 from .chat_routing import ChatResolver, RouteAction, RouteDecision, observe_chat, log_route
 from .status_line import Reactions, StatusKind, StatusLines, status_kind
 from .telegram_inbox import TelegramInbox
@@ -448,6 +448,9 @@ class TelegramChannelAdapter(ChannelAdapter):
             except ValueError:
                 return DeliveryReceipt(channel="telegram", success=False, error="a notice without a Telegram chat id")
             notice = Notice.from_payload(envelope.payload)
+            await store_envelope_body(self.channel_id, envelope,
+                                      for_group(notice.text) if notice is not None and notice.target.group
+                                      else str(envelope.payload.get("text") or ""))
             if notice is None or not notice.target.group:
                 return await self._send_answer(chat, str(envelope.payload.get("text") or ""),
                                                message_id=envelope.message_id, source=OutboxSource.NOTICE)
@@ -475,6 +478,8 @@ class TelegramChannelAdapter(ChannelAdapter):
                 else:
                     if (envelope.message_type is MessageType.STATUS_UPDATE
                             and status_kind(envelope.payload) is StatusKind.PROGRESS):
+                        await store_envelope_body(self.channel_id, envelope, str(envelope.payload["text"]),
+                                                  chat=str(chat_id), group=chat_id < 0)
                         return await self._send_answer(chat_id, str(envelope.payload["text"]),
                                                        message_id=envelope.message_id, source=OutboxSource.PROGRESS)
                     self._remember(corr_id, chat_id)
@@ -492,6 +497,8 @@ class TelegramChannelAdapter(ChannelAdapter):
                     await self._status.update(corr_id, str(chat_id), envelope.payload)
                 case StatusKind.PROGRESS:
                     # Task progress leaves the status line alone.
+                    await store_envelope_body(self.channel_id, envelope, str(envelope.payload["text"]),
+                                              chat=str(chat_id), group=chat_id < 0)
                     return await self._send_answer(chat_id, str(envelope.payload["text"]),
                                                    message_id=envelope.message_id, source=OutboxSource.PROGRESS)
             return DeliveryReceipt(channel="telegram", success=True)
@@ -501,6 +508,8 @@ class TelegramChannelAdapter(ChannelAdapter):
             return DeliveryReceipt(channel="telegram", success=True)
 
         text, cards = card_actions.shown(text, envelope.metadata.get("cards"))
+        if text:
+            await store_envelope_body(self.channel_id, envelope, text, chat=str(chat_id), group=chat_id < 0)
         receipt = (await self._send_answer(chat_id, text, message_id=envelope.message_id) if text
                    else DeliveryReceipt(channel="telegram", success=True))
         for i, card in enumerate(cards):
@@ -908,7 +917,7 @@ class TelegramChannelAdapter(ChannelAdapter):
                 # An answer is stored once it was sent, or as not delivered (the Manager names its record).
                 receipt = await self.deliver(envelope)
                 self.record_envelope_delivery(envelope, receipt)
-                if chat_settings.metrics_enabled() and envelope.metadata.get("proactive"):
+                if envelope.metadata.get("proactive"):
                     route = envelope.metadata.get("reply_route")
                     route = route if isinstance(route, dict) else {}
                     chat = str(route.get("chat_id") or self._correlation_chat.get(envelope.correlation_id) or "")

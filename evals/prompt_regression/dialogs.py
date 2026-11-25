@@ -88,6 +88,7 @@ from looper.agents.delivery_guard import FOLLOWUP_MESSAGE
 from looper.agents.tiers.manager import _looper_call
 
 from .compare import outcome
+from . import group_dialogs
 from .routed_dialogs import cases as _routed_cases
 from .metrics import runner_evidence
 from .runner import (
@@ -176,6 +177,7 @@ class Say:
     code_only: bool = False  # Looper answers the step without calling the model (for example, /profile).
     profile_after: Literal["switch", "settings"] | None = None  # A code-only session profile selection.
     attachments: tuple[tuple[str, bytes], ...] = ()
+    sender: Literal["operator", "member", "bot"] = "operator"
 
 
 @dataclass(frozen=True)
@@ -190,6 +192,8 @@ class Dialog:
     seed: Callable[[Api, str], None] | None = None
     manager: str | None = None  # the key of the scenario Manager the dialog talks to (its seed creates it)
     client: bool = False  # the dialog talks to the default Manager as an API client (``/api/v1/chat/send``)
+    routing: Literal["per_chat", "scoped"] | None = None
+    manager_seed: dict[str, Any] | None = None  # Group Manager fields, inserted before server startup.
     tags: tuple[str, ...] = field(default=())
     projects_root: bool = False  # the server has [projects] root set to a directory of the case
     fake_task: dict[str, Any] | None = None  # fake mode: the stand-in Planner's script for its tasks (else slow)
@@ -3524,6 +3528,17 @@ FAILURE_DIALOGS = tuple(_hold_dialog(action) for action in ("retry", "planner", 
 
 
 FAKE_DIALOGS: tuple[Dialog, ...] = (
+    Dialog("group_per_chat_smoke", (
+        Say("Operator greeting.", group_dialogs.smoke_check,
+            (("__reply__", {"text": f"Received in {group_dialogs.CHAT}."}),)),
+        Say("Member greeting.", group_dialogs.smoke_check,
+            (("__reply__", {"text": f"Received in {group_dialogs.CHAT}."}),), sender="member",
+            attachments=(("greeting.txt", b"Synthetic group attachment.\n"),)),
+        Say("Bot greeting.", group_dialogs.smoke_check,
+            (("__reply__", {"text": f"Received in {group_dialogs.CHAT}."}),), sender="bot"),
+    ), session="group", routing="per_chat", manager="group-smoke", manager_seed={
+        "name": "Eval group desk", "tools": "all",
+        "system_prompt": "Answer the messages addressed to you in this group."}),
     Dialog("session_bound_rotate", (
         Say("先记住这一轮。", lambda look: None,
             (("__context__", {"tokens": 40001}), ("__reply__", {"text": "已记住。"}))),
@@ -4093,7 +4108,9 @@ def run_dialog(api: Api, dialog: Dialog, *, database_url: str, project_id: str, 
             client_id = created["client"]["id"]
             client_api = Api(api.base_url, token=created["token"], timeout=api.timeout)
         other_task = None
-        if dialog.session:
+        if dialog.session and dialog.routing:
+            group_dialogs.prepare(api, scenarios.parent, dialog, database_url)
+        elif dialog.session:
             from .routed_dialogs import prepare
 
             other_task = prepare(api, dialog, database_url, project_id, task)
@@ -4120,13 +4137,24 @@ def run_dialog(api: Api, dialog: Dialog, *, database_url: str, project_id: str, 
                         rendered = rendered.replace("<lead>", _memory_lead(previous, kind)["id"])
                     scripted.append([name, json.loads(rendered)])
                 data.setdefault("manager", {})[text] = scripted
+                if dialog.session and say.attachments:
+                    # Rich resource placeholders and the saved-attachment section follow this exact prefix.
+                    prefix = text + "\n" + "\n".join(
+                        f"[file {i}: {name}]" for i, (name, _) in enumerate(say.attachments, 1))
+                    data.setdefault("manager_prefix", {})[prefix + "\n\n"] = scripted
                 if dialog.id == "tools_only_no_text":
                     data["manager"][FOLLOWUP_MESSAGE] = [["__reply__", {"text": "已查到项目：eval-calc。"}]]
                 scenarios.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
             before = _last_action(database_url, agent)
             expects_api = api_turn and not (say.code_only or say.stop or say.withdraw)
             before_run = _newest_run(api, agent) if expects_api else 0
-            if dialog.session:
+            manager_session = None
+            stored_messages = []
+            if dialog.session and dialog.routing:
+                reply, manager_session, stored_messages = group_dialogs.ask(
+                    api, scenarios.parent / "lark", dialog, text, sender=say.sender,
+                    database_url=database_url, timeout=timeout, attachments=say.attachments, **budget_args)
+            elif dialog.session:
                 from .routed_dialogs import ask
 
                 reply = ask(api, scenarios.parent / "lark", dialog, text, database_url=database_url,
@@ -4154,7 +4182,9 @@ def run_dialog(api: Api, dialog: Dialog, *, database_url: str, project_id: str, 
             # What a refused call was told, and the arguments it came with: what to fix in a tool or its description.
             errors = [{"tool": a["tool"], "arguments": a["arguments"], "message": (a["result"] or {}).get("message")}
                       for a in trail if a["status"] == "error"]
-            turns.append({"text": text, "reply": reply[:2000], "calls": calls, "errors": errors, "problem": problem})
+            turns.append({"text": text, "reply": reply[:2000], "calls": calls, "errors": errors, "problem": problem,
+                          **({"sender": say.sender, "manager_session": manager_session,
+                              "stored_messages": stored_messages} if dialog.session and dialog.routing else {})})
             if problem:
                 break
         check_budget()
@@ -4180,8 +4210,8 @@ def run_dialog(api: Api, dialog: Dialog, *, database_url: str, project_id: str, 
     passed = not problems and len(turns) == len(dialog.says)
     return {"id": dialog.id, **(error or {"outcome": (Outcome.PASS if passed else Outcome.FAIL).value,
                                           "success": passed}),
-            **({"transport": "lark-cli CliTransport", "session": dialog.session, "sender": dialog.sender}
-               if dialog.session else {}),
+            **({"transport": "lark-cli CliTransport", "session": dialog.session} if dialog.session else {}),
+            **({"sender": dialog.sender} if dialog.session and not dialog.routing else {}),
             "problems": problems, "turns": turns,
             "calls": sum(len(t["calls"]) for t in turns), "duration_s": round(time.monotonic() - started, 1)}
 
@@ -4342,9 +4372,18 @@ def run(
                 projects_root.mkdir()
             with fresh_database(admin_url) as (database_url, _), _clean_command_runners(case / "runtime"):
                 if dialog.session:
-                    from .routed_dialogs import seed_server
+                    if dialog.routing:
+                        group_dialogs.enable_channel(database_url)
+                        if not dialog.manager:
+                            raise EvalError("group dialogs need a scenario Manager and an explicit routing mode")
+                        if dialog.manager_seed is not None:
+                            group_dialogs.seed_manager(database_url, manager=f"manager-{dialog.manager}",
+                                                       values=dialog.manager_seed)
+                        group_dialogs.seed_server(database_url, manager=f"manager-{dialog.manager}", routing=dialog.routing)
+                    else:
+                        from .routed_dialogs import seed_server
 
-                    seed_server(database_url)
+                        seed_server(database_url)
                 reminder_now = REMINDER_NOW if mode == "fake" and dialog.id == "reminder_tools" else None
                 with running_server(database_url=database_url, runtime_root=case / "runtime", bin_dir=case / "bin",
                                     log_path=logs / f"{dialog.id}-{rep}.log", home=home,

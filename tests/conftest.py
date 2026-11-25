@@ -11,6 +11,7 @@ import sys
 from collections import Counter
 from collections.abc import Callable, Iterator
 from datetime import datetime, timezone
+from importlib import import_module
 from pathlib import Path
 from statistics import median
 from types import SimpleNamespace
@@ -42,6 +43,60 @@ import worker_database  # noqa: E402
 _TEST_SHARD = pytest.StashKey[tuple[int, int]]()
 _SHARD_DURATIONS = pytest.StashKey[dict[str, float]]()
 _STAGED_DASHBOARD_DIR = REPO_ROOT / "looper" / "web" / "dashboard"
+
+
+@pytest.fixture
+def fixed_clock(monkeypatch: pytest.MonkeyPatch, request: pytest.FixtureRequest):
+    """Opt in to one mutable wall clock; seed SQL timestamps explicitly with ``fixed_clock()``.
+
+    Select an aware ISO instant through ``LOOPER_TEST_NOW`` or an indirect
+    ``fixed_clock`` parameter (a datetime or ISO string). Pass the returned
+    clock to services with a ``clock=`` constructor: default arguments may
+    already hold the original callable. Advance it with ``fixed_clock.now``.
+    PostgreSQL's clock and event-loop/monotonic clocks remain real.
+    """
+    from datetime import date, datetime as real_datetime
+    from tests.schedule_support import Clock
+
+    clock = Clock()
+    instant = getattr(request, "param", os.environ.get("LOOPER_TEST_NOW", "2026-01-15T19:00:00+00:00"))
+    clock.now = datetime.fromisoformat(instant) if isinstance(instant, str) else instant
+    if clock.now.tzinfo is None or clock.now.utcoffset() is None:
+        raise ValueError("fixed_clock requires a timezone-aware instant")
+    clock.now = clock.now.astimezone(timezone.utc)
+
+    # Database timestamps must still pass attention's isinstance(datetime) checks.
+    class FrozenDateTimeMeta(type):
+        def __instancecheck__(cls, value):
+            return isinstance(value, real_datetime)
+
+    class FrozenDateTime(real_datetime, metaclass=FrozenDateTimeMeta):
+        @classmethod
+        def now(cls, tz=None):
+            return clock().astimezone(tz) if tz is not None else clock().astimezone().replace(tzinfo=None)
+
+    class FrozenDate(date):
+        @classmethod
+        def today(cls):
+            return clock().astimezone().date()
+
+    # Patch module attributes, including date.today() inside local_midnight,
+    # so callers that imported that function before fixture setup also agree.
+    for name in (
+        "looper.agents.overview", "looper.agents.schedules", "looper.agents.scheduler",
+        "looper.agents.memory_draft_service", "looper.agents.intents",
+        "looper.agents.proactive_delivery", "looper.agents.morning_brief", "looper.agents.attention",
+        "looper.agents.config_transfer", "looper.agents.ops.schedules",
+        "looper.agents.manager_turn_context", "looper.agents.v1_domains.status_card",
+        "looper.agents.v1_domains.schedule_writes", "looper.agents.v1_domains.runs",
+        "looper.db.llm_records",
+    ):
+        monkeypatch.setattr(import_module(name), "datetime", FrozenDateTime)
+    monkeypatch.setattr("looper.agents.overview.date", FrozenDate)
+    monkeypatch.setattr("looper.agents.schedules._utcnow", clock)
+    monkeypatch.setattr("looper.agents.scheduler._utcnow", clock)
+    monkeypatch.setattr("looper.agents.intents._now", clock)
+    return clock
 
 
 @pytest.fixture(scope="session", autouse=True)
@@ -558,6 +613,7 @@ def _chat_stop_default_off(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(chat_settings, "_delivery_enabled", chat_settings.DEFAULT_DELIVERY_ENABLED)
     monkeypatch.setattr(chat_settings, "_morning_brief_enabled", chat_settings.DEFAULT_MORNING_BRIEF_ENABLED)
     monkeypatch.setattr(chat_settings, "_morning_brief_time", chat_settings.DEFAULT_MORNING_BRIEF_TIME)
+    monkeypatch.setattr(chat_settings, "_morning_brief_cutoff", None)
     monkeypatch.setattr(persona, "_current", persona.Persona())
     monkeypatch.setattr(persona, "_warned", None)
     monkeypatch.setattr(chat_settings, "_turn_context_enabled", False)

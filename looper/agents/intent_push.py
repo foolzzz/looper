@@ -390,10 +390,10 @@ class IntentPushService:
             card = (await intent_cards.make(intent, post["channel_id"], post["chat"], post["text"], conn=conn)
                     if post["kind"] == "push" else None)
             target = push_target(post["channel_id"], post["chat"])
-            kwargs = {"reply_to": reply, "idempotency_key": delivery_key,
-                      **turn_metrics.proactive_kwargs(turn_metrics.ProactiveSource.INTENT, str(intent["id"]))}
-            receipt = (await self._registry.post_card(post["channel_id"], target, card, **kwargs) if card is not None
-                       else await self._registry.post(post["channel_id"], target, post["text"], **kwargs))
+            kwargs = {"reply_to": reply, "idempotency_key": delivery_key}
+            with turn_metrics.proactive_send(turn_metrics.ProactiveSource.INTENT, str(intent["id"])):
+                receipt = (await self._registry.post_card(post["channel_id"], target, card, **kwargs) if card is not None
+                           else await self._registry.post(post["channel_id"], target, post["text"], **kwargs))
             state = {PostOutcome.SENT: "sent", PostOutcome.REJECTED: "failed", PostOutcome.UNKNOWN: "uncertain"}[receipt.result]
             external = receipt.external_ids[0] if receipt.external_ids else None
             error = receipt.error

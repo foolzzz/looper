@@ -8,14 +8,20 @@ LOOPER_TEST_DATABASE_URL points at a disposable database.
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from typing import Any
 
 import pytest
 
-from tests.db_support import DSN, run_db
+from looper.agents import api_v1, step_workspaces
+from looper.agents.action_levels import ActionLevel
+from looper.db import task_worktrees
+from tests.db_support import DSN, run_db, v1_api
+from tests.test_task_changes import git, repository as _repository
 from tests.test_task_capture_db import _task
 
 pytestmark = pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
+repository = _repository
 
 
 def test_supplements_and_requirement_edits_are_pending_until_delivered(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -106,3 +112,105 @@ def test_the_requirement_of_a_task_in_any_running_status_can_be_edited(monkeypat
         assert edited["version"] == 2
 
     run_db(test, monkeypatch)
+
+
+def test_schema_and_level():
+    op = api_v1.find("POST", "/api/v1/tasks/changes")
+    assert op is not None and op.operator_only and op.risk == "read"
+    assert op.level is ActionLevel.MACHINE and op.tool is None and not op.hand
+    assert len(op.summary) <= 120 and op.description.startswith(op.summary)
+    assert op.request["additionalProperties"] is False and op.result["additionalProperties"] is False
+    assert op.result["properties"]["files"]["maxItems"] == 200
+    assert op.result["properties"]["files"]["items"]["additionalProperties"] is False
+
+
+def test_http_permission_validation_and_real_git(tmp_path, monkeypatch, repository):
+    repo = repository
+    row = {"task_id": "t", "repo_dir": str(repo), "subdir": "", "path": str(repo), "branch": "task",
+           "base_commit": git(repo, "rev-parse", "HEAD"), "state": "active", "links": []}
+
+    async def run(pool):
+        await pool.execute("INSERT INTO projects(id,name) VALUES ('p','Project')")
+        await pool.execute("INSERT INTO tasks(id,requirement,project_id,workspace_dir,work_dir,workspace_mode) "
+                           "VALUES ('t','Changes','p',$1,$1,'worktree')", str(repo))
+        await task_worktrees.save(row, pool=pool)
+        calls = []
+        original = step_workspaces._git
+
+        async def record(*args, **kwargs):
+            calls.append(args)
+            return await original(*args, **kwargs)
+
+        monkeypatch.setattr(step_workspaces, "_git", record)
+        async with v1_api(tmp_path, pool) as call:
+            code, body = await call("tasks.changes", {"task_id": "t"}, client=True)
+            assert code == 403 and body["error"]["code"] == "forbidden" and calls == []
+            code, body = await call("tasks.changes", {"task_id": "missing"})
+            assert code == 404 and calls == []
+            for args in ({}, {"task_id": ""}, {"task_id": "t", "limit": 0},
+                         {"task_id": "t", "limit": 201}, {"task_id": "t", "limit": "1"},
+                         {"task_id": "t", "limit": True}, {"task_id": "t", "cwd": "elsewhere"},
+                         {"task_id": "t", "ref": "other"}):
+                code, body = await call("tasks.changes", args)
+                assert code == 400 and body["error"]["code"] == "invalid", body
+            assert calls == []
+            for i in range(201):
+                (repo / f"new-{i:03}").write_text("new")
+            for args, count in (({}, 100), ({"limit": 1}, 1), ({"limit": 200}, 200)):
+                code, body = await call("tasks.changes", {"task_id": "t", **args})
+                result = body["result"]
+                assert code == 200 and result["kind"] == "ok", body
+                assert len(result["files"]) == count and result["truncated"] and "total" not in result
+                api_v1.validate_arguments(api_v1.find("POST", "/api/v1/tasks/changes").result, result)
+            git(repo, "checkout", "-b", "other")
+            code, body = await call("tasks.changes", {"task_id": "t"})
+            assert code == 200 and body["result"]["reason"] == "branch_changed"
+            assert body["result"]["files"] == []
+    run_db(run, monkeypatch)
+
+
+def test_http_persisted_scopes_and_unavailable(tmp_path, monkeypatch, repository):
+    repo = repository
+    base = git(repo, "rev-parse", "HEAD")
+    (repo / "committed").write_text("task commit")
+    git(repo, "commit", "-am", "Task")
+    git(repo, "checkout", "-b", "other", base)
+    (repo / "modified").write_text("current checkout")
+    (repo / "untracked").write_text("current checkout")
+
+    async def run(pool):
+        await pool.execute("INSERT INTO projects(id,name) VALUES ('p','Project')")
+        await pool.execute("INSERT INTO tasks(id,requirement,project_id,workspace_dir,work_dir,workspace_mode) "
+                           "VALUES ('t','Changes','p',$1,$1,'worktree')", str(repo))
+        await task_worktrees.save({"task_id": "t", "repo_dir": str(repo), "subdir": "",
+            "path": str(repo / "gone"), "branch": "task", "base_commit": base,
+            "state": "removed", "removed_at": datetime.now(timezone.utc), "links": []}, pool=pool)
+        async with v1_api(tmp_path, pool) as call:
+            code, body = await call("tasks.changes", {"task_id": "t"})
+            assert code == 200 and body["result"]["scope"] == "task_branch"
+            assert body["result"]["files"] == [{"path": "committed", "status": "modified", "old_path": None}]
+            git(repo, "branch", "-D", "task")
+            code, body = await call("tasks.changes", {"task_id": "t"})
+            assert code == 200 and body["result"]["reason"] == "branch_missing"
+            await pool.execute("UPDATE task_worktrees SET state='active',removed_at=NULL WHERE task_id='t'")
+            code, body = await call("tasks.changes", {"task_id": "t"})
+            assert code == 200 and body["result"]["reason"] == "workspace_missing"
+            await pool.execute("DELETE FROM task_worktrees WHERE task_id='t'")
+            await pool.execute("UPDATE tasks SET workspace_mode='in_place' WHERE id='t'")
+            code, body = await call("tasks.changes", {"task_id": "t"})
+            assert code == 200 and body["result"]["scope"] == "working_tree"
+            assert {f["path"] for f in body["result"]["files"]} == {"modified", "untracked"}
+            await pool.execute("UPDATE tasks SET workspace_dir=$1 WHERE id='t'", str(tmp_path))
+            code, body = await call("tasks.changes", {"task_id": "t"})
+            assert code == 200 and body["result"]["reason"] == "not_git"
+            original = step_workspaces._git
+
+            async def fail(*args, **kwargs):
+                raise step_workspaces.GitError("private diagnostic")
+
+            monkeypatch.setattr(step_workspaces, "_git", fail)
+            code, body = await call("tasks.changes", {"task_id": "t"})
+            assert code == 200 and body["result"] == {"task_id": "t", "kind": "unavailable", "scope": None,
+                "files": [], "truncated": False, "reason": "git_error"}
+            monkeypatch.setattr(step_workspaces, "_git", original)
+    run_db(run, monkeypatch)
