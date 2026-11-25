@@ -76,7 +76,9 @@ beforeEach(() => {
   api.fetchTaskActivityWindow.mockResolvedValue({ events: [], hasMore: false });
   api.streamTaskActivity.mockReturnValue(() => {});
   api.fetchGateThread.mockResolvedValue({ messages: [] });
-  vi.stubGlobal("fetch", vi.fn(async () => Response.json({ status: "ok", result: { activity: [{ seq: 1 }] } })));
+  vi.stubGlobal("fetch", vi.fn(async (url: string) => Response.json({ status: "ok", result: url.endsWith("/changes")
+    ? { task_id: "task 1", kind: "ok", scope: "task_branch", files: [], truncated: false, reason: null }
+    : { activity: [{ seq: 1 }] } })));
   window.innerWidth = 1280;
   window.innerHeight = 800;
   host = document.createElement("div");
@@ -92,6 +94,22 @@ afterEach(() => {
 });
 
 describe("Work plan on the page", () => {
+  it("renders one cost section from shared detail and replaces it on task selection", async () => {
+    api.fetchTaskDetail.mockResolvedValue({ ...detail(), task_budget_usd: 10, own_budget_usd: null, cost: {
+      cost_usd: 8, runs: 1, running: 0, unpriced_runs: 0, by_model: [], manager_by_model: [],
+      by_role: { planner: { cost_usd: 8, runs: 1 }, worker: { cost_usd: 0, runs: 0 }, reviewer: { cost_usd: 0, runs: 0 } },
+    } });
+    await show(<WorkPage sub="task/task%201" onNavigate={vi.fn()} />);
+    expect(host.querySelectorAll('[aria-labelledby="work-cost-title"]')).toHaveLength(1);
+    expect(host.querySelector('[aria-labelledby="work-cost-title"]')?.textContent).toContain("80% of $10.00 cap · near the cap");
+    expect(api.fetchTaskDetail).toHaveBeenCalledTimes(1);
+    api.fetchTaskDetail.mockResolvedValue({ ...detail(), task_id: "other", cost: null });
+    await show(<WorkPage sub="task/other" onNavigate={vi.fn()} />);
+    expect(host.querySelector('[aria-labelledby="work-cost-title"]')?.textContent).toContain("费用尚不可用");
+    expect(host.querySelector('[aria-labelledby="work-cost-title"]')?.textContent).not.toContain("$8.00");
+    expect(api.fetchTaskDetail).toHaveBeenCalledTimes(2);
+  });
+
   it("opens, scrolls to and focuses the one gate editor from a step", async () => {
     const scroll = vi.spyOn(HTMLElement.prototype, "scrollIntoView").mockImplementation(() => {});
     await show(<WorkPage sub="task/task%201" onNavigate={() => {}} />);
@@ -114,7 +132,7 @@ describe("Work plan on the page", () => {
     expect(earlier.querySelector("textarea")).toBeNull();
   });
 
-  it("scrolls the short conversation and keeps both detail sections in one dismissible panel", async () => {
+  it("scrolls the short conversation and keeps all detail sections in one dismissible panel", async () => {
     window.innerWidth = 844;
     window.innerHeight = 390;
     await show(<WorkPage sub="task/task%201" onNavigate={() => {}} />);
@@ -133,6 +151,7 @@ describe("Work plan on the page", () => {
     const panel = host.querySelector('[role="dialog"]') as HTMLElement;
     const title = panel.querySelector("#work-steps-title") as HTMLElement;
     expect(panel.contains(host.querySelector('[aria-label="关卡"]'))).toBe(true);
+    expect(panel.querySelectorAll('[aria-label="改动文件"]')).toHaveLength(1);
     expect(panel.className).toContain("overflow-y-auto");
     expect(panel.className).not.toContain("40dvh");
     expect(panel.contains(composer)).toBe(false);
@@ -154,6 +173,7 @@ describe("Work plan on the page", () => {
     expect(detail.getAttribute("data-layout")).toBe("split");
     expect(panel.querySelector("#work-steps-title")).not.toBeNull();
     expect(panel.querySelector('[aria-label="关卡"]')).not.toBeNull();
+    expect(panel.querySelectorAll('[aria-label="改动文件"]')).toHaveLength(1);
     expect(panel.className).toContain("overflow-y-auto");
     expect(host.querySelectorAll('aside[aria-label="任务详情"]')).toHaveLength(1);
     expect(host.querySelector('[role="dialog"]')).toBeNull();
