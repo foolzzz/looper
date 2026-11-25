@@ -197,6 +197,8 @@ BUILTIN_PROFILE = LegacyAgentProfile("agent-claude-code-opus", "claude-code/opus
 # changes it. The advisor's names its model in full, never the alias: an alias maps to another model with another
 # provider, or in another release.
 BUILTIN_ROLE_PROFILES: Mapping[str, LegacyAgentProfile] = MappingProxyType({
+    "task_manager": LegacyAgentProfile("agent-claude-code-sonnet-5-5", "claude-code/sonnet-5-5", BUILTIN_RUNTIME,
+                                       BUILTIN_PROVIDER, "claude-sonnet-5-5"),
     "advisor": LegacyAgentProfile("agent-claude-code-fable-5-2", "claude-code/fable-5-2", BUILTIN_RUNTIME,
                                   BUILTIN_PROVIDER, "claude-fable-5-2", effort="high"),
     "advice_check": LegacyAgentProfile("agent-claude-code-sonnet-5-5", "claude-code/sonnet-5-5", BUILTIN_RUNTIME,

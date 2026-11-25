@@ -516,6 +516,9 @@ async def delete_task(task_id: str, runtime_root: Path | None, *,
         raise RequestError(HTTP_404, "task not found")
     if task.get("status", "") in db_tasks.ACTIVE_STATUSES:
         raise _TaskActive()
+    from .tiers.task_manager import current_pool
+    if manager_pool := current_pool():
+        await manager_pool.forget(task_id)
     async with db_connection.transaction() as conn:
         # Serialize cleanup with start_ready_task's UPDATE, using this connection throughout
         # so cleanup cannot wait for another connection while holding the row lock.

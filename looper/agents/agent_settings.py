@@ -145,6 +145,7 @@ FIELDS = ("harness_prompt", "profile_id", "env", "run_budget_usd", "max_concurre
 
 class AgentType(str, Enum):
     MANAGER = "manager"
+    TASK_MANAGER = "task_manager"
     PLANNER = "planner"
     WORKER = "worker"
     REVIEWER = "reviewer"
@@ -172,7 +173,8 @@ NO_HARNESS_ROLES = (AgentType.PROCESSOR, *SPAWN_ROLES)
 PROJECT_ROLES = (*TASK_ROLES, AgentType.PROCESSOR)
 # The roles whose runs have tools (``runtimes.TOOL_ROLES``): the shared defaults' profile is checked against these, and
 # the Manager's settings tool knows only these.
-TOOL_ROLES = tuple(AgentType(role) for role in TOOL_ROLE_NAMES)
+# Task Manager choices are operator-only; keep the existing Manager tool schema frozen.
+TOOL_ROLES = tuple(AgentType(role) for role in TOOL_ROLE_NAMES if role != "task_manager")
 # The roles whose concurrency a limit counts, in one task: one Planner runs a task, and any number of tasks run.
 TASK_LIMIT_ROLES = (AgentType.WORKER, AgentType.REVIEWER)
 # The roles a task's Planner may choose the Agent Profile of: never its own.
@@ -183,6 +185,7 @@ BUILTIN_CONCURRENCY = {AgentType.WORKER: 16, AgentType.REVIEWER: 8}
 # Whether a role replaces its runtime's default system prompt or appends to it, when its role layer sets none
 # (``Launch.system_prompt_mode``).
 BUILTIN_SYSTEM_PROMPT_MODE = {
+    AgentType.TASK_MANAGER: SystemPromptMode.APPEND,
     AgentType.MANAGER: SystemPromptMode.REPLACE, AgentType.PLANNER: SystemPromptMode.REPLACE,
     AgentType.WORKER: SystemPromptMode.APPEND, AgentType.REVIEWER: SystemPromptMode.APPEND,
     # The processor has no tools: the runtime's own prompt, which describes them, does not apply.
@@ -679,7 +682,7 @@ def resolve(role: AgentType | str | None, layers: Mapping[Place, LayerValues],
             harness = Harness(text, layer, in_project, from_role)
         # Explorers have their own profile and cap; shared task defaults must
         # not silently replace the deliberately cheaper built-in model.
-        own_explorer_layer = agent is not AgentType.EXPLORER or layer_role is AgentType.EXPLORER
+        own_explorer_layer = agent not in (AgentType.EXPLORER, AgentType.TASK_MANAGER) or layer_role is agent
         if values.profile is not None and own_explorer_layer:
             chosen, chosen_source = values.profile, layer
         if values.run_budget_usd is not None and own_explorer_layer:
@@ -815,7 +818,8 @@ async def load_agent_settings(
         if row is None:
             raise SettingsError(f"the run's Agent Profile {profile_id!r} no longer exists")
         settings = replace(settings, profile=_stored_profile(row), profile_error=None, pricing_catalog=())
-    elif settings.profile_source is Layer.BUILTIN and AgentType(role) in (*SPAWN_ROLES, AgentType.EXPLORER):
+    elif settings.profile_source is Layer.BUILTIN and AgentType(role) in (*SPAWN_ROLES, AgentType.EXPLORER,
+                                                                      AgentType.TASK_MANAGER):
         # A spawned role's own built-in profile, seeded with the schema; without it the role does not run (another
         # model in its place would not be the one chosen for it).
         builtin = builtin_profile(AgentType(role).value)
