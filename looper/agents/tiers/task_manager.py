@@ -4,21 +4,53 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import json
+import logging
 import time
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass, field, replace
 from enum import Enum
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal, Protocol
 
-from ...db import activity, projects, tasks
-from .. import outbound_hook, task_conversations_settings, task_manager_safety, task_manager_settings, task_workspaces
+from ...db import activity, agent_sessions, projects, tasks
+from .. import outbound_hook, step_workspaces, task_budget, task_conversations_settings
+from .. import task_manager_safety, task_manager_settings, task_workspaces
 from ..agent_settings import Access, Launch
-from ..claude_cli import ResidentClaude
+from ..claude_cli import ClaudeRunRecorder, ResidentClaude
 from ..library import EMPTY_LIBRARY
 from ..project_execution import ProjectExecution
 from ..run_usage import Usage
+from ..runtimes.cancel import TurnCancel
 from ..system_prompt import SystemPrompt
 from ..task_manager_brief import brief, instructions
+from ..untrusted import Source, fence
+
+logger = logging.getLogger(__name__)
+
+
+class TaskManagerEvent(str, Enum):
+    QUEUED = "queued"
+    SESSION_FRESH = "session_fresh"
+    TURN_SUMMARY = "turn_summary"
+    REFUSED = "refused"
+    STOPPED = "stopped"
+
+
+@dataclass(frozen=True)
+class ToolRecord:
+    tool_use_id: str
+    name: str
+    args: str
+    result: str
+    is_error: bool
+
+
+class TurnSink(Protocol):
+    async def delta(self, text: str) -> None: ...
+    async def tool(self, record: ToolRecord) -> None: ...
+    async def event(self, kind: TaskManagerEvent, payload: Mapping[str, Any]) -> None: ...
+    async def final(self, text: str, outcome: str) -> None: ...
 
 
 class RefuseReason(str, Enum):
@@ -38,6 +70,54 @@ class Refused(Exception):
         self.reason = reason
 
 
+@dataclass(frozen=True)
+class Submitted:
+    state: Literal["started", "queued", "refused"]
+    reason: RefuseReason | None = None
+
+
+@dataclass
+class _Request:
+    task_id: str
+    text: str
+    message_id: str
+    sink: TurnSink
+    history: Sequence[Mapping[str, Any] | str]
+    admitted: asyncio.Future[Submitted]
+    cancel: TurnCancel = field(default_factory=TurnCancel)
+
+
+class _ResumeFailed(Exception):
+    pass
+
+
+async def _files(cwd: str) -> dict[str, tuple[Any, ...]]:
+    """Status plus file metadata distinguishes another edit without reading large files."""
+    status = await step_workspaces._git(cwd, "status", "--porcelain", "-z", "--untracked-files=all", check=False)
+    if status.returncode:
+        return {}
+
+    def snapshot() -> dict[str, tuple[Any, ...]]:
+        found = {}
+        entries = iter(status.stdout.decode("utf-8", "surrogateescape").split("\0"))
+        for entry in entries:
+            if not entry:
+                continue
+            name = entry[3:]
+            if "R" in entry[:2] or "C" in entry[:2]:
+                next(entries, None)
+            path = Path(cwd) / name
+            try:
+                stat = path.lstat()
+                value = (stat.st_mtime_ns, stat.st_ctime_ns, stat.st_size)
+            except OSError:
+                value = ()
+            found[name] = (entry[:2], *value)
+        return found
+
+    return await asyncio.to_thread(snapshot)
+
+
 class TaskManagerAgent:
     def __init__(self, pool: TaskManagerPool, task_id: str) -> None:
         self.pool, self.task_id = pool, task_id
@@ -46,6 +126,8 @@ class TaskManagerAgent:
         self.busy = False
         self.session_id: str | None = None
         self.totals = Usage()
+        self.loaded = False
+        self.running: asyncio.Task[None] | None = None
 
     async def prepare(self) -> tuple[Mapping[str, Any], Any, Launch, SystemPrompt]:
         """Read configuration afresh; no launch bypasses the direct-mode review checks."""
@@ -53,6 +135,12 @@ class TaskManagerAgent:
             raise Refused(RefuseReason.WORK_MODE_OFF, "Task conversations are disabled.")
         if self.pool.closing:
             raise Refused(RefuseReason.SHUTTING_DOWN, "The task Manager is shutting down.")
+        if not self.loaded:
+            saved = await agent_sessions.get_session(f"task-manager-{self.task_id}")
+            if saved:
+                self.session_id = saved["session_id"]
+                self.totals = Usage.from_dict(saved["session_totals"])
+            self.loaded = True
         task = await tasks.get_task(self.task_id)
         if task is None:
             raise Refused(RefuseReason.WORKSPACE, "The task no longer exists.")
@@ -118,8 +206,112 @@ class TaskManagerAgent:
             if self.session_id:
                 command += ["--resume", self.session_id]
             await self.resident.start(command, cwd=reopened.work_dir, signature=signature, env=env,
-                                      totals=self.totals, price=launch.price)
+                                      totals=self.totals, price=launch.price, capture_stderr=True)
         return task, reopened, launch, prompt
+
+    async def turn(self, request: _Request) -> None:
+        gate = await task_budget.gate(self.task_id)
+        if not gate.allowed:
+            raise Refused(RefuseReason.BUDGET, "这个任务已到花费上限，提高上限后再说")
+        if gate.unknown_models:
+            await activity.insert_activity(task_id=self.task_id, kind="error",
+                summary="Warning: task Manager cost is unknown for " + ", ".join(gate.unknown_models))
+        task, reopened, launch, prompt = await self.prepare()
+        if not request.admitted.done():
+            request.admitted.set_result(Submitted("started"))
+        if reopened.reason and not self.session_id:
+            await request.sink.event(TaskManagerEvent.SESSION_FRESH,
+                                     {"reason": "read_only_open", "detail": reopened.reason})
+        before = await _files(reopened.work_dir)
+        text, outcome = "", "failed"
+        written = False
+        try:
+            for attempt in range(2):
+                resuming = "--resume" in self.resident.command
+                expected = self.session_id if resuming else None
+                initialized = False
+                pieces: list[str] = []
+                tools: dict[str, ToolRecord] = {}
+
+                async def on_event(event: dict[str, Any]) -> None:
+                    nonlocal initialized
+                    await recorder.record(event)
+                    if event.get("type") == "system" and event.get("subtype") == "init":
+                        if expected and event.get("session_id") != expected:
+                            raise _ResumeFailed("Claude Code resumed a different session")
+                        initialized = True
+                        self.session_id = event.get("session_id") or self.session_id
+                    if event.get("parent_tool_use_id") is not None:
+                        return
+                    delta = (event.get("event") or {}).get("delta") or {}
+                    if delta.get("type") == "text_delta":
+                        chunk = str(delta.get("text") or "")
+                        pieces.append(chunk)
+                        await request.sink.delta(chunk)
+                    content = (event.get("message") or {}).get("content") or []
+                    for block in content if isinstance(content, list) else []:
+                        if not isinstance(block, dict):
+                            continue
+                        if block.get("type") == "tool_use" and event.get("type") == "assistant":
+                            name = str(block.get("name") or "")
+                            record = ToolRecord(str(block.get("id") or ""), name,
+                                (name + " " + json.dumps(block.get("input"), ensure_ascii=False))[:200], "", False)
+                            tools[record.tool_use_id] = record
+                            await request.sink.tool(record)
+                        elif block.get("type") == "tool_result" and block.get("tool_use_id") in tools:
+                            record = replace(tools[block["tool_use_id"]],
+                                result=json.dumps(block.get("content"), ensure_ascii=False)[:200],
+                                is_error=bool(block.get("is_error")))
+                            await request.sink.tool(record)
+
+                message = request.text
+                if attempt and request.history:
+                    history = "\n".join(item if isinstance(item, str) else json.dumps(dict(item), ensure_ascii=False)
+                                        for item in request.history[-20:])
+                    message = fence(history, source=Source.CHAT_HISTORY) + "\n\n" + message
+                retry_detail = ""
+                async with ClaudeRunRecorder(agent_id=f"task-manager-{self.task_id}", task_id=self.task_id,
+                    command=self.resident.command, cwd=reopened.work_dir, input_text=message,
+                    session_id=self.session_id, system_prompt=prompt, launch=launch,
+                    pid_of=lambda: self.resident.pid) as recorder:
+                    try:
+                        result = await self.resident.run_turn(message, on_event, tag=request,
+                                                              stop=recorder.cap_stop, cancel=request.cancel)
+                        written |= result.prompt_sent
+                        if resuming and not initialized and not request.cancel.requested:
+                            retry_detail = result.stderr or await self.resident.stderr_tail()
+                            raise _ResumeFailed(retry_detail or "Claude Code exited before init")
+                    except _ResumeFailed as exc:
+                        if attempt or request.cancel.requested:
+                            raise
+                        await self.resident.stop(kill=True)
+                        self.session_id, self.totals = None, Usage()
+                        await request.sink.event(TaskManagerEvent.SESSION_FRESH,
+                                                {"reason": "resume_failed", "detail": str(exc)})
+                        # Re-run all configuration and review gates before the one fresh attempt.
+                        task, reopened, launch, prompt = await self.prepare()
+                        continue
+                    text = str((result.result_event or {}).get("result") or "".join(pieces))
+                    outcome = ("stopped" if result.stopped else "success"
+                               if (result.result_event or {}).get("subtype") == "success" else "failed")
+                    self.totals = self.resident.totals
+                    await recorder.finish(output_text=text, result_event=result.result_event,
+                                          usage=result.usage, outcome=outcome)
+                if result.stopped:
+                    await request.sink.event(TaskManagerEvent.STOPPED, {"method": result.stopped.value})
+                break
+        finally:
+            if self.session_id:
+                await agent_sessions.save_session(f"task-manager-{self.task_id}", self.session_id, self.totals.to_dict(),
+                    runtime_type="claude-code", profile_id=launch.profile.id, provider_id=launch.profile.provider.id)
+            after = await _files(reopened.work_dir)
+            files = sorted(name for name in before.keys() | after.keys() if before.get(name) != after.get(name))
+            commit = None
+            if written and task.get("workspace_mode") == "worktree" and self.mode == "direct":
+                commit = await step_workspaces.commit_pending(Path(reopened.work_dir), self.links,
+                    f"looper: task Manager turn of task {self.task_id}\n\nLooper-Task: {self.task_id}")
+            await request.sink.event(TaskManagerEvent.TURN_SUMMARY, {"files": files, "commit": commit, "mode": self.mode})
+        await request.sink.final(text, outcome)
 
 
 _pool: TaskManagerPool | None = None
@@ -138,6 +330,9 @@ class TaskManagerPool:
         self.agents: dict[str, TaskManagerAgent] = {}
         self.closing = False
         self._lock = asyncio.Lock()
+        self._pending: list[_Request] = []
+        self._active: dict[str, _Request] = {}
+        self._closing_tasks: set[str] = set()
         self._ticker = asyncio.create_task(self._tick(), name="task-manager-reclaim")
         _pool = self
 
@@ -154,13 +349,90 @@ class TaskManagerPool:
         """Called under the pool gate; an idle eviction never races a turn admission."""
         if agent.resident.started:
             return True
-        live = sum(a.resident.started for a in self.agents.values())
+        live = sum(a.resident.started or a.busy for a in self.agents.values())
         if live < self.max_resident():
             return True
         for other in sorted(self.agents.values(), key=lambda a: a.last_used):
             if not other.busy and await other.resident.try_stop_if_idle():
                 return True
         return False
+
+    async def _refuse(self, request: _Request, reason: RefuseReason, text: str) -> None:
+        if not request.admitted.done():
+            request.admitted.set_result(Submitted("refused", reason))
+        await request.sink.event(TaskManagerEvent.REFUSED, {"reason": reason})
+        await request.sink.final(text, "refused")
+
+    async def submit(self, task_id: str, text: str, *, message_id: str, sink: TurnSink,
+                     history: Sequence[Mapping[str, Any] | str] = ()) -> Submitted:
+        request = _Request(task_id, text, message_id, sink, history, asyncio.get_running_loop().create_future())
+        reason = (RefuseReason.SHUTTING_DOWN if self.closing else RefuseReason.WORK_MODE_OFF
+                  if not task_conversations_settings.enabled() else None)
+        if task_id in self._closing_tasks:
+            reason = RefuseReason.SHUTTING_DOWN
+        if reason:
+            await self._refuse(request, reason, "Task conversations are disabled or shutting down.")
+            return request.admitted.result()
+        async with self._lock:
+            self._pending.append(request)
+            await self._dispatch()
+            if request in self._pending:
+                busy = self.in_turn(task_id)
+                position = sum(r.task_id == task_id for r in self._pending) if busy else len(self._pending)
+                await sink.event(TaskManagerEvent.QUEUED, {"reason": "turn" if busy else "cap", "position": position})
+                return Submitted("queued")
+        return await asyncio.shield(request.admitted)
+
+    async def _dispatch(self) -> None:
+        if self.closing:
+            return
+        for request in list(self._pending):
+            if request.task_id in self._closing_tasks:
+                continue
+            agent = self.agent(request.task_id)
+            if agent.busy or not await self._slot(agent):
+                continue
+            self._pending.remove(request)
+            agent.busy = True
+            self._active[request.task_id] = request
+            agent.running = asyncio.create_task(self._drive(agent, request), name=f"task-manager-{request.task_id}")
+
+    async def _drive(self, agent: TaskManagerAgent, request: _Request) -> None:
+        try:
+            if not task_conversations_settings.enabled():
+                raise Refused(RefuseReason.WORK_MODE_OFF, "Task conversations are disabled.")
+            await agent.turn(request)
+        except Refused as exc:
+            await self._refuse(request, exc.reason, str(exc))
+        except asyncio.CancelledError:
+            if not request.admitted.done():
+                request.admitted.set_result(Submitted("refused", RefuseReason.SHUTTING_DOWN))
+            raise  # Interrupted turns are not replayed on restart.
+        except Exception:
+            logger.exception("task Manager turn failed for %s", request.task_id)
+            await agent.resident.stop(kill=True)
+            if not request.admitted.done():
+                request.admitted.set_result(Submitted("started"))
+            await request.sink.final("The task Manager turn failed; inspect its run record before retrying.", "failed")
+        finally:
+            async with self._lock:
+                agent.busy, agent.running, agent.last_used = False, None, self.clock()
+                self._active.pop(request.task_id, None)
+                await self._dispatch()
+
+    async def stop_turn(self, task_id: str, message_id: str) -> bool:
+        active = self._active.get(task_id)
+        if active and active.message_id == message_id:
+            active.cancel.request()
+            return True
+        async with self._lock:
+            queued = next((r for r in self._pending if r.task_id == task_id and r.message_id == message_id), None)
+            if queued is None:
+                return False
+            self._pending.remove(queued)
+        await queued.sink.event(TaskManagerEvent.STOPPED, {"method": "kill"})
+        await queued.sink.final("", "stopped")
+        return True
 
     async def reclaim(self) -> None:
         async with self._lock:
@@ -174,21 +446,47 @@ class TaskManagerPool:
             await self.reclaim()
 
     async def close(self, task_id: str) -> None:
+        already_closing = task_id in self._closing_tasks
+        self._closing_tasks.add(task_id)
+        queued = [r for r in self._pending if r.task_id == task_id]
+        self._pending = [r for r in self._pending if r.task_id != task_id]
         agent = self.agents.get(task_id)
-        if agent:
-            await agent.resident.stop(kill=True)
+        try:
+            for request in queued:
+                await self._refuse(request, RefuseReason.SHUTTING_DOWN, "The task Manager was closed.")
+            if agent:
+                running = agent.running
+                if running:
+                    running.cancel()
+                await agent.resident.stop(kill=True)
+                if running and running is not asyncio.current_task():
+                    await asyncio.gather(running, return_exceptions=True)
+        finally:
+            if not already_closing:
+                self._closing_tasks.discard(task_id)
 
     async def forget(self, task_id: str) -> None:
-        await self.close(task_id)
-        self.agents.pop(task_id, None)
-        from ...db.connection import get_pool
-        await get_pool().execute("DELETE FROM agent_sessions WHERE agent_id=$1", f"task-manager-{task_id}")
+        self._closing_tasks.add(task_id)
+        try:
+            await self.close(task_id)
+            self.agents.pop(task_id, None)
+            from ...db.connection import get_pool
+            await get_pool().execute("DELETE FROM agent_sessions WHERE agent_id=$1", f"task-manager-{task_id}")
+        finally:
+            self._closing_tasks.discard(task_id)
 
     async def shutdown(self) -> None:
         global _pool
         self.closing = True
+        for request in self._pending:
+            await self._refuse(request, RefuseReason.SHUTTING_DOWN, "The task Manager is shutting down.")
+        self._pending.clear()
         self._ticker.cancel()
         await asyncio.gather(self._ticker, return_exceptions=True)
+        running = [a.running for a in self.agents.values() if a.running]
+        for task in running:
+            task.cancel()
         await asyncio.gather(*(a.resident.stop(kill=True) for a in self.agents.values()))
+        await asyncio.gather(*running, return_exceptions=True)
         if _pool is self:
             _pool = None

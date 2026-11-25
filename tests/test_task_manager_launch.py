@@ -3,6 +3,10 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
+import shlex
+import subprocess
+import sys
 from dataclasses import replace
 from pathlib import Path
 
@@ -164,3 +168,86 @@ def test_unreadable_settings_fail_closed(tmp_path, monkeypatch):
     path.write_text("not-json")
     result = asyncio.run(safety.gate("not-executed", cwd=tmp_path, environment={"HOME": str(tmp_path)}, phase="launch"))
     assert result.reason.value == "review_hook_disabled" and str(path) in result.notice
+
+
+@pytest.mark.installed
+def test_real_cli_direct_turn_saves_session(tmp_path, monkeypatch):
+    """Run the real task-owned launch against a loopback script, never a paid model."""
+    binary = os.environ.get("LOOPER_CLAUDE_PROBE_BIN")
+    if not binary:
+        pytest.skip("Set LOOPER_CLAUDE_PROBE_BIN for the offline real-CLI task Manager check; a skip is not a pass")
+    from fake_anthropic_messages import FakeAnthropicMessages, text, tool_use
+    from looper.agents import claude_cli, outbound_hook, task_conversations_settings, task_manager_settings
+    from looper.agents.tiers.task_manager import TaskManagerPool
+    from looper.db import agent_sessions, projects, tasks
+    from tests.db_support import run_db
+
+    binary = str(Path(binary).resolve())
+    home, config, workspace = tmp_path / "home", tmp_path / "config", tmp_path / "project"
+    for path in (home, config, workspace):
+        path.mkdir()
+    subprocess.run(["git", "init", "-q", str(workspace)], check=True, capture_output=True)
+    server = FakeAnthropicMessages()
+    url, requests = server.start([tool_use("Bash", {"command": "printf probe > result.txt"}), text("done")])
+    hook_script = tmp_path / "hook.py"
+    hook_script.write_text("import json,pathlib,sys\njson.load(sys.stdin)\npathlib.Path(sys.argv[1]).write_text('fired')\n")
+
+    def hook(name):
+        return ToolHook(" ".join(shlex.quote(part) for part in (sys.executable, str(hook_script), str(tmp_path / name))))
+
+    config.joinpath("settings.json").write_text(json.dumps({
+        "hooks": hook("user-hook").settings(), "claudeMdExcludes": claude_cli._outside_memory(workspace)}))
+    env = {"PATH": os.defpath, "HOME": str(home), "CLAUDE_CONFIG_DIR": str(config),
+           "ANTHROPIC_BASE_URL": url, "ANTHROPIC_API_KEY": "sk-probe-not-real",
+           "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1", "DISABLE_AUTOUPDATER": "1",
+           "DISABLE_TELEMETRY": "1", "NO_PROXY": "127.0.0.1,localhost"}
+    # Runtime environment construction is covered above; this installed test must never inherit credentials.
+    monkeypatch.setattr(CLAUDE_CODE, "environment", lambda launch: dict(env))
+    monkeypatch.setattr(outbound_hook, "known_enabled", lambda: True)
+    monkeypatch.setattr(task_conversations_settings, "_enabled", True)
+
+    async def settings(task):
+        return AgentSettings(profile=builtin_resolved_profile())
+
+    monkeypatch.setattr(task_manager_settings, "load_task_manager_settings", settings)
+
+    class Ops:
+        def tool_hook(self, *args, **kwargs):
+            return hook("launch-hook")
+
+    class Sink:
+        def __init__(self):
+            self.done = asyncio.Event()
+            self.outcome = None
+
+        async def delta(self, value): pass
+        async def tool(self, record): pass
+        async def event(self, kind, payload): pass
+        async def final(self, value, outcome):
+            self.outcome = outcome
+            self.done.set()
+
+    async def check(db):
+        project = await projects.create_project(name="Offline probe", work_dir=str(workspace))
+        await tasks.create_task(task_id="probe", requirement="Run the offline probe", project_id=project["id"],
+                                status="draft", work_dir=str(workspace), workspace_dir=str(workspace),
+                                workspace_mode="in_place")
+        pool = TaskManagerPool(tmp_path / "runtime", binary, ops=Ops(), max_resident=lambda: 1)
+        sink = Sink()
+        try:
+            submitted = await pool.submit("probe", "Run the offline probe", message_id="probe-message", sink=sink)
+            assert submitted.state == "started"
+            await asyncio.wait_for(sink.done.wait(), timeout=90)
+            session = await agent_sessions.get_session("task-manager-probe")
+            assert session is not None and session["session_id"]
+            assert workspace.joinpath("result.txt").read_text() == "probe"
+            assert tmp_path.joinpath("user-hook").read_text() == "fired"
+            assert tmp_path.joinpath("launch-hook").read_text() == "fired"
+            assert requests and all(request["api_key"] == "sk-probe-not-real" for request in requests)
+        finally:
+            await pool.shutdown()
+
+    try:
+        run_db(check, monkeypatch)
+    finally:
+        server.stop()

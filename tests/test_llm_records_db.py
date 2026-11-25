@@ -247,6 +247,28 @@ def test_a_tasks_cost_is_the_sum_of_its_planner_worker_and_reviewer_runs() -> No
     run_db(test, max_size=2)
 
 
+def test_task_manager_spend_is_counted_without_changing_other_tasks_shape() -> None:
+    from looper.agents import task_budget
+    from looper.agents.project_execution import ProjectExecution
+    from looper.db import llm_records
+    from unittest.mock import AsyncMock, patch
+
+    async def test(pool: Any) -> None:
+        await _run_record(pool, "task-manager-t1", task_id="t1", cost=0.4)
+        await _run_record(pool, "planner-t1", task_id="t1", cost=0.1)
+        await _run_record(pool, "manager", task_id="t1", cost=20.0)
+        costs = await llm_records.task_costs(["t1", "t2"], pool=pool)
+        assert costs["t1"]["cost_usd"] == 0.5 and costs["t1"]["runs"] == 2
+        assert costs["t1"]["by_role"]["task_manager"] == {"cost_usd": 0.4, "runs": 1}
+        assert costs["t1"]["manager_by_model"][0]["cost_usd"] == 20.0
+        assert "task_manager" not in costs["t2"]["by_role"]
+        with patch.object(task_budget.db_llm_records, "task_costs", AsyncMock(return_value=costs)):
+            decision = await task_budget.gate("t1", execution=ProjectExecution(task_budget_usd=0.5))
+        assert not decision.allowed and decision.spent == 0.5
+
+    run_db(test, max_size=2)
+
+
 def test_a_tasks_cost_by_model_counts_its_runs_tokens_and_the_managers_turns_about_it() -> None:
     from looper.db import llm_records
 
