@@ -3,6 +3,7 @@ import { Button } from "@/components/ui/button";
 import { WorkList } from "@/components/work-list";
 import { WorkSwitcher } from "@/components/work-switcher";
 import { WorkGates } from "@/components/work-gates";
+import { WorkRequirement } from "@/components/work-requirement";
 import { WorkSteps } from "@/components/work-steps";
 import { openWorkGate } from "@/components/work-activity-feed";
 import { fetchTaskDetail, isActiveTask, TaskDetailError, type TaskDetail, type UserGate } from "@/lib/api";
@@ -111,6 +112,7 @@ function WorkPageContent({
   }, [taskId]);
   const closePanel = () => { restorePanelFocus.current = true; setPanel(false); };
   const detailRevision = useRef(0);
+  const requirementRefresh = useRef(0);
   // Gate replies already return the new gate. Update the one shared detail without remounting its editor.
   const onGateChanged = useCallback((gate: UserGate) => {
     detailRevision.current += 1;
@@ -118,6 +120,20 @@ function WorkPageContent({
       ...current, task: { ...current.task, gates: current.task.gates?.map(item => item.step_id === gate.step_id ? gate : item) },
     });
   }, [taskId]);
+  // Requirement edits read this task back through the shared detail. A newer read, or a task that is no longer selected, is dropped.
+  const refreshDetail = useCallback(async () => {
+    const id = taskId;
+    if (!id) return;
+    const token = ++requirementRefresh.current;
+    detailRevision.current += 1;
+    const task = await fetchTaskDetail(id);
+    if (requirementRefresh.current !== token) return;
+    if (task.task_id !== id) throw new Error("任务详情与当前任务不匹配，请刷新");
+    conversations.cache(workConversationKey({ kind: "planner", taskId: id }), { task });
+    setDetail(current => (
+      current.id === id && requirementRefresh.current === token ? { id, task } : current
+    ));
+  }, [taskId, conversations]);
   const active = !!selected && isActiveTask(selected);
   useEffect(() => {
     if (!taskId || !active) return;
@@ -140,6 +156,8 @@ function WorkPageContent({
   useEffect(() => {
     if (!taskId) return;
     const ctrl = new AbortController();
+    // A requirement readback bumps this token. This older read must not replace it.
+    const refreshToken = requirementRefresh.current;
     setDetail({ id: taskId, task: conversations.cached(cacheKey)?.task });
     // Read the latest event, not the first forward page (which can be over 1,000 events behind).
     Promise.all([
@@ -149,16 +167,17 @@ function WorkPageContent({
       if (ctrl.signal.aborted) return;
       if (task.task_id !== taskId) throw new Error("任务详情与当前任务不匹配，请刷新");
       if ("status" in activity) throw new Error("Task activity is unavailable");
-      setDetail({ id: taskId, task });
-      conversations.cache(cacheKey, { task });
       const seq = Math.max(0, ...activity.activity.map(event => event.seq));
       const key = `${taskId}:${seq}`;
       if (seen.current !== key) {
         seen.current = key;
         markSeen(taskId, seq).catch((err: unknown) => console.error(err));
       }
+      if (requirementRefresh.current !== refreshToken) return;
+      setDetail({ id: taskId, task });
+      conversations.cache(cacheKey, { task });
     }).catch((err: unknown) => {
-      if (ctrl.signal.aborted) return;
+      if (ctrl.signal.aborted || requirementRefresh.current !== refreshToken) return;
       setDetail(current => ({ id: taskId, task: current.id === taskId ? current.task : undefined,
         missing: (err instanceof TaskDetailError || err instanceof V1Error) && err.status === 404 && !isMissingOperation(err), error: errorText(err) }));
     });
@@ -268,6 +287,7 @@ function WorkPageContent({
         className={wide ? "min-h-0 w-72 shrink-0 overflow-y-auto border-l border-border"
           : "fixed inset-0 z-50 overflow-y-auto bg-background"}>
         {!wide && <div className="border-b border-border p-3"><Button variant="outline" onClick={closePanel}>关闭任务详情</Button></div>}
+        <WorkRequirement task={selected} onRefresh={refreshDetail} />
         <WorkSteps task={selected} onOpenGate={step => openGate(step.step_key)} />
         <WorkGates task={selected} onOpenGate={openGate} />
       </aside>}
