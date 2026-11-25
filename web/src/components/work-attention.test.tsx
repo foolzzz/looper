@@ -339,7 +339,9 @@ function stubFetch() {
       return new Response(JSON.stringify({ status: "error", error: { code: "invalid", message: "use POST" } }), { status: 405 });
     }
     const path = String(url);
-    const result = path.includes("tasks/detail")
+    const result = path.includes("operator_chat/messages")
+      ? { messages: [{ message_id: "manager-message", role: "assistant", content: "Manager conversation stays", created_at: "2026-01-01T00:00:00Z" }] }
+      : path.includes("tasks/detail")
       ? { task_id: "task-1", title: "Task body stays", status: "running", group: "in_progress", project_id: "p", project_name: "Demo", requirement: "" }
       : path.includes("tasks/activity")
         ? { activity: [{ seq: 1 }] }
@@ -385,7 +387,7 @@ describe("Work attention on the manager column", () => {
     expect(host.textContent).not.toContain("暂时没有需要你处理的事");
   });
 
-  it("keeps the return and title height and scrolls the list in the space left", async () => {
+  it("keeps one Manager conversation beside the summary and gives both scroll space", async () => {
     stubFetch();
     vi.mocked(fetchAttention).mockResolvedValue(summary([
       section({
@@ -397,11 +399,12 @@ describe("Work attention on the manager column", () => {
     const aside = host.querySelector('aside[aria-label="需要你处理"]');
     const column = aside?.parentElement;
     const manager = column?.children[0];
-    const title = host.querySelector("header")?.parentElement;
+    const title = host.querySelector("header");
+    const conversation = host.querySelector('section[aria-label="Conversation"]');
     const back = [...host.querySelectorAll("button")].find((button) => button.textContent === "Back to the list");
     const names = (node: Element | null | undefined) => (node?.className ?? "").split(/\s+/);
-    // Below xl the list is a column under the return/title region. It must take the leftover
-    // height and scroll. A non-shrinking full-height list collapses that region to nothing.
+    // Below xl the conversation and list share the height. Both must shrink and scroll
+    // so the live conversation cannot push the summary outside the viewport.
     expect(names(column)).toContain("flex-col");
     expect(names(aside)).toContain("min-h-0");
     expect(names(aside)).toContain("flex-1");
@@ -409,11 +412,15 @@ describe("Work attention on the manager column", () => {
     expect(names(aside)).not.toContain("max-h-full");
     expect(names(aside)).not.toContain("shrink-0");
     expect(names(aside).some((name) => name === "xl:shrink-0" || name === "xl:flex-none")).toBe(true);
-    expect(names(manager)).toContain("shrink-0");
-    expect(names(manager)).not.toContain("flex-1");
-    expect(names(manager)).toContain("xl:flex-1");
-    expect(names(title)).not.toContain("flex-1");
-    expect(names(title)).toContain("xl:flex-1");
+    expect(names(manager)).toContain("min-h-0");
+    expect(names(manager)).toContain("flex-1");
+    expect(names(title)).toContain("shrink-0");
+    expect(conversation?.parentElement).toBe(manager);
+    expect(conversation?.getAttribute("data-identity")).toMatch(/^manager:/);
+    expect(conversation?.textContent).toContain("Manager conversation stays");
+    expect(host.querySelectorAll('section[aria-label="Conversation"]')).toHaveLength(1);
+    expect(host.querySelectorAll('textarea[aria-label="Message"]')).toHaveLength(1);
+    expect(host.querySelector('a[href="#chat"]')).toBeNull();
     expect(names(back?.parentElement)).toContain("shrink-0");
   });
 });

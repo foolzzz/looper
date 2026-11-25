@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
-import { PlannerWorkConversation } from "@/components/work-conversation";
+import { ManagerWorkConversation, PlannerWorkConversation } from "@/components/work-conversation";
 import { WorkAttention } from "@/components/work-attention";
 import { WorkList } from "@/components/work-list";
 import { WorkSwitcher } from "@/components/work-switcher";
@@ -147,17 +147,17 @@ export function WorkPage({
       </div>
       <div className={`h-full min-h-0 min-w-0 flex-1 ${pane === "detail" ? "flex" : "hidden md:flex"}`}>
         <div className="flex h-full min-h-0 min-w-0 flex-1 flex-col xl:flex-row">
-          <div className={`flex min-w-0 flex-col ${showAttention ? "shrink-0 xl:min-h-0 xl:min-w-0 xl:flex-1" : "min-h-0 flex-1"}`}>
+          <div className="flex min-h-0 min-w-0 flex-1 flex-col">
             <div className="shrink-0 border-b border-border p-3 md:hidden">
               <Button type="button" variant="outline" onClick={() => setPane("list")}>Back to the list</Button>
             </div>
             {selection.kind === "manager" ? (
-              <div className={showAttention ? "p-4 xl:min-h-0 xl:flex-1 xl:overflow-y-auto" : "min-h-0 flex-1 overflow-y-auto p-4"}>
-                <header aria-label="Selected task" className="space-y-3">
+              <>
+                <header aria-label="Selected task" className="shrink-0 border-b border-border p-4">
                   <h1 className="text-lg font-semibold">Manager</h1>
-                  <a className={LINK} href="#chat">Open the Manager chat</a>
                 </header>
-              </div>
+                <ManagerWorkConversation />
+              </>
             ) : !selected ? (
               <div className="min-h-0 flex-1 overflow-y-auto p-4">
                 <header aria-label="Selected task" className="space-y-3">

@@ -12,11 +12,12 @@ import {
 import { historyFrom, joinStaged, pullBack } from "@/lib/composer";
 import { randomId } from "@/lib/ids";
 import { useReplyStream } from "@/lib/use-reply-stream";
+import { useWorkManagerConversation } from "@/lib/use-work-manager-conversation";
 import { errorText } from "@/lib/use-action";
 import { cn } from "@/lib/utils";
 
-/** Who the pane is talking as. Manager stays a link until its own adapter exists. */
-export type WorkIdentity = { kind: "manager" } | { kind: "planner"; taskId: string };
+/** The owner of the conversation shown in the pane. */
+export type WorkIdentity = { kind: "manager"; sessionId?: string } | { kind: "planner"; taskId: string };
 
 export interface WorkPaneMessage {
   id: string;
@@ -44,6 +45,7 @@ export interface WorkConversationProps {
   events?: SSEEvent[];
   history: "loading" | "empty" | "ready" | "error";
   historyError?: string;
+  loadingText?: string;
   onRetry?: () => void;
   phase?: string;
   replying?: boolean;
@@ -56,6 +58,7 @@ export interface WorkConversationProps {
   onStop?: () => void;
   notice?: string;
   canStop?: boolean;
+  stopRefusal?: string;
 }
 
 const RECENT = "仅显示最近的对话";
@@ -223,16 +226,15 @@ function MessageList({ messages }: { messages: WorkPaneMessage[] }) {
 
 /**
  * The Work centre pane. An adapter supplies identity, whether sending is allowed,
- * the shared task, stream events and the send/stop callbacks. Manager renders nothing:
- * the page keeps the Chat link.
+ * the shared task, stream events and the send/stop callbacks.
  */
 export function WorkConversation(props: WorkConversationProps) {
   const {
-    identity, missing, canSend, refusal, detail, messages, events, history, historyError, onRetry,
-    phase, replying, draft, onDraft, staged, onStaged, inputHistory, onSend, onStop, notice, canStop,
+    identity, missing, canSend, refusal, detail, messages, events, history, historyError, loadingText, onRetry,
+    phase, replying, draft, onDraft, staged, onStaged, inputHistory, onSend, onStop, notice, canStop, stopRefusal,
   } = props;
-  if (identity.kind === "manager") return null;
-  if (missing) return <p role="status" data-identity={`planner:${identity.taskId}`}>{NOT_FOUND}</p>;
+  const ownerKey = identity.kind === "manager" ? `manager:${identity.sessionId ?? ""}` : `planner:${identity.taskId}`;
+  if (missing) return <p role="status" data-identity={ownerKey}>{NOT_FOUND}</p>;
 
   const folded = foldStream(messages, events ?? []);
   const shownPhase = phase || folded.phase;
@@ -242,12 +244,12 @@ export function WorkConversation(props: WorkConversationProps) {
   return (
     <section
       aria-label="Conversation"
-      data-identity={`planner:${identity.taskId}`}
+      data-identity={ownerKey}
       data-task-status={detail?.status ?? ""}
       className="flex h-full min-h-0 flex-1 flex-col"
     >
       <div className="flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto p-4">
-        {history === "loading" && shown.length === 0 && <p role="status">{LOADING}</p>}
+        {history === "loading" && shown.length === 0 && <p role="status">{loadingText ?? LOADING}</p>}
         {history === "error" && (
           <p role="alert" className="flex flex-wrap items-center gap-2 text-sm text-destructive">
             <span>{READ_FAILED} {historyError}</span>
@@ -262,7 +264,7 @@ export function WorkConversation(props: WorkConversationProps) {
         {refusal && <p role="status" className="text-xs text-muted-foreground">{refusal}</p>}
         {shownPhase && <p role="status" data-phase={shownPhase}>{shownPhase}</p>}
         <ChatComposer
-          key={identity.taskId}
+          key={ownerKey}
           draft={draft}
           onDraft={onDraft}
           staged={staged}
@@ -270,6 +272,7 @@ export function WorkConversation(props: WorkConversationProps) {
           history={inputHistory ?? historyFrom(shown)}
           replying={replying ?? false}
           canStop={canStop ?? false}
+          stopRefusal={stopRefusal}
           onSend={onSend}
           onStop={onStop ?? (() => {})}
           notice={notice}
@@ -279,6 +282,11 @@ export function WorkConversation(props: WorkConversationProps) {
       </div>
     </section>
   );
+}
+
+/** Manager adapter mounts only while the gated Work page selects Manager. */
+export function ManagerWorkConversation() {
+  return <WorkConversation {...useWorkManagerConversation()} />;
 }
 
 /**
