@@ -2,21 +2,21 @@
 
 - **状态：** 提案，只有文档，不含实现。方向由维护者定：先做 CLI 的「进入任务」（第 3 节方案 a），再做已结束任务的续接和与渠道无关的任务会话键。第 4 节的决定按本文建议写下。原来待定的问题已经定下，第 13 节逐条写成本版本的决定，各附理由；各项默认值以后都可以改。飞书话题的两个问题留到第 4 步开工前再定（13.8）。
 - **相关：** [群聊里的能力范围 RFC](chat-scopes-v0.zh-CN.md) 第 7 节（会话键与指纹）和第 16 节（留下的任务维度）；[助理层 RFC](assistant-layer-v0.zh-CN.md) 第 5.3 节（会话路由）；[任务的工作区 RFC](task-workspaces-v0.zh-CN.md)（W1、W3、W5、W6、W7）；[定时任务共用一条规划者会话 RFC](schedule-planner-session-v0.zh-CN.md)（任务之间接续规划者会话的先例）；[用户关卡 RFC](user-gate-v0.zh-CN.md)（回复关卡帖）；[agent room RFC](agent-room-v0.zh-CN.md)（会诊）；[管家台账 RFC](manager-completion-ledger-v0.zh-CN.md)；开放的 #1736（第 10 节第 0 步）。
-- **代码基线：** `main` `20ed06508`。第 2 节的现状是读代码得出的，每项标了出处；出处路径相对 `looper/agents/`，`schema.sql`、`db/…` 在 `looper/db/` 下，`web/…` 相对仓库根。本文没有启动服务，没有调用模型，文中的 SQL 也没有在数据库上执行过（由各步的迁移测试在一次性 PostgreSQL 上验证）。用到的 Claude Code 参数（`--session-id`、`--resume`、`--fork-session`、`--name`、`--settings`、`--permission-mode plan`、`--append-system-prompt`）只在 2.1.332 的 `claude --help` 里确认存在；它们的行为凡是没有现成代码证明的，都标了「需要验证」，在第 1 步开工前验证（10.3）。
+- **代码基线：** `main` `e574e70dd`。初稿按 `20ed06508` 写成，其后被引用的文件里只有 `projects.py` 和 `cli.py` 有改动；所有行号都按 `e574e70dd` 重新核对过。第 2 节的现状是读代码得出的，每项标了出处；出处路径相对 `looper/agents/`，`schema.sql`、`db/…` 在 `looper/db/` 下，`web/…` 相对仓库根。本文没有启动服务，没有调用模型，文中的 SQL 也没有在数据库上执行过（由各步的迁移测试在一次性 PostgreSQL 上验证）。用到的 Claude Code 参数（`--session-id`、`--resume`、`--fork-session`、`--name`、`--settings`、`--permission-mode plan`、`--append-system-prompt`）只在 2.1.332 的 `claude --help` 里确认存在；它们的行为凡是没有现成代码证明的，都标了「需要验证」，在第 1 步开工前验证（10.3）。
 
 ## 1. 问题与目标
 
 在编码 CLI 里，一件事通常有自己的目录和一条会话：离开几天，回到这个目录、续上这条会话，就能接着做。Looper 里一件事是一个任务，但操作者没法「切到」一个任务接着谈、接着做：
 
 1. **对话是单向的。** 让管家把话转给任务，管家把原话存成补充说明、唤醒规划者（`ops/tasks.py:547-571`）。规划者下一轮自己决定怎么处理，它的回答不会回到这段对话里。
-2. **结束的任务接不上。** 补充说明只收运行中的任务（`ops/tasks.py:553-555`）；重启只对失败、停止、取消的任务（`db/tasks.py:105-108`、`projects.py:1228-1233`）；规划者对已结束的任务直接回「任务已结束……不能再发消息」（`tiers/planner.py:4535-4536`）。所以对一个已完成任务的追问只能变成一个新任务，同一件事散成好几个任务。
+2. **结束的任务接不上。** 补充说明只收运行中的任务（`ops/tasks.py:553-555`）；重启只对失败、停止、取消的任务（`db/tasks.py:105-108`、`projects.py:1253-1258`）；规划者对已结束的任务直接回「任务已结束……不能再发消息」（`tiers/planner.py:4535-4536`）。所以对一个已完成任务的追问只能变成一个新任务，同一件事散成好几个任务。
 3. **唯一的双向入口不好找。** 控制台 Chat 页可以把目标选成运行中任务的规划者，直接对话（`chat_targets.py:52-56`）；任务结束后只读（`web/src/pages/chat.tsx:1243`）；任务页上没有入口（#1736 补上）。
 
-「说的是哪个任务」不是主要问题，操作者一般知道自己在说哪件事。缺的是：进得去，能双向地谈，结束以后还能接着做。
+「说的是哪个任务」不是主要问题，操作者一般知道自己在说哪件事，只是说出来的是几个字或一个 MR 号，不是任务 id。缺的是：进得去，能双向地谈，结束以后还能接着做。
 
 **目标：**
 
-- `looper task enter <id>` 在任务的目录里打开一条 Claude Code 会话，带上任务的需求、计划、进度和最近动态；离开再进来，续上的是同一条会话。
+- `looper task enter [<选择>]` 在任务的目录里打开一条 Claude Code 会话，带上任务的需求、计划、进度和最近动态；离开再进来，续上的是同一条会话。`<选择>` 可以省略（按所在目录），可以是几个字或一个 MR，也可以是任务 id（5.7）。
 - 反过来，把一个已有目录（可选连同一条 CLI 会话）登记成任务，交给后台的 agent 接着做，并说清楚交过去的是什么。
 - 已结束的任务（包括已完成的）可以在同一个任务上继续：用一个类型化的转换，规定规划者拿到什么，以及预算、工作区、台账怎么变。
 - 一个与渠道无关的任务会话键 `task:<task_id>`：CLI、控制台任务页、飞书里一个任务一个话题，都对着同一段任务对话；渠道和聊天只决定答复发到哪。
@@ -26,19 +26,19 @@
 
 - 不把操作者的 CLI 会话记录原样交给 Looper 的 agent；Looper 也不读会话记录（工作区 RFC 的 W7 仍然成立）。
 - 不给操作者在 agent room 里设座位（`room_messages.sender_kind`，`schema.sql:976`）。
-- 不从自由文本里猜「用户说的是哪个任务」。
-- 不改管家的 main 会话和默认管家的群会话，也不改能力范围 RFC 的范围模型。
+- 不用模型去猜「用户说的是哪个任务」：自由文本和 MR 号由确定性的代码解析，只有恰好一个匹配时才直接进入，几个就列出来挑，没有就明说（5.7、13.10）。
+- 不改管家的 main 会话和默认管家的群会话。能力范围 RFC 的范围模型只在本文第 3 步按 8.6 扩展（加内置集合 `task_session` 和相应的约束），其余不改。
 - 不做 OS 级隔离。
 
 ## 2. 现状（读代码得出）
 
 | 环节 | 现在怎么做 | 出处 |
 |---|---|---|
-| 管家转话给任务 | `looper_task_instruct` 把原话存成补充说明，发 `TASK_CHANGE` 唤醒规划者，回「规划者下一轮拿到」；只收运行中的任务，未开始的要改需求 | `ops/tasks.py:547-571`、`projects.py:1269-1289` |
-| 和规划者直接对话 | `operator_chat.send` 可以把目标设成运行中任务的规划者，只有操作者能用；消息先存成 `via = chat` 的补充说明，规划者在 `[CHAT]` 回合里作答，答复回给发送方 | `v1_domains/operator_chat_streams.py:47-60`、`chat_targets.py:34-57`、`projects.py:1292-1302`、`tiers/planner.py:4528-4570` |
+| 管家转话给任务 | `looper_task_instruct` 把原话存成补充说明，发 `TASK_CHANGE` 唤醒规划者，回「规划者下一轮拿到」；只收运行中的任务，未开始的要改需求 | `ops/tasks.py:547-571`、`projects.py:1294-1314` |
+| 和规划者直接对话 | `operator_chat.send` 可以把目标设成运行中任务的规划者，只有操作者能用；消息先存成 `via = chat` 的补充说明，规划者在 `[CHAT]` 回合里作答，答复回给发送方 | `v1_domains/operator_chat_streams.py:47-60`、`chat_targets.py:34-57`、`projects.py:1317-1327`、`tiers/planner.py:4528-4570` |
 | 规划者对结束的任务 | 计划状态不是 executing / verifying 就回固定文字：规划中让稍后再发，否则说任务已结束 | `tiers/planner.py:4532-4536` |
 | 任务状态 | 一张表把状态分组：进行中、等你、就绪、需要关注（失败、停止）、完成、取消；`ACTIVE_STATUSES` 是前两组 | `db/tasks.py:26-59`、`:93-94` |
-| 重启 | `restart`、`start_over` 只对失败、停止、取消的任务，且要有目录。`RestartMode` 有 `continue`（沿用计划，规划者一轮 `[RESTART]`）、`start_over`（删计划、步骤和规划者会话）、`at_cap`（提高上限后接着跑） | `db/tasks.py:105-108`、`projects.py:1216-1257`、`message.py:96-105`、`tiers/task.py:714-790` |
+| 重启 | `restart`、`start_over` 只对失败、停止、取消的任务，且要有目录。`RestartMode` 有 `continue`（沿用计划，规划者一轮 `[RESTART]`）、`start_over`（删计划、步骤和规划者会话）、`at_cap`（提高上限后接着跑） | `db/tasks.py:105-108`、`projects.py:1241-1281`、`message.py:96-105`、`tiers/task.py:714-790` |
 | `[RESTART]` 回合 | 已验收的步骤保留，没做完的回到未开始；消息里有结束原因、规划者还没拿到的变化、计划和日志；允许 `none`、`add_steps`、`replan` | `tiers/planner.py:4392-4405`、`:6440-6463` |
 | 每次运行 | 重启把 `tasks.run_no` 加一、清掉结果；每次运行结束在 `task_outcomes` 写一行，键是（任务, `run_no`） | `db/tasks.py:508-542`、`db/migrations/task_outcomes.py:7-26` |
 | `continue` 这个名字 | v1 的 `tasks.continue` 是「提高因上限失败的任务的上限，接着跑」，高风险 | `v1_domains/task_configuration.py:54-57`、`:61-70` |
@@ -75,20 +75,20 @@
 | D1 | 新命令放在 `looper` 下（`looper task …`），不放进 `loopercli`：它们在本机起进程、读本机文件，只给操作者用。`loopercli` 是 API 客户端的工具，不变 | 5.1 |
 | D2 | 每个任务最多一条操作者会话，记在新表 `task_operator_sessions`。第一次进入时由 Looper 生成会话 id，用 `--session-id` 启动；以后用 `--resume` 续上；`--new` 换一条，旧 id 留作记录 | 5.3 |
 | D3 | 进哪个目录由代码按任务状态和工作区方式决定（5.2 表），不接受任意路径；目录不在就拒绝，带类型化原因 | 5.2 |
-| D4 | 两种进入方式（类型 `EnterMode`）：`observe` 用 Claude Code 的 plan 权限模式防误改；`work` 不限，但要先拿到这个任务的文件租约。进行中的任务默认 `observe`，要 `work` 必须显式 `--mode work`；租约这时在任务的这次运行手里，所以被拒绝，并说明是谁持有（`lease_held`）；不能强行接管。结束的任务默认 `work`，同样先拿租约。操作者以 `work` 持有租约时，这个任务的开始、重启、重新打开同样被拒绝。同一目录上的其他任务只提醒 | 5.2、9.1、13.3 |
+| D4 | 两种进入方式（类型 `EnterMode`）：`observe` 用 Claude Code 的 plan 权限模式防误改；`work` 不限，但要先拿到这个 checkout 的排他租约。任务的每次运行持有同一个 checkout 的共享租约，所以进行中的任务上 `work` 被拒绝，并说明是谁持有（`lease_held`）；不能强行接管。进行中的任务默认 `observe`，`work` 必须显式 `--mode work`；结束的任务默认 `work`，同样先拿租约。操作者持有排他租约时，这个 checkout 上任何任务的开始、重启、重新打开、服务启动时的恢复都被拒绝。两个任务之间照 W5 只提醒 | 5.2、9.1、13.3 |
 | D5 | 简报由代码按固定的节拼出，别人写的内容一律围起来，有总长上限。每次启动用 `--settings` 传一个只属于这次启动的 SessionStart 钩子注入，不写操作者的用户设置；`resume` 时多一节「上次离开以后」，压缩后重新注入 | 5.4、5.5 |
 | D6 | 进去以后和任务说话是显式的：`looper task ask` 对运行中的任务走规划者的 `[CHAT]` 回合，双向；对没有规划者的任务，第 3 步之前拒绝并提示 `reopen`。退出时不自动写回任何东西 | 5.6 |
 | D7 | 反向登记默认原地（`in_place`）：目录留在原处，Looper 挂到它上面。只交摘要：需求、在操作者会话里写好并经操作者看过的交接说明、目录和它的 git 状态；可以把那条 CLI 会话的 id 记成这个任务的操作者会话。会话记录、用户级设置和工具都不交；把 CLI 会话分叉给规划者不做，列为以后的探索 | 第 6 节、13.5、13.9 |
-| D8 | 已结束的任务在同一个任务上「重新打开」：类型化转换 `reopen`（`RestartMode.REOPEN`），完成、失败、停止、取消都可以，必须带一段续接说明；`run_no` 加一，规划者续自己的会话，拿到一轮 `[REOPEN]`。不叫 `continue`，因为 `tasks.continue` 已经是「提高上限后接着跑」 | 7.1–7.3 |
-| D9 | 花费上限按任务累计，重新打开不重置。已经到上限时，重新打开必须在命令里给出新的上限，否则拒绝（`budget_exhausted`），任务从不悄悄接着花；新上限走现有的高风险确认 | 7.4、13.7 |
+| D8 | 已结束的任务在同一个任务上「重新打开」：类型化转换 `reopen`（`RestartMode.REOPEN`），完成、失败、停止、取消都可以，必须带一段续接说明；`run_no` 加一，规划者续自己的会话，拿到一轮 `[REOPEN]`（计划已经完成时也一样，7.3 改了控制流）。定时任务产生的任务和绑了意图规则的任务，v0 不能重新打开。不叫 `continue`，因为 `tasks.continue` 已经是「提高上限后接着跑」 | 7.1–7.3 |
+| D9 | 花费上限按任务累计，重新打开不重置。预检和规划者用同一个谓词，在重置任务之前做；已经到上限时，必须在命令里给出新的上限，只写这个任务自己的 `tasks.budget_usd`，否则拒绝（`budget_exhausted`）；花费读不到时拒绝（`budget_unavailable`）。任务从不悄悄接着花 | 7.4、13.7 |
 | D10 | 每次运行的起点记在新表 `task_runs`（原因、入口、回复路由、续接说明），和 `task_outcomes` 按（任务, `run_no`）对上；重新打开的运行只把进度和结束告诉发起它的地方，默认不通知原来的来源聊天 | 7.6、7.7、13.2 |
 | D11 | 新增 `SessionKind.TASK`，键 `task:<task_id>`，存在 `manager_sessions` 新加的 `task_id` 列上；渠道和聊天降为回复路由，每条进来的消息带自己的类型化回复路由 | 8.1、8.3 |
 | D12 | 谁来答：任务有活着的规划者时是规划者（`[CHAT]`）；没有时是这个任务所属管家的任务会话（只用平台工具，工具绑定在这个任务上）。规划者答「任务已结束」时，入口按类型化结果改投任务会话一次 | 8.2、13.1 |
 | D13 | 和能力范围 RFC 组合：任务维度不进指纹；键是 `task:<task_id>`，带指纹时接 `~<指纹>`，以后有共享受众时在两者之间加 `@<channel_id>:<chat>`。代码按列取值，不解析键 | 8.5 |
 | D14 | 所有新的写操作只给操作者：CLI 在 Looper 启动的 agent 里拒绝；v1 操作 `operator_only`；管家的 `reopen` 只在操作者的回合里能用（调用时判断），先确认；v0 的任务会话只有操作者一个受众；飞书话题里只有操作者的回复进任务会话 | 9.2 |
 | D15 | 开关：`tasks.reopen.enabled`（第 2 步的管家工具和控制台按钮）、`manager.task_sessions.enabled`（第 3、5 步）、按 bot 的 `task_threads`（第 4 步），都默认关。第 1 步只加新命令，不改已有行为，不设开关 | 第 10 节 |
-| D16 | 完成的 worktree 任务，worktree 不自动重建：以 `work` 进入或重新打开时才按分支 T 建回来。为操作者建回的 worktree 记为 `operator` 状态，启动清扫和完成收尾都不碰它，重新打开时交还给任务 | 5.2、7.5、13.4 |
-| D17 | 操作者自己的任务会话可以只读这个任务的工作目录（受限只读，唯一的根是这个目录）；别的受众都不行，和能力范围 RFC 的 D8、D21 一致 | 8.4、13.6 |
+| D16 | 完成的 worktree 任务，worktree 不自动重建：以 `work` 进入或重新打开时才建回来，分支 T 在就按 T，T 没了就按记下的 `result_commit`，那个提交也没了就拒绝。为操作者建回的 worktree 记为新状态 `operator`（要改 CHECK、枚举、清扫的列表和 `finish` 的删除分支），重新打开时交还给任务。新任务第一次建 worktree 的路径不变 | 5.2、7.5、13.4 |
+| D17 | 操作者自己的任务会话可以只读这个任务的工作目录（受限只读，唯一的根是符号根 `task_dir`）；别的受众都不行。这是对能力范围 RFC 的 D21 的明确例外：那篇第 3 步定根列表时，不能再假设 v0 的列表是空的。任务会话的范围直接构造成（`operator`, `task_session`），不走那篇第 6 节的解析表 | 8.4、8.6、13.6 |
 | D18 | 执行顺序 1 → 2 → 1b → 3 → 5 → 4：已结束的任务接不上是实际使用里最大的缺口，所以续接紧跟在进入之后。本文第 1、2、1b 步和能力范围 RFC 的第 1b 步并行，不改那一步拥有的会话路由代码，分工到函数（10.2） | 10.1、10.2 |
 
 ## 5. CLI 进入任务
@@ -105,26 +105,26 @@ looper task register --dir PATH --requirement TEXT [--handoff-file FILE] [--sess
 looper task reopen <task_id> <text> [--budget-usd N] [--yes]                           # 第 2 步
 ```
 
-- 都带 `--runtime-root`、`--config`（`cli.py` 的 `_add_location_flags`），`--claude` 的默认值同 `looper claude-code`（`cli.py:121`）。读操作直接读本机数据库，所以服务停着也能用；`ask`、`reopen`、`register --start` 经回环地址调本机服务。
+- 都带 `--runtime-root`、`--config`（`cli.py` 的 `_add_location_flags`），`--claude` 的默认值同 `looper claude-code`（`cli.py:122`）。读操作直接读本机数据库，所以服务停着也能用；`ask`、`reopen`、`register --start` 经回环地址调本机服务。
 - `<选择>` 可以省略，可以是几个字或一个 MR，也可以是任务 id（5.7）。
-- 退出码沿用 `looper ledger`：0 完成，2 用法，3 列出了候选、什么都没做（5.7），4 拒绝（规则或身份），5 没有这个任务，6 数据库不可用；`enter` 另有 7，找不到 Claude Code。拒绝时打印类型化原因（`not_started`、`no_directory`、`lease_held`、`already_entered`……）、持有者（如果是租约）和下一步怎么做。
+- 退出码是这组命令自己的（和 `looper ledger` 不同，那里的 3 是「台账没开」，`ledger_commands.py:8`）：0 完成，2 用法，3 列出了候选、什么都没做（5.7），4 拒绝（规则或身份），5 没有这个任务，6 数据库不可用，7 找不到 Claude Code（`enter`）。拒绝时打印类型化原因（`not_started`、`no_directory`、`lease_held`、`already_entered`……）、持有者（如果是租约）和下一步怎么做。
 - 在 Looper 启动的 agent 里（`LOOPER_AGENT_RUN`）一律拒绝，做法同 `ledger_commands.py:152-157`。
 
 ### 5.2 进哪个目录、用哪种方式
 
 | 任务 | 工作区方式 | 目录 | 默认方式 | `work` |
 |---|---|---|---|---|
-| 就绪（没开始过） | 任意 | 拒绝 `not_started`：先开始它，或在任务页改需求 | — | — |
-| 进行中、等你 | 原地 | `work_dir` | `observe` | 要显式 `--mode work`；租约在任务的这次运行手里，拒绝 `lease_held`，说明持有者（第几次运行、什么状态、从什么时候起），提示停掉任务或等它结束 |
+| 就绪（没开始过，存的状态是 `init`） | 任意 | 拒绝 `not_started`：先开始它，或在任务页改需求 | — | — |
+| 进行中、等你 | 原地 | `work_dir` | `observe` | 要显式 `--mode work`；这个 checkout 的共享租约在任务的运行手里，拒绝 `lease_held`，说明持有者（哪些任务、第几次运行、从什么时候起），提示停掉任务或等它结束 |
 | 进行中、等你 | worktree | 任务 worktree 里的任务目录（`work_dir`） | `observe` | 同上 |
 | 失败、停止、取消 | 原地；worktree（保留着） | `work_dir` | `work` | 先拿租约 |
 | 完成 | 原地 | `work_dir` | `work` | 先拿租约 |
-| 完成 | worktree（已删，分支 T 还在） | `observe`：工作区 W（`workspace_dir`），简报写明结果在分支 T、没有检出在这里；`work`：拿到租约后按 T 在原路径建回任务 worktree，进它里面的任务目录 | `work` | 先拿租约；T 正检出在别处时拒绝 `branch_checked_out` |
+| 完成 | worktree（已删） | `observe`：工作区 W（`workspace_dir`），简报写明结果在分支 T、没有检出在这里；`work`：拿到租约后在原路径建回任务 worktree（7.5 的规则），进它里面的任务目录 | `work` | 先拿租约；T 正检出在别处时拒绝 `branch_checked_out`；T 和 `result_commit` 都没了时拒绝 `branch_gone` |
 | 任意 | 目录为空或不存在 | 拒绝 `no_directory` | — | — |
 
 - `observe` 给 Claude Code 加 `--permission-mode plan`：改文件、跑有副作用的命令之前，要操作者同意退出 plan 模式。这是防误改，不是隔离，操作者可以自己退出。方式在启动时定下，会话里换不了；要换就退出再进。
 - `work` 总是先拿租约（9.1），拿不到就拒绝并说明持有者，没有强行接管。进行中的任务默认 `observe`，`work` 只能显式要。
-- **完成的 worktree 按需建回。** 不自动重建：只有以 `work` 进入或重新打开时，才用 `prepare` 的同一段代码按分支 T 在原路径建回（`task_workspaces.py:324-385`）。为操作者建回的 worktree，`task_worktrees.state` 记成新值 `operator`：服务启动时的清扫（`task_workspaces.py:442`）和完成收尾都跳过它，Looper 不替操作者提交。操作者离开后它留着，`enter` 退出时打印它的路径和未提交的文件数；重新打开时它变回 `active`，未提交的改动原样交给任务，并列进 `[REOPEN]` 的目录变化；删除任务时照删除的规则先提交、再删。
+- **完成的 worktree 按需建回。** 不自动重建：只有以 `work` 进入或重新打开时才建回，规则和要改的代码在 7.5。为操作者建回的 worktree，`task_worktrees.state` 记成新值 `operator`，Looper 不替操作者提交；操作者离开后它留着，`enter` 退出时打印它的路径和未提交的文件数；重新打开时它变回 `active`，未提交的改动原样交给任务，并列进 `[REOPEN]` 的目录变化。
 - 第一次进入时记下目录。以后任务的目录变了（例如原地任务改了目录），拒绝并提示 `--new`：Claude Code 按目录找会话，换了目录可能续不上（需要验证）。
 
 ### 5.3 会话 id 与续接
@@ -147,7 +147,7 @@ CREATE TABLE IF NOT EXISTS task_operator_sessions (
 );
 ```
 
-- 第一次：`claude --session-id <新 uuid> --name "<任务标题> · <task_id>" --settings <5.5 的 JSON> [--permission-mode plan]`，工作目录是 5.2 的目录。`enter` 作为父进程等 Claude Code 退出，不 `exec`：它要持有租约（9.1），退出后要推进游标。
+- 第一次：`claude --session-id <新 uuid> --name "<任务标题> · <task_id>" --settings <5.5 的 JSON> [--permission-mode plan]`，工作目录是 5.2 的目录。`enter` 作为父进程等 Claude Code 退出，不 `exec`，因为退出后要推进游标；`work` 的租约描述符不带 close-on-exec，由 Claude Code 继承，所以 `enter` 被杀掉、Claude Code 还在写时，租约仍然被持有（9.1）。
 - 以后：`claude --resume <session_id> --settings <…> [--permission-mode plan]`。续不上（Claude Code 报找不到会话）时不自动新开，提示 `--new`。
 - 会话 id 只留在本机：`looper task sessions` 列出来，不进 API、页面和日志，和定时任务规划者会话的做法一样。任务详情（`tasks.detail`）只多一个 `operator_session` 字段：上次进入时间、方式、现在是否在里面（试一下租约得出）。
 - v0 只支持 Claude Code。
@@ -190,7 +190,7 @@ messages are. The task's agents are changing files in this directory now, so the
 
 - `enter` 每次启动时传 `--settings`，内容只有一个钩子：`{"hooks": {"SessionStart": [{"hooks": [{"type": "command", "command": "<looper> task brief <task_id> --hook --runtime-root <…>", "timeout": 5}]}]}}`，命令行由 `claude_code_entry.desired_handler` 的同一套办法拼出（`claude_code_entry.py:140-146`）。钩子只存在于这次启动，不写进用户设置，和工作区 RFC W6「不写操作者的 Claude Code 文件」一致。装了画像钩子的话，它照常运行，两者内容不重复。
 - 钩子看 Claude Code 传来的 `source`：`startup`、`clear`、`compact` 给完整简报，所以压缩以后简报还在；`resume` 给完整简报加「上次离开以后」。
-- 约束同画像钩子：本地读数据库，1 秒内读不到就不输出；任何失败都不写 stderr、退出 0；在 Looper 启动的 agent 里不输出（`claude_code_entry.py:53-78`）。为了让失败看得见，`enter` 启动前自己先拼一次：拼不出就打印一行原因，照常启动。
+- `--hook` 时的约束同画像钩子：本地读数据库，1 秒内读不到就不输出；任何失败都不写 stderr、退出 0；在 Looper 启动的 agent 里不输出（`claude_code_entry.py:69-73`）。不带 `--hook` 时，`looper task brief` 和画像命令一样把原因打到 stderr，按 5.1 的退出码退出（`claude_code_entry.py:74-78`）。为了让失败看得见，`enter` 启动前自己先拼一次：拼不出就打印一行原因，照常启动。
 - 钩子不推进游标。`enter` 等 Claude Code 退出后，把游标推到当时最新的 activity 和日志，所以下次的「上次离开以后」从这次离开算起。
 - 需要验证：`--settings` 里的钩子和用户设置里的钩子是否都执行，`source` 的取值，`additionalContext` 的长度限制和截断方式。验证不通过时退回 `--append-system-prompt-file`：每次启动重新生成，放在 runtime root 下、只给操作者读，退出后删除。代价是数据进了系统提示词，所以只作备选。
 
@@ -206,7 +206,7 @@ messages are. The task's agents are changing files in this directory now, so the
 
 | 选择 | 规则 |
 |---|---|
-| 任务 id（`task-` 加 12 位十六进制，`projects.py:594`） | 照旧：就是这个任务，没有就退出码 5 |
+| 任务 id（`task-` 加 12 位十六进制，`projects.py:619`） | 照旧：就是这个任务，没有就退出码 5 |
 | 省略 | 先看环境变量：在 `enter` 打开的会话里（`LOOPER_TASK_SESSION`）就是那个任务。否则取 `cwd` 的真实路径，找目录等于它或包含它的任务：任务的 `work_dir`、`workspace_dir`、活着的或 `operator` 状态的任务 worktree。只保留最深的那一层目录；剩一个就是它；剩几个时，其中恰好一个在进行中就取那个，否则列出来。一个都没有，就列出最近的任务：最近 14 天有动态的，最多 20 个，按最近动态倒序，每行标题、项目、状态、最近动态的时间 |
 | 一个 MR | 整个选择是一个 MR：带 `/pull/<N>` 或 `/merge_requests/<N>` 的链接（同时取出仓库路径），或 `!N`、`#N`、`MR N`、`PR N`，或 1 到 7 位的纯数字。和任务关联的 MR 比较：任务等待步骤里的 `github_pr` 检查（仓库和编号，`waits.py:228-244`），以及用同一套规则从标题、需求、原话和补充说明里认出的引用；任务文本里的纯数字不算引用。链接里有仓库时，仓库和编号都要对上，或者编号对上、引用本身没写仓库 |
 | 别的文字 | 先规范化：NFKC（全角转半角）、转小写、空白合成一个空格、去掉两头的引号。再按空格切成词（连着写的中文整段算一个词），每个词都要是任务文本的字面子串才算匹配（不是通配符，同 `db/tasks.py:690-691` 的任务搜索）。看的字段只有标题和最新版本的需求 |
@@ -263,25 +263,38 @@ messages are. The task's agents are changing files in this directory now, so the
 | 进行中、等你 | 拒绝 `still_running` | 用 `ask` 或 `looper_task_instruct` |
 | 失败、停止、取消 | 允许 | 就是「带说明的 `restart`」 |
 | 完成 | 允许 | 新增 |
-| 没有目录 | 拒绝 `no_directory` | 同 `restart`（`projects.py:1232-1233`） |
-| 文件租约在操作者的 `work` 会话手里 | 拒绝 `lease_held`，说明持有者 | 9.1 |
+| 没有目录 | 拒绝 `no_directory` | 同 `restart`（`projects.py:1257-1258`） |
+| 定时任务产生的任务（`tasks.schedule_id` 不为空） | 拒绝 `scheduled_task` | 它的规划者用的是定时任务共用的会话（`_claim_schedule_session`，`tiers/planner.py:7111-7138`），不是 `planner-<task_id>`；重新打开要么续不到这次运行真正用的会话，要么把 `[REOPEN]` 写进下一次定时运行还要接着用的会话。要追问，改定时任务的需求或立即运行一次 |
+| 绑了意图规则的任务（`config.intent_rule_bound`） | 拒绝 `rule_bound` | 开始路径会处理规则执行的租约（`projects.py:1214-1238`），`reset_task_for_restart` 不碰那些行；重新打开算不算那次执行，v0 不定 |
+| 这个 checkout 的排他租约在操作者的 `work` 会话手里 | 拒绝 `lease_held`，说明持有者 | 9.1 |
 | 已经到上限，命令里没给新上限 | 拒绝 `budget_exhausted` | 7.4 |
+| 任务有上限，花费读不到 | 拒绝 `budget_unavailable` | 7.4 |
 | worktree 任务的分支 T 正检出在别处 | 拒绝 `branch_checked_out` | 7.5 |
+| worktree 任务的 T 和 `result_commit` 都没了 | 拒绝 `branch_gone` | 7.5 |
 
 **入口：** v1 操作 `tasks.reopen`（`task_id`、`text`、可选的 `budget_usd`；`operator_only`，控制台和 `looper task reopen` 用它）；管家工具 `looper_task_control` 的新动作 `reopen`，多一个 `text` 参数（开关关着时工具的描述和参数逐字节不变）。
 
-执行顺序，和 `add_task_supplement` 一样先存再发消息：
+**执行顺序：**
 
-1. 续接说明存成补充说明：`via = reopen`，`from_operator = true`，未送达。
-2. 任务有台账条目时写一条 `note` 事件（操作者，`via` 是入口）；条目的状态本来就读任务的状态（`db/ledger.py:213`），重新打开后自然显示为进行中。
-3. 发 `TASK_RESTART`，`mode = reopen`，带上补充说明的 id、入口和回复路由。
-4. TaskRouter 的 `_handle_restart` 只在这个模式下多接受 `completed`（`tiers/task.py:742-746`），其余同 `continue`：关掉尝试；在一个事务里 `reset_task_for_restart(keep_steps=True)` 把 `run_no` 加一，并写 `task_runs` 的一行（7.7）；然后 `TASK_REQUEST` 带上 `restart = reopen` 和结束时的状态。TaskRouter 这一步不开始时（9.1 的试锁，或状态已经变了），补充说明留着，下一次运行时送达，activity 写明原因。
+1. **检查**（`check_task_control`，发消息之前）：上表每一行，包括 7.4 的预算预检和 7.5 的分支检查。任何一行不过，什么都不写。
+2. **一个事务：** 给了新上限就写进这个任务的 `tasks.budget_usd`；续接说明存成补充说明（`via = reopen`，`from_operator = true`，未送达）。新上限因此在规划者启动之前就已经写好。
+3. **发 `TASK_RESTART`**，`mode = reopen`，带上补充说明的 id、入口、回复路由，以及 CLI 入口的会话标签（第 5 步用）。
+4. **TaskRouter 的 `_handle_restart`** 只在这个模式下多接受 `completed`（`tiers/task.py:742-746`）。写任何状态之前，先用同一个谓词再算一次预算，再拿这个 checkout 的共享租约（9.1）；任何一项不过就不开始，activity 写明原因，补充说明留着，下一次运行时送达。都过了，其余同 `continue`：`close_attempts` 只关当前 `run_no` 上还没裁决的尝试，已经裁决的不改；然后在一个事务里 `reset_task_for_restart(keep_steps=True)` 把 `run_no` 加一，并写 `task_runs` 的一行（7.7）；最后发 `TASK_REQUEST`，带上 `restart = reopen` 和结束时的状态。
+5. **台账：** 任务有台账条目、台账也开着时，第 4 步提交之后写一条 `note` 事件，`actor_kind = user`，`via` 是入口。入口是 CLI 时，`session_label` 必填（`schema.sql:1831-1832`）：在 `enter` 打开的会话里是 `task-session:<task_id>`，否则是 `cli:task-reopen`。条目的状态本来就读任务的状态（`db/ledger.py:213`），重新打开后自然显示为进行中，所以这条 note 只是记录：写失败时记日志、计数（`task_reopen_ledger_note_failures`），不中止、也不回滚重新打开。
 
 不带说明的 `restart` 行为不变。
 
 ### 7.3 规划者拿到什么
 
-规划者续自己的会话（`planner-<task_id>`，`agent_sessions` 里还在）；运行时或 provider 变了续不上时，走现有的 `[HANDOFF]` / `[RESUME]`（`tiers/planner.py:5986`、`:6033`）。然后是一轮 `[REOPEN]`，回答用 CHAT 的形状，代码走 `_restart_plan`（`tiers/planner.py:4392`），只换这一轮的消息：
+规划者续自己的会话（`planner-<task_id>`，`agent_sessions` 里还在；定时任务的任务在 7.2 已经拒绝）；运行时或 provider 变了续不上时，走现有的 `[HANDOFF]` / `[RESUME]`（`tiers/planner.py:5986`、`:6033`）。然后是一轮 `[REOPEN]`，回答用 CHAT 的形状。
+
+**控制流（只换消息不够）：** 代码走 `_restart_plan`（`tiers/planner.py:4392-4492`），`RestartMode.REOPEN` 改三处：
+
+1. 到保存这一步为止和 `continue` 一样，等待中的关卡那一段（`:4439-4451`）原样保留：它清掉关卡的失败计数，并给每个仍在等的关卡发「The task was restarted; this gate still waits for you.」。超限即返回的那一句（`:4412`）也保留，7.4 的预检已经保证它这时会放行。
+2. `:4458-4460` 在计划已经完成时直接 `_complete_plan` 并返回（`is_complete`：每一步都是 verified 或 skipped，`:585-586`）。这一句只对 `continue` 生效；`reopen` 跳过它，接着发 `[REOPEN]`，否则规划者永远看不到续接说明，任务会立刻又完成。
+3. `[REOPEN]` 的答复：`add_steps` 或 `replan` 照 `_apply_chat` 走；`none` 时，先 `_mark_delivered`，计划仍然完成就 `_complete_plan`，答复的 `final` 作为新的总结。这一轮失败时：计划已经完成的，任务以类型化原因 `reopen_turn_failed` 失败，续接说明不标送达，下一次重新打开或重启时再送；计划没完成的，照 `continue` 的退路让没开始的步骤照常跑，续接说明留到规划者下一轮 CHAT 送达。
+
+消息（完成的任务用下面这句自己的开头；`_ended`（`:4496-4500`）只有 failed、cancelled、stopped 三种说法，不复用）：
 
 ```
 [REOPEN] The task completed on <date> (run 1): <final summary, clipped>. The operator reopened it (run 2) with the
@@ -294,25 +307,38 @@ Decide what the request needs: add_steps or replan. Reply "none" only when nothi
 ```
 
 - **结束以后目录里发生了什么**由代码算出，不让规划者去猜：worktree 任务是分支 T 上 `result_commit` 之后的提交（主题行，最多 20 条），以及 T 还在不在；原地任务是结束时目录的 HEAD（新列 `task_outcomes.end_commit`，结束写这一行时一并写下）之后的提交，加上未提交的文件清单（最多 50 个）。操作者进去改过的东西就这样到了规划者那里。
-- 失败、停止、取消的任务重新打开时，没做完的步骤照 `continue` 回到未开始，消息开头换成它们原来的结束原因（`_ended`，`tiers/planner.py:4496`）。
+- 失败、停止、取消的任务重新打开时，没做完的步骤照 `continue` 回到未开始，消息开头用 `_ended` 给出的结束原因。
 - `[REOPEN]` 是新的模型可见内容：第 2 步用真实 Claude CLI 跑规划者评测（开发计划第 1 节）。
 
 ### 7.4 预算
 
-- 任务的上限是累计的：`_within_budget` 读这个任务所有运行的花费（`tiers/planner.py:6851-6873`），重新打开不重置。
-- 重新打开之前先算：没有上限，或者还没到上限，就允许。已经到上限时，命令里必须给出新的上限（`--budget-usd N`；控制台和管家的 `reopen` 同理），而且要高于已花费，否则拒绝 `budget_exhausted`，答复里写出已花费和上限。这样，没人给新额度时任务从不悄悄接着花。新上限写进这个任务自己的上限（`tasks.budget_usd`），照 `tasks.continue` 的高风险确认走（`v1_domains/task_configuration.py:61-70`）。
+- **累计：** `_within_budget` 读这个任务所有运行的花费（`tiers/planner.py:6851-6887`），重新打开不重置。
+- **同一个谓词：** 上限是任务自己的 `budget_usd`，没有就用项目的 `task_budget_usd`（`db/tasks.py:126-128`）；花费是 `task_costs` 的 `cost_usd`，有未定价的模型时用已知的部分；`spent < cap` 才算还有额度。这段从 `_within_budget` 里抽成一个共用函数，规划者和重新打开都调它；`_within_budget` 在运行中的行为（包括读不到花费时放行，`:6866-6873`）不变。
+- **在重置之前预检：** `check_task_control` 先算一次，TaskRouter 在 `reset_task_for_restart` 之前再算一次（7.2 第 1、4 步）。已经到上限时，命令里必须给出新的上限（`--budget-usd N`；控制台和管家的 `reopen` 同理），而且要高于已花费，否则拒绝 `budget_exhausted`，答复里写出已花费和上限。没人给新额度时任务从不悄悄接着花。
+- **读不到花费：** 任务有上限而花费读不到时，预检拒绝（`budget_unavailable`），和运行中的放行不同：重新打开是一个「再花钱」的决定，没有这个数就守不住上面那条。没有上限的任务不用读花费。
+- **只写这个任务：** 新上限只写这个任务自己的 `tasks.budget_usd`，从不写项目的上限。`tasks.continue` 在任务没有自己的上限时提高的是项目的 per-task 上限，会波及项目里的其他任务（`v1_domains/task_configuration.py:61-70`）；`reopen` 不那样做。它沿用同一套高风险确认的机制，但文案说的是这个任务：「要把任务「<名字>」自己的花费上限设为 $N（已花费 $S，原来的上限 $C 来自任务 / 项目）并重新打开吗？只改这个任务，项目和其他任务的上限不变。」
 - 不做每次运行单独的上限：一件事的总花费才是操作者关心的数，分开算会让「多开几次」绕过上限。
 
 ### 7.5 工作区
 
-| 方式与状态 | 重新打开时 |
+`prepare`（`task_workspaces.py:324-385`）今天的路径：行是 `active` 时沿用，目录丢了走 `_restore`（`:387-400`），分支没了就报错，不重建；没有行或行是 `removed` 时，先算基点 `_base_commit(repo, workspace_base)`（`:346`，点名的基点，否则 W 现在的提交），分支在就 `worktree add <路径> T`（`:353`），不在就 `worktree add -b T <路径> <基点>`（`:355`）。最后这一支也是新任务第一次建 worktree 的路径，本文不改它。
+
+| 方式与状态 | 重新打开时（以 `work` 进入时相同） |
 |---|---|
 | 原地 | 同一个目录；同一目录上有别的进行中任务时提醒（W5） |
-| worktree，失败、停止、取消 | worktree 还在，接着用（W3） |
-| worktree，完成，T 还在 | `prepare` 看到 worktree 已删，按分支建回来：`git worktree add <路径> T`（`task_workspaces.py:350-353`），之前的提交都在 |
-| worktree，完成，操作者以 `work` 进入时已经建回（`operator` 状态） | 接着用这个 worktree，状态变回 `active`；未提交的改动交给任务，列进 `[REOPEN]` 的目录变化 |
-| worktree，完成，T 已删（例如合并后删了分支） | 从 W 现在的提交建新的 T，activity 写明。任务点名过基点时也用现在的提交，不用旧基点（`prepare` 要改这一处） |
-| worktree，完成，T 正检出在别处（例如操作者在 W 里切到了 T） | 拒绝 `branch_checked_out`，告诉操作者 T 检出在哪、怎么放开；不替操作者切分支 |
+| worktree，失败、停止、取消（行是 `active`） | 照今天：沿用；目录丢了走 `_restore`，分支没了就报错 |
+| worktree，完成，T 还在 | 照今天：`:353` 按 T 建回，T 上的提交都在 |
+| worktree，完成，T 已删（例如合并后删了分支） | 不走 `:355`。`reopen` 给 `prepare` 传 `from_commit = result_commit`（`finish` 删 worktree 时记下的 T 的末端，`schema.sql:510`）：这个提交还在仓库里（合并过就一定在），就 `worktree add -b T <路径> <result_commit>`，activity 写明；不在了就在第 1 步拒绝 `branch_gone`。只存在于已删的 T 上、又被 git 回收的提交找不回来，Looper 不假装能 |
+| worktree，完成，操作者以 `work` 进入时已经建回（`operator` 状态） | 沿用这个 worktree，状态改回 `active`；未提交的改动交给任务，列进 `[REOPEN]` 的目录变化 |
+| worktree，完成，T 正检出在别处（例如操作者在 W 里切到了 T） | 在第 1 步拒绝 `branch_checked_out`，告诉操作者 T 检出在哪、怎么放开；不替操作者切分支 |
+
+**`operator` 状态要改的地方**（今天写不进去）：
+
+- `task_worktrees.state` 的 CHECK（`schema.sql:509`）加 `'operator'`；`WorktreeState`（`task_workspaces.py:63-65`）加 `OPERATOR`。
+- 启动清扫只认 `list_active` 给的行（`db/task_worktrees.py:40-47`，只取 `active`），别的目录当孤儿，先提交再删（`task_workspaces.py:442-461`）。改成取 `active` 和 `operator`：`operator` 的目录进已知集合，从不收尾；清扫在收尾或删除任何目录之前，先非阻塞地试这个 checkout 的排他租约（9.1），拿不到就跳过这一次。
+- `finish` 对不是 `active` 的行直接返回（`:413`），既不提交也不删。加一条删除任务的分支：`operator` 的行在删除任务时照 `active` 的做法先提交剩余改动、再删目录、留分支；完成收尾用不到它，`operator` 只出现在已完成的任务上。
+- `prepare` 把 `operator` 的行当 `active` 处理（目录在就沿用，丢了走 `_restore`），然后改回 `active`。
+- `enter` 建回时先拿排他租约，再执行和上表相同的 git 命令，最后把行写成 `operator`。
 
 ### 7.6 通知
 
@@ -343,9 +369,11 @@ CREATE TABLE IF NOT EXISTS task_runs (
 
 第 2 步逐处核对，每处一个测试：
 
-- `AGENTS_EDITABLE_STATUSES` 注释说「只有完成任务的 agent 是最终的」（`projects.py:1265-1266`）：重新打开后按进行中处理。
-- 工作区收尾和启动清扫（`task_workspaces.py:402-442`）：都看当前状态，重新打开后的任务不会被当成完成；`operator` 状态的 worktree 两者都跳过（5.2）。
-- 结束时只跑一次的收尾：`_teardown_task`、`_task_ended`（`tiers/task.py:794-830`）以及挂在任务结束上的记忆收尾、结束通知、成本释放。逐个定第二次完成时是再跑一次还是只跑增量，默认按运行号再跑一次。
+- `AGENTS_EDITABLE_STATUSES` 注释说「只有完成任务的 agent 是最终的」（`projects.py:1290-1291`）：重新打开后按进行中处理。
+- 工作区：7.5 列出的 CHECK、枚举、`list_active`、清扫和 `finish` 的删除分支，各一个测试。
+- 关卡：重新打开后任务不再是完成，仍在等的关卡又开始收回复（`gate_routing.py:16` 只在任务完成时把回复交给管家）；7.3 保留的那段会给它们发「still waits」。
+- 结束时只跑一次的收尾：`_teardown_task`、`_task_ended`（`tiers/task.py:794-828`）以及挂在任务结束上的记忆收尾、结束通知、成本释放。逐个定第二次完成时是再跑一次还是只跑增量，默认按运行号再跑一次。`reset_task_for_restart` 里的 `db.tasks._task_ended`（`db/tasks.py:542`）只通知 listener：确认它们不会因为重置再记一条结果，也不会再发结束通知。
+- 尝试：`close_attempts` 只关当前 `run_no` 上还没裁决的尝试，发生在加一之前；已经裁决的尝试不会被改成 STOPPED。
 - 控制台把「完成」当最终状态的地方：任务页的按钮，Chat 页的「task ended · read-only」。
 
 ## 8. 任务会话键
@@ -390,6 +418,7 @@ ALTER TABLE manager_sessions
 ```
 
 - **对话记录：** 任务对话有自己的线程 id `task-chat:<task_id>`，在 `chat_threads` 里归这个任务的管家；`chat_messages` 每行另记它从哪个入口来（新列 `entry`：`cli`、`dashboard`、`lark`）。线程 id 和会话键是两样东西，代码从不拿会话键去查 `chat_messages`（能力范围 RFC 第 7 节的规则）。规划者在运行中答的 `[CHAT]` 也写进这个线程，所以任务结束后接手的任务会话看得到前面谈过什么。
+- **任务换了管家：** `move_task`（`projects.py:1202`）把任务挪到别的管家之后，旧管家名下的任务会话行就不能再用：同一个事务里给它写上 `retired_at`，下一条消息在新管家名下开新会话，开场带任务对话线程的摘录；线程本身改归新管家。
 
 ### 8.2 谁来答
 
@@ -414,7 +443,7 @@ answerer(task) -> Planner | TaskSession | Queued | Refused(reason)
   任务会话没开                                   → Refused(task_session_off)：提示 reopen
 ```
 
-- **竞态：** 消息发给规划者时任务恰好结束，规划者今天回固定文字（`tiers/planner.py:4535-4536`）。改成回一个类型化的结果（`AGENT_REPLY` 的 `payload.refused = "task_ended"`），入口收到后改投任务会话一次；还不行就如实告诉用户。改投计数，每条消息最多一次。
+- **竞态：** 消息发给规划者时任务恰好结束，规划者今天回固定文字（`tiers/planner.py:4535-4536`）。`manager.task_sessions.enabled` 打开时，改成回一个类型化的结果（`AGENT_REPLY` 的 `payload.refused = "task_ended"`），入口收到后改投任务会话一次；还不行就如实告诉用户。改投计数，每条消息最多一次。开关关着时，规划者对已结束任务的回复保持今天的文字，不带这个字段。
 - 重新打开以后规划者又活了，下一条消息自动回到规划者。任务会话保持不动，下次结束后接着用，开场带上中间这段对话的摘录。
 
 ### 8.3 回复路由
@@ -434,8 +463,8 @@ class ReplyRoute:
 
 ### 8.4 任务会话的输入和工具
 
-- **启动：** 受众是操作者，所以用能力范围 RFC 的受限只读启动（那篇第 10 节：只有 Read、Glob、Grep，目录外读写阻止，不跳过权限），唯一的根是这个任务的工作目录（5.2 里 `observe` 用的那个目录），另加会话绑定的服务端工具。受限只读要等那篇第 3 步接入；在那之前，或者运行时不支持受限只读时，按只用平台工具启动（`Access.PLATFORM_TOOLS`，`agent_settings.py:970-982`、`runtimes/claude_code.py:320-325`）：这是严格更窄的启动，契约如实说读不了文件。启动模式进指纹（那篇第 7 节），所以受限只读接入后，任务会话会开一条新的。连平台工具都不支持的运行时拒启，带类型化原因，不退回更宽的启动（那篇 D15）。会话的工作目录是它自己的根（`tiers/manager.py:967-1023`）。
-- **读目录只给操作者。** 这个根只在受众是操作者时出现；以后的共享受众（8.5）和群里的任何范围都拿不到它，和那篇的 D8（全能力只给操作者）、D21（受限范围不读本地文件）一致。凭据文件的 deny 规则只是补充，不当成隔离（那篇第 10 节）。第 4 步如果给群里来的任务开话题，答复会被群里的人看到，这条读权限要在那时一起重新看（13.8）。
+- **启动：** 受众是操作者，所以用能力范围 RFC 的受限只读启动（那篇第 10 节：只有 Read、Glob、Grep，目录外读写阻止，不跳过权限），唯一的根是符号根 `task_dir`，启动时才解析成这个任务的工作目录（5.2 里 `observe` 用的那个目录），另加会话绑定的服务端工具。指纹只哈希符号根 `task_dir`，不哈希解析出来的路径，所以同一个范围下换一个任务，指纹不变（那篇第 16 节）。受限只读要等那篇第 3 步接入；在那之前，或者运行时不支持受限只读时，按只用平台工具启动（`Access.PLATFORM_TOOLS`，`agent_settings.py:970-982`、`runtimes/claude_code.py:320-325`）：这是严格更窄的启动，契约如实说读不了文件。启动模式进指纹（那篇第 7 节），所以受限只读接入后，任务会话会开一条新的。连平台工具都不支持的运行时拒启，带类型化原因，不退回更宽的启动（那篇 D15）。会话的工作目录是它自己的根（`tiers/manager.py:967-1023`）。
+- **读目录只给操作者，是对 D21 的明确例外。** 那篇的 D21 和第 15.8 节规定 v0 的受限范围不读本地文件，第 5.1 节的 `files.read.roots` 在 v0 只接受 `chat_attachments`；`task_dir` 是一个本地根，所以它是这两条的例外，只对受众 operator 的任务会话成立。那篇第 3 步定根列表时，不能再假设 v0 的列表是空的：`task_dir` 已经在里面，而且只对 operator 合法。以后的共享受众（8.5）和群里的任何范围都拿不到它，符合那篇的 D8（全能力只给操作者）。凭据文件的 deny 规则只是补充，不当成隔离（那篇第 10 节）。第 4 步如果给群里来的任务开话题，答复会被群里的人看到，这条读权限要在那时一起重新看（13.8）。
 - **输入**（类型化清单，逐项冻结测试，做法同 #1708 的 `SessionAllowlist`）：固定的任务会话契约（新写，公开）；5.4 的简报（同一个 `compose`，上限放到 12000）；这个任务对话线程的最近摘录；本条消息。不纳入：操作者画像、台账、全局稳定块、别的任务、别的聊天。理由同能力范围 RFC 的 D12：答复可能发进飞书话题。
 - **工具**（服务端按会话绑定的 `task_id` 逐次校验，参数里的任务不是这一个就答 `not_found`）：`task_detail`、`task_activity`（读）；`task_diff`（新：这个任务的改动，worktree 任务是基点到 T，原地任务是计划的 `start_commit` 到 HEAD，有行数上限）；`task_consult`（问一个已结束的步骤座位，走现有会诊，次数和花费算在任务上；任务整体结束后会诊是否可用要验证）；`task_reopen`（7.2，先确认）。
 - **花费：** 任务会话的回合算管家的花费，不算进任务的上限，否则谈得多了反而开不了；会诊和重新打开之后的运行算任务的。
@@ -454,7 +483,7 @@ task:<task_id>@<channel_id>:<chat>~<fingerprint>   以后：群里别人对着�
 
   `~` 仍是指纹的分隔符；聊天段用 `@`，不和 `~`、渠道线程 id 的 `#manager…` 后缀混淆。那篇 16 节设想的是「在群会话键后面加一段任务」；这里反过来，任务是键的主体，因为任务对话不在某一个聊天里，飞书话题只是它的一个入口。真有「某个群里的人对着某个任务说话」时，聊天作为第二段加进来，仍然每个（聊天, 范围）一条会话，满足那篇方案 A 的隔离。v0 不做共享受众：它要先有那篇的范围解析和群动态。
 - **摘录按线程取。** 任务会话的摘录按任务对话的线程 id 取（8.1），不动范围模型。
-- **先后。** 本文第 3 步排在那篇 1b 合入之后（10.2），所以任务会话的键从一开始就带指纹。键约束由本文第 3 步写成合在一起的形式：`CASE kind WHEN 'task' THEN 'task:' || task_id ELSE kind || ':' || channel_id || ':' || chat END || coalesce('~' || scope_fingerprint, '')`；8.1 的 SQL 按这个形式写最后那条约束。那篇 1b 只写 `chat_only`、`full`、`legacy` 三个内置集合；任务会话用的内置集合 `task_session` 由本文第 3 步加（8.6）。
+- **先后。** 本文第 3 步排在那篇 1b 合入之后（10.2），所以任务会话的键从一开始就带指纹。键约束由本文第 3 步写成合在一起的形式：`CASE kind WHEN 'task' THEN 'task:' || task_id ELSE kind || ':' || channel_id || ':' || chat END || coalesce('~' || scope_fingerprint, '')`；8.1 的 SQL 按这个形式写最后那条约束。那篇的 id 检查列了五个内置集合：`chat_only`、`task_entry`、`readonly_qa`、`full`、`legacy`（那篇 D3、5.4），1b 写入其中的 `chat_only`、`full`、`legacy`，另外两个在那篇第 2、3 步写入。任务会话用的 `task_session` 不在其中任何一步里，由本文第 3 步加；id 检查以 8.6 的 SQL 为准，六个都列上，不会拒绝已有的行。
 
 ### 8.6 任务会话的范围（本文第 3 步）
 
@@ -472,7 +501,7 @@ task:<task_id>@<channel_id>:<chat>~<fingerprint>   以后：群里别人对着�
 
 > 受众是操作者时，范围是 `full`（群和私聊会话），或者 `task_session`（任务会话）；`task_session` 只用在 `kind = task` 的会话上，受众只能是操作者；`kind = task` 的会话，范围只能是 `task_session`。
 
-1. **`Resolved`**（那篇第 6 节的解析结果）：构造检查加上会话种类。`kind is TASK` 时只接受（`operator`, `task_session`）；其他种类照旧，另外拒绝 `task_session`。违反就抛错，消息不结算，按不变量违例告警，和那篇的 D8 一样。
+1. **`Resolved`**（那篇第 6 节的解析结果）：构造检查加上会话种类。`kind is TASK` 时只接受（`operator`, `task_session`）；其他种类照旧，另外拒绝 `task_session`。违反就抛错，消息不结算，按不变量违例告警，和那篇的 D8 一样。**任务会话不走那篇第 6 节的五步解析表**（那张表第 1 步不看会话种类，把操作者一律解析成 `full`，走进去会先得到 `full`、再被这条检查拒绝）：`answerer`（8.2）在确认发送者是操作者之后，直接构造 `Resolved(audience=operator, scope=task_session, kind=TASK)`。
 2. **`SessionScope`**（那篇 1b 里会话记下的范围）：同一条检查，在构造时做。
 3. **`manager_sessions_scope_audience_check`**，以及 `capability_sets` 的 id 检查、群里能用的那几处范围检查：
 
@@ -511,24 +540,35 @@ ALTER TABLE binding_principal_scopes
 
 ## 9. 并发与安全
 
-### 9.1 同一目录的两个写入方
+### 9.1 同一个 checkout 的两个写入方
+
+**保证（13.3）：** 同一个 checkout 上，操作者的一次 `work` 会话和任何任务的后台运行不会同时写。两个任务之间仍按 W5 只提醒。`observe` 退出 plan 模式以后写文件，不在这个保证之内：plan 模式不是隔离。
 
 | 情形 | 处理 |
 |---|---|
-| 任务进行中（原地或 worktree），操作者 `enter` | 默认 `observe`。显式 `--mode work` 时先要租约；租约在任务的这次运行手里，拒绝 `lease_held`，说明持有者（第几次运行、什么状态、从什么时候起），提示停掉任务或等它结束 |
-| 操作者以 `work` 持有租约，有人要开始、重启、重新打开这个任务 | 拒绝 `lease_held`，说明持有者是操作者的 `work` 会话、从什么时候起；操作者退出后再来 |
-| 操作者以 `work` 进入着，同一目录上要开始别的任务 | 只提醒：W5 的 `shared` 加一句「操作者正在这个目录里工作」，不阻止 |
+| 任务进行中（原地或 worktree），操作者 `enter` | 默认 `observe`。显式 `--mode work` 时要排他租约，任务的运行持有共享租约，所以拒绝 `lease_held`，说明持有者（哪些任务、第几次运行、从什么时候起），提示停掉任务或等它结束 |
+| 操作者以 `work` 持有排他租约，这个 checkout 上有任务要开始、重启、重新打开或在服务启动时恢复 | 不开始，`lease_held`，说明持有者是操作者的 `work` 会话、从什么时候起；操作者退出后再来 |
+| 两个任务在同一个 checkout 上 | 只提醒（W5），互不阻挡 |
 | 两个终端同时 `enter` 同一个任务 | 第二个拒绝 `already_entered`：一条 Claude Code 会话不能两个进程一起写 |
 
-**文件租约：** 每个任务一把，同一时刻只有一个写入方持有：这个任务的一次运行，或者操作者的一条 `work` 会话。
+**单位是 checkout，不是任务：** 租约的键是目录所在 checkout 的真实路径，即 `git rev-parse --show-toplevel` 的结果再取 `realpath`；不在 git 里就是目录本身的 `realpath`。原地任务用 `work_dir` 所在的 checkout；worktree 任务用任务 worktree 的路径（`<runtime_root>/task-worktrees/<task_id>`，worktree 还没建时也按这个路径算）。同一个 checkout 的任何子目录、经过符号链接的写法，都落在同一把锁上。`others_active_in` 只比较 `work_dir` 字面相等（`db/tasks.py:96-102`），仍然只用于 W5 的提醒，不参与互斥。
 
-- **任务的运行**持有它，由任务状态表示：任务在 `ACTIVE_STATUSES` 里，租约就在这次运行手里，不另占文件。
-- **操作者的 `work` 会话**用排他 `flock` 持有 `<runtime_root>/.local/task-sessions/<task_id>.work.lock`，拿到后把持有者（会话、进程号、开始时间）写进这个文件，供被拒的一方说明是谁。进程退出（包括崩溃、关掉终端）时由内核释放，不会留下过期的租约。
-- **交接点：** `enter` 先拿 `flock`，再读任务状态；任务在运行，就放开锁并拒绝。服务端把任务从结束或就绪变成 `pending` 时试同一把锁，都是非阻塞的：`check_task_control` 和 `start_ready_task`（`projects.py:1189-1236`）先试一次，给出及早的拒绝；TaskRouter 写状态之前再试一次，拿到后持有到状态写完，拿不到就不开始，activity 写明持有者。所以不论谁先谁后，两个写入方都不会同时持有。
+**锁：** 每个 checkout 一个锁文件，文件名是键的 sha256 前 16 位，放在用户级的状态目录 `${XDG_STATE_HOME:-~/.local/state}/looper/checkout-leases/` 下，不放在 runtime root 下：CLI 和服务可能用不同的 runtime root，按主机和用户放，两边才会碰到同一把锁。测试用 `LOOPER_LEASE_DIR` 指到临时目录。`flock` 只在本机有效，Looper 本来就是单机的；这个目录不在本地文件系统上时，`enter` 拒绝（`lease_unsupported`）。
+
+- 任务的运行持有**共享锁**（`LOCK_SH`）：几个任务可以同在一个 checkout，互不阻挡，符合 W5。
+- 操作者的 `work` 会话持有**排他锁**（`LOCK_EX`）：挡住所有任务运行和别的 `work` 会话。
+- 持有者把自己写进旁边的说明文件：任务 id 和运行号，或者 `enter` 的会话 id、Claude Code 的进程号和开始时间。被拒的一方读它来说明是谁；说明文件只用来显示，互斥只看锁。
+
+**顺序：**
+
+- **任务开始：** 包括就绪开始、重启和重新打开（TaskRouter 的 `_handle_start`、`_handle_restart`），以及服务启动时的 `resume_tasks`、`start_tasks`（`tiers/task.py:270-300`）。① 算出键；② 非阻塞地拿共享锁，拿不到就不开始，activity 写明持有者，任务状态不动；服务启动时恢复的任务记成 stopped，原因 `operator_session_open`，操作者退出后可以重启；③ 写状态（`pending`，或者恢复）；④ 一直持有，到 `_teardown_task` 写完最终状态才放开。`check_task_control` 和 `start_ready_task`（`projects.py:1214-1261`）另外先试一次，好及早给出拒绝，但它们不是判断点。没有操作者会话时共享锁总能拿到，开始路径的行为不变，只多一个打开的文件描述符。
+- **`enter --mode work`：** ① 算出键；② 非阻塞地拿排他锁，拿不到就拒绝 `lease_held`，按说明文件说出持有者；③ 拿到以后才写 `task_operator_sessions` 的行和说明文件；④ 启动 Claude Code。互斥只看锁，所以行先写还是后写都不影响结果：任务运行一旦持有共享锁，排他锁就拿不到，反过来也一样，不存在「路由先看到没有行，随后写 pending」的空档。
+- **清扫**（7.5）：收尾或删除任何任务 worktree 目录之前，非阻塞地拿这个 checkout 的排他锁，拿不到就跳过这一次。
+
+**进程的生命周期：** `enter` 打开锁文件时不设 close-on-exec，Claude Code 启动时继承这个描述符。`flock` 跟着打开的文件描述走，所有引用它的进程都退出后才释放：`enter` 被 SIGKILL 而 Claude Code 还在写，锁仍然在；Claude Code 和 `enter` 都退出了，锁才放开。Claude Code 跑在终端的前台进程组里，关终端时两者一起收到信号。Claude Code 用 shell 启动、脱离出去、又没有继承这个描述符的后台进程，不在这个保证之内（同能力范围 RFC 第 7 节的说法）。
+
 - **没有强行接管。** 被拒的一方只能等对方放开。要立刻收回，操作者自己退出会话，或者停掉任务。
-- `<task_id>.session.lock`：`enter` 在整个会话期间持有，两种方式都持有，只用来拒绝第二个 `enter`（`already_entered`），以及得出 `tasks.detail` 的「现在是否在里面」。`observe` 不持有文件租约，任务在操作者旁观时结束，照样可以被重新打开。
-
-只有 `task_operator_sessions` 里有行的任务才试锁，其他任务的开始路径不变。
+- `<task_id>.session.lock`（同一个目录下）：`enter` 在整个会话期间持有，两种方式都持有，只用来拒绝第二个 `enter`（`already_entered`），以及得出 `tasks.detail` 的「现在是否在里面」。`observe` 不持有 checkout 的锁，任务在操作者旁观时结束，照样可以被重新打开。
 
 plan 模式和租约管的是 Looper 这一侧的动作和误操作，不是隔离：操作者的会话和任务的 agent 都以操作者的系统账号运行。
 
@@ -562,7 +602,7 @@ plan 模式和租约管的是 Looper 这一侧的动作和误操作，不是隔�
 | 顺序 | 步 | 内容 | 依赖 | 开关 | 粗估 |
 |---|---|---|---|---|---|
 | — | 0 | #1736：任务列表和任务页上的「和这个任务对话」，跳到 Chat 页的规划者目标 | 无 | 无，只加入口 | 已在评审 |
-| 1 | 1 | `looper task enter / brief / ask / sessions`；`task_operator_sessions`；简报和按启动传的钩子；文件租约和服务端的两处试锁；`tasks.detail` 的 `operator_session` 字段 | 无 | 无：新命令；试锁只对有行的任务 | 4–6 人日 |
+| 1 | 1 | `looper task enter / brief / ask / sessions`；`task_operator_sessions`；简报和按启动传的钩子；checkout 租约（任务运行的共享锁、`work` 的排他锁、清扫前试锁）；`tasks.detail` 的 `operator_session` 字段 | 无 | 无：新命令；开始路径多拿一把共享锁，没有操作者会话时总能拿到，行为不变 | 4–6 人日 |
 | 2 | 2 | `reopen`：转换、`[REOPEN]`、`task_runs`、`task_outcomes.end_commit`、预算检查、工作区的各种情形（含 `operator` 状态的 worktree 和 `work` 进入时按需建回）、台账事件、通知路由；`looper task reopen`、管家工具和控制台按钮；7.8 的逐处核对 | 1（命令组和租约） | `tasks.reopen.enabled`，默认关；关着时管家的工具描述和控制台逐字节不变 | 4–6 人日 |
 | 3 | 1b | `looper task register`（默认原地）和交接说明 | 1 | 无 | 3–5 人日 |
 | 4 | 3 | `SessionKind.TASK`、`manager_sessions` 迁移、任务对话线程、`answerer`、类型化的「任务已结束」改投、任务会话的输入和工具（含操作者的只读目录）；内置集合 `task_session` 和操作者 ⇔ 范围规则的三处扩展（8.6）；`looper task ask` 对结束的任务接上 | 2；能力范围 RFC 第 1b 步（10.2） | `manager.task_sessions.enabled`，默认关 | 6–9 人日 |
@@ -583,10 +623,10 @@ plan 模式和租约管的是 Looper 这一侧的动作和误操作，不是隔�
 | 管家会话的存储与启动 | 不碰 | `manager_sessions` 表和 `db/manager_sessions.py`；`tiers/manager.py` 的会话启动、`_persist_chat`、`_build_user_message`；`tiers/group_session.py` 的 `opening`、`excerpt`、`brief` |
 | 平台工具的授权 | 只调用 `operator_call`（`ops/service.py:1474`），签名不变 | `ops/service.py` 的 `ManagerOps.current_listing`（按轮过滤清单）、`_authorize`、`_operator_turn`、`_confirm` 和两处高风险检查；`ops/__init__.py` 的待确认 |
 | 运行时与渠道 | 不碰 | 运行时的启动模式声明；渠道写 `sender_kind` |
-| 任务的开始与重启 | `projects` 的 `check_task_control`、`start_ready_task`、`control_task`、`store_chat_supplement`；`tiers/task.py` 的 `_handle_start`、`_handle_restart`、`_start` | 不碰 |
+| 任务的开始与重启 | `projects` 的 `check_task_control`、`start_ready_task`、`control_task`、`store_chat_supplement`；`tiers/task.py` 的 `_handle_start`、`_handle_restart`、`_start`、`resume_tasks`、`start_tasks`、`_teardown_task`（租约的拿和放） | 不碰 |
 | 规划者 | `tiers/planner.py` 的 `_restart_plan`、`_restart_message`（加 `[REOPEN]`） | 不碰 |
 | 管家的任务工具 | `ops/tasks.py` 的 `_control`、`_confirming` 和 `looper_task_control` 的描述（第 2 步，带开关） | 不碰 |
-| 工作区 | `task_workspaces` 的 `prepare`、`sweep`、`finish`（`operator` 状态） | 不碰 |
+| 工作区 | `task_workspaces` 的 `WorktreeState`、`prepare`（`from_commit`）、`sweep`、`finish`（`operator` 状态和删除分支）；`db/task_worktrees.py` 的 `list_active`；`task_worktrees` 的 state CHECK | 不碰 |
 | 读与操作 | `v1_domains/task_views.py` 的 `tasks.detail`；新操作 `tasks.reopen`；`v1_domains/operator_chat_streams.py` 的 `run`（`ask` 带上 `via`） | 不碰 |
 | 新模块和表 | `cli.py` 的 `task` 命令组；新模块 `task_entry`（进入、租约）、`task_select`（5.7 的解析）、`task_brief`（`compose`）、`task_commands`；`task_operator_sessions`、`task_runs` 及迁移 | — |
 | 共用的小改动 | `untrusted.Source` 加一个值 `TASK_REQUIREMENT`，只加不改 | 用 `untrusted.fence`，不改它 |
@@ -599,8 +639,8 @@ plan 模式和租约管的是 Looper 这一侧的动作和误操作，不是隔�
 
 
 - **第 1 步开工前**用真实 Claude Code 验证三件事：`--settings` 里的 SessionStart 钩子和用户设置里的钩子都执行，`source` 的取值和 `additionalContext` 的长度限制；`--session-id` 之后 `--resume` 续上的是同一条；换目录 `--resume` 的行为。结论写进 PR，作为 5.3、5.5 的依据。
-- **第 1 步：** 5.2 表每行一个参数化测试；5.7 的解析每条规则一个参数化用例（id、`cwd` 在任务目录里和更深处、同一目录几个任务、最近列表、MR 的各种写法和仓库对不上、全角和大小写、多词都要命中、恰好一个、几个、没有），并确认没有模型调用；租约两种先后顺序各一个测试，被拒时说出持有者；带 `LOOPER_AGENT_RUN` 时拒绝；简报的截断和围栏（正文和标题里的尖括号、引号拆不开围栏）；10.2 左栏之外的文件没有改动（评审时按表核对）；真实 CLI 按 10.1 的「试一下」跑一遍，读回「上次离开以后」，并确认 `observe` 时在 plan 模式。
-- **第 2 步：** 7.2 表每行一个测试；完成的 worktree 任务以 `work` 进入时按需建回并记成 `operator`，启动清扫跳过它，重新打开后变回 `active`、未提交的改动还在；不进入也不重新打开时不建回；T 检出在别处时拒绝；到了上限不给新上限时拒绝，给了能开；`task_runs` 和 `task_outcomes` 对得上；7.8 每处一个测试；`[REOPEN]` 是新的模型可见内容，跑真实规划者评测；用全新数据库在非 8767 端口、临时 runtime root 上跑 `looper serve`：完成一个任务、重新打开、再完成，读回两次运行。
+- **第 1 步：** 5.2 表每行一个参数化测试；5.7 的解析每条规则一个参数化用例（id、`cwd` 在任务目录里和更深处、同一目录几个任务、最近列表、MR 的各种写法和仓库对不上、全角和大小写、多词都要命中、恰好一个、几个、没有），并确认没有模型调用；租约：任务运行和 `work` 两种先后顺序各一个测试，被拒时说出持有者；同一个 checkout 的子目录和符号链接写法落在同一把锁上；SIGKILL `enter` 之后 Claude Code 子进程还在时锁仍被持有；服务启动时恢复撞上排他锁时任务记成 stopped；清扫拿不到锁时跳过；带 `LOOPER_AGENT_RUN` 时拒绝；简报的截断和围栏（正文和标题里的尖括号、引号拆不开围栏）；10.2 左栏之外的文件没有改动（评审时按表核对）；真实 CLI 按 10.1 的「试一下」跑一遍，读回「上次离开以后」，并确认 `observe` 时在 plan 模式。
+- **第 2 步：** 7.2 表每行一个测试；完成的计划收到 `[REOPEN]`（不会被 `_complete_plan` 抢先），`none` 时再次完成，这一轮失败时任务以 `reopen_turn_failed` 失败且续接说明未送达；仍在等的关卡收到「still waits」；定时任务和绑了规则的任务被拒；预检在重置之前，花费读不到时拒绝，新上限只写任务自己的列；台账 note 写失败不中止；完成的 worktree 任务以 `work` 进入时按需建回并记成 `operator`，启动清扫跳过它，重新打开后变回 `active`、未提交的改动还在；T 已删时按 `result_commit` 建回，提交也没了时拒绝，新任务第一次建 worktree 的路径逐字节不变；不进入也不重新打开时不建回；T 检出在别处时拒绝；到了上限不给新上限时拒绝，给了能开；`task_runs` 和 `task_outcomes` 对得上；7.8 每处一个测试；`[REOPEN]` 是新的模型可见内容，跑真实规划者评测；用全新数据库在非 8767 端口、临时 runtime root 上跑 `looper serve`：完成一个任务、重新打开、再完成，读回两次运行。
 - **1b：** 默认原地，未提交的改动在任务里；显式 worktree 且有未提交改动时拒绝；交接说明出现在规划者的第一轮里；一次性 serve 上读回任务和补充说明。
 - **第 3 步：** `answerer` 每个分支一个测试；`SessionKey` 的形状检查，8.1 和 8.6 的每条 CHECK 各有一个写入被拒的负例（含 `task` 会话的范围或受众为空、`task_session` 出现在群会话或群绑定上、`task` 会话受众是 `shared`），`Resolved` 和 `SessionScope` 的同一组负例，在一次性 PostgreSQL 上跑迁移，旧行保留；改投最多一次；任务会话的输入清单冻结，哨兵门禁证明输入里没有画像、台账、别的任务，并有本任务的正向对照；工具对别的任务答 `not_found`；受众是操作者时能读这个任务的目录、读不到目录外，没有受限只读时按只用平台工具启动；任务会话契约跑真实管家评测。
 - **第 5 步：** 无头浏览器上，运行中和结束后各发一条，截图一张。
@@ -661,15 +701,15 @@ plan 模式和租约管的是 Looper 这一侧的动作和误操作，不是隔�
 
 ### 13.3 进行中的任务默认 `observe`，`work` 要显式并先拿租约
 
-**决定：** 进行中的任务默认 `observe`。`work` 要显式 `--mode work`，并且先拿这个任务的文件租约；租约被占就拒绝，说明是谁持有，不能强行接管（5.2、9.1）。
+**决定：** 进行中的任务默认 `observe`。`work` 要显式 `--mode work`，并且先拿这个 checkout 的排他租约；任务的运行持有共享租约，所以被拒绝，并说明是谁持有，不能强行接管（5.2、9.1）。保证的范围：同一个 checkout 上，操作者的一次 `work` 和任何任务的后台运行不会同时写；两个任务之间照 W5 只提醒；`observe` 退出 plan 模式后写文件不在保证之内。
 
-**理由：** 任务的 agent 正在这个目录里写，两个写入方会互相覆盖。有了租约，「现在谁在写」只有一个答案，被拒的一方也知道在等谁。不做强行接管，因为接管就是在 agent 写到一半时把目录抢过来。以后可以改，例如加一个「先停任务再以 `work` 进入」的组合命令。
+**理由：** 任务的 agent 正在这个目录里写，两个写入方会互相覆盖。按 checkout 的真实路径加锁，「现在操作者和任务谁在写」只有一个答案，被拒的一方也知道在等谁；锁跟着 Claude Code 进程走，`enter` 被杀掉也不会放开。不做强行接管，因为接管就是在 agent 写到一半时把目录抢过来。以后可以改，例如加一个「先停任务再以 `work` 进入」的组合命令。
 
 ### 13.4 完成任务的 worktree 按需建回
 
 **决定：** 完成的 worktree 任务不自动重建 worktree；以 `work` 进入或重新打开时，才按分支 T 建回来（5.2、7.5）。
 
-**理由：** 大多数完成的任务不会再回来，自动重建既占磁盘，又和启动清扫冲突。按需建回只在有人真要写的时候发生，提交都在分支 T 上，什么都不会丢。以后可以改，例如 `observe` 也建回一份只读的检出。
+**理由：** 大多数完成的任务不会再回来，自动重建既占磁盘，又和启动清扫冲突。按需建回只在有人真要写的时候发生：T 还在时提交都在；T 被删了，按记下的 `result_commit` 建回，合并过的提交因此都在；只存在于已删的 T 上、又被 git 回收了的提交找不回来，这时拒绝并说明，不假装能建回。以后可以改，例如 `observe` 也建回一份只读的检出。
 
 ### 13.5 登记已有目录默认原地
 
@@ -679,9 +719,9 @@ plan 模式和租约管的是 Looper 这一侧的动作和误操作，不是隔�
 
 ### 13.6 操作者的任务会话可以只读这个任务的目录
 
-**决定：** 受众是操作者的任务会话，可以只读这个任务的工作目录；别的受众都不行（8.4）。
+**决定：** 受众是操作者的任务会话，可以只读这个任务的工作目录（符号根 `task_dir`）；别的受众都不行（8.4）。这是对能力范围 RFC 的 D21 和第 15.8 节的明确例外，那篇第 3 步定根列表时要把它算进去。任务会话的范围直接构造成（`operator`, `task_session`），不走那篇第 6 节的解析表（8.6）。
 
-**理由：** 任务结束后的问题大多要看代码和改动。只读、只限这一个目录、只给操作者，不扩大任何别人的能力，和能力范围 RFC 的 D8、D21 一致。以后可以改，例如加上 vault 的某个子目录。
+**理由：** 任务结束后的问题大多要看代码和改动。只读、只限这一个目录、只给操作者，不扩大任何别人的能力，符合那篇的 D8；D21 管的是群里的受众能借管家读到什么，这条例外不给群里任何人新的读权限。以后可以改，例如加上 vault 的某个子目录。
 
 ### 13.7 上限按任务累计，到了上限要给新上限才能重新打开
 
