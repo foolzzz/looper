@@ -16,6 +16,7 @@ from looper.agents.message import MANAGER_ADDRESS, MessageEnvelope, MessageType,
 from looper.agents.runtimes.api.session import ApiSession
 from looper.agents.tiers import idle_check_turn
 from looper.db import idle_checks as store
+from looper.db import chat as db_chat
 from tests.api_manager_support import USAGE, _manager, _message
 from tests.db_support import DSN, run_db, until
 from tests.fake_model_api import ResponseScript, call_events, call_item, completed, text_events
@@ -74,8 +75,15 @@ def test_idle_reply_records_its_origin_and_sends_only_a_valid_message(monkeypatc
                 assert post.await_args.kwargs["idempotency_key"] == f"idle-{check_id}"
                 text = post.await_args.args[2]
                 assert text == reply + "\n\n" + idle_checks.DETAILS_LINE
-                record = await pool.fetchrow("SELECT role, content FROM chat_messages WHERE message_id=$1", f"idle-{check_id}")
-                assert tuple(record) == ("assistant", text)
+                record = await pool.fetchrow("SELECT role, content, manager_session, sender_kind, sender_name, "
+                                             "session_id FROM chat_messages WHERE message_id=$1", f"idle-{check_id}")
+                own = await db_chat.activity_since(record["session_id"], after_id=0, exclude_session="main",
+                                                   exclude_message_id=None, limit=10, pool=pool)
+                other = await db_chat.activity_since(record["session_id"], after_id=0, exclude_session="other",
+                                                     exclude_message_id=None, limit=10, pool=pool)
+                assert own.rows == [] and own.hidden == 0
+                assert [row["content"] for row in other.rows] == [text]
+                assert tuple(record)[:5] == ("assistant", text, "main", None, None)
                 assert await pool.fetchval("SELECT outcome FROM proactive_deliveries WHERE dedupe_key=$1", f"idle-{check_id}") == "sent"
             else:
                 post.assert_not_awaited()

@@ -14,6 +14,8 @@ from looper.agents.channels.allowlist import SenderAllowlist
 from looper.agents.channels.chat_history import CHAT_RECORD, chat_record, record_reply
 from looper.agents.channels.lark import LarkChannelAdapter
 from looper.agents.message import MANAGER_ADDRESS, MessageEnvelope, MessageType, channel_address
+from looper.agents.managers import ManagerFleet
+from looper.agents.supervisor import AgentSupervisor
 from looper.agents.session_routing import SessionKey, SessionKind
 from looper.agents.tiers.manager import ManagerAgent, ManagerConfig, _message_origin, _session_key
 from looper.db import chat
@@ -21,6 +23,46 @@ from tests.db_support import DSN, run_db
 from tests.lark_cli_stand_in import BOT_MENTION, BOT_OPEN_ID, OPEN_ID
 
 pytestmark = pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
+
+
+@pytest.mark.parametrize("channel", ["lark", "telegram"])
+@pytest.mark.parametrize("case", ["stopped_main", "stopped_routed", "stopped_routed_queued", "queued_off"])
+def test_fleet_reply_session_readback(monkeypatch, tmp_path, channel, case):
+    async def body(pool):
+        bus = MessageBus(runtime_root=tmp_path)
+        manager = ManagerAgent(config=ManagerConfig(work_dir=tmp_path), runtime_root=tmp_path)
+        manager._bus = bus
+        fleet = ManagerFleet(platform=None, supervisor=AgentSupervisor(bus, tmp_path), runtime_root=tmp_path,
+                             url="http://127.0.0.1:1", config=manager._config, broadcaster=None)
+        chat_id = "731241" if channel == "telegram" else "oc_synthetic_dm"
+        envelope = MessageEnvelope.create(
+            source=channel_address(channel), target=MANAGER_ADDRESS, message_type=MessageType.USER_MESSAGE,
+            payload={"text": "hello", "channel_context": {"chat_id": chat_id, "chat_type": "p2p"}})
+        expected = "main"
+        try:
+            if case == "queued_off":
+                await fleet._deal_with("manager", [envelope])
+            else:
+                session = manager._sessions["main"]
+                if case in {"stopped_routed", "stopped_routed_queued"}:
+                    session = manager._router.session(SessionKey(SessionKind.DM, f"channel-{channel}", chat_id))
+                    expected = session.key
+                token = manager._register_turn(envelope)
+                if case == "stopped_routed_queued":
+                    manager._router.dispatch(session, envelope)
+                else:
+                    session.running_token = token
+                    token.partial = "partial answer"
+                await manager.stop()
+                await fleet._settle_retired("manager", manager)
+            reply = bus.get_queue(f"channel-{channel}").get_nowait()
+            await record_reply(channel, reply, DeliveryReceipt(channel=channel, success=True))
+            row = await pool.fetchrow("SELECT manager_session, sender_kind, sender_name FROM chat_messages")
+            assert tuple(row) == (expected, None, None)
+        finally:
+            await bus.shutdown()
+
+    run_db(body, monkeypatch)
 
 
 def test_native_lark_provenance_round_trip(monkeypatch, tmp_path: Path, lark_cli_stand_in) -> None:

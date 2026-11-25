@@ -820,12 +820,13 @@ class GoalSnapshot:
 def reply_envelope(original: MessageEnvelope, text: str, source: AgentAddress, *, error: str | None = None,
                    outcome: ReplyOutcome | None = None, record: dict[str, Any] | None = None,
                    snapshot: str | None = None, cards: list[dict[str, Any]] | None = None,
-                   ephemeral: bool = False) -> MessageEnvelope:
+                   ephemeral: bool = False, manager_session: str = MAIN_SESSION) -> MessageEnvelope:
     """The reply from ``source`` to ``original``, addressed to the channel it came from; by default it is kept in
-    the chat's history (``record``). ``cards`` are blocks of ``text`` a channel with buttons sends as cards."""
+    the chat's history (``record``). Code-owned replies without a running session belong to main; callers answering
+    a session's interrupted turn pass its key. ``cards`` are blocks of ``text`` a channel with buttons sends as cards."""
     outcome = outcome or (ReplyOutcome.FAILED if error else ReplyOutcome.ANSWERED)
     if record is None:
-        record = _chat_record(original, f"{original.message_id}:reply")
+        record = _chat_record(original, f"{original.message_id}:reply", manager_session=manager_session)
     return MessageEnvelope.create(
         source=source,
         target=original.source,
@@ -939,6 +940,7 @@ class ManagerAgent:
         # hands them over when it retires this Manager).
         self._handling: MessageEnvelope | None = None
         self.stopped_in_flight: tuple[tuple[MessageEnvelope, str], ...] = ()
+        self.stopped_in_flight_sessions: dict[str, str] = {}
 
     @property
     def name(self) -> str:
@@ -1263,9 +1265,18 @@ class ManagerAgent:
         self._running = False
         # Before the cancel: it runs the handlers' finally blocks, which end the tokens and clear ``_handling``.
         tokens = self._turns.live()
+        # Preserve ownership before cancellation clears worker/token state; unrouted fleet replies use main.
+        self.stopped_in_flight_sessions = {
+            envelope.message_id: key for key, envelope in self._router._handling.items()}
+        for key, queue in self._router._queues.items():
+            for _, item in (*queue.interactive, *queue.background):
+                if isinstance(item, MessageEnvelope):
+                    self.stopped_in_flight_sessions[item.message_id] = key
         for session in self._sessions.values():  # every session's
             if session.running_token is not None:
                 tokens.append(session.running_token)  # settled while its record finishes, but still answering the chat
+                if session.running_token.envelope is not None:
+                    self.stopped_in_flight_sessions[session.running_token.envelope.message_id] = session.key
         handling = ([self._handling] if self._handling is not None else []) + self._router.handling()
         pending = [(e, "") for e in handling] + [(t.envelope, t.partial) for t in tokens if t.envelope is not None]
         self.stopped_in_flight = tuple({e.message_id: (e, partial) for e, partial in pending}.values())
