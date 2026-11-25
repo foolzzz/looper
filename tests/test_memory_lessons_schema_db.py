@@ -82,12 +82,12 @@ def test_lesson_constraints_and_source_deletion(monkeypatch):
             key, value = next(iter(changes.items()))
             with pytest.raises(asyncpg.CheckViolationError):
                 await pool.execute(f"UPDATE memory_candidates SET {key}=$2 WHERE id=$1", candidate, value)
-        await pool.execute("INSERT INTO task_lesson_snapshots VALUES ('task-mem',$1,1)", candidate)
+        await pool.execute("INSERT INTO task_lesson_snapshots(task_id,candidate_id,position) VALUES ('task-mem',$1,1)", candidate)
         other, _ = await lesson(pool)
         with pytest.raises(asyncpg.UniqueViolationError):
-            await pool.execute("INSERT INTO task_lesson_snapshots VALUES ('task-mem',$1,1)", other)
-        injection = await pool.fetchval("INSERT INTO memory_injections(task_id,agent_kind,block_sha256,block_chars) "
-                                        "VALUES ('task-mem','worker',$1,100) RETURNING id", "b" * 64)
+            await pool.execute("INSERT INTO task_lesson_snapshots(task_id,candidate_id,position) VALUES ('task-mem',$1,1)", other)
+        injection = await pool.fetchval("INSERT INTO memory_injections(task_id,agent_kind,block_sha256,block_chars,delivery_key) "
+                                        "VALUES ('task-mem','worker',$1,100,'synthetic-legacy') RETURNING id", "b" * 64)
         await pool.execute("INSERT INTO memory_injection_items VALUES ($1,$2,1,false,false)", injection, candidate)
         with pytest.raises(asyncpg.CheckViolationError):
             await pool.execute("UPDATE memory_injection_items SET cited=true,wrong=true WHERE injection_id=$1", injection)

@@ -51,6 +51,38 @@ afterEach(() => {
 });
 
 describe("Needs you page", () => {
+  it("shows failure holds and terminal reminders once in the server's section order", async () => {
+    vi.mocked(fetchAttention).mockResolvedValue({ read_at: "2026-11-20T08:00:00Z", total: 2, sections: [
+      { kind: "failure_holds", state: "ok", count: 1, error: null, items: [
+        { key: "failure:1", title: "Resume work", context: "demo", since: null, href: "#tasks/held-task",
+          ref: null, facts: { kind: "environment", streak: 3 } }] },
+      { kind: "reminders", state: "ok", count: 1, error: null, items: [
+        { key: "reminder:1", title: "Check the application", context: "", since: null, href: "#chat",
+          ref: "#1", facts: { state: "uncertain", due_at: "2026-11-19T08:00:00Z", timezone: "UTC" } }] },
+    ] });
+    await render();
+    expect(Array.from(host.querySelectorAll("section"), (section) => section.getAttribute("aria-label")))
+      .toEqual(["运行失败等你处理", "未确认送达的提醒"]);
+    expect(host.textContent?.match(/Resume work/g)).toHaveLength(1);
+    expect(host.textContent?.match(/Check the application/g)).toHaveLength(1);
+    expect(host.querySelector('a[href="#tasks/held-task"]')).not.toBeNull();
+    expect(host.querySelector('a[href="#chat"]')).not.toBeNull();
+  });
+
+  it("shows a terminal reminder with its due time, uncertain state and cancellation action", async () => {
+    vi.mocked(fetchAttention).mockResolvedValue({ read_at: "2026-11-24T12:00:00Z", total: 1, sections: [
+      { kind: "reminders", state: "ok", count: 1, error: null, items: [
+        { key: "reminder:42", title: "核对申请", context: "原定 2026-11-24 10:00 UTC；uncertain：可能未送达",
+          since: null, href: "#chat", ref: "#42", facts: { state: "uncertain" } },
+      ] },
+    ] });
+    await render();
+    expect(host.textContent).toContain("核对申请");
+    expect(host.textContent).toContain("2026-11-24 10:00 UTC");
+    expect(host.textContent).toContain("uncertain：可能未送达");
+    expect(host.textContent).toContain("取消提醒");
+    expect(host.querySelector('a[href="#chat"]')).not.toBeNull();
+  });
   it("keeps catchup items alongside message-stream alerts", async () => {
     vi.mocked(fetchAttention).mockResolvedValue({ read_at: "2026-11-22T12:00:00Z", total: 2, sections: [
       { kind: "deliveries", state: "ok", count: 2, error: null, items: [

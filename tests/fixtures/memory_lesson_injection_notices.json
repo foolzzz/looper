@@ -1,0 +1,18 @@
+{
+  "protocol": "project-lessons-notices/1",
+  "source": "New model-visible protocol; these notices do not exist in the pre-injection revision.",
+  "items": {
+    "disabled": {
+      "text": "Project lessons are now turned off for this session: lessons shown earlier no longer apply, so do not rely on them.",
+      "sha256": "80cdad9bb67b2d014097ce969385375651933f9f93ae9a30e822bdcf44ba5a5b"
+    },
+    "replaced": {
+      "text": "This task's lessons replace the lessons from earlier runs in this session.",
+      "sha256": "65f962cd4242fb0c2a8d5052da6f351cce8e7d4ff7990b54a2210227e5498285"
+    },
+    "cleared": {
+      "text": "This task has no project lessons. Lessons from earlier runs in this session no longer apply, so do not rely on them.",
+      "sha256": "b6b5c8c178a6231c58c0f983fa875ee5a255614f896c6a08e715707b54087ea5"
+    }
+  }
+}

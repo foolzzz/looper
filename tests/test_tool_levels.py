@@ -172,6 +172,8 @@ DECIDED_OPERATIONS: dict[str, ActionLevel] = {
     "limit_signals_settings.update": INSIDE,  # changes only Looper's collection switch
     "session_routing.get": INSIDE,  # reads Looper's own session routing controls
     "session_routing.update": INSIDE,  # stores session routing settings; sends no message
+    "scenario_session_routing.get": INSIDE,  # reads only a stored Manager definition
+    "scenario_session_routing.update": INSIDE,  # stores only a routing policy; sends no message
     "outbound_gateway.get": INSIDE,  # reads Looper's own gateway settings
     "outbound_gateway.update": INSIDE,  # stores gateway settings; sends no message
     "memory.list": INSIDE,  # reads stored candidates
