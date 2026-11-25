@@ -82,7 +82,7 @@ class _Channel:
         self.outcomes, self.delay, self.posts = list(outcomes), delay, []
 
     async def post(self, channel_id: str, target: Any, text: str, *, reply_to: str | None = None,
-                   idempotency_key: str | None = None) -> PostReceipt:
+                   idempotency_key: str | None = None, proactive: Any = None) -> PostReceipt:
         self.posts.append({"channel_id": channel_id, "kind": target.kind.value, "to": target.id,
                            "group": target.group, "text": text, "key": idempotency_key})
         if self.delay:

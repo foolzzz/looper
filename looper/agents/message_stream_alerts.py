@@ -245,10 +245,10 @@ class SourceAlerts:
         try:
             parsed = parse_channel_id(row["target_channel"])
             kind = TargetKind.CHAT if parsed.channel_type == "telegram" else TargetKind.USER
-            receipt = await self.post(row["target_channel"], NotifyTarget(kind, row["target_chat"], group=False), text,
-                                      idempotency_key=key, **turn_metrics.proactive_kwargs(
-                                          turn_metrics.ProactiveSource.MESSAGE_STREAM_ALERT,
-                                          source_ref=str(row["id"]), dedupe_key=key))
+            with turn_metrics.proactive_send(turn_metrics.ProactiveSource.MESSAGE_STREAM_ALERT,
+                                             source_ref=str(row["id"]), dedupe_key=key):
+                receipt = await self.post(row["target_channel"], NotifyTarget(kind, row["target_chat"], group=False), text,
+                                          idempotency_key=key)
             return receipt.result.value, None if receipt.result is PostOutcome.SENT else "delivery"
         except asyncio.CancelledError:
             raise

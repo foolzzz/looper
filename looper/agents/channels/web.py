@@ -28,7 +28,7 @@ from ..message import (
     channel_address,
 )
 from .base import ChannelAdapter, DeliveryReceipt
-from .proactive import record_delivery
+from .proactive import record_delivery, store_envelope_body
 
 logger = logging.getLogger(__name__)
 
@@ -133,6 +133,11 @@ class WebChannelAdapter(ChannelAdapter):
             )
 
         event = self._envelope_to_sse_event(envelope)
+        if saved is None:
+            route = envelope.metadata.get("reply_route")
+            route = route if isinstance(route, dict) else {}
+            await store_envelope_body("web", envelope, str(envelope.payload.get("text") or ""),
+                                      chat=str(route.get("session_id") or corr_id))
         try:
             sse_q.put_nowait(event)
             receipt = DeliveryReceipt(channel="web", success=True)
@@ -160,6 +165,7 @@ class WebChannelAdapter(ChannelAdapter):
         from ...db.chat import save_message
 
         text = str(envelope.payload.get("text") or "")
+        await store_envelope_body("web", envelope, text, chat=session_id)
         message_id = message_id or envelope.message_id
         entry_kind = envelope.payload.get("entry_kind")
         receipt = DeliveryReceipt(channel="web", success=True)

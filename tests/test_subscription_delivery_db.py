@@ -60,11 +60,12 @@ def test_registry_metrics_share_the_digest_decision(monkeypatch, tmp_path, metri
         assert (sent["text"], sent["target"].id, sent["key"]) == (TEXT, DM, run["id"])
         assert run["stream"]["outcome"] == "delivered" and await cursor(env, sid) == top
         rows = await env.pool.fetch("SELECT * FROM proactive_deliveries")
-        assert len(rows) == int(metrics_enabled or delivery_enabled)
+        assert len(rows) == 1
         if rows:
             [row] = rows
             assert row["dedupe_key"] == (f"subscription_run:{run['id']}" if delivery_enabled else run["id"])
             assert row["source"] == "subscription" and row["outcome"] == "sent"
+            assert row["body"] == TEXT
             assert row["external_id"] == "om_1" and row["sent_at"] is not None
             assert row["decision"] == ("send" if delivery_enabled else None)
             assert row["urgency"] == ("digest" if delivery_enabled else None)
