@@ -773,7 +773,22 @@ and key or CLI version, and increment a reason/phase/version counter visible in
 `tasks.managers.max_resident` defaults to 6 (1–20). Admission can reclaim the least
 recently used idle process; a 60-second ticker reclaims processes idle for 30
 minutes. Shutdown stops owned processes; deleting a task forgets its resident and
-session. This foundation adds no conversation transport or task-bound MCP tools.
+session. Messages for a busy task queue in FIFO order; when every resident is busy,
+the oldest eligible waiting message gets the next slot. Each turn rechecks the
+work-mode switch and the shared task budget. Unknown model cost emits a warning;
+a reached cap refuses the turn without changing task status. A running task
+Manager prevents starting that task's background execution.
+
+Turns stream text and bounded code-generated tool summaries to a sink and record
+their task-attributed usage in `llm_records`. Stop uses the resident's control
+interrupt with kill fallback. Sessions and cumulative usage are saved under
+`task-manager-<task_id>` in `agent_sessions`; a changed mode, model, effort,
+workspace or prompt restarts the process with the saved session. A failed resume
+retries once fresh with the caller's last 20 fenced thread messages and emits
+`session_fresh` with a bounded diagnostic. Server restart never replays a cut turn.
+Worktree turns commit pending changes with the task trailer; in-place turns list
+changed files without committing. No conversation transport or task-bound MCP
+tools are included yet.
 
 ### TaskRouter (`looper/agents/tiers/task.py`)
 
