@@ -772,7 +772,8 @@ and key or CLI version, and increment a reason/phase/version counter visible in
 
 `tasks.managers.max_resident` defaults to 6 (1–20). Admission can reclaim the least
 recently used idle process; a 60-second ticker reclaims processes idle for 30
-minutes. Shutdown stops owned processes; deleting a task forgets its resident and
+minutes, measured from the last turn ending. All preparation shares the admission
+gate. A busy turn prevents background start. Shutdown stops owned processes; deleting a task forgets its resident and
 session. Messages for a busy task queue in FIFO order; when every resident is busy,
 the oldest eligible waiting message gets the next slot. Each turn rechecks the
 work-mode switch and the shared task budget. Unknown model cost emits a warning;

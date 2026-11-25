@@ -129,7 +129,7 @@ class TaskManagerAgent:
         self.loaded = False
         self.running: asyncio.Task[None] | None = None
 
-    async def prepare(self) -> tuple[Mapping[str, Any], Any, Launch, SystemPrompt]:
+    async def prepare(self, *, sink: TurnSink | None = None) -> tuple[Mapping[str, Any], Any, Launch, SystemPrompt]:
         """Read configuration afresh; no launch bypasses the direct-mode review checks."""
         if not task_conversations_settings.enabled():
             raise Refused(RefuseReason.WORK_MODE_OFF, "Task conversations are disabled.")
@@ -193,20 +193,32 @@ class TaskManagerAgent:
                                                                   prompt_file=prompt_file, launch=launch))
         env = task_manager_safety.environment(launch, self.task_id)
         settings_file = command[command.index("--settings") + 1] if "--settings" in command else ""
-        signature = (self.mode, reopened.work_dir, launch.profile.id, launch.model, launch.effort, prompt.sha256, settings_file)
-        restarting = not self.resident.started or self.resident.stale(signature)
-        if restarting:
-            if direct:
-                problem = await task_manager_safety.gate(executable, cwd=reopened.work_dir, environment=launch.runtime.environment(launch),
-                    phase="resume" if self.session_id else "launch", settings_file=Path(settings_file))
-                if problem is not None:
-                    await self.resident.stop(kill=True)
-                    raise Refused(RefuseReason(problem.reason.value), problem.notice)
-            await self.resident.stop()
-            if self.session_id:
-                command += ["--resume", self.session_id]
-            await self.resident.start(command, cwd=reopened.work_dir, signature=signature, env=env,
-                                      totals=self.totals, price=launch.price, capture_stderr=True)
+        signature = (self.mode, reopened.work_dir, launch.profile.id, launch.model, launch.effort, launch.profile.provider, prompt.sha256, settings_file)
+        async with self.pool._available:
+            notified = False
+            while not await self.pool._slot(self):
+                if self.pool.closing:
+                    raise Refused(RefuseReason.SHUTTING_DOWN, "The task Manager is shutting down.")
+                if sink is not None and not notified:
+                    await sink.event(TaskManagerEvent.QUEUED, {"reason": "cap", "position": 1})
+                    notified = True
+                await self.pool._available.wait()
+            if self.pool.closing:
+                raise Refused(RefuseReason.SHUTTING_DOWN, "The task Manager is shutting down.")
+            restarting = not self.resident.started or self.resident.stale(signature)
+            if restarting:
+                if direct:
+                    problem = await task_manager_safety.gate(executable, cwd=reopened.work_dir, environment=launch.runtime.environment(launch),
+                        phase="resume" if self.session_id else "launch", settings_file=Path(settings_file))
+                    if problem is not None:
+                        await self.resident.stop(kill=True)
+                        raise Refused(RefuseReason(problem.reason.value), problem.notice)
+                await self.resident.stop()
+                if self.session_id:
+                    command += ["--resume", self.session_id]
+                await self.resident.start(command, cwd=reopened.work_dir, signature=signature, env=env,
+                                          totals=self.totals, price=launch.price, capture_stderr=True)
+            self.last_used = self.pool.clock()
         return task, reopened, launch, prompt
 
     async def turn(self, request: _Request) -> None:
@@ -330,6 +342,7 @@ class TaskManagerPool:
         self.agents: dict[str, TaskManagerAgent] = {}
         self.closing = False
         self._lock = asyncio.Lock()
+        self._available = asyncio.Condition(self._lock)
         self._pending: list[_Request] = []
         self._active: dict[str, _Request] = {}
         self._closing_tasks: set[str] = set()
@@ -349,7 +362,7 @@ class TaskManagerPool:
         """Called under the pool gate; an idle eviction never races a turn admission."""
         if agent.resident.started:
             return True
-        live = sum(a.resident.started or a.busy for a in self.agents.values())
+        live = sum(a.resident.started or a.busy for a in self.agents.values() if a is not agent)
         if live < self.max_resident():
             return True
         for other in sorted(self.agents.values(), key=lambda a: a.last_used):
@@ -418,6 +431,7 @@ class TaskManagerPool:
             async with self._lock:
                 agent.busy, agent.running, agent.last_used = False, None, self.clock()
                 self._active.pop(request.task_id, None)
+                self._available.notify_all()
                 await self._dispatch()
 
     async def stop_turn(self, task_id: str, message_id: str) -> bool:
@@ -439,6 +453,7 @@ class TaskManagerPool:
             for agent in self.agents.values():
                 if not agent.busy and self.clock() - agent.last_used >= 1800:
                     await agent.resident.try_stop_if_idle()
+            self._available.notify_all()
 
     async def _tick(self) -> None:
         while True:
