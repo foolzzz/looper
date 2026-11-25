@@ -362,8 +362,13 @@ async def update_task_status(
     error: str | None = None,
     fail_kind: FailKind | None = None,
     pool: asyncpg.Pool | None = None,
+    notify: bool = True,
 ) -> None:
-    """Set the task's status; the fields given (not ``None``) are set too, and kept until a restart."""
+    """Set the task's status; the fields given (not ``None``) are set too, and kept until a restart.
+
+    ``notify`` runs the task-end listeners. A caller that still holds this task's row lock passes False and
+    runs them after committing: a listener takes its own connection and would wait on that lock.
+    """
     pool = pool or get_pool()
     now = datetime.now(timezone.utc)
     completed_at = now if status in ("completed", "failed", "cancelled") else None
@@ -388,7 +393,7 @@ async def update_task_status(
         attempt_ended_at,
         json.dumps(process_record, ensure_ascii=False) if process_record is not None else None,
     )
-    if status in ("completed", "failed", "cancelled", "stopped"):
+    if notify and status in ("completed", "failed", "cancelled", "stopped"):
         await _task_ended(task_id)
 
 

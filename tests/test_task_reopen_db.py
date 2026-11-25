@@ -9,6 +9,7 @@ from pathlib import Path
 
 import pytest
 
+from looper.agents import step_workspaces as ws
 from looper.agents import task_conversations_settings as settings
 from looper.agents import task_workspaces as tw
 from looper.agents.tiers.task import TaskRouter
@@ -124,6 +125,69 @@ def test_reopen_branch_checked_out(monkeypatch, tmp_path) -> None:
         assert git(other, "symbolic-ref", "--short", "HEAD") == branch
         assert not (runtime / "task-worktrees" / "held").exists()
         assert await _columns(pool, "held") == (before_task, before_tree)
+
+    run_db(check, monkeypatch)
+
+
+def test_reopen_branch_deleted_after_precheck(monkeypatch, tmp_path) -> None:
+    """The branch disappearing after the pre-check is read-only, and no replacement branch is created."""
+
+    async def check(pool) -> None:
+        task_id = "deleted-late"
+        repo, runtime = await _removed_worktree(pool, tmp_path, task_id)
+        branch = tw.task_branch(task_id)
+        before_task, before_tree = await _columns(pool, task_id)
+        original = ws.branch_exists
+        armed = {"yes": True}
+
+        async def exists(repo_dir: str, name: str) -> bool:
+            found = await original(repo_dir, name)
+            if armed["yes"] and name == branch and found:
+                armed["yes"] = False
+                git(repo, "branch", "-D", branch)
+                return True
+            return found
+
+        monkeypatch.setattr(ws, "branch_exists", exists)
+        opened = await tw.reopen(await tasks.get_task(task_id), runtime_root=runtime, links=(), note=_note)
+        assert opened.mode == tw.ReopenMode.READ_ONLY
+        assert opened.reason == "branch_gone"
+        assert opened.work_dir == str(repo)
+        assert git(repo, "branch", "--list", branch) == ""
+        assert not (runtime / "task-worktrees" / task_id).exists()
+        assert await _columns(pool, task_id) == (before_task, before_tree)
+
+    run_db(check, monkeypatch)
+
+
+def test_reopen_branch_checked_out_after_precheck(monkeypatch, tmp_path) -> None:
+    """A branch checked out elsewhere after the pre-check is read-only, not an exception and not writable."""
+
+    async def check(pool) -> None:
+        task_id = "checked-late"
+        repo, runtime = await _removed_worktree(pool, tmp_path, task_id)
+        branch = tw.task_branch(task_id)
+        other = tmp_path / "checked-elsewhere"
+        before_task, before_tree = await _columns(pool, task_id)
+        original = ws.branch_checked_out
+        armed = {"yes": True}
+
+        async def checked(repo_dir: str, name: str) -> bool:
+            held = await original(repo_dir, name)
+            if armed["yes"] and name == branch and not held:
+                armed["yes"] = False
+                git(repo, "worktree", "add", "-q", str(other), branch)
+                return False
+            return held
+
+        monkeypatch.setattr(ws, "branch_checked_out", checked)
+        opened = await tw.reopen(await tasks.get_task(task_id), runtime_root=runtime, links=(), note=_note)
+        assert opened.mode == tw.ReopenMode.READ_ONLY
+        assert opened.reason == "branch_checked_out"
+        assert opened.work_dir == str(repo)
+        assert git(other, "symbolic-ref", "--short", "HEAD") == branch
+        assert not (runtime / "task-worktrees" / task_id).exists()
+        assert await _columns(pool, task_id) == (before_task, before_tree)
 
     run_db(check, monkeypatch)
 

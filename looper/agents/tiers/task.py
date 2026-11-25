@@ -613,21 +613,23 @@ class TaskRouter:
         finished = await self._finish_task_workspace(task.task_id, task.workspace_mode)
         return finished.branch_line
 
-    async def _finish_task_workspace(self, task_id: str, workspace_mode: str | None) -> _WorkspaceFinish:
+    async def _finish_task_workspace(self, task_id: str, workspace_mode: str | None, *,
+                                     pool: Any = None) -> _WorkspaceFinish:
         """Commit a worktree task's leftovers and remove its worktree, as a Planner completion does.
 
         A ``TaskWorkspaceError`` is an error activity (and ``warning``); the task still ends and ``sweep`` finishes
-        the worktree later. Any other failure is logged and returns neither line nor warning.
+        the worktree later. Any other failure is logged and returns neither line nor warning. ``pool`` keeps the
+        writes on the caller's connection, so a row lock stays held across the finish.
         """
         from ..project_execution import TaskWorkspaces
 
         if workspace_mode != TaskWorkspaces.WORKTREE.value:
             return _WorkspaceFinish()
         try:
-            worktree = await task_workspaces.finish(task_id, completed=True)
+            worktree = await task_workspaces.finish(task_id, completed=True, pool=pool)
         except task_workspaces.TaskWorkspaceError as exc:
             await db_activity.insert_activity(task_id=task_id, worker="planner", kind="error",
-                                              summary=f"Warning: {exc}"[:500])
+                                              summary=f"Warning: {exc}"[:500], pool=pool)
             return _WorkspaceFinish(warning=str(exc))
         except Exception:
             logger.exception("cannot finish the worktree of task %s", task_id)
@@ -638,29 +640,38 @@ class TaskRouter:
             task_id=task_id, worker="planner", kind="phase",
             summary=f"The task's work is on branch {worktree.branch} of {worktree.repo_dir}, "
                     f"at {(worktree.result_commit or '')[:12]}; its worktree is removed. Merge the branch "
-                    "when you are ready: Looper does not"[:500])
+                    "when you are ready: Looper does not"[:500], pool=pool)
         return _WorkspaceFinish(branch_line=task_workspaces.notice_line(worktree))
 
     async def complete_direct(self, task_id: str) -> DirectDone:
-        """Complete a task the background is not working on. Does not run the task-end listener."""
-        from .. import cost_guard, projects
+        """Complete a task the background is not working on. Does not run the task-end listener.
 
-        task = await db_tasks.get_task(task_id)
-        if task is None:
-            raise projects.RequestError(projects.HTTP_404, "task not found")
-        if db_tasks.interaction_mode(task["status"]) is db_tasks.InteractionMode.ORCHESTRATED:
-            raise projects.RequestError(
-                projects.HTTP_409,
-                f"the background is working on task {task_id}: stop it or wait for it to end first")
-        if task["status"] == "completed":
-            return DirectDone("completed", changed=False)
-        finished = await self._finish_task_workspace(task_id, task.get("workspace_mode"))
-        await db_tasks.update_task_status(task_id, "completed")
+        The re-read, the worktree finish and the status write hold the task row (``FOR NO KEY UPDATE``). A start
+        or a restart waits on that same lock when it updates the row, so neither can claim the task while its
+        worktree is being removed, and a second call cannot commit again.
+        """
+        from .. import cost_guard, projects
+        from ...db import connection as db_connection
+
+        async with db_connection.transaction() as conn:
+            task = await db_tasks.get_task(task_id, pool=conn, for_update=True)
+            if task is None:
+                raise projects.RequestError(projects.HTTP_404, "task not found")
+            if db_tasks.interaction_mode(task["status"]) is db_tasks.InteractionMode.ORCHESTRATED:
+                raise projects.RequestError(
+                    projects.HTTP_409,
+                    f"the background is working on task {task_id}: stop it or wait for it to end first")
+            if task["status"] == "completed":
+                return DirectDone("completed", changed=False)
+            finished = await self._finish_task_workspace(task_id, task.get("workspace_mode"), pool=conn)
+            await db_tasks.update_task_status(task_id, "completed", pool=conn, notify=False)
+            summary = "Completed by the operator in direct mode"
+            await db_activity.insert_activity(task_id=task_id, worker="operator", kind="phase", summary=summary,
+                                              pool=conn)
         loaded = self._tasks.get(task_id)
         if loaded is not None:
             loaded.status = "completed"
-        summary = "Completed by the operator in direct mode"
-        await db_activity.insert_activity(task_id=task_id, worker="operator", kind="phase", summary=summary)
+        await db_tasks._task_ended(task_id)
         if self._broadcaster is not None:
             self._broadcaster.publish(task_id, {"kind": "phase", "summary": summary, "worker": "operator"})
         await cost_guard.release_queued(task_id)
