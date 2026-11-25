@@ -376,6 +376,9 @@ def _add_service_parser(commands: argparse._SubParsersAction) -> None:
     upgrade = service_commands.add_parser(
         "upgrade", allow_abbrev=False, help="Plan, drain, install and restart the changed components.")
     upgrade.add_argument("--dry-run", action="store_true", help="Print the upgrade plan only.")
+    upgrade.add_argument("--backup-before-stop", action="store_true",
+                         help="Take a verified migration backup before draining (default off). Writes after its "
+                              "snapshot are absent; reuse expires after 15 minutes. Registry upgrades still back up at startup.")
     upgrade.add_argument("--to", metavar="REF_OR_WHEEL", help="Target Git ref (default origin/main) or wheel path.")
     upgrade.add_argument("--start-timeout", "--timeout", dest="timeout", type=float, default=300.0,
                          metavar="SECONDS", help="Seconds to wait for the restarted service to answer (default 300).")
@@ -530,7 +533,7 @@ def _service(args: argparse.Namespace) -> int:
             print(service.upgrade(host, label=args.label, to=args.to, dry_run=args.dry_run,
                                   timeout=args.timeout, drain_timeout=args.drain_timeout,
                                   turns_timeout=args.turns_timeout, no_force=args.no_force,
-                                  preflight_wait=args.preflight_wait))
+                                  preflight_wait=args.preflight_wait, backup_before_stop=args.backup_before_stop))
         elif args.service_command == "restart":
             print(service.restart(host, label=args.label, timeout=args.timeout, drain=args.drain,
                                   drain_timeout=args.drain_timeout, no_force=args.no_force))

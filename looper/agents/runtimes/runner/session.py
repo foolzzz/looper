@@ -320,6 +320,7 @@ class RunnerSession:
                 outcome = "cancelled"
                 return claude_cli.ResidentTurn({**claude_cli.user_stop_result(), "trace_id": trace}, session_started=False,
                     usage=Usage(cost_usd=0), stopped=StopMethod.CANCEL, prompt_sent=False)
+            lease.wake_tree()
             beginning = asyncio.create_task(bridge.begin_turn(sid, trace, emit, self._turn, text=text,
                 tools=[{"name": s.name, "description": s.description, "inputSchema": dict(s.schema)} for s in specs]))
             unregister = self._cancel.on_request(self._request_cancel)
