@@ -260,3 +260,10 @@ async def set_acceptance_checks(project_id: str, mode: str | None, *, pool: Any 
     result = await (pool or get_pool()).execute(
         "UPDATE projects SET acceptance_checks = $2, updated_at = now() WHERE id = $1", project_id, mode)
     return result == "UPDATE 1"
+
+
+async def set_memory_closeout(project_id: str, mode: str | None, *, pool: Any = None) -> bool:
+    """Store the operator's memory-closeout switch; NULL means off. ``mode`` is ``'on'`` or None."""
+    result = await (pool or get_pool()).execute(
+        "UPDATE projects SET memory_closeout = $2, updated_at = now() WHERE id = $1", project_id, mode)
+    return result == "UPDATE 1"

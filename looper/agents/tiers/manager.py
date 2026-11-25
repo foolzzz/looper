@@ -75,6 +75,7 @@ from ..claude_cli import (
     user_stop_result,
 )
 from .. import admission, turn_admission
+from .. import failures
 from ..failures import FailureClass
 from .. import attention, chat_attachments, chat_commands, chat_settings, completion_events, gate_commands, ledger_routing, memory_routing, outbound_hook, status_card, turn_metrics
 from ..turn_metrics import TurnDelivery, TurnTimes, AckKind, ChatKind, ProactiveSource
@@ -458,6 +459,7 @@ class Prepared:
     launch: Any = None
     prompt_file: Any = None
     signature: Any = None
+    signature_components: dict[str, str] = field(default_factory=dict)
     switch: Any = None
     turn_text: str = ""
     run: RunState = field(default_factory=RunState)
@@ -753,6 +755,14 @@ class NoReply(RuntimeError):
     """The runtime ended the turn without a word of reply (not an exit, a cap or an error)."""
 
 
+def _typed_failure_reply(found: failures.Failure) -> str | None:
+    if found.cls is FailureClass.TRANSIENT:
+        return f"Manager 遇到瞬时故障（{found.cause.value}），这次回复没有完成；不会自动重试已执行的操作。"
+    if found.cls is FailureClass.ENVIRONMENT:
+        return f"Manager 遇到环境问题（{found.cause.value}），请检查运行时、登录或配置后再继续。"
+    return None
+
+
 class _CompletionNotTaken(Exception):
     """The Manager was turned off before its completion turn ran."""
 
@@ -864,6 +874,7 @@ class ManagerAgent:
         self._drain = drain
         self._tools_ready = tools_ready
         self._definition = definition or default_definition()
+        session_routing.set_scenario_routing(self._definition.id, self._definition.session_routing)
         self._log = self._definition.id
         # Set when the definition was turned off or deleted; the fleet (card 6) sets ``on_turned_off``.
         self._turned_off = False
@@ -959,7 +970,7 @@ class ManagerAgent:
         session = self._session_now()
         if session.key == MAIN_SESSION:
             return self._runtime_root
-        root = self._runtime_root / ".local" / "manager-sessions" / session_routing.key_digest(session.key)
+        root = self._runtime_root / ".local" / "manager-sessions" / session_routing.session_digest(self.agent_id, session.key)
         root.mkdir(mode=0o700, parents=True, exist_ok=True)
         return root
 
@@ -1123,6 +1134,7 @@ class ManagerAgent:
                 self._turned_off = True
                 return
             self._definition = ManagerDefinition.from_row(row)
+            session_routing.set_scenario_routing(self.agent_id, self._definition.session_routing)
             self._system_prompt = row["system_prompt"]
             self._prompt_recommended = False
             return
@@ -1644,6 +1656,13 @@ class ManagerAgent:
                 # Always answer: the chat stream waits for a final reply. What a tool did before is still shown.
                 cause = str(exc) or type(exc).__name__
                 logger.exception("%s failed to answer %s: %s", self._log, envelope.message_id, cause)
+                if await failures.typing_mode() is failures.FailureTyping.ACT:
+                    found = (failures.Failure(failures.FailureCause.PROFILE) if isinstance(exc, ProfileUnavailable)
+                             else failures.start_failure(exc) if isinstance(exc, OSError) else None)
+                    if found is not None and (typed_reply := _typed_failure_reply(found)) is not None:
+                        await self._send_reply(envelope, _with_blocks(typed_reply, turn.blocks),
+                                               error=f"{found.cls.value}/{found.cause.value}")
+                        return
                 hint = exc.hint() if isinstance(exc, ProfileUnavailable) else ""
                 await self._send_reply(
                     envelope, _with_blocks(f"Manager 出错，没能完成这次回复：{cause}{hint}", turn.blocks), error=cause)
@@ -1740,8 +1759,6 @@ class ManagerAgent:
             quote_ref = lark_quote.QuoteRef.from_payload(envelope.payload.get("quote_ref"))
             if not text.strip() and quote_ref is None:  # a bare forward or @-mention under a message is answered
                 return Prepared()
-            # Read here, in the message's turn: in order, stoppable, and again when a restart replays the message.
-            quoted = await token.step("read_quote", self._read_quote(envelope, quote_ref)) if quote_ref else None
             # Code-only replies do not claim the resident or replace its native tool binding.
             await token.keep("resident_settlement", self._settle_native_inputs(token), 60)
             origin = _message_origin(envelope)
@@ -1759,6 +1776,8 @@ class ManagerAgent:
             self._running_token = token
             await token.keep("persist_user_message", self._persist_user(envelope, text), 10)
             await token.step("status_thinking", self._send_status(envelope, "thinking", phase=True, activity="thinking"))
+            # Read after the status, in the message's turn: in order, stoppable, and again on restart replay.
+            quoted = await token.step("read_quote", self._read_quote(envelope, quote_ref)) if quote_ref else None
             # Claude can do nothing without Looper's tools, and might say it did: the user hears that they are down.
             problem = (await token.step("tools_probe", self._tools_problem())
                        if not (self._claude_runtime.in_process
@@ -1800,7 +1819,7 @@ class ManagerAgent:
         if agent_settings.profile_error:  # answered as an error; never another profile
             raise ProfileUnavailable(agent_settings.profile_error, agent_settings.profile_source)
         await token.step("templates", self._read_templates())
-        routed = self._session_now().key != MAIN_SESSION
+        routed = self.agent_id == DEFAULT_MANAGER_ID and self._session_now().key != MAIN_SESSION
         library = EMPTY_LIBRARY if routed else await token.step("library", load_installed(
             self._runtime_root, AgentType.MANAGER.value, manager_id=self.agent_id))
         library = await token.step("library_server", self._library_with_server(library))
@@ -1843,6 +1862,9 @@ class ManagerAgent:
             launch.library.sha256, launch.binding_sha256,
             launch.llmrec.url if isinstance(launch.llmrec, LlmrecRoute) else None,
         )
+        components = dict(zip(("launch_args", "system_prompt", "env", "library", "provider_binding", "llmrec_url"),
+                              signature))
+        components["tools"] = None
         has_workflows = any("workflow" in t["inputSchema"].get("properties", {}) for t in tools)
         has_leads = any(t["name"] in (ops_leads.LEADS_TOOL, *ops_vault.TOOL_NAMES) for t in tools)
         has_ledger = any(t["name"].startswith("looper_ledger_") for t in tools)
@@ -1854,6 +1876,11 @@ class ManagerAgent:
             # The MCP tool list is read when the process starts: a changed one restarts it.
             listing = json.dumps(tools, sort_keys=True) if self.ops is not None else ""
             signature += (hashlib.sha256(listing.encode("utf-8")).hexdigest(),)
+            components["tools"] = signature[-1]
+        # Diagnostic hashes are separate from the unchanged resident comparison. Hash even absent components
+        # and existing digests so no command, URL or provider binding value can reach the restart log.
+        signature_components = {name: hashlib.sha256(json.dumps(value).encode("utf-8")).hexdigest()
+                                for name, value in components.items()}
         session = self._session_now()
         switch = session_switch.profile_switch(session.session_id, session.session_runtime, self._session_profile,
                                                launch, session_provider=self._session_provider,
@@ -1867,7 +1894,7 @@ class ManagerAgent:
             command = await token.step("claude_command", asyncio.to_thread(self._claude_command, prompt_file, launch))
             await token.step("claude_start", self._restore_resident(token, session, envelope, command,
                                                                    signature, launch, seconds=10))
-            self._process = _Process(command, signature, system_prompt, launch)
+            self._process = _Process(command, signature, system_prompt, launch, signature_components)
             if self.ops is not None:
                 self.ops.activate_tool_hook(launch.tool_hook, session_key=self._session_now().key)
         if switch is None and session.session_id and session.session_runtime == "api" \
@@ -1879,7 +1906,7 @@ class ManagerAgent:
             with self._runtime_start_budget(launch) as seconds:
                 await token.step("claude_start", self._restore_resident(token, session, envelope, command,
                                                                        signature, launch, seconds=seconds))
-            self._process = _Process(command, signature, system_prompt, launch)
+            self._process = _Process(command, signature, system_prompt, launch, signature_components)
             if self.ops is not None:
                 self.ops.activate_tool_hook(launch.tool_hook, session_key=self._session_now().key)
         if switch is None and session.session_id and isinstance(self._claude, ReportsContext) \
@@ -1908,6 +1935,7 @@ class ManagerAgent:
         return Prepared(
             envelope=envelope, turn=ask.turn, message=ask.message, note=ask.note, retried=ask.retried, system_prompt=system_prompt,
             launch=launch, prompt_file=prompt_file, signature=signature, switch=switch, turn_text=turn_text,
+            signature_components=signature_components,
             run=RunState(persona_scope=persona_scope), quoted=ask.quoted,
             state=tuple(state) if state is not None else None, session=session)
 
@@ -1980,6 +2008,15 @@ class ManagerAgent:
         else:
             await self._claude.stop(kill=True)
 
+    def _log_signature_change(self, prepared: Prepared) -> None:
+        previous = self._process
+        if previous is not None and previous.signature != prepared.signature and previous.signature_components:
+            changed = ", ".join(f"{name}={previous.signature_components[name][:8]}->{value[:8]}"
+                                for name, value in prepared.signature_components.items()
+                                if previous.signature_components[name] != value)
+            logger.info("Manager %s session=%s restarting: signature changed: %s",
+                        self.agent_id, prepared.session.key, changed)
+
     async def _start_turn(self, token: TurnToken, prepared: Prepared) -> None:
         """The prepared turn gets its process: the session switch, the runtime swap and the stale process's stop,
         the resume brief, the record and Claude's start. ``prepared.run`` holds what the run needs afterwards."""
@@ -2008,7 +2045,11 @@ class ManagerAgent:
             await token.keep("claude_stop", self._stop_replaced_session(whole_tree=unhooked), 30)
             self._claude, self._claude_runtime = launch.runtime.resident_session(self._resident_label()), launch.runtime
         if self._claude.stale(signature):
+            self._log_signature_change(prepared)
             await token.keep("claude_stop", self._stop_replaced_session(whole_tree=unhooked), 30)
+        elif not self._claude.started:
+            # An idle library refresh may already have closed the resident before reaching this point.
+            self._log_signature_change(prepared)
         if not self._claude.started and session_routing.routes(self.agent_id):
             # Room under the resident cap, or a wait for it (``SessionRouter.admit``).
             await token.step("resident_admission", self._router.admit(session, envelope))
@@ -2064,7 +2105,8 @@ class ManagerAgent:
                             autonomous=self._autonomous_turns(command, prepared.system_prompt, launch),
                             price=launch.price), seconds, undo=lambda: self._claude.stop(kill=True))
                 except TurnStopped:
-                    self._process = _Process(self._claude.command or command, signature, prepared.system_prompt, launch)
+                    self._process = _Process(self._claude.command or command, signature, prepared.system_prompt, launch,
+                                             prepared.signature_components)
                     if self.ops is not None:
                         self.ops.activate_tool_hook(launch.tool_hook, session_key=self._session_now().key)
                     raise
@@ -2084,7 +2126,7 @@ class ManagerAgent:
                     # A per-turn runtime may materialize its owner's home at start.
                     command = self._claude.command
                     await token.step("recorder_annotate", recorder.annotate({"command": command}))
-                self._process = _Process(command, signature, prepared.system_prompt, launch)
+                self._process = _Process(command, signature, prepared.system_prompt, launch, prepared.signature_components)
                 if self.ops is not None:
                     self.ops.activate_tool_hook(launch.tool_hook, session_key=self._session_now().key)
         except TurnStopped:
@@ -2129,6 +2171,7 @@ class ManagerAgent:
                         # launch in this turn's record and retry the capability refresh next turn.
                         prepared = replace(prepared, launch=previous.launch, system_prompt=previous.system_prompt,
                                            signature=previous.signature,
+                                           signature_components=previous.signature_components,
                                            prompt_file=previous.system_prompt.write_file(self._session_root()))
                         if prepared.turn is not None:
                             prepared.turn.blocks.append(notice)
@@ -2451,8 +2494,9 @@ class ManagerAgent:
         """The Manager's agent settings (system and role layers), read now; the last ones read when they
         cannot be read (the built-in defaults before any). Without ``fallback`` the read error stays, so a turn
         never runs on a profile the user did not choose."""
-        # The profile chosen for the session (``select_session_profile``) is main's: the others follow the settings.
-        own = {} if self._session_now().key == MAIN_SESSION else {"manager_session": False}
+        # Scenario sessions share their Manager's profile choice; default routed sessions follow Settings.
+        own = ({"manager_session": False} if self.agent_id == DEFAULT_MANAGER_ID
+               and self._session_now().key != MAIN_SESSION else {})
         agent_settings = await load_agent_settings(AgentType.MANAGER, manager_id=self.agent_id, wait=wait, **own)
         if agent_settings.error is not None:
             return (self._agent_settings or agent_settings) if fallback else agent_settings
@@ -2555,10 +2599,6 @@ class ManagerAgent:
         handling: asyncio.Task[None] | None = None
         session_unsaved = False
 
-        def quota_diagnostic(payload: dict[str, Any]) -> bool:
-            return (admission.probing() and payload.get("type") == "assistant"
-                    and payload.get("error") == "rate_limit")
-
         def observe(payload: dict[str, Any]) -> None:
             nonlocal session_unsaved, model_output
             recorder.account(payload)
@@ -2573,7 +2613,7 @@ class ManagerAgent:
                 if session.session_runtime != "api" or not self._pending_handoff:
                     self._pending_switch = self._pending_handoff = None  # CLI sessions own the prompt at init
                 session_unsaved = True
-            if quota_diagnostic(payload):
+            if turn_admission.quota_diagnostic(payload):
                 return  # Claude's synthetic error text is quota evidence, not model output.
             message = payload.get("message") if payload.get("type") == "assistant" else None
             if isinstance(message, dict):
@@ -2647,7 +2687,7 @@ class ManagerAgent:
                 session_unsaved = False
                 await self._save_session_state()
 
-            if quota_diagnostic(payload):
+            if turn_admission.quota_diagnostic(payload):
                 return  # Keep a failed probe's diagnostic out of the user's streamed answer.
             event_type = payload.get("type")
             # Only the Manager's own turn is the reply; subagent output is internal.
@@ -2698,19 +2738,6 @@ class ManagerAgent:
                             )
                         elif block_type == "thinking":
                             await show("thinking", phase=True, activity="thinking")
-
-        async def retry_quota_probe() -> None:
-            if model_output or token.partial or token.cancel.requested or not admission.probing():
-                return
-            if not admission.quota_probe_failed():
-                # Closing a record bounds its background writes. Classify the captured runtime evidence
-                # before settling even when the record's database writer has not finished yet.
-                cause = recorder.failure_signal()
-                if cause is not None and cause.cls is FailureClass.QUOTA:
-                    await recorder.report_admission(cause)
-                    raise turn_admission.RetryQuotaProbe()
-            if admission.quota_probe_failed():
-                raise turn_admission.RetryQuotaProbe()
 
         try:
             if run.state is not None and run.state_generation != self._state_generation:
@@ -2791,7 +2818,7 @@ class ManagerAgent:
                 output_text="".join(text_parts) or None, result_event=None,
                 error=error, status=ended_by(exc),
             )
-            await retry_quota_probe()
+            await turn_admission.retry_quota_probe(token, recorder, model_output=model_output)
             if admission.probing():
                 self._settle(token)
             if isinstance(exc, TurnBlocked) and task_id:
@@ -2800,6 +2827,10 @@ class ManagerAgent:
                 except Exception:
                     logger.debug("failed to record manager activity", exc_info=True)
             await self._link_turn_task(recorder, ops_turn)
+            if await failures.typing_mode() is failures.FailureTyping.ACT:
+                found = recorder.failure_signal()
+                if reply := _typed_failure_reply(found):
+                    raise TurnFailed(reply, f"{found.cls.value}/{found.cause.value}") from None
             raise
 
         context_overflow = isinstance(self._claude, ReportsContext) and self._claude.context_full
@@ -2887,7 +2918,7 @@ class ManagerAgent:
             )),
             usage=turn.usage,
         )
-        await retry_quota_probe()
+        await turn_admission.retry_quota_probe(token, recorder, model_output=model_output)
         if settle_on_finish and admission.probing():
             self._settle(token)
         await self._link_turn_task(recorder, ops_turn)
@@ -2915,6 +2946,10 @@ class ManagerAgent:
 
         if over_cap:
             raise OverCap(over_cap)
+        if not replied and await failures.typing_mode() is failures.FailureTyping.ACT:
+            found = recorder.failure_signal()
+            if reply := _typed_failure_reply(found):
+                raise TurnFailed(reply, f"{found.cls.value}/{found.cause.value}")
         if failed:
             raise RuntimeError(failed)
         if not replied:
@@ -3529,10 +3564,12 @@ class ManagerAgent:
         last one: a new session (``/new``, a switch such as a full context, none saved), a new process (a server
         restart, an idle close), or a runtime whose resident session does not report its compactions."""
         session = self._session_now()
-        if persona_scope is manager_persona_context.Scope.OMIT:
-            # Never diff private main state into a shared group/other-sender turn, even as removed lines.
+        if persona_scope.isolated:
+            # Never diff private main state into another audience's turn, even as removed lines.
             return state_view.render(sections, None, session=session.session_id,
-                                     whole_reason="persona omitted for shared turn")
+                                     whole_reason="persona omitted for shared turn"
+                                     if persona_scope is manager_persona_context.Scope.OMIT
+                                     else "operator profile omitted for client turn")
         shown = self._state_shown
         reason = None
         if not launch.runtime.resident_compaction_events:
@@ -3555,7 +3592,7 @@ class ManagerAgent:
         (``seen``) with the generation it was rendered for. A turn that did not go through leaves no block a later
         turn may refer to; a compaction or a turn of its own meanwhile forgot it already (``_context_changed``)."""
         session = self._session_now()
-        if run.state is None or run.persona_scope is manager_persona_context.Scope.OMIT:
+        if run.state is None or run.persona_scope.isolated:
             return
         if not seen:
             self._state_shown, self._state_lost = None, "the last turn did not go through"

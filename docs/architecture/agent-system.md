@@ -79,7 +79,8 @@ Manager has no tool for it. The dashboard shows the task page's 指标 card and 
   (`looper/agents/tiers/manager_session.py`). Every Manager has `main`; by
   default it is the only one, and a group chat's turns run in the operator's
   session. [Session routing](#manager-session-routing) gives the default
-  Manager more. `session_routing.group_isolation` tells a feature that must
+  Manager more; a scenario Manager can independently opt into one session per group.
+  `session_routing.group_isolation` tells a feature that must
   not reach a group through the operator's context how far a group's turns
   are kept apart: `shared`, or `isolated` while routing is on. `ManagerFleet` (`looper/agents/managers.py`) runs the enabled ones, at most
   8 at once. A scenario Manager has its own system prompt, Agent Profile and
@@ -103,6 +104,26 @@ Manager has no tool for it. The dashboard shows the task page's 指标 card and 
     dashboard and generated CLI use these operations; `chat_settings` keeps
     only reply stopping, completion turns, research order and the ledger.
     Lark and Telegram need no new configuration command.
+  - A scenario Manager's independent `managers.session_routing` setting is
+    `off` by default, or `per_chat`. The operator-only
+    `scenario_session_routing.get` operation takes `{"manager_id": "manager-example"}`;
+    `scenario_session_routing.update` also requires `session_routing` (`"off"`,
+    `"per_chat"` or `null`, which restores off). Both return `manager_id` and
+    `session_routing`. Update is high risk, declares confirmation and records
+    an operator action; API clients and Manager turns cannot use either operation.
+    The generated CLI exposes `scenario-session-routing get/update`. These
+    operations leave `chat_settings` unchanged; the dashboard uses the existing
+    session list and needs no new chat command for Lark or Telegram.
+    With `per_chat`, every group bound to that Manager uses
+    `group:<channel id>:<chat>`; every non-group turn stays in main, including
+    another sender's direct chat. `group_isolation()` reports `isolated` for its groups.
+    All its sessions retain that scenario Manager's own system prompt and
+    scope contract, Agent Profile, installed capabilities and tools. The
+    default Manager's global switch and its non-main tool boundary stay unchanged.
+    Off, scenario message bytes, session keys and process signatures are unchanged.
+    Enabling does not migrate history: the existing session stays main and
+    each group's next turn starts fresh. Disabling sends new turns back to
+    main; in-flight turns finish and group sessions remain for idle reclaim.
   - Sessions run in parallel; inside one, messages run in order. The message
     loop hands each user message to its session's worker. Completion wake-ups
     resolve the bot's identity before claiming events, then use the event
@@ -118,9 +139,10 @@ Manager has no tool for it. The dashboard shows the task page's 指标 card and 
   - Each non-main resident has its own label (`manager.<kind>.<digest>`,
     for its logs and session directory), workspace, runtime state, caches, prompts,
     MCP configuration and binding file under
-    `.local/manager-sessions/<digest>/`. Its MCP entry carries a distinct
+    `.local/manager-sessions/<digest>/` (scenario digests include the Manager id,
+    so two Managers cannot share runtime files). Its MCP entry carries a distinct
     credential: the server checks that a binding belongs to that credential's
-    session, so learning another binding cannot authorize its calls. Only
+    session, so learning another binding cannot authorize its calls. For the default Manager, only
     Looper's platform tools are available: no local file or shell tools,
     catalog MCP servers, plugins, skills or subagents. Claude Code and the
     in-process API runtime support this mode; other runtimes refuse a
@@ -134,9 +156,12 @@ Manager has no tool for it. The dashboard shows the task page's 指标 card and 
     server's OS user; it does not sandbox a compromised runtime executable.
     Calls remain bound until the routed turns end, even after routing is
     switched off, whatever `chat.stop_enabled` says.
-  - At most `manager.sessions.max_resident` sessions (1–16, default 2) keep a
+  - Per Manager, at most `manager.sessions.max_resident` sessions (1–16, default 2) keep a
     process. Starts reserve capacity atomically, including saved-session
     restores; successful, failed and cancelled starts release their reservation.
+    The shared setting applies independently to each routed Manager: count
+    its main process, its group/DM processes and starts with a reservation,
+    never another Manager's residents.
     A session other than main that would start one at the cap stops
     the least recently active idle one other than main; its session id stays
     saved and resumes on its next message. When none is idle, the message
@@ -146,8 +171,9 @@ Manager has no tool for it. The dashboard shows the task page's 指标 card and 
     stops it once the turn is over.
   - `/new` resets only the session it was sent in. In a group or dm session
     it leaves main's pending confirmations and remembered leads alone. The
-    profile chosen for the session (`/profile`, `select_session_profile`) is
-    main's: another session follows the settings and refuses `/profile`.
+    profile is chosen in main (`/profile`, `select_session_profile`): a default
+    Manager's other sessions follow Settings, and a scenario Manager's group
+    sessions share its main profile choice. Non-main sessions refuse `/profile`.
     The dashboard's Manager section lists these sessions (name, kind, whether
     a process is running, last activity, cost) and can reset one. That reset
     clears the session the same way `/new` does and does not post into the
@@ -231,7 +257,10 @@ Manager has no tool for it. The dashboard shows the task page's 指标 card and 
   Dashboard and generated CLI configuration use the existing operator-only
   `turn_context_settings.get/update`, separate from `chat_settings`; Lark and
   Telegram need no new command. See [the assistant RFC](rfcs/assistant-layer-v0.zh-CN.md#51-11-每轮上下文).
-- With the system setting `manager.stable_context` `true` (default off), those
+- The operator-only `stable_context_settings.get/update` operations read and
+  write `manager.stable_context` (`enabled`: true, false or null to restore off).
+  The next Manager turn reads it through the existing configuration path.
+  With the system setting `manager.stable_context` `true` (default off), those
   sections and the active goals are one block, `Looper state (rev R)`, R a
   hash of its lines (`tiers/state_view.py`), so the resident session's growing
   history keeps hitting the prompt cache. A turn starts with the whole block
@@ -394,11 +423,12 @@ Manager has no tool for it. The dashboard shows the task page's 指标 card and 
   The independent operator-only `profile_settings.get/update` operations control `manager.profile.enabled`
   (default off; null restores off). Settings → Knowledge vault exposes its confirmed switch. Off, the Manager
   never compiles a profile and its model-facing bytes remain unchanged. On, the default Manager's own dashboard
-  and operator direct-chat turns include an `Operator profile` resident section. Group and other-sender turns,
-  routed non-main sessions and scenario Managers omit it. With `manager.stable_context` on it is inside the
-  stable block and follows its whole/change/unchanged rules; otherwise it is its own resident section before
-  Projects. Shared turns never receive private profile text in stable-state removal lines either. This does
-  not erase profile text already present in a shared resident session's history.
+  (without an API client) and operator direct-chat turns include an `Operator profile` resident section.
+  API-client turns, group and other-sender turns, routed non-main sessions and scenario Managers omit it.
+  With `manager.stable_context` on it is inside the stable block and follows its whole/change/unchanged rules;
+  otherwise it is its own resident section before Projects. Shared and API-client turns never receive private
+  profile text in stable-state removal lines either. This does not erase profile text already present in a
+  shared resident session's history.
   `looper profile show [--runtime-root …] [--config …]` reads the same file with the same compiler and prints
   exactly the resident section's body, with no added newline, whether injection is on or off. It makes no model
   call or schema/cache write. Its worker has a 1-second deadline covering imports, settings and file I/O;
@@ -441,7 +471,10 @@ Manager has no tool for it. The dashboard shows the task page's 指标 card and 
   types are rejected, and member wording follows the chat kind. **Manager integration is pending:** saving these
   settings does not yet replace the `Channel:` line, inject the contract or set a turn's speaker. The dashboard, Lark, Telegram and API-client
   turns therefore retain their current prompt and authorization behavior until that integration lands.
-- The dashboard chat, Lark and Telegram share the default Manager's one session (a scenario Manager's session serves its own dashboard chat threads; with [session routing](#manager-session-routing) on, groups and other senders' direct chats have their own), so
+- Without routing, the dashboard chat, Lark and Telegram share their Manager's
+  main session. With [session routing](#manager-session-routing), the default
+  Manager separates groups and other senders' direct chats; a scenario Manager
+  with `per_chat` separates groups only. In every mode,
   every message ends with a code-written line saying where it came from, just
   before the message: `Channel: the Looper dashboard chat`, `Channel: a Lark
   direct message`, `Channel: a Lark group chat, from <sender>` (the name the
@@ -1330,6 +1363,35 @@ Managed hooks remain effective. A UserPromptSubmit hook's input does not contain
 but it can read the session transcript; real-CLI verification of hook execution and transcript visibility is pending.
 The separately approved real-CLI check must also measure the injected profile's actual token count.
 
+**Retrieval (`looper claude-code mcp`).** This opt-in stdio server offers `vault_search`, `vault_read` and
+`leads_search`, forwarding to the corresponding operator-only `manager_retrieval.*` v1 reads. They reuse the
+default Manager's answer functions, knowledge vault root and switches (`manager_read` and `leads.enabled`).
+Each message lead adds a `label` saying it came from messages and is only a lead; the existing untrusted fence
+also applies. These reads have no chat footer or group backstop side effects: Claude Code is not a Looper group
+chat. No tool writes, and nothing is installed by default. Dashboard, Telegram and Lark retain the Manager's tools.
+`looper claude-code install mcp` previews the entry and command, then asks before running
+`claude mcp add-json --scope user`; `uninstall mcp` previews and confirms removal. With no part specified,
+installation and removal process the hook and MCP separately, in that order. `status` checks installed parts,
+including the current vault root and message-lead switch.
+The listening HTTP server atomically publishes its bound host and port in the runtime root's
+`server-address.json`. MCP resolves it on each call; `status` uses the same resolver. This covers both
+`serve --port` and service-unit overrides without freezing the address into the MCP registration.
+The server holds a lock on the published record until its listener closes. Shutdown or a crash leaves
+an unlocked, stale record: clients report it and never fall back to another port. A missing record,
+including one deleted while locked, also refuses retrieval and asks the operator to run `looper serve`;
+the ops file is never a fallback address. Wildcard listeners resolve to their loopback address;
+other non-loopback destinations remain refused.
+Address publication failures only degrade this integration: the HTTP server keeps serving and logs a warning.
+If another listener owns the same runtime root's address, the second listener does not replace that record;
+retrieval keeps using the first listener. The second listener does not automatically claim the record later.
+Each call rereads the local operator token and derives a domain-separated, read-only credential; the raw token
+is never sent by MCP or stored in its entry. The HTTP connection gate permits that credential only on direct
+loopback connections and only for the three POST retrieval paths, before body reads, uploads or dispatch.
+Every other v1 operation returns 403. The retrieval gate also rereads the current token on every retrieval
+request: operator rotation immediately invalidates the old derived credential without restarting serve.
+Tools still list when Looper is stopped; calls return the reason without retrying. Managed `PreToolUse` and
+`PostToolUse` hooks can see the calls and results. Real-model checks of this integration remain pending approval.
+
 ### What an agent may do
 
 The Manager, the Workers and the Reviewers have every tool but the ones that
@@ -1581,6 +1643,18 @@ leads. It sends SIGTERM to those groups and to the tree's processes outside
 them, waits up to `TERM_GRACE_SEC` (3 s), then sends SIGKILL to what is
 left. It never signals the server's own process or group.
 
+`TurnTree` also samples the running tree every 0.5 s. After 5 s without a
+change to its live processes or groups, it samples every 5 s instead. A
+detected change or a new resident turn restores the 0.5 s interval. Stop
+paths always force a fresh snapshot; periodic discovery while idle can lag
+by up to 5 s.
+
+On macOS, process identities come directly from libproc's
+`proc_pidinfo(PROC_PIDTBSDINFO)`, without spawning `ps`. They retain the
+existing whitespace-normalized `LC_ALL=C`, `TZ=UTC` `ps -o lstart=` format,
+including in persisted records. Failed native reads fall back to `ps`;
+Linux and other platforms continue to use `ps` for identities.
+
 A resident Claude Code that is asked to exit (its stdin closed, then
 `STOP_GRACE_SEC`) has its tree read before its stdin closes, so what it
 started is still found after it has exited and its children have been
@@ -1631,8 +1705,8 @@ resumes, `proc_tree.sweep` reads every record:
   server that exited during an end (its shutdown deadline, a second signal)
   has the rest ended now, the agent's children that outlived it included;
 - a pid is signalled only while it still has the recorded start time, checked
-  again right before its SIGTERM and its SIGKILL: what is left is the one
-  `ps` call between that check and the signal;
+  again right before its SIGTERM and its SIGKILL: an identity lookup still
+  leaves a small window before the signal;
 - a record is removed once what it names has been ended, except one whose
   server still runs (another server on the same runtime root), which is
   left alone with its agent, and one whose start times could not be read,
@@ -1956,8 +2030,22 @@ Manager tools.
   for each turn. File tools stay within the working directory and explicit
   added directories; bash is not confined to those paths and is not an OS
   sandbox. Bash uses the session's private HOME and environment, with a
-  ceiling of the run timeout (86,400 seconds when unset); a shorter tool
-  timeout is honored. An unset run request limit becomes 1,000 requests.
+  per-call deadline of 120 seconds, independent of the Worker's run deadline
+  (seeded at 86,400 seconds). A shorter model-requested timeout is honored;
+  longer requests are clamped to the session deadline and a hard 600-second
+  cap. No new operator setting is required. Timeout or abort sends TERM to the
+  shell group, KILL after two seconds, then drains output for at most 500 ms
+  before ending that call's executor. Timeout results keep the existing
+  `is_error=false` contract and include the timeout text; cancellation remains
+  an error. If the shell exits while a background process keeps its output
+  open, output drains for at most 500 ms before returning the exit code and an
+  explicit background-output note. A process that escaped the shell group can
+  survive; its session owner must manage its lifetime separately. Runner
+  diagnostics include tool span identifiers, deadlines, elapsed time and
+  cleanup phases, with a command hash rather than command text. These changes
+  affect only operators who select the opt-in DSH runtime; dashboard, channels
+  and CLI continue to show the paired tool result through their existing paths.
+  An unset run request limit becomes 1,000 requests.
   Spend and request caps are checked before every model request, including
   compaction, with no provider retry. Per-request token buckets use the saved
   model's effective prices (`cost_source=provider_price`); these reservations
@@ -3009,6 +3097,28 @@ memory, and the spend at once. The knobs that bound it: a schedule's
 `max_parallel_runs` and `task_limits`, the role defaults in Settings → Roles,
 and a task's own limits.
 
+### Project lessons: bounded hints with frozen task snapshots
+
+Project lessons are a separate, default-off source of bounded hints. When the
+system `memory_lessons.enabled` setting and the project's `memory_lessons = on`
+are both enabled, the first PLAN freezes a task's selection, rendered lines,
+activation dates and limits in PostgreSQL, including an empty selection.
+Planner PLAN/new-session RESUME messages and Worker prompts share those bytes;
+the Worker's `lessons` layer follows the vault. Reviewer injection requires its
+own opt-in, and Managers never receive lessons. Later runs filter stopped or
+expired candidates without replacement. Planner system prompts stay unchanged.
+
+`memory.task_lessons` reads a task's frozen lines and paginated delivery history.
+`memory.revoke` and `memory.renew`, also available as `looper memory revoke/renew`,
+are operator-only controls; `looper memory lessons` lists lessons and counters.
+Revocation atomically records an event and fingerprint tombstone. Only accepted
+runtime input increments injection counters. Typed `lessons_used/lessons_wrong`
+references apply to that run's delivered items; two distinct tasks reporting a
+lesson wrong hold it automatically. An interrupted, unconfirmed delivery is
+`uncertain` and must be reconciled against the original session or record.
+See [the lesson RFC](rfcs/memory-tiers-v0.zh-CN.md) for compatibility exceptions
+for previously enabled sessions, retention and the pending real-model evals.
+
 ### Project knowledge: documents read on demand
 
 A project can carry reference material too large for a prompt
@@ -3316,6 +3426,22 @@ memory page shows their candidates for the operator to review.
   again afterwards, the writer checks the committed paths and bytes against
   the confirmed operations. A branch advance outside those paths can be
   replayed and reverified on the new base before merging; touching a target requires new drafting and confirmation.
+- **Task source:** when memory writing is enabled with `sources.tasks`, the
+  project has a lesson or project target, and the operator has turned that
+  project's memory closeout on, an ended task's Planner proposes lesson and
+  project candidates instead of the vault closeout. The turn is `[MEMORY]`.
+  Its journal lines are numbered `J1`, `J2`, … for rows that have an id;
+  review rounds and rows the budget leaves out are not citable. A proposal
+  names its kind, statement, why, keywords and those journal ids. Items that
+  fail the shape, the kind, the evidence or a secret check are dropped and
+  counted; the task still ends. The activity line says what was proposed, or
+  the note when nothing was, and the drop counts when any were dropped. An
+  empty journal or a spent task cap skips the turn. Writing a confirmed
+  candidate that cites a task journal adds `Memory: M-… written to …` on that
+  task. The switch is operator-only (`memory_closeout.get` /
+  `memory_closeout.update`), default off, and omitted from project reads and
+  configuration export until it is on. While it is off, prompts, tool lists
+  and the vault closeout stay as they were.
 - **Failure and recovery:** a blocked write keeps its confirmation and waits
   for the operator's retry; a content conflict clears confirmation and
   requests redrafting once. No write stashes, resets or commits somebody
@@ -3362,6 +3488,38 @@ memory page shows their candidates for the operator to review.
   editor save can overwrite it; the content hash and commit trailers allow
   checking what was written. An agent with a shell has the same system-user
   access to the vault; this supported write path does not isolate that user.
+
+### Project lesson retrospectives
+
+`memory_lessons` is independent of vault writing and defaults off. Both its `enabled` field and the project's
+`memory_lessons = 'on'` are required. On, project-scoped learnings still enter the task journal, but the old
+project-document drafts and `[LESSONS]` turn stop. Vault closeout keeps its separate setting and path. Empty
+lesson snapshots do not disable retrospectives; context injection is a separate feature.
+The server loads the validated switch before recovering tasks, and successful settings updates refresh it in
+memory. While off, retrospective ticks and terminal callbacks read only that switch, without database reads.
+Turning it on at runtime resumes processing within the next 10-second interval.
+
+After TaskRouter forwards the final completed/failed status and tears down the Planner, an independent terminal
+listener enqueues the newly observed journal range. Scheduler and retrospective callbacks cannot block one
+another on failure. `MemoryRetroService` recovers post-activation terminal tasks, claims a short database lease,
+then invokes the private `memory_retro` role without holding a connection or transaction. Migration 1980 widens
+the role/run-kind checks online; 1990 adds durable cursors, activation high-water, attempt leases, independent
+spend reservations, range output references and distinct-task reinforcement records. Retrying once consumes
+another reservation; missing costs consume the full reserved cap. The default cap is $0.10 per attempt and
+$0.50 per local day. The existing global cost guard still applies.
+
+The role uses `model_call.ChildCall`, one turn, an empty working directory, replaced prompt, no tools, MCP or
+harness, and at most 90 seconds. Its private records retain metadata and input digests, never journal or reply
+bodies. A built-in model awaits the approved real comparison; operators must select an explicit role profile.
+Escaped input includes only this range's displayed numbered journal evidence, up to 60 active project lessons
+and 20 held lessons. Strict JSON parsing drops unsafe items and records typed counts. A short transaction
+rechecks configuration, project, task, evidence, trust, lease, tombstones and replacement targets before saving
+candidates, sources, events, spending and the task activity. Shadow mode creates held lessons; external tasks
+always create independent held candidates and cannot reinforce trusted lessons. Later distinct tasks can renew
+an active lesson once each; replacement reuses the conservative protected-token gate. The existing operator-only
+lesson list and task activity expose results. Task deletion confirmation counts sourced active lessons once.
+Three distinct failed tasks claim one durable operator-only warning, at most once per local day; without an operator DM destination the
+warning stays in logs. This feature adds no channel completion footer, injection, weekly delivery or vault write.
 
 ### Project skills: skills a project writes
 
@@ -4529,6 +4687,29 @@ With none of these the backup fails before any DDL. The upgraded schema must
 not be opened by an older binary: the forward guard in this binary does not
 protect an older one.
 
+For other schema changes, `looper service upgrade --backup-before-stop`
+optionally takes that same verified dump while the old service is still serving,
+after preparation and preflight but before drain. The default remains a dump at
+startup, inside the outage. The option requires the service's database and backup
+settings in its ops file. A failed online dump stops the upgrade before drain or
+stop; dry-run, NOOP and WEB_ONLY plans take no online dump.
+
+The new process reuses an online dump only for the recorded target package version
+and control-plane fingerprint, the same database and unchanged schema fingerprint,
+registry version and migration markers. Private metadata records the snapshot's
+start and verification times; reuse expires 15 minutes after the start, requires
+the same archive file and a successful archive listing, and consumes the metadata
+once. Missing, stale, mismatched or unreadable metadata or archives fall back to
+the startup dump. The log names the reused archive; the upgrade report includes
+`online_backup` and `online_backup_seconds` only when the option ran a backup.
+Registry upgrades always take the startup dump, even with this option.
+
+An online dump omits writes after its snapshot, including those during the dump,
+drain and stop, and any delay before migration. The reuse deadline bounds age,
+not acceptable data loss. Keep the default for strict recovery-point requirements,
+long drains, registry upgrades, or workloads that cannot lose those writes; an
+independently managed WAL/PITR setup is another recovery strategy.
+
 A migration of a large table holds the table's lock only for statements that
 neither scan nor rewrite it. The run tree columns of `llm_records`, for
 example, are added without a default, with their constraints `NOT VALID`, and
@@ -4797,13 +4978,13 @@ project `ask` action. Backup-profile fallback and unanswered-push pauses follow 
 
 ### Why a run failed (failure classes)
 
-While the system setting `engine.failure_typing` is `record` (`off` by default; [engine reliability
+While the system setting `engine.failure_typing` is `record` or `act` (`off` by default; [engine reliability
 RFC](rfcs/engine-reliability-v0.zh-CN.md), section 4), the close of a failed run records why it failed as a type
 (`looper/agents/failures.py`): `llm_records.failure_class` (`quota`, `transient`, `environment` or `judgment`),
 `failure_cause` (each cause has one class, and a check constraint holds the pair: `usage_limit`, `rate_limit`;
 `connection_failed`, `provider_overloaded`, `start_timeout`; `runtime_missing`, `login`, `tls`, `profile`; `timeout`,
 `context`, `budget`, `report`, `unknown`), and `metadata.failure` (`signal`: `typed` or `text`, and `resets_at` for a
-used-up window). This step only records: what happens to a failed run, its step and its task is unchanged.
+used-up window). `record` leaves the task's existing control flow unchanged; `act` also handles failures below.
 
 - **Which runs.** A record that ends `failed`, and a Worker's or Reviewer's run whose own report says the step failed
   (`metadata.outcome` `reported_failed`, `contract` or `files_mismatch`: `judgment`, `report`). A Reviewer's
@@ -4823,9 +5004,10 @@ used-up window). This step only records: what happens to a failed run, its step 
     at capacity and a broken stream (`signal: text`).
   - The API runtime: its loop's error kind, which a failed result now carries (`error_kind`, `error_status`).
   - Other runtimes give no signal yet: their failures are `unknown`.
-- **Settings.** `engine_settings.get` and `engine_settings.update` (`{"failure_typing": "off" | "record" | null}`,
-  null for the built-in `off`; operator only; `act`, failure handling, is refused until it exists), and the generated
-  `loopercli engine-settings` commands. Not a Manager tool: nothing changes for the Manager, Telegram or Lark.
+- **Settings.** `engine_settings.get` and `engine_settings.update` (`{"failure_typing": "off" | "record" | "act" | null}`,
+  null for the built-in `off`; operator only, changes require confirmation), the generated
+  `loopercli engine-settings` commands, and Settings → LLM Providers. The Manager's `looper_settings` gains engine
+  read/write actions only while act is active. Initial activation uses the API, CLI or dashboard.
 - **Counts.** `runs.failures` (`{"days"}`, 1 to 90, 7 when omitted): the classified runs by UTC day, run kind,
   runtime, class and cause, the total by class, and `steps`: of the Workers' and Reviewers' classified runs, how
   many were not a judgment (the failures that reach a Planner without needing one).
@@ -4834,6 +5016,48 @@ used-up window). This step only records: what happens to a failed run, its step 
 - **Off.** No class and no `metadata.failure`: a record's close writes exactly what it wrote before. The migration
   `failure_typing` adds the two columns without a rewrite; its check is validated and its index
   (`idx_llm_records_failures`) built online.
+
+### Recovering failed executions
+
+With `engine.failure_typing=act`, a current Worker or Reviewer result is routed before a decision or review vote.
+Quota failures hold the step until reset plus 60 seconds, or an unknown-reset backoff of 5, 10, 20, 40, then 60
+minutes. Transient failures wait 120 and 600 seconds, each with ±20% jitter. Environment failures wait for the
+operator, independently of project user gates. Other ready steps keep running. Recovery releases task and account
+slots while waiting, re-enters account admission in the recovery lane, and dispatches only the failed execution
+unit. A review retry preserves the Worker's output and the review role, seat and round. The dynamic input warns
+that an incomplete run may have left changes; the original instruction remains intact.
+
+All four failure classes share one durable counter per work step, including its reviewers and panel seats. The
+third consecutive failure immediately opens the breaker and goes to Planner DECISION with the entire current
+sequence of typed failures. Successful execution resets the counter; `not_passed` neither increments nor resets
+it. Repeated negative verdicts retain the existing `max_step_retries` limit (`DecisionContext.offered` and
+`planner_protocol.parse_decision`). Replans and automatic recovery preserve the counter; an authenticated
+operator's confirmed restart/start-over resets it with an audit entry. History retains the original step/run
+identities for the task's lifetime, even after a step or run record is removed.
+
+An environment or breaker hold projects `waiting_user`, appears in Needs you when attention is enabled, and
+notifies the task's recorded source. The task's Pipeline shows holds, versioned actions and paginated history.
+Operator-only operations `tasks.failure_history`, `tasks.holds` and `tasks.hold_release` use the corresponding
+`POST /api/v1/tasks/...` paths. Release requires the exact `failure_id` and confirmation: retry only the failed
+unit, send the saved failure to the Planner, or stop the entire task. The act-only Manager tool `looper_task_hold`
+offers the same actions in the console and authenticated operator direct chats. The generated CLI uses these
+same operations. Old versions conflict; releases are persisted until the Planner acknowledges recovery.
+
+Planner runtime retries reuse the same prepared message, launch and session outside account slots. Transient
+turns allow at most three executions. A scheduled task's quota wait starts at its first frozen admission or quota
+failure, with a durable deadline of six hours or one schedule period, whichever is shorter; expiration uses
+`quota_exhausted`. A planning environment failure uses `environment`. Other turn failures retain their original
+fallback. Processor retries share the caller's total deadline and spend cap, report the sum of all attempts' cost,
+and preserve private batch filtering. Manager transient/environment errors produce fixed typed replies without
+automatic replay of tools. Leaving act wakes waits and drains step holds to the previous decision path; existing
+gates, waits and cost holds remain independent.
+
+Migration `step_failure_handling` (1920) adds explicit state, idempotent run evidence, append-only failures,
+current holds, a recovery outbox and scheduled quota deadlines. Existing checks widen without dropping other
+values. Task outcome metrics add act-only hold counts, longest wait, automatic retries, breaker counts and
+role/class/streak distributions; self-check warns above five breakers per UTC day. Environment holds have one
+durable reminder after an hour. See [validation](../validation/failure-handling.md) for measured coverage and
+pending real-model evaluations.
 
 ### Translated models (local gateway)
 
@@ -5246,10 +5470,10 @@ contract 5.3 KB (5,309 bytes of `TOOLS_CONTRACT`).
 | `looper_settings` | `view` the shared defaults and each role's layer, what applies to each role with its source and its timeout, or with `project` its layer, its roles' layers and its allowed profiles; `set` `values` on one layer (neither `role` nor `project`: the shared defaults; `role`; `project`; both: the role in the project): `profile` by id or name, `harness_prompt`, `env` (the layer's whole `{NAME: value}`), `run_budget_usd`, `max_concurrency` (the `worker` or `reviewer` role: the default for every task), `timeout_seconds` (a role alone, as Settings → Roles saves it), null clearing one, written by `agent_settings.update_system`, `update_role` or `update_project` and letting what waits check again after a limit; `allowed_profiles`: `add` profiles to a project's list or `remove` some (one not on it is refused), then the whole list is set by `projects.set_allowed_profiles`, which checks each. The answer gives each value before and after and what now applies | view reads; write; the shared defaults, a role's default concurrency limit and a higher or removed spend cap (any run of the layer's roles, resolved through the layers) are high, shown before → after |
 | `looper_schedules` | `list` every project's schedules as the Schedules page does (`schedules.list_all_schedules`; by `project`, by `enabled`): id, name, project, rule, zone, the rule in words, kind, enabled, user gates, next fire, last run (kind and exit code included), failures in a row; `get` one (`GET /api/schedules/:id`, the requirement cut to 1,000 characters) with its 5 latest runs, the routine skips left out and counted, as its page shows them; `create` one in an existing `project` from `fields` (the `fields` that `POST /api/v1/schedule_admin/create` takes, `profiles` being its `profile_overrides`, and `task_limits`), always disabled (`created_via` `manager`): Looper adds its configuration (project, directory, the rule in words and its next 3 fires in its zone, overlap, pre-run gate, user gates, caps, notify, profiles, task limits for agent schedules; kind, command in a verbatim code fence, timeout, env keys only, env file, success deadline and alert thresholds for command schedules) and 「要启用吗？回复「启用」就启用」 to the reply (in a group chat only 「要启用吗？@我回复「启用」就启用…」), and the turn that created it may neither `enable` nor `run` it (`conflict`: the user has not seen it); made from a Telegram or Lark chat without a `notify_target`, it tells whoever asked when their channel's allowlist lets them; `update` the `fields` given (`schedules.update_schedule`; null clears one, `profiles` and `task_limits` are replaced whole), and Looper adds each change before → after (commands in verbatim code fences, and the next 3 fires for a new rule or zone); every command schedule update also says it uses no agent or model spend; in a group chat it adds one line naming the settings that changed and whether the schedule is enabled, without their values; `enable` one (as its switch does; the answer says when it was so already) or `run` it now (`schedules.run_now`: the dashboard's Run now, through the overlap check, its next fire time left; the answer is the run), each asking first: a command schedule shows its exact command in a code fence, directory, timeout and env keys only (plus env file when set); enabling also shows its success deadline and alert thresholds, and both confirmations say it runs without an agent or model spend. An agent schedule keeps its task and spending confirmation. In a group chat these confirmations, and those of a raised cap or an enabled command's edit, are one question each, without the requirement, command, directory, environment or budgets. The call answers `needs_confirmation` and does nothing until the user's next message confirms (a schedule already enabled is not asked), and the turn that created a schedule may do neither (`conflict`); `disable` one (the user confirms first for a running command schedule, including after a refused delete); `delete` one (`schedules.delete_schedule`; a command schedule with a running run is refused (`conflict`) before anything is asked, saying it can be deleted once the command finishes, that disabling stops new fires, and that a queued run still starts after the running one even when the schedule is disabled); `reset_planner_session` clears its stored Planner session and holder after the user confirms in their next message. The reset confirmation says whether a session is stored, that the next run starts fresh, and that a run in flight keeps its own session until it ends and cannot write back. A schedule is named by its id, or by its name ignoring case, within `project` when given; a name more than one project has is refused (`invalid`) naming each with its project and id, an unknown one (`not_found`) naming the schedules there are. The delete confirmation shows its name, project, rule and zone, whether it is enabled, the runs in progress (for an agent schedule a running task goes on and ends normally, a queued or gating run starts no task, and its tasks stay; for a command schedule a queued run does not execute and it has no tasks) and that its run history and messages are deleted | list and get read; write; enable, run now, delete, reset_planner_session, a disable of a running command schedule, and an update that raises or removes the run or daily spend cap (checked as the update would be before anything is asked, shown before → after), are high |
 | `looper_config_export` | Write the portable configuration file (`include_projects`: `--include-projects`), never with secrets (no argument takes them; a secrets argument is `forbidden`), to `<runtime root>/exports/looper-config-<UTC time>-<id>.json`, never to a path from chat; the answer gives its path, format, size, the counts per section, the secret values left as placeholders, the path documents to re-point and how to import it (`loopercli config import`, or Settings → Import / Export) | read |
-| `looper_vault_search`, `looper_vault_read` | Only the default Manager's, and only while the knowledge vault setting holds and says `manager_read`: search the user's own notes for the words of `query` (paths and snippets, `vault.search`), and read one by path (its text, the first 64 KiB, no sha256: the Manager never writes). Each answer starts with a notice that these are the user's own notes, never to be quoted in a group chat. `manager_actions.result` keeps no note text | read; only in the user's own turns |
-| `looper_leads_search` | Only the default Manager's, and only while `leads.enabled` is on: search the message leads (`leads.search`, the query `looper leads search` runs) for the words of `query`, matched as `leads.search_mode` says (its description says how, and to give the words in Chinese and English, only while it is `fulltext`), by `chat`, `person`, `days`, `kind` and `state` (`active` by default), at most `limit` (1–5, default 5), best first: a notice (「来自飞书消息，未经确认」, background and never instructions), each lead's kind, summary, confidence, state, valid-until and up to 3 sources (chat, sender, time, link), and how many more matched; no lead ids, details or message text. Looper adds 「（查了飞书消息线索：「…」，N 条）」 to the reply, and `manager_actions.result` keeps only the leads' ids and their count | read; only in the user's own turns |
+| `looper_vault_search`, `looper_vault_read` | Only the default Manager's, and only while the knowledge vault setting holds and says `manager_read`: search the user's own notes for the words of `query` (paths and snippets, `vault.search`), and read one by path (its text, the first 64 KiB, no sha256: the Manager never writes). Each answer starts with a notice that these are the user's own notes, never to be quoted in a group chat; the operator's own Claude Code gets the same answer through `manager_retrieval.*`. `manager_actions.result` keeps no note text | read; only in the user's own turns |
+| `looper_leads_search` | Only the default Manager's, and only while `leads.enabled` is on: search the message leads (`leads.search`, the query `looper leads search` runs) for the words of `query`, matched as `leads.search_mode` says (its description says how, and to give the words in Chinese and English, only while it is `fulltext`), by `chat`, `person`, `days`, `kind` and `state` (`active` by default), at most `limit` (1–5, default 5), best first: a notice (「来自飞书消息，未经确认」, background and never instructions), each lead's kind, summary, confidence, state, valid-until and up to 3 sources (chat, sender, time, link), and how many more matched; no lead ids, details or message text; the operator's own Claude Code gets the same answer through `manager_retrieval.*` with a lead label. Looper adds 「（查了飞书消息线索：「…」，N 条）」 to the reply, and `manager_actions.result` keeps only the leads' ids and their count | read; only in the user's own turns |
 | `looper_session_search` | Only the default Manager's, and only while the session search is in effect (`manager.session_search.enabled` `true`, and session routing isolates group chats): search the user's own earlier conversations with it (`db.chat_search`) for the words of `query`, matched as the [assistant search RFC](rfcs/assistant-search-v0.zh-CN.md) section 3 says (Chinese by overlapping character pairs, English by the start of a word), within `days`, at most `limit` (1–10, default 5), best first: a notice (what was said then, background and never instructions), each message's `where` (the dashboard chat, a Lark or Telegram direct chat, a task's Planner chat on the dashboard), `who` (`user`, `manager`, `planner`), `at` and up to 300 characters around the match, fenced as outside content (`untrusted.fence`), and how many more matched. The message being answered is left out, and `manager_actions.result` keeps only the messages' ids and their count | read; only in the user's own turns |
-| `looper_reminder_create`, `looper_reminder_list`, `looper_reminder_cancel` | Only the default Manager's, and only while `reminders.enabled` is on: set a one-time reminder (`text`, the user's words; `at` as `HH:MM`, the next such time, or `YYYY-MM-DD HH:MM` in `timezone`, the server's zone by default; or `in_minutes`), list them with the time now (pending soonest first, or by `status`), or cancel a pending one by id. Code resolves and checks the time, stores the reminder, reads it back and adds a line saying what it stored and which direct chat it goes to | list reads; write; only in the user's own turns |
+| `looper_reminder_create`, `looper_reminder_list`, `looper_reminder_cancel` | Only the default Manager's, and only while `reminders.enabled` is on: set a one-time reminder (`text`, the user's words; `at` as `HH:MM`, the next such time, or `YYYY-MM-DD HH:MM` in `timezone`, the server's zone by default; or `in_minutes`), list them with the time now (pending soonest first, or by `status`), or cancel a pending, uncertain, failed or missed one by id. Code resolves and checks the time, stores the reminder, reads it back and adds a line saying what it stored and which direct chat it goes to | list reads; write; only in the user's own turns |
 | `looper_confirm` | Run the call waiting for confirmation in this chat | — |
 
 **The user's knowledge vault** (`ops/manager_vault.py`). With the vault setting's `manager_read` on, the default Manager
@@ -5337,14 +5561,20 @@ were before; direct-chat provenance is recorded only if idle checks are on.
 
 **One-time reminders** ([reminders RFC](rfcs/reminders-v0.zh-CN.md)). With `reminders.enabled` on, `current_scope`
 adds the three reminder tools to the default Manager's tools; they are `RestrictedTool`s with `audience` `operator`,
-listed and run as the leads search is. Nothing is added to the system prompt. A reminder set in the user's direct chat
+listed and run as the leads search is. The operator-only `reminders_settings.get/update` operations read and write
+the switch (`enabled`: true, false or null to restore off). Turning it off keeps existing reminders; turning it on
+resumes processing under the same catch-up rules. Nothing is added to the system prompt. A reminder set in the user's direct chat
 goes back to it (the bot and the user's sender id there); one set on the dashboard goes to the user's direct chat with
 the first enabled bot of the default Manager that names an `operator_sender_id`, and is refused (`conflict`) when there
 is none. The table `reminders` (migration `reminders`) keeps each one with its target and status: `pending`,
 `sending`, `delivered`, `failed`, `uncertain`, `missed` or `cancelled`. `ReminderService` (started by `looper serve`,
 idle while the switch is off or the server drains) ticks every 10 seconds under one advisory lock. A stop starts no
-other send and takes at most 15 seconds, the cancellation of a send that did not finish included. A tick settles a
-`sending` row left by a stopped sender as `uncertain`, then sends the due ones in code-written words
+other send and takes at most 15 seconds, the cancellation of a send that did not finish included. A tick recovers a
+`sending` row left by a stopped sender as `pending` if no channel post started, or `uncertain` if one may have
+started. The sender commits `post_started_at` immediately before calling the channel, and clears it after an
+explicit refusal before retrying. Recovery updates reminder states and existing decision receipts in one
+transaction: started sends become `unknown`; receipts lost after a settled send are restored from that state.
+An upgrade treats pre-marker `sending` rows as possibly sent. The service then sends the due ones in code-written words
 (「⏰ 你在 <when asked> 让我提醒你：<text>」) through `ChannelRegistry.post` with the idempotency key
 `looper-reminder-<id>`, after checking that the bot still names that user as its operator. The rule keeps no state:
 every reminder due at most 2 minutes ago is sent, however many at once; one due longer ago was missed (Looper was
@@ -5352,12 +5582,22 @@ down, asleep, stalled, switched off or draining), and of each chat's missed ones
 hours is sent, with a line saying when it was due, unless a reminder on time goes to that chat in the same tick; the
 others become `missed`. A start, a sleep and two servers taking turns in an upgrade are judged alike. A refused send is tried at the next tick, three times in all;
 an unknown outcome is `uncertain` and never sent again. Reminders are never throttled: no quiet hours, cap or merge
-window. With `delivery.enabled` on, a claimed reminder asks `proactive_delivery.decide` as
+window. Terminal `uncertain`, `failed` and `missed` reminders appear once each in needs-you's `reminders` section,
+with their text, original due time and zone, and state, until the user cancels them or seven days after settlement.
+Cancellation reuses the existing tool and records the prior state in its detail; rescheduling means cancelling
+the old reminder and creating a new one. `uncertain` says only that it may not have been delivered. These items
+never enter idle-check candidates or cause a separate proactive send. With attention off, the morning brief
+still lists each in its own short line. Digest rows for the same reminder id fold into the needs/fallback line,
+while their exact ids remain in the brief's claim and consumption records. With `delivery.enabled` on, a claimed reminder asks `proactive_delivery.decide` as
 `user_reminder` / `user_set`: `send` / `urgent`, uncounted, never deferred to the digest. The decision and
 channel receipt (`sent`, `rejected`, `unknown`) share `looper-reminder-<id>` in `proactive_deliveries`, with
 the reminder id as `source_ref`; refused-send retries retain that decision. A failed decision is logged and
-the reminder still sent; a failed receipt write does not retry the send. Off, the post and reminder writes
-are unchanged and no delivery record is added. The time is the nearest future instant the wall time names in its zone: of the two when the clocks go back,
+the reminder still sent; a failed receipt write does not retry the send. Off, normal sends keep their existing
+message bytes, retry policy and outcomes, and no delivery record is added. Recovery uses the
+same marker with either delivery setting. Lark receives the same idempotency key on a safe retry, but recovery
+does not rely on channel deduplication: neither Lark nor Telegram resends a possibly started post. A crash after
+the marker commits but before the channel is called remains conservatively uncertain. Recovered pending rows
+follow the existing catch-up policy. The time is the nearest future instant the wall time names in its zone: of the two when the clocks go back,
 the first still ahead; one the clocks skip becomes the first valid minute after it; the confirmation says either.
 
 Continuing a task that failed at its spend cap needs a higher cap, which is
@@ -6404,7 +6644,9 @@ lead, 6 unusable database or missing tables (start serve once to migrate).
 Dates without times use the machine's zone, at midnight.
 How the words match is the system setting `leads.search_mode` (assistant search RFC, section 4), the same for
 this command, `leads.search` and the Manager's tool: `words` (the default, and any value it does not know) wants
-every word in the lead's summary or detail, or in a chat's or a person's name, as written; `fulltext` matches any
+every word in the lead's summary or detail, or in a chat's or a person's name, as written. The operator-only
+`leads_search_settings.get/update` operations read and write it (`mode`: `words`, `fulltext` or null to restore
+`words`), affecting subsequent searches without enabling extraction or rewriting leads. `fulltext` matches any
 word as the session search does (Chinese by overlapping character pairs, English by the start of a word), a chat's
 or a person's name holding it, and, with pg_trgm installed, an ASCII word of four characters or more by its
 likeness (`word_similarity` at least 0.6), ranking the leads by every word's coverage weighted by rarity within
@@ -6668,10 +6910,67 @@ run after the Manager's final stop check. A stopped or timed-out preparation
 changes no intents or tasks; timeout and task-validation failures receive
 code-written replies. Task creation and the transition are one database
 transaction; task notices belong to the operator's direct chat, never the source
-conversation. The requirement
+conversation. With rules off, the requirement
 contains only the displayed title, summary and up to five source references,
 marked as background rather than instructions. Tasks created from the dashboard
 leave `origin_channel_id` empty, as other dashboard-created tasks do.
+
+With `intents.rules.enabled` on, newly extracted candidates have a durable rule
+work item before confirmation delivery. The ordered, typed AND rules select
+confirmation, record-only, or automatic MR review; unavailable verification
+immediately falls back to confirmation. The switch defaults off, does not scan
+old pending suggestions, and does not authorize an operator-requested recognition
+batch to create tasks. Record-only suggestions remain pending and can be built
+manually. Configuration, discovery submission, migration previews and revocation
+are operator-only v1 operations; rule editing adds no CLI or Manager tools.
+
+`IntentRuleService` verifies MR URLs through an explicitly configured read-only
+command adapter, outside row-locking transactions. Saving its configuration
+requires an absolute executable path; execution never searches PATH. It uses
+direct argv, a fresh empty working directory, a minimal explicit environment,
+a ten-second deadline and a 64 KiB stdout bound, and cleans up the process group
+after normal exits as well as failures. The request contains only the canonical MR URL and
+protocol version. A host integration can inject dedicated credential references
+with `intent_rule_verifier.configure_credentials`; a missing reference confirms
+instead of borrowing another provider's credentials. The empty directory is not
+a sandbox. The response is a closed schema, and its canonical target must match
+the requested system, repository route and MR. Reviewer IDs come from the API;
+DM targets, mentions and sender IDs come from the same real request event.
+
+Before creation the service verifies again and, under the shared admission lock,
+rechecks the switch, delivery, rule generation, project/workflow snapshots,
+source authorization and the original revision. The transaction atomically
+claims `(system_id, repository_id, mr_id, revision)`, creates the existing task
+lifecycle's ready task, transitions the candidate, consumes the shared operator /
+project / local-day quota, writes audit and queues start and notice outboxes.
+Messages, structured discoveries and manual MR builds share that claim. Existing
+or cancelled revisions link the same task without another quota charge. Manual
+builds do not consume automatic quota. An unknown historical revision blocks the
+MR until the operator resolves its ownership; migration preview/confirmation
+registers reliable existing ownership without switching an installation.
+
+Automatic and manual rule-bound MR requirements contain only a fixed review
+sentence and the verified URL, with an explicit project and workflow. Message
+titles, summaries and source text never become Worker instructions. Starts
+recover only their committed task ID and are acknowledged by the atomic
+`init → pending` transition, not by successful bus publication. Revocation
+serializes with that transition, cancels a ready task locally or asks the current
+TaskRouter to stop active work, and reports the observed state. Claims and quota
+survive revocation; posted review comments cannot be withdrawn by this action.
+
+Rule notices use normal proactive delivery to the current operator DM, with
+separate `rule-created:`, `rule-discovery:` and fault-episode references. Quiet
+hours and daily limits retain a digest; uncertain channel receipts do not blindly
+retry. Source deletion clears message audit while committed execution/start and
+minimal MR claims survive. Confirmation push, attention and morning-brief items
+are checked again at send time under the same candidate gate. Switching rules
+off holds notices without stopping committed starts or tasks; switching back on
+resumes the same notices and never creates again. Three consecutive unavailable
+checks produce one normal operator notice per fault episode. Execution readback
+includes start, quota, delivery and revocation facts, and statistics count unique
+automatic executions rather than multiplying tasks through deduplicated hits.
+The remote API and local commit cannot be atomic: the workflow must still read
+the current MR before working on it.
 
 The one state writer permits `pending → tasked | rejected | expired` and
 `expired → tasked`. A transition of an intent whose push was delivered (sent, with a
@@ -6911,11 +7210,17 @@ direct chat. It names what waits (the needs-you summary), reminders due that
 local day, and proactive messages deferred into the digest (`decision`
 `digest`). Every brief reads from the first attempt's dates (Monday also
 Saturday and Sunday) through the day being sent, except digest rows already
-recorded by id in `morning_brief_consumed`. The claim stores the ids that
-read returned, in that same write. A sent or uncertain brief records them in
+recorded by id in `morning_brief_consumed`. A row whose `schedule_id`
+is a schedule the needs section lists is left out of the deferred-message
+section; that schedule's line says how many deferred pushes it has
+(「，另有 N 条推迟的推送」). The claim stores the ids that
+read returned, including those rows, in that same write. A sent or uncertain brief records them in
 the same transaction as its row. A refusal records none and clears the stored
-ids, so a rejected Tuesday brief's digest is still in Wednesday's. A sender
-that stops before the record is `uncertain` on restart, and that recovery
+ids, so a rejected Tuesday brief's digest is still in Wednesday's. Immediately
+before the channel call, the sender commits `send_started_at`. A claim without
+that marker becomes retryable on recovery: its attempt is refunded, its first
+date is kept, and no digest or triage ids are consumed. A sender that stops
+after that marker is `uncertain` on restart, and that recovery
 consumes exactly the stored ids: it does not scan by `decided_at`. A row whose
 insert had not committed is therefore still read once, on the next brief.
 `consumed_until` is the check time, not a watermark. With
@@ -6939,7 +7244,9 @@ it had. The switch
 (`morning_brief.get`, `morning_brief.update`); off, a tick reads the in-memory
 switch and does nothing else. One `morning_briefs` row per local date and chat
 makes a restart and a second server send it at most once. A send that stops
-mid-way is `uncertain` and is not sent again. With `delivery.enabled` on, the
+mid-way is `uncertain` and is not sent again. Upgrades conservatively mark old
+`sending` rows as started because they cannot prove that no send occurred.
+With `delivery.enabled` on, the
 decision and the channel receipt share one `proactive_deliveries` row. A later
 successful try replaces a rejected receipt on that row (`outcome`, `sent_at`,
 `external_id`). A receipt already recorded as `sent` or `unknown` keeps those
@@ -7033,8 +7340,9 @@ when the channel has one.
 One read-only summary of what waits for the operator
 ([RFC](rfcs/assistant-needs-you-v0.zh-CN.md), `looper/agents/attention.py`),
 gathered by code from what Looper already keeps: no model call, nothing
-stored. It is off until the system setting `attention.enabled` is `true`
-(there is no dashboard switch). Off, `attention.summary` answers `conflict`,
+stored. It is off until the system setting `attention.enabled` is `true`.
+The operator-only `attention.settings_update` operation writes the switch
+(`enabled`: true, false or null to restore off). Off, `attention.summary` answers `conflict`,
 the dashboard lists no page for it, `/todo` is an ordinary message for the
 Manager's model and Telegram drops the command as before; no prompt, tool
 list or command line changes either way.
@@ -7056,7 +7364,11 @@ list or command line changes either way.
   pushes, intent messages and task-end messages of the last 72 hours, plus intent
   final notices whose bounded retries exhausted in that window. The
   `uncertain_deliveries` migration builds the existing tables' uncertain-row
-  indexes online; the final-notice table has its own failed-row index). A
+  indexes online; the final-notice table has its own failed-row index),
+  `cost` (pending spend holds), `failure_holds` (environment and breaker holds
+  while failure handling is in act mode), then
+  `reminders` (`uncertain`, `failed` and `missed` reminders until cancelled
+  or seven days after settlement; excluded from idle checks). A
   section is `ok`, `error` (its source could not be read, with the reason;
   never shown as empty) or `unknown` (this caller cannot read it); a
   feature that is off leaves its section out. Each lists up to 20 items and
@@ -7067,6 +7379,14 @@ list or command line changes either way.
   item `{key, title, context, since, href, ref, facts}`.
   `POST /api/v1/attention/settings_get` returns `{enabled}` to the operator,
   including while off, without reading summary sources.
+  `POST /api/v1/attention/settings_update` accepts `{"enabled": true}`, false
+  or null and returns the effective `{enabled}` value after persistence.
+  The generated CLI is `loopercli attention settings-update --enabled true|false|null`.
+  Like `status_card_settings.update`, this and the reminder, stable-context,
+  decision-snapshot and lead-search settings writes declare high risk and
+  confirmation, use the operator action trail, and return a typed readback.
+  Their get/update operations also generate CLI commands; no new dashboard
+  control or model tool is added.
 - **Dashboard:** `#todo`, "Needs you" under Dashboard in the sidebar, listed
   only while the setting is on. The sidebar reads the setting rather than
   requesting the summary on every page load. Failing logins that were read
@@ -7975,8 +8295,9 @@ A task's dispatch passes and its Planner's step decisions can be recorded with
 what they read, so that a change to how a task moves on can be checked against
 history offline ([Decision snapshot RFC](rfcs/decision-snapshot-v0.zh-CN.md)).
 It is off until the system setting `decision_snapshots.enabled` is `true`
-(read before every dispatch pass and every applied decision; the dashboard has
-no switch yet). Off, nothing is written; on or off, no prompt, tool list or
+(read before every dispatch pass and every applied decision). The operator-only
+`decision_snapshots_settings.get/update` operations read and write the switch
+(`enabled`: true, false or null to restore off). Off, nothing is written; on or off, no prompt, tool list or
 command line changes: snapshots read what the Planner already holds and feed
 nothing back, and a failure to read the switch or to write is logged and never
 fails the decision. Each snapshot's database work (the switch, the turn's
@@ -9072,9 +9393,17 @@ implementation supplies it and is retested.
   never sent) become one status message, sent at the first phase
   (「⏳ 处理中：思考中 · 0s」; a tool shows as, say, 「运行命令 (Bash)」 or
   「读文件 (Read)」, with the seconds so far) and edited in place: only when its
-  text changed, at most once every 3 s (a phase that comes sooner is shown by
-  one trailing edit), and at most 18 times (Feishu edits a message at most 20
-  times); after that it is left as it is. The answer goes as a new message, so
+  text changed, every 3 s for the first 30 s, then with a gap of at least
+  0.8 times the elapsed time at the previous edit (and always at least 3 s).
+  A phase that comes sooner is shown by one trailing edit, using the same
+  schedule. There are at most 18 progress edits, covering about 55 minutes
+  with frequent phases; the last says 「⏳ 仍在处理（已用时 N 分钟）」 with the
+  elapsed minutes at that edit, and stays until the turn ends. Feishu allows
+  20 edits per message: 18 for progress, one closing edit, and one spare.
+  The Manager emits the first phase before reading a quoted thread, still
+  within its ordered, stoppable, replayable preparation; stopping or
+  withdrawing during the read closes the line as 「已停止」.
+  The answer goes as a new message, so
   the user is notified, and the status message is then edited a last time to
   「✅ 完成 · 用时 Ns · 工具 N 次」, or 「❌ 出错：<reason>」 when the reply carries
   an `error` (the Manager's failed turns do). A failed send or edit is logged

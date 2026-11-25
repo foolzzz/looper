@@ -697,3 +697,183 @@ def test_the_self_check_reports_the_verifier_and_fails_without_one(tmp_path, mon
     check, dumper = self_check.check_pg_dump(160004, True, _ops(tmp_path, pg_dump=str(tmp_path / "bin" / "pg_dump")))
     assert dumper is None and check.status == self_check.FAIL
     assert "backup.verify_command" in check.detail
+
+
+@pytest.fixture
+def online_backup(tmp_path, monkeypatch):
+    from datetime import datetime, timezone
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+    import asyncpg
+
+    _install(tmp_path / "bin", mode="offline")
+    monkeypatch.setenv("PATH", str(tmp_path / "bin"))
+    ops = _ops(tmp_path)
+    conn = SimpleNamespace(fetchval=AsyncMock(return_value=160004), close=AsyncMock())
+    monkeypatch.setattr(asyncpg, "connect", AsyncMock(return_value=conn))
+    state = {"fingerprint": "a" * 64, "registry_version": 4, "migrations": ["baseline"]}
+    read_state = AsyncMock(return_value=state)
+    monkeypatch.setattr(db_backup, "schema_state", read_state)
+    return SimpleNamespace(ops=ops, root=ops.runtime_root, conn=conn, state=state, read_state=read_state,
+        target=SimpleNamespace(version="1.0.1", components={"control_plane": "b" * 64}),
+        now=datetime(2026, 11, 24, 12, tzinfo=timezone.utc))
+
+
+def test_online_backup_records_verified_private_metadata_and_is_consumed_once(online_backup):
+    case = online_backup
+    path = asyncio.run(db_backup.online_upgrade_backup(case.ops, case.root, case.target, now=case.now))
+    sidecar = path.with_suffix(".dump.json")
+    metadata = json.loads(sidecar.read_text())
+    assert sidecar.stat().st_mode & 0o777 == 0o600
+    assert metadata["target_version"] == case.target.version
+    assert metadata["target_control_plane"] == case.target.components["control_plane"]
+    assert metadata["schema_state"] == case.state
+    assert metadata["verified"] is True
+    assert metadata["started_at"] == case.now.isoformat()
+    assert "postgresql://" not in sidecar.read_text()
+    assert asyncio.run(db_backup.reusable_upgrade_backup(
+        case.conn, case.ops, case.root, case.target, now=case.now)) == path
+    assert not sidecar.exists() and path.exists()
+    case.read_state.reset_mock()
+    assert asyncio.run(db_backup.reusable_upgrade_backup(
+        case.conn, case.ops, case.root, case.target, now=case.now)) is None
+    case.read_state.assert_not_awaited()
+    # One initial verification and one startup verification, both on the archive.
+    assert len((case.root.parent / "restore-calls").read_text().splitlines()) == 2
+
+
+@pytest.mark.parametrize("damage", ["stale", "future", "naive-time", "wrong-version", "wrong-code", "wrong-db",
+    "unverified", "new-schema", "replaced", "missing", "bad-json", "not-an-object", "unreadable"])
+def test_online_backup_rejects_ineligible_archives(online_backup, monkeypatch, damage):
+    from datetime import timedelta
+    case = online_backup
+    path = asyncio.run(db_backup.online_upgrade_backup(case.ops, case.root, case.target, now=case.now))
+    sidecar = path.with_suffix(".dump.json")
+    metadata = json.loads(sidecar.read_text())
+    now = case.now
+    if damage == "stale":
+        now += timedelta(minutes=15, microseconds=1)
+    elif damage == "future":
+        now -= timedelta(microseconds=1)
+    elif damage == "naive-time":
+        metadata["started_at"] = case.now.replace(tzinfo=None).isoformat()
+    elif damage == "wrong-version":
+        metadata["target_version"] = "1.0.2"
+    elif damage == "wrong-code":
+        metadata["target_control_plane"] = "c" * 64
+    elif damage == "wrong-db":
+        metadata["database"] = "different database"
+    elif damage == "unverified":
+        metadata["verified"] = False
+    elif damage == "new-schema":
+        case.read_state.return_value = {**case.state, "migrations": ["baseline", "new_migration"]}
+    elif damage == "replaced":
+        path.unlink()
+        path.write_bytes(b"PGDMP replacement")
+    elif damage == "missing":
+        path.unlink()
+    elif damage == "unreadable":
+        _install(case.root.parent / "bin", mode="offline", restore_ok=False)
+    sidecar.write_text("{" if damage == "bad-json" else json.dumps([] if damage == "not-an-object" else metadata))
+    assert asyncio.run(db_backup.reusable_upgrade_backup(
+        case.conn, case.ops, case.root, case.target, now=now)) is None
+
+    # Prove rejection reaches the startup dump, rather than merely returning None.
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock, MagicMock, Mock
+    from looper import components
+    from looper.agents import self_check, serve
+    from looper.db import connection
+    reuse = db_backup.reusable_upgrade_backup
+
+    async def at_time(conn, ops, root):
+        return await reuse(conn, ops, root, now=now)
+
+    monkeypatch.setattr(db_backup, "reusable_upgrade_backup", at_time)
+    monkeypatch.setattr(components, "prepare_loaded_manifest", AsyncMock(return_value=case.target))
+    monkeypatch.setattr(connection, "schema_change_pending", AsyncMock(return_value=True))
+    monkeypatch.setattr(connection, "check_registry_schema_version", AsyncMock(
+        return_value=connection.REGISTRY_SCHEMA_VERSION))
+    monkeypatch.setattr(self_check, "check_pg_dump", Mock(return_value=(None, SimpleNamespace(detail="test"))))
+    fallback = case.root / "backups" / "in-outage.dump"
+    fallback.write_bytes(b"PGDMP startup backup")
+    dump = Mock(return_value=(fallback, "listed"))
+    monkeypatch.setattr(db_backup, "back_up", dump)
+    pool = MagicMock()
+    pool.acquire.return_value.__aenter__.return_value = case.conn
+    asyncio.run(serve._back_up_before_schema_change(pool, case.ops, case.root, skip_backup=False))
+    assert dump.call_count == 1
+
+
+def test_online_backup_freshness_is_measured_from_dump_start(online_backup):
+    from datetime import timedelta
+    case = online_backup
+    path = asyncio.run(db_backup.online_upgrade_backup(case.ops, case.root, case.target, now=case.now))
+    assert asyncio.run(db_backup.reusable_upgrade_backup(
+        case.conn, case.ops, case.root, case.target, now=case.now + timedelta(minutes=15))) == path
+
+
+@pytest.mark.parametrize("failure", ["dump", "verification", "schema-changed"])
+def test_online_backup_failure_never_publishes_reusable_metadata(online_backup, failure):
+    case = online_backup
+    if failure == "schema-changed":
+        case.read_state.side_effect = [case.state, {**case.state, "registry_version": 5}]
+    else:
+        _install(case.root.parent / "bin", mode="exit" if failure == "dump" else "offline",
+                 restore_ok=failure != "verification")
+    with pytest.raises(db_backup.BackupFailed):
+        asyncio.run(db_backup.online_upgrade_backup(case.ops, case.root, case.target, now=case.now))
+    assert list((case.root / "backups").glob("*.json")) == []
+    case.conn.close.assert_awaited_once()
+
+
+def test_online_backup_retention_removes_only_its_archive_metadata(online_backup):
+    from datetime import timedelta
+    case = online_backup
+    paths = [asyncio.run(db_backup.online_upgrade_backup(
+        case.ops, case.root, case.target, now=case.now + timedelta(seconds=index))) for index in range(6)]
+    assert not paths[0].exists() and not paths[0].with_suffix(".dump.json").exists()
+    assert all(path.exists() and path.with_suffix(".dump.json").exists() for path in paths[1:])
+
+
+@needs_database
+def test_online_backup_schema_state_detects_a_new_migration():
+    from tests.db_support import fresh_schema
+    from looper.db.connection import ensure_schema
+
+    async def run():
+        async with fresh_schema() as pool:
+            await ensure_schema(pool)
+            async with pool.acquire() as conn:
+                before = await db_backup.schema_state(conn)
+                await conn.execute("INSERT INTO schema_migrations (name) VALUES ('online_backup_test')")
+                after = await db_backup.schema_state(conn)
+            assert before["fingerprint"] and before["registry_version"] == 4
+            assert after["migrations"] == sorted([*before["migrations"], "online_backup_test"])
+            assert after != before
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("failure", ["timeout", "connection", "closed"])
+def test_online_backup_connection_failure_is_safe_and_happens_before_dump(online_backup, monkeypatch, failure):
+    import asyncpg
+    from unittest.mock import AsyncMock, Mock
+    case = online_backup
+    error = {"timeout": TimeoutError, "connection": asyncpg.PostgresConnectionError,
+             "closed": asyncpg.InterfaceError}[failure]("secret-dsn")
+    monkeypatch.setattr(asyncpg, "connect", AsyncMock(side_effect=error))
+    dump = Mock()
+    monkeypatch.setattr(db_backup, "back_up", dump)
+    with pytest.raises(db_backup.BackupFailed) as caught:
+        asyncio.run(db_backup.online_upgrade_backup(case.ops, case.root, case.target))
+    assert "secret-dsn" not in str(caught.value)
+    dump.assert_not_called()
+
+
+def test_online_backup_rechecks_schema_after_listing_archive(online_backup):
+    case = online_backup
+    path = asyncio.run(db_backup.online_upgrade_backup(case.ops, case.root, case.target, now=case.now))
+    case.read_state.side_effect = [case.state, {**case.state, "registry_version": 5}]
+    assert asyncio.run(db_backup.reusable_upgrade_backup(
+        case.conn, case.ops, case.root, case.target, now=case.now)) is None
+    assert path.with_suffix(".dump.json").exists()

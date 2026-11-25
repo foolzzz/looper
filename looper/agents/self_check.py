@@ -571,7 +571,8 @@ async def provider_limit_checks_for_database(database_url: str) -> list[Check]:
     conn = None
     try:
         conn = await asyncpg.connect(database_url, timeout=_DATABASE_TIMEOUT_SECONDS)
-        return [*(await provider_limit_checks(pool=conn)), *(await admission_checks(pool=conn))]
+        return [*(await provider_limit_checks(pool=conn)), *(await admission_checks(pool=conn)),
+                *(await failure_handling_checks(pool=conn))]
     except (asyncpg.PostgresError, OSError, TimeoutError):
         return []  # database readiness is reported separately; this probe is advisory
     finally:
@@ -595,6 +596,28 @@ async def admission_checks(*, pool=None) -> list[Check]:
               f"Account slots, lanes and quota freezes enabled; {over} interactive over-admissions today. "
               "Planner and Manager turns are not admitted yet.")
     return [Check("admission", "Account admission", WARN if typing_off or over > 3 else OK, detail)]
+
+
+async def failure_handling_checks(*, pool=None) -> list[Check]:
+    """Failure holds and today's breaker count, only while typed recovery is active."""
+    from . import failure_handling
+    from .failures import FailureTyping
+    from ..db import step_failures
+
+    service = failure_handling.get_service()
+    if service is None or service.known_mode() is not FailureTyping.ACT:
+        return []
+    try:
+        figures = await step_failures.stats(pool=pool or service.pool)
+    except Exception:
+        logger.warning("Could not read failure handling self-check", exc_info=True)
+        return [Check("failure_handling", "Failure recovery", WARN,
+                      "Failure history is unavailable", "Check the database and failure recovery logs")]
+    count = figures['breakers_today']
+    detail = (f"{figures['holds']} holds; longest wait {figures['longest_wait_seconds']:.0f}s; "
+              f"{figures['automatic_retries']} automatic retries today; {count} breakers today")
+    return [Check("failure_handling", "Failure recovery", WARN if count > 5 else OK, detail,
+                  "Review typed failure history and recovery decisions" if count > 5 else "")]
 
 
 async def provider_limit_checks(*, pool=None) -> list[Check]:

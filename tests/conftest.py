@@ -3,12 +3,13 @@ from __future__ import annotations
 import contextlib
 import copy
 import json
+import logging
 import math
 import os
 import re
 import sys
 from collections import Counter
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from datetime import datetime, timezone
 from pathlib import Path
 from statistics import median
@@ -508,6 +509,17 @@ async def _created_project(
 
 
 @pytest.fixture(autouse=True)
+def _root_log_level() -> Iterator[None]:
+    """Every test starts with the root logger at WARNING, Python's default. serve, mcp-server and the claude-code
+    MCP entry set it to INFO in-process (log_redaction.log_to_stderr); without this, caplog in a later test of the
+    same worker sees INFO records or not depending on which tests ran before it."""
+    root = logging.getLogger()
+    root.setLevel(logging.WARNING)
+    yield
+    root.setLevel(logging.WARNING)
+
+
+@pytest.fixture(autouse=True)
 def _gate_command_state(monkeypatch: pytest.MonkeyPatch) -> None:
     """Gate lists belong to one server lifetime, not to earlier tests in this worker."""
     # An unimported module has no state to reset; do not load the agent stack for CLI-only tests.
@@ -536,7 +548,9 @@ def _no_live_runs(monkeypatch: pytest.MonkeyPatch) -> None:
 def _chat_stop_default_off(monkeypatch: pytest.MonkeyPatch) -> None:
     """Every test starts with the chat's settings at their defaults (``chat_settings``: stopping a reply, completion
     turns, the delivery layer and the morning brief off), whatever an earlier one set."""
-    from looper.agents import chat_settings, persona
+    from looper.agents import chat_settings, persona, session_routing
+
+    monkeypatch.setattr(session_routing, "_scenario_routing", {})
 
     monkeypatch.setattr(chat_settings, "_stop_enabled", chat_settings.DEFAULT_STOP_ENABLED)
     monkeypatch.setattr(chat_settings, "_completion_turns", chat_settings.DEFAULT_COMPLETION_TURNS)

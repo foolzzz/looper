@@ -541,6 +541,8 @@ def write_control(stdin: asyncio.StreamWriter, request: dict[str, Any]) -> str:
 
 # How long a resident Claude may take to end its turn after an interrupt request before it is killed.
 INTERRUPT_GRACE_SEC = 5.0
+# Stay below the Manager's 60-second preparation settlement deadline.
+RESERVED_INPUT_WAIT_SEC = 30.0
 # How long a stopping resident Claude may take to exit after its stdin closes before it is ended.
 STOP_GRACE_SEC = 5.0
 # How long the rest of an exited Claude's output may take to be read.
@@ -660,6 +662,10 @@ class _InputPhase(Enum):
     OPEN = "open"
     GENERATING = "generating"
     COMPLETE = "complete"
+
+
+class ReservedInputTimeout(RuntimeError):
+    """A preceding native input did not finish; admitting another prompt could repeat its effects."""
 
 
 @dataclass
@@ -1278,7 +1284,13 @@ class ResidentClaude:
             # later claim rather than writing that message into the transcript twice.
             if (message_id != keep_message_id and (owner := output.queued.get(message_id)) is not None
                     and not owner.completed.is_set()):
-                await self.discard_reserved_input(message_id)
+                try:
+                    async with asyncio.timeout(RESERVED_INPUT_WAIT_SEC):
+                        await owner.completed.wait()
+                except TimeoutError as exc:
+                    error = f"native input {message_id} did not complete within {RESERVED_INPUT_WAIT_SEC:g}s"
+                    logger.error("%s: %s; refusing to interrupt or rewrite it", self._label, error)
+                    raise ReservedInputTimeout(error) from exc
 
     async def discard_reserved_input(self, message_id: str | None) -> None:
         """A token ended without claiming: bounded withdrawal before this resident is reused."""
@@ -1863,6 +1875,8 @@ class ClaudeRunRecorder:
         # What its stream said about how it may fail, and what its close classifies (``failures``).
         self._evidence = failures.Evidence()
         self._failure_basis: tuple[dict[str, Any] | None, str | None, failures.Failure | None] | None = None
+        self._finished_status: str | None = None
+        self._finished_outcome: str | None = None
         self._admission_reported = False
         self._admission_quota_reported = False
         self._admission_report_version = 0
@@ -2250,6 +2264,23 @@ class ClaudeRunRecorder:
         result, outcome, given = self._failure_basis or (self._result, None, None)
         return failures.classify(self._runtime(), result, self._evidence, outcome=outcome, given=given)
 
+    def execution_signal(self) -> dict[str, Any] | None:
+        """The finished execution's typed facts; callers must first check act mode.
+
+        This reads the same evidence as recording, without a record readback or a
+        second admission report. Detached and interrupted runs have no result.
+        """
+        if self._detached or self._finished_status in (None, "interrupted"):
+            return None
+        outcome = self._finished_outcome or "run_failed"
+        failed = self._finished_status == "failed" or outcome in failures.REPORT_OUTCOMES
+        found = self.failure_signal() if failed else None
+        return {"record_id": self.record_id,
+                "provider_id": self._launch.profile.provider.id if self._launch is not None else None,
+                "outcome": outcome,
+                "failure": ({"class": found.cls.value, "cause": found.cause.value,
+                             **found.metadata()} if found is not None else None)}
+
     async def report_admission(self, found: failures.Failure | None, *, interrupted: bool = False) -> None:
         """Apply one run's signal once, allowing a probe's quota evidence to upgrade an untyped result.
 
@@ -2324,6 +2355,8 @@ class ClaudeRunRecorder:
         stopped). Waiting is bounded by ``CLOSE_TIMEOUT_SEC`` even if the database
         ignores cancellation; a failed write is logged.
         """
+        if self._finished_status is None:
+            self._finished_status, self._finished_outcome = status.value, outcome
         self._untrack()
         if self._record_id is None or self._closed:
             return

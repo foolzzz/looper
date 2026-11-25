@@ -139,6 +139,10 @@ class RunnerLease:
             await self.release()
             raise
 
+    def wake_tree(self) -> None:
+        if self._generation.tree is not None:
+            self._generation.tree.wake()
+
     async def release(self) -> None:
         if self._release_task is None or self._release_task.done() and self in self._generation.leases:
             self.valid = False

@@ -1,0 +1,23 @@
+{
+  "main_revision": "f747456affe6ccacaf28b21cc0d180a63c1bc2f6",
+  "sha256": {
+    "vault_message_completed": "c6477285319c7471eb632bb79747a2ae9482d0618f0a8b45351e2800d7a747d0",
+    "vault_message_failed": "1e3a5012c759a5cfcccb431739dad9b232881f2c63ed0d560e40d28c8369a951",
+    "lessons_journal_plain": "63ffb2d92900047a71ffe180960c1572a0c637d489f0179fdc1bedd30140058b",
+    "lessons_journal_fenced": "040c54f266bf69e62acadcd8b775779b253ecfe2b9ac385ed15ae6242de66050",
+    "project_view_off": "3ed3478ffd2198a8b0201b2bd85a15c13540cfa401e45c179f2e2846651b2daf",
+    "export_entry_off": "d436880365e503dcbf257f3009d84eef319a286be66d911cc089858b1e5821df"
+  },
+  "off_path": {
+    "prompt": {
+      "system_prompt": "1fb72851acaf28becb36b02ba7ea01f90ec84922758118fb52eb1292f0d6768d",
+      "tools_guide": "dc8d29aa7fc55e6f39e7eef5d67948d0832ca40b9cb79c408bae4a9c6d3a7936"
+    },
+    "tools": {
+      "order": ["looper_task_profiles", "looper_task_profile_set", "looper_task_concurrency"],
+      "looper_task_profiles": "0a31858fab5654b541aa38404edeb3677935fe3b66a6ba5eb8844ee928649987",
+      "looper_task_profile_set": "604d7e2a9fe81a51f13b3a578b7f0385485d2843eee3d1754f6cee60a23ae11c",
+      "looper_task_concurrency": "b0a27ebf12927f481e39dd74fa6d7399b33ce85ef1027497ca648c50b16d17c6"
+    }
+  }
+}

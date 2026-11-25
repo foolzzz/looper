@@ -25,7 +25,9 @@ import zipfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
-REQUIRED = ("looper/db/schema.sql", "looper/web/dashboard/index.html")
+REQUIRED = ("looper/db/schema.sql", "looper/web/dashboard/index.html",
+            "looper/agents/runtimes/runner/dsh_runner/src/main.ts",
+            "looper/agents/runtimes/runner/dsh_runner/src/tool-deadlines.json")
 
 
 def run(*cmd: str, cwd: Path, env: dict[str, str] | None = None) -> str:
@@ -43,14 +45,25 @@ def serve_check(venv: Path, work: Path, dsn: str) -> None:
     env = {**os.environ, "LOOPER_DATABASE_URL": dsn}
     for name in ("LARK_APP_ID", "TELEGRAM_BOT_TOKEN"):
         env.pop(name, None)
+    log = work / "serve.log"
     proc = subprocess.Popen(
         [str(venv / "bin" / "looper"), "serve", "--port", str(port), "--runtime-root", str(work / "rt")],
-        cwd=work, env=env, stdout=subprocess.DEVNULL, stderr=subprocess.STDOUT,
+        cwd=work, env=env, stdout=log.open("wb"), stderr=subprocess.STDOUT,
     )
+
+    def did_not_come_up(reason: str) -> SystemExit:
+        tail = log.read_text(encoding="utf-8", errors="replace").splitlines()[-60:]
+        return SystemExit(f"installed looper serve did not come up: {reason}\n" + "\n".join(tail))
+
     try:
         base = f"http://127.0.0.1:{port}"
         token_file = work / "rt" / "operator-token"
-        for _ in range(120):
+        deadline = time.monotonic() + 180
+        while True:
+            if proc.poll() is not None:
+                raise did_not_come_up(f"it exited with code {proc.returncode}")
+            if time.monotonic() > deadline:
+                raise did_not_come_up("no running status within 180 s")
             try:
                 # /api/ needs the operator token, which serve writes into the runtime root on its first start.
                 auth = {"Authorization": f"Bearer {token_file.read_text().strip()}",
@@ -63,8 +76,6 @@ def serve_check(venv: Path, work: Path, dsn: str) -> None:
                 break
             except OSError:
                 time.sleep(0.5)
-        else:
-            raise SystemExit("installed looper serve did not come up")
         try:
             urllib.request.urlopen(urllib.request.Request(f"{base}/api/v1/project_admin/list",
                                                          method="POST", data=b"{}"), timeout=5)
@@ -96,7 +107,11 @@ def main() -> int:
         # files from an earlier build into the wheel and hide a regression.
         src = work / "src"
         for name in run("git", "ls-files", "-z", cwd=ROOT).split("\0"):
-            if name and (ROOT / name).is_file():
+            if name and (ROOT / name).is_symlink():
+                # A tracked symlink (e.g. a runner directory) stays a link, as in the release checkout's build.
+                (src / name).parent.mkdir(parents=True, exist_ok=True)
+                os.symlink(os.readlink(ROOT / name), src / name)
+            elif name and (ROOT / name).is_file():
                 (src / name).parent.mkdir(parents=True, exist_ok=True)
                 shutil.copy2(ROOT / name, src / name)
         shutil.copytree(ROOT / "looper/web/dashboard", src / "looper/web/dashboard")

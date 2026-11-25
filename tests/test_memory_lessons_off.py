@@ -11,18 +11,24 @@ from pathlib import Path
 
 import pytest
 
-REVISION = "5f03d2929d14d21c6cc69ec053e0230370829f44"
+REVISION = "189fbcc490e76e294fe86a10f8d993bb4a1673c4"
 FIXTURE = Path(__file__).parent / "fixtures" / "memory_lessons_off.json"
 ROOT = Path(__file__).resolve().parents[1]
 # Function bodies are separate freezes, guarding the real unchanged behavior as well as rendered constants.
 FUNCTIONS = {
-    "looper/agents/tiers/planner.py": ["PlannerAgent._plan_message", "PlannerAgent._resume_brief",
-        "PlannerAgent._capture_project_learnings", "PlannerAgent._distill_lessons", "PlannerAgent._lessons_message"],
-    "looper/agents/system_prompt.py": ["build_system_prompt", "build_role_prompt", "work_contract", "review_contract"],
+    "looper/agents/tiers/planner.py": ["PlannerAgent._distill_lessons", "PlannerAgent._lessons_message"],
     "looper/agents/claude_cli.py": ["ResidentClaude.command", "budget_args", "system_prompt_args", "permission_args", "library_args", "knowledge_args"],
     "looper/agents/runtimes/codex.py": ["CodexRuntime._command", "CodexRuntime.resident_command", "CodexRuntime.run_command"],
     "looper/agents/task_notice.py": ["notice_text"],
     "looper/agents/memory_routing.py": ["route"],
+}
+# Optional lesson parameters change these sources; their concrete off outputs are frozen per item in
+# memory_lesson_injection_off.json, recorded from ad62143e7fc02afa840cd6771a730836d72fed89.
+OUTPUT_FROZEN = {
+    "function:looper/agents/tiers/planner.py:PlannerAgent._plan_message",
+    "function:looper/agents/tiers/planner.py:PlannerAgent._resume_brief",
+    *(f"function:looper/agents/system_prompt.py:{name}" for name in
+      ("build_system_prompt", "build_role_prompt", "work_contract", "review_contract")),
 }
 
 
@@ -87,12 +93,16 @@ def recorded_surfaces(root=ROOT):
     for file, names in FUNCTIONS.items():
         source = (root / file).read_text()
         tree = ast.parse(source)
+        # Only the frozen names are hashed. get_source_segment splits the whole file on every call, and these
+        # files make that split the cost of the freeze; the other nodes are not a recorded surface.
+        wanted = set(names)
         found = {}
         def visit(nodes, prefix=""):
             for node in nodes:
                 if isinstance(node, (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)):
                     name = prefix + node.name
-                    found[name] = ast.get_source_segment(source, node)
+                    if name in wanted:
+                        found[name] = ast.get_source_segment(source, node)
                     if isinstance(node, ast.ClassDef):
                         visit(node.body, name + ".")
         visit(tree.body)
@@ -102,14 +112,22 @@ def recorded_surfaces(root=ROOT):
     return result
 
 
+@pytest.fixture(scope="module")
+def frozen_surfaces():
+    """The freeze does not depend on the lesson mode. Build it once; each parameter still compares every surface."""
+    return recorded_surfaces()
+
+
 @pytest.mark.parametrize("global_mode,project_mode", [(None,None),(False,"on"),(True,None),(True,"off")])
-def test_disabled_lessons_preserve_each_recorded_surface(monkeypatch, global_mode, project_mode):
+def test_disabled_lessons_preserve_each_recorded_surface(monkeypatch, global_mode, project_mode, frozen_surfaces):
     from looper.agents.project_execution import ProjectExecution
     from looper.agents.ops.config import _model_project
     baseline = json.loads(FIXTURE.read_text())
     assert baseline["revision"] == REVISION
-    current = recorded_surfaces()
+    current = frozen_surfaces
     for key, expected in baseline["surfaces"].items():
+        if key in OUTPUT_FROZEN:
+            continue
         assert current[key] == expected, key
     from looper.agents import memory_lessons
     from looper.db import system_settings

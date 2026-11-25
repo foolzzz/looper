@@ -101,8 +101,18 @@ def test_a_lark_error_code_is_kept_and_an_idempotency_key_is_at_most_50_characte
     assert lark_cli.failure_code(b'{"ok": false, "error": {"code": 230011, "message": "recalled"}}') == 230011
     assert lark_cli.failure_code(b'{"ok": false, "error": {"message": "no code"}}') is None
     assert lark_cli.failure_code(b"not json") is None
-    with pytest.raises(ValueError, match="1 to 50"):
-        lark_cli.reply_command("om_1", text="x", idempotency_key="k" * 51)
+
+    def key(argv: list[str]) -> str:
+        return argv[argv.index("--idempotency-key") + 1]
+
+    # Keys of 1 to 50 characters pass unchanged; a longer key is shortened to 50 the same way every time.
+    assert key(lark_cli.reply_command("om_1", text="x", idempotency_key="k" * 50)) == "k" * 50
+    long_key = key(lark_cli.reply_command("om_1", text="x", idempotency_key="k" * 51))
+    assert len(long_key) == 50 and long_key.startswith("looper:")
+    assert key(lark_cli.reply_command("om_2", text="y", idempotency_key="k" * 51)) == long_key
+    assert key(lark_cli.reply_command("om_1", text="x", idempotency_key="k" * 52)) != long_key
+    with pytest.raises(ValueError, match="must not be empty"):
+        lark_cli.reply_command("om_1", text="x", idempotency_key="")
 
 
 @pytest.mark.parametrize("printed", [

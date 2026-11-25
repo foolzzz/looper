@@ -185,7 +185,7 @@ def test_a_line_that_is_not_a_json_object_is_answered_with_a_null_id(line: str |
 
 
 def test_a_failure_while_handling_is_an_internal_error_not_a_crash(monkeypatch: pytest.MonkeyPatch) -> None:
-    def broken(*_: Any) -> None:
+    def broken(*_: Any, **__: Any) -> None:
         raise KeyError("boom")
 
     monkeypatch.setattr(mcp_server, "handle", broken)
@@ -585,7 +585,7 @@ for (const dep of [...official.inject, ...runner.inject, 'systemPrompt']) {
 if (new Set(plugin.inject).size !== plugin.inject.length) throw new Error('duplicate dependency');
 const entries = [
   {id:'system-prompt', name:pathToFileURL(require.resolve('@deepseek-ai/dsh-system-prompt')).href},
-  {id:'tools', name:pathToFileURL(require.resolve('@deepseek-ai/dsh-tools')).href, config:{mode:'native'}},
+  {id:'tools', name:pathToFileURL(require.resolve('@deepseek-ai/dsh-tools')).href},
   {id:'headless-runner', name:moduleUrl, config:{task:'exercise the bridge'}},
 ];
 writeFileSync(configPath, JSON.stringify(entries));

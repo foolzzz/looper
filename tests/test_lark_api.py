@@ -11,7 +11,7 @@ import httpx
 import pytest
 
 from lark_platform_fake import FakeLarkPlatform
-from looper.agents.channels import lark_api
+from looper.agents.channels import lark_api, lark_cli
 from looper.agents.channels.lark_api import BotInfo, LarkApi, LarkApiError
 from looper.agents.channels.lark_cli import MESSAGE_GONE_CODES, LarkCliError
 
@@ -162,17 +162,33 @@ def test_uuid_deduplicates_messages(method: str) -> None:
     asyncio.run(run())
 
 
-@pytest.mark.parametrize("key", ["", "a" * 51])
 @pytest.mark.parametrize("method", ["send", "reply"])
-def test_uuid_length_is_validated(key: str, method: str) -> None:
+def test_an_empty_uuid_is_refused_before_any_request(method: str) -> None:
     async def run() -> None:
         async with platform() as (fake, api):
             with pytest.raises(ValueError):
                 if method == "send":
-                    await api.send(chat_id="oc_chat", text="hello", idempotency_key=key)
+                    await api.send(chat_id="oc_chat", text="hello", idempotency_key="")
                 else:
-                    await api.reply("om_parent", text="hello", idempotency_key=key)
+                    await api.reply("om_parent", text="hello", idempotency_key="")
             assert not fake.requests
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("method", ["send", "reply"])
+def test_a_long_uuid_is_shortened_like_the_cli_and_still_deduplicates(method: str) -> None:
+    long_key = "morning_brief:2026-11-24:channel-lark:" + "o" * 35
+
+    async def run() -> None:
+        async with platform() as (fake, api):
+            async def send() -> str | None:
+                if method == "send":
+                    return await api.send(chat_id="oc_chat", text="hello", idempotency_key=long_key)
+                return await api.reply("om_parent", text="hello", idempotency_key=long_key)
+            assert await send() == await send()
+            assert len(fake.sent) == 1
+            assert fake.sent[0]["uuid"] == lark_cli.normalize_key(long_key)
+            assert len(fake.sent[0]["uuid"]) == 50
     asyncio.run(run())
 
 

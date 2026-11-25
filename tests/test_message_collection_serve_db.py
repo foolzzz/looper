@@ -13,9 +13,10 @@ import asyncpg
 import pytest
 
 from looper.agents.serve import seed_channel_configs
-from evals.prompt_regression.runner import EvalError
+from evals.prompt_regression.runner import ApiError, EvalError
 from tests import msgflow_support as flow
 from tests.db_support import DSN, fresh_database_without_recording
+from tests.fake_claude import fake_claude
 from tests.message_collection_serve_support import ROOT, assert_target, serving, until
 from lark_cli_stand_in import BOT_MENTION, BOT_OPEN_ID, OPEN_ID, WORLD
 
@@ -70,10 +71,24 @@ def test_isolated_serve_bridge_collect_parity_alert_and_rollback(tmp_path):
 
         with serving(root, url, world) as (api, ops):
             def post(action, body=None):
-                assert_target(ops.path, ops.runtime_root, api)
-                answer = api.post("/api/v1/" + action.replace(".", "/"), body or {})
-                assert answer["status"] == "ok", answer
-                return answer["result"]
+                busy_message = {"message_collection.run_now": "collection could not start: connection",
+                                "message_collection.mode_update": "busy"}.get(action)
+
+                def attempt():
+                    assert_target(ops.path, ops.runtime_root, api)
+                    try:
+                        answer = api.post("/api/v1/" + action.replace(".", "/"), body or {})
+                    except ApiError as exc:
+                        # Background collection may still hold a task or writer slot.
+                        if busy_message is not None and exc.status == 409 and exc.body == {
+                            "status": "error", "error": {"code": "conflict",
+                                "message": busy_message},
+                        }:
+                            return None
+                        raise
+                    assert answer["status"] == "ok", answer
+                    return answer["result"]
+                return until(attempt) if busy_message is not None else attempt()
 
             def observe(phase):
                 observer = os.environ.get("LOOPER_COLLECTION_BROWSER")
@@ -114,13 +129,20 @@ def test_isolated_serve_bridge_collect_parity_alert_and_rollback(tmp_path):
             assert len(sql("SELECT external_id FROM source_parity_members WHERE side='collect'", fetch=True)) == 4
             assert dict(sql("SELECT bridge_offset,bridge_inode,bridge_size FROM source_chats", fetch=True)[0]) == bridge_position
             # A real CLI subprocess reads the stored report, without account I/O or writes.
-            before_calls = calls_file.read_bytes()
+            cli_bin = root / "parity-cli-bin"
+            cli_bin.mkdir()
+            cli_account_call = root / "parity-cli-account-call"
+            fake_claude(cli_bin / "lark-cli", "from pathlib import Path\n"
+                f"Path({str(cli_account_call)!r}).touch()\nraise SystemExit(76)\n")
+            cli_env = {**os.environ, "HOME": str(root / "home"),
+                "CLAUDE_CONFIG_DIR": str(root / "home/.claude"),
+                "PATH": os.pathsep.join((str(cli_bin), str(root / "bin"), "/usr/bin", "/bin", "/usr/sbin", "/sbin"))}
             result = subprocess.run([sys.executable, "-m", "looper.cli", "msgflow", "parity", "--source", "synthetic",
                 "--session", session, "--json", "--config", str(ops.path), "--runtime-root", str(ops.runtime_root)],
-                cwd=ROOT, capture_output=True, text=True, timeout=20)
+                cwd=ROOT, env=cli_env, capture_output=True, text=True, timeout=20)
             assert result.returncode == 0, result.stderr
             assert json.loads(result.stdout)["totals"]["intersection"] == 4
-            assert calls_file.read_bytes() == before_calls
+            assert not cli_account_call.exists()
             # A new window's event gets one canonical seq; parity keeps rechecking the same frozen window.
             new_message = flow.message("om_new_synthetic", sent_at=datetime.now(timezone.utc)-timedelta(milliseconds=1))
             state["collector"]["messages"]["oc_collect_synthetic"].append(new_message)
@@ -140,8 +162,9 @@ def test_isolated_serve_bridge_collect_parity_alert_and_rollback(tmp_path):
             until(lambda: sql("SELECT 1 FROM source_stream_alerts WHERE kind='parity_drift' AND open_state='sent'", fetch=True))
             result = subprocess.run([sys.executable, "-m", "looper.cli", "msgflow", "parity", "--source", "synthetic",
                 "--session", session, "--json", "--config", str(ops.path), "--runtime-root", str(ops.runtime_root)],
-                cwd=ROOT, capture_output=True, text=True, timeout=20)
+                cwd=ROOT, env=cli_env, capture_output=True, text=True, timeout=20)
             assert result.returncode == 1 and json.loads(result.stdout)["totals"] == drift["totals"]
+            assert not cli_account_call.exists()
             attention = post("attention.summary")
             assert any(item["facts"].get("session") == session for section in attention["sections"]
                        for item in section["items"] if item["facts"].get("source") == "message_stream"), attention
@@ -164,7 +187,8 @@ def test_isolated_serve_bridge_collect_parity_alert_and_rollback(tmp_path):
             accepted = post("message_collection.run_now", {"source_id": "synthetic"})
             until(lambda: sql("SELECT status FROM source_runs WHERE id=$1 AND status='ok'",
                               int(accepted["run_id"]), fetch=True))
-            until(lambda: sql("SELECT 1 FROM source_stream_alerts WHERE kind='auth' AND resolved_at IS NOT NULL", fetch=True))
+            # Each episode sends its recovery separately; resolution alone is not a delivery receipt.
+            until(lambda: sql("SELECT 1 FROM source_stream_alerts WHERE kind='auth' AND recovery_state='sent'", fetch=True))
             until(lambda: sql("SELECT 1 FROM source_stream_alerts WHERE kind='parity_drift' AND recovery_state='sent'", fetch=True))
             assert post("message_collection.get", {"source_id": "synthetic"})["parity"]["state"] == "matched"
             observe("matched")
@@ -207,10 +231,22 @@ def test_isolated_serve_bridge_collect_parity_alert_and_rollback(tmp_path):
             finally:
                 await inbox.close()
         asyncio.run(debt())
+
+        async def catchup_readback():
+            from looper.agents.channels.lark_inbox import LarkInbox
+            inbox = await LarkInbox.open(root / "runtime/.local/lark/channel-lark/inbox.sqlite3")
+            try:
+                return ("oc_ingress_synthetic" not in await inbox.debts()
+                        and await inbox.processed("om_admitted_synthetic"))
+            finally:
+                await inbox.close()
+
         with serving(root, url, world) as (api, ops):
             until(lambda: sql("SELECT 1 FROM chat_messages WHERE role='user' AND content LIKE $1",
                               "%"+admitted+"%", fetch=True))
             until(lambda: len(sql("SELECT seq FROM source_events", fetch=True)) == 6, timeout=80)
+            # Live admission and bridge collection can finish before the bot history's second page.
+            until(lambda: asyncio.run(catchup_readback()))
             assert len(sql("SELECT 1 FROM chat_messages WHERE role='user' AND content LIKE $1",
                            "%"+admitted+"%", fetch=True)) == 1
             assert not sql("SELECT 1 FROM chat_messages WHERE role='user' AND content LIKE $1",
@@ -220,15 +256,7 @@ def test_isolated_serve_bridge_collect_parity_alert_and_rollback(tmp_path):
         calls = [json.loads(line) for line in (root / "lark-calls.jsonl").read_text().splitlines()]
         assert any("--as" in call and "bot" in call and any("overlap" in arg for arg in call) for call in calls)
 
-        async def catchup_readback():
-            from looper.agents.channels.lark_inbox import LarkInbox
-            inbox = await LarkInbox.open(root / "runtime/.local/lark/channel-lark/inbox.sqlite3")
-            try:
-                assert "oc_ingress_synthetic" not in await inbox.debts()
-                assert await inbox.processed("om_admitted_synthetic")
-            finally:
-                await inbox.close()
-        asyncio.run(catchup_readback())
+        assert asyncio.run(catchup_readback())
 
 
 def test_two_isolated_servers_share_writer_lock_and_shutdown_interrupts_collection(tmp_path):

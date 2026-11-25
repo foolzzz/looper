@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import shutil
 import sys
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -101,7 +102,7 @@ def build_parser() -> argparse.ArgumentParser:
 def _add_claude_code_parser(commands: argparse._SubParsersAction) -> None:
     cc = commands.add_parser(
         "claude-code", allow_abbrev=False,
-        help="Give your own Claude Code the Manager's operator profile (opt-in).",
+        help="Give your own Claude Code the Manager's profile and read-only retrieval (opt-in).",
         description="Reuse looper profile show for your own Claude Code. Nothing is installed until install "
                     "shows the change and you confirm it.")
     sub = cc.add_subparsers(dest="claude_code_command", required=True)
@@ -111,15 +112,20 @@ def _add_claude_code_parser(commands: argparse._SubParsersAction) -> None:
                     "0 printed, 1 unavailable or empty, 2 usage, 4 inside an agent run. "
                     "With --hook: print SessionStart JSON or nothing, never write stderr, always exit 0.")
     profile.add_argument("--hook", action="store_true", help="Claude Code SessionStart hook mode.")
-    for name, help_text in (("install", "Add the SessionStart hook after showing the change."),
-                            ("uninstall", "Remove the SessionStart hook after showing the change.")):
+    for name, help_text in (("install", "Add the SessionStart hook and retrieval MCP server after confirmation."),
+                            ("uninstall", "Remove the SessionStart hook and retrieval MCP server after confirmation.")):
         command = sub.add_parser(name, allow_abbrev=False, help=help_text)
-        # Python 3.11 argparse rejects [] with nargs="*", choices=["hook"]. Validate in run instead.
-        command.add_argument("parts", nargs="*", help="What to change: hook (default: every part).")
+        # Python 3.11 argparse rejects [] with nargs="*", choices=["hook", "mcp"]. Validate in run instead.
+        command.add_argument("parts", nargs="*", help="What to change: hook, mcp (default: every part).")
         command.add_argument("--yes", action="store_true", help="Write without asking (review --dry-run first).")
         command.add_argument("--dry-run", action="store_true", help="Show the change; write nothing.")
+        command.add_argument("--claude", default=shutil.which("claude"), help="Claude Code executable path.")
         _add_location_flags(command)
+    mcp = sub.add_parser("mcp", allow_abbrev=False,
+        help="Serve read-only retrieval tools over MCP on stdin/stdout (install mcp registers it).")
+    _add_location_flags(mcp)
     status = sub.add_parser("status", allow_abbrev=False, help="Show what is installed and whether it works.")
+    status.add_argument("--claude", default=shutil.which("claude"), help="Claude Code executable path.")
     for command in (profile, status):
         _add_location_flags(command)
 
@@ -295,16 +301,24 @@ def _add_memory_parser(commands: argparse._SubParsersAction) -> None:
     check = sub.add_parser("check", allow_abbrev=False,
                            help="Check what a write needs now (setting, git, branch, worktree folder); changes nothing.")
     check.add_argument("--json", action="store_true")
+    lessons = sub.add_parser("lessons", allow_abbrev=False, help="List project lessons and their counters.")
+    lessons.add_argument("--project")
+    lessons.add_argument("--state", default="all")
+    lessons.add_argument("--limit", type=int, default=50)
+    lessons.add_argument("--before", help="Continue before this M-id.")
+    lessons.add_argument("--json", action="store_true")
     writes = []
     for name, help_text in (("reject", "Reject an unwritten memory candidate."),
                             ("retry", "Retry a blocked write, preserving its confirmed content."),
+                            ("revoke", "Revoke an active project lesson and retain its fingerprint tombstone."),
+                            ("renew", "Renew an active project lesson's validity."),
                             ("delete", "Delete a candidate, leaving its fingerprint tombstone and vault notes.")):
         command = sub.add_parser(name, allow_abbrev=False, help=help_text)
         command.add_argument("candidate", help="M-0042 or M-42.")
-        if name == "reject":
+        if name in {"reject", "revoke"}:
             command.add_argument("--reason", help="Why this memory is not useful (at most 300 characters).")
         writes.append(command)
-    for command in (listing, show, check, *writes):
+    for command in (listing, show, check, lessons, *writes):
         _add_location_flags(command)
 
 
@@ -373,6 +387,9 @@ def _add_service_parser(commands: argparse._SubParsersAction) -> None:
     upgrade = service_commands.add_parser(
         "upgrade", allow_abbrev=False, help="Plan, drain, install and restart the changed components.")
     upgrade.add_argument("--dry-run", action="store_true", help="Print the upgrade plan only.")
+    upgrade.add_argument("--backup-before-stop", action="store_true",
+                         help="Take a verified migration backup before draining (default off). Writes after its "
+                              "snapshot are absent; reuse expires after 15 minutes. Registry upgrades still back up at startup.")
     upgrade.add_argument("--to", metavar="REF_OR_WHEEL", help="Target Git ref (default origin/main) or wheel path.")
     upgrade.add_argument("--start-timeout", "--timeout", dest="timeout", type=float, default=300.0,
                          metavar="SECONDS", help="Seconds to wait for the restarted service to answer (default 300).")
@@ -531,7 +548,7 @@ def _service(args: argparse.Namespace) -> int:
             print(service.upgrade(host, label=args.label, to=args.to, dry_run=args.dry_run,
                                   timeout=args.timeout, drain_timeout=args.drain_timeout,
                                   turns_timeout=args.turns_timeout, no_force=args.no_force,
-                                  preflight_wait=args.preflight_wait))
+                                  preflight_wait=args.preflight_wait, backup_before_stop=args.backup_before_stop))
         elif args.service_command == "restart":
             print(service.restart(host, label=args.label, timeout=args.timeout, drain=args.drain,
                                   drain_timeout=args.drain_timeout, no_force=args.no_force))

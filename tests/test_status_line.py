@@ -119,6 +119,94 @@ def test_the_edit_cap_stops_progress_but_not_the_closing_edit() -> None:
     assert MAX_PROGRESS_EDITS + 1 <= 20  # Feishu's limit per message
 
 
+def test_long_turn_spreads_the_budget_and_leaves_an_explicit_running_status() -> None:
+    chat = _Chat()
+    now = 100.0
+    edited_at: list[float] = []
+
+    async def edit(*args: Any) -> None:
+        edited_at.append(now - 100.0)
+        await chat.edit(*args)
+
+    async def main() -> None:
+        nonlocal now
+        lines = StatusLines(channel="test", send=chat.send, edit=edit, clock=lambda: now)
+        await lines.update("c1", "oc_1", _phase(0))
+        for second in range(1, 7201):
+            now = 100.0 + second
+            await lines.update("c1", "oc_1", _phase(second))
+        assert len(chat.edits) == MAX_PROGRESS_EDITS
+        assert 45 * 60 <= edited_at[-1] <= 60 * 60
+        assert edited_at == [*range(3, 31, 3), 54, 98, 177, 319, 575, 1035, 1863, 3354]
+        assert chat.edits[-2].startswith("⏳ 处理中：")
+        assert chat.edits[-1] == f"⏳ 仍在处理（已用时 {int(edited_at[-1] // 60)} 分钟）"
+        assert len(chat.sent) == 1
+        await lines.finish("c1")
+
+    asyncio.run(main())
+    assert len(chat.edits) == MAX_PROGRESS_EDITS + 1 <= 20
+    assert chat.edits[-1].startswith("✅ 完成 · 用时 7200s · 工具 ")
+
+
+def test_short_turn_keeps_the_same_edit_times_and_phase_labels() -> None:
+    chat = _Chat()
+    now = 0.0
+    edited_at: list[float] = []
+
+    async def edit(*args: Any) -> None:
+        edited_at.append(now)
+        await chat.edit(*args)
+
+    async def main() -> None:
+        nonlocal now
+        lines = StatusLines(channel="test", send=chat.send, edit=edit, clock=lambda: now)
+        for second in range(29):
+            now = float(second)
+            await lines.update("c1", "oc_1", _phase(second))
+        await lines.finish("c1")
+
+    asyncio.run(main())
+    assert edited_at == [*range(3, 28, 3), 28]
+    assert chat.edits[:-1] == [f"⏳ 处理中：思考中 · {second}s" for second in range(3, 28, 3)]
+    assert chat.edits[-1] == "✅ 完成 · 用时 28s · 工具 19 次"
+
+
+def test_a_trailing_edit_uses_the_growing_gap_and_latest_phase(monkeypatch: pytest.MonkeyPatch) -> None:
+    from looper.agents.channels import status_line
+
+    chat = _Chat()
+    now = 0.0
+    waits: list[float] = []
+
+    async def timeout(awaitable: Any, *, timeout: float) -> None:
+        nonlocal now
+        awaitable.close()
+        waits.append(timeout)
+        now += timeout
+        raise asyncio.TimeoutError
+
+    # Advance only this module's timer; no wall-clock wait or global asyncio patch.
+    monkeypatch.setattr(status_line, "asyncio", SimpleNamespace(
+        ensure_future=asyncio.ensure_future, wait_for=timeout, TimeoutError=asyncio.TimeoutError,
+        gather=asyncio.gather))
+
+    async def main() -> None:
+        nonlocal now
+        lines = _lines(chat, clock=lambda: now)
+        for second in range(0, 31, 3):
+            now = float(second)
+            await lines.update("c1", "oc_1", _phase(second))
+        now = 31.0
+        await lines.update("c1", "oc_1", _phase(1))
+        await lines.update("c1", "oc_1", _phase(2))
+        await asyncio.sleep(0)  # one trailing edit, even without another phase
+        assert waits == [23.0]
+        assert chat.edits[-1] == "⏳ 处理中：改文件 (Edit) · 54s"
+        await lines.finish("c1")
+
+    asyncio.run(main())
+
+
 def test_a_stopped_reply_closes_the_line_without_an_error_mark() -> None:
     chat = _Chat()
 
@@ -195,6 +283,72 @@ def test_status_kinds(payload: dict[str, Any], kind: StatusKind) -> None:
 
 
 # --- Lark, end to end through the stand-in lark-cli ---
+
+
+@pytest.mark.parametrize("stop", [False, True])
+def test_status_precedes_a_slow_quote_read_and_closes_even_when_withdrawn(
+    tmp_path: Path, lark_cli_stand_in: Path, agent_db: Any, current_turn: Any,
+    monkeypatch: pytest.MonkeyPatch, stop: bool,
+) -> None:
+    from looper.agents import chat_settings
+    from looper.agents.channels import lark_quote
+    from looper.agents.channels.lark import LarkChannelAdapter
+    from looper.agents.tiers.manager import StopResult
+    from tests.test_manager_stop import _manager, _Session
+
+    monkeypatch.setattr(chat_settings, "_stop_enabled", True)
+
+    async def main() -> None:
+        session = _Session(hold=False)
+        manager, bus, _ = _manager(tmp_path, session)
+        adapter = LarkChannelAdapter(runtime_root=tmp_path,
+                                     allowlist=SenderAllowlist("channel-lark", frozenset({OPEN_ID})))
+        adapter._correlation_chat["c1"] = "oc_dm"
+        source = channel_address("lark")
+        queue = bus.get_queue(source.agent_id)
+        reading, release, cancelled = asyncio.Event(), asyncio.Event(), asyncio.Event()
+        before_read: list[MessageEnvelope] = []
+
+        async def read(ref: Any, *, after: int) -> Any:
+            while not queue.empty():
+                before_read.append(queue.get_nowait())
+            reading.set()
+            try:
+                await release.wait()
+                return lark_quote.unread(ref, "recalled")
+            finally:
+                cancelled.set()
+
+        manager.read_quote = read
+        envelope = MessageEnvelope.create(source=source, target=MANAGER_ADDRESS,
+            message_type=MessageType.USER_MESSAGE, correlation_id="c1",
+            payload={"text": "summarize this", "channel_context": {"chat_id": "oc_dm", "chat_type": "p2p"},
+                     "quote_ref": {"channel_id": "channel-lark", "chat_id": "oc_dm", "message_id": "om_in",
+                                   "kind": "reply", "parent_id": "om_parent"}})
+        handling = asyncio.create_task(manager._handle(envelope))
+        try:
+            await asyncio.wait_for(reading.wait(), 5)
+            assert len(before_read) == 1 and before_read[0].payload.get("activity") == "thinking"
+            assert (await adapter.deliver(before_read[0])).success
+            assert adapter._status.tracked() == 1
+            if stop:
+                assert await manager.stop_turn(envelope.message_id, via="lark") is StopResult.STOPPING
+            else:
+                release.set()
+            await asyncio.wait_for(handling, 5)
+            while not queue.empty():
+                assert (await adapter.deliver(queue.get_nowait())).success
+            assert cancelled.is_set() and adapter._status.tracked() == 0
+            assert len(session.turns) == (0 if stop else 1)
+            edits = [call[-1] for call in _calls(lark_cli_stand_in) if "+messages-edit" in call]
+            assert len(edits) == 1
+            assert (edits[0] == "已停止") if stop else edits[0].startswith("✅ 完成")
+        finally:
+            release.set()
+            await asyncio.gather(handling, return_exceptions=True)
+            await bus.shutdown()
+
+    asyncio.run(main())
 
 
 def _envelope(kind: MessageType, payload: dict[str, Any], correlation_id: str = "c1") -> MessageEnvelope:

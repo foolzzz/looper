@@ -1,7 +1,7 @@
 import { callV1, V1Error } from "@/lib/v1";
 
 /** The sections of the "needs you" summary (`attention.summary`), in the order the server lists them. */
-export type AttentionKind = "gates" | "confirmations" | "schedules" | "logins" | "intents" | "ledger" | "deliveries" | "cost" | "vault_commits";
+export type AttentionKind = "gates" | "confirmations" | "schedules" | "logins" | "intents" | "ledger" | "deliveries" | "cost" | "failure_holds" | "reminders" | "vault_commits";
 
 /** One thing that waits for the operator. `facts` are the kind's own (`looper/agents/attention.py`). */
 export interface AttentionItem {

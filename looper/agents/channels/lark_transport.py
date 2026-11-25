@@ -229,17 +229,24 @@ class CliTransport:
     async def send(self, *, chat_id: str | None = None, user_id: str | None = None,
                    text: str | None = None, markdown: str | None = None,
                    idempotency_key: str | None = None, return_id: bool = False) -> str | None:
-        return await self._message(lark_cli.send_command(
-            chat_id=chat_id, user_id=user_id, text=text, markdown=markdown, profile=self._profile,
-            idempotency_key=idempotency_key), return_id=return_id, resolve_thread=chat_id is not None)
+        try:
+            argv = lark_cli.send_command(
+                chat_id=chat_id, user_id=user_id, text=text, markdown=markdown, profile=self._profile,
+                idempotency_key=idempotency_key)
+        except ValueError as exc:
+            raise lark_cli.LarkCliError(str(exc), not_sent=True) from exc
+        return await self._message(argv, return_id=return_id, resolve_thread=chat_id is not None)
 
     async def reply(self, message_id: str, *, text: str | None = None, markdown: str | None = None,
                     idempotency_key: str | None = None, return_id: bool = False,
                     reply_in_thread: bool = False) -> str | None:
-        return await self._message(lark_cli.reply_command(
-            message_id, text=text, markdown=markdown, profile=self._profile,
-            idempotency_key=idempotency_key, reply_in_thread=reply_in_thread),
-            return_id=return_id, resolve_thread=True)
+        try:
+            argv = lark_cli.reply_command(
+                message_id, text=text, markdown=markdown, profile=self._profile,
+                idempotency_key=idempotency_key, reply_in_thread=reply_in_thread)
+        except ValueError as exc:
+            raise lark_cli.LarkCliError(str(exc), not_sent=True) from exc
+        return await self._message(argv, return_id=return_id, resolve_thread=True)
 
     async def _message(self, argv: list[str], *, return_id: bool, resolve_thread: bool = False) -> str | None:
         """Remember successful thread sends without turning a bookkeeping error into a send retry."""
@@ -400,6 +407,12 @@ class GatedLarkTransport:
 
     async def _message(self, kind: str, body: dict[str, Any], reply_to: str | None = None) -> str | None:
         from .outbound import derived_key
+
+        if body.get("idempotency_key") is not None:
+            try:
+                body["idempotency_key"] = lark_cli.normalize_key(body["idempotency_key"])
+            except ValueError as exc:
+                raise lark_cli.LarkCliError(str(exc), not_sent=True) from exc
 
         async def direct():
             if reply_to is not None:
