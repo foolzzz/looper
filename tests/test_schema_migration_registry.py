@@ -1,12 +1,22 @@
 """Migration discovery preserves the released order without a shared append-only list."""
 from dataclasses import asdict
+import inspect
 import json
 from pathlib import Path
 import sys
+from typing import get_type_hints
 
 import pytest
 
 from looper.db import migrations
+
+
+def test_every_migration_apply_reports_whether_it_did_work():
+    # The startup timing line is driven by this bool rather than by the separate pending() probe,
+    # because some migrations do constraint-validation or marker-repair work while pending() is false.
+    for migration in migrations.discover():
+        # get_type_hints resolves the string form that ``from __future__ import annotations`` stores.
+        assert get_type_hints(migration.apply).get("return") is bool, migration.name
 
 
 _BASELINE = json.loads((Path(__file__).parent / "fixtures" / "schema_migration_order.json").read_text())
@@ -38,7 +48,7 @@ def _write_migration(directory, module_name, name, order, pending_order):
     (directory / f"{module_name}.py").write_text(
         f"name = {name!r}\norder = {order}\npending_order = {pending_order}\n"
         "async def pending(conn):\n    return False\n"
-        "async def apply(conn, *, sql, state):\n    pass\n"
+        "async def apply(conn, *, sql, state) -> bool:\n    return False\n"
     )
 
 
