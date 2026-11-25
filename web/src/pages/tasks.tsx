@@ -18,6 +18,7 @@ import {
   X,
 } from "lucide-react";
 import { FailedChecksLine } from "@/components/failed-checks-line";
+import { TaskChatEntry, useTaskChatTargets } from "@/components/task-chat-entry";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
@@ -329,6 +330,7 @@ export function TasksPage({ sub, query, onNavigate }: TasksPageProps) {
   const [scheduleNames, setScheduleNames] = useState<Record<string, string>>({});
   const [taskPath, taskQuery = ""] = (sub || "").split("?");
   const selectedTaskId = taskPath ? decodeURIComponent(taskPath) : null;
+  const chatAvailability = useTaskChatTargets(!selectedTaskId);
   const taskParams = new URLSearchParams(taskQuery);
   const gateStep = taskParams.get("gate");
   const tabParam = taskParams.get("tab");
@@ -872,6 +874,7 @@ export function TasksPage({ sub, query, onNavigate }: TasksPageProps) {
                   </div>
                 </div>
                 <div className="shrink-0 flex flex-wrap items-center gap-1 max-sm:pl-7">
+                  <TaskChatEntry taskId={task.task_id} availability={chatAvailability} />
                   {isActiveTask(task) && (
                     <button
                       type="button"
