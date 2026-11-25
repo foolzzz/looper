@@ -26,8 +26,9 @@ from tests.test_api_v1_auth import _bearer, _send, _send_raw, _serving
 from tests.test_operator_auth import TOKEN
 
 PREFIX = "/api/v1/operator_chat/"
-# Canonical OpenAPI document on this branch before the task target and the two stream events.
-PRE_CARD_DOCUMENT = "18973c35d8b7af331ff6ca9f7a1854b9df4a97a06fea12400dd73709fe5ebb8d"
+# Stripped OpenAPI document after the task-manager branches and main: the task target and the two
+# stream events are removed, and this hash is what remains.
+PRE_CARD_DOCUMENT = "6c578e885403c0e1588fd54f0aea7962b6807b2237e0f60780658997d648fc75"
 LATER = "这个命令要等「交给后台」上线后才能用"
 
 
@@ -47,9 +48,15 @@ class Pool:
         self.running = {}
         self.drive = None
         self.refuse = False
+        self.entered = None
+        self.release = None
 
     async def submit(self, task_id, text, *, message_id, sink, history=()):
         self.calls.append({"task_id": task_id, "text": text, "message_id": message_id, "history": list(history)})
+        if self.entered is not None:
+            self.entered.set()
+        if self.release is not None:
+            await self.release.wait()
         self.running[task_id] = message_id
         if self.drive is not None:
             await self.drive(sink)
@@ -470,3 +477,189 @@ def test_manager_path_unchanged(monkeypatch, tmp_path):
             stored = await conn.fetchrow("SELECT channel, content FROM chat_messages WHERE message_id = 'm-1'")
             assert stored["channel"] == "web" and stored["content"] == "hello from the manager"
     run_db(check, monkeypatch)
+
+
+INDENTED = "  keep indentation\n    nested\n"
+STARTING_REPLY = "已存储，启动中"
+ORCHESTRATED_REPLY = "这句话已留下，没有交给任务管家。编排中的纠正还不能从这里送出。"
+MESSAGE_CONFLICT = "this message_id was already sent with different text"
+
+
+def test_task_text_kept_verbatim(monkeypatch, tmp_path):
+    """A task target stores and delivers the original text; Manager and Planner targets stay trimmed."""
+    pool = Pool()
+    use_pool(monkeypatch, pool)
+    recorded = []
+
+    async def supplement(task_id, text, **kwargs):
+        recorded.append(text)
+        return await kwargs["wake"](1)
+
+    monkeypatch.setattr("looper.agents.http_server.projects.add_task_supplement", supplement)
+
+    async def check(conn):
+        settings.set_enabled(True)
+        task_id = await make_task(conn, tmp_path)
+        async with opened(tmp_path) as server:
+            server._task_router.has_planner = lambda wanted: wanted == task_id
+            status, answer = await send(server, task_id, INDENTED, "raw")
+            assert status == 200, answer
+            assert pool.calls[0]["text"] == INDENTED
+            stored = await conn.fetchval("SELECT content FROM chat_messages WHERE message_id = 'raw'")
+            assert stored == INDENTED
+            status, answer = await send(server, task_id, "  /done  \n", "done-raw")
+            assert status == 200, answer
+            done = await reply(server, answer["result"]["correlation_id"])
+            assert final_text(done)["text"] == "任务已完成"
+            assert [call["text"] for call in pool.calls] == [INDENTED]
+            assert await conn.fetchval("SELECT content FROM chat_messages WHERE message_id = 'done-raw'") == "  /done  \n"
+            status, answer = await send(server, task_id, "  \n\t  ", "blank")
+            assert status == 400 and answer["error"]["code"] == "invalid"
+            assert await conn.fetchval("SELECT count(*) FROM chat_messages WHERE message_id = 'blank'") == 0
+            status, _, answer = await post(server, "send", {"text": "  hello manager \n", "message_id": "mgr",
+                                                           "session_id": "manager-thread"})
+            assert status == 200, answer
+            assert await conn.fetchval("SELECT content FROM chat_messages WHERE message_id = 'mgr'") == "hello manager"
+            status, _, answer = await post(server, "send", {
+                "text": "  hello planner \n", "message_id": "pln", "session_id": "planner-thread",
+                "target": {"kind": "planner", "task_id": task_id}})
+            assert status == 200, answer
+            assert recorded == ["hello planner"]
+            assert await conn.fetchval("SELECT content FROM chat_messages WHERE message_id = 'pln'") == "hello planner"
+    run_db(check, monkeypatch, timeout=60)
+
+
+def test_task_message_retry_claims_once(monkeypatch, tmp_path):
+    """One message id runs one turn. The same retry reuses it; a different body conflicts."""
+    import asyncio
+
+    pool = Pool()
+    pool.entered = asyncio.Event()
+    pool.release = asyncio.Event()
+    use_pool(monkeypatch, pool)
+
+    async def check(conn):
+        settings.set_enabled(True)
+        task_id = await make_task(conn, tmp_path)
+        async with opened(tmp_path) as server:
+            text = "  retry me\n    again\n"
+
+            async def both():
+                return await asyncio.gather(send(server, task_id, text, "same"),
+                                            send(server, task_id, text, "same"))
+
+            running = asyncio.create_task(both())
+            await pool.entered.wait()
+            for _ in range(50):
+                if len(pool.calls) > 1 or running.done():
+                    break
+                await asyncio.sleep(0.01)
+            observed = len(pool.calls)
+            pool.release.set()
+            first, second = await running
+            assert observed == 1
+            assert pool.calls[0]["text"] == text
+            assert first[0] == 200 and second[0] == 200, (first, second)
+            assert first[1]["result"]["correlation_id"] == second[1]["result"]["correlation_id"]
+            assert len(pool.calls) == 1
+            assert await conn.fetchval("SELECT content FROM chat_messages WHERE message_id = 'same'") == text
+            status, answer = await send(server, task_id, "different body", "same")
+            assert status == 409, answer
+            assert answer["error"]["code"] == "conflict"
+            assert answer["error"]["message"] == MESSAGE_CONFLICT
+            assert await conn.fetchval("SELECT content FROM chat_messages WHERE message_id = 'same'") == text
+            assert len(pool.calls) == 1
+            left, right = await asyncio.gather(send(server, task_id, "alpha-body", "race"),
+                                               send(server, task_id, "beta-body", "race"))
+            statuses = sorted((left[0], right[0]))
+            assert statuses == [200, 409], (left, right)
+            conflict = left if left[0] == 409 else right
+            assert conflict[1]["error"]["code"] == "conflict"
+            assert conflict[1]["error"]["message"] == MESSAGE_CONFLICT
+            assert len(pool.calls) == 2
+            stored = await conn.fetchval("SELECT content FROM chat_messages WHERE message_id = 'race'")
+            assert stored in ("alpha-body", "beta-body")
+            assert pool.calls[1]["text"] == stored
+    run_db(check, monkeypatch, timeout=60)
+
+
+def test_task_message_routes_by_status(monkeypatch, tmp_path):
+    """pending and assigned are stored with a starting reply. Other orchestrated statuses are not sent to the task Manager."""
+    pool = Pool()
+    use_pool(monkeypatch, pool)
+
+    async def check(conn):
+        settings.set_enabled(True)
+        async with opened(tmp_path) as server:
+            for status_name in ("pending", "assigned"):
+                task_id = await make_task(conn, tmp_path, status=status_name)
+                before = len(pool.calls)
+                status, answer = await send(server, task_id, INDENTED, "s-" + status_name)
+                assert status == 200, answer
+                events = await reply(server, answer["result"]["correlation_id"])
+                assert final_text(events)["text"] == STARTING_REPLY
+                assert final_text(events)["outcome"] == "starting"
+                assert {"kind": "starting", "status": status_name} in [payload for kind, payload in events
+                                                                       if kind == "task.event"]
+                assert len(pool.calls) == before
+                assert await conn.fetchval(
+                    "SELECT content FROM chat_messages WHERE message_id = $1", "s-" + status_name) == INDENTED
+            task_id = await make_task(conn, tmp_path, status="executing")
+            before = len(pool.calls)
+            status, answer = await send(server, task_id, INDENTED, "s-executing")
+            assert status == 200, answer
+            events = await reply(server, answer["result"]["correlation_id"])
+            assert final_text(events)["text"] == ORCHESTRATED_REPLY
+            assert final_text(events)["outcome"] == "refused"
+            assert {"kind": "refused", "reason": "orchestrated", "status": "executing"} in [
+                payload for kind, payload in events if kind == "task.event"]
+            assert len(pool.calls) == before
+            assert await conn.fetchval(
+                "SELECT content FROM chat_messages WHERE message_id = 's-executing'") == INDENTED
+            for status_name in ("running", "waiting_user"):
+                task_id = await make_task(conn, tmp_path, status=status_name)
+                before = len(pool.calls)
+                status, answer = await send(server, task_id, "hello " + status_name, "s-" + status_name)
+                assert status == 200, answer
+                events = await reply(server, answer["result"]["correlation_id"])
+                assert final_text(events)["outcome"] == "refused"
+                assert {"kind": "refused", "reason": "orchestrated", "status": status_name} in [
+                    payload for kind, payload in events if kind == "task.event"]
+                assert len(pool.calls) == before
+            draft_id = await make_task(conn, tmp_path, status="draft")
+            status, answer = await send(server, draft_id, INDENTED, "s-draft")
+            assert status == 200, answer
+            assert pool.calls[-1]["task_id"] == draft_id
+            assert pool.calls[-1]["text"] == INDENTED
+    run_db(check, monkeypatch, timeout=60)
+
+
+def test_fixed_commands_never_submit_or_enter_history(monkeypatch, tmp_path):
+    """Each fixed command is matched on the trimmed message and never becomes a turn or model history."""
+    from looper.agents.task_commands import TaskCommand
+
+    pool = Pool()
+    use_pool(monkeypatch, pool)
+
+    async def check(conn):
+        settings.set_enabled(True)
+        task_id = await make_task(conn, tmp_path)
+        async with opened(tmp_path) as server:
+            for command in TaskCommand:
+                status, answer = await send(server, task_id, f"\n  {command.value.upper()}  ",
+                                            "cmd-" + command.value[1:])
+                assert status == 200, answer
+                events = await reply(server, answer["result"]["correlation_id"])
+                assert final_text(events)["outcome"] == "command"
+                assert pool.calls == []
+            status, answer = await send(server, task_id, "please continue", "after-commands")
+            assert status == 200, answer
+            assert [call["text"] for call in pool.calls] == ["please continue"]
+            blob = json.dumps(pool.calls[0]["history"], ensure_ascii=False)
+            for command in TaskCommand:
+                assert command.value not in blob
+                assert f"\n  {command.value.upper()}  " not in blob
+            for phrase in ("现在没有在进行的回合", "任务已完成", "这个命令要等"):
+                assert phrase not in blob
+            assert conn is not None
+    run_db(check, monkeypatch, timeout=60)

@@ -73,7 +73,10 @@ OPERATIONS = (
 
 
 async def run(server, operation, arguments, principal, headers):
-    text = arguments["text"].strip()
+    raw_text = arguments["text"]
+    # Manager and Planner messages stay trimmed. A task message is stored and delivered unchanged; only the empty
+    # check and the fixed-command match use the trimmed copy.
+    text = raw_text.strip()
     if not text:
         raise OpError(ErrorCode.INVALID, "text is required")
     try:
@@ -124,7 +127,8 @@ async def run(server, operation, arguments, principal, headers):
             shutil.rmtree(chat_attachments.root(server._runtime_root) / "web" / upload_id)
             raise OpError(ErrorCode.INVALID, f"{rejected.name}: {rejected.reason or rejected.state.value}")
         attachments = [item.to_payload() for item in saved]
-    return await server._deliver_chat(text=text, target=target, session_id=session_id,
+    delivered = raw_text if target.agent_type == "task_manager" else text
+    return await server._deliver_chat(text=delivered, target=target, session_id=session_id,
         message_id=arguments.get("message_id"), language=arguments.get("language", "zh"),
         goal_id=arguments.get("goal_id"), attachments=attachments, new_session_profile_id=profile)
 

@@ -24,6 +24,7 @@ from ..run_usage import Usage
 from ..runtimes.cancel import TurnCancel
 from ..system_prompt import SystemPrompt
 from ..task_manager_brief import brief, instructions
+from ..task_commands import history_for_model
 from ..untrusted import Source, fence
 
 logger = logging.getLogger(__name__)
@@ -62,6 +63,16 @@ class RefuseReason(str, Enum):
     SHUTTING_DOWN = "shutting_down"
     REVIEW_HOOK_DISABLED = "review_hook_disabled"
     CLI_UNVERIFIED = "cli_unverified"
+
+
+def resume_message(text: str, history: Sequence[Any]) -> str:
+    """The text a fresh or rotating turn sends. Fixed commands and their code replies are matched and left out."""
+    kept = history_for_model(history)[-20:]
+    if not kept:
+        return text
+    rendered = "\n".join(item if isinstance(item, str) else json.dumps(dict(item), ensure_ascii=False)
+                         for item in kept)
+    return fence(rendered, source=Source.CHAT_HISTORY) + "\n\n" + text
 
 
 class Refused(Exception):
@@ -295,9 +306,7 @@ class TaskManagerAgent:
 
                 message = request.text
                 if (attempt or rotating) and request.history:
-                    history = "\n".join(item if isinstance(item, str) else json.dumps(dict(item), ensure_ascii=False)
-                                        for item in request.history[-20:])
-                    message = fence(history, source=Source.CHAT_HISTORY) + "\n\n" + message
+                    message = resume_message(request.text, request.history)
                 retry_detail = ""
                 async with ClaudeRunRecorder(agent_id=f"task-manager-{self.task_id}", task_id=self.task_id,
                     command=self.resident.command, cwd=reopened.work_dir, input_text=message,

@@ -2,18 +2,54 @@
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from typing import Any, Literal
 
+from ..agents.task_commands import history_for_model
 from .chat import task_thread
 from .connection import get_pool
 
 
-async def recent(task_id: str, limit: int) -> list[dict[str, Any]]:
-    """The last ``limit`` user and assistant rows of the task's thread, oldest first.
+async def claim_user_message(session_id: str, message_id: str, content: str, *,
+                             channel: str = "web") -> Literal["inserted", "same", "conflict"]:
+    """Insert the user row once. The same text again is ``same``; a different text is ``conflict`` and is not stored.
 
-    Tool and event rows are left out, so the history a turn resumes from is the conversation. ``created_at`` is
-    text: a resume stores the list as JSON.
+    ``save_message`` upserts and would replace the first text, so the claim is this insert. The unique
+    ``(session_id, message_id)`` is what makes two concurrent retries agree on one row.
     """
+    pool = get_pool()
+    async with pool.acquire() as conn, conn.transaction():
+        inserted = await conn.fetchrow(
+            """
+            INSERT INTO chat_messages (session_id, message_id, role, content, channel, created_at)
+            VALUES ($1, $2, 'user', $3, $4, $5)
+            ON CONFLICT (session_id, message_id) DO NOTHING
+            RETURNING content
+            """,
+            session_id, message_id, content, channel, datetime.now(timezone.utc))
+        if inserted is not None:
+            return "inserted"
+        existing = await conn.fetchval(
+            "SELECT content FROM chat_messages WHERE session_id = $1 AND message_id = $2",
+            session_id, message_id)
+        return "same" if existing == content else "conflict"
+
+
+async def message_content(session_id: str, message_id: str) -> str | None:
+    """The stored text of one row, or None when that id was never claimed."""
+    return await get_pool().fetchval(
+        "SELECT content FROM chat_messages WHERE session_id = $1 AND message_id = $2",
+        session_id, message_id)
+
+
+async def recent(task_id: str, limit: int) -> list[dict[str, Any]]:
+    """The last ``limit`` user and assistant rows a model may see, oldest first.
+
+    Tool and event rows are left out. Fixed commands and the code replies after them are left out too, so a fresh
+    retry after a resume failure does not hand those rows to the model. ``created_at`` is text: a resume stores the
+    list as JSON. The read looks past a run of commands so they do not take the model's slots.
+    """
+    window = min(max(limit, 1) * 5, 200)
     rows = await get_pool().fetch(
         """
         SELECT role, content, created_at FROM (
@@ -24,13 +60,13 @@ async def recent(task_id: str, limit: int) -> list[dict[str, Any]]:
         ) m
         ORDER BY id ASC
         """,
-        task_thread(task_id), limit)
+        task_thread(task_id), window)
     history = []
     for row in rows:
         created = row["created_at"]
         history.append({"role": row["role"], "content": row["content"],
                         "created_at": created.isoformat() if hasattr(created, "isoformat") else created})
-    return history
+    return history_for_model(history)[-limit:]
 
 
 async def turn_state(task_id: str) -> Literal["idle", "running", "interrupted"]:
