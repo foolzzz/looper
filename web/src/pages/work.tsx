@@ -3,6 +3,7 @@ import { Button } from "@/components/ui/button";
 import { WorkList } from "@/components/work-list";
 import { WorkSwitcher } from "@/components/work-switcher";
 import { WorkGates } from "@/components/work-gates";
+import { WorkSteps } from "@/components/work-steps";
 import { openWorkGate } from "@/components/work-activity-feed";
 import { fetchTaskDetail, isActiveTask, TaskDetailError, type TaskDetail, type UserGate } from "@/lib/api";
 import { startPolling } from "@/lib/polling";
@@ -13,6 +14,21 @@ import { TaskStatusMark } from "@/pages/tasks";
 import { isMissingOperation, markSeen, taskTitle, workSelection, workStorage } from "@/lib/work";
 
 const LINK = "text-sm text-primary underline-offset-2 hover:underline focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring";
+
+/** Short screens scroll the conversation and composer together; details use the dismissible panel. */
+const SHORT_COLUMN = "(max-height: 32rem) and (max-width: 1023px)";
+
+function useMedia(query: string): boolean {
+  const [matches, setMatches] = useState(() => window.matchMedia(query).matches);
+  useEffect(() => {
+    const media = window.matchMedia(query);
+    const onChange = () => setMatches(media.matches);
+    onChange();
+    media.addEventListener("change", onChange);
+    return () => media.removeEventListener("change", onChange);
+  }, [query]);
+  return matches;
+}
 
 /** Centre is the default Manager or the selected task’s Planner conversation. */
 export function WorkPage({
@@ -39,6 +55,7 @@ export function WorkPage({
   const seen = useRef("");
   const restored = useRef(false);
   const onFinder = useCallback((available: boolean) => setFinder(available), []);
+  const shortColumn = useMedia(SHORT_COLUMN);
 
   // A bare #work restores the last selection. #work/manager and #work/task/… win over storage.
   useEffect(() => {
@@ -181,8 +198,8 @@ export function WorkPage({
           onFind={openSwitcher}
         />
       </div>
-      <div className={`h-full min-h-0 min-w-0 flex-1 flex-col ${pane === "detail" ? "flex" : "hidden md:flex"}`}>
-        <div inert={panel && !wide} className="flex h-full min-h-0 flex-col">
+      <div className={`h-full min-h-0 min-w-0 flex-1 flex-col ${pane === "detail" ? "flex" : "hidden md:flex"} ${shortColumn ? "overflow-y-auto" : ""}`} data-work-scroll={shortColumn ? "" : undefined}>
+        <div inert={panel && !wide} className={shortColumn ? "flex h-auto min-h-full shrink-0 flex-col" : "flex h-full min-h-0 flex-col"}>
           <div className="shrink-0 border-b border-border p-3 md:hidden">
             <Button type="button" variant="outline" onClick={() => setPane("list")}>Back to the list</Button>
           </div>
@@ -213,7 +230,8 @@ export function WorkPage({
                 {gateError && <p role="alert" className="text-sm text-destructive">{gateError}</p>}
                 {detail.error && <p role="alert" className="text-sm text-destructive">Task refresh failed: {detail.error}</p>}
               </header>
-              <div ref={conversation} className="flex min-h-0 flex-1 flex-col">
+              <div ref={conversation} data-work-detail="" data-layout={shortColumn ? "scroll" : "split"}
+                className={shortColumn ? "work-short-conversation block" : "flex min-h-0 min-w-0 flex-1 flex-col"}>
                 <PlannerWorkConversation key={taskId} taskId={taskId} detail={selected} task={selected} onGateChanged={onGateChanged} />
               </div>
             </>
@@ -226,7 +244,7 @@ export function WorkPage({
           if (wide) return;
           if (event.key === "Escape") { event.preventDefault(); event.stopPropagation(); closePanel(); }
           if (event.key === "Tab") {
-            const buttons = [...(panelRef.current?.querySelectorAll<HTMLButtonElement>("button:not(:disabled)") ?? [])];
+            const buttons = [...(panelRef.current?.querySelectorAll<HTMLElement>("button:not(:disabled), a[href], summary") ?? [])];
             const first = buttons[0], last = buttons[buttons.length - 1];
             if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last?.focus(); }
             else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first?.focus(); }
@@ -235,6 +253,7 @@ export function WorkPage({
         className={wide ? "min-h-0 w-72 shrink-0 overflow-y-auto border-l border-border"
           : "fixed inset-0 z-50 overflow-y-auto bg-background"}>
         {!wide && <div className="border-b border-border p-3"><Button variant="outline" onClick={closePanel}>关闭任务详情</Button></div>}
+        <WorkSteps task={selected} onOpenGate={step => openGate(step.step_key)} />
         <WorkGates task={selected} onOpenGate={openGate} />
       </aside>}
       <WorkSwitcher open={switcher && finder} onClose={closeSwitcher} onOpen={openTask} restore={restore} />
