@@ -161,9 +161,10 @@ Manager has no tool for it. The dashboard shows the task page's 指标 card and 
     credential: the server checks that a binding belongs to that credential's
     session, so learning another binding cannot authorize its calls. For the default Manager, only
     Looper's platform tools are available: no local file or shell tools,
-    catalog MCP servers, plugins, skills or subagents. Claude Code and the
-    in-process API runtime support this mode; other runtimes refuse a
-    non-main turn without falling back to main. Main's launch is unchanged.
+    catalog MCP servers, plugins, skills or subagents. Runtimes declare their
+    supported launch modes (`platform_tools`, `restricted_read`, `full`);
+    a non-main turn requires `platform_tools` and is refused otherwise,
+    without falling back to main. Main's launch is unchanged.
     Claude Code shares only its CLI login with the operator (the original
     keychain namespace on macOS), keeping settings and histories separate.
     A default macOS keychain login retains the original `HOME` so its native

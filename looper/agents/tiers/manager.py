@@ -47,6 +47,7 @@ from collections.abc import Awaitable, Callable, Iterator, Sequence
 from typing import TYPE_CHECKING, Any, NoReturn
 
 from ..broadcast import Broadcaster
+from ..chat_scopes import LaunchMode
 from ..drain import DrainState
 from ..bus import MessageBus
 from ..channels import lark_quote
@@ -1827,7 +1828,7 @@ class ManagerAgent:
         library = await token.step("library_server", self._library_with_server(library))
         launch = Launch(agent_settings, library, role=AgentType.MANAGER,
                         access=Access.PLATFORM_TOOLS if routed else None)
-        if routed and not launch.runtime.supports_platform_tools_only:
+        if routed and LaunchMode.PLATFORM_TOOLS not in launch.runtime.launch_modes:
             raise ProfileUnavailable(f"{launch.runtime.label} 尚不支持仅使用平台工具的路由会话，请选择支持的 Agent Profile。",
                                      agent_settings.profile_source)
         if self.ops is not None and await token.step("outbound_review", outbound_hook.enabled()):
