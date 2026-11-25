@@ -4,7 +4,7 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { WorkRequirement } from "@/components/work-requirement";
 import { WorkPage } from "@/pages/work";
-import type { RequirementVersion, TaskDetail } from "@/lib/api";
+import type { RequirementVersion, TaskDetail, TaskStep, UserGate } from "@/lib/api";
 import { V1Error } from "@/lib/v1";
 
 const api = vi.hoisted(() => ({
@@ -488,6 +488,7 @@ describe("Work requirement on the page", () => {
     api.fetchGateThread.mockResolvedValue({ messages: [] });
     api.fetchChatMessages.mockResolvedValue([]);
     api.fetchChatTargets.mockResolvedValue([]);
+    api.postGateMessage.mockReset();
     vi.stubGlobal("fetch", vi.fn(async (url: string) => {
       fetches.push(String(url));
       return Response.json({ status: "ok", result: { activity: [{ seq: 1 }] } });
@@ -550,5 +551,245 @@ describe("Work requirement on the page", () => {
     expect(host.querySelector("[data-requirement-body]")?.textContent).toBe("beta");
     expect(host.textContent).not.toContain("ALPHA-LATE");
     expect(host.textContent).not.toContain("alpha changed");
+  });
+
+  function holdDetails() {
+    const pending: { id: string; resolve: (task: TaskDetail) => void }[] = [];
+    api.fetchTaskDetail.mockImplementation((id: string) => new Promise(resolve => {
+      pending.push({ id, resolve });
+    }));
+    return pending;
+  }
+
+  async function releaseOldest(pending: { id: string; resolve: (task: TaskDetail) => void }[], value: TaskDetail) {
+    const item = pending.shift();
+    expect(item).toBeTruthy();
+    await act(async () => { item!.resolve(value); });
+    await settle();
+  }
+
+  async function releaseAt(
+    pending: { id: string; resolve: (task: TaskDetail) => void }[],
+    index: number,
+    value: TaskDetail,
+  ) {
+    const [item] = pending.splice(index, 1);
+    expect(item).toBeTruthy();
+    await act(async () => { item!.resolve(value); });
+    await settle();
+  }
+
+  function openGate(topic: string): UserGate {
+    return {
+      step: "decision", step_id: "gate-step", state: "open", topic, findings: "", summary: null,
+      resolution: "", agenda: [], ended_by_user: false, plan_change: null, depends_on: [],
+      waiting_on: "user", not_delivered: 0, retry_at: null, turns: 0, reminders: 0,
+      opened_at: "2026-11-01T10:00:00Z", first_reply_at: null, closed_at: null, channel_posts: null,
+    };
+  }
+
+  function workStep(instruction: string): TaskStep {
+    return {
+      id: "s1", task_id: "A", kind: "work", step_key: "implement", step_index: 0, instruction,
+      acceptance_criteria: [], target_files: [], depends_on: [], status: "pending", review: false,
+      role_key: null, role_version: null, review_roles: [], review_stage: null, review_position: null,
+      retries: 0, worker_id: null, reviewer_id: null, result: null, created_at: "2026-01-01T00:00:00Z",
+      updated_at: "2026-01-01T00:00:00Z", completed_at: null, started_at: null,
+    };
+  }
+
+  function detailAt(versionNo: number, topic: string, instruction: string): TaskDetail {
+    return task({
+      task_id: "A", title: "Task A", status: "running", group: "in_progress",
+      requirement: `body-v${versionNo}`,
+      requirement_versions: [version({ version: versionNo, text: `body-v${versionNo}` })],
+      gates: [openGate(topic)],
+      steps: [workStep(instruction)],
+    });
+  }
+
+  function panel() {
+    return host.querySelector('aside[aria-label="任务详情"]');
+  }
+
+  async function showSettled(versionNo: number, topic: string, instruction: string) {
+    vi.useFakeTimers();
+    Object.defineProperty(document, "visibilityState", { configurable: true, get: () => "visible" });
+    media(true);
+    window.innerWidth = 1280;
+    const pending = holdDetails();
+    const value = detailAt(versionNo, topic, instruction);
+    await showPage(<WorkPage sub="task/A" onNavigate={vi.fn()} />);
+    while (!host.querySelector("[data-requirement-version]")?.textContent?.includes(`版本 ${versionNo}`)) {
+      expect(pending.length).toBeGreaterThan(0);
+      await releaseOldest(pending, value);
+    }
+    while (pending.length) await releaseOldest(pending, value);
+    expect(panel()?.textContent).toContain(topic);
+    expect(panel()?.textContent).toContain(instruction);
+    return pending;
+  }
+
+  it("does not let a late save of task A refresh or invalidate an uncached task B", async () => {
+    media(true);
+    window.innerWidth = 1280;
+    api.fetchTaskDetail.mockImplementation(async (id: string) => task({
+      task_id: id, requirement: id === "A" ? "alpha" : "beta", title: id === "A" ? "Task A" : "Task B",
+    }));
+    await showPage(<WorkPage sub="task/A" onNavigate={vi.fn()} />);
+    expect(host.querySelector("[data-requirement-body]")?.textContent).toBe("alpha");
+
+    const save = deferred<void>();
+    api.editTaskRequirement.mockReturnValue(save.promise);
+    const loadB = deferred<TaskDetail>();
+    api.fetchTaskDetail.mockImplementation((id: string) => (
+      id === "B" ? loadB.promise : Promise.resolve(task({ task_id: id, requirement: "alpha-late", title: "Task A" }))
+    ));
+    await click("编辑");
+    await typeInto("alpha changed");
+    await click("保存");
+    await showPage(<WorkPage sub="task/B" onNavigate={vi.fn()} />);
+    expect(host.textContent).toContain("Loading task…");
+    const callsAtSwitch = api.fetchTaskDetail.mock.calls.length;
+    save.resolve();
+    await act(async () => { await save.promise; });
+    await settle();
+    expect(api.fetchTaskDetail.mock.calls.slice(callsAtSwitch).map(call => call[0])).not.toContain("A");
+    loadB.resolve(task({ task_id: "B", requirement: "beta", title: "Task B" }));
+    await settle();
+    expect(host.querySelector("[data-requirement-body]")?.textContent).toBe("beta");
+    expect(host.textContent).not.toContain("Loading task…");
+    expect(host.textContent).not.toContain("alpha-late");
+    expect(host.textContent).not.toContain("alpha changed");
+  });
+
+  it("does not read the task back after leaving Work", async () => {
+    media(true);
+    window.innerWidth = 1280;
+    api.fetchTaskDetail.mockResolvedValue(task({ task_id: "A", requirement: "alpha", title: "Task A" }));
+    await showPage(<WorkPage sub="task/A" onNavigate={vi.fn()} />);
+    expect(host.querySelector("[data-requirement-body]")?.textContent).toBe("alpha");
+    const save = deferred<void>();
+    api.editTaskRequirement.mockReturnValue(save.promise);
+    api.fetchTaskDetail.mockClear();
+    await click("编辑");
+    await typeInto("alpha changed");
+    await click("保存");
+    expect(api.fetchTaskDetail).not.toHaveBeenCalled();
+    await act(async () => { root.unmount(); });
+    root = createRoot(host);
+    save.resolve();
+    await act(async () => { await save.promise; });
+    await settle();
+    expect(api.fetchTaskDetail).not.toHaveBeenCalled();
+  });
+
+  it("does not let an older requirement readback replace a newer shared poll", async () => {
+    const pending = await showSettled(1, "topic-v1", "step-v1");
+    api.editTaskRequirement.mockResolvedValue(undefined);
+    await click("编辑");
+    await typeInto("body-v1\nedited");
+    await click("保存");
+    expect(pending).toHaveLength(1);
+    await act(async () => { await vi.advanceTimersByTimeAsync(2000); });
+    expect(pending.map(item => item.id)).toEqual(["A", "A"]);
+    // The poll started second. It publishes version 3 while the older requirement readback is still in flight.
+    await releaseAt(pending, 1, detailAt(3, "topic-v3", "step-v3"));
+    expect(host.querySelector("[data-requirement-version]")?.textContent).toContain("版本 3");
+    expect(panel()?.textContent).toContain("topic-v3");
+    expect(panel()?.textContent).toContain("step-v3");
+    await releaseAt(pending, 0, detailAt(2, "topic-v2", "step-v2"));
+    await settle();
+    expect(host.querySelector("[data-requirement-version]")?.textContent).toContain("版本 3");
+    expect(panel()?.textContent).toContain("topic-v3");
+    expect(panel()?.textContent).toContain("step-v3");
+    expect(panel()?.textContent).not.toContain("topic-v2");
+    expect(panel()?.textContent).not.toContain("step-v2");
+    expect(host.textContent).not.toContain("body-v2");
+
+    await showPage(<WorkPage sub="task/B" onNavigate={vi.fn()} />);
+    await showPage(<WorkPage sub="task/A" onNavigate={vi.fn()} />);
+    expect(host.querySelector("[data-requirement-version]")?.textContent).toContain("版本 3");
+    expect(panel()?.textContent).toContain("topic-v3");
+    expect(panel()?.textContent).toContain("step-v3");
+    expect(panel()?.textContent).not.toContain("topic-v2");
+    expect(host.textContent).not.toContain("body-v2");
+  });
+
+  it.each(["completed", "mystery"])("revokes an open editor when the shared poll reports %s", async (status) => {
+    const pending = await showSettled(1, "topic-v1", "step-v1");
+    await click("编辑");
+    await typeInto("draft before transition");
+    await act(async () => { await vi.advanceTimersByTimeAsync(2000); });
+    expect(pending).toHaveLength(1);
+    await releaseOldest(pending, { ...detailAt(2, "topic-v2", "step-v2"), status });
+    expect((host.querySelector('[aria-label="需求正文"]') as HTMLTextAreaElement).readOnly).toBe(true);
+    expect(button("保存")!.disabled).toBe(true);
+    await click("保存");
+    expect(api.editTaskRequirement).not.toHaveBeenCalled();
+  });
+
+  it("does not let an older shared poll replace a newer requirement readback or its cache", async () => {
+    const pending = await showSettled(1, "topic-v1", "step-v1");
+    await act(async () => { await vi.advanceTimersByTimeAsync(2000); });
+    expect(pending).toHaveLength(1);
+    api.editTaskRequirement.mockResolvedValue(undefined);
+    await click("编辑");
+    await typeInto("edited");
+    await click("保存");
+    expect(pending).toHaveLength(2);
+    await releaseAt(pending, 1, detailAt(3, "topic-v3", "step-v3"));
+    await releaseOldest(pending, detailAt(2, "topic-v2", "step-v2"));
+    expect(host.querySelector("[data-requirement-version]")?.textContent).toContain("版本 3");
+    expect(panel()?.textContent).toContain("topic-v3");
+    expect(panel()?.textContent).toContain("step-v3");
+    await showPage(<WorkPage sub="task/B" onNavigate={vi.fn()} />);
+    await showPage(<WorkPage sub="task/A" onNavigate={vi.fn()} />);
+    expect(host.querySelector("[data-requirement-version]")?.textContent).toContain("版本 3");
+    expect(panel()?.textContent).toContain("topic-v3");
+  });
+
+  it("does not let an older requirement readback replace a newer gate update", async () => {
+    const pending = await showSettled(1, "topic-v1", "step-v1");
+    const updated = openGate("topic-from-gate");
+    api.postGateMessage.mockResolvedValue({
+      gate: updated,
+      message: { id: 1, role: "user", text: "ship it", created_at: "2026-11-01T10:00:00Z" },
+      delivered: "sent",
+    });
+    api.editTaskRequirement.mockResolvedValue(undefined);
+    await click("编辑");
+    await typeInto("body-v1\nedited");
+    await click("保存");
+    expect(pending).toHaveLength(1);
+
+    const input = host.querySelector("#gate-decision-text") as HTMLTextAreaElement;
+    expect(input).toBeTruthy();
+    await act(async () => {
+      const set = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")!.set!;
+      set.call(input, "ship it");
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    const send = input.closest("form")!.querySelector('button[type="submit"]') as HTMLButtonElement;
+    await act(async () => { send.click(); });
+    await settle();
+    expect(api.postGateMessage).toHaveBeenCalledWith("A", "decision", { text: "ship it" });
+    expect(panel()?.textContent).toContain("topic-from-gate");
+    expect(host.textContent).toContain("topic-from-gate");
+
+    await releaseOldest(pending, detailAt(2, "topic-v2", "step-v2"));
+    await settle();
+    expect(panel()?.textContent).toContain("topic-from-gate");
+    expect(panel()?.textContent).toContain("step-v1");
+    expect(panel()?.textContent).not.toContain("topic-v2");
+    expect(panel()?.textContent).not.toContain("step-v2");
+    expect(host.textContent).not.toContain("body-v2");
+    expect(host.textContent).toContain("topic-from-gate");
+
+    await showPage(<WorkPage sub="task/B" onNavigate={vi.fn()} />);
+    await showPage(<WorkPage sub="task/A" onNavigate={vi.fn()} />);
+    expect(panel()?.textContent).toContain("topic-from-gate");
+    expect(panel()?.textContent).not.toContain("topic-v1");
+    expect(panel()?.textContent).not.toContain("topic-v2");
   });
 });
