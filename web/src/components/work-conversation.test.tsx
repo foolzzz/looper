@@ -2,7 +2,7 @@
 import { act, useState, type ReactNode } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { PlannerWorkConversation, WorkConversation, type WorkConversationProps } from "@/components/work-conversation";
+import { clearWorkComposerMemory, PlannerWorkConversation, WorkConversation, type WorkConversationProps } from "@/components/work-conversation";
 import { WorkPage } from "@/pages/work";
 
 type Handler = (event: { kind: string; payload: Record<string, unknown> }) => void;
@@ -53,6 +53,17 @@ function TaskPane({ taskId }: { taskId: string }) {
   );
 }
 
+/** Same remount the page does with `key={taskId}`: the pane unmounts, the owner must not. */
+function KeyedPane({ taskId }: { taskId: string }) {
+  return (
+    <PlannerWorkConversation
+      key={taskId}
+      taskId={taskId}
+      detail={{ title: "Task", status: "running", project_name: "Beta", group: "in_progress" }}
+    />
+  );
+}
+
 describe("work conversation", () => {
   let container: HTMLDivElement;
   let root: Root;
@@ -97,6 +108,7 @@ describe("work conversation", () => {
   beforeEach(() => {
     localStorage.clear();
     sessionStorage.clear();
+    clearWorkComposerMemory();
     for (const fn of Object.values(api)) fn.mockReset();
     api.sendChat.mockResolvedValue({ correlation_id: "reply-correlation" });
     api.streamChatReply.mockImplementation((_url: string, onEvent: Handler, onDone?: () => void) => {
@@ -349,6 +361,32 @@ describe("work conversation", () => {
     expect(api.stopChatReply).not.toHaveBeenCalled();
   });
 
+  it("shows that the reply stream disconnected when it ends without a final", async () => {
+    await show(<TaskPane taskId="t1" />);
+    await say("first");
+    await fire("answer.delta", { text: "half answer" });
+    await say("queued");
+    await act(async () => { done?.(); });
+    await flush();
+    expect(container.textContent).toContain("回复流已断开，服务端可能仍在运行");
+    expect(container.textContent).toContain("half answer");
+    expect(container.textContent).toContain("first");
+    expect(api.sendChat).toHaveBeenCalledTimes(1);
+    expect(input().value).toBe("queued");
+    expect(container.querySelector('button[aria-label^="Stop"]')).toBeNull();
+    expect(api.stopChatReply).not.toHaveBeenCalled();
+    expect(api.fetchChatTurn).not.toHaveBeenCalled();
+
+    await say("next");
+    await fire("answer.final", { text: "done", outcome: "answered" });
+    await act(async () => { done?.(); });
+    await flush();
+    expect(container.textContent).toContain("done");
+    expect(container.textContent).not.toContain("回复流已断开，服务端可能仍在运行");
+    expect(api.sendChat).toHaveBeenCalledTimes(2);
+    expect(api.stopChatReply).not.toHaveBeenCalled();
+  });
+
   it("puts a rejected send back into the draft and does not retry it", async () => {
     api.sendChat.mockRejectedValueOnce(new Error("planner stopped"));
     await show(<TaskPane taskId="t1" />);
@@ -469,6 +507,131 @@ describe("work conversation", () => {
     expect(api.sendChat).toHaveBeenCalledTimes(1);
     expect(api.sendChat.mock.calls[0][0]).toBe("still sends");
     expect(api.sendChat.mock.calls[0][3]).toEqual({ kind: "planner", task_id: "t2" });
+  });
+
+  // happy-dom binds Storage methods onto the instance, so a prototype spy never runs.
+  function blockStorage(mode: "disabled" | "full"): () => void {
+    const backing = new Map<string, string>();
+    if (mode === "full") {
+      backing.set("looper-work-draft:planner-t1", "stale draft");
+      backing.set("looper-work-staged:planner-t1", JSON.stringify(["stale queued"]));
+    }
+    const fail = () => {
+      throw new DOMException(mode === "full" ? "quota" : "disabled", mode === "full" ? "QuotaExceededError" : "SecurityError");
+    };
+    const storage = window.sessionStorage;
+    const previous = { getItem: storage.getItem, setItem: storage.setItem, removeItem: storage.removeItem };
+    const define = (name: keyof typeof previous, value: unknown) => {
+      Object.defineProperty(storage, name, { value, writable: true, configurable: true });
+    };
+    define("getItem", (key: string) => {
+      if (mode === "disabled") fail();
+      return backing.get(String(key)) ?? null;
+    });
+    define("setItem", (key: string, value: string) => {
+      if (mode === "disabled" || mode === "full") fail();
+      backing.set(String(key), String(value));
+    });
+    define("removeItem", (key: string) => {
+      if (mode === "disabled") fail();
+      backing.delete(String(key));
+    });
+    return () => {
+      define("getItem", previous.getItem);
+      define("setItem", previous.setItem);
+      define("removeItem", previous.removeItem);
+    };
+  }
+
+  it.each(["disabled", "full"] as const)("keeps A's draft when storage is %s across a switch to B and back", async (mode) => {
+    const restore = blockStorage(mode);
+    try {
+      await show(<KeyedPane taskId="t1" />);
+      if (mode === "full") expect(input().value).toBe("stale draft");
+      type("fresh draft");
+      await show(<KeyedPane taskId="t2" />);
+      expect(input().value).not.toBe("fresh draft");
+      type("beta draft");
+      await show(<KeyedPane taskId="t1" />);
+      expect(input().value).toBe("fresh draft");
+      await show(<KeyedPane taskId="t2" />);
+      expect(input().value).toBe("beta draft");
+    } finally {
+      restore();
+    }
+  });
+
+  it.each(["disabled", "full"] as const)("keeps A's queued message when storage is %s across a switch to B and back", async (mode) => {
+    const restore = blockStorage(mode);
+    try {
+      await show(<KeyedPane taskId="t1" />);
+      await say("ask");
+      await say("fresh queued");
+      expect(container.textContent).toContain("fresh queued");
+      expect(container.textContent).toContain("Queued");
+      await show(<KeyedPane taskId="t2" />);
+      expect(container.textContent).not.toContain("fresh queued");
+      await show(<KeyedPane taskId="t1" />);
+      expect(container.textContent).toContain("fresh queued");
+      expect(container.textContent).not.toContain("stale queued");
+      expect(api.sendChat).toHaveBeenCalledTimes(1);
+      expect(api.stopChatReply).not.toHaveBeenCalled();
+    } finally {
+      restore();
+    }
+  });
+
+  it("shows the turn when a send succeeds after history failed", async () => {
+    api.fetchChatMessages.mockRejectedValueOnce(new Error("disk offline"));
+    await show(<TaskPane taskId="t1" />);
+    expect(container.textContent).toContain("对话读取失败");
+    expect(container.textContent).toContain("disk offline");
+    await say("visible ask");
+    expect(api.sendChat).toHaveBeenCalledTimes(1);
+    expect(container.querySelector('[data-role="user"]')?.textContent).toContain("visible ask");
+    await fire("answer.delta", { text: "visible answer" });
+    expect(container.textContent).toContain("visible answer");
+    expect(container.querySelector('[data-role="assistant"]')?.textContent).toContain("visible answer");
+    expect(container.textContent).toContain("对话读取失败");
+  });
+
+  it("keeps the turn visible when history fails after the send", async () => {
+    let rejectHistory!: (error: Error) => void;
+    api.fetchChatMessages.mockReturnValueOnce(new Promise((_resolve, reject) => { rejectHistory = reject; }));
+    await show(<TaskPane taskId="t1" />);
+    expect(container.textContent).toContain("正在加载对话…");
+    await say("sent during load");
+    expect(container.querySelector('[data-role="user"]')?.textContent).toContain("sent during load");
+    await act(async () => { rejectHistory(new Error("late disk")); });
+    await flush();
+    expect(container.textContent).toContain("对话读取失败");
+    expect(container.textContent).toContain("late disk");
+    expect(container.querySelector('[data-role="user"]')?.textContent).toContain("sent during load");
+    await fire("answer.delta", { text: "still streaming" });
+    expect(container.textContent).toContain("still streaming");
+    expect(api.sendChat).toHaveBeenCalledTimes(1);
+  });
+
+  it("uses neutral message and send controls beside the Work accent", async () => {
+    api.fetchChatMessages.mockResolvedValueOnce([
+      { message_id: "u1", role: "user", content: "earlier", created_at: "2026-11-25T00:00:00Z" },
+    ]);
+    await show(<TaskPane taskId="t1" />);
+    const earlier = container.querySelector('[data-role="user"] > div');
+    expect(earlier?.className ?? "").not.toContain("bg-primary");
+    expect(earlier?.className).toContain("bg-card");
+    type("ready");
+    const send = container.querySelector('button[aria-label="Send"]');
+    expect(send?.className ?? "").not.toContain("bg-primary");
+    expect(send?.className).toContain("border-border");
+    await say("go");
+    const sent = container.querySelector('[data-message-id][data-role="user"] > div');
+    expect(sent?.className ?? "").not.toContain("bg-primary");
+    type("later");
+    const queue = container.querySelector('button[aria-label="Queue message"]');
+    expect(queue?.textContent).toBe("Queue");
+    expect(queue?.className ?? "").not.toContain("bg-primary");
+    expect(queue?.className).toContain("border-border");
   });
 
   it("sends a planner turn over HTTP and reads that turn back", async () => {

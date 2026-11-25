@@ -68,6 +68,18 @@ const CHECK_FAILED = "Chat availability could not be checked";
 const NO_PLANNER = "Only tasks with a running Planner can be chatted with";
 const PLANNER_ENDED = "This task has ended, so its Planner no longer takes messages.";
 const CONNECT_FAILED = "Failed to connect. Is the server running?";
+const STREAM_LOST = "回复流已断开，服务端可能仍在运行";
+
+/**
+ * Draft and queue for each task. The page remounts the pane with `key={taskId}`,
+ * and a disabled or full sessionStorage keeps only this copy.
+ */
+type ComposerSlot = { draft: string; staged: string[] };
+const composerMemory = new Map<string, ComposerSlot>();
+
+export function clearWorkComposerMemory(): void {
+  composerMemory.clear();
+}
 
 function draftKey(taskId: string): string {
   return `looper-work-draft:planner-${taskId}`;
@@ -77,7 +89,7 @@ function stagedKey(taskId: string): string {
   return `looper-work-staged:planner-${taskId}`;
 }
 
-function readStoredDraft(taskId: string): string {
+function storageDraft(taskId: string): string {
   try {
     return sessionStorage.getItem(draftKey(taskId)) ?? "";
   } catch {
@@ -85,7 +97,7 @@ function readStoredDraft(taskId: string): string {
   }
 }
 
-function readStoredStaged(taskId: string): string[] {
+function storageStaged(taskId: string): string[] {
   try {
     const parsed = JSON.parse(sessionStorage.getItem(stagedKey(taskId)) ?? "[]");
     return Array.isArray(parsed) ? parsed.filter((item): item is string => typeof item === "string") : [];
@@ -94,21 +106,39 @@ function readStoredStaged(taskId: string): string[] {
   }
 }
 
+function slot(taskId: string): ComposerSlot {
+  const existing = composerMemory.get(taskId);
+  if (existing) return existing;
+  const created = { draft: storageDraft(taskId), staged: storageStaged(taskId) };
+  composerMemory.set(taskId, created);
+  return created;
+}
+
+function readStoredDraft(taskId: string): string {
+  return slot(taskId).draft;
+}
+
+function readStoredStaged(taskId: string): string[] {
+  return [...slot(taskId).staged];
+}
+
 function writeStoredDraft(taskId: string, draft: string) {
+  slot(taskId).draft = draft;
   try {
     if (draft) sessionStorage.setItem(draftKey(taskId), draft);
     else sessionStorage.removeItem(draftKey(taskId));
   } catch {
-    // Storage full or blocked: the draft still lives in this view.
+    // Disabled or full: the memory copy is the copy that survives a task switch.
   }
 }
 
 function writeStoredStaged(taskId: string, staged: string[]) {
+  slot(taskId).staged = [...staged];
   try {
     if (staged.length === 0) sessionStorage.removeItem(stagedKey(taskId));
     else sessionStorage.setItem(stagedKey(taskId), JSON.stringify(staged));
   } catch {
-    // Same as the draft: the queue still works until the view is left.
+    // Disabled or full: the memory copy is the copy that survives a task switch.
   }
 }
 
@@ -170,7 +200,7 @@ function MessageList({ messages }: { messages: WorkPaneMessage[] }) {
             <div
               className={cn(
                 "min-w-0 max-w-[85%] rounded-lg px-4 py-2.5 text-sm [overflow-wrap:anywhere]",
-                message.role === "user" ? "bg-primary text-primary-foreground"
+                message.role === "user" ? "border border-border bg-card text-card-foreground"
                   : known ? "bg-muted text-foreground"
                     : "text-muted-foreground",
               )}
@@ -226,7 +256,7 @@ export function WorkConversation(props: WorkConversationProps) {
         )}
         {loaded && <p className="text-center text-xs text-muted-foreground">{RECENT}</p>}
         {loaded && shown.length === 0 && <p role="status">{EMPTY}</p>}
-        {history !== "error" && <MessageList messages={shown} />}
+        {(history !== "error" || shown.length > 0) && <MessageList messages={shown} />}
       </div>
       <div className="shrink-0 space-y-2 border-t border-border p-4">
         {refusal && <p role="status" className="text-xs text-muted-foreground">{refusal}</p>}
@@ -244,6 +274,7 @@ export function WorkConversation(props: WorkConversationProps) {
           onStop={onStop ?? (() => {})}
           notice={notice}
           disabled={!canSend}
+          controls="neutral"
         />
       </div>
     </section>
@@ -473,13 +504,15 @@ export function PlannerWorkConversation({
       },
       onDone: () => {
         if (turn !== gen.current || taskRef.current !== taskId || !still.current()) return;
+        const disconnected = !finalSeen.current;
         setLive((current) => ({
           ...current,
           replying: false,
           phase: "",
+          notice: disconnected ? STREAM_LOST : current.notice,
           messages: current.messages.map((message) => message.id === assistantId ? { ...message, streaming: false } : message),
         }));
-        if (finalSeen.current) return;
+        if (!disconnected) return;
         restoreDraft();
       },
       onError: (error) => {
