@@ -229,7 +229,7 @@ def test_confirmation_hijack_uses_the_next_messages_typed_sender(monkeypatch, tm
     async def check(pool):
         await seed(pool)
         await pool.execute("INSERT INTO system_settings (key, value) VALUES ($1, 'true')", card_actions.ENABLED_KEY)
-        ran, answers = [], []
+        ran, answers, listings = [], [], []
 
         async def run(call):
             ran.append(call.turn.sender)
@@ -250,7 +250,7 @@ def test_confirmation_hijack_uses_the_next_messages_typed_sender(monkeypatch, tm
         async def calls(on_event):
             turn = rig.manager._running_token.ops_turn
             listing = await ops.current_listing(turn)
-            assert "looper_leads_search" not in [tool["name"] for tool in listing]
+            listings.append([tool["name"] for tool in listing])
             name, arguments = ("looper_confirm", {"confirmation_id": answers[0]["confirmation_id"]}) if answers else ("t_delete", {})
             answers.append(await ops.call(name, arguments))
 
@@ -264,6 +264,8 @@ def test_confirmation_hijack_uses_the_next_messages_typed_sender(monkeypatch, tm
             assert answers[0]["status"] == "needs_confirmation"
             assert await restored_count() == 1
             await rig.manager._handle(envelope(speaker))
+            assert len(listings) == 2
+            assert all("looper_leads_search" not in listing for listing in listings)
             if speaker == OPEN_ID or speaker == "client":
                 assert answers[1] == {"status": "ok", "result": {"done": True}}
                 assert ran == [None if speaker == "client" else OPEN_ID]

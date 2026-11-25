@@ -69,9 +69,12 @@ def test_existing_database_and_outputs_are_frozen_without_collection_side_effect
         for name, digest in actual.items():
             assert digest == expected[name], (mode, name)
 
+        backend_calls = []
+
         class ForbiddenBackend:
             def __getattr__(self, name):
-                raise AssertionError("default source attempted user CLI: " + name)
+                backend_calls.append(name)
+                raise RuntimeError("default source attempted user CLI: " + name)
 
         service = SourceService(collector_backend=ForbiddenBackend())
         await service.run_once(clock=lambda: flow.NOW)
@@ -80,5 +83,6 @@ def test_existing_database_and_outputs_are_frozen_without_collection_side_effect
                       "source_parity_coverage", "source_stream_alerts"):
             assert await pool.fetchval(f"SELECT count(*) FROM {table}") == 0
         await service.stop()
+        assert backend_calls == []
 
     run_db(check, monkeypatch, timeout=30)
