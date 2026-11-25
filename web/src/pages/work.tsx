@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
+import { WorkAttention } from "@/components/work-attention";
 import { WorkList } from "@/components/work-list";
 import { WorkSwitcher } from "@/components/work-switcher";
 import { fetchTaskDetail, TaskDetailError, type TaskDetail } from "@/lib/api";
@@ -10,7 +11,30 @@ import { isMissingOperation, markSeen, taskTitle, workSelection, workStorage } f
 
 const LINK = "text-sm text-primary underline-offset-2 hover:underline focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring";
 
-/** Centre is a header and links. The conversation and the task panel are later pages. */
+function mediaMatches(query: string): boolean {
+  try {
+    return window.matchMedia?.(query)?.matches ?? false;
+  } catch {
+    return false;
+  }
+}
+
+/** True at the width where the detail column stays on screen beside the list. */
+function useDetailColumnVisible(): boolean {
+  const query = "(min-width: 768px)";
+  const [matches, setMatches] = useState(() => mediaMatches(query));
+  useEffect(() => {
+    const media = window.matchMedia?.(query);
+    if (!media) return;
+    const onChange = () => setMatches(media.matches);
+    onChange();
+    media.addEventListener("change", onChange);
+    return () => media.removeEventListener("change", onChange);
+  }, [query]);
+  return matches;
+}
+
+/** Centre is a header and links. The manager column lists what needs you. The conversation and the task panel are later pages. */
 export function WorkPage({
   sub,
   onNavigate,
@@ -106,6 +130,8 @@ export function WorkPage({
   }, [finder, switcher, openSwitcher]);
 
   const running = !!selected && (selected.group === "in_progress" || selected.group === "needs_you");
+  const detailVisible = useDetailColumnVisible();
+  const showAttention = selection.kind === "manager" && (pane === "detail" || detailVisible);
 
   return (
     <div className="flex h-full min-h-0 w-full">
@@ -119,12 +145,13 @@ export function WorkPage({
           onFind={openSwitcher}
         />
       </div>
-      <div className={`h-full min-h-0 min-w-0 flex-1 flex-col ${pane === "detail" ? "flex" : "hidden md:flex"}`}>
-        <div className="flex h-full min-h-0 flex-col">
-          <div className="shrink-0 border-b border-border p-3 md:hidden">
-            <Button type="button" variant="outline" onClick={() => setPane("list")}>Back to the list</Button>
-          </div>
-          <div className="min-h-0 flex-1 overflow-y-auto p-4">
+      <div className={`h-full min-h-0 min-w-0 flex-1 ${pane === "detail" ? "flex" : "hidden md:flex"}`}>
+        <div className="flex h-full min-h-0 min-w-0 flex-1 flex-col xl:flex-row">
+          <div className="flex min-h-0 min-w-0 flex-1 flex-col">
+            <div className="shrink-0 border-b border-border p-3 md:hidden">
+              <Button type="button" variant="outline" onClick={() => setPane("list")}>Back to the list</Button>
+            </div>
+            <div className="min-h-0 flex-1 overflow-y-auto p-4">
             <header aria-label="Selected task" className="space-y-3">
               {selection.kind === "manager" ? (
                 <>
@@ -149,7 +176,9 @@ export function WorkPage({
                 </>
               )}
             </header>
+            </div>
           </div>
+          {showAttention && <WorkAttention />}
         </div>
       </div>
       <WorkSwitcher open={switcher && finder} onClose={closeSwitcher} onOpen={openTask} restore={restore} />
