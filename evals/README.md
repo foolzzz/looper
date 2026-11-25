@@ -1121,6 +1121,17 @@ chat, each reply checked against what Looper did (the API, and the Manager's
 tool calls in the run's `manager_actions`). Same setup as `run`: a new
 database, a disposable `looper serve`, and fake or real mode.
 
+Group dialogs (`Dialog.session="group"`) use the real lark-cli `CliTransport`
+with a native CLI stand-in ported from #1710. It never contacts the network;
+each `Say.sender` selects a synthetic operator, member or bot (the bot's events
+use `sender_type="app"`). `group_per_chat_smoke` is explicitly selected in fake
+mode and checks an operator turn followed by a member turn in one per-chat
+session. Rows record the transport and each turn's sender and `manager_session`
+(null until the chat provenance column is available). The harness binds the
+group to the scenario Manager and sets `per_chat` through its operation;
+`scoped` is seeded directly until that switch value becomes selectable.
+Every client and the disposable ops file must name the isolated server port.
+
 | dialog | what it checks |
 |---|---|
 | `tools_only_no_text` | the delivery guard recovers a successful tool-only turn with a hidden follow-up; fake mode requires two records in the same session and the recovery annotation |
