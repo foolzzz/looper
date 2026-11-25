@@ -195,7 +195,8 @@ def from_payload(raw: Any, runtime_root: Path) -> list[Attachment]:
     return sorted(attachments, key=lambda item: item.index)
 
 
-def section(attachments: Sequence[Attachment], image_input: ImageInput, *, fence: bool = False) -> list[str]:
+def section(attachments: Sequence[Attachment], image_input: ImageInput, *, fence: bool = False,
+            readable: bool = True) -> list[str]:
     """The attachments' list in the Manager's turn; with ``fence`` (the untrusted fence is on), its items, whose
     names the sender chose, in an ``<untrusted source="attachment">`` block."""
     from . import untrusted
@@ -218,7 +219,8 @@ def section(attachments: Sequence[Attachment], image_input: ImageInput, *, fence
         lines.append(line)
     if fence:
         lines[header:] = [untrusted.fence("\n".join(lines[header:]), source=untrusted.Source.ATTACHMENT)]
-    lines.append("Open one with your file-reading tool when the message needs it." if image_input is ImageInput.READ_TOOL else
+    lines.append("This session cannot open attachments; if the message needs one, say so." if not readable else
+                 "Open one with your file-reading tool when the message needs it." if image_input is ImageInput.READ_TOOL else
                  "Open a file with your file-reading tool when the message needs it; your runtime cannot view images, "
                  "so if the user asks what an image shows, say you cannot see it.")
     return lines

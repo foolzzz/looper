@@ -5,26 +5,29 @@ from __future__ import annotations
 import json
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
-from types import MappingProxyType
+from types import MappingProxyType, SimpleNamespace
 from pathlib import Path
 from typing import Any
 
 import pytest
 
-from looper.agents import attention, lanes_settings, operator_profile, persona, vault
+from looper.agents import attention, lanes_settings, operator_profile, persona, session_visibility, vault
+from looper.agents.chat_attachments import Attachment, AttachmentKind, AttachmentState
 from looper.agents.ops import Risk, Tool, Turn
 from looper.agents.ops import service
-from looper.agents.ops.service import ManagerOps, Platform
+from looper.agents.ops.service import ManagerOps, Platform, scope_for
 from looper.agents.session_routing import SessionKey, SessionKind
-from looper.agents.tiers.manager import GoalSnapshot, ManagerAgent
+from looper.agents.tiers.manager import GoalSnapshot, ManagerAgent, channel_line
 from looper.agents import api_v1, intent_rules, message_stream_parity
 from looper.db import message_collection, message_parity, message_stream_alerts
 from tests import subscription_support
-from tests.db_support import DSN
+from tests.db_support import DSN, run_db
 from tests.lark_cli_stand_in import OPEN_ID, OTHER
 from tests.test_manager_session_routing_db import (  # noqa: F401
-    LARK, _lark, _published, _Resident, _run, _Rig, routed,
+    LARK, _lark, _published, _Resident, _run, _Rig, _web, routed,
 )
+from tests.test_scoped_routing_db import GROUP_A, MANAGER, OPERATOR, _message, _send, _setup
+from tests.test_scenario_session_routing_db import GROUP_B, MARKERS, _to
 
 pytestmark = pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
 
@@ -293,3 +296,237 @@ def test_operator_data_never_reaches_a_routed_session(routed: Any, tmp_path: Pat
         assert session.state_shown is not rig.manager._sessions["main"].state_shown
 
     _run(test, routed, tmp_path)
+
+
+async def _scoped_inputs(pool: Any, root: Path, monkeypatch: Any, *, default: str | None = None,
+                         seed: bool = False) -> tuple[Any, list[Any], dict[str, list[dict[str, Any]]]]:
+    """Reuse the routed boundary's sources and the scoped bus fixture, capturing the actual prepared inputs."""
+    if seed:
+        await _seed(pool, root)
+    rig, residents = await _setup(pool, root, monkeypatch, default=default)
+    if seed:
+        await pool.execute("UPDATE tasks SET manager_id=$1 WHERE id='private-task'", MANAGER)
+        await pool.execute("UPDATE manager_task_templates SET manager_id=$1 WHERE key='synthetic-template'", MANAGER)
+        await pool.execute("UPDATE managers SET system_prompt=$1 WHERE id=$2", SENTINELS["role_prompt"], MANAGER)
+        rig.manager._goal_snapshots["synthetic-goal"] = GoalSnapshot("synthetic-goal", title=SENTINELS["goal"])
+    ops = ManagerOps(Platform(bus=None, task_router=SimpleNamespace(has_planner=lambda _: False), manager=rig.manager),
+                     url="http://127.0.0.1:9/", token="synthetic", scope=scope_for(rig.manager._definition))
+    ops._working_at = ops._clock()
+    rig.manager.ops = ops
+    captures: dict[str, list[dict[str, Any]]] = {}
+    prepare = ManagerAgent._prepare_turn
+
+    async def capture(self: Any, *args: Any, **kwargs: Any) -> Any:
+        prepared = await prepare(self, *args, **kwargs)
+        if prepared.signature is not None:
+            captures.setdefault(self._session_now().key, []).append({
+                "system_prompt": prepared.system_prompt.text, "layers": prepared.system_prompt.layers,
+                "sections": await self._sections(prepared.envelope), "turn": prepared.turn_text,
+                "state": prepared.state, "tools": await self.ops.current_listing(prepared.turn),
+                "prepared": prepared,
+            })
+        return prepared
+
+    monkeypatch.setattr(ManagerAgent, "_prepare_turn", capture)
+    return rig, residents, captures
+
+
+def test_operator_group_session_input_gate(monkeypatch: Any, tmp_path: Path) -> None:
+    async def body(pool: Any) -> None:
+        rig, residents, captures = await _scoped_inputs(pool, tmp_path, monkeypatch, seed=True)
+        asker = Turn(channel="lark", channel_id=LARK.agent_id, chat=MAIN_CHAT,
+                     message_id="synthetic-pending", sender=OPERATOR)
+        rig.manager.ops._pending[asker.chat_key] = service._Pending(
+            id="synthetic-pending", tool=service.CONFIRM, arguments={}, block=SENTINELS["confirmation"],
+            asked_in="earlier-message", at=rig.manager.ops._clock(), confirmation={}, asker=asker)
+        await rig.start()
+        try:
+            await rig.reply(await _published(rig, _to(rig, _web("main positive control"))))
+            main_input = _encoded(captures["main"]) + "\n".join(rig.main.turns)
+            for name in ("ready_task", "other_gate", "goal", "project", "template", "workflow"):
+                assert SENTINELS[name] in main_input, name
+            assert SENTINELS["profile"] in await operator_profile.resident_text()
+            assert SENTINELS["ledger"] in _encoded(await attention.collect())
+            assert MARKERS[GROUP_B] in await pool.fetchval(
+                "SELECT content FROM chat_messages WHERE message_id=$1", f"seed-{GROUP_B}")
+            await _send(rig, "group operator input", OPERATOR)
+            session = next(s for s in rig.manager._sessions.values() if s.scope is not None)
+            prepared = captures[session.key][0]
+            complete = _encoded({key: value for key, value in prepared.items() if key != "prepared"}) + residents[0].turns[0]
+            for name in ("ready_task", "other_gate", "goal", "profile", "ledger", "confirmation"):
+                assert SENTINELS[name] not in complete, name
+            assert MARKERS[GROUP_B] not in complete
+            assert MARKERS[GROUP_A] in residents[0].turns[0]
+            for name in ("project", "template", "workflow", "harness", "custom_prompt", "role_prompt"):
+                assert SENTINELS[name] in complete, name
+            assert session_visibility.OPERATOR_GROUP_CONTRACT in prepared["system_prompt"]
+            assert prepared["state"] and session.state_shown is not rig.manager._sessions["main"].state_shown
+        finally:
+            await rig.close()
+    run_db(body, monkeypatch, timeout=90)
+
+
+def test_chat_only_shared_input(monkeypatch: Any, tmp_path: Path) -> None:
+    async def body(pool: Any) -> None:
+        rig, residents, captures = await _scoped_inputs(pool, tmp_path, monkeypatch, seed=True)
+        await pool.execute("UPDATE system_settings SET value='false' WHERE key='manager.stable_context'")
+        await rig.start()
+        try:
+            await _send(rig, "shared message")
+            session = next(s for s in rig.manager._sessions.values() if s.scope is not None)
+            prepared = captures[session.key][0]
+            assert prepared["system_prompt"] == (
+                session_visibility.PUBLIC_PROMPT + "\n\n" + SENTINELS["role_prompt"] + "\n\n" +
+                session_visibility.SHARED_SPEAKERS_NOTE)
+            assert prepared["layers"]["contract"]["name"] == "CHAT_SESSION_ALLOWLIST+SHARED_SPEAKERS"
+            complete = _encoded({key: value for key, value in prepared.items() if key != "prepared"}) + residents[0].turns[0]
+            for name, sentinel in SENTINELS.items():
+                if name != "role_prompt":
+                    assert sentinel not in complete, name
+            assert "TOOLS_CONTRACT" not in _encoded(prepared["layers"])
+            assert prepared["tools"] == [] and prepared["sections"] == []
+            assert MARKERS[GROUP_A] in residents[0].turns[0]
+        finally:
+            await rig.close()
+    run_db(body, monkeypatch, timeout=90)
+
+
+def test_legacy_shared_input_is_1a_plus_note(monkeypatch: Any, tmp_path: Path) -> None:
+    async def body(pool: Any) -> None:
+        rig, residents, captures = await _scoped_inputs(pool, tmp_path, monkeypatch, default="legacy", seed=True)
+        await pool.execute("UPDATE system_settings SET value='false' WHERE key='manager.stable_context'")
+        await pool.execute("INSERT INTO system_settings(key,value) VALUES('untrusted_fence.enabled','true')")
+        await rig.start()
+        try:
+            message = _message(rig, "legacy comparison")
+            session = await rig.manager._router.target(message)
+            await rig.manager._load_session_state(session)
+            rig.manager._current.set(session)
+            scope, session.scope = session.scope, None
+            try:
+                settings = await rig.manager._load_agent_settings(fallback=False)
+                baseline_sections = await rig.manager._sections(message)
+                baseline_prompt = rig.manager._composed_prompt(settings)
+                baseline_brief = await rig.manager._resume_brief(message, "legacy comparison")
+                baseline_tools = await rig.manager.ops.current_listing(session_key=session.key)
+            finally:
+                session.scope = scope
+            await rig.bus.publish(message)
+            await rig.reply(message)
+            prepared = captures[session.key][0]
+            actual = prepared["prepared"]
+            scope, session.scope = session.scope, None
+            try:
+                baseline_turn = await rig.manager._build_user_message(
+                    actual.message, actual.note, channel=channel_line(message), envelope=message,
+                    turn=actual.turn, image_input=actual.launch.runtime.image_input,
+                    persona_scope=actual.run.persona_scope)
+            finally:
+                session.scope = scope
+            assert prepared["system_prompt"] == baseline_prompt.text + "\n" + session_visibility.SHARED_SPEAKERS_NOTE
+            assert prepared["layers"].keys() == baseline_prompt.layers.keys()
+            for layer, value in baseline_prompt.layers.items():
+                if layer != "contract":
+                    assert prepared["layers"][layer] == value, layer
+            assert prepared["layers"]["contract"]["name"] == baseline_prompt.layers["contract"]["name"] + "+SHARED_SPEAKERS"
+            for field, expected in (("sections", baseline_sections), ("tools", baseline_tools)):
+                assert len(prepared[field]) == len(expected), field
+                for index, value in enumerate(expected):
+                    assert prepared[field][index] == value, (field, index)
+            assert prepared["state"] is None
+            assert prepared["turn"] == baseline_turn
+            assert residents[0].turns[0] == f"{baseline_brief}\n\n{baseline_turn}"
+        finally:
+            await rig.close()
+    run_db(body, monkeypatch, timeout=90)
+
+
+def test_fence_always_on_in_scoped_sessions(monkeypatch: Any, tmp_path: Path) -> None:
+    async def body(pool: Any) -> None:
+        rig, residents, captures = await _scoped_inputs(pool, tmp_path, monkeypatch)
+        assert await pool.fetchval("SELECT value FROM system_settings WHERE key='untrusted_fence.enabled'") is None
+        await rig.start()
+        try:
+            await _send(rig, "member words")
+            await _send(rig, "operator words", OPERATOR)
+            sessions = [s for s in rig.manager._sessions.values() if s.scope is not None]
+            for session, resident in zip(sessions, residents):
+                assert '<untrusted source="group_message" chat=' in resident.turns[0]
+                assert MARKERS[GROUP_A] in resident.turns[0]
+                turn = captures[session.key][0]["turn"]
+                if session.scope.resolved.audience.value == "operator":
+                    assert "operator words" in turn and '<untrusted source="group_message"' not in turn
+                else:
+                    assert '<untrusted source="group_message"' in turn
+                    assert "\nmember words\n</untrusted>" in turn
+        finally:
+            await rig.close()
+    run_db(body, monkeypatch, timeout=90)
+
+
+@pytest.mark.parametrize("default", [None, "legacy"], ids=["chat-only", "legacy"])
+def test_attachments_line_follows_mode(default: str | None, monkeypatch: Any, tmp_path: Path) -> None:
+    async def body(pool: Any) -> None:
+        rig, residents, captures = await _scoped_inputs(pool, tmp_path, monkeypatch, default=default)
+        directory = tmp_path / "chat-attachments" / "lark" / "synthetic-message"
+        directory.mkdir(parents=True)
+        path = directory / "synthetic.txt"
+        path.write_text("synthetic attachment", encoding="utf-8")
+        attachment = Attachment(1, AttachmentKind.FILE, AttachmentState.SAVED, path.name, "lark",
+                                path=str(path), mime="text/plain", size=path.stat().st_size)
+        message = _message(rig, "use the attachment")
+        message = replace(message, payload={**message.payload, "attachments": [attachment.to_payload()]})
+        await rig.start()
+        try:
+            await rig.bus.publish(message)
+            await rig.reply(message)
+            session = next(s for s in rig.manager._sessions.values() if s.scope is not None)
+            prepared = captures[session.key][0]
+            expected = ("This session cannot open attachments; if the message needs one, say so." if default is None else
+                        "Open one with your file-reading tool when the message needs it.")
+            assert prepared["turn"].endswith(expected)
+            assert residents[0].turns[0].endswith(expected)
+            assert '<untrusted source="attachment">' in prepared["turn"]
+            assert str(path) in prepared["turn"]
+        finally:
+            await rig.close()
+    run_db(body, monkeypatch, timeout=90)
+
+
+@pytest.mark.parametrize("default", [None, "legacy"])
+def test_scope_change_brief_has_no_handoff(default: str | None, monkeypatch: Any, tmp_path: Path) -> None:
+    async def body(pool: Any) -> None:
+        rig, residents, _ = await _scoped_inputs(pool, tmp_path, monkeypatch, default=default)
+        await rig.start()
+        try:
+            message = _message(rig, "fresh scope")
+            session = await rig.manager._router.target(message)
+            await rig.manager._load_session_state(session)
+            # Seed a stale handoff on this new scope's actual row, not only the retired old row.
+            session.pending_handoff = "SYNTHETIC_STALE_SCOPE_HANDOFF"
+            await rig.manager._write_session_state(session=session)
+            assert "SYNTHETIC_STALE_SCOPE_HANDOFF" == await pool.fetchval(
+                "SELECT pending_handoff FROM manager_sessions WHERE manager_id=$1 AND session_key=$2",
+                MANAGER, session.key)
+            await rig.bus.publish(message)
+            await rig.reply(message)
+            assert "SYNTHETIC_STALE_SCOPE_HANDOFF" not in residents[0].turns[0]
+            assert "Handoff from your previous session" not in residents[0].turns[0]
+            assert MARKERS[GROUP_A] in residents[0].turns[0]
+        finally:
+            await rig.close()
+    run_db(body, monkeypatch, timeout=90)
+
+
+def test_inputs_version_moves_the_fingerprint(monkeypatch: Any, tmp_path: Path) -> None:
+    async def body(pool: Any) -> None:
+        rig, _, _ = await _scoped_inputs(pool, tmp_path, monkeypatch)
+        message = _message(rig, "operator version", OPERATOR)
+        first = await rig.manager._router.target(message)
+        original = session_visibility.OPERATOR_GROUP_INPUTS
+        monkeypatch.setattr(session_visibility, "OPERATOR_GROUP_INPUTS", replace(original, version=original.version + 1))
+        second = await rig.manager._router.target(message)
+        assert first.scope.resolved == second.scope.resolved
+        assert first.scope.mode == second.scope.mode
+        assert first.key != second.key and first.scope.fingerprint != second.scope.fingerprint
+    run_db(body, monkeypatch, timeout=90)

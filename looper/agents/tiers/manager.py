@@ -2686,10 +2686,23 @@ class ManagerAgent:
         if (policy := session_visibility.for_session(self._session_now().key, manager_id=self.agent_id)) is not None:
             contract = (state_view.STABLE_CONTEXT_CONTRACT
                         if self._stable_context and SessionInput.STABLE_BLOCK in policy.inputs else "")
+            role = session_visibility.PUBLIC_PROMPT if SessionInput.PUBLIC_PROMPT in policy.inputs else ""
+            contract_name = "CHAT_SESSION_ALLOWLIST"
+            if SessionInput.ROLE_PROMPT in policy.inputs:
+                role += f"\n\n{self._system_prompt}"
+            if SessionInput.SPEAKERS_NOTE in policy.inputs:
+                contract = session_visibility.SHARED_SPEAKERS_NOTE + ("\n" + contract if contract else "")
+                contract_name += "+SHARED_SPEAKERS"
             return build_system_prompt(
                 harness=Harness("", Layer.BUILTIN), role_id=self.agent_id,
-                role=session_visibility.PUBLIC_PROMPT if SessionInput.PUBLIC_PROMPT in policy.inputs else "",
-                recommended=True, contract_name="CHAT_SESSION_ALLOWLIST", contract=contract)
+                role=role, recommended=True, contract_name=contract_name, contract=contract)
+        scope = self._session_now().scope
+        inputs = session_visibility.inputs_for(scope) if scope is not None else None
+        operator_inputs = inputs if scope is not None and scope.resolved.audience is chat_scopes.ScopeAudience.OPERATOR else None
+
+        def allowed(item: SessionInput) -> bool:
+            return operator_inputs is None or item in operator_inputs.inputs
+
         contract_name, contract = "TOOLS_CONTRACT", root_adjusted(TOOLS_CONTRACT)
         if self.agent_id != DEFAULT_MANAGER_ID:
             contract_name = "TOOLS_CONTRACT+SCOPE_CONTRACT"
@@ -2707,17 +2720,26 @@ class ManagerAgent:
         if (research := getattr(self, "_research", None)) is not None:  # the turn's sources (``_prepare_turn``)
             contract_name += f"+{research_order.CONTRACT_NAME}"
             contract += "\n" + research_order.section(research)
-        if getattr(self, "_stable_context", False):  # last, so every part before it reads as it does without it
+        if not allowed(SessionInput.TOOLS_CONTRACT):
+            contract_name, contract = "", ""
+        if inputs is not None and SessionInput.OPERATOR_CONTRACT in inputs.inputs:
+            contract_name += "+OPERATOR_GROUP_CONTRACT"
+            contract += "\n" + session_visibility.OPERATOR_GROUP_CONTRACT
+        if inputs is not None and SessionInput.SPEAKERS_NOTE in inputs.inputs:
+            contract_name += "+SHARED_SPEAKERS"
+            contract += "\n" + session_visibility.SHARED_SPEAKERS_NOTE
+        if getattr(self, "_stable_context", False) and allowed(SessionInput.STABLE_BLOCK):
             contract_name += "+STABLE_CONTEXT_CONTRACT"
             contract += "\n" + state_view.STABLE_CONTEXT_CONTRACT
         if chat_settings.turn_context_enabled():
             contract_name += "+TURN_CONTEXT_CONTRACT"
             contract += "\n" + TURN_CONTEXT_CONTRACT
         return build_system_prompt(
-            harness=agent_settings.harness,
-            custom_prompt=agent_settings.profile.custom_prompt,
+            harness=agent_settings.harness if allowed(SessionInput.HARNESS) else Harness("", Layer.BUILTIN),
+            custom_prompt=agent_settings.profile.custom_prompt if allowed(SessionInput.PROFILE_PROMPT) else "",
             role_id=self.agent_id,
-            role=root_adjusted(self._system_prompt) if self._prompt_recommended else self._system_prompt,
+            role=(root_adjusted(self._system_prompt) if self._prompt_recommended else self._system_prompt)
+            if allowed(SessionInput.ROLE_PROMPT) else "",
             recommended=self._prompt_recommended,
             contract_name=contract_name, contract=contract,
         )
@@ -3502,7 +3524,7 @@ class ManagerAgent:
         """What starts the first turn of a new session: why it is new, the handoff the old session wrote, and
         the recent conversation of each chat; '' when there is none of these."""
         session = self._session_now()
-        if self._pending_handoff and session.session_runtime == "api" and session.session_id:
+        if session.scope is None and self._pending_handoff and session.session_runtime == "api" and session.session_id:
             # A prior turn may have committed before its final state write (or the Manager's restart).
             await self._save_session_state()
             if not self._pending_handoff:
@@ -3510,13 +3532,17 @@ class ManagerAgent:
         switch, handoff = self._pending_switch, self._pending_handoff
         if session.key != MAIN_SESSION:  # a group's or another sender's chat: only its own (``group_session``)
             policy = session_visibility.for_session(session.key, manager_id=self.agent_id)
+            if session.scope is not None and session.scope.resolved.audience is chat_scopes.ScopeAudience.OPERATOR:
+                policy = session_visibility.inputs_for(session.scope)
             if policy is not None and SessionInput.CHAT_OPENING not in policy.inputs:
                 return ""
-            lines = (await group_session.excerpt(_session_key(envelope), message, kind=session.route.kind)
+            lines = (await group_session.excerpt(_session_key(envelope), message, kind=session.route.kind,
+                                                fenced=True if session.scope is not None else None)
                      if policy is None or SessionInput.CHAT_HISTORY in policy.inputs else [])
             return group_session.brief(session.route.kind, _message_origin(envelope)["channel"], lines,
                                        switch=switch,
-                                       handoff=handoff if policy is None or SessionInput.CHAT_HANDOFF in policy.inputs else None,
+                                       handoff=handoff if session.scope is None and (
+                                           policy is None or SessionInput.CHAT_HANDOFF in policy.inputs) else None,
                                        new=session.session_id is None)
         conversations = await self._recent_conversations(envelope, message)
         if switch is None and not handoff and not conversations:
@@ -3678,7 +3704,10 @@ class ManagerAgent:
                                   image_input: ImageInput = ImageInput.NONE, sections: bool = True,
                                   turn: Turn | None = None,
                                   persona_scope: manager_persona_context.Scope | None = None) -> str:
+        scope = self._session_now().scope
         policy = session_visibility.for_session(self._session_now().key, manager_id=self.agent_id)
+        if scope is not None and scope.resolved.audience is chat_scopes.ScopeAudience.OPERATOR:
+            policy = session_visibility.inputs_for(scope)
         def allowed(item: SessionInput) -> bool:
             return policy is None or item in policy.inputs
 
@@ -3687,7 +3716,7 @@ class ManagerAgent:
             parts += [note, ""]
         # The untrusted fence (``untrusted``): a chat message from someone other than the operator, its quotes and
         # its attachments' names go in <untrusted> blocks, after one line saying how to read them.
-        fence = await untrusted_text.enabled()
+        fence = True if scope is not None else await untrusted_text.enabled()
         # The shared turn context includes operator timezone/language settings.
         # A routed chat receives only the provenance of its current message.
         context = await manager_turn_context.prepare(envelope, turn) if policy is None else None
@@ -3714,7 +3743,9 @@ class ManagerAgent:
             parts += ["", *lead, *lark_quote.section(quoted, fence=fence)]
             lead = []
         if attachments:
-            parts += ["", *lead, *chat_attachments.section(attachments, image_input, fence=fence)]
+            parts += ["", *lead, *chat_attachments.section(
+                attachments, image_input, fence=fence,
+                readable=scope is None or scope.mode is not LaunchMode.PLATFORM_TOOLS)]
         return "\n".join(parts)
 
     async def _sections(self, envelope: MessageEnvelope | None, *,
@@ -3724,6 +3755,22 @@ class ManagerAgent:
         if (policy := session_visibility.for_session(self._session_now().key, manager_id=self.agent_id)) is not None:
             return (manager_persona_context.section(self.agent_id, manager_persona_context.Scope.NAME)
                     if SessionInput.PERSONA_NAME in policy.inputs else [])
+        scope = self._session_now().scope
+        if scope is not None and scope.resolved.audience is chat_scopes.ScopeAudience.OPERATOR:
+            inputs = session_visibility.inputs_for(scope).inputs
+            parts: list[str] = []
+            for item, section in ((SessionInput.PROJECTS, self._projects_section),
+                                  (SessionInput.TEMPLATES, self._templates_section),
+                                  (SessionInput.WORKFLOWS, self._workflows_section),
+                                  (SessionInput.READY_TASKS, self._ready_tasks_section)):
+                if item in inputs:
+                    parts += await section()
+            if SessionInput.OPEN_GATES in inputs:
+                parts += await self._open_gates_section(envelope)
+            if SessionInput.GOALS in inputs and self._goal_snapshots:
+                parts += ["当前活跃目标:", *(f"  - [{snap.status}] {snap.title or gid}: {snap.progress}"
+                                            for gid, snap in self._goal_snapshots.items()), ""]
+            return parts
         if persona_scope is None:
             persona_scope = await manager_persona_context.scope(
                 self.agent_id, self._session_now().route, envelope,
