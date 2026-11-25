@@ -3,16 +3,17 @@ import { Button } from "@/components/ui/button";
 import { WorkList } from "@/components/work-list";
 import { WorkSwitcher } from "@/components/work-switcher";
 import { WorkChanges } from "@/components/work-changes";
-import { fetchTaskDetail, TaskDetailError, type TaskDetail } from "@/lib/api";
+import { fetchTaskDetail, isActiveTask, TaskDetailError, type TaskDetail, type UserGate } from "@/lib/api";
+import { startPolling } from "@/lib/polling";
 import { callV1, V1Error } from "@/lib/v1";
 import { errorText } from "@/lib/use-action";
-import { PlannerWorkConversation } from "@/components/work-conversation";
+import { ManagerWorkConversation, PlannerWorkConversation } from "@/components/work-conversation";
 import { TaskStatusMark } from "@/pages/tasks";
 import { isMissingOperation, markSeen, taskTitle, workSelection, workStorage } from "@/lib/work";
 
 const LINK = "text-sm text-primary underline-offset-2 hover:underline focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring";
 
-/** Centre is the selected task and its Planner conversation. Manager stays a link to Chat. */
+/** Centre is the default Manager or the selected task’s Planner conversation. */
 export function WorkPage({
   sub,
   onNavigate,
@@ -50,6 +51,31 @@ export function WorkPage({
   const selection = explicit ?? { kind: "manager" as const };
   const taskId = selection.kind === "task" ? selection.taskId : "";
   const selected = detail.id === taskId ? detail.task : undefined;
+  const detailRevision = useRef(0);
+  // Gate replies already return the new gate. Update the one shared detail without remounting its editor.
+  const onGateChanged = useCallback((gate: UserGate) => {
+    detailRevision.current += 1;
+    setDetail(current => current.id !== taskId || !current.task ? current : {
+      ...current, task: { ...current.task, gates: current.task.gates?.map(item => item.step_id === gate.step_id ? gate : item) },
+    });
+  }, [taskId]);
+  const active = !!selected && isActiveTask(selected);
+  useEffect(() => {
+    if (!taskId || !active) return;
+    // One shared reader observes gates opened/closed by the Planner, not one poller per feed row.
+    return startPolling(async signal => {
+      const revision = detailRevision.current;
+      try {
+        const task = await fetchTaskDetail(taskId, signal);
+        if (signal.aborted || revision !== detailRevision.current) return;
+        setDetail(current => current.id === taskId ? { id: taskId, task } : current);
+        return !isActiveTask(task);
+      } catch (err) {
+        if (!signal.aborted && revision === detailRevision.current)
+          setDetail(current => current.id === taskId ? { ...current, error: errorText(err) } : current);
+      }
+    }, 2000);
+  }, [taskId, active]);
   useEffect(() => {
     const media = window.matchMedia("(min-width: 1280px)");
     const resize = () => setWidePanel(media.matches);
@@ -149,12 +175,12 @@ export function WorkPage({
             <Button type="button" variant="outline" onClick={() => { setPane("list"); setPanelOpen(false); }}>Back to the list</Button>
           </div>
           {selection.kind === "manager" ? (
-            <div className="min-h-0 flex-1 overflow-y-auto p-4">
-              <header aria-label="Selected task" className="space-y-3">
+            <>
+              <header aria-label="Selected task" className="shrink-0 border-b border-border p-4">
                 <h1 className="text-lg font-semibold">Manager</h1>
-                <a className={LINK} href="#chat">Open the Manager chat</a>
               </header>
-            </div>
+              <ManagerWorkConversation />
+            </>
           ) : !selected ? (
             <div className="min-h-0 flex-1 overflow-y-auto p-4">
               <header aria-label="Selected task" className="space-y-3">
@@ -175,10 +201,11 @@ export function WorkPage({
                     if (panelOpen) closePanel();
                     else { focusPanel.current = true; setPanelOpen(true); }
                   }}>任务详情</Button>
+                {detail.error && <p role="alert" className="text-sm text-destructive">Task refresh failed: {detail.error}</p>}
               </header>
               <div className="flex min-h-0 flex-1 flex-col xl:flex-row">
                 <div className="flex min-h-0 min-w-0 flex-1 flex-col">
-                  <PlannerWorkConversation key={taskId} taskId={taskId} detail={selected} />
+                  <PlannerWorkConversation key={taskId} taskId={taskId} detail={selected} task={selected} onGateChanged={onGateChanged} />
                 </div>
                 {panelOpen && <Panel id="work-task-details" ref={node => { panelRef.current = node; }} tabIndex={-1} aria-label="任务详情"
                   className={`min-h-0 min-w-0 space-y-3 overflow-y-auto border-border bg-background p-4 text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring ${widePanel
