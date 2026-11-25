@@ -34,12 +34,13 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from datetime import date, datetime, time, timedelta, timezone
 from typing import Any
 from zoneinfo import ZoneInfo
 
 from ..db import connection, morning_briefs as store, proactive_deliveries as deliveries, triage_events
+from ..db import reminders as reminder_store
 from ..db.triage_events import BriefEvent
 from . import attention, chat_settings, proactive_delivery, triage_settings, turn_metrics
 from .channels.base import PostOutcome
@@ -183,10 +184,18 @@ def _fold_same_source(needs: str | None, digests: list[Mapping[str, Any]], summa
 
 
 def render(*, day: date, needs: str | None, reminders: list[Mapping[str, Any]], digests: list[Mapping[str, Any]],
-           tz: ZoneInfo, triage: list[BriefEvent] = (), triage_more: int = 0,
-           summary: Mapping[str, Any] | None = None, dashboard_url: str = "") -> str | None:
+           tz: ZoneInfo, triage: list[BriefEvent] = (), triage_more: int = 0, dashboard_url: str = "",
+           summary: Mapping[str, Any] | None = None, failed_reminders: Sequence[Mapping[str, Any]] = ()) -> str | None:
     """The brief, or None when every section is empty. ``needs`` is the needs-you summary; the empty summary is
-    not a section. With ``summary``, a digest row for a schedule that summary lists is folded into that line."""
+    not a section. Fold reminder digests into their needs/fallback lines, then schedule digests into their
+    schedule lines, without changing the consumed ids."""
+    listed = {item["key"] for section in (summary or {}).get("sections", ())
+              if section["kind"] == "reminders" and section["state"] == "ok" for item in section["items"]
+              } if needs and needs != attention.NOTHING else set()
+    failures = [attention._reminder_item(row) for row in failed_reminders if f"reminder:{row['id']}" not in listed]
+    shown = listed | {item["key"] for item in failures}
+    digests = [row for row in digests if not (
+        row["kind"] == "user_reminder" and f"reminder:{row.get('source_ref')}" in shown)]
     if summary is not None:
         needs, digests = _fold_same_source(needs, digests, summary)
     sections: list[str] = []
@@ -194,6 +203,10 @@ def render(*, day: date, needs: str | None, reminders: list[Mapping[str, Any]], 
         sections.append(needs)
     if reminders:
         sections.append("今天的提醒\n" + "\n".join(_reminder_line(row, tz) for row in reminders))
+    if failures:
+        sections.append("未确认送达的提醒\n" + "\n".join(
+            attention._line("reminders", item, datetime.now(timezone.utc))
+            + f"；回复「取消提醒 {item['ref']}」处理" for item in failures))
     if digests:
         sections.append("推迟到这份晨报的消息\n" + "\n".join(_digest_line(row, tz, dashboard_url=dashboard_url) for row in digests))
     if triage:
@@ -205,6 +218,14 @@ def render(*, day: date, needs: str | None, reminders: list[Mapping[str, Any]], 
         return None
     title = f"晨报 · {day:%m-%d}（周{_WEEKDAYS[day.weekday()]}）"
     return "\n\n".join([title, *sections])
+
+
+async def _brief_summary(summary: dict[str, Any]) -> dict[str, Any]:
+    """With attention off, terminal reminders use their own brief lines; keep other brief sources unchanged."""
+    if await attention.enabled():
+        return summary
+    sections = [section for section in summary["sections"] if section["kind"] != "reminders"]
+    return {**summary, "sections": sections, "total": sum(s["count"] for s in sections if s["state"] == "ok")}
 
 
 def _triage_line(event: BriefEvent, tz: ZoneInfo) -> str:
@@ -345,7 +366,7 @@ class MorningBriefService:
                 break
         if not pending:
             return
-        summary = await attention.collect(managers=self._managers)
+        summary = await _brief_summary(await attention.collect(managers=self._managers))
         # The switch, the channel and the operator can change while the summary is read.
         if not self._running():
             return
@@ -385,7 +406,7 @@ class MorningBriefService:
         async with confirmation_locks(conn, intent_ids), discovery_locks(conn, discovery_ids):
             # Keep all non-intent sections current too. The final refresh cannot
             # reintroduce a handled candidate while its execution gate is held.
-            summary = await attention.collect(managers=self._managers)
+            summary = await _brief_summary(await attention.collect(managers=self._managers))
             intent_section = next((section for section in summary['sections'] if section['kind'] == 'intents'), None)
             if intent_section and intent_section.get('state') == 'ok':
                 intent_section['items'] = [item for item in intent_section['items']
@@ -406,6 +427,7 @@ class MorningBriefService:
             return
         reminders = await store.reminders_today(conn, channel_id=channel_id, chat=chat, start=start,
                                                 end=start + timedelta(days=1))
+        failures = await reminder_store.needing_attention(now=now, db=conn, channel_id=channel_id, chat=chat)
         # The window stays the first attempt's dates through today. Rows already read are excluded by id, so a
         # custom time does not drop a message held later that morning and does not repeat one. The claim stores
         # this read's ids; a refusal records none. An insert that has not committed is not among them, so the
@@ -430,7 +452,8 @@ class MorningBriefService:
                 dates_start = datetime.combine(min(dates), time.min, tzinfo=policy.timezone)
                 triage, triage_more = await triage_events.for_brief(conn, dates_start=dates_start)
         text = render(day=day, needs=needs, reminders=reminders, digests=deferred, tz=policy.timezone,
-                      triage=triage, triage_more=triage_more, summary=summary, dashboard_url=self._dashboard_url)
+                      triage=triage, triage_more=triage_more, dashboard_url=self._dashboard_url,
+                      summary=summary, failed_reminders=failures)
         delivery = Delivery(DeliveryKind.MORNING_BRIEF, Urgency.NORMAL, ChatKind.DIRECT, silent=text is None)
         decision = proactive_delivery.deliver(delivery, policy, DeliveryState(now))
         if not await self._accepts(channel_id, chat):
@@ -460,7 +483,8 @@ class MorningBriefService:
         if any(row.get('source_ref') for row in deferred):
             deferred = await store.filter_rule_digests(conn, deferred, channel_id=channel_id, chat=chat)
             text = render(day=day, needs=needs, reminders=reminders, digests=deferred, tz=policy.timezone,
-                          triage=triage, triage_more=triage_more, summary=summary, dashboard_url=self._dashboard_url)
+                          triage=triage, triage_more=triage_more, dashboard_url=self._dashboard_url,
+                          summary=summary, failed_reminders=failures)
             read_ids = [row['id'] for row in deferred]
             if text is None:
                 await store.release(conn, day, channel_id, chat)

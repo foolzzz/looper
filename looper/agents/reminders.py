@@ -5,8 +5,9 @@ The user sets a reminder in their own turn (``ops.reminders``); at its time Loop
 chat with the bot it names, in words code writes (「你在 X 让我提醒你：……」), without a model. Nothing throttles it:
 the user asked for it.
 
-Each tick, under one advisory lock (so two servers never send the same reminder), the service settles as
-``uncertain`` what a sender stopped in the middle of, then sends what is due (``plan``). The rule holds no state:
+Each tick, under one advisory lock (so two servers never send the same reminder), the service retries claims
+that never started a post and settles started sends as ``uncertain``, then sends what is due (``plan``).
+The rule holds no state:
 a reminder due at most ``GRACE`` ago is sent as any; one due longer ago was missed (Looper was down, asleep, stalled,
 switched off or draining), and of each chat's missed ones only the newest due within ``CATCH_UP`` is sent, saying
 when it was due, and only when nothing newer goes to that chat in the same tick; the others are settled ``missed``.
@@ -256,8 +257,10 @@ class ReminderService:
 
     async def _tick(self, conn: Any) -> None:
         now = self._clock()
-        if orphans := await store.orphans_uncertain(conn, now):
-            logger.warning("%d reminder(s) were being sent when their sender stopped: settled uncertain", orphans)
+        retried, uncertain = await store.recover(conn, now)
+        if retried or uncertain:
+            logger.warning("recovered reminders: %d unstarted claim(s) pending, %d started send(s) uncertain",
+                           retried, uncertain)
         due = await store.due(conn, now)
         decided = plan(due, now)
         for reminder_id, why in decided.missed.items():
@@ -292,6 +295,7 @@ class ReminderService:
                     last_user_message_at=None, now=now)
             except Exception:
                 logger.exception("reminder %s: decision failed; sending as with the layer off", reminder_id)
+        await store.start_post(conn, reminder_id, self._clock())
         try:
             receipt = await self._registry.post(channel_id, target(chat), message_text(reminder, now=now),
                                                 idempotency_key=key)
