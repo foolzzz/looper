@@ -1150,6 +1150,9 @@ class WorkerPool:
         # The Planner exposes a dispatched step before its run has an input channel.
         # Corrections in that window must wait for startup rather than look like a finished run.
         self._input_ready: dict[str, asyncio.Event] = {}
+        # Once launch begins, shutdown must let its initial input finish before detaching.
+        self._launching_kept: dict[str, tuple[KeptRun, asyncio.Event]] = {}
+        self._detaching_kept = False
         self._input_deliveries: set[asyncio.Task[None]] = set()
         # The agent room's tools for the runs (``ops.room.RoomOps``); without them a run has no room.
         self.room_ops: Any = None
@@ -1312,6 +1315,23 @@ class WorkerPool:
                 wp.handle.fence()
 
     async def detach_kept(self, *, epoch: int, timeout: float = 3.0) -> dict[DetachKind, list[str]]:
+        self._detaching_kept = True
+        starting = []
+        for wid, wp in list(self._active.items()):
+            if not isinstance(wp.handle, KeptRun) or wid not in self._tasks:
+                continue
+            launching = self._launching_kept.get(wid)
+            if launching is not None and launching[0] is wp.handle:
+                ready = launching[1]
+                if not ready.is_set():
+                    starting.append(asyncio.create_task(ready.wait()))
+            elif wp.handle.state is KeptRunState.STARTING:
+                # No launch has begun: cancellation leaves the persisted step for re-dispatch.
+                self._tasks[wid].cancel()
+        if starting:
+            # Launch and channel.start have their own timeouts. Never cancel a launch that may
+            # already have spawned its child just because the detach transport budget expired.
+            await asyncio.gather(*starting)
         deadline = asyncio.get_running_loop().time() + KEPT_DETACH_BUDGET_SEC
 
         def remaining():
@@ -1908,14 +1928,19 @@ class WorkerPool:
             logger.debug("worker %s already active, skipping", worker_id)
             return
 
-        role = "reviewer" if envelope.message_type is MessageType.VERIFY_REQUEST else "worker"
-        logger.info("dispatching %s %s%s (active=%d)", role, worker_id,
-                    _task_step_log(envelope.payload.get("parent_task_id", ""), envelope.payload.get("task_id")),
-                    len(self._active))
         self._input_ready[worker_id] = asyncio.Event()
-        task = asyncio.create_task(self._run_worker(envelope))
+        task = asyncio.create_task(self._dispatch_when_serving(envelope))
         self._tasks[worker_id] = task
         task.add_done_callback(lambda t: self._cleanup_worker(worker_id))
+
+    async def _dispatch_when_serving(self, envelope: MessageEnvelope) -> None:
+        if self._drain is not None:
+            await self._drain.wait_serving()
+        role = "reviewer" if envelope.message_type is MessageType.VERIFY_REQUEST else "worker"
+        logger.info("dispatching %s %s%s (active=%d)", role, envelope.target.agent_id,
+                    _task_step_log(envelope.payload.get("parent_task_id", ""), envelope.payload.get("task_id")),
+                    len(self._active))
+        await self._run_worker(envelope)
 
     def _cleanup_worker(self, worker_id: str) -> None:
         if ready := self._input_ready.pop(worker_id, None):
@@ -1923,6 +1948,8 @@ class WorkerPool:
         self._tasks.pop(worker_id, None)
         self._active.pop(worker_id, None)
         self._admission_waiting.discard(worker_id)
+        if launching := self._launching_kept.pop(worker_id, None):
+            launching[1].set()
         held = self._slots.pop(worker_id, None)
         if held is not None:
             self._wake_slot_waiters(held)
@@ -1937,10 +1964,20 @@ class WorkerPool:
     def drain_waiting(self) -> dict[str, Any]:
         # Keep the slot counted through result publication, not just subprocess completion.
         return {"runs": [{"worker_id": wp.worker_id, "task_id": wp.parent_task_id or wp.task_id,
-                          "role": wp.role.value, "since": wp.since.isoformat(), "keepable": wp.keepable,
+                          "role": wp.role.value, "since": wp.since.isoformat(),
+                          "keepable": wp.keepable and self._ready_to_keep(wid, wp.handle),
                           "runtime_id": wp.runtime_id, "runtime_type": wp.runtime_type}
                          for wid, wp in self._active.items()
                          if wid in self._slots and wid not in self._admission_waiting]}
+
+    def _ready_to_keep(self, worker_id: str, handle: RunHandle | None) -> bool:
+        if isinstance(handle, KeptRun) and handle.state is KeptRunState.STARTING:
+            return False
+        launching = self._launching_kept.get(worker_id)
+        if launching is not None and launching[0] is handle:
+            return launching[1].is_set()
+        ready = self._input_ready.get(worker_id)
+        return ready is None or ready.is_set()
 
     async def recheck(self) -> None:
         """Let every run waiting for room in its task check its task's limit again (a limit changed)."""
@@ -2724,6 +2761,8 @@ class WorkerPool:
         role = "reviewer" if is_verify else "worker"
         task_step = _task_step_log(parent_task_id, ctx.step_id)
         assert handle is not None
+        if isinstance(handle, KeptRun) and self._detaching_kept:
+            raise asyncio.CancelledError  # shutdown won admission before this attempt could spawn
         recorder = ClaudeRunRecorder(
             agent_id=worker_id,
             task_id=parent_task_id,
@@ -2773,6 +2812,7 @@ class WorkerPool:
                                 "summary": error, "verification": ctx.verification}
                 if isinstance(handle, KeptRun):
                     handle.set_record(recorder.record_id)
+                    self._launching_kept[worker_id] = (handle, asyncio.Event())
                 await handle.launch()
                 if runtime.type == "acp":
                     await recorder.annotate(handle.launch_record)
@@ -3209,6 +3249,9 @@ class WorkerPool:
                     logger.warning("worker %s: Claude closed stdin before the prompt was sent", worker_id)
                 if (ready := self._input_ready.get(worker_id)) is not None:
                     ready.set()
+                launching = self._launching_kept.get(worker_id)
+                if launching is not None and launching[0] is handle:
+                    launching[1].set()
 
                 await asyncio.wait_for(_read_output(), timeout=max(0, deadline - time.monotonic())
                                        if deadline is not None else None)

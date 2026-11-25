@@ -15,24 +15,51 @@ With `manager.metrics.enabled` on (default off, operator only), model user turns
 record `metadata.turn_metrics`: version, origin, chat kind, receipt time, ack kind
 and latency, first-reply latency, top-level tool calls, delivery and replay status.
 Completion turns record origin, tool calls and delivery. Proactive sends record
-their typed source and receipt in `proactive_deliveries`; an operator message
-marks deliveries in that chat from the preceding 30 minutes. All writes run in
-bounded background tasks and failures leave replies unaffected. The read-only
+their typed source, rendered body and receipt in `proactive_deliveries`, independently
+of the metrics switch; an operator message marks deliveries in that chat from
+the preceding 30 minutes. Turn metrics and receipts use bounded background tasks;
+failures leave replies unaffected. The read-only
 `manager_metrics.get` operation (also available through the CLI) returns delivery
 counts, P50/P95 latencies excluding replayed and completion turns, daily proactive
 counts in the server timezone and mature, successfully sent delivery reply rates
 for 1–30 days. Housekeeping retains proactive rows for 90 days whether or not
 metrics are on, because delivery writes the same table while that switch is off.
-Proactive delivery recording owns the table's single named migration:
-one row per message, with the send receipt in `outcome`. `source` includes
+Proactive delivery recording keeps one row per message, with the send receipt in `outcome`. `source` includes
 `completion`, `user_reminder` and `morning_brief` (the digest itself); `chat_kind`
 is `direct` or `group`.
 Unsent decisions leave both `outcome` and `sent_at` null. Registry sends reuse
-idempotency keys and bus sends reuse envelope ids as `dedupe_key`; retries update
-only the receipt, preserving the first decision. Nullable `decision`, `reason`,
-cap and digest fields are reserved for the delivery layer's future `decide()`
-write point.
-Off, turns have no metrics key and sends add no writes.
+idempotency keys and bus sends reuse envelope ids as `dedupe_key`; retries preserve
+the first decision. The delivery layer's `decide()` fills the nullable `decision`,
+`reason`, cap and digest fields; body capture does not change those decisions.
+Off, turns have no metrics key; proactive body and receipt recording still runs.
+
+Before handing a proactive message to its channel, the sender saves the rendered
+text as `body`, bounded to 32 KiB of UTF-8 without splitting a character;
+`body_truncated` identifies a stored prefix. The text sent is unchanged. Registry
+posts (including subscriptions and digests), bus notices and completion replies,
+morning briefs and user reminders share this storage. The existing morning-brief
+key (`morning_brief:<local date>:<channel id>:<chat>`) and reminder key
+(`looper-reminder-<id>`) link the text to their `morning_briefs` and `reminders`
+records, including when delivery policy is off. Retries reuse the delivery row
+and replace its stored text with the latest attempted channel input.
+`body_stored_at` records that attempt; a missing receipt may mean a send is still
+running or was interrupted. Storage has a one-second timeout; failures warn and
+leave sending unaffected. No body is injected into agent context.
+
+The fixed `BODY_RETENTION_DAYS = 14` in `looper/db/proactive_deliveries.py` governs
+body retention. The existing hourly housekeeping pass, first scheduled at service
+startup, clears expired bodies to `NULL` in batches while keeping rows, receipts,
+timestamps and truncation flags. The separate 90-day delivery-row retention is
+unchanged. Historical rows have no backfilled body.
+The operator-only `proactive_sends.list` operation
+(`POST /api/v1/proactive_sends/list`) reads these records with optional `source`
+and `local_date` filters (the operator timezone), `limit` (1–100, default 50) and
+`before`; `next_before` pages backward by delivery id. Each record includes its
+body, truncation flag and receipt. API clients receive 403 before validation or
+storage access. The generated operator CLI exposes `proactive-sends list`, for
+example `proactive-sends list --source morning_brief --limit 10`. No Manager tool
+is added. Dashboard, Telegram and Lark controls need no change: this is an
+operator diagnostic read, and their sent text and switches remain unchanged.
 
 With metrics enabled, Lark turns also store `metadata.turn_metrics.lark_ingress`:
 UTC ISO timestamps `platform_sent_at` (the event's millisecond `create_time`),
@@ -8882,6 +8909,16 @@ is not done.
 
 ## Web Dashboard
 
+In Work, one task details column lists the plan and gate summaries from the
+selected task's shared detail. Both gate entry points locate the conversation's
+existing gate card; only that card owns the editor and discussion reads. Narrow
+layouts open details in a scrollable dialog, while short screens scroll the
+conversation and composer together. Dismissing details restores its opener;
+choosing a gate closes it before focusing the gate. States without a conversation
+card (pending, skipped or unknown) have disabled summaries with an explanation.
+A missing expected card asks the operator to refresh and restores the opener,
+instead of locating a same-named gate outside the selected conversation.
+
 Single-page React app served from `web/dist/` via the built-in HTTP server
 (`looper/agents/http_server.py`). Default port: 8767. An installed wheel has no
 `web/`; it serves the copy staged into the package (`looper/web/dashboard`,
@@ -8908,6 +8945,46 @@ built by `scripts/stage-dashboard.sh` at release time), and it carries
 - **Activity SSE**: `GET /api/tasks/:id/activity/stream` — server-sent events from Worker subprocess
 - **Task polling**: 2-second interval with auto-stop on terminal status
 - **Chat SSE**: `POST /api/v1/operator_chat/reply_events` (`correlation_id`) and `POST /api/v1/operator_chat/thread_events` (`session_id`, optional `manager`) — real-time replies and autonomous thread messages; the `answer.final` of a Manager reply carries its `outcome` (`answered`, `failed`, `stopped` or `confirm`; absent reads as `answered`), which the page uses to send queued messages only after `answered`
+- **Work Manager conversation**: when the Work conversations switch is enabled, the pinned Manager uses
+  the default Manager's current `looper-chat-session-id` thread. A Manager-scoped history read must confirm
+  ownership before messages are shown, the thread is watched or sending is enabled. A foreign pointer starts
+  a new thread with the existing Chat notice; a failed read disables sending and offers Retry. Thread events
+  and reply events merge by message id, with saved replies replacing partial text. Stop uses Chat's setting
+  and the running turn's interrupt capability. Only an answered final drains staged text automatically;
+  other outcomes return it to the draft. A stream without a final follows the server turn, then re-reads history
+  and returns staged text to the draft. Leaving the pane cancels browser subscriptions and polls without
+  stopping the server. The existing Chat page and channel entry points keep their behavior.
+- **Work task activity**: the selected Planner's messages and task activity share one time-ordered feed,
+  ordered by timestamp, fixed source order and source id. Activity reads start with the latest window,
+  page backwards by the smallest loaded sequence and subscribe after that window's largest sequence;
+  overlapping reads and live events deduplicate by sequence. Read failures offer Retry. One `TaskGates`
+  instance uses the page's shared detail and updates it from gate replies. The page has one visibility-aware
+  detail reader while the task runs, so later gate openings and closures appear without a second editor;
+  replies invalidate older reads. Summaries can focus its existing
+  anchor with `openWorkGate`. Tool presentation records update by stable id and stay folded by default;
+  the task-thread adapter owns their decoding. Unknown activity and task events remain neutral text.
+- **Work conversation state**: a store owned by the mounted Work page keeps up to 20 conversation
+  caches, with at most 1,000 loaded message/activity rows per conversation. The selected conversation
+  and its reading anchor take priority; eviction leaves unsent drafts and queues intact. Versioned
+  session storage contains only unsent input, view geometry and the departure row/sequence watermark;
+  message content and input history stay in memory and are read from the server after reload. Task
+  cache hits render before revalidation. Manager cache hits still wait for a scoped ownership read;
+  unconfirmed or foreign threads cannot display cached content, watch or send. A refresh failure keeps
+  content whose ownership is already confirmed and shows its reason. Returning restores the stable
+  row anchor and offset after layout is available, including a previously hidden narrow pane. Earlier
+  activity pages and growing tool results preserve that anchor; live updates follow the bottom only
+  when the reader is there. One “你离开之后” separator precedes the first row after the departure
+  watermark. This client watermark is independent of `tasks.mark_seen`, which still sends only a sequence.
+- **Work task cost**: the existing task details panel renders one read-only cost section from the shared
+  detail, without a separate read or poll. Missing costs or no recorded task runs remain unavailable;
+  recorded zero costs retain their value. Running or unpriced runs retain the cost caveats and label any
+  available amount as a known subtotal, with no complete remaining allowance or spend meter. Complete
+  costs use the existing meter only with a positive effective `task_budget_usd`; null and zero caps have
+  explicit labels, and `own_budget_usd` explains whether the cap belongs to the task or its project.
+  An optional server `by_role.task_manager` share is already in the total; `manager_by_model` stays outside
+  the task's cost and cap. The section never sums either into the total and offers no budget writes or
+  continue control. It mounts only within the gated Work page's visible task panel.
+
 
 ### Hash Routing
 
@@ -9174,7 +9251,7 @@ notify a channel, or call the task-end listener. A task the background is workin
 | `/api/v1/auth/{set_password,clear_password}` | POST | `auth.{set_password,clear_password}` |
 | `/api/v1/system/{check,status,overview}` | POST | `system.{check,status,overview}` |
 | `/api/v1/config/{export,import_preview,import_apply,import_upload,import_cancel}` | POST | `config.{export,import_preview,import_apply,import_upload,import_cancel}` |
-| `/api/v1/tasks/{requirement_update,configure,move,agents,continue,role_update,room_view,activity,activity_detail,conversation,activity_stream,create,create_draft,done,page,detail,delete,work_list,mark_seen}` | POST | `tasks.{requirement_update,configure,move,agents,continue,role_update,room_view,activity,activity_detail,conversation,activity_stream,create,create_draft,done,page,detail,delete,work_list,mark_seen}` |
+| `/api/v1/tasks/{requirement_update,configure,move,agents,continue,role_update,room_view,activity,activity_detail,conversation,activity_stream,create,create_draft,done,page,detail,delete,select,work_list,mark_seen}` | POST | `tasks.{requirement_update,configure,move,agents,continue,role_update,room_view,activity,activity_detail,conversation,activity_stream,create,create_draft,done,page,detail,delete,select,work_list,mark_seen}` |
 | `/api/v1/task_conversations/{get,update}` | POST | `task_conversations.{get,update}` (operator-only; read or set `tasks.conversations.enabled`, default false; null restores false) |
 | `/api/v1/catalog_items/{list,get,update,delete}` | POST | `catalog_items.{list,get,update,delete}` |
 | `/api/v1/installs/{create,update,delete,project}` | POST | `installs.{create,update,delete,project}` |
@@ -9360,6 +9437,27 @@ separate tokens and is not exported to API clients. No unversioned operator rout
   updated_at) DESC, id DESC)` concurrently, restricted respectively to open and ended non-scheduled
   tasks. Activity and schedules use `idx_activity_task` and `idx_tasks_schedule`. These new operations
   do not change existing pages, channels, task operations or agent tools.
+- **Task file changes.** Operator-only `tasks.changes {task_id, limit?}` reads file names and statuses,
+  never patches or contents. `limit` defaults to 100 and accepts integers from 1 to 200; unknown fields
+  (including paths and refs) are rejected. The closed result contains `task_id`, `kind`, `scope`, `files`
+  (`path`, `status`, nullable `old_path`), `truncated` and nullable `reason`, with no total count.
+  `task_branch` means net changes from the stored base commit, including committed and pending changes
+  in an active task worktree, or only the retained branch when its worktree was removed. A changed
+  checkout branch is refused; detached HEAD is accepted only at the resolved task branch tip.
+  `working_tree` means only uncommitted and untracked files in an in-place workspace. Paths are relative
+  to the task directory; sibling files and outside rename sources are excluded. Ignored files are omitted.
+  `truncated` reports more unique files than the requested limit; parsing retains at most limit + 1 entries,
+  while the shared git runner still buffers command stdout. This is not an I/O memory bound.
+  An unavailable read returns empty files, null scope and one of `not_git`, `workspace_missing`,
+  `branch_missing`, `branch_changed` or `git_error`, rather than claiming a clean workspace. Missing tasks
+  return 404; API clients receive 403 before git runs. Git failures never return raw local diagnostics.
+  The operation uses read-only git with optional locks disabled and never prepares or reopens worktrees.
+  The generated CLI exposes this operation; there is no new agent tool. Inside the default-off Work page,
+  the task details section reads 100 entries when opened or explicitly refreshed, cancels on close or task
+  change, and never polls. It shows scope, file status, rename paths, truncation and readable failure reasons;
+  paths are plain text. A failed refresh marks retained files as stale, and file-read failures leave the
+  conversation available. Wide screens place the section on the right; narrow screens use a closable drawer
+  with focus return. Existing task pages, Lark and Telegram requests remain unchanged.
 - **Run tree.** The operator-only `runs.tree {task_id}` reads every persisted run of one task, following only
   that task's `parent_record_id` edges. It returns creator, reason, model, status, summary and failure details,
   with own and subtree costs split into subscription equivalents and API spend; unknown amounts remain null.
@@ -9370,6 +9468,16 @@ separate tokens and is not exported to API clients. No unversioned operator rout
   exports; the Manager's compact project hides this group while off, preserving the base view byte for byte.
   First enablement uses the project-settings form and project administration API. The Manager's project tool
   and its schema are unchanged; chat configuration is deferred to a follow-up with a Manager dialog comparison.
+- **Finding a task.** `POST /api/v1/tasks/select` (`tasks.select`) is an operator-only read and calls no model.
+  It is not a generated client command. An empty selection uses the current directory: the deepest `work_dir`,
+  `workspace_dir` or active worktree that contains it, and when several tasks share that directory and only one
+  has not ended, that one is returned. With no directory match, the tasks with activity in the last 14 days, at
+  most 20, newest first. A task id returns that task. One merge-request reference (a `/pull/N` or
+  `/merge_requests/N` URL, `!N`, `#N`, `mr N`, `pr N`, or a bare number) matches a `github_pr` wait or the same
+  reference in the title, latest requirement, original text or supplements. Any other text matches when every
+  word is in the title or the latest requirement. Text and merge-request matches use the last 90 days of activity
+  unless `all` is set. One match is returned; two or more are listed, at most ten, and the first is not chosen;
+  none says what was searched.
 - **Client-only tools.** `looper_task_pipeline` (a task's steps in plan order with kind, status, dependencies and role)
   and `looper_gates` (list a task's gates, read their messages, reply, end a gate) exist for clients. A client does not
   get `looper_task_gate_reply`, because a gate reply there is the user's own words in a chat (a client answers with

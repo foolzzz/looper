@@ -10,6 +10,7 @@ import os
 import plistlib
 import signal
 import subprocess
+import sys
 import tarfile
 import urllib.error
 import venv
@@ -1887,6 +1888,52 @@ def test_online_backup_preserves_default_steps_and_precedes_drain(deployment, mo
         assert data["online_backup"].endswith("online.dump")
     else:
         assert "online_backup" not in data and "online_backup_seconds" not in data
+
+
+@pytest.mark.parametrize("verify_command", [False, True])
+def test_online_upgrade_runs_command_backup_from_unit_ops_file(deployment, monkeypatch, verify_command):
+    import asyncpg
+    from looper import ops_config
+    from looper.agents import db_backup
+
+    root = deployment.root
+    command = [sys.executable, "-c", "import sys; sys.stdout.buffer.write(b'PGDMP command archive')"]
+    verified = root / "verified"
+    verifier = [sys.executable, "-c",
+        "import sys; from pathlib import Path; "
+        "data = sys.stdin.buffer.read(); "
+        f"Path({str(verified)!r}).write_bytes(data); "
+        "sys.exit(1) if data != b'PGDMP command archive' else None; "
+        "print('1; 1259 100 TABLE public example test\\n2; 0 100 TABLE DATA public example test')"]
+    path = root / ops_config.FILE
+    body = f'[database]\nurl = "postgresql://test/test"\n[backup]\ncommand = {json.dumps(command)}\n'
+    if verify_command:
+        body += f'verify_command = {json.dumps(verifier)}\n'
+    else:
+        # Exercise backup.command's source lookup independently of the verifier's.
+        restore = root / "bin/pg_restore"
+        restore.parent.mkdir()
+        restore.write_text(f'#!{sys.executable}\n' + verifier[-1].replace(
+            "sys.stdin.buffer.read()", "Path(sys.argv[-1]).read_bytes()") + '\n')
+        restore.chmod(0o755)
+        monkeypatch.setenv("PATH", str(restore.parent))
+    ops_config.write_private(path, body)
+    mgr = service.manager(deployment.host, "test")
+    mgr.unit_argv = lambda: service.looper_command(deployment.host.executable) + [
+        "serve", "--config", str(path), "--runtime-root", str(root)]
+    mgr.ops = lambda: service._Manager.ops(mgr)
+    conn = SimpleNamespace(fetchval=AsyncMock(return_value=160004), close=AsyncMock())
+    monkeypatch.setattr(asyncpg, "connect", AsyncMock(return_value=conn))
+    monkeypatch.setattr(db_backup, "schema_state", AsyncMock(return_value={
+        "fingerprint": "a" * 64, "registry_version": 4, "migrations": ["baseline"]}))
+
+    assert cli.main(["service", "upgrade", "--backup-before-stop"]) == 0
+    data = report(deployment)
+    archive = Path(data["online_backup"])
+    assert archive.read_bytes() == verified.read_bytes() == b"PGDMP command archive"
+    assert json.loads(archive.with_suffix(".dump.json").read_text())["verified"] is True
+    assert data["status"] == "ok"
+    assert deployment.events == ["drain", "drain_status", "stop", "install", "start"]
 
 
 @pytest.mark.parametrize("reason", ["dump failed", "archive verification failed", "schema changed during backup"])
