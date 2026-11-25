@@ -7294,16 +7294,26 @@ intent edits and fallback replies, subscription alerts and failure notices,
 task progress, completion turns, the dashboard chat and other senders retain
 their existing paths. The delivery settings UI is not delivered here.
 Design: [proactive delivery RFC](rfcs/proactive-delivery-v0.zh-CN.md).
-A morning brief (`source` `morning_brief`) is sent uncounted and is never
-deferred: it is the digest. The brief has its own switch and still calls `deliver`
-while the delivery switch is off.
+A morning brief (`source` `morning_brief`) is a scheduled delivery: quiet hours
+apply even after a recent reply, while the daily cap neither blocks nor counts it.
+A quiet brief waits for an eligible tick before its catch-up cutoff; otherwise its
+unconsumed digest stays for the next workday. The brief has its own switch and
+still calls `deliver` while the delivery switch is off.
 
 ### Morning brief
 
 On a workday (Monday to Friday; a weekday holiday still sends), at
 `morning_brief.time` (09:15 by default) in `user.timezone` (else the server's
 zone, `turn_context.zone()`), one brief goes to each enabled bot's operator
-direct chat. It names what waits (the needs-you summary), reminders due that
+direct chat. A missed send can catch up only before `morning_brief.cutoff`
+(12:00 local by default); the cutoff itself is excluded. Quiet hours always
+block the brief. It can resume when they end only if still before the cutoff.
+The sender rechecks the current local date, time window and quiet hours before
+posting, so collection that crosses a boundary cannot cause a late send.
+A quiet or expired tick preserves the first unread date without consuming digest
+or triage ids or spending a send attempt. The next eligible workday reads from
+that same boundary, and consumes only the ids it actually sends. It names what
+waits (the needs-you summary), reminders due that
 local day, and proactive messages deferred into the digest (`decision`
 `digest`). Every brief reads from the first attempt's dates (Monday also
 Saturday and Sunday) through the day being sent, except digest rows already
@@ -7335,10 +7345,25 @@ channel is enabled and who the operator is are read again after the summary is
 collected and again immediately before the post. The switch is read again after
 the operator
 query returns. A fresh claim that then fails that check is deleted; a claim
-that continued a refusal is put back as that refusal, with the attempt count
-it had. The switch
+that continued a refusal or a zero-attempt deferral is restored with its prior
+attempt count and first unread date. The switch
 `morning_brief.enabled` is off by default and operator-only
-(`morning_brief.get`, `morning_brief.update`); off, a tick reads the in-memory
+(`morning_brief.get`, `morning_brief.update`). Those operations, the generated
+CLI and Settings → Chat expose `enabled`, `time` and `cutoff`; stored times use `HH:MM`.
+An explicit cutoff must be later than send time. An absent or null cutoff derives
+12:00 for sends before noon, otherwise send time plus three hours, capped at the
+end of the local day (24:00, exclusive). Thus 21:30 derives 24:00, and 23:59 has
+a catch-up window until midnight; quiet hours still block it and preserve its
+unconsumed digest for the next eligible workday.
+On load, a stored cutoff not later than send time is ignored with one warning and
+the same derivation applies. Readback includes the effective `cutoff` and
+`cutoff_source` (`stored` or `derived`). The `cutoff` result is either an `HH:MM`
+string or the typed boundary `{"kind":"end_of_day"}` for exclusive local 24:00;
+it is never a `"24:00"` time string. Internally that boundary is
+`MorningBriefBoundary.END_OF_DAY`, distinct from a wall-clock `time`.
+Updates accept only `HH:MM` or null for cutoff; null keeps derivation, including
+when the dashboard displays the end-of-day boundary. Other null fields restore their defaults.
+An invalid update changes nothing. Off, a tick reads the in-memory
 switch and does nothing else. One `morning_briefs` row per local date and chat
 makes a restart and a second server send it at most once. A send that stops
 mid-way is `uncertain` and is not sent again. Upgrades conservatively mark old
@@ -8576,6 +8601,7 @@ PostgreSQL is a hard startup dependency. All data paths:
 | `tasks` | Task metadata, status, phase, timestamps, `work_dir`, `project_id` (required), `schedule_id` (the schedule that fired it), `budget_usd` (its own spend cap, over its project's), `chat_id`, `chat_kind` and `chat_mention` (who is told when it ends: a Telegram chat id, a Lark sender's open_id, or a Lark group's id and the requester it @-mentions; `chat_kind` is `user` or `chat`; NULL for a task asked for elsewhere), `chat_group` (that chat is a group chat, told only the task's end; false for a task from before it), `original_user_text` (the user's message the Manager's task JSON answered, often 「确认」; kept as history), `title` (a few words naming it, from the task JSON; `task_name` falls back to the goal id, then the requirement), and `workspace_dir`, `workspace_mode` and `workspace_base` ([Task workspaces](#task-workspaces)); `manager_id` (the Manager that created it, which hears of its progress and end), `template` (JSON snapshot of the task template it came from, NULL without one), `workflow` (immutable workflow snapshot, NULL without one) and `origin_thread` (the web chat thread it was asked for in) |
 | `task_worktrees` | A worktree task's git worktree ([Task workspaces](#task-workspaces)), one per task (going with it): `repo_dir` and `subdir` (the workspace in its repository), `path`, `branch`, `base_commit`, `links`, `state` (`active`, `removed`), `result_commit` (the branch's tip when it was removed), `created_at`, `removed_at` |
 | `task_steps` | A task's steps, each with everything its Planner decides with: `step_key` (label), `kind` (`work` or `gate`), `depends_on` (step ids), `review`, `acceptance_criteria`, `validation_commands`, `status`, `result`, `worker_id`, `reviewer_id`, `retries`, `feedback`, `missed_messages`, `started_at` (when its run was first dispatched, kept through retries, reviews and server restarts; cleared when a restart of the task sends it back to not started; null for steps from before the column); `difficulty` (`routine`, `hard`, `critical`, null when unset; a critical step's plan is reviewed by the advisor before it starts: [Consults of the advisor](#consults-of-the-advisor)) |
+| `task_seen` | Per-operator task progress: `(principal, task_id)` primary key, monotonic `seen_activity_seq`, reserved nullable `seen_message_id`, and `seen_at`; deleting a task cascades its seen records |
 | `task_user_gates` | A gate step's gate ([User gates](#user-gates)): `topic`, `agenda`, `findings`, `state`, `summary` (only once passed), `resolution`, `ended_by_user`, `plan_change`, `delivered_through`, `turns`, `reminders` and its times; the Planner writes all but `first_reply_at` and the reminders' columns, and a closed gate stays as it closed |
 | `task_user_gate_messages` | A gate's discussion, oldest first: the user's messages (`message`, `end`), the Planner's replies and code's notes (`opened`, `updated`, `reminder`, `cancelled`, `closed`, `resumed`, `error`), with `via`, the option a button chose, in a group chat the author, and for a user's message `from_operator` (whether the operator wrote it in their own turn, decided by code as it is stored; NULL: not known) |
 | `task_plans` | A task's plan, one row per task: `plan_id`, `status` (`planning`, `executing`, `verifying`, `stopping`, `completed`, `failed`), `correlation_id`, `origin_channel_id`, `final_summary`, `fail_reason`, and with step workspaces `start_branch` and `start_commit` (where the branch was when the task dispatched its first step; `''` otherwise); replaced when the task is planned again |
@@ -9089,7 +9115,7 @@ notify a channel, or call the task-end listener. A task the background is workin
 | `/api/v1/auth/{set_password,clear_password}` | POST | `auth.{set_password,clear_password}` |
 | `/api/v1/system/{check,status,overview}` | POST | `system.{check,status,overview}` |
 | `/api/v1/config/{export,import_preview,import_apply,import_upload,import_cancel}` | POST | `config.{export,import_preview,import_apply,import_upload,import_cancel}` |
-| `/api/v1/tasks/{requirement_update,configure,move,agents,continue,role_update,room_view,activity,activity_detail,conversation,activity_stream,create,create_draft,done,page,detail,delete}` | POST | `tasks.{requirement_update,configure,move,agents,continue,role_update,room_view,activity,activity_detail,conversation,activity_stream,create,create_draft,done,page,detail,delete}` |
+| `/api/v1/tasks/{requirement_update,configure,move,agents,continue,role_update,room_view,activity,activity_detail,conversation,activity_stream,create,create_draft,done,page,detail,delete,work_list,mark_seen}` | POST | `tasks.{requirement_update,configure,move,agents,continue,role_update,room_view,activity,activity_detail,conversation,activity_stream,create,create_draft,done,page,detail,delete,work_list,mark_seen}` |
 | `/api/v1/task_conversations/{get,update}` | POST | `task_conversations.{get,update}` (operator-only; read or set `tasks.conversations.enabled`, default false; null restores false) |
 | `/api/v1/catalog_items/{list,get,update,delete}` | POST | `catalog_items.{list,get,update,delete}` |
 | `/api/v1/installs/{create,update,delete,project}` | POST | `installs.{create,update,delete,project}` |
@@ -9260,6 +9286,21 @@ separate tokens and is not exported to API clients. No unversioned operator rout
   export and import share their implementation with `looper_config_export` and the dashboard;
   `config.import_preview` stages a document and returns an import id, and `config.import_apply` requires a
   client confirmation before writing it.
+- **Work list.** Operator-only `tasks.work_list {section, project_id?, statuses?, cursor?, limit?}`
+  returns `open` and `ended` task pages (`items`, counts by status under the same project/status filters,
+  `next_cursor`), or one row per schedule (`schedules`, `next_cursor`). Limits are 1–100, default 50;
+  statuses accept 1–10 raw status names for task sections only. Open tasks sort by latest activity,
+  ended tasks by `COALESCE(completed_at, attempt_ended_at, updated_at)`; scheduled tasks appear only
+  in their folded section, including disabled schedules and those without runs. Base64 JSON keysets
+  carry the section, timestamp and id; malformed or cross-section cursors return 400 `invalid`.
+  Rows carry `needs_you`, activity sequence and per-operator `unseen`; old ended tasks without a seen
+  record have no unseen dot. `tasks.mark_seen {task_id, seq}` advances the operator's watermark
+  monotonically (unknown task: 404). Each task page uses one list/count statement and two page-id
+  batches for gates and seen records. Migration `task_work_list` (2060) adds `task_seen` and builds
+  `idx_tasks_open (project_id, id)` and `idx_tasks_ended (COALESCE(completed_at, attempt_ended_at,
+  updated_at) DESC, id DESC)` concurrently, restricted respectively to open and ended non-scheduled
+  tasks. Activity and schedules use `idx_activity_task` and `idx_tasks_schedule`. These new operations
+  do not change existing pages, channels, task operations or agent tools.
 - **Run tree.** The operator-only `runs.tree {task_id}` reads every persisted run of one task, following only
   that task's `parent_record_id` edges. It returns creator, reason, model, status, summary and failure details,
   with own and subtree costs split into subscription equivalents and API spend; unknown amounts remain null.
