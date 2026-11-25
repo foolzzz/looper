@@ -55,22 +55,51 @@ _HINT_TEXT = "Nothing matched. Search every task with all, or give the task id."
 _HINT_ID = "No task has this id."
 _HINT_RECENT = "No task had activity in the last 14 days."
 _ENDED = {TaskGroup.COMPLETED, TaskGroup.CANCELLED, TaskGroup.ATTENTION}
-# Literal substring, as tasks._SEARCH does: '%' and '_' in the selection stay characters, never LIKE wildcards.
-_FOLD = "lower(regexp_replace(coalesce({column}, ''), '\\s+', ' ', 'g'))"
-_FROM = """
-SELECT t.id, t.title, t.requirement, t.original_user_text, t.status, t.work_dir, t.workspace_dir, t.updated_at,
-       p.name AS project_name, act.at AS last_activity_at, wt.path AS worktree_path
-FROM tasks t
-LEFT JOIN projects p ON p.id = t.project_id
+_MR_FIELDS = ["github_pr", "title", "requirement", "original_user_text", "supplements"]
+# NFKC then lower, the same two steps as normalize(). Whitespace and one surrounding quote pair stay
+# wider than Python: a search token has no space, and stripping quotes only removes a prefix and a suffix.
+# The raw strpos keeps a row when the server's normalize/lower is narrower. Python still accepts or rejects it.
+# '%' and '_' stay characters: this is strpos, never a LIKE pattern.
+_FOLD = "lower(regexp_replace(normalize(coalesce({column}, ''), NFKC), '\\s+', ' ', 'g'))"
+# The newest activity row. (task_id, seq) serves ORDER BY seq DESC LIMIT 1; max(created_at) cannot.
+_ACTIVITY = """
 LEFT JOIN LATERAL (
-    SELECT max(a.created_at) AS at FROM activity a WHERE a.task_id = t.id
+    SELECT a.created_at AS at
+    FROM activity a
+    WHERE a.task_id = t.id
+    ORDER BY a.seq DESC
+    LIMIT 1
 ) act ON true
-LEFT JOIN task_worktrees wt ON wt.task_id = t.id AND wt.state = 'active'
+"""
+_COLUMNS = """
+t.id, t.title, t.requirement, t.original_user_text, t.status, t.updated_at,
+p.name AS project_name, act.at AS last_activity_at
 """
 
 
+def _fold(column: str) -> str:
+    return _FOLD.format(column=column)
+
+
 def _has(column: str, placeholder: str) -> str:
-    return f"strpos({_FOLD.format(column=column)}, {placeholder}) > 0"
+    """True when the folded text or the raw text contains the bound literal."""
+    return (f"(strpos({_fold(column)}, {placeholder}) > 0 "
+            f"OR strpos(coalesce({column}, ''), {placeholder}) > 0)")
+
+
+def _interval(days: int) -> str:
+    return f"interval '{int(days)} days'"
+
+
+def _window_ids(days: int) -> str:
+    """Tasks that can be inside the window: a recent update, or any recent activity row.
+
+    A row whose newest activity is older is dropped after the seq probe. The indexes are
+    (updated_at) and (created_at, task_id); neither is asked to compute max(created_at).
+    """
+    limit = _interval(days)
+    return (f"SELECT id FROM tasks WHERE updated_at >= now() - {limit} "
+            f"UNION SELECT task_id FROM activity WHERE created_at >= now() - {limit}")
 
 
 def _ended(status: str) -> bool:
@@ -114,20 +143,96 @@ def _pack(rows, presented, searched, hint) -> dict[str, Any]:
     return _result("none", None, [], 0, searched, hint)
 
 
-async def _fetch(pool, where: str, args: list) -> list:
-    return list(await pool.fetch(_FROM + " WHERE " + where, *args))
+def _ancestors(cwd: str) -> list[str]:
+    """Normpath ancestors of the real working directory, the directory itself first."""
+    current = os.path.normpath(os.path.realpath(cwd))
+    found = []
+    while True:
+        found.append(current)
+        parent = os.path.dirname(current)
+        if parent == current:
+            return found
+        current = parent
 
 
-def _directories(row) -> set[str]:
-    found = set()
-    for raw in (row["work_dir"], row["workspace_dir"], row["worktree_path"]):
-        if isinstance(raw, str) and os.path.isabs(raw):
-            found.add(os.path.normpath(os.path.realpath(raw)))
-    return found
+def _contains_symlink(path: str, cache: dict[str, bool]) -> bool:
+    """Whether any component is a symlink or `.`/`..`. Parents are remembered across paths."""
+    current = "/"
+    for part in path.split("/")[1:]:
+        if part in {"", ".", ".."}:
+            return True
+        current = "/" + part if current == "/" else current + "/" + part
+        if current not in cache:
+            cache[current] = os.path.islink(current)
+        if cache[current]:
+            return True
+    return False
 
 
-def _window(see_all: bool, days: int) -> str:
-    return f"($1::bool OR COALESCE(act.at, t.updated_at) >= now() - interval '{days} days')"
+def _resolved_directory(path: str, ancestors: set[str], cache: dict[str, bool]) -> str | None:
+    """The real directory when it contains the working directory.
+
+    A stored path that is already an ancestor is returned as stored. realpath runs only for a symlink
+    or a `.`/`..` component, so a canonical path is not resolved again.
+    """
+    if not isinstance(path, str) or not os.path.isabs(path):
+        return None
+    if _contains_symlink(path, cache):
+        real = os.path.normpath(os.path.realpath(path))
+        return real if real in ancestors else None
+    norm = os.path.normpath(path)
+    return norm if norm in ancestors else None
+
+
+def _search_sql(match: str, see_all: bool, days: int) -> str:
+    """Windowed candidates, then the literal prefilter, then one activity row per survivor.
+
+    ``all`` reads every task: the caller asked for that. Otherwise the window indexes produce the ids,
+    and each id is one primary-key lookup. The prefilter is a superset of the Python match.
+    """
+    if see_all:
+        return f"""
+            SELECT {_COLUMNS}
+            FROM tasks t
+            LEFT JOIN projects p ON p.id = t.project_id
+            {_ACTIVITY}
+            WHERE {match}
+        """
+    window = f"COALESCE(act.at, t.updated_at) >= now() - {_interval(days)}"
+    return f"""
+        WITH narrowed AS MATERIALIZED (
+            {_window_ids(days)}
+        )
+        SELECT {_COLUMNS}
+        FROM narrowed n
+        JOIN LATERAL (
+            SELECT t.id, t.title, t.requirement, t.original_user_text, t.status, t.updated_at, t.project_id
+            FROM tasks t
+            WHERE t.id = n.id AND ({match})
+            -- Keeps the primary-key lookup outside the text filter. Without it the planner
+            -- applies the filter to every task, then keeps the window.
+            OFFSET 0
+        ) t ON true
+        LEFT JOIN projects p ON p.id = t.project_id
+        {_ACTIVITY}
+        WHERE {window}
+    """
+
+
+async def _rows(pool, sql: str, args: list) -> list:
+    return list(await pool.fetch(sql, *args))
+
+
+async def _rows_by_ids(pool, task_ids: list[str]) -> list:
+    if not task_ids:
+        return []
+    return await _rows(pool, f"""
+        SELECT {_COLUMNS}
+        FROM tasks t
+        LEFT JOIN projects p ON p.id = t.project_id
+        {_ACTIVITY}
+        WHERE t.id = ANY($1::text[])
+    """, [task_ids])
 
 
 def _object_of(value: Any) -> dict:
@@ -149,26 +254,98 @@ def _check_ref(spec: Any) -> pure.MrRef | None:
     return pure.MrRef(number, repo if isinstance(repo, str) and repo.strip() else None)
 
 
+_DIRECTORY_HITS = """
+SELECT id, path FROM (
+    SELECT id, work_dir AS path FROM tasks
+    WHERE work_dir <> '' AND work_dir = ANY($1::text[])
+    UNION ALL
+    SELECT id, workspace_dir FROM tasks
+    WHERE workspace_dir <> '' AND workspace_dir = ANY($1::text[])
+    UNION ALL
+    SELECT task_id, path FROM task_worktrees
+    WHERE state = 'active' AND path = ANY($1::text[])
+) hit
+"""
+# Paths that are not already an ancestor. A symlink or a `.`/`..` component may still contain the directory.
+_DIRECTORY_REST = """
+SELECT id, path FROM (
+    SELECT id, work_dir AS path FROM tasks
+    WHERE work_dir <> '' AND NOT (work_dir = ANY($1::text[]))
+    UNION ALL
+    SELECT id, workspace_dir FROM tasks
+    WHERE workspace_dir <> '' AND NOT (workspace_dir = ANY($1::text[]))
+    UNION ALL
+    SELECT task_id, path FROM task_worktrees
+    WHERE state = 'active' AND NOT (path = ANY($1::text[]))
+) rest
+"""
+
+
+async def _directory_pairs(pool, ancestors: list[str]) -> list[tuple[str, str]]:
+    """Tasks whose real work_dir, workspace_dir or active worktree contains the working directory."""
+    known = set(ancestors)
+    cache: dict[str, bool] = {}
+    pairs: list[tuple[str, str]] = []
+    for row in await pool.fetch(_DIRECTORY_HITS, ancestors):
+        resolved = _resolved_directory(row["path"], known, cache)
+        if resolved is not None:
+            pairs.append((row["id"], resolved))
+    for row in await pool.fetch(_DIRECTORY_REST, ancestors):
+        resolved = _resolved_directory(row["path"], known, cache)
+        if resolved is not None:
+            pairs.append((row["id"], resolved))
+    return pairs
+
+
+async def _recent(pool, see_all: bool) -> dict[str, Any]:
+    """At most 20 tasks with activity in the last 14 days. ``all`` does not widen the window.
+
+    ``count(*) OVER()`` is the full window, so ``more`` stays exact while only 20 rows are read back.
+    """
+    limit = _interval(pure.RECENT_DAYS)
+    rows = await _rows(pool, f"""
+        WITH narrowed AS MATERIALIZED (
+            {_window_ids(pure.RECENT_DAYS)}
+        )
+        SELECT {_COLUMNS}, count(*) OVER() AS total
+        FROM narrowed n
+        JOIN LATERAL (
+            SELECT id, title, requirement, original_user_text, status, updated_at, project_id
+            FROM tasks
+            WHERE id = n.id
+            -- Same fence as the text lookup: one primary-key read per window id.
+            OFFSET 0
+        ) t ON true
+        LEFT JOIN projects p ON p.id = t.project_id
+        {_ACTIVITY}
+        WHERE COALESCE(act.at, t.updated_at) >= now() - {limit}
+        ORDER BY COALESCE(act.at, t.updated_at) DESC, t.id
+        LIMIT {pure.RECENT_LIMIT}
+    """, [])
+    total = int(rows[0]["total"]) if rows else 0
+    ordered = sorted((_candidate(row, 0) for row in rows), key=lambda item: (-item.activity, item.task_id))
+    kind, chosen, _shown = pure.present(ordered, limit=pure.RECENT_LIMIT, single=False)
+    more = 0 if kind == "none" else total - len(chosen)
+    searched = {"fields": ["last_activity_at"], "window_days": pure.RECENT_DAYS, "all": see_all}
+    return _pack(rows, (kind, chosen, more), searched, _HINT_RECENT)
+
+
 async def _by_directory(pool, cwd: str, see_all: bool) -> dict[str, Any]:
     if cwd:
-        rows = await _fetch(pool, "TRUE", [])
-        listed = [(row, _directories(row)) for row in rows]
-        deepest = pure.deepest_paths(os.path.realpath(cwd), (path for _, dirs in listed for path in dirs))
+        ancestors = _ancestors(cwd)
+        pairs = await _directory_pairs(pool, ancestors)
+        deepest = pure.deepest_paths(ancestors[0], (path for _task_id, path in pairs))
         if deepest:
-            chosen = [row for row, dirs in listed if dirs & deepest]
             # Several in the deepest directory: the one that has not ended, when it is the only such task.
-            ranked = pure.prefer_single_open([_candidate(row, 0) for row in chosen])
+            ids = list(dict.fromkeys(task_id for task_id, path in pairs if path in deepest))
+            rows = await _rows_by_ids(pool, ids)
+            ranked = pure.prefer_single_open([_candidate(row, 0) for row in rows])
             return _pack(rows, pure.present(pure.rank(ranked), limit=pure.CANDIDATE_LIMIT, single=True), None, None)
-    rows = await _fetch(pool, f"COALESCE(act.at, t.updated_at) >= now() - interval '{pure.RECENT_DAYS} days'", [])
-    # Newest activity, then task id. Not ended-before-open, and never an exact match, even for one row.
-    ordered = sorted((_candidate(row, 0) for row in rows), key=lambda item: (-item.activity, item.task_id))
-    # `all` does not widen this list, so the window stays 14 days.
-    searched = {"fields": ["last_activity_at"], "window_days": pure.RECENT_DAYS, "all": see_all}
-    return _pack(rows, pure.present(ordered, limit=pure.RECENT_LIMIT, single=False), searched, _HINT_RECENT)
+    return await _recent(pool, see_all)
 
 
 async def _by_id(pool, task_id: str, see_all: bool) -> dict[str, Any]:
-    rows = await _fetch(pool, "t.id = $1", [task_id])
+    rows = await _rows_by_ids(pool, [task_id])
     ranked = [_candidate(row, 0) for row in rows]
     return _pack(rows, pure.present(ranked, limit=1, single=True),
                  _searched(["task_id"], see_all, None), _HINT_ID)
@@ -195,15 +372,20 @@ async def _references(pool, rows) -> dict[str, set[pure.MrRef]]:
     return found
 
 
-async def _by_mr(pool, ref: pure.MrRef, see_all: bool) -> dict[str, Any]:
-    number = str(ref.number)
-    text = " OR ".join(_has(column, "$2") for column in ("t.title", "t.requirement", "t.original_user_text"))
+def _mr_match_sql() -> str:
+    number = "$1"
+    text = " OR ".join(_has(column, number) for column in ("t.title", "t.requirement", "t.original_user_text"))
     supplement = ("EXISTS (SELECT 1 FROM task_journal j WHERE j.task_id = t.id AND j.kind = 'supplement' AND "
-                  + _has("j.summary", "$2") + ")")
+                  + _has("j.summary", number) + ")")
+    folded_number = f"btrim(normalize(coalesce(w.spec #>> '{{check,number}}', ''), NFKC)) = {number}"
     check = ("EXISTS (SELECT 1 FROM task_waits w WHERE w.task_id = t.id "
-             "AND w.spec #>> '{check,type}' = 'github_pr' AND w.spec #>> '{check,number}' = $2)")
-    where = f"{_window(see_all, pure.WINDOW_DAYS)} AND ({check} OR {text} OR {supplement})"
-    rows = await _fetch(pool, where, [see_all, number])
+             "AND w.spec #>> '{check,type}' = 'github_pr' AND ("
+             f"{folded_number} OR w.spec #>> '{{check,number}}' = {number}))")
+    return f"({check} OR {text} OR {supplement})"
+
+
+async def _by_mr(pool, ref: pure.MrRef, see_all: bool) -> dict[str, Any]:
+    rows = await _rows(pool, _search_sql(_mr_match_sql(), see_all, pure.WINDOW_DAYS), [str(ref.number)])
     refs = await _references(pool, rows)
     matched = []
     for row in rows:
@@ -212,19 +394,16 @@ async def _by_mr(pool, ref: pure.MrRef, see_all: bool) -> dict[str, Any]:
             matched.append(_candidate(row, 0))
         elif tier == "number":
             matched.append(_candidate(row, 1))
-    fields = ["github_pr", "title", "requirement", "original_user_text", "supplements"]
     return _pack(rows, pure.present(pure.rank(matched), limit=pure.CANDIDATE_LIMIT, single=True),
-                 _searched(fields, see_all, pure.WINDOW_DAYS), _HINT_TEXT)
+                 _searched(_MR_FIELDS, see_all, pure.WINDOW_DAYS), _HINT_TEXT)
 
 
 async def _by_text(pool, parts: list[str], see_all: bool) -> dict[str, Any]:
-    args: list = [see_all]
     clauses = []
-    for part in parts:
-        args.append(part)
-        placeholder = f"${len(args)}"
+    for index, _part in enumerate(parts, start=1):
+        placeholder = f"${index}"
         clauses.append(f"({_has('t.title', placeholder)} OR {_has('t.requirement', placeholder)})")
-    rows = await _fetch(pool, f"{_window(see_all, pure.WINDOW_DAYS)} AND {' AND '.join(clauses)}", args)
+    rows = await _rows(pool, _search_sql(" AND ".join(clauses), see_all, pure.WINDOW_DAYS), list(parts))
     matched = []
     for row in rows:
         tier = pure.text_match(row["title"], row["requirement"], parts)

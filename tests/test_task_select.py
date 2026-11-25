@@ -40,15 +40,28 @@ def test_normalize(raw, expected):
     ("https://github.com/owner/name/issues/12", None),
     ("https://github.com/owner/name/pull/12345678", None),
     ('"「12」"', None),
+    ("https://[/pull/12", None),
 ])
 def test_parse_mr(raw, expected):
     assert parse_mr(raw) == expected
 
 
-def test_text_refs_finds_marks_and_urls_but_not_bare_numbers():
-    text = ("please review !12, see https://github.com/owner/name/pull/34, amr 12, "
-            "https://example.com/a#5, the count is 99")
-    assert text_refs(text) == {MrRef(12), MrRef(34, "owner/name")}
+@pytest.mark.parametrize("text, expected", [
+    ("please review !12 today", {MrRef(12)}),
+    ("see #12 now", {MrRef(12)}),
+    ("open mr 12 please", {MrRef(12)}),
+    ("open pr 12 please", {MrRef(12)}),
+    ("see https://github.com/owner/name/pull/34 thanks", {MrRef(34, "owner/name")}),
+    ("see https://gitlab.example/group/sub/name/-/merge_requests/34 thanks", {MrRef(34, "group/sub/name")}),
+    ("the count is 99 today", set()),
+    ("amr 12 stays a word", set()),
+    ("see https://example.com/a#5 please", set()),
+    ("see ！１２ now", {MrRef(12)}),
+    ("review !12 https://[/pull/12", {MrRef(12)}),
+    ("only https://[/pull/12 here", set()),
+])
+def test_text_refs(text, expected):
+    assert text_refs(text) == expected
 
 
 @pytest.mark.parametrize("raw, expected", [

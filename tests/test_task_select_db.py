@@ -281,6 +281,101 @@ def test_operator_only(monkeypatch, tmp_path):
     run_db(check, monkeypatch)
 
 
+def test_two_open_tasks_in_the_deepest_directory_stay_candidates(monkeypatch, tmp_path):
+    async def check(pool):
+        project_id = (await projects.create_project(name="select", pool=pool))["id"]
+        root, sub, leaf = tmp_path / "proj", tmp_path / "proj" / "sub", tmp_path / "proj" / "sub" / "leaf"
+        leaf.mkdir(parents=True)
+        await _task(pool, project_id, "task-shallow", work_dir=str(root), title="shallow", status="running")
+        await _task(pool, project_id, "task-open-a", work_dir=str(sub), title="open a", status="running")
+        await _task(pool, project_id, "task-open-b", work_dir=str(sub), title="open b", status="running")
+        stamp = datetime(2026, 11, 1, tzinfo=timezone.utc)
+        await pool.execute("UPDATE tasks SET updated_at = $2 WHERE id = ANY($1::text[])",
+                           ["task-shallow", "task-open-a", "task-open-b"], stamp)
+        found = await _select({"cwd": str(leaf)})
+        _candidates(found, ["task-open-a", "task-open-b"])
+        assert found["kind"] != "one" and "task-shallow" not in _ids(found)
+
+    run_db(check, monkeypatch)
+
+
+@pytest.mark.parametrize("titles, kind, ids", [
+    (("ＡＢＣ", "abc"), "candidates", ["task-00000000000a", "task-00000000000b"]),
+    (("ＡＢＣ",), "one", ["task-00000000000a"]),
+])
+def test_normalized_text_stays_ambiguous(titles, kind, ids, monkeypatch):
+    async def check(pool):
+        project_id = (await projects.create_project(name="select", pool=pool))["id"]
+        task_ids = ["task-00000000000a", "task-00000000000b"][:len(titles)]
+        for task_id, title in zip(task_ids, titles):
+            await _task(pool, project_id, task_id, title=title, requirement="other", status="running")
+        stamp = datetime(2026, 11, 2, tzinfo=timezone.utc)
+        await pool.execute("UPDATE tasks SET updated_at = $2 WHERE id = ANY($1::text[])", task_ids, stamp)
+        found = await _select({"selection": "abc"})
+        if kind == "one":
+            _one(found, ids[0])
+        else:
+            _candidates(found, ids)
+            assert found["kind"] != "one"
+
+    run_db(check, monkeypatch)
+
+
+@pytest.mark.parametrize("where", ["title", "requirement", "original_user_text", "supplement"])
+def test_fullwidth_mr_reference_matches(where, monkeypatch):
+    async def check(pool):
+        project_id = (await projects.create_project(name="select", pool=pool))["id"]
+        fields = {"title": "work", "requirement": "work", "status": "running"}
+        if where in {"title", "requirement", "original_user_text"}:
+            fields[where] = "请看！１２"
+        await _task(pool, project_id, "task-fwmr", **fields)
+        if where == "supplement":
+            await add_supplement("task-fwmr", "请看！１２", via="dashboard", pool=pool)
+        _one(await _select({"selection": "12"}), "task-fwmr")
+
+    run_db(check, monkeypatch)
+
+
+@pytest.mark.parametrize("requirement, selection, kind", [
+    ("review !12 https://[/pull/12", "12", "one"),
+    ("see https://[/pull/12 only", "12", "none"),
+])
+def test_malformed_stored_url_does_not_abort_mr_search(requirement, selection, kind, monkeypatch):
+    async def check(pool):
+        project_id = (await projects.create_project(name="select", pool=pool))["id"]
+        await _task(pool, project_id, "task-badurl", title="work", requirement=requirement, status="running")
+        found = await _select({"selection": selection})
+        if kind == "one":
+            _one(found, "task-badurl")
+        else:
+            _none(found, ["github_pr", "title", "requirement", "original_user_text", "supplements"],
+                  90, False, _HINT_TEXT)
+
+    run_db(check, monkeypatch)
+
+
+@pytest.mark.parametrize("selection, see_all, kind, task_id", [
+    ("12", False, "none", None),
+    ("12", True, "one", "task-oldmr"),
+    ("424242", False, "none", None),
+    ("44", False, "one", "task-titlemr"),
+])
+def test_mr_window_all_miss_and_title(selection, see_all, kind, task_id, monkeypatch):
+    async def check(pool):
+        project_id = (await projects.create_project(name="select", pool=pool))["id"]
+        await _task(pool, project_id, "task-oldmr", title="old", requirement="review !12", status="running")
+        await _task(pool, project_id, "task-titlemr", title="ship !44", requirement="work", status="running")
+        await _backdate(pool, ["task-oldmr"], "100 days")
+        found = await _select({"selection": selection, "all": see_all})
+        if kind == "one":
+            _one(found, task_id)
+        else:
+            _none(found, ["github_pr", "title", "requirement", "original_user_text", "supplements"],
+                  None if see_all else 90, see_all, _HINT_TEXT)
+
+    run_db(check, monkeypatch)
+
+
 def test_no_model_call(monkeypatch):
     async def check(pool):
         project_id = (await projects.create_project(name="select", pool=pool))["id"]

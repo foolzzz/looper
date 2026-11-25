@@ -61,7 +61,11 @@ def _url_ref(folded: str) -> MrRef | None:
     """
     if re.search(r"\s", folded):
         return None
-    parts = urlsplit(folded)
+    try:
+        parts = urlsplit(folded)
+    except ValueError:
+        # A stored URL can be syntactically invalid. It is not a reference, and the rest of the text still is.
+        return None
     if parts.scheme not in {"http", "https"} or not parts.netloc:
         return None
     found = _SEGMENT.search(parts.path)
