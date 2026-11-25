@@ -21,7 +21,21 @@ bounded background tasks and failures leave replies unaffected. The read-only
 `manager_metrics.get` operation (also available through the CLI) returns delivery
 counts, P50/P95 latencies excluding replayed and completion turns, daily proactive
 counts in the server timezone and mature, successfully sent delivery reply rates
-for 1–30 days. Housekeeping retains proactive rows for 90 days whether or not
+for 1–30 days. It also includes `scopes`: turn counts by manager, scope id and
+audience; `out_of_scope` refusals by manager, capability and principal kind; the
+legacy binding count; resident total, cap, per-manager counts and the longest
+queue wait in the in-process sample; and since-start counters for start refusals,
+invariants, resolution retries and sessions opened. A scoped turn records
+`metadata.scope` (id, version, audience) beside the existing annotations.
+Unscoped records are unchanged.
+Four alerts go to the operator's direct chat. An invariant violation is sent
+every time (critical). A runtime start refusal is sent once per manager, chat
+and scope per hour (high). Ten `out_of_scope` refusals in one chat in one hour
+are sent once per chat per local day (medium). Scope resolution retrying for at
+least five minutes is sent once until recovery (medium). A queue wait over two
+minutes is only on `scopes.residents.max_wait_s_24h`. Legacy bindings are counted
+and never alerted.
+Housekeeping retains proactive rows for 90 days whether or not
 metrics are on, because delivery writes the same table while that switch is off.
 Proactive delivery recording owns the table's single named migration:
 one row per message, with the send receipt in `outcome`. `source` includes
