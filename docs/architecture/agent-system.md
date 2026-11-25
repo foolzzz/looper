@@ -8907,6 +8907,15 @@ built by `scripts/stage-dashboard.sh` at release time), and it carries
   activity pages and growing tool results preserve that anchor; live updates follow the bottom only
   when the reader is there. One “你离开之后” separator precedes the first row after the departure
   watermark. This client watermark is independent of `tasks.mark_seen`, which still sends only a sequence.
+- **Work task cost**: the existing task details panel renders one read-only cost section from the shared
+  detail, without a separate read or poll. Missing costs or no recorded task runs remain unavailable;
+  recorded zero costs retain their value. Running or unpriced runs retain the cost caveats and label any
+  available amount as a known subtotal, with no complete remaining allowance or spend meter. Complete
+  costs use the existing meter only with a positive effective `task_budget_usd`; null and zero caps have
+  explicit labels, and `own_budget_usd` explains whether the cap belongs to the task or its project.
+  An optional server `by_role.task_manager` share is already in the total; `manager_by_model` stays outside
+  the task's cost and cap. The section never sums either into the total and offers no budget writes or
+  continue control. It mounts only within the gated Work page's visible task panel.
 
 
 ### Hash Routing

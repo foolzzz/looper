@@ -206,6 +206,8 @@ describe("Work page shell", () => {
     expect(window.location.hash).toBe("#dashboard");
     expect(host.textContent).toContain("Dashboard view");
     expect(host.querySelector("nav")!.textContent).not.toContain("Work");
+    expect(host.querySelector('[aria-labelledby="work-cost-title"]')).toBeNull();
+    expect(calls.filter(call => /\/tasks\//.test(call.url))).toEqual([]);
   });
 
   it("selection", async () => {
