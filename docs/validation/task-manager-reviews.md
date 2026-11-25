@@ -10,6 +10,8 @@ Foundation validation uses the native stream-json stand-in and disposable
 PostgreSQL, with two pytest workers. The task Manager, settings, brief, draft and
 registry files passed together (97 tests). The existing Manager configuration
 tools, task role settings and registry reads also passed (122 tests).
+The shared settings, role APIs, Manager tools and registry files passed together
+after the final role-list audit (243 tests).
 
 Regression evidence:
 
@@ -19,6 +21,8 @@ Regression evidence:
 - Omitting the provider from the signature leaves the PID unchanged when provider
   environment changes; the new provider-restart test fails.
 - Restoring the task role to either shared role table fails the discovery freeze.
+- The shared role schema, seeded `roles.list` response and `agent_settings.get`
+  response each failed a new freeze before the shared-role projection was fixed.
 - Removing the background-start guard fails the native-turn write-exclusion test.
 
 No conversation transport changes are included: the dashboard, Telegram, Lark and
