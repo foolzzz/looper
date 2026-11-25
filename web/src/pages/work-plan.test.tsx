@@ -103,35 +103,45 @@ describe("Work plan on the page", () => {
     expect(document.querySelectorAll('[id="gate-ask/earlier"]')).toHaveLength(1);
 
     const button = host.querySelector('[data-step-key="ask/earlier"] button') as HTMLButtonElement;
+    scroll.mockClear();
     await act(async () => { button.click(); });
 
     expect(earlier.open).toBe(true);
     expect(scroll).toHaveBeenCalledWith({ block: "nearest" });
+    expect(scroll.mock.contexts).toEqual([earlier]);
     expect(document.activeElement).toBe(earlier.querySelector("summary"));
     expect(document.querySelectorAll('[id="gate-ask/earlier"]')).toHaveLength(1);
     expect(earlier.querySelector("textarea")).toBeNull();
   });
 
-  it("scrolls the composer and the plan together on a short landscape screen", async () => {
+  it("scrolls the short conversation and keeps both detail sections in one dismissible panel", async () => {
     window.innerWidth = 844;
     window.innerHeight = 390;
     await show(<WorkPage sub="task/task%201" onNavigate={() => {}} />);
     const column = host.querySelector("[data-work-scroll]") as HTMLElement;
     const detail = host.querySelector("[data-work-detail]") as HTMLElement;
-    const steps = host.querySelector("[data-work-steps-pane]") as HTMLElement;
     const composer = host.querySelector('textarea[aria-label="Message"]') as HTMLElement;
-    const title = host.querySelector("#work-steps-title") as HTMLElement;
     const conversation = host.querySelector('section[aria-label="Conversation"]') as HTMLElement;
     expect(column).not.toBeNull();
     expect(column.className).toContain("overflow-y-auto");
     expect(detail.getAttribute("data-layout")).toBe("scroll");
-    expect(steps.className).not.toContain("40dvh");
     expect(conversation.parentElement?.className).toContain("work-short-conversation");
     expect(column.contains(composer)).toBe(true);
-    expect(column.contains(title)).toBe(true);
-    expect(steps.contains(composer)).toBe(false);
-    expect(conversation.contains(title)).toBe(false);
+    expect(host.querySelector("#work-steps-title")).toBeNull();
+    const opener = host.querySelector('[aria-haspopup="dialog"]') as HTMLButtonElement;
+    await act(async () => opener.click());
+    const panel = host.querySelector('[role="dialog"]') as HTMLElement;
+    const title = panel.querySelector("#work-steps-title") as HTMLElement;
+    expect(panel.contains(host.querySelector('[aria-label="关卡"]'))).toBe(true);
+    expect(panel.className).toContain("overflow-y-auto");
+    expect(panel.className).not.toContain("40dvh");
+    expect(panel.contains(composer)).toBe(false);
+    expect(column.contains(title)).toBe(false);
+    expect(composer.closest("[inert]")).not.toBeNull();
     expect(title.textContent).toBe("计划与步骤");
+    await act(async () => panel.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true })));
+    expect(document.activeElement).toBe(opener);
+    expect(composer.closest("[inert]")).toBeNull();
   });
 
   it("keeps the side plan on a tall screen", async () => {
@@ -140,9 +150,12 @@ describe("Work plan on the page", () => {
     await show(<WorkPage sub="task/task%201" onNavigate={() => {}} />);
     expect(host.querySelector("[data-work-scroll]")).toBeNull();
     const detail = host.querySelector("[data-work-detail]") as HTMLElement;
-    const steps = host.querySelector("[data-work-steps-pane]") as HTMLElement;
+    const panel = host.querySelector('aside[aria-label="任务详情"]') as HTMLElement;
     expect(detail.getAttribute("data-layout")).toBe("split");
-    expect(steps.className).toContain("max-lg:max-h-[40dvh]");
-    expect(steps.className).toContain("lg:w-80");
+    expect(panel.querySelector("#work-steps-title")).not.toBeNull();
+    expect(panel.querySelector('[aria-label="关卡"]')).not.toBeNull();
+    expect(panel.className).toContain("overflow-y-auto");
+    expect(host.querySelectorAll('aside[aria-label="任务详情"]')).toHaveLength(1);
+    expect(host.querySelector('[role="dialog"]')).toBeNull();
   });
 });

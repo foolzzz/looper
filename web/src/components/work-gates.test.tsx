@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { WorkGates } from "./work-gates";
 import { WorkPage } from "@/pages/work";
 import type { TaskDetail, UserGate } from "@/lib/api";
+import { gateAnchor } from "@/lib/gates";
 
 const api = vi.hoisted(() => ({ fetchTaskDetail: vi.fn(), fetchTaskActivityWindow: vi.fn(),
   streamTaskActivity: vi.fn(), fetchGateThread: vi.fn(), postGateMessage: vi.fn(),
@@ -69,6 +70,39 @@ describe("Work gate summaries", () => {
     await click(host.querySelector("button"));
     expect(open).toHaveBeenCalledTimes(3); expect(host.textContent).toContain("关卡已更新，请刷新");
   });
+  it.each(["pending", "skipped", "future"])("does not offer navigation for an unmounted %s gate", async state => {
+    const open = vi.fn();
+    await show(<WorkGates task={task({ gates: [gate({ state } as Partial<UserGate>)] })} onOpenGate={open} />);
+    const row = host.querySelector("button")!;
+    expect(row.disabled).toBe(true);
+    expect(row.textContent).toContain("没有对话卡片");
+    await click(row); await key(row, "Enter"); await key(row, " ");
+    expect(open).not.toHaveBeenCalled();
+  });
+  it("expands and scrolls the non-latest closed gate inside the current conversation", async () => {
+    const scroll = vi.spyOn(HTMLElement.prototype, "scrollIntoView").mockImplementation(() => {});
+    api.fetchTaskDetail.mockResolvedValue(task({ gates: [
+      gate({ state: "passed", closed_at: "2026-11-01T00:00:00Z" }),
+      gate({ step: "later", step_id: "later-id", state: "cancelled", closed_at: "2026-11-02T00:00:00Z" }),
+    ] }));
+    const foreign = document.createElement("details"); foreign.id = gateAnchor("decision");
+    foreign.innerHTML = "<summary>Another conversation</summary>"; document.body.prepend(foreign);
+    try {
+      await show(<WorkPage sub="task/A" onNavigate={vi.fn()} />);
+      const anchor = host.querySelector(`[id="${gateAnchor("decision")}"]`) as HTMLDetailsElement;
+      expect(anchor).toBeInstanceOf(HTMLDetailsElement);
+      expect(anchor.open).toBe(false);
+      expect((host.querySelector("#gate-later") as HTMLDetailsElement).open).toBe(true);
+      await click(button("任务详情")); scroll.mockClear();
+      await click(host.querySelector('[aria-label="关卡"] button'));
+      expect(anchor.open).toBe(true);
+      expect(scroll.mock.contexts).toEqual([anchor]);
+      expect(scroll).toHaveBeenCalledWith({ block: "nearest" });
+      expect(document.activeElement).toBe(anchor.querySelector("summary"));
+      expect(foreign.open).toBe(false);
+      expect(host.querySelectorAll(`[id="${gateAnchor("decision")}"]`)).toHaveLength(1);
+    } finally { foreign.remove(); }
+  });
   it("closes mobile details before focusing the single editor and restores the opener on dismissal", async () => {
     vi.useFakeTimers();
     api.fetchTaskDetail.mockResolvedValue(task({ gates: [gate({ state: "discussing", waiting_on: "planner" })] }));
@@ -118,7 +152,25 @@ describe("Work gate summaries", () => {
     try {
       await click(host.querySelector('[aria-label="关卡"] button'));
       expect(host.textContent).toContain("关卡已更新，请刷新"); expect(document.activeElement).not.toBe(foreign);
+      expect(host.querySelector('[role="dialog"]')).toBeNull();
+      expect(document.activeElement).toBe(button("任务详情"));
     } finally { foreign.remove(); }
+  });
+  it.each(["pending", "skipped"])("gives truthful feedback and restores focus for a %s step entry", async state => {
+    api.fetchTaskDetail.mockResolvedValue(task({ gates: [gate({ state } as Partial<UserGate>)], steps: [
+      { id: "gate-step", task_id: "A", step_key: "decision", step_index: 0, kind: "gate", instruction: "Decide",
+        depends_on: [], acceptance_criteria: [], target_files: [], status: "pending", review: false,
+        role_key: null, role_version: null, review_roles: [], review_stage: null, review_position: null,
+        retries: 0, worker_id: null, reviewer_id: null, result: null, created_at: "", updated_at: "",
+        completed_at: null, started_at: null },
+    ] }));
+    await show(<WorkPage sub="task/A" onNavigate={vi.fn()} />);
+    await click(button("任务详情"));
+    await click(host.querySelector('[data-step-key="decision"] button'));
+    expect(host.textContent).toContain("没有对话卡片");
+    expect(host.textContent).not.toContain("关卡已更新，请刷新");
+    expect(document.activeElement).toBe(button("任务详情"));
+    expect(host.querySelector('[role="dialog"]')).toBeNull();
   });
   it("rejects a detail response for another task before showing its gates", async () => {
     api.fetchTaskDetail.mockResolvedValue(task({ task_id: "B" }));

@@ -12,6 +12,7 @@ import { errorText } from "@/lib/use-action";
 import { ManagerWorkConversation, PlannerWorkConversation } from "@/components/work-conversation";
 import { TaskStatusMark } from "@/pages/tasks";
 import { isMissingOperation, markSeen, taskTitle, workSelection, workStorage } from "@/lib/work";
+import { isGateShown } from "@/lib/gates";
 
 const LINK = "text-sm text-primary underline-offset-2 hover:underline focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring";
 
@@ -87,12 +88,14 @@ export function WorkPage({
   useEffect(() => {
     if (!gateTarget || panel) return;
     if (gateTarget.taskId === taskId && selected?.task_id === taskId) {
-      const exists = selected.gates?.some(gate => gate.step === gateTarget.step);
-      setGateError(exists && conversation.current && openWorkGate(gateTarget.step, conversation.current)
-        ? "" : "关卡已更新，请刷新");
+      const gate = selected.gates?.find(gate => gate.step === gateTarget.step);
+      const located = gate && isGateShown(gate) && conversation.current && openWorkGate(gateTarget.step, conversation.current);
+      setGateError(located ? "" : gate && !isGateShown(gate)
+        ? "此状态没有对话卡片，无法定位" : "关卡已更新，请刷新");
+      if (!located && !wide) panelOpener.current?.focus();
     }
     setGateTarget(null);
-  }, [gateTarget, panel, selected, taskId]);
+  }, [gateTarget, panel, selected, taskId, wide]);
   const openGate = useCallback((step: string) => {
     setPanel(false); setGateTarget({ taskId, step });
   }, [taskId]);

@@ -1,7 +1,7 @@
 import { GateBadge } from "@/components/task-gates";
 import { Badge } from "@/components/ui/badge";
 import { isActiveTask, type TaskDetail } from "@/lib/api";
-import { GATE_STATES } from "@/lib/gates";
+import { GATE_STATES, isGateShown } from "@/lib/gates";
 
 /** Summaries share the page's detail; the conversation owns every gate editor and thread. */
 export function WorkGates({ task, onOpenGate }: { task: TaskDetail; onOpenGate: (step: string) => void }) {
@@ -10,10 +10,10 @@ export function WorkGates({ task, onOpenGate }: { task: TaskDetail; onOpenGate: 
     <h2 className="text-sm font-semibold">关卡</h2>
     {!gates.length ? <p className="text-sm text-muted-foreground">没有关卡</p> : <ul className="space-y-2">
       {gates.map(gate => <li key={gate.step_id}>
-        <button type="button" disabled={!gate.step}
+        <button type="button" disabled={!gate.step || !isGateShown(gate)}
           onClick={() => onOpenGate(gate.step)}
           onKeyDown={event => {
-            if ((event.key === "Enter" || event.key === " ") && gate.step) {
+            if ((event.key === "Enter" || event.key === " ") && gate.step && isGateShown(gate)) {
               event.preventDefault(); onOpenGate(gate.step);
             }
           }}
@@ -25,6 +25,7 @@ export function WorkGates({ task, onOpenGate }: { task: TaskDetail; onOpenGate: 
           </span>
           <span className="line-clamp-2 block">{gate.topic}</span>
           {!gate.step && <span className="block text-destructive">关卡已更新，请刷新</span>}
+          {gate.step && !isGateShown(gate) && <span className="block text-muted-foreground">此状态没有对话卡片，无法定位</span>}
         </button>
       </li>)}
     </ul>}
