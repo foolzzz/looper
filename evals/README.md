@@ -1125,11 +1125,17 @@ Group dialogs (`Dialog.session="group"`) use the real lark-cli `CliTransport`
 with a native CLI stand-in ported from #1710. It never contacts the network;
 each `Say.sender` selects a synthetic operator, member or bot (the bot's events
 use `sender_type="app"`). `group_per_chat_smoke` is explicitly selected in fake
-mode and checks an operator turn followed by a member turn in one per-chat
-session. Rows record the transport and each turn's sender and `manager_session`
-(null until the chat provenance column is available). The harness binds the
-group to the scenario Manager and sets `per_chat` through its operation;
-`scoped` is seeded directly until that switch value becomes selectable.
+mode and checks operator, member and bot turns in one per-chat session, including
+a synthetic attachment downloaded through the native CLI stand-in. Rows record
+the transport, each turn's sender, and the stored user/assistant rows' sender kind
+and Manager session (null when those columns are unavailable or not yet populated).
+`Dialog.manager_seed` supplies the scenario Manager's fields before startup;
+`Dialog.seed` can still set up other fixtures through the running API. The harness
+binds the group and sets `per_chat` through its operation. For `scoped`, it writes
+the routing column before starting the server, then reads it back before the first
+turn. An unsupported schema or routing enum raises `EvalError`, naming the
+chat-scopes schema (#1743) and the pending routing operation; it never falls back to main.
+The operation will replace the direct scoped write when it supports that value.
 Every client and the disposable ops file must name the isolated server port.
 
 | dialog | what it checks |
