@@ -19,8 +19,9 @@ LINE = ("This step was interrupted before (restart not adopted); the workspace m
         "(pushes, comments, messages) without checking whether they already happened.")
 
 
-@pytest.mark.parametrize("case", ["interrupted", "first", "failure", "new_attempt", "reviewer", "off", "invalid", "unset"])
-def test_interruption_hint_is_scoped_to_the_previous_worker_run(tmp_path, monkeypatch, agent_db, case):
+@pytest.mark.parametrize("case", ["interrupted", "first", "failure", "new_attempt", "reviewer", "off", "invalid", "unset",
+                                 "read_error"])
+def test_interruption_hint_is_scoped_to_the_previous_worker_run(tmp_path, monkeypatch, agent_db, caplog, case):
     previous = None if case in ("first", "new_attempt") else {
         "status": "failed" if case == "failure" else "interrupted", "error": "not_adopted", "metadata": {}}
     lookup = AsyncMock(return_value=previous)
@@ -28,13 +29,30 @@ def test_interruption_hint_is_scoped_to_the_previous_worker_run(tmp_path, monkey
     agent_db.get_settings.return_value = {KEY: {"off": "false", "invalid": "yes"}.get(case, "true")}
     if case == "unset":
         agent_db.get_settings.return_value = {}
+    if case == "read_error":
+        monkeypatch.setattr(worker.worker_interruption, "_read_warning_logged", False)
+
+        async def read(keys):
+            if KEY in keys:
+                raise RuntimeError("settings unavailable")
+            return {}
+
+        agent_db.get_settings.side_effect = read
 
     async def scenario():
-        async with _pool(tmp_path, monkeypatch, ScriptedRun(_events()), ScriptedRun(_events())) as (pool, _, _):
+        async with _pool(tmp_path, monkeypatch, ScriptedRun(_events()), ScriptedRun(_events()),
+                         ScriptedRun(_events())) as (pool, _, _):
             item = _item(tmp_path)
             item.payload.update(attempt_id=7, dependencies=[{"step": "seed", "summary": "ready"}], findings="A finding")
             original = dict(item.payload)
             ctx = await pool._prepare(item, is_verify=case == "reviewer")
+            if case == "read_error":
+                repeated = await pool._prepare(item)
+                assert isinstance(repeated, worker.RunContext) and repeated.prompt == ctx.prompt
+                warnings = [record for record in caplog.records
+                            if record.name == "looper.agents.worker_interruption" and record.levelname == "WARNING"]
+                assert len(warnings) == 1 and "disabled" in warnings[0].message
+                agent_db.get_settings.side_effect = None
             agent_db.get_settings.return_value = {}
             baseline = await pool._prepare(item, is_verify=case == "reviewer")
             assert isinstance(ctx, worker.RunContext) and isinstance(baseline, worker.RunContext)
@@ -55,7 +73,7 @@ def test_interruption_hint_is_scoped_to_the_previous_worker_run(tmp_path, monkey
             else:
                 assert baseline.prompt == ("Review the step in the Task section of your instructions. "
                                           "The Worker's report, to check:\nFiles changed: {}")
-            if case in ("off", "invalid", "unset", "reviewer"):
+            if case in ("off", "invalid", "unset", "reviewer", "read_error"):
                 lookup.assert_not_awaited()
             else:
                 lookup.assert_awaited_once_with(7, "t1", "s1")

@@ -1,5 +1,6 @@
 """Fixed recovery guidance for an interrupted Worker attempt; opt-in, default off."""
 
+import logging
 from enum import StrEnum
 from typing import Any, Mapping
 
@@ -8,6 +9,8 @@ from .kept_dirs import Reason
 from .kept_run import AdoptFailure
 
 KEY = "worker.interrupted_hint.enabled"
+logger = logging.getLogger(__name__)
+_read_warning_logged = False
 
 
 class InterruptionReason(StrEnum):
@@ -39,7 +42,14 @@ def instruction(reason: InterruptionReason) -> str:
 
 
 async def enabled() -> bool:
-    return (await system_settings.get_settings([KEY])).get(KEY) == "true"
+    global _read_warning_logged
+    try:
+        return (await system_settings.get_settings([KEY])).get(KEY) == "true"
+    except Exception:
+        if not _read_warning_logged:
+            _read_warning_logged = True
+            logger.warning("Worker interruption hint setting unavailable; treating it as disabled")
+        return False
 
 
 async def view() -> dict[str, bool]:
