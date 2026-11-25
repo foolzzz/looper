@@ -210,11 +210,11 @@ def test_api_needs_project_returns_the_same_selection_instruction(monkeypatch, t
     run_db(check, monkeypatch, timeout=30)
 
 
-def test_group_reads_round_trip_and_refusals(monkeypatch, tmp_path):
+def test_group_reads_round_trip_and_refusals(monkeypatch, tmp_path, fixed_clock):
     from datetime import timedelta
     from looper.agents import chat_settings, cron, extraction
 
-    now = datetime.now(timezone.utc)
+    now = fixed_clock()
     monkeypatch.setattr(chat_settings, "_delivery_enabled", False)
 
     async def check(pool):
