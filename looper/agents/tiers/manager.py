@@ -1043,7 +1043,7 @@ class ManagerAgent:
             session.session_provider = saved.get("provider_id")
             session.clean_start = bool(saved.get("clean_start"))
             session.pending_handoff = saved.get("pending_handoff")
-            if (policy := session_visibility.for_session(session.key)) is not None and (
+            if (policy := session_visibility.for_session(session.key, manager_id=self.agent_id)) is not None and (
                     saved.get("context_policy_version", 0) != policy.version):
                 session.session_id = None
                 session.pending_handoff = session.pending_switch = None
@@ -1066,13 +1066,14 @@ class ManagerAgent:
             handoff = None
         if session.key != MAIN_SESSION:
             route = session.route
+            policy = session_visibility.for_session(session.key, manager_id=self.agent_id)
             await db_manager_sessions.save({
                 "manager_id": self.agent_id, "session_key": session.key, "kind": route.kind.value,
                 "channel_id": route.channel_id, "chat": route.chat, "session_id": session.session_id,
                 "session_totals": session.session_totals.to_dict(), "runtime_type": session.session_runtime,
                 "profile_id": session.session_profile, "provider_id": session.session_provider,
                 "clean_start": session.clean_start, "pending_handoff": handoff,
-                "context_policy_version": session_visibility.NON_MAIN_ALLOWLIST.version}, pool=pool)
+                "context_policy_version": policy.version if policy is not None else 0}, pool=pool)
         else:
             await db_agent_sessions.save_session(self.agent_id, session.session_id, session.session_totals.to_dict(),
                                                  runtime_type=session.session_runtime,
@@ -1714,7 +1715,7 @@ class ManagerAgent:
         comes back as an ``action``), stored, the tools probed, then the Manager's role, session, agent settings,
         library, prompt and the message Claude is sent. With ``ask`` (the resume retry, or a caller without a chat
         message) only the second half runs."""
-        restricted = session_visibility.for_session(self._session_now().key) is not None
+        restricted = session_visibility.for_session(self._session_now().key, manager_id=self.agent_id) is not None
         if restricted and ask is not None and ask.turn is not None and (
                 lanes.manager_lane(ask.turn.origin) is lanes.Lane.BACKGROUND):
             raise _CompletionNotTaken()  # no background model input is on the allowlist
@@ -1729,7 +1730,7 @@ class ManagerAgent:
                 self._acting(token)
                 return Prepared(action=lambda: self._send_reply(envelope, chat_commands.help_text()))
             gate = NOT_A_REPLY
-            if session_visibility.for_session(self._session_now().key) is not None:
+            if session_visibility.for_session(self._session_now().key, manager_id=self.agent_id) is not None:
                 if (command := parse_profile_command(text)) is not None:
                     await token.keep("persist_user_message", self._persist_user(envelope, text), 10)
                     self._acting(token)
@@ -1738,7 +1739,7 @@ class ManagerAgent:
                     self._acting(token)
                     return Prepared(action=lambda: self._send_reply(
                         envelope, "此会话无法读取任务或待办，请操作员在自己的会话中查看。"))
-            if session_visibility.for_session(self._session_now().key) is None:
+            if session_visibility.for_session(self._session_now().key, manager_id=self.agent_id) is None:
                 # /todo while the "needs you" summary is on: answered by code, never by the model (off: a message).
                 if attention.is_command(text) and await token.step("attention_enabled", attention.enabled()):
                     await token.keep("persist_user_message", self._persist_user(envelope, text), 10)
@@ -2546,7 +2547,7 @@ class ManagerAgent:
 
     def _composed_prompt(self, agent_settings: AgentSettings) -> SystemPrompt:
         """The Manager's harness, its role prompt, then how to use Looper's tools (no project, no task)."""
-        if (policy := session_visibility.for_session(self._session_now().key)) is not None:
+        if (policy := session_visibility.for_session(self._session_now().key, manager_id=self.agent_id)) is not None:
             contract = (state_view.STABLE_CONTEXT_CONTRACT
                         if self._stable_context and SessionInput.STABLE_BLOCK in policy.inputs else "")
             return build_system_prompt(
@@ -3372,14 +3373,14 @@ class ManagerAgent:
                 return ""
         switch, handoff = self._pending_switch, self._pending_handoff
         if session.key != MAIN_SESSION:  # a group's or another sender's chat: only its own (``group_session``)
-            policy = session_visibility.NON_MAIN_ALLOWLIST
-            if SessionInput.CHAT_OPENING not in policy.inputs:
+            policy = session_visibility.for_session(session.key, manager_id=self.agent_id)
+            if policy is not None and SessionInput.CHAT_OPENING not in policy.inputs:
                 return ""
             lines = (await group_session.excerpt(_session_key(envelope), message, kind=session.route.kind)
-                     if SessionInput.CHAT_HISTORY in policy.inputs else [])
+                     if policy is None or SessionInput.CHAT_HISTORY in policy.inputs else [])
             return group_session.brief(session.route.kind, _message_origin(envelope)["channel"], lines,
                                        switch=switch,
-                                       handoff=handoff if SessionInput.CHAT_HANDOFF in policy.inputs else None,
+                                       handoff=handoff if policy is None or SessionInput.CHAT_HANDOFF in policy.inputs else None,
                                        new=session.session_id is None)
         conversations = await self._recent_conversations(envelope, message)
         if switch is None and not handoff and not conversations:
@@ -3541,7 +3542,7 @@ class ManagerAgent:
                                   image_input: ImageInput = ImageInput.NONE, sections: bool = True,
                                   turn: Turn | None = None,
                                   persona_scope: manager_persona_context.Scope | None = None) -> str:
-        policy = session_visibility.for_session(self._session_now().key)
+        policy = session_visibility.for_session(self._session_now().key, manager_id=self.agent_id)
         def allowed(item: SessionInput) -> bool:
             return policy is None or item in policy.inputs
 
@@ -3584,7 +3585,7 @@ class ManagerAgent:
                         persona_scope: manager_persona_context.Scope | None = None) -> list[str]:
         """What every user turn starts with: persona, operator profile, projects, task templates, workflows, ready tasks, open gates
         and active goals, each section ending with a blank line."""
-        if (policy := session_visibility.for_session(self._session_now().key)) is not None:
+        if (policy := session_visibility.for_session(self._session_now().key, manager_id=self.agent_id)) is not None:
             return (manager_persona_context.section(self.agent_id, manager_persona_context.Scope.NAME)
                     if SessionInput.PERSONA_NAME in policy.inputs else [])
         if persona_scope is None:

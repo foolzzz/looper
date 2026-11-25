@@ -221,7 +221,7 @@ async def _tell_completion(self, rows: list[dict[str, Any]], batch: uuid.UUID) -
     the way ``/stop`` stops it; one that cannot runs to its end, and its reply only stays on its record."""
     from .manager import NoReply, OverCap, _CompletionNotTaken
 
-    if session_visibility.for_session(self._session_now().key) is not None:
+    if session_visibility.for_session(self._session_now().key, manager_id=self.agent_id) is not None:
         # Existing completion prompts add project/cost facts with no chat-safe projection.
         # Their already routed code notices still go to the originating chat.
         await self._fall_back_completion(batch, "session_allowlist", {"rows": rows})

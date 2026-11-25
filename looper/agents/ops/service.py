@@ -468,7 +468,7 @@ class ManagerOps:
         turn = (turn or self._turn) if session_key is None else (
             self._session_turns.get(session_key) or Turn(channel=None, chat=None))
         key = session_key if session_key is not None else self._session_of(turn)
-        if (policy := session_visibility.for_session(key)) is not None:
+        if (policy := session_visibility.for_session(key, manager_id=self._scope.manager_id)) is not None:
             # Filter before reading any global schemas (templates, workflows, settings).
             return [tool.listing() for name, tool in self._scope.tools.items() if name in policy.tools]
         tools = list((await self.current_scope()).tools.values())
@@ -563,7 +563,7 @@ class ManagerOps:
             return _error(ErrorCode.FORBIDDEN, "this turn belongs to another session; the call did not run")
         key = session_key if session_key is not None else self._binding_sessions.get(
             binding or "", self._session_of(bound or self._turn))
-        if (policy := session_visibility.for_session(key)) is not None and name not in policy.tools:
+        if (policy := session_visibility.for_session(key, manager_id=self._scope.manager_id)) is not None and name not in policy.tools:
             # Also deny guessed, unknown and stale tool names, without revealing global
             # schemas, validation errors or return values. Authenticated sessions cannot
             # acquire main's access by omitting their binding.
@@ -1090,7 +1090,7 @@ class ManagerOps:
         """``turn`` runs now; the note its message starts with (``_begin_turn``), then, in a user turn, what the
         operator's card buttons did in this chat since its last one (``_note_button``)."""
         note = self._begin_turn(turn, binding, session_key=session_key)
-        if session_visibility.for_session(session_key) is not None:
+        if session_visibility.for_session(session_key, manager_id=self._scope.manager_id) is not None:
             return ""
         return "\n".join(part for part in (note, *self._take_button_notes(turn, session_key)) if part)
 
@@ -1180,7 +1180,7 @@ class ManagerOps:
             self._routed_turns[id(turn)] = turn
         if binding:
             self.register(turn, binding, session_key=session_key)
-        if session_visibility.for_session(session_key) is not None:
+        if session_visibility.for_session(session_key, manager_id=self._scope.manager_id) is not None:
             return ""
         pending = self._pending.get(turn.chat_key)
         if turn.autonomous or pending is None:

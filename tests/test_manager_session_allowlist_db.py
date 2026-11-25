@@ -112,9 +112,12 @@ async def _seed_operator_extensions(pool: Any) -> None:
                        "$2::jsonb,'push_for_confirmation','synthetic')", rule_id,
                        _encoded([{"kind": "sender_in_allowlist", "sender_ids": [SENTINELS["intent_rule"]]}]))
     hit_id = await pool.fetchval("INSERT INTO intent_rule_hits(evaluation_key,intent_id,generation,rule_id,"
-                                "rule_version,selection,action,reason) SELECT 'synthetic-evaluation',id,0,"
-                                "$1::text::uuid,1,'matched','push_for_confirmation',$2 FROM intents "
-                                "WHERE source_id='private-source' RETURNING id", rule_id, SENTINELS["intent_rule_hit"])
+                                "rule_version,selection,action,mr_identity) SELECT 'synthetic-evaluation',id,0,"
+                                "$1::text::uuid,1,'matched','push_for_confirmation',$2::jsonb FROM intents "
+                                "WHERE source_id='private-source' RETURNING id", rule_id, _encoded({
+                                    "system_id": "synthetic", "repository_id": SENTINELS["intent_rule_hit"],
+                                    "mr_id": "1", "revision": "synthetic",
+                                    "canonical_url": "https://review.example.invalid/changes/1"}))
     await pool.execute("UPDATE event_sources SET lark_profile=$1 WHERE id='private-source'",
                        SENTINELS["collection_config"])
     await pool.execute("INSERT INTO source_collection_settings(source_id) VALUES('private-source')")
