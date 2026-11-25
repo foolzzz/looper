@@ -1277,13 +1277,13 @@ async def fake_server(handler):
             yield path
         finally:
             server.close()
-            await server.wait_closed()
             for writer in writers:
                 await close_writer(writer)
             for task in tasks:
                 if not task.done():
                     task.cancel()
             outcomes = await asyncio.gather(*tasks, return_exceptions=True)
+            await server.wait_closed()
             for outcome in outcomes:
                 if isinstance(outcome, BaseException) and not isinstance(outcome, asyncio.CancelledError):
                     raise outcome
