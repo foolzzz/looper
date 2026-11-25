@@ -130,10 +130,15 @@ def test_terminal_reminder_is_in_the_brief_once_even_with_a_digest(
         await _operator(pool, who=who)
         await pool.execute("INSERT INTO system_settings (key,value) VALUES ('attention.enabled',$1)",
                            "true" if attention_on else "false")
-        now = datetime.now(timezone.utc)
+        now = MONDAY
         local = now.astimezone(ZONE)
-        # The service clock and source reads share the current weekday, after the configured send time.
-        monkeypatch.setattr(morning_brief, "is_due", lambda *args: True)
+        # Attention and the brief must read terminal reminders at the same fixed instant.
+        read_reminders = reminder_store.needing_attention
+
+        async def needing_attention(**kwargs):
+            return await read_reminders(**{**kwargs, "now": now})
+
+        monkeypatch.setattr(reminder_store, "needing_attention", needing_attention)
         row = await reminder_store.create(text="Review the application", due_at=now - timedelta(hours=2),
                                           timezone=str(ZONE), channel_id="channel-lark", chat=who,
                                           created_channel="web", created_message_id=None)
