@@ -558,6 +558,7 @@ def _chat_stop_default_off(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(chat_settings, "_delivery_enabled", chat_settings.DEFAULT_DELIVERY_ENABLED)
     monkeypatch.setattr(chat_settings, "_morning_brief_enabled", chat_settings.DEFAULT_MORNING_BRIEF_ENABLED)
     monkeypatch.setattr(chat_settings, "_morning_brief_time", chat_settings.DEFAULT_MORNING_BRIEF_TIME)
+    monkeypatch.setattr(chat_settings, "_morning_brief_cutoff", chat_settings.DEFAULT_MORNING_BRIEF_CUTOFF)
     monkeypatch.setattr(persona, "_current", persona.Persona())
     monkeypatch.setattr(persona, "_warned", None)
     monkeypatch.setattr(chat_settings, "_turn_context_enabled", False)

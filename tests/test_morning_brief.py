@@ -80,8 +80,13 @@ def test_it_is_due_on_a_workday_at_the_configured_time() -> None:
     assert not is_due(datetime(2026, 11, 23, 9, 14, tzinfo=ZONE), send)
     assert not is_due(datetime(2026, 11, 22, 12, 0, tzinfo=ZONE), send)  # Sunday
     assert not is_due(datetime(2026, 11, 21, 9, 15, tzinfo=ZONE), send)  # Saturday
-    assert not is_due(datetime(2026, 11, 23, 14, 59, tzinfo=ZONE), time(15, 0))
-    assert is_due(datetime(2026, 11, 23, 15, 0, tzinfo=ZONE), time(15, 0))
+    assert not is_due(datetime(2026, 11, 23, 14, 59, tzinfo=ZONE), time(15, 0), time(16))
+    assert is_due(datetime(2026, 11, 23, 15, 0, tzinfo=ZONE), time(15, 0), time(16))
+
+
+@pytest.mark.parametrize(("hour", "minute", "expected"), [(11, 59, True), (12, 0, False), (12, 1, False), (23, 0, False)])
+def test_catch_up_ends_at_noon(hour, minute, expected):
+    assert is_due(datetime(2026, 11, 23, hour, minute, tzinfo=ZONE), time(9, 15)) is expected
 
 
 def test_a_skipped_minute_is_due_on_the_first_tick_after_the_gap() -> None:
@@ -102,7 +107,7 @@ def test_a_repeated_hour_is_still_due_and_the_same_local_date() -> None:
     second = datetime(2026, 10, 29, 23, 30, tzinfo=zone, fold=1)
     assert first.utcoffset() != second.utcoffset()
     assert first.date() == second.date() == date(2026, 10, 29)
-    assert is_due(first, send) and is_due(second, send)
+    assert is_due(first, send, time(23, 59)) and is_due(second, send, time(23, 59))
 
 
 def _reminder(hour: int, text: str) -> dict:
