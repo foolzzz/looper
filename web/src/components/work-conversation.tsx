@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { ChatComposer } from "@/components/chat-composer";
-import { WorkActivityFeed, WorkMessageRow, type WorkFeedRecord } from "@/components/work-activity-feed";
+import { WorkActivityFeed, WorkMessageRow, WorkSinceAway, type WorkFeedRecord } from "@/components/work-activity-feed";
 import { Button } from "@/components/ui/button";
 import {
   fetchChatMessages,
@@ -16,9 +16,10 @@ import { randomId } from "@/lib/ids";
 import { useReplyStream } from "@/lib/use-reply-stream";
 import { useWorkManagerConversation } from "@/lib/use-work-manager-conversation";
 import { errorText } from "@/lib/use-action";
+import { clearWorkConversationMemory, useWorkConversationState, useWorkConversationViewport } from "@/lib/use-work-conversation-state";
 
 /** The owner of the conversation shown in the pane. */
-export type WorkIdentity = { kind: "manager"; sessionId?: string } | { kind: "planner"; taskId: string };
+export type WorkIdentity = { kind: "manager"; managerId?: string; sessionId?: string } | { kind: "planner"; taskId: string; sessionId?: string };
 
 export interface WorkPaneMessage {
   id: string;
@@ -78,77 +79,7 @@ const PLANNER_ENDED = "This task has ended, so its Planner no longer takes messa
 const CONNECT_FAILED = "Failed to connect. Is the server running?";
 const STREAM_LOST = "回复流已断开，服务端可能仍在运行";
 
-/**
- * Draft and queue for each task. The page remounts the pane with `key={taskId}`,
- * and a disabled or full sessionStorage keeps only this copy.
- */
-type ComposerSlot = { draft: string; staged: string[] };
-const composerMemory = new Map<string, ComposerSlot>();
-
-export function clearWorkComposerMemory(): void {
-  composerMemory.clear();
-}
-
-function draftKey(taskId: string): string {
-  return `looper-work-draft:planner-${taskId}`;
-}
-
-function stagedKey(taskId: string): string {
-  return `looper-work-staged:planner-${taskId}`;
-}
-
-function storageDraft(taskId: string): string {
-  try {
-    return sessionStorage.getItem(draftKey(taskId)) ?? "";
-  } catch {
-    return "";
-  }
-}
-
-function storageStaged(taskId: string): string[] {
-  try {
-    const parsed = JSON.parse(sessionStorage.getItem(stagedKey(taskId)) ?? "[]");
-    return Array.isArray(parsed) ? parsed.filter((item): item is string => typeof item === "string") : [];
-  } catch {
-    return [];
-  }
-}
-
-function slot(taskId: string): ComposerSlot {
-  const existing = composerMemory.get(taskId);
-  if (existing) return existing;
-  const created = { draft: storageDraft(taskId), staged: storageStaged(taskId) };
-  composerMemory.set(taskId, created);
-  return created;
-}
-
-function readStoredDraft(taskId: string): string {
-  return slot(taskId).draft;
-}
-
-function readStoredStaged(taskId: string): string[] {
-  return [...slot(taskId).staged];
-}
-
-function writeStoredDraft(taskId: string, draft: string) {
-  slot(taskId).draft = draft;
-  try {
-    if (draft) sessionStorage.setItem(draftKey(taskId), draft);
-    else sessionStorage.removeItem(draftKey(taskId));
-  } catch {
-    // Disabled or full: the memory copy is the copy that survives a task switch.
-  }
-}
-
-function writeStoredStaged(taskId: string, staged: string[]) {
-  slot(taskId).staged = [...staged];
-  try {
-    if (staged.length === 0) sessionStorage.removeItem(stagedKey(taskId));
-    else sessionStorage.setItem(stagedKey(taskId), JSON.stringify(staged));
-  } catch {
-    // Disabled or full: the memory copy is the copy that survives a task switch.
-  }
-}
+export const clearWorkComposerMemory = clearWorkConversationMemory;
 
 function fromDb(rows: DbChatMessage[]): WorkPaneMessage[] {
   return rows.map((row) => ({
@@ -204,6 +135,7 @@ export function WorkConversation(props: WorkConversationProps) {
     phase, replying, draft, onDraft, staged, onStaged, inputHistory, onSend, onStop, notice, canStop, stopRefusal,
   } = props;
   const ownerKey = identity.kind === "manager" ? `manager:${identity.sessionId ?? ""}` : `planner:${identity.taskId}`;
+  const position = useWorkConversationViewport(identity, history === "ready" || history === "empty" || messages.length > 0);
   if (missing) return <p role="status" data-identity={ownerKey}>{NOT_FOUND}</p>;
 
   const folded = foldStream(messages, events ?? []);
@@ -218,7 +150,7 @@ export function WorkConversation(props: WorkConversationProps) {
       data-task-status={detail?.status ?? ""}
       className="flex h-full min-h-0 flex-1 flex-col"
     >
-      <div className="flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto p-4">
+      <div ref={position.viewport} aria-label="Conversation history" className="flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto p-4 [overflow-anchor:none]">
         {history === "loading" && shown.length === 0 && <p role="status">{loadingText ?? LOADING}</p>}
         {history === "error" && (
           <p role="alert" className="flex flex-wrap items-center gap-2 text-sm text-destructive">
@@ -229,8 +161,12 @@ export function WorkConversation(props: WorkConversationProps) {
         {loaded && <p className="text-center text-xs text-muted-foreground">{RECENT}</p>}
         {loaded && shown.length === 0 && <p role="status">{EMPTY}</p>}
         {props.task ? <WorkActivityFeed identity={identity} task={props.task} messages={shown}
-          onGateChanged={props.onGateChanged} records={props.records} />
-          : (history !== "error" || shown.length > 0) && shown.map(message => <WorkMessageRow key={message.id} message={message} />)}
+          onGateChanged={props.onGateChanged} records={props.records} dividerBefore={position.divider} />
+          : (history !== "error" || shown.length > 0) && shown.map(message => <div key={message.id} data-feed-key={`message:${message.id}`}
+            data-row-time={Date.parse(message.created_at ?? "") || undefined} className="shrink-0">
+            {position.divider === `message:${message.id}` && <WorkSinceAway />}
+            <WorkMessageRow message={message} />
+          </div>)}
       </div>
       <div className="shrink-0 space-y-2 border-t border-border p-4">
         {refusal && <p role="status" className="text-xs text-muted-foreground">{refusal}</p>}
@@ -245,7 +181,7 @@ export function WorkConversation(props: WorkConversationProps) {
           replying={replying ?? false}
           canStop={canStop ?? false}
           stopRefusal={stopRefusal}
-          onSend={onSend}
+          onSend={text => { onSend(text); position.afterSend(); }}
           onStop={onStop ?? (() => {})}
           notice={notice}
           disabled={!canSend}
@@ -291,39 +227,28 @@ export function PlannerWorkConversation({
   const replyRef = useRef(reply);
   replyRef.current = reply;
 
-  const [draft, setDraftState] = useState(() => (missing ? "" : readStoredDraft(taskId)));
-  const [staged, setStagedState] = useState<string[]>(() => (missing ? [] : readStoredStaged(taskId)));
-  const draftRef = useRef(draft);
-  const stagedRef = useRef(staged);
-  const storedTask = useRef(taskId);
-  let shownDraft = draft;
-  let shownStaged = staged;
-  if (storedTask.current !== taskId) {
-    storedTask.current = taskId;
-    shownDraft = missing ? "" : readStoredDraft(taskId);
-    shownStaged = missing ? [] : readStoredStaged(taskId);
-    draftRef.current = shownDraft;
-    stagedRef.current = shownStaged;
-    setDraftState(shownDraft);
-    setStagedState(shownStaged);
-  }
-
+  const conversation = useWorkConversationState(identity);
+  const { store, key: cacheKey } = conversation;
+  const shownDraft = missing ? "" : conversation.value.draft;
+  const shownStaged = missing ? [] : conversation.value.staged;
+  const draftRef = useRef(shownDraft);
+  const stagedRef = useRef(shownStaged);
+  draftRef.current = shownDraft;
+  stagedRef.current = shownStaged;
   const setDraft = (next: string | ((value: string) => string)) => {
     const value = typeof next === "function" ? next(draftRef.current) : next;
     draftRef.current = value;
-    writeStoredDraft(taskRef.current, value);
-    setDraftState(value);
+    conversation.setDraft(value);
   };
   const setStaged = (next: string[]) => {
     stagedRef.current = next;
-    writeStoredStaged(taskRef.current, next);
-    setStagedState(next);
+    conversation.setStaged(next);
   };
-
+  const cached = missing ? undefined : store.cached(cacheKey);
   const [live, setLive] = useState({
     taskId,
-    messages: [] as WorkPaneMessage[],
-    history: (missing ? "empty" : "loading") as WorkConversationProps["history"],
+    messages: cached?.messages ?? [] as WorkPaneMessage[],
+    history: (missing ? "empty" : cached?.messagesLoaded ? (cached.messages.length ? "ready" : "empty") : "loading") as WorkConversationProps["history"],
     historyError: "",
     phase: "",
     notice: "",
@@ -332,8 +257,8 @@ export function PlannerWorkConversation({
   if (live.taskId !== taskId) {
     setLive({
       taskId,
-      messages: [],
-      history: missing ? "empty" : "loading",
+      messages: cached?.messages ?? [],
+      history: missing ? "empty" : cached?.messagesLoaded ? (cached.messages.length ? "ready" : "empty") : "loading",
       historyError: "",
       phase: "",
       notice: "",
@@ -342,7 +267,7 @@ export function PlannerWorkConversation({
   }
   const liveRef = useRef(live);
   liveRef.current = live.taskId === taskId ? live : {
-    taskId, messages: [], history: "loading" as const, historyError: "", phase: "", notice: "", replying: false,
+    taskId, messages: cached?.messages ?? [], history: "loading" as const, historyError: "", phase: "", notice: "", replying: false,
   };
 
   const [availability, setAvailability] = useState({ canSend: false, reason: missing ? "" : CHECKING });
@@ -391,7 +316,7 @@ export function PlannerWorkConversation({
     const ctrl = new AbortController();
     const turn = gen.current;
     const sent = sendGen.current;
-    setLive((current) => current.taskId !== taskId ? current : { ...current, history: "loading", historyError: "" });
+    setLive((current) => current.taskId !== taskId ? current : { ...current, history: store.cached(cacheKey)?.messagesLoaded ? current.history : "loading", historyError: "" });
     fetchChatMessages(`planner-${taskId}`, ctrl.signal).then((rows) => {
       if (ctrl.signal.aborted || turn !== gen.current || taskRef.current !== taskId) return;
       if (!Array.isArray(rows)) throw new Error("The server returned invalid chat messages.");
@@ -407,11 +332,18 @@ export function PlannerWorkConversation({
       setLive((current) => current.taskId !== taskId ? current : {
         ...current,
         history: "error",
-        historyError: errorText(error),
+        historyError: `${current.messages.length ? "刷新失败：" : ""}${errorText(error)}`,
       });
     });
     return () => ctrl.abort();
   }, [taskId, missing, retry]);
+
+  useEffect(() => {
+    if (live.taskId !== taskId || missing || live.history === "loading") return;
+    store.cache(cacheKey, { messages: live.messages });
+    const history = historyFrom(live.messages);
+    if (history.length) conversation.rememberHistory(history);
+  }, [live, taskId, missing, store, cacheKey]);
 
   const restoreDraft = (extra: string[] = []) => {
     const list = [...extra, ...stagedRef.current];
@@ -535,7 +467,7 @@ export function PlannerWorkConversation({
       onDraft={setDraft}
       staged={shownStaged}
       onStaged={setStaged}
-      inputHistory={historyFrom(view.messages)}
+      inputHistory={conversation.value.history}
       onSend={(text) => {
         setDraft("");
         send(text);
