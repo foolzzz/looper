@@ -25,7 +25,7 @@ from datetime import datetime, timedelta, timezone as dt_timezone
 from typing import Any
 
 from ..db import connection, proactive_deliveries as db_deliveries, reminders as store, system_settings
-from . import chat_settings, cron, proactive_delivery as delivery
+from . import chat_settings, cron, proactive_delivery as delivery, turn_metrics
 from .channels.base import PostOutcome
 from .operator_identity import operator_sender_id
 from .task_notice import NotifyTarget, TargetKind
@@ -298,7 +298,9 @@ class ReminderService:
         await store.start_post(conn, reminder_id, self._clock())
         try:
             receipt = await self._registry.post(channel_id, target(chat), message_text(reminder, now=now),
-                                                idempotency_key=key)
+                                                idempotency_key=key, **turn_metrics.proactive_kwargs(
+                                                    turn_metrics.ProactiveSource.USER_REMINDER, str(reminder_id),
+                                                    dedupe_key=key))
             outcome, error = receipt.result, receipt.error
             external = receipt.external_ids[0] if receipt.external_ids else None
         except Exception as exc:

@@ -26,8 +26,10 @@ def test_registry_records_post_before_returning_its_receipt(monkeypatch, tmp_pat
         target = NotifyTarget(TargetKind.CHAT, "oc_synthetic", group=True)
         body = "question" if method == "post" else SimpleNamespace(text="question")
         assert await getattr(registry, method)("channel-lark", target, body, proactive=ref) is receipt
+        record_key = calls[0][1]["dedupe_key"]
+        assert isinstance(record_key, str) and record_key
         assert calls == [(ref, {"channel_id": "channel-lark", "chat": "oc_synthetic", "group": True,
-                                "external_id": "message-a", "outcome": "sent", "dedupe_key": None})]
+                                "external_id": "message-a", "outcome": "sent", "dedupe_key": record_key})]
         await getattr(registry, method)("channel-lark", target, body)
         assert len(calls) == 1
 

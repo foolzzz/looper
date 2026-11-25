@@ -1050,7 +1050,8 @@ def test_a_successful_retry_replaces_a_rejected_receipt_when_metrics_are_off(
         service = _service(channel, MONDAY)
         await service.run_once()
         key = f"morning_brief:{MONDAY.date().isoformat()}:channel-lark:{OP}"
-        assert channel.posts[0]["proactive"] is None and channel.posts[0]["key"] == key
+        assert channel.posts[0]["proactive"].source is turn_metrics.ProactiveSource.MORNING_BRIEF
+        assert channel.posts[0]["key"] == key
         rejected = await pool.fetchrow(
             "SELECT decision, outcome, external_id FROM proactive_deliveries WHERE dedupe_key = $1", key)
         assert dict(rejected) == {"decision": "send", "outcome": "rejected", "external_id": "om_rejected"}

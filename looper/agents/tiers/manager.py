@@ -2395,8 +2395,6 @@ class ManagerAgent:
                 await self._task_progress(envelope, progress_text)
 
     def _proactive_metadata(self, source: ProactiveSource, source_ref: str | None = None) -> dict[str, Any]:
-        if not chat_settings.metrics_enabled():
-            return {}
         return {"proactive": {"source": source.value, "source_ref": source_ref, "manager_id": self.agent_id}}
 
     async def _task_progress(self, envelope: MessageEnvelope, text: str) -> None:

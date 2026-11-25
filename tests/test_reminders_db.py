@@ -82,7 +82,7 @@ class _Channel:
         self.outcomes, self.delay, self.posts = list(outcomes), delay, []
 
     async def post(self, channel_id: str, target: Any, text: str, *, reply_to: str | None = None,
-                   idempotency_key: str | None = None) -> PostReceipt:
+                   idempotency_key: str | None = None, proactive: Any = None) -> PostReceipt:
         self.posts.append({"channel_id": channel_id, "kind": target.kind.value, "to": target.id,
                            "group": target.group, "text": text, "key": idempotency_key})
         if self.delay:
@@ -879,7 +879,10 @@ def test_delivery_off_freezes_reminder_post_bytes_and_records(monkeypatch, mode,
         await reminders.ReminderService(Channel(), clock=_Clock(now)).run_once()
         assert posts == [((channel_id, reminders.target(chat),
                            "⏰ 你在 11-20 22:50 让我提醒你：exact reminder\n第二行"),
-                          {"idempotency_key": f"looper-reminder-{reminder_id}"})]
+                          {"idempotency_key": f"looper-reminder-{reminder_id}",
+                           "proactive": reminders.turn_metrics.ProactiveRef(
+                               reminders.turn_metrics.ProactiveSource.USER_REMINDER, str(reminder_id),
+                               dedupe_key=f"looper-reminder-{reminder_id}")})]
         assert (await _statuses(pool))[reminder_id] == ("delivered", 1, None)
         assert await pool.fetchval("SELECT external_id FROM reminders WHERE id=$1", reminder_id) == "om_1"
         assert await pool.fetchval("SELECT count(*) FROM proactive_deliveries") == 0
