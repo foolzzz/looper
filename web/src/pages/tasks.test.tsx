@@ -83,6 +83,12 @@ describe("task list polling and pagination", () => {
     await act(async () => el!.click());
   };
   const rows = () => [...container.querySelectorAll(".divide-y p.truncate")].map((el) => el.textContent);
+  const expectChatReason = (text: string) => {
+    const entry = container.querySelector('[aria-disabled="true"]')!;
+    const reason = document.getElementById(entry.getAttribute("aria-describedby")!)!;
+    expect(reason.textContent).toBe(text);
+    expect(reason.closest(".sr-only, .hidden, [hidden]")).toBeNull();
+  };
 
   it("links each live Planner using its server target id without opening the task row", async () => {
     vi.mocked(fetchChatTargets).mockResolvedValue([
@@ -106,12 +112,20 @@ describe("task list polling and pagination", () => {
       await finish(0, page([{ ...task("idle", 25), status }]));
       const entry = container.querySelector<HTMLElement>('[aria-disabled="true"]')!;
       expect(entry.textContent).toContain("Talk to this task");
-      expect(entry.getAttribute("title")).toBe("Only tasks with a running Planner can be chatted with");
+      expectChatReason("Only tasks with a running Planner can be chatted with");
       expect(entry.hasAttribute("href")).toBe(false);
       await act(async () => entry.click());
       expect(navigate).not.toHaveBeenCalled();
     },
   );
+
+  it("shows a visible reason while chat availability is loading", async () => {
+    vi.mocked(fetchChatTargets).mockImplementationOnce(() => new Promise(() => {}));
+    await show();
+    await finish(0, page([task("idle", 25)]));
+    expectChatReason("Checking chat availability");
+    expect(container.querySelector('a[href^="#chat?target="]')).toBeNull();
+  });
 
   it("revokes the entry on a failed availability refresh and recovers on the next read", async () => {
     vi.mocked(fetchChatTargets).mockResolvedValue([{ kind: "planner", id: "planner-live", task_id: "live", can_send: true }]);
@@ -120,7 +134,7 @@ describe("task list polling and pagination", () => {
     expect(container.querySelector('a[href="#chat?target=planner-live"]')).not.toBeNull();
     vi.mocked(fetchChatTargets).mockRejectedValueOnce(new Error("unavailable"));
     await tick(10_000);
-    expect(container.querySelector('[aria-disabled="true"]')?.getAttribute("title")).toBe("Chat availability could not be checked");
+    expectChatReason("Chat availability could not be checked");
     expect(container.querySelector('a[href="#chat?target=planner-live"]')).toBeNull();
     await tick(10_000);
     expect(container.querySelector('a[href="#chat?target=planner-live"]')).not.toBeNull();

@@ -62,6 +62,12 @@ describe("TaskDetailRoute", () => {
     await act(async () => tab!.click());
     await settle();
   };
+  const expectChatReason = (text: string) => {
+    const entry = container.querySelector('[aria-disabled="true"]')!;
+    const reason = document.getElementById(entry.getAttribute("aria-describedby")!)!;
+    expect(reason.textContent).toBe(text);
+    expect(reason.closest(".sr-only, .hidden, [hidden]")).toBeNull();
+  };
 
   it.each([true, false])("shows task chat in the header with server availability %s", async canSend => {
     vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => Response.json(
@@ -75,9 +81,25 @@ describe("TaskDetailRoute", () => {
     if (canSend) expect(entry!.getAttribute("href")).toBe("#chat?target=planner-task-a");
     else {
       expect(entry!.getAttribute("aria-disabled")).toBe("true");
-      expect(entry!.getAttribute("title")).toBe("Only tasks with a running Planner can be chatted with");
+      expectChatReason("Only tasks with a running Planner can be chatted with");
       expect(entry!.hasAttribute("href")).toBe(false);
     }
+  });
+
+  it.each([
+    ["loading", "Checking chat availability"],
+    ["failed", "Chat availability could not be checked"],
+  ])("shows a visible reason when chat availability is %s", async (state, reason) => {
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      if (String(input) === "/api/v1/operator_chat/targets") {
+        if (state === "loading") return new Promise<Response>(() => {});
+        throw new Error("unavailable");
+      }
+      return Response.json(answer(String(input), init));
+    }));
+    await show("task-a");
+    expectChatReason(reason);
+    expect(container.querySelector('a[href^="#chat?target="]')).toBeNull();
   });
 
   it.each(["stopped", "failed", "cancelled"])("resumes Sessions after stale %s reads, even if the new run ends immediately", async (initialStatus) => {

@@ -41,18 +41,19 @@ export function TaskChatEntry({ taskId, availability }: { taskId: string; availa
       {label}
     </a>
   ) : (
-    <span
-      role="link"
-      aria-label="Talk to this task"
-      aria-disabled="true"
-      aria-describedby={reasonId}
-      tabIndex={0}
-      title={reason}
-      onClick={event => event.stopPropagation()}
-      className={`${className} cursor-not-allowed text-muted-foreground opacity-50`}
-    >
-      {label}
-      <span id={reasonId} className="sr-only">{reason}</span>
+    <span className="inline-flex max-w-64 flex-col items-start gap-1 max-sm:w-full max-sm:max-w-none" onClick={event => event.stopPropagation()}>
+      <span
+        role="link"
+        aria-label="Talk to this task"
+        aria-disabled="true"
+        aria-describedby={reasonId}
+        tabIndex={0}
+        title={reason}
+        className={`${className} cursor-not-allowed text-muted-foreground opacity-50`}
+      >
+        {label}
+      </span>
+      <span id={reasonId} className="text-xs text-muted-foreground">{reason}</span>
     </span>
   );
 }
