@@ -8849,6 +8849,15 @@ built by `scripts/stage-dashboard.sh` at release time), and it carries
   other outcomes return it to the draft. A stream without a final follows the server turn, then re-reads history
   and returns staged text to the draft. Leaving the pane cancels browser subscriptions and polls without
   stopping the server. The existing Chat page and channel entry points keep their behavior.
+- **Work task activity**: the selected Planner's messages and task activity share one time-ordered feed,
+  ordered by timestamp, fixed source order and source id. Activity reads start with the latest window,
+  page backwards by the smallest loaded sequence and subscribe after that window's largest sequence;
+  overlapping reads and live events deduplicate by sequence. Read failures offer Retry. One `TaskGates`
+  instance uses the page's shared detail and updates it from gate replies. The page has one visibility-aware
+  detail reader while the task runs, so later gate openings and closures appear without a second editor;
+  replies invalidate older reads. Summaries can focus its existing
+  anchor with `openWorkGate`. Tool presentation records update by stable id and stay folded by default;
+  the task-thread adapter owns their decoding. Unknown activity and task events remain neutral text.
 
 
 ### Hash Routing
