@@ -332,23 +332,23 @@ describe("Work attention polling", () => {
   });
 });
 
-describe("Work attention on the manager column", () => {
-  function stubFetch() {
-    vi.stubGlobal("fetch", vi.fn(async (url: string, init?: RequestInit) => {
-      const method = init?.method ?? "GET";
-      if (method === "GET") {
-        return new Response(JSON.stringify({ status: "error", error: { code: "invalid", message: "use POST" } }), { status: 405 });
-      }
-      const path = String(url);
-      const result = path.includes("tasks/detail")
-        ? { task_id: "task-1", title: "Task body stays", status: "running", group: "in_progress", project_id: "p", project_name: "Demo", requirement: "" }
-        : path.includes("tasks/activity")
-          ? { activity: [{ seq: 1 }] }
-          : { items: [], schedules: [], next_cursor: null };
-      return new Response(JSON.stringify({ status: "ok", result }), { status: 200, headers: { "Content-Type": "application/json" } });
-    }));
-  }
+function stubFetch() {
+  vi.stubGlobal("fetch", vi.fn(async (url: string, init?: RequestInit) => {
+    const method = init?.method ?? "GET";
+    if (method === "GET") {
+      return new Response(JSON.stringify({ status: "error", error: { code: "invalid", message: "use POST" } }), { status: 405 });
+    }
+    const path = String(url);
+    const result = path.includes("tasks/detail")
+      ? { task_id: "task-1", title: "Task body stays", status: "running", group: "in_progress", project_id: "p", project_name: "Demo", requirement: "" }
+      : path.includes("tasks/activity")
+        ? { activity: [{ seq: 1 }] }
+        : { items: [], schedules: [], next_cursor: null };
+    return new Response(JSON.stringify({ status: "ok", result }), { status: 200, headers: { "Content-Type": "application/json" } });
+  }));
+}
 
+describe("Work attention on the manager column", () => {
   it("drops a late manager summary when a task is selected and aborts the poll", async () => {
     stubFetch();
     let release: ((value: AttentionSummary) => void) | undefined;
@@ -383,6 +383,134 @@ describe("Work attention on the manager column", () => {
     await render();
     expect(host.textContent).toContain("正在读取待办…");
     expect(host.textContent).not.toContain("暂时没有需要你处理的事");
+  });
+
+  it("keeps the return and title height and scrolls the list in the space left", async () => {
+    stubFetch();
+    vi.mocked(fetchAttention).mockResolvedValue(summary([
+      section({
+        kind: "gates", state: "ok", count: 12,
+        items: Array.from({ length: 12 }, (_, index) => item({ key: `g${index}`, title: `Waiting item ${index}` })),
+      }),
+    ]));
+    await render(<WorkPage sub="manager" onNavigate={() => {}} />);
+    const aside = host.querySelector('aside[aria-label="需要你处理"]');
+    const column = aside?.parentElement;
+    const manager = column?.children[0];
+    const title = host.querySelector("header")?.parentElement;
+    const back = [...host.querySelectorAll("button")].find((button) => button.textContent === "Back to the list");
+    const names = (node: Element | null | undefined) => (node?.className ?? "").split(/\s+/);
+    // Below xl the list is a column under the return/title region. It must take the leftover
+    // height and scroll. A non-shrinking full-height list collapses that region to nothing.
+    expect(names(column)).toContain("flex-col");
+    expect(names(aside)).toContain("min-h-0");
+    expect(names(aside)).toContain("flex-1");
+    expect(names(aside)).toContain("overflow-y-auto");
+    expect(names(aside)).not.toContain("max-h-full");
+    expect(names(aside)).not.toContain("shrink-0");
+    expect(names(aside).some((name) => name === "xl:shrink-0" || name === "xl:flex-none")).toBe(true);
+    expect(names(manager)).toContain("shrink-0");
+    expect(names(manager)).not.toContain("flex-1");
+    expect(names(manager)).toContain("xl:flex-1");
+    expect(names(title)).not.toContain("flex-1");
+    expect(names(title)).toContain("xl:flex-1");
+    expect(names(back?.parentElement)).toContain("shrink-0");
+  });
+});
+
+describe("Work attention login diagnosis", () => {
+  it("shows a diagnosis that mentions a token and never renders a credential value", async () => {
+    const credential = "sk-live-ABCDEFGHIJKLMNOPQRSTUVWXYZ12";
+    vi.mocked(fetchAttention).mockResolvedValue(summary([
+      section({ kind: "logins", state: "ok", count: 1, items: [item({
+        key: "login:cursor", title: "Cursor login",
+        facts: {
+          detail: "partly signed in (no refresh token)",
+          fix: `Run cursor-agent login; dropped ${credential}`,
+          refresh_token: "rt_live_supersecretvalue",
+        },
+      })] }),
+    ]));
+    await render();
+    expect(host.textContent).toContain("partly signed in (no refresh token)");
+    expect(host.textContent).toContain("Run cursor-agent login");
+    expect(host.textContent).not.toContain(credential);
+    expect(host.innerHTML).not.toContain(credential);
+    expect(host.textContent).not.toContain("rt_live_supersecretvalue");
+    expect(host.innerHTML).not.toContain("rt_live_supersecretvalue");
+  });
+});
+
+describe("Work attention narrow column", () => {
+  function columnWidth(matches: boolean) {
+    const listeners = new Set<() => void>();
+    let wide = matches;
+    vi.stubGlobal("matchMedia", () => ({
+      get matches() { return wide; },
+      media: "(min-width: 768px)",
+      addEventListener: (_type: string, listener: () => void) => { listeners.add(listener); },
+      removeEventListener: (_type: string, listener: () => void) => { listeners.delete(listener); },
+    }));
+    return {
+      set(next: boolean) {
+        wide = next;
+        listeners.forEach((listener) => listener());
+      },
+    };
+  }
+
+  it("aborts the read and stops polling when returning to the list", async () => {
+    columnWidth(false);
+    stubFetch();
+    let signal: AbortSignal | undefined;
+    vi.mocked(fetchAttention).mockImplementation((next?: AbortSignal) => {
+      signal = next;
+      return new Promise(() => {});
+    });
+    await render(<WorkPage sub="manager" onNavigate={() => {}} />);
+    expect(host.querySelector('aside[aria-label="需要你处理"]')).not.toBeNull();
+    const back = [...host.querySelectorAll("button")].find((button) => button.textContent === "Back to the list");
+    await act(async () => { back?.click(); });
+    expect(signal?.aborted).toBe(true);
+    expect(host.querySelector('aside[aria-label="需要你处理"]')).toBeNull();
+    const calls = vi.mocked(fetchAttention).mock.calls.length;
+    vi.useFakeTimers();
+    await act(async () => { await vi.advanceTimersByTimeAsync(60_000); });
+    expect(fetchAttention).toHaveBeenCalledTimes(calls);
+  });
+
+  it("remounts the summary when the detail column crosses the breakpoint", async () => {
+    const media = columnWidth(false);
+    stubFetch();
+    const signals: AbortSignal[] = [];
+    vi.mocked(fetchAttention).mockImplementation((next?: AbortSignal) => {
+      if (next) signals.push(next);
+      return Promise.resolve(summary([
+        section({ kind: "gates", state: "ok", count: 1, items: [item({ key: "g1", title: "Pick a database" })] }),
+      ]));
+    });
+    await render(<WorkPage sub="" onNavigate={() => {}} />);
+    expect(host.querySelector('aside[aria-label="需要你处理"]')).toBeNull();
+    expect(fetchAttention).not.toHaveBeenCalled();
+
+    await act(async () => { media.set(true); });
+    expect(host.querySelector('aside[aria-label="需要你处理"]')).not.toBeNull();
+    expect(fetchAttention).toHaveBeenCalledTimes(1);
+    expect(host.textContent).toContain("Pick a database");
+
+    await act(async () => { media.set(false); });
+    expect(host.querySelector('aside[aria-label="需要你处理"]')).toBeNull();
+    expect(signals[0]?.aborted).toBe(true);
+    const calls = vi.mocked(fetchAttention).mock.calls.length;
+    vi.useFakeTimers();
+    await act(async () => { await vi.advanceTimersByTimeAsync(60_000); });
+    expect(fetchAttention).toHaveBeenCalledTimes(calls);
+
+    vi.useRealTimers();
+    await act(async () => { media.set(true); });
+    expect(fetchAttention).toHaveBeenCalledTimes(calls + 1);
+    expect(host.textContent).toContain("Pick a database");
+    expect(signals.at(-1)?.aborted).toBe(false);
   });
 });
 

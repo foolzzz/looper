@@ -41,8 +41,15 @@ const DELIVERY_SOURCES: Record<string, string> = {
   message_stream: "消息流采集/对账需处理",
 };
 
-const SECRET = /token|secret|password|credential|authorization|cookie|api[_-]?key|private[_-]?key/i;
-const text = (value: unknown) => (typeof value === "string" && !SECRET.test(value) ? value : "");
+const SECRET_KEY = /token|secret|password|credential|authorization|cookie|api[_-]?key|private[_-]?key/i;
+/** A credential-shaped value. A diagnosis that only mentions a token is not one. */
+const CREDENTIAL_VALUE = /\b(?:sk|rk|pk|ghp|gho|github_pat|xox[baprs]|AKIA)[-_][A-Za-z0-9_\-]{8,}\b|bearer\s+[A-Za-z0-9\-._~+/]{8,}/gi;
+
+/** Known display text, with an actual credential replaced. Mentioning a token keeps the sentence. */
+function text(value: unknown): string {
+  if (typeof value !== "string") return "";
+  return value.replace(CREDENTIAL_VALUE, "[redacted]");
+}
 const count = (value: unknown) => (typeof value === "number" ? value : 0);
 const plural = (n: number, one: string) => `${n} ${one}${n === 1 ? "" : "s"}`;
 
@@ -50,7 +57,7 @@ const plural = (n: number, one: string) => `${n} ${one}${n === 1 ? "" : "s"}`;
 function visibleFacts(facts: Record<string, unknown>): Record<string, unknown> {
   const copy: Record<string, unknown> = {};
   for (const [key, value] of Object.entries(facts)) {
-    if (!SECRET.test(key)) copy[key] = value;
+    if (!SECRET_KEY.test(key)) copy[key] = value;
   }
   return copy;
 }
@@ -58,7 +65,8 @@ function visibleFacts(facts: Record<string, unknown>): Record<string, unknown> {
 /** The second line of an item: where it belongs and the kind's own facts, in words. */
 function details(kind: AttentionKind, item: AttentionItem): { line: string; badges: string[] } {
   const facts = visibleFacts(item.facts);
-  const { context, ref } = item;
+  const context = text(item.context);
+  const ref = text(item.ref);
   const parts = (...values: (string | null | false | undefined)[]) => values.filter(Boolean).join(" · ");
   switch (kind) {
     case "failure_holds":
@@ -73,7 +81,8 @@ function details(kind: AttentionKind, item: AttentionItem): { line: string; badg
     }
     case "schedules": {
       const failures = count(facts.failures);
-      const alerts = Array.isArray(facts.alerts) ? facts.alerts.map((alert) => ALERTS[String(alert)] ?? String(alert)) : [];
+      const alerts = Array.isArray(facts.alerts)
+        ? facts.alerts.map((alert) => text(ALERTS[String(alert)] ?? String(alert))) : [];
       return { line: context, badges: [...(failures > 0 ? [`${plural(failures, "failure")} in a row`] : []), ...alerts] };
     }
     case "logins":
@@ -116,11 +125,13 @@ type Phase = "loading" | "ready" | "off" | "unsupported" | "error";
 function Item({ kind, item }: { kind: AttentionKind; item: AttentionItem }) {
   const { line, badges } = details(kind, item);
   const href = item.href ? workHref(item.href) : null;
-  const context = item.context && !line.includes(item.context) ? item.context : "";
-  const note = [context, line, ...badges].filter(Boolean).join(" · ");
+  const title = text(item.title);
+  const context = text(item.context);
+  const extra = context && !line.includes(context) ? context : "";
+  const note = [extra, line, ...badges].filter(Boolean).join(" · ");
   return (
     <li className="space-y-0.5 py-1.5 text-sm">
-      {href ? <a href={href} className={LINK}>{item.title}</a> : <span className="font-medium [overflow-wrap:anywhere]">{item.title}</span>}
+      {href ? <a href={href} className={LINK}>{title}</a> : <span className="font-medium [overflow-wrap:anywhere]">{title}</span>}
       {note && <p className="text-xs text-muted-foreground [overflow-wrap:anywhere]">{note}</p>}
       {item.since && (
         <time dateTime={item.since} className="block text-xs tabular-nums text-muted-foreground">{sinceText(item.since)}</time>
@@ -136,7 +147,7 @@ function SectionView({ section, onRetry }: { section: AttentionSection; onRetry:
       <h3 className="text-xs font-semibold">{TITLES[section.kind]}</h3>
       {section.state === "error" ? (
         <div role="alert" className="space-y-2 text-sm text-destructive [overflow-wrap:anywhere]">
-          <p>{section.error || "此来源读取失败"}</p>
+          <p>{text(section.error) || "此来源读取失败"}</p>
           <Button type="button" variant="outline" size="sm" onClick={onRetry}>重试</Button>
         </div>
       ) : section.state === "unknown" ? (
@@ -204,7 +215,7 @@ export function WorkAttention() {
     && sections.every((section) => section.state === "ok" && section.count === 0);
 
   return (
-    <aside aria-label="需要你处理" className="flex max-h-full min-h-0 w-full shrink-0 flex-col overflow-y-auto border-t border-border xl:w-80 xl:border-l xl:border-t-0">
+    <aside aria-label="需要你处理" className="flex min-h-0 w-full flex-1 flex-col overflow-y-auto border-t border-border xl:w-80 xl:flex-none xl:shrink-0 xl:border-l xl:border-t-0">
       <div className="space-y-3 p-4">
         <h2 className="text-sm font-semibold">需要你处理</h2>
         {phase === "loading" && !summary && (
@@ -218,7 +229,7 @@ export function WorkAttention() {
         {phase === "error" && (
           <div role="alert" className="space-y-2 text-sm text-destructive [overflow-wrap:anywhere]">
             <p>待办读取失败</p>
-            {error && <p>{error}</p>}
+            {error && <p>{text(error)}</p>}
             <Button type="button" variant="outline" size="sm" onClick={retry}>重试</Button>
           </div>
         )}
