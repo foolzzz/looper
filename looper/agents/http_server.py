@@ -64,6 +64,9 @@ logger = logging.getLogger(__name__)
 API_SLOW_SECONDS = 2.0
 API_SUMMARY_SECONDS = 600
 API_LATENCY_SAMPLES = 20_000
+# Leave most of serve's 15-second shutdown deadline for agents and the database.
+HTTP_SHUTDOWN_GRACE_SECONDS = 1.0
+HTTP_SHUTDOWN_CLEANUP_SECONDS = 1.0
 _PACKAGE_ROOT = Path(__file__).resolve().parents[1]
 
 
@@ -288,7 +291,7 @@ class AgentHTTPServer:
         # Configuration files uploaded for import, waiting to be applied (under the runtime root).
         self._config_imports = config_imports.ConfigImports(runtime_root) if runtime_root else None
         self._server: asyncio.Server | None = None
-        self._handlers: set[asyncio.Task] = set()
+        self._handlers: dict[asyncio.Task, asyncio.StreamWriter] = {}
         self._address_publication: Publication | None = None
         self._components: components.Manifest | None = None
 
@@ -380,10 +383,20 @@ class AgentHTTPServer:
             self._summary_task = None
         if self._server:
             self._server.close()
-        handlers = list(self._handlers)
-        for task in handlers:
-            task.cancel()
-        await asyncio.gather(*handlers, return_exceptions=True)
+        handlers = dict(self._handlers)
+        if handlers:
+            _, pending = await asyncio.wait(handlers, timeout=HTTP_SHUTDOWN_GRACE_SECONDS)
+            if pending:
+                logger.warning("HTTP shutdown grace expired; aborting %d HTTP connection(s)", len(pending))
+                for task in pending:
+                    # close()/wait_closed() can wait forever for a peer that never reads.
+                    handlers[task].transport.abort()
+                    task.cancel()
+                _, pending = await asyncio.wait(pending, timeout=HTTP_SHUTDOWN_CLEANUP_SECONDS)
+                if pending:
+                    logger.warning("HTTP shutdown cleanup expired; cancelling %d handler(s)", len(pending))
+                    for task in pending:
+                        task.cancel()
         if self._server:
             # Python 3.12.1+ waits for active connections as well as the listener.
             await self._server.wait_closed()
@@ -401,7 +414,7 @@ class AgentHTTPServer:
         writer: asyncio.StreamWriter,
     ) -> None:
         connection_task = asyncio.current_task()
-        self._handlers.add(connection_task)
+        self._handlers[connection_task] = writer
         peer = writer.get_extra_info("peername")
         peer_host = peer[0] if peer else None
         sign_in_headers = None
@@ -576,7 +589,7 @@ class AgentHTTPServer:
             except Exception:
                 pass
             finally:
-                self._handlers.discard(connection_task)
+                self._handlers.pop(connection_task, None)
 
     async def _client_principal(self, headers: Mapping[str, str], peer_host: str | None) -> api_v1.Principal | None:
         """Who calls ``/api/v1``: the operator, an API client (a local, direct caller with an ``lpc_`` bearer token),
