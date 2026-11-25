@@ -45,11 +45,11 @@ _RESULT = _object({
 }, closed=True)
 
 RESULTS: dict = {}
-# Reads only Looper's own task rows.
+# Reads only Looper's own task rows. Not a generated client command: the task CLI is a later change.
 OPERATIONS = (
     Operation("tasks.select", "POST", "/api/v1/tasks/select", SUMMARY, DESCRIPTION,
               _object({"selection": _STR, "cwd": _STR, "all": _BOOL}, [], closed=True), _RESULT,
-              risk="read", operator_only=True, level=ActionLevel.INSIDE),
+              risk="read", operator_only=True, cli=False, level=ActionLevel.INSIDE),
 )
 
 _HINT_TEXT = "Nothing matched. Search every task with all, or give the task id."

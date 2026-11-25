@@ -93,16 +93,11 @@ def test_deepest_directory_contains_cwd(cwd, paths, expected):
     assert deepest_paths(cwd, paths) == expected
 
 
-def test_select_is_a_generated_operator_only_command():
+def test_select_is_not_a_generated_client_command():
     from looper.agents import api_v1
     from looper.loopercli import generated_operations
 
     operation = next(item for item in api_v1.operations() if item.operation_id == "tasks.select")
-    assert operation.cli is True and operation.tool is None
-    documented = api_v1.document()["paths"]["/tasks/select"]["post"]
-    assert documented["x-looper-operator-only"] is True
-    assert documented.get("x-looper-cli", True) is True
-    command = next(command for head, tail, _summary, _description, command
-                   in generated_operations(api_v1.document()) if (head, tail) == ("tasks", "select"))
-    assert command.operator_only and command.method == "POST" and command.path == "/api/v1/tasks/select"
-    assert set(command.properties) == {"selection", "cwd", "all"}
+    assert operation.cli is False and operation.tool is None
+    pairs = {(head, tail) for head, tail, *_rest in generated_operations(api_v1.document())}
+    assert ("tasks", "select") not in pairs
