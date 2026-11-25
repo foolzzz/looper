@@ -177,7 +177,7 @@ CREATE TABLE IF NOT EXISTS binding_principal_scopes (
 );
 ```
 
-`manager_sessions` 的改动见第 7 节，它也有一条受众和范围的 CHECK：受众是操作者当且仅当范围是 `full`。`jsonb_path_exists` 是不可变函数，可以放进 CHECK，实现时由迁移测试确认。这几条 CHECK 是兜底，第一道是第 6 节的类型化解析。写覆盖的 API 收的是一个主体（类别、一到两个 id、集合），在一个事务里锁住绑定行，然后写下这个主体的全部行。`default_scope` 也不接受 `full`。`legacy` 只能写到 `legacy_allowed` 为 true 的绑定上，也就是迁移时已经存在的绑定，这样单个群可以改回去（第 11 节）。聊天换绑到别的管家时，`legacy_allowed` 变成 false。
+`manager_sessions` 的改动见第 7 节，它也有一条受众和范围的 CHECK：范围和受众要么都为空，要么都不为空，且受众是操作者当且仅当范围是 `full`（只写等式挡不住空受众，因为 `NULL = true` 的结果是 NULL，CHECK 会放行）。`jsonb_path_exists` 是不可变函数，可以放进 CHECK，实现时由迁移测试确认。这几条 CHECK 是兜底，第一道是第 6 节的类型化解析。写覆盖的 API 收的是一个主体（类别、一到两个 id、集合），在一个事务里锁住绑定行，然后写下这个主体的全部行。`default_scope` 也不接受 `full`。`legacy` 只能写到 `legacy_allowed` 为 true 的绑定上，也就是迁移时已经存在的绑定，这样单个群可以改回去（第 11 节）。聊天换绑到别的管家时，`legacy_allowed` 变成 false。
 
 ## 6. 范围解析
 
@@ -229,20 +229,28 @@ session_key = "group:" + channel_id + ":" + chat + "~" + fingerprint
 ALTER TABLE manager_sessions
     ADD COLUMN IF NOT EXISTS scope_id TEXT,
     ADD COLUMN IF NOT EXISTS scope_version INTEGER,
-    ADD COLUMN IF NOT EXISTS audience TEXT CHECK (audience IN ('operator', 'shared')),
+    ADD COLUMN IF NOT EXISTS audience TEXT
+        CONSTRAINT manager_sessions_audience_values CHECK (audience IN ('operator', 'shared')),
     ADD COLUMN IF NOT EXISTS scope_fingerprint TEXT,
     ADD COLUMN IF NOT EXISTS retired_at TIMESTAMPTZ,
     ADD COLUMN IF NOT EXISTS retired_reason TEXT,
     ADD COLUMN IF NOT EXISTS activity_cursor BIGINT,          -- 群动态读到的最后一个 chat_messages.id（第 8 节）
-    ADD CONSTRAINT manager_sessions_audience_check
-        CHECK (scope_id IS NULL OR ((audience = 'operator') = (scope_id = 'full')));   -- D8
--- manager_sessions_key 放宽为：
---   session_key = kind || ':' || channel_id || ':' || chat || coalesce('~' || scope_fingerprint, '')
+    -- D8：范围和受众要么都为空（默认管家的会话），要么都不为空，且受众是操作者当且仅当范围是 full
+    ADD CONSTRAINT manager_sessions_scope_audience_check
+        CHECK ((scope_id IS NULL AND audience IS NULL)
+               OR (scope_id IS NOT NULL AND audience IS NOT NULL
+                   AND (audience = 'operator') = (scope_id = 'full'))),
+    -- 会话键放宽：带指纹时以 '~' 加指纹结尾
+    DROP CONSTRAINT manager_sessions_key,
+    ADD CONSTRAINT manager_sessions_key
+        CHECK (session_key = kind || ':' || channel_id || ':' || chat || coalesce('~' || scope_fingerprint, ''));
 ALTER TABLE chat_messages
     ADD COLUMN IF NOT EXISTS manager_session TEXT,  -- 写下这一行的管家会话（manager_sessions.session_key）
     ADD COLUMN IF NOT EXISTS sender_kind TEXT CHECK (sender_kind IN ('person', 'bot')),
     ADD COLUMN IF NOT EXISTS sender_name TEXT;      -- 渠道给的显示名，只用来写围栏的 from
 ```
+
+**已验证：** 在一次性的 PostgreSQL 16 库里，按 `main` 上 `manager_sessions` 的定义建表（去掉对 `managers` 的外键），先插一行迁移前的行，再执行上面这条 `ALTER TABLE manager_sessions`：执行成功，迁移前的行保留。随后插入的结果：`full` + `operator` 接受；`full` + 空受众、`full` + `shared`、`chat_only` + `operator`、空范围 + `shared` 都被 `manager_sessions_scope_audience_check` 拒绝；两者都为空接受；`legacy` + `shared` 接受；未知的受众被 `manager_sessions_audience_values` 拒绝；设了指纹但键不带 `~` 指纹的行被 `manager_sessions_key` 拒绝。列约束和表约束各有自己的名字，不会撞名。验证完库已删除。
 
 ## 8. 操作者在群里
 
