@@ -772,8 +772,13 @@ and key or CLI version, and increment a reason/phase/version counter visible in
 
 `tasks.managers.max_resident` defaults to 6 (1–20). Admission can reclaim the least
 recently used idle process; a 60-second ticker reclaims processes idle for 30
-minutes. Shutdown stops owned processes; deleting a task forgets its resident and
-session. This foundation adds no conversation transport.
+minutes, measured from the end of the last turn. Admission, including preparation,
+shares the pool gate; all-busy messages queue visibly, and an active turn prevents
+starting the task in the background. Shutdown stops owned processes; deleting a
+task forgets its resident and session. This foundation provides the scheduling and
+native-turn primitive, with no conversation transport.
+Session persistence, per-task profile switching and turn accounting belong to the
+stacked turn implementation.
 
 **Tools.** Each process receives a task-bound `taskmgr.` credential for Looper's
 MCP server; the tool service stores only its hash. `task_status` reads compact
