@@ -2637,6 +2637,14 @@ export interface TaskDetail extends TaskInfo {
   fail_kind: "task_budget" | "quota_exhausted" | "environment" | null;
   /** Present only with active failure handling or retained failure history. */
   holds?: import("./api-task-failures").FailureHold[];
+  /** Present while a model API connection failure pauses this task or waits for an operator. */
+  network_pause?: {
+    id: number;
+    state: "paused" | "waiting_user";
+    reason: string;
+    started_at: string;
+    deadline: string;
+  };
   /** The task's spend cap (USD): its own, else its project's per task; null for none. */
   task_budget_usd: number | null;
   /** The task's own cap (a scheduled run's), raised alone when it continues at its cap; null for none. */
