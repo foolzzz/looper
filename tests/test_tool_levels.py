@@ -20,6 +20,7 @@ INSIDE, OPERATOR, ORIGIN, MACHINE, EXTERNAL, UNKNOWN = (ActionLevel.INSIDE, Acti
                                                         ActionLevel.MACHINE, ActionLevel.EXTERNAL, ActionLevel.UNKNOWN)
 # The RFC's table (section 4.2): a fixed level, or "args" where the call's arguments decide it.
 RFC_TABLE: dict[str, ActionLevel | str] = {
+    "task_status": INSIDE, "task_requirement_set": INSIDE,
     # Chat task operations stay inside Looper; task agents are reviewed where they run.
     "looper_chat_tasks": INSIDE, "looper_chat_task_create": INSIDE,
     "looper_chat_task_control": INSIDE, "looper_chat_task_instruct": INSIDE,
