@@ -448,5 +448,8 @@
  "workflows.preview": "inside",
  "workflows.put": "inside",
  "workspaces.check": "inside",
- "workspaces.discard": "inside"
+ "workspaces.discard": "inside",
+ "tasks.create_draft": "inside",
+ "task_conversations.get": "inside",
+ "task_conversations.update": "inside"
 }
