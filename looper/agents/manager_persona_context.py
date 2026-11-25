@@ -2,6 +2,7 @@
 
 Shared group/other-sender turns omit it; their own sessions get only the name.
 The dashboard, API clients and the operator's direct chats keep the full persona.
+With a private profile, API clients omit it and keep main's stable baseline isolated.
 """
 
 import logging
@@ -21,8 +22,31 @@ NAME_HEADING = "Persona (set by the operator: your name; Looper's rules still ap
 
 class Scope(Enum):
     FULL = "full"
+    PERSONA_ONLY = "persona_only"  # full persona, without the private operator profile
     NAME = "name"
     OMIT = "omit"
+
+    @property
+    def isolated(self) -> bool:
+        """Render without main's private baseline and do not replace its last shown state."""
+        return self in (Scope.OMIT, Scope.PERSONA_ONLY)
+
+
+async def _is_operator(envelope: MessageEnvelope) -> bool:
+    """Check the trusted origin, including an API client's verified identity; failures grant nothing."""
+    from .tiers.manager import _message_client, _message_origin
+
+    origin = _message_origin(envelope)
+    operator_id = None
+    if origin["channel"] in BOT_CHANNEL_TYPES and not origin["group"]:
+        try:
+            operator_id = await operator_identity.operator_sender_id(origin["channel_id"])
+        except Exception:
+            logger.warning("could not read persona audience identity; omitting persona", exc_info=True)
+            return False
+    return operator_identity.is_operator(
+        channel=origin["channel"], group=origin["group"], sender=origin["sender"],
+        client_id=_message_client(envelope)[0], operator_id=operator_id)
 
 
 async def scope(manager_id: str, route: SessionKey, envelope: MessageEnvelope | None, *,
@@ -41,16 +65,11 @@ async def scope(manager_id: str, route: SessionKey, envelope: MessageEnvelope | 
         return Scope.FULL
     origin = _message_origin(envelope)
     if origin["channel"] not in BOT_CHANNEL_TYPES:
+        if private and not await _is_operator(envelope):
+            return Scope.PERSONA_ONLY
         return Scope.FULL
-    if not origin["group"]:
-        try:
-            operator_id = await operator_identity.operator_sender_id(origin["channel_id"])
-        except Exception:
-            logger.warning("could not read persona audience identity; omitting persona", exc_info=True)
-            operator_id = None
-        if operator_identity.is_operator(channel=origin["channel"], group=False, sender=origin["sender"],
-                                         client_id=None, operator_id=operator_id):
-            return Scope.FULL
+    if await _is_operator(envelope):
+        return Scope.FULL
     return Scope.OMIT
 
 

@@ -806,6 +806,8 @@ class AcpGrok:
             self._totals = self._totals.plus(early.usage)
             return ResidentTurn(early.result_event, session_started=True, usage=early.usage)
         started = time.monotonic()
+        if self._tree is not None:
+            self._tree.wake()
         self._requests += 1
         self._prompt_id = self._requests
         self._readying = False

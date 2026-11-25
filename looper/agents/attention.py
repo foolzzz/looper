@@ -78,6 +78,15 @@ async def enabled() -> bool:
     return (await db_settings.get_settings([ENABLED_KEY])).get(ENABLED_KEY) == "true"
 
 
+async def update(value: bool | None) -> dict[str, bool]:
+    """Persist the operator's choice; null removes the row and restores off."""
+    if value is not None and not isinstance(value, bool):
+        raise ValueError("enabled must be true, false or null")
+    await db_settings.put_settings({ENABLED_KEY: None if value is None else str(value).lower()})
+    logger.info("attention setting updated enabled=%s reset=%s", value is True, value is None)
+    return {"enabled": await enabled()}
+
+
 def use_status_checks(read: StatusChecks | None, *, owner: StatusChecks | None = None,
                       catchup: CatchupChecks | None = None) -> None:
     """Where ``logins`` is read from: the HTTP server's startup checks with the logins read now, set while it runs
