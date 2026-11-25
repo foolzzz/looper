@@ -48,23 +48,23 @@ def test_the_switch_is_off_at_09_15_by_default_stored_loaded_and_reset(settings)
 
     async def check():
         await chat_settings.load()
-        assert chat_settings.morning_brief_view() == {"enabled": False, "time": "09:15", "cutoff": "12:00"}
-        assert await chat_settings.update_morning_brief({"enabled": True}) == {"enabled": True, "time": "09:15", "cutoff": "12:00"}
+        assert chat_settings.morning_brief_view() == {"enabled": False, "time": "09:15", "cutoff": "12:00", "cutoff_source": "derived"}
+        assert await chat_settings.update_morning_brief({"enabled": True}) == {"enabled": True, "time": "09:15", "cutoff": "12:00", "cutoff_source": "derived"}
         assert stored["morning_brief.enabled"] == "true"
         chat_settings.set_morning_brief_enabled(False)  # a restart
         chat_settings.set_morning_brief_time("09:15")
         await chat_settings.load()
         assert chat_settings.morning_brief_enabled() is True
-        assert await chat_settings.update_morning_brief({"time": "15:00", "cutoff": "16:00"}) == {"enabled": True, "time": "15:00", "cutoff": "16:00"}
+        assert await chat_settings.update_morning_brief({"time": "15:00", "cutoff": "16:00"}) == {"enabled": True, "time": "15:00", "cutoff": "16:00", "cutoff_source": "stored"}
         assert stored["morning_brief.time"] == "15:00"
         await chat_settings.update_morning_brief({"enabled": None, "time": None, "cutoff": None})
         assert "morning_brief.enabled" not in stored and "morning_brief.time" not in stored
-        assert chat_settings.morning_brief_view() == {"enabled": False, "time": "09:15", "cutoff": "12:00"}
+        assert chat_settings.morning_brief_view() == {"enabled": False, "time": "09:15", "cutoff": "12:00", "cutoff_source": "derived"}
         stored["morning_brief.enabled"] = "garbage"
         stored["morning_brief.time"] = "noon"
         stored["morning_brief.cutoff"] = "noon"
         await chat_settings.load()
-        assert chat_settings.morning_brief_view() == {"enabled": False, "time": "09:15", "cutoff": "12:00"}
+        assert chat_settings.morning_brief_view() == {"enabled": False, "time": "09:15", "cutoff": "12:00", "cutoff_source": "derived"}
         assert len(writes) == 3
 
     asyncio.run(check())
@@ -77,7 +77,7 @@ def test_a_bad_value_writes_nothing(settings, body):
         with pytest.raises(ValueError):
             await chat_settings.update_morning_brief(body)
         assert settings == ({}, [])
-        assert chat_settings.morning_brief_view() == {"enabled": False, "time": "09:15", "cutoff": "12:00"}
+        assert chat_settings.morning_brief_view() == {"enabled": False, "time": "09:15", "cutoff": "12:00", "cutoff_source": "derived"}
     asyncio.run(check())
 
 
@@ -125,10 +125,12 @@ def test_the_operator_reads_and_changes_it_through_v1(tmp_path, monkeypatch, set
         await chat_settings.load()
         async with _serving(tmp_path) as server:
             server._client_ops = ClientOps(SimpleNamespace())
-            steps = (("get", {}, {"enabled": False, "time": "09:15", "cutoff": "12:00"}),
-                     ("update", {"enabled": True}, {"enabled": True, "time": "09:15", "cutoff": "12:00"}),
-                     ("update", {"time": "15:00", "cutoff": "16:00"}, {"enabled": True, "time": "15:00", "cutoff": "16:00"}),
-                     ("update", {"enabled": None, "time": None, "cutoff": None}, {"enabled": False, "time": "09:15", "cutoff": "12:00"}))
+            steps = (("get", {}, {"enabled": False, "time": "09:15", "cutoff": "12:00", "cutoff_source": "derived"}),
+                     ("update", {"enabled": True}, {"enabled": True, "time": "09:15", "cutoff": "12:00", "cutoff_source": "derived"}),
+                     ("update", {"time": "15:00", "cutoff": "16:00"}, {"enabled": True, "time": "15:00", "cutoff": "16:00", "cutoff_source": "stored"}),
+                     ("update", {"cutoff": None}, {"enabled": True, "time": "15:00", "cutoff": "18:00", "cutoff_source": "derived"}),
+                     ("get", {}, {"enabled": True, "time": "15:00", "cutoff": "18:00", "cutoff_source": "derived"}),
+                     ("update", {"enabled": None, "time": None, "cutoff": None}, {"enabled": False, "time": "09:15", "cutoff": "12:00", "cutoff_source": "derived"}))
             for action, body, expected in steps:
                 status, _, answer = await _send(server, f"POST /api/v1/morning_brief/{action}",
                                                 _bearer(TOKEN), json.dumps(body))
@@ -160,7 +162,8 @@ def test_turning_it_on_or_off_asks_first(settings, body, enabled, when):
 
 
 @pytest.mark.parametrize("body", [{"cutoff": "9:30"}, {"cutoff": "24:00"}, {"cutoff": 1200},
-                                  {"cutoff": "09:15"}, {"cutoff": "08:00"}, {"time": "12:00"}])
+                                  {"cutoff": "09:15"}, {"cutoff": "08:00"},
+                                  {"time": "15:00", "cutoff": "14:00"}, {"time": "23:59"}])
 def test_invalid_cutoff_or_send_time_is_atomic(settings, body):
     async def check():
         await chat_settings.load()
@@ -177,11 +180,56 @@ def test_cutoff_persists_reloads_and_null_restores_noon(settings):
         assert settings[0]["morning_brief.cutoff"] == "11:30"
         await chat_settings.load()
         assert chat_settings.morning_brief_view()["cutoff"] == "11:30"
+        assert chat_settings.morning_brief_view()["cutoff_source"] == "stored"
         assert (await chat_settings.update_morning_brief({"cutoff": None}))["cutoff"] == "12:00"
         assert "morning_brief.cutoff" not in settings[0]
         await chat_settings.update_morning_brief({"time": "15:00", "cutoff": "16:00"})
-        before = (dict(settings[0]), list(settings[1]))
-        with pytest.raises(ValueError, match="later"):
-            await chat_settings.update_morning_brief({"cutoff": None})
-        assert settings == before
+        assert (await chat_settings.update_morning_brief({"cutoff": None}))["cutoff"] == "18:00"
+        assert "morning_brief.cutoff" not in settings[0]
+    asyncio.run(check())
+
+
+@pytest.mark.parametrize(("when", "cutoff"), [
+    ("09:15", "12:00"), ("12:00", "15:00"), ("15:00", "18:00"), ("22:00", "23:59"),
+])
+def test_missing_cutoff_is_derived_on_load_and_update(settings, when, cutoff):
+    async def check():
+        settings[0]["morning_brief.time"] = when
+        await chat_settings.load()
+        assert chat_settings.morning_brief_view() == {
+            "enabled": False, "time": when, "cutoff": cutoff, "cutoff_source": "derived"}
+        assert "morning_brief.cutoff" not in settings[0]
+        await chat_settings.update_morning_brief({"time": "09:15"})
+        assert chat_settings.morning_brief_view()["cutoff"] == "12:00"
+        await chat_settings.update_morning_brief({"time": when})
+        assert chat_settings.morning_brief_view()["cutoff"] == cutoff
+    asyncio.run(check())
+
+
+@pytest.mark.parametrize("cutoff", ["14:00", "15:00"])
+def test_legacy_cutoff_not_later_than_send_is_ignored_with_one_warning(settings, caplog, cutoff):
+    async def check():
+        settings[0].update({"morning_brief.time": "15:00", "morning_brief.cutoff": cutoff})
+        await chat_settings.load()
+        for _ in range(7):
+            assert chat_settings.morning_brief_view() == {
+                "enabled": False, "time": "15:00", "cutoff": "18:00", "cutoff_source": "derived"}
+        warnings = [record for record in caplog.records if record.name == "looper.agents.chat_settings"]
+        assert len(warnings) == 1 and "cutoff" in warnings[0].message
+        assert settings[1] == []
+    asyncio.run(check())
+
+
+def test_invalid_cutoff_is_refused_before_confirmation(settings):
+    from looper.agents.ops import ErrorCode, OpError
+
+    operation = api_v1.find("POST", "/api/v1/morning_brief/update")
+
+    async def check():
+        await chat_settings.load()
+        with pytest.raises(OpError) as error:
+            await api_v1.domain_for(operation).impact(
+                None, operation, {"time": "15:00", "cutoff": "14:00"}, api_v1.OPERATOR, {})
+        assert error.value.code == ErrorCode.INVALID
+        assert settings == ({}, [])
     asyncio.run(check())

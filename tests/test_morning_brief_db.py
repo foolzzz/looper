@@ -1325,8 +1325,11 @@ def test_the_brief_off_leaves_a_failed_schedules_deferred_push(monkeypatch: pyte
     run_with_channel_configs(test, monkeypatch)
 
 
-@pytest.mark.parametrize(("hour", "minute"), [(11, 59), (12, 0), (12, 1), (23, 0)])
-def test_first_tick_catch_up_keeps_unconsumed_digest(monkeypatch, tmp_path, lark_cli_stand_in, hour, minute):
+@pytest.mark.parametrize(("send", "hour", "minute"), [
+    ("09:15", 11, 59), ("09:15", 12, 0), ("09:15", 12, 1), ("09:15", 23, 0),
+    ("15:00", 15, 0), ("15:00", 17, 59), ("15:00", 18, 0),
+])
+def test_first_tick_catch_up_keeps_unconsumed_digest(monkeypatch, tmp_path, lark_cli_stand_in, send, hour, minute):
     from looper.agents.channels.allowlist import SenderAllowlist
     from looper.agents.channels.lark import LarkChannelAdapter
     from looper.agents.channels.registry import ChannelRegistry
@@ -1336,6 +1339,7 @@ def test_first_tick_catch_up_keeps_unconsumed_digest(monkeypatch, tmp_path, lark
         return [call[call.index("--markdown") + 1] for call in calls if "+messages-send" in call]
 
     async def test(pool):
+        await pool.execute("INSERT INTO system_settings (key, value) VALUES ('morning_brief.time', $1)", send)
         await _zone(pool)
         await _operator(pool)
         monkeypatch.setattr(chat_settings, "_delivery_enabled", True)
@@ -1348,12 +1352,13 @@ def test_first_tick_catch_up_keeps_unconsumed_digest(monkeypatch, tmp_path, lark
         service = _service(channel, MONDAY.replace(hour=hour, minute=minute))
         await service.run_once()
         await service.run_once()
-        catches_up = hour < 12
+        catches_up = hour < (12 if send == "09:15" else 18)
         assert len(posts()) == int(catches_up)
         assert await pool.fetchval("SELECT count(*) FROM morning_brief_consumed") == int(catches_up)
         assert await pool.fetchval("SELECT count(*) FROM proactive_deliveries WHERE counted") == 0
-        await _service(channel, MONDAY + timedelta(days=1)).run_once()
-        await _service(channel, MONDAY + timedelta(days=1)).run_once()
+        next_day = (MONDAY + timedelta(days=1)).replace(hour=int(send[:2]), minute=int(send[3:]))
+        await _service(channel, next_day).run_once()
+        await _service(channel, next_day).run_once()
         assert len(posts()) == 1
         assert "11-23 07:00" in posts()[0]
         assert [r["delivery_id"] for r in await pool.fetch("SELECT delivery_id FROM morning_brief_consumed")] == [item]
@@ -1382,6 +1387,41 @@ def test_quiet_hours_wait_only_until_cutoff(monkeypatch, quiet_end):
         await service.run_once()
         assert len(channel.posts) == int(quiet_end < 12)
         assert await pool.fetchval("SELECT count(*) FROM morning_brief_consumed") == int(quiet_end < 12)
+    run_with_channel_configs(test, monkeypatch)
+
+
+@pytest.mark.parametrize("when", ["09:15", "15:00", "22:00"])
+def test_stored_send_without_cutoff_keeps_sending_over_a_week(monkeypatch, when):
+    from dataclasses import replace
+    from datetime import time
+
+    async def test(pool):
+        await _zone(pool)
+        await _operator(pool)
+        await pool.execute("INSERT INTO system_settings (key, value) VALUES ('morning_brief.time', $1)", when)
+        await chat_settings.load()
+        policy = replace(proactive_delivery.load_policy(), quiet_hours=None)
+        monkeypatch.setattr(proactive_delivery, "load_policy", lambda: policy)
+        monkeypatch.setattr(attention, "collect", _collect(_summary("ok")))
+        send = time.fromisoformat(when)
+        channel = _Channel()
+        service = _service(channel, MONDAY)
+        workdays = 0
+        for offset in range(7):
+            day = MONDAY + timedelta(days=offset)
+            await _digest(pool, f"held-{offset}", day.date(), hour=7)
+            service._clock.now = day.replace(hour=send.hour, minute=send.minute) - timedelta(minutes=1)
+            await service.run_once()
+            assert len(channel.posts) == workdays
+            # Missing the configured minute must still leave an eligible tick.
+            service._clock.now += timedelta(minutes=2)
+            await service.run_once()
+            await service.run_once()
+            workdays += int(day.weekday() < 5)
+            assert len(channel.posts) == workdays
+        assert workdays == 5
+        assert await pool.fetchval("SELECT count(*) FROM morning_briefs WHERE status = 'sent'") == 5
+        assert await pool.fetchval("SELECT count(*) FROM morning_brief_consumed") == 5
     run_with_channel_configs(test, monkeypatch)
 
 

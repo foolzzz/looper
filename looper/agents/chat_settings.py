@@ -50,6 +50,7 @@ refresh them. Until loaded, the switches are off and the brief's time is 09:15.
 
 from __future__ import annotations
 
+import logging
 import re
 from collections.abc import Mapping
 from dataclasses import asdict
@@ -90,6 +91,7 @@ _MORNING_BRIEF_TIME = re.compile(r"^([01][0-9]|2[0-3]):[0-5][0-9]$")
 FIELDS = ("stop_enabled", "completion_turns", "research_order", "ledger_enabled")
 OPERATOR_FIELDS = ("ledger_enabled",)  # only the operator sets the ledger
 SESSION_ROUTING_FIELDS = ("session_routing_enabled", "max_resident")
+logger = logging.getLogger(__name__)
 
 TURN_CONTEXT_KEY = "manager.turn_context.enabled"
 TIMEZONE_KEY = "user.timezone"
@@ -134,7 +136,7 @@ _mid_turn_input_enabled = DEFAULT_MID_TURN_INPUT_ENABLED
 _delivery_enabled = DEFAULT_DELIVERY_ENABLED
 _morning_brief_enabled = DEFAULT_MORNING_BRIEF_ENABLED
 _morning_brief_time = DEFAULT_MORNING_BRIEF_TIME
-_morning_brief_cutoff = DEFAULT_MORNING_BRIEF_CUTOFF
+_morning_brief_cutoff: str | None = None
 
 
 def stop_enabled() -> bool:
@@ -299,22 +301,31 @@ def set_morning_brief_time(value: str) -> None:
 
 
 def morning_brief_cutoff() -> str:
-    return _morning_brief_cutoff
+    return _morning_brief_cutoff or derived_morning_brief_cutoff(_morning_brief_time)
 
 
-def set_morning_brief_cutoff(value: str) -> None:
-    """Apply the validated cutoff in memory (load and update persist it)."""
+def derived_morning_brief_cutoff(when: str) -> str:
+    """Keep a same-day catch-up window for send times stored before cutoffs existed."""
+    if when < DEFAULT_MORNING_BRIEF_CUTOFF:
+        return DEFAULT_MORNING_BRIEF_CUTOFF
+    hour, minute = map(int, when.split(":"))
+    minutes = min(hour * 60 + minute + 180, 23 * 60 + 59)
+    return f"{minutes // 60:02d}:{minutes % 60:02d}"
+
+
+def set_morning_brief_cutoff(value: str | None) -> None:
+    """Apply a validated stored cutoff, or None to derive it from the send time."""
     global _morning_brief_cutoff
     _morning_brief_cutoff = value
 
 
 def morning_brief_view() -> dict[str, Any]:
-    return {"enabled": _morning_brief_enabled, "time": _morning_brief_time, "cutoff": _morning_brief_cutoff}
+    return {"enabled": _morning_brief_enabled, "time": _morning_brief_time, "cutoff": morning_brief_cutoff(),
+            "cutoff_source": "stored" if _morning_brief_cutoff is not None else "derived"}
 
 
-async def update_morning_brief(body: Mapping[str, Any]) -> dict[str, Any]:
-    """Persist the operator's choice. A field left out keeps its value; null restores that field's default.
-    A refused body changes nothing."""
+def checked_morning_brief(body: Mapping[str, Any]) -> dict[str, Any]:
+    """Validate the complete prospective window before confirmation or any write."""
     unknown = [key for key in body if key not in ("enabled", "time", "cutoff")]
     if unknown:
         raise ValueError(f"unknown setting {unknown[0]!r}; the morning brief has enabled, time, cutoff")
@@ -329,23 +340,33 @@ async def update_morning_brief(body: Mapping[str, Any]) -> dict[str, Any]:
         if name in body and value is not None and (not isinstance(value, str) or _MORNING_BRIEF_TIME.fullmatch(value) is None):
             raise ValueError(f"{name} must be HH:MM or null")
     effective_time = (DEFAULT_MORNING_BRIEF_TIME if when is None else when) if "time" in body else _morning_brief_time
-    effective_cutoff = (DEFAULT_MORNING_BRIEF_CUTOFF if cutoff is None else cutoff) if "cutoff" in body else _morning_brief_cutoff
+    chosen_cutoff = cutoff if "cutoff" in body else _morning_brief_cutoff
+    effective_cutoff = chosen_cutoff or derived_morning_brief_cutoff(effective_time)
     if effective_cutoff <= effective_time:
         raise ValueError("cutoff must be later than time")
+    return {"enabled": (DEFAULT_MORNING_BRIEF_ENABLED if enabled is None else enabled) if "enabled" in body else _morning_brief_enabled,
+            "time": effective_time, "cutoff": effective_cutoff}
+
+
+async def update_morning_brief(body: Mapping[str, Any]) -> dict[str, Any]:
+    """Persist a validated choice; null cutoff restores derivation from the send time."""
+    checked_morning_brief(body)
     stored: dict[str, str | None] = {}
     if "enabled" in body:
+        enabled = body["enabled"]
         stored[MORNING_BRIEF_ENABLED_KEY] = None if enabled is None else ("true" if enabled else "false")
     if "time" in body:
-        stored[MORNING_BRIEF_TIME_KEY] = when
+        stored[MORNING_BRIEF_TIME_KEY] = body["time"]
     if "cutoff" in body:
-        stored[MORNING_BRIEF_CUTOFF_KEY] = cutoff
+        stored[MORNING_BRIEF_CUTOFF_KEY] = body["cutoff"]
     await db_settings.put_settings(stored)
     if "enabled" in body:
         set_morning_brief_enabled(DEFAULT_MORNING_BRIEF_ENABLED if enabled is None else enabled)
     if "time" in body:
+        when = body["time"]
         set_morning_brief_time(DEFAULT_MORNING_BRIEF_TIME if when is None else when)
     if "cutoff" in body:
-        set_morning_brief_cutoff(effective_cutoff)
+        set_morning_brief_cutoff(body["cutoff"])
     return morning_brief_view()
 
 
@@ -381,8 +402,12 @@ async def load() -> bool:
     set_morning_brief_time(raw_time if isinstance(raw_time, str) and _MORNING_BRIEF_TIME.fullmatch(raw_time)
                            else DEFAULT_MORNING_BRIEF_TIME)
     raw_cutoff = stored.get(MORNING_BRIEF_CUTOFF_KEY)
-    set_morning_brief_cutoff(raw_cutoff if isinstance(raw_cutoff, str) and _MORNING_BRIEF_TIME.fullmatch(raw_cutoff)
-                             else DEFAULT_MORNING_BRIEF_CUTOFF)
+    if raw_cutoff is not None and (not isinstance(raw_cutoff, str) or not _MORNING_BRIEF_TIME.fullmatch(raw_cutoff)
+                                   or raw_cutoff <= morning_brief_time()):
+        logger.warning("Ignoring invalid morning_brief.cutoff %r for send time %s; deriving cutoff",
+                       raw_cutoff, morning_brief_time())
+        raw_cutoff = None
+    set_morning_brief_cutoff(raw_cutoff)
     set_outbound_enabled(stored.get(OUTBOUND_ENABLED_KEY) == "true")
     limits = {}
     for key, default in OUTBOUND_DEFAULTS.items():

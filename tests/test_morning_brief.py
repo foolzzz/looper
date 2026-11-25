@@ -89,6 +89,13 @@ def test_catch_up_ends_at_noon(hour, minute, expected):
     assert is_due(datetime(2026, 11, 23, hour, minute, tzinfo=ZONE), time(9, 15)) is expected
 
 
+@pytest.mark.parametrize(("hour", "minute", "expected"), [
+    (14, 59, False), (15, 0, True), (17, 59, True), (18, 0, False),
+])
+def test_afternoon_send_without_cutoff_has_three_hours_to_catch_up(hour, minute, expected):
+    assert is_due(datetime(2026, 11, 23, hour, minute, tzinfo=ZONE), time(15)) is expected
+
+
 def test_a_skipped_minute_is_due_on_the_first_tick_after_the_gap() -> None:
     """Asia/Jerusalem, Friday 2026-03-27: 01:59 is followed by 03:00. 02:15 never happens, so 03:00 is due."""
     zone = ZoneInfo("Asia/Jerusalem")

@@ -85,11 +85,13 @@ def digest_dates_through(origin: date, day: date) -> tuple[date, ...]:
     return tuple(start + timedelta(days=offset) for offset in range((day - start).days + 1))
 
 
-def is_due(local: datetime, send_at: time, cutoff: time = time(12)) -> bool:
+def is_due(local: datetime, send_at: time, cutoff: time | None = None) -> bool:
     """Whether ``local`` is a workday at or after ``send_at`` and strictly before ``cutoff``. A minute the clocks skip
     is due on the first tick after the gap; a repeated hour is still the same local date, so the row sends once."""
     if local.weekday() >= 5:
         return False
+    if cutoff is None:
+        cutoff = time.fromisoformat(chat_settings.derived_morning_brief_cutoff(send_at.strftime("%H:%M")))
     return send_at.replace(tzinfo=None) <= local.time().replace(tzinfo=None) < cutoff.replace(tzinfo=None)
 
 
