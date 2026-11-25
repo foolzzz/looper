@@ -588,6 +588,7 @@ export interface ChatTargetInfo {
 export async function fetchChatTargets(signal?: AbortSignal): Promise<ChatTargetInfo[]> {
   const result = await callV1<{ targets: ChatTargetInfo[] }>("/api/v1/operator_chat/targets", {}, { signal });
   if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
+  if (!Array.isArray(result.targets)) throw new V1Error(200, "unavailable", "The server returned invalid chat targets.");
   return result.targets;
 }
 

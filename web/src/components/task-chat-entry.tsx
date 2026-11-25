@@ -16,7 +16,6 @@ export function useTaskChatTargets(enabled = true, mode: "once" | "poll" = "poll
     return startPolling(async signal => {
       try {
         const targets = await fetchChatTargets(signal);
-        if (!Array.isArray(targets)) throw new Error("Invalid chat targets");
         if (!signal.aborted) setAvailability({ targets });
       } catch {
         if (!signal.aborted) setAvailability({ targets: [], reason: "Chat availability could not be checked" });
