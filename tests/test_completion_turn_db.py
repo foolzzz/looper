@@ -16,11 +16,10 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
-from unittest.mock import AsyncMock
 
 import pytest
 
-from looper.agents import chat_settings, completion_events, session_routing
+from looper.agents import chat_settings, completion_events
 from looper.agents.claude_cli import ResidentTurn
 from looper.agents.channels.base import DeliveryReceipt
 from looper.agents.channels.chat_history import record_reply
@@ -154,19 +153,13 @@ def test_the_dashboard_chat_gets_the_managers_message_and_the_tasks_link_instead
     run_db(run, monkeypatch, timeout=60)
 
 
-@pytest.mark.parametrize("routed", [False, True])
-def test_a_lark_direct_chat_gets_the_managers_message_as_the_notice_would_go(monkeypatch, tmp_path, turns_on, routed):
+def test_a_lark_direct_chat_gets_the_managers_message_as_the_notice_would_go(monkeypatch, tmp_path, turns_on):
     async def run(pool):
         async with _manager(pool, tmp_path, monkeypatch, [_text(REPLY)]) as chat:
-            if routed:
-                monkeypatch.setattr(session_routing, "_routing_enabled", True)
-                monkeypatch.setattr(chat.manager._router, "completion_operator", AsyncMock(return_value="ou_operator"))
-                chat.manager._running = True
             await _task(pool, tmp_path)
             await _end_and_tell(chat, _goal_status(thread=None, notice=_dm_notice(),
                                                    reply_route={"chat_id": DM_CHAT},
                                                    origin_channel_id="channel-lark"))
-            await until(lambda: not chat.bus.get_queue("channel-lark").empty(), "completion reply delivered")
             (sent,) = _drain(chat.bus, "channel-lark")
             assert sent.message_type is MessageType.CHAT_NOTICE
             assert sent.payload == {**_dm_notice().payload(), "text": f"{REPLY}\n\n[/#tasks/t1](/#tasks/t1)"}
@@ -174,14 +167,13 @@ def test_a_lark_direct_chat_gets_the_managers_message_as_the_notice_would_go(mon
             assert record["session_id"] == f"lark:{DM_CHAT}" and record["message_id"].startswith("completion-")
             await record_reply("lark", sent, DeliveryReceipt(channel="lark", success=True))
             stored = await pool.fetchrow("SELECT manager_session, sender_kind, sender_name FROM chat_messages")
-            expected = f"dm:channel-lark:{DM_CHAT}" if routed else "main"
-            own = await db_chat.activity_since(record["session_id"], after_id=0, exclude_session=expected,
+            own = await db_chat.activity_since(record["session_id"], after_id=0, exclude_session="main",
                                                exclude_message_id=None, limit=10, pool=pool)
             other = await db_chat.activity_since(record["session_id"], after_id=0, exclude_session="other",
                                                  exclude_message_id=None, limit=10, pool=pool)
             assert own.rows == [] and own.hidden == 0
             assert [row["content"] for row in other.rows] == [sent.payload["text"]]
-            assert tuple(stored) == (expected, None, None)
+            assert tuple(stored) == ("main", None, None)
             (row,) = await _events(pool)
             assert (row["target_kind"], row["state"]) == ("dm", "delivered")
             assert "Channel: a Lark direct message" in _input(chat.model.requests[0])

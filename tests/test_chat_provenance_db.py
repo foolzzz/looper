@@ -17,6 +17,8 @@ from looper.agents.message import MANAGER_ADDRESS, MessageEnvelope, MessageType,
 from looper.agents.managers import ManagerFleet
 from looper.agents.supervisor import AgentSupervisor
 from looper.agents.session_routing import SessionKey, SessionKind
+from looper.agents.ops import TurnOrigin
+from looper.agents.tiers import background_turn
 from looper.agents.tiers.manager import ManagerAgent, ManagerConfig, _message_origin, _session_key
 from looper.db import chat
 from tests.db_support import DSN, run_db
@@ -129,6 +131,14 @@ def test_user_row_provenance(monkeypatch, tmp_path: Path, routed: bool) -> None:
         await record_reply("lark", bus.get_queue("channel-lark").get_nowait(),
                            DeliveryReceipt(channel="lark", success=True))
         assert await pool.fetchval("SELECT manager_session FROM chat_messages WHERE content = 'autonomous answer'") == expected
+        # Registration must preserve the executing context even when a routing policy blocks a later model turn.
+        state = {}
+        background_turn.register(manager, TurnOrigin.COMPLETION, envelope, state)
+        background = replace(reply, payload={"text": "background answer"}, metadata=state["chat_record"])
+        await record_reply("lark", background, DeliveryReceipt(channel="lark", success=True))
+        stored = await pool.fetchrow("SELECT manager_session, sender_kind, sender_name FROM chat_messages "
+                                     "WHERE content = 'background answer'")
+        assert tuple(stored) == (expected, None, None)
         assert await chat.latest_id(_session_key(envelope), pool=pool) is not None
         await bus.shutdown()
 
