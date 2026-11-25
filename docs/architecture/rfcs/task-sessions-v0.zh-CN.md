@@ -82,7 +82,21 @@
 - **工作目录：** 任务的工作区（原地任务是 `work_dir`；worktree 任务是任务 worktree 里的位置，第一次需要时由 `task_workspaces.prepare` 建好，`task_workspaces.py:324-385`）。
 - **权限：** 直接模式给全部工具、跳过权限确认（同执行者，`agent_settings.py:1031`）；编排模式下写权限在后台，任务管家改用 Looper 自己的隔离加只读启动（`isolation_args` 加 `read_only_args`，`claude_cli.py:142-195`、`:377-407`）续同一条会话：不载入操作者的设置，操作者的 allow 规则和 MCP 服务就放宽不了它。模式一变，启动签名就变，停掉进程、按同一个会话 id 续上。会诊是 `--resume --fork-session`，原会话不动（`consult.py:14-22`），**不能证明**同会话换权限可行；后者需要任务卡 1.0 的真实 CLI 离线探针验证，失败就报告，不暗中分叉或放宽权限。
 - **操作者本人的环境：** 直接模式自己组启动参数，不调用 `isolation_args`：该函数只要收到 `hooks` 就强制 `--setting-sources ""`（`claude_cli.py:191`），会把用户设置一起关掉。让操作者的用户设置、全局指令、记忆和 skill 生效。三处仍由 Looper 加上（经只属于这次启动的 `--settings`）：拒绝别的会话发来的消息（`crossSessionInbound: refuse`）；对外动作审查的 PreToolUse 钩子（`outbound_hook.py:220-232`）；禁掉和 Looper 撞名的内置工具。不设 `LOOPER_AGENT_RUN`，改设 `LOOPER_TASK_MANAGER=<task_id>`；本机命令按第 18 节的类型化表拒绝或只限本任务。这是减速带，不是隔离，不能声称它挡得住绕开 CLI 的调用。
-- **前置条件：** `--settings` 里的 PreToolUse 钩子（对外动作审查）和用户设置里的钩子要能同时执行。第 1 步开工前先验证（任务卡 1.0）：用真实的 Claude Code CLI 接本地的假模型服务，返回固定的工具调用，在临时的 `HOME` 和 `CLAUDE_CONFIG_DIR` 里放一份合成的用户设置，不调用真实模型、不碰操作者的 `~/.claude`（做法同能力范围 RFC 第 10 节的离线探针）。只有必须真跑一轮模型才能证明时，才先估价、并进评测预算，由协调者去问维护者。验证不过，任务管家就不能用操作者本人的环境启动，这算推翻性的问题，要立刻报告。同一张卡还要测：用户设置、仓库里提交的 `.claude/settings.json`、模型在会话里写出的 `.claude/settings.json` 带 `disableAllHooks` 时，审查钩子还执行不执行（今天的隔离正是为此不载入设置文件，`claude_cli.py:142-170`）。
+- **审查钩子的启动门（已定）：** 直接模式任务管家**每次启动前、每次续接前**，由代码读取这次 CLI 会加载的每一份设置：用户配置目录的 `settings.json` 和 `settings.local.json`、项目 `.claude/settings.json` 和 `.claude/settings.local.json`、启动的 `--settings`，以及 CLI 会加载的 managed settings 文件。逐来源检查，不只看合并后的值，不因文件是操作者写的就放行。命中下表就不启动、不续接；任务对话插入代码生成的说明（文件、键、如何改回），类型化原因 `review_hook_disabled`，计入第 21 节的 `task_manager_launch_refusals_total`。只报告，不自动修改设置；managed settings **绝不修改**，说明由管理方处理。探针 D3 在运行中写出的设置不影响当前进程，下一次续接仍须重读并拦住。
+
+  检测器是类型化表 `(source, key, predicate)`：`source` 是 `USER / USER_LOCAL / PROJECT / PROJECT_LOCAL / LAUNCH / MANAGED` 枚举，`key` 是精确的键路径，`predicate` 是 `IS_TRUE / EQ_STRING_1 / TRUE_OR_CONTAINS_HOOKS` 枚举，不用文本包含规则。任务卡 1.0（#1751）证明能停掉 `--settings` 钩子的其他设置也必须进表；当前记录如下：
+
+  | source | key | predicate |
+  |---|---|---|
+  | `USER`、`USER_LOCAL`、`PROJECT`、`PROJECT_LOCAL`、`LAUNCH`、`MANAGED` | `disableAllHooks` | `IS_TRUE`：JSON 布尔值 true |
+  | `USER`、`LAUNCH` | `env.CLAUDE_CODE_SAFE_MODE`、`env.CLAUDE_CODE_SIMPLE`（各一条） | `EQ_STRING_1`：字符串 `"1"` |
+  | `MANAGED` | `allowManagedHooksOnly` | `IS_TRUE` |
+  | `MANAGED` | `strictPluginOnlyCustomization` | `TRUE_OR_CONTAINS_HOOKS`：布尔值 true 或数组含精确元素 `"hooks"` |
+
+  #1751 的普通设置命中已有 2.1.332 探针记录；managed 三个键的门有内置 schema/分发依据，但 managed 来源的正向对照尚未通过，运行时覆盖仍是**未验证**，不能把记录测试通过写成来源已验证。启动参数和进程环境也不得启用探针已证明会停钩子的 `--bare`、`--safe-mode`、`CLAUDE_CODE_SAFE_MODE=1`、`CLAUDE_CODE_SIMPLE=1`；命中同样拒绝并指出参数或环境键。
+
+- **CLI 版本门（已定）：** 行为验证基线是 **Claude Code 2.1.332**。每次直接启动或续接都读实际 CLI 版本；低于 2.1.332，或更高但任务卡 1.0 探针尚未在该版本通过，就拒绝直接模式，原因 `cli_unverified`，任务对话由代码说明实际版本和需补跑的探针，同样计入拒绝指标。每次 CLI 升级后探针是必过检查，不按「更新版本应当兼容」放行。探针用真实 CLI 接本地假模型服务、临时 `HOME` / `CLAUDE_CONFIG_DIR` 和合成配置，不调用真实模型、不碰操作者配置；必须付费才能验证的部分先估价、并进第 20 节预算，另请维护者批准。
+- **不采用的选项（已定）：** 不采用探针的「只载入用户设置，由 Looper 自己注入项目记忆」：它会丢项目记忆。第 4 节 D4 的启动行为保持，和探针 D4 不是同一项。现在没有退出上述检查的开关，也没有「用户自己写的所以允许」例外；显式 Looper 开关只记为后续待办。
 - **提示词：** `APPEND`：保留 Claude Code 自带的提示，追加任务简报（第 14 节的 `compose`，别人写的内容围起来）和一小段 Looper 说明（这个任务是什么、怎么交给后台、怎么看后台的进展、哪些工具绑定在这个任务上）。这是新的会话类型；现有管家仍用 `REPLACE`。
 - **角色和模型：** 任务管家有自己的角色 `task_manager`，`role_configs` 一行，拥有自己的职责提示和配置，不沿用所属管家的 Profile。今天角色枚举在 `agent_settings.py:146-158`，角色表在 `schema.sql:555-567`；模型和运行时由 Agent Profile 承载，不能塞回 `role_configs.model`（`agent_settings.py:1432-1452`）。新增角色的默认 Profile 是 Claude Code + **Sonnet**，角色层可以选 Profile；任务的显式选择优先于角色层，不读所属管家的选择。按任务覆盖复用 `task_profile_overrides`，将其 role CHECK 扩展为允许 `task_manager`（今天只有三个角色，`schema.sql:573-578`），不借用 `agent_sessions.selected_profile_id`。
 - **按任务切换：** 新建任务时和任务面板里都能选模型，至少有 Sonnet、Opus 两个 Claude Code Profile；`tasks.create_draft` 可带 `task_manager_profile_id`，另有操作者专用 `tasks.task_manager_profile_set(task_id, profile_id)`，返回读回的有效模型、运行时、provider 和配置来源。切换和发送共用任务串行队列：有回合时返回 `task_manager_busy`（409，让操作者先 Stop），空闲时停掉进程、写覆盖、按新模型和原 `session_id` 重启续接；续接失败才走第 10 节的显式 `session_fresh`。不清对话、计划或累计花费，也不改 Planner/Worker/Reviewer。模型、effort、provider、模式和提示哈希都进启动签名。切换前后同会话的真实 CLI 验证在 1.0，Opus 的少量真实确认在第 20 节。
@@ -153,7 +167,7 @@
   5. 记一行 `task_handoffs`（方向、需求版本、模型摘要、原话摘录及引用、快照上界、截断元数据、工作区状态）；这几个独立字段组成 `via = handoff` 的补充说明，原话不经过模型和 `journal.kept_text`，执行者和评审者都看得到。
   6. 状态 → `pending`（模式随之是 `orchestrated`）；TaskRouter 照今天起规划者，规划者在**它自己的新会话**里按需求和交接规划（规划者不变）。这个任务以前跑过时，这是又一次运行：`run_no` 加一，规划者走 `_restart_plan` 的续接（6.3）。
 
-**交接原话的唯一截取规则（代码执行）：** 在任务串行队列内固定本次交接的数据库快照，保存 `snapshot_max_id`；只选本任务里、代码确认来自操作者且在直接模式发送的消息。按 `chat_messages.id DESC` 读取（今天分页也按存储 id 排序，`db/chat.py:261-267`），不按时间戳、不重查漂移中的最新页。字符一律按 Unicode 码点（Python `len(str)`）计，不 strip、不正规化；至多 20 条、正文合计至多 4000 个码点。第一条永远保留：若它单条超过 4000，就取前 4000 个码点后停止；每条后续消息必须整条放得下，**遇到第一条放不下的就停止，不跳过找更短的，也不切开它**。满 20 条或 4000 码点立即停。每条保留 `id`、`message_id`、原长度、保留长度及 `truncated`；截断条在正文外显式标「此原消息仅保留前 4000 字符，后文已截断」，被省略的旧消息另记 `omitted_older = true`。引用头和标记不计正文预算，不能混进原话。选取和交付都保持倒序。转 pending 前在任务串行锁内重查快照上界，有新操作者消息就拒绝旧确认、生成新快照。因此最新纠正所在的消息不会整条被丢掉；超长时仍有它的前 4000 字符和明确标记。验收覆盖恰好放满、第一条超长、后续放不下即停、同时间不同 id、确认期间新纠正和重复交接读回一致。
+**交接原话的唯一截取规则（代码执行）：** 在任务串行队列内固定本次交接的数据库快照，保存 `snapshot_max_id`；只选本任务里、代码确认来自操作者且在直接模式发送的消息。按 `chat_messages.id DESC` 读取（今天分页也按存储 id 排序，`db/chat.py:261-267`），不按时间戳、不重查漂移中的最新页。字符一律按 Unicode 码点（Python `len(str)`）计，不 strip、不正规化；至多 20 条、正文合计至多 4000 个码点。第一条永远保留：若它单条超过 4000，就取前 4000 个码点后停止；每条后续消息必须整条放得下，**遇到第一条放不下的就停止，不跳过找更短的，也不切开它**。满 20 条或 4000 码点立即停。每条保留 `id`、`message_id`、原长度、保留长度及 `truncated`；截断条在正文外显式标「此原消息仅保留前 4000 个 Unicode 码点，后文已截断」，被省略的旧消息另记 `omitted_older = true`。引用头和标记不计正文预算，不能混进原话。选取和交付都保持倒序。转 pending 前在任务串行锁内重查快照上界，有新操作者消息就拒绝旧确认、生成新快照。因此最新纠正所在的消息不会整条被丢掉；超长时仍有它的前 4000 个 Unicode 码点和明确标记。验收覆盖恰好放满、第一条超长、后续放不下即停、同时间不同 id、确认期间新纠正和重复交接读回一致。
 
 ### 6.2 编排 → 直接
 
@@ -273,15 +287,15 @@ draft、init ──删除──→ （删除）
 
 | 卡 | 内容 | 粗估（人日） |
 |---|---|---|
-| 1.0 | 前置验证（排在最前）：真实 CLI 接假模型服务，临时 `HOME` 和 `CLAUDE_CONFIG_DIR`、合成配置。验证 PreToolUse 双来源、SessionStart 注入、四种 `disableAllHooks` 情况（3.3、22），以及同会话直接/隔离只读切换、Sonnet/Opus 切换后上下文仍在；保存 argv、工具清单和钩子哨兵的公开安全结论，不调用模型、不碰操作者配置 | 0.5–1 |
+| 1.0 | 前置验证（#1751，排在最前，CLI 每次升级后必过）：真实 CLI 接假模型服务，临时 `HOME` 和 `CLAUDE_CONFIG_DIR`、合成配置。验证 PreToolUse 双来源、SessionStart 注入、各设置来源和停钩子候选，将证实的 `(source, key, predicate)` 交给 1.3 的检测器；D3 验证运行中写入不生效、下次续接前须拦截；探针 D4 只作未采用方案的证据。验证同会话直接/隔离只读切换、Sonnet/Opus 切换后上下文仍在；保存版本、argv、工具清单和钩子哨兵的公开安全结论，不调用模型、不碰操作者配置；managed 来源正向对照未通过的明确记为未验证 | 0.5–1 |
 | 1.1 | 输入项目、标题、工作区选择和可选 `task_manager_profile_id`，新 `tasks.create_draft` 输出 task id、draft/direct、有效模型；无需求存 `''`。落点：新的 `v1_domains/task_conversations.py`、`projects.py`、`db/tasks.py`、角色和 Profile 注册、`db/role_configs.py`、`task_profile_overrides` CHECK、独立迁移。新角色 `task_manager` 默认 Claude Code Sonnet；独立开关 get/update，不进 chat_settings。验收：空需求草稿可建，旧 tasks.create 空需求仍拒绝；非操作者/错误项目/其他运行时拒绝；关着时旧路径和提示逐字不变 | 1.5–2 |
 | 1.2 | 输入任务 id 和控制动作，输出持久化状态/派生模式或类型化拒绝。落点：`db/tasks.py` 的模式函数、`tasks.done`、`task_workspaces.reopen`、第 8 节的每任务租约、新操作及 7.3 的本步状态检查。验收：草稿不恢复后台；/done 幂等；分支还在建回、分支没了/被检出只读且不能交接；并发开始和直接回合只有一个可写 | 0.5–1 |
-| 1.3 | 输入任务消息、有效角色配置和会话状态，输出 delta/agent.tool、回合记录和持久化会话。落点：新 `tiers/task_manager.py`，按 3.3 自组直接启动参数（不调用 isolation_args）、按第 9 节维护上下文和预算；`agent_sessions` 保存/清理及 `read_only_copies` 只保留；worktree 每轮提交。验收：中断/队列、6 个上限/闲置回收、原会话续接/显式 session_fresh、每轮 context/cost、压缩成功/失败/未知、跨权限和模型重启续接、不支持运行时拒绝 | 3–4 |
+| 1.3 | 输入任务消息、有效角色配置和会话状态，输出 delta/agent.tool、回合记录和持久化会话。落点：新 `tiers/task_manager.py`，按 3.3 自组直接启动参数（不调用 isolation_args），每次启动/续接前逐来源读设置、执行类型化检测表和 CLI 版本门；按第 9 节维护上下文和预算；`agent_sessions` 保存/清理及 `read_only_copies` 只保留；worktree 每轮提交。验收：每个来源命中均不启动，review_hook_disabled 的文件/键/修复说明与计数、D3 后续接拦截、cli_unverified 的实际版本说明、无例外/退出开关；中断/队列、6 个上限/闲置回收、原会话续接/显式 session_fresh、每轮 context/cost、压缩成功/失败/未知、跨权限和模型重启续接、不支持运行时拒绝 | 3–4 |
 | 1.4 | 任务对话的地址：`operator_chat.send` 的目标 `kind: task`、对话线程 `task-chat:<task_id>`（`chat_threads` 归任务的管家，`chat_messages.channel` 记入口）、停止的入口、固定命令 | 1–1.5 |
 | 1.5 | 输入任务绑定 MCP 凭据和工具请求，输出本任务结果或拒绝。落点：新任务管家 MCP 授权模块、`task_status` / `task_requirement_set`、`cli.py` 分发表及第 18 节各本机守卫。验收：外任务 id、未知命令/工具、全部 deny 叶子、伪造原话、非操作者；枚举 parser 叶子保证表无遗漏，旧 LOOPER_AGENT_RUN 行为不变 | 0.5–1 |
 | 1.6 | 验证：全新数据库、非 8767 端口、临时 runtime root 上跑 `looper serve`，配假模型走完「新建 → 直接干活 → 停止 → 接着说 → 完成」；写好任务管家的对话评测用例，真实运行列进 PR 等批准 | 1 |
 
-合计 8–11.5 人日（含 1.0）；不含 1.0 是 7.5–10.5。这些就是本文内的任务卡边界，不引用仓库外的「已写成」任务卡。1.0 先出报告，由维护者确认钩子风险的处理；**报告出来且前置条件通过之前，任何会启动任务管家的卡都不开 PR**。离线探针不能证明的行为写为未验证，付费后备验证另行批准；不自动改用操作者环境启动。1.1 的纯状态/配置部分、2.1、2.2 可以先做；共用文件按第 19 节排顺序。
+合计 8–11.5 人日（含 1.0）；不含 1.0 是 7.5–10.5。这些就是本文内的任务卡边界，不引用仓库外的「已写成」任务卡。钩子风险按 3.3 已定的逐来源拒绝和版本门处理，1.0 的报告用于验证并补齐检测表，不再等待另定缓解方案；**报告出来且前置条件通过之前，任何会启动任务管家的卡都不开 PR**，启动卡必须交付上述拒绝路径。离线探针不能证明的行为写为未验证，付费后备验证另行批准；不自动改用操作者环境启动。1.1 的纯状态/配置部分、2.1、2.2 可以先做；共用文件按第 19 节排顺序。
 
 1.4 的输入是操作者发送/停止请求（目标 `kind: task`），输出线程消息和事件流；落点是 `chat_targets.py`、`v1_domains/operator_chat_streams.py`、新的任务对话读写模块、`channels/web.py`。它调用现有 `db/chat.save_message`，不改该函数；另存消息的任务归属、可信发送者及发送时的派生模式供 6.1 取原话。验收要从 HTTP 发送到持久化后分页读回，再测重复发送去重、非操作者拒绝和 Stop 无需排队。1.6 交付 1.1–1.5 的完整 smoke 证据及第 20 节用例；真实评测尚未批准时只提交用例和待验证项，不写通过。所有新操作/工具声明 action level 和一句理由，校验/权限错误用类型化结果。
 
@@ -380,7 +394,7 @@ draft、init ──删除──→ （删除）
 ## 18. 安全
 
 - **只对操作者开放：** 任务对话的发送、建草稿、交给后台、接手、完成、模型切换、`tasks.work_list`、`tasks.mark_seen`、`tasks.select`、`tasks.changes` 都是 `operator_only`；API 客户端答 `operator_only`。管家的 `looper_task_draft` 只在操作者的回合里能用（`ops/tasks.py` 调用时用 `operator_call(call.turn)`，`ops/service.py:1493`，只调用、签名不变）。飞书里回复任务通知只认操作者本人。
-- **操作者本人的环境：** 直接模式能读写操作者能读写的东西；用户设置、钩子和 MCP 会加载，但其中调用下表拒绝的 Looper 入口也被拒绝，不能声称所有操作者检索命令照常可用。Looper 的三处附加限制要由任务卡 1.0 证明不能被 `disableAllHooks` 等设置关掉；没有证明之前不启动，不把规格当已验证的隔离。
+- **操作者本人的环境：** 直接模式能读写操作者能读写的东西；用户设置、钩子和 MCP 会加载，但其中调用下表拒绝的 Looper 入口也被拒绝，不能声称所有操作者检索命令照常可用。每次直接启动/续接前执行 3.3 的逐来源设置检测和 CLI 版本门；命中停钩子设置就以 `review_hook_disabled` 拒绝，未验证版本以 `cli_unverified` 拒绝，代码在任务对话说明并计数。没有用户自写例外或退出开关，不修改 managed settings；这仍不是隔离。
 - **本机命令的类型化结果：** `CommandPolicy = ALLOW | OWN_TASK_ONLY | DENY`。在 `looper/cli.py:421` parse 后、任何分发和副作用前检查；未知叶子默认 DENY，通常退出 4、原因 `task_manager_command_denied`。OWN_TASK_ONLY 必须在解析选择器后再校验实际 task id 等于 `LOOPER_TASK_MANAGER`，令牌也必须绑定该任务，否则 `task_manager_task_mismatch`。保留原 `LOOPER_AGENT_RUN` 的所有行为（两变量都有时先应用旧规则，绝不借新变量放行）。安全的全局 `--version` 和 parser help 保留。
 
 | CLI 叶子（含全部参数变体） | LOOPER_TASK_MANAGER 下的结果 | 当前 origin/main 的分发/定义 |
@@ -468,6 +482,7 @@ draft、init ──删除──→ （删除）
 | 停止次数和从按下到停住的时间 | 模式 | 「随时能停」是否成立 |
 | 交给后台、自动转回、中途接手的次数 | 方向、方式 | 两种模式的用法 |
 | 活着的任务管家数、满了以后回收和排队的次数、续接落到 `session_fresh` 的次数 | 原因 | 第 9、10 节 |
+| `task_manager_launch_refusals_total` | reason（`review_hook_disabled` / `cli_unverified`）、phase（launch / resume）、cli_version | 每次启动/续接被 3.3 的门拒绝计一次，不按命中文件重复计；设置命中的文件、键和修复办法留在代码生成的任务对话说明，版本拒绝说明实际版本 |
 | `task_manager_context_tokens`、`task_manager_turn_cost_usd` | task_id、turn/record id、model、mode、maintenance | 每个任务管家回合的上下文大小和花费序列；来自该轮 llm_records，未知为 NULL，不冒充 0；会话末轮值写 agent_sessions |
 | `task_manager_compactions_total`、`task_manager_session_rotations_total` | 原因、结果 | 压缩是否成功、压后 tokens 是否下降；失败/超时轮换是否带 session_fresh；压缩的前后值记在维护记录 |
 | 同一件事拆成多个任务的比例 | 项目 | 再交给后台的次数对新建任务数 |
@@ -482,8 +497,8 @@ draft、init ──删除──→ （删除）
 |---|---|
 | 任务管家用操作者本人的环境：用户设置、钩子、MCP、全局指令、自动记忆都生效，而且不设 `LOOPER_AGENT_RUN` | 已定：用 `LOOPER_TASK_MANAGER` 按第 18 节逐叶子拒绝操作者入口或只限本任务，不能把加载设置等同于放行其中所有命令。有负向测试；变量是减速带，shell 能取消它或绕开 CLI，不能当隔离 |
 | `--settings` 里的钩子和用户设置里的钩子是否都执行（对外动作审查靠它） | 前置条件，任务卡 1.0 先验证，不调用模型。不过就不能用操作者本人的环境启动，这是推翻性的问题，要立刻报告 |
-| 同一目录同一时间只有一方写 | 已定：只在同一个任务内部强制；两个任务共用一个原地目录时维持 W5，只提醒，任务面板上写明 |
-| 设置里的 `disableAllHooks` 可能关掉审查钩子：任务管家载入设置文件，模型能在工作区写一个 | 任务卡 1.0 测四种情况（用户设置、提交的、会话中写出的、只载入用户设置时）；能关掉就报告，由维护者定缓解办法。1.0 未报告并通过之前，没有任务管家启动卡开 PR |
+| 同一个任务的任务管家和后台不能同时写 | 已定：只在同一个任务内部强制；两个任务共用一个原地目录时维持 W5，只提醒，任务面板上写明 |
+| 设置或 CLI 版本使审查钩子失效 | 已定：3.3 的类型化表扫描每次直接启动/续接会加载的所有设置来源，命中就不启动，review_hook_disabled 的代码说明给文件、键和修复办法；D3 的会话中写入在下次续接拦住。CLI 以 2.1.332 为已验证基线，低版本和未经 1.0 探针通过的高版本拒绝 cli_unverified，每次升级必跑探针；第 21 节计数。无用户自写例外、无退出开关，managed 文件只报告绝不修改；不采用只载入用户设置再自行注入项目记忆的选项，第 4 节 D4 保持 |
 | 一次性配置没有操作者的登录 | 第 20 节由操作者选凭据：默认订阅 OAuth token，API key 备选；临时 HOME/CLAUDE_CONFIG_DIR，不复制真实配置 |
 | 模型和运行时选择 | 已定：task_manager 独立角色，默认 Sonnet，创建/面板按任务换 Sonnet/Opus，停进程续接；不是 Claude Code 时 task_manager_runtime_unsupported，不继承所属管家的 Profile，不静默替换 |
 | 编排模式下，要改计划的话经任务管家交给规划者，多一跳 | 原话由代码原样附上；进展问题任务管家自己读状态回答；只有改计划才多走这一步 |
@@ -524,6 +539,7 @@ draft、init ──删除──→ （删除）
 - 不用任务 id 也能找到任务，解析是确定性的代码（14.3）。
 - 把 CLI 会话分叉给规划者不做，列为以后的探索。
 - 飞书话题待定（第 16 节）。
+- 后续待办：是否提供显式 Looper 开关退出审查钩子的启动检查，另行设计和确认；当前没有该开关（3.3）。
 
 ## 24. 默认行为与用户入口
 
