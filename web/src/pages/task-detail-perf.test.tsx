@@ -201,6 +201,7 @@ describe("useTaskRuns refresh", () => {
 
 describe("task page polling", () => {
   const detailUrl = "/api/v1/tasks/detail";
+  const targetsUrl = "/api/v1/operator_chat/targets";
   const taskBody = {
     task_id: "task-a", name: "t", requirement: "r", status: "running", group: "active", phase: "x", planner_id: null,
     steps: [], journal: [], progress: [], gates: [], roles: [], config: {}, requirement_versions: [], supplements: [],
@@ -209,7 +210,7 @@ describe("task page polling", () => {
   const respond = (url: string) =>
     Response.json({
       status: "ok",
-      result: url === detailUrl ? taskBody : { activity: [], conversation: [], runs: [] },
+      result: url === detailUrl ? taskBody : url === targetsUrl ? { targets: [] } : { activity: [], conversation: [], runs: [] },
     });
   const taskCalls = (fetchMock: ReturnType<typeof vi.fn>) =>
     fetchMock.mock.calls.filter(([url]) => String(url) === detailUrl);
@@ -253,9 +254,30 @@ describe("task page polling", () => {
     expect(taskCalls(fetchMock)).toHaveLength(2);
     await act(async () => { visibility("visible"); await vi.advanceTimersByTimeAsync(0); });
     expect(taskCalls(fetchMock)).toHaveLength(3);
+    // Availability is a single page read, independent of task polls and visibility changes.
+    expect(fetchMock.mock.calls.filter(([url]) => String(url) === targetsUrl)).toHaveLength(1);
 
     act(() => root.unmount());
     expect(signals[signals.length - 1].aborted).toBe(true);
+    root = createRoot(container);
+  });
+
+  it("aborts a pending chat availability read on unmount without issuing another read", async () => {
+    let signal: AbortSignal | null | undefined;
+    const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      if (String(input) === targetsUrl) {
+        signal = init?.signal;
+        return new Promise<Response>(() => {});
+      }
+      return Promise.resolve(respond(String(input)));
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    await act(async () => root.render(<TaskDetailRoute taskId="task-a" onBack={() => {}} />));
+    await act(async () => { await vi.advanceTimersByTimeAsync(30_000); });
+    expect(fetchMock.mock.calls.filter(([url]) => String(url) === targetsUrl)).toHaveLength(1);
+    expect(signal?.aborted).toBe(false);
+    act(() => root.unmount());
+    expect(signal?.aborted).toBe(true);
     root = createRoot(container);
   });
 });

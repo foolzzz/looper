@@ -183,6 +183,22 @@ def test_queued_cancellation_records_each_typed_reason(tmp_path, monkeypatch, re
     run_db(check, monkeypatch)
 
 
+def test_spawn_cancellation_preserves_an_already_completed_record(tmp_path, monkeypatch):
+    async def check(pool):
+        service, parent = await setup(pool, tmp_path, monkeypatch)
+        row = await service.admit(parent, brief(), key="completed-before-cancel")
+        record_id = await llm_records.start_record(agent_id="explorer-test", task_id="t", pool=pool)
+        await agent_spawns.move(row["id"], agent_spawns.SpawnState.ASKING,
+            expect=agent_spawns.SpawnState.QUEUED, child_record_id=record_id, pool=pool)
+        await llm_records.finish_record(record_id, status="completed", cost_usd=.03,
+                                        cost_source="runtime", pool=pool)
+        before = await pool.fetchrow("SELECT * FROM llm_records WHERE id=$1", record_id)
+        cancelled = await service.cancel(row["id"])
+        assert cancelled["state"] == "cancelled" and cancelled["spent_usd"] == .03
+        assert await pool.fetchrow("SELECT * FROM llm_records WHERE id=$1", record_id) == before
+    run_db(check, monkeypatch)
+
+
 def test_parent_cascade_preserves_other_parents_children(tmp_path, monkeypatch):
     async def check(pool):
         service, parent = await setup(pool, tmp_path, monkeypatch)

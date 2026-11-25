@@ -195,7 +195,7 @@ def test_two_messages_of_one_group_run_in_order(routed: Any, tmp_path: Path) -> 
     _run(test, routed, tmp_path)
 
 
-def test_a_call_belongs_to_the_turn_its_binding_names_and_one_without_cannot_write(routed: Any,
+def test_a_routed_turn_cannot_call_an_unlisted_tool_with_or_without_its_binding(routed: Any,
                                                                                   tmp_path: Path) -> None:
     from looper.agents.ops import Risk, Tool
     from looper.agents.ops.service import ManagerOps, Platform
@@ -229,9 +229,8 @@ def test_a_call_belongs_to_the_turn_its_binding_names_and_one_without_cannot_wri
         question = _lark("改一下", GROUP_A, OTHER, group=True)
         await rig.bus.publish(question)
         await rig.reply(question)
-        assert chats == [GROUP_A]  # main's turn was running all along, and got nothing
-        assert answers[0].get("status") != "error"
-        assert answers[1]["status"] == "error" and answers[1]["error"]["code"] == "needs_user_turn"
+        assert chats == []  # neither the group's binding nor no binding grants a tool
+        assert all(answer["status"] == "error" and answer["error"]["code"] == "forbidden" for answer in answers)
         rig.main.release.set()
 
     _run(test, routed, tmp_path)

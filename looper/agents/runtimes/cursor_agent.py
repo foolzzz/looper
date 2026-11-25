@@ -527,6 +527,7 @@ class CursorStream:
     _pending: list[dict[str, Any]] = field(default_factory=list)
     _thinking: list[str] = field(default_factory=list)
     _open: set[str] = field(default_factory=set)
+    _totals: Usage = field(default_factory=Usage)
 
     async def events(self, stdout: asyncio.StreamReader) -> AsyncIterator[dict[str, Any]]:
         from ..claude_cli import stream_events
@@ -608,7 +609,10 @@ class CursorStream:
             if self.routed_model is not None:
                 result["routed_model"] = self.routed_model
             events, self._pending = self._pending, []
-            return [*events, usage_event(self.model, reported_totals(result), session_id=self.session_id), result]
+            totals = reported_totals(result)
+            own = totals.since(self._totals)
+            self._totals = totals
+            return [*events, usage_event(self.model, own, session_id=self.session_id), result]
         return [{"type": "system", "subtype": "cursor_event", "session_id": self.session_id, "event": dict(raw)}]
 
 
