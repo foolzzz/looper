@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { WorkList } from "@/components/work-list";
 import { WorkSwitcher } from "@/components/work-switcher";
+import { WorkChanges } from "@/components/work-changes";
 import { fetchTaskDetail, TaskDetailError, type TaskDetail } from "@/lib/api";
 import { callV1, V1Error } from "@/lib/v1";
 import { errorText } from "@/lib/use-action";
@@ -24,6 +25,11 @@ export function WorkPage({
   const [pane, setPane] = useState<"list" | "detail">(sub === "" ? "list" : "detail");
   const [switcher, setSwitcher] = useState(false);
   const [finder, setFinder] = useState(true);
+  const [widePanel, setWidePanel] = useState(() => window.matchMedia("(min-width: 1280px)").matches);
+  const [panelOpen, setPanelOpen] = useState(widePanel);
+  const panelRef = useRef<HTMLElement>(null);
+  const panelOpener = useRef<HTMLButtonElement>(null);
+  const focusPanel = useRef(false);
   const opener = useRef<HTMLElement | null>(null);
   const seen = useRef("");
   const restored = useRef(false);
@@ -44,6 +50,25 @@ export function WorkPage({
   const selection = explicit ?? { kind: "manager" as const };
   const taskId = selection.kind === "task" ? selection.taskId : "";
   const selected = detail.id === taskId ? detail.task : undefined;
+  useEffect(() => {
+    const media = window.matchMedia("(min-width: 1280px)");
+    const resize = () => setWidePanel(media.matches);
+    media.addEventListener("change", resize);
+    return () => media.removeEventListener("change", resize);
+  }, []);
+  useEffect(() => {
+    if (panelOpen && selected) {
+      const panel = panelRef.current;
+      if (panel instanceof HTMLDialogElement && !panel.open) panel.showModal();
+      if (focusPanel.current) { panel?.focus(); focusPanel.current = false; }
+    }
+  }, [panelOpen, selected, widePanel]);
+  const closePanel = () => {
+    if (panelRef.current instanceof HTMLDialogElement) panelRef.current.close();
+    setPanelOpen(false);
+    panelOpener.current?.focus();
+  };
+  const Panel = widePanel ? "aside" : "dialog";
   useEffect(() => {
     if (!taskId) return;
     const ctrl = new AbortController();
@@ -121,7 +146,7 @@ export function WorkPage({
       <div className={`h-full min-h-0 min-w-0 flex-1 flex-col ${pane === "detail" ? "flex" : "hidden md:flex"}`}>
         <div className="flex h-full min-h-0 flex-col">
           <div className="shrink-0 border-b border-border p-3 md:hidden">
-            <Button type="button" variant="outline" onClick={() => setPane("list")}>Back to the list</Button>
+            <Button type="button" variant="outline" onClick={() => { setPane("list"); setPanelOpen(false); }}>Back to the list</Button>
           </div>
           {selection.kind === "manager" ? (
             <div className="min-h-0 flex-1 overflow-y-auto p-4">
@@ -145,8 +170,26 @@ export function WorkPage({
                 <TaskStatusMark status={selected.status} />
                 {selected.project_name && <p className="text-sm text-muted-foreground">{selected.project_name}</p>}
                 <a className={LINK} href={`#tasks/${encodeURIComponent(taskId)}`}>Open the task page</a>
+                <Button ref={panelOpener} type="button" variant="outline" aria-expanded={panelOpen} aria-controls="work-task-details"
+                  onClick={() => {
+                    if (panelOpen) closePanel();
+                    else { focusPanel.current = true; setPanelOpen(true); }
+                  }}>任务详情</Button>
               </header>
-              <PlannerWorkConversation key={taskId} taskId={taskId} detail={selected} />
+              <div className="flex min-h-0 flex-1 flex-col xl:flex-row">
+                <div className="flex min-h-0 min-w-0 flex-1 flex-col">
+                  <PlannerWorkConversation key={taskId} taskId={taskId} detail={selected} />
+                </div>
+                {panelOpen && <Panel id="work-task-details" ref={node => { panelRef.current = node; }} tabIndex={-1} aria-label="任务详情"
+                  className={`min-h-0 min-w-0 space-y-3 overflow-y-auto border-border bg-background p-4 text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring ${widePanel
+                    ? "w-72 shrink-0 border-l"
+                    : "fixed inset-y-0 right-0 left-auto m-0 h-dvh max-h-dvh w-full max-w-sm border-l backdrop:bg-black/50"}`}
+                  onCancel={event => { event.preventDefault(); closePanel(); }}
+                  onKeyDown={event => { if (event.key === "Escape") { event.preventDefault(); event.stopPropagation(); closePanel(); } }}>
+                  <Button type="button" variant="outline" size="sm" onClick={closePanel}>关闭详情</Button>
+                  <WorkChanges taskId={taskId} visible />
+                </Panel>}
+              </div>
             </>
           )}
         </div>
