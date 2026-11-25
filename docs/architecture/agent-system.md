@@ -501,7 +501,9 @@ Manager has no tool for it. The dashboard shows the task page's 指标 card and 
   an API client, an allowlisted sender and a member. An operator in a group may authorize operations, while
   access to private tools still follows the existing operator-turn check. `ManagerOps.call` refuses escalating
   operations and confirmations for allowed senders and members, audits `forbidden` with reason `operator_only`,
-  and drops a refused confirmation. A turn with no speaker keeps the existing behavior.
+  and drops a refused confirmation. Scoped sessions check the routing-time principal instead of the speaker;
+  a waiting confirmation belongs to its session and sender (`not_initiator` otherwise), and a non-operator's
+  `/stop` stops only shared sessions' turns. Unscoped turns retain the existing speaker rules.
   Settings → Chat uses the operator-only v1 `turn_context_settings.get` and `turn_context_settings.update`
   operations to store `manager.turn_context.enabled`
   (off by default), `user.timezone` (an IANA name, or null for the server zone) and `user.reply_language`
