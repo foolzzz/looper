@@ -29,22 +29,28 @@ async def save_message(
     channel: str = "web",
     delivery_failure: str | None = None,
     delivery_error: str | None = None,
+    entry_kind: str | None = None,
     pool: asyncpg.Pool | asyncpg.Connection | None = None,
 ) -> None:
     """Store a message; a Telegram or Lark answer its channel could not send with why (``delivery_failure``, a
-    ``channels.base.DeliveryFailure``) and the channel's error."""
+    ``channels.base.DeliveryFailure``) and the channel's error.
+
+    ``entry_kind`` is ``message``, ``command`` or ``command_reply`` when the writer classified the row. A later
+    save that omits it keeps the kind already stored.
+    """
     pool = pool or get_pool()
     await pool.execute(
         """
         INSERT INTO chat_messages (session_id, message_id, role, content, channel, created_at, delivery_failure,
-                                   delivery_error)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+                                   delivery_error, entry_kind)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
         ON CONFLICT (session_id, message_id) DO UPDATE
         SET content = EXCLUDED.content, delivery_failure = EXCLUDED.delivery_failure,
-            delivery_error = EXCLUDED.delivery_error
+            delivery_error = EXCLUDED.delivery_error,
+            entry_kind = COALESCE(EXCLUDED.entry_kind, chat_messages.entry_kind)
         """,
         session_id, message_id, role, content, channel,
-        datetime.now(timezone.utc), delivery_failure, delivery_error,
+        datetime.now(timezone.utc), delivery_failure, delivery_error, entry_kind,
     )
 
 

@@ -18,6 +18,13 @@ class TaskCommand(str, Enum):
     START = "/start"
 
 
+# Stored on chat_messages.entry_kind. Model history reads this column; it does not parse the text again.
+ENTRY_MESSAGE = "message"
+ENTRY_COMMAND = "command"
+ENTRY_COMMAND_REPLY = "command_reply"
+_ENTRY_KINDS = frozenset({ENTRY_MESSAGE, ENTRY_COMMAND, ENTRY_COMMAND_REPLY})
+
+
 def parse(text: str) -> TaskCommand | None:
     """The whole message, trimmed and case-folded. ``/stop now`` is not a command."""
     folded = text.strip().casefold()
@@ -64,16 +71,34 @@ def _command_item(item: Any) -> bool:
     return False
 
 
+def _entry_kind(item: Any) -> str | None:
+    if not isinstance(item, Mapping):
+        return None
+    kind = item.get("entry_kind")
+    return kind if kind in _ENTRY_KINDS else None
+
+
 def history_for_model(history: Sequence[Any]) -> list[Any]:
     """Drop fixed commands and the code-written reply that follows each one.
 
-    A command is the whole trimmed message. The rows after it that are not a later user message (its code reply,
-    and a tool or event row sitting between them) stay out of every model path, including a fresh retry after
-    resume fails.
+    A row with ``entry_kind`` ``command`` or ``command_reply`` is out, whatever its text says. A row marked
+    ``message`` stays, even when the text is ``/done``. A row with no kind still uses the whole trimmed message:
+    the rows after it that are not a later user message (its code reply, and a tool or event row between them)
+    stay out of every model path, including a fresh retry after resume fails.
     """
     kept: list[Any] = []
     skip_reply = False
     for item in history:
+        kind = _entry_kind(item)
+        if kind == ENTRY_COMMAND:
+            skip_reply = True
+            continue
+        if kind == ENTRY_COMMAND_REPLY:
+            continue
+        if kind == ENTRY_MESSAGE:
+            skip_reply = False
+            kept.append(item)
+            continue
         if skip_reply:
             role = item.get("role") if isinstance(item, Mapping) else None
             if role == "assistant":

@@ -1560,11 +1560,13 @@ class AgentHTTPServer:
         pool = current_pool()
         if command is None and route == task_commands.DIRECT and pool is None:
             raise OpError(ErrorCode.UNAVAILABLE, "the task Manager is not running")
+        manager_id = str(task.get("manager_id") or "manager")
 
         async def accept() -> dict[str, Any]:
             return await self._accept_task_message(
                 task_id=task_id, thread=thread, message_id=message_id, text=text, command=command,
-                route=route, status=str(task.get("status") or ""), pool=pool, adapter=adapter)
+                route=route, status=str(task.get("status") or ""), pool=pool, adapter=adapter,
+                manager_id=manager_id)
 
         return await self._one_task_message(task_id, message_id, text, accept)
 
@@ -1610,16 +1612,21 @@ class AgentHTTPServer:
 
     async def _accept_task_message(self, *, task_id: str, thread: str, message_id: str, text: str,
                                    command: Any, route: str | None, status: str, pool: Any,
-                                   adapter: Any) -> dict[str, Any]:
-        """Claim the row, then answer. A repeat of the stored text does not start another turn."""
+                                   adapter: Any, manager_id: str) -> dict[str, Any]:
+        """Claim the thread and the row, then answer. A repeat of the stored text does not start another turn."""
         from ..db import task_chat as db_task_chat
+        from ..db.chat import claim_thread
         from .channels.web import reply_message_id
         from .channels.web_task_sink import WebTaskSink
         from .task_commands import (
-            DIRECT, MESSAGE_TEXT_CONFLICT, ORCHESTRATED, ORCHESTRATED_REPLY, STARTING, STARTING_REPLY,
+            DIRECT, ENTRY_COMMAND, ENTRY_MESSAGE, MESSAGE_TEXT_CONFLICT, ORCHESTRATED, ORCHESTRATED_REPLY,
+            STARTING, STARTING_REPLY,
         )
 
-        outcome = await db_task_chat.claim_user_message(thread, message_id, text, channel="web")
+        await claim_thread(thread, manager_id)
+        outcome = await db_task_chat.claim_user_message(
+            thread, message_id, text, channel="web",
+            entry_kind=ENTRY_COMMAND if command is not None else ENTRY_MESSAGE)
         claim = self._task_message_claims.get((task_id, message_id))
         if claim is not None and outcome != "conflict":
             claim.stored_text = text

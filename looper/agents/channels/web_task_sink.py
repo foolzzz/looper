@@ -60,7 +60,12 @@ class WebTaskSink:
         await self._publish(MessageType.STATUS_UPDATE, {"task_event": body})
 
     async def final(self, text: str, outcome: str) -> None:
-        await self._publish(MessageType.AGENT_REPLY, {"text": text, "outcome": outcome})
+        from ..task_commands import ENTRY_COMMAND_REPLY
+
+        payload = {"text": text, "outcome": outcome}
+        if outcome == "command":
+            payload["entry_kind"] = ENTRY_COMMAND_REPLY
+        await self._publish(MessageType.AGENT_REPLY, payload)
 
     async def _publish(self, message_type: MessageType, payload: dict[str, Any]) -> None:
         await self._bus.publish(MessageEnvelope.create(

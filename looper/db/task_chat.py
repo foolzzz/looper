@@ -11,22 +11,24 @@ from .connection import get_pool
 
 
 async def claim_user_message(session_id: str, message_id: str, content: str, *,
-                             channel: str = "web") -> Literal["inserted", "same", "conflict"]:
+                             channel: str = "web",
+                             entry_kind: str = "message") -> Literal["inserted", "same", "conflict"]:
     """Insert the user row once. The same text again is ``same``; a different text is ``conflict`` and is not stored.
 
     ``save_message`` upserts and would replace the first text, so the claim is this insert. The unique
-    ``(session_id, message_id)`` is what makes two concurrent retries agree on one row.
+    ``(session_id, message_id)`` is what makes two concurrent retries agree on one row. ``entry_kind`` is stored
+    with that first insert; a retry does not change it.
     """
     pool = get_pool()
     async with pool.acquire() as conn, conn.transaction():
         inserted = await conn.fetchrow(
             """
-            INSERT INTO chat_messages (session_id, message_id, role, content, channel, created_at)
-            VALUES ($1, $2, 'user', $3, $4, $5)
+            INSERT INTO chat_messages (session_id, message_id, role, content, channel, created_at, entry_kind)
+            VALUES ($1, $2, 'user', $3, $4, $5, $6)
             ON CONFLICT (session_id, message_id) DO NOTHING
             RETURNING content
             """,
-            session_id, message_id, content, channel, datetime.now(timezone.utc))
+            session_id, message_id, content, channel, datetime.now(timezone.utc), entry_kind)
         if inserted is not None:
             return "inserted"
         existing = await conn.fetchval(
@@ -45,15 +47,16 @@ async def message_content(session_id: str, message_id: str) -> str | None:
 async def recent(task_id: str, limit: int) -> list[dict[str, Any]]:
     """The last ``limit`` user and assistant rows a model may see, oldest first.
 
-    Tool and event rows are left out. Fixed commands and the code replies after them are left out too, so a fresh
+    Tool and event rows are left out. Rows stored as ``command`` or ``command_reply`` are left out too, so a fresh
     retry after a resume failure does not hand those rows to the model. ``created_at`` is text: a resume stores the
-    list as JSON. The read looks past a run of commands so they do not take the model's slots.
+    list as JSON. The read looks past a run of commands so they do not take the model's slots. ``entry_kind`` stays
+    on each kept row so a later resume still trusts the stored kind.
     """
     window = min(max(limit, 1) * 5, 200)
     rows = await get_pool().fetch(
         """
-        SELECT role, content, created_at FROM (
-            SELECT id, role, content, created_at FROM chat_messages
+        SELECT role, content, created_at, entry_kind FROM (
+            SELECT id, role, content, created_at, entry_kind FROM chat_messages
             WHERE session_id = $1 AND role IN ('user', 'assistant')
             ORDER BY id DESC
             LIMIT $2
@@ -64,7 +67,7 @@ async def recent(task_id: str, limit: int) -> list[dict[str, Any]]:
     history = []
     for row in rows:
         created = row["created_at"]
-        history.append({"role": row["role"], "content": row["content"],
+        history.append({"role": row["role"], "content": row["content"], "entry_kind": row["entry_kind"],
                         "created_at": created.isoformat() if hasattr(created, "isoformat") else created})
     return history_for_model(history)[-limit:]
 

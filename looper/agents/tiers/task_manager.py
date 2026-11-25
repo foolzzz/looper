@@ -65,13 +65,19 @@ class RefuseReason(str, Enum):
     CLI_UNVERIFIED = "cli_unverified"
 
 
+def _visible_history_item(item: Any) -> str:
+    if isinstance(item, str):
+        return item
+    visible = {key: value for key, value in dict(item).items() if key != "entry_kind"}
+    return json.dumps(visible, ensure_ascii=False)
+
+
 def resume_message(text: str, history: Sequence[Any]) -> str:
     """The text a fresh or rotating turn sends. Fixed commands and their code replies are matched and left out."""
     kept = history_for_model(history)[-20:]
     if not kept:
         return text
-    rendered = "\n".join(item if isinstance(item, str) else json.dumps(dict(item), ensure_ascii=False)
-                         for item in kept)
+    rendered = "\n".join(_visible_history_item(item) for item in kept)
     return fence(rendered, source=Source.CHAT_HISTORY) + "\n\n" + text
 
 

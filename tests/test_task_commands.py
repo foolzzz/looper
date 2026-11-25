@@ -51,3 +51,25 @@ def test_history_for_model_drops_each_command_and_its_code_reply():
         assert command.value not in resumed
         assert f"code reply {command.value}" not in resumed
     assert "已停止这一轮" not in resumed
+
+
+def test_history_for_model_uses_typed_entry_kind_not_the_text():
+    """A stored kind decides model history. Text that only looks like a command stays when it is a message."""
+    history = [
+        {"role": "user", "content": "/done", "entry_kind": "message"},
+        {"role": "assistant", "content": "the model said done", "entry_kind": "message"},
+        {"role": "user", "content": "not a command word", "entry_kind": "command"},
+        {"role": "user", "content": "between"},
+        {"role": "assistant", "content": "stored as the code reply", "entry_kind": "command_reply"},
+        {"role": "user", "content": "after"},
+    ]
+    kept = history_for_model(history)
+    assert [item["content"] for item in kept] == ["/done", "the model said done", "between", "after"]
+    resumed = resume_message("next", history)
+    assert "/done" in resumed
+    assert "the model said done" in resumed
+    assert "between" in resumed
+    assert "after" in resumed
+    assert "not a command word" not in resumed
+    assert "stored as the code reply" not in resumed
+    assert "entry_kind" not in resumed

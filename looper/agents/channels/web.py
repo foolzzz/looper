@@ -161,9 +161,11 @@ class WebChannelAdapter(ChannelAdapter):
 
         text = str(envelope.payload.get("text") or "")
         message_id = message_id or envelope.message_id
+        entry_kind = envelope.payload.get("entry_kind")
         receipt = DeliveryReceipt(channel="web", success=True)
         try:
-            await save_message(session_id=session_id, message_id=message_id, role="assistant", content=text)
+            await save_message(session_id=session_id, message_id=message_id, role="assistant", content=text,
+                               entry_kind=entry_kind if isinstance(entry_kind, str) else None)
         except Exception as exc:
             logger.warning("web: could not add a reply to chat %s", session_id, exc_info=True)
             receipt = DeliveryReceipt(channel="web", success=False, error=f"could not save to chat: {exc}")

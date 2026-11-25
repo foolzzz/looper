@@ -1,5 +1,6 @@
 """A task conversation: its thread, streamed answer, stop, fixed commands, and the unchanged Manager path."""
 
+import asyncio
 import copy
 import hashlib
 import json
@@ -23,7 +24,7 @@ from looper.db.chat import PLANNER_THREAD_PREFIX, task_thread
 from looper.db import task_chat
 from tests.db_support import run_db
 from tests.test_api_v1_auth import _bearer, _send, _send_raw, _serving
-from tests.test_operator_auth import TOKEN
+from tests.test_operator_auth import TOKEN, _request
 
 PREFIX = "/api/v1/operator_chat/"
 # Stripped OpenAPI document after the task-manager branches and main: the task target and the two
@@ -103,12 +104,12 @@ def target(task_id):
     return {"kind": "task", "task_id": task_id}
 
 
-async def make_task(pool, tmp_path, *, status="draft"):
+async def make_task(pool, tmp_path, *, status="draft", manager_id="manager"):
     project = await projects.create_project(name=f"conversation-{uuid.uuid4().hex[:8]}", work_dir=str(tmp_path),
                                             pool=pool)
     task_id = f"task-{project['id'].removeprefix('proj-')}"
     await tasks.create_task(task_id=task_id, requirement="draft work", project_id=project["id"],
-                            status=status, work_dir=str(tmp_path), pool=pool)
+                            status=status, work_dir=str(tmp_path), manager_id=manager_id, pool=pool)
     return task_id
 
 
@@ -662,4 +663,98 @@ def test_fixed_commands_never_submit_or_enter_history(monkeypatch, tmp_path):
             for phrase in ("现在没有在进行的回合", "任务已完成", "这个命令要等"):
                 assert phrase not in blob
             assert conn is not None
+    run_db(check, monkeypatch, timeout=60)
+
+
+def test_command_rows_keep_a_typed_kind_and_leave_model_history(monkeypatch, tmp_path):
+    """Model history follows the stored kind. A row whose text is /done stays when its kind is message."""
+    from looper.agents.task_commands import TaskCommand
+    from looper.agents.tiers.task_manager import resume_message
+
+    pool = Pool()
+    use_pool(monkeypatch, pool)
+
+    async def check(conn):
+        settings.set_enabled(True)
+        task_id = await make_task(conn, tmp_path)
+        thread = task_thread(task_id)
+        async with opened(tmp_path) as server:
+            status, answer = await send(server, task_id, "\n  /DONE  ", "cmd-done")
+            assert status == 200, answer
+            events = await reply(server, answer["result"]["correlation_id"])
+            assert final_text(events)["outcome"] == "command"
+            assert await conn.fetchval(
+                "SELECT entry_kind FROM chat_messages WHERE session_id = $1 AND message_id = 'cmd-done'",
+                thread) == "command"
+            assert await conn.fetchval(
+                "SELECT entry_kind FROM chat_messages WHERE session_id = $1 AND message_id = 'cmd-done:reply'",
+                thread) == "command_reply"
+            await conn.execute(
+                """
+                INSERT INTO chat_messages (session_id, message_id, role, content, channel, created_at, entry_kind)
+                VALUES ($1, 'typed-message', 'user', '/done', 'web', now(), 'message'),
+                       ($1, 'typed-command', 'user', 'not a command word', 'web', now(), 'command'),
+                       ($1, 'typed-between', 'user', 'between', 'web', now(), 'message'),
+                       ($1, 'typed-reply', 'assistant', 'stored as the code reply', 'web', now(), 'command_reply')
+                """,
+                thread)
+            status, answer = await send(server, task_id, "please continue", "after-typed")
+            assert status == 200, answer
+            history = pool.calls[0]["history"]
+            contents = [item["content"] for item in history]
+            assert "/done" in contents
+            assert "between" in contents
+            assert "please continue" in contents
+            assert "not a command word" not in contents
+            assert "stored as the code reply" not in contents
+            assert all(item.get("entry_kind") != "command" for item in history)
+            assert all(item.get("entry_kind") != "command_reply" for item in history)
+            for command in TaskCommand:
+                assert command.value.upper() not in json.dumps(history, ensure_ascii=False)
+            resumed = resume_message("next", history)
+            assert "/done" in resumed and "entry_kind" not in resumed
+            assert "not a command word" not in resumed
+            assert "stored as the code reply" not in resumed
+    run_db(check, monkeypatch, timeout=60)
+
+
+def test_task_thread_is_claimed_by_the_tasks_manager(monkeypatch, tmp_path):
+    """The task thread is owned by that task's Manager on first use, and a second send keeps the owner."""
+    from tests.test_managers_schema_db import _manager
+
+    pool = Pool()
+    use_pool(monkeypatch, pool)
+
+    async def headers_of(server, body):
+        reader, writer = await asyncio.open_connection("127.0.0.1", server._port)
+        try:
+            writer.write(_request(server._port, "POST " + PREFIX + "thread_events", _bearer(TOKEN),
+                                  json.dumps(body)).encode())
+            await writer.drain()
+            return await asyncio.wait_for(reader.readuntil(b"\r\n\r\n"), 2)
+        finally:
+            writer.close()
+            await writer.wait_closed()
+
+    async def check(conn):
+        settings.set_enabled(True)
+        manager = await _manager(conn, "review")
+        task_id = await make_task(conn, tmp_path, manager_id=manager["id"])
+        thread = task_thread(task_id)
+        async with opened(tmp_path) as server:
+            status, answer = await send(server, task_id, "hello manager", "owned")
+            assert status == 200, answer
+            assert await chat.thread_owner(thread) == manager["id"]
+            status, answer = await send(server, task_id, "again", "owned-2")
+            assert status == 200, answer
+            assert await chat.thread_owner(thread) == manager["id"]
+            assert await conn.fetchval("SELECT count(*) FROM chat_threads WHERE session_id = $1", thread) == 1
+            opened_headers = await headers_of(server, {"session_id": thread, "manager": manager["id"]})
+            assert b"200 OK" in opened_headers
+            status, _, body = await post(server, "thread_events", {"session_id": thread, "manager": "manager"})
+            assert status == 409, body
+            assert body["error"]["details"]["manager_id"] == manager["id"]
+            status, _, messages = await post(server, "messages", {"session_id": thread, "manager": manager["id"]})
+            assert status == 200, messages
+            assert any(row["message_id"] == "owned" for row in messages["result"]["messages"])
     run_db(check, monkeypatch, timeout=60)
