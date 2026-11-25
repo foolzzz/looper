@@ -257,24 +257,34 @@ def test_operator_data_never_reaches_a_routed_session(routed: Any, tmp_path: Pat
         resident = _Resident("sess-allowlist")
         session = rig.manager._router.session(SessionKey(kind, LARK.agent_id, chat))
         session.claude = resident
-        denied: list[Any] = []
+        denied: list[tuple[str, Any]] = []
+        turn_checks: list[dict[str, Any]] = []
         async def calls(on_event: Any) -> None:
             turn = rig.manager._running_token.ops_turn
             binding = rig.manager._running_token.binding
-            assert ops.has_confirmation(operator_turn.chat_key)
-            assert SENTINELS["confirmation"] in ops._pending[operator_turn.chat_key].block
-            assert await ops.current_listing(turn) == []
-            assert await ops.current_listing(session_key=session.key) == []
+            turn_checks.append({
+                "has_confirmation": ops.has_confirmation(operator_turn.chat_key),
+                "confirmation": ops._pending[operator_turn.chat_key].block,
+                "turn_listing": await ops.current_listing(turn),
+                "session_listing": await ops.current_listing(session_key=session.key),
+            })
             for tool in global_tools.values():
                 answer = await ops.call(tool.name, _arguments(tool.schema), binding=binding,
                                         session_key=session.key)
-                denied.append(answer)
-                assert answer.get("status") == "error", (tool.name, answer)
-                assert answer["error"]["code"] == "forbidden", (tool.name, answer)
+                denied.append((tool.name, answer))
         resident.on_turn = calls
         for index in range(2):
             await rig.reply(await _published(rig, _lark(f"hello {index}", chat, OTHER, group=kind is SessionKind.GROUP)))
+        assert len(turn_checks) == 2
+        for checks in turn_checks:
+            assert checks["has_confirmation"]
+            assert SENTINELS["confirmation"] in checks["confirmation"]
+            assert checks["turn_listing"] == []
+            assert checks["session_listing"] == []
         assert len(denied) == 2 * len(global_tools)
+        for name, answer in denied:
+            assert answer.get("status") == "error", (name, answer)
+            assert answer["error"]["code"] == "forbidden", (name, answer)
         assert len(resident.turns) == 2 and len(captures[session.key]) == 2
         complete = _encoded(captures[session.key]) + "\n".join(resident.turns) + _encoded(denied)
         for name, sentinel in SENTINELS.items():

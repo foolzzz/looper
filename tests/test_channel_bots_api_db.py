@@ -66,8 +66,10 @@ def test_unknown_lark_identity_refuses_writes_until_recovery(
 
     broken, duplicate = False, False
 
+    fresh_reads = []
+
     async def identity(profile: str | None = None, *, fresh: bool = False) -> Any:
-        assert fresh
+        fresh_reads.append(fresh)
         profile = "candidate" if profile == "alias" else profile
         if broken and (profile == unavailable or unavailable == "empty" and profile == "candidate"):
             if unavailable == "empty":
@@ -139,6 +141,7 @@ def test_unknown_lark_identity_refuses_writes_until_recovery(
                                        saved["channel_id"]) == expected
 
     run_with_channel_configs(test, monkeypatch)
+    assert fresh_reads and all(fresh_reads), fresh_reads
 
 
 @pytest.mark.parametrize("kind,fields", [
@@ -154,8 +157,10 @@ def test_unchanged_lark_bot_can_be_disabled_without_authentication(monkeypatch, 
 
     broken = False
 
+    fresh_reads = []
+
     async def identity(profile=None, *, fresh=False):
-        assert fresh
+        fresh_reads.append(fresh)
         if broken:
             raise lark_cli.LarkCliError(f"authentication failed: {SECRET}")
         return lark_cli.Identity(profile or "", "cli_added" if profile else "cli_builtin", "Bot", "ou_bot")
@@ -190,6 +195,7 @@ def test_unchanged_lark_bot_can_be_disabled_without_authentication(monkeypatch, 
                                    saved["channel_id"]) == (SECRET if kind == "lark_bot" else None)
 
     run_with_channel_configs(test, monkeypatch)
+    assert fresh_reads and all(fresh_reads), fresh_reads
 
 
 @pytest.mark.parametrize("changed", ["profile", "token", "allowlist", "binding"])
@@ -275,8 +281,10 @@ def test_full_config_disable_preserves_sender_admission_over_http(monkeypatch, t
 
     broken = False
 
+    fresh_reads = []
+
     async def identity(profile=None, *, fresh=False):
-        assert fresh
+        fresh_reads.append(fresh)
         if broken:
             raise lark_cli.LarkCliError(f"authentication failed: {SECRET}")
         return lark_cli.Identity(profile or "", "cli_added" if profile else "cli_builtin", "Bot", "ou_bot")
@@ -347,6 +355,7 @@ def test_full_config_disable_preserves_sender_admission_over_http(monkeypatch, t
                 assert status == 200 and readback["result"] == recovered["result"]
 
     run_with_channel_configs(test, monkeypatch)
+    assert fresh_reads and all(fresh_reads), fresh_reads
 
 
 def test_lark_identity_admission_over_http(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:

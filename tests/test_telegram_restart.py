@@ -19,12 +19,17 @@ from looper.agents.channels.telegram_inbox import TelegramInbox
 
 
 class BotAPI:
+    instances: list[BotAPI] = []
+
     def __init__(self, inbox: Path) -> None:
         self.inbox = inbox
         self.updates: list[dict] = []
         self.offsets: list[int] = []
         self.drops: list[bool] = []
         self.changed = asyncio.Event()
+        self.acknowledged_rows: list[tuple[int, bool]] = []
+        self.other_methods: list[str] = []
+        self.instances.append(self)
 
     def send(self, update_id: int, text: str, *, age: int = 0, sent_at: int | None = None) -> None:
         self.updates.append({"update_id": update_id, "message": {
@@ -52,8 +57,8 @@ class BotAPI:
                 with sqlite3.connect(self.inbox) as db:
                     for update in self.updates:
                         if update["update_id"] < offset:
-                            assert db.execute("SELECT 1 FROM updates WHERE update_id = ?",
-                                              (update["update_id"],)).fetchone()
+                            self.acknowledged_rows.append((update["update_id"], bool(db.execute(
+                                "SELECT 1 FROM updates WHERE update_id = ?", (update["update_id"],)).fetchone())))
             limit = int(data.get("limit", 100))
             result = [update for update in self.updates if update["update_id"] >= offset][:limit]
             if not result and data.get("timeout", 0):
@@ -64,9 +69,18 @@ class BotAPI:
                     pass
                 result = [update for update in self.updates if update["update_id"] >= offset][:limit]
         else:
-            assert method in {"setMyCommands", "setMessageReaction"}, method
+            self.other_methods.append(method)
             result = True
         return 200, json.dumps({"ok": True, "result": result}).encode()
+
+
+@pytest.fixture(autouse=True)
+def check_bot_api_observations(monkeypatch):
+    monkeypatch.setattr(BotAPI, "instances", [])
+    yield
+    for api in BotAPI.instances:
+        assert all(present for _, present in api.acknowledged_rows), api.acknowledged_rows
+        assert set(api.other_methods) <= {"setMyCommands", "setMessageReaction"}
 
 
 @pytest.mark.parametrize("backlog_seconds", [600, 30])
