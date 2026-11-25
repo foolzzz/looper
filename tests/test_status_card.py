@@ -45,6 +45,13 @@ def test_waiting_card_names_blocked_vault_commits():
     assert "知识库提交受阻 1" in text and "/todo" in text
 
 
+def test_waiting_card_names_terminal_reminders():
+    text = status_card._waiting_text({"kinds": [
+        {"kind": "reminders", "state": "ok", "count": 1}]})
+    assert "未确认送达的提醒 1" in text and "/todo" in text
+    assert "reminders" not in text
+
+
 def _tools_sha(tools: Any) -> str:
     payload = [{"name": tool.name, "description": tool.description, "schema": tool.schema} for tool in tools]
     return _sha(json.dumps(payload, sort_keys=True, ensure_ascii=False))
