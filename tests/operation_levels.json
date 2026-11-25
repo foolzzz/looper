@@ -436,6 +436,7 @@
  "tasks.role_update": "inside",
  "tasks.room": "inside",
  "tasks.room_view": "inside",
+ "tasks.select": "inside",
  "tasks.work_list": "inside",
  "triage.why": "inside",
  "triage_settings.get": "inside",
