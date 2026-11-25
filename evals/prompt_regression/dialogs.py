@@ -175,6 +175,7 @@ class Say:
     code_only: bool = False  # Looper answers the step without calling the model (for example, /profile).
     profile_after: Literal["switch", "settings"] | None = None  # A code-only session profile selection.
     attachments: tuple[tuple[str, bytes], ...] = ()
+    client: bool = False  # this turn alone uses the API client; other turns keep the dialog's audience
 
 
 @dataclass(frozen=True)
@@ -362,6 +363,22 @@ def _state_views(database_url: str) -> list[str]:
         return [row["view"] for row in rows]
 
     return asyncio.run(read())
+
+
+def _stable_audience_view(*views: str) -> Callable[[Look], str | None]:
+    def check(look: Look) -> str | None:
+        actual = _state_views(look.database_url)
+        return None if actual == list(views) else f"state views: {actual}, expected {list(views)}"
+    return check
+
+
+def _seed_stable_audience(api: Api, project_id: str) -> None:
+    from .runner import _confirmed
+
+    root = _seed_vault(api)
+    (root / "关于我.md").write_text("## Name\nEval Operator\n", encoding="utf-8")
+    api.post("/api/v1/manager_persona/update", {"name": "Atlas", "tone": "concise"})
+    _confirmed(api, "/api/v1/profile_settings/update", {"enabled": True})
 
 
 # --- One-time reminders (looper_reminder_*): reminders on, the user named as the Lark bot's operator ---
@@ -3517,6 +3534,16 @@ FAILURE_DIALOGS = tuple(_hold_dialog(action) for action in ("retry", "planner", 
 
 
 FAKE_DIALOGS: tuple[Dialog, ...] = (
+    Dialog("stable_whole_after_client", (
+        Say("请说出我的称呼和你的名字。", _stable_audience_view("whole"),
+            (("__reply__", {"text": "你是 Eval Operator，我是 Atlas。"}),)),
+        Say("作为 API 客户端，只查询你叫什么。", _stable_audience_view("whole", "whole"),
+            (("__reply__", {"text": "我是 Atlas。"}),), client=True),
+        Say("再说一次我的称呼和你的名字。", _stable_audience_view("whole", "whole", "whole"),
+            (("__reply__", {"text": "你是 Eval Operator，我是 Atlas。"}),)),
+        Say("继续保持当前称呼。", _stable_audience_view("whole", "whole", "whole", "unchanged"),
+            (("__reply__", {"text": "好的。"}),)),
+    ), seed=_seed_stable_audience, tags=("manager", "stable_context", "audience")),
     Dialog("session_bound_rotate", (
         Say("先记住这一轮。", lambda look: None,
             (("__context__", {"tokens": 40001}), ("__reply__", {"text": "已记住。"}))),
@@ -3999,7 +4026,7 @@ def run_dialog(api: Api, dialog: Dialog, *, database_url: str, project_id: str, 
     budget_args = {"check_budget": check_budget} if cap_left is not None else {}
     client_id: str | None = None  # the API client a client dialog made; its token stays in this function
     try:
-        if dialog.client and any(say.stop or say.withdraw for say in dialog.says):
+        if any((dialog.client or say.client) and (say.stop or say.withdraw) for say in dialog.says):
             raise EvalError("stop and withdraw are not supported in client dialogs")
         fixture_hold = None
         if dialog.failure_hold:
@@ -4071,12 +4098,14 @@ def run_dialog(api: Api, dialog: Dialog, *, database_url: str, project_id: str, 
             api.post("/api/v1/session_budget/update", {"turn_budget_usd": 4})
             api.post("/api/v1/scheduler_settings/update", {"session_context_max_tokens": 40000})
             _seed_session_bound_task(database_url, project_id)
+        if dialog.id == "stable_whole_after_client":
+            _turn_on(database_url, "manager.stable_context")
         registry_before = api.post("/api/v1/registry/view", {})["result"] if dialog.id in {
             "model_login_runtime", "model_missing_endpoint"} else None
         session = f"eval-{dialog.id}-{uuid.uuid4().hex[:6]}"
         client_api: Api | None = None
         conversation: str | None = None
-        if dialog.client:
+        if dialog.client or any(say.client for say in dialog.says):
             created = api.post("/api/v1/clients/create", {"name": f"eval-{uuid.uuid4().hex[:6]}"})["result"]
             client_id = created["client"]["id"]
             client_api = Api(api.base_url, token=created["token"], timeout=api.timeout)
@@ -4109,7 +4138,7 @@ def run_dialog(api: Api, dialog: Dialog, *, database_url: str, project_id: str, 
             before = _last_action(database_url, agent)
             expects_api = api_turn and not (say.code_only or say.stop or say.withdraw)
             before_run = _newest_run(api, agent) if expects_api else 0
-            if client_api is not None:
+            if client_api is not None and (dialog.client or say.client):
                 reply, conversation = _ask_client(client_api, api, conversation, text, timeout=timeout,
                                                   database_url=database_url, **budget_args)
             else:
