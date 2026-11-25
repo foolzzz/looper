@@ -230,20 +230,20 @@ def test_normal_settlement_is_identical_with_and_without_checkpoints(monkeypatch
 
 
 @pytest.mark.parametrize("late_write", ["finish", "interrupt", "checkpoint"])
-def test_ended_bill_rejects_late_writes(monkeypatch, caplog, late_write):
+@pytest.mark.parametrize("current", ["interrupted", "completed"])
+def test_ended_bill_rejects_late_writes(monkeypatch, caplog, late_write, current):
     caplog.set_level(logging.INFO, logger=llm_records.__name__)
 
     async def body(pool):
         record_id = await llm_records.start_record(agent_id="worker-billing", pool=pool)
         checkpoint = await llm_records.checkpoint_usage(
             record_id, Usage(input_tokens=100_000, cost_usd=.4), "provider_price", pool=pool)
-        if late_write == "finish":
+        if current == "interrupted":
             ended = await llm_records.end_record_interrupted(record_id, "private reason", pool=pool)
-            target, current = "completed", "interrupted"
         else:
             ended = await llm_records.finish_record(record_id, status="completed", input_tokens=1,
                 cost_usd=9.9, cost_source="runtime", metadata={"kept": True}, pool=pool)
-            target, current = ("interrupted" if late_write == "interrupt" else "running"), "completed"
+        target = {"finish": "completed", "interrupt": "interrupted", "checkpoint": "running"}[late_write]
         before = await pool.fetchrow("SELECT * FROM llm_records WHERE id=$1", record_id)
         if late_write == "finish":
             applied = await llm_records.finish_record(record_id, status="completed", input_tokens=1,
@@ -303,7 +303,8 @@ def test_adopted_completion_clears_partial_markers_and_settles_once(monkeypatch,
 
 
 @pytest.mark.parametrize("first,second", [("interrupt", "finish"), ("finish", "interrupt"),
-                                         ("finish", "checkpoint"), ("finish", "finish")])
+                                         ("finish", "checkpoint"), ("finish", "finish"),
+                                         ("interrupt", "checkpoint"), ("interrupt", "interrupt")])
 def test_concurrent_record_writers_recheck_status_after_row_lock(monkeypatch, first, second):
     async def write(conn, record_id, kind):
         if kind == "interrupt":
