@@ -9300,6 +9300,23 @@ separate tokens and is not exported to API clients. No unversioned operator rout
   updated_at) DESC, id DESC)` concurrently, restricted respectively to open and ended non-scheduled
   tasks. Activity and schedules use `idx_activity_task` and `idx_tasks_schedule`. These new operations
   do not change existing pages, channels, task operations or agent tools.
+- **Task file changes.** Operator-only `tasks.changes {task_id, limit?}` reads file names and statuses,
+  never patches or contents. `limit` defaults to 100 and accepts integers from 1 to 200; unknown fields
+  (including paths and refs) are rejected. The closed result contains `task_id`, `kind`, `scope`, `files`
+  (`path`, `status`, nullable `old_path`), `truncated` and nullable `reason`, with no total count.
+  `task_branch` means net changes from the stored base commit, including committed and pending changes
+  in an active task worktree, or only the retained branch when its worktree was removed. A changed
+  checkout branch is refused; detached HEAD is accepted only at the resolved task branch tip.
+  `working_tree` means only uncommitted and untracked files in an in-place workspace. Paths are relative
+  to the task directory; sibling files and outside rename sources are excluded. Ignored files are omitted.
+  `truncated` reports more unique files than the requested limit; parsing retains at most limit + 1 entries,
+  while the shared git runner still buffers command stdout. This is not an I/O memory bound.
+  An unavailable read returns empty files, null scope and one of `not_git`, `workspace_missing`,
+  `branch_missing`, `branch_changed` or `git_error`, rather than claiming a clean workspace. Missing tasks
+  return 404; API clients receive 403 before git runs. Git failures never return raw local diagnostics.
+  The operation uses read-only git with optional locks disabled and never prepares or reopens worktrees.
+  The generated CLI exposes this operation; there is no new agent tool. Dashboard integration and channel
+  controls are separate work; existing dashboard, Lark and Telegram requests remain unchanged.
 - **Run tree.** The operator-only `runs.tree {task_id}` reads every persisted run of one task, following only
   that task's `parent_record_id` edges. It returns creator, reason, model, status, summary and failure details,
   with own and subtree costs split into subscription equivalents and API spend; unknown amounts remain null.
