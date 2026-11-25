@@ -1482,6 +1482,10 @@ async def operator_call(turn: Turn) -> bool:
 async def _operator_turn(turn: Turn) -> bool:
     """Whether ``turn`` is the user's own (``operator_identity.is_operator``); a turn Claude runs on its own (a
     completion turn too) never is."""
+    if turn.principal is not None:
+        from ..chat_scopes import ScopeAudience
+
+        return not turn.autonomous and turn.principal.audience is ScopeAudience.OPERATOR
     if turn.autonomous:
         return False
     operator_id = None

@@ -17,6 +17,8 @@ from typing import Any, TypedDict
 
 import asyncpg
 
+from looper.agents import chat_scopes
+
 from .connection import get_pool
 
 logger = logging.getLogger(__name__)
@@ -68,6 +70,22 @@ class ChannelChat(TypedDict):
     binding_created_at: datetime | None
     unbound_count: int | None
     unbound_last_at: datetime | None
+
+
+async def scope_config(channel_id: str, chat_id: str, manager_id: str, *,
+                       pool: _Reader | None = None) -> chat_scopes.ScopeConfig:
+    """Read one binding and its overrides from the same authority snapshot."""
+    rows = await (pool or get_pool()).fetch(
+        "SELECT b.default_scope, b.legacy_allowed, p.sender_id, p.principal_id, p.principal_kind, p.scope_id "
+        "FROM manager_chat_bindings b LEFT JOIN binding_principal_scopes p "
+        "ON p.channel_id = b.channel_id AND p.chat_id = b.chat_id "
+        "WHERE b.channel_id = $1 AND b.chat_id = $2 AND b.manager_id = $3", channel_id, chat_id, manager_id)
+    if not rows:
+        return chat_scopes.ScopeConfig(False, None, False, {})
+    overrides = {row["sender_id"]: chat_scopes.Override(
+        row["principal_id"], chat_scopes.PrincipalKind(row["principal_kind"]), row["scope_id"])
+        for row in rows if row["sender_id"] is not None}
+    return chat_scopes.ScopeConfig(True, rows[0]["default_scope"], rows[0]["legacy_allowed"], overrides)
 
 
 def _kind(channel_id: str) -> str:

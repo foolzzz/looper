@@ -27,6 +27,7 @@ from typing import TYPE_CHECKING, Any, TypedDict
 from ..message import AgentAddress, MessageEnvelope, manager_address
 
 if TYPE_CHECKING:
+    from ..chat_scopes import Principal
     from ..turn_context import SpeakerKind
     from ..delivery_guard import DeliveryDebt
     from .service import OpsScope
@@ -163,6 +164,7 @@ class Turn:
     origin: TurnOrigin | None = None
     # Set only with per-turn context enabled; None preserves the existing authorization behavior.
     speaker: SpeakerKind | None = None
+    principal: Principal | None = None
     operator_id_missing: bool = False
     # Initialized explicitly by delivery-guard wiring; absent when disabled.
     debt: DeliveryDebt | None = None

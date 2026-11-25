@@ -18,6 +18,7 @@ Until loaded, routing is off.
 from __future__ import annotations
 
 import hashlib
+import re
 from collections.abc import Mapping
 from dataclasses import dataclass
 from enum import Enum
@@ -58,16 +59,22 @@ class SessionKey:
     kind: SessionKind
     channel_id: str | None = None
     chat: str | None = None
+    scope_fingerprint: str | None = None
 
     def __post_init__(self) -> None:
         if (self.kind is SessionKind.MAIN) != (self.channel_id is None and self.chat is None) \
                 or (self.kind is not SessionKind.MAIN and not (self.channel_id and self.chat)):
             raise ValueError(f"a {self.kind.value} session key needs {'no' if self.kind is SessionKind.MAIN else 'a'}"
                              " channel and chat")
+        if self.scope_fingerprint is not None and (self.kind is not SessionKind.GROUP
+                or not isinstance(self.scope_fingerprint, str)
+                or re.fullmatch(r"[0-9a-f]{16}", self.scope_fingerprint) is None):
+            raise ValueError("a scope fingerprint needs a group key and 16 lowercase hexadecimal characters")
 
     @property
     def text(self) -> str:
-        return SessionKind.MAIN.value if self.kind is SessionKind.MAIN else f"{self.kind.value}:{self.channel_id}:{self.chat}"
+        text = SessionKind.MAIN.value if self.kind is SessionKind.MAIN else f"{self.kind.value}:{self.channel_id}:{self.chat}"
+        return text if self.scope_fingerprint is None else f"{text}~{self.scope_fingerprint}"
 
 
 MAIN_KEY = SessionKey(SessionKind.MAIN)
@@ -140,7 +147,14 @@ def routes(manager_id: str) -> bool:
     """Default Manager: global switch. Scenario Manager: its independent typed definition setting."""
     from .managers_api import DEFAULT_MANAGER_ID  # here: the Managers' definitions import the chat settings
 
-    return _routing_enabled if manager_id == DEFAULT_MANAGER_ID else _scenario_routing.get(manager_id) == "per_chat"
+    return _routing_enabled if manager_id == DEFAULT_MANAGER_ID else _scenario_routing.get(manager_id) in ("per_chat", "scoped")
+
+
+def scoped(manager_id: str) -> bool:
+    """Only a scenario Manager can opt into fingerprinted scope sessions."""
+    from .managers_api import DEFAULT_MANAGER_ID
+
+    return manager_id != DEFAULT_MANAGER_ID and _scenario_routing.get(manager_id) == "scoped"
 
 
 def set_scenario_routing(manager_id: str, value: str) -> None:
