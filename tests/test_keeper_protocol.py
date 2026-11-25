@@ -50,6 +50,25 @@ def short_directory():
         shutil.rmtree(directory)
 
 
+@pytest.fixture(autouse=True)
+def notification_assertions(monkeypatch):
+    failures = []
+    callback = KeeperClient._callback
+
+    async def checked(client, handler, *args):
+        try:
+            await callback(client, handler, *args)
+        except AssertionError as error:
+            failures.append(error)
+            raise
+
+    monkeypatch.setattr(KeeperClient, "_callback", checked)
+    yield
+    # The client may close and log a callback error; pytest must still see it.
+    if failures:
+        raise failures[0]
+
+
 def exercise(coroutine) -> None:
     asyncio.run(asyncio.wait_for(coroutine, 35))
 

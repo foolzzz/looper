@@ -100,9 +100,7 @@ def test_worker_end_cascades_after_binding_the_started_parent(tmp_path, monkeypa
     bound = []
 
     def bind(run_id, recorder, launch):
-        assert recorder.record_id == 1
-        assert run.launch_calls == 0
-        bound.append(run_id)
+        bound.append((run_id, recorder.record_id, run.launch_calls))
 
     pool.room_ops.bind_subagents.side_effect = bind
 
@@ -117,7 +115,7 @@ def test_worker_end_cascades_after_binding_the_started_parent(tmp_path, monkeypa
                 await pool.kill("worker-subagents")
             else:
                 await task
-            assert bound == ["worker-subagents"]
+            assert bound == [("worker-subagents", 1, 0)]
             pool.room_ops.end_subagents.assert_awaited_once_with("worker-subagents")
             pool.room_ops.revoke_run.assert_called_once_with("worker-subagents")
         finally:
