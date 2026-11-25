@@ -63,6 +63,23 @@ describe("TaskDetailRoute", () => {
     await settle();
   };
 
+  it.each([true, false])("shows task chat in the header with server availability %s", async canSend => {
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => Response.json(
+      String(input) === "/api/v1/operator_chat/targets"
+        ? { status: "ok", result: { targets: [{ kind: "planner", id: "planner-task-a", task_id: "task-a", can_send: canSend }] } }
+        : answer(String(input), init),
+    )));
+    await show("task-a");
+    const entry = [...container.querySelectorAll<HTMLElement>('[role="link"], a')].find(el => el.textContent?.includes("Talk to this task"));
+    expect(entry).toBeDefined();
+    if (canSend) expect(entry!.getAttribute("href")).toBe("#chat?target=planner-task-a");
+    else {
+      expect(entry!.getAttribute("aria-disabled")).toBe("true");
+      expect(entry!.getAttribute("title")).toBe("Only tasks with a running Planner can be chatted with");
+      expect(entry!.hasAttribute("href")).toBe(false);
+    }
+  });
+
   it.each(["stopped", "failed", "cancelled"])("resumes Sessions after stale %s reads, even if the new run ends immediately", async (initialStatus) => {
     let started = false;
     let polls = 0;

@@ -1,4 +1,5 @@
 import { TaskFailureHolds } from "@/components/task-failure-holds";
+import { TaskChatEntry, useTaskChatTargets } from "@/components/task-chat-entry";
 import { type CSSProperties, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   ArrowLeft,
@@ -2286,6 +2287,7 @@ export function TaskDetailRoute(props: TaskDetailPageProps) {
 }
 
 function TaskDetailPage({ taskId, gateStep, tab: tabParam, focusStep, onTab, roomFilter, roomRole, onRoomFilter, onBack }: TaskDetailPageProps) {
+  const chatAvailability = useTaskChatTargets();
   const [task, setTask] = useState<TaskDetail | null>(null);
   const taskRuns = useTaskRuns(task);
   const [error, setError] = useState("");
@@ -2448,6 +2450,7 @@ function TaskDetailPage({ taskId, gateStep, tab: tabParam, focusStep, onTab, roo
             </div>
             {task && <TaskCreatedBy task={task} className={cn("max-sm:order-2 max-lg:basis-full", folded)} />}
           </div>
+          {task && <TaskChatEntry taskId={taskId} availability={chatAvailability} />}
           {task && isActiveTask(task) && (
             <button
               type="button"
