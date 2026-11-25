@@ -319,7 +319,8 @@ async def _read(tmp_path: Path, ref: QuoteRef, *, after: int = 0) -> QuoteRead:
 @pytest.mark.parametrize("group", [False, True])
 @pytest.mark.parametrize("case", ["own", "other_session", "other_manager", "other_sender", "other_bot",
                                   "thread", "unknown_thread", "missing", "shape", "attachment", "edited", "root",
-                                  "post", "post_attachment", "other_key", "no_session", "no_proof", "other_chat"])
+                                  "post", "post_attachment", "other_key", "no_session", "no_proof", "other_chat",
+                                  "missing_cache"])
 def test_own_quote_requires_a_matching_resident_delivery_and_complete_plain_copy(
     tmp_path: Path, lark_cli_stand_in: Path, caplog, group: bool, case: str,
 ) -> None:
@@ -375,6 +376,8 @@ def test_own_quote_requires_a_matching_resident_delivery_and_complete_plain_copy
             sent = replace(sent, metadata={k: v for k, v in sent.metadata.items() if k != "quote_session"})
         receipt = await adapter.deliver(sent)
         assert receipt.success
+        if case == "missing_cache":
+            del adapter._quote_deliveries
         if case == "other_session":
             manager._session_now().session_id = "resident-elsewhere"
         if case == "other_key":

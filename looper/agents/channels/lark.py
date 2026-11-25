@@ -740,7 +740,7 @@ class LarkChannelAdapter(ChannelAdapter):
         return PostReceipt(True, external_ids=(external_id,))
 
     async def edit(self, target: NotifyTarget, external_id: str, text: str) -> PostReceipt:
-        self._quote_deliveries.pop(external_id, None)  # even an uncertain edit invalidates the stored copy
+        getattr(self, "_quote_deliveries", {}).pop(external_id, None)  # even an uncertain edit invalidates the stored copy
         text = files.redact(text, self._runtime_root)
         try:
             await self._transport.edit(external_id, markdown=text)
@@ -1358,7 +1358,7 @@ class LarkChannelAdapter(ChannelAdapter):
         names included; a read that fails becomes a line saying why. The images and files in it are saved beside
         the message's own, numbered after its ``after`` and within its limits (``_collect``). The Manager calls it
         while it prepares the message's turn (``lark_quote.QuoteReader``)."""
-        delivery = self._quote_deliveries.get(ref.parent_id)
+        delivery = getattr(self, "_quote_deliveries", {}).get(ref.parent_id)
         if (ref.kind is QuoteKind.REPLY and not ref.thread_id and delivery is not None
                 and ref.session is not None and delivery.session == ref.session and delivery.chat_id == ref.chat_id):
             quote, _ = lark_quote.build(QuoteKind.REPLY, ref.parent_id, [delivery.item],
