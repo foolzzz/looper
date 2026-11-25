@@ -5,6 +5,7 @@ import {
   attentionSettingsGet, fetchAttention, isAttentionOff, type AttentionItem, type AttentionKind, type AttentionSection,
   type AttentionSummary,
 } from "@/lib/api-attention";
+import { displayText as text } from "@/lib/attention-display";
 import { channelLabel } from "@/lib/chat-channels";
 import { sinceText } from "@/lib/gates";
 import { startPolling } from "@/lib/polling";
@@ -42,14 +43,6 @@ const DELIVERY_SOURCES: Record<string, string> = {
 };
 
 const SECRET_KEY = /token|secret|password|credential|authorization|cookie|api[_-]?key|private[_-]?key/i;
-/** A credential-shaped value. A diagnosis that only mentions a token is not one. */
-const CREDENTIAL_VALUE = /\b(?:sk|rk|pk|ghp|gho|github_pat|xox[baprs]|AKIA)[-_][A-Za-z0-9_\-]{8,}\b|bearer\s+[A-Za-z0-9\-._~+/]{8,}/gi;
-
-/** Known display text, with an actual credential replaced. Mentioning a token keeps the sentence. */
-function text(value: unknown): string {
-  if (typeof value !== "string") return "";
-  return value.replace(CREDENTIAL_VALUE, "[redacted]");
-}
 const count = (value: unknown) => (typeof value === "number" ? value : 0);
 const plural = (n: number, one: string) => `${n} ${one}${n === 1 ? "" : "s"}`;
 

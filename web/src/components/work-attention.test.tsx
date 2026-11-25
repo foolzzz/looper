@@ -425,7 +425,7 @@ describe("Work attention login diagnosis", () => {
       section({ kind: "logins", state: "ok", count: 1, items: [item({
         key: "login:cursor", title: "Cursor login",
         facts: {
-          detail: "partly signed in (no refresh token)",
+          detail: "partly signed in (no refresh token); refresh_token=rt_live_supersecretvalue",
           fix: `Run cursor-agent login; dropped ${credential}`,
           refresh_token: "rt_live_supersecretvalue",
         },
