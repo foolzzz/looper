@@ -9428,12 +9428,26 @@ implementation supplies it and is retested.
   while it prepares the turn: after commands and gate routing (a `/command`
   or a gate reply reads nothing), in the stoppable step `read_quote`, through
   the running channel the reference names (`ChannelRegistry.read_quote`,
-  which raises `QuoteUnavailable` when that channel is not running). The read
-  is therefore part of the message's turn: messages are read in the order the
+  which raises `QuoteUnavailable` when that channel is not running). A plain
+  reply can reuse a bounded, in-memory delivery record only when it proves this
+  bot sent the quoted message from this exact Manager, session key and resident
+  session id. Only model replies receive that proof; commands, notices, cards
+  and replies augmented or replaced by code do not. The record uses the raw
+  platform item already obtained while sending, with its type, sender, timestamp
+  and body, rendered through the same quote builder; it never reconstructs a
+  quote from reply Markdown or adds a prefetch. Missing or incomplete copies,
+  unknown thread state, group roots, any thread reference and quoted attachments
+  retain the normal read. A group copy must identify a reply below another root;
+  a direct chat has no group thread. Edits invalidate the copy; restart or eviction
+  of the channel's oldest records (at most 1,000) restores reading. Reuse preserves
+  the model-facing quoted bytes, including escaping and truncation. The decision
+  is typed as `READ` or `SKIP_OWN_IN_SESSION`.
+  The read or reuse is part of the message's turn: messages are read in the order the
   Manager takes them, a `/stop` from the chat cancels the read like any
   preparation step (the next turn is told the user withdrew the message), and
   a restart replays the journaled envelope, with its reference, so the quote
-  is read again. Both transports read `GET /open-apis/im/v1/messages/{id}`
+  is read again after a server restart. Both transports read
+  `GET /open-apis/im/v1/messages/{id}`
   (`lark-cli api GET … --as bot`, or the bot token's REST call) and try once
   more when the first read fails (the platform sometimes answers a long merged
   forward with its time-out after about 5 s) or takes 7 s (lark-cli: `im
@@ -9469,7 +9483,8 @@ implementation supplies it and is retested.
   its own but a quote, such as a bare merged forward, is answered too. The
   quote is not stored in the chat's history. One INFO `lark_quote` line per
   message logs its ids, kind, quoted ids, message count, characters,
-  attachments, outcome and seconds, with the seconds of the reads, the name
+  attachments, outcome, decision (`read` or `skip_own_in_session`) and seconds,
+  with the seconds of the reads, the name
   lookup and the downloads (`read=`, `names=`, `files=`), never content. Reading needs the app's
   `im:message:readonly`, as downloads do. The adapter remembers the latest
   1,000 group messages in a thread, for answering in the thread.
