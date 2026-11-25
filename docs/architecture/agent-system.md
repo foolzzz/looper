@@ -773,7 +773,32 @@ and key or CLI version, and increment a reason/phase/version counter visible in
 `tasks.managers.max_resident` defaults to 6 (1–20). Admission can reclaim the least
 recently used idle process; a 60-second ticker reclaims processes idle for 30
 minutes. Shutdown stops owned processes; deleting a task forgets its resident and
-session. This foundation adds no conversation transport or task-bound MCP tools.
+session. This foundation adds no conversation transport.
+
+**Tools.** Each process receives a task-bound `taskmgr.` credential for Looper's
+MCP server; the tool service stores only its hash. `task_status` reads compact
+task detail, fenced requirement
+and activity, interaction mode and git workspace state (at most 50 changed paths,
+plus the total uncommitted count). In direct mode, `task_requirement_set` versions
+the requirement through the existing edit path, only for draft or ready tasks
+and only during a turn Looper sent. Orchestrated mode lists only `task_status`
+and refuses requirement writes. Completion keeps the credential valid; process
+replacement, close, eviction, idle reclaim, shutdown and deletion revoke it.
+The same credential carries outbound review through the task's placement; its
+private hook file is removed on revocation and unanswered checks fail closed.
+With task conversations off, no credential is issued and no tool is served.
+
+**Local commands.** With `LOOPER_TASK_MANAGER` set, the CLI checks a typed table
+before dispatch. Allowed commands are `version`, `profile show`, `claude-code
+profile` (including `--hook`), `claude-code mcp/status`, `ledger list/show`, `leads
+search`, `memory list/show/lessons`, and `mcp-server` (the server checks its token).
+Service management, authentication and configuration writes, probes, installers,
+ledger writes, leads mutations/export, memory mutations/check, knowledge migration,
+message-flow commands and decision replay are refused with exit 4. Unlisted
+commands are refused too; no own-task CLI commands are added yet. Existing
+`LOOPER_AGENT_RUN` refusals are unchanged. This guard is a speed bump: the task
+Manager shares the operator's account and can read its token file or call HTTP
+directly. It is not an isolation boundary.
 
 ### TaskRouter (`looper/agents/tiers/task.py`)
 
