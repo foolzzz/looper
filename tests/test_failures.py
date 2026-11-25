@@ -250,14 +250,17 @@ def test_failure_metadata():
 def test_typing_mode(monkeypatch, stored, mode):
     from looper.db import system_settings
 
+    requested = []
+
     async def get_settings(keys, *, pool=None):
-        assert keys == ["engine.failure_typing"]
+        requested.append(keys)
         if isinstance(stored, Exception):
             raise stored
         return stored
 
     monkeypatch.setattr(system_settings, "get_settings", get_settings)
     assert asyncio.run(failures.typing_mode()) is mode
+    assert requested == [["engine.failure_typing"]]
 
 
 def test_evidence_keeps_only_bounded_facts():

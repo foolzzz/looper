@@ -110,16 +110,19 @@ async def _off_observation(pool, root, monkeypatch):
     forbidden = AsyncMock(side_effect=AssertionError("off path touched account admission"))
     monkeypatch.setattr(admission, "parent_for", forbidden)
     monkeypatch.setattr(admission, "slot", forbidden)
+    lock_entries = []
     class ForbiddenLock:
         async def __aenter__(self):
-            raise AssertionError("off path acquired controller lock")
+            lock_entries.append(True)
+
+        async def __aexit__(self, *args):
+            pass
     monkeypatch.setattr(case.controller, "lock", ForbiddenLock())
     queries = Counter()
     def observe(name):
         original = getattr(type(pool), name)
         async def query(current, sql, *args, **kwargs):
             if current is pool:
-                assert "provider_admission" not in sql and "provider_limit_windows" not in sql
                 queries[sql] += 1
             return await original(current, sql, *args, **kwargs)
         monkeypatch.setattr(type(pool), name, query)
@@ -162,8 +165,10 @@ async def _off_observation(pool, root, monkeypatch):
         return value
     observations["row_after_spawn"] = row_columns(spawned)
     observations["row_after_finish"] = row_columns(finished)
+    assert not any("provider_admission" in sql or "provider_limit_windows" in sql for sql in queries)
     observations["direct_queries"] = dict(sorted(queries.items()))
     forbidden.assert_not_awaited()
+    assert not lock_entries
     return observations
 
 

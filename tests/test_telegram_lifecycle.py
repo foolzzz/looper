@@ -44,6 +44,7 @@ def test_stop_drains_reactions_from_already_queued_messages(tmp_path, monkeypatc
         help_started, help_release = asyncio.Event(), asyncio.Event()
         stop_started, reaction_started, reaction_finished = (asyncio.Event() for _ in range(3))
         events, reactions, closed, transport_snapshots = [], [], [], []
+        other_methods = []
         stop_app, shutdown_app = Application.stop, Application.shutdown
         shutdown_request = HTTPXRequest.shutdown
 
@@ -65,7 +66,7 @@ def test_stop_drains_reactions_from_already_queued_messages(tmp_path, monkeypatc
                     events.append("reaction.finished")
                     reaction_finished.set()
             else:
-                assert method == "setMyCommands", method
+                other_methods.append(method)
                 result = True
             return 200, json.dumps({"ok": True, "result": result}).encode()
 
@@ -138,6 +139,7 @@ def test_stop_drains_reactions_from_already_queued_messages(tmp_path, monkeypatc
             before = list(events)
             await adapter.stop()
             assert events == before
+            assert other_methods and set(other_methods) == {"setMyCommands"}
         finally:
             # A failing-first assertion must not leave real Application tasks or HTTP clients behind.
             help_release.set()
@@ -170,6 +172,7 @@ def test_partial_start_releases_resources(
             bot_token="0:synthetic", allowlist=SenderAllowlist("channel-telegram", frozenset({"7"})))
         error = RuntimeError(failure)
         events: list[str] = []
+        cleanup_states = []
         app = SimpleNamespace(running=False, open=False, updater=SimpleNamespace(running=False))
 
         async def phase(name: str) -> None:
@@ -184,13 +187,13 @@ def test_partial_start_releases_resources(
                 app.updater.running = True
                 await adapter._inbox.polling_received([])
             elif name == "updater.stop":
-                assert app.updater.running
+                cleanup_states.append((name, app.updater.running))
                 app.updater.running = False
             elif name == "stop":
-                assert app.running
+                cleanup_states.append((name, app.running))
                 app.running = False
             elif name == "shutdown":
-                assert not app.running and not app.updater.running
+                cleanup_states.append((name, not app.running and not app.updater.running))
                 app.open = False
 
         app.add_handler = MagicMock()
@@ -234,6 +237,7 @@ def test_partial_start_releases_resources(
                     await registry.unregister(adapter.channel_id)
                 else:
                     await adapter.stop()
+            assert cleanup_states and all(valid for _, valid in cleanup_states), cleanup_states
             assert not app.open and not app.running and not app.updater.running
             assert ("updater.stop" in events) is (failure is None)
             assert ("stop" in events) is (failure in (None, "deleteWebhook"))
