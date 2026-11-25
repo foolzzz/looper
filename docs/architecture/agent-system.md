@@ -8918,6 +8918,15 @@ built by `scripts/stage-dashboard.sh` at release time), and it carries
   activity pages and growing tool results preserve that anchor; live updates follow the bottom only
   when the reader is there. One “你离开之后” separator precedes the first row after the departure
   watermark. This client watermark is independent of `tasks.mark_seen`, which still sends only a sequence.
+- **Work task controls**: the gated task panel starts ready tasks and valid drafts through the existing
+  operator start operation, resumes failed/stopped/cancelled tasks with the saved plan, and stops background
+  execution separately from the conversation's reply Stop. Direct-mode completion uses `tasks.done`.
+  Controls reread detail before writing, lock synchronous duplicate clicks, and use the page's shared
+  refresh to confirm the persisted result. A start acknowledges an active new attempt immediately; a fast
+  terminal attempt requires two identical changed, settled snapshots. Historical terminal rows and run
+  counts alone do not confirm a start. Errors and unfinished confirmation remain visible; retry only reads.
+  Task switches abort readback and discard late results. Missing operations are unavailable; pause,
+  background handoff and takeover remain disabled with a reason. The old task page is unchanged.
 - **Work task cost**: the existing task details panel renders one read-only cost section from the shared
   detail, without a separate read or poll. Missing costs or no recorded task runs remain unavailable;
   recorded zero costs retain their value. Running or unpriced runs retain the cost caveats and label any
