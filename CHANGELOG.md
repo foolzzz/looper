@@ -18,6 +18,14 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.15.38] - 2026-11-25
+
+Contains exactly v2.15.37 plus [#1785](https://github.com/foolzzz/looper/pull/1785), frozen at `e98913682`, and release metadata. From v2.15.37, this is frontend only: no new migration, setting or server change. Upgrading from v2.15.36 or earlier also includes all of v2.15.37: read [its release notes](docs/releases/v2.15.37.md) first for migrations, backup requirements and breaking changes. See [the v2.15.38 release notes](docs/releases/v2.15.38.md) for the frozen scope and exclusions.
+
+### Fixed
+
+- **Stop repeated probes for an absent Work operation.** ([#1785](https://github.com/foolzzz/looper/pull/1785)) The dashboard sidebar previously requested `task_conversations/get` every 30 seconds indefinitely on servers that do not register the operation, including every released server through v2.15.37. It now probes once per page load and keeps Work hidden when the operation is absent. Registered operations retain their existing polling, visibility and transient-error recovery behavior. Telegram, Lark and the CLI do not run this dashboard poll and need no change.
+
 ## [2.15.37] - 2026-11-25
 
 Cut from main at `4ad331978`, with no later changes included. Upgrade from v2.15.36. Startup applies seven migrations (1970, 2000, 2010, 2040, 2060, 2070, 2080) and four online steps after the usual pre-migration backup, even with every optional switch off. Migration 2080 adds stored generated columns that rewrite the task tables before backfill; the online steps validate checks and build indexes concurrently. No feature setting turns itself on. The release workflow rebuilds the dashboard bundle. Installations older than the bridge must upgrade to v2.13.165 first. See [the release notes](docs/releases/v2.15.37.md) for upgrade boundaries and activation instructions.
