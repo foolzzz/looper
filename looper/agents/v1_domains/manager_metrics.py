@@ -1,5 +1,6 @@
 """Read-only Manager turn and proactive-delivery measurements."""
 from datetime import datetime, timedelta, timezone
+import json
 
 from ...db import manager_actions, proactive_deliveries
 from ..channels import outbound_metrics
@@ -28,6 +29,17 @@ SUMMARY = _object({"enabled": _BOOL, "window_days": _INT,
 SUMMARY["properties"]["work_mode"] = _object({"task_manager_launch_refusals_total": _array(_object({
     "reason": {"enum": ["review_hook_disabled", "cli_unverified"]},
     "phase": {"enum": ["launch", "resume"]}, "cli_version": _STR, "count": _INT}, closed=True))}, closed=True)
+_TASK_MEASUREMENT = _object({"task_id": _STR, "record_id": _INT,
+    "model": {"type": ["string", "null"]}, "mode": {"enum": ["direct", "orchestrated"]},
+    "maintenance": _BOOL, "value": _NUMBER}, closed=True)
+_TASK_BOUND_COUNT = _array(_object({"reason": _STR, "result": {"enum": ["compacted", "rotated"]},
+                                  "count": _INT}, closed=True))
+SUMMARY["properties"]["work_mode"]["properties"].update({
+    "task_manager_context_tokens": _array(_TASK_MEASUREMENT),
+    "task_manager_turn_cost_usd": _array(_TASK_MEASUREMENT),
+    "task_manager_compactions_total": _TASK_BOUND_COUNT,
+    "task_manager_session_rotations_total": _TASK_BOUND_COUNT,
+})
 RESULTS = {}
 OPERATIONS = (
     Operation("manager_metrics.get", "POST", "/api/v1/manager_metrics/get",
@@ -79,4 +91,35 @@ async def run(server, operation, arguments, principal, headers):
         result["work_mode"] = {"task_manager_launch_refusals_total": [
             {"reason": reason, "phase": phase, "cli_version": version, "count": count}
             for (reason, phase, version), count in sorted(task_manager_safety.refusal_counts.items())]}
+        result["work_mode"].update(await _task_manager_metrics(db, days))
+    return result
+
+
+async def _task_manager_metrics(db, days):
+    """Read turn-owned measurements and maintenance outcomes, never session carry-over values."""
+    rows = await db.fetch("""SELECT id, task_id, model, context_tokens, cost_usd, metadata
+        FROM llm_records WHERE agent_id LIKE 'task-manager-%' AND task_id IS NOT NULL
+          AND created_at >= now() - make_interval(days => $1) AND status <> 'running'
+          AND metadata->'task_manager' IS NOT NULL ORDER BY id""", days)
+    result = {"task_manager_context_tokens": [], "task_manager_turn_cost_usd": [],
+              "task_manager_compactions_total": [], "task_manager_session_rotations_total": []}
+    compactions, rotations = {}, {}
+    for row in rows:
+        metadata = json.loads(row["metadata"]) if isinstance(row["metadata"], str) else row["metadata"]
+        dimensions = {"task_id": row["task_id"], "record_id": row["id"], "model": row["model"],
+                      "mode": metadata["task_manager"]["mode"],
+                      "maintenance": metadata["task_manager"]["maintenance"]}
+        result["task_manager_context_tokens"].append({**dimensions, "value": row["context_tokens"]})
+        result["task_manager_turn_cost_usd"].append({**dimensions,
+            "value": float(row["cost_usd"]) if row["cost_usd"] is not None else None})
+        if compacted := metadata.get("task_manager_compaction"):
+            key = compacted["reason"], compacted["result"]
+            compactions[key] = compactions.get(key, 0) + 1
+        if (bound := metadata.get("session_bound")) and bound.get("action") == "rotated":
+            key = bound["reason"], bound["action"]
+            rotations[key] = rotations.get(key, 0) + 1
+    for metric, counts in (("task_manager_compactions_total", compactions),
+                           ("task_manager_session_rotations_total", rotations)):
+        result[metric] = [{"reason": reason, "result": outcome, "count": count}
+                          for (reason, outcome), count in sorted(counts.items())]
     return result

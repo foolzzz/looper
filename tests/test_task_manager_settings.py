@@ -64,7 +64,9 @@ def test_profile_switch_refuses_busy_then_closes_idle_resident(monkeypatch):
     from looper.agents.tiers import task_manager
     from looper.agents.projects import RequestError
 
-    pool = SimpleNamespace(_lock=asyncio.Lock(), in_turn=lambda _: True, close=AsyncMock())
+    stop = AsyncMock()
+    pool = SimpleNamespace(_lock=asyncio.Lock(), in_turn=lambda _: True,
+                           agents={"task-a": SimpleNamespace(resident=SimpleNamespace(stop=stop))})
     monkeypatch.setattr(task_manager, "current_pool", lambda: pool)
     write = AsyncMock()
     monkeypatch.setattr(settings.db_layers, "set_task_layer", write)
@@ -75,11 +77,11 @@ def test_profile_switch_refuses_busy_then_closes_idle_resident(monkeypatch):
             await settings.set_task_manager_profile("task-a", "agent-claude-code-opus")
         assert failure.value.status == "409 Conflict"
         write.assert_not_awaited()
-        pool.close.assert_not_awaited()
+        stop.assert_not_awaited()
         pool.in_turn = lambda _: False
         await settings.set_task_manager_profile("task-a", "agent-claude-code-opus")
         write.assert_awaited_once_with("task-a", profiles={"task_manager": "agent-claude-code-opus"})
-        pool.close.assert_awaited_once_with("task-a")
+        stop.assert_awaited_once_with(kill=True)
     asyncio.run(check())
 
 
