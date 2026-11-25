@@ -52,9 +52,12 @@ type Outcome =
 
 type Pending = "write" | "read" | null;
 
-type Props =
-  | { mode: "task"; taskId: string; snapshot: TaskManagerSnapshot | null; onReread: () => Promise<TaskManagerSnapshot> }
-  | { mode: "create"; snapshot: TaskManagerSnapshot | null; onChange: (profileId: string | null) => void };
+type Props = {
+  mode: "task";
+  taskId: string;
+  snapshot: TaskManagerSnapshot | null;
+  onReread: () => Promise<TaskManagerSnapshot>;
+};
 
 function sourceLabel(source: string): string {
   if (!Object.hasOwn(SOURCE_GLOSS, source)) return source;
@@ -73,10 +76,6 @@ function viewMatches(requested: string | null, profile: TaskManagerSnapshot): bo
   return profile.effective.profile_id === requested && profile.selectedProfileId === requested;
 }
 
-function isAbort(err: unknown): boolean {
-  return typeof err === "object" && err !== null && "name" in err && (err as { name: string }).name === "AbortError";
-}
-
 function outcomeFrom(result: ProfileSetResult): Outcome {
   if (result.ok || result.reason === "missing") return null;
   if (result.reason === "busy") return { kind: "busy" };
@@ -87,7 +86,7 @@ function outcomeFrom(result: ProfileSetResult): Outcome {
 
 /** Profile choices for one task. A null snapshot means the server has no read for this yet. */
 export function WorkTaskManagerModel(props: Props) {
-  const taskKey = props.mode === "task" ? props.taskId : "create";
+  const taskKey = props.taskId;
   const epoch = useRef(0);
   const writingRef = useRef(false);
   const [tracked, setTracked] = useState(taskKey);
@@ -111,18 +110,17 @@ export function WorkTaskManagerModel(props: Props) {
   const selectedChoice = snapshot?.choices.find((choice) => choice.profile_id === selection);
   const unconfirmed = outcome?.kind === "uncertain" || outcome?.kind === "readback-failed";
   const writesLocked = pending !== null || unconfirmed;
-  const submittable = props.mode === "task" && !!snapshot && snapshot.choices.length > 0 && !writesLocked && (
+  const submittable = !!snapshot && snapshot.choices.length > 0 && !writesLocked && (
     (requested === null && snapshot.inherit) || (!!selectedChoice && !blockReason(selectedChoice))
   );
 
   function pick(profileId: string | null, blocked: boolean) {
     if (writesLocked || blocked) return;
     setSelection(profileId ?? "");
-    if (props.mode === "create") props.onChange(profileId);
   }
 
   function save() {
-    if (props.mode !== "task" || !snapshot || !submittable || writesLocked || writingRef.current) return;
+    if (!snapshot || !submittable || writesLocked || writingRef.current) return;
     const currentTask = props.taskId;
     const wanted = requested;
     const token = epoch.current;
@@ -143,12 +141,12 @@ export function WorkTaskManagerModel(props: Props) {
           if (token !== epoch.current) return;
           if (viewMatches(wanted, next)) setOutcome({ kind: "success" });
           else setOutcome({ kind: "mismatch", readId: next.effective?.profile_id ?? "" });
-        } catch (err) {
-          if (token !== epoch.current || isAbort(err)) return;
+        } catch {
+          if (token !== epoch.current) return;
           setOutcome({ kind: "readback-failed" });
         }
-      } catch (err) {
-        if (token !== epoch.current || isAbort(err)) return;
+      } catch {
+        if (token !== epoch.current) return;
         setOutcome({ kind: "uncertain" });
       } finally {
         if (token === epoch.current) {
@@ -160,7 +158,7 @@ export function WorkTaskManagerModel(props: Props) {
   }
 
   function reread() {
-    if (props.mode !== "task" || writingRef.current) return;
+    if (writingRef.current) return;
     const wanted = requested;
     const token = epoch.current;
     writingRef.current = true;
@@ -171,8 +169,8 @@ export function WorkTaskManagerModel(props: Props) {
         if (token !== epoch.current) return;
         if (viewMatches(wanted, next)) setOutcome({ kind: "success" });
         else setOutcome({ kind: "mismatch", readId: next.effective?.profile_id ?? "" });
-      } catch (err) {
-        if (token !== epoch.current || isAbort(err)) return;
+      } catch {
+        if (token !== epoch.current) return;
       } finally {
         if (token === epoch.current) {
           writingRef.current = false;
@@ -250,7 +248,7 @@ export function WorkTaskManagerModel(props: Props) {
       {draftDiffers && (
         <p className="text-sm">当前选择与有效配置不同。当前选择 {requested ?? "跟随角色默认"}。有效配置 {effective?.profile_id}。</p>
       )}
-      {props.mode === "task" && snapshot && (
+      {snapshot && (
         <Button type="button" variant="outline" disabled={!submittable} onClick={save}>切换模型</Button>
       )}
       {outcome?.kind === "saving" && <p role="status">正在切换…</p>}

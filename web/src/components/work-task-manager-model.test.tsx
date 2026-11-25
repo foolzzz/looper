@@ -111,6 +111,11 @@ let handle: (url: string, body: Record<string, unknown>) => Promise<Response> | 
 const ok = (result: unknown) => Response.json({ status: "ok", result });
 const fail = (status: number, code: string, message: string) =>
   Response.json({ status: "error", error: { code, message } }, { status });
+function aborted(): Error {
+  const error = new Error("aborted");
+  error.name = "AbortError";
+  return error;
+}
 const field = (name: string) => host.querySelector(`[data-field="${name}"]`)?.textContent ?? "";
 const choice = (id: string) => host.querySelector(`[data-choice="${id}"]`) as HTMLElement;
 const button = (text: string) => [...host.querySelectorAll("button")].find((el) => el.textContent === text);
@@ -342,6 +347,44 @@ describe("task manager model writes", () => {
     expect(field("profile-id")).toBe(SONNET.profile_id);
   });
 
+  it("locks writes when the set is aborted and a second click does not send another set", async () => {
+    handle = (url) => {
+      if (url.includes(TASK_MANAGER_PROFILE_SET_PATH)) throw aborted();
+      return ok({});
+    };
+    await show(<TaskBox taskId="abort-set" snapshot={snap()} onReread={async () => snap()} />);
+    await choose(OPUS.profile_id);
+    await click("切换模型");
+    expect(sets()).toHaveLength(1);
+    expect(host.textContent).toContain("切换结果尚未确认");
+    expect((button("切换模型") as HTMLButtonElement).disabled).toBe(true);
+    expect(radios().length).toBeGreaterThan(0);
+    expect(radios().every((input) => input.disabled)).toBe(true);
+    expect((button("重新读取") as HTMLButtonElement).disabled).toBe(false);
+    await act(async () => { (button("切换模型") as HTMLButtonElement).click(); });
+    await settle();
+    expect(sets()).toHaveLength(1);
+  });
+
+  it("locks writes when the readback is aborted after a successful set and a second click does not send another set", async () => {
+    handle = (url, body) => {
+      if (url.includes(TASK_MANAGER_PROFILE_SET_PATH)) return ok({ task_id: body.task_id, profile_id: body.profile_id });
+      return ok({});
+    };
+    await show(<TaskBox taskId="abort-readback" snapshot={snap()} onReread={async () => { throw aborted(); }} />);
+    await choose(OPUS.profile_id);
+    await click("切换模型");
+    expect(sets()).toHaveLength(1);
+    expect(host.textContent).toContain("模型读取失败");
+    expect((button("切换模型") as HTMLButtonElement).disabled).toBe(true);
+    expect(radios().every((input) => input.disabled)).toBe(true);
+    expect((button("重新读取") as HTMLButtonElement).disabled).toBe(false);
+    await act(async () => { (button("切换模型") as HTMLButtonElement).click(); });
+    await settle();
+    expect(sets()).toHaveLength(1);
+    expect(field("profile-id")).toBe(SONNET.profile_id);
+  });
+
   it("unlocks after a re-read confirms the server profile", async () => {
     let readback: () => Promise<TaskManagerSnapshot> = async () => { throw new Error("readback down"); };
     handle = (url, body) => {
@@ -443,31 +486,6 @@ describe("task manager model writes", () => {
     expect(button("切换模型")).toBeUndefined();
     expect(sets()).toHaveLength(1);
     expect(calls.every((call) => !call.url.includes("task_manager_profile_get"))).toBe(true);
-  });
-});
-
-describe("draft profile selection", () => {
-  it("returns only the profile id and never writes", async () => {
-    const onChange = vi.fn();
-    await show(<WorkTaskManagerModel mode="create" snapshot={snap()} onChange={onChange} />);
-    expect(onChange).not.toHaveBeenCalled();
-    expect(button("切换模型")).toBeUndefined();
-    await choose(OPUS.profile_id);
-    expect(onChange).toHaveBeenCalledTimes(1);
-    expect(onChange).toHaveBeenCalledWith(OPUS.profile_id);
-    await choose("");
-    expect(onChange).toHaveBeenLastCalledWith(null);
-    expect(sets()).toHaveLength(0);
-    expect(calls).toHaveLength(0);
-  });
-
-  it("emits nothing when no snapshot is available", async () => {
-    const onChange = vi.fn();
-    await show(<WorkTaskManagerModel mode="create" snapshot={null} onChange={onChange} />);
-    expect(host.textContent).toContain("此服务器尚不支持任务模型切换");
-    expect(onChange).not.toHaveBeenCalled();
-    expect(sets()).toHaveLength(0);
-    expect(calls).toHaveLength(0);
   });
 });
 
