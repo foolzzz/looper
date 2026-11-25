@@ -100,6 +100,37 @@ def test_binding_default_scope(tmp_path, monkeypatch, case):
     _run(run, monkeypatch)
 
 
+@pytest.mark.parametrize("old_scope,fields,changes", [
+    (None, {}, False),
+    ("legacy", {}, False),
+    (None, {"default_scope": "chat_only"}, False),
+    ("chat_only", {"default_scope": None}, False),
+    ("legacy", {"default_scope": "legacy"}, False),
+    (None, {"manager_id": OTHER}, False),
+    ("legacy", {"manager_id": OTHER}, True),
+    ("legacy", {"default_scope": None}, True),
+    (None, {"default_scope": "legacy"}, True),
+    ("legacy", {"manager_id": OTHER, "default_scope": "chat_only"}, True),
+])
+def test_binding_confirms_only_effective_scope_changes(tmp_path, monkeypatch, old_scope, fields, changes):
+    async def run(pool):
+        await pool.execute("INSERT INTO manager_chat_bindings "
+                           "(channel_id, chat_id, manager_id, default_scope, legacy_allowed) "
+                           "VALUES ($1, '7', $2, $3, true)", BOT, TARGET, old_scope)
+        async with _api(tmp_path, pool) as (call, _, _):
+            status, answer = await call("manager_chat_bindings.put", {**_binding(), **fields})
+            effective = fields.get("default_scope", old_scope if "manager_id" not in fields else None) or "chat_only"
+            if changes:
+                assert status == 202 and answer["status"] == "needs_confirmation", answer
+                assert answer["impact"].startswith(f"Set the group default of 7 to {effective}.")
+                assert await pool.fetchval("SELECT default_scope FROM manager_chat_bindings WHERE channel_id = $1", BOT) == old_scope
+                status, answer = await call("confirm", {"confirmation_id": answer["confirmation_id"]})
+            assert status == 200 and answer["status"] == "ok", answer
+            assert "confirmation_id" not in answer and "impact" not in answer
+            assert answer["result"]["binding"]["effective_default_scope"] == effective
+    _run(run, monkeypatch)
+
+
 def test_binding_response_fields(tmp_path, monkeypatch):
     async def run(pool):
         async with _api(tmp_path, pool) as (call, _, _):
@@ -255,7 +286,8 @@ def test_operator_only_and_confirm(tmp_path, monkeypatch):
                 status, answer = await call(name, body, client=True)
                 assert status == 403 and answer["error"]["code"] == "forbidden", answer
                 if name.endswith((".put", ".delete")):
-                    assert operation.risk == "high" and operation.confirms
+                    assert operation.risk == ("write" if name == "manager_chat_bindings.put" else "high")
+                    assert operation.confirms
                     status, pending = await call(name, body)
                     assert status == 202 and pending["status"] == "needs_confirmation", pending
                     assert CHAT in pending["impact"]

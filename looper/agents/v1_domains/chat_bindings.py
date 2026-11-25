@@ -54,7 +54,7 @@ OPERATIONS = (
                      "description": "Senders admitted only in this chat besides the bot's allowlist: Lark open_ids or bot app ids, "
                          "or Telegram user IDs. Omit to keep them (cleared when the chat moves to another Manager); [] clears."}},
                 ["channel_id", "chat_id", "manager_id"], closed=True),
-        _object({"binding": BINDING}, closed=True), risk="high"),
+        _object({"binding": BINDING}, closed=True), risk="write"),
     _op("manager_chat_bindings.delete", "Remove an explicit native chat binding.",
         _object({"channel_id": _ID, "chat_id": _ID}, closed=True),
         _object({"channel_id": _ID, "chat_id": _ID, "deleted": _BOOL}, closed=True), risk="write"),
@@ -159,11 +159,15 @@ async def impact(server, operation, arguments, principal, headers, confirmation=
                 arguments["channel_id"], arguments["chat_id"], arguments["manager_id"])
     value = arguments.get("default_scope", previous["default_scope"] if previous and
                           previous["manager_id"] == arguments["manager_id"] else None)
-    text = scope_impact(arguments["chat_id"], value or "chat_only", arguments.get("stop_now", False),
-                        legacy=previous is not None and previous["default_scope"] == "legacy")
+    previous_scope = (previous["default_scope"] if previous else None) or "chat_only"
+    text = None
+    if (value or "chat_only") != previous_scope:
+        text = scope_impact(arguments["chat_id"], value or "chat_only", arguments.get("stop_now", False),
+                            legacy=previous_scope == "legacy")
     if not telegram and policy == "chat" and manager["tools"] == "all":
-        text += (" Anyone in this chat, including bots, can then reach a Manager with all tools. "
-                 "This Manager can run commands on this machine. Open this chat to everyone?")
+        warning = ("Anyone in this chat, including bots, can then reach a Manager with all tools. "
+                   "This Manager can run commands on this machine. Open this chat to everyone?")
+        text = f"{text} {warning}" if text else warning
     return text
 
 

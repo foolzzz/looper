@@ -52,7 +52,7 @@ def _run(test, monkeypatch):
 
 
 @asynccontextmanager
-async def _api(tmp_path, pool, *, registry=True, listen=True, managers=None, confirm_binding=True):
+async def _api(tmp_path, pool, *, registry=True, listen=True, managers=None):
     _, token = await api_clients.create("Routing validation", pool=pool)
     bus = MessageBus(runtime_root=tmp_path)
     channels = ChannelRegistry(bus) if registry else None
@@ -68,9 +68,6 @@ async def _api(tmp_path, pool, *, registry=True, listen=True, managers=None, con
             path = "/api/v1/" + operation.replace(".", "/")
             status, _, answer = await _send(server, "POST " + path, {
                 **_bearer(token if client else TOKEN), "X-Looper-Session": session}, json.dumps(body or {}))
-            if (confirm_binding and operation == "manager_chat_bindings.put" and status == 202
-                    and "default_scope" not in (body or {}) and "Anyone in this chat" not in answer.get("impact", "")):
-                status, answer = await call("confirm", {"confirmation_id": answer["confirmation_id"]}, client=client, session=session)
             if status == 200 and operation != "confirm":
                 api_v1.validate_arguments({"type": "object", "properties": {
                     "result": api_v1.find("POST", path).result}}, {"result": answer["result"]})
@@ -680,7 +677,9 @@ def test_all_tools_chat_policy_requires_operator_confirmation_before_write(tmp_p
             registry.bindings_changed("channel-lark", await routing.load_snapshot("channel-lark"))
             status, answer = await call("manager_chat_bindings.put", _policy_binding(manager="manager"))
             assert status == 202 and answer["status"] == "needs_confirmation", answer
-            assert "Anyone in this chat" in answer["impact"] and "all tools" in answer["impact"]
+            assert answer["impact"] == (
+                "Anyone in this chat, including bots, can then reach a Manager with all tools. "
+                "This Manager can run commands on this machine. Open this chat to everyone?")
             assert await pool.fetchval("SELECT count(*) FROM manager_chat_bindings") == 0
             assert registry.resolve_chat("channel-lark", "oc_example").sender_policy is routing.SenderPolicy.LISTED
             status, confirmed = await call("confirm", {"confirmation_id": answer["confirmation_id"]})
