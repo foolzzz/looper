@@ -20,9 +20,10 @@ import { LedgerPage } from "@/pages/ledger";
 import { SettingsPage } from "@/pages/settings";
 import { AgentHistoryPage, historyHref, isHistoryRole } from "@/pages/agent-history";
 import { ProjectPage } from "@/pages/project";
+import { WorkPage } from "@/pages/work";
 import { DEFAULT_SETTINGS_PAGE, isSettingsPage, type SettingsPageId } from "@/lib/settings-pages";
 
-const PAGES = new Set<Page>(["dashboard", "todo", "chat", "tasks", "ledger", "gates", "projects", "schedules", "messages", "intents", "memory", "settings", "history"]);
+const PAGES = new Set<Page>(["dashboard", "todo", "chat", "work", "tasks", "ledger", "gates", "projects", "schedules", "messages", "intents", "memory", "settings", "history"]);
 
 interface Route {
   page: Page;
@@ -57,6 +58,13 @@ function readHash(): Route {
 
 function App() {
   const [route, setRoute] = useState<Route>(readHash);
+  // Null until the sidebar has read the switch. Off must not bounce a direct link during that read.
+  const [workEnabled, setWorkEnabled] = useState<boolean | null>(null);
+  useEffect(() => {
+    if (route.page !== "work" || workEnabled !== false) return;
+    window.history.replaceState(null, "", "#dashboard");
+    setRoute(readHash());
+  }, [route.page, workEnabled]);
 
   useEffect(() => {
     const onHash = () => setRoute(readHash());
@@ -132,6 +140,7 @@ function App() {
         }}
         open={navOpen}
         onClose={() => setNavOpen(false)}
+        onWorkEnabled={setWorkEnabled}
       />
       {navOpen && (
         <div aria-hidden="true" onClick={() => setNavOpen(false)} className="fixed inset-0 z-30 bg-black/50 lg:hidden" />
@@ -162,6 +171,11 @@ function App() {
           </div>
           {route.page === "dashboard" && (
             <div className="h-full overflow-y-auto p-6"><DashboardPage /></div>
+          )}
+          {route.page === "work" && workEnabled === true && (
+            <div className="h-full">
+              <WorkPage sub={route.sub} onNavigate={(next, replace) => navigateSub("work", next, "", replace ?? false)} />
+            </div>
           )}
           {route.page === "tasks" && (
             <div className="h-full overflow-y-auto">

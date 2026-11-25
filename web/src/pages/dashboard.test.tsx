@@ -8,6 +8,7 @@ import { WaitingGatesProvider } from "@/lib/use-waiting-gates";
 import { fetchManagerMetrics, type ManagerMetrics } from "@/lib/manager-metrics";
 import { fetchStatusCard, type StatusSection } from "@/lib/status-card";
 import { V1Error } from "@/lib/v1";
+import { taskConversationsGet } from "@/lib/work";
 import { fetchGates, fetchOverview, fetchProjectsList, fetchTasks, fetchTaskDetail, postGateMessage, GATE_MESSAGE_MAX_CHARS,
   type GateList, type AgentProcess, type Overview, type TaskDetail, type UserGate, type GatePosted } from "@/lib/api";
 
@@ -31,6 +32,7 @@ vi.mock("@/lib/api-cost-guard", () => ({
   fetchCostHolds: vi.fn(async () => ({ holds: [] })),
 }));
 vi.mock("@/components/project-dialog", () => ({ ProjectDialog: () => null }));
+vi.mock("@/lib/work", () => ({ taskConversationsGet: vi.fn(async () => ({ enabled: false })) }));
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
 const gate = (step: string, extra: Partial<UserGate> = {}): UserGate => ({
@@ -62,6 +64,7 @@ describe("Dashboard waiting gates", () => {
     Object.defineProperty(document, "visibilityState", { configurable: true, value: "visible" });
     vi.setSystemTime(new Date("2026-10-20T10:12:00Z"));
     vi.resetAllMocks();
+    vi.mocked(taskConversationsGet).mockResolvedValue({ enabled: false });
     vi.mocked(fetchManagerMetrics).mockResolvedValue(METRICS_OFF);
     vi.mocked(fetchStatusCard).mockRejectedValue(new V1Error(409, "conflict", "off"));
     window.localStorage.clear();
