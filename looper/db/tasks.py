@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 from collections.abc import Awaitable, Callable, Collection, Mapping, Sequence
+from contextlib import nullcontext
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from enum import Enum
@@ -14,7 +15,7 @@ from typing import Any
 import asyncpg
 
 from . import journal as db_journal
-from .connection import get_pool
+from .connection import _connection, get_pool
 from .directories import canonical_directory
 
 logger = logging.getLogger(__name__)
@@ -96,6 +97,18 @@ PLANNER_END_STATUSES = frozenset({"completed", "failed"})
 # start resumes (with a live plan), starts (``pending``) or else marks stopped.
 ACTIVE_STATUSES = tuple(status for status, group in STATUS_GROUPS.items()
                         if group in (TaskGroup.NEEDS_YOU, TaskGroup.IN_PROGRESS))
+
+
+class InteractionMode(str, Enum):
+    DIRECT = "direct"              # the task Manager may write: never started, ready, or ended
+    ORCHESTRATED = "orchestrated"  # the background owns the task's workspace (ACTIVE_STATUSES)
+
+
+def interaction_mode(status: str | None) -> InteractionMode:
+    """Who may write the task's workspace. A status this mapping does not know is direct: only the background
+    writes while a task is active, so an unknown status is not one it owns."""
+    return InteractionMode.ORCHESTRATED if status in ACTIVE_STATUSES else InteractionMode.DIRECT
+
 
 async def others_active_in(work_dir: str, task_id: str, *, pool: asyncpg.Pool | None = None) -> bool:
     """Whether a task other than ``task_id`` is running or starting (``ACTIVE_STATUSES``) in the directory
@@ -362,8 +375,13 @@ async def update_task_status(
     error: str | None = None,
     fail_kind: FailKind | None = None,
     pool: asyncpg.Pool | None = None,
+    notify: bool = True,
 ) -> None:
-    """Set the task's status; the fields given (not ``None``) are set too, and kept until a restart."""
+    """Set the task's status; the fields given (not ``None``) are set too, and kept until a restart.
+
+    ``notify`` runs the task-end listeners. A caller that still holds this task's row lock passes False and
+    runs them after committing: a listener takes its own connection and would wait on that lock.
+    """
     pool = pool or get_pool()
     now = datetime.now(timezone.utc)
     completed_at = now if status in ("completed", "failed", "cancelled") else None
@@ -388,7 +406,7 @@ async def update_task_status(
         attempt_ended_at,
         json.dumps(process_record, ensure_ascii=False) if process_record is not None else None,
     )
-    if status in ("completed", "failed", "cancelled", "stopped"):
+    if notify and status in ("completed", "failed", "cancelled", "stopped"):
         await _task_ended(task_id)
 
 
@@ -520,42 +538,70 @@ async def _restore_template_roles(conn: asyncpg.Connection, task_id: str) -> Non
                  "summary": f"Role {key} v1 restored from the task {source} {name}"})
 
 
-async def reset_task_for_restart(
-    task_id: str,
-    *,
-    keep_steps: bool = False,
-    pool: asyncpg.Pool | None = None,
-) -> bool:
-    """Clear the task's outcome before it runs again.
+async def _clear_restart_plan(conn: asyncpg.Connection, task_id: str) -> None:
+    """Drop the plan a restart planned anew, and restore the template roles. The caller owns the transaction."""
+    await conn.execute("DELETE FROM task_planner_profiles WHERE task_id = $1", task_id)
+    await conn.execute("DELETE FROM task_roles WHERE task_id = $1", task_id)
+    await _restore_template_roles(conn, task_id)
+    # Its room goes with the plan: what its agents agreed on was for the steps planned anew.
+    for table in ("room_consults", "room_watches", "room_reads", "room_messages"):
+        await conn.execute(f"DELETE FROM {table} WHERE task_id = $1", task_id)
+    await conn.execute("DELETE FROM task_steps WHERE task_id = $1", task_id)
+    await conn.execute("DELETE FROM task_plans WHERE task_id = $1", task_id)
+    await conn.execute("DELETE FROM agent_sessions WHERE agent_id = $1", planner_agent_id(task_id))
 
-    Planned anew, its steps, its plan, its Planner's session, its Planner's
-    choices of Agent Profile and the roles its Planner defined go; continuing its
-    plan (``keep_steps``), they stay.
-    """
-    pool = pool or get_pool()
-    if not keep_steps:
-        async with pool.acquire() as conn, conn.transaction():
-            await conn.execute("DELETE FROM task_planner_profiles WHERE task_id = $1", task_id)
-            await conn.execute("DELETE FROM task_roles WHERE task_id = $1", task_id)
-            await _restore_template_roles(conn, task_id)
-            # Its room goes with the plan: what its agents agreed on was for the steps planned anew.
-            for table in ("room_consults", "room_watches", "room_reads", "room_messages"):
-                await conn.execute(f"DELETE FROM {table} WHERE task_id = $1", task_id)
-            await conn.execute("DELETE FROM task_steps WHERE task_id = $1", task_id)
-            await conn.execute("DELETE FROM task_plans WHERE task_id = $1", task_id)
-            await conn.execute("DELETE FROM agent_sessions WHERE agent_id = $1", planner_agent_id(task_id))
-    result = await pool.execute(
-        """
+
+_RESET_FOR_RESTART = """
         UPDATE tasks
         SET status = 'pending', phase = 'pending', run_no = run_no + 1,
             error = NULL, completed_at = NULL, attempt_ended_at = NULL, fail_kind = NULL,
             result_summary = NULL, process_record = NULL, updated_at = now()
         WHERE id = $1
-        """,
-        task_id,
-    )
-    await _task_ended(task_id)  # the previous attempt's explorers end with it, however briefly it is `pending`
-    return result == "UPDATE 1"
+        """
+
+
+async def reset_task_for_restart(
+    task_id: str,
+    *,
+    keep_steps: bool = False,
+    expected_status: str | None = None,
+    notify: bool = True,
+    pool: asyncpg.Pool | asyncpg.Connection | None = None,
+) -> bool:
+    """Clear the task's outcome before it runs again.
+
+    Planned anew, its steps, its plan, its Planner's session, its Planner's
+    choices of Agent Profile and the roles its Planner defined go; continuing its
+    plan (``keep_steps``), they stay. ``expected_status`` claims the row only while
+    it still has that status, in the caller's transaction when one is already open.
+    ``notify`` runs the task-end listeners; a caller that still holds the row passes
+    False and runs them after committing.
+    """
+    pool = pool or get_pool()
+    if expected_status is None:
+        if not keep_steps:
+            async with pool.acquire() as conn, conn.transaction():
+                await _clear_restart_plan(conn, task_id)
+        result = await pool.execute(_RESET_FOR_RESTART, task_id)
+        if notify:
+            await _task_ended(task_id)  # the previous attempt's explorers end with it, however briefly it is `pending`
+        return result == "UPDATE 1"
+
+    async with _connection(pool) as conn:
+        own = not conn.is_in_transaction()
+        async with conn.transaction() if own else nullcontext():
+            current = await conn.fetchval(
+                "SELECT status FROM tasks WHERE id = $1 FOR NO KEY UPDATE", task_id)
+            if current != expected_status:
+                updated = False
+            else:
+                if not keep_steps:
+                    await _clear_restart_plan(conn, task_id)
+                result = await conn.execute(_RESET_FOR_RESTART + " AND status = $2", task_id, expected_status)
+                updated = result == "UPDATE 1"
+        if updated and notify and own:
+            await _task_ended(task_id)
+        return updated
 
 
 async def start_ready_task(task_id: str, *, pool: asyncpg.Pool | None = None) -> dict[str, Any] | None:

@@ -459,5 +459,6 @@
  "workspaces.discard": "inside",
  "tasks.create_draft": "inside",
  "task_conversations.get": "inside",
- "task_conversations.update": "inside"
+ "task_conversations.update": "inside",
+ "tasks.done": "inside"
 }

@@ -820,6 +820,19 @@ async def branch_exists(repo_dir: str, branch: str) -> bool:
     return run.returncode == 0
 
 
+async def branch_checked_out(repo_dir: str, branch: str) -> bool:
+    """Whether a worktree has ``branch`` checked out (an exact ``branch refs/heads/…`` porcelain line).
+
+    A failure is raised: treating it as free would let a caller add another worktree of the same branch.
+    """
+    run = await _git(repo_dir, "worktree", "list", "--porcelain", check=False)
+    if run.returncode != 0:
+        detail = (run.stderr or run.stdout).decode("utf-8", "replace").strip()[:500]
+        raise GitError(f"git worktree list failed: {detail or f'exit {run.returncode}'}")
+    needle = f"branch refs/heads/{branch}"
+    return any(line == needle for line in run.text.splitlines())
+
+
 def undo_commands(task_id: str, *, start_branch: str, start_commit: str,
                   merged: Sequence[tuple[str, str]]) -> list[dict[str, str]]:
     """The commands, run in the task directory, that undo what the task did to its branch (the RFC's section 8):
