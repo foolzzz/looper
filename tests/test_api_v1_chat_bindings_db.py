@@ -52,7 +52,7 @@ def _run(test, monkeypatch):
 
 
 @asynccontextmanager
-async def _api(tmp_path, pool, *, registry=True, listen=True):
+async def _api(tmp_path, pool, *, registry=True, listen=True, managers=None, confirm_binding=True):
     _, token = await api_clients.create("Routing validation", pool=pool)
     bus = MessageBus(runtime_root=tmp_path)
     channels = ChannelRegistry(bus) if registry else None
@@ -60,12 +60,17 @@ async def _api(tmp_path, pool, *, registry=True, listen=True):
         channels.bindings_changed(BOT, await routing.load_snapshot(BOT))
     async with _serving(tmp_path, listen=listen) as server:
         server._channels = channels
+        if managers is not None:
+            server._managers = SimpleNamespace(get=managers.get)
         server._client_ops = ClientOps(Platform(bus=bus, task_router=server._task_router, runtime_root=tmp_path))
 
-        async def call(operation, body=None, *, client=False):
+        async def call(operation, body=None, *, client=False, session="routing"):
             path = "/api/v1/" + operation.replace(".", "/")
             status, _, answer = await _send(server, "POST " + path, {
-                **_bearer(token if client else TOKEN), "X-Looper-Session": "routing"}, json.dumps(body or {}))
+                **_bearer(token if client else TOKEN), "X-Looper-Session": session}, json.dumps(body or {}))
+            if (confirm_binding and operation == "manager_chat_bindings.put" and status == 202
+                    and "default_scope" not in (body or {}) and "Anyone in this chat" not in answer.get("impact", "")):
+                status, answer = await call("confirm", {"confirmation_id": answer["confirmation_id"]}, client=client, session=session)
             if status == 200 and operation != "confirm":
                 api_v1.validate_arguments({"type": "object", "properties": {
                     "result": api_v1.find("POST", path).result}}, {"result": answer["result"]})
@@ -107,7 +112,9 @@ def test_binding_crud_filters_and_idempotency_have_closed_enriched_readback(tmp_
             first = answer["result"]["binding"]
             assert first == {**_binding(), "created_at": first["created_at"], "channel_type": "telegram",
                 "bot_name": "Example bot", "chat_name": None, "manager_name": "Review",
-                "manager_enabled": True, "manager_deleted": False, "allowed_senders": [], "sender_policy": "listed"}
+                "manager_enabled": True, "manager_deleted": False, "allowed_senders": [], "sender_policy": "listed",
+                "default_scope": None, "effective_default_scope": "chat_only", "legacy_allowed": False,
+                "suggested_scope": None}
             assert (await call("manager_chat_bindings.put", _binding()))[1]["result"]["binding"] == first
             for filters in ({}, {"channel_id": BOT}, {"manager_id": TARGET},
                             {"channel_id": BOT, "manager_id": TARGET}):
@@ -409,6 +416,9 @@ def test_tcp_disconnect_during_commit_still_publishes_before_next_http_write(tmp
         async with _serving(tmp_path, listen=True) as server:
             server._channels = registry
             server._client_ops = ClientOps(Platform(bus=None, task_router=server._task_router, runtime_root=tmp_path))
+            status, _, pending = await _send(server, "POST /api/v1/manager_chat_bindings/put",
+                                            _bearer(TOKEN), json.dumps(_binding()))
+            assert status == 202, pending
             entered, release = asyncio.Event(), asyncio.Event()
             waiting = _watch_contention(registry, monkeypatch)
             original = asyncpg.transaction.Transaction.commit
@@ -422,8 +432,8 @@ def test_tcp_disconnect_during_commit_still_publishes_before_next_http_write(tmp
             monkeypatch.setattr(asyncpg.transaction.Transaction, "commit", commit)
             _, writer = await asyncio.open_connection("127.0.0.1", server._port)
             try:
-                writer.write(_request(server._port, "POST /api/v1/manager_chat_bindings/put",
-                                      _bearer(TOKEN), json.dumps(_binding())).encode())
+                writer.write(_request(server._port, "POST /api/v1/confirm", _bearer(TOKEN),
+                                      json.dumps({"confirmation_id": pending["confirmation_id"]})).encode())
                 await writer.drain()
                 await entered.wait()
                 writer.close()
@@ -808,7 +818,8 @@ def test_tools_upgrade_rechecks_open_chats_when_confirmed(tmp_path, monkeypatch)
             assert (await call("manager_chat_bindings.put", _policy_binding()))[0] == 200
             status, pending = await call("managers.update", {"manager_id": TARGET, "fields": {"tools": "all"}})
             assert status == 202, pending
-            assert (await call("manager_chat_bindings.put", {**_policy_binding(), "chat_id": "oc_another"}))[0] == 200
+            assert (await call("manager_chat_bindings.put", {**_policy_binding(), "chat_id": "oc_another"},
+                               session="routing-other"))[0] == 200
             status, refused = await call("confirm", {"confirmation_id": pending["confirmation_id"]})
             assert status == 409 and refused["error"]["code"] == "conflict", refused
             assert await pool.fetchval("SELECT tools FROM managers WHERE id = $1", TARGET) == "tasks"
