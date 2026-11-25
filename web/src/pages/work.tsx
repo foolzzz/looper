@@ -269,7 +269,12 @@ function WorkPageContent({
         className={wide ? "min-h-0 w-72 shrink-0 overflow-y-auto border-l border-border"
           : "fixed inset-0 z-50 overflow-y-auto bg-background"}>
         {!wide && <div className="border-b border-border p-3"><Button variant="outline" onClick={closePanel}>关闭任务详情</Button></div>}
-        <WorkTaskManagerModel mode="task" taskId={taskId} />
+        <WorkTaskManagerModel
+          mode="task"
+          taskId={taskId}
+          snapshot={null}
+          onReread={() => Promise.reject(new Error("task manager profile read is not available"))}
+        />
         <WorkSteps task={selected} onOpenGate={step => openGate(step.step_key)} />
         <WorkGates task={selected} onOpenGate={openGate} />
       </aside>}
