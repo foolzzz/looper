@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { ChatComposer } from "@/components/chat-composer";
-import { Markdown } from "@/components/markdown";
+import { WorkActivityFeed, WorkMessageRow, type WorkFeedRecord } from "@/components/work-activity-feed";
 import { Button } from "@/components/ui/button";
 import {
   fetchChatMessages,
@@ -8,20 +8,23 @@ import {
   type ChatTarget,
   type DbChatMessage,
   type SSEEvent,
+  type TaskDetail,
+  type UserGate,
 } from "@/lib/api";
 import { historyFrom, joinStaged, pullBack } from "@/lib/composer";
 import { randomId } from "@/lib/ids";
 import { useReplyStream } from "@/lib/use-reply-stream";
+import { useWorkManagerConversation } from "@/lib/use-work-manager-conversation";
 import { errorText } from "@/lib/use-action";
-import { cn } from "@/lib/utils";
 
-/** Who the pane is talking as. Manager stays a link until its own adapter exists. */
-export type WorkIdentity = { kind: "manager" } | { kind: "planner"; taskId: string };
+/** The owner of the conversation shown in the pane. */
+export type WorkIdentity = { kind: "manager"; sessionId?: string } | { kind: "planner"; taskId: string };
 
 export interface WorkPaneMessage {
   id: string;
   role: string;
   content: string;
+  created_at?: string;
   streaming?: boolean;
   outcome?: string;
 }
@@ -41,9 +44,13 @@ export interface WorkConversationProps {
   refusal?: string;
   detail?: WorkConversationDetail | null;
   messages: WorkPaneMessage[];
+  task?: TaskDetail;
+  onGateChanged?: (gate: UserGate) => void;
+  records?: WorkFeedRecord[];
   events?: SSEEvent[];
   history: "loading" | "empty" | "ready" | "error";
   historyError?: string;
+  loadingText?: string;
   onRetry?: () => void;
   phase?: string;
   replying?: boolean;
@@ -56,6 +63,7 @@ export interface WorkConversationProps {
   onStop?: () => void;
   notice?: string;
   canStop?: boolean;
+  stopRefusal?: string;
 }
 
 const RECENT = "仅显示最近的对话";
@@ -147,6 +155,7 @@ function fromDb(rows: DbChatMessage[]): WorkPaneMessage[] {
     id: row.message_id,
     role: row.role,
     content: row.content,
+    created_at: row.created_at,
   }));
 }
 
@@ -185,54 +194,17 @@ function sendFailure(error: unknown): string {
   return error.message;
 }
 
-function MessageList({ messages }: { messages: WorkPaneMessage[] }) {
-  return (
-    <>
-      {messages.map((message) => {
-        const known = message.role === "user" || message.role === "assistant";
-        return (
-          <div
-            key={message.id}
-            data-message-id={message.id}
-            data-role={message.role}
-            className={cn("flex", message.role === "user" ? "justify-end" : "justify-start")}
-          >
-            <div
-              className={cn(
-                "min-w-0 max-w-[85%] rounded-lg px-4 py-2.5 text-sm [overflow-wrap:anywhere]",
-                message.role === "user" ? "border border-border bg-card text-card-foreground"
-                  : known ? "bg-muted text-foreground"
-                    : "text-muted-foreground",
-              )}
-            >
-              {message.role === "assistant" ? (
-                <Markdown>{message.content}</Markdown>
-              ) : (
-                <p className="whitespace-pre-wrap">{message.content}</p>
-              )}
-              {message.outcome === "stopped" && (
-                <p className="mt-1.5 text-xs text-muted-foreground">Stopped</p>
-              )}
-            </div>
-          </div>
-        );
-      })}
-    </>
-  );
-}
-
 /**
  * The Work centre pane. An adapter supplies identity, whether sending is allowed,
- * the shared task, stream events and the send/stop callbacks. Manager renders nothing:
- * the page keeps the Chat link.
+ * the shared task, stream events and the send/stop callbacks.
  */
 export function WorkConversation(props: WorkConversationProps) {
   const {
-    identity, missing, canSend, refusal, detail, messages, events, history, historyError, onRetry,
-    phase, replying, draft, onDraft, staged, onStaged, inputHistory, onSend, onStop, notice, canStop,
+    identity, missing, canSend, refusal, detail, messages, events, history, historyError, loadingText, onRetry,
+    phase, replying, draft, onDraft, staged, onStaged, inputHistory, onSend, onStop, notice, canStop, stopRefusal,
   } = props;
-  if (identity.kind === "manager") return null;
-  if (missing) return <p role="status" data-identity={`planner:${identity.taskId}`}>{NOT_FOUND}</p>;
+  const ownerKey = identity.kind === "manager" ? `manager:${identity.sessionId ?? ""}` : `planner:${identity.taskId}`;
+  if (missing) return <p role="status" data-identity={ownerKey}>{NOT_FOUND}</p>;
 
   const folded = foldStream(messages, events ?? []);
   const shownPhase = phase || folded.phase;
@@ -242,12 +214,12 @@ export function WorkConversation(props: WorkConversationProps) {
   return (
     <section
       aria-label="Conversation"
-      data-identity={`planner:${identity.taskId}`}
+      data-identity={ownerKey}
       data-task-status={detail?.status ?? ""}
       className="flex h-full min-h-0 flex-1 flex-col"
     >
       <div className="flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto p-4">
-        {history === "loading" && shown.length === 0 && <p role="status">{LOADING}</p>}
+        {history === "loading" && shown.length === 0 && <p role="status">{loadingText ?? LOADING}</p>}
         {history === "error" && (
           <p role="alert" className="flex flex-wrap items-center gap-2 text-sm text-destructive">
             <span>{READ_FAILED} {historyError}</span>
@@ -256,13 +228,15 @@ export function WorkConversation(props: WorkConversationProps) {
         )}
         {loaded && <p className="text-center text-xs text-muted-foreground">{RECENT}</p>}
         {loaded && shown.length === 0 && <p role="status">{EMPTY}</p>}
-        {(history !== "error" || shown.length > 0) && <MessageList messages={shown} />}
+        {props.task ? <WorkActivityFeed identity={identity} task={props.task} messages={shown}
+          onGateChanged={props.onGateChanged} records={props.records} />
+          : (history !== "error" || shown.length > 0) && shown.map(message => <WorkMessageRow key={message.id} message={message} />)}
       </div>
       <div className="shrink-0 space-y-2 border-t border-border p-4">
         {refusal && <p role="status" className="text-xs text-muted-foreground">{refusal}</p>}
         {shownPhase && <p role="status" data-phase={shownPhase}>{shownPhase}</p>}
         <ChatComposer
-          key={identity.taskId}
+          key={ownerKey}
           draft={draft}
           onDraft={onDraft}
           staged={staged}
@@ -270,6 +244,7 @@ export function WorkConversation(props: WorkConversationProps) {
           history={inputHistory ?? historyFrom(shown)}
           replying={replying ?? false}
           canStop={canStop ?? false}
+          stopRefusal={stopRefusal}
           onSend={onSend}
           onStop={onStop ?? (() => {})}
           notice={notice}
@@ -281,6 +256,11 @@ export function WorkConversation(props: WorkConversationProps) {
   );
 }
 
+/** Manager adapter mounts only while the gated Work page selects Manager. */
+export function ManagerWorkConversation() {
+  return <WorkConversation {...useWorkManagerConversation()} />;
+}
+
 /**
  * Planner adapter for one selected task. The thread is `planner-<task id>` and the
  * send target is `{kind:'planner', task_id}`. There is no Stop and no turn poll.
@@ -288,10 +268,14 @@ export function WorkConversation(props: WorkConversationProps) {
 export function PlannerWorkConversation({
   taskId,
   detail = null,
+  task,
+  onGateChanged,
   missing = false,
 }: {
   taskId: string;
   detail?: WorkConversationDetail | null;
+  task?: TaskDetail;
+  onGateChanged?: (gate: UserGate) => void;
   missing?: boolean;
 }) {
   const identity: WorkIdentity = { kind: "planner", taskId };
@@ -446,6 +430,7 @@ export function PlannerWorkConversation({
     reply.cancel();
     const id = randomId();
     const assistantId = `${id}:reply`;
+    const created_at = new Date().toISOString();
     setLive((current) => ({
       ...current,
       taskId,
@@ -455,8 +440,8 @@ export function PlannerWorkConversation({
       replying: true,
       messages: [
         ...current.messages,
-        { id, role: "user", content: text },
-        { id: assistantId, role: "assistant", content: "", streaming: true },
+        { id, role: "user", content: text, created_at },
+        { id: assistantId, role: "assistant", content: "", streaming: true, created_at },
       ],
     }));
     const still = { current: () => false };
@@ -538,6 +523,8 @@ export function PlannerWorkConversation({
       canSend={availabilityView.canSend && !missing}
       refusal={availabilityView.reason || undefined}
       detail={detail}
+      task={task}
+      onGateChanged={onGateChanged}
       messages={view.messages}
       history={view.history}
       historyError={view.historyError}

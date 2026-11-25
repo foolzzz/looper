@@ -2,18 +2,34 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { WorkList } from "@/components/work-list";
 import { WorkSwitcher } from "@/components/work-switcher";
-import { fetchTaskDetail, TaskDetailError, type TaskDetail, type TaskStep } from "@/lib/api";
+import { fetchTaskDetail, isActiveTask, TaskDetailError, type TaskDetail, type TaskStep, type UserGate } from "@/lib/api";
 import { WorkSteps } from "@/components/work-steps";
-import { gateAnchor } from "@/lib/gates";
+import { openWorkGate } from "@/components/work-activity-feed";
+import { startPolling } from "@/lib/polling";
 import { callV1, V1Error } from "@/lib/v1";
 import { errorText } from "@/lib/use-action";
-import { PlannerWorkConversation } from "@/components/work-conversation";
+import { ManagerWorkConversation, PlannerWorkConversation } from "@/components/work-conversation";
 import { TaskStatusMark } from "@/pages/tasks";
 import { isMissingOperation, markSeen, taskTitle, workSelection, workStorage } from "@/lib/work";
 
 const LINK = "text-sm text-primary underline-offset-2 hover:underline focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring";
 
-/** Centre is the selected task and its Planner conversation. Manager stays a link to Chat. */
+/** Below this height a stacked Work column cannot reserve a composer and a 40dvh plan without one painting over the other. */
+const SHORT_COLUMN = "(max-height: 32rem) and (max-width: 1023px)";
+
+function useMedia(query: string): boolean {
+  const [matches, setMatches] = useState(() => window.matchMedia(query).matches);
+  useEffect(() => {
+    const media = window.matchMedia(query);
+    const onChange = () => setMatches(media.matches);
+    onChange();
+    media.addEventListener("change", onChange);
+    return () => media.removeEventListener("change", onChange);
+  }, [query]);
+  return matches;
+}
+
+/** Centre is the default Manager or the selected task’s Planner conversation. */
 export function WorkPage({
   sub,
   onNavigate,
@@ -30,6 +46,7 @@ export function WorkPage({
   const seen = useRef("");
   const restored = useRef(false);
   const onFinder = useCallback((available: boolean) => setFinder(available), []);
+  const shortColumn = useMedia(SHORT_COLUMN);
 
   // A bare #work restores the last selection. #work/manager and #work/task/… win over storage.
   useEffect(() => {
@@ -46,6 +63,31 @@ export function WorkPage({
   const selection = explicit ?? { kind: "manager" as const };
   const taskId = selection.kind === "task" ? selection.taskId : "";
   const selected = detail.id === taskId ? detail.task : undefined;
+  const detailRevision = useRef(0);
+  // Gate replies already return the new gate. Update the one shared detail without remounting its editor.
+  const onGateChanged = useCallback((gate: UserGate) => {
+    detailRevision.current += 1;
+    setDetail(current => current.id !== taskId || !current.task ? current : {
+      ...current, task: { ...current.task, gates: current.task.gates?.map(item => item.step_id === gate.step_id ? gate : item) },
+    });
+  }, [taskId]);
+  const active = !!selected && isActiveTask(selected);
+  useEffect(() => {
+    if (!taskId || !active) return;
+    // One shared reader observes gates opened/closed by the Planner, not one poller per feed row.
+    return startPolling(async signal => {
+      const revision = detailRevision.current;
+      try {
+        const task = await fetchTaskDetail(taskId, signal);
+        if (signal.aborted || revision !== detailRevision.current) return;
+        setDetail(current => current.id === taskId ? { id: taskId, task } : current);
+        return !isActiveTask(task);
+      } catch (err) {
+        if (!signal.aborted && revision === detailRevision.current)
+          setDetail(current => current.id === taskId ? { ...current, error: errorText(err) } : current);
+      }
+    }, 2000);
+  }, [taskId, active]);
   useEffect(() => {
     if (!taskId) return;
     const ctrl = new AbortController();
@@ -77,13 +119,9 @@ export function WorkPage({
     workStorage.setSelection(selection.kind === "manager" ? "manager" : taskId);
   }, [sub, selection.kind, taskId]);
 
+  // The activity feed owns the only gate editor. This locates it; it does not mount another.
   const openGate = useCallback((step: TaskStep) => {
-    const place = document.getElementById(gateAnchor(step.step_key));
-    if (!place) return;
-    if (place instanceof HTMLDetailsElement) place.open = true;
-    place.scrollIntoView({ block: "start" });
-    const focus = place instanceof HTMLDetailsElement ? place.querySelector("summary") : place;
-    if (focus instanceof HTMLElement) focus.focus({ preventScroll: true });
+    openWorkGate(step.step_key);
   }, []);
 
   const openTask = useCallback((id: string) => {
@@ -129,18 +167,18 @@ export function WorkPage({
           onFind={openSwitcher}
         />
       </div>
-      <div className={`h-full min-h-0 min-w-0 flex-1 flex-col ${pane === "detail" ? "flex" : "hidden md:flex"}`}>
-        <div className="flex h-full min-h-0 flex-col">
+      <div className={`h-full min-h-0 min-w-0 flex-1 flex-col ${pane === "detail" ? "flex" : "hidden md:flex"} ${shortColumn ? "overflow-y-auto" : ""}`} data-work-scroll={shortColumn ? "" : undefined}>
+        <div className={shortColumn ? "flex h-auto min-h-full shrink-0 flex-col" : "flex h-full min-h-0 flex-col"}>
           <div className="shrink-0 border-b border-border p-3 md:hidden">
             <Button type="button" variant="outline" onClick={() => setPane("list")}>Back to the list</Button>
           </div>
           {selection.kind === "manager" ? (
-            <div className="min-h-0 flex-1 overflow-y-auto p-4">
-              <header aria-label="Selected task" className="space-y-3">
+            <>
+              <header aria-label="Selected task" className="shrink-0 border-b border-border p-4">
                 <h1 className="text-lg font-semibold">Manager</h1>
-                <a className={LINK} href="#chat">Open the Manager chat</a>
               </header>
-            </div>
+              <ManagerWorkConversation />
+            </>
           ) : !selected ? (
             <div className="min-h-0 flex-1 overflow-y-auto p-4">
               <header aria-label="Selected task" className="space-y-3">
@@ -156,12 +194,22 @@ export function WorkPage({
                 <TaskStatusMark status={selected.status} />
                 {selected.project_name && <p className="text-sm text-muted-foreground">{selected.project_name}</p>}
                 <a className={LINK} href={`#tasks/${encodeURIComponent(taskId)}`}>Open the task page</a>
+                {detail.error && <p role="alert" className="text-sm text-destructive">Task refresh failed: {detail.error}</p>}
               </header>
-              <div className="flex min-h-0 min-w-0 flex-1 flex-col lg:flex-row">
-                <div className="flex min-h-0 min-w-0 flex-1 flex-col">
-                  <PlannerWorkConversation key={taskId} taskId={taskId} detail={selected} />
+              <div
+                data-work-detail=""
+                data-layout={shortColumn ? "scroll" : "split"}
+                className={shortColumn ? "block" : "flex min-h-0 min-w-0 flex-1 flex-col lg:flex-row"}
+              >
+                <div className={shortColumn ? "work-short-conversation block" : "flex min-h-0 min-w-0 flex-1 flex-col"}>
+                  <PlannerWorkConversation key={taskId} taskId={taskId} detail={selected} task={selected} onGateChanged={onGateChanged} />
                 </div>
-                <div className="min-h-0 min-w-0 overflow-y-auto border-t border-border max-lg:max-h-[40dvh] lg:w-80 lg:shrink-0 lg:border-l lg:border-t-0">
+                <div
+                  data-work-steps-pane=""
+                  className={shortColumn
+                    ? "border-t border-border"
+                    : "min-h-0 min-w-0 overflow-y-auto border-t border-border max-lg:max-h-[40dvh] lg:w-80 lg:shrink-0 lg:border-l lg:border-t-0"}
+                >
                   <WorkSteps task={selected} onOpenGate={openGate} />
                 </div>
               </div>

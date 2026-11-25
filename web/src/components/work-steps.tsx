@@ -66,6 +66,8 @@ function KindMark({ kind }: { kind: string }) {
   );
 }
 
+const SUMMARY = "cursor-pointer focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring pointer-coarse:flex pointer-coarse:min-h-11 pointer-coarse:items-center";
+
 function ExpandableInstruction({ text }: { text: string }) {
   const long = text.length > PREVIEW || text.includes("\n");
   const body = "whitespace-pre-wrap break-words [overflow-wrap:anywhere]";
@@ -73,7 +75,7 @@ function ExpandableInstruction({ text }: { text: string }) {
   const preview = `${text.slice(0, PREVIEW).replace(/\s+/g, " ").trimEnd()}…`;
   return (
     <details data-instruction className="group mt-1 min-w-0">
-      <summary className="cursor-pointer text-sm focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring">
+      <summary className={`${SUMMARY} text-sm`}>
         <span className={body}>{preview}</span>
         <span className="ml-1 text-xs text-primary group-open:hidden">展开</span>
       </summary>
@@ -123,7 +125,7 @@ export function WorkSteps({ task, onOpenGate }: {
                   <ExpandableInstruction text={step.instruction ?? ""} />
                   {(step.acceptance_criteria ?? []).length > 0 && (
                     <details data-acceptance className="mt-1 min-w-0">
-                      <summary className="cursor-pointer text-xs text-muted-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring">验收</summary>
+                      <summary className={`${SUMMARY} text-xs text-muted-foreground`}>验收</summary>
                       <ol className="mt-1 list-decimal space-y-1 pl-4 text-sm">
                         {(step.acceptance_criteria ?? []).map((item, index) => (
                           <li key={index} className="whitespace-pre-wrap break-words [overflow-wrap:anywhere]">{item}</li>

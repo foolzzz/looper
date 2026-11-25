@@ -8840,6 +8840,25 @@ built by `scripts/stage-dashboard.sh` at release time), and it carries
 - **Activity SSE**: `GET /api/tasks/:id/activity/stream` — server-sent events from Worker subprocess
 - **Task polling**: 2-second interval with auto-stop on terminal status
 - **Chat SSE**: `POST /api/v1/operator_chat/reply_events` (`correlation_id`) and `POST /api/v1/operator_chat/thread_events` (`session_id`, optional `manager`) — real-time replies and autonomous thread messages; the `answer.final` of a Manager reply carries its `outcome` (`answered`, `failed`, `stopped` or `confirm`; absent reads as `answered`), which the page uses to send queued messages only after `answered`
+- **Work Manager conversation**: when the Work conversations switch is enabled, the pinned Manager uses
+  the default Manager's current `looper-chat-session-id` thread. A Manager-scoped history read must confirm
+  ownership before messages are shown, the thread is watched or sending is enabled. A foreign pointer starts
+  a new thread with the existing Chat notice; a failed read disables sending and offers Retry. Thread events
+  and reply events merge by message id, with saved replies replacing partial text. Stop uses Chat's setting
+  and the running turn's interrupt capability. Only an answered final drains staged text automatically;
+  other outcomes return it to the draft. A stream without a final follows the server turn, then re-reads history
+  and returns staged text to the draft. Leaving the pane cancels browser subscriptions and polls without
+  stopping the server. The existing Chat page and channel entry points keep their behavior.
+- **Work task activity**: the selected Planner's messages and task activity share one time-ordered feed,
+  ordered by timestamp, fixed source order and source id. Activity reads start with the latest window,
+  page backwards by the smallest loaded sequence and subscribe after that window's largest sequence;
+  overlapping reads and live events deduplicate by sequence. Read failures offer Retry. One `TaskGates`
+  instance uses the page's shared detail and updates it from gate replies. The page has one visibility-aware
+  detail reader while the task runs, so later gate openings and closures appear without a second editor;
+  replies invalidate older reads. Summaries can focus its existing
+  anchor with `openWorkGate`. Tool presentation records update by stable id and stay folded by default;
+  the task-thread adapter owns their decoding. Unknown activity and task events remain neutral text.
+
 
 ### Hash Routing
 

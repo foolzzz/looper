@@ -239,4 +239,42 @@ describe("WorkSteps", () => {
     expect(host.textContent).toContain("beta");
     expect(fetches).toEqual([]);
   });
+
+  it("gives instruction and acceptance summaries a 44px coarse target and toggles them from the keyboard", () => {
+    const dom = (window as unknown as { happyDOM: { settings: { navigator: { maxTouchPoints: number } } } }).happyDOM;
+    dom.settings.navigator.maxTouchPoints = 1;
+    const style = document.createElement("style");
+    style.textContent = "@media (pointer: coarse) { .pointer-coarse\\:min-h-11 { min-height: 44px; } }";
+    document.head.append(style);
+    const instruction = "核对退款终态\n" + "x".repeat(90);
+    show(task({
+      steps: [step({
+        id: "a", step_key: "refund", step_index: 0, instruction, acceptance_criteria: ["保持原文"],
+      })],
+    }));
+    const boxes = [...host.querySelectorAll("[data-instruction] summary, [data-acceptance] summary")] as HTMLElement[];
+    expect(boxes).toHaveLength(2);
+    expect(boxes.map((box) => box.textContent)).toEqual([expect.stringContaining("展开"), "验收"]);
+    for (const summary of boxes) {
+      expect(summary.className).toContain("pointer-coarse:min-h-11");
+      const minHeight = parseFloat(window.getComputedStyle(summary).minHeight);
+      expect(minHeight).toBeGreaterThanOrEqual(44);
+      const details = summary.parentElement as HTMLDetailsElement;
+      expect(details.open).toBe(false);
+      summary.focus();
+      expect(document.activeElement).toBe(summary);
+      for (const key of ["Enter", " "] as const) {
+        const down = new KeyboardEvent("keydown", { key, bubbles: true, cancelable: true });
+        summary.dispatchEvent(down);
+        expect(down.defaultPrevented).toBe(false);
+      }
+      // Enter and Space activate a summary through a click. happy-dom toggles <details> on that click.
+      summary.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
+      expect(details.open).toBe(true);
+      summary.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
+      expect(details.open).toBe(false);
+    }
+    style.remove();
+    dom.settings.navigator.maxTouchPoints = 0;
+  });
 });
