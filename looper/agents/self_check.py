@@ -44,6 +44,7 @@ from typing import TYPE_CHECKING, Any, Literal
 from .. import child_env
 from ..ops_config import OpsConfig
 from . import db_backup
+from .log_redaction import redact_diagnostic
 
 if TYPE_CHECKING:
     from .runtimes import coco_login, cursor_login, grok_login
@@ -87,6 +88,12 @@ class Check:
     status: CheckStatus
     detail: str
     fix: str = ""
+
+    def __post_init__(self) -> None:
+        # Sanitize before either direct display or serialization (including refreshed checks).
+        if self.id in CLAUDE_CHECK_IDS or self.id in LOGIN_CHECKS:
+            object.__setattr__(self, "detail", redact_diagnostic(self.detail))
+            object.__setattr__(self, "fix", redact_diagnostic(self.fix))
 
     def to_dict(self) -> dict[str, str]:
         return asdict(self)
