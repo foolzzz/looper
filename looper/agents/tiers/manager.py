@@ -1759,8 +1759,6 @@ class ManagerAgent:
             quote_ref = lark_quote.QuoteRef.from_payload(envelope.payload.get("quote_ref"))
             if not text.strip() and quote_ref is None:  # a bare forward or @-mention under a message is answered
                 return Prepared()
-            # Read here, in the message's turn: in order, stoppable, and again when a restart replays the message.
-            quoted = await token.step("read_quote", self._read_quote(envelope, quote_ref)) if quote_ref else None
             # Code-only replies do not claim the resident or replace its native tool binding.
             await token.keep("resident_settlement", self._settle_native_inputs(token), 60)
             origin = _message_origin(envelope)
@@ -1778,6 +1776,8 @@ class ManagerAgent:
             self._running_token = token
             await token.keep("persist_user_message", self._persist_user(envelope, text), 10)
             await token.step("status_thinking", self._send_status(envelope, "thinking", phase=True, activity="thinking"))
+            # Read after the status, in the message's turn: in order, stoppable, and again on restart replay.
+            quoted = await token.step("read_quote", self._read_quote(envelope, quote_ref)) if quote_ref else None
             # Claude can do nothing without Looper's tools, and might say it did: the user hears that they are down.
             problem = (await token.step("tools_probe", self._tools_problem())
                        if not (self._claude_runtime.in_process
