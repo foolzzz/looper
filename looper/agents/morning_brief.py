@@ -534,9 +534,9 @@ class MorningBriefService:
             return
         external: str | None = None
         try:
-            receipt = await self._registry.post(
-                channel_id, target(chat), text, idempotency_key=key, **turn_metrics.proactive_kwargs(
-                    turn_metrics.ProactiveSource.MORNING_BRIEF, dedupe_key=key))
+            with turn_metrics.proactive_send(turn_metrics.ProactiveSource.MORNING_BRIEF, dedupe_key=key):
+                receipt = await self._registry.post(
+                    channel_id, target(chat), text, idempotency_key=key)
             outcome, error = receipt.result, receipt.error
             external = receipt.external_ids[0] if receipt.external_ids else None
         except Exception as exc:

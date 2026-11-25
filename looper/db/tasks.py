@@ -16,6 +16,7 @@ import asyncpg
 
 from . import journal as db_journal
 from .connection import _connection, get_pool
+from .directories import canonical_directory
 
 logger = logging.getLogger(__name__)
 
@@ -257,15 +258,21 @@ async def create_task(
     pool = pool or get_pool()
     now = datetime.now(timezone.utc)
     config_json = _config_json(config)
+    # Real paths are what tasks.select compares. The stored text stays as the caller wrote it.
+    real_work, real_space = canonical_directory(work_dir), canonical_directory(workspace_dir)
+    origin_column = ", origin_session" if origin_session is not None else ""
+    origin_value = ", $28" if origin_session is not None else ""
+    real_values = "$29, $30" if origin_session is not None else "$28, $29"
     await pool.execute(
         f"""
         INSERT INTO tasks (id, requirement, goal_id, work_dir, project_id,
                            config, status, correlation_id, origin_channel_id, chat_id, original_user_text, title,
                            created_at, updated_at, schedule_id, budget_usd, chat_kind, chat_mention,
                            workspace_dir, workspace_mode, workspace_base, manager_id, template, origin_thread,
-                           client_id, origin_reply_route, workflow, chat_group{", origin_session" if origin_session is not None else ""})
+                           client_id, origin_reply_route, workflow, chat_group{origin_column},
+                           work_dir_real, workspace_dir_real)
         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $13, $14, $15, $16, $17, $18, $19, $20,
-                $21, $22::jsonb, $23, $24, $25::jsonb, $26::jsonb, $27{", $28" if origin_session is not None else ""})
+                $21, $22::jsonb, $23, $24, $25::jsonb, $26::jsonb, $27{origin_value}, {real_values})
         ON CONFLICT (id) DO NOTHING
         """,
         task_id, requirement, goal_id, work_dir, project_id,
@@ -276,6 +283,7 @@ async def create_task(
         json.dumps(dict(origin_reply_route)) if origin_reply_route is not None else None,
         json.dumps(dict(workflow)) if workflow is not None else None, chat_group,
         *([origin_session] if origin_session is not None else []),
+        real_work, real_space,
     )
     return {"task_id": task_id, "created_at": now.isoformat()}
 
@@ -283,7 +291,9 @@ async def create_task(
 async def set_work_dir(task_id: str, work_dir: str, *, pool: asyncpg.Pool | None = None) -> None:
     """Where the task runs from now on: its worktree's task directory, once the worktree is made."""
     pool = pool or get_pool()
-    await pool.execute("UPDATE tasks SET work_dir = $2, updated_at = now() WHERE id = $1", task_id, work_dir)
+    await pool.execute(
+        "UPDATE tasks SET work_dir = $2, work_dir_real = $3, updated_at = now() WHERE id = $1",
+        task_id, work_dir, canonical_directory(work_dir))
 
 
 async def active_workspaces(*, besides: str | None = None,
@@ -694,6 +704,9 @@ async def update_task_config(
     if work_dir is not None:
         sets.append(f"work_dir = ${idx}")
         args.append(work_dir)
+        idx += 1
+        sets.append(f"work_dir_real = ${idx}")
+        args.append(canonical_directory(work_dir))
         idx += 1
     if config is not None:
         # Execution ownership is server metadata, retained under the same row

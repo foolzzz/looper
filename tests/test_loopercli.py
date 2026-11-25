@@ -1552,7 +1552,7 @@ def test_tasks_help_lists_operations_from_every_domain(cli: Run) -> None:
     code, out, err = cli("tasks", "--help")
     assert code == 0 and err == ""
     expected = {op.operation_id.partition(".")[2].replace("_", "-")
-                for op in api_v1.operations() if op.operation_id.startswith("tasks.") and not op.hand}
+                for op in api_v1.operations() if op.operation_id.startswith("tasks.") and not op.hand and op.cli}
     assert "delete" in expected
     listed = set(re.findall(r"^    ([a-z][a-z-]*)\s", out, re.MULTILINE))
     assert expected <= listed

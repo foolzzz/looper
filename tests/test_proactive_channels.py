@@ -12,6 +12,80 @@ from looper.agents.channels.registry import ChannelRegistry
 from looper.agents.task_notice import NotifyTarget, TargetKind
 
 
+@pytest.mark.parametrize("method", ["notify", "post", "post_card"])
+@pytest.mark.parametrize("metrics", [False, True])
+def test_proactive_context_preserves_legacy_callers_and_transport_json(monkeypatch, tmp_path, method, metrics):
+    import json
+    from looper.agents import chat_settings, turn_metrics
+
+    monkeypatch.setattr(chat_settings, "_metrics_enabled", metrics)
+
+    async def run():
+        stored, recorded, wire = [], [], []
+
+        async def capture(ref, text, **kwargs):
+            stored.append((ref, text, kwargs))
+
+        async def transport(*args, **kwargs):
+            wire.append(json.dumps(kwargs))
+            return (DeliveryReceipt("lark", True) if method == "notify" else PostReceipt(True))
+
+        monkeypatch.setattr("looper.agents.channels.registry.store_body", capture)
+        monkeypatch.setattr(turn_metrics, "record_proactive", lambda ref, **kw: recorded.append(ref))
+        registry = ChannelRegistry(MessageBus(tmp_path))
+        registry._channels["channel-lark"] = SimpleNamespace(**{method: transport})
+        target = "synthetic-chat" if method == "notify" else NotifyTarget(TargetKind.CHAT, "synthetic-chat")
+        body = SimpleNamespace(text="message") if method == "post_card" else "message"
+
+        # A pre-existing wrapper accepts only transport arguments, with no observation keyword.
+        async def legacy_sender(channel, target, body):
+            return await getattr(registry, method)(channel, target, body)
+
+        with turn_metrics.proactive_send(turn_metrics.ProactiveSource.SCHEDULE, "synthetic-run", group=True):
+            await legacy_sender("channel-lark", target, body)
+        await legacy_sender("channel-lark", target, body)
+        assert stored[0][0] == turn_metrics.ProactiveRef(turn_metrics.ProactiveSource.SCHEDULE, "synthetic-run")
+        assert stored[1][0] is None
+        assert stored[0][2]["group"] is (method == "notify")
+        assert recorded == [stored[0][0]]
+        assert len(wire) == 2 and all("proactive" not in value for value in wire)
+
+    asyncio.run(run())
+
+
+def test_proactive_context_is_nested_task_local_and_cleared_after_cancellation():
+    from looper.agents import turn_metrics
+
+    async def run():
+        entered = asyncio.Event()
+        observed = []
+
+        async def sending():
+            try:
+                with turn_metrics.proactive_send(turn_metrics.ProactiveSource.INTENT, "child", group=True):
+                    observed.append(turn_metrics.current_proactive())
+                    entered.set()
+                    await asyncio.Event().wait()
+            finally:
+                observed.append(turn_metrics.current_proactive())
+
+        with turn_metrics.proactive_send(turn_metrics.ProactiveSource.SCHEDULE, "parent"):
+            parent = turn_metrics.current_proactive()
+            with turn_metrics.proactive_send(turn_metrics.ProactiveSource.GATE, "nested"):
+                assert turn_metrics.current_proactive()[0].source_ref == "nested"
+            task = asyncio.create_task(sending())
+            await entered.wait()
+            assert turn_metrics.current_proactive() == parent
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+            assert turn_metrics.current_proactive() == parent
+            assert observed == [(turn_metrics.ProactiveRef(turn_metrics.ProactiveSource.INTENT, "child"), True), parent]
+        assert turn_metrics.current_proactive() == (None, False)
+
+    asyncio.run(run())
+
+
 @pytest.mark.parametrize("method", ["post", "post_card"])
 def test_registry_records_post_before_returning_its_receipt(monkeypatch, tmp_path, method):
     async def run():
@@ -26,8 +100,10 @@ def test_registry_records_post_before_returning_its_receipt(monkeypatch, tmp_pat
         target = NotifyTarget(TargetKind.CHAT, "oc_synthetic", group=True)
         body = "question" if method == "post" else SimpleNamespace(text="question")
         assert await getattr(registry, method)("channel-lark", target, body, proactive=ref) is receipt
+        record_key = calls[0][1]["dedupe_key"]
+        assert isinstance(record_key, str) and record_key
         assert calls == [(ref, {"channel_id": "channel-lark", "chat": "oc_synthetic", "group": True,
-                                "external_id": "message-a", "outcome": "sent", "dedupe_key": None})]
+                                "external_id": "message-a", "outcome": "sent", "dedupe_key": record_key})]
         await getattr(registry, method)("channel-lark", target, body)
         assert len(calls) == 1
 

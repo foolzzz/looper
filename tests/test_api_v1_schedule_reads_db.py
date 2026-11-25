@@ -38,12 +38,12 @@ async def _api(tmp_path, pool):
         yield call
 
 
-async def _seed(pool):
+async def _seed(pool, *, now=None):
     project = await projects.create_project(name="Example", work_dir="/srv/example")
     view = (await schedules.create_schedule(project["id"], {"name": "Hourly", "cron": "0 * * * *",
         "timezone": "UTC", "requirement": "Read the project reports. " * 100}))["schedule"]
     sid = view["schedule_id"]
-    now = datetime.now(timezone.utc)
+    now = now if now is not None else datetime.now(timezone.utc)
     await pool.execute("INSERT INTO tasks (id, project_id, title, requirement, work_dir, status) "
                        "VALUES ('task-example', $1, 'Latest report', 'Read reports', '/srv/example', 'completed')", project["id"])
     run_id = await db_schedules.insert_run(pool, schedule_id=sid, scheduled_for=now, fired_at=now,
@@ -56,9 +56,9 @@ async def _seed(pool):
 
 
 @pytest.mark.parametrize("client", [True, False])
-def test_full_list_get_and_project_limits_keep_requirement_spend_and_session(tmp_path, monkeypatch, client):
+def test_full_list_get_and_project_limits_keep_requirement_spend_and_session(tmp_path, monkeypatch, client, fixed_clock):
     async def run(pool):
-        pid, sid, _ = await _seed(pool)
+        pid, sid, _ = await _seed(pool, now=fixed_clock())
         async with _api(tmp_path, pool) as call:
             for action, body in (("list", {}), ("get", {"schedule_id": sid}), ("project_list", {"project_id": pid})):
                 status, result = await call(action, body, client=client)

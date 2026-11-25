@@ -158,11 +158,12 @@ def find_dumper(server_major: int | None, ops: OpsConfig | None = None) -> Dumpe
     verify, verify_label = _verifier(command, ops.backup_verify_command if ops else (), ops)
     if command:
         # The program only: its arguments can hold a password (docker exec -e PGPASSWORD=...).
-        return Dumper(command, True, f"{ops.sources['backup_command']}: {command[0]} … (version not checked)",
+        source = ops.sources.get("backup_command", "backup.command")
+        return Dumper(command, True, f"{source}: {command[0]} … (version not checked)",
                       verify, verify_label)
     program = shutil.which(configured or "pg_dump")
     if program is None:
-        raise NoDumper(f"{ops.sources['pg_dump']} names {configured}, which is not an executable" if configured
+        raise NoDumper(f"{ops.sources.get('pg_dump', 'backup.pg_dump')} names {configured}, which is not an executable" if configured
                        else "`pg_dump` is not on PATH")
     try:
         version = subprocess.run([program, "--version"], capture_output=True, text=True, env=child_env.backup(),
@@ -223,8 +224,9 @@ def _verifier(command: tuple[str, ...], explicit: tuple[str, ...], ops: OpsConfi
     """The command that lists the dump from stdin and how the result names it; ((), "") for the local pg_restore."""
     if explicit:
         # The program only, like the dump command: its arguments can hold a password.
-        source = ops.sources["backup_verify_command"]
-        return explicit, f"{explicit[0]} … ({'backup.verify_command' if source.origin is Origin.FILE else source})"
+        source = ops.sources.get("backup_verify_command")
+        label = "backup.verify_command" if source is None or source.origin is Origin.FILE else str(source)
+        return explicit, f"{explicit[0]} … ({label})"
     container = docker_exec_container(command)
     if container is None:
         return (), ""

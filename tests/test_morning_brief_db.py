@@ -1011,12 +1011,11 @@ def test_delivery_on_records_the_receipt_on_the_decision_row(monkeypatch: pytest
         key = f"morning_brief:{MONDAY.date().isoformat()}:channel-lark:{OP}"
         (post,) = channel.posts
         assert post["key"] == key
-        assert post["proactive"].source.value == "morning_brief"
-        assert post["proactive"].dedupe_key == key
-        rows = await pool.fetch("SELECT dedupe_key, decision, outcome, external_id, sent_at IS NOT NULL AS sent "
+        rows = await pool.fetch("SELECT dedupe_key, source, decision, outcome, external_id, sent_at IS NOT NULL AS sent "
                                 "FROM proactive_deliveries")
         assert [dict(row) for row in rows] == [
-            {"dedupe_key": key, "decision": "send", "outcome": "sent", "external_id": "om_1", "sent": True}]
+            {"dedupe_key": key, "source": "morning_brief", "decision": "send", "outcome": "sent",
+             "external_id": "om_1", "sent": True}]
 
     run_with_channel_configs(test, monkeypatch)
 
@@ -1050,10 +1049,11 @@ def test_a_successful_retry_replaces_a_rejected_receipt_when_metrics_are_off(
         service = _service(channel, MONDAY)
         await service.run_once()
         key = f"morning_brief:{MONDAY.date().isoformat()}:channel-lark:{OP}"
-        assert channel.posts[0]["proactive"] is None and channel.posts[0]["key"] == key
+        assert channel.posts[0]["key"] == key
         rejected = await pool.fetchrow(
-            "SELECT decision, outcome, external_id FROM proactive_deliveries WHERE dedupe_key = $1", key)
-        assert dict(rejected) == {"decision": "send", "outcome": "rejected", "external_id": "om_rejected"}
+            "SELECT source, decision, outcome, external_id FROM proactive_deliveries WHERE dedupe_key = $1", key)
+        assert dict(rejected) == {"source": "morning_brief", "decision": "send", "outcome": "rejected",
+                                  "external_id": "om_rejected"}
         stale = datetime(2020, 1, 1, tzinfo=timezone.utc)
         await pool.execute("UPDATE proactive_deliveries SET sent_at = $1 WHERE dedupe_key = $2", stale, key)
         await service.run_once()
