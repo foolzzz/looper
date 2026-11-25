@@ -1,5 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
+import { ManagerWorkConversation, PlannerWorkConversation } from "@/components/work-conversation";
+import { WorkAttention } from "@/components/work-attention";
 import { WorkList } from "@/components/work-list";
 import { WorkSwitcher } from "@/components/work-switcher";
 import { WorkChanges } from "@/components/work-changes";
@@ -13,7 +15,6 @@ import { fetchTaskDetail, isActiveTask, TaskDetailError, type TaskDetail, type U
 import { startPolling } from "@/lib/polling";
 import { callV1, V1Error } from "@/lib/v1";
 import { errorText } from "@/lib/use-action";
-import { ManagerWorkConversation, PlannerWorkConversation } from "@/components/work-conversation";
 import { TaskStatusMark } from "@/pages/tasks";
 import { isMissingOperation, markSeen, taskTitle, workSelection, workStorage } from "@/lib/work";
 import { isGateShown } from "@/lib/gates";
@@ -47,7 +48,7 @@ function useMedia(query: string): boolean {
   return matches;
 }
 
-/** Centre is the default Manager or the selected task’s Planner conversation. */
+/** Centre shows the selected task’s Planner conversation, or Manager with the needs-you summary. */
 export function WorkPage({
   sub, onNavigate,
 }: { sub: string; onNavigate: (sub: string, replace?: boolean) => void }) {
@@ -245,6 +246,9 @@ function WorkPageContent({
     return () => window.removeEventListener("keydown", onKey);
   }, [finder, switcher, openSwitcher]);
 
+  const detailVisible = useMedia("(min-width: 768px)");
+  const showAttention = selection.kind === "manager" && (pane === "detail" || detailVisible);
+
   return (
     <div className="flex h-full min-h-0 w-full">
       <div inert={panel && !wide} className={`h-full min-h-0 w-full flex-col border-border md:flex md:w-80 md:shrink-0 md:border-r ${pane === "list" ? "flex" : "hidden"}`}>
@@ -257,8 +261,8 @@ function WorkPageContent({
           onFind={openSwitcher}
         />
       </div>
-      <div className={`h-full min-h-0 min-w-0 flex-1 flex-col ${pane === "detail" ? "flex" : "hidden md:flex"} ${shortColumn ? "overflow-y-auto" : ""}`} data-work-scroll={shortColumn ? "" : undefined}>
-        <div inert={panel && !wide} className={shortColumn ? "flex h-auto min-h-full shrink-0 flex-col" : "flex h-full min-h-0 flex-col"}>
+      <div className={`h-full min-h-0 min-w-0 flex-1 flex-col xl:flex-row ${pane === "detail" ? "flex" : "hidden md:flex"} ${shortColumn ? "overflow-y-auto" : ""}`} data-work-scroll={shortColumn ? "" : undefined}>
+        <div inert={panel && !wide} className={shortColumn && selection.kind === "task" ? "flex h-auto min-h-full shrink-0 flex-col" : "flex h-full min-h-0 min-w-0 flex-1 flex-col"}>
           <div className="shrink-0 border-b border-border p-3 md:hidden">
             <Button type="button" variant="outline" onClick={() => setPane("list")}>Back to the list</Button>
           </div>
@@ -296,6 +300,7 @@ function WorkPageContent({
             </>
           )}
         </div>
+        {showAttention && <WorkAttention />}
       </div>
       {selected && (wide || panel) && <aside ref={panelRef} aria-label="任务详情"
         role={wide ? undefined : "dialog"} aria-modal={wide ? undefined : true}
