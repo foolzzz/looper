@@ -96,7 +96,8 @@ def register(self: ManagerAgent, origin_kind: TurnOrigin, context: MessageEnvelo
 
     origin = _message_origin(context)
     try:
-        state["chat_record"] = _chat_record(context, context.correlation_id)
+        state["chat_record"] = _chat_record(context, context.correlation_id,
+                                           manager_session=self._session_now().key)
     except ValueError:
         state["chat_record"] = {}
     token = self._turns.receive(context, channel=origin["channel"] or "", chat=origin["chat"] or "",

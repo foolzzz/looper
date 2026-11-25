@@ -36,6 +36,33 @@ def _adapter(tmp_path: Path, profile: str = "", **kwargs: Any) -> LarkChannelAda
                               allowlist=SenderAllowlist("channel-lark", frozenset({OPEN_ID})), **kwargs)
 
 
+@pytest.mark.parametrize("sender_type,group,kind", [
+    ("user", True, "person"), ("app", True, "bot"), ("bot", True, "bot"), ("user", False, "person"),
+])
+def test_lark_sender_kind(tmp_path: Path, lark_cli_stand_in: Path, sender_type, group, kind) -> None:
+    world_file = tmp_path / "world.json"
+    world = json.loads(world_file.read_text())
+    world["events"] = [{"type": "im.message.receive_v1", "chat_id": "oc_synthetic",
+                        "chat_type": "group" if group else "p2p", "message_id": "om_synthetic",
+                        "message_type": "text", "sender_id": OPEN_ID, "sender_type": sender_type,
+                        "content": "hello", "mentions": [BOT_MENTION] if group else []}]
+    world_file.write_text(json.dumps(world))
+
+    async def body():
+        bus = MessageBus(runtime_root=tmp_path)
+        adapter = _adapter(tmp_path)
+        adapter._bus, adapter._running = bus, True
+        try:
+            await asyncio.wait_for(adapter._run_event_consumer(), 5)
+            (message,) = bus.journal.undelivered()
+            assert message.payload["channel_context"]["sender_kind"] == kind
+        finally:
+            await adapter.stop()
+            await bus.shutdown()
+
+    asyncio.run(body())
+
+
 @pytest.mark.parametrize("enabled,created", [(True, "1700000000123"), (True, None), (True, "invalid"), (False, "1700000000123")])
 def test_cli_ingress_timing_reads_stdout_without_additional_calls(
     tmp_path, lark_cli_stand_in, monkeypatch, caplog, enabled, created,
@@ -229,11 +256,12 @@ def test_direct_messages_and_group_mentions_of_the_bot_reach_the_manager(tmp_pat
     direct, group = messages
     assert direct.payload["text"] == "status please"
     assert direct.payload["channel_context"] == {"chat_id": "oc_dm", "chat_type": "p2p", "sender_id": OPEN_ID,
-                                                 "message_id": "om_9"}
+                                                 "message_id": "om_9", "sender_kind": "person"}
     # The @-mention is taken out; the Manager is told who wrote, by the name the contact search finds.
     assert group.payload["text"] == "what runs now?"
     assert group.payload["channel_context"] == {"chat_id": "oc_group", "chat_type": "group", "sender_id": OPEN_ID,
-                                                "message_id": "om_11", "sender_name": "Ada Lovelace"}
+                                                "message_id": "om_11", "sender_name": "Ada Lovelace",
+                                                "sender_kind": "person"}
     assert conversations == {direct.correlation_id: "oc_dm", group.correlation_id: "oc_group"}
     assert replies_to == {group.correlation_id: "om_11"}
     # The unlisted sender's @-mention: who and in which chat, never what; the other group messages: nothing.

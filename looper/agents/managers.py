@@ -31,6 +31,7 @@ from .tiers.manager import (
     ReplyOutcome, StopResult, default_definition, reply_envelope, stopped_reply,
 )
 from .tiers.turn_token import TurnToken
+from .tiers.manager_session import MAIN_SESSION
 
 logger = logging.getLogger(__name__)
 
@@ -508,7 +509,9 @@ class ManagerFleet:
             else:
                 # The stopped turn's final reply first: the chat waits for it, and settling alone ends no stream.
                 await bus.publish(reply_envelope(envelope, stopped_reply(partial, []), manager_address(manager_id),
-                                                 outcome=ReplyOutcome.STOPPED))
+                                                 outcome=ReplyOutcome.STOPPED,
+                                                 manager_session=agent.stopped_in_flight_sessions.get(
+                                                     envelope.message_id, MAIN_SESSION)))
                 bus.settle(envelope.message_id)  # a user message's token ended as stopped
         await self._deal_with(manager_id, taken)
         self._retiring.discard(manager_id)
@@ -518,7 +521,9 @@ class ManagerFleet:
         source = manager_address(manager_id)
         for envelope in taken:
             if envelope.message_type == MessageType.USER_MESSAGE:
-                await self._bus.publish(reply_envelope(envelope, TURNED_OFF_REPLY, source))
+                # No session has taken this queued message: the fleet answers on main.
+                await self._bus.publish(reply_envelope(envelope, TURNED_OFF_REPLY, source,
+                                                       manager_session=MAIN_SESSION))
                 self._bus.settle(envelope.message_id)
             elif envelope.message_type in _TASK_REPORTS:
                 await self._hand_over(envelope, manager_id)

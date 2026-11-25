@@ -21,13 +21,15 @@ import pytest
 
 from looper.agents import chat_settings, completion_events
 from looper.agents.claude_cli import ResidentTurn
+from looper.agents.channels.base import DeliveryReceipt
+from looper.agents.channels.chat_history import record_reply
 from looper.agents.message import (MANAGER_ADDRESS, TASK_ROUTER_ADDRESS, MessageEnvelope, MessageType,
                                    channel_address)
 from looper.agents.ops import Turn, TurnOrigin
 from looper.agents.run_usage import Usage
 from looper.agents.tiers.turn_token import TurnStopped
 from looper.agents.task_notice import Notice, NotifyChannel, NotifyTarget, TargetKind, web_end_text
-from looper.db import projects, tasks
+from looper.db import chat as db_chat, projects, tasks
 from tests.api_manager_support import USAGE, _manager
 from tests.db_support import DSN, run_db, until
 from tests.fake_model_api import ResponseScript, call_events, completed, call_item, text_events
@@ -163,6 +165,15 @@ def test_a_lark_direct_chat_gets_the_managers_message_as_the_notice_would_go(mon
             assert sent.payload == {**_dm_notice().payload(), "text": f"{REPLY}\n\n[/#tasks/t1](/#tasks/t1)"}
             record = sent.metadata["chat_record"]
             assert record["session_id"] == f"lark:{DM_CHAT}" and record["message_id"].startswith("completion-")
+            await record_reply("lark", sent, DeliveryReceipt(channel="lark", success=True))
+            stored = await pool.fetchrow("SELECT manager_session, sender_kind, sender_name FROM chat_messages")
+            own = await db_chat.activity_since(record["session_id"], after_id=0, exclude_session="main",
+                                               exclude_message_id=None, limit=10, pool=pool)
+            other = await db_chat.activity_since(record["session_id"], after_id=0, exclude_session="other",
+                                                 exclude_message_id=None, limit=10, pool=pool)
+            assert own.rows == [] and own.hidden == 0
+            assert [row["content"] for row in other.rows] == [sent.payload["text"]]
+            assert tuple(stored) == ("main", None, None)
             (row,) = await _events(pool)
             assert (row["target_kind"], row["state"]) == ("dm", "delivered")
             assert "Channel: a Lark direct message" in _input(chat.model.requests[0])

@@ -35,6 +35,7 @@ from .managers_api import DEFAULT_MANAGER_ID
 from .message import MessageEnvelope, MessageType, channel_thread_id, manager_address, parse_channel_id
 from .operator_identity import DmTarget, operator_dm_target
 from .reminders import target as notify_target
+from .session_routing import MAIN_KEY
 from .turn_metrics import ProactiveSource
 
 logger = logging.getLogger(__name__)
@@ -458,7 +459,7 @@ async def _remember(check: Mapping[str, Any], text: str, *, failure: str | None 
         await db_chat.save_channel_message(
             session_id=channel_thread_id(check["channel_id"], check["chat"], "manager", "manager"),
             message_id=f"idle-{check['id']}", role="assistant", content=text, channel=parsed.channel_type,
-            manager_id=MANAGER_ID, delivery_failure=failure)
+            manager_id=MANAGER_ID, manager_session=MAIN_KEY.text, delivery_failure=failure)
     except Exception:
         logger.warning("could not store idle check %s's message in the chat", check["id"], exc_info=True)
 
