@@ -159,6 +159,8 @@ class AgentType(str, Enum):
     EXPLORER = "explorer"
 
 
+# The task Manager has dedicated operator controls, outside shared role discovery.
+GLOBAL_ROLES = tuple(role for role in AgentType if role is not AgentType.TASK_MANAGER)
 TASK_ROLES = (AgentType.PLANNER, AgentType.WORKER, AgentType.REVIEWER)
 # The roles whose runs another run starts, with no tool (``spawn``, the advisor RFC): only their role layer chooses
 # their profile and environment (the shared defaults are for the roles with tools, and a project sets their limits in
@@ -1353,7 +1355,7 @@ async def settings_view() -> dict[str, Any]:
         "roles": {
             role.value: {"values": layers.get((Layer.ROLE, role), EMPTY_LAYER).view(),
                          "effective": _effective(role, layers)}
-            for role in AgentType
+            for role in GLOBAL_ROLES
         },
     }
 
