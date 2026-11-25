@@ -385,11 +385,15 @@ Manager has no tool for it. The dashboard shows the task page's 指标 card and 
   a missing, invalid or unreadable source logs a warning and yields no profile, without disabling other vault
   tools or returning a previously cached profile.
   The compiler preserves typed fields — name, address, reply language, time zone, working hours, communication
-  preferences and standing rules — with relative-path, heading and line citations. Inline `[kind:: …]` bullets
-  keep their existing classification and inactive-entry filtering. Frontmatter and fenced code are excluded;
+  preferences, standing rules and background facts (`about`) — with relative-path, heading and line citations.
+  Inline `[kind:: fact]` bullets compile under `About:`; `person`, `decision`, `commitment`, `request` and
+  `deadline` remain under `Standing rules:`, while `preference` and `habit` remain under `Communication:`.
+  Superseded and deleted entries, frontmatter and fenced code are excluded; unknown kinds are skipped;
   backticks are normalized. Duplicate single-value fields fail compilation. The text stays within 1500 Unicode
-  characters, dropping lower-priority fields first and truncating a remaining oversized field with `…`.
-  `profile.get` caches the compiled block in `profile_blocks`, retaining its version when the body is unchanged.
+  characters, dropping lower-priority fields first (`About:` before `Standing rules:`) and truncating a remaining
+  oversized value with `…`. Profiles without facts keep exactly the same compiled text.
+  `profile.get` caches the compiled block in `profile_blocks`, advancing its version only when the text changes;
+  citation and field metadata refreshes alone retain the version.
   Manager and CLI reads do not write that cache.
   The independent operator-only `profile_settings.get/update` operations control `manager.profile.enabled`
   (default off; null restores off). Settings → Knowledge vault exposes its confirmed switch. Off, the Manager
