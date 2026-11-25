@@ -4034,8 +4034,15 @@ the design is the [task workspaces RFC](rfcs/task-workspaces-v0.zh-CN.md)):
 - **At the end.** A completed task's leftovers are committed on its branch as
   Looper (never the links), its worktree is removed and the branch stays in
   the user's repository: the activity, the task page and the Telegram or Lark
-  end notice name it, and Looper never merges it. A stopped, failed or
-  cancelled task keeps its worktree as it is for its restart. Deleting a task
+  end notice name it, and Looper never merges it. Direct-mode completion
+  (`tasks.done`) finishes a worktree the same way. `reopen` rebuilds a removed
+  worktree only when its branch still exists and no other worktree has it
+  checked out; otherwise it returns the repository directory read-only
+  (`branch_gone` or `branch_checked_out`) and does not start a new branch. An
+  in-place directory that is gone is the nearest existing parent
+  (`workspace_missing`), and no directory is created. Reopening does not change
+  the task's status. A stopped, failed or cancelled task keeps its worktree as
+  it is for its restart. Deleting a task
   removes its step worktrees, commits its leftovers and removes its
   worktree, keeping the branch (409, and nothing deleted, when they cannot be
   committed). Starting over keeps the worktree and the branch. At startup the
@@ -8518,7 +8525,7 @@ Planner decides in a `[RESTART]` turn how the task goes on. Starting it over
 (`start_over`) plans it anew instead, with its steps, plan and Planner session
 deleted.
 
-**Status values**, by group (`looper/db/tasks.py` `STATUS_GROUPS`, the one place that groups them): needs you `waiting_user` (the Planner reports it while a user gate of the plan waits for the user, whatever else runs; [User gates](#user-gates)); in progress `pending` (started, its Planner starting), `assigned`, `running`, and the Planner's own `planning`, `executing`, `verifying` and `stopping`, which the TaskRouter stores; draft `draft` (created in work mode, never handed to the background; may have no requirement; can be deleted or started as `pending` once it has a requirement and directory); ready `init` (created from the dashboard or by the Manager, never started; the dashboard labels it "Ready — not started"); needs attention `failed` and `stopped`; `completed`; `cancelled`. A status no group knows counts as `other`, on the Dashboard and in `GET /api/tasks?group=other`, never dropped.
+**Status values**, by group (`looper/db/tasks.py` `STATUS_GROUPS`, the one place that groups them): needs you `waiting_user` (the Planner reports it while a user gate of the plan waits for the user, whatever else runs; [User gates](#user-gates)); in progress `pending` (started, its Planner starting), `assigned`, `running`, and the Planner's own `planning`, `executing`, `verifying` and `stopping`, which the TaskRouter stores; draft `draft` (created in work mode, never handed to the background; may have no requirement; can be deleted or started as `pending` once it has a requirement and directory); ready `init` (created from the dashboard or by the Manager, never started; the dashboard labels it "Ready — not started"); needs attention `failed` and `stopped`; `completed`; `cancelled`. A status no group knows counts as `other`, on the Dashboard and in `GET /api/tasks?group=other`, never dropped. Interaction mode is `interaction_mode(status)`, not a column and not a field of `tasks.detail`, `tasks.page` or the Manager's tools: `direct` for draft, ready (`init`), ended and any status outside `ACTIVE_STATUSES` (including one the grouping does not know), and `orchestrated` while the status is in `ACTIVE_STATUSES`.
 
 **Phase values** (finer-grained, set by planner): `pending`, `planning`, `executing`, `verifying`, `completed`, `failed`
 
@@ -9023,6 +9030,10 @@ workflow, template, schedule or rule. A draft gets a ledger item only when it st
 its requirement through `tasks.requirement_update` and start it through `task_control.start`;
 the Manager and API clients retain their ready-only start contract.
 
+`tasks.done` is operator-only and requires the same setting. It completes a task in direct mode. A worktree
+task's leftover work is committed on its branch, as a Planner completion does. It does not publish `GOAL_STATUS`,
+notify a channel, or call the task-end listener. A task the background is working on is refused.
+
 | Path | Method | operationId |
 |---|---|---|
 | `/api/v1/ops/{overview,task_create,task_instruct,task_update,concurrency,config_export,costs,task_pipeline}` | POST | `overview, task_create, task_instruct, task_update, concurrency, config_export, costs, task_pipeline` |
@@ -9042,7 +9053,7 @@ the Manager and API clients retain their ready-only start contract.
 | `/api/v1/auth/{set_password,clear_password}` | POST | `auth.{set_password,clear_password}` |
 | `/api/v1/system/{check,status,overview}` | POST | `system.{check,status,overview}` |
 | `/api/v1/config/{export,import_preview,import_apply,import_upload,import_cancel}` | POST | `config.{export,import_preview,import_apply,import_upload,import_cancel}` |
-| `/api/v1/tasks/{requirement_update,configure,move,agents,continue,role_update,room_view,activity,activity_detail,conversation,activity_stream,create,create_draft,page,detail,delete}` | POST | `tasks.{requirement_update,configure,move,agents,continue,role_update,room_view,activity,activity_detail,conversation,activity_stream,create,create_draft,page,detail,delete}` |
+| `/api/v1/tasks/{requirement_update,configure,move,agents,continue,role_update,room_view,activity,activity_detail,conversation,activity_stream,create,create_draft,done,page,detail,delete}` | POST | `tasks.{requirement_update,configure,move,agents,continue,role_update,room_view,activity,activity_detail,conversation,activity_stream,create,create_draft,done,page,detail,delete}` |
 | `/api/v1/task_conversations/{get,update}` | POST | `task_conversations.{get,update}` (operator-only; read or set `tasks.conversations.enabled`, default false; null restores false) |
 | `/api/v1/catalog_items/{list,get,update,delete}` | POST | `catalog_items.{list,get,update,delete}` |
 | `/api/v1/installs/{create,update,delete,project}` | POST | `installs.{create,update,delete,project}` |
