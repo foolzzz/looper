@@ -8519,7 +8519,7 @@ PostgreSQL is a hard startup dependency. All data paths:
 | `outbound_reviews` | A review of an outbound action ([Reviews of outbound actions](#reviews-of-outbound-actions)): `agent_id` and `parent_record_id` (who asked), `record_id` (the classifier's run; null when code blocked it), `task_id` (going with its task), `manager_action_id`, `channel` and `chat`, `source` (`tool`, `hook`, `post`), `tool`, `action`, `level`, `target_kind` and `target`, a masked `summary` (at most 500 characters), `verdict` (`allow`, `block`), `failure` (`not_operator`, `timeout`, `parse`, `runtime`, `rate_limited`, `unavailable`, `budget`, `too_long`, `refused`, `protected`; only on a block), `reason` (at most 300 characters), `signals`, `profile_id`, `model`, `cost_usd`, `latency_ms` |
 | `manager_actions` | The Manager's tool calls (`looper/agents/ops`), one row each: `manager_id`, `channel`, `chat` and `message_id` of the turn (empty for a turn Claude ran on its own), `tool`, `arguments` (secret values masked), `risk` (`read`, `write`, `high`), `status` (`ok`, `needs_confirmation`, `error` with `error_code`), `result` (of a change; a read's is not kept), `confirmation_id` (the call that asked, on a confirmed one) and `task_id` (the task it acted on, no foreign key) |
 | `activity` | Execution trace events (SSE streaming to frontend) |
-| `chat_messages` | Chat conversation history of every channel: `session_id` (the web session or stable bot/chat/Manager thread described above; not Telegram groups), `message_id`, `role`, `content`, `channel` (`web`, `telegram`, `lark` or `lark_bot`; rows from before it read `web`), `delivery_failure` and `delivery_error` (a Lark or Telegram answer its channel did not deliver: `no_chat` or `send_failed`, and the channel's error; NULL otherwise), and nullable provenance columns `manager_session` (the writing Manager's `manager_sessions.session_key`), `sender_kind` (`person` or `bot`) and `sender_name` (the channel's display name); a new Manager session's resume brief reads the recent chats that are not a task's Planner thread (`planner-<task_id>`) |
+| `chat_messages` | Chat conversation history of every channel: `session_id` (the web session or stable bot/chat/Manager thread described above; not Telegram groups), `message_id`, `role`, `content`, `channel` (`web`, `telegram`, `lark` or `lark_bot`; rows from before it read `web`), `delivery_failure` and `delivery_error` (a Lark or Telegram answer its channel did not deliver: `no_chat` or `send_failed`, and the channel's error; NULL otherwise), and nullable provenance columns `manager_session` (the writing Manager's `manager_sessions.session_key`), `sender_kind` (`person` or `bot`) and `sender_name` (the channel's raw display name). `_persist_chat` writes all three for user rows; `record_reply` writes `manager_session` for assistant rows, leaving sender fields NULL. The web path leaves all three NULL. No runtime consumes this provenance yet; a new Manager session's resume brief reads the recent chats that are not a task's Planner thread (`planner-<task_id>`) |
 | `chat_direct_threads` | Who a stored Lark or Telegram direct chat (`session_id`) is with: its bot (`channel_id`) and `sender_id`, recorded when one of their messages is stored while session search or idle checks are on, the first record kept; the session search counts the chat as the user's own while the sender is the bot's `operator_sender_id` |
 | `llm_records` | One row per agent run: input and output text, status (`running`, `completed`, `failed`, `interrupted`), the run's own `cost_usd` and its `cost_source` (`runtime` or `provider_price`), `input_tokens`, `output_tokens`, `cache_read_tokens` and `cache_creation_tokens`, its final `context_tokens` and its `compactions`; `metadata` holds the exact argv (`command`), `cwd`, the supplied `system_prompt`, its `system_prompt_mode` (`append` for old records without it), its `system_prompt_sha256`, its `prompt_layers`, the `profile` (`agent` on runs recorded before the rename), the `model_choice`, the Settings `env` names, the `library` items loaded, the `project_instructions` the runtime was given and a task agent's `project_skills`, and for a Worker's or Reviewer's run its `outcome` (`completed`, `reported_failed`, `files_mismatch`, `passed`, `not_passed`, `contract`, `run_failed`; `worker.RunOutcome`); `run_kind` (`manager`, `planner`, `worker`, `reviewer`, `processor`, `consult`, `advisor`, `advice_check`, `outbound_check`, `leads_check`: what the record's agent id says, or what a spawned run names; null on rows from before it, which no migration rewrites: readers take those rows' kind from their agent id, `llm_records.RUN_KIND`) and `parent_record_id` (the run that started it: a spawned run's parent) |
 | `role_configs` | Each role's own settings, keyed by `role` (`manager`, `planner`, `worker`, `reviewer`): display name, role prompt and its recommended `default_prompt`, turns, timeout, enabled |
@@ -9468,7 +9468,10 @@ implementation supplies it and is retested.
   path becomes `bot***`, the configured token anywhere `***`, and a failed
   send's error is masked the same way. `allowed_user_ids` lists numeric
   Telegram user IDs (a negative id is a group or channel, not a sender); a
-  comma-separated string from before is still read.
+  comma-separated string from before is still read. Non-status messages carry
+  `user_id`, `username` and trusted `sender_kind` in `channel_context`:
+  `is_bot is True` gives `bot`, otherwise `person`. Delivery of other bots'
+  group messages remains unverified.
   `LOOPX_TELEGRAM_ALLOWED_USERS` no longer applies. `/new` (without
   arguments) goes to the Manager as `/new`, and `/stop` as `/stop`, which the
   fleet answers outside its queues and which requests all live replies for
@@ -9523,7 +9526,11 @@ implementation supplies it and is retested.
   the text (`@name` as lark-cli shows it, else its `@_user_N` placeholder;
   rich posts also handle `@@name` and `<at>` tags),
   and the Manager is told the sender's name (`contact +search-user`, the
-  name the allowlist resolves, else the open_id after 5 s). Text and rich-text
+  name the allowlist resolves, else the open_id after 5 s). `channel_context`
+  carries `chat_id`, `chat_type`, `sender_id`, `message_id`, a group's raw
+  `sender_name`, and trusted `sender_kind` for both groups and direct messages:
+  event `sender_type` values `app` and `bot` give `bot`, otherwise `person`.
+  Text and rich-text
   posts, and merged forwards (`merge_forward`) in a direct message, reach the Manager. Posts keep lark-cli's rendered titles, paragraphs,
   links and fenced code, with other mentions shown as `@name`. Images and files
   in posts, image messages and file messages become numbered `[image N]` /
