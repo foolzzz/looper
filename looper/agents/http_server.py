@@ -288,6 +288,7 @@ class AgentHTTPServer:
         # Configuration files uploaded for import, waiting to be applied (under the runtime root).
         self._config_imports = config_imports.ConfigImports(runtime_root) if runtime_root else None
         self._server: asyncio.Server | None = None
+        self._handlers: set[asyncio.Task] = set()
         self._address_publication: Publication | None = None
         self._components: components.Manifest | None = None
 
@@ -379,6 +380,12 @@ class AgentHTTPServer:
             self._summary_task = None
         if self._server:
             self._server.close()
+        handlers = list(self._handlers)
+        for task in handlers:
+            task.cancel()
+        await asyncio.gather(*handlers, return_exceptions=True)
+        if self._server:
+            # Python 3.12.1+ waits for active connections as well as the listener.
             await self._server.wait_closed()
             self._server = None
             logger.info("HTTP server stopped")
@@ -393,6 +400,8 @@ class AgentHTTPServer:
         reader: asyncio.StreamReader,
         writer: asyncio.StreamWriter,
     ) -> None:
+        connection_task = asyncio.current_task()
+        self._handlers.add(connection_task)
         peer = writer.get_extra_info("peername")
         peer_host = peer[0] if peer else None
         sign_in_headers = None
@@ -566,6 +575,8 @@ class AgentHTTPServer:
                 await writer.wait_closed()
             except Exception:
                 pass
+            finally:
+                self._handlers.discard(connection_task)
 
     async def _client_principal(self, headers: Mapping[str, str], peer_host: str | None) -> api_v1.Principal | None:
         """Who calls ``/api/v1``: the operator, an API client (a local, direct caller with an ``lpc_`` bearer token),
