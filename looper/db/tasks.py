@@ -21,6 +21,7 @@ logger = logging.getLogger(__name__)
 # A ready task: created (from the dashboard or by the Manager) and never started. Only a user starts it
 # (``start_ready_task``); a server start never resumes it.
 READY = "init"
+DRAFT = "draft"
 
 
 class TaskGroup(str, Enum):
@@ -29,6 +30,7 @@ class TaskGroup(str, Enum):
     NEEDS_YOU = "needs_you"  # its Planner runs, and a user gate of its plan waits for the user
     IN_PROGRESS = "in_progress"  # its Planner runs, or is starting
     READY = "ready"  # created, never started
+    DRAFT = "draft"  # created in work mode, never handed to the background; may have no requirement
     ATTENTION = "attention"  # failed or stopped: it needs a look, a restart or a continue
     COMPLETED = "completed"
     CANCELLED = "cancelled"
@@ -52,6 +54,7 @@ STATUS_GROUPS: Mapping[str, TaskGroup] = MappingProxyType({
     # Started, its Planner starting (it used to wait here for room under its project's Planner limit).
     "pending": TaskGroup.IN_PROGRESS,
     READY: TaskGroup.READY,
+    DRAFT: TaskGroup.DRAFT,
     "failed": TaskGroup.ATTENTION,
     "stopped": TaskGroup.ATTENTION,
     "completed": TaskGroup.COMPLETED,
@@ -80,7 +83,7 @@ STATUS_FILTERS: Mapping[str, tuple[str, ...]] = MappingProxyType({
     "running": tuple(status for status, group in STATUS_GROUPS.items()
                      if group is TaskGroup.IN_PROGRESS and status not in ("waiting", "pending")),
     **{status: (status,) for status in (
-        READY, "waiting", "waiting_user", "awaiting_budget", "pending", "completed", "failed", "cancelled", "stopped",
+        READY, DRAFT, "waiting", "waiting_user", "awaiting_budget", "pending", "completed", "failed", "cancelled", "stopped",
     )},
 })
 
@@ -565,8 +568,8 @@ async def start_ready_task(task_id: str, *, pool: asyncpg.Pool | None = None) ->
                 await conn.execute("UPDATE intent_rule_task_starts SET state='acknowledged',lease_token=NULL,lease_until=NULL,updated_at=now() WHERE task_id=$1", task_id)
             return _task(row) if row is not None else None
     row = await pool.fetchrow(
-        "UPDATE tasks SET status = 'pending', updated_at = now() WHERE id = $1 AND status = $2 RETURNING *",
-        task_id, READY,
+        "UPDATE tasks SET status = 'pending', updated_at = now() WHERE id = $1 AND status = ANY($2::text[]) RETURNING *",
+        task_id, [READY, DRAFT],
     )
     return _task(row) if row is not None else None
 

@@ -712,7 +712,8 @@ TOOLS: tuple[Tool, ...] = (
                 "task_id": {**_TASK_ID, "description": "The task to get (action get, room)."},
                 "query": {"type": "string", "description": "Words to find in a task's id, name, requirement or "
                                                           "project (action list)."},
-                "group": {"type": "string", "enum": [g.value for g in db_tasks.TaskGroup],
+                "group": {"type": "string", "enum": [g.value for g in db_tasks.TaskGroup
+                                                        if g is not db_tasks.TaskGroup.DRAFT],
                           "description": "Only the tasks in this group (action list)."},
                 "project": {"type": "string", "description": "Only this project's tasks, by name (action list)."},
                 "limit": {"type": "integer", "minimum": 1, "maximum": 50,
