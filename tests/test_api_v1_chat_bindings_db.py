@@ -413,9 +413,6 @@ def test_tcp_disconnect_during_commit_still_publishes_before_next_http_write(tmp
         async with _serving(tmp_path, listen=True) as server:
             server._channels = registry
             server._client_ops = ClientOps(Platform(bus=None, task_router=server._task_router, runtime_root=tmp_path))
-            status, _, pending = await _send(server, "POST /api/v1/manager_chat_bindings/put",
-                                            _bearer(TOKEN), json.dumps(_binding()))
-            assert status == 202, pending
             entered, release = asyncio.Event(), asyncio.Event()
             waiting = _watch_contention(registry, monkeypatch)
             original = asyncpg.transaction.Transaction.commit
@@ -429,8 +426,8 @@ def test_tcp_disconnect_during_commit_still_publishes_before_next_http_write(tmp
             monkeypatch.setattr(asyncpg.transaction.Transaction, "commit", commit)
             _, writer = await asyncio.open_connection("127.0.0.1", server._port)
             try:
-                writer.write(_request(server._port, "POST /api/v1/confirm", _bearer(TOKEN),
-                                      json.dumps({"confirmation_id": pending["confirmation_id"]})).encode())
+                writer.write(_request(server._port, "POST /api/v1/manager_chat_bindings/put",
+                                      _bearer(TOKEN), json.dumps(_binding())).encode())
                 await writer.drain()
                 await entered.wait()
                 writer.close()
