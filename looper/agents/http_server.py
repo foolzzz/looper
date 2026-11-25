@@ -1794,7 +1794,7 @@ class AgentHTTPServer:
         try:
             resolved = file_path.resolve()
             static_resolved = self._static_dir.resolve()
-            if not str(resolved).startswith(str(static_resolved)):
+            if not resolved.is_relative_to(static_resolved):
                 writer.write(_json_response(HTTP_404, {"error": "not found"}))
                 await writer.drain()
                 return
