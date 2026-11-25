@@ -52,7 +52,6 @@ from ..drain import DrainState
 from ..bus import MessageBus
 from ..channels import lark_quote
 from ..channels.chat_history import CHAT_RECORD, chat_record
-from ..chat_scopes import PrincipalKind
 from ..supervisor import cancel_and_wait
 from ..agent_settings import Access, AgentSettings, AgentType, Harness, Launch, Layer, load_agent_settings
 from ..session_profile import (
