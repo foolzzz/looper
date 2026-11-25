@@ -115,6 +115,75 @@ async def _rows(pool: Any) -> list[dict[str, Any]]:
         "SELECT local_date, channel_id, chat, status, attempts FROM morning_briefs ORDER BY channel_id, chat")]
 
 
+@pytest.mark.parametrize("state", ["uncertain", "failed", "missed"])
+@pytest.mark.parametrize("attention_on", [True, False])
+@pytest.mark.parametrize("schedule_fold", [False, True])
+def test_terminal_reminder_is_in_the_brief_once_even_with_a_digest(
+        monkeypatch, tmp_path, lark_cli_stand_in, state, attention_on, schedule_fold):
+    from looper.agents.channels.allowlist import SenderAllowlist
+    from looper.agents.channels.lark import LarkChannelAdapter
+    from looper.agents.channels.registry import ChannelRegistry
+
+    async def test(pool):
+        await _zone(pool)
+        who = "ou_x"
+        await _operator(pool, who=who)
+        await pool.execute("INSERT INTO system_settings (key,value) VALUES ('attention.enabled',$1)",
+                           "true" if attention_on else "false")
+        now = datetime.now(timezone.utc)
+        local = now.astimezone(ZONE)
+        # The service clock and source reads share the current weekday, after the configured send time.
+        monkeypatch.setattr(morning_brief, "is_due", lambda *args: True)
+        row = await reminder_store.create(text="Review the application", due_at=now - timedelta(hours=2),
+                                          timezone=str(ZONE), channel_id="channel-lark", chat=who,
+                                          created_channel="web", created_message_id=None)
+        await reminder_store.settle(pool, row["id"], state, now=now, from_status="pending")
+        await _digest(pool, "held-reminder", local.date(), kind="user_reminder", hour=0, chat=who)
+        await pool.execute("UPDATE proactive_deliveries SET source_ref=$1 WHERE dedupe_key='held-reminder'",
+                           str(row["id"]))
+        digest_id = await pool.fetchval("SELECT id FROM proactive_deliveries WHERE dedupe_key='held-reminder'")
+        digest_ids = [digest_id]
+        if schedule_fold:
+            await pool.execute("INSERT INTO projects (id, name) VALUES ('proj', 'Demo')")
+            await _schedule(pool, "sched-alpha", "Alpha report", "proj", 1)
+            await pool.execute("UPDATE proactive_deliveries SET schedule_id='sched-alpha' WHERE id=$1", digest_id)
+            digest_ids.append(await _digest(pool, "alpha", local.date(), kind="subscription", hour=0,
+                                            schedule_id="sched-alpha", chat=who))
+        monkeypatch.setattr(chat_settings, "_delivery_enabled", True)
+        adapter = LarkChannelAdapter(runtime_root=tmp_path,
+                                     allowlist=SenderAllowlist("channel-lark", frozenset({who})))
+        registry = ChannelRegistry(SimpleNamespace())
+        registry._channels[adapter.channel_id] = adapter
+        service = _service(registry, now)
+        await service.run_once()
+        await service.run_once()
+        calls = [json.loads(line) for line in lark_cli_stand_in.read_text().splitlines()]
+        send, = [call for call in calls if "+messages-send" in call]
+        assert send[send.index("--as") + 1] == "bot"
+        text = send[send.index("--markdown") + 1]
+        assert len(Path(str(lark_cli_stand_in) + ".delivered.jsonl").read_text().splitlines()) == 1
+        assert text.count(row["text"]) == 1 and state in text
+        assert row["due_at"].astimezone(ZONE).strftime("%Y-%m-%d %H:%M") in text
+        assert "推迟到这份晨报的消息" not in text
+        if schedule_fold:
+            assert text.count("Alpha report") == 1
+            assert "另有 1 条推迟的推送" in text
+            assert "另有 2 条推迟的推送" not in text
+        heading = "未确认送达的提醒"
+        assert heading in text
+        before = text.split(row["text"])[0]
+        assert (heading + " 1：" in before) is attention_on
+        if state == "uncertain":
+            assert "可能未送达" in text
+        assert await pool.fetchval("SELECT read_ids FROM morning_briefs") == digest_ids
+        assert [r["delivery_id"] for r in await pool.fetch(
+            "SELECT delivery_id FROM morning_brief_consumed ORDER BY delivery_id")] == digest_ids
+        assert await pool.fetchval("SELECT count(*) FROM proactive_deliveries") == len(digest_ids) + 1
+        assert await pool.fetchval("SELECT count(*) FROM proactive_deliveries WHERE source='morning_brief'") == 1
+
+    run_with_channel_configs(test, monkeypatch)
+
+
 @pytest.mark.parametrize(("outbound", "failure"), [(False, None), (False, "validation"), (False, "not_started"),
                                                 (True, None), (True, "validation")])
 def test_lark_brief_long_key_and_pre_send_retry(monkeypatch, tmp_path, lark_cli_stand_in, failure, outbound) -> None:

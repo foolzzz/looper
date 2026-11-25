@@ -18,6 +18,45 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.15.36] - 2026-11-24
+
+Cut from main at `21fb4d682`. Upgrade from v2.15.35 (or v2.15.34, which has the same schema). From a database that has finished v2.15.35, startup applies five migrations and two online steps with every optional switch off, after the usual pre-migration `pg_dump` (unless `--skip-backup`). The migrations add empty or small tables, columns and checks, and 1930 and 2020 backfill only rows still being sent; the dump dominates the outage. Migration 1940 refuses to start while the existing `task_lesson_snapshots` table holds any row (`legacy lesson snapshots contain no frozen text; operator inspection is required`). The startup transaction then rolls back after the backup, and v2.15.35 still starts on the unchanged schema. No released version writes that table. No feature setting turns itself on, and an upgrade does not insert a feature-setting row. `web/` changed, so the release workflow rebuilds the dashboard bundle. Installations older than the bridge must upgrade to v2.13.165 first. #1724 and #1727 already shipped in v2.15.35, and their main merges change no file. #1723 and #1729 are release pull requests. #1734 is a documentation-only RFC.
+
+### Added
+
+- **Execution failure recovery stays off until `act`.** ([#1686](https://github.com/foolzzz/looper/pull/1686))
+  - Migration `step_failure_handling` (1920) creates the failure state, run, failure, hold, release and quota-wait tables. It widens `tasks_fail_kind_check` and `task_journal_kind_check` `NOT VALID`. Online step `step_failure_handling_online` validates them, scanning `tasks` and `task_journal`.
+  - `engine_settings.update` now accepts `act`, and every change asks for confirmation. Under `act`:
+    - quota and transient Worker and Reviewer failures retry only the failed unit, after bounded waits;
+    - environment failures and a third consecutive failure hold the step (`waiting_user`, a source notice, and Needs you while attention is on);
+    - operator-only `tasks.failure_history`, `tasks.holds` and `tasks.hold_release`, and the act-only Manager tool `looper_task_hold`, read and release holds.
+  - Outside `act`, startup builds the service and reads its settings. Only a database read error of `engine.failure_pending_recovery` at startup fails it, when the database is unavailable to the rest of startup anyway. No stored value of either setting fails startup: an unknown `engine.failure_typing` counts as `off`, with a warning, and any `engine.failure_pending_recovery` other than `true` counts as false. Several paths read `engine.failure_typing` once more each, and model-visible bytes are unchanged. The dashboard always shows the engine failure handling card under Settings → LLM Providers.
+- **Project lessons are injected where the lesson settings are already on.** ([#1690](https://github.com/foolzzz/looper/pull/1690))
+  - Migration `memory_lesson_injection` (1940) adds the snapshot set, wrong-report and Planner-state tables, three snapshot columns, seven injection columns and four `NOT VALID` checks. Online step `memory_lesson_injection_online` validates them and builds three indexes concurrently.
+  - Startup fails, after the pre-migration backup, while the existing `task_lesson_snapshots` table holds any row (`legacy lesson snapshots contain no frozen text; operator inspection is required`). The whole startup transaction rolls back. Inspect the rows and keep v2.15.35, which still starts on that schema. An incompatible index also fails startup.
+  - With `memory_lessons.enabled` and a project's `memory_lessons` on, in-effect lessons are frozen at the task's first PLAN and injected into Planner PLAN and new-session RESUME messages and into Worker prompts. There is no separate switch: `inject.planner` and `inject.worker` default to true.
+  - New operator-only `memory.task_lessons`, `memory.revoke` and `memory.renew`, and the local commands `looper memory lessons|revoke|renew`.
+  - While lessons are off, each Planner turn still reads the lesson settings and the empty injection tables, and model-visible bytes are unchanged.
+- **Scenario Managers can give each group its own resident session.** ([#1733](https://github.com/foolzzz/looper/pull/1733)) Migration `scenario_session_routing` (2030) adds `managers.session_routing` (`off` by default, or `per_chat`). It is set through the operator-only, high-risk, confirmed `scenario_session_routing.get/update` and the generated `loopercli scenario-session-routing` commands. Non-group turns stay in main. Enabling does not migrate history. With `off`, message bytes, session keys and process signatures are unchanged.
+- **Optional online upgrade backup.** ([#1714](https://github.com/foolzzz/looper/pull/1714))
+  - `looper service upgrade --backup-before-stop` takes the verified migration dump before drain. The new process reuses it once, within 15 minutes, when the target version, control-plane fingerprint, database and schema state match.
+  - Registry upgrades always dump at startup. Writes after the snapshot are not in that backup.
+  - The installed CLI parses the option, so the upgrade to v2.15.36 itself still backs up at startup. Startup lists `backups/` for the metadata before dumping.
+
+### Changed
+
+- **Breaking, for the engine settings write, for servers that already store lesson settings on, for a database with legacy lesson snapshot rows, and for needs-you with attention on.** ([#1686](https://github.com/foolzzz/looper/pull/1686), [#1690](https://github.com/foolzzz/looper/pull/1690), [#1716](https://github.com/foolzzz/looper/pull/1716)) See the release notes.
+- **A morning brief claimed but not yet sent is retried after a restart.** ([#1707](https://github.com/foolzzz/looper/pull/1707))
+  - Migration `morning_brief_send_started` (1930, no online step) adds `morning_briefs.send_started_at` and marks pre-upgrade `sending` rows started.
+  - The marker is committed before the channel call. A claim without it refunds its attempt and consumes nothing. One with it stays uncertain and is never resent.
+- **One-time reminders recover their restart boundary, and terminal ones wait in Needs you.** ([#1716](https://github.com/foolzzz/looper/pull/1716))
+  - Migration `reminder_post_started` (2020, no online step) adds `reminders.post_started_at` and marks pre-upgrade `sending` rows started.
+  - With reminders on, an unstarted claim returns to `pending`. A possibly started post becomes `uncertain` with an `unknown` receipt and is never resent. The list and cancel tool descriptions change, and cancel also dismisses `uncertain`, `failed` and `missed` reminders.
+  - With attention on, Needs you, `/todo` and the morning brief list those reminders for seven days after settlement, whether or not reminders are on. Idle checks do not push them. Brief digest rows now always carry `source_ref`, and matching reminder digests fold into the reminder line.
+- **Stable process trees are sampled every five seconds.** ([#1722](https://github.com/foolzzz/looper/pull/1722)) After five seconds without a change, the sampling interval grows from 0.5 to 5 seconds. A new resident turn or a detected change restores fast sampling. macOS start times are read without `ps`, with `ps` as the fallback. Stored identities are unchanged.
+- **Manager restarts name the changed signature components.** ([#1721](https://github.com/foolzzz/looper/pull/1721)) One INFO line with component names and 8-character hashes, never their contents.
+- **Tests, evals and docs.** ([#1725](https://github.com/foolzzz/looper/pull/1725), [#1718](https://github.com/foolzzz/looper/pull/1718), [#1720](https://github.com/foolzzz/looper/pull/1720), [#1726](https://github.com/foolzzz/looper/pull/1726), [#1734](https://github.com/foolzzz/looper/pull/1734)) No product behavior on upgrade. #1725 runs the intent-rule serve checks at a daytime local hour. #1718 restores the installed-runtime checks. #1720 pins serve startup with missing optional runtimes. #1726 adds a budgeted resident-profile Manager eval. #1734 adds the chat scopes RFC.
+
 ## [2.15.35] - 2026-11-24
 
 Cut from the v2.15.34 tag with #1724 and #1727 applied on top. Upgrade from v2.15.34. No migration, no online step, and no feature setting turns itself on; `web/` is unchanged. Installations older than the bridge must upgrade to v2.13.165 first. #1707, #1686 and the other pulls merged into main after v2.15.34 ship next.

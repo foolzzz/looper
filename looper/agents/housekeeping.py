@@ -54,6 +54,8 @@ class Report:
     chat_attachments: int = 0
     skill_tombstones: int = 0
     skill_proposals_expired: int = 0
+    lessons_expired: int = 0
+    lesson_injections: int = 0
     rotated: list[str] = field(default_factory=list)
     failed_steps: dict[str, str] = field(default_factory=dict)
 
@@ -291,6 +293,13 @@ async def run_once(runtime_root: Path, now: datetime, *, current_runner: Path | 
         async with db_connection.transaction() as conn:
             report.skill_proposals_expired = await expire_due(conn, now)
         await notify_pending(now=now)
+    with _step(report, "project lessons"):
+        from . import memory_lessons
+        from ..db import memory_lesson_injection
+
+        if (await memory_lessons.settings_view())["enabled"]:
+            report.lessons_expired = await memory_lesson_injection.expire_due(now=now)
+            report.lesson_injections = await memory_lesson_injection.purge_logs(now=now)
     with _step(report, "decision snapshots"):
         # Off, nothing writes the table, this cleanup included: rows of an earlier window stay with their task.
         async with db_connection.transaction() as conn:

@@ -102,6 +102,7 @@ def test_the_section_table_names_every_summary_section_and_keeps_gates_and_confi
     assert tuple(ic.RULES) == attention.KINDS
     assert ic.RULES["gates"] is None and ic.RULES["confirmations"] is None
     assert ic.RULES["failure_holds"] is None
+    assert ic.RULES["reminders"] is None  # visibility in /todo and the brief never starts an extra push
     excluded = {kind: [item(f"{kind}:1", since=NOW - timedelta(hours=30))]
                 for kind, rule in ic.RULES.items() if rule is None}
     found = ic.select(summary(**excluded), now=NOW)

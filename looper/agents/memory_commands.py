@@ -22,7 +22,8 @@ import asyncpg
 
 from .. import child_env
 from ..db import memory as db_memory
-from . import memory, memory_actions, memory_model as model, memory_settings
+from . import memory, memory_actions, memory_model as model, memory_settings, memory_lessons
+from .ops import OpError
 
 logger = logging.getLogger(__name__)
 OK, EMPTY, USAGE, NOT_CONFIGURED, REFUSED, NOT_FOUND, NO_DATABASE, WRONG_STATE = 0, 1, 2, 3, 4, 5, 6, 7
@@ -97,10 +98,21 @@ def _dump(value: Any) -> str:
 
 
 async def _command(pool: asyncpg.Pool, args: Any) -> tuple[int, str]:
-    if args.memory_command in {"reject", "retry", "delete"}:
+    if args.memory_command == "lessons":
+        result = await memory_lessons.list_view(project=args.project, state=args.state, limit=args.limit,
+                                                 before=getattr(args, "before", None), db=pool)
+        code = OK if result["lessons"] else EMPTY
+        if args.json:
+            return code, _dump(result)
+        lines = [_line(item["candidate"]) for item in result["lessons"]]
+        if result["more"]:
+            lines.append("还有更多，用 --before 继续查看")
+        return code, "\n".join(lines) if lines else "没有项目经验"
+    if args.memory_command in {"reject", "retry", "delete", "revoke", "renew"}:
         try:
-            result = await memory_actions.act(args.memory_command, args.candidate, via=model.Via.CLI, db=pool,
-                                              reason=getattr(args, "reason", None))
+            service = memory_lessons if args.memory_command in {"revoke", "renew"} else memory_actions
+            result = await service.act(args.memory_command, args.candidate, via=model.Via.CLI, db=pool,
+                                       reason=getattr(args, "reason", None))
         except db_memory.MemoryRefused as error:
             return {"not_found": NOT_FOUND, "state": WRONG_STATE, "stale": WRONG_STATE,
                     "disabled": NOT_CONFIGURED, "invalid": USAGE}.get(error.code, REFUSED), str(error)
@@ -143,6 +155,8 @@ async def _run(database_url: str, args: Any) -> tuple[int, str]:
             return await _command(pool, args)
         except ValueError as error:
             return USAGE, str(error)
+        except OpError as error:
+            return NOT_FOUND if error.code.value == "not_found" else REFUSED, str(error)
     except (OSError, asyncpg.PostgresError, TimeoutError) as error:
         return NO_DATABASE, f"the database failed: {error}"
     finally:
@@ -155,15 +169,19 @@ def run(args: Any, load_ops: Any) -> int:
         print("记忆候选只供操作者查看，请在自己的终端运行", file=sys.stderr)
         return REFUSED
     try:
-        if args.memory_command == "list":
+        if args.memory_command in {"list", "lessons"}:
             if not 1 <= args.limit <= LIMIT_MAX:
                 raise ValueError(f"--limit must be 1 to {LIMIT_MAX}")
-            memory.states_for(args.state)
-            if args.kind is not None and args.kind not in set(model.Kind):
+            if args.memory_command == "lessons":
+                if args.state != "all" and args.state not in model.LOOPER_STATES:
+                    raise ValueError("state must be all or a lesson state")
+            else:
+                memory.states_for(args.state)
+            if getattr(args, "kind", None) is not None and args.kind not in set(model.Kind):
                 raise ValueError(f"unknown kind {args.kind!r}: one of {', '.join(model.Kind)}")
-        elif args.memory_command in {"show", "reject", "retry", "delete"}:
+        elif args.memory_command in {"show", "reject", "retry", "delete", "revoke", "renew"}:
             model.parse_id(args.candidate)
-            if args.memory_command == "reject" and args.reason is not None and len(args.reason) > model.NOTE_MAX_CHARS:
+            if args.memory_command in {"reject", "revoke"} and args.reason is not None and len(args.reason) > model.NOTE_MAX_CHARS:
                 raise ValueError(f"--reason has at most {model.NOTE_MAX_CHARS} characters")
     except ValueError as error:
         print(str(error), file=sys.stderr)

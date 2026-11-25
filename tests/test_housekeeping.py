@@ -78,8 +78,10 @@ def test_runner_cleanup_keeps_current_and_recent_source(tmp_path: Path) -> None:
 def test_hourly_housekeeping_prunes_expired_chat_attachments_and_reports_count(tmp_path, monkeypatch, caplog,
                                                                             admission_on):
     from looper.agents import chat_attachments, housekeeping
+    from looper.agents import memory_lessons
 
     monkeypatch.setattr(housekeeping.admission, "enabled", lambda: admission_on)
+    monkeypatch.setattr(memory_lessons, "settings_view", AsyncMock(return_value={"enabled": False}))
     admission_prune = AsyncMock(return_value=3)
 
     @asynccontextmanager

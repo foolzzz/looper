@@ -28,6 +28,7 @@ const TITLES: Record<AttentionKind, string> = {
   intents: "Intents 意图",
   ledger: "Ledger items waiting for you",
   deliveries: "Messages that may not have arrived",
+  reminders: "未确认送达的提醒",
   cost: "花费等你决定",
 };
 
@@ -40,6 +41,7 @@ const HOW: Partial<Record<AttentionKind, string>> = {
   intents: "Build or reject each one on the Intents page, or reply 建 / 驳回 with its number in your chat.",
   ledger: "Confirm, close or amend them through the Manager, or with looper ledger on this machine.",
   deliveries: "Looper never sends these again: check the chat, and resend by hand if it is missing.",
+  reminders: "在聊天里回复「取消提醒 #编号」移除此项；重新安排时取消旧提醒，再设置新提醒。最多展示 7 天。",
 };
 
 const ALERTS: Record<string, string> = {
@@ -84,6 +86,8 @@ function details(kind: AttentionKind, item: AttentionItem): { line: string; badg
     case "ledger":
       return { line: parts(ref, LEDGER_KINDS[text(facts.kind)] ?? text(facts.kind)),
         badges: facts.overdue === true ? ["overdue"] : [] };
+    case "reminders":
+      return { line: parts(ref, context), badges: [] };
     case "cost":
       if (facts.reason === "unanswered") {
         return { line: parts(ref, context, count(facts.pushes) > 0 && `${count(facts.pushes)} 条推送没人回`), badges: [] };

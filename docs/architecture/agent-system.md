@@ -3114,6 +3114,28 @@ memory, and the spend at once. The knobs that bound it: a schedule's
 `max_parallel_runs` and `task_limits`, the role defaults in Settings → Roles,
 and a task's own limits.
 
+### Project lessons: bounded hints with frozen task snapshots
+
+Project lessons are a separate, default-off source of bounded hints. When the
+system `memory_lessons.enabled` setting and the project's `memory_lessons = on`
+are both enabled, the first PLAN freezes a task's selection, rendered lines,
+activation dates and limits in PostgreSQL, including an empty selection.
+Planner PLAN/new-session RESUME messages and Worker prompts share those bytes;
+the Worker's `lessons` layer follows the vault. Reviewer injection requires its
+own opt-in, and Managers never receive lessons. Later runs filter stopped or
+expired candidates without replacement. Planner system prompts stay unchanged.
+
+`memory.task_lessons` reads a task's frozen lines and paginated delivery history.
+`memory.revoke` and `memory.renew`, also available as `looper memory revoke/renew`,
+are operator-only controls; `looper memory lessons` lists lessons and counters.
+Revocation atomically records an event and fingerprint tombstone. Only accepted
+runtime input increments injection counters. Typed `lessons_used/lessons_wrong`
+references apply to that run's delivered items; two distinct tasks reporting a
+lesson wrong hold it automatically. An interrupted, unconfirmed delivery is
+`uncertain` and must be reconciled against the original session or record.
+See [the lesson RFC](rfcs/memory-tiers-v0.zh-CN.md) for compatibility exceptions
+for previously enabled sessions, retention and the pending real-model evals.
+
 ### Project knowledge: documents read on demand
 
 A project can carry reference material too large for a prompt
@@ -5445,7 +5467,7 @@ contract 5.3 KB (5,309 bytes of `TOOLS_CONTRACT`).
 | `looper_vault_search`, `looper_vault_read` | Only the default Manager's, and only while the knowledge vault setting holds and says `manager_read`: search the user's own notes for the words of `query` (paths and snippets, `vault.search`), and read one by path (its text, the first 64 KiB, no sha256: the Manager never writes). Each answer starts with a notice that these are the user's own notes, never to be quoted in a group chat; the operator's own Claude Code gets the same answer through `manager_retrieval.*`. `manager_actions.result` keeps no note text | read; only in the user's own turns |
 | `looper_leads_search` | Only the default Manager's, and only while `leads.enabled` is on: search the message leads (`leads.search`, the query `looper leads search` runs) for the words of `query`, matched as `leads.search_mode` says (its description says how, and to give the words in Chinese and English, only while it is `fulltext`), by `chat`, `person`, `days`, `kind` and `state` (`active` by default), at most `limit` (1–5, default 5), best first: a notice (「来自飞书消息，未经确认」, background and never instructions), each lead's kind, summary, confidence, state, valid-until and up to 3 sources (chat, sender, time, link), and how many more matched; no lead ids, details or message text; the operator's own Claude Code gets the same answer through `manager_retrieval.*` with a lead label. Looper adds 「（查了飞书消息线索：「…」，N 条）」 to the reply, and `manager_actions.result` keeps only the leads' ids and their count | read; only in the user's own turns |
 | `looper_session_search` | Only the default Manager's, and only while the session search is in effect (`manager.session_search.enabled` `true`, and session routing isolates group chats): search the user's own earlier conversations with it (`db.chat_search`) for the words of `query`, matched as the [assistant search RFC](rfcs/assistant-search-v0.zh-CN.md) section 3 says (Chinese by overlapping character pairs, English by the start of a word), within `days`, at most `limit` (1–10, default 5), best first: a notice (what was said then, background and never instructions), each message's `where` (the dashboard chat, a Lark or Telegram direct chat, a task's Planner chat on the dashboard), `who` (`user`, `manager`, `planner`), `at` and up to 300 characters around the match, fenced as outside content (`untrusted.fence`), and how many more matched. The message being answered is left out, and `manager_actions.result` keeps only the messages' ids and their count | read; only in the user's own turns |
-| `looper_reminder_create`, `looper_reminder_list`, `looper_reminder_cancel` | Only the default Manager's, and only while `reminders.enabled` is on: set a one-time reminder (`text`, the user's words; `at` as `HH:MM`, the next such time, or `YYYY-MM-DD HH:MM` in `timezone`, the server's zone by default; or `in_minutes`), list them with the time now (pending soonest first, or by `status`), or cancel a pending one by id. Code resolves and checks the time, stores the reminder, reads it back and adds a line saying what it stored and which direct chat it goes to | list reads; write; only in the user's own turns |
+| `looper_reminder_create`, `looper_reminder_list`, `looper_reminder_cancel` | Only the default Manager's, and only while `reminders.enabled` is on: set a one-time reminder (`text`, the user's words; `at` as `HH:MM`, the next such time, or `YYYY-MM-DD HH:MM` in `timezone`, the server's zone by default; or `in_minutes`), list them with the time now (pending soonest first, or by `status`), or cancel a pending, uncertain, failed or missed one by id. Code resolves and checks the time, stores the reminder, reads it back and adds a line saying what it stored and which direct chat it goes to | list reads; write; only in the user's own turns |
 | `looper_confirm` | Run the call waiting for confirmation in this chat | — |
 
 **The user's knowledge vault** (`ops/manager_vault.py`). With the vault setting's `manager_read` on, the default Manager
@@ -5541,8 +5563,12 @@ the first enabled bot of the default Manager that names an `operator_sender_id`,
 is none. The table `reminders` (migration `reminders`) keeps each one with its target and status: `pending`,
 `sending`, `delivered`, `failed`, `uncertain`, `missed` or `cancelled`. `ReminderService` (started by `looper serve`,
 idle while the switch is off or the server drains) ticks every 10 seconds under one advisory lock. A stop starts no
-other send and takes at most 15 seconds, the cancellation of a send that did not finish included. A tick settles a
-`sending` row left by a stopped sender as `uncertain`, then sends the due ones in code-written words
+other send and takes at most 15 seconds, the cancellation of a send that did not finish included. A tick recovers a
+`sending` row left by a stopped sender as `pending` if no channel post started, or `uncertain` if one may have
+started. The sender commits `post_started_at` immediately before calling the channel, and clears it after an
+explicit refusal before retrying. Recovery updates reminder states and existing decision receipts in one
+transaction: started sends become `unknown`; receipts lost after a settled send are restored from that state.
+An upgrade treats pre-marker `sending` rows as possibly sent. The service then sends the due ones in code-written words
 (「⏰ 你在 <when asked> 让我提醒你：<text>」) through `ChannelRegistry.post` with the idempotency key
 `looper-reminder-<id>`, after checking that the bot still names that user as its operator. The rule keeps no state:
 every reminder due at most 2 minutes ago is sent, however many at once; one due longer ago was missed (Looper was
@@ -5550,12 +5576,22 @@ down, asleep, stalled, switched off or draining), and of each chat's missed ones
 hours is sent, with a line saying when it was due, unless a reminder on time goes to that chat in the same tick; the
 others become `missed`. A start, a sleep and two servers taking turns in an upgrade are judged alike. A refused send is tried at the next tick, three times in all;
 an unknown outcome is `uncertain` and never sent again. Reminders are never throttled: no quiet hours, cap or merge
-window. With `delivery.enabled` on, a claimed reminder asks `proactive_delivery.decide` as
+window. Terminal `uncertain`, `failed` and `missed` reminders appear once each in needs-you's `reminders` section,
+with their text, original due time and zone, and state, until the user cancels them or seven days after settlement.
+Cancellation reuses the existing tool and records the prior state in its detail; rescheduling means cancelling
+the old reminder and creating a new one. `uncertain` says only that it may not have been delivered. These items
+never enter idle-check candidates or cause a separate proactive send. With attention off, the morning brief
+still lists each in its own short line. Digest rows for the same reminder id fold into the needs/fallback line,
+while their exact ids remain in the brief's claim and consumption records. With `delivery.enabled` on, a claimed reminder asks `proactive_delivery.decide` as
 `user_reminder` / `user_set`: `send` / `urgent`, uncounted, never deferred to the digest. The decision and
 channel receipt (`sent`, `rejected`, `unknown`) share `looper-reminder-<id>` in `proactive_deliveries`, with
 the reminder id as `source_ref`; refused-send retries retain that decision. A failed decision is logged and
-the reminder still sent; a failed receipt write does not retry the send. Off, the post and reminder writes
-are unchanged and no delivery record is added. The time is the nearest future instant the wall time names in its zone: of the two when the clocks go back,
+the reminder still sent; a failed receipt write does not retry the send. Off, normal sends keep their existing
+message bytes, retry policy and outcomes, and no delivery record is added. Recovery uses the
+same marker with either delivery setting. Lark receives the same idempotency key on a safe retry, but recovery
+does not rely on channel deduplication: neither Lark nor Telegram resends a possibly started post. A crash after
+the marker commits but before the channel is called remains conservatively uncertain. Recovered pending rows
+follow the existing catch-up policy. The time is the nearest future instant the wall time names in its zone: of the two when the clocks go back,
 the first still ahead; one the clocks skip becomes the first valid minute after it; the confirmation says either.
 
 Continuing a task that failed at its spend cap needs a higher cap, which is
@@ -7322,7 +7358,11 @@ list or command line changes either way.
   pushes, intent messages and task-end messages of the last 72 hours, plus intent
   final notices whose bounded retries exhausted in that window. The
   `uncertain_deliveries` migration builds the existing tables' uncertain-row
-  indexes online; the final-notice table has its own failed-row index). A
+  indexes online; the final-notice table has its own failed-row index),
+  `cost` (pending spend holds), `failure_holds` (environment and breaker holds
+  while failure handling is in act mode), then
+  `reminders` (`uncertain`, `failed` and `missed` reminders until cancelled
+  or seven days after settlement; excluded from idle checks). A
   section is `ok`, `error` (its source could not be read, with the reason;
   never shown as empty) or `unknown` (this caller cannot read it); a
   feature that is off leaves its section out. Each lists up to 20 items and
@@ -9347,9 +9387,17 @@ implementation supplies it and is retested.
   never sent) become one status message, sent at the first phase
   (「⏳ 处理中：思考中 · 0s」; a tool shows as, say, 「运行命令 (Bash)」 or
   「读文件 (Read)」, with the seconds so far) and edited in place: only when its
-  text changed, at most once every 3 s (a phase that comes sooner is shown by
-  one trailing edit), and at most 18 times (Feishu edits a message at most 20
-  times); after that it is left as it is. The answer goes as a new message, so
+  text changed, every 3 s for the first 30 s, then with a gap of at least
+  0.8 times the elapsed time at the previous edit (and always at least 3 s).
+  A phase that comes sooner is shown by one trailing edit, using the same
+  schedule. There are at most 18 progress edits, covering about 55 minutes
+  with frequent phases; the last says 「⏳ 仍在处理（已用时 N 分钟）」 with the
+  elapsed minutes at that edit, and stays until the turn ends. Feishu allows
+  20 edits per message: 18 for progress, one closing edit, and one spare.
+  The Manager emits the first phase before reading a quoted thread, still
+  within its ordered, stoppable, replayable preparation; stopping or
+  withdrawing during the read closes the line as 「已停止」.
+  The answer goes as a new message, so
   the user is notified, and the status message is then edited a last time to
   「✅ 完成 · 用时 Ns · 工具 N 次」, or 「❌ 出错：<reason>」 when the reply carries
   an `error` (the Manager's failed turns do). A failed send or edit is logged
