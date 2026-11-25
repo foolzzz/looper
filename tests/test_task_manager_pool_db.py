@@ -1,4 +1,5 @@
 """Admission, idle timing and write exclusion on the native resident path."""
+import asyncio
 from dataclasses import replace
 from unittest.mock import AsyncMock
 
@@ -8,7 +9,7 @@ from looper.agents import projects as project_service
 from looper.agents.message import channel_address
 from looper.agents.tiers import task_manager as tm
 from tests.db_support import run_db, until
-from tests.task_manager_support import NativeTaskManager, Sink
+from tests.task_manager_support import NativeTaskManager, Sink, submit_and_wait
 
 
 def test_prepare_obeys_cap_and_reclaims_lru(monkeypatch, tmp_path):
@@ -107,5 +108,51 @@ def test_idle_reclaim_measures_from_turn_end(monkeypatch, tmp_path):
             await pool.reclaim()
             assert not pool.agent(task_id).resident.started
         finally:
+            await pool.shutdown()
+    run_db(check, monkeypatch, timeout=30)
+
+
+@pytest.mark.parametrize("action", ["close", "shutdown"])
+def test_lifecycle_waits_for_dispatch_lock(monkeypatch, tmp_path, action):
+    native = NativeTaskManager(monkeypatch, tmp_path)
+    async def check(db):
+        first, _, _ = await native.create(db, "first-task")
+        second, _, _ = await native.create(db, "second-task")
+        third, _, _ = await native.create(db, "third-task")
+        pool = tm.TaskManagerPool(tmp_path / "runtime", native.executable, max_resident=lambda: 1)
+        entered, release, changing = asyncio.Event(), asyncio.Event(), asyncio.Event()
+        work = []
+        try:
+            await submit_and_wait(pool, first)
+            idle = pool.agent(first).resident
+            stop = idle.try_stop_if_idle
+            async def paused_stop():
+                entered.set()
+                await release.wait()
+                return await stop()
+            monkeypatch.setattr(idle, "try_stop_if_idle", paused_stop)
+            sink = Sink()
+            work.append(asyncio.create_task(pool.submit(second, "reply", message_id="second", sink=sink)))
+            await entered.wait()
+            async def change():
+                changing.set()
+                await (pool.close(second) if action == "close" else pool.shutdown())
+            work.append(asyncio.create_task(change()))
+            await changing.wait()
+            await asyncio.sleep(0)
+            # Neither lifecycle action may remove dispatch's request while eviction yields.
+            assert [r.task_id for r in pool._pending] == [second]
+            release.set()
+            results = await asyncio.gather(*work, return_exceptions=True)
+            assert not any(isinstance(result, BaseException) for result in results), results
+            assert pool._pending == []
+            if action == "close":
+                await submit_and_wait(pool, third)
+            else:
+                assert not any(a.resident.started for a in pool.agents.values())
+                assert not pool.in_turn(second)
+        finally:
+            release.set()
+            await asyncio.gather(*work, return_exceptions=True)
             await pool.shutdown()
     run_db(check, monkeypatch, timeout=30)
