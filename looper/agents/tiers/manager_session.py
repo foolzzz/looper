@@ -82,6 +82,7 @@ class ManagerSession:
     route: SessionKey = MAIN_KEY  # the conversation it holds (``session_routing.session_key_for``); key is its text
     scope: SessionScope | None = None
     retired: Retirement | None = None
+    activity_cursor: int | None = None
     # The resident Claude: started on the first chat message, then fed one
     # user turn per message; restarted when its system prompt changes.
     claude: ResidentSession

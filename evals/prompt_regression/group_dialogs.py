@@ -248,6 +248,20 @@ def scoped_operator_input(look) -> str | None:
     return None if look.reply.strip() else "no reply"
 
 
+def scoped_group_activity(look) -> str | None:
+    if look.fake and look.reply != "群里说发布推迟到周五。":
+        return f"the fake rejected its actual group activity input: {look.reply}"
+    if not re.search(r"周五|星期五|Friday", look.reply, re.IGNORECASE):
+        return "the reply did not recall Friday from the member's group activity"
+    if look.turn_actions():
+        return "the operator asked for recall, but the Manager called a tool"
+    from .dialogs import claims_change
+
+    if claims_change(look.reply):
+        return "the reply claims to have acted on the member's group activity"
+    return None
+
+
 def scoped_shared_input(look) -> str | None:
     if look.fake and look.reply != "这条会话打不开附件，请把需要的内容贴出来。":
         return f"the fake rejected its actual scoped shared input: {look.reply}"

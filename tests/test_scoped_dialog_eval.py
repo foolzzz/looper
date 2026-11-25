@@ -40,3 +40,16 @@ def test_scoped_inputs_on_native_cli_transport(tmp_path: Path, case_id: str, sen
     assert turn["calls"] == []
     # The stand-in returns this only after checking its actual system prompt and complete turn input.
     assert turn["reply"] == reply
+
+
+@pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
+def test_scoped_group_activity_on_native_cli_transport(tmp_path: Path) -> None:
+    case, = dialogs.select(["scoped_group_activity"])
+    result, _ = dialogs.run(mode="fake", dialogs=(case,), admin_url=str(DSN), out_dir=tmp_path,
+                            agent="claude-code/opus")
+    assert result["aborted"] is None
+    row, = result["dialogs"]
+    assert row["outcome"] == "pass", row["problems"]
+    assert row["transport"] == "lark-cli CliTransport"
+    assert [turn["sender"] for turn in row["turns"]] == ["operator", "member", "operator"]
+    assert row["turns"][-1]["reply"] == "群里说发布推迟到周五。"
