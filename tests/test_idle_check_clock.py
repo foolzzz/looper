@@ -98,7 +98,7 @@ def test_claimed_completion_advances_clock_through_loop_or_worker(monkeypatch, t
         row = {"target_kind": "web", "chat": target.chat, "payload": {}, "fallback": [],
                "created_at": datetime.now(timezone.utc)}
         monkeypatch.setattr(manager_module.db_manager_events, "claim", AsyncMock(return_value=[row]))
-        calls = []
+        calls, replies = [], []
         async def tell(rows, batch):
             calls.append(rows)
             async def work():
@@ -106,10 +106,11 @@ def test_claimed_completion_advances_clock_through_loop_or_worker(monkeypatch, t
                 return "Synthetic completion"
             result = await background_turn.run(agent, origin=TurnOrigin.COMPLETION,
                 deadline_seconds=1, fallback=AsyncMock(), state={}, work=work())
-            assert result.value() == "Synthetic completion"
+            replies.append(result.value())
         monkeypatch.setattr(agent, "_tell_completion", tell)
         await _loop(agent, completion_events.wake(MANAGER_ADDRESS, target), settled)
         assert calls == [[row]]
+        assert replies == ["Synthetic completion"]
         assert agent._sessions["main"].turn_ended_at == 200.0
     asyncio.run(check())
 
