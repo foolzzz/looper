@@ -3538,7 +3538,10 @@ FAKE_DIALOGS: tuple[Dialog, ...] = (
     Dialog("scoped_operator_group_contract", (
         Say("这个群里刚才说了什么？", group_dialogs.scoped_operator_input,
             (("__input_contract__", {
-                "system": ["## This group session"],
+                "system": ["## This group session",
+                           "This is your session for one group chat, and only the operator's messages are turns in it.",
+                           "This session does not list ready tasks, open gates or goals; "
+                           "a missing section does not mean there are none."],
                 "input": [group_dialogs.THIS_CHAT_HISTORY],
                 "excluded": [group_dialogs.OTHER_CHAT_HISTORY],
                 "reply": f"这个群里之前说过：{group_dialogs.THIS_CHAT_HISTORY}。"}),)),
@@ -3549,6 +3552,8 @@ FAKE_DIALOGS: tuple[Dialog, ...] = (
             (("__input_contract__", {
                 "system": ["Several people may speak in this session; each message is labelled with its speaker.",
                            group_dialogs.SCOPED_ROLE],
+                "input": [group_dialogs.THIS_CHAT_HISTORY],
+                "excluded": [group_dialogs.OTHER_CHAT_HISTORY],
                 "attachment_end": "This session cannot open attachments; if the message needs one, say so.",
                 "reply": "这条会话打不开附件，请把需要的内容贴出来。"}),), sender="member",
             attachments=(("notes.txt", b"Synthetic shared-session attachment.\n"),)),

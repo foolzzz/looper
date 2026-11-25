@@ -160,7 +160,9 @@ Manager has no tool for it. The dashboard shows the task page's 指标 card and 
     Inputs are typed by audience and mode: operator `full` sessions use `OPERATOR_GROUP_INPUTS`
     (harness, Agent Profile and role prompts, tool/scope/group contracts, projects, templates, workflows
     and this chat's input and stable block; no operator profile, ledger, other-chat confirmations,
-    ready tasks, open gates or goals). `legacy` preserves the per-chat assembly with the shared-speaker
+    ready tasks, open gates or goals). Its group contract makes clear that these sections are omitted,
+    not empty; the shared turn-context block and contract are both omitted, even when enabled globally.
+    `legacy` preserves the per-chat assembly with the shared-speaker
     note; `LEGACY_SHARED_INPUTS` names only that note and group activity. Platform-tools `chat_only`
     uses `SCOPED_CHAT_ALLOWLIST`: the public chat inputs plus the scenario role prompt, shared-speaker
     note and group activity, without handoffs. Each allowlist's version feeds the scope fingerprint.
