@@ -3,11 +3,11 @@ import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { DEFAULT_STATUS_FILTERS, TasksPage } from "@/pages/tasks";
-import { fetchTasks, fetchWorkflows, previewWorkflow, fetchProjectsList, type Workflow, type Project, type TaskInfo, type TasksPage as TaskPage } from "@/lib/api";
+import { fetchChatTargets, fetchTasks, fetchWorkflows, previewWorkflow, fetchProjectsList, type Workflow, type Project, type TaskInfo, type TasksPage as TaskPage } from "@/lib/api";
 
 vi.mock("@/lib/api", async (original) => ({
   ...await original<typeof import("@/lib/api")>(),
-  fetchWorkflows: vi.fn(async () => []), previewWorkflow: vi.fn(), fetchTasks: vi.fn(), fetchProjectsList: vi.fn(), fetchManagers: vi.fn(async () => []),
+  fetchChatTargets: vi.fn(async () => []), fetchWorkflows: vi.fn(async () => []), previewWorkflow: vi.fn(), fetchTasks: vi.fn(), fetchProjectsList: vi.fn(), fetchManagers: vi.fn(async () => []),
 }));
 vi.mock("@/pages/task-detail", () => ({ TaskDetailRoute: () => <div>Task detail</div> }));
 vi.mock("@/components/agent-profiles", () => ({ AgentProfileSelect: ({ id, value, disabled }: { id: string; value: string; disabled?: boolean }) => <select id={id} value={value} disabled={disabled} onChange={() => {}}><option value={value}>{value}</option></select> }));
@@ -45,6 +45,7 @@ describe("task list polling and pagination", () => {
   }[];
 
   beforeEach(() => {
+    vi.mocked(fetchChatTargets).mockResolvedValue([]);
     vi.mocked(fetchWorkflows).mockResolvedValue([]);
     vi.mocked(previewWorkflow).mockResolvedValue(["- dev：Development（codex/model）；回落至 Backup（claude-code/sonnet）",
       "- 评审面板：必需席位：review_a、review_b；建议席位：suggest；验收：全部通过",
@@ -82,6 +83,62 @@ describe("task list polling and pagination", () => {
     await act(async () => el!.click());
   };
   const rows = () => [...container.querySelectorAll(".divide-y p.truncate")].map((el) => el.textContent);
+  const expectChatReason = (text: string) => {
+    const entry = container.querySelector('[aria-disabled="true"]')!;
+    const reason = document.getElementById(entry.getAttribute("aria-describedby")!)!;
+    expect(reason.textContent).toBe(text);
+    expect(reason.closest(".sr-only, .hidden, [hidden]")).toBeNull();
+  };
+
+  it("links each live Planner using its server target id without opening the task row", async () => {
+    vi.mocked(fetchChatTargets).mockResolvedValue([
+      { kind: "planner", id: "planner-live", task_id: "live", can_send: true, status: "running" },
+      { kind: "planner", id: "planner-wait", task_id: "wait", can_send: true, status: "waiting_user" },
+    ]);
+    const navigate = vi.fn();
+    await act(async () => root.render(<TasksPage onNavigate={navigate} />));
+    await finish(0, page([{ ...task("live", 25), status: "running" }, { ...task("wait", 24), status: "waiting_user" }]));
+    const links = [...container.querySelectorAll<HTMLAnchorElement>('a')].filter(a => a.textContent?.includes("Talk to this task"));
+    expect(links.map(a => a.getAttribute("href"))).toEqual(["#chat?target=planner-live", "#chat?target=planner-wait"]);
+    await act(async () => links[0].dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true })));
+    expect(navigate).not.toHaveBeenCalled();
+  });
+
+  it.each(["completed", "failed", "stopped", "cancelled", "init", "pending", "assigned", "running"])(
+    "disables chat for %s without a live Planner and explains why", async status => {
+      vi.mocked(fetchChatTargets).mockResolvedValue([{ kind: "planner", id: "planner-idle", task_id: "idle", can_send: false }]);
+      const navigate = vi.fn();
+      await act(async () => root.render(<TasksPage onNavigate={navigate} />));
+      await finish(0, page([{ ...task("idle", 25), status }]));
+      const entry = container.querySelector<HTMLElement>('[aria-disabled="true"]')!;
+      expect(entry.textContent).toContain("Talk to this task");
+      expectChatReason("Only tasks with a running Planner can be chatted with");
+      expect(entry.hasAttribute("href")).toBe(false);
+      await act(async () => entry.click());
+      expect(navigate).not.toHaveBeenCalled();
+    },
+  );
+
+  it("shows a visible reason while chat availability is loading", async () => {
+    vi.mocked(fetchChatTargets).mockImplementationOnce(() => new Promise(() => {}));
+    await show();
+    await finish(0, page([task("idle", 25)]));
+    expectChatReason("Checking chat availability");
+    expect(container.querySelector('a[href^="#chat?target="]')).toBeNull();
+  });
+
+  it("revokes the entry on a failed availability refresh and recovers on the next read", async () => {
+    vi.mocked(fetchChatTargets).mockResolvedValue([{ kind: "planner", id: "planner-live", task_id: "live", can_send: true }]);
+    await show();
+    await finish(0, page([task("live", 25)]));
+    expect(container.querySelector('a[href="#chat?target=planner-live"]')).not.toBeNull();
+    vi.mocked(fetchChatTargets).mockRejectedValueOnce(new Error("unavailable"));
+    await tick(10_000);
+    expectChatReason("Chat availability could not be checked");
+    expect(container.querySelector('a[href="#chat?target=planner-live"]')).toBeNull();
+    await tick(10_000);
+    expect(container.querySelector('a[href="#chat?target=planner-live"]')).not.toBeNull();
+  });
 
   it("does not read the hidden list and refreshes once when visible", async () => {
     Object.defineProperty(document, "visibilityState", { configurable: true, value: "hidden" });
