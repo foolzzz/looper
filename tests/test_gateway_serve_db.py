@@ -59,7 +59,9 @@ def test_serve_translated_manager_works_without_recording(short_root, cli_entry)
     home.mkdir()
     _install_stubs(bin_dir)
     executable = Path(_resident_executable(bin_dir))
-    script = executable.read_text().replace('import json, os, sys, urllib.request',
+    observed_api_keys = root / "api-key-observations.jsonl"
+    script_path = Path(f"{executable}.py")
+    script = script_path.read_text().replace('import json, os, sys, urllib.request',
         "import json, os, sys, urllib.request\n"
         "if '--version' in sys.argv:\n    print('2.1.285 (Claude Code)'); sys.exit(0)\n"
         "if '--print' not in sys.argv:\n    sys.exit(1)")
@@ -71,12 +73,13 @@ def test_serve_translated_manager_works_without_recording(short_root, cli_entry)
         "explicit = json.loads(setting) if setting.startswith('{') else json.load(open(setting))\n"
         "os.environ.update(project['env'])\n"
         "os.environ.update(explicit.get('env', {}))\n"
-        "assert os.environ.get('ANTHROPIC_API_KEY') == '', 'project API key escaped settings'")
+        f"with open({str(observed_api_keys)!r}, 'a') as observed:\n"
+        "    observed.write(json.dumps(os.environ.get('ANTHROPIC_API_KEY')) + '\\n')")
     script = script.replace("with urllib.request.urlopen(req, timeout=10) as response:",
         "if os.environ.get('ANTHROPIC_API_KEY'):\n"
         "        req.add_header('x-api-key', os.environ['ANTHROPIC_API_KEY'])\n"
         "    with urllib.request.urlopen(req, timeout=10) as response:")
-    executable.write_text(script)
+    script_path.write_text(script)
     stale_settings = runtime / '.local/prompts/claude-settings/stale.json'
     stale_settings.parent.mkdir(parents=True)
     stale_settings.write_text('obsolete credential')
@@ -105,6 +108,8 @@ def test_serve_translated_manager_works_without_recording(short_root, cli_entry)
                     'values': {'profile_id': profile['profile_id']}})
                 assert _ask(api, 'gateway-test', 'Reply briefly.', timeout=20)
                 assert _ask(api, 'gateway-test', 'Reply again.', timeout=20)
+                api_keys = [json.loads(line) for line in observed_api_keys.read_text().splitlines()]
+                assert api_keys and all(key == "" for key in api_keys)
                 records = api.post('/api/v1/runs/list', {'agent_id': 'manager'})['result']['records']
                 assert len(records) == 2 and all(row['status'] == 'completed' for row in records)
                 assert 'synthetic-key' not in json.dumps(records)

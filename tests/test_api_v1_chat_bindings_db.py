@@ -497,10 +497,11 @@ def test_concurrent_puts_each_return_the_binding_written_by_that_request(tmp_pat
             lock = registry.mutation_lock(BOT)
             original = domain._bindings
             reads, lock_requests = 0, 0
+            lock_channels = []
 
             def mutation_lock(channel_id):
                 nonlocal lock_requests
-                assert channel_id == BOT
+                lock_channels.append(channel_id)
                 lock_requests += 1
                 if lock_requests == 2:
                     second_attempted.set()
@@ -535,6 +536,7 @@ def test_concurrent_puts_each_return_the_binding_written_by_that_request(tmp_pat
                 await second_attempted.wait()
                 release.set()
                 first_answer, second_answer = await asyncio.gather(first, second)
+                assert lock_channels and all(channel_id == BOT for channel_id in lock_channels), lock_channels
                 assert [first_answer[0], second_answer[0]] == [200, 200]
                 first_binding = first_answer[1]["result"]["binding"]
                 second_binding = second_answer[1]["result"]["binding"]

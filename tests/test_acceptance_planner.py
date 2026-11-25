@@ -35,12 +35,11 @@ def test_worker_result_collects_before_decision_and_blocks_failed_checks(
     if has_checks:
         item["checks"] = [{"id": "c1", "criterion": 1, "type": "command", "command": "exit 1"}]
     claude = planner_claude(plan(item), decide("accept" if succeeded else "fail"))
-    observed = []
+    observed, ordering = [], []
 
     async def collect(**kwargs):
         saved = next(iter(agent_db.store.steps["t1"].values()))
-        assert saved["status"] == "deciding" and saved["result"]["status"] == "completed"
-        assert len(claude.turns()) == 1  # no DECISION turn before the evidence write
+        ordering.append((saved["status"], saved["result"]["status"], len(claude.turns())))
         observed.append(kwargs)
         return [{"state": "failed", "check_id": "c1"}]
 
@@ -48,6 +47,8 @@ def test_worker_result_collects_before_decision_and_blocks_failed_checks(
     result = WORK_OK if succeeded else WORK_FAILED
     h = drive(claude, lambda _: {**result, "acceptance_baseline": {"head_sha": "forged"}})
     assert bool(observed) is expected
+    # Fallback gathers evidence again after both invalid accept replies were rejected.
+    assert ordering == ([("deciding", "completed", 1), ("deciding", "completed", 3)] if expected else [])
     assert h.final().payload["status"] == ("completed" if succeeded and not expected else "failed")
     if expected:
         call = observed[0]
