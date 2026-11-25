@@ -148,6 +148,15 @@ Manager has no tool for it. The dashboard shows the task page's 指标 card and 
     others share one per scope. An unreachable fingerprint retires its session: its current turn finishes,
     then the whole process tree stops; queued messages resolve again and move, and a later return to that
     key opens fresh, without resuming or carrying a handoff. Read failures retry without falling back.
+    `chat_only` launches with platform tools only, an empty installed library and its own workspace;
+    `full` and `legacy` use main's installed library, working directory and unchanged environment.
+    Prompt, MCP and binding files remain session-specific in every mode. Before every turn, including
+    live-process reuse and Profile switches, the runtime must declare support for the resolved launch mode.
+    Otherwise `ScopeStartRefused` answers 「这个群的能力范围在当前 Agent Profile 上跑不了，请操作者换一个支持的 Agent Profile。」;
+    no process starts and no wider mode is substituted. The launch signature includes the scope fingerprint
+    and mode. A launch invariant rejects permission bypasses in non-full modes, or wider access / installed
+    capabilities in platform-tools mode, fails the turn with `scope_invariant` and logs a critical event.
+    Retirement revokes the session's MCP credential before removing its registered scope grant.
   - Sessions run in parallel; inside one, messages run in order. The message
     loop hands each user message to its session's worker. Completion wake-ups
     resolve the bot's identity before claiming events, then use the event
@@ -220,7 +229,7 @@ Manager has no tool for it. The dashboard shows the task page's 指标 card and 
     own handoff and the same excerpt, never other chats. `main`'s brief is
     unchanged. The typed, module-level `session_visibility.NON_MAIN_ALLOWLIST`
     governs both model inputs and tool registration/calls for the default Manager's
-    non-main sessions only. Its complete input
+    non-main sessions, and registered scoped `chat_only` sessions. Its complete input
     grant is a fixed public chat prompt, the Manager's name only, this chat's
     opening/history/handoff, current message and provenance, quotes and attachments,
     session stop notices, and a session-local stable block containing only the name.
@@ -238,8 +247,9 @@ Manager has no tool for it. The dashboard shows the task page's 指标 card and 
     allowlist version; cost totals remain. Main and routing-off input/tool behavior
     is unchanged. Scenario Managers, including their `per_chat` group sessions,
     retain their own prompt, Agent Profile, tools, installed library and saved
-    context: this boundary is step 0 of the [chat scopes RFC, section 12](rfcs/chat-scopes-v0.zh-CN.md#12-分步计划),
-    whose intermediate-state table keeps scenario capabilities unchanged until scope resolution ships.
+    context unless they use stored `scoped` routing: its `chat_only` sessions register the same public input
+    boundary with no Looper tools, and their completions also use code notices.
+    See the [chat scopes RFC, section 12](rfcs/chat-scopes-v0.zh-CN.md#12-分步计划).
     A reply out of a dm session goes
     through the group backstop (`ops.leads.for_group`), like a group's. With the untrusted
     fence enabled, stored user messages in this excerpt use the same typed group or direct-message
@@ -5445,7 +5455,12 @@ contract 5.3 KB (5,309 bytes of `TOOLS_CONTRACT`).
   `not_found`, `invalid` (the arguments fail the schema, or something only
   the user can give is missing), `needs_user_turn`, `forbidden`, `conflict`
   (the task's status does not allow it), `expired` and `unavailable` (the
-  database failed; it may work later).
+  database failed; it may work later). Default Manager non-main sessions keep their fixed tool refusal.
+  In scoped `chat_only` sessions, even guessed and unknown names instead return
+  `{"status":"error","error":{"code":"forbidden","reason":"out_of_scope","capability":"tasks.create",
+  "message":"this chat's scope does not include tasks.create: it did not run and nothing waits; tell the speaker that the operator can change this group's scope"}}`.
+  The capability depends on the attempted tool/action (`unknown` for an unknown name); the refusal
+  exposes no tool list and creates no task, queue, approval or card.
 - **Tiers.** `read` runs in any turn; so do the actions of a tool that only
   list, get or view (`Tool.read_actions`), whose result the trail does not
   keep either. `write` runs only in a turn that
@@ -5481,7 +5496,11 @@ contract 5.3 KB (5,309 bytes of `TOOLS_CONTRACT`).
   and the `confirmation_id`. `GET /api/tasks/:id` lists a task's
   (`manager_actions`), and the task page shows them under "By the Manager".
   `manager_actions.manager_id` says which Manager made the call (no foreign
-  key: the trail outlives a deleted Manager).
+  key: the trail outlives a deleted Manager). An `out_of_scope` row keeps only argument keys with null
+  values, `status=error`, `error_code=forbidden`, the known tool's tier (otherwise `read`), and a result
+  containing `reason`, `capability`, `scope` (`<id>@<version>`) and `principal_kind`.
+  Refusal logs contain Manager, a 12-character session-key digest, capability, reason and principal kind,
+  never argument values or sender ids.
 - **What a Manager may use and see.** Two independent settings of a row in
   `managers`. `tools` (`all` / `tasks`) says which tools it has: `all` is the
   whole catalog, `tasks` the task tools, `looper_confirm` and the read-only
