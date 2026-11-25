@@ -15,6 +15,7 @@ from typing import Any
 import asyncpg
 
 from ..db import connection, projects as db_projects
+from ..db.directories import refresh_project_directories
 from ..db.tasks import ACTIVE_STATUSES
 from . import operator_notes, projects, step_workspaces
 from .project_execution import ProjectExecution
@@ -422,6 +423,8 @@ async def move(project_id: str, data: Mapping[str, Any], *, expected_move_versio
                     for worktree in task_worktrees:
                         await conn.execute("UPDATE task_worktrees SET repo_dir = $2, path = $3 WHERE task_id = $1",
                                            worktree["task_id"], worktree["repo_dir"], worktree["path"])
+                    # After the rename and the optional old-path symlink, so realpath follows the link.
+                    await refresh_project_directories(conn, project_id)
                     for schedule_id, new_dir in schedule_paths.items():
                         await conn.execute("UPDATE schedules SET work_dir = $2, updated_at = now() WHERE id = $1",
                                            schedule_id, new_dir)

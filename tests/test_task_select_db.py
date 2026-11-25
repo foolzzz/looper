@@ -8,7 +8,7 @@ import pytest
 from looper.agents.action_levels import ActionLevel
 from looper.agents.ops import ErrorCode, OpError
 from looper.agents.v1_domains import task_select as domain
-from looper.db import projects, tasks
+from looper.db import projects, task_worktrees, tasks
 from looper.db.task_changes import add_supplement
 from tests.db_support import DSN, run_db, v1_api
 
@@ -67,92 +67,239 @@ async def _backdate(pool, task_ids, interval):
                        list(task_ids))
 
 
-def test_empty_selection(monkeypatch, tmp_path):
+async def _project(pool):
+    return (await projects.create_project(name="select", pool=pool))["id"]
+
+
+async def _stamp(pool, task_ids):
+    await pool.execute("UPDATE tasks SET updated_at = $2 WHERE id = ANY($1::text[])", list(task_ids),
+                       datetime(2026, 11, 1, tzinfo=timezone.utc))
+
+
+async def _wait(pool, task_id, number, repo="acme/widgets"):
+    step_id = f"step-{task_id}"
+    await pool.execute(
+        "INSERT INTO task_steps (id, task_id, step_index, instruction) VALUES ($1, $2, 0, 'wait')",
+        step_id, task_id)
+    spec = {"check": {"type": "github_pr", "repo": repo, "number": number, "ready_when": "merged"}}
+    await pool.execute(
+        "INSERT INTO task_waits (step_id, task_id, topic, spec) VALUES ($1, $2, 'pr', $3::jsonb)",
+        step_id, task_id, json.dumps(spec))
+
+
+async def _worktree(pool, task_id, path, *, removed=False):
+    await task_worktrees.save({
+        "task_id": task_id, "repo_dir": path, "subdir": "", "path": path, "branch": "task",
+        "base_commit": "abc", "links": [], "state": "removed" if removed else "active",
+        "result_commit": None, "removed_at": datetime.now(timezone.utc) if removed else None,
+    }, pool=pool)
+
+
+def test_relative_cwd_is_rejected(monkeypatch):
     async def check(pool):
-        project_id = (await projects.create_project(name="select", pool=pool))["id"]
-        root, sub = tmp_path / "proj", tmp_path / "proj" / "sub"
-        leaf, target, alias = sub / "leaf", tmp_path / "target", tmp_path / "alias"
-        space, live, gone = tmp_path / "space", tmp_path / "live", tmp_path / "gone"
-        pair, both, many, other, nowhere = (tmp_path / "pair", tmp_path / "both", tmp_path / "many",
-                                             tmp_path / "proj-other", tmp_path / "nowhere")
-        for path in (leaf, target, space, live, gone, pair, both, many, other, nowhere):
-            path.mkdir(parents=True)
-        alias.symlink_to(target, target_is_directory=True)
-
-        await _task(pool, project_id, "task-shallow", work_dir=str(root), title="shallow", status="running")
-        await _task(pool, project_id, "task-deep", work_dir=str(sub), title="deep", status="running")
-        await _task(pool, project_id, "task-link", work_dir=str(alias), title="link", status="running")
-        await _task(pool, project_id, "task-space", workspace_dir=str(space), title="space", status="running")
-        await _task(pool, project_id, "task-tree", title="tree", status="running")
-        await _task(pool, project_id, "task-gone", title="gone", status="completed")
-        await _task(pool, project_id, "task-proj", work_dir=str(root), title="proj", status="running")
-        await _task(pool, project_id, "task-open", work_dir=str(pair), title="open", status="running")
-        await _task(pool, project_id, "task-shut", work_dir=str(pair), title="shut", status="completed")
-        await _task(pool, project_id, "task-endnew", work_dir=str(both), title="newer", status="completed")
-        await _task(pool, project_id, "task-endold", work_dir=str(both), title="older", status="completed")
-        await _task(pool, project_id, "task-empty", title="empty", status="running")
-        many_ids = [f"task-m{index:011x}" for index in range(1, 12)]
-        for task_id in many_ids:
-            await _task(pool, project_id, task_id, work_dir=str(many), title="many", status="completed")
-        directory_ids = ["task-shallow", "task-deep", "task-link", "task-space", "task-tree", "task-gone",
-                         "task-proj", "task-open", "task-shut", "task-endnew", "task-endold", "task-empty", *many_ids]
-        await _backdate(pool, directory_ids, "30 days")
-        await pool.execute(
-            "INSERT INTO task_worktrees (task_id, repo_dir, path, branch, base_commit) VALUES ($1, $2, $2, 'task', 'abc')",
-            "task-tree", str(live))
-        await pool.execute(
-            "INSERT INTO task_worktrees (task_id, repo_dir, path, branch, base_commit, state, removed_at) "
-            "VALUES ($1, $2, $2, 'task', 'abc', 'removed', now())", "task-gone", str(gone))
-        now = datetime.now(timezone.utc)
-        await _activity(pool, "task-open", now - timedelta(days=40))
-        await _activity(pool, "task-shut", now - timedelta(days=31))
-        await _activity(pool, "task-endnew", now - timedelta(days=31))
-        await _activity(pool, "task-endold", now - timedelta(days=40))
-
         with pytest.raises(OpError) as raised:
             await _select({"cwd": "relative/path"})
         assert raised.value.code is ErrorCode.INVALID and str(raised.value) == "cwd must be an absolute path"
 
-        assert (await _select({"cwd": str(nowhere)}))["kind"] == "none"
-        _none(await _select({"selection": "", "cwd": str(nowhere), "all": True}),
-              ["last_activity_at"], 14, True, _HINT_RECENT)
-        _none(await _select({"cwd": str(other)}), ["last_activity_at"], 14, False, _HINT_RECENT)
-        _none(await _select({"cwd": str(gone)}), ["last_activity_at"], 14, False, _HINT_RECENT)
+    run_db(check, monkeypatch)
 
-        found = await _select({"selection": '""', "cwd": str(leaf)})
-        _one(found, "task-deep")
+
+@pytest.mark.parametrize("kind,see_all", [
+    ("empty", False),
+    ("empty", True),
+    ("sibling", False),
+    ("removed", False),
+])
+def test_directory_miss_uses_the_recent_window(kind, see_all, monkeypatch, tmp_path):
+    async def check(pool):
+        project_id = await _project(pool)
+        if kind == "sibling":
+            root, other = tmp_path / "proj", tmp_path / "proj-other"
+            root.mkdir()
+            other.mkdir()
+            await _task(pool, project_id, "task-proj", work_dir=str(root), title="proj", status="running")
+            await _backdate(pool, ["task-proj"], "30 days")
+            cwd = other
+        elif kind == "removed":
+            gone = tmp_path / "gone"
+            gone.mkdir()
+            await _task(pool, project_id, "task-gone", title="gone", status="completed")
+            await _worktree(pool, "task-gone", str(gone), removed=True)
+            await _backdate(pool, ["task-gone"], "30 days")
+            cwd = gone
+        else:
+            cwd = tmp_path / "nowhere"
+            cwd.mkdir()
+        _none(await _select({"cwd": str(cwd), "all": see_all}),
+              ["last_activity_at"], 14, see_all, _HINT_RECENT)
+
+    run_db(check, monkeypatch)
+
+
+@pytest.mark.parametrize("selection", ["", '""', "   "])
+def test_blank_selection_uses_the_working_directory(selection, monkeypatch, tmp_path):
+    async def check(pool):
+        project_id = await _project(pool)
+        root = tmp_path / "proj"
+        root.mkdir()
+        await _task(pool, project_id, "task-here", work_dir=str(root), title="here", status="running")
+        found = await _select({"selection": selection, "cwd": str(root)})
+        _one(found, "task-here")
         assert found["task"]["group"] == "in_progress" and found["task"]["project_name"] == "select"
         assert found["task"]["last_activity_at"]
-        _one(await _select({"cwd": str(target)}), "task-link")
-        _one(await _select({"cwd": str(space)}), "task-space")
-        _one(await _select({"cwd": str(live)}), "task-tree")
+
+    run_db(check, monkeypatch)
+
+
+@pytest.mark.parametrize("source", ["work_dir", "workspace_dir", "worktree", "symlink", "dotdot"])
+def test_stored_directory_resolves_to_one_task(source, monkeypatch, tmp_path):
+    async def check(pool):
+        project_id = await _project(pool)
+        target = tmp_path / "target"
+        target.mkdir()
+        if source == "symlink":
+            alias = tmp_path / "alias"
+            alias.symlink_to(target, target_is_directory=True)
+            stored = str(alias)
+        elif source == "dotdot":
+            stored = str(target / "missing" / "..")
+        else:
+            stored = str(target)
+        task_id = "task-dir"
+        if source == "workspace_dir":
+            await _task(pool, project_id, task_id, workspace_dir=stored, title="dir", status="running")
+        elif source == "worktree":
+            await _task(pool, project_id, task_id, title="dir", status="running")
+            await _worktree(pool, task_id, stored)
+        else:
+            await _task(pool, project_id, task_id, work_dir=stored, title="dir", status="running")
+        _one(await _select({"cwd": str(target)}), task_id)
+
+    run_db(check, monkeypatch)
+
+
+def test_deepest_directory_wins(monkeypatch, tmp_path):
+    async def check(pool):
+        project_id = await _project(pool)
+        root, leaf = tmp_path / "proj", tmp_path / "proj" / "sub" / "leaf"
+        leaf.mkdir(parents=True)
+        await _task(pool, project_id, "task-shallow", work_dir=str(root), title="shallow", status="running")
+        await _task(pool, project_id, "task-deep", work_dir=str(leaf.parent), title="deep", status="running")
+        _one(await _select({"cwd": str(leaf)}), "task-deep")
+
+    run_db(check, monkeypatch)
+
+
+def test_one_open_task_in_a_directory_is_selected(monkeypatch, tmp_path):
+    async def check(pool):
+        project_id = await _project(pool)
+        pair = tmp_path / "pair"
+        pair.mkdir()
+        await _task(pool, project_id, "task-open", work_dir=str(pair), title="open", status="running")
+        await _task(pool, project_id, "task-shut", work_dir=str(pair), title="shut", status="completed")
+        now = datetime.now(timezone.utc)
+        await _activity(pool, "task-open", now - timedelta(days=40))
+        await _activity(pool, "task-shut", now - timedelta(days=31))
         _one(await _select({"cwd": str(pair)}), "task-open")
+
+    run_db(check, monkeypatch)
+
+
+def test_ended_tasks_in_a_directory_stay_candidates(monkeypatch, tmp_path):
+    async def check(pool):
+        project_id = await _project(pool)
+        both = tmp_path / "both"
+        both.mkdir()
+        await _task(pool, project_id, "task-endnew", work_dir=str(both), title="newer", status="completed")
+        await _task(pool, project_id, "task-endold", work_dir=str(both), title="older", status="completed")
+        now = datetime.now(timezone.utc)
+        await _activity(pool, "task-endnew", now - timedelta(days=31))
+        await _activity(pool, "task-endold", now - timedelta(days=40))
         _candidates(await _select({"cwd": str(both)}), ["task-endnew", "task-endold"])
-        _candidates(await _select({"cwd": str(many)}), many_ids[:10], more=1)
 
+    run_db(check, monkeypatch)
+
+
+def test_directory_lookup_uses_the_canonical_indexes(monkeypatch, tmp_path):
+    async def check(pool):
+        project_id = await _project(pool)
+        root = tmp_path / "indexed"
+        root.mkdir()
+        await _task(pool, project_id, "task-indexed", work_dir=str(root), workspace_dir=str(root),
+                    title="indexed", status="running")
+        await _worktree(pool, "task-indexed", str(root))
+        async with pool.acquire() as conn, conn.transaction():
+            await conn.execute("SET LOCAL enable_seqscan = off")
+            rows = await conn.fetch("EXPLAIN " + domain._DIRECTORY_HITS, domain._ancestors(str(root)))
+        plan = "\n".join(row["QUERY PLAN"] for row in rows)
+        for index in ("idx_tasks_select_work_dir_real", "idx_tasks_select_workspace_dir_real",
+                      "idx_task_worktrees_select_path_real"):
+            assert index in plan
+        assert "Seq Scan" not in plan
+
+    run_db(check, monkeypatch)
+
+
+def test_directory_candidates_are_capped(monkeypatch, tmp_path):
+    async def check(pool):
+        project_id = await _project(pool)
+        many = tmp_path / "many"
+        many.mkdir()
+        ids = [f"task-m{index:011x}" for index in range(1, 12)]
+        for task_id in ids:
+            await _task(pool, project_id, task_id, work_dir=str(many), title="many", status="completed")
+        await _stamp(pool, ids)
+        _candidates(await _select({"cwd": str(many)}), ids[:10], more=1)
+
+    run_db(check, monkeypatch)
+
+
+def test_one_recent_task_stays_a_candidate(monkeypatch, tmp_path):
+    async def check(pool):
+        project_id = await _project(pool)
+        cwd = tmp_path / "nowhere"
+        cwd.mkdir()
         await _task(pool, project_id, "task-000000000001", title="recent", status="running")
-        hour = now - timedelta(hours=1)
-        await _activity(pool, "task-000000000001", hour)
-        alone = await _select({"cwd": str(nowhere)})
-        _candidates(alone, ["task-000000000001"])
-        assert alone["kind"] != "one"
+        await _activity(pool, "task-000000000001", datetime.now(timezone.utc) - timedelta(hours=1))
+        found = await _select({"cwd": str(cwd)})
+        _candidates(found, ["task-000000000001"])
+        assert found["kind"] != "one"
 
-        for index in range(2, 21):
+    run_db(check, monkeypatch)
+
+
+def test_recent_list_is_capped_at_twenty(monkeypatch, tmp_path):
+    async def check(pool):
+        project_id = await _project(pool)
+        cwd = tmp_path / "nowhere"
+        cwd.mkdir()
+        now = datetime.now(timezone.utc)
+        hour = now - timedelta(hours=1)
+        for index in range(1, 21):
             task_id = f"task-{index:012x}"
             await _task(pool, project_id, task_id, title=f"recent {index}", status="running")
             await _activity(pool, task_id, hour)
         await _task(pool, project_id, "task-recentend", title="ended recent", status="completed")
         await _activity(pool, "task-recentend", now - timedelta(minutes=1))
-        await _task(pool, project_id, "task-0000000000aa", title="old", status="running")
-        await _backdate(pool, ["task-0000000000aa"], "20 days")
-
         shown = ["task-recentend", *[f"task-{index:012x}" for index in range(1, 20)]]
-        listed = await _select({"selection": "   ", "cwd": str(nowhere)})
+        listed = await _select({"selection": "   ", "cwd": str(cwd)})
         _candidates(listed, shown, more=1)
-        assert "task-000000000014" not in _ids(listed) and "task-0000000000aa" not in _ids(listed)
-        assert "task-deep" not in _ids(listed)
+        assert "task-000000000014" not in _ids(listed)
 
     run_db(check, monkeypatch)
+
+
+def test_recent_window_excludes_older_activity(monkeypatch, tmp_path):
+    async def check(pool):
+        project_id = await _project(pool)
+        cwd = tmp_path / "nowhere"
+        cwd.mkdir()
+        await _task(pool, project_id, "task-0000000000aa", title="old", status="running")
+        await _backdate(pool, ["task-0000000000aa"], "20 days")
+        _none(await _select({"cwd": str(cwd)}), ["last_activity_at"], 14, False, _HINT_RECENT)
+
+    run_db(check, monkeypatch)
+
 
 
 def test_task_id(monkeypatch):
@@ -169,73 +316,143 @@ def test_task_id(monkeypatch):
     run_db(check, monkeypatch)
 
 
-def test_mr_matches_references_not_bare_numbers(monkeypatch):
+async def _mr_world(pool):
+    project_id = await _project(pool)
+    await _task(pool, project_id, "task-aaa", title="wait", requirement="work", status="running")
+    await _task(pool, project_id, "task-bbb", title="note", requirement="please review !12", status="running")
+    await _task(pool, project_id, "task-ccc", title="link",
+                requirement="see https://github.com/other/repo/pull/12 please", status="running")
+    await _wait(pool, "task-aaa", 12, repo="Owner/Name")
+    now = datetime.now(timezone.utc)
+    await _activity(pool, "task-bbb", now)
+    await _activity(pool, "task-aaa", now - timedelta(hours=2))
+    await _activity(pool, "task-ccc", now - timedelta(hours=1))
+
+
+@pytest.mark.parametrize("selection,ids,absent", [
+    ("https://github.com/owner/name/pull/12", ["task-aaa", "task-bbb"], ["task-ccc"]),
+    ("12", ["task-bbb", "task-ccc", "task-aaa"], []),
+    ("https://github.com/other/repo/pull/12", ["task-ccc", "task-bbb"], ["task-aaa"]),
+])
+def test_mr_repo_narrows_the_same_number(selection, ids, absent, monkeypatch):
     async def check(pool):
-        project_id = (await projects.create_project(name="select", pool=pool))["id"]
-        await _task(pool, project_id, "task-aaa", title="wait", requirement="work", status="running")
-        await _task(pool, project_id, "task-bbb", title="note", requirement="please review !12", status="running")
-        await _task(pool, project_id, "task-ccc", title="link",
-                    requirement="see https://github.com/other/repo/pull/12 please", status="running")
-        await _task(pool, project_id, "task-ddd", title="prose", requirement="the count is 12 today", status="running")
-        await _task(pool, project_id, "task-eee", title="extra", requirement="work", status="running")
-        await _task(pool, project_id, "task-fff", title="origin", requirement="work",
-                    original_user_text="see #78", status="running")
-        await add_supplement("task-eee", "ship !77", via="dashboard", pool=pool)
-        await pool.execute("INSERT INTO task_steps (id, task_id, step_index, instruction) VALUES ('step-a', 'task-aaa', 0, 'wait')")
-        spec = json.dumps({"check": {"type": "github_pr", "repo": "Owner/Name", "number": 12, "ready_when": "merged"}})
-        await pool.execute(
-            "INSERT INTO task_waits (step_id, task_id, topic, spec) VALUES ('step-a', 'task-aaa', 'pr', $1::jsonb)", spec)
-        now = datetime.now(timezone.utc)
-        await _activity(pool, "task-bbb", now)
-        await _activity(pool, "task-aaa", now - timedelta(hours=2))
-        await _activity(pool, "task-ccc", now - timedelta(hours=1))
-
-        url = await _select({"selection": "https://github.com/owner/name/pull/12"})
-        _candidates(url, ["task-aaa", "task-bbb"])
-        assert "task-ccc" not in _ids(url) and "task-ddd" not in _ids(url)
-
-        bare = await _select({"selection": "12"})
-        _candidates(bare, ["task-bbb", "task-ccc", "task-aaa"])
-        assert "task-ddd" not in _ids(bare)
-
-        other = await _select({"selection": "https://github.com/other/repo/pull/12"})
-        _candidates(other, ["task-ccc", "task-bbb"])
-        assert "task-aaa" not in _ids(other) and "task-ddd" not in _ids(other)
-
-        _one(await _select({"selection": "77"}), "task-eee")
-        _one(await _select({"selection": "#78"}), "task-fff")
+        await _mr_world(pool)
+        found = await _select({"selection": selection})
+        _candidates(found, ids)
+        assert all(task_id not in _ids(found) for task_id in absent)
 
     run_db(check, monkeypatch)
 
 
-def test_text_matches_every_token_and_ranks(monkeypatch):
+def test_mr_prose_number_is_not_a_reference(monkeypatch):
     async def check(pool):
-        project_id = (await projects.create_project(name="select", pool=pool))["id"]
+        project_id = await _project(pool)
+        await _task(pool, project_id, "task-ddd", title="prose", requirement="the count is 12 today", status="running")
+        _none(await _select({"selection": "12"}),
+              ["github_pr", "title", "requirement", "original_user_text", "supplements"], 90, False, _HINT_TEXT)
+
+    run_db(check, monkeypatch)
+
+
+@pytest.mark.parametrize("field,text,selection", [
+    ("requirement", "please review !12", "12"),
+    ("original_user_text", "see #78", "#78"),
+    ("supplement", "ship !77", "77"),
+])
+def test_mr_reference_in_one_field(field, text, selection, monkeypatch):
+    async def check(pool):
+        project_id = await _project(pool)
+        fields = {"title": "work", "requirement": "work", "status": "running"}
+        if field != "supplement":
+            fields[field] = text
+        await _task(pool, project_id, "task-ref", **fields)
+        if field == "supplement":
+            await add_supplement("task-ref", text, via="dashboard", pool=pool)
+        _one(await _select({"selection": selection}), "task-ref")
+
+    run_db(check, monkeypatch)
+
+
+@pytest.mark.parametrize("left,right", [
+    ("１２", "００１２"),
+    ("١٢", "0012"),
+    ("٠٠١٢", "１２"),
+    ("\U0001E951\U0001E952", "１２"),
+])
+def test_unicode_wait_numbers_stay_ambiguous(left, right, monkeypatch):
+    async def check(pool):
+        project_id = await _project(pool)
+        await _task(pool, project_id, "task-00000000000a", title="left", requirement="work", status="running")
+        await _task(pool, project_id, "task-00000000000b", title="right", requirement="work", status="running")
+        await _task(pool, project_id, "task-00000000000c", title="other", requirement="work", status="running")
+        await _wait(pool, "task-00000000000a", left)
+        await _wait(pool, "task-00000000000b", right)
+        await _wait(pool, "task-00000000000c", 13)
+        await _stamp(pool, ["task-00000000000a", "task-00000000000b", "task-00000000000c"])
+        found = await _select({"selection": "12"})
+        _candidates(found, ["task-00000000000a", "task-00000000000b"])
+        assert found["kind"] != "one" and "task-00000000000c" not in _ids(found)
+
+    run_db(check, monkeypatch)
+
+
+def test_text_requires_every_token(monkeypatch):
+    async def check(pool):
+        project_id = await _project(pool)
         await _task(pool, project_id, "task-alpha", title="alpha", requirement="unrelated", status="running")
         await _task(pool, project_id, "task-both", title="alpha beta case", requirement="work", status="running")
+        _one(await _select({"selection": "alpha beta"}), "task-both")
+        assert "task-alpha" not in _ids(await _select({"selection": "alpha beta"}))
+
+    run_db(check, monkeypatch)
+
+
+def test_text_ranks_title_before_requirement(monkeypatch):
+    async def check(pool):
+        project_id = await _project(pool)
         await _task(pool, project_id, "task-title", title="red blue open", requirement="work", status="running")
         await _task(pool, project_id, "task-ended", title="red blue ended", requirement="work", status="completed")
         await _task(pool, project_id, "task-req", title="red", requirement="blue note", status="running")
-        await _task(pool, project_id, "task-wild", title="100%_done", requirement="work", status="running")
-        await _task(pool, project_id, "task-like", title="100XXdone", requirement="work", status="running")
-        await _task(pool, project_id, "task-act", title="unique needle", requirement="work", status="running")
-        await _task(pool, project_id, "task-old", title="unique needle", requirement="work", status="running")
         now = datetime.now(timezone.utc)
         await _activity(pool, "task-title", now - timedelta(days=3))
         await _activity(pool, "task-ended", now - timedelta(days=1))
         await _activity(pool, "task-req", now)
+        _candidates(await _select({"selection": "red blue"}), ["task-title", "task-ended", "task-req"])
+
+    run_db(check, monkeypatch)
+
+
+@pytest.mark.parametrize("see_all,ids", [
+    (False, ["task-act"]),
+    (True, ["task-act", "task-old"]),
+])
+def test_text_window_follows_activity(see_all, ids, monkeypatch):
+    async def check(pool):
+        project_id = await _project(pool)
+        await _task(pool, project_id, "task-act", title="unique needle", requirement="work", status="running")
+        await _task(pool, project_id, "task-old", title="unique needle", requirement="work", status="running")
+        now = datetime.now(timezone.utc)
         await _backdate(pool, ["task-act"], "100 days")
         await _activity(pool, "task-act", now - timedelta(days=1))
         await _activity(pool, "task-old", now - timedelta(days=100))
         await pool.execute("UPDATE tasks SET updated_at = now() - interval '1 day' WHERE id = 'task-old'")
+        found = await _select({"selection": "unique needle", "all": see_all})
+        if see_all:
+            _candidates(found, ids)
+        else:
+            _one(found, ids[0])
 
-        _one(await _select({"selection": "alpha beta"}), "task-both")
-        assert "task-alpha" not in _ids(await _select({"selection": "alpha beta"}))
-        _candidates(await _select({"selection": "red blue"}), ["task-title", "task-ended", "task-req"])
-        _one(await _select({"selection": "unique needle"}), "task-act")
-        _candidates(await _select({"selection": "unique needle", "all": True}), ["task-act", "task-old"])
-        _one(await _select({"selection": "100%_done"}), "task-wild")
-        assert (await _select({"selection": "100%_done"}))["task"]["task_id"] != "task-like"
+    run_db(check, monkeypatch)
+
+
+def test_text_percent_and_underscore_are_literal(monkeypatch):
+    async def check(pool):
+        project_id = await _project(pool)
+        await _task(pool, project_id, "task-wild", title="100%_done", requirement="work", status="running")
+        await _task(pool, project_id, "task-like", title="100XXdone", requirement="work", status="running")
+        found = await _select({"selection": "100%_done"})
+        _one(found, "task-wild")
+        assert found["task"]["task_id"] != "task-like"
 
     run_db(check, monkeypatch)
 

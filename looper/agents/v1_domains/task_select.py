@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import unicodedata
 from typing import Any
 
 from ...db.connection import get_pool
@@ -81,6 +82,34 @@ def _fold(column: str) -> str:
     return _FOLD.format(column=column)
 
 
+def _digit_maps() -> tuple[str, str]:
+    """Every Unicode decimal digit, mapped to ASCII. The same set ``str.isdecimal`` accepts."""
+    grouped: list[list[str]] = [[] for _ in range(10)]
+    for code in range(0x110000):
+        char = chr(code)
+        if char.isdecimal():
+            grouped[unicodedata.decimal(char)].append(char)
+    source = [char for value in range(10) for char in grouped[value]]
+    target = [str(value) for value in range(10) for _ in grouped[value]]
+    return "".join(source), "".join(target)
+
+
+_DIGIT_FROM, _DIGIT_TO = _digit_maps()
+
+
+def _decimal_key(expr: str) -> str:
+    """The integer text of a Unicode decimal string, or NULL.
+
+    ``int`` accepts ``１２``, ``００１２`` and ``١٢`` as 12. NFKC string equality does not:
+    it keeps ``0012`` and leaves Arabic-Indic digits unchanged. Leading zeros are removed
+    so both compare with the bound number. Anything that is not all decimal digits stays
+    NULL and Python never sees it as a number.
+    """
+    mapped = f"translate({expr}, $digits${_DIGIT_FROM}$digits$, $digits${_DIGIT_TO}$digits$)"
+    return (f"CASE WHEN {mapped} ~ '^[0-9]+$' "
+            f"THEN COALESCE(NULLIF(ltrim({mapped}, '0'), ''), '0') END")
+
+
 def _has(column: str, placeholder: str) -> str:
     """True when the folded text or the raw text contains the bound literal."""
     return (f"(strpos({_fold(column)}, {placeholder}) > 0 "
@@ -144,7 +173,10 @@ def _pack(rows, presented, searched, hint) -> dict[str, Any]:
 
 
 def _ancestors(cwd: str) -> list[str]:
-    """Normpath ancestors of the real working directory, the directory itself first."""
+    """Normpath ancestors of the real working directory, the directory itself first.
+
+    ``realpath`` runs once, on the query. Stored paths were resolved when they were written.
+    """
     current = os.path.normpath(os.path.realpath(cwd))
     found = []
     while True:
@@ -153,35 +185,6 @@ def _ancestors(cwd: str) -> list[str]:
         if parent == current:
             return found
         current = parent
-
-
-def _contains_symlink(path: str, cache: dict[str, bool]) -> bool:
-    """Whether any component is a symlink or `.`/`..`. Parents are remembered across paths."""
-    current = "/"
-    for part in path.split("/")[1:]:
-        if part in {"", ".", ".."}:
-            return True
-        current = "/" + part if current == "/" else current + "/" + part
-        if current not in cache:
-            cache[current] = os.path.islink(current)
-        if cache[current]:
-            return True
-    return False
-
-
-def _resolved_directory(path: str, ancestors: set[str], cache: dict[str, bool]) -> str | None:
-    """The real directory when it contains the working directory.
-
-    A stored path that is already an ancestor is returned as stored. realpath runs only for a symlink
-    or a `.`/`..` component, so a canonical path is not resolved again.
-    """
-    if not isinstance(path, str) or not os.path.isabs(path):
-        return None
-    if _contains_symlink(path, cache):
-        real = os.path.normpath(os.path.realpath(path))
-        return real if real in ancestors else None
-    norm = os.path.normpath(path)
-    return norm if norm in ancestors else None
 
 
 def _search_sql(match: str, see_all: bool, days: int) -> str:
@@ -254,47 +257,26 @@ def _check_ref(spec: Any) -> pure.MrRef | None:
     return pure.MrRef(number, repo if isinstance(repo, str) and repo.strip() else None)
 
 
+# Equality on the stored real path. The partial indexes require the ``<> ''`` predicate.
 _DIRECTORY_HITS = """
 SELECT id, path FROM (
-    SELECT id, work_dir AS path FROM tasks
-    WHERE work_dir <> '' AND work_dir = ANY($1::text[])
+    SELECT id, work_dir_real AS path FROM tasks
+    WHERE work_dir_real <> '' AND work_dir_real = ANY($1::text[])
     UNION ALL
-    SELECT id, workspace_dir FROM tasks
-    WHERE workspace_dir <> '' AND workspace_dir = ANY($1::text[])
+    SELECT id, workspace_dir_real FROM tasks
+    WHERE workspace_dir_real <> '' AND workspace_dir_real = ANY($1::text[])
     UNION ALL
-    SELECT task_id, path FROM task_worktrees
-    WHERE state = 'active' AND path = ANY($1::text[])
+    SELECT task_id, path_real FROM task_worktrees
+    WHERE state = 'active' AND path_real <> '' AND path_real = ANY($1::text[])
 ) hit
-"""
-# Paths that are not already an ancestor. A symlink or a `.`/`..` component may still contain the directory.
-_DIRECTORY_REST = """
-SELECT id, path FROM (
-    SELECT id, work_dir AS path FROM tasks
-    WHERE work_dir <> '' AND NOT (work_dir = ANY($1::text[]))
-    UNION ALL
-    SELECT id, workspace_dir FROM tasks
-    WHERE workspace_dir <> '' AND NOT (workspace_dir = ANY($1::text[]))
-    UNION ALL
-    SELECT task_id, path FROM task_worktrees
-    WHERE state = 'active' AND NOT (path = ANY($1::text[]))
-) rest
 """
 
 
 async def _directory_pairs(pool, ancestors: list[str]) -> list[tuple[str, str]]:
-    """Tasks whose real work_dir, workspace_dir or active worktree contains the working directory."""
+    """Tasks whose stored real work_dir, workspace_dir or active worktree contains the directory."""
     known = set(ancestors)
-    cache: dict[str, bool] = {}
-    pairs: list[tuple[str, str]] = []
-    for row in await pool.fetch(_DIRECTORY_HITS, ancestors):
-        resolved = _resolved_directory(row["path"], known, cache)
-        if resolved is not None:
-            pairs.append((row["id"], resolved))
-    for row in await pool.fetch(_DIRECTORY_REST, ancestors):
-        resolved = _resolved_directory(row["path"], known, cache)
-        if resolved is not None:
-            pairs.append((row["id"], resolved))
-    return pairs
+    return [(row["id"], row["path"]) for row in await pool.fetch(_DIRECTORY_HITS, ancestors)
+            if row["path"] in known]
 
 
 async def _recent(pool, see_all: bool) -> dict[str, Any]:
@@ -377,10 +359,11 @@ def _mr_match_sql() -> str:
     text = " OR ".join(_has(column, number) for column in ("t.title", "t.requirement", "t.original_user_text"))
     supplement = ("EXISTS (SELECT 1 FROM task_journal j WHERE j.task_id = t.id AND j.kind = 'supplement' AND "
                   + _has("j.summary", number) + ")")
-    folded_number = f"btrim(normalize(coalesce(w.spec #>> '{{check,number}}', ''), NFKC)) = {number}"
+    # int() on a decimal string, not NFKC text. ``００１２`` and ``١٢`` are both 12.
+    stored_number = _decimal_key("w.spec #>> '{check,number}'")
     check = ("EXISTS (SELECT 1 FROM task_waits w WHERE w.task_id = t.id "
-             "AND w.spec #>> '{check,type}' = 'github_pr' AND ("
-             f"{folded_number} OR w.spec #>> '{{check,number}}' = {number}))")
+             "AND w.spec #>> '{check,type}' = 'github_pr' AND "
+             f"{stored_number} = {number})")
     return f"({check} OR {text} OR {supplement})"
 
 
