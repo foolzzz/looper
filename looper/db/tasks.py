@@ -96,6 +96,18 @@ PLANNER_END_STATUSES = frozenset({"completed", "failed"})
 ACTIVE_STATUSES = tuple(status for status, group in STATUS_GROUPS.items()
                         if group in (TaskGroup.NEEDS_YOU, TaskGroup.IN_PROGRESS))
 
+
+class InteractionMode(str, Enum):
+    DIRECT = "direct"              # the task Manager may write: never started, ready, or ended
+    ORCHESTRATED = "orchestrated"  # the background owns the task's workspace (ACTIVE_STATUSES)
+
+
+def interaction_mode(status: str | None) -> InteractionMode:
+    """Who may write the task's workspace. A status this mapping does not know is direct: only the background
+    writes while a task is active, so an unknown status is not one it owns."""
+    return InteractionMode.ORCHESTRATED if status in ACTIVE_STATUSES else InteractionMode.DIRECT
+
+
 async def others_active_in(work_dir: str, task_id: str, *, pool: asyncpg.Pool | None = None) -> bool:
     """Whether a task other than ``task_id`` is running or starting (``ACTIVE_STATUSES``) in the directory
     ``work_dir``: its agents may change files there."""

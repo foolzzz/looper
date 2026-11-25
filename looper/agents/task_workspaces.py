@@ -65,6 +65,18 @@ class WorktreeState(str, Enum):
     REMOVED = "removed"  # its directory is gone; its branch stays
 
 
+class ReopenMode(str, Enum):
+    WRITE = "write"          # the task Manager may write here
+    READ_ONLY = "read_only"  # only reading: the work cannot be brought back
+
+
+@dataclass(frozen=True)
+class Reopened:
+    mode: ReopenMode
+    work_dir: str
+    reason: str | None = None  # "branch_gone", "branch_checked_out", "workspace_missing"
+
+
 def task_branch(task_id: str) -> str:
     """The task's branch: not ``looper/<task_id>``, which git could not have beside its steps' branches
     ``looper/<task_id>/<key>-<n>``."""
@@ -485,3 +497,41 @@ async def sweep(runtime_root: Path) -> int:
             ws._remove_empty(path.parent)
             removed += 1
     return removed
+
+
+def _nearest_existing(path: Path) -> Path:
+    current = path
+    while not current.exists():
+        parent = current.parent
+        if parent == current:
+            return current
+        current = parent
+    return current
+
+
+async def reopen(task: Mapping[str, Any], *, runtime_root: Path, links: Sequence[str], note: Note) -> Reopened:
+    """The directory the task Manager works in. Never changes ``tasks.status``.
+
+    A removed worktree is rebuilt only when its branch still exists and no worktree has it checked out. Otherwise
+    the repository directory is read-only: ``prepare`` would start a new branch from the base.
+    """
+    if task.get("workspace_mode") != TaskWorkspaces.WORKTREE.value:
+        work_dir = str(task.get("work_dir") or "")
+        if work_dir and Path(work_dir).exists():
+            return Reopened(ReopenMode.WRITE, work_dir)
+        place = Path(work_dir) if work_dir else Path(".")
+        return Reopened(ReopenMode.READ_ONLY, str(_nearest_existing(place)), "workspace_missing")
+
+    from ..db import task_worktrees as db_task_worktrees
+
+    task_id = str(task["id"])
+    row = await db_task_worktrees.get(task_id)
+    if row is None or row["state"] == WorktreeState.ACTIVE.value:
+        return Reopened(ReopenMode.WRITE, await prepare(task, runtime_root=runtime_root, links=links, note=note))
+    repo = str(task.get("workspace_dir") or row["repo_dir"])
+    branch = str(row["branch"])
+    if not await ws.branch_exists(repo, branch):
+        return Reopened(ReopenMode.READ_ONLY, repo, "branch_gone")
+    if await ws.branch_checked_out(repo, branch):
+        return Reopened(ReopenMode.READ_ONLY, repo, "branch_checked_out")
+    return Reopened(ReopenMode.WRITE, await prepare(task, runtime_root=runtime_root, links=links, note=note))
