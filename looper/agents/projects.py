@@ -969,8 +969,11 @@ async def task_detail(task_id: str, *, compact: bool = False) -> dict[str, Any]:
     if failure_holds is not None:
         from .v1_domains.task_failures import hold_view
         failure_holds = [hold_view(row) for row in failure_holds]
+    from ..db import network_pauses
+    network_pause = await network_pauses.get(task_id)
     return {
         **({"holds": failure_holds} if failure_holds is not None else {}),
+        **({"network_pause": network_pauses.view(network_pause)} if network_pause is not None else {}),
         "task_id": raw.get("id", ""),
         "requirement": raw.get("requirement", ""),
         "name": raw.get("name", ""),

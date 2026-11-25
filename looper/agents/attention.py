@@ -413,14 +413,21 @@ async def _earliest_deliveries(_: Any) -> dict[str, Any] | None:
 
 async def _failure_holds(_: Any) -> Read:
     from . import failures
-    from ..db import step_failures
-    if await failures.typing_mode() is not failures.FailureTyping.ACT:
+    from ..db import network_pauses, step_failures
+    typing_on = await failures.typing_mode() is failures.FailureTyping.ACT
+    network_on = (await db_settings.get_settings(['engine.network_pause.enabled'])).get('engine.network_pause.enabled') == 'true'
+    if not typing_on and not network_on:
         return NotRead.OFF
-    rows = [row for row in await step_failures.list_holds() if row["kind"] in ("environment", "breaker")]
+    rows = ([row for row in await step_failures.list_holds() if row["kind"] in ("environment", "breaker")]
+            if typing_on else [])
     items = [_item(f"failure:{row['failure_id']}", f"{row['step_key'] or row['step_id']}：{row['cause']}",
                    context=row["task_id"], since=row["created_at"], href=f"#tasks/{row['task_id']}",
                    failure_id=row["failure_id"], step_id=row["step_id"], kind=row["kind"], streak=row["streak"])
              for row in rows]
+    if network_on:
+        items.extend(_item(f"network_pause:{row['task_id']}", '网络恢复等待已到上限', context=row['task_id'],
+                           since=row['started_at'], href=f"#tasks/{row['task_id']}", kind='network',
+                           reason=row['reason']) for row in await network_pauses.needs_attention())
     return items[:SHOWN], len(items)
 
 
@@ -528,6 +535,8 @@ def _line(kind: str, item: Mapping[str, Any], now: datetime) -> str:
     facts = item["facts"]
     title, context, waited = _plain(item["title"]), _plain(item["context"]), _ago(item["since"], now)
     if kind == "failure_holds":
+        if facts.get('kind') == 'network':
+            return f"- 【{context}】{title}：{_plain(facts['reason'])}。可停止任务，或恢复连接后重启任务。"
         return f"- 【{context}】{title}（连续失败 {facts['streak']} 次），在任务页选择重试、交给 Planner 或停止。"
     if kind == "gates":
         return f"- 【{context}】{facts['step']} {title}" + (f"（已等 {waited}）" if waited else "")

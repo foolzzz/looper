@@ -578,6 +578,7 @@ class TaskRouter:
                 attempts.TaskFailure.TASK_BUDGET if budget else outcome_failure)
             task.status = status  # teardown persists this; it would default to "completed"
             await self._teardown_task(task_id)
+            await self._clear_network_pause(task_id)
 
     def _notice(self, task: Task, status: str, summary: str | None, branch_line: str | None = None, *,
                 delivery_summary: str | None = None, evidence: acceptance_result.ResultEvidence | None = None) -> Notice | None:
@@ -643,6 +644,7 @@ class TaskRouter:
                 correlation_id=task.correlation_id,
             ))
             await self._teardown_task(task_id)
+        await self._clear_network_pause(task_id)
 
     async def _handle_stop(self, envelope: MessageEnvelope) -> None:
         assert self._bus is not None
@@ -659,6 +661,7 @@ class TaskRouter:
             except Exception:
                 logger.exception("failed to mark orphan task %s stopped", task_id)
             await self._task_ended(task_id, "stopped")
+            await self._clear_network_pause(task_id)
             return
 
         task.status = "stopped"
@@ -680,6 +683,7 @@ class TaskRouter:
         if planner:
             await planner.stop()
             self._planners.pop(task_id, None)
+        await self._clear_network_pause(task_id)
         if self._broadcaster:
             self._broadcaster.close_task(task_id)
 
@@ -697,6 +701,14 @@ class TaskRouter:
         service = failure_handling.get_service()
         if service is not None and service.mode is failures.FailureTyping.ACT:
             await service.cancel_task(task_id)
+
+    @staticmethod
+    async def _clear_network_pause(task_id: str) -> None:
+        from .. import network_pause_settings
+        from ...db import network_pauses
+
+        if (await network_pause_settings.load()).enabled:
+            await network_pauses.clear(task_id, reason='stopped')
 
     @staticmethod
     async def _stop_note(task_id: str, reason: str | None = None) -> str:
