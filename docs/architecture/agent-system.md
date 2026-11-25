@@ -9034,7 +9034,7 @@ The OpenAPI document is authoritative for fields, authentication and errors. Pro
 | `/api/v1/auth/{set_password,clear_password}` | POST | `auth.{set_password,clear_password}` |
 | `/api/v1/system/{check,status,overview}` | POST | `system.{check,status,overview}` |
 | `/api/v1/config/{export,import_preview,import_apply,import_upload,import_cancel}` | POST | `config.{export,import_preview,import_apply,import_upload,import_cancel}` |
-| `/api/v1/tasks/{requirement_update,configure,move,agents,continue,role_update,room_view,activity,activity_detail,conversation,activity_stream,create,page,detail,delete}` | POST | `tasks.{requirement_update,configure,move,agents,continue,role_update,room_view,activity,activity_detail,conversation,activity_stream,create,page,detail,delete}` |
+| `/api/v1/tasks/{requirement_update,configure,move,agents,continue,role_update,room_view,activity,activity_detail,conversation,activity_stream,create,page,detail,delete,select}` | POST | `tasks.{requirement_update,configure,move,agents,continue,role_update,room_view,activity,activity_detail,conversation,activity_stream,create,page,detail,delete,select}` |
 | `/api/v1/catalog_items/{list,get,update,delete}` | POST | `catalog_items.{list,get,update,delete}` |
 | `/api/v1/installs/{create,update,delete,project}` | POST | `installs.{create,update,delete,project}` |
 | `/api/v1/catalog_sources/{import_machine,import_mcp,upload,git_preview,git_import,create_skill,create_mcp}` | POST | `catalog_sources.{import_machine,import_mcp,upload,git_preview,git_import,create_skill,create_mcp}` |
@@ -9214,6 +9214,16 @@ separate tokens and is not exported to API clients. No unversioned operator rout
   exports; the Manager's compact project hides this group while off, preserving the base view byte for byte.
   First enablement uses the project-settings form and project administration API. The Manager's project tool
   and its schema are unchanged; chat configuration is deferred to a follow-up with a Manager dialog comparison.
+- **Finding a task.** `POST /api/v1/tasks/select` (`tasks.select`) is an operator-only read and calls no model.
+  It is not a generated client command. An empty selection uses the current directory: the deepest `work_dir`,
+  `workspace_dir` or active worktree that contains it, and when several tasks share that directory and only one
+  has not ended, that one is returned. With no directory match, the tasks with activity in the last 14 days, at
+  most 20, newest first. A task id returns that task. One merge-request reference (a `/pull/N` or
+  `/merge_requests/N` URL, `!N`, `#N`, `mr N`, `pr N`, or a bare number) matches a `github_pr` wait or the same
+  reference in the title, latest requirement, original text or supplements. Any other text matches when every
+  word is in the title or the latest requirement. Text and merge-request matches use the last 90 days of activity
+  unless `all` is set. One match is returned; two or more are listed, at most ten, and the first is not chosen;
+  none says what was searched.
 - **Client-only tools.** `looper_task_pipeline` (a task's steps in plan order with kind, status, dependencies and role)
   and `looper_gates` (list a task's gates, read their messages, reply, end a gate) exist for clients. A client does not
   get `looper_task_gate_reply`, because a gate reply there is the user's own words in a chat (a client answers with
