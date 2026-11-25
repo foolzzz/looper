@@ -18,7 +18,7 @@ from .connection import get_pool
 
 _COLUMNS = ("manager_id, session_key, kind, channel_id, chat, session_id, session_totals, runtime_type, "
             "profile_id, provider_id, clean_start, pending_handoff, context_tokens, last_turn_cost_usd, "
-            "created_at, last_active_at")
+            "created_at, last_active_at, context_policy_version")
 
 
 def _row(record: asyncpg.Record) -> dict[str, Any]:
@@ -40,20 +40,24 @@ async def get(
 
 
 async def save(row: Mapping[str, Any], *, pool: asyncpg.Pool | asyncpg.Connection | None = None) -> None:
-    """Insert or replace a session. ``context_tokens`` and ``last_turn_cost_usd`` are kept when ``row`` omits them."""
+    """Insert or replace a session. Omitted policy versions mark legacy context (0).
+
+    ``context_tokens`` and ``last_turn_cost_usd`` are kept when ``row`` omits them.
+    """
     pool = pool or get_pool()
     await pool.execute(
         """
         INSERT INTO manager_sessions (manager_id, session_key, kind, channel_id, chat, session_id, session_totals,
                                       runtime_type, profile_id, provider_id, clean_start, pending_handoff,
-                                      context_tokens, last_turn_cost_usd, last_active_at)
-        VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8, $9, $10, $11, $12, $13, $14, now())
+                                      context_tokens, last_turn_cost_usd, last_active_at, context_policy_version)
+        VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8, $9, $10, $11, $12, $13, $14, now(), $15)
         ON CONFLICT (manager_id, session_key) DO UPDATE
         SET kind = EXCLUDED.kind, channel_id = EXCLUDED.channel_id, chat = EXCLUDED.chat,
             session_id = EXCLUDED.session_id, session_totals = EXCLUDED.session_totals,
             runtime_type = EXCLUDED.runtime_type, profile_id = EXCLUDED.profile_id,
             provider_id = EXCLUDED.provider_id, clean_start = EXCLUDED.clean_start,
             pending_handoff = EXCLUDED.pending_handoff,
+            context_policy_version = EXCLUDED.context_policy_version,
             context_tokens = COALESCE(EXCLUDED.context_tokens, manager_sessions.context_tokens),
             last_turn_cost_usd = COALESCE(EXCLUDED.last_turn_cost_usd, manager_sessions.last_turn_cost_usd),
             last_active_at = now()
@@ -61,6 +65,7 @@ async def save(row: Mapping[str, Any], *, pool: asyncpg.Pool | asyncpg.Connectio
         row["manager_id"], row["session_key"], row["kind"], row["channel_id"], row["chat"], row["session_id"],
         json.dumps(dict(row["session_totals"])), row["runtime_type"], row["profile_id"], row["provider_id"],
         row["clean_start"], row["pending_handoff"], row.get("context_tokens"), row.get("last_turn_cost_usd"),
+        row.get("context_policy_version", 0),
     )
 
 
