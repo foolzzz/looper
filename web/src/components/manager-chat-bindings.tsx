@@ -11,13 +11,28 @@ import { V1Error, type V1PendingConfirmation } from "@/lib/v1";
 
 const bindingError = (err: unknown) => err instanceof V1Error ? `${err.code}: ${err.message}` : errorText(err);
 
+/** A catalog or override read. Empty is a successful read with nothing to offer, distinct from still loading or failed. */
+export type RemoteRead<T> =
+  | { status: "loading" }
+  | { status: "ready"; rows: T[] }
+  | { status: "empty" }
+  | { status: "failed"; message: string };
+
+function settled<T>(rows: T[]): RemoteRead<T> {
+  return rows.length ? { status: "ready", rows } : { status: "empty" };
+}
+
 /** One section-wide snapshot; a write invalidates every earlier read before it starts. */
 export function useManagerChatBindings() {
   const [bindings, setBindings] = useState<Binding[] | null>(null);
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
   const [loading, setLoading] = useState(false);
+  const [setsRead, setSetsRead] = useState<RemoteRead<CapabilitySet>>({ status: "loading" });
+  const [catalogTick, setCatalogTick] = useState(0);
   const request = useRef<AbortController | null>(null);
+  const setsRequest = useRef<AbortController | null>(null);
+  const setsAttempt = useRef(0);
   const version = useRef(0);
   const writing = useRef(false);
   const mounted = useRef(true);
@@ -27,7 +42,7 @@ export function useManagerChatBindings() {
   }, []);
   useEffect(() => {
     mounted.current = true;
-    return () => { mounted.current = false; invalidate(); };
+    return () => { mounted.current = false; invalidate(); setsRequest.current?.abort(); };
   }, [invalidate]);
 
   const read = useCallback(async () => {
@@ -50,9 +65,28 @@ export function useManagerChatBindings() {
       if (mounted.current && current === version.current) setLoading(false);
     }
   }, [invalidate]);
+  const readSets = useCallback(async () => {
+    setsRequest.current?.abort();
+    const controller = new AbortController();
+    setsRequest.current = controller;
+    const attempt = ++setsAttempt.current;
+    setSetsRead({ status: "loading" });
+    try {
+      const rows = await listCapabilitySets(controller.signal);
+      if (!mounted.current || attempt !== setsAttempt.current) return;
+      setSetsRead(settled(rows));
+    } catch (err) {
+      if (!mounted.current || attempt !== setsAttempt.current || controller.signal.aborted) return;
+      setSetsRead({ status: "failed", message: bindingError(err) });
+    }
+  }, []);
+  const retrySets = useCallback(() => readSets(), [readSets]);
   const refresh = useCallback(async () => {
-    if (!writing.current) await read().catch(() => {});
-  }, [read]);
+    if (!writing.current) {
+      setCatalogTick((n) => n + 1);
+      await Promise.all([read().catch(() => {}), readSets()]);
+    }
+  }, [read, readSets]);
   const mutate = useCallback(async (write: () => Promise<unknown>) => {
     if (writing.current) return;
     writing.current = true;
@@ -75,7 +109,8 @@ export function useManagerChatBindings() {
     }
   }, [invalidate, read]);
   const deleted = new Set(bindings?.filter((b) => b.manager_deleted).map((b) => b.manager_id));
-  return { bindings, loaded: bindings !== null, error, busy, loading, refresh, mutate, deleted };
+  return { bindings, loaded: bindings !== null, error, busy, loading, refresh, mutate, deleted,
+    setsRead, retrySets, catalogTick };
 }
 
 type Snapshot = Omit<ReturnType<typeof useManagerChatBindings>, "bindings">;
@@ -85,26 +120,26 @@ export function ManagerChatBindings({ manager, managers, bindings, snapshot, rel
   snapshot: Snapshot; reload: () => Promise<void>;
 }) {
   const id = useId();
-  const [sets, setSets] = useState<CapabilitySet[]>([]);
-  const [setsError, setSetsError] = useState("");
-  useEffect(() => {
-    if (!bindings.length) return;
-    const controller = new AbortController();
-    listCapabilitySets(controller.signal).then((rows) => {
-      if (!controller.signal.aborted) setSets(rows);
-    }).catch((err: unknown) => {
-      if (!controller.signal.aborted) setSetsError(bindingError(err));
-    });
-    return () => controller.abort();
-  }, [bindings.length]);
+  const sets = snapshot.setsRead;
   return (
     <section role="region" aria-label={`Chats for ${manager.name}`} className="mt-2 rounded-md border border-border">
       <h4 id={id} tabIndex={-1} className="px-3 py-2 text-sm font-medium">Chats</h4>
       <p className="px-3 pb-2 text-[11px] text-muted-foreground">Scope applies once scoped routing is on for this Manager.</p>
-      {setsError && <p role="alert" className="px-3 pb-2 text-xs text-destructive">{setsError}</p>}
+      {bindings.length > 0 && sets.status === "loading" && (
+        <p role="status" className="px-3 pb-2 text-xs text-muted-foreground">Loading capability sets…</p>
+      )}
+      {bindings.length > 0 && sets.status === "empty" && (
+        <p className="px-3 pb-2 text-xs text-muted-foreground">No capability sets.</p>
+      )}
+      {bindings.length > 0 && sets.status === "failed" && (
+        <div role="alert" className="flex flex-wrap items-center gap-2 px-3 pb-2">
+          <p className="text-xs text-destructive">Capability sets could not be loaded. {sets.message}</p>
+          <Button type="button" size="sm" variant="outline" onClick={() => void snapshot.retrySets()}>Retry capability sets</Button>
+        </div>
+      )}
       {bindings.length ? <ul aria-labelledby={id} className="divide-y divide-border border-t border-border">
         {bindings.map((b) => <ChatBindingRow key={JSON.stringify([b.channel_id, b.chat_id])}
-          binding={b} managers={managers} sets={sets} snapshot={snapshot} reload={reload}
+          binding={b} managers={managers} snapshot={snapshot} reload={reload}
           onRemoved={() => document.getElementById(id)?.focus()} />)}
       </ul> : <p className="px-3 pb-3 text-xs text-muted-foreground">
         {!snapshot.loaded ? "Explicit chat bindings have not loaded." : "No explicit chat bindings."}
@@ -113,8 +148,8 @@ export function ManagerChatBindings({ manager, managers, bindings, snapshot, rel
   );
 }
 
-function ChatBindingRow({ binding: b, managers, sets, snapshot, reload, onRemoved }: {
-  binding: Binding; managers: ManagerInfo[]; sets: CapabilitySet[]; snapshot: Snapshot;
+function ChatBindingRow({ binding: b, managers, snapshot, reload, onRemoved }: {
+  binding: Binding; managers: ManagerInfo[]; snapshot: Snapshot;
   reload: () => Promise<void>; onRemoved: () => void;
 }) {
   const id = useId();
@@ -139,11 +174,12 @@ function ChatBindingRow({ binding: b, managers, sets, snapshot, reload, onRemove
   const [scopeAsk, setScopeAsk] = useState<{ scope: string | null } | null>(null);
   const [stopNow, setStopNow] = useState(false);
   const [scopeConfirmation, setScopeConfirmation] = useState<V1PendingConfirmation | null>(null);
-  const [overrides, setOverrides] = useState<ScopeOverride[] | null>(null);
+  const [overrides, setOverrides] = useState<RemoteRead<ScopeOverride>>({ status: "loading" });
+  const [overrideAttempt, setOverrideAttempt] = useState(0);
   const [kind, setKind] = useState<"person" | "bot">("person");
   const [primaryId, setPrimaryId] = useState("");
   const [secondaryId, setSecondaryId] = useState("");
-  const [overrideScope, setOverrideScope] = useState("chat_only");
+  const [overrideScope, setOverrideScope] = useState("");
   const [overrideError, setOverrideError] = useState("");
   const [overrideConfirm, setOverrideConfirm] = useState<V1PendingConfirmation | null>(null);
   const overrideGeneration = useRef(0);
@@ -156,13 +192,16 @@ function ChatBindingRow({ binding: b, managers, sets, snapshot, reload, onRemove
   }, []);
   useEffect(() => {
     const current = ++overrideGeneration.current;
-    listOverrides(b).then((rows) => {
-      if (active.current && current === overrideGeneration.current) setOverrides(rows);
+    const controller = new AbortController();
+    setOverrides({ status: "loading" });
+    listOverrides(b, controller.signal).then((rows) => {
+      if (active.current && current === overrideGeneration.current) setOverrides(settled(rows));
     }).catch((err: unknown) => {
-      if (active.current && current === overrideGeneration.current) setOverrideError(bindingError(err));
+      if (!active.current || current !== overrideGeneration.current || controller.signal.aborted) return;
+      setOverrides({ status: "failed", message: bindingError(err) });
     });
-    return () => { overrideGeneration.current++; };
-  }, [b]);
+    return () => { controller.abort(); overrideGeneration.current++; };
+  }, [b, snapshot.catalogTick, overrideAttempt]);
   const busy = snapshot.busy || preparing;
   const name = b.chat_name || b.chat_id;
   const options = managers.filter((m) => !snapshot.deleted.has(m.id));
@@ -193,8 +232,13 @@ function ChatBindingRow({ binding: b, managers, sets, snapshot, reload, onRemove
       if (active.current) setPreparing(false);
     }
   };
-  const groupScopes = sets.filter((set) => set.id !== "full" && (set.id !== "legacy" || b.legacy_allowed));
-  const overrideScopes = sets.filter((set) => set.id !== "full" && set.id !== "legacy");
+  const setsReady = snapshot.setsRead.status === "ready";
+  const catalog = snapshot.setsRead.status === "ready" ? snapshot.setsRead.rows : [];
+  const groupScopes = catalog.filter((set) => set.id !== "full" && (set.id !== "legacy" || b.legacy_allowed));
+  const overrideScopes = catalog.filter((set) => set.id !== "full" && set.id !== "legacy");
+  const scopeOffered = setsReady && (scopeValue === "" || groupScopes.some((set) => set.id === scopeValue));
+  const overridePicked = overrideScopes.some((set) => set.id === overrideScope);
+  const overrideCount = overrides.status === "ready" ? overrides.rows.length : overrides.status === "empty" ? 0 : null;
   const openScope = (scope: string | null) => {
     setStopNow(false); setScopeAsk({ scope }); setScopeConfirmation(null); setError("");
   };
@@ -212,14 +256,22 @@ function ChatBindingRow({ binding: b, managers, sets, snapshot, reload, onRemove
   };
   const reloadOverrides = async () => {
     const current = ++overrideGeneration.current;
-    const rows = await listOverrides(b);
-    if (active.current && current === overrideGeneration.current) setOverrides(rows);
+    try {
+      const rows = await listOverrides(b);
+      if (active.current && current === overrideGeneration.current) setOverrides(settled(rows));
+    } catch (err) {
+      if (active.current && current === overrideGeneration.current) {
+        setOverrides({ status: "failed", message: bindingError(err) });
+      }
+      throw err;
+    }
   };
   const saveScope = () => scopeAsk && wrote(() => putDefaultScope(b, scopeAsk.scope, stopNow), () => setScopeAsk(null),
     (pending) => { setScopeAsk(null); setScopeConfirmation(pending); }, setError);
   const confirmSavedScope = () => scopeConfirmation && wrote(() => confirmChatBinding(scopeConfirmation),
     () => setScopeConfirmation(null), setScopeConfirmation, setError);
   const addOverride = () => {
+    if (!overridePicked) return;
     const senderIds = [primaryId.trim(), ...(kind === "bot" ? [secondaryId.trim()] : [])].filter(Boolean);
     setOverrideConfirm(null);
     return wrote(() => putOverride(b, { principal_kind: kind, sender_ids: senderIds, scope_id: overrideScope, stop_now: false }),
@@ -282,12 +334,15 @@ function ChatBindingRow({ binding: b, managers, sets, snapshot, reload, onRemove
       </div>
       <div className="space-y-2">
         <label htmlFor={scopeId} className={LABEL}>Group default scope</label>
-        <select id={scopeId} aria-label={`Scope for ${name}`} className={SELECT} value={scopeValue} disabled={busy}
+        <select id={scopeId} aria-label={`Scope for ${name}`} className={SELECT} value={scopeValue} disabled={busy || !setsReady}
           onChange={(event) => { setScopeValue(event.target.value); setScopeAsk(null); setScopeConfirmation(null); }}>
           <option value="">System default (chat only)</option>
+          {scopeValue !== "" && !groupScopes.some((set) => set.id === scopeValue) && (
+            <option value={scopeValue} disabled>{scopeValue}</option>
+          )}
           {groupScopes.map((set) => <option key={set.id} value={set.id}>{set.name}</option>)}
         </select>
-        <Button size="sm" variant="outline" disabled={busy || scopeValue === (b.default_scope ?? "")}
+        <Button size="sm" variant="outline" disabled={busy || !scopeOffered || scopeValue === (b.default_scope ?? "")}
           onClick={() => openScope(scopeValue === "" ? null : scopeValue)}>Save scope</Button>
         {scopeAsk && <div className="space-y-2">
           <label className="flex items-center gap-2 text-xs pointer-coarse:min-h-11">
@@ -308,15 +363,23 @@ function ChatBindingRow({ binding: b, managers, sets, snapshot, reload, onRemove
         </div>}
         <div className="space-y-2">
           <p className={LABEL}>Scope overrides</p>
-          <ul className="space-y-1">
-            {overrides?.map((row) => <li key={row.principal_id} className="flex flex-wrap items-center gap-2 text-xs">
+          {overrides.status === "loading" && <p role="status" className="text-xs text-muted-foreground">Loading scope overrides…</p>}
+          {overrides.status === "empty" && <p className="text-xs text-muted-foreground">No scope overrides.</p>}
+          {overrides.status === "failed" && (
+            <div role="alert" className="flex flex-wrap items-center gap-2">
+              <p className="text-xs text-destructive">Scope overrides could not be loaded. {overrides.message}</p>
+              <Button type="button" size="sm" variant="outline" onClick={() => setOverrideAttempt((n) => n + 1)}>Retry scope overrides</Button>
+            </div>
+          )}
+          {overrides.status === "ready" && <ul className="space-y-1">
+            {overrides.rows.map((row) => <li key={row.principal_id} className="flex flex-wrap items-center gap-2 text-xs">
               <span>{row.principal_kind}</span>
               <span className="break-all">{row.sender_ids.join(", ")}</span>
               <span>{row.scope_id}</span>
               <Button size="sm" variant="outline" disabled={busy} aria-label={`Remove override ${row.principal_id}`}
                 onClick={() => void removeOverride(row.principal_id)}>Remove</Button>
             </li>)}
-          </ul>
+          </ul>}
           <div className="flex flex-wrap items-center gap-2">
             <label htmlFor={overrideKindId} className="sr-only">Override kind</label>
             <select id={overrideKindId} aria-label={`Override kind for ${name}`} className={SELECT} value={kind} disabled={busy}
@@ -329,11 +392,12 @@ function ChatBindingRow({ binding: b, managers, sets, snapshot, reload, onRemove
             {kind === "bot" && <Input aria-label={`Override second id for ${name}`} value={secondaryId} disabled={busy}
               placeholder="second id" onChange={(event) => setSecondaryId(event.target.value)} />}
             <label htmlFor={overrideScopeId} className="sr-only">Override scope</label>
-            <select id={overrideScopeId} aria-label={`Override scope for ${name}`} className={SELECT} value={overrideScope} disabled={busy}
-              onChange={(event) => setOverrideScope(event.target.value)}>
+            <select id={overrideScopeId} aria-label={`Override scope for ${name}`} className={SELECT} value={overrideScope}
+              disabled={busy || !setsReady} onChange={(event) => setOverrideScope(event.target.value)}>
+              <option value="">Choose a scope</option>
               {overrideScopes.map((set) => <option key={set.id} value={set.id}>{set.name}</option>)}
             </select>
-            <Button size="sm" variant="outline" disabled={busy || !primaryId.trim() || !overrideScope}
+            <Button size="sm" variant="outline" disabled={busy || !primaryId.trim() || !overridePicked}
               onClick={() => void addOverride()}>Add override</Button>
           </div>
           {overrideConfirm && <div className="space-y-2">
@@ -356,6 +420,6 @@ function ChatBindingRow({ binding: b, managers, sets, snapshot, reload, onRemove
     <p className="break-all text-xs text-muted-foreground">
       {{ telegram: "Telegram", lark: "Lark", lark_bot: "Lark Bot" }[b.channel_type]} · {b.bot_name} · {b.channel_id}
     </p>
-    <p className="break-all text-xs text-muted-foreground">Chat ID: {b.chat_id} · Bound to {b.manager_name}{b.manager_deleted ? " · Deleted" : !b.manager_enabled ? " · Off" : ""}{b.allowed_senders.length > 0 ? ` · ${b.allowed_senders.length} extra sender${b.allowed_senders.length === 1 ? "" : "s"}` : ""}{b.sender_policy === "chat" ? " · Everyone in this chat" : ""}{` · Scope: ${b.effective_default_scope}`}{overrides ? ` · ${overrides.length} override${overrides.length === 1 ? "" : "s"}` : ""}</p>
+    <p className="break-all text-xs text-muted-foreground">Chat ID: {b.chat_id} · Bound to {b.manager_name}{b.manager_deleted ? " · Deleted" : !b.manager_enabled ? " · Off" : ""}{b.allowed_senders.length > 0 ? ` · ${b.allowed_senders.length} extra sender${b.allowed_senders.length === 1 ? "" : "s"}` : ""}{b.sender_policy === "chat" ? " · Everyone in this chat" : ""}{` · Scope: ${b.effective_default_scope}`}{overrideCount != null ? ` · ${overrideCount} override${overrideCount === 1 ? "" : "s"}` : ""}</p>
   </Row>;
 }

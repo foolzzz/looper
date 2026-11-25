@@ -44,12 +44,14 @@ function isList(value: SessionList | { status: string }): value is SessionList {
   return "sessions" in value;
 }
 
-/** A Manager's sessions. Omit `managerId` for the default Manager (the dashboard). Routing off shows main and says so. */
+/** A Manager's sessions. Omit `managerId` for the default Manager (the dashboard). Routing off shows main and says so.
+ *  Reset takes no manager id and always clears the default Manager, so a scenario list is read-only. */
 export function ManagerSessions({ managerId }: { managerId?: string }) {
   const [view, setView] = useState<SessionList | null>(null);
   const [error, setError] = useState("");
   const [pending, setPending] = useState<ManagerSessionRow | null>(null);
   const [busy, setBusy] = useState(false);
+  const readOnly = managerId != null;
 
   const load = useCallback(async (signal?: AbortSignal) => {
     try {
@@ -71,7 +73,7 @@ export function ManagerSessions({ managerId }: { managerId?: string }) {
   }, [load]);
 
   const confirm = async () => {
-    if (!pending) return;
+    if (readOnly || !pending) return;
     setBusy(true);
     try {
       const result = await callV1<ManagerSessionRow>("/api/v1/manager_sessions/reset", { key: pending.key });
@@ -109,7 +111,7 @@ export function ManagerSessions({ managerId }: { managerId?: string }) {
                     <p className="text-xs text-muted-foreground">{KIND[row.kind]} · {row.resident ? "常驻" : "已回收"}</p>
                     <SessionMarks row={row} />
                   </div>
-                  <Button type="button" variant="outline" size="sm" onClick={() => setPending(row)}>重置</Button>
+                  {!readOnly && <Button type="button" variant="outline" size="sm" onClick={() => setPending(row)}>重置</Button>}
                 </div>
                 <p className="text-xs text-muted-foreground">
                   {relative(row.last_active_at)} · 上下文 {formatTokens(row.context_tokens)} · {formatUsd(row.cost_usd)}
@@ -128,7 +130,7 @@ export function ManagerSessions({ managerId }: { managerId?: string }) {
                   <th scope="col" className="py-1.5 pr-3 font-normal">最近活动</th>
                   <th scope="col" className="py-1.5 pr-3 font-normal">上下文</th>
                   <th scope="col" className="py-1.5 pr-3 font-normal">费用</th>
-                  <th scope="col" className="py-1.5 font-normal"><span className="sr-only">操作</span></th>
+                  {!readOnly && <th scope="col" className="py-1.5 font-normal"><span className="sr-only">操作</span></th>}
                 </tr>
               </thead>
               <tbody className="divide-y divide-border">
@@ -141,9 +143,9 @@ export function ManagerSessions({ managerId }: { managerId?: string }) {
                     <td className="whitespace-nowrap py-1.5 pr-3 tabular-nums">{relative(row.last_active_at)}</td>
                     <td className="py-1.5 pr-3 tabular-nums">{formatTokens(row.context_tokens)}</td>
                     <td className="py-1.5 pr-3 tabular-nums">{formatUsd(row.cost_usd)}</td>
-                    <td className="py-1.5 text-right">
+                    {!readOnly && <td className="py-1.5 text-right">
                       <Button type="button" variant="outline" size="sm" onClick={() => setPending(row)}>重置</Button>
-                    </td>
+                    </td>}
                   </tr>
                 ))}
               </tbody>
@@ -151,7 +153,7 @@ export function ManagerSessions({ managerId }: { managerId?: string }) {
           </div>
         </>
       )}
-      {pending && (
+      {!readOnly && pending && (
         <ConfirmDialog title="重置会话" onClose={() => { if (!busy) setPending(null); }}>
           <p className="text-sm">{RESET}</p>
           <div className="flex justify-end gap-2">

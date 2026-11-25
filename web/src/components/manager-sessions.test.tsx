@@ -69,6 +69,14 @@ describe("Manager sessions", () => {
       "/api/v1/manager_sessions/reset", { key: "group:channel-lark:oc_synthroom01" }]);
   });
 
+  it("shows a scenario Manager's sessions without offering reset", async () => {
+    await act(async () => { root.render(<ManagerSessions managerId="review" />); });
+    expect(container.textContent).toContain("主会话");
+    expect(container.querySelector("button")).toBeNull();
+    expect(container.querySelector("[role=dialog]")).toBeNull();
+    expect(vi.mocked(callV1).mock.calls.map((call) => call[0])).toEqual(["/api/v1/manager_sessions/list"]);
+  });
+
   it("sends manager_id and shows scope, audience and retirement", async () => {
     vi.mocked(callV1).mockResolvedValue({
       routing_enabled: true,

@@ -115,13 +115,20 @@ it("sends capability set, group default and override bodies", async () => {
   ]);
 });
 
-it("leaves a scope write pending until the operator confirms it", async () => {
-  const fetcher = vi.fn(async () => Response.json({ status: "needs_confirmation", confirmation_id: "pending-scope",
-    impact: "Set the group default of 42 to chat_only.", expires_in_seconds: 60 }, { status: 202 }));
+it("leaves a scope write pending until the operator confirms it, then returns the saved binding", async () => {
+  const saved = { ...binding, default_scope: "chat_only", effective_default_scope: "chat_only" };
+  const fetcher = vi.fn()
+    .mockResolvedValueOnce(Response.json({ status: "needs_confirmation", confirmation_id: "pending-scope",
+      impact: "Set the group default of 42 to chat_only.", expires_in_seconds: 60 }, { status: 202 }))
+    .mockResolvedValueOnce(Response.json({ status: "ok", result: { binding: saved } }));
   vi.stubGlobal("fetch", fetcher);
   const error = await putDefaultScope(binding, "chat_only", false).catch((caught) => caught);
   expect(error).toBeInstanceOf(ChatBindingConfirmation);
   expect(fetcher).toHaveBeenCalledTimes(1);
+  await expect(confirmChatBinding(error.confirmation)).resolves.toEqual({ binding: saved });
+  expect(fetcher.mock.calls[1][0]).toBe("/api/v1/confirm");
+  expect(JSON.parse(fetcher.mock.calls[1][1].body)).toEqual({ confirmation_id: "pending-scope" });
+  expect(fetcher.mock.calls[1][1].headers["X-Looper-Session"]).toBe(fetcher.mock.calls[0][1].headers["X-Looper-Session"]);
 });
 
 it.each([{ senders: undefined }, { senders: [] }, { senders: ["ou_example"] }])("sends extra senders only when supplied: %j", async ({ senders }) => {
