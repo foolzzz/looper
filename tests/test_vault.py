@@ -509,15 +509,19 @@ def test_writes_from_separate_event_loops_share_one_transaction_lock(
 
 def test_git_index_lock_released_during_retry_commits(
         config: vault.VaultConfig, monkeypatch: pytest.MonkeyPatch) -> None:
-    lock = config.path / ".git/index.lock"
-    lock.write_text("synthetic competing git operation")
+    lock = None
     timer = threading.Timer(0.3, lambda: lock.unlink(missing_ok=True))
     original_run = vault._run_git
     started = False
     failed_attempts = 0
 
     def record_run(args, **kwargs):
-        nonlocal started, failed_attempts
+        nonlocal started, failed_attempts, lock
+        if args[args.index("-C") + 2] == "add" and lock is None:
+            worktree = Path(args[args.index("-C") + 1])
+            git_dir = Path(git(worktree, "rev-parse", "--absolute-git-dir"))
+            lock = git_dir / "index.lock"
+            lock.write_text("synthetic competing git operation")
         result = original_run(args, **kwargs)
         if "add" in args and result.returncode and "index.lock" in result.stderr:
             failed_attempts += 1
@@ -534,13 +538,18 @@ def test_git_index_lock_released_during_retry_commits(
         if started:
             timer.cancel()
             timer.join(timeout=5)
-        lock.unlink(missing_ok=True)
+        if lock is not None:
+            lock.unlink(missing_ok=True)
     assert started and failed_attempts >= 1, "a real index.lock failure must precede a successful retry"
     assert result["commit"] == git(config.path, "rev-parse", "HEAD"), result.get("note")
     assert git(config.path, "show", "--name-only", "--format=", "HEAD") == "codex-mem/new.md"
 
 
-def test_git_index_lock_held_through_retries_keeps_written_note(config: vault.VaultConfig) -> None:
+def test_main_index_lock_blocks_merge_and_preserves_owned_worktree(config: vault.VaultConfig, monkeypatch) -> None:
+    from unittest.mock import AsyncMock
+    from looper.agents import vault_commit_attention
+    notified = AsyncMock()
+    monkeypatch.setattr(vault_commit_attention, "record", notified)
     head = git(config.path, "rev-parse", "HEAD")
     lock = config.path / ".git/index.lock"
     lock.write_text("synthetic competing git operation")
@@ -549,9 +558,11 @@ def test_git_index_lock_held_through_retries_keeps_written_note(config: vault.Va
     finally:
         lock.unlink(missing_ok=True)
     assert result["commit"] is None, result
-    assert result["git_exit"] != 0 and "index.lock" in result["note"]
+    assert result["state"] == "blocked" and result["bytes"] == 0
     assert git(config.path, "rev-parse", "HEAD") == head
-    assert (config.path / "codex-mem/new.md").read_text() == "new note"
+    assert not (config.path / "codex-mem/new.md").exists()
+    retained = notified.await_args.args[0]
+    assert (retained.worktree / "codex-mem/new.md").read_text() == "new note"
 
 
 @pytest.mark.parametrize("command", ["add", "commit"])
@@ -698,8 +709,9 @@ def test_a_git_timeout_ends_the_hooks_it_started(config: vault.VaultConfig, monk
     result = write(config)
     # Killing git alone leaves the hook's sleeps holding its pipes, and the write waits them out (31 s).
     assert time.monotonic() - started < 15
-    assert result["commit"] is None and result["git_status"] == "timed_out"
-    assert (config.path / "codex-mem/new.md").read_text() == "new note"
+    assert result["commit"] is None and result["reason"] == "git_timeout"
+    assert result["state"] == "blocked" and result["bytes"] == 0
+    assert not (config.path / "codex-mem/new.md").exists()
     left = subprocess.run(["pgrep", "-f", f"sleep {marker}"], capture_output=True, text=True, timeout=10).stdout
     assert left.strip() == "", "the hook's processes outlived git's timeout"
 
@@ -709,9 +721,9 @@ def test_a_hook_printing_bytes_that_are_not_utf8_still_gives_a_result(config: va
     hook.write_text("#!/bin/sh\nprintf '\\377\\376 not utf-8\\n' >&2\nexit 1\n")
     hook.chmod(0o755)
     result = write(config)
-    assert result["commit"] is None and result["git_exit"] == 1
-    assert result["note"].startswith("written, but the commit failed: ") and "not utf-8" in result["note"]
-    assert (config.path / "codex-mem/new.md").read_text() == "new note"
+    assert result["commit"] is None and result["reason"] == "hook_rejected"
+    assert result["state"] == "blocked" and result["bytes"] == 0
+    assert not (config.path / "codex-mem/new.md").exists()
 
 
 def test_a_root_swapped_for_a_link_after_the_check_is_refused(config: vault.VaultConfig) -> None:
@@ -902,3 +914,22 @@ def test_search_under_excludes_other_folders_and_their_scan_budget(config: vault
 def test_search_under_refuses_invalid_boundaries(config: vault.VaultConfig, under) -> None:
     with pytest.raises(OpError):
         asyncio.run(vault.search(config, "needle", under=under))
+
+
+def test_empty_writable_list_never_starts_a_commit(config, monkeypatch):
+    from dataclasses import replace
+    monkeypatch.setattr(vault, '_git_root_sync', lambda *args: pytest.fail('read-only write reached git'))
+    before = sorted(path.relative_to(config.path) for path in config.path.rglob('*'))
+    with pytest.raises(OpError) as error:
+        write(replace(config, writable=()))
+    assert error.value.code is ErrorCode.FORBIDDEN
+    assert sorted(path.relative_to(config.path) for path in config.path.rglob('*')) == before
+
+
+def test_missing_writable_boundary_is_not_recreated(config):
+    # Git does not track the empty writable directory, but permission still requires it in the live vault.
+    import shutil
+    shutil.rmtree(config.path / 'codex-mem')
+    with pytest.raises(FileNotFoundError):
+        write(config)
+    assert not (config.path / 'codex-mem').exists()

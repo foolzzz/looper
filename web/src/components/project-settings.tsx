@@ -23,6 +23,7 @@ import { ProjectMemoryCloseout } from "@/components/project-memory-closeout";
 interface Draft {
   name: string;
   workDir: string;
+  knowledgeDir: string;
   description: string;
   background: string;
   execution: ExecutionDraft;
@@ -32,6 +33,7 @@ function draftOf(project: Project): Draft {
   return {
     name: project.name,
     workDir: project.work_dir,
+    knowledgeDir: project.knowledge_dir ?? "",
     description: project.description,
     background: project.background,
     execution: executionDraft(project),
@@ -44,6 +46,7 @@ function changesOf(draft: Draft, project: Project): ProjectUpdate {
   if (draft.name.trim() !== project.name) fields.name = draft.name.trim();
   if (draft.description.trim() !== project.description) fields.description = draft.description.trim();
   if (draft.workDir.trim() !== project.work_dir) fields.work_dir = draft.workDir.trim();
+  if ((draft.knowledgeDir.trim() || null) !== (project.knowledge_dir ?? null)) fields.knowledge_dir = draft.knowledgeDir.trim() || null;
   if (draft.background !== project.background) fields.background = draft.background;
   return fields;
 }
@@ -231,6 +234,11 @@ export function ProjectSettingsForm({ project, projectsRoot = "", onDeleted }: {
           />
         </div>
         <ProjectBackgroundField id={`${id}-background`} value={draft.background} onChange={set("background")} />
+        <div className="space-y-1">
+          <label htmlFor={`${id}-knowledge-dir`} className="text-xs font-medium text-muted-foreground">知识目录</label>
+          <Input id={`${id}-knowledge-dir`} value={draft.knowledgeDir} onChange={(e) => set("knowledgeDir")(e.target.value)} placeholder="projects/example" className="font-mono" />
+          <p className="text-xs text-muted-foreground">相对于知识库的目录。留空保持当前行为；保存不会迁移现有文档。</p>
+        </div>
         <ProjectExecutionFields idPrefix={id} draft={draft.execution} onChange={set("execution")} />
         <ProjectAcceptanceChecks key={project.project_id} project={project} />
         <ProjectMemoryCloseout key={`${project.project_id}-memory`} project={project} />

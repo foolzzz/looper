@@ -20,7 +20,8 @@ The sections, in this order (``KINDS``):
   again, so the operator checks), and persisted dropped Lark catch-up windows;
 - ``cost``: pending spend holds, while the cost guard enforces limits;
 - ``failure_holds``: environment and breaker holds, while failure handling is in act mode;
-- ``reminders``: terminal not-delivered reminders, until cancelled or seven days after settlement.
+- ``reminders``: terminal not-delivered reminders, until cancelled or seven days after settlement;
+- ``vault_commits``: owned vault commits whose fast-forward merge needs the operator.
 
 A section is ``ok`` (read; possibly empty), ``error`` (its source could not be read: never shown as empty) or
 ``unknown`` (this caller cannot read it, e.g. ``logins`` without a status reader). A feature that is off leaves its
@@ -37,6 +38,7 @@ import unicodedata
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from datetime import datetime, timedelta, timezone
 from enum import Enum
+from pathlib import Path
 from typing import Any
 from urllib.parse import urlencode
 from zoneinfo import ZoneInfo
@@ -50,7 +52,7 @@ from .message import MessageEnvelope, is_lark, parse_channel_id
 logger = logging.getLogger(__name__)
 
 ENABLED_KEY = "attention.enabled"
-KINDS = ("gates", "confirmations", "schedules", "logins", "intents", "ledger", "deliveries", "cost", "failure_holds", "reminders")
+KINDS = ("gates", "confirmations", "schedules", "logins", "intents", "ledger", "deliveries", "cost", "failure_holds", "reminders", "vault_commits")
 SHOWN = 20
 DELIVERY_WINDOW = timedelta(hours=72)
 # The checks the dashboard's banner shows as a login that fails (web/src/components/claude-check-banner.tsx).
@@ -329,6 +331,23 @@ async def _earliest_cost(_: Any) -> dict[str, Any] | None:
     return _oldest(read[0]) if isinstance(read, tuple) else None
 
 
+async def _vault_commits(_: Any) -> Read:
+    from . import vault_commit_attention
+
+    rows = await vault_commit_attention.pending()
+    if not rows:
+        return NotRead.OFF
+    items = [_item(row["key"], "知识库提交受阻", context=Path(row["repo"]).name, since=row["since"],
+                   branch=row["branch"], worktree=row["worktree"], reason=row["reason"], commit=row["commit"])
+             for row in rows]
+    return items[:SHOWN], len(items)
+
+
+async def _earliest_vault_commits(_: Any) -> dict[str, Any] | None:
+    read = await _vault_commits(None)
+    return _oldest(read[0]) if isinstance(read, tuple) else None
+
+
 def _oldest(items: Sequence[Mapping[str, Any]]) -> dict[str, Any] | None:
     """The earliest item by ``since``; the first when none is dated (logins have no clock)."""
     dated = [item for item in items if isinstance(item.get("since"), datetime)]
@@ -409,11 +428,12 @@ async def _earliest_failure_holds(_: Any) -> dict[str, Any] | None:
 
 _READERS = {"gates": _gates, "confirmations": _confirmations, "schedules": _schedules, "logins": _logins,
             "intents": _intents, "ledger": _ledger, "deliveries": _deliveries, "cost": _cost,
-            "failure_holds": _failure_holds, "reminders": _reminders}
+            "failure_holds": _failure_holds, "reminders": _reminders, "vault_commits": _vault_commits}
 _EARLIEST = {"gates": _earliest_gates, "confirmations": _earliest_confirmations, "schedules": _earliest_schedules,
              "logins": _earliest_logins, "intents": _earliest_intents, "ledger": _earliest_ledger,
              "deliveries": _earliest_deliveries, "cost": _earliest_cost,
-             "failure_holds": _earliest_failure_holds, "reminders": _earliest_reminders}
+             "failure_holds": _earliest_failure_holds, "reminders": _earliest_reminders,
+             "vault_commits": _earliest_vault_commits}
 
 
 async def earliest(kind: str, *, managers: Any = None) -> dict[str, Any] | None:
@@ -461,7 +481,7 @@ NOTHING = "现在没有需要你处理的事。"
 _TITLES = {"gates": "等你回复的关卡", "confirmations": "等你确认的操作", "schedules": "失败的定时任务",
            "logins": "登录失效", "intents": "待处理的意图", "ledger": "账本里等你的事",
            "deliveries": "可能没送到的消息", "cost": "花费等你决定",
-           "failure_holds": "运行失败等你处理", "reminders": "未确认送达的提醒"}
+           "failure_holds": "运行失败等你处理", "reminders": "未确认送达的提醒", "vault_commits": "知识库提交受阻"}
 _CHANNELS = {"web": "控制台聊天", "lark": "飞书", "lark_bot": "飞书", "telegram": "Telegram"}
 _ALERTS = {"failures": "连续失败告警", "stale": "太久没成功", "deadline": "没在截止时间前成功", "overlap": "运行重叠",
            "unanswered": "没人回，已自动暂停"}
@@ -529,6 +549,8 @@ def _line(kind: str, item: Mapping[str, Any], now: datetime) -> str:
         return f"- {item['ref']} {title}（{label}）"
     if kind == "reminders":
         return f"- 提醒 {item['ref']} {title}（{context}）"
+    if kind == "vault_commits":
+        return f"- {context}：{_plain(facts['reason'])}；保留分支 {_plain(facts['branch'])}，工作区 {_plain(facts['worktree'])}"
     if kind == "deliveries" and facts["source"] == "catchup":
         return f"- {_DELIVERY_SOURCES['catchup']}：{title}。{_plain(facts['fix'])}"
     if kind == "deliveries" and facts["source"] == "message_stream":
