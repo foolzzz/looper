@@ -60,6 +60,8 @@ from __future__ import annotations
 import asyncio
 import datetime
 import getpass
+import hashlib
+import json
 import os
 import re
 import shutil
@@ -68,9 +70,15 @@ import urllib.parse
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
+from typing import TYPE_CHECKING, Any
 
 from .. import child_env
 from ..ops_config import OpsConfig, Origin
+
+if TYPE_CHECKING:
+    from ..components import Manifest
+
+ONLINE_BACKUP_MAX_AGE = datetime.timedelta(minutes=15)
 BACKUP_DIRNAME = "backups"
 KEEP = 5
 # Ingested message bodies live only in source_events (text and body). The other
@@ -271,7 +279,10 @@ def prune(backup_dir: Path, dbname: str, keep: int = KEEP) -> list[Path]:
     Message backups (``looper-<database>-<stamp>.messages.dump``) do not match, nor does any other file.
     A database whose name ends in ``-messages`` cannot match another database's message backups.
     """
-    return _drop_oldest(_named_dumps(backup_dir, _schema_pattern(dbname)), keep)
+    removed = _drop_oldest(_named_dumps(backup_dir, _schema_pattern(dbname)), keep)
+    for path in removed:
+        path.with_suffix(".dump.json").unlink(missing_ok=True)
+    return removed
 
 
 def _message_pattern(dbname: str) -> re.Pattern[str]:
@@ -317,6 +328,141 @@ def back_up(dumper: Dumper, dsn: str, backup_dir: Path, *, now: datetime.datetim
     return _write_dump(dumper, dsn, backup_dir, now=now, extra=_SCHEMA_EXCLUDES, require_extra=False,
                        name_for=lambda dbname, stamp: f"{_file_stem(dbname)}-{stamp}.dump",
                        keep_own=prune)
+
+
+async def schema_state(conn: Any) -> dict:
+    """The applied schema and migration markers, read from one consistent snapshot without DDL."""
+    async with conn.transaction(isolation="repeatable_read", readonly=True):
+        state = {}
+        for table, field, query in (
+            ("schema_fingerprint", "fingerprint", "SELECT sha256 FROM schema_fingerprint"),
+            ("registry_schema_version", "registry_version", "SELECT version FROM registry_schema_version"),
+        ):
+            state[field] = (await conn.fetchval(query)
+                            if await conn.fetchval("SELECT to_regclass($1) IS NOT NULL", table) else None)
+        state["migrations"] = ([row["name"] for row in await conn.fetch(
+            "SELECT name FROM schema_migrations ORDER BY name")]
+            if await conn.fetchval("SELECT to_regclass('schema_migrations') IS NOT NULL") else [])
+        return state
+
+
+def _database_identity(dsn: str) -> str:
+    # Password changes do not change which database an archive protects. Never persist the URL.
+    return hashlib.sha256(_connection(dsn)[0].encode()).hexdigest()
+
+
+def _archive_identity(path: Path) -> list[int]:
+    stat = path.stat()
+    return [stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns]
+
+
+async def online_upgrade_backup(ops: OpsConfig, runtime_root: Path, target: Manifest, *,
+                                now: datetime.datetime | None = None) -> Path:
+    """Take the regular verified backup online; publish reuse metadata only if its schema stayed unchanged.
+
+    The snapshot starts before pg_dump runs, so freshness never hides the dump's duration.
+    A schema change during the dump leaves the archive for recovery but no reusable metadata.
+    """
+    import asyncpg
+    from ..ops_config import write_private
+
+    conn = None
+    try:
+        conn = await asyncpg.connect(ops.database_url, timeout=15, command_timeout=30)
+        before = await schema_state(conn)
+        major = int(await conn.fetchval("SELECT current_setting('server_version_num')")) // 10000
+        dumper = await asyncio.to_thread(find_dumper, major, ops)
+        started = now or datetime.datetime.now(datetime.timezone.utc)
+        path, checked = await asyncio.to_thread(back_up, dumper, ops.database_url,
+                                               runtime_root / BACKUP_DIRNAME, now=started)
+        if await schema_state(conn) != before:
+            raise BackupFailed("the database schema changed during the online backup; retry before draining")
+        metadata = {"target_version": target.version, "target_control_plane": target.components["control_plane"],
+                    "database": _database_identity(ops.database_url), "schema_state": before,
+                    "started_at": started.isoformat(),
+                    "verified_at": (now or datetime.datetime.now(datetime.timezone.utc)).isoformat(),
+                    "verified": True, "verification": checked, "archive": _archive_identity(path)}
+        await asyncio.to_thread(write_private, path.with_suffix(".dump.json"), json.dumps(metadata))
+        return path
+    except (asyncpg.PostgresError, asyncpg.InterfaceError, OSError, TimeoutError) as exc:
+        # Connection errors and filesystem errors can embed credentials or command arguments.
+        raise BackupFailed(f"online backup could not complete ({type(exc).__name__}); nothing was drained") from None
+    finally:
+        if conn is not None:
+            await conn.close()
+
+
+def _matching_online_metadata(path: Path, ops: OpsConfig, target: Manifest, now: datetime.datetime) -> dict | None:
+    try:
+        sidecar = path.with_suffix(".dump.json")
+        if sidecar.is_symlink() or path.is_symlink():
+            return None
+        metadata = json.loads(sidecar.read_text())
+        if not isinstance(metadata, dict):
+            return None
+        started = datetime.datetime.fromisoformat(metadata["started_at"])
+        verified = datetime.datetime.fromisoformat(metadata["verified_at"])
+        if (started.tzinfo is None or verified.tzinfo is None or not started <= verified <= now
+                or not datetime.timedelta(0) <= now - started <= ONLINE_BACKUP_MAX_AGE
+                or metadata.get("verified") is not True or not metadata.get("verification")
+                or metadata.get("database") != _database_identity(ops.database_url)
+                or metadata.get("target_version") != target.version
+                or metadata.get("target_control_plane") != target.components["control_plane"]
+                or metadata.get("archive") != _archive_identity(path)):
+            return None
+        return metadata
+    except (OSError, ValueError, TypeError, KeyError):
+        return None
+
+
+def _verify_online_archive(dumper: Dumper, path: Path, dsn: str) -> None:
+    _, password, dbname, user = _connection(dsn)
+
+    def fill(text: str) -> str:
+        return _PLACEHOLDER.sub(lambda match: dbname if match[1] == "dbname" else user, text)
+
+    _verify(path, dumper.pg_restore, password=password, verify=tuple(fill(arg) for arg in dumper.verify),
+            verify_label=fill(dumper.verify_label))
+
+
+async def reusable_upgrade_backup(conn: Any, ops: OpsConfig, runtime_root: Path, target: Manifest | None = None, *,
+                                   now: datetime.datetime | None = None) -> Path | None:
+    """Consume one fresh, matching, still-readable archive's metadata, or fall back to the normal startup dump.
+
+    Without online metadata this performs no database queries or command resolution.
+    Registry upgrades must be excluded by the caller before reaching this function.
+    """
+    backup_dir = runtime_root / BACKUP_DIRNAME
+    _, _, dbname, _ = _connection(ops.database_url)
+    candidates = [path for _, path in reversed(_named_dumps(backup_dir, _schema_pattern(dbname)))
+                  if path.with_suffix(".dump.json").is_file()]
+    if not candidates:
+        return None
+    if target is None:
+        from ..components import prepare_loaded_manifest
+        target = await prepare_loaded_manifest()
+    current = None
+    for path in candidates:
+        metadata = _matching_online_metadata(path, ops, target, now or datetime.datetime.now(datetime.timezone.utc))
+        if metadata is None:
+            continue
+        if current is None:
+            current = await schema_state(conn)
+        if metadata.get("schema_state") != current:
+            continue
+        try:
+            dumper = await asyncio.to_thread(find_dumper, None, ops)
+            await asyncio.to_thread(_verify_online_archive, dumper, path, ops.database_url)
+            # Do not authorize a replacement archive or a schema changed while listing it.
+            if (_matching_online_metadata(path, ops, target, now or datetime.datetime.now(datetime.timezone.utc))
+                    is None or await schema_state(conn) != current):
+                continue
+            # Consume before migration: a subsequent startup may not reuse this recovery point.
+            path.with_suffix(".dump.json").unlink()
+        except (NoDumper, BackupFailed, OSError):
+            continue
+        return path
+    return None
 
 
 def back_up_messages(dumper: Dumper, dsn: str, backup_dir: Path, *,
