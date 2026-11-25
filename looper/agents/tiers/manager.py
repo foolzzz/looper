@@ -2562,7 +2562,8 @@ class ManagerAgent:
                         if self._stable_context and SessionInput.STABLE_BLOCK in policy.inputs else "")
             return build_system_prompt(
                 harness=Harness("", Layer.BUILTIN), role_id=self.agent_id,
-                role=session_visibility.PUBLIC_PROMPT if SessionInput.PUBLIC_PROMPT in policy.inputs else "",
+                role=(session_visibility.PUBLIC_PROMPT_TOOLS if policy.tools else session_visibility.PUBLIC_PROMPT)
+                if SessionInput.PUBLIC_PROMPT in policy.inputs else "",
                 recommended=True, contract_name="CHAT_SESSION_ALLOWLIST", contract=contract)
         contract_name, contract = "TOOLS_CONTRACT", root_adjusted(TOOLS_CONTRACT)
         if self.agent_id != DEFAULT_MANAGER_ID:

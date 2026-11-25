@@ -80,7 +80,6 @@ def test_unexited_main_process_blocks_replacement_and_retry(tmp_path, agent_db, 
     async def bounded(self, name, aw, timeout, **kwargs):
         if name == "claude_stop":
             budgets.append(timeout)
-            assert timeout == 30
             timeout = 0.05  # exercise the deadline without waiting two real 30-second budgets
         return await keep(self, name, aw, timeout, **kwargs)
 

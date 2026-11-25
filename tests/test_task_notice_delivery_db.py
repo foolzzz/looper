@@ -72,10 +72,12 @@ async def prepare(pool, tmp_path, monkeypatch, channel="lark", group=False, stat
 def test_off_keeps_exact_envelope_and_channel_calls(tmp_path, monkeypatch, channel, group, status):
     async def check(pool):
         adapter, sender, notice, queued, _ = await prepare(pool, tmp_path, monkeypatch, channel, group, status)
-        monkeypatch.setattr(delivery, "decide", AsyncMock(side_effect=AssertionError("off must not decide")))
+        decide = AsyncMock(side_effect=RuntimeError("off must not decide"))
+        monkeypatch.setattr(delivery, "decide", decide)
         assert queued.payload == notice.payload()
         assert queued.metadata == {"origin_channel_id": notice.channel_id}
         assert (await adapter.deliver(queued)).success
+        decide.assert_not_awaited()
         [call] = sender.await_args_list
         assert call.args == (int(notice.target.id) if channel == "telegram" else notice.target, notice.text)
         if channel == "telegram":
@@ -213,13 +215,15 @@ def test_completion_reply_and_other_chat_notices_do_not_use_task_delivery(tmp_pa
     async def check(pool):
         adapter, sender, _, queued, _ = await prepare(pool, tmp_path, monkeypatch)
         chat_settings.set_delivery_enabled(True)
-        monkeypatch.setattr(delivery, "decide", AsyncMock(side_effect=AssertionError("unmarked notice")))
+        decide = AsyncMock(side_effect=RuntimeError("unmarked notice"))
+        monkeypatch.setattr(delivery, "decide", decide)
         event = dict(await pool.fetchrow("SELECT * FROM manager_events"))
         bus = SimpleNamespace(publish=AsyncMock())
         await completion_events._send_reply(bus, MANAGER_ADDRESS, [event], "Synthetic completion", None)
         assert (await adapter.deliver(bus.publish.await_args.args[0])).success
         assert (await adapter.deliver(queued)).success
         assert sender.await_count == 2
+        decide.assert_not_awaited()
         assert await pool.fetchval("SELECT count(*) FROM proactive_deliveries") == 0
     run_db(check, monkeypatch)
 

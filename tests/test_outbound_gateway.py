@@ -354,9 +354,10 @@ def test_outbox_insert_failure_falls_back_to_gateway():
         class BrokenDatabase:
             async def insert_or_get(self, row):
                 raise OSError('database unavailable')
+        sent = []
         class Transport:
             async def send(self, **kwargs):
-                assert kwargs == dict(chat_id='oc_test', text='hello', idempotency_key='key', return_id=True)
+                sent.append(kwargs)
                 return 'om_sent'
         gateway = Gateway('test')
         receipt = await Outbox('test', Transport(), gateway, BrokenDatabase()).send(
@@ -364,6 +365,7 @@ def test_outbox_insert_failure_falls_back_to_gateway():
         assert receipt.success
         assert receipt.external_ids == ('om_sent',)
         assert gateway.counters.db_fallbacks == 1
+        assert sent == [dict(chat_id='oc_test', text='hello', idempotency_key='key', return_id=True)]
     asyncio.run(run())
 
 

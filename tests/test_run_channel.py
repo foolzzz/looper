@@ -351,12 +351,14 @@ async def _pi_worker_tree_ended(pids: list[int]) -> None:
             await asyncio.sleep(.01)
 
 
-def _pi_worker_settings(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, scenario: str) -> None:
+def _pi_worker_settings(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, scenario: str) -> list[str]:
     executable = _fake_claude(tmp_path, _WORKER_PI)
+    run_commands = []
 
     class Runtime(PiRuntime):
         def run_command(self, executable: str, **kwargs: Any) -> list[str]:
-            raise AssertionError('a steering-capable Worker must use the RPC command')
+            run_commands.append(executable)
+            return [executable, scenario]
 
         def steer_command(self, executable: str, **kwargs: Any) -> list[str]:
             return [executable, scenario]
@@ -372,6 +374,7 @@ def _pi_worker_settings(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, scenari
     monkeypatch.setattr(worker, 'load_agent_settings', AsyncMock(return_value=settings))
     monkeypatch.setattr(worker, '_load_settings', AsyncMock(return_value=worker.WorkerSettings(
         6 if scenario == 'timeout' else 0, 0, 'work')))
+    return run_commands
 
 
 async def _pi_worker_result(bus: MessageBus) -> MessageEnvelope:
@@ -386,7 +389,7 @@ async def _pi_worker_result(bus: MessageBus) -> MessageEnvelope:
 def test_pi_worker_input_waits_for_queued_ack_then_settled_closes_stdin(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, agent_db: Any,
 ) -> None:
-    _pi_worker_settings(tmp_path, monkeypatch, 'normal')
+    run_commands = _pi_worker_settings(tmp_path, monkeypatch, 'normal')
 
     async def run() -> None:
         bus = MessageBus(runtime_root=tmp_path)
@@ -430,13 +433,14 @@ def test_pi_worker_input_waits_for_queued_ack_then_settled_closes_stdin(
             await bus.shutdown()
 
     asyncio.run(asyncio.wait_for(run(), 45))
+    assert run_commands == []
 
 
 @pytest.mark.parametrize('reason', ['cancel', 'timeout', 'cap'])
 def test_pi_worker_stops_its_process_tree_and_clears_unacknowledged_input(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, agent_db: Any, reason: str,
 ) -> None:
-    _pi_worker_settings(tmp_path, monkeypatch, reason)
+    run_commands = _pi_worker_settings(tmp_path, monkeypatch, reason)
     monkeypatch.setattr(proc_tree, 'TERM_GRACE_SEC', .1)
     tree: list[int] = []
 
@@ -485,6 +489,7 @@ def test_pi_worker_stops_its_process_tree_and_clears_unacknowledged_input(
 
     try:
         asyncio.run(asyncio.wait_for(run(), 45))
+        assert run_commands == []
     finally:
         # Also clean up descendants when an assertion fails before Worker shutdown.
         for pid in _pi_worker_running(tree):
@@ -522,6 +527,7 @@ def test_buffered_pipe_input_survives_a_drain_timeout(tmp_path: Path) -> None:
 def test_reminder_timeout_keeps_reading_and_suppresses_its_echo(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, agent_db: Any,
 ) -> None:
+    tail_path = tmp_path / 'reminder-tail.json'
     body = r'''
 sys.stdin.readline()
 def emit(event):
@@ -535,11 +541,13 @@ emit({"type": "assistant", "message": {"content": [{"type": "text", "text": "rea
 emit({"type": "result", "subtype": "success", "result": json.dumps({"status": "completed", "summary": "original report"})})
 emit({"type": "result", "subtype": "success", "user_message_uuids": [reminder["uuid"]],
       "result": json.dumps({"status": "completed", "summary": "reminder echo"})})
-assert sys.stdin.read() == "", "uncertain reminder was retransmitted"
+with open(__TAIL_PATH__, "w") as tail:
+    tail.write(json.dumps(sys.stdin.read()))
 '''
 
     async def run() -> None:
-        pool = WorkerPool(config=WorkerConfig(claude_bin=_fake_claude(tmp_path, body)), runtime_root=tmp_path)
+        pool = WorkerPool(config=WorkerConfig(claude_bin=_fake_claude(
+            tmp_path, body.replace("__TAIL_PATH__", repr(str(tail_path))))), runtime_root=tmp_path)
         pool._reminders["w1"] = state = worker._Reminders(pending=True, next_delivery=AsyncMock(
             return_value=worker.RoomDelivery("room delivery" * 32768, 42, (42,), True, 0)), confirm=AsyncMock())
         monkeypatch.setattr(StreamChannel, "send_timeout", .02)
@@ -547,6 +555,7 @@ assert sys.stdin.read() == "", "uncertain reminder was retransmitted"
         item.payload["parent_task_id"] = "t1"
         result = await pool._execute(item)
         assert result["status"] == "completed" and result["summary"] == "original report", result
+        assert json.loads(tail_path.read_text()) == "", "uncertain reminder was retransmitted"
         assert not state.pending and len(state.uuids) == 1 and state.sent == 0
         assert state.through == 42
         state.confirm.assert_awaited_once_with(42)

@@ -34,6 +34,7 @@ import sys
 import tempfile
 import threading
 import time
+import tomllib
 import traceback
 import urllib.error
 import urllib.parse
@@ -474,6 +475,9 @@ def running_server(*, database_url: str, runtime_root: Path, bin_dir: Path, log_
                                pi_runtime=pi_runtime, dsh_runtime=dsh_runtime,
                                keeper_mode=ops_config.KeeperMode(keeper_mode))
     ops_config.write_private(ops.path, ops_config.render(ops))
+    stored_port = tomllib.loads(ops.path.read_text(encoding="utf-8"))["server"]["port"]
+    if stored_port != port or stored_port == RESERVED_PORT:
+        raise EvalError("eval ops file must name its isolated server port")
     # None of the operator's ops variables: the file names the eval's database.
     server_env = {**{k: v for k, v in os.environ.items() if k not in ops_config.VARIABLES},
                   "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}",
@@ -488,6 +492,8 @@ def running_server(*, database_url: str, runtime_root: Path, bin_dir: Path, log_
         cwd=str(runtime_root), env=server_env, stdout=log, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
     )
     api = Api(f"http://127.0.0.1:{port}")
+    if urllib.parse.urlsplit(api.base_url).port == RESERVED_PORT:
+        raise EvalError("eval clients require an isolated server")
     try:
         deadline = time.monotonic() + startup_timeout
         while True:
