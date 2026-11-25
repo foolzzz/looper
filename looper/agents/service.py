@@ -1359,7 +1359,8 @@ def _deployment_signals():
 def _execute_plan(host: Host, mgr: _Manager, *, port: int, root: Path, log_path: Path | None,
                   plan, running, target, installer, timeout: float, drain_timeout: float,
                   no_force: bool, turns_timeout: float = 180, preflight_wait: float = 0,
-                  prepare: Callable[[], None] | None = None, address: str = "127.0.0.1") -> str:
+                  prepare: Callable[[], None] | None = None, address: str = "127.0.0.1",
+                  online_backup: Callable[[], Path] | None = None) -> str:
     from ..components import Manifest
     from ..upgrade import UpgradeKind
 
@@ -1426,6 +1427,11 @@ def _execute_plan(host: Host, mgr: _Manager, *, port: int, root: Path, log_path:
                         raise ServiceError(f"{len(blockers['non_keepable_runs'])} non-keepable runs are in flight "
                                            f"({_drain_summary(blockers)}); nothing was drained; deploy again later")
                     host.sleep(min(_PREFLIGHT_POLL_SECONDS, remaining))
+            if online_backup is not None:
+                backup_started = host.clock()
+                path = online_backup()
+                report["online_backup"] = str(path)
+                report["online_backup_seconds"] = round(host.clock() - backup_started, 3)
             started = host.clock()
             turns_started = None
             next_summary = started + _DRAIN_SUMMARY_SECONDS
@@ -1686,7 +1692,7 @@ def _checkout_sync_environment(host: Host) -> Path:
 
 def upgrade(host: Host, *, label: str = DEFAULT_LABEL, to: str | None = None, dry_run: bool = False,
             timeout: float = DEFAULT_START_TIMEOUT_SECONDS, drain_timeout: float = 1200, turns_timeout: float = 180,
-            no_force: bool = False, preflight_wait: float = 0) -> str:
+            no_force: bool = False, preflight_wait: float = 0, backup_before_stop: bool = False) -> str:
     """Compute a plan before mutating files; stop the old interpreter before a full install."""
     from .. import components
     from ..upgrade import UpgradeKind, UpgradePlan, decide, scan_keepers
@@ -1779,6 +1785,20 @@ def upgrade(host: Host, *, label: str = DEFAULT_LABEL, to: str | None = None, dr
                 nonlocal prepared_web
                 prepared_web = preparation.enter_context(_prepare_checkout_dashboard(host, source))
 
+            def online_backup() -> Path:
+                import asyncio
+                from . import db_backup
+
+                if ops is None or not ops.database_url:
+                    raise ServiceError("--backup-before-stop requires the service's database and backup settings "
+                                       "in its ops file; nothing was drained")
+                print("Taking an online upgrade backup; writes after its snapshot (including dump, drain and stop "
+                      "time) will not be in the backup.", file=sys.stderr, flush=True)
+                try:
+                    return asyncio.run(db_backup.online_upgrade_backup(ops, root, target))
+                except (db_backup.NoDumper, db_backup.BackupFailed, OSError) as exc:
+                    raise ServiceError(f"online upgrade backup failed: {exc}; nothing was drained") from None
+
             build_web = "web" in plan.changed_components
             return _execute_plan(host, mgr, port=port, root=root, log_path=log_path, plan=plan,
                 address=address, running=running, target=target, prepare=prepare if build_web and not wheel else None,
@@ -1786,6 +1806,7 @@ def upgrade(host: Host, *, label: str = DEFAULT_LABEL, to: str | None = None, dr
                     dependencies=dependencies, sync_environment=sync_environment, wheel_environment=wheel_environment,
                     prepared_web=prepared_web),
                 timeout=timeout, drain_timeout=drain_timeout, turns_timeout=turns_timeout,
-                no_force=no_force, preflight_wait=preflight_wait)
+                no_force=no_force, preflight_wait=preflight_wait,
+                online_backup=online_backup if backup_before_stop else None)
     except (ValueError, KeyError, zipfile.BadZipFile) as exc:
         raise ServiceError(str(exc)) from exc

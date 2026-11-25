@@ -231,7 +231,10 @@ Manager has no tool for it. The dashboard shows the task page's 指标 card and 
   Dashboard and generated CLI configuration use the existing operator-only
   `turn_context_settings.get/update`, separate from `chat_settings`; Lark and
   Telegram need no new command. See [the assistant RFC](rfcs/assistant-layer-v0.zh-CN.md#51-11-每轮上下文).
-- With the system setting `manager.stable_context` `true` (default off), those
+- The operator-only `stable_context_settings.get/update` operations read and
+  write `manager.stable_context` (`enabled`: true, false or null to restore off).
+  The next Manager turn reads it through the existing configuration path.
+  With the system setting `manager.stable_context` `true` (default off), those
   sections and the active goals are one block, `Looper state (rev R)`, R a
   hash of its lines (`tiers/state_view.py`), so the resident session's growing
   history keeps hitting the prompt cache. A turn starts with the whole block
@@ -398,11 +401,12 @@ Manager has no tool for it. The dashboard shows the task page's 指标 card and 
   The independent operator-only `profile_settings.get/update` operations control `manager.profile.enabled`
   (default off; null restores off). Settings → Knowledge vault exposes its confirmed switch. Off, the Manager
   never compiles a profile and its model-facing bytes remain unchanged. On, the default Manager's own dashboard
-  and operator direct-chat turns include an `Operator profile` resident section. Group and other-sender turns,
-  routed non-main sessions and scenario Managers omit it. With `manager.stable_context` on it is inside the
-  stable block and follows its whole/change/unchanged rules; otherwise it is its own resident section before
-  Projects. Shared turns never receive private profile text in stable-state removal lines either. This does
-  not erase profile text already present in a shared resident session's history.
+  (without an API client) and operator direct-chat turns include an `Operator profile` resident section.
+  API-client turns, group and other-sender turns, routed non-main sessions and scenario Managers omit it.
+  With `manager.stable_context` on it is inside the stable block and follows its whole/change/unchanged rules;
+  otherwise it is its own resident section before Projects. Shared and API-client turns never receive private
+  profile text in stable-state removal lines either. This does not erase profile text already present in a
+  shared resident session's history.
   `looper profile show [--runtime-root …] [--config …]` reads the same file with the same compiler and prints
   exactly the resident section's body, with no added newline, whether injection is on or off. It makes no model
   call or schema/cache write. Its worker has a 1-second deadline covering imports, settings and file I/O;
@@ -4613,6 +4617,29 @@ With none of these the backup fails before any DDL. The upgraded schema must
 not be opened by an older binary: the forward guard in this binary does not
 protect an older one.
 
+For other schema changes, `looper service upgrade --backup-before-stop`
+optionally takes that same verified dump while the old service is still serving,
+after preparation and preflight but before drain. The default remains a dump at
+startup, inside the outage. The option requires the service's database and backup
+settings in its ops file. A failed online dump stops the upgrade before drain or
+stop; dry-run, NOOP and WEB_ONLY plans take no online dump.
+
+The new process reuses an online dump only for the recorded target package version
+and control-plane fingerprint, the same database and unchanged schema fingerprint,
+registry version and migration markers. Private metadata records the snapshot's
+start and verification times; reuse expires 15 minutes after the start, requires
+the same archive file and a successful archive listing, and consumes the metadata
+once. Missing, stale, mismatched or unreadable metadata or archives fall back to
+the startup dump. The log names the reused archive; the upgrade report includes
+`online_backup` and `online_backup_seconds` only when the option ran a backup.
+Registry upgrades always take the startup dump, even with this option.
+
+An online dump omits writes after its snapshot, including those during the dump,
+drain and stop, and any delay before migration. The reuse deadline bounds age,
+not acceptable data loss. Keep the default for strict recovery-point requirements,
+long drains, registry upgrades, or workloads that cannot lose those writes; an
+independently managed WAL/PITR setup is another recovery strategy.
+
 A migration of a large table holds the table's lock only for statements that
 neither scan nor rewrite it. The run tree columns of `llm_records`, for
 example, are added without a default, with their constraints `NOT VALID`, and
@@ -5464,7 +5491,9 @@ were before; direct-chat provenance is recorded only if idle checks are on.
 
 **One-time reminders** ([reminders RFC](rfcs/reminders-v0.zh-CN.md)). With `reminders.enabled` on, `current_scope`
 adds the three reminder tools to the default Manager's tools; they are `RestrictedTool`s with `audience` `operator`,
-listed and run as the leads search is. Nothing is added to the system prompt. A reminder set in the user's direct chat
+listed and run as the leads search is. The operator-only `reminders_settings.get/update` operations read and write
+the switch (`enabled`: true, false or null to restore off). Turning it off keeps existing reminders; turning it on
+resumes processing under the same catch-up rules. Nothing is added to the system prompt. A reminder set in the user's direct chat
 goes back to it (the bot and the user's sender id there); one set on the dashboard goes to the user's direct chat with
 the first enabled bot of the default Manager that names an `operator_sender_id`, and is refused (`conflict`) when there
 is none. The table `reminders` (migration `reminders`) keeps each one with its target and status: `pending`,
@@ -6531,7 +6560,9 @@ lead, 6 unusable database or missing tables (start serve once to migrate).
 Dates without times use the machine's zone, at midnight.
 How the words match is the system setting `leads.search_mode` (assistant search RFC, section 4), the same for
 this command, `leads.search` and the Manager's tool: `words` (the default, and any value it does not know) wants
-every word in the lead's summary or detail, or in a chat's or a person's name, as written; `fulltext` matches any
+every word in the lead's summary or detail, or in a chat's or a person's name, as written. The operator-only
+`leads_search_settings.get/update` operations read and write it (`mode`: `words`, `fulltext` or null to restore
+`words`), affecting subsequent searches without enabling extraction or rewriting leads. `fulltext` matches any
 word as the session search does (Chinese by overlapping character pairs, English by the start of a word), a chat's
 or a person's name holding it, and, with pg_trgm installed, an ASCII word of four characters or more by its
 likeness (`word_similarity` at least 0.6), ranking the leads by every word's coverage weighted by rarity within
@@ -7225,8 +7256,9 @@ when the channel has one.
 One read-only summary of what waits for the operator
 ([RFC](rfcs/assistant-needs-you-v0.zh-CN.md), `looper/agents/attention.py`),
 gathered by code from what Looper already keeps: no model call, nothing
-stored. It is off until the system setting `attention.enabled` is `true`
-(there is no dashboard switch). Off, `attention.summary` answers `conflict`,
+stored. It is off until the system setting `attention.enabled` is `true`.
+The operator-only `attention.settings_update` operation writes the switch
+(`enabled`: true, false or null to restore off). Off, `attention.summary` answers `conflict`,
 the dashboard lists no page for it, `/todo` is an ordinary message for the
 Manager's model and Telegram drops the command as before; no prompt, tool
 list or command line changes either way.
@@ -7259,6 +7291,14 @@ list or command line changes either way.
   item `{key, title, context, since, href, ref, facts}`.
   `POST /api/v1/attention/settings_get` returns `{enabled}` to the operator,
   including while off, without reading summary sources.
+  `POST /api/v1/attention/settings_update` accepts `{"enabled": true}`, false
+  or null and returns the effective `{enabled}` value after persistence.
+  The generated CLI is `loopercli attention settings-update --enabled true|false|null`.
+  Like `status_card_settings.update`, this and the reminder, stable-context,
+  decision-snapshot and lead-search settings writes declare high risk and
+  confirmation, use the operator action trail, and return a typed readback.
+  Their get/update operations also generate CLI commands; no new dashboard
+  control or model tool is added.
 - **Dashboard:** `#todo`, "Needs you" under Dashboard in the sidebar, listed
   only while the setting is on. The sidebar reads the setting rather than
   requesting the summary on every page load. Failing logins that were read
@@ -8167,8 +8207,9 @@ A task's dispatch passes and its Planner's step decisions can be recorded with
 what they read, so that a change to how a task moves on can be checked against
 history offline ([Decision snapshot RFC](rfcs/decision-snapshot-v0.zh-CN.md)).
 It is off until the system setting `decision_snapshots.enabled` is `true`
-(read before every dispatch pass and every applied decision; the dashboard has
-no switch yet). Off, nothing is written; on or off, no prompt, tool list or
+(read before every dispatch pass and every applied decision). The operator-only
+`decision_snapshots_settings.get/update` operations read and write the switch
+(`enabled`: true, false or null to restore off). Off, nothing is written; on or off, no prompt, tool list or
 command line changes: snapshots read what the Planner already holds and feed
 nothing back, and a failure to read the switch or to write is logged and never
 fails the decision. Each snapshot's database work (the switch, the turn's

@@ -34,8 +34,21 @@ BASELINE = {False: {'sections': '1db4fa7cabcd2bd37cbfc5da7110f1baee4f19644ade5c1
         'command': 'e8f4c7aa9c0df509ed6ec960fcb698d7e476c3edbb278821e7601c2034a08740',
         'signature': '5f76b151eb503d212e137ffa5c78c04cb6b5a885a78a5b415327f184c943ff13'}}
 
+# Turn hashes captured on 8a69cf7ca before changing the audience guard (stable off, on).
+AUDIENCE_TURNS = {
+    "api": ("0bd9831de9506288df0df68a7c7bf6f5699c195afa7726a0e3e97f1782f5bb13",
+            "edbea9634c8f2776afaa3b24bb6a4591865cc43530b800a3e9d058eb9250f0fd"),
+    "lark": ("27e5216bfe7451e13ca442ab2f9bedbd2fec6841650a345bdfa4147e070e6e43",
+             "0a71d08e7e54d369b20e5bb17895e2f0bf6204fa4ba1f077a6d9fbd909e0b326"),
+    "telegram": ("b2c90ba295974a125e9b7e0c209c2997bf39c167765176df9d6fa62b51253bec",
+                 "e5a8cacb3b8f6b6a2f1889b4c286ee8bc42e0b68004daff9f575b8ca9214ae1c"),
+    "group": ("08d97464220c942acbf47a8fd30e2ddadb7d786afc9e7e26b1ff8b35fa2d02a8",
+              "67166cc2b402b334cbc9108f3042ec947083c1dfa3a64b22fc6bef7dfd692b43"),
+}
+AUDIENCE_TURNS["other-dm"] = AUDIENCE_TURNS["lark"]
 
-async def observe(root, monkeypatch):
+
+async def observe(root, monkeypatch, *, entry="web"):
     monkeypatch.setattr(profile_registry, "_login_modules", lambda: {})
     monkeypatch.setattr(claude_cli, "_outside_memory", lambda *args, **kwargs: ["/synthetic/CLAUDE.md"])
     bus = MessageBus(runtime_root=root)
@@ -57,9 +70,17 @@ async def observe(root, monkeypatch):
     monkeypatch.setattr(manager, "_prepare_turn", capture)
     monkeypatch.delenv("LOOPER_MCP_TRACE", raising=False)
     try:
+        context = {"session_id": "persona-chat"} if entry in ("web", "api") else {
+            "chat_id": "-12345" if entry == "group" else "12345",
+            "chat_type": "group" if entry == "group" else "p2p",
+            "sender_id": "synthetic-operator" if entry in ("lark", "telegram") else "synthetic-other"}
+        if entry == "api":
+            context["client"] = {"id": "synthetic-client", "name": "Test client"}
         await manager._handle(MessageEnvelope.create(
-            source=channel_address("web"), target=MANAGER_ADDRESS, message_type=MessageType.USER_MESSAGE,
-            payload={"text": "hello", "channel_context": {"session_id": "persona-chat"}}))
+            source=channel_address(entry if entry in ("lark", "telegram") else
+                                   "lark" if entry in ("group", "other-dm") else "web"),
+            target=MANAGER_ADDRESS, message_type=MessageType.USER_MESSAGE,
+            payload={"text": "hello", "channel_context": context}))
         item, = prepared
         tools = await manager.ops.current_listing(item.turn)
         command = list(item.signature[0])
@@ -110,6 +131,27 @@ def test_disabled_or_unset_persona_matches_main(monkeypatch, tmp_path, stored, s
         digests, tools, system = await observe(tmp_path, monkeypatch)
         assert digests == BASELINE[stable]
         assert_main_surfaces(tools, system, tmp_path, variant="stable_context" if stable else "default")
+
+    run_db(check, monkeypatch, timeout=40)
+
+
+@pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
+@pytest.mark.parametrize("entry", ["api", "lark", "telegram", "group", "other-dm"])
+@pytest.mark.parametrize("stable", [False, True])
+def test_profile_off_audiences_match_main_bytes_without_identity_reads(monkeypatch, tmp_path, entry, stable):
+    from unittest.mock import AsyncMock
+    from looper.agents import operator_identity, session_routing
+
+    async def check(pool):
+        monkeypatch.setattr(session_routing, "_routing_enabled", False)
+        read = AsyncMock(side_effect=RuntimeError("identity must not be read"))
+        monkeypatch.setattr(operator_identity, "operator_sender_id", read)
+        if stable:
+            await pool.execute("INSERT INTO system_settings (key,value) VALUES ('manager.stable_context','true')")
+        digests, tools, system = await observe(tmp_path, monkeypatch, entry=entry)
+        assert digests == {**BASELINE[stable], "turn": AUDIENCE_TURNS[entry][stable]}
+        assert_main_surfaces(tools, system, tmp_path, variant="stable_context" if stable else "default")
+        read.assert_not_awaited()
 
     run_db(check, monkeypatch, timeout=40)
 
