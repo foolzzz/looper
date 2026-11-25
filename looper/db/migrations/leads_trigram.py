@@ -48,8 +48,10 @@ async def pending(conn: asyncpg.Connection) -> bool:
     return await extension_pending(conn) or await index_pending(conn)
 
 
-async def apply(conn: asyncpg.Connection, *, sql: str, state: str) -> None:
+async def apply(conn: asyncpg.Connection, *, sql: str, state: str) -> bool:
+    did_work = False
     if await extension_pending(conn):
+        did_work = True
         await conn.execute(DDL)
         # A fresh database records only its baseline. If the attempt failed,
         # its next start gets one more attempt and records it even on failure.
@@ -58,7 +60,9 @@ async def apply(conn: asyncpg.Connection, *, sql: str, state: str) -> None:
     # This is intentionally independent of the extension-attempt marker: an
     # extension installed later, or an index dropped later, must get its index.
     if await index_pending(conn):
+        did_work = True
         await conn.execute(
             f"CREATE INDEX IF NOT EXISTS {INDEX} ON message_leads USING gin "
             f"(lower(summary || ' ' || detail) {await trigram_schema(conn)}.gin_trgm_ops)"
         )
+    return did_work

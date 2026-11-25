@@ -1500,10 +1500,11 @@ async def ensure_schema(pool: asyncpg.Pool | asyncpg.Connection | None = None) -
         elif state == "bridge":
             await upgrade_from_bridge(conn)
         for migration in _MIGRATIONS:
-            will_apply = await migration.pending(conn)
             started = time.monotonic()
-            await migration.apply(conn, sql=sql, state=state)
-            if will_apply:
+            # The timing line follows what apply actually did: a satisfied pending() probe does not
+            # rule out constraint-validation and marker-repair branches, so apply reports work itself.
+            did_work = await migration.apply(conn, sql=sql, state=state)
+            if did_work:
                 logger.info("migration applied: %s order=%d in %.3fs",
                             migration.name, migration.order, time.monotonic() - started)
         # Current databases never replay initialization DDL. Missing builtins

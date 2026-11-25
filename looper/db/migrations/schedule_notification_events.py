@@ -13,10 +13,12 @@ async def pending(conn):
     return await legacy._schedule_notification_events_pending(conn)
 
 
-async def apply(conn, *, sql, state):
+async def apply(conn, *, sql, state) -> bool:
+    did_work = False
     from .. import connection as legacy
 
     if await legacy._schedule_notification_events_pending(conn):
+        did_work = True
         await conn.execute(
             "ALTER TABLE schedule_notifications ADD COLUMN IF NOT EXISTS manager_event_id BIGINT, "
             "ADD CONSTRAINT schedule_notifications_manager_event_id_fkey FOREIGN KEY "
@@ -26,6 +28,7 @@ async def apply(conn, *, sql, state):
             "INSERT INTO schema_migrations (name) VALUES ($1)",
             legacy._SCHEDULE_NOTIFICATION_EVENTS,
         )
+    return did_work
 
 
 online_order = 30

@@ -11,10 +11,12 @@ async def pending(conn):
     return await legacy._review_panel_pending(conn)
 
 
-async def apply(conn, *, sql, state):
+async def apply(conn, *, sql, state) -> bool:
+    did_work = False
     from .. import connection as legacy
 
     if await legacy._review_panel_pending(conn):
+        did_work = True
         await conn.execute(
             "ALTER TABLE task_steps ADD COLUMN accept_when JSONB, ADD COLUMN reviews TEXT"
         )
@@ -48,3 +50,4 @@ async def apply(conn, *, sql, state):
         await conn.execute(
             "INSERT INTO schema_migrations (name) VALUES ($1)", legacy._REVIEW_PANEL
         )
+    return did_work

@@ -81,9 +81,9 @@ async def pending(conn):
                 and _matches(await _definition(conn, "cost_holds_reason_shape"), _SHAPE_DEF))
 
 
-async def apply(conn, *, sql, state):
+async def apply(conn, *, sql, state) -> bool:
     if not await pending(conn):
-        return
+        return False
     rebuilt = False
     if not _matches(await _definition(conn, "cost_holds_scope_check"), _SCOPE_DEF):
         await conn.execute("ALTER TABLE cost_holds DROP CONSTRAINT IF EXISTS cost_holds_scope_check")
@@ -99,3 +99,4 @@ async def apply(conn, *, sql, state):
     await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1) ON CONFLICT DO NOTHING", name)
     if rebuilt:
         await conn.execute("DELETE FROM schema_migrations WHERE name = $1", online[0].marker)
+    return True

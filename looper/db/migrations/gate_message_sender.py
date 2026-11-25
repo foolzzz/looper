@@ -16,7 +16,10 @@ async def pending(conn):
     return await connection._column_pending(conn, name, "task_user_gate_messages", "from_operator")
 
 
-async def apply(conn, *, sql, state):
+async def apply(conn, *, sql, state) -> bool:
+    did_work = False
     if await pending(conn):
+        did_work = True
         await conn.execute("ALTER TABLE task_user_gate_messages ADD COLUMN from_operator BOOLEAN")
         await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", name)
+    return did_work

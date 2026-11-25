@@ -40,8 +40,10 @@ async def pending(conn: asyncpg.Connection) -> bool:
     return row is None or "morning_brief" not in row["definition"]
 
 
-async def apply(conn, *, sql, state):
+async def apply(conn, *, sql, state) -> bool:
+    did_work = False
     if await pending(conn):
+        did_work = True
         row = await _source_row(conn)
         if row is not None and re.fullmatch(r"[A-Za-z0-9_]+", row["conname"]):
             await conn.execute(f"ALTER TABLE proactive_deliveries DROP CONSTRAINT {row['conname']}")
@@ -50,3 +52,4 @@ async def apply(conn, *, sql, state):
         if state != "empty":
             await conn.execute(
                 "INSERT INTO schema_migrations (name) VALUES ($1) ON CONFLICT DO NOTHING", name)
+    return did_work
