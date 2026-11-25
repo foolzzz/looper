@@ -749,6 +749,32 @@ Manager has no tool for it. The dashboard shows the task page's 指标 card and 
   the chat is opened) instead of a message's stream; Lark and Telegram send it
   to the chat. With no message before it, the reply is only recorded
 
+### Task Manager (`looper/agents/tiers/task_manager.py`)
+
+Each task can own a Claude Code resident, separate from the operator's Manager.
+The pool is constructed after workspace recovery, before HTTP admission; constructing
+it starts no model process. `tasks.conversations.enabled` remains off by default.
+The independent `task_manager` role defaults to Sonnet; task profile overrides take
+precedence over that role and never inherit the owning Manager's profile. Other
+runtimes are refused rather than substituted.
+
+Direct launches append the fixed task instructions and a bounded, fenced brief.
+They retain the operator's settings, memory and MCP servers. Orchestrated or
+unrecoverable workspaces use the existing isolated read-only command. The child
+receives `LOOPER_TASK_MANAGER`, never `LOOPER_AGENT_RUN`. An enabled outbound review
+requires an actual review hook. Before every direct launch or resume, a typed
+settings-source table rejects hook-disabling settings and environment variables;
+unreadable settings also fail closed. Managed policy checks are statically
+confirmed only. Claude Code must match the verified version constant; upgrading
+it requires rerunning the local fake-model launch probe. Refusals name the file
+and key or CLI version, and increment a reason/phase/version counter visible in
+`manager_metrics.get` while work mode is enabled.
+
+`tasks.managers.max_resident` defaults to 6 (1–20). Admission can reclaim the least
+recently used idle process; a 60-second ticker reclaims processes idle for 30
+minutes. Shutdown stops owned processes; deleting a task forgets its resident and
+session. This foundation adds no conversation transport or task-bound MCP tools.
+
 ### TaskRouter (`looper/agents/tiers/task.py`)
 
 - Every task belongs to exactly one project (`project_id`) and runs in its
