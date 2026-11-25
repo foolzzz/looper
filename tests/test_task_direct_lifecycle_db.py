@@ -14,11 +14,12 @@ from looper.agents import task_conversations_settings as settings
 from looper.agents import task_workspaces as tw
 from looper.agents.broadcast import Broadcaster
 from looper.agents.message import TASK_ROUTER_ADDRESS, MessageEnvelope, MessageType
-from looper.agents.projects import HTTP_404, RequestError
+from looper.agents.projects import HTTP_404, HTTP_409, RequestError
 from looper.agents.tiers.planner import PlannerAgent
-from looper.agents.tiers.task import TaskRouter
+from looper.agents.tiers.task import RestartRefusal, TaskRouter
 from looper.db import activity as db_activity
-from looper.db import projects, tasks
+from looper.db import plans, projects, tasks
+from looper.db import step_workspaces as db_step_workspaces
 from looper.db.tasks import (
     ACTIVE_STATUSES,
     STATUS_GROUPS,
@@ -399,6 +400,216 @@ def test_concurrent_done_writes_one_phase(monkeypatch, tmp_path) -> None:
         assert (await tasks.get_task(task_id))["status"] == "completed"
 
     run_db(check, monkeypatch, timeout=30)
+
+
+async def _plan_shape(pool, task_id: str) -> tuple:
+    plan = await pool.fetchrow("SELECT plan_id, status FROM task_plans WHERE task_id=$1", task_id)
+    steps = await pool.fetch(
+        "SELECT id, status, instruction FROM task_steps WHERE task_id=$1 ORDER BY step_index", task_id)
+    run_no = await pool.fetchval("SELECT run_no FROM tasks WHERE id=$1", task_id)
+    return (
+        None if plan is None else (plan["plan_id"], plan["status"]),
+        [(row["id"], row["status"], row["instruction"]) for row in steps],
+        run_no,
+    )
+
+
+async def _stopped_restart_task(pool, tmp_path: Path, task_id: str) -> dict:
+    """A stopped worktree task with a plan, a step worktree and a kept run session."""
+    made = await _worktree(pool, tmp_path, task_id)
+    await pool.execute("UPDATE tasks SET status='stopped', run_no=1 WHERE id=$1", task_id)
+    step_id = f"{task_id}-step"
+    await plans.save(
+        task_id, plan={"plan_id": f"plan-{task_id}", "status": "failed"},
+        steps=[{"id": step_id, "index": 0, "instruction": "keep this step", "status": "completed"}],
+        pool=pool)
+    step_dir = tmp_path / task_id / "step-work"
+    step_dir.mkdir(parents=True)
+    (step_dir / "marker.txt").write_text("step\n")
+    base = git(made["repo"], "rev-parse", "HEAD")
+    workspace_id = await db_step_workspaces.next_id(pool=pool)
+    await db_step_workspaces.save({
+        "id": workspace_id, "task_id": task_id, "step_id": step_id, "repo_dir": str(made["repo"]),
+        "subdir": "", "target_branch": "main", "path": str(step_dir),
+        "branch": f"looper/{task_id}/keep-{workspace_id}", "base_commit": base, "checkpoint": False,
+        "result_commit": None, "merge_commit": None, "state": "active", "merge_error": None,
+        "detail": "", "removed_at": None, "links": [], "merge_files": [],
+    }, pool=pool)
+    session = made["runtime"] / ".local" / "codex" / "run-sessions" / task_id / "run1"
+    session.mkdir(parents=True)
+    (session / "note.txt").write_text("session\n")
+    made.update(step_dir=step_dir, session=session, plan=await _plan_shape(pool, task_id))
+    return made
+
+
+def _markers(made: dict) -> tuple[bool, bool, bool]:
+    work = made["work"]
+    step = made["step_dir"] / "marker.txt"
+    session = made["session"] / "note.txt"
+    return (
+        work.is_dir() and (work / "left.txt").is_file() and (work / "left.txt").read_text() == "left\n",
+        step.is_file() and step.read_text() == "step\n",
+        session.is_file() and session.read_text() == "session\n",
+    )
+
+
+def _restart_envelope(task_id: str, mode: str):
+    return MessageEnvelope.create(
+        source=TASK_ROUTER_ADDRESS, target=TASK_ROUTER_ADDRESS,
+        message_type=MessageType.TASK_RESTART, payload={"task_id": task_id, "mode": mode})
+
+
+def _one_winner(done, done_error, restart_result, *, status: str, router: TaskRouter, task_id: str,
+                plan_now, made: dict, work_kept: bool, step_kept: bool, session_kept: bool, mode: str) -> None:
+    """Exactly one of /done and restart took effect, and the loser left the other's state alone."""
+    done_won = bool(
+        done is not None and done.changed and done_error is None and status == "completed"
+        and not router.has_planner(task_id) and not work_kept
+        and plan_now == made["plan"] and step_kept and session_kept)
+    continue_kept = plan_now[:2] == made["plan"][:2] and step_kept and session_kept and plan_now[2] == made["plan"][2] + 1
+    started_over = plan_now[:2] == (None, []) and not step_kept and not session_kept and plan_now[2] == made["plan"][2] + 1
+    restart_won = bool(
+        restart_result is None and router.has_planner(task_id) and status in ACTIVE_STATUSES and work_kept
+        and done_error is not None and done_error.status == HTTP_409
+        and (continue_kept if mode == "continue" else started_over))
+    assert int(done_won) + int(restart_won) == 1
+    if done_won:
+        assert restart_result is RestartRefusal.COMPLETED
+
+
+@pytest.mark.parametrize("mode", ["continue", "start_over"])
+def test_done_and_restart_one_wins(monkeypatch, tmp_path, mode: str) -> None:
+    """A restart that arrives during /done's worktree finish waits for that row.
+
+    It does not read the pre-commit status, clean the plan or step workspace, or
+    turn a completed task back into pending. Exactly one side takes effect.
+    """
+    from looper.agents import step_workspaces
+    from looper.agents.tiers import task as task_tier
+
+    async def check(pool) -> None:
+        task_id = f"race-done-{mode}"
+        made = await _stopped_restart_task(pool, tmp_path, task_id)
+        entered, release = asyncio.Event(), asyncio.Event()
+        original_finish = tw.finish
+        original_remove = step_workspaces.remove_task
+        original_sessions = task_tier.remove_run_sessions
+        cleaned = {"step": False, "session": False}
+
+        async def paused_finish(task_id_: str, *, completed: bool = False, deleted: bool = False, pool=None):
+            if task_id_ == task_id:
+                entered.set()
+                await release.wait()
+            return await original_finish(task_id_, completed=completed, deleted=deleted, pool=pool)
+
+        async def watched_remove(task_id_: str, *, pool=None):
+            if task_id_ == task_id and not release.is_set():
+                cleaned["step"] = True
+            return await original_remove(task_id_, pool=pool)
+
+        def watched_sessions(runtime_root: Path, task_id_: str) -> None:
+            if task_id_ == task_id and not release.is_set():
+                cleaned["session"] = True
+            original_sessions(runtime_root, task_id_)
+
+        monkeypatch.setattr(tw, "finish", paused_finish)
+        monkeypatch.setattr(step_workspaces, "remove_task", watched_remove)
+        monkeypatch.setattr(task_tier, "remove_run_sessions", watched_sessions)
+        monkeypatch.setattr(PlannerAgent, "start", AsyncMock())
+        router = TaskRouter(runtime_root=made["runtime"])
+        router._bus = _Bus()
+        done_task = asyncio.create_task(router.complete_direct(task_id))
+        await asyncio.wait_for(entered.wait(), 5)
+        restart_task = asyncio.create_task(router._handle_restart(_restart_envelope(task_id, mode)))
+
+        try:
+            await _until(lambda: _lock_waiting(pool))
+            held_plan = await _plan_shape(pool, task_id)
+            held_markers = _markers(made)
+            held_cleaned = dict(cleaned)
+        finally:
+            release.set()
+        done_error = None
+        try:
+            done = await done_task
+        except RequestError as exc:
+            done, done_error = None, exc
+        restart_result = await restart_task
+        status = (await tasks.get_task(task_id))["status"]
+        plan_now = await _plan_shape(pool, task_id)
+        work_kept, step_kept, session_kept = _markers(made)
+        assert held_plan == made["plan"]
+        assert held_markers == (True, True, True)
+        assert held_cleaned == {"step": False, "session": False}
+        _one_winner(done, done_error, restart_result, status=status, router=router, task_id=task_id,
+                    plan_now=plan_now, made=made, work_kept=work_kept, step_kept=step_kept,
+                    session_kept=session_kept, mode=mode)
+
+    run_db(check, monkeypatch, timeout=30, max_size=4)
+
+
+@pytest.mark.parametrize("mode", ["continue", "start_over"])
+def test_restart_and_done_one_wins(monkeypatch, tmp_path, mode: str) -> None:
+    """A /done that arrives during restart's claim waits for that row.
+
+    It does not finish the worktree or change the plan while restart holds the
+    task. Exactly one side takes effect.
+    """
+
+    async def check(pool) -> None:
+        task_id = f"race-restart-{mode}"
+        made = await _stopped_restart_task(pool, tmp_path, task_id)
+        entered, release = asyncio.Event(), asyncio.Event()
+        finish_entered, finish_release = asyncio.Event(), asyncio.Event()
+        original_finish = tw.finish
+        original_reset = tasks.reset_task_for_restart
+
+        async def paused_reset(task_id_: str, **kwargs):
+            if task_id_ == task_id:
+                entered.set()
+                await release.wait()
+            return await original_reset(task_id_, **kwargs)
+
+        async def watched_finish(task_id_: str, *, completed: bool = False, deleted: bool = False, pool=None):
+            if task_id_ == task_id:
+                finish_entered.set()
+                await finish_release.wait()
+            return await original_finish(task_id_, completed=completed, deleted=deleted, pool=pool)
+
+        monkeypatch.setattr(tasks, "reset_task_for_restart", paused_reset)
+        monkeypatch.setattr(tw, "finish", watched_finish)
+        monkeypatch.setattr(PlannerAgent, "start", AsyncMock())
+        router = TaskRouter(runtime_root=made["runtime"])
+        router._bus = _Bus()
+        restart_task = asyncio.create_task(router._handle_restart(_restart_envelope(task_id, mode)))
+        await asyncio.wait_for(entered.wait(), 5)
+        done_task = asyncio.create_task(router.complete_direct(task_id))
+
+        async def done_settled() -> bool:
+            return finish_entered.is_set() or await _lock_waiting(pool)
+
+        try:
+            await _until(done_settled)
+            blocked = await _lock_waiting(pool) and not finish_entered.is_set()
+            held_work = _markers(made)[0]
+        finally:
+            release.set()
+            finish_release.set()
+        done_error = None
+        try:
+            done = await done_task
+        except RequestError as exc:
+            done, done_error = None, exc
+        restart_result = await restart_task
+        status = (await tasks.get_task(task_id))["status"]
+        plan_now = await _plan_shape(pool, task_id)
+        work_kept, step_kept, session_kept = _markers(made)
+        assert blocked and held_work
+        _one_winner(done, done_error, restart_result, status=status, router=router, task_id=task_id,
+                    plan_now=plan_now, made=made, work_kept=work_kept, step_kept=step_kept,
+                    session_kept=session_kept, mode=mode)
+
+    run_db(check, monkeypatch, timeout=30, max_size=4)
 
 
 def test_done_switch_off(monkeypatch, tmp_path) -> None:
