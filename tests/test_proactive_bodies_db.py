@@ -30,8 +30,9 @@ def test_every_typed_source_stores_the_body_before_transport_with_metrics_off(so
         registry = ChannelRegistry(SimpleNamespace())
         registry._channels["synthetic-channel"] = SimpleNamespace(post=post)
         text = "  Rendered **message**\n第二行\n"
-        receipt = await registry.post("synthetic-channel", NotifyTarget(TargetKind.CHAT, "synthetic-chat"), text,
-            idempotency_key="synthetic-key", **turn_metrics.proactive_kwargs(source, "synthetic-ref"))
+        with turn_metrics.proactive_send(source, "synthetic-ref"):
+            receipt = await registry.post("synthetic-channel", NotifyTarget(TargetKind.CHAT, "synthetic-chat"), text,
+                                          idempotency_key="synthetic-key")
         await asyncio.gather(*turn_metrics._pending)
         assert receipt.success
         assert len(observed) == 1 and observed[0]["body"] == text

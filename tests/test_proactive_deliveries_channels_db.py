@@ -32,9 +32,10 @@ def test_channel_receipt_updates_the_existing_gate_reminder_decision(monkeypatch
                                      allowlist=SenderAllowlist("channel-lark", frozenset({OPEN_ID})))
         registry = ChannelRegistry(SimpleNamespace())
         registry._channels[adapter.channel_id] = adapter
-        receipt = await registry.post(adapter.channel_id, NotifyTarget(TargetKind.USER, OPEN_ID), "A reminder",
-            idempotency_key="gate-17", **turn_metrics.proactive_kwargs(
-                turn_metrics.ProactiveSource.GATE_REMINDER, "synthetic-gate", dedupe_key="gate_message:17"))
+        with turn_metrics.proactive_send(turn_metrics.ProactiveSource.GATE_REMINDER, "synthetic-gate",
+                                         dedupe_key="gate_message:17"):
+            receipt = await registry.post(adapter.channel_id, NotifyTarget(TargetKind.USER, OPEN_ID), "A reminder",
+                                          idempotency_key="gate-17")
         assert receipt.success and receipt.external_ids
         await asyncio.gather(*turn_metrics._pending)
         rows = await pool.fetch("SELECT * FROM proactive_deliveries")

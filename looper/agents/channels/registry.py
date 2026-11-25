@@ -199,6 +199,9 @@ class ChannelRegistry:
                      idempotency_key: str | None = None, proactive: ProactiveRef | None = None,
                      group: bool = False) -> tuple[bool, str | None]:
         """Send through the running channel, retaining the event key across caller retries when supplied."""
+        context_ref, context_group = turn_metrics.current_proactive()
+        proactive = proactive or context_ref
+        group = group or context_group
         record_key = (proactive.dedupe_key or idempotency_key or str(uuid4())) if proactive else idempotency_key
         adapter = self._channels.get(channel_id)
         if adapter is None:
@@ -229,6 +232,7 @@ class ChannelRegistry:
                    reply_to: str | None = None, idempotency_key: str | None = None,
                    proactive: ProactiveRef | None = None) -> PostReceipt:
         """Post ``text`` to ``target`` through the running channel ``channel_id`` (``ChannelAdapter.post``)."""
+        proactive = proactive or turn_metrics.current_proactive()[0]
         record_key = (proactive.dedupe_key or idempotency_key or str(uuid4())) if proactive else idempotency_key
         adapter = self._channels.get(channel_id)
         if adapter is None:
@@ -261,6 +265,7 @@ class ChannelRegistry:
                         reply_to: str | None = None, idempotency_key: str | None = None,
                         proactive: ProactiveRef | None = None) -> PostReceipt:
         """Post ``card`` (``card_actions.Card``) to ``target`` like ``post`` (``ChannelAdapter.post_card``)."""
+        proactive = proactive or turn_metrics.current_proactive()[0]
         record_key = (proactive.dedupe_key or idempotency_key or str(uuid4())) if proactive else idempotency_key
         adapter = self._channels.get(channel_id)
         if adapter is None:

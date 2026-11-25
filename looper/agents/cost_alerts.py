@@ -190,9 +190,9 @@ async def _send(text: str, key: str, now: datetime) -> None:
             dedupe_key=key, channel_id=target.channel_id, chat=target.target.id, last_user_message_at=None, now=now)
         if outcome.outcome is not delivery.Outcome.SEND:
             return
-    proactive = turn_metrics.proactive_kwargs(turn_metrics.ProactiveSource.ADVISOR_ALERT, dedupe_key=key)
-    sent, error = await _sender(target.channel_id, target.target.id, text, group=target.target.group,
-                               idempotency_key=key, **proactive)
+    with turn_metrics.proactive_send(turn_metrics.ProactiveSource.ADVISOR_ALERT, dedupe_key=key):
+        sent, error = await _sender(target.channel_id, target.target.id, text, group=target.target.group,
+                                   idempotency_key=key)
     if decided:
         await proactive_deliveries.record_receipt(key, 'sent' if sent else 'rejected')
     if not sent:

@@ -297,10 +297,9 @@ class ReminderService:
                 logger.exception("reminder %s: decision failed; sending as with the layer off", reminder_id)
         await store.start_post(conn, reminder_id, self._clock())
         try:
-            receipt = await self._registry.post(channel_id, target(chat), message_text(reminder, now=now),
-                                                idempotency_key=key, **turn_metrics.proactive_kwargs(
-                                                    turn_metrics.ProactiveSource.USER_REMINDER, str(reminder_id),
-                                                    dedupe_key=key))
+            with turn_metrics.proactive_send(turn_metrics.ProactiveSource.USER_REMINDER, str(reminder_id), dedupe_key=key):
+                receipt = await self._registry.post(channel_id, target(chat), message_text(reminder, now=now),
+                                                    idempotency_key=key)
             outcome, error = receipt.result, receipt.error
             external = receipt.external_ids[0] if receipt.external_ids else None
         except Exception as exc:
