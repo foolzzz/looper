@@ -102,6 +102,18 @@ describe("TaskDetailRoute", () => {
     expect(container.querySelector('a[href^="#chat?target="]')).toBeNull();
   });
 
+  it.each([undefined, null, {}])("shows a read failure for invalid chat targets %j", async targets => {
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => Response.json(
+      String(input) === "/api/v1/operator_chat/targets"
+        ? { status: "ok", result: { targets } }
+        : answer(String(input), init),
+    )));
+    await show("task-a");
+    expect(container.querySelector("h1")?.textContent).toBe("task-a");
+    expectChatReason("Chat availability could not be checked");
+    expect(container.querySelector('a[href^="#chat?target="]')).toBeNull();
+  });
+
   it.each(["stopped", "failed", "cancelled"])("resumes Sessions after stale %s reads, even if the new run ends immediately", async (initialStatus) => {
     let started = false;
     let polls = 0;

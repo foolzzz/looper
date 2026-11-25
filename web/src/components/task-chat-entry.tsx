@@ -7,21 +7,23 @@ import { startPolling } from "@/lib/polling";
 type Availability = { targets: ChatTargetInfo[]; reason?: string };
 const CHECKING: Availability = { targets: [], reason: "Checking chat availability" };
 
-/** One read per page, shared by its rows. The server's live Planners define availability, not task status. */
-export function useTaskChatTargets(enabled = true): Availability {
+/** Shared by the page's rows; detail reads once rather than adding another polling cycle. */
+export function useTaskChatTargets(enabled = true, mode: "once" | "poll" = "poll"): Availability {
   const [availability, setAvailability] = useState<Availability>(CHECKING);
   useEffect(() => {
     setAvailability(CHECKING);
     if (!enabled) return;
     return startPolling(async signal => {
       try {
-        const targets = await fetchChatTargets();
+        const targets = await fetchChatTargets(signal);
+        if (!Array.isArray(targets)) throw new Error("Invalid chat targets");
         if (!signal.aborted) setAvailability({ targets });
       } catch {
         if (!signal.aborted) setAvailability({ targets: [], reason: "Chat availability could not be checked" });
       }
+      return mode === "once";
     }, 10_000);
-  }, [enabled]);
+  }, [enabled, mode]);
   return availability;
 }
 

@@ -2287,7 +2287,7 @@ export function TaskDetailRoute(props: TaskDetailPageProps) {
 }
 
 function TaskDetailPage({ taskId, gateStep, tab: tabParam, focusStep, onTab, roomFilter, roomRole, onRoomFilter, onBack }: TaskDetailPageProps) {
-  const chatAvailability = useTaskChatTargets();
+  const chatAvailability = useTaskChatTargets(true, "once");
   const [task, setTask] = useState<TaskDetail | null>(null);
   const taskRuns = useTaskRuns(task);
   const [error, setError] = useState("");
