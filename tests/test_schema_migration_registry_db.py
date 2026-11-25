@@ -224,6 +224,7 @@ def test_reminder_send_boundary_upgrades_after_brief_and_retrospective_migration
 
 
 @pytest.mark.parametrize("migration_name,rollback", [
+    ("task_origin_session", "ALTER TABLE tasks DROP COLUMN origin_session CASCADE"),
     ("skill_proposal_feedback", "ALTER TABLE skill_proposal_events DROP COLUMN told_at"),
     ("mcp_tool_levels", "DROP TABLE mcp_tool_levels CASCADE"),
     ("failure_typing", "ALTER TABLE llm_records DROP COLUMN failure_class, DROP COLUMN failure_cause"),
