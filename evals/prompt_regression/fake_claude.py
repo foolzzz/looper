@@ -418,6 +418,9 @@ def _worker(script: dict[str, Any], system_prompt: str, stdin: _Stdin, args: lis
         if expected_diff not in diff:
             raise RuntimeError("the simulated PR does not contain the commit this review needs")
     files = dict(attempt.get("files") or {})
+    if attempt.get("run_verification"):
+        for command in ("configure.py", "verify.py"):
+            subprocess.run([sys.executable, command], check=True, timeout=10, capture_output=True)
     wait = (script.get("wait_for_input") or {}).get(label)
     if wait and attempt_no == 1:
         _emit({"type": "system", "subtype": "init", "session_id": "fake-worker", "model": "fake"})
@@ -459,6 +462,10 @@ def _worker(script: dict[str, Any], system_prompt: str, stdin: _Stdin, args: lis
               "deleted_files": [], "summary": attempt.get("summary") or f"step {label} attempt {attempt_no}"}
     if "learnings" in attempt:
         report["learnings"] = attempt["learnings"]
+    if scenario := attempt.get("lesson_scenario"):
+        ids = re.findall(r"^- (M-\d+) \(", system_prompt, re.MULTILINE)
+        if ids:
+            report["lessons_used" if scenario == "use" else "lessons_wrong"] = ids
     _answer("fake-worker", attempt.get("raw") or "Done.\n" + json.dumps(report), WORKER_RUN_COST)
 
 

@@ -290,16 +290,24 @@ def _add_memory_parser(commands: argparse._SubParsersAction) -> None:
     check = sub.add_parser("check", allow_abbrev=False,
                            help="Check what a write needs now (setting, git, branch, worktree folder); changes nothing.")
     check.add_argument("--json", action="store_true")
+    lessons = sub.add_parser("lessons", allow_abbrev=False, help="List project lessons and their counters.")
+    lessons.add_argument("--project")
+    lessons.add_argument("--state", default="all")
+    lessons.add_argument("--limit", type=int, default=50)
+    lessons.add_argument("--before", help="Continue before this M-id.")
+    lessons.add_argument("--json", action="store_true")
     writes = []
     for name, help_text in (("reject", "Reject an unwritten memory candidate."),
                             ("retry", "Retry a blocked write, preserving its confirmed content."),
+                            ("revoke", "Revoke an active project lesson and retain its fingerprint tombstone."),
+                            ("renew", "Renew an active project lesson's validity."),
                             ("delete", "Delete a candidate, leaving its fingerprint tombstone and vault notes.")):
         command = sub.add_parser(name, allow_abbrev=False, help=help_text)
         command.add_argument("candidate", help="M-0042 or M-42.")
-        if name == "reject":
+        if name in {"reject", "revoke"}:
             command.add_argument("--reason", help="Why this memory is not useful (at most 300 characters).")
         writes.append(command)
-    for command in (listing, show, check, *writes):
+    for command in (listing, show, check, lessons, *writes):
         _add_location_flags(command)
 
 

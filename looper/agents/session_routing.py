@@ -1,16 +1,18 @@
 """Which Manager session a conversation runs in, and what that means for a group chat's turns.
 
-With ``manager.session_routing.enabled`` off (the default) every conversation of a Manager shares one session,
-``main`` (``tiers.manager_session``): a group chat's turn runs in the context of the operator's own conversation. On,
+By default every conversation of a Manager shares ``main`` (``tiers.manager_session``): a group chat's turn runs
+in the context of the operator's own conversation. With ``manager.session_routing.enabled`` on,
 the default Manager gives each Lark or Telegram group and each other allowed sender's direct chat a session of its
 own (``session_key_for``), run in parallel with the others, at most ``manager.sessions.max_resident`` of them
-resident at once. Scenario Managers keep one session.
+resident at once. Scenario Managers opt in independently with ``session_routing=per_chat`` in their definition;
+only their groups are routed, and their other turns keep main.
 
 A feature that must not reach a group through the shared context (what the operator said elsewhere, the operator's
 notes) checks ``group_isolation`` and stays off in group turns until it reports ``GroupIsolation.ISOLATED``.
 
-The two settings are kept in memory: ``load`` reads them at startup (from ``chat_settings.load``) and an update
-applies them at once. Until loaded, routing is off.
+The global settings are kept in memory: ``load`` reads them at startup (from ``chat_settings.load``) and an update
+applies them at once. Scenario definitions are applied at startup and by the fleet's change listener.
+Until loaded, routing is off.
 """
 
 from __future__ import annotations
@@ -32,6 +34,7 @@ MAX_RESIDENT_RANGE = (1, 16)
 
 _routing_enabled = DEFAULT_ROUTING_ENABLED
 _max_resident = DEFAULT_MAX_RESIDENT
+_scenario_routing: dict[str, str] = {}
 
 
 class GroupIsolation(str, Enum):
@@ -99,6 +102,13 @@ def key_digest(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()[:12]
 
 
+def session_digest(manager_id: str, key: str) -> str:
+    """Keep the default Manager's paths stable; other Managers must not share its runtime files."""
+    from .managers_api import DEFAULT_MANAGER_ID
+
+    return key_digest(key if manager_id == DEFAULT_MANAGER_ID else f"{manager_id}:{key}")
+
+
 def routing_enabled() -> bool:
     return _routing_enabled
 
@@ -127,10 +137,22 @@ def checked_max_resident(value: Any) -> int:
 
 
 def routes(manager_id: str) -> bool:
-    """Whether Manager ``manager_id``'s messages go to sessions by key: only the default Manager's, with routing on."""
+    """Default Manager: global switch. Scenario Manager: its independent typed definition setting."""
     from .managers_api import DEFAULT_MANAGER_ID  # here: the Managers' definitions import the chat settings
 
-    return _routing_enabled and manager_id == DEFAULT_MANAGER_ID
+    return _routing_enabled if manager_id == DEFAULT_MANAGER_ID else _scenario_routing.get(manager_id) == "per_chat"
+
+
+def set_scenario_routing(manager_id: str, value: str) -> None:
+    """Apply a definition at startup or after the fleet reads a committed change."""
+    from .managers_api import DEFAULT_MANAGER_ID, ScenarioSessionRouting
+
+    mode = ScenarioSessionRouting(value)
+    if manager_id != DEFAULT_MANAGER_ID:
+        if mode is ScenarioSessionRouting.OFF:
+            _scenario_routing.pop(manager_id, None)
+        else:
+            _scenario_routing[manager_id] = mode.value
 
 
 def apply_stored(stored: Mapping[str, str]) -> None:
