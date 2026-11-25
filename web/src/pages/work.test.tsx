@@ -103,6 +103,7 @@ async function render(node: ReactNode) {
 }
 
 beforeEach(() => {
+  vi.spyOn(HTMLElement.prototype, "clientHeight", "get").mockReturnValue(600);
   calls.length = 0;
   handler = workHandler;
   vi.stubGlobal("fetch", vi.fn(async (url: string, init?: RequestInit) => {
@@ -140,6 +141,7 @@ afterEach(() => {
   act(() => root.unmount());
   host.remove();
   vi.unstubAllGlobals();
+  vi.restoreAllMocks();
 });
 
 describe("Work page shell", () => {

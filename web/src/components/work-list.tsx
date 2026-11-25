@@ -96,12 +96,20 @@ export function WorkList({
     const el = scroller.current;
     if (!el || restored.current || !open.ready || !schedules.ready || (endedOpen && !ended.ready)) return;
     if (schedules.items.some(schedule => workStorage.expanded().includes(schedule.schedule_id) && !restoredSchedules.includes(schedule.schedule_id))) return;
-    el.scrollTop = scrollTarget.current;
-    restored.current = true;
+    const restore = () => {
+      // A selected task hides the list on narrow screens. Wait for Back to give it layout.
+      if (restored.current || el.clientHeight === 0) return;
+      el.scrollTop = scrollTarget.current;
+      restored.current = true;
+    };
+    restore();
+    const observer = new ResizeObserver(restore);
+    observer.observe(el);
+    return () => observer.disconnect();
   }, [open.ready, schedules.ready, schedules.items, endedOpen, ended.ready, restoredSchedules]);
 
   const saveScroll = () => {
-    if (scroller.current && restored.current) workStorage.setScroll(scroller.current.scrollTop);
+    if (scroller.current && scroller.current.clientHeight > 0 && restored.current) workStorage.setScroll(scroller.current.scrollTop);
   };
   const projectId = preferredProjectId || workStorage.lastProject() || projects?.[0]?.project_id || "";
   const draftReason = drafts === false

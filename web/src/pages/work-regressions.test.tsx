@@ -26,6 +26,7 @@ async function click(name: string) {
 }
 async function remount(initial = "") { act(() => root.unmount()); root = createRoot(host); await show(initial); }
 beforeEach(() => {
+  vi.spyOn(HTMLElement.prototype, "clientHeight", "get").mockReturnValue(600);
   calls.length = 0; detailStatus = 200; delay = null; held = false; releases.length = 0;
   localStorage.clear(); sessionStorage.clear();
   vi.stubGlobal("fetch", vi.fn(async (path: string, init?: RequestInit) => {
@@ -45,7 +46,7 @@ beforeEach(() => {
   }));
   host = document.createElement("div"); document.body.append(host); root = createRoot(host);
 });
-afterEach(() => { act(() => root.unmount()); host.remove(); vi.unstubAllGlobals(); });
+afterEach(() => { act(() => root.unmount()); host.remove(); vi.unstubAllGlobals(); vi.restoreAllMocks(); });
 
 it("reaches the eleventh scheduled run through the server cursor", async () => {
   await show(); await click("Nightly");
@@ -114,4 +115,21 @@ it("creates a draft with N only outside editable controls", async () => {
   expect(calls.filter(c => c.path.includes("create_draft") && Object.keys(c.body).length)).toHaveLength(0);
   search.blur(); await act(async () => { window.dispatchEvent(new KeyboardEvent("keydown", { key: "n", bubbles: true })); }); await settle();
   expect(calls.filter(c => c.path.includes("create_draft") && c.body.project_id === "p")).toHaveLength(1);
+});
+
+it("waits for a hidden narrow-screen list to have layout before restoring", async () => {
+  const height = vi.spyOn(HTMLElement.prototype, "clientHeight", "get").mockReturnValue(0);
+  let resized!: () => void;
+  vi.stubGlobal("ResizeObserver", class {
+    constructor(callback: () => void) { resized = callback; }
+    observe() {}
+    disconnect() {}
+  });
+  sessionStorage.setItem("looper.work.scroll", "600");
+  await show("task/outside");
+  const list = host.querySelector('[aria-label="Work tasks"]') as HTMLElement;
+  expect(list.scrollTop).toBe(0);
+  height.mockReturnValue(600);
+  await act(async () => { resized(); });
+  expect(list.scrollTop).toBe(600);
 });
