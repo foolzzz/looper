@@ -32,3 +32,38 @@ Regression evidence:
 No conversation transport changes are included: the dashboard, Telegram, Lark and
 CLI conversation surfaces remain the work of their companion changes. The launch
 boundary and task-start guard apply below those surfaces. No real model is used.
+
+## Stacked turn validation
+
+The turn change saves the native session at init, adds the operator-only task
+profile operation, and keeps its session through idle model switches. Cost-read
+failures record `budget_unverifiable` and allow the turn; a reached cap still
+refuses only that turn. Per-record measurements replace prior measurements,
+including NULLs, and drive serialized compaction or durable fresh-session rotation.
+The four context/cost/compaction/rotation metrics are read from recorded data.
+
+The new budget, init-persistence and profile-operation tests failed before their
+fixes. Eight original context cases also failed before context maintenance was
+wired. The completed context file has 11 passing cases, including direct and
+read-only compaction, failed/unconfirmed/oversized/timed-out compaction, measurement
+read failure, cost-triggered rotation across restart, and maintenance-time queueing,
+write exclusion, profile refusal and stop notification. Removing operator-only
+from the profile operation made its HTTP test fail with an unexpected client 200;
+the guard was restored.
+
+The broad related suite passed 736 tests with one opt-in test skipped. The new
+profile operation was then added to the default-off operation-id allowlist; the
+existing request and Manager-tool goldens remain unchanged. That freeze file and
+the profile/budget/session regressions passed together (22 tests).
+The final integrated pool, turn, context, metrics, role-freeze and draft files
+passed together after the ordinary branch merges (65 tests, two workers).
+
+The skipped opt-in was run explicitly: Claude Code **2.1.332** passed the native
+task Manager test against the local fake Anthropic model (1 test). It verified a
+Bash-created file, both user and launch hooks, and the saved session row. Its HOME
+and CLI config directory were temporary; requests carried only the fake probe key.
+There were no real-provider calls. CI was neither started nor rerun manually.
+
+The pending plan update is to mark task Manager admission, durable turns and
+context maintenance implemented after review acceptance; conversation delivery and
+task-bound tools remain companion work. The shared plan file is unchanged.
