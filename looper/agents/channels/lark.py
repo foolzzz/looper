@@ -9,6 +9,7 @@ and reply references for routing and idempotent retries.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import math
 import re
@@ -1137,36 +1138,65 @@ class LarkChannelAdapter(ChannelAdapter):
             await self._inbox.remember_thread(chat_id, thread_id, time())
 
     async def _handle_lark_event(self, event: dict[str, Any]) -> Literal["handled", "duplicate", "ignored", "too_old"]:
+        metrics = None
+        if chat_settings.metrics_enabled() and event.get("type") == RECEIVE_EVENT:
+            metrics = {"sender_name_lookup_ms": 0, "attachment_download_ms": 0}
+            if read_at := event.get("_lark_stdout_read_at"):
+                metrics["stdout_read_at"] = read_at
+            # The consumer's create_time is a millisecond epoch string; never substitute receipt time.
+            try:
+                raw = event.get("create_time")
+                if isinstance(raw, (str, int)) and not isinstance(raw, bool):
+                    sent = datetime.fromtimestamp(int(raw) / 1000, timezone.utc)
+                    metrics["platform_sent_at"] = sent.isoformat()
+                    if read_at:
+                        metrics["platform_to_stdout_ms"] = round(
+                            (datetime.fromisoformat(read_at) - sent).total_seconds() * 1000)
+            except (ValueError, OverflowError, OSError):
+                pass
+        waiting = monotonic() if metrics is not None else None
         async with self._ingress_lock:
-            message_id = event.get("message_id")
-            if self._inbox is not None and message_id and await self._inbox.processed(message_id):
-                return "duplicate"
-            created = event.get("_catchup_created_at")
-            if (self._inbox is not None and event.get("type") == RECEIVE_EVENT
-                    and created is None and event.get("sender_type") in {"app", "bot"} and event.get("chat_id")):
-                await self._inbox.remember_bot(event["chat_id"], time())
-            if self._own_message(event):
-                event["_bot_outcome"] = "own_message"
-                handled = False
-            elif event.get("chat_type") == "group" and not self._bot_mentions(event):
-                handled = False
-            elif created is not None and created.before(time() - _CATCHUP_MAX_AGE):
-                if self._inbox is not None:
-                    await self._inbox.drop_window(event.get("chat_id") or "", created.at, created.at,
-                                                  CatchupDropReason.STALE)
-                    if message_id:
-                        await self._inbox.finish(message_id)
-                return "too_old"
-            else:
-                handled = await self._process_lark_event(event)
-            if event.get("sender_type") in {"app", "bot"}:
-                logger.info("lark_bot_message chat=%s bot_id=%s message_id=%s outcome=%s",
-                            event.get("chat_id"), event.get("sender_id"), message_id,
-                            "handled" if handled else event.get("_bot_outcome", "ignored"))
-            if self._inbox is not None and message_id and event.get("type") == RECEIVE_EVENT:
-                await self._inbox.finish(message_id, chat_id=event.get("chat_id") or "",
-                                   thread_id=(event.get("thread_id") or "") if handled else "", at=time())
-            return "handled" if handled else "ignored"
+            if metrics is not None:
+                metrics["lock_wait_ms"] = round((monotonic() - waiting) * 1000)
+                metrics["lock_acquired_at"] = datetime.now(timezone.utc).isoformat()
+                event["_lark_ingress"] = metrics
+            try:
+                return await self._handle_locked_lark_event(event)
+            finally:
+                if metrics is not None:
+                    logger.info("lark_ingress %s", json.dumps({"channel_id": self.channel_id,
+                                "message_id": event.get("message_id"), **metrics}, separators=(",", ":")))
+
+    async def _handle_locked_lark_event(self, event: dict[str, Any]) -> Literal["handled", "duplicate", "ignored", "too_old"]:
+        message_id = event.get("message_id")
+        if self._inbox is not None and message_id and await self._inbox.processed(message_id):
+            return "duplicate"
+        created = event.get("_catchup_created_at")
+        if (self._inbox is not None and event.get("type") == RECEIVE_EVENT
+                and created is None and event.get("sender_type") in {"app", "bot"} and event.get("chat_id")):
+            await self._inbox.remember_bot(event["chat_id"], time())
+        if self._own_message(event):
+            event["_bot_outcome"] = "own_message"
+            handled = False
+        elif event.get("chat_type") == "group" and not self._bot_mentions(event):
+            handled = False
+        elif created is not None and created.before(time() - _CATCHUP_MAX_AGE):
+            if self._inbox is not None:
+                await self._inbox.drop_window(event.get("chat_id") or "", created.at, created.at,
+                                              CatchupDropReason.STALE)
+                if message_id:
+                    await self._inbox.finish(message_id)
+            return "too_old"
+        else:
+            handled = await self._process_lark_event(event)
+        if event.get("sender_type") in {"app", "bot"}:
+            logger.info("lark_bot_message chat=%s bot_id=%s message_id=%s outcome=%s",
+                        event.get("chat_id"), event.get("sender_id"), message_id,
+                        "handled" if handled else event.get("_bot_outcome", "ignored"))
+        if self._inbox is not None and message_id and event.get("type") == RECEIVE_EVENT:
+            await self._inbox.finish(message_id, chat_id=event.get("chat_id") or "",
+                               thread_id=(event.get("thread_id") or "") if handled else "", at=time())
+        return "handled" if handled else "ignored"
 
     async def _process_lark_event(self, event: dict[str, Any]) -> bool | None:
         with self._transport.message_scope(event.get("message_id") or str(_uuid.uuid4()),
@@ -1247,6 +1277,9 @@ class LarkChannelAdapter(ChannelAdapter):
                 del self._thread_messages[next(iter(self._thread_messages))]
         manager_id, explicit = self._manager_id, False
         metadata = {"origin_channel_id": self.channel_id}
+        ingress = event.get("_lark_ingress")
+        if ingress is not None:
+            metadata["lark_ingress"] = ingress
         if decision is not None:
             manager_id, explicit = decision.manager_id, decision.explicit
             silent = decision.action is RouteAction.SILENT
@@ -1255,6 +1288,8 @@ class LarkChannelAdapter(ChannelAdapter):
                 metadata["channel_manager_id"] = self._manager_id
             await observe_chat(self.channel_id, chat_id, suppressed=silent)
             if silent:
+                if ingress is not None:
+                    ingress["route_decided_at"] = datetime.now(timezone.utc).isoformat()
                 log_route(logger, self.channel_id, chat_id, decision)
                 return
         from ..tiers.manager import is_stop_command
@@ -1274,6 +1309,8 @@ class LarkChannelAdapter(ChannelAdapter):
             return
         if bot:
             turns.append(now)
+        if ingress is not None:
+            ingress["route_decided_at"] = datetime.now(timezone.utc).isoformat()
         log_route(logger, self.channel_id, chat_id, decision or RouteDecision(RouteAction.ADMIT, manager_id, explicit),
                   via_chat_senders=sender_open_id not in self._allowlist.ids)
         if inbound.kind is lark_content.ContentKind.UNSUPPORTED:
@@ -1290,7 +1327,12 @@ class LarkChannelAdapter(ChannelAdapter):
                                chat_id, exc_info=True)
             return True
         self._reactions.add(chat_id, message_id)  # the bot saw it; in the background, the Manager gets it now
-        attachments = await self._collect(message_id, inbound.resources) if inbound.resources else []
+        downloading = monotonic() if ingress is not None else None
+        try:
+            attachments = await self._collect(message_id, inbound.resources) if inbound.resources else []
+        finally:
+            if ingress is not None and inbound.resources:
+                ingress["attachment_download_ms"] = round((monotonic() - downloading) * 1000)
         if any(item.state is not AttachmentState.SAVED for item in attachments):
             try:
                 reply = _not_received(attachments)
@@ -1313,7 +1355,12 @@ class LarkChannelAdapter(ChannelAdapter):
         if group:
             if message_id:
                 self._group_message[correlation_id] = message_id
-            context["sender_name"] = await self._sender_name(sender_open_id or "")
+            looking_up = monotonic() if ingress is not None else None
+            try:
+                context["sender_name"] = await self._sender_name(sender_open_id or "")
+            finally:
+                if ingress is not None:
+                    ingress["sender_name_lookup_ms"] = round((monotonic() - looking_up) * 1000)
         # What it quotes is read by the Manager, as it prepares the turn (``read_quote``); a /stop reads nothing.
         quote_ref = None if stop else QuoteRef.received(
             self.channel_id, event, forward=inbound.kind is lark_content.ContentKind.FORWARD)
