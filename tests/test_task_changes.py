@@ -8,10 +8,16 @@ reply is done. A failed turn or a restart leaves them for the next turn.
 
 from __future__ import annotations
 
+import asyncio
+import subprocess
 from typing import Any
 
 import pytest
 
+from looper.agents import step_workspaces as runner
+from looper.agents import task_changes
+from looper.agents import task_workspaces
+from looper.db import tasks, task_worktrees
 from looper.agents.message import TASK_ROUTER_ADDRESS, MessageEnvelope, MessageType, planner_address
 from looper.agents.tiers.planner import PlannerAgent
 from looper.db.task_changes import RequirementEdit
@@ -209,3 +215,275 @@ class TestChatReplan:
 
 def always_ok() -> Any:
     return lambda envelope: WORK_OK
+
+
+def git(cwd, *args):
+    return subprocess.run(["git", "-c", "core.hooksPath=/dev/null", "-c", "commit.gpgSign=false", *args],
+                          cwd=cwd, check=True, capture_output=True).stdout.decode().strip()
+
+
+@pytest.fixture
+def repository(tmp_path, monkeypatch):
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", "/dev/null")
+    monkeypatch.setenv("GIT_CONFIG_NOSYSTEM", "1")
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    git(repo, "init", "-b", "task")
+    git(repo, "config", "user.name", "Test")
+    git(repo, "config", "user.email", "test")
+    for name in ("modified", "deleted", "rename", "committed", "sub/inside", "sibling/outside"):
+        path = repo / name
+        path.parent.mkdir(exist_ok=True)
+        path.write_text(name + "\n" * 20)
+    git(repo, "add", ".")
+    git(repo, "commit", "-m", "Base")
+    return repo
+
+
+@pytest.fixture
+def workspace(repository, monkeypatch):
+    repo = repository
+    row = {"task_id": "t", "repo_dir": str(repo), "subdir": "", "path": str(repo), "branch": "task",
+           "base_commit": git(repo, "rev-parse", "HEAD"), "state": "active"}
+    task = {"id": "t", "workspace_dir": str(repo), "work_dir": str(repo), "workspace_mode": "worktree"}
+
+    async def get_task(task_id):
+        return task if task_id == "t" else None
+
+    async def get_tree(task_id):
+        return row if task["workspace_mode"] == "worktree" else None
+
+    monkeypatch.setattr(tasks, "get_task", get_task)
+    monkeypatch.setattr(task_worktrees, "get", get_tree)
+    # No preparation/reopening belongs on a read path.
+    calls = []
+
+    async def forbidden(*args, **kwargs):
+        calls.append(args)
+        raise RuntimeError("unexpected workspace write")
+
+    monkeypatch.setattr(task_workspaces, "prepare", forbidden)
+    yield repo, task, row
+    assert calls == []
+
+
+def read(limit=100):
+    return asyncio.run(task_changes.read("t", limit=limit))
+
+
+def test_net_changes_names_rename_and_readonly(workspace, tmp_path, monkeypatch):
+    repo, _, _ = workspace
+    (repo / "committed").write_text("new commit")
+    git(repo, "commit", "-am", "Task commit")
+    (repo / "modified").write_text("staged")
+    git(repo, "add", "modified")
+    (repo / "modified").write_text("unstaged too")
+    (repo / "deleted").unlink()
+    git(repo, "mv", "rename", "renamed file\nnext")
+    for name in ("with space", "with\nnewline", "-leading"):
+        (repo / name).write_text("new")
+    (repo / ".gitignore").write_text("ignored\n")
+    (repo / "ignored").write_text("ignored")
+    git(repo, "add", ".gitignore")
+    marker = tmp_path / "sentinel"
+    script = tmp_path / "sentinel.sh"
+    script.write_text(f'#!/bin/sh\ntouch "{marker}"\nexit 1\n')
+    script.chmod(0o755)
+    git(repo, "config", "core.hooksPath", str(tmp_path))
+    for name in ("post-index-change", "reference-transaction"):
+        (tmp_path / name).symlink_to(script)
+    git(repo, "config", "diff.external", str(script))
+    git(repo, "config", "diff.sentinel.textconv", str(script))
+    (repo / ".gitattributes").write_text("* diff=sentinel\n")
+    git(repo, "add", ".gitattributes")
+    other = tmp_path / "other"
+    other.mkdir()
+    git(other, "init")
+    for name, value in {"GIT_DIR": str(other / ".git"), "GIT_WORK_TREE": str(other),
+                        "GIT_INDEX_FILE": str(other / "index"), "GIT_COMMON_DIR": str(other / ".git")}.items():
+        monkeypatch.setenv(name, value)
+    before = {p.relative_to(repo): p.read_bytes() for p in repo.rglob("*") if p.is_file()}
+    result = read()
+    assert result["kind"] == "ok" and result["scope"] == "task_branch" and result["reason"] is None
+    files = {f["path"]: f for f in result["files"]}
+    assert files["committed"]["status"] == files["modified"]["status"] == "modified"
+    assert files["deleted"]["status"] == "deleted"
+    assert files["renamed file\nnext"] == {"path": "renamed file\nnext", "status": "renamed", "old_path": "rename"}
+    assert all(files[n]["status"] == "untracked" for n in ("with space", "with\nnewline", "-leading"))
+    assert "ignored" not in files and "rename" not in files
+    assert len(files) == len(result["files"]) and not result["truncated"]
+    assert before == {p.relative_to(repo): p.read_bytes() for p in repo.rglob("*") if p.is_file()}
+    assert not marker.exists() and not (other / "index").exists()
+
+
+@pytest.mark.parametrize("count,limit,truncated", [(0, 100, False), (1, 1, False), (2, 1, True),
+                                                    (101, 100, True), (200, 200, False), (201, 200, True)])
+@pytest.mark.parametrize("mode", ["worktree", "in_place"])
+def test_entry_bound(workspace, count, limit, truncated, mode):
+    repo, task, _ = workspace
+    task["workspace_mode"] = mode
+    for i in range(count):
+        (repo / f"new-{i:03}").write_text("new")
+    result = read(limit)
+    assert len(result["files"]) == min(count, limit)
+    assert result["truncated"] is truncated and "total" not in result
+
+
+def test_active_branch_identity_and_detached(workspace):
+    repo, _, row = workspace
+    git(repo, "checkout", "-b", "other")
+    assert read()["reason"] == "branch_changed"
+    git(repo, "checkout", "--detach", "task")
+    assert read()["kind"] == "ok"
+    git(repo, "checkout", "other")
+    (repo / "committed").write_text("different tip")
+    git(repo, "commit", "-am", "Other")
+    git(repo, "checkout", "--detach")
+    assert read()["reason"] == "branch_changed"
+    git(repo, "branch", "-D", row["branch"])
+    assert read()["reason"] == "branch_missing"
+
+
+def test_linked_worktree_missing_does_not_fall_back(workspace, tmp_path):
+    repo, _, row = workspace
+    checkout = tmp_path / "task-checkout"
+    git(repo, "checkout", "-b", "operator")
+    git(repo, "worktree", "add", str(checkout), "task")
+    row["path"] = str(checkout)
+    (checkout / "committed").write_text("task commit")
+    git(checkout, "commit", "-am", "Task")
+    (repo / "modified").write_text("operator change")
+    assert read()["files"] == [{"path": "committed", "status": "modified", "old_path": None}]
+    git(repo, "worktree", "remove", str(checkout))
+    assert read()["reason"] == "workspace_missing"
+    row["state"] = "removed"
+    assert read()["files"] == [{"path": "committed", "status": "modified", "old_path": None}]
+
+
+def test_conflict_is_one_file(workspace):
+    repo, task, row = workspace
+    git(repo, "checkout", "-b", "other")
+    (repo / "modified").write_text("other branch")
+    git(repo, "commit", "-am", "Other")
+    git(repo, "checkout", "task")
+    (repo / "modified").write_text("task branch")
+    git(repo, "commit", "-am", "Task")
+    with pytest.raises(subprocess.CalledProcessError):
+        git(repo, "merge", "other")
+    assert read()["files"] == [{"path": "modified", "status": "conflicted", "old_path": None}]
+    task["workspace_mode"] = "in_place"
+    assert read()["files"] == [{"path": "modified", "status": "conflicted", "old_path": None}]
+
+
+def test_shared_runner_timeout_is_typed(workspace, monkeypatch):
+    monkeypatch.setattr(runner, "GIT_TIMEOUT_SEC", 0)
+    assert read() == {"task_id": "t", "kind": "unavailable", "scope": None, "files": [],
+                      "truncated": False, "reason": "git_error"}
+
+
+def test_bad_base_is_git_error(workspace):
+    _, _, row = workspace
+    row["base_commit"] = "missing-base"
+    assert read()["reason"] == "git_error"
+
+
+def test_removed_ignores_checkout_and_in_place_ignores_commits(workspace):
+    repo, task, row = workspace
+    (repo / "committed").write_text("task commit")
+    git(repo, "commit", "-am", "Task")
+    row.update(state="removed", path=str(repo / "gone"))
+    git(repo, "checkout", "-b", "other", row["base_commit"])
+    (repo / "modified").write_text("other checkout")
+    (repo / "untracked").write_text("other checkout")
+    assert read()["files"] == [{"path": "committed", "status": "modified", "old_path": None}]
+    task["workspace_mode"] = "in_place"
+    git(repo, "checkout", "task")
+    result = read()
+    assert result["scope"] == "working_tree"
+    assert {f["path"] for f in result["files"]} == {"modified", "untracked"}
+    task["workspace_mode"] = "worktree"
+    git(repo, "branch", "-D", "other")
+    git(repo, "checkout", "-b", "other", row["base_commit"])
+    git(repo, "branch", "-D", "task")
+    assert read()["reason"] == "branch_missing"
+
+
+@pytest.mark.parametrize("mode", ["active", "removed", "in_place"])
+@pytest.mark.parametrize("direction", ["inside", "out", "in"])
+def test_subdirectory_renames(workspace, mode, direction):
+    repo, task, row = workspace
+    row["subdir"] = "sub"
+    task["workspace_dir"] = str(repo / "sub")
+    src, dst = {"inside": ("sub/inside", "sub/new"), "out": ("sub/inside", "sibling/new"),
+                "in": ("sibling/outside", "sub/new")}[direction]
+    git(repo, "mv", src, dst)
+    (repo / "sibling/private").write_text("not in task")
+    if mode == "removed":
+        git(repo, "commit", "-m", "Move")
+        row.update(state="removed", path=str(repo / "gone"))
+    elif mode == "in_place":
+        task["workspace_mode"] = "in_place"
+    result = read()
+    expected = {"inside": {"path": "new", "status": "renamed", "old_path": "inside"},
+                "out": {"path": "inside", "status": "deleted", "old_path": None},
+                "in": {"path": "new", "status": "added", "old_path": None}}[direction]
+    assert result["files"] == [expected] and result["reason"] is None
+
+
+@pytest.mark.parametrize("mode", ["worktree", "in_place"])
+def test_literal_scope_and_work_dir_fallback(workspace, mode):
+    repo, task, row = workspace
+    git(repo, "mv", "sub", "sub[task]")
+    git(repo, "commit", "-m", "Workspace with literal brackets")
+    row.update(subdir="sub[task]", base_commit=git(repo, "rev-parse", "HEAD"))
+    task.update(workspace_mode=mode, workspace_dir="", work_dir=str(repo / "sub[task]"))
+    (repo / "sub[task]/inside").write_text("changed")
+    (repo / "sibling/outside").write_text("sibling")
+    before = {p.relative_to(repo): p.read_bytes() for p in repo.rglob("*") if p.is_file()}
+    assert read()["files"] == [{"path": "inside", "status": "modified", "old_path": None}]
+    assert before == {p.relative_to(repo): p.read_bytes() for p in repo.rglob("*") if p.is_file()}
+
+
+@pytest.mark.parametrize("reason", ["not_git", "workspace_missing", "git_error", "timeout"])
+def test_unavailable_never_success_empty(workspace, monkeypatch, tmp_path, reason):
+    repo, task, row = workspace
+    if reason == "not_git":
+        row["path"] = str(tmp_path)
+    elif reason == "workspace_missing":
+        row["path"] = str(tmp_path / "missing")
+    else:
+        original = runner._git
+
+        async def fail(cwd, *args, **kwargs):
+            if args[0] == "diff":
+                raise runner.GitError("private stderr" if reason == "git_error" else "timed out")
+            return await original(cwd, *args, **kwargs)
+
+        monkeypatch.setattr(runner, "_git", fail)
+    result = read()
+    assert result == {"task_id": "t", "kind": "unavailable", "scope": None, "files": [],
+                      "truncated": False, "reason": "git_error" if reason == "timeout" else reason}
+
+
+def test_nul_parser_copy_type_conflict_dedup_and_boundary():
+    raw = b"R100\0sub/old\0sub/new\0C100\0sibling/private\0sub/copy\0T\0sub/type\0U\0sub/conflict\0"
+    assert list(task_changes._entries(raw, "sub")) == [
+        {"path": "new", "status": "renamed", "old_path": "old"},
+        {"path": "copy", "status": "added", "old_path": None},
+        {"path": "type", "status": "type_changed", "old_path": None},
+        {"path": "conflict", "status": "conflicted", "old_path": None}]
+    porcelain = b"UU sub/conflict\0?? sub/new\nfile\0R  sub/new\0sub/old\0"
+    assert [f["status"] for f in task_changes._entries(porcelain, "sub", porcelain=True)] == [
+        "conflicted", "untracked", "renamed"]
+    assert list(task_changes._entries(b"C100\0sub/old\0sub/copy\0X\0sub/unknown\0", "sub")) == [
+        {"path": "copy", "status": "copied", "old_path": "old"},
+        {"path": "unknown", "status": "unknown", "old_path": None}]
+    assert list(task_changes._entries(b"R100\0sub/old\0sibling/new\0", "sub")) == [
+        {"path": "old", "status": "deleted", "old_path": None}]
+    assert list(task_changes._entries(b"A\0../private\0A\0/absolute\0A\0sibling/private\0", "sub")) == []
+
+
+@pytest.mark.parametrize("data", [b"M\0", b"R100\0old\0", b"M\0unterminated"])
+def test_incomplete_git_output_is_an_error(data):
+    with pytest.raises(runner.GitError):
+        list(task_changes._entries(data, ""))

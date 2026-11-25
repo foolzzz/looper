@@ -224,7 +224,9 @@ describe("Work page shell", () => {
     await render(<Harness initial="task/t-b1" />);
     expect(host.querySelector("h1")!.textContent).toBe("Beta new");
     expect(host.querySelector('a[href="#tasks/t-b1"]')!.textContent).toBe("Open the task page");
-    expect(host.querySelector('a[href="#chat?target=planner-t-b1"]')!.textContent).toBe("Talk to its Planner");
+    expect(host.querySelector('a[href="#chat?target=planner-t-b1"]')).toBeNull();
+    expect(host.querySelector('textarea[aria-label="Message"]')).not.toBeNull();
+    expect(host.textContent).not.toContain("Talk to its Planner");
     expect((host.querySelector('[aria-label="Work tasks"]') as HTMLElement).scrollTop).toBe(120);
 
     act(() => root.unmount());

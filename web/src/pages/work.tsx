@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
+import { PlannerWorkConversation } from "@/components/work-conversation";
 import { WorkAttention } from "@/components/work-attention";
 import { WorkList } from "@/components/work-list";
 import { WorkSwitcher } from "@/components/work-switcher";
@@ -34,7 +35,7 @@ function useDetailColumnVisible(): boolean {
   return matches;
 }
 
-/** Centre is a header and links. The manager column lists what needs you. The conversation and the task panel are later pages. */
+/** Centre shows the selected task and its Planner conversation, or Manager with the needs-you column. */
 export function WorkPage({
   sub,
   onNavigate,
@@ -129,7 +130,6 @@ export function WorkPage({
     return () => window.removeEventListener("keydown", onKey);
   }, [finder, switcher, openSwitcher]);
 
-  const running = !!selected && (selected.group === "in_progress" || selected.group === "needs_you");
   const detailVisible = useDetailColumnVisible();
   const showAttention = selection.kind === "manager" && (pane === "detail" || detailVisible);
 
@@ -151,32 +151,32 @@ export function WorkPage({
             <div className="shrink-0 border-b border-border p-3 md:hidden">
               <Button type="button" variant="outline" onClick={() => setPane("list")}>Back to the list</Button>
             </div>
-            <div className={showAttention ? "p-4 xl:min-h-0 xl:flex-1 xl:overflow-y-auto" : "min-h-0 flex-1 overflow-y-auto p-4"}>
-            <header aria-label="Selected task" className="space-y-3">
-              {selection.kind === "manager" ? (
-                <>
+            {selection.kind === "manager" ? (
+              <div className={showAttention ? "p-4 xl:min-h-0 xl:flex-1 xl:overflow-y-auto" : "min-h-0 flex-1 overflow-y-auto p-4"}>
+                <header aria-label="Selected task" className="space-y-3">
                   <h1 className="text-lg font-semibold">Manager</h1>
                   <a className={LINK} href="#chat">Open the Manager chat</a>
-                </>
-              ) : !selected ? (
-                detail.id !== taskId || !detail.error ? <p role="status">Loading task…</p>
-                  : detail.missing ? <p role="status">Task not found.</p>
-                    : <div role="alert"><p>{detail.error}</p><Button variant="outline" onClick={() => setRetry(n => n + 1)}>Retry</Button></div>
-              ) : (
-                <>
-                  <h1 className="text-lg font-semibold">{taskTitle(selected?.title)}</h1>
-                  {selected && <TaskStatusMark status={selected.status} />}
-                  {selected?.project_name && <p className="text-sm text-muted-foreground">{selected.project_name}</p>}
-                  <div className="flex flex-wrap gap-4">
-                    <a className={LINK} href={`#tasks/${encodeURIComponent(taskId)}`}>Open the task page</a>
-                    {running && (
-                      <a className={LINK} href={`#chat?${new URLSearchParams({ target: `planner-${taskId}` })}`}>Talk to its Planner</a>
-                    )}
-                  </div>
-                </>
-              )}
-            </header>
-            </div>
+                </header>
+              </div>
+            ) : !selected ? (
+              <div className="min-h-0 flex-1 overflow-y-auto p-4">
+                <header aria-label="Selected task" className="space-y-3">
+                  {detail.id !== taskId || !detail.error ? <p role="status">Loading task…</p>
+                    : detail.missing ? <PlannerWorkConversation taskId={taskId} missing />
+                      : <div role="alert"><p>{detail.error}</p><Button variant="outline" onClick={() => setRetry(n => n + 1)}>Retry</Button></div>}
+                </header>
+              </div>
+            ) : (
+              <>
+                <header aria-label="Selected task" className="shrink-0 space-y-3 border-b border-border p-4">
+                  <h1 className="text-lg font-semibold">{taskTitle(selected.title)}</h1>
+                  <TaskStatusMark status={selected.status} />
+                  {selected.project_name && <p className="text-sm text-muted-foreground">{selected.project_name}</p>}
+                  <a className={LINK} href={`#tasks/${encodeURIComponent(taskId)}`}>Open the task page</a>
+                </header>
+                <PlannerWorkConversation key={taskId} taskId={taskId} detail={selected} />
+              </>
+            )}
           </div>
           {showAttention && <WorkAttention />}
         </div>

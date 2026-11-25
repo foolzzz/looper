@@ -62,7 +62,8 @@ it("reaches the eleventh scheduled run through the server cursor", async () => {
 it("reads deep-linked and reloaded tasks independently with the latest watermark", async () => {
   await show("task/outside");
   expect(host.querySelector("h1")?.textContent).toBe("Outside first screen");
-  expect(host.querySelector('a[href="#chat?target=planner-outside"]')).not.toBeNull();
+  expect(host.querySelector('a[href="#chat?target=planner-outside"]')).toBeNull();
+  expect(host.querySelector('textarea[aria-label="Message"]')).not.toBeNull();
   expect(calls.filter(c => c.path.includes("mark_seen")).map(c => c.body)).toEqual([{ task_id: "outside", seq: 1501 }]);
   await remount("task/outside");
   expect(host.querySelector("h1")?.textContent).toBe("Outside first screen");
@@ -73,7 +74,7 @@ it("distinguishes selected task loading, missing and error states without markin
   await show("task/outside");
   expect(host.querySelector('[aria-label="Selected task"]')?.textContent).toContain("Loading");
   detailStatus = 404; delay = null; await act(async () => { release(); }); await settle();
-  expect(host.querySelector('[aria-label="Selected task"]')?.textContent).toContain("Task not found");
+  expect(host.querySelector('[aria-label="Selected task"]')?.textContent).toContain("任务不存在");
   detailStatus = 500; await remount("task/outside");
   expect(host.querySelector('[aria-label="Selected task"] [role="alert"]')).not.toBeNull();
   expect(calls.some(c => c.path.includes("mark_seen"))).toBe(false);

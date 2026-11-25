@@ -9096,7 +9096,7 @@ The OpenAPI document is authoritative for fields, authentication and errors. Pro
 | `/api/v1/auth/{set_password,clear_password}` | POST | `auth.{set_password,clear_password}` |
 | `/api/v1/system/{check,status,overview}` | POST | `system.{check,status,overview}` |
 | `/api/v1/config/{export,import_preview,import_apply,import_upload,import_cancel}` | POST | `config.{export,import_preview,import_apply,import_upload,import_cancel}` |
-| `/api/v1/tasks/{requirement_update,configure,move,agents,continue,role_update,room_view,activity,activity_detail,conversation,activity_stream,create,page,detail,delete,work_list,mark_seen}` | POST | `tasks.{requirement_update,configure,move,agents,continue,role_update,room_view,activity,activity_detail,conversation,activity_stream,create,page,detail,delete,work_list,mark_seen}` |
+| `/api/v1/tasks/{requirement_update,configure,move,agents,continue,role_update,room_view,activity,activity_detail,conversation,activity_stream,create,page,detail,delete,select,work_list,mark_seen}` | POST | `tasks.{requirement_update,configure,move,agents,continue,role_update,room_view,activity,activity_detail,conversation,activity_stream,create,page,detail,delete,select,work_list,mark_seen}` |
 | `/api/v1/catalog_items/{list,get,update,delete}` | POST | `catalog_items.{list,get,update,delete}` |
 | `/api/v1/installs/{create,update,delete,project}` | POST | `installs.{create,update,delete,project}` |
 | `/api/v1/catalog_sources/{import_machine,import_mcp,upload,git_preview,git_import,create_skill,create_mcp}` | POST | `catalog_sources.{import_machine,import_mcp,upload,git_preview,git_import,create_skill,create_mcp}` |
@@ -9281,6 +9281,23 @@ separate tokens and is not exported to API clients. No unversioned operator rout
   updated_at) DESC, id DESC)` concurrently, restricted respectively to open and ended non-scheduled
   tasks. Activity and schedules use `idx_activity_task` and `idx_tasks_schedule`. These new operations
   do not change existing pages, channels, task operations or agent tools.
+- **Task file changes.** Operator-only `tasks.changes {task_id, limit?}` reads file names and statuses,
+  never patches or contents. `limit` defaults to 100 and accepts integers from 1 to 200; unknown fields
+  (including paths and refs) are rejected. The closed result contains `task_id`, `kind`, `scope`, `files`
+  (`path`, `status`, nullable `old_path`), `truncated` and nullable `reason`, with no total count.
+  `task_branch` means net changes from the stored base commit, including committed and pending changes
+  in an active task worktree, or only the retained branch when its worktree was removed. A changed
+  checkout branch is refused; detached HEAD is accepted only at the resolved task branch tip.
+  `working_tree` means only uncommitted and untracked files in an in-place workspace. Paths are relative
+  to the task directory; sibling files and outside rename sources are excluded. Ignored files are omitted.
+  `truncated` reports more unique files than the requested limit; parsing retains at most limit + 1 entries,
+  while the shared git runner still buffers command stdout. This is not an I/O memory bound.
+  An unavailable read returns empty files, null scope and one of `not_git`, `workspace_missing`,
+  `branch_missing`, `branch_changed` or `git_error`, rather than claiming a clean workspace. Missing tasks
+  return 404; API clients receive 403 before git runs. Git failures never return raw local diagnostics.
+  The operation uses read-only git with optional locks disabled and never prepares or reopens worktrees.
+  The generated CLI exposes this operation; there is no new agent tool. Dashboard integration and channel
+  controls are separate work; existing dashboard, Lark and Telegram requests remain unchanged.
 - **Run tree.** The operator-only `runs.tree {task_id}` reads every persisted run of one task, following only
   that task's `parent_record_id` edges. It returns creator, reason, model, status, summary and failure details,
   with own and subtree costs split into subscription equivalents and API spend; unknown amounts remain null.
@@ -9291,6 +9308,16 @@ separate tokens and is not exported to API clients. No unversioned operator rout
   exports; the Manager's compact project hides this group while off, preserving the base view byte for byte.
   First enablement uses the project-settings form and project administration API. The Manager's project tool
   and its schema are unchanged; chat configuration is deferred to a follow-up with a Manager dialog comparison.
+- **Finding a task.** `POST /api/v1/tasks/select` (`tasks.select`) is an operator-only read and calls no model.
+  It is not a generated client command. An empty selection uses the current directory: the deepest `work_dir`,
+  `workspace_dir` or active worktree that contains it, and when several tasks share that directory and only one
+  has not ended, that one is returned. With no directory match, the tasks with activity in the last 14 days, at
+  most 20, newest first. A task id returns that task. One merge-request reference (a `/pull/N` or
+  `/merge_requests/N` URL, `!N`, `#N`, `mr N`, `pr N`, or a bare number) matches a `github_pr` wait or the same
+  reference in the title, latest requirement, original text or supplements. Any other text matches when every
+  word is in the title or the latest requirement. Text and merge-request matches use the last 90 days of activity
+  unless `all` is set. One match is returned; two or more are listed, at most ten, and the first is not chosen;
+  none says what was searched.
 - **Client-only tools.** `looper_task_pipeline` (a task's steps in plan order with kind, status, dependencies and role)
   and `looper_gates` (list a task's gates, read their messages, reply, end a gate) exist for clients. A client does not
   get `looper_task_gate_reply`, because a gate reply there is the user's own words in a chat (a client answers with

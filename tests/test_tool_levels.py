@@ -215,6 +215,7 @@ DECIDED_OPERATIONS: dict[str, ActionLevel] = {
     "message_collection.update": INSIDE,  # stores configuration without reading an account
     "message_collection.mode_update": INSIDE,  # changes Looper's ingestion state
     "message_collection.run_now": MACHINE,  # starts a local read-only collector CLI
+    "tasks.changes": MACHINE,  # reads a local task repository with read-only git commands
 }
 
 
