@@ -929,7 +929,10 @@ class CodexStream:
             usage = raw.get("usage") if isinstance(raw.get("usage"), Mapping) else {}
             result = {"type": "result", "subtype": "success", "is_error": False, "result": self._last_text,
                       **self._base(), "modelUsage": {self.model or "codex": _codex_usage(usage)}}
-            return [usage_event(self.model, reported_totals(result).since(self.before), **self._base()), result]
+            totals = reported_totals(result)
+            own = totals.since(self.before)
+            self.before = totals
+            return [usage_event(self.model, own, **self._base()), result]
         if kind in ("turn.failed", "thread.failed"):
             error = raw.get("error")
             message = str(error.get("message") if isinstance(error, Mapping) else error or "the turn failed")

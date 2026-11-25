@@ -39,7 +39,9 @@ async def _api(tmp_path, pool, *, client=True):
 async def _record(pool, agent="worker-one", task="task-one", *, at="2026-10-22T12:00:00Z", **values):
     rid = await llm_records.start_record(agent_id=agent, task_id=task, session_id=values.pop("session_id", None),
                                          input_text="Recorded prompt", metadata=values.pop("metadata", None), pool=pool)
-    await llm_records.finish_record(rid, status=values.pop("status", "completed"), **values, pool=pool)
+    status = values.pop("status", "completed")
+    if status != "running":
+        await llm_records.finish_record(rid, status=status, **values, pool=pool)
     await pool.execute("UPDATE llm_records SET created_at = $2 WHERE id = $1", rid, datetime.fromisoformat(at))
     return rid
 
@@ -84,15 +86,24 @@ def test_task_rows_keep_profile_and_role_without_record_bodies(tmp_path, monkeyp
     run_db(run, monkeypatch, timeout=30)
 
 
-def test_record_get_preserves_historical_metadata_and_interrupted_status(tmp_path, monkeypatch):
+@pytest.mark.parametrize("historical", [False, True])
+def test_record_get_preserves_historical_metadata_and_interrupted_status(tmp_path, monkeypatch, historical):
     async def run(pool):
         metadata = {"profile": {"name": "Legacy profile"}, "historical": {"nested": [None, {"value": 3}]},
                     "prompt_layers": {"task_role": {"id": "specialist", "kind": "work", "version": 1}}}
-        rid = await _record(pool, status="interrupted", metadata=metadata, error="Stopped before completion")
+        if historical:
+            # Seed a row from before interrupted usage markers existed, without today's settlement logic.
+            rid = await pool.fetchval(
+                "INSERT INTO llm_records (agent_id, status, metadata, error, finished_at) "
+                "VALUES ('worker-one', 'interrupted', $1::jsonb, 'Stopped before completion', now()) RETURNING id",
+                json.dumps(metadata))
+        else:
+            rid = await _record(pool, status="interrupted", metadata=metadata, error="Stopped before completion")
         before = await llm_records.get_record(rid, pool=pool)
+        assert before["metadata"].get("usage_status") == (None if historical else "unreported")
         async with _api(tmp_path, pool) as call:
             row = (await call("get", {"record_id": rid}))["record"]
-            assert row["status"] == "interrupted" and row["metadata"] == llm_records.normalize_record_metadata(metadata)
+            assert row["status"] == "interrupted" and row["metadata"] == before["metadata"]
             assert row["task_role"] == metadata["prompt_layers"]["task_role"]
             assert row["cost_source"] is None and row["context_tokens"] is None and row["compactions"] is None
             assert {key: row[key] for key in before} == before

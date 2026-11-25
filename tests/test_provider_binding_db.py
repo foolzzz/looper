@@ -902,7 +902,8 @@ if {mode in ('cancel', 'soft-cap', 'unknown-cap')!r}:
         try:
             if mode == "cancel":
                 async def started() -> None:
-                    while not await pool.fetchval("SELECT count(*) FROM llm_record_events"):
+                    while not await pool.fetchval(
+                            "SELECT count(*) FROM llm_records WHERE task_id=$1 AND cost_usd IS NOT NULL", task):
                         await asyncio.sleep(0.01)
 
                 await asyncio.wait_for(started(), 5)
@@ -927,7 +928,11 @@ if {mode in ('cancel', 'soft-cap', 'unknown-cap')!r}:
                                      "completed" if mode in ("success", "unknown") else "failed")
         assert record["session_id"] == "binding-session"
         assert record["model"] == "deepseek-flash" and record["cost_source"] == "provider_price"
-        assert record["cost_usd"] is None  # DSH root observations never claim a complete bill.
+        if mode == "cancel":
+            assert record["cost_usd"] == pytest.approx(0.000008442)
+            assert record["metadata"]["usage_status"] == "partial"
+        else:
+            assert record["cost_usd"] is None  # DSH root observations never claim a complete bill.
         assert record["finished_at"] is not None
         metadata = record["metadata"]
         assert metadata["profile"]["id"] == profile_id
