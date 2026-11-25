@@ -672,7 +672,8 @@ def main(argv: list[str]) -> int:
     stdin = _Stdin()
     # The role is in the task section: a Reviewer's names the step under review, a Worker's its step; the
     # Manager's prompt ends with Looper's tools contract.
-    if "## Looper's tools (required)" in system_prompt:
+    if ("## Looper's tools (required)" in system_prompt
+            or "You are Looper's chat assistant for this conversation." in system_prompt):
         _manager(scenarios_path, args, stdin)
     elif "## Your answer (required; code reads it)" in system_prompt:  # a consult of a run's session
         _consult(script, stdin)

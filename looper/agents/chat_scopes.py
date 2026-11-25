@@ -149,6 +149,43 @@ class ScopeInvariantViolation(Exception):
     """Refuse a launch that would break an authority invariant."""
 
 
+def check_launch(scope: SessionScope | None, launch: Any, *, command: list[str]) -> None:
+    """Check the assembled authority before it can reach a resident process."""
+    from .agent_settings import Access
+    from .library import ItemKind
+
+    if scope is None or scope.mode is LaunchMode.FULL:
+        return
+    if any("--dangerously-skip-permissions" in arg or "bypassPermissions" in arg for arg in command):
+        raise ScopeInvariantViolation("restricted launch bypasses permissions")
+    if scope.mode is LaunchMode.PLATFORM_TOOLS:
+        if launch.access_level is not Access.PLATFORM_TOOLS:
+            raise ScopeInvariantViolation("platform-tools launch has wider access")
+        if launch.library.plugin_dirs or any(
+            item.kind is not ItemKind.MCP or item.name != "looper" or item.scope != "builtin"
+            for item in launch.library.items
+        ):
+            raise ScopeInvariantViolation("platform-tools launch carries local capabilities")
+
+
+def capability_of(tool: str, arguments: Mapping[str, Any]) -> str:
+    """A refusal's capability label; unknown or future tools never inherit a grant."""
+    from .ops.levels import TOOL_LEVELS
+
+    if tool in {"looper_overview", "looper_tasks", "looper_gates", "looper_projects"}:
+        return "tasks.read"
+    if tool == "looper_task_create":
+        return "tasks.create"
+    if tool in {"looper_task_instruct", "looper_task_gate_reply", "looper_task_update"}:
+        return "tasks.instruct"
+    if tool == "looper_task_control":
+        action = arguments.get("action")
+        return f"tasks.{action}" if action in ("start", "stop", "restart") else "full"
+    if tool == "looper_schedules":
+        return "schedules.read" if arguments.get("action") in ("list", "get") else "schedules.manage"
+    return "full" if tool in TOOL_LEVELS else "unknown"
+
+
 def _strings(value: Any) -> tuple[str, ...]:
     if not isinstance(value, list) or any(not isinstance(entry, str) for entry in value):
         raise ValueError("expected a list of strings")

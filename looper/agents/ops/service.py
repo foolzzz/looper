@@ -64,7 +64,7 @@ from ...db import ledger as db_ledger, manager_actions as db_actions, managers a
 from ..managers_api import DEFAULT_MANAGER_ID, ManagerDefinition, ManagerTools, TaskPolicy, TaskScope
 from ..message import BOT_CHANNEL_TYPES, MessageEnvelope, builtin_channel_id
 from ..operator_identity import is_operator, operator_sender_id
-from .. import session_routing, session_visibility
+from .. import session_routing, session_visibility, chat_scopes
 from ..reminders import reminders_on
 from ..tiers.manager_session import MAIN_SESSION, on_session_replaced
 from ..turn_context import SpeakerKind
@@ -567,6 +567,8 @@ class ManagerOps:
             # Also deny guessed, unknown and stale tool names, without revealing global
             # schemas, validation errors or return values. Authenticated sessions cannot
             # acquire main's access by omitting their binding.
+            if session_visibility.scoped_for(self._scope.manager_id, key) is not None:
+                return await self._out_of_scope(name, raw, bound or self._session_turns.get(key), key)
             return _error(ErrorCode.FORBIDDEN, "this session has no access to that tool")
         tool = self._scope.tools.get(name) or _MANAGER_TOOL_NAMES.get(name) or _LEDGER_TOOLS.get(name)
         if tool is None:
@@ -894,6 +896,31 @@ class ManagerOps:
         turn.blocks.append(block)
         return pending
 
+    async def _out_of_scope(self, name: str, raw: Any, turn: Turn | None, key: str) -> dict[str, Any]:
+        arguments = raw if isinstance(raw, dict) else {}
+        capability = chat_scopes.capability_of(name, arguments)
+        turn = turn or Turn(channel=None, chat=None)
+        principal = turn.principal
+        result = {"reason": "out_of_scope", "capability": capability,
+                  "scope": f"{principal.scope_id}@{principal.scope_version}" if principal is not None else None,
+                  "principal_kind": principal.kind.value if principal is not None else None}
+        tool = self._scope.tools.get(name) or _MANAGER_TOOL_NAMES.get(name) or _LEDGER_TOOLS.get(name)
+        try:
+            await db_actions.record(
+                channel=turn.channel, chat=turn.chat, message_id=turn.message_id, tool=name,
+                arguments={key: None for key in arguments}, risk=tool.risk.value if tool else Risk.READ.value,
+                status="error", error_code=ErrorCode.FORBIDDEN.value, result=result,
+                manager_id=self._scope.manager_id, client_id=turn.client_id)
+        except Exception:
+            logger.warning("could not record scoped tool refusal", exc_info=True)
+        logger.info("scoped tool refused", extra={
+            "manager_id": self._scope.manager_id, "chat_digest": session_routing.key_digest(key),
+            "capability": capability, "reason": "out_of_scope", "principal_kind": result["principal_kind"]})
+        return {"status": "error", "error": {
+            "code": ErrorCode.FORBIDDEN.value, "reason": "out_of_scope", "capability": capability,
+            "message": f"this chat's scope does not include {capability}: it did not run and nothing waits; "
+                       "tell the speaker that the operator can change this group's scope"}}
+
     async def _record(self, turn: Turn, tool: Tool, arguments: Mapping[str, Any], risk: Risk, status: str, *,
                       error_code: str | None = None, result: Any = None,
                       confirmation_id: str | None = None, watch: receipts.Watch | None = None) -> int | None:
@@ -1139,6 +1166,11 @@ class ManagerOps:
                 and receipts_settings.enabled():
             return text.replace(token, "\n".join(texts), 1)
         return text.replace(token + "\n", "", 1) if token + "\n" in text else text.replace(token, "", 1)
+
+    def retire_session(self, session_key: str) -> None:
+        """Revoke a retired scope's credential before its allowlist is forgotten."""
+        self._session_tokens.pop(session_key, None)
+        self.forget_session(session_key)
 
     def forget_session(self, session_key: str) -> None:
         """The Manager session ``session_key`` was reset: the card-button notes left in it are never told."""

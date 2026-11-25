@@ -75,7 +75,7 @@ from ..claude_cli import (
     exit_note,
     user_stop_result,
 )
-from .. import admission, turn_admission, session_visibility
+from .. import admission, turn_admission, session_visibility, chat_scopes
 from ..session_visibility import Input as SessionInput
 from .. import failures
 from ..failures import FailureClass
@@ -508,6 +508,18 @@ class ProfileUnavailable(RuntimeError):
             return "\n\n发送 /profile 换一个 Agent Profile，或 /profile 0 跟随设置。"
         if self.source is Layer.ROLE:
             return "\n\n发送 /profile 选另一个 Agent Profile。"
+        return ""
+
+
+class ScopeStartRefused(ProfileUnavailable):
+    """A runtime cannot provide the session's declared authority; never widen it."""
+
+    def __init__(self, *, runtime: str, scope: str, mode: str) -> None:
+        self.runtime, self.scope, self.mode = runtime, scope, mode
+        super().__init__("这个群的能力范围在当前 Agent Profile 上跑不了，请操作者换一个支持的 Agent Profile。",
+                         Layer.ROLE)
+
+    def hint(self) -> str:
         return ""
 
 
@@ -1002,7 +1014,8 @@ class ManagerAgent:
         return root
 
     def _session_work_dir(self) -> Path:
-        if self._session_now().key == MAIN_SESSION:
+        session = self._session_now()
+        if session.key == MAIN_SESSION or (session.scope is not None and session.scope.mode is LaunchMode.FULL):
             return self._config.work_dir
         path = self._session_root() / "work"
         path.mkdir(mode=0o700, exist_ok=True)
@@ -1010,7 +1023,8 @@ class ManagerAgent:
 
     def _session_environment(self, launch: Launch) -> dict[str, str]:
         env = launch.environment()
-        if self._session_now().key == MAIN_SESSION:
+        session = self._session_now()
+        if session.key == MAIN_SESSION or (session.scope is not None and session.scope.mode is LaunchMode.FULL):
             return env
         root = self._session_root()
         original_home = Path(env.get("HOME", str(Path.home())))
@@ -1715,6 +1729,9 @@ class ManagerAgent:
             elif isinstance(exc, cost_guard.Held):
                 await self._send_reply(envelope, cost_manager.usage_reply(exc))
                 return
+            elif isinstance(exc, ScopeStartRefused):
+                await self._send_reply(envelope, _with_blocks(str(exc), turn.blocks), error=str(exc))
+                return
             elif isinstance(exc, (TurnFailed, cost_guard.Denied)):
                 logger.error("%s failed to answer %s: %s", self._log, envelope.message_id, exc.error)
                 await self._send_reply(envelope, _with_blocks(exc.reply, turn.blocks), error=exc.error)
@@ -1910,15 +1927,25 @@ class ManagerAgent:
             raise ProfileUnavailable(agent_settings.error, agent_settings.profile_source)
         if agent_settings.profile_error:  # answered as an error; never another profile
             raise ProfileUnavailable(agent_settings.profile_error, agent_settings.profile_source)
-        routed = self.agent_id == DEFAULT_MANAGER_ID and self._session_now().key != MAIN_SESSION
-        if not routed:
+        scope = self._session_now().scope
+        restricted = (scope.mode is LaunchMode.PLATFORM_TOOLS if scope is not None
+                      else self.agent_id == DEFAULT_MANAGER_ID and self._session_now().key != MAIN_SESSION)
+        if not restricted:
             await token.step("templates", self._read_templates())
-        library = EMPTY_LIBRARY if routed else await token.step("library", load_installed(
+        library = EMPTY_LIBRARY if restricted else await token.step("library", load_installed(
             self._runtime_root, AgentType.MANAGER.value, manager_id=self.agent_id))
         library = await token.step("library_server", self._library_with_server(library))
         launch = Launch(agent_settings, library, role=AgentType.MANAGER,
-                        access=Access.PLATFORM_TOOLS if routed else None)
-        if routed and LaunchMode.PLATFORM_TOOLS not in launch.runtime.launch_modes:
+                        access=Access.PLATFORM_TOOLS if restricted else None)
+        if scope is not None and scope.mode not in launch.runtime.launch_modes:
+            # Scope start refusal counters and alerts hook in here.
+            logger.error("scoped runtime refused", extra={
+                "manager_id": self.agent_id, "chat_digest": session_routing.key_digest(self._session_now().key),
+                "runtime": launch.runtime.type, "scope": f"{scope.resolved.scope_id}@{scope.version}",
+                "mode": scope.mode.value})
+            raise ScopeStartRefused(runtime=launch.runtime.type, scope=f"{scope.resolved.scope_id}@{scope.version}",
+                                    mode=scope.mode.value)
+        if scope is None and restricted and LaunchMode.PLATFORM_TOOLS not in launch.runtime.launch_modes:
             raise ProfileUnavailable(f"{launch.runtime.label} 尚不支持仅使用平台工具的路由会话，请选择支持的 Agent Profile。",
                                      agent_settings.profile_source)
         if self.ops is not None and await token.step("outbound_review", outbound_hook.enabled()):
@@ -1970,6 +1997,17 @@ class ManagerAgent:
             listing = json.dumps(tools, sort_keys=True) if self.ops is not None else ""
             signature += (hashlib.sha256(listing.encode("utf-8")).hexdigest(),)
             components["tools"] = signature[-1]
+        if scope is not None:
+            signature += (scope.fingerprint, scope.mode.value)
+            components["scope"] = (scope.fingerprint, scope.mode.value)
+        try:
+            chat_scopes.check_launch(scope, launch, command=list(signature[0]))
+        except ScopeInvariantViolation:
+            logger.critical("scoped launch invariant failed", extra={
+                "manager_id": self.agent_id, "chat_digest": session_routing.key_digest(self._session_now().key),
+                "runtime": launch.runtime.type, "scope": f"{scope.resolved.scope_id}@{scope.version}" if scope else None,
+                "mode": scope.mode.value if scope else None}, exc_info=True)
+            raise TurnFailed("这条消息没有处理：启动检查没有通过。", "scope_invariant") from None
         # Diagnostic hashes are separate from the unchanged resident comparison. Hash even absent components
         # and existing digests so no command, URL or provider binding value can reach the restart log.
         signature_components = {name: hashlib.sha256(json.dumps(value).encode("utf-8")).hexdigest()
@@ -2260,6 +2298,8 @@ class ManagerAgent:
                         and (previous.launch.tool_hook is None) == (prepared.launch.tool_hook is None):
                     close = getattr(self._claude, "try_stop_if_idle", None)
                     if close is None or not await token.keep("library_idle_close", close(), 10):
+                        if prepared.session.scope is not None and previous.signature[-2:] != prepared.signature[-2:]:
+                            raise ScopeInvariantViolation("library refresh cannot reuse another scope's launch")
                         # A user result may leave background/autonomous work running. Keep the actual
                         # launch in this turn's record and retry the capability refresh next turn.
                         prepared = replace(prepared, launch=previous.launch, system_prompt=previous.system_prompt,
@@ -2566,6 +2606,8 @@ class ManagerAgent:
     async def _fall_back_completion(self, batch: uuid.UUID, reason: str, state: dict[str, Any], *,
                                     rejected: bool = False) -> None:
         assert self._bus is not None
+        if reason == "session_allowlist" and self._session_now().scope is not None:
+            reason = "group_chat"  # Scoped code notices use the existing persisted completion reason.
         try:
             await completion_events.fall_back(self._bus, self.agent_address, reason=reason, batch=batch,
                                               record_id=state.get("record_id"), rejected=rejected)
