@@ -11,27 +11,27 @@ from tests.db_support import DSN, run_db
 pytestmark = pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
 
 
-def test_manager_summaries_keep_unknown_cost_separate_from_zero(monkeypatch):
+@pytest.mark.parametrize("cost", [None, 0., .05])
+def test_manager_summaries_keep_unknown_cost_separate_from_zero(monkeypatch, cost):
     async def check(pool):
         project = await projects.create_project(name="cost readers", pool=pool)
         await pool.execute("INSERT INTO tasks (id, project_id, requirement, status) "
                            "VALUES ('task', $1, 'work', 'running')", project["id"])
         record = await llm_records.start_record(agent_id="manager", pool=pool)
-        await llm_records.finish_record(record, status="completed", model="claude-haiku-5-5", pool=pool)
+        await llm_records.finish_record(record, status="completed", model="claude-haiku-5-5", cost_usd=cost, pool=pool)
         event = await manager_events.record(manager_id="manager", task_id="task", origin="chat", target_kind="web",
                                            channel_id="web", chat="main", dedupe_key="one", payload={}, fallback=[],
                                            state="skipped", reason="off", pool=pool)
         await pool.execute("UPDATE manager_events SET record_id=$2 WHERE id=$1", event.row["id"], record)
         spend = (await llm_records.manager_spend(["manager", "never"],
                  since=datetime.now(timezone.utc) - timedelta(hours=1), pool=pool))
-        assert spend["manager"]["cost_status"] == "unknown"
-        assert spend["manager"]["unpriced_runs"] == 1
+        expected = "unknown" if cost is None else "known"
+        assert spend["manager"]["cost_status"] == expected
+        assert spend["manager"]["unpriced_runs"] == int(cost is None)
         assert spend["never"]["cost_status"] == "known"
         summary = await manager_events.summary(pool=pool)
-        assert summary["cost_status"] == "unknown" and summary["unpriced_runs"] == 1
-        await llm_records.finish_record(record, status="completed", cost_usd=0.05, pool=pool)
-        summary = await manager_events.summary(pool=pool)
-        assert summary["cost_status"] == "known" and summary["turn_cost_usd"] == 0.05
+        assert summary["cost_status"] == expected and summary["unpriced_runs"] == int(cost is None)
+        assert summary["turn_cost_usd"] == (cost or 0.)
     run_db(check)
 
 
