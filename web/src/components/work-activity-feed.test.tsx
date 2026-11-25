@@ -1,4 +1,5 @@
 // @vitest-environment happy-dom
+import { clearWorkConversationMemory } from "@/lib/use-work-conversation-state";
 import { act, type ReactNode } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -56,6 +57,7 @@ describe("Work activity feed", () => {
     el.dispatchEvent(new Event("input", { bubbles: true }));
   });
   beforeEach(() => {
+    clearWorkConversationMemory();
     vi.resetAllMocks();
     cleanup = vi.fn();
     api.fetchTaskActivityWindow.mockResolvedValue({ events: [], hasMore: false });

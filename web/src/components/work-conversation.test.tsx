@@ -1,4 +1,5 @@
 // @vitest-environment happy-dom
+import { createWorkConversationStore, workConversationKey } from "@/lib/use-work-conversation-state";
 import { act, useState, type ReactNode } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -520,8 +521,9 @@ describe("work conversation", () => {
   function blockStorage(mode: "disabled" | "full"): () => void {
     const backing = new Map<string, string>();
     if (mode === "full") {
-      backing.set("looper-work-draft:planner-t1", "stale draft");
-      backing.set("looper-work-staged:planner-t1", JSON.stringify(["stale queued"]));
+      const seed = createWorkConversationStore();
+      const key = workConversationKey({ kind: "planner", taskId: "t1" });
+      backing.set(key, JSON.stringify({ ...seed.read(key), draft: "stale draft", staged: ["stale queued"] }));
     }
     const fail = () => {
       throw new DOMException(mode === "full" ? "quota" : "disabled", mode === "full" ? "QuotaExceededError" : "SecurityError");

@@ -6,6 +6,7 @@ import {
 } from "@/lib/api";
 import { historyFrom, joinStaged, pullBack, turnAnswers } from "@/lib/composer";
 import { randomId } from "@/lib/ids";
+import { useWorkConversationState } from "@/lib/use-work-conversation-state";
 import { useReplyStream } from "@/lib/use-reply-stream";
 
 const POINTER = "looper-chat-session-id";
@@ -14,7 +15,6 @@ const STOP_DISABLED = "Stopping a reply is off (Settings → Chat).";
 const OTHER_MESSAGE = "The Manager is answering another message first; this one has not started.";
 const CANNOT_INTERRUPT = "This runtime cannot interrupt a reply.";
 const FOREIGN = "The saved conversation belongs to another Manager, so this is a new conversation.";
-const key = (kind: string, sid: string) => `looper-work-${kind}:manager:${sid}`;
 const newThread = () => `session-${randomId().slice(0, 8)}`;
 
 // Same default pointer and creation policy as Chat; Work also tolerates blocked storage.
@@ -27,25 +27,10 @@ function currentThread(fallback?: string): string {
     return fallback || newThread();
   }
 }
-function read(kind: string, sid: string): string {
-  try { return sessionStorage.getItem(key(kind, sid)) ?? ""; } catch { return ""; }
-}
-function queue(sid: string): string[] {
-  try {
-    const value: unknown = JSON.parse(read("staged", sid) || "[]");
-    return Array.isArray(value) ? value.filter((item): item is string => typeof item === "string") : [];
-  } catch { return []; }
-}
-function write(kind: string, sid: string, value: string) {
-  try {
-    if (value) sessionStorage.setItem(key(kind, sid), value);
-    else sessionStorage.removeItem(key(kind, sid));
-  } catch { /* The mounted composer remains usable when storage is blocked. */ }
-}
 function merge(rows: WorkPaneMessage[], saved: DbChatMessage[]): WorkPaneMessage[] {
   const next = new Map(rows.map(row => [row.id, row]));
   for (const row of saved) next.set(row.message_id, {
-    id: row.message_id, role: row.role, content: row.content, streaming: false,
+    id: row.message_id, role: row.role, content: row.content, created_at: row.created_at, streaming: false,
     outcome: next.get(row.message_id)?.outcome,
   });
   return [...next.values()];
@@ -70,7 +55,7 @@ interface Thread {
 function empty(sid: string): Thread {
   return {
     sid, owned: false, history: "loading", error: "", messages: [], saved: new Set(),
-    draft: read("draft", sid), staged: queue(sid), sending: false, ownId: null,
+    draft: "", staged: [], sending: false, ownId: null,
     serverTurn: null, interrupt: null, phase: "", notice: "",
   };
 }
@@ -78,7 +63,11 @@ function empty(sid: string): Thread {
 /** Default Manager only. Navigation cancels browser clients, never the server turn. */
 export function useWorkManagerConversation(): WorkConversationProps {
   const [sid, setSid] = useState(() => currentThread());
+  const conversation = useWorkConversationState({ kind: "manager", managerId: "manager", sessionId: sid });
+  const { store, key: cacheKey } = conversation;
+  const confirmed = useRef("");
   const sidRef = useRef(sid);
+  if (sidRef.current !== sid) confirmed.current = "";
   sidRef.current = sid;
   const [retry, setRetry] = useState(0);
   const [replaced, setReplaced] = useState("");
@@ -110,17 +99,32 @@ export function useWorkManagerConversation(): WorkConversationProps {
 
   useEffect(() => {
     const thread = empty(sid);
+    const composer = store.read(cacheKey);
+    thread.draft = composer.draft; thread.staged = [...composer.staged];
+    if (confirmed.current === sid) {
+      thread.owned = true;
+      thread.messages = store.cached(cacheKey)?.messages ?? [];
+      thread.history = thread.messages.length ? "ready" : "empty";
+    }
     const controller = new AbortController();
     let alive = true;
     let closeWatch: (() => void) | undefined;
     let poll: { ids: string[]; stopped: boolean; timer?: ReturnType<typeof setTimeout> } | null = null;
     let capabilityTimer: ReturnType<typeof setTimeout> | undefined;
     const fresh = () => alive && sidRef.current === sid;
-    const publish = () => { if (fresh()) setView({ ...thread }); };
-    const setDraft = (draft: string) => { thread.draft = draft; write("draft", sid, draft); };
+    const publish = () => {
+      if (!fresh()) return;
+      if (thread.owned) {
+        store.cache(cacheKey, { messages: thread.messages });
+        const history = historyFrom(thread.messages);
+        if (history.length) conversation.rememberHistory(history);
+      }
+      setView({ ...thread });
+    };
+    const setDraft = (draft: string) => { thread.draft = draft; store.patch(cacheKey, { draft }); };
     const setStaged = (staged: string[]) => {
       thread.staged = staged;
-      write("staged", sid, staged.length ? JSON.stringify(staged) : "");
+      store.patch(cacheKey, { staged: [...staged] });
     };
     const pullStaged = (extra: string[] = []) => {
       const items = [...extra, ...thread.staged];
@@ -256,18 +260,22 @@ export function useWorkManagerConversation(): WorkConversationProps {
     fetchChatMessages(sid, controller.signal, "manager").then(rows => {
       if (!fresh()) return;
       if (!Array.isArray(rows)) throw new Error("The server returned invalid chat messages.");
-      saved(rows); thread.owned = true; thread.history = rows.length ? "ready" : "empty"; publish();
+      if (!thread.owned) thread.messages = store.cached(cacheKey)?.messages ?? [];
+      saved(rows); thread.owned = true; confirmed.current = sid; thread.history = rows.length ? "ready" : "empty"; publish();
       closeWatch = watchChat(sid, message => { if (fresh()) { saved([message]); publish(); } }, "manager");
       void syncTurn();
     }).catch(error => {
       if (!fresh()) return;
       if (error instanceof ForeignConversationError) {
+        confirmed.current = "";
+        thread.owned = false; thread.messages = []; publish();
         const next = newThread();
         try { localStorage.setItem(POINTER, next); } catch { /* Keep the replacement in memory. */ }
         setReplaced(next); setSid(next);
       } else {
-        thread.owned = false; thread.messages = []; thread.history = "error";
-        thread.error = error instanceof Error ? error.message : String(error); publish();
+        if (!thread.owned) thread.messages = [];
+        thread.history = "error";
+        thread.error = `${thread.owned ? "刷新失败：" : ""}${error instanceof Error ? error.message : String(error)}`; publish();
       }
     });
     const visible = () => { if (document.visibilityState === "visible") void syncTurn(); };
@@ -289,16 +297,16 @@ export function useWorkManagerConversation(): WorkConversationProps {
     loadingText: "正在确认会话归属…", onRetry: () => setRetry(value => value + 1),
     refusal: replaced === sid ? FOREIGN : undefined,
     draft: shown.owned ? shown.draft : "", staged: shown.owned ? shown.staged : [],
-    inputHistory: historyFrom(shown.owned ? shown.messages : []),
+    inputHistory: shown.owned ? conversation.value.history : [],
     phase: shown.phase, replying: shown.sending || shown.serverTurn !== null,
     canStop: stopEnabled && runningId !== null && interruptible,
     stopRefusal: stopEnabled && runningId !== null && !interruptible ? CANNOT_INTERRUPT : undefined,
     notice: shown.notice,
-    onDraft: draft => { if (owner && active.current === owner) { owner.thread.draft = draft; write("draft", sid, draft); owner.publish(); } },
-    onStaged: staged => { if (owner && active.current === owner) { owner.thread.staged = staged; write("staged", sid, staged.length ? JSON.stringify(staged) : ""); owner.publish(); } },
+    onDraft: draft => { if (owner && active.current === owner) { owner.thread.draft = draft; store.patch(cacheKey, { draft }); owner.publish(); } },
+    onStaged: staged => { if (owner && active.current === owner) { owner.thread.staged = staged; store.patch(cacheKey, { staged: [...staged] }); owner.publish(); } },
     onSend: text => {
       if (!owner?.thread.owned || active.current !== owner || sidRef.current !== sid) return;
-      owner.thread.draft = ""; write("draft", sid, ""); owner.send(text);
+      owner.thread.draft = ""; store.patch(cacheKey, { draft: "" }); owner.send(text);
     },
     onStop: () => owner?.stop(),
   };
