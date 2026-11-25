@@ -126,6 +126,28 @@ describe("chat Manager picker", () => {
     vi.useRealTimers();
   });
 
+  it.each([true, false])("opens the deep-linked task Planner with can_send=%s", async canSend => {
+    const targets = deferred<unknown[]>();
+    api.fetchChatTargets.mockReturnValue(targets.promise);
+    await mount("target=planner-task-a");
+    await act(async () => targets.resolve([MANAGER, {
+      kind: "planner", id: "planner-task-a", task_id: "task-a", name: "Synthetic chat task", can_send: canSend,
+    }]));
+    await flush();
+    expect(container.textContent).toContain("Synthetic chat task");
+    expect(api.fetchChatMessages).toHaveBeenCalledWith("planner-task-a", expect.anything(), undefined);
+    if (canSend) {
+      expect(input()).not.toBeNull();
+      await say("task update");
+      expect(api.sendChat).toHaveBeenLastCalledWith(
+        "task update", "planner-task-a", expect.any(String), { kind: "planner", task_id: "task-a" }, expect.anything(),
+      );
+    } else {
+      expect(input()).toBeNull();
+      expect(container.textContent).toContain("its Planner no longer takes messages");
+    }
+  });
+
   it("pauses target and conversation timers while hidden and resumes once", async () => {
     vi.useFakeTimers();
     await mount();

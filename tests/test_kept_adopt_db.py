@@ -95,9 +95,9 @@ if Path('delay-exit').exists():
 """
 
 
-def _short_directory() -> Path:
+def _short_directory(prefix='.k') -> Path:
     for suffix in random.sample(string.ascii_letters + string.digits, 62):
-        directory = ROOT / f'.k{suffix}'
+        directory = ROOT / f'{prefix}{suffix}'
         if not directory.exists():
             assert len(os.fsencode(directory / keeper.SOCKET)) <= keeper.SOCKET_PATH_MAX
             return directory
@@ -119,8 +119,8 @@ async def _stored(db, count: int) -> None:
 
 @asynccontextmanager
 async def _pools(db, tmp_path, monkeypatch, *, timeout=0, cap=None, rooms=False, fallback=False, review=False,
-                 before_dispatch=None):
-    run_dir = _short_directory()
+                 run_prefix='.k', before_dispatch=None):
+    run_dir = _short_directory(run_prefix)
     run_id = run_dir.name
     saved = {}
     handles = []
@@ -376,6 +376,31 @@ def test_an_adopted_run_continues_its_record(tmp_path, monkeypatch):
             assert sum(row['kind'] == 'text' for row in activity) == 1
             assert len(case.results) == 1
 
+    run_db(run, monkeypatch, timeout=35)
+
+
+def test_adopted_run_replaces_reported_bill_without_counting_replay_twice(tmp_path, monkeypatch):
+    async def run(db):
+        async with _pools(db, tmp_path, monkeypatch, run_prefix='worker-') as case:
+            (tmp_path / 'gap-usage').touch()
+            async with asyncio.timeout(10):
+                while await db.fetchval('SELECT cost_usd FROM llm_records') is None:
+                    await asyncio.sleep(.02)
+            record_id = await db.fetchval('SELECT id FROM llm_records')
+            assert await db.fetchval('SELECT input_tokens FROM llm_records') == 1_000_000
+            await _detach(case)
+            await _adopt(case)
+            (tmp_path / 'release').touch()
+            await _finished(case)
+            # The runtime's final bill replaces the estimate on the original row, including replayed usage.
+            assert await db.fetchval('SELECT count(*) FROM llm_records') == 1
+            row = await llm_records.get_record(record_id)
+            assert row['status'] == 'completed' and row['cost_usd'] == .375
+            assert 'usage_status' not in row['metadata']
+            costs = (await llm_records.task_costs(['task-adopt']))['task-adopt']
+            assert costs['runs'] == 1 and costs['cost_usd'] == .375
+            since = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
+            assert (await llm_records.spend_since(since))['equivalent_usd'] == .375
     run_db(run, monkeypatch, timeout=35)
 
 
