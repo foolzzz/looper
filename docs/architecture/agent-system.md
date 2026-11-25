@@ -5176,6 +5176,48 @@ role/class/streak distributions; self-check warns above five breakers per UTC da
 durable reminder after an hour. See [validation](../validation/failure-handling.md) for measured coverage and
 pending real-model evaluations.
 
+### Pausing model network outages
+
+`network_pause.get/update` is an independent operator-only policy. Its single
+`enabled` switch defaults to false; `max_pause_seconds` defaults to 7200 and
+accepts 1–86400. Updates require confirmation; null restores either default.
+The generated CLI exposes `network-pause get/update`. Chat settings, prompts,
+tool descriptions and runtime command lines are unchanged.
+
+When enabled, a failed Planner, Worker or Reviewer run pauses its task only
+when structured runtime evidence identifies a model API connection failure.
+The existing typed connection classifier is reused, alongside exact API error
+codes `ENOTFOUND`, `ECONNRESET`, `EAI_AGAIN` and `ECONNREFUSED`. Tool output,
+free text, authentication failures, quota errors and HTTP server errors do not
+qualify. This policy works with failure typing off and takes precedence over
+its transient retries when both policies are enabled. The runtime's own
+internal retries still finish before Looper receives the final failure.
+
+The task projects `waiting`, retains its plan, workspace and Planner session,
+and starts no new model executions while paused. Already running parallel
+executions are not interrupted. A DNS plus TCP/TLS connection probe uses the
+failed launch's configured endpoint (or the known runtime default), sends no
+HTTP or model request, and backs off from 5 to 60 seconds with jitter and a
+5-second connection timeout. An unknown endpoint cannot count as success.
+Successful connectivity resumes the same Planner turn or redispatches the
+failed step/review in the same attempt, without spending a step retry. A
+persisted pause is restored before task work resumes after a server restart.
+
+At the original deadline the task becomes `waiting_user`, stops probing and
+appears once in the existing failure-holds section of Needs you when attention
+is enabled. The operator can check connectivity, stop and restart the task, or
+disable this policy to release existing waits on their next settings check.
+The task detail API and dashboard show the pause reason
+and deadline. Lark and Telegram use the existing task controls and Needs you
+summary; neither needs a new chat command.
+
+Migration `network_pauses` stores pause history with version-fenced releases.
+Logs record pause, resume and expiry. While enabled, `metrics.task_outcomes`
+adds global lifetime `network_pause` counts, active paused/human waits and total
+pause duration in seconds (bounded by each pause deadline); those counters
+are independent of the task metric window and project filters. With the
+switch off, ordinary failure and retry behavior is unchanged.
+
 ### Translated models (local gateway)
 
 Claude Code can run an `openai-chat` model through Looper's local gateway.
