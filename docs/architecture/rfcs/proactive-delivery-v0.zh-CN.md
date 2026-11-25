@@ -27,7 +27,7 @@
 | # | 条件 | 结果 | `reason` | 计数 |
 |---|---|---|---|---|
 | 1 | 来源说没什么要说 | 不发 | `silent` | 否 |
-| 2 | `kind` 是 `morning_brief`（晨报本身，见晨报 RFC） | 发 | `within_limits` | 否 |
+| 2 | `kind` 是 `morning_brief`（晨报本身，见晨报 RFC） | 免打扰始终拦截，进摘要；否则发送（发送方只在截止时间之前补发） | 免打扰时 `quiet_hours`，否则 `within_limits` | 否，不受每日上限拦截，也不占额度 |
 | 3 | `urgency` 是 `blocking` 或 `user_set` | 发 | `urgent` | 否 |
 | 4 | 不在来源自己的生效时段（按来源的时区） | 进摘要 | `outside_active_hours` | 否 |
 | 5 | 用户 `recent_reply` 内在这个会话说过话 | 发 | `recent_reply` | 否 |

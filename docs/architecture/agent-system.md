@@ -7229,8 +7229,12 @@ that continued a refusal or a zero-attempt deferral is restored with its prior
 attempt count and first unread date. The switch
 `morning_brief.enabled` is off by default and operator-only
 (`morning_brief.get`, `morning_brief.update`). Those operations, the generated
-CLI and Settings → Chat expose `enabled`, `time` and `cutoff`; times use `HH:MM`,
-cutoff must be later than send time, and null restores the field's default.
+CLI and Settings → Chat expose `enabled`, `time` and `cutoff`; times use `HH:MM`.
+An explicit cutoff must be later than send time. An absent or null cutoff derives
+12:00 for sends before noon, otherwise send time plus three hours, capped at 23:59.
+On load, a stored cutoff not later than send time is ignored with one warning and
+the same derivation applies. Readback includes the effective `cutoff` and
+`cutoff_source` (`stored` or `derived`). Other null fields restore their defaults.
 An invalid update changes nothing. Off, a tick reads the in-memory
 switch and does nothing else. One `morning_briefs` row per local date and chat
 makes a restart and a second server send it at most once. A send that stops
