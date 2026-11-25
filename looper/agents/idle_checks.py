@@ -240,6 +240,7 @@ RULES: dict[str, SectionRule | None] = {
     "cost": None,  # a pending spend hold already asked the operator to decide; not repeated here
     "failure_holds": None,  # failure handling owns source notices and timed reminders
     "reminders": None,  # terminal reminder failures surface only in /todo and the morning brief
+    "vault_commits": None,  # git recovery stays in the operator summary, outside model-visible idle context
 }
 
 
