@@ -127,6 +127,7 @@ class TaskManagerAgent:
         self.session_id: str | None = None
         self.totals = Usage()
         self.loaded = False
+        self.context_rotation_pending = False
         self.running: asyncio.Task[None] | None = None
 
     async def prepare(self, *, sink: TurnSink | None = None) -> tuple[Mapping[str, Any], Any, Launch, SystemPrompt]:
@@ -140,6 +141,7 @@ class TaskManagerAgent:
             if saved:
                 self.session_id = saved["session_id"]
                 self.totals = Usage.from_dict(saved["session_totals"])
+                self.context_rotation_pending = saved.get("pending_handoff") == "context_bound"
             self.loaded = True
         task = await tasks.get_task(self.task_id)
         if task is None:
@@ -222,21 +224,32 @@ class TaskManagerAgent:
         return task, reopened, launch, prompt
 
     async def turn(self, request: _Request) -> None:
-        gate = await task_budget.gate(self.task_id)
-        if not gate.allowed:
+        try:
+            gate = await task_budget.gate(self.task_id)
+        except Exception:
+            logger.warning("task Manager %s: budget_unverifiable; allowing this turn", self.task_id, exc_info=True)
+            await activity.insert_activity(task_id=self.task_id, kind="error",
+                summary="budget_unverifiable: cannot read task costs; allowing this task Manager turn")
+            gate = None
+        if gate is not None and not gate.allowed:
             raise Refused(RefuseReason.BUDGET, "这个任务已到花费上限，提高上限后再说")
-        if gate.unknown_models:
+        if gate is not None and gate.unknown_models:
             await activity.insert_activity(task_id=self.task_id, kind="error",
                 summary="Warning: task Manager cost is unknown for " + ", ".join(gate.unknown_models))
         task, reopened, launch, prompt = await self.prepare()
         if not request.admitted.done():
             request.admitted.set_result(Submitted("started"))
-        if reopened.reason and not self.session_id:
+        rotating = self.context_rotation_pending
+        if rotating:
+            await request.sink.event(TaskManagerEvent.SESSION_FRESH,
+                                     {"reason": "context_bound", "detail": "The task session reached its context bound."})
+        elif reopened.reason and not self.session_id:
             await request.sink.event(TaskManagerEvent.SESSION_FRESH,
                                      {"reason": "read_only_open", "detail": reopened.reason})
         before = await _files(reopened.work_dir)
         text, outcome = "", "failed"
         written = False
+        record_id = None
         try:
             for attempt in range(2):
                 resuming = "--resume" in self.resident.command
@@ -252,7 +265,11 @@ class TaskManagerAgent:
                         if expected and event.get("session_id") != expected:
                             raise _ResumeFailed("Claude Code resumed a different session")
                         initialized = True
-                        self.session_id = event.get("session_id") or self.session_id
+                        session_id = event.get("session_id") or self.session_id
+                        await agent_sessions.save_session(f"task-manager-{self.task_id}", session_id,
+                            self.resident.totals.to_dict(), runtime_type="claude-code",
+                            profile_id=launch.profile.id, provider_id=launch.profile.provider.id)
+                        self.session_id = session_id
                     if event.get("parent_tool_use_id") is not None:
                         return
                     delta = (event.get("event") or {}).get("delta") or {}
@@ -277,7 +294,7 @@ class TaskManagerAgent:
                             await request.sink.tool(record)
 
                 message = request.text
-                if attempt and request.history:
+                if (attempt or rotating) and request.history:
                     history = "\n".join(item if isinstance(item, str) else json.dumps(dict(item), ensure_ascii=False)
                                         for item in request.history[-20:])
                     message = fence(history, source=Source.CHAT_HISTORY) + "\n\n" + message
@@ -307,6 +324,8 @@ class TaskManagerAgent:
                     outcome = ("stopped" if result.stopped else "success"
                                if (result.result_event or {}).get("subtype") == "success" else "failed")
                     self.totals = self.resident.totals
+                    record_id = recorder.record_id
+                    self.context_rotation_pending = False
                     await recorder.finish(output_text=text, result_event=result.result_event,
                                           usage=result.usage, outcome=outcome)
                 if result.stopped:
@@ -323,6 +342,8 @@ class TaskManagerAgent:
                 commit = await step_workspaces.commit_pending(Path(reopened.work_dir), self.links,
                     f"looper: task Manager turn of task {self.task_id}\n\nLooper-Task: {self.task_id}")
             await request.sink.event(TaskManagerEvent.TURN_SUMMARY, {"files": files, "commit": commit, "mode": self.mode})
+        from . import task_manager_context
+        await task_manager_context.maintain(self, request, reopened, launch, prompt, record_id)
         await request.sink.final(text, outcome)
 
 
@@ -346,6 +367,8 @@ class TaskManagerPool:
         self._pending: list[_Request] = []
         self._active: dict[str, _Request] = {}
         self._closing_tasks: set[str] = set()
+        self._close_tasks: dict[str, asyncio.Task[None]] = {}
+        self._forgetting: set[str] = set()
         self._ticker = asyncio.create_task(self._tick(), name="task-manager-reclaim")
         _pool = self
 
@@ -379,21 +402,20 @@ class TaskManagerPool:
     async def submit(self, task_id: str, text: str, *, message_id: str, sink: TurnSink,
                      history: Sequence[Mapping[str, Any] | str] = ()) -> Submitted:
         request = _Request(task_id, text, message_id, sink, history, asyncio.get_running_loop().create_future())
-        reason = (RefuseReason.SHUTTING_DOWN if self.closing else RefuseReason.WORK_MODE_OFF
-                  if not task_conversations_settings.enabled() else None)
-        if task_id in self._closing_tasks:
-            reason = RefuseReason.SHUTTING_DOWN
-        if reason:
+        async with self._lock:
+            reason = (RefuseReason.SHUTTING_DOWN if self.closing or task_id in self._closing_tasks
+                      else RefuseReason.WORK_MODE_OFF if not task_conversations_settings.enabled() else None)
+            if reason is None:
+                self._pending.append(request)
+                await self._dispatch()
+                if request in self._pending:
+                    busy = self.in_turn(task_id)
+                    position = sum(r.task_id == task_id for r in self._pending) if busy else len(self._pending)
+                    await sink.event(TaskManagerEvent.QUEUED, {"reason": "turn" if busy else "cap", "position": position})
+                    return Submitted("queued")
+        if reason is not None:
             await self._refuse(request, reason, "Task conversations are disabled or shutting down.")
             return request.admitted.result()
-        async with self._lock:
-            self._pending.append(request)
-            await self._dispatch()
-            if request in self._pending:
-                busy = self.in_turn(task_id)
-                position = sum(r.task_id == task_id for r in self._pending) if busy else len(self._pending)
-                await sink.event(TaskManagerEvent.QUEUED, {"reason": "turn" if busy else "cap", "position": position})
-                return Submitted("queued")
         return await asyncio.shield(request.admitted)
 
     async def _dispatch(self) -> None:
@@ -460,48 +482,63 @@ class TaskManagerPool:
             await asyncio.sleep(60)
             await self.reclaim()
 
-    async def close(self, task_id: str) -> None:
-        already_closing = task_id in self._closing_tasks
-        self._closing_tasks.add(task_id)
-        queued = [r for r in self._pending if r.task_id == task_id]
-        self._pending = [r for r in self._pending if r.task_id != task_id]
-        agent = self.agents.get(task_id)
+    async def close(self, task_id: str, *, forget: bool = False) -> None:
+        async with self._lock:
+            if forget:
+                self._forgetting.add(task_id)
+            cleanup = self._close_tasks.get(task_id)
+            if cleanup is None:
+                self._closing_tasks.add(task_id)
+                queued = [r for r in self._pending if r.task_id == task_id]
+                self._pending = [r for r in self._pending if r.task_id != task_id]
+                cleanup = asyncio.create_task(self._finish_close(task_id, queued), name=f"task-manager-close-{task_id}")
+                self._close_tasks[task_id] = cleanup
+        # A driver needs the gate in its finally block; never wait for it while holding that gate.
+        await asyncio.shield(cleanup)
+
+    async def _finish_close(self, task_id: str, queued: list[_Request]) -> None:
         try:
             for request in queued:
                 await self._refuse(request, RefuseReason.SHUTTING_DOWN, "The task Manager was closed.")
+            agent = self.agents.get(task_id)
             if agent:
                 running = agent.running
                 if running:
                     running.cancel()
                 await agent.resident.stop(kill=True)
-                if running and running is not asyncio.current_task():
+                if running:
                     await asyncio.gather(running, return_exceptions=True)
+            async with self._lock:
+                if task_id in self._forgetting:
+                    from ...db.connection import get_pool
+                    await get_pool().execute("DELETE FROM agent_sessions WHERE agent_id=$1", f"task-manager-{task_id}")
+                    self.agents.pop(task_id, None)
         finally:
-            if not already_closing:
+            async with self._lock:
+                self._forgetting.discard(task_id)
                 self._closing_tasks.discard(task_id)
+                self._close_tasks.pop(task_id, None)
+                self._available.notify_all()
+                await self._dispatch()
 
     async def forget(self, task_id: str) -> None:
-        self._closing_tasks.add(task_id)
-        try:
-            await self.close(task_id)
-            self.agents.pop(task_id, None)
-            from ...db.connection import get_pool
-            await get_pool().execute("DELETE FROM agent_sessions WHERE agent_id=$1", f"task-manager-{task_id}")
-        finally:
-            self._closing_tasks.discard(task_id)
+        await self.close(task_id, forget=True)
 
     async def shutdown(self) -> None:
         global _pool
-        self.closing = True
-        for request in self._pending:
+        async with self._lock:
+            self.closing = True
+            queued, self._pending = self._pending, []
+            running = [a.running for a in self.agents.values() if a.running]
+            closing = list(self._close_tasks.values())
+            self._available.notify_all()
+        for request in queued:
             await self._refuse(request, RefuseReason.SHUTTING_DOWN, "The task Manager is shutting down.")
-        self._pending.clear()
         self._ticker.cancel()
         await asyncio.gather(self._ticker, return_exceptions=True)
-        running = [a.running for a in self.agents.values() if a.running]
         for task in running:
             task.cancel()
-        await asyncio.gather(*(a.resident.stop(kill=True) for a in self.agents.values()))
-        await asyncio.gather(*running, return_exceptions=True)
+        await asyncio.gather(*(a.resident.stop(kill=True) for a in list(self.agents.values())))
+        await asyncio.gather(*running, *closing, return_exceptions=True)
         if _pool is self:
             _pool = None

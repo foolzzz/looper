@@ -48,5 +48,6 @@ async def set_task_manager_profile(task_id: str, profile_id: str | None) -> None
             if profile.runtime.type != "claude-code":
                 raise RuntimeUnsupported(f"Profile {profile.name}: the task Manager runs only on Claude Code for now.")
         await db_layers.set_task_layer(task_id, profiles={"task_manager": profile_id})
-        if pool is not None:
-            await pool.close(task_id)
+        if pool is not None and (agent := pool.agents.get(task_id)) is not None:
+            # Idle only: no driver needs joining, and admission stays excluded until stop finishes.
+            await agent.resident.stop(kill=True)
