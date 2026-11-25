@@ -8592,6 +8592,7 @@ PostgreSQL is a hard startup dependency. All data paths:
 | `tasks` | Task metadata, status, phase, timestamps, `work_dir`, `project_id` (required), `schedule_id` (the schedule that fired it), `budget_usd` (its own spend cap, over its project's), `chat_id`, `chat_kind` and `chat_mention` (who is told when it ends: a Telegram chat id, a Lark sender's open_id, or a Lark group's id and the requester it @-mentions; `chat_kind` is `user` or `chat`; NULL for a task asked for elsewhere), `chat_group` (that chat is a group chat, told only the task's end; false for a task from before it), `original_user_text` (the user's message the Manager's task JSON answered, often 「确认」; kept as history), `title` (a few words naming it, from the task JSON; `task_name` falls back to the goal id, then the requirement), and `workspace_dir`, `workspace_mode` and `workspace_base` ([Task workspaces](#task-workspaces)); `manager_id` (the Manager that created it, which hears of its progress and end), `template` (JSON snapshot of the task template it came from, NULL without one), `workflow` (immutable workflow snapshot, NULL without one) and `origin_thread` (the web chat thread it was asked for in) |
 | `task_worktrees` | A worktree task's git worktree ([Task workspaces](#task-workspaces)), one per task (going with it): `repo_dir` and `subdir` (the workspace in its repository), `path`, `branch`, `base_commit`, `links`, `state` (`active`, `removed`), `result_commit` (the branch's tip when it was removed), `created_at`, `removed_at` |
 | `task_steps` | A task's steps, each with everything its Planner decides with: `step_key` (label), `kind` (`work` or `gate`), `depends_on` (step ids), `review`, `acceptance_criteria`, `validation_commands`, `status`, `result`, `worker_id`, `reviewer_id`, `retries`, `feedback`, `missed_messages`, `started_at` (when its run was first dispatched, kept through retries, reviews and server restarts; cleared when a restart of the task sends it back to not started; null for steps from before the column); `difficulty` (`routine`, `hard`, `critical`, null when unset; a critical step's plan is reviewed by the advisor before it starts: [Consults of the advisor](#consults-of-the-advisor)) |
+| `task_seen` | Per-operator task progress: `(principal, task_id)` primary key, monotonic `seen_activity_seq`, reserved nullable `seen_message_id`, and `seen_at`; deleting a task cascades its seen records |
 | `task_user_gates` | A gate step's gate ([User gates](#user-gates)): `topic`, `agenda`, `findings`, `state`, `summary` (only once passed), `resolution`, `ended_by_user`, `plan_change`, `delivered_through`, `turns`, `reminders` and its times; the Planner writes all but `first_reply_at` and the reminders' columns, and a closed gate stays as it closed |
 | `task_user_gate_messages` | A gate's discussion, oldest first: the user's messages (`message`, `end`), the Planner's replies and code's notes (`opened`, `updated`, `reminder`, `cancelled`, `closed`, `resumed`, `error`), with `via`, the option a button chose, in a group chat the author, and for a user's message `from_operator` (whether the operator wrote it in their own turn, decided by code as it is stored; NULL: not known) |
 | `task_plans` | A task's plan, one row per task: `plan_id`, `status` (`planning`, `executing`, `verifying`, `stopping`, `completed`, `failed`), `correlation_id`, `origin_channel_id`, `final_summary`, `fail_reason`, and with step workspaces `start_branch` and `start_commit` (where the branch was when the task dispatched its first step; `''` otherwise); replaced when the task is planned again |
@@ -9095,7 +9096,7 @@ The OpenAPI document is authoritative for fields, authentication and errors. Pro
 | `/api/v1/auth/{set_password,clear_password}` | POST | `auth.{set_password,clear_password}` |
 | `/api/v1/system/{check,status,overview}` | POST | `system.{check,status,overview}` |
 | `/api/v1/config/{export,import_preview,import_apply,import_upload,import_cancel}` | POST | `config.{export,import_preview,import_apply,import_upload,import_cancel}` |
-| `/api/v1/tasks/{requirement_update,configure,move,agents,continue,role_update,room_view,activity,activity_detail,conversation,activity_stream,create,page,detail,delete,select}` | POST | `tasks.{requirement_update,configure,move,agents,continue,role_update,room_view,activity,activity_detail,conversation,activity_stream,create,page,detail,delete,select}` |
+| `/api/v1/tasks/{requirement_update,configure,move,agents,continue,role_update,room_view,activity,activity_detail,conversation,activity_stream,create,page,detail,delete,select,work_list,mark_seen}` | POST | `tasks.{requirement_update,configure,move,agents,continue,role_update,room_view,activity,activity_detail,conversation,activity_stream,create,page,detail,delete,select,work_list,mark_seen}` |
 | `/api/v1/catalog_items/{list,get,update,delete}` | POST | `catalog_items.{list,get,update,delete}` |
 | `/api/v1/installs/{create,update,delete,project}` | POST | `installs.{create,update,delete,project}` |
 | `/api/v1/catalog_sources/{import_machine,import_mcp,upload,git_preview,git_import,create_skill,create_mcp}` | POST | `catalog_sources.{import_machine,import_mcp,upload,git_preview,git_import,create_skill,create_mcp}` |
@@ -9265,6 +9266,21 @@ separate tokens and is not exported to API clients. No unversioned operator rout
   export and import share their implementation with `looper_config_export` and the dashboard;
   `config.import_preview` stages a document and returns an import id, and `config.import_apply` requires a
   client confirmation before writing it.
+- **Work list.** Operator-only `tasks.work_list {section, project_id?, statuses?, cursor?, limit?}`
+  returns `open` and `ended` task pages (`items`, counts by status under the same project/status filters,
+  `next_cursor`), or one row per schedule (`schedules`, `next_cursor`). Limits are 1–100, default 50;
+  statuses accept 1–10 raw status names for task sections only. Open tasks sort by latest activity,
+  ended tasks by `COALESCE(completed_at, attempt_ended_at, updated_at)`; scheduled tasks appear only
+  in their folded section, including disabled schedules and those without runs. Base64 JSON keysets
+  carry the section, timestamp and id; malformed or cross-section cursors return 400 `invalid`.
+  Rows carry `needs_you`, activity sequence and per-operator `unseen`; old ended tasks without a seen
+  record have no unseen dot. `tasks.mark_seen {task_id, seq}` advances the operator's watermark
+  monotonically (unknown task: 404). Each task page uses one list/count statement and two page-id
+  batches for gates and seen records. Migration `task_work_list` (2060) adds `task_seen` and builds
+  `idx_tasks_open (project_id, id)` and `idx_tasks_ended (COALESCE(completed_at, attempt_ended_at,
+  updated_at) DESC, id DESC)` concurrently, restricted respectively to open and ended non-scheduled
+  tasks. Activity and schedules use `idx_activity_task` and `idx_tasks_schedule`. These new operations
+  do not change existing pages, channels, task operations or agent tools.
 - **Run tree.** The operator-only `runs.tree {task_id}` reads every persisted run of one task, following only
   that task's `parent_record_id` edges. It returns creator, reason, model, status, summary and failure details,
   with own and subtree costs split into subscription equivalents and API spend; unknown amounts remain null.

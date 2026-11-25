@@ -125,6 +125,17 @@ describe("StatusCard", () => {
     expect(text()).not.toContain("Nothing");
   });
 
+  it("names a terminal reminder with the English label, never the raw key", async () => {
+    fetchMock.mockResolvedValue(okBody(snapshot([ok("waiting", { kinds: [
+      { kind: "reminders", state: "ok", count: 1, earliest: null, error: null }] })])));
+    await show();
+    const anchor = container.querySelector('a[href="#todo"]')!;
+    expect(anchor.textContent).toBe("1 reminders not confirmed delivered");
+    expect(text()).toContain("reminders not confirmed delivered");
+    // The raw-key fallback would leave the bare word; every occurrence must carry the label.
+    expect(text()).not.toMatch(/\breminders\b(?! not confirmed delivered)/);
+  });
+
   it("hides the card when a later read answers 409", async () => {
     fetchMock.mockResolvedValueOnce(okBody(FULL)).mockResolvedValue(off());
     await show();
