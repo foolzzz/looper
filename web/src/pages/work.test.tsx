@@ -145,6 +145,23 @@ afterEach(() => {
 });
 
 describe("Work page shell", () => {
+  it.each(["off", "missing", "offline"])("never mounts file reads when the Work switch is %s", async mode => {
+    const matchMedia = window.matchMedia.bind(window);
+    vi.spyOn(window, "matchMedia").mockImplementation(query => Object.assign(matchMedia(query), { matches: true }));
+    handler = (url, method, body) => {
+      if (url.includes("task_conversations/get")) {
+        if (mode === "offline") throw new Error("Offline");
+        if (mode === "missing") return { status: 404, body: { status: "error", error: { code: "not_found", message: `no POST ${url}` } } };
+      }
+      return workHandler(url, method, body);
+    };
+    window.history.replaceState(null, "", "#work/task/t-b1");
+    await render(<App />);
+    expect(host.textContent).toContain("Dashboard view");
+    expect(calls.some(call => call.url.includes("tasks/changes"))).toBe(false);
+    expect(host.querySelector('[aria-label="改动文件"]')).toBeNull();
+  });
+
   it("nav hidden when off", async () => {
     const show = async () => {
       await render(
@@ -189,6 +206,8 @@ describe("Work page shell", () => {
     expect(window.location.hash).toBe("#dashboard");
     expect(host.textContent).toContain("Dashboard view");
     expect(host.querySelector("nav")!.textContent).not.toContain("Work");
+    expect(host.querySelector('[aria-labelledby="work-cost-title"]')).toBeNull();
+    expect(calls.filter(call => /\/tasks\//.test(call.url))).toEqual([]);
   });
 
   it("selection", async () => {

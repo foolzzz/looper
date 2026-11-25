@@ -83,18 +83,29 @@ def test_off_push_has_exact_original_call_and_no_card_writes(monkeypatch, tmp_pa
 
 
 @pytest.mark.parametrize("cards_on", [False, True])
-def test_intent_push_keeps_measurements_for_cards_and_text(monkeypatch, tmp_path, cards_on):
+@pytest.mark.parametrize("metrics", [False, True])
+def test_intent_push_keeps_measurements_for_cards_and_text(monkeypatch, tmp_path, cards_on, metrics):
     from looper.agents import chat_settings, turn_metrics
+    from looper.agents.channels.registry import ChannelRegistry
 
     async def check(pool):
         env = await seed(pool, monkeypatch, tmp_path, on=cards_on)
-        monkeypatch.setattr(chat_settings, "metrics_enabled", lambda: True)
+        monkeypatch.setattr(chat_settings, "metrics_enabled", lambda: metrics)
+        method = "post_card" if cards_on else "post"
+
+        async def post(target, body, **kwargs):
+            return await getattr(env.registry, method)(env.channel_id, target, body, **kwargs)
+
+        registry = ChannelRegistry(SimpleNamespace())
+        registry._channels[env.channel_id] = SimpleNamespace(**{method: post})
+        env.service._registry = registry
         await env.service.run_once()
+        await asyncio.gather(*turn_metrics._pending)
         calls = env.card_posts if cards_on else env.posts
         assert len(calls) == 1
-        proactive = calls[0][3]["proactive"]
-        assert proactive.source == turn_metrics.ProactiveSource.INTENT
-        assert proactive.source_ref == str(env.iid)
+        assert "proactive" not in json.loads(json.dumps(calls[0][3]))
+        row = await pool.fetchrow("SELECT source,source_ref,body,outcome FROM proactive_deliveries")
+        assert tuple(row) == ("intent", str(env.iid), calls[0][2].text if cards_on else calls[0][2], "sent")
     run_db(check, monkeypatch)
 
 

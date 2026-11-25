@@ -31,7 +31,7 @@ import { useProjects } from "@/lib/use-projects";
 import { useWaitingGates } from "@/lib/use-waiting-gates";
 import { useLedger } from "@/lib/use-ledger";
 import { startPolling } from "@/lib/polling";
-import { taskConversationsGet } from "@/lib/work";
+import { isMissingOperation, taskConversationsGet } from "@/lib/work";
 import { cn } from "@/lib/utils";
 
 /** "history" is one agent's session, or every run of one role; "projects" is one project, from the
@@ -114,9 +114,10 @@ export function Sidebar({
       const settings = await taskConversationsGet(signal);
       if (signal.aborted) return;
       setWorkOn(settings.enabled === true);
-    } catch {
+    } catch (err) {
       if (signal.aborted) return;
       setWorkOn(false);
+      if (isMissingOperation(err)) return true;
     }
   }, 30_000), []);
   useEffect(() => { onWorkEnabled?.(workOn); }, [workOn, onWorkEnabled]);
