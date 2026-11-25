@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { WorkList } from "@/components/work-list";
 import { WorkSwitcher } from "@/components/work-switcher";
+import { WorkChanges } from "@/components/work-changes";
 import { WorkGates } from "@/components/work-gates";
 import { WorkRequirement } from "@/components/work-requirement";
 import { WorkSteps } from "@/components/work-steps";
@@ -290,6 +291,7 @@ function WorkPageContent({
         <WorkRequirement task={selected} onRefresh={refreshDetail} />
         <WorkSteps task={selected} onOpenGate={step => openGate(step.step_key)} />
         <WorkGates task={selected} onOpenGate={openGate} />
+        <div className="p-4"><WorkChanges taskId={taskId} visible /></div>
       </aside>}
       <WorkSwitcher open={switcher && finder} onClose={closeSwitcher} onOpen={openTask} restore={restore} />
     </div>
