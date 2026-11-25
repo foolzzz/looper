@@ -363,8 +363,7 @@ def test_thread_reply_keeps_raw_references_for_gate_routing(
                 agent_id="manager-helper", _session_now=lambda: SimpleNamespace(key="main"),
                 _bus=bus, ops=SimpleNamespace(platform=SimpleNamespace(
                     task_router=SimpleNamespace(has_planner=lambda _: True))),
-                agent_address=manager_address("manager-helper"), _acting=lambda _: None,
-                _session_now=lambda: SimpleNamespace(key="main"))
+                agent_address=manager_address("manager-helper"), _acting=lambda _: None)
             manager._route_to_gate = lambda envelope: ManagerAgent._route_to_gate(manager, envelope)
 
             async def step(name, operation):
