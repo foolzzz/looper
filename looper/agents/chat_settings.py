@@ -54,6 +54,7 @@ import logging
 import re
 from collections.abc import Mapping
 from dataclasses import asdict
+from datetime import time
 from enum import Enum
 import math
 from typing import Any
@@ -300,17 +301,26 @@ def set_morning_brief_time(value: str) -> None:
     _morning_brief_time = value
 
 
-def morning_brief_cutoff() -> str:
-    return _morning_brief_cutoff or derived_morning_brief_cutoff(_morning_brief_time)
+class MorningBriefBoundary(Enum):
+    END_OF_DAY = "end_of_day"
 
 
-def derived_morning_brief_cutoff(when: str) -> str:
+def morning_brief_cutoff() -> time | MorningBriefBoundary:
+    return time.fromisoformat(_morning_brief_cutoff) if _morning_brief_cutoff is not None else derived_morning_brief_cutoff(_morning_brief_time)
+
+
+def derived_morning_brief_cutoff(when: str) -> time | MorningBriefBoundary:
     """Keep a same-day catch-up window for send times stored before cutoffs existed."""
     if when < DEFAULT_MORNING_BRIEF_CUTOFF:
-        return DEFAULT_MORNING_BRIEF_CUTOFF
+        return time.fromisoformat(DEFAULT_MORNING_BRIEF_CUTOFF)
     hour, minute = map(int, when.split(":"))
-    minutes = min(hour * 60 + minute + 180, 23 * 60 + 59)
-    return f"{minutes // 60:02d}:{minutes % 60:02d}"
+    minutes = hour * 60 + minute + 180
+    return MorningBriefBoundary.END_OF_DAY if minutes >= 24 * 60 else time(minutes // 60, minutes % 60)
+
+
+def _morning_brief_cutoff_view(cutoff: time | MorningBriefBoundary) -> str | dict[str, str]:
+    """24:00 is an exclusive day boundary, not a wall-clock time or a magic string."""
+    return {"kind": cutoff.value} if isinstance(cutoff, MorningBriefBoundary) else cutoff.strftime("%H:%M")
 
 
 def set_morning_brief_cutoff(value: str | None) -> None:
@@ -320,7 +330,7 @@ def set_morning_brief_cutoff(value: str | None) -> None:
 
 
 def morning_brief_view() -> dict[str, Any]:
-    return {"enabled": _morning_brief_enabled, "time": _morning_brief_time, "cutoff": morning_brief_cutoff(),
+    return {"enabled": _morning_brief_enabled, "time": _morning_brief_time, "cutoff": _morning_brief_cutoff_view(morning_brief_cutoff()),
             "cutoff_source": "stored" if _morning_brief_cutoff is not None else "derived"}
 
 
@@ -341,11 +351,11 @@ def checked_morning_brief(body: Mapping[str, Any]) -> dict[str, Any]:
             raise ValueError(f"{name} must be HH:MM or null")
     effective_time = (DEFAULT_MORNING_BRIEF_TIME if when is None else when) if "time" in body else _morning_brief_time
     chosen_cutoff = cutoff if "cutoff" in body else _morning_brief_cutoff
-    effective_cutoff = chosen_cutoff or derived_morning_brief_cutoff(effective_time)
-    if effective_cutoff <= effective_time:
+    if chosen_cutoff is not None and chosen_cutoff <= effective_time:
         raise ValueError("cutoff must be later than time")
+    effective_cutoff = time.fromisoformat(chosen_cutoff) if chosen_cutoff is not None else derived_morning_brief_cutoff(effective_time)
     return {"enabled": (DEFAULT_MORNING_BRIEF_ENABLED if enabled is None else enabled) if "enabled" in body else _morning_brief_enabled,
-            "time": effective_time, "cutoff": effective_cutoff}
+            "time": effective_time, "cutoff": _morning_brief_cutoff_view(effective_cutoff)}
 
 
 async def update_morning_brief(body: Mapping[str, Any]) -> dict[str, Any]:

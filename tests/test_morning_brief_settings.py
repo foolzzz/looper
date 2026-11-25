@@ -130,11 +130,14 @@ def test_the_operator_reads_and_changes_it_through_v1(tmp_path, monkeypatch, set
                      ("update", {"time": "15:00", "cutoff": "16:00"}, {"enabled": True, "time": "15:00", "cutoff": "16:00", "cutoff_source": "stored"}),
                      ("update", {"cutoff": None}, {"enabled": True, "time": "15:00", "cutoff": "18:00", "cutoff_source": "derived"}),
                      ("get", {}, {"enabled": True, "time": "15:00", "cutoff": "18:00", "cutoff_source": "derived"}),
+                     ("update", {"time": "23:59"}, {"enabled": True, "time": "23:59", "cutoff": {"kind": "end_of_day"}, "cutoff_source": "derived"}),
+                     ("get", {}, {"enabled": True, "time": "23:59", "cutoff": {"kind": "end_of_day"}, "cutoff_source": "derived"}),
                      ("update", {"enabled": None, "time": None, "cutoff": None}, {"enabled": False, "time": "09:15", "cutoff": "12:00", "cutoff_source": "derived"}))
             for action, body, expected in steps:
                 status, _, answer = await _send(server, f"POST /api/v1/morning_brief/{action}",
                                                 _bearer(TOKEN), json.dumps(body))
                 assert status == 200 and answer["result"] == expected, answer
+                api_v1.validate_arguments(api_v1.find("POST", f"/api/v1/morning_brief/{action}").result, answer["result"])
             for body in ({}, {"time": "9:15"}, {"enabled": "yes"}, {"cutoff": "09:15"}, {"cutoff": "24:00"}):
                 status, _, answer = await _send(server, "POST /api/v1/morning_brief/update", _bearer(TOKEN),
                                                 json.dumps(body))
@@ -163,7 +166,8 @@ def test_turning_it_on_or_off_asks_first(settings, body, enabled, when):
 
 @pytest.mark.parametrize("body", [{"cutoff": "9:30"}, {"cutoff": "24:00"}, {"cutoff": 1200},
                                   {"cutoff": "09:15"}, {"cutoff": "08:00"},
-                                  {"time": "15:00", "cutoff": "14:00"}, {"time": "23:59"}])
+                                  {"time": "15:00", "cutoff": "14:00"},
+                                  {"time": "23:59", "cutoff": "23:59"}])
 def test_invalid_cutoff_or_send_time_is_atomic(settings, body):
     async def check():
         await chat_settings.load()
@@ -190,7 +194,9 @@ def test_cutoff_persists_reloads_and_null_restores_noon(settings):
 
 
 @pytest.mark.parametrize(("when", "cutoff"), [
-    ("09:15", "12:00"), ("12:00", "15:00"), ("15:00", "18:00"), ("22:00", "23:59"),
+    ("09:15", "12:00"), ("12:00", "15:00"), ("15:00", "18:00"),
+    ("20:59", "23:59"), ("21:00", {"kind": "end_of_day"}),
+    ("21:30", {"kind": "end_of_day"}), ("23:59", {"kind": "end_of_day"}),
 ])
 def test_missing_cutoff_is_derived_on_load_and_update(settings, when, cutoff):
     async def check():

@@ -7,7 +7,7 @@ import { ConfirmDialog } from "@/components/confirm-dialog";
 import { callV1, confirmV1, type V1PendingConfirmation } from "@/lib/v1";
 import { errorText } from "@/lib/use-action";
 
-interface MorningBriefSettings { enabled: boolean; time: string; cutoff: string }
+interface MorningBriefSettings { enabled: boolean; time: string; cutoff: string | { kind: "end_of_day" } }
 
 /** Operator-only timing controls use the brief's own operations, separate from chat settings. */
 export function MorningBriefSettingsSection() {
@@ -42,11 +42,12 @@ export function MorningBriefSettingsSection() {
 
   const save = () => {
     if (!settings || saving) return;
-    if ((settings.cutoff || "12:00") <= (settings.time || "09:15")) {
+    if (typeof settings.cutoff === "string" && settings.cutoff && settings.cutoff <= (settings.time || "09:15")) {
       setError("补发截止时间必须晚于发送时间。"); return;
     }
     void finish(callV1<MorningBriefSettings>("/api/v1/morning_brief/update", {
-      enabled: settings.enabled, time: settings.time || null, cutoff: settings.cutoff || null,
+      enabled: settings.enabled, time: settings.time || null,
+      cutoff: typeof settings.cutoff === "string" ? settings.cutoff || null : null,
     }));
   };
 
@@ -66,11 +67,13 @@ export function MorningBriefSettingsSection() {
         {([{ key: "time", label: "发送时间", default: "09:15" },
           { key: "cutoff", label: "补发截止时间", default: "12:00" }] as const).map((field) => <div key={field.key} className="space-y-1.5">
           <label htmlFor={`${id}-${field.key}`} className="text-sm font-medium">{field.label}</label>
-          <Input id={`${id}-${field.key}`} type="time" value={settings[field.key]} disabled={saving || !!asking}
+          <Input id={`${id}-${field.key}`} type="time" value={typeof settings[field.key] === "string" ? settings[field.key] as string : ""} disabled={saving || !!asking}
             aria-describedby={`${id}-${field.key}-help`} onChange={(event) => {
               setSettings({ ...settings, [field.key]: event.target.value }); setSaved(false); setError("");
             }} />
-          <p id={`${id}-${field.key}-help`} className="text-xs text-muted-foreground">留空恢复默认 {field.default}。</p>
+          <p id={`${id}-${field.key}-help`} className="text-xs text-muted-foreground">{field.key === "cutoff"
+            ? (typeof settings.cutoff === "object" ? "当前截止为本地 24:00（不含），留空保持自动推导。" : "留空按发送时间推导截止时间，最晚本地 24:00（不含）。")
+            : `留空恢复默认 ${field.default}。`}</p>
         </div>)}
       </div>
       <Button type="submit" disabled={saving || !!asking}>{saving ? "保存中…" : "保存晨报设置"}</Button>

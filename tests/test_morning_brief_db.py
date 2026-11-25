@@ -1390,7 +1390,7 @@ def test_quiet_hours_wait_only_until_cutoff(monkeypatch, quiet_end):
     run_with_channel_configs(test, monkeypatch)
 
 
-@pytest.mark.parametrize("when", ["09:15", "15:00", "22:00"])
+@pytest.mark.parametrize("when", ["09:15", "15:00", "21:30", "23:59"])
 def test_stored_send_without_cutoff_keeps_sending_over_a_week(monkeypatch, when):
     from dataclasses import replace
     from datetime import time
@@ -1413,8 +1413,8 @@ def test_stored_send_without_cutoff_keeps_sending_over_a_week(monkeypatch, when)
             service._clock.now = day.replace(hour=send.hour, minute=send.minute) - timedelta(minutes=1)
             await service.run_once()
             assert len(channel.posts) == workdays
-            # Missing the configured minute must still leave an eligible tick.
-            service._clock.now += timedelta(minutes=2)
+            # A delayed tick must still leave an eligible window, even for 23:59.
+            service._clock.now += timedelta(minutes=1, seconds=30)
             await service.run_once()
             await service.run_once()
             workdays += int(day.weekday() < 5)
@@ -1422,6 +1422,52 @@ def test_stored_send_without_cutoff_keeps_sending_over_a_week(monkeypatch, when)
         assert workdays == 5
         assert await pool.fetchval("SELECT count(*) FROM morning_briefs WHERE status = 'sent'") == 5
         assert await pool.fetchval("SELECT count(*) FROM morning_brief_consumed") == 5
+    run_with_channel_configs(test, monkeypatch)
+
+
+@pytest.mark.parametrize("quiet_end", ["23:59", "08:00"])
+def test_end_of_day_cutoff_respects_quiet_hours_and_keeps_digest(monkeypatch, tmp_path, lark_cli_stand_in, quiet_end):
+    from dataclasses import replace
+    from datetime import time
+    from looper.agents.channels.allowlist import SenderAllowlist
+    from looper.agents.channels.lark import LarkChannelAdapter
+    from looper.agents.channels.registry import ChannelRegistry
+
+    def posts():
+        calls = [json.loads(line) for line in lark_cli_stand_in.read_text().splitlines()] if lark_cli_stand_in.exists() else []
+        return [call[call.index("--markdown") + 1] for call in calls if "+messages-send" in call]
+
+    async def test(pool):
+        await pool.execute("INSERT INTO system_settings (key, value) VALUES ('morning_brief.time', '23:59')")
+        await _zone(pool)
+        await _operator(pool)
+        policy = replace(proactive_delivery.load_policy(),
+                         quiet_hours=proactive_delivery.DailyWindow(time(22), time.fromisoformat(quiet_end)))
+        monkeypatch.setattr(proactive_delivery, "load_policy", lambda: policy)
+        monkeypatch.setattr(attention, "collect", _collect(_summary("ok")))
+        item = await _digest(pool, "held-at-midnight", MONDAY.date(), hour=7)
+        channel = ChannelRegistry(SimpleNamespace())
+        adapter = LarkChannelAdapter(runtime_root=tmp_path,
+                                     allowlist=SenderAllowlist("channel-lark", frozenset({OP})))
+        channel._channels[adapter.channel_id] = adapter
+        service = _service(channel, MONDAY.replace(hour=23, minute=59, second=30))
+        await service.run_once()
+        assert len(posts()) == int(quiet_end == "23:59")
+        assert await pool.fetchval("SELECT count(*) FROM morning_brief_consumed") == int(quiet_end == "23:59")
+        service._clock.now = (MONDAY + timedelta(days=1)).replace(hour=0, minute=0)
+        await service.run_once()
+        assert len(posts()) == int(quiet_end == "23:59")
+        # Quiet hours ending after midnight cannot extend the previous day's window.
+        service._clock.now = service._clock.now.replace(hour=8)
+        await service.run_once()
+        assert len(posts()) == int(quiet_end == "23:59")
+        monkeypatch.setattr(proactive_delivery, "load_policy", lambda: replace(policy, quiet_hours=None))
+        service._clock.now = service._clock.now.replace(hour=23, minute=59)
+        await service.run_once()
+        await service.run_once()
+        assert len(posts()) == 1
+        assert "11-23 07:00" in posts()[0]
+        assert [row["delivery_id"] for row in await pool.fetch("SELECT delivery_id FROM morning_brief_consumed")] == [item]
     run_with_channel_configs(test, monkeypatch)
 
 

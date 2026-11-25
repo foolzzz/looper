@@ -7,9 +7,9 @@ import { MorningBriefSettingsSection } from "./morning-brief-settings";
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 afterEach(() => vi.unstubAllGlobals());
 
-async function mount(fail = false) {
+async function mount(fail = false, settings: { enabled: boolean; time: string; cutoff: string | { kind: "end_of_day" } } =
+  { enabled: false, time: "09:15", cutoff: "12:00" }) {
   const requests: { path: string; body: Record<string, unknown>; session: string }[] = [];
-  const settings = { enabled: false, time: "09:15", cutoff: "12:00" };
   vi.stubGlobal("fetch", vi.fn(async (path: string, init: RequestInit) => {
     requests.push({ path, body: JSON.parse(String(init.body)),
       session: (init.headers as Record<string, string>)["X-Looper-Session"] });
@@ -78,6 +78,17 @@ it("refuses a cutoff at or before the send time without a request", async () => 
     await submit(page.container);
     expect(page.requests).toHaveLength(1);
     expect(page.container.querySelector('[role="alert"]')?.textContent).toContain("晚于");
+  } finally { page.close(); }
+});
+
+it.each(["21:30", "23:59"])("reads an end-of-day cutoff for %s and preserves derivation on save", async (time) => {
+  const page = await mount(false, { enabled: true, time, cutoff: { kind: "end_of_day" } });
+  try {
+    expect(page.container.querySelector<HTMLInputElement>('[id$="-cutoff"]')!.value).toBe("");
+    expect(page.container.querySelector('[id$="-cutoff-help"]')?.textContent).toContain("24:00");
+    await submit(page.container);
+    expect(page.requests[1].body).toEqual({ enabled: true, time, cutoff: null });
+    expect(page.container.querySelector('[role="dialog"]')).not.toBeNull();
   } finally { page.close(); }
 });
 

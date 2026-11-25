@@ -85,14 +85,16 @@ def digest_dates_through(origin: date, day: date) -> tuple[date, ...]:
     return tuple(start + timedelta(days=offset) for offset in range((day - start).days + 1))
 
 
-def is_due(local: datetime, send_at: time, cutoff: time | None = None) -> bool:
+def is_due(local: datetime, send_at: time, cutoff: time | chat_settings.MorningBriefBoundary | None = None) -> bool:
     """Whether ``local`` is a workday at or after ``send_at`` and strictly before ``cutoff``. A minute the clocks skip
     is due on the first tick after the gap; a repeated hour is still the same local date, so the row sends once."""
     if local.weekday() >= 5:
         return False
     if cutoff is None:
-        cutoff = time.fromisoformat(chat_settings.derived_morning_brief_cutoff(send_at.strftime("%H:%M")))
-    return send_at.replace(tzinfo=None) <= local.time().replace(tzinfo=None) < cutoff.replace(tzinfo=None)
+        cutoff = chat_settings.derived_morning_brief_cutoff(send_at.strftime("%H:%M"))
+    local_time = local.time().replace(tzinfo=None)
+    return send_at.replace(tzinfo=None) <= local_time and (
+        cutoff is chat_settings.MorningBriefBoundary.END_OF_DAY or local_time < cutoff.replace(tzinfo=None))
 
 
 def _plain(text: str) -> str:
@@ -329,7 +331,7 @@ class MorningBriefService:
         now = self._clock()
         policy = proactive_delivery.load_policy()
         local = now.astimezone(policy.timezone)
-        cutoff = time.fromisoformat(chat_settings.morning_brief_cutoff())
+        cutoff = chat_settings.morning_brief_cutoff()
         if local.date() != day or not is_due(local, _send_at(), cutoff):
             return False
         delivery = Delivery(DeliveryKind.MORNING_BRIEF, Urgency.NORMAL, ChatKind.DIRECT)
