@@ -11,7 +11,7 @@ from typing import Any
 
 import pytest
 
-from looper.agents import attention, lanes_settings, operator_profile, persona, session_visibility, vault
+from looper.agents import attention, chat_settings, lanes_settings, operator_profile, persona, session_visibility, vault
 from looper.agents.chat_attachments import Attachment, AttachmentKind, AttachmentState
 from looper.agents.ops import Risk, Tool, Turn
 from looper.agents.ops import service
@@ -360,6 +360,8 @@ def test_operator_group_session_input_gate(monkeypatch: Any, tmp_path: Path) -> 
             for name in ("project", "template", "workflow", "harness", "custom_prompt", "role_prompt"):
                 assert SENTINELS[name] in complete, name
             assert session_visibility.OPERATOR_GROUP_CONTRACT in prepared["system_prompt"]
+            assert ("This session does not list ready tasks, open gates or goals; "
+                    "a missing section does not mean there are none.") in prepared["system_prompt"]
             assert prepared["state"] and session.state_shown is not rig.manager._sessions["main"].state_shown
         finally:
             await rig.close()
@@ -386,6 +388,33 @@ def test_chat_only_shared_input(monkeypatch: Any, tmp_path: Path) -> None:
             assert "TOOLS_CONTRACT" not in _encoded(prepared["layers"])
             assert prepared["tools"] == [] and prepared["sections"] == []
             assert MARKERS[GROUP_A] in residents[0].turns[0]
+            assert MARKERS[GROUP_B] not in complete
+        finally:
+            await rig.close()
+    run_db(body, monkeypatch, timeout=90)
+
+
+@pytest.mark.parametrize("sender,default,has_context", [
+    (OPERATOR, None, False), (OTHER, None, False), (OTHER, "legacy", True),
+], ids=["operator", "chat-only", "legacy"])
+def test_scoped_turn_context_contract_matches_input(sender: str, default: str | None, has_context: bool,
+                                                   monkeypatch: Any, tmp_path: Path) -> None:
+    async def body(pool: Any) -> None:
+        rig, residents, captures = await _scoped_inputs(pool, tmp_path, monkeypatch, default=default)
+        await pool.execute("INSERT INTO system_settings(key,value) VALUES('manager.turn_context.enabled','true')")
+        await chat_settings.load()
+        await rig.start()
+        try:
+            await rig.reply(await _published(rig, _to(rig, _web("context positive control"))))
+            assert "## Turn context" in captures["main"][0]["system_prompt"]
+            assert "[Turn context]" in rig.main.turns[0]
+            await _send(rig, "scoped context", sender)
+            session = next(s for s in rig.manager._sessions.values() if s.scope is not None)
+            prepared = captures[session.key][0]
+            assert ("## Turn context" in prepared["system_prompt"]) is has_context
+            assert ("TURN_CONTEXT_CONTRACT" in _encoded(prepared["layers"])) is has_context
+            assert ("[Turn context]" in prepared["turn"]) is has_context
+            assert ("[Turn context]" in residents[0].turns[0]) is has_context
         finally:
             await rig.close()
     run_db(body, monkeypatch, timeout=90)

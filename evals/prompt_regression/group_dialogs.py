@@ -117,7 +117,7 @@ def prepare(api: Api, root: Path, dialog, database_url: str) -> None:
         raise EvalError(f"group Manager routing readback: expected {dialog.routing}")
     _confirmed(api, "/api/v1/manager_chat_bindings/put", {
         "channel_id": "channel-lark", "chat_id": CHAT, "manager_id": manager})
-    if dialog.id == "scoped_operator_group_contract":
+    if dialog.id in {"scoped_operator_group_contract", "scoped_shared_speakers"}:
         for chat, content in ((CHAT, THIS_CHAT_HISTORY), ("oc_evalanother", OTHER_CHAT_HISTORY)):
             thread = channel_thread_id("channel-lark", chat, manager, "manager")
             _read(database_url, "INSERT INTO chat_threads (session_id, manager_id) VALUES ($1, $2) RETURNING session_id",

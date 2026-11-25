@@ -602,15 +602,6 @@ def _looper_call(name: Any, raw: Any) -> tuple[str, dict[str, Any]]:
     return name, arguments
 
 
-def _sender_kind(envelope: MessageEnvelope) -> PrincipalKind | None:
-    """The channel's trusted sender kind, or None for absent or unknown values."""
-    context = envelope.payload.get("channel_context")
-    try:
-        return PrincipalKind(context.get("sender_kind") if isinstance(context, dict) else None)
-    except (ValueError, TypeError):
-        return None
-
-
 def _message_origin(envelope: MessageEnvelope) -> dict[str, Any]:
     """The channel a message came from, its sender (Lark's open_id, Telegram's user id; the web chat names none),
     its chat (the Lark or Telegram chat, the web chat session) and whether that is a group chat: a Lark chat says
@@ -632,7 +623,7 @@ def _message_origin(envelope: MessageEnvelope) -> dict[str, Any]:
 
 
 def _sender_kind(envelope: MessageEnvelope) -> PrincipalKind | None:
-    """The channel's trusted sender classification; absent classification grants no person authority."""
+    """The channel's trusted sender kind, or None for absent or unknown values."""
     context = envelope.payload.get("channel_context")
     value = context.get("sender_kind") if isinstance(context, dict) else None
     if value is None:
@@ -640,7 +631,7 @@ def _sender_kind(envelope: MessageEnvelope) -> PrincipalKind | None:
     try:
         return PrincipalKind(value)
     except (TypeError, ValueError):
-        raise ScopeInvariantViolation("invalid channel sender kind") from None
+        return None
 
 
 def _completion_origin(row: dict[str, Any], manager: AgentAddress, batch: uuid.UUID) -> dict[str, Any]:
@@ -2751,7 +2742,8 @@ class ManagerAgent:
         if getattr(self, "_stable_context", False) and allowed(SessionInput.STABLE_BLOCK):
             contract_name += "+STABLE_CONTEXT_CONTRACT"
             contract += "\n" + state_view.STABLE_CONTEXT_CONTRACT
-        if chat_settings.turn_context_enabled():
+        # Operator group inputs omit the shared timezone/language context and its contract together.
+        if operator_inputs is None and chat_settings.turn_context_enabled():
             contract_name += "+TURN_CONTEXT_CONTRACT"
             contract += "\n" + TURN_CONTEXT_CONTRACT
         return build_system_prompt(
