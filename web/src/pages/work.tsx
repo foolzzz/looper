@@ -5,13 +5,13 @@ import { WorkSwitcher } from "@/components/work-switcher";
 import { fetchTaskDetail, TaskDetailError, type TaskDetail } from "@/lib/api";
 import { callV1, V1Error } from "@/lib/v1";
 import { errorText } from "@/lib/use-action";
-import { PlannerWorkConversation } from "@/components/work-conversation";
+import { ManagerWorkConversation, PlannerWorkConversation } from "@/components/work-conversation";
 import { TaskStatusMark } from "@/pages/tasks";
 import { isMissingOperation, markSeen, taskTitle, workSelection, workStorage } from "@/lib/work";
 
 const LINK = "text-sm text-primary underline-offset-2 hover:underline focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring";
 
-/** Centre is the selected task and its Planner conversation. Manager stays a link to Chat. */
+/** Centre is the default Manager or the selected task’s Planner conversation. */
 export function WorkPage({
   sub,
   onNavigate,
@@ -124,12 +124,12 @@ export function WorkPage({
             <Button type="button" variant="outline" onClick={() => setPane("list")}>Back to the list</Button>
           </div>
           {selection.kind === "manager" ? (
-            <div className="min-h-0 flex-1 overflow-y-auto p-4">
-              <header aria-label="Selected task" className="space-y-3">
+            <>
+              <header aria-label="Selected task" className="shrink-0 border-b border-border p-4">
                 <h1 className="text-lg font-semibold">Manager</h1>
-                <a className={LINK} href="#chat">Open the Manager chat</a>
               </header>
-            </div>
+              <ManagerWorkConversation />
+            </>
           ) : !selected ? (
             <div className="min-h-0 flex-1 overflow-y-auto p-4">
               <header aria-label="Selected task" className="space-y-3">
