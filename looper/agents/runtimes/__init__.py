@@ -257,7 +257,6 @@ class CostSource(str, Enum):
 # after a restart; a Worker or Reviewer runs once, taking the Planner's steering while it runs; the processor runs
 # once with no tools, over messages other people wrote.
 ROLE_CAPABILITIES: Mapping[str, frozenset[Capability]] = {
-    "task_manager": frozenset({Capability.RESIDENT_SESSION, Capability.RESUME}),
     "manager": frozenset({Capability.RESIDENT_SESSION, Capability.RESUME}),
     "planner": frozenset({Capability.RESIDENT_SESSION, Capability.RESUME}),
     "worker": frozenset({Capability.RUN}),
@@ -278,7 +277,7 @@ ROLE_CAPABILITIES: Mapping[str, frozenset[Capability]] = {
 # The roles whose runs have tools: every role but the processor. A profile chosen for all of them at once (the
 # shared defaults) or as another profile's fallback is checked against these; a profile is checked for the processor
 # where it is chosen for it (its role, in a project, by a schedule) and again when the processor launches.
-TOOL_ROLES = ("manager", "planner", "worker", "reviewer", "task_manager")
+TOOL_ROLES = ("manager", "planner", "worker", "reviewer")
 
 
 @dataclass(frozen=True)
