@@ -9301,9 +9301,17 @@ implementation supplies it and is retested.
   never sent) become one status message, sent at the first phase
   (「⏳ 处理中：思考中 · 0s」; a tool shows as, say, 「运行命令 (Bash)」 or
   「读文件 (Read)」, with the seconds so far) and edited in place: only when its
-  text changed, at most once every 3 s (a phase that comes sooner is shown by
-  one trailing edit), and at most 18 times (Feishu edits a message at most 20
-  times); after that it is left as it is. The answer goes as a new message, so
+  text changed, every 3 s for the first 30 s, then with a gap of at least
+  0.8 times the elapsed time at the previous edit (and always at least 3 s).
+  A phase that comes sooner is shown by one trailing edit, using the same
+  schedule. There are at most 18 progress edits, covering about 55 minutes
+  with frequent phases; the last says 「⏳ 仍在处理（已用时 N 分钟）」 with the
+  elapsed minutes at that edit, and stays until the turn ends. Feishu allows
+  20 edits per message: 18 for progress, one closing edit, and one spare.
+  The Manager emits the first phase before reading a quoted thread, still
+  within its ordered, stoppable, replayable preparation; stopping or
+  withdrawing during the read closes the line as 「已停止」.
+  The answer goes as a new message, so
   the user is notified, and the status message is then edited a last time to
   「✅ 完成 · 用时 Ns · 工具 N 次」, or 「❌ 出错：<reason>」 when the reply carries
   an `error` (the Manager's failed turns do). A failed send or edit is logged
