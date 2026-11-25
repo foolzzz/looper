@@ -96,9 +96,9 @@
 ### 5.1 命令
 
 ```
-looper task enter <task_id> [--mode observe|work] [--new] [--claude PATH]
-looper task brief <task_id> [--full] [--hook]
-looper task ask <task_id> <text> [--timeout SECONDS]
+looper task enter [<选择>] [--all] [--mode observe|work] [--new] [--claude PATH]
+looper task brief [<选择>] [--all] [--full] [--hook]
+looper task ask [--task <选择>] <text> [--timeout SECONDS]
 looper task sessions [<task_id>]
 looper task register --dir PATH --requirement TEXT [--handoff-file FILE] [--session ID]
                      [--project NAME] [--workspace-mode worktree|in_place] [--start]   # 1b
@@ -106,7 +106,8 @@ looper task reopen <task_id> <text> [--budget-usd N] [--yes]                    
 ```
 
 - 都带 `--runtime-root`、`--config`（`cli.py` 的 `_add_location_flags`），`--claude` 的默认值同 `looper claude-code`（`cli.py:121`）。读操作直接读本机数据库，所以服务停着也能用；`ask`、`reopen`、`register --start` 经回环地址调本机服务。
-- 退出码沿用 `looper ledger`：0 完成，2 用法，4 拒绝（规则或身份），5 没有这个任务，6 数据库不可用；`enter` 另有 7，找不到 Claude Code。拒绝时打印类型化原因（`not_started`、`no_directory`、`lease_held`、`already_entered`……）、持有者（如果是租约）和下一步怎么做。
+- `<选择>` 可以省略，可以是几个字或一个 MR，也可以是任务 id（5.7）。
+- 退出码沿用 `looper ledger`：0 完成，2 用法，3 列出了候选、什么都没做（5.7），4 拒绝（规则或身份），5 没有这个任务，6 数据库不可用；`enter` 另有 7，找不到 Claude Code。拒绝时打印类型化原因（`not_started`、`no_directory`、`lease_held`、`already_entered`……）、持有者（如果是租约）和下一步怎么做。
 - 在 Looper 启动的 agent 里（`LOOPER_AGENT_RUN`）一律拒绝，做法同 `ledger_commands.py:152-157`。
 
 ### 5.2 进哪个目录、用哪种方式
@@ -177,7 +178,7 @@ messages are. The task's agents are changing files in this directory now, so the
 ## Since you were last here
 …
 ## To act on the task
-- Ask its Planner and wait for the answer: looper task ask <id> "<text>"
+- Ask its Planner and wait for the answer: looper task ask "<text>" (this session is bound to the task)
 ```
 
 - 围栏由 `untrusted.fence()` 生成，简报里总是打开，不看 `untrusted_fence.enabled`（同能力范围 RFC 的 D16）。
@@ -195,9 +196,25 @@ messages are. The task's agents are changing files in this directory now, so the
 
 ### 5.6 在会话里和任务说话
 
-- `looper task ask <id> <text>`：任务有活着的规划者时，经回环地址用本机的操作者令牌（`operator_auth.read_token`）调 `operator_chat.send`，目标是这个任务的规划者，跟着 `reply_events` 等最终答复并打印（默认等 300 秒；超时只说还没答，消息已经存成补充说明）。补充说明的 `via` 记成 `cli`（`store_chat_supplement` 多一个参数）。没有活着的规划者时：第 3 步之前拒绝（`no_planner`，提示结束的任务用 `reopen`）；第 3 步以后交给任务会话（8.2）。
+- `looper task ask [--task <选择>] <text>`：在进入的会话里不用指明任务（5.7）；任务有活着的规划者时，经回环地址用本机的操作者令牌（`operator_auth.read_token`）调 `operator_chat.send`，目标是这个任务的规划者，跟着 `reply_events` 等最终答复并打印（默认等 300 秒；超时只说还没答，消息已经存成补充说明）。补充说明的 `via` 记成 `cli`（`store_chat_supplement` 多一个参数）。没有活着的规划者时：第 3 步之前拒绝（`no_planner`，提示结束的任务用 `reopen`）；第 3 步以后交给任务会话（8.2）。
 - `enter` 给 Claude Code 的环境加 `LOOPER_TASK_SESSION=<task_id>`。带这个变量时，`looper task ask`、`reopen` 只接受同一个任务，别的任务拒绝（`other_task`），写操作记 `via = cli_task_session`。这也是减速带：会话以操作者的系统账号运行。
 - 不自动写回。退出时 `enter` 只打印一行：停留期间任务有什么变化，怎么 `ask` 或 `reopen`。会话里发生的事，只有操作者用 `ask` 或 `reopen` 说出来，任务才知道；这是操作者自己的会话，Looper 不读它。
+
+### 5.7 不用任务 id 找到任务
+
+回到一件旧事时，人很少记得任务 id，说的是几个字或一个 MR 号。`enter`、`brief` 和 `ask --task` 用同一个解析函数 `task_select.resolve(选择, cwd)`。它是确定性的代码，只读数据库，从不调用模型，结果是三种之一：一个任务、一张候选表、没找到。
+
+| 选择 | 规则 |
+|---|---|
+| 任务 id（`task-` 加 12 位十六进制，`projects.py:594`） | 照旧：就是这个任务，没有就退出码 5 |
+| 省略 | 先看环境变量：在 `enter` 打开的会话里（`LOOPER_TASK_SESSION`）就是那个任务。否则取 `cwd` 的真实路径，找目录等于它或包含它的任务：任务的 `work_dir`、`workspace_dir`、活着的或 `operator` 状态的任务 worktree。只保留最深的那一层目录；剩一个就是它；剩几个时，其中恰好一个在进行中就取那个，否则列出来。一个都没有，就列出最近的任务：最近 14 天有动态的，最多 20 个，按最近动态倒序，每行标题、项目、状态、最近动态的时间 |
+| 一个 MR | 整个选择是一个 MR：带 `/pull/<N>` 或 `/merge_requests/<N>` 的链接（同时取出仓库路径），或 `!N`、`#N`、`MR N`、`PR N`，或 1 到 7 位的纯数字。和任务关联的 MR 比较：任务等待步骤里的 `github_pr` 检查（仓库和编号，`waits.py:228-244`），以及用同一套规则从标题、需求、原话和补充说明里认出的引用；任务文本里的纯数字不算引用。链接里有仓库时，仓库和编号都要对上，或者编号对上、引用本身没写仓库 |
+| 别的文字 | 先规范化：NFKC（全角转半角）、转小写、空白合成一个空格、去掉两头的引号。再按空格切成词（连着写的中文整段算一个词），每个词都要是任务文本的字面子串才算匹配（不是通配符，同 `db/tasks.py:690-691` 的任务搜索）。看的字段只有标题和最新版本的需求 |
+
+- **范围：** 文字和 MR 只在最近 90 天有动态的任务里找，`--all` 找全部。「最近动态」是这个任务最新一条 activity 的时间，没有 activity 时用 `tasks.updated_at`。
+- **排序：** MR 先排仓库也对上的，再排只有编号对上的；文字先排每个词都在标题里的，再排要靠需求才凑齐的。同一档里进行中的排前面，然后按最近动态倒序。
+- **什么算模糊：** 只有恰好一个匹配时才直接进入。两个及以上一律列出来让操作者挑（最多 10 行，多出的只报个数），排第一的也不自动选。没有匹配时明说没找到，写出查了哪些字段和多大范围，提示 `--all` 或任务 id，从不退回模糊匹配或「最像的一个」。
+- **挑选：** 在终端里，候选表带编号，输入编号就进那个任务，回车直接退出（退出码 3）。不在终端里时（比如会话里的模型用 Bash 调 `ask`），只打印带任务 id 的候选表，退出码 3，什么都不做；调用方用 id 再来一次。`reopen` 用同一个解析，但它是写操作，只接受唯一的结果，或者操作者在终端里挑出的那一个。
 
 ## 6. 反向：把已有目录登记成任务
 
@@ -501,7 +518,7 @@ plan 模式和租约管的是 Looper 这一侧的动作和误操作，不是隔�
 
 合计约 25–39 人日，不含第 0 步。每一步都能单独评审、单独回滚。
 
-**试一下（第 1 步）：** 在任意终端里（不用先进任务的目录）运行 `looper task enter <task_id>`。终端先打印一行：任务、标题、状态、要进的目录、方式（进行中的任务是 `observe`）；然后 Claude Code 在这个任务的目录里启动，会话名是任务标题，进行中的任务处于 plan 模式。问它「这个任务现在到哪了」，它按简报里的需求、计划、进度和最近动态回答；在会话里运行 `looper task ask <task_id> "下一步打算怎么做？"`，终端里打印规划者的答复。退出后再运行同一条命令，回到同一条会话，简报多一节「上次离开以后」。
+**试一下（第 1 步）：** 不需要任务 id。在任务的目录里直接运行 `looper task enter`；在别处运行 `looper task enter "<标题里的几个字或一个 MR 号>"`，有几个匹配就先挑一个（5.7）。终端先打印一行：任务、标题、状态、要进的目录、方式（进行中的任务是 `observe`）；然后 Claude Code 在这个任务的目录里启动，会话名是任务标题，进行中的任务处于 plan 模式。问它「这个任务现在到哪了」，它按简报里的需求、计划、进度和最近动态回答；在会话里运行 `looper task ask "下一步打算怎么做？"`（会话里不用指明任务），终端里打印规划者的答复。退出后再运行同一条命令，回到同一条会话，简报多一节「上次离开以后」。
 
 ### 10.2 和能力范围 RFC 第 1b 步的分工
 
@@ -518,7 +535,7 @@ plan 模式和租约管的是 Looper 这一侧的动作和误操作，不是隔�
 | 管家的任务工具 | `ops/tasks.py` 的 `_control`、`_confirming` 和 `looper_task_control` 的描述（第 2 步，带开关） | 不碰 |
 | 工作区 | `task_workspaces` 的 `prepare`、`sweep`、`finish`（`operator` 状态） | 不碰 |
 | 读与操作 | `v1_domains/task_views.py` 的 `tasks.detail`；新操作 `tasks.reopen`；`v1_domains/operator_chat_streams.py` 的 `run`（`ask` 带上 `via`） | 不碰 |
-| 新模块和表 | `cli.py` 的 `task` 命令组；新模块 `task_entry`（进入、租约）、`task_brief`（`compose`）、`task_commands`；`task_operator_sessions`、`task_runs` 及迁移 | — |
+| 新模块和表 | `cli.py` 的 `task` 命令组；新模块 `task_entry`（进入、租约）、`task_select`（5.7 的解析）、`task_brief`（`compose`）、`task_commands`；`task_operator_sessions`、`task_runs` 及迁移 | — |
 | 共用的小改动 | `untrusted.Source` 加一个值 `TASK_REQUIREMENT`，只加不改 | 用 `untrusted.fence`，不改它 |
 
 - 本文第 2 步的「`reopen` 只给操作者的回合」因此在调用时判断，不靠按轮过滤工具清单：那篇 1b 要把那段改成按范围取清单。
@@ -529,7 +546,7 @@ plan 模式和租约管的是 Looper 这一侧的动作和误操作，不是隔�
 
 
 - **第 1 步开工前**用真实 Claude Code 验证三件事：`--settings` 里的 SessionStart 钩子和用户设置里的钩子都执行，`source` 的取值和 `additionalContext` 的长度限制；`--session-id` 之后 `--resume` 续上的是同一条；换目录 `--resume` 的行为。结论写进 PR，作为 5.3、5.5 的依据。
-- **第 1 步：** 5.2 表每行一个参数化测试；租约两种先后顺序各一个测试，被拒时说出持有者；带 `LOOPER_AGENT_RUN` 时拒绝；简报的截断和围栏（正文和标题里的尖括号、引号拆不开围栏）；10.2 左栏之外的文件没有改动（评审时按表核对）；真实 CLI 按 10.1 的「试一下」跑一遍，读回「上次离开以后」，并确认 `observe` 时在 plan 模式。
+- **第 1 步：** 5.2 表每行一个参数化测试；5.7 的解析每条规则一个参数化用例（id、`cwd` 在任务目录里和更深处、同一目录几个任务、最近列表、MR 的各种写法和仓库对不上、全角和大小写、多词都要命中、恰好一个、几个、没有），并确认没有模型调用；租约两种先后顺序各一个测试，被拒时说出持有者；带 `LOOPER_AGENT_RUN` 时拒绝；简报的截断和围栏（正文和标题里的尖括号、引号拆不开围栏）；10.2 左栏之外的文件没有改动（评审时按表核对）；真实 CLI 按 10.1 的「试一下」跑一遍，读回「上次离开以后」，并确认 `observe` 时在 plan 模式。
 - **第 2 步：** 7.2 表每行一个测试；完成的 worktree 任务以 `work` 进入时按需建回并记成 `operator`，启动清扫跳过它，重新打开后变回 `active`、未提交的改动还在；不进入也不重新打开时不建回；T 检出在别处时拒绝；到了上限不给新上限时拒绝，给了能开；`task_runs` 和 `task_outcomes` 对得上；7.8 每处一个测试；`[REOPEN]` 是新的模型可见内容，跑真实规划者评测；用全新数据库在非 8767 端口、临时 runtime root 上跑 `looper serve`：完成一个任务、重新打开、再完成，读回两次运行。
 - **1b：** 默认原地，未提交的改动在任务里；显式 worktree 且有未提交改动时拒绝；交接说明出现在规划者的第一轮里；一次性 serve 上读回任务和补充说明。
 - **第 3 步：** `answerer` 每个分支一个测试；`SessionKey` 的形状检查，三条 CHECK 各有一个写入被拒的负例，在一次性 PostgreSQL 上跑迁移，旧行保留；改投最多一次；任务会话的输入清单冻结，哨兵门禁证明输入里没有画像、台账、别的任务，并有本任务的正向对照；工具对别的任务答 `not_found`；受众是操作者时能读这个任务的目录、读不到目录外，没有受限只读时按只用平台工具启动；任务会话契约跑真实管家评测。
@@ -628,6 +645,12 @@ plan 模式和租约管的是 Looper 这一侧的动作和误操作，不是隔�
 **决定：** 不做，列为以后的探索（第 6 节）。
 
 **理由：** 两边的协议不同；会话记录里的私人内容会流进 agent 的输出；启动参数不同；worktree 任务的目录也不同。以后探索时，先在一次性目录里验证这样续接能不能成功、规划者在这样的会话里能不能守住计划协议，再决定要不要做。
+
+### 13.10 不用任务 id 也能找到任务
+
+**决定：** `enter`、`brief`、`ask` 接受三种写法：省略（按所在目录或进入的会话，否则列出最近的任务）、几个字或一个 MR、任务 id。解析是确定性的代码，不调用模型；只有恰好一个匹配时才直接进入，几个就列出来挑，没有就明说（5.7）。
+
+**理由：** 回到旧任务时，人说的几乎总是几个字或一个 MR 号，不是任务 id；要求 id 等于让人先去控制台查。只有唯一匹配才自动进入，因为进错任务比多挑一次代价大；不用模型，结果可复现、可测试，也不花钱。14 天、20 个、90 天这几个数以后都可以改，例如按项目调。
 
 ## 14. 默认行为与用户入口
 
