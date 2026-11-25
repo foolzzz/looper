@@ -304,6 +304,21 @@ describe("work conversation", () => {
     expect(container.querySelector("[data-identity]")?.getAttribute("data-identity")).toBe("planner:t1");
   });
 
+  it("rechecks sending after background start and stop without dropping unsent input", async () => {
+    api.fetchChatTargets.mockResolvedValueOnce([planner("t1", false)]);
+    await show(<PlannerWorkConversation taskId="t1" detail={{ group: "ready", status: "init" }} />);
+    expect(input().disabled).toBe(true);
+    await show(<PlannerWorkConversation taskId="t1" detail={{ group: "in_progress", status: "running" }} />);
+    expect(input().disabled).toBe(false);
+    type("keep this draft");
+    api.fetchChatTargets.mockResolvedValueOnce([planner("t1", false)]);
+    await show(<PlannerWorkConversation taskId="t1" detail={{ group: "attention", status: "stopped" }} />);
+    expect(input().disabled).toBe(true);
+    expect(input().value).toBe("keep this draft");
+    expect(api.fetchChatTargets).toHaveBeenCalledTimes(3);
+    expect(api.sendChat).not.toHaveBeenCalled();
+  });
+
   it("checks planner availability once and does not poll a turn", async () => {
     vi.useFakeTimers();
     await show(<TaskPane taskId="t1" />);
