@@ -9292,8 +9292,7 @@ separate tokens and is not exported to API clients. No unversioned operator rout
   First enablement uses the project-settings form and project administration API. The Manager's project tool
   and its schema are unchanged; chat configuration is deferred to a follow-up with a Manager dialog comparison.
 - **Finding a task.** `POST /api/v1/tasks/select` (`tasks.select`) is an operator-only read and calls no model.
-  The generated CLI exposes `tasks select` with `--selection`, `--cwd` and `--all` for an operator token.
-  An empty selection uses the current directory: the deepest `work_dir`,
+  It is not a generated client command. An empty selection uses the current directory: the deepest `work_dir`,
   `workspace_dir` or active worktree that contains it, and when several tasks share that directory and only one
   has not ended, that one is returned. With no directory match, the tasks with activity in the last 14 days, at
   most 20, newest first. A task id returns that task. One merge-request reference (a `/pull/N` or
