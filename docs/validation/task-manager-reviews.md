@@ -24,6 +24,10 @@ Regression evidence:
 - The shared role schema, seeded `roles.list` response and `agent_settings.get`
   response each failed a new freeze before the shared-role projection was fixed.
 - Removing the background-start guard fails the native-turn write-exclusion test.
+- Concurrent close and shutdown each failed while dispatch was paused inside idle
+  eviction. The corrected lifecycle uses the pool gate for queue mutation and
+  waits for drivers outside it; the foundation pool/native preparation files
+  passed together (8 tests).
 
 No conversation transport changes are included: the dashboard, Telegram, Lark and
 CLI conversation surfaces remain the work of their companion changes. The launch
