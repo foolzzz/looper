@@ -220,3 +220,46 @@ def test_enabled_admission_probe_publishes_its_own_result(monkeypatch, caplog, p
         assert not any(c["status"] == "pending" for c in snapshot)
 
     asyncio.run(run())
+
+
+@pytest.mark.parametrize("registry_upgrade, reusable", [(False, True), (False, False), (True, True)])
+def test_startup_reuses_online_backup_only_outside_registry_upgrade(
+    tmp_path, monkeypatch, caplog, registry_upgrade, reusable,
+):
+    from contextlib import asynccontextmanager
+    from unittest.mock import Mock
+
+    from looper import components
+    from looper.agents import db_backup
+    from looper.db import connection
+
+    conn = SimpleNamespace(fetchval=AsyncMock(side_effect=[True, "160000"] if registry_upgrade else ["160000"]))
+
+    @asynccontextmanager
+    async def acquire():
+        yield conn
+
+    pool = SimpleNamespace(acquire=acquire)
+    monkeypatch.setattr(connection, "schema_change_pending", AsyncMock(return_value=True))
+    monkeypatch.setattr(connection, "check_registry_schema_version", AsyncMock(return_value=
+        connection.REGISTRY_SCHEMA_VERSION - int(registry_upgrade)))
+    path = tmp_path / "verified.dump"
+    path.write_bytes(b"PGDMP test")
+    match = AsyncMock(return_value=path if reusable else None)
+    monkeypatch.setattr(db_backup, "reusable_upgrade_backup", match, raising=False)
+    dump = Mock(return_value=(path, "archive listed"))
+    monkeypatch.setattr(db_backup, "back_up", dump)
+    monkeypatch.setattr(components, "loaded_manifest", lambda: SimpleNamespace(version="test"))
+    check = serve.self_check.Check("pg_dump", "pg_dump backup", "ok", "ready")
+    monkeypatch.setattr(serve.self_check, "check_pg_dump", lambda *_: (check, SimpleNamespace(detail="test dumper")))
+    ops = ops_config.OpsConfig(tmp_path, tmp_path / "ops.toml", database_url="postgresql://test/test")
+
+    with caplog.at_level(logging.INFO):
+        asyncio.run(serve._back_up_before_schema_change(pool, ops, tmp_path, skip_backup=False))
+    reused = reusable and not registry_upgrade
+    assert dump.call_count == int(not reused)
+    assert match.await_count == int(not registry_upgrade)
+    if reused:
+        assert str(path) in caplog.text and "online upgrade backup" in caplog.text
+    if registry_upgrade:
+        assert "phase=backup_verified" in caplog.text

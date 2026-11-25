@@ -397,11 +397,12 @@ Manager has no tool for it. The dashboard shows the task page's 指标 card and 
   The independent operator-only `profile_settings.get/update` operations control `manager.profile.enabled`
   (default off; null restores off). Settings → Knowledge vault exposes its confirmed switch. Off, the Manager
   never compiles a profile and its model-facing bytes remain unchanged. On, the default Manager's own dashboard
-  and operator direct-chat turns include an `Operator profile` resident section. Group and other-sender turns,
-  routed non-main sessions and scenario Managers omit it. With `manager.stable_context` on it is inside the
-  stable block and follows its whole/change/unchanged rules; otherwise it is its own resident section before
-  Projects. Shared turns never receive private profile text in stable-state removal lines either. This does
-  not erase profile text already present in a shared resident session's history.
+  (without an API client) and operator direct-chat turns include an `Operator profile` resident section.
+  API-client turns, group and other-sender turns, routed non-main sessions and scenario Managers omit it.
+  With `manager.stable_context` on it is inside the stable block and follows its whole/change/unchanged rules;
+  otherwise it is its own resident section before Projects. Shared and API-client turns never receive private
+  profile text in stable-state removal lines either. This does not erase profile text already present in a
+  shared resident session's history.
   `looper profile show [--runtime-root …] [--config …]` reads the same file with the same compiler and prints
   exactly the resident section's body, with no added newline, whether injection is on or off. It makes no model
   call or schema/cache write. Its worker has a 1-second deadline covering imports, settings and file I/O;
@@ -1613,6 +1614,18 @@ leads. It sends SIGTERM to those groups and to the tree's processes outside
 them, waits up to `TERM_GRACE_SEC` (3 s), then sends SIGKILL to what is
 left. It never signals the server's own process or group.
 
+`TurnTree` also samples the running tree every 0.5 s. After 5 s without a
+change to its live processes or groups, it samples every 5 s instead. A
+detected change or a new resident turn restores the 0.5 s interval. Stop
+paths always force a fresh snapshot; periodic discovery while idle can lag
+by up to 5 s.
+
+On macOS, process identities come directly from libproc's
+`proc_pidinfo(PROC_PIDTBSDINFO)`, without spawning `ps`. They retain the
+existing whitespace-normalized `LC_ALL=C`, `TZ=UTC` `ps -o lstart=` format,
+including in persisted records. Failed native reads fall back to `ps`;
+Linux and other platforms continue to use `ps` for identities.
+
 A resident Claude Code that is asked to exit (its stdin closed, then
 `STOP_GRACE_SEC`) has its tree read before its stdin closes, so what it
 started is still found after it has exited and its children have been
@@ -1663,8 +1676,8 @@ resumes, `proc_tree.sweep` reads every record:
   server that exited during an end (its shutdown deadline, a second signal)
   has the rest ended now, the agent's children that outlived it included;
 - a pid is signalled only while it still has the recorded start time, checked
-  again right before its SIGTERM and its SIGKILL: what is left is the one
-  `ps` call between that check and the signal;
+  again right before its SIGTERM and its SIGKILL: an identity lookup still
+  leaves a small window before the signal;
 - a record is removed once what it names has been ended, except one whose
   server still runs (another server on the same runtime root), which is
   left alone with its agent, and one whose start times could not be read,
@@ -4599,6 +4612,29 @@ dump is proved readable by, in order, `backup.verify_command` (dump on stdin),
 With none of these the backup fails before any DDL. The upgraded schema must
 not be opened by an older binary: the forward guard in this binary does not
 protect an older one.
+
+For other schema changes, `looper service upgrade --backup-before-stop`
+optionally takes that same verified dump while the old service is still serving,
+after preparation and preflight but before drain. The default remains a dump at
+startup, inside the outage. The option requires the service's database and backup
+settings in its ops file. A failed online dump stops the upgrade before drain or
+stop; dry-run, NOOP and WEB_ONLY plans take no online dump.
+
+The new process reuses an online dump only for the recorded target package version
+and control-plane fingerprint, the same database and unchanged schema fingerprint,
+registry version and migration markers. Private metadata records the snapshot's
+start and verification times; reuse expires 15 minutes after the start, requires
+the same archive file and a successful archive listing, and consumes the metadata
+once. Missing, stale, mismatched or unreadable metadata or archives fall back to
+the startup dump. The log names the reused archive; the upgrade report includes
+`online_backup` and `online_backup_seconds` only when the option ran a backup.
+Registry upgrades always take the startup dump, even with this option.
+
+An online dump omits writes after its snapshot, including those during the dump,
+drain and stop, and any delay before migration. The reuse deadline bounds age,
+not acceptable data loss. Keep the default for strict recovery-point requirements,
+long drains, registry upgrades, or workloads that cannot lose those writes; an
+independently managed WAL/PITR setup is another recovery strategy.
 
 A migration of a large table holds the table's lock only for statements that
 neither scan nor rewrite it. The run tree columns of `llm_records`, for
