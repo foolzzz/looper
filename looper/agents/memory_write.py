@@ -11,12 +11,8 @@ import asyncio
 import contextlib
 import hashlib
 import logging
-import os
 import re
-import secrets
-import stat
 import subprocess
-import threading
 from collections.abc import Mapping, Sequence
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
@@ -24,7 +20,7 @@ from pathlib import Path, PurePosixPath
 from typing import Any
 
 from ..db import connection, memory as store
-from . import memory_model as model, memory_settings, vault
+from . import memory_model as model, memory_settings, vault, vault_commit
 from .advice_lint import _SECRETS
 
 logger = logging.getLogger(__name__)
@@ -104,29 +100,10 @@ def validate_changes(config: vault.VaultConfig, settings: model.MemorySettings, 
 
 
 def _read(root: Path, path: str) -> bytes | None:
-    fds = vault._open_real_path(root)
-    try:
-        for part in PurePosixPath(path).parts[:-1]:
-            try:
-                fds.append(os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fds[-1]))
-            except FileNotFoundError:
-                return None
-        try:
-            fd = os.open(PurePosixPath(path).name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=fds[-1])
-        except FileNotFoundError:
-            return None
-        fds.append(fd)
-        if not stat.S_ISREG(os.fstat(fd).st_mode):
-            raise ValueError("a memory target must be a regular file")
-        with os.fdopen(fd, "rb", closefd=False) as stream:
-            data = stream.read(vault.READ_MAX_BYTES + 1)
-        if len(data) > vault.READ_MAX_BYTES or b"\0" in data:
-            raise ValueError("a memory target must be bounded UTF-8 text")
-        data.decode("utf-8")
-        return data
-    finally:
-        for fd in reversed(fds):
-            os.close(fd)
+    data = vault_commit._read(root, path)
+    if data is not None and len(data) > vault.READ_MAX_BYTES:
+        raise ValueError("a memory target must be bounded UTF-8 text")
+    return data
 
 
 def _apply(change: Mapping[str, Any], before: bytes | None) -> bytes:
@@ -181,51 +158,8 @@ def replay(root: Path, changes: Sequence[Mapping[str, Any]]) -> tuple[dict[str, 
     return after, before
 
 
-def _replace(root: Path, path: str, data: bytes) -> None:
-    """Directory-fd walk, no links, bounded regular files, atomic fsynced replacement preserving permissions."""
-    fds = vault._open_real_path(root)
-    try:
-        for part in PurePosixPath(path).parts[:-1]:
-            try:
-                fd = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fds[-1])
-            except FileNotFoundError:
-                os.mkdir(part, 0o755, dir_fd=fds[-1])
-                fd = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fds[-1])
-            fds.append(fd)
-        parent, name = fds[-1], PurePosixPath(path).name
-        try:
-            info = os.stat(name, dir_fd=parent, follow_symlinks=False)
-            if not stat.S_ISREG(info.st_mode):
-                raise ValueError("a memory target must be a regular file")
-            mode = stat.S_IMODE(info.st_mode)
-        except FileNotFoundError:
-            mode = 0o644
-        temp = f".looper-{secrets.token_hex(8)}.tmp"
-        fd = os.open(temp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, mode, dir_fd=parent)
-        try:
-            with os.fdopen(fd, "wb") as stream:
-                stream.write(data)
-                stream.flush()
-                os.fsync(stream.fileno())
-                os.fchmod(stream.fileno(), mode)
-            os.replace(temp, name, src_dir_fd=parent, dst_dir_fd=parent)
-        finally:
-            with contextlib.suppress(FileNotFoundError):
-                os.unlink(temp, dir_fd=parent)
-    finally:
-        for fd in reversed(fds):
-            os.close(fd)
-
-
-def _git_bytes(root: Path, *args: str) -> bytes:
-    # vault._git strips output: blob verification must keep final newlines and arbitrary UTF-8 bytes intact.
-    from .. import child_env
-
-    done = vault._run_git(["git", "--literal-pathspecs", "-C", str(root), *args],
-                          env={**child_env.inherited(), "GIT_TERMINAL_PROMPT": "0"})
-    if done.returncode:
-        raise subprocess.CalledProcessError(done.returncode, args)
-    return done.stdout.encode("utf-8")
+_replace = vault_commit._replace
+_git_bytes = vault_commit._git_bytes
 
 
 def _preflight(repo: Path, settings: model.MemorySettings, paths: list[str]) -> None:
@@ -298,19 +232,7 @@ def _names(row: Mapping[str, Any], repo: Path, settings: model.MemorySettings, r
     return where / name / repo.name, _BRANCH_PREFIX + name
 
 
-def _remove(repo: Path, worktree: Path, branch: str, *, merged: bool) -> None:
-    """Only call for a registered, owned attempt; never remove an arbitrary directory on a guessed path."""
-    try:
-        vault._git(repo, "worktree", "remove", *([] if merged else ["--force"]), str(worktree))
-        with contextlib.suppress(OSError):
-            worktree.parent.rmdir()
-    except (OSError, subprocess.SubprocessError):
-        logger.warning("memory worktree cleanup deferred")
-        return
-    try:
-        vault._git(repo, "branch", "-d" if merged else "-D", branch)
-    except (OSError, subprocess.SubprocessError):
-        logger.warning("memory branch cleanup deferred")
+_remove = vault_commit._remove
 
 
 def _write(config: vault.VaultConfig, settings: model.MemorySettings, found: Mapping[str, Any],
@@ -334,77 +256,32 @@ def _write(config: vault.VaultConfig, settings: model.MemorySettings, found: Map
     where = memory_settings.worktree_root(settings, runtime_root)
     if where is None or memory_settings._worktree_problem(where, repo):
         raise WriteFailure("blocked", "vault_problem")
-    base = vault._git(repo, "rev-parse", f"refs/heads/{settings.branch}")
     worktree, branch = _names(row, repo, settings, runtime_root)
-    created, merged = False, False
-    try:
-        try:
-            worktree.parent.mkdir(parents=True, exist_ok=True)
-            vault._git(repo, "worktree", "add", "-b", branch, str(worktree), base)
-            created = True
-        except (OSError, subprocess.CalledProcessError):
-            raise WriteFailure("blocked", "worktree_failed") from None
-        work_config = vault.VaultConfig(worktree / relative_vault, (), config.rules_file)
-        # Git does not track empty folders. The configured folders were checked in the main checkout; fd-based
-        # replay/replacement below checks links and creates missing parents only for these allowed target paths.
+
+    def prepare(work_config):
         validate_changes(work_config, settings, row["kind"], changes)
-        after, before = replay(work_config.path, changes)
-        if all(data == before[path] for path, data in after.items()):
-            return None
-        expected = {str(relative_vault / path): data for path, data in after.items()}
-        changed = {str(relative_vault / path) for path in after if after[path] != before[path]}
-        for path, data in after.items():
-            if data != before[path]:
-                _replace(work_config.path, path, data)
-        if any(_read(worktree, path) != data for path, data in expected.items()):
-            raise WriteFailure("blocked", "commit_mismatch")
-        vault._git(worktree, "add", "--", *sorted(changed))
-        # Keep the message out of the index and the worktree: hooks cannot accidentally add it.
-        message_file = Path(vault._git(worktree, "rev-parse", "--git-path", "looper-memory-message"))
-        if not message_file.is_absolute():
-            message_file = worktree / message_file
-        fd = os.open(message_file, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
-        with os.fdopen(fd, "w", encoding="utf-8") as stream:
-            stream.write(commit_message(settings, found))
+        return replay(work_config.path, changes)
+
+    def preflight():
         try:
-            try:
-                vault._git(worktree, "-c", "commit.gpgsign=false", "commit", "-F", str(message_file), "--", *sorted(changed))
-            except subprocess.CalledProcessError as error:
-                raise WriteFailure("blocked", "hook_rejected" if error.returncode == 1 else "git_failed") from None
-        finally:
-            message_file.unlink(missing_ok=True)
-        commit = vault._git(worktree, "rev-parse", "HEAD")
-        _verify(worktree, commit, expected, changed, row, settings, check_worktree=True)
-        if vault._git(worktree, "status", "--porcelain=v1", "--untracked-files=all"):
-            raise WriteFailure("blocked", "commit_mismatch")
-        current = vault._git(repo, "rev-parse", f"refs/heads/{settings.branch}")
-        if current != base:
-            try:
-                vault._git(repo, "diff", "--quiet", base, current, "--", *paths)
-            except subprocess.CalledProcessError:
-                raise WriteFailure("conflict", "target_changed") from None
-            vault._git(worktree, "-c", "commit.gpgsign=false", "rebase", f"refs/heads/{settings.branch}")
-            commit = vault._git(worktree, "rev-parse", "HEAD")
-            _verify(worktree, commit, expected, changed, row, settings, check_worktree=True)
-        _preflight(repo, settings, paths)
-        try:
-            vault._git(repo, "merge", "--ff-only", branch)
-        except subprocess.CalledProcessError:
             _preflight(repo, settings, paths)
-            raise WriteFailure("blocked", "git_failed") from None
-        merged = True
-        if vault._git(repo, "rev-parse", "HEAD") != commit:
-            raise WriteFailure("blocked", "commit_mismatch")
-        _verify(repo, commit, expected, changed, row, settings)
-        return commit
-    finally:
-        if created:
-            _remove(repo, worktree, branch, merged=merged)
+        except WriteFailure as failure:
+            raise vault_commit.TransactionBlocked(failure.reason.value) from None
+
+    result = vault_commit.transaction(
+        config, [change["path"] for change in changes], commit_message(settings, found), prepare=prepare,
+        runtime_root=runtime_root, worktree_root=where, worktree=worktree, branch=branch,
+        checked_branch=settings.branch, preflight=preflight,
+        verify=lambda root, sha, expected, changed, **kw: _verify(root, sha, expected, changed, row, settings, **kw),
+        refresh_on_advance=True)
+    if result.state is vault_commit.CommitState.BLOCKED:
+        failure = WriteFailure("conflict" if result.reason == "target_changed" else "blocked", result.reason)
+        failure.result = result
+        raise failure
+    return result.commit
 
 
-def _thread_lock(config: vault.VaultConfig) -> threading.Lock:
-    with vault._LOCKS_LOCK:
-        return vault._LOCKS.setdefault(str(config.path), threading.Lock())
+_thread_lock = vault_commit.thread_lock
 
 
 class MemoryWriteService:
@@ -520,6 +397,11 @@ class MemoryWriteService:
         await memory_closeout.note_written(conn, row, commit)
 
     async def _failure(self, conn, row, failure):
+        if getattr(failure, "result", None) is not None and failure.result.branch:
+            from . import vault_commit_attention
+            config, _ = await vault.load()
+            repo = await asyncio.to_thread(vault._git_root_sync, config.path)
+            await vault_commit_attention.record(failure.result, repo=repo, db=conn)
         action = {model.State.BLOCKED: "block", model.State.CONFLICT: "conflict"}[failure.state]
         await self._move(conn, row["id"], failure.state, action, reason=failure.reason, note=failure.reason.value)
         logger.warning("memory candidate=%s state=%s reason=%s", model.format_id(row["id"]), failure.state, failure.reason)
@@ -628,11 +510,7 @@ class MemoryWriteService:
                             "ON (c.source_id, c.chat_id) = (e.source_id, e.chat_id) WHERE s.lead_id = $1",
                             source["lead_id"])
 
-                def write():
-                    with _thread_lock(config):
-                        return _write(config, settings, found, repo, self.runtime_root)
-
-                commit = await asyncio.to_thread(write)
+                commit = await asyncio.to_thread(_write, config, settings, found, repo, self.runtime_root)
                 if commit is None:
                     await self._move(conn, cid, "dropped", "drop", reason="duplicate")
                 else:
@@ -687,7 +565,7 @@ class MemoryWriteService:
 
     async def _cleanup(self, conn, config, settings, repo):
         active = await conn.fetch("SELECT id, attempts FROM memory_candidates WHERE destination = 'vault' "
-                                  "AND state = 'writing'")
+                                  "AND state IN ('writing', 'blocked')")
         keep = {f"{model.format_id(row['id'])}-a{row['attempts']}" for row in active}
         def clean():
             with _thread_lock(config):
@@ -752,6 +630,15 @@ def _cleanup(repo, settings, runtime_root, keep):
         expected = root / name / repo.name
         if worktree != expected or model._passes_link(root, str(worktree.relative_to(root))):
             continue
+        marker = Path(vault._git(worktree, "rev-parse", "--git-path", "looper-vault-blocked"))
+        if not marker.is_absolute():
+            marker = worktree / marker
+        if marker.exists():
+            try:
+                vault._git(repo, "merge-base", "--is-ancestor", branch, "HEAD")
+            except subprocess.CalledProcessError:
+                keep.add(name)
+                continue
         _remove(repo, worktree, branch, merged=False)
     vault._git(repo, "worktree", "prune")
     for branch in vault._git(repo, "for-each-ref", "--format=%(refname:short)", "refs/heads/looper/memory/").splitlines():

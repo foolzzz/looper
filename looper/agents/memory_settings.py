@@ -125,7 +125,8 @@ def commit_prefix(config: vault.VaultConfig, root: str, toplevel: Path) -> str:
 def worktree_root(settings: model.MemorySettings, runtime_root: Path | None) -> Path | None:
     if settings.worktree_root is not None:
         return Path(settings.worktree_root)
-    return runtime_root / WORKTREE_FOLDER if runtime_root is not None else None
+    from .vault_commit import default_worktree_root
+    return default_worktree_root()
 
 
 def _worktree_problem(path: Path, toplevel: Path | None) -> str | None:

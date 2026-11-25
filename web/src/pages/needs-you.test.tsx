@@ -51,20 +51,25 @@ afterEach(() => {
 });
 
 describe("Needs you page", () => {
-  it("shows failure holds and terminal reminders once in the server's section order", async () => {
-    vi.mocked(fetchAttention).mockResolvedValue({ read_at: "2026-11-20T08:00:00Z", total: 2, sections: [
+  it("shows failure holds, terminal reminders and vault commits once in the server's section order", async () => {
+    vi.mocked(fetchAttention).mockResolvedValue({ read_at: "2026-11-20T08:00:00Z", total: 3, sections: [
       { kind: "failure_holds", state: "ok", count: 1, error: null, items: [
         { key: "failure:1", title: "Resume work", context: "demo", since: null, href: "#tasks/held-task",
           ref: null, facts: { kind: "environment", streak: 3 } }] },
       { kind: "reminders", state: "ok", count: 1, error: null, items: [
         { key: "reminder:1", title: "Check the application", context: "", since: null, href: "#chat",
           ref: "#1", facts: { state: "uncertain", due_at: "2026-11-19T08:00:00Z", timezone: "UTC" } }] },
+      { kind: "vault_commits", state: "ok", count: 1, error: null, items: [
+        { key: "vault:synthetic", title: "Preserved vault commit", context: "vault", since: null, href: null,
+          ref: null, facts: { branch: "looper/vault/synthetic", worktree: "synthetic-worktree",
+            reason: "merge_blocked" } }] },
     ] });
     await render();
     expect(Array.from(host.querySelectorAll("section"), (section) => section.getAttribute("aria-label")))
-      .toEqual(["运行失败等你处理", "未确认送达的提醒"]);
+      .toEqual(["运行失败等你处理", "未确认送达的提醒", "知识库提交受阻"]);
     expect(host.textContent?.match(/Resume work/g)).toHaveLength(1);
     expect(host.textContent?.match(/Check the application/g)).toHaveLength(1);
+    expect(host.textContent?.match(/Preserved vault commit/g)).toHaveLength(1);
     expect(host.querySelector('a[href="#tasks/held-task"]')).not.toBeNull();
     expect(host.querySelector('a[href="#chat"]')).not.toBeNull();
   });
@@ -83,6 +88,21 @@ describe("Needs you page", () => {
     expect(host.textContent).toContain("取消提醒");
     expect(host.querySelector('a[href="#chat"]')).not.toBeNull();
   });
+  it("shows blocked vault commits with their preserved branch and recovery location", async () => {
+    vi.mocked(fetchAttention).mockResolvedValue({ read_at: "2026-11-20T08:00:00Z", total: 1, sections: [
+      { kind: "vault_commits", state: "ok", count: 1, error: null, items: [
+        { key: "vault:synthetic", title: "知识库提交受阻", context: "vault", since: null,
+          href: null, ref: null, facts: { branch: "looper/vault/synthetic", worktree: "synthetic-worktree",
+            reason: "merge_blocked" } }] },
+    ] });
+    await render();
+    const section = host.querySelector('section[aria-label="知识库提交受阻"]')!;
+    expect(section.textContent).toContain("looper/vault/synthetic");
+    expect(section.textContent).toContain("synthetic-worktree");
+    expect(section.textContent).toContain("merge_blocked");
+    expect(section.textContent).toContain("保留");
+  });
+
   it("keeps catchup items alongside message-stream alerts", async () => {
     vi.mocked(fetchAttention).mockResolvedValue({ read_at: "2026-11-22T12:00:00Z", total: 2, sections: [
       { kind: "deliveries", state: "ok", count: 2, error: null, items: [
