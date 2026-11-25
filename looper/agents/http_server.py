@@ -146,7 +146,7 @@ HTTP_503 = "503 Service Unavailable"
 # which the same-origin check refuses. Nothing leaves for another site either way.
 SIGN_IN_HEADERS = {
     "Cache-Control": "no-store", "Referrer-Policy": "same-origin",
-    "Content-Security-Policy": "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'",
+    "Content-Security-Policy": "default-src 'none'; manifest-src 'self'; img-src 'self'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'",
 }
 
 V1_HEADERS = {"Cache-Control": "no-store"}
@@ -1694,6 +1694,7 @@ class AgentHTTPServer:
                 "or open the dashboard there.</p>" if not unusable else "")
         page = ("<!doctype html><html lang=\"en\"><meta charset=\"utf-8\">"
                 "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\"><title>Looper</title>"
+                "<link rel=\"manifest\" href=\"/manifest.webmanifest\"><meta name=\"theme-color\" content=\"#0a0a0f\">"
                 "<style>:root{color-scheme:light dark;font:16px system-ui;background:#f4f5f7;color:#202124}"
                 "body{max-width:24rem;margin:12vh auto;padding:2rem}form,label{display:grid;gap:.6rem}"
                 "form{gap:1.2rem}input,button{font:inherit;padding:.7rem;border:1px solid #888;border-radius:.4rem}"
@@ -1809,7 +1810,9 @@ class AgentHTTPServer:
             await self._login_page(writer)
             return
 
-        content_type, _ = mimetypes.guess_type(str(file_path))
+        # Keep the manifest MIME type consistent across host MIME databases.
+        content_type = ("application/manifest+json" if file_path.suffix == ".webmanifest"
+                        else mimetypes.guess_type(str(file_path))[0])
         if content_type is None:
             content_type = "application/octet-stream"
 
