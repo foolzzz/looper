@@ -10,7 +10,7 @@ points at a disposable database.
 from __future__ import annotations
 
 import json
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -1282,7 +1282,7 @@ def test_a_tasks_cost_is_the_task_pages(monkeypatch: pytest.MonkeyPatch, tmp_pat
 
 
 def test_spend_by_project_and_time_range_counts_the_runs_started_in_it(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, fixed_clock,
 ) -> None:
     from looper.agents.overview import local_midnight
     from looper.db import llm_records
@@ -1292,12 +1292,13 @@ def test_spend_by_project_and_time_range_counts_the_runs_started_in_it(
         await _task(pool, "task-a", "completed", calc)
         await _task(pool, "task-b", "completed", calc)
         await _task(pool, "task-c", "completed", other)
-        now = datetime.now(timezone.utc)
+        now = fixed_clock()
         await _run_record(pool, "worker-1", task_id="task-a", cost=0.4)
         await _run_record(pool, "planner-task-b", task_id="task-b", cost=0.1)
         await _run_record(pool, "worker-2", task_id="task-c", cost=0.2)
         await _run_record(pool, "manager", cost=0.03)
         await _run_record(pool, "manager", task_id="task-a", cost=7.0)  # the Manager's: no task's, no project's
+        await pool.execute("UPDATE llm_records SET created_at=$1", now)
         await _at(pool, await _run_record(pool, "worker-3", task_id="task-a", cost=5.0), now - timedelta(days=40))
         chat = _Chat(tmp_path)
 
@@ -1321,7 +1322,7 @@ def test_spend_by_project_and_time_range_counts_the_runs_started_in_it(
                 for p in today["result"]["projects"]] == [("calc", 2, 0.5), ("other", 1, 0.2)]
         # A day as until counts that whole day.
         (to_today,) = await chat.say("calc 到今天为止", ("looper_costs", {
-            "project": "calc", "until": datetime.now().astimezone().date().isoformat()}))
+            "project": "calc", "until": fixed_clock().astimezone().date().isoformat()}))
         assert to_today["result"]["total"]["runs"] == 3
         (window,) = await chat.say("40 天前那天", ("looper_costs", {
             "since": (now - timedelta(days=41)).isoformat(), "until": (now - timedelta(days=39)).isoformat()}))
