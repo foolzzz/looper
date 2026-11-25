@@ -58,8 +58,10 @@ def test_an_empty_database_reads_as_empty_and_writes_no_switch(monkeypatch: pyte
     from looper.db import tasks as db_tasks
 
     async def test(pool: Any) -> None:
-        async def unread(*_args: Any, **_kwargs: Any) -> Any:
-            raise AssertionError("an empty task list must not read names")
+        name_reads: list[Any] = []
+        async def unread(*args: Any, **kwargs: Any) -> Any:
+            name_reads.append((args, kwargs))
+            return {}
 
         saved = (db_tasks.names_and_projects_of, db_projects.names_of)
         db_tasks.names_and_projects_of = unread
@@ -69,6 +71,7 @@ def test_an_empty_database_reads_as_empty_and_writes_no_switch(monkeypatch: pyte
                 fleet=_Fleet(), task_router=SimpleNamespace(running_planners=lambda: []), worker_pool=None, now=NOW)
         finally:
             db_tasks.names_and_projects_of, db_projects.names_of = saved
+        assert name_reads == []
         text = card["text"]
         assert text.startswith("截至 11-22 15:05")
         assert "管家：空闲；排队 0 条" in text
