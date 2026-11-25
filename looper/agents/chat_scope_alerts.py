@@ -25,8 +25,8 @@ _WINDOW_SECONDS = 3600.0
 _REFUSAL_THRESHOLD = 10
 _RETRY_SECONDS = 300.0
 _hits: dict[tuple[str, str], deque[float]] = {}
-_retry_since: dict[str, float] = {}
-_retry_alerted: set[str] = set()
+_retry_since: dict[tuple[str, str], float] = {}
+_retry_alerted: set[tuple[str, str]] = set()
 
 
 def configure(sender: Sender | None) -> None:
@@ -52,9 +52,15 @@ def reset() -> None:
     _retry_alerted.clear()
 
 
-def clear_retry(manager_id: str) -> None:
-    _retry_since.pop(manager_id, None)
-    _retry_alerted.discard(manager_id)
+def clear_retry(manager_id: str, episode: str | None = None) -> None:
+    """Drop one resolution attempt. Omit ``episode`` to drop every attempt of ``manager_id``."""
+    if episode is not None:
+        _retry_since.pop((manager_id, episode), None)
+        _retry_alerted.discard((manager_id, episode))
+        return
+    for key in [key for key in _retry_since if key[0] == manager_id]:
+        del _retry_since[key]
+    _retry_alerted.difference_update({key for key in _retry_alerted if key[0] == manager_id})
 
 
 def _scope_label(scope: str | None) -> str:
@@ -142,11 +148,11 @@ def _crossed(channel_id: str | None, chat: str | None) -> bool:
     while hits and hits[0] <= cutoff:
         hits.popleft()
     hits.append(now)
-    return len(hits) == _REFUSAL_THRESHOLD
+    return len(hits) >= _REFUSAL_THRESHOLD
 
 
 async def out_of_scope(manager_id: str, *, channel_id: str | None, chat: str | None, scope: str | None) -> None:
-    """Medium. The tenth refusal in one chat within an hour, once per chat each local day."""
+    """Medium. At least ten refusals in one chat within an hour, once per chat each local day."""
     try:
         if not _crossed(channel_id, chat):
             return
@@ -161,17 +167,18 @@ async def out_of_scope(manager_id: str, *, channel_id: str | None, chat: str | N
         logger.warning("cannot send an out-of-scope alert", exc_info=True)
 
 
-async def resolution_retrying(manager_id: str, *, channel_id: str | None, chat: str | None) -> None:
-    """Medium. Once a streak has lasted at least five minutes, until ``clear_retry``."""
+async def resolution_retrying(manager_id: str, *, episode: str, channel_id: str | None, chat: str | None) -> None:
+    """Medium. Once this attempt has lasted five minutes, until that attempt ends."""
     try:
         now = _mono()
-        started = _retry_since.get(manager_id)
+        key = (manager_id, episode)
+        started = _retry_since.get(key)
         if started is None:
-            _retry_since[manager_id] = now
+            _retry_since[key] = now
             return
-        if manager_id in _retry_alerted or now - started < _RETRY_SECONDS:
+        if key in _retry_alerted or now - started < _RETRY_SECONDS:
             return
-        _retry_alerted.add(manager_id)
+        _retry_alerted.add(key)
         manager = await _manager_label(manager_id)
         label = await _chat_label(channel_id, chat)
         await _deliver(f"中：Manager {manager} 的范围解析已连续重试超过 5 分钟，会话「{label}」。")

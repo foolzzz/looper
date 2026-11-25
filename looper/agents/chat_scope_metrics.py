@@ -48,11 +48,11 @@ def resolution_retry(manager_id: str) -> None:
     _retries[(manager_id,)] += 1
 
 
-def resolution_recovered(manager_id: str) -> None:
-    """The retry count stays. The alert streak for ``manager_id`` ends."""
+def resolution_recovered(manager_id: str, episode: str | None = None) -> None:
+    """The retry count stays. This attempt's alert streak ends; other attempts stay."""
     from . import chat_scope_alerts
 
-    chat_scope_alerts.clear_retry(manager_id)
+    chat_scope_alerts.clear_retry(manager_id, episode)
 
 
 def session_opened(manager_id: str, reason: OpenReason) -> None:

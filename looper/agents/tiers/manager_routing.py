@@ -198,22 +198,27 @@ class SessionRouter:
         from .. import completion_events
 
         retried = False
-        while True:
-            try:
-                key = await self._user_key(envelope)
-                found = self.session(key, self._scope(envelope))
-                if retried:
-                    self._observe_recovered()
-                return found
-            except (ScopeUnavailable, ScopeInvariantViolation) as exc:
-                if isinstance(exc, ScopeInvariantViolation):
-                    await self._observe_invariant(envelope, exc, default="resolve")
-                return await self._scope_error(envelope, exc)
-            except IdentityUnavailable:
-                # Not settled on the bus: shutdown/restart also retries this message.
-                retried = True
-                await self._observe_retry(envelope)
-                await asyncio.sleep(completion_events.RETRY_SECONDS)
+        episode = self._scope_attempt(envelope)
+        try:
+            while True:
+                try:
+                    key = await self._user_key(envelope)
+                    found = self.session(key, self._scope(envelope))
+                    if retried and episode is not None:
+                        self._observe_recovered(episode)
+                    return found
+                except (ScopeUnavailable, ScopeInvariantViolation) as exc:
+                    if isinstance(exc, ScopeInvariantViolation):
+                        await self._observe_invariant(envelope, exc, default="resolve")
+                    return await self._scope_error(envelope, exc)
+                except IdentityUnavailable:
+                    # Not settled on the bus: shutdown/restart also retries this message.
+                    retried = True
+                    if episode is not None:
+                        await self._observe_retry(envelope, episode)
+                    await asyncio.sleep(completion_events.RETRY_SECONDS)
+        finally:
+            self._finish_scope_attempt(episode)
 
     def dispatch(self, session: ManagerSession, envelope: MessageEnvelope) -> None:
         """Queue ``envelope`` for ``session``'s worker, started on first use."""
@@ -304,19 +309,35 @@ class SessionRouter:
         await chat_scope_alerts.invariant_violation(
             self._agent.agent_id, where, channel_id=origin.get("channel_id"), chat=origin.get("chat"), scope=scope)
 
-    async def _observe_retry(self, envelope: MessageEnvelope) -> None:
+    def _scope_attempt(self, envelope: MessageEnvelope) -> str | None:
+        """The message id when this delivery resolves a scoped group. Other identity retries stay uncounted."""
+        from .manager import _message_origin
+
+        origin = _message_origin(envelope)
+        if session_routing.scoped(self._agent.agent_id) and origin["group"]:
+            return envelope.message_id
+        return None
+
+    def _finish_scope_attempt(self, episode: str | None) -> None:
+        if episode is None:
+            return
+        from .. import chat_scope_alerts
+
+        chat_scope_alerts.clear_retry(self._agent.agent_id, episode)
+
+    async def _observe_retry(self, envelope: MessageEnvelope, episode: str) -> None:
         from .. import chat_scope_alerts, chat_scope_metrics
         from .manager import _message_origin
 
         chat_scope_metrics.resolution_retry(self._agent.agent_id)
         origin = _message_origin(envelope)
         await chat_scope_alerts.resolution_retrying(
-            self._agent.agent_id, channel_id=origin.get("channel_id"), chat=origin.get("chat"))
+            self._agent.agent_id, episode=episode, channel_id=origin.get("channel_id"), chat=origin.get("chat"))
 
-    def _observe_recovered(self) -> None:
+    def _observe_recovered(self, episode: str) -> None:
         from .. import chat_scope_metrics
 
-        chat_scope_metrics.resolution_recovered(self._agent.agent_id)
+        chat_scope_metrics.resolution_recovered(self._agent.agent_id, episode)
 
     async def _scoped_key(self, envelope: MessageEnvelope) -> SessionKey:
         from .manager import _message_origin, _sender_kind
@@ -620,9 +641,11 @@ class SessionRouter:
                 if not isinstance(item, _Completion) and envelope.message_type is MessageType.USER_MESSAGE \
                         and session_routing.scoped(agent.agent_id):
                     self._resolving.add(session.key)
+                    episode = None
                     try:
                         from .. import completion_events
 
+                        episode = self._scope_attempt(envelope)
                         retried = False
                         while True:
                             try:
@@ -630,8 +653,8 @@ class SessionRouter:
                                 if session.retired is not None:
                                     break
                                 target = self.session(key, self._scope(envelope))
-                                if retried:
-                                    self._observe_recovered()
+                                if retried and episode is not None:
+                                    self._observe_recovered(episode)
                                 break
                             except (ScopeUnavailable, ScopeInvariantViolation) as exc:
                                 if isinstance(exc, ScopeInvariantViolation):
@@ -642,9 +665,11 @@ class SessionRouter:
                                 if session.retired is not None:
                                     break
                                 retried = True
-                                await self._observe_retry(envelope)
+                                if episode is not None:
+                                    await self._observe_retry(envelope, episode)
                                 await asyncio.sleep(completion_events.RETRY_SECONDS)
                     finally:
+                        self._finish_scope_attempt(episode)
                         self._resolving.discard(session.key)
                     if session.retired is not None:
                         await self._end_retired(session, first=item)
