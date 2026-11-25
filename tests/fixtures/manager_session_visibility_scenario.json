@@ -1,0 +1,235 @@
+{
+  "baseline_revision": "e574e70dd",
+  "cases": {
+    "off": {
+      "launch_args": [
+        "--dangerously-skip-permissions",
+        "--disallowedTools",
+        "ListAgents,SendMessage",
+        "--model",
+        "claude-fable-5-2",
+        "--plugin-dir",
+        "<root>/.local/library/0998ca5a35046fb455f690026a96d1488b7450c68bb4947081ba0511deb8a846/personal",
+        "--mcp-config",
+        "<root>/.local/mcp/<sha>.json"
+      ],
+      "resident_command": "0c128b1b5a3a411aa746ac5b4d68c95d3556d77eb537b69cdcc5bb95a17aa63d",
+      "library": {
+        "items": [
+          {
+            "kind": "skill",
+            "name": "synthetic-global",
+            "sha256": "e8a2dbd0b879c7b5f9188462e83361b48d7b528746508e8e78192e6a36ce3bfb",
+            "plugin": "personal",
+            "scope": "global"
+          },
+          {
+            "kind": "skill",
+            "name": "synthetic-scenario",
+            "sha256": "6c80870902dd2510312dd156f17d43690b118c7ffb60425dcb54a234647be117",
+            "plugin": "personal",
+            "scope": "manager"
+          }
+        ],
+        "plugin_dirs": [
+          "<root>/.local/library/0998ca5a35046fb455f690026a96d1488b7450c68bb4947081ba0511deb8a846/personal"
+        ],
+        "manager_tools": [
+          "looper_overview",
+          "looper_tasks",
+          "looper_task_create",
+          "looper_task_control",
+          "looper_task_instruct",
+          "looper_task_gate_reply",
+          "looper_task_update",
+          "looper_concurrency",
+          "looper_projects",
+          "looper_agent_profiles",
+          "looper_providers",
+          "looper_models",
+          "looper_catalog",
+          "looper_config_export",
+          "looper_costs",
+          "looper_settings",
+          "looper_schedules",
+          "looper_confirm"
+        ],
+        "error": null
+      },
+      "mcp": {
+        "mcpServers": {
+          "looper": {
+            "args": [
+              "-m",
+              "looper.cli",
+              "mcp-server"
+            ],
+            "command": "<python>",
+            "env": {
+              "LOOPER_AGENT_TOKEN": "synthetic",
+              "LOOPER_AGENT_URL": "http://127.0.0.1:9"
+            }
+          }
+        }
+      },
+      "prompt": "c48270378ac65a1f427c2cfeb5ba274a1c455fe3e1d024390755e59dcefc38fb",
+      "tool_order": [
+        "looper_overview",
+        "looper_tasks",
+        "looper_task_create",
+        "looper_task_control",
+        "looper_task_instruct",
+        "looper_task_gate_reply",
+        "looper_task_update",
+        "looper_concurrency",
+        "looper_projects",
+        "looper_agent_profiles",
+        "looper_providers",
+        "looper_models",
+        "looper_catalog",
+        "looper_config_export",
+        "looper_costs",
+        "looper_settings",
+        "looper_schedules",
+        "looper_confirm"
+      ],
+      "tools": {
+        "looper_overview": "b5ee253a37eb115fc90ebffc015e561ccb9d6afab0c3d9420ea1a16feedd4da6",
+        "looper_tasks": "a9ff5f7dc5f1c4eb9f1ba77c8bd01353a1d541626cbfd2a750f6313f79754649",
+        "looper_task_create": "39269512caa056b31f14479b77ea6b3e17d2795e83806cadb419327162c1095c",
+        "looper_task_control": "3fb9132b9024d8108e8c9730be23465d60732047c88e0579de2d0a41d6f1a819",
+        "looper_task_instruct": "2a6279526fdd08f2d6e9433d8e2e30dcb7e681446b9a527614c810cb0773f984",
+        "looper_task_gate_reply": "94819e17ff41f6a288b7721a2d2f9facbe752e7395047304ee6b81192e6804a5",
+        "looper_task_update": "b5a40181cb5a11c130f6c474b46e7004b0a9eef336113307353e87fc229917d8",
+        "looper_concurrency": "3a111a278071107c52ad6b76e0a0ee6aec6a33ac6bba90adb635d07f403606c5",
+        "looper_projects": "d18d5765ded84307f8bd592c313bef33ee6a7b78e941141da07af3bef5c6abc9",
+        "looper_agent_profiles": "ad887df43a10c87e85bae6bda68bf1b12fa5eccae0032c22dcd920aef2494c78",
+        "looper_providers": "38a6fcd72f3cb6646f6acd3d60b961d20f1c5bcdc91a45cd510a99b1de5c0952",
+        "looper_models": "28c46d9a7d1fdd63e1aee8b72cb4a953253f44ff5120579a40763a9aa9bd1d13",
+        "looper_catalog": "74249f1b8239c958c0244277ab75632015fb579b5e9a3bc5c42e3aca4fdc4496",
+        "looper_config_export": "fb127d2db5f30d42172e5bac89c8e2f3cd3275575ff2c6468dc6c714d97f7a21",
+        "looper_costs": "f737f53681ed61cb2f03d34a097bf249ee5dcc2ee3926637b4ee48b167aa85de",
+        "looper_settings": "16e7a31043af9eb0f4ab0e699fb1342dada0ee17afa605c640a9d0f4ba376c0d",
+        "looper_schedules": "12a32e66203d74972622cc0e8e0a682300785ba2205170608f6cc06c9a4c07ca",
+        "looper_confirm": "cf31650b286bc77490ca6158eabab8853e5737f95a9a8066e8cb95462c209ef6"
+      },
+      "sections": "1db4fa7cabcd2bd37cbfc5da7110f1baee4f19644ade5c15e852ad21ba7d948d",
+      "input": "489d2511f38c2f2ad37a59b763497f251642ce532fe1a0816e247189070e4038"
+    },
+    "per_chat": {
+      "launch_args": [
+        "--dangerously-skip-permissions",
+        "--disallowedTools",
+        "ListAgents,SendMessage",
+        "--model",
+        "claude-fable-5-2",
+        "--plugin-dir",
+        "<root>/.local/library/0998ca5a35046fb455f690026a96d1488b7450c68bb4947081ba0511deb8a846/personal",
+        "--mcp-config",
+        "<root>/.local/manager-sessions/de8dd2a1f77e/.local/mcp/<sha>.json"
+      ],
+      "resident_command": "3d2fd51546fd8adaa024e2c614b2a77536549b371080eaf59e8ac6ee071ccd09",
+      "library": {
+        "items": [
+          {
+            "kind": "skill",
+            "name": "synthetic-global",
+            "sha256": "e8a2dbd0b879c7b5f9188462e83361b48d7b528746508e8e78192e6a36ce3bfb",
+            "plugin": "personal",
+            "scope": "global"
+          },
+          {
+            "kind": "skill",
+            "name": "synthetic-scenario",
+            "sha256": "6c80870902dd2510312dd156f17d43690b118c7ffb60425dcb54a234647be117",
+            "plugin": "personal",
+            "scope": "manager"
+          }
+        ],
+        "plugin_dirs": [
+          "<root>/.local/library/0998ca5a35046fb455f690026a96d1488b7450c68bb4947081ba0511deb8a846/personal"
+        ],
+        "manager_tools": [
+          "looper_overview",
+          "looper_tasks",
+          "looper_task_create",
+          "looper_task_control",
+          "looper_task_instruct",
+          "looper_task_gate_reply",
+          "looper_task_update",
+          "looper_concurrency",
+          "looper_projects",
+          "looper_agent_profiles",
+          "looper_providers",
+          "looper_models",
+          "looper_catalog",
+          "looper_config_export",
+          "looper_costs",
+          "looper_settings",
+          "looper_schedules",
+          "looper_confirm"
+        ],
+        "error": null
+      },
+      "mcp": {
+        "mcpServers": {
+          "looper": {
+            "args": [
+              "-m",
+              "looper.cli",
+              "mcp-server"
+            ],
+            "command": "<python>",
+            "env": {
+              "LOOPER_AGENT_TOKEN": "synthetic-group-token",
+              "LOOPER_AGENT_URL": "http://127.0.0.1:9"
+            }
+          }
+        }
+      },
+      "prompt": "c48270378ac65a1f427c2cfeb5ba274a1c455fe3e1d024390755e59dcefc38fb",
+      "tool_order": [
+        "looper_overview",
+        "looper_tasks",
+        "looper_task_create",
+        "looper_task_control",
+        "looper_task_instruct",
+        "looper_task_gate_reply",
+        "looper_task_update",
+        "looper_concurrency",
+        "looper_projects",
+        "looper_agent_profiles",
+        "looper_providers",
+        "looper_models",
+        "looper_catalog",
+        "looper_config_export",
+        "looper_costs",
+        "looper_settings",
+        "looper_schedules",
+        "looper_confirm"
+      ],
+      "tools": {
+        "looper_overview": "b5ee253a37eb115fc90ebffc015e561ccb9d6afab0c3d9420ea1a16feedd4da6",
+        "looper_tasks": "a9ff5f7dc5f1c4eb9f1ba77c8bd01353a1d541626cbfd2a750f6313f79754649",
+        "looper_task_create": "39269512caa056b31f14479b77ea6b3e17d2795e83806cadb419327162c1095c",
+        "looper_task_control": "3fb9132b9024d8108e8c9730be23465d60732047c88e0579de2d0a41d6f1a819",
+        "looper_task_instruct": "2a6279526fdd08f2d6e9433d8e2e30dcb7e681446b9a527614c810cb0773f984",
+        "looper_task_gate_reply": "94819e17ff41f6a288b7721a2d2f9facbe752e7395047304ee6b81192e6804a5",
+        "looper_task_update": "b5a40181cb5a11c130f6c474b46e7004b0a9eef336113307353e87fc229917d8",
+        "looper_concurrency": "3a111a278071107c52ad6b76e0a0ee6aec6a33ac6bba90adb635d07f403606c5",
+        "looper_projects": "d18d5765ded84307f8bd592c313bef33ee6a7b78e941141da07af3bef5c6abc9",
+        "looper_agent_profiles": "ad887df43a10c87e85bae6bda68bf1b12fa5eccae0032c22dcd920aef2494c78",
+        "looper_providers": "38a6fcd72f3cb6646f6acd3d60b961d20f1c5bcdc91a45cd510a99b1de5c0952",
+        "looper_models": "28c46d9a7d1fdd63e1aee8b72cb4a953253f44ff5120579a40763a9aa9bd1d13",
+        "looper_catalog": "74249f1b8239c958c0244277ab75632015fb579b5e9a3bc5c42e3aca4fdc4496",
+        "looper_config_export": "fb127d2db5f30d42172e5bac89c8e2f3cd3275575ff2c6468dc6c714d97f7a21",
+        "looper_costs": "f737f53681ed61cb2f03d34a097bf249ee5dcc2ee3926637b4ee48b167aa85de",
+        "looper_settings": "16e7a31043af9eb0f4ab0e699fb1342dada0ee17afa605c640a9d0f4ba376c0d",
+        "looper_schedules": "12a32e66203d74972622cc0e8e0a682300785ba2205170608f6cc06c9a4c07ca",
+        "looper_confirm": "cf31650b286bc77490ca6158eabab8853e5737f95a9a8066e8cb95462c209ef6"
+      },
+      "sections": "1db4fa7cabcd2bd37cbfc5da7110f1baee4f19644ade5c15e852ad21ba7d948d",
+      "input": "b85bf391db8044da80edcca8d51cf2daf992be2973c6885e895e35792edbde2d"
+    }
+  }
+}

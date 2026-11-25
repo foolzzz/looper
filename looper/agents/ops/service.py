@@ -64,7 +64,7 @@ from ...db import ledger as db_ledger, manager_actions as db_actions, managers a
 from ..managers_api import DEFAULT_MANAGER_ID, ManagerDefinition, ManagerTools, TaskPolicy, TaskScope
 from ..message import BOT_CHANNEL_TYPES, MessageEnvelope, builtin_channel_id
 from ..operator_identity import is_operator, operator_sender_id
-from .. import session_routing
+from .. import session_routing, session_visibility
 from ..reminders import reminders_on
 from ..tiers.manager_session import MAIN_SESSION, on_session_replaced
 from ..turn_context import SpeakerKind
@@ -467,11 +467,18 @@ class ManagerOps:
         listed only in such a turn, never with no turn running."""
         turn = (turn or self._turn) if session_key is None else (
             self._session_turns.get(session_key) or Turn(channel=None, chat=None))
+        key = session_key if session_key is not None else self._session_of(turn)
+        if (policy := session_visibility.for_session(key, manager_id=self._scope.manager_id)) is not None:
+            # Filter before reading any global schemas (templates, workflows, settings).
+            return [tool.listing() for name, tool in self._scope.tools.items() if name in policy.tools]
         tools = list((await self.current_scope()).tools.values())
         if any(_audience(tool) is Audience.OPERATOR for tool in tools) and not (
                 turn is not None and await _operator_turn(turn)):
             tools = [tool for tool in tools if _audience(tool) is Audience.ANY]
         return [task_directory_tool(project_tool(tool)).listing() for tool in tools]
+
+    def _session_of(self, turn: Turn | None) -> str:
+        return next((key for key, active in self._session_turns.items() if active is turn), MAIN_SESSION)
 
     async def _authorize(self, scope: OpsScope, name: str, arguments: Mapping[str, Any]) -> Tool:
         """The one check of what ``scope`` allows: the tool is among its tools, a read-only tool is only read, and
@@ -550,6 +557,17 @@ class ManagerOps:
         binding only observes: the call runs in the turn running when it comes, as it did before turns were bound,
         and each disagreement is logged and counted (``binding_report``), never refused. An authenticated session
         can only use its own bindings, in either mode."""
+        bound = self._bindings.get(binding) if binding else None
+        if bound is not None and session_key is not None and self._binding_sessions.get(binding) != session_key:
+            self._mismatch("other_session", bound, name, enforced=True)
+            return _error(ErrorCode.FORBIDDEN, "this turn belongs to another session; the call did not run")
+        key = session_key if session_key is not None else self._binding_sessions.get(
+            binding or "", self._session_of(bound or self._turn))
+        if (policy := session_visibility.for_session(key, manager_id=self._scope.manager_id)) is not None and name not in policy.tools:
+            # Also deny guessed, unknown and stale tool names, without revealing global
+            # schemas, validation errors or return values. Authenticated sessions cannot
+            # acquire main's access by omitting their binding.
+            return _error(ErrorCode.FORBIDDEN, "this session has no access to that tool")
         tool = self._scope.tools.get(name) or _MANAGER_TOOL_NAMES.get(name) or _LEDGER_TOOLS.get(name)
         if tool is None:
             from .planner import TOOLS as PLANNER_TOOLS
@@ -562,9 +580,6 @@ class ManagerOps:
         enforced = (chat_settings.stop_enabled() or session_routing.routes(self._scope.manager_id)
                     or bool(self._routed_turns) or session_key not in (None, MAIN_SESSION))
         bound = self._bindings.get(binding) if binding else None
-        if bound is not None and session_key is not None and self._binding_sessions.get(binding) != session_key:
-            self._mismatch("other_session", bound, name, enforced=True)
-            return _error(ErrorCode.FORBIDDEN, "this turn belongs to another session; the call did not run")
         self._observe_turn(name, binding, bound, enforced=enforced)
         turn = (bound if enforced else self._turn) or Turn(channel=None, chat=None)
         if _audience(tool) is Audience.OPERATOR:
@@ -1075,6 +1090,8 @@ class ManagerOps:
         """``turn`` runs now; the note its message starts with (``_begin_turn``), then, in a user turn, what the
         operator's card buttons did in this chat since its last one (``_note_button``)."""
         note = self._begin_turn(turn, binding, session_key=session_key)
+        if session_visibility.for_session(session_key, manager_id=self._scope.manager_id) is not None:
+            return ""
         return "\n".join(part for part in (note, *self._take_button_notes(turn, session_key)) if part)
 
     def _take_button_notes(self, turn: Turn, session_key: str) -> list[str]:
@@ -1163,6 +1180,8 @@ class ManagerOps:
             self._routed_turns[id(turn)] = turn
         if binding:
             self.register(turn, binding, session_key=session_key)
+        if session_visibility.for_session(session_key, manager_id=self._scope.manager_id) is not None:
+            return ""
         pending = self._pending.get(turn.chat_key)
         if turn.autonomous or pending is None:
             return ""
