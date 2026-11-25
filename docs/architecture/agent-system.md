@@ -8918,7 +8918,16 @@ built by `scripts/stage-dashboard.sh` at release time), and it carries
   activity pages and growing tool results preserve that anchor; live updates follow the bottom only
   when the reader is there. One “你离开之后” separator precedes the first row after the departure
   watermark. This client watermark is independent of `tasks.mark_seen`, which still sends only a sequence.
-- **Work task controls**: the gated task panel starts ready tasks and valid drafts through the existing
+- **Work drafts**: the centre composer appends messages to the server requirement through
+  `tasks.requirement_update`, separated by a blank line, and displays the persisted text and version.
+  It rereads before appending and clears input only after readback confirms the write. An uncertain save
+  locks sending and Start until a read confirms it; retry never repeats a write. Draft messages do not
+  start a Planner. The adjacent Start control requires a nonempty requirement and valid directory and
+  retains its owner and confirmation result when the task leaves draft. Other tasks keep panel controls.
+  Untitled rows and headers share a local creation-time label; task rows reserve the first line for
+  the title and show a single short status with a colored dot below it. New labels follow the panel's
+  Chinese copy; Work has no language-selection mechanism. CLI, Lark and Telegram operations are unchanged.
+- **Work task controls**: the gated Work page starts ready tasks and valid drafts through the existing
   operator start operation, resumes failed/stopped/cancelled tasks with the saved plan, and stops background
   execution separately from the conversation's reply Stop. Direct-mode completion uses `tasks.done`.
   Controls reread detail before writing, lock synchronous duplicate clicks, and use the page's shared
