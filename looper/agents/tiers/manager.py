@@ -52,6 +52,7 @@ from ..drain import DrainState
 from ..bus import MessageBus
 from ..channels import lark_quote
 from ..channels.chat_history import CHAT_RECORD, chat_record
+from ..chat_scopes import PrincipalKind
 from ..supervisor import cancel_and_wait
 from ..agent_settings import Access, AgentSettings, AgentType, Launch, Layer, load_agent_settings
 from ..session_profile import (
@@ -588,6 +589,15 @@ def _looper_call(name: Any, raw: Any) -> tuple[str, dict[str, Any]]:
     return name, arguments
 
 
+def _sender_kind(envelope: MessageEnvelope) -> PrincipalKind | None:
+    """The channel's trusted sender kind, or None for absent or unknown values."""
+    context = envelope.payload.get("channel_context")
+    try:
+        return PrincipalKind(context.get("sender_kind") if isinstance(context, dict) else None)
+    except (ValueError, TypeError):
+        return None
+
+
 def _message_origin(envelope: MessageEnvelope) -> dict[str, Any]:
     """The channel a message came from, its sender (Lark's open_id, Telegram's user id; the web chat names none),
     its chat (the Lark or Telegram chat, the web chat session) and whether that is a group chat: a Lark chat says
@@ -691,14 +701,14 @@ def _session_key(envelope: MessageEnvelope) -> str | None:
     return None
 
 
-def _chat_record(envelope: MessageEnvelope, message_id: str) -> dict[str, Any]:
+def _chat_record(envelope: MessageEnvelope, message_id: str, *, manager_session: str | None = None) -> dict[str, Any]:
     """The metadata that has a Telegram or Lark channel store an answer to ``envelope`` as ``message_id`` once it
     has tried to send it (``channels.chat_history``); nothing for the web chat, which stores its own, and for a chat
     whose turns are not stored."""
     key = _session_key(envelope)
     if _message_origin(envelope)["channel"] == "web" or not key:
         return {}
-    return {CHAT_RECORD: chat_record(key, message_id)}
+    return {CHAT_RECORD: chat_record(key, message_id, manager_session=manager_session)}
 
 
 def _reply_route(envelope: MessageEnvelope) -> dict[str, Any]:
@@ -3474,7 +3484,7 @@ class ManagerAgent:
             correlation_id=last.correlation_id,
             metadata={"origin_channel_id": last.metadata.get("origin_channel_id"),
                       **_reply_route(last),
-                      **_chat_record(last, f"auto-{uuid.uuid4().hex[:12]}"),
+                      **_chat_record(last, f"auto-{uuid.uuid4().hex[:12]}", manager_session=self._session_now().key),
                       **self._proactive_metadata(ProactiveSource.AUTONOMOUS)},
         ))
 
@@ -3749,9 +3759,14 @@ class ManagerAgent:
             key = _session_key(env)
             if not key:
                 return
+            context = env.payload.get("channel_context")
+            context = context if isinstance(context, dict) else {}
+            kind = _sender_kind(env)
             await db_chat.save_channel_message(
                 session_id=key, message_id=message_id,
                 role=role, content=content, channel=channel, manager_id=self.agent_id,
+                **({"manager_session": self._session_now().key, "sender_kind": kind.value if kind else None,
+                    "sender_name": context.get("sender_name")} if role == "user" else {}),
             )
             await ops_sessions.note_direct_thread(key, _message_origin(env))
         except Exception:
@@ -3769,7 +3784,8 @@ class ManagerAgent:
         failed with an ``error``, else answered."""
         assert self._bus is not None
         text = self._group_safe(original, text)
-        record = None if persist else {}
+        record = (_chat_record(original, f"{original.message_id}:reply", manager_session=self._session_now().key)
+                  if persist else {})
         outcome = outcome or (ReplyOutcome.FAILED if error else ReplyOutcome.ANSWERED)
         await self._bus.publish(reply_envelope(original, text, self.agent_address, error=error, outcome=outcome,
                                                record=record, snapshot=snapshot, cards=cards, ephemeral=ephemeral))
