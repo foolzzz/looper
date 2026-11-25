@@ -5,22 +5,26 @@
 
 const REDACTED = "[redacted]";
 
-/** A key whose value is a credential: a whole segment, so "keyboard" and "no refresh token" are not. */
-const SECRET_KEY = /(?:^|[_-])(?:api[_-]?key|private[_-]?key|passwd|password|authorization|bearer|cookie|session|token|secret|credential|key)(?=$|[_-])/i;
+/** Match only credential keys, so a nonsecret prefix cannot consume an inner assignment. */
+const SECRET_SEGMENT = "(?:api[_-]?key|private[_-]?key|passwd|password|authorization|bearer|cookie|session|token|secret|credential|key)";
+const SECRET_KEY = `(?:[A-Za-z0-9]+[_-])*${SECRET_SEGMENT}(?:[_-][A-Za-z0-9]+)*`;
+const ASSIGNMENT = new RegExp(
+  String.raw`(?<![A-Za-z0-9_-])((?:"${SECRET_KEY}"|'${SECRET_KEY}'|${SECRET_KEY})\s*[:=]\s*)("(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|\[redacted\]|[^\s,;&?#{}\[\]"'<>]+)`,
+  "gi",
+);
 
 function assigned(value: string): string {
-  return value.replace(
-    /\b([A-Za-z0-9]+(?:[_-][A-Za-z0-9]+)*)(\s*[:=]\s*)("(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|[^\s,;&]+)/g,
-    (match, key: string, sep: string) => (SECRET_KEY.test(key) ? `${key}${sep}${REDACTED}` : match),
-  );
+  return value.replace(ASSIGNMENT, (_match, keyAndSeparator: string) => `${keyAndSeparator}${REDACTED}`);
 }
 
 /** `value` with credential material replaced. Mentioning a token keeps the sentence. */
 export function redactDisplay(value: string): string {
-  return assigned(value.replace(/\b(?:Bearer|Basic)\s+[A-Za-z0-9\-._~+/=]{8,}/gi, REDACTED))
+  return assigned(value.replace(/\b(?:Bearer|Basic)\s+[A-Za-z0-9\-._~+/=]+/gi, REDACTED))
     .replace(/\b(?:sk|rk|pk|ghp|gho|github_pat|xox[baprs]|AKIA)[-_][A-Za-z0-9_\-]{8,}\b/gi, REDACTED)
+    .replace(/\b[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b/g, REDACTED)
+    // Opaque values can be hex or base64 without a mixture of cases and digits.
     .replace(
-      /(?<![A-Za-z0-9+/_-])(?=[A-Za-z0-9+/_-]*\d)(?=[A-Za-z0-9+/_-]*[a-z])(?=[A-Za-z0-9+/_-]*[A-Z])[A-Za-z0-9+/_-]{40,}={0,2}/g,
+      /(?<![A-Za-z0-9+/_-])[A-Za-z0-9+/_-]{40,}={0,2}/g,
       REDACTED,
     );
 }

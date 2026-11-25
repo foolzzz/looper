@@ -3,7 +3,7 @@ import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { WorkAttention } from "@/components/work-attention";
-import { redactDisplay } from "@/lib/attention-display";
+import { displayText } from "@/lib/attention-display";
 import { attentionSettingsGet, fetchAttention, type AttentionSummary } from "@/lib/api-attention";
 import { NeedsYouPage } from "@/pages/needs-you";
 
@@ -12,82 +12,69 @@ vi.mock("@/lib/api-attention", async (original) => ({
   attentionSettingsGet: vi.fn(),
   fetchAttention: vi.fn(),
 }));
-vi.mock("@/lib/v1", async (original) => ({
-  ...await original<typeof import("@/lib/v1")>(),
-  callV1: vi.fn(),
-  confirmV1: vi.fn(),
-}));
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
-const SAFE = "partly signed in (no refresh token)";
-const OPAQUE = `qW7${"nR2mK9pL4".repeat(5)}`;
-/** Each secret is distinct so one masked form cannot hide another. */
-const SECRETS = [
-  "rt_live_supersecretvalue",
-  "ak_live_colonsecretvalue",
-  "pw_live_passwordvalue1",
-  "pw_live_passwdvalue12",
-  "sec_live_secretvalue1",
-  "auth_live_headervalue",
-  "bear_live_keyvalue123",
-  "ck_live_cookievalue12",
-  "sess_live_sessionvalue",
-  "ky_live_barekeyvalue1",
-  "tk_live_tokensecret12",
-  "AbCdEfGh1234567890",
-  "dXNlcjpwYXNzZW9yZA",
-  "pw_quoted_secret_value",
-  "tk_single_quoted_value",
-  "sk-live-ABCDEFGHIJKLMNOPQRSTUVWXYZ12",
-  OPAQUE,
+const REDACTED = "[redacted]";
+const SAFE = ["partly signed in (no refresh token)", "token expired", "not signed in"];
+const KEYS = [
+  "refresh_token", "access_token", "api_key", "password", "passwd", "secret", "authorization", "cookie", "session",
+  "bearer", "key", "token", "client-secret", "private_key", "credential",
 ];
-const DIAGNOSIS = [
-  SAFE,
-  "refresh_token=rt_live_supersecretvalue",
-  "api_key: ak_live_colonsecretvalue",
-  "password=pw_live_passwordvalue1",
-  "passwd: pw_live_passwdvalue12",
-  "secret=sec_live_secretvalue1",
-  "authorization: auth_live_headervalue",
-  "bearer=bear_live_keyvalue123",
-  "cookie=ck_live_cookievalue12",
-  "session: sess_live_sessionvalue",
-  "key=ky_live_barekeyvalue1",
-  "token=tk_live_tokensecret12",
-  "Authorization: Bearer AbCdEfGh1234567890",
-  "Proxy-Authorization: Basic dXNlcjpwYXNzZW9yZA",
-  'password="pw_quoted_secret_value"',
-  "token: 'tk_single_quoted_value'",
-  "sk-live-ABCDEFGHIJKLMNOPQRSTUVWXYZ12",
-  OPAQUE,
-].join(" | ");
+const HEX = "0123456789abcdef".repeat(4);
+const OPAQUE = `qW7${"nR2mK9pL4".repeat(5)}`;
+const BASE64 = "c3ludGhldGljY3JlZGVudGlhbGZvcnRlc3Rpbmdvbmx5";
+const JWT = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJzeW50aGV0aWMifQ.c2lnbmF0dXJl";
+const CASES = [
+  ...KEYS.flatMap((key) => ["=", ": "].map((sep) => ({
+    name: `${key}${sep}`, input: `${key}${sep}synthetic_value`, expected: `${key}${sep}${REDACTED}`,
+    secrets: ["synthetic_value"],
+  }))),
+  ...[
+    ["failure prefix", "failed: refresh_token=rt_live_supersecretvalue", `failed: refresh_token=${REDACTED}`, "rt_live_supersecretvalue"],
+    ["nested prefix", 'failed: reason: {"refresh_token":"rt_live_supersecretvalue"}', `failed: reason: {"refresh_token":${REDACTED}}`, "rt_live_supersecretvalue"],
+    ["quoted key", '{"token":"tk_json_synthetic"}', `{"token":${REDACTED}}`, "tk_json_synthetic"],
+    ["single quoted key", "{'access_token': 'tk_synthetic value'}", `{'access_token': ${REDACTED}}`, "tk_synthetic value"],
+    ["quoted value", 'password="pw_quoted_secret_value with spaces"', `password=${REDACTED}`, "pw_quoted_secret_value"],
+    ["escaped quote", String.raw`token: "tk_synthetic\"value"`, `token: ${REDACTED}`, "tk_synthetic"],
+    ["single quoted value", "token: 'tk_single_quoted_value'", `token: ${REDACTED}`, "tk_single_quoted_value"],
+    ["URL query", "https://example.test/login?token=tk_query_value&state=ok", `https://example.test/login?token=${REDACTED}&state=ok`, "tk_query_value"],
+    ["multiple URL parameters", "?state=ok&access_token=tk_access_value&refresh_token=rt_refresh_value#done", `?state=ok&access_token=${REDACTED}&refresh_token=${REDACTED}#done`, "tk_access_value", "rt_refresh_value"],
+    ["Bearer header", "Authorization: Bearer AbCdEfGh1234567890", `Authorization: ${REDACTED}`, "AbCdEfGh1234567890"],
+    ["Basic header", "Proxy-Authorization: Basic dXNlcjpwYXNzZW9yZA", `Proxy-Authorization: ${REDACTED}`, "dXNlcjpwYXNzZW9yZA"],
+    ["short Basic header", "Authorization: Basic dTpw", `Authorization: ${REDACTED}`, "dTpw"],
+    ["quoted Basic header", 'authorization="Basic dTpw"', `authorization=${REDACTED}`, "dTpw"],
+    ["standalone short Basic", "failed: Basic dTpw", `failed: ${REDACTED}`, "dTpw"],
+    ["short Bearer", "failed: bearer x7", `failed: ${REDACTED}`, "x7"],
+    ["known token prefix", "sk-live-ABCDEFGHIJKLMNOPQRSTUVWXYZ12", REDACTED, "sk-live-ABCDEFGHIJKLMNOPQRSTUVWXYZ12"],
+    ["opaque", OPAQUE, REDACTED, OPAQUE],
+    ["hex", HEX, REDACTED, HEX],
+    ["uppercase hex", HEX.toUpperCase(), REDACTED, HEX.toUpperCase()],
+    ["base64", BASE64, REDACTED, BASE64],
+    ["padded base64", `${BASE64}==`, REDACTED, BASE64],
+    ["JWT", JWT, REDACTED, JWT],
+    ["adjacent assignments", "state: failed; token=tk_first, password=pw_second", `state: failed; token=${REDACTED}, password=${REDACTED}`, "tk_first", "pw_second"],
+  ].map(([name, input, expected, ...secrets]) => ({ name, input, expected, secrets })),
+  ...[...SAFE, "count=3; state: ok", "keyboard=connected; tokenizer: ready"].map((input) => ({
+    name: input, input, expected: input, secrets: [],
+  })),
+];
 
-const summary: AttentionSummary = {
-  read_at: "2026-11-20T08:00:00Z",
-  total: 2,
-  sections: [
-    {
-      kind: "failure_holds", state: "ok", count: 1, error: null,
-      items: [{
-        key: "failure:1", title: "Held task", context: DIAGNOSIS, since: null, href: null, ref: null,
-        facts: { streak: 2 },
-      }],
-    },
-    {
-      kind: "logins", state: "ok", count: 1, error: null,
-      items: [{
-        key: "login:cursor", title: "Cursor login", context: "", since: null, href: "#settings/runtimes", ref: null,
-        facts: { detail: DIAGNOSIS, fix: DIAGNOSIS },
-      }],
-    },
-  ],
-};
+function summary(input: string): AttentionSummary {
+  const item = { title: "Synthetic diagnosis", context: "", since: null, href: null, ref: null };
+  return {
+    read_at: "2026-11-20T08:00:00Z", total: 3, sections: [
+      { kind: "failure_holds", state: "ok", count: 1, error: null,
+        items: [{ ...item, context: input, key: "failure:1", facts: { streak: 2 } }] },
+      { kind: "deliveries", state: "ok", count: 1, error: null,
+        items: [{ ...item, key: "delivery:1", facts: { source: "subscription", fix: input } }] },
+      { kind: "logins", state: "ok", count: 1, error: null,
+        items: [{ ...item, key: "login:synthetic", facts: { detail: input, fix: input } }] },
+    ],
+  };
+}
 
-function line(host: HTMLElement): string {
-  const hits = [...host.querySelectorAll("p, span")]
-    .map((node) => node.textContent ?? "")
-    .filter((text) => text.includes(SAFE) && text.includes("连续失败"));
-  return hits.sort((a, b) => a.length - b.length)[0] ?? "";
+function detail(host: HTMLElement, section: string): string | null | undefined {
+  return host.querySelector(`section[aria-label="${section}"] li .text-xs`)?.textContent;
 }
 
 let workRoot: Root;
@@ -97,7 +84,6 @@ let needsHost: HTMLElement;
 
 beforeEach(() => {
   vi.mocked(attentionSettingsGet).mockResolvedValue({ enabled: true });
-  vi.mocked(fetchAttention).mockResolvedValue(summary);
   workHost = document.createElement("div");
   needsHost = document.createElement("div");
   document.body.append(workHost, needsHost);
@@ -113,37 +99,22 @@ afterEach(() => {
 });
 
 describe("attention display redaction", () => {
-  it("masks each credential form and keeps a diagnosis that only mentions a token", () => {
-    expect(OPAQUE.length).toBeGreaterThanOrEqual(40);
-    const masked = redactDisplay(DIAGNOSIS);
-    expect(masked).toContain(SAFE);
-    expect(masked).toContain("refresh_token=[redacted]");
-    expect(masked).toContain("api_key: [redacted]");
-    expect(masked).toContain("password=[redacted]");
-    expect(masked).toContain("passwd: [redacted]");
-    expect(masked).toContain("Authorization: [redacted]");
-    expect(masked).toContain("Proxy-Authorization: [redacted]");
-    for (const secret of SECRETS) expect(masked).not.toContain(secret);
-    expect(redactDisplay(SAFE)).toBe(SAFE);
-    expect(redactDisplay("count=3; state: ok")).toBe("count=3; state: ok");
-  });
-
-  it("renders the same masked text on the Needs you page and the work panel", async () => {
+  it.each(CASES)("renders the same safe diagnosis for $name", async ({ input, expected, secrets }) => {
+    expect(displayText(input)).toBe(expected);
+    vi.mocked(fetchAttention).mockResolvedValue(summary(input));
     await act(async () => {
       workRoot.render(<WorkAttention />);
       needsRoot.render(<NeedsYouPage />);
     });
-    const workLine = line(workHost);
-    const needsLine = line(needsHost);
-    expect(workLine).toContain(SAFE);
-    expect(needsLine).toContain(SAFE);
-    expect(workLine).toBe(needsLine);
-    expect(workHost.textContent).toContain("To fix:");
     for (const host of [workHost, needsHost]) {
-      for (const secret of SECRETS) {
+      expect(detail(host, "运行失败等你处理")).toBe(`${expected} · 连续失败 2 次`);
+      expect(detail(host, "Messages that may not have arrived")).toBe(`Subscription push · ${expected}`);
+      for (const secret of secrets) {
         expect(host.textContent).not.toContain(secret);
         expect(host.innerHTML).not.toContain(secret);
       }
     }
+    // Needs you leaves successful login reads to the startup banner; exercise the panel's detail/fix path too.
+    expect(detail(workHost, "Logins that fail")).toBe(`${expected} · To fix: ${expected}`);
   });
 });
