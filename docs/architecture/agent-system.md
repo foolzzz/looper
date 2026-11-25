@@ -167,9 +167,9 @@ Manager has no tool for it. The dashboard shows the task page's 指标 card and 
     so two Managers cannot share runtime files). Its MCP entry carries a distinct
     credential: the server checks that a binding belongs to that credential's
     session, so learning another binding cannot authorize its calls. For the default Manager, only
-    Looper's platform tools are available: no local file or shell tools,
-    catalog MCP servers, plugins, skills or subagents. Runtimes declare their
-    supported launch modes (`platform_tools`, `restricted_read`, `full`);
+    tools granted by `session_visibility.NON_MAIN_ALLOWLIST` are available
+    (currently none): no local file or shell tools, catalog MCP servers, plugins, skills or subagents.
+    Runtimes declare their supported launch modes (`platform_tools`, `restricted_read`, `full`);
     a non-main turn requires `platform_tools` and is refused otherwise,
     without falling back to main. Main's launch is unchanged.
     Claude Code shares only its CLI login with the operator (the original
@@ -207,7 +207,7 @@ Manager has no tool for it. The dashboard shows the task page's 指标 card and 
     what main's worker holds keeps its order, and the other sessions'
     processes stop once idle (the fleet's idle sweep). Their rows and saved
     runtime histories stay, including across a restart while routing is off.
-  - What a group or dm session sees is its own chat only
+  - What a default Manager's group or dm session sees is its own chat only
     (`tiers/group_session.py`). Its first turn starts with an opening, not
     `main`'s resume brief: `[GROUP SESSION] This is the session of one Lark
     group chat. You do not see the operator's direct chats or other groups.`
@@ -218,8 +218,29 @@ Manager has no tool for it. The dashboard shows the task page's 指标 card and 
     message being answered. A Telegram group stores none, so its opening says
     so. A session that starts over (a full context, a changed agent) gets its
     own handoff and the same excerpt, never other chats. `main`'s brief is
-    unchanged. A group or dm session's turn is not the operator's, so its
-    tools have no leads search or vault reads. A reply out of a dm session goes
+    unchanged. The typed, module-level `session_visibility.NON_MAIN_ALLOWLIST`
+    governs both model inputs and tool registration/calls for the default Manager's
+    non-main sessions only. Its complete input
+    grant is a fixed public chat prompt, the Manager's name only, this chat's
+    opening/history/handoff, current message and provenance, quotes and attachments,
+    session stop notices, and a session-local stable block containing only the name.
+    Operator-customized prompts, harness and profile text, projects, directories,
+    templates, workflows, tasks, gates, goals, knowledge, leads, memory, intents,
+    reminders, ledger, confirmations, settings and cost views are excluded.
+    New global sections and tools are excluded by default. Existing Manager tools
+    lack complete chat scopes, so none are registered or callable, including by
+    guessing a tool name or omitting a binding. Tasks cannot be created or controlled
+    from these model sessions. `/gates` and `/todo` return a fixed refusal;
+    `/profile` keeps its existing refusal. Operator command routers are bypassed.
+    Completion events use their originating chat's code notices instead of a model
+    turn that would read global project/cost facts. Old routed histories and handoffs
+    are discarded once when their saved `context_policy_version` differs from the
+    allowlist version; cost totals remain. Main and routing-off input/tool behavior
+    is unchanged. Scenario Managers, including their `per_chat` group sessions,
+    retain their own prompt, Agent Profile, tools, installed library and saved
+    context: this boundary is step 0 of the [chat scopes RFC, section 12](rfcs/chat-scopes-v0.zh-CN.md#12-分步计划),
+    whose intermediate-state table keeps scenario capabilities unchanged until scope resolution ships.
+    A reply out of a dm session goes
     through the group backstop (`ops.leads.for_group`), like a group's. With the untrusted
     fence enabled, stored user messages in this excerpt use the same typed group or direct-message
     fence as new messages, with chat and time provenance; assistant messages and handoffs stay unchanged.
@@ -248,7 +269,7 @@ Manager has no tool for it. The dashboard shows the task page's 指标 card and 
   ([The Manager's platform tools](#the-managers-platform-tools)): the MCP
   server `looper` is in every launch of its Claude, and each turn tells
   `ManagerOps` which chat and message the calls belong to. Every user turn
-  starts with a `Projects` section listing the existing projects (name,
+  in `main` starts with a `Projects` section listing the existing projects (name,
   default directory or "no default directory", description cut to 80
   characters) and, when there are any, a `Ready tasks` section: the 10 newest
   tasks created but not started (id, project, goal, requirement cut to 80

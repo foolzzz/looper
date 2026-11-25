@@ -19,7 +19,7 @@ from .connection import get_pool
 _COLUMNS = ("manager_id, session_key, kind, channel_id, chat, session_id, session_totals, runtime_type, "
             "profile_id, provider_id, clean_start, pending_handoff, context_tokens, last_turn_cost_usd, "
             "scope_id, scope_version, audience, scope_fingerprint, retired_at, retired_reason, activity_cursor, "
-            "created_at, last_active_at")
+            "created_at, last_active_at, context_policy_version")
 
 
 def _row(record: asyncpg.Record) -> dict[str, Any]:
@@ -41,15 +41,18 @@ async def get(
 
 
 async def save(row: Mapping[str, Any], *, pool: asyncpg.Pool | asyncpg.Connection | None = None) -> None:
-    """Insert or replace a session. ``context_tokens`` and ``last_turn_cost_usd`` are kept when ``row`` omits them."""
+    """Insert or replace a session. Omitted policy versions mark legacy context (0).
+
+    ``context_tokens`` and ``last_turn_cost_usd`` are kept when ``row`` omits them.
+    """
     pool = pool or get_pool()
     await pool.execute(
         """
         INSERT INTO manager_sessions (manager_id, session_key, kind, channel_id, chat, session_id, session_totals,
                                       runtime_type, profile_id, provider_id, clean_start, pending_handoff,
                                       context_tokens, last_turn_cost_usd, scope_id, scope_version, audience,
-                                      scope_fingerprint, last_active_at)
-        VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, now())
+                                      scope_fingerprint, last_active_at, context_policy_version)
+        VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, now(), $19)
         ON CONFLICT (manager_id, session_key) DO UPDATE
         SET kind = EXCLUDED.kind, channel_id = EXCLUDED.channel_id, chat = EXCLUDED.chat,
             session_id = EXCLUDED.session_id, session_totals = EXCLUDED.session_totals,
@@ -58,6 +61,7 @@ async def save(row: Mapping[str, Any], *, pool: asyncpg.Pool | asyncpg.Connectio
             pending_handoff = EXCLUDED.pending_handoff,
             scope_id = EXCLUDED.scope_id, scope_version = EXCLUDED.scope_version,
             audience = EXCLUDED.audience, scope_fingerprint = EXCLUDED.scope_fingerprint,
+            context_policy_version = EXCLUDED.context_policy_version,
             context_tokens = COALESCE(EXCLUDED.context_tokens, manager_sessions.context_tokens),
             last_turn_cost_usd = COALESCE(EXCLUDED.last_turn_cost_usd, manager_sessions.last_turn_cost_usd),
             last_active_at = now()
@@ -66,6 +70,7 @@ async def save(row: Mapping[str, Any], *, pool: asyncpg.Pool | asyncpg.Connectio
         json.dumps(dict(row["session_totals"])), row["runtime_type"], row["profile_id"], row["provider_id"],
         row["clean_start"], row["pending_handoff"], row.get("context_tokens"), row.get("last_turn_cost_usd"),
         row.get("scope_id"), row.get("scope_version"), row.get("audience"), row.get("scope_fingerprint"),
+        row.get("context_policy_version", 0),
     )
 
 
