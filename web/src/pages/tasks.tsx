@@ -115,6 +115,16 @@ function statusIcon(status: string) {
   }
 }
 
+/** The Tasks page's status icon plus its wording, so another page cannot invent a label. */
+export function TaskStatusMark({ status }: { status: string }) {
+  return (
+    <span className="inline-flex items-center gap-1.5">
+      {statusIcon(status)}
+      {statusBadge(status)}
+    </span>
+  );
+}
+
 const RESTARTABLE_STATUSES = ["stopped", "failed", "cancelled", READY_STATUS];
 
 /** A status filter's name. */
