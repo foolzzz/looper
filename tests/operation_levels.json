@@ -342,6 +342,8 @@
  "runs.usage": "inside",
  "runtimes.probe": "inside",
  "schedule_admin.confirm_target": "args",
+ "scenario_session_routing.get": "inside",
+ "scenario_session_routing.update": "inside",
  "schedule_admin.create": "args",
  "schedule_admin.delete": "inside",
  "schedule_admin.get": "inside",

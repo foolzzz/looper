@@ -1037,7 +1037,7 @@ class ManagerOps:
             raise ValueError("a Manager session needs a key")
         if session_key == MAIN_SESSION or self._turn_file is None:
             return self._turn_file
-        return (self._turn_file.parent / "manager-sessions" / session_routing.key_digest(session_key)
+        return (self._turn_file.parent / "manager-sessions" / session_routing.session_digest(self._scope.manager_id, session_key)
                 / ".local" / "manager-turn.json")
 
     def publish_binding(self, binding: str | None, *, session_key: str = MAIN_SESSION) -> None:

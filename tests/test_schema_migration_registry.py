@@ -108,7 +108,7 @@ def test_unanswered_pause_migrations_keep_unique_relative_order():
 def test_current_baseline_additions_have_upgrade_and_admission_migrations():
     discovered = migrations.discover()
     expected = {"mcp_tool_levels", "failure_typing", "memory_candidates", "channel_outbox",
-                "memory_draft_role", "memory_draft_queue"}
+                "memory_draft_role", "memory_draft_queue", "scenario_session_routing"}
     assert expected <= {migration.name for migration in discovered}
     assert expected <= {migration.name for migration in migrations.pending_migrations(discovered)}
     steps = migrations.online_steps(discovered)
