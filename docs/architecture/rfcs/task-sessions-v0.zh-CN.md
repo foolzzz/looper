@@ -454,7 +454,60 @@ task:<task_id>@<channel_id>:<chat>~<fingerprint>   以后：群里别人对着�
 
   `~` 仍是指纹的分隔符；聊天段用 `@`，不和 `~`、渠道线程 id 的 `#manager…` 后缀混淆。那篇 16 节设想的是「在群会话键后面加一段任务」；这里反过来，任务是键的主体，因为任务对话不在某一个聊天里，飞书话题只是它的一个入口。真有「某个群里的人对着某个任务说话」时，聊天作为第二段加进来，仍然每个（聊天, 范围）一条会话，满足那篇方案 A 的隔离。v0 不做共享受众：它要先有那篇的范围解析和群动态。
 - **摘录按线程取。** 任务会话的摘录按任务对话的线程 id 取（8.1），不动范围模型。
-- **先后。** 本文第 3 步排在那篇 1b 合入之后（10.2），所以任务会话的键从一开始就带指纹。键约束由本文第 3 步写成合在一起的形式：`CASE kind WHEN 'task' THEN 'task:' || task_id ELSE kind || ':' || channel_id || ':' || chat END || coalesce('~' || scope_fingerprint, '')`；8.1 的 SQL 按这个形式写最后那条约束。任务会话的能力在 1b 里写成内置集合 `task_session`：`chat`，绑定在这个任务上的 `tasks{read, reopen}`，以及 `files.read{roots: [task_dir], required: false}`；根 `task_dir` 只在受众是操作者时合法。集合由代码定义，Settings 里改不了。
+- **先后。** 本文第 3 步排在那篇 1b 合入之后（10.2），所以任务会话的键从一开始就带指纹。键约束由本文第 3 步写成合在一起的形式：`CASE kind WHEN 'task' THEN 'task:' || task_id ELSE kind || ':' || channel_id || ':' || chat END || coalesce('~' || scope_fingerprint, '')`；8.1 的 SQL 按这个形式写最后那条约束。那篇 1b 只写 `chat_only`、`full`、`legacy` 三个内置集合；任务会话用的内置集合 `task_session` 由本文第 3 步加（8.6）。
+
+### 8.6 任务会话的范围（本文第 3 步）
+
+**内置集合 `task_session`**，由代码定义，迁移写入第 1 版，Settings 里改不了：
+
+```json
+[{"kind": "chat"},
+ {"kind": "tasks", "projects": "manager", "actions": ["read", "reopen"], "visibility": "bound_task"},
+ {"kind": "files.read", "roots": ["task_dir"], "required": false}]
+```
+
+这一步同时扩展能力项的类型（那篇 5.1）：`tasks.actions` 加 `reopen`，`tasks.visibility` 加 `bound_task`（只有会话绑定的那个任务），`files.read.roots` 加 `task_dir`（8.4 的那个目录）。这三个新值只在 `task_session` 里合法，写进别的集合一律被拒（那篇 D2 的写入校验）。集合不带 `shell`，那篇的 `capability_set_versions_shell_check` 不用改。
+
+**操作者 ⇔ `full` 这条规则扩展成一条，三处同时改：**
+
+> 受众是操作者时，范围是 `full`（群和私聊会话），或者 `task_session`（任务会话）；`task_session` 只用在 `kind = task` 的会话上，受众只能是操作者；`kind = task` 的会话，范围只能是 `task_session`。
+
+1. **`Resolved`**（那篇第 6 节的解析结果）：构造检查加上会话种类。`kind is TASK` 时只接受（`operator`, `task_session`）；其他种类照旧，另外拒绝 `task_session`。违反就抛错，消息不结算，按不变量违例告警，和那篇的 D8 一样。
+2. **`SessionScope`**（那篇 1b 里会话记下的范围）：同一条检查，在构造时做。
+3. **`manager_sessions_scope_audience_check`**，以及 `capability_sets` 的 id 检查、群里能用的那几处范围检查：
+
+```sql
+ALTER TABLE capability_sets
+    DROP CONSTRAINT capability_sets_id_check,
+    -- 以那篇 1b 合入时的内置 id 列表为准，只加 'task_session'
+    ADD CONSTRAINT capability_sets_id_check
+        CHECK (id IN ('chat_only', 'task_entry', 'readonly_qa', 'full', 'legacy', 'task_session')
+               OR id ~ '^set-[a-z][a-z0-9-]{1,30}$');
+ALTER TABLE manager_sessions
+    DROP CONSTRAINT manager_sessions_scope_audience_check,
+    ADD CONSTRAINT manager_sessions_scope_audience_check CHECK (coalesce(CASE
+        WHEN kind = 'task' THEN scope_id = 'task_session' AND audience = 'operator'
+        ELSE (scope_id IS NULL AND audience IS NULL)
+             OR (scope_id IS NOT NULL AND audience IS NOT NULL AND scope_id <> 'task_session'
+                 AND (audience = 'operator') = (scope_id = 'full')) END, false));
+-- 群永远拿不到 task_session：群默认、建议范围和按人覆盖都排除它
+ALTER TABLE manager_chat_bindings
+    DROP CONSTRAINT manager_chat_bindings_scope_check,
+    ADD CONSTRAINT manager_chat_bindings_scope_check
+        CHECK (default_scope IS DISTINCT FROM 'full' AND default_scope IS DISTINCT FROM 'task_session'
+               AND (default_scope IS DISTINCT FROM 'legacy' OR legacy_allowed)),
+    DROP CONSTRAINT manager_chat_bindings_suggested_check,
+    ADD CONSTRAINT manager_chat_bindings_suggested_check
+        CHECK (suggested_scope IS NULL OR suggested_scope NOT IN ('full', 'legacy', 'task_session'));
+ALTER TABLE binding_principal_scopes
+    DROP CONSTRAINT binding_principal_scopes_scope_id_check,
+    ADD CONSTRAINT binding_principal_scopes_scope_id_check
+        CHECK (scope_id NOT IN ('full', 'legacy', 'task_session'));
+```
+
+- `coalesce(…, false)` 是因为 `kind = 'task'` 而范围或受众为空时，`scope_id = 'task_session'` 的结果是 NULL，CHECK 会放行（那篇 5.4 讲过同样的坑）。`ELSE` 分支里先判了非空，不会得出 NULL。
+- 约束名按那篇 1b 合入后库里实际的名字核对；`binding_principal_scopes` 那条是列上的内联约束，名字由 PostgreSQL 生成。
+- 以后有了共享受众的任务会话（8.5 的第三种键），在 `kind = 'task'` 分支里加上它的范围，同样三处一起改。
 
 ## 9. 并发与安全
 
@@ -512,7 +565,7 @@ plan 模式和租约管的是 Looper 这一侧的动作和误操作，不是隔�
 | 1 | 1 | `looper task enter / brief / ask / sessions`；`task_operator_sessions`；简报和按启动传的钩子；文件租约和服务端的两处试锁；`tasks.detail` 的 `operator_session` 字段 | 无 | 无：新命令；试锁只对有行的任务 | 4–6 人日 |
 | 2 | 2 | `reopen`：转换、`[REOPEN]`、`task_runs`、`task_outcomes.end_commit`、预算检查、工作区的各种情形（含 `operator` 状态的 worktree 和 `work` 进入时按需建回）、台账事件、通知路由；`looper task reopen`、管家工具和控制台按钮；7.8 的逐处核对 | 1（命令组和租约） | `tasks.reopen.enabled`，默认关；关着时管家的工具描述和控制台逐字节不变 | 4–6 人日 |
 | 3 | 1b | `looper task register`（默认原地）和交接说明 | 1 | 无 | 3–5 人日 |
-| 4 | 3 | `SessionKind.TASK`、`manager_sessions` 迁移、任务对话线程、`answerer`、类型化的「任务已结束」改投、任务会话的输入和工具（含操作者的只读目录）；`looper task ask` 对结束的任务接上 | 2；能力范围 RFC 第 1b 步（10.2） | `manager.task_sessions.enabled`，默认关 | 6–9 人日 |
+| 4 | 3 | `SessionKind.TASK`、`manager_sessions` 迁移、任务对话线程、`answerer`、类型化的「任务已结束」改投、任务会话的输入和工具（含操作者的只读目录）；内置集合 `task_session` 和操作者 ⇔ 范围规则的三处扩展（8.6）；`looper task ask` 对结束的任务接上 | 2；能力范围 RFC 第 1b 步（10.2） | `manager.task_sessions.enabled`，默认关 | 6–9 人日 |
 | 5 | 5 | 控制台任务页的对话框：`resolve_chat_target` 加 `kind: task`，运行中和结束后都对着任务对话 | 3 | 跟第 3 步 | 2–3 人日 |
 | 6 | 4 | 飞书一个任务一个话题：`task_threads` 映射表、根帖、进度 / 关卡 / 结束都回复到话题、入站按话题路由（关卡帖优先）、只认操作者 | 3；13.8 的决定 | 按 bot 的 `task_threads`，默认关 | 6–10 人日 |
 
@@ -522,13 +575,13 @@ plan 模式和租约管的是 Looper 这一侧的动作和误操作，不是隔�
 
 ### 10.2 和能力范围 RFC 第 1b 步的分工
 
-那一步和本文的第 1、2、1b 步并行开发。本文这三步不改那一步拥有的会话路由代码，按函数分工如下：
+那一步和本文的第 1、2、1b 步并行开发。会话路由、`manager_sessions` 和 `ops/service.py` 里的授权都归那一步；本文这三步可以调用 `operator_call`，但不改它的签名，其余一概不碰。按函数分工如下：
 
 | | 本文第 1、2、1b 步拥有 | 能力范围 RFC 第 1b 步拥有（本文这三步不改） |
 |---|---|---|
 | 会话路由 | 不碰 | `session_routing` 的 `SessionKind`、`SessionKey`、`session_key_for`、`resident_label`、`routes`；`tiers/manager_routing.py` 的 `SessionRouter.target`、`_user_key`、`session`、`admit`（常驻上限） |
 | 管家会话的存储与启动 | 不碰 | `manager_sessions` 表和 `db/manager_sessions.py`；`tiers/manager.py` 的会话启动、`_persist_chat`、`_build_user_message`；`tiers/group_session.py` 的 `opening`、`excerpt`、`brief` |
-| 平台工具的授权 | 只调用 `operator_call`（`ops/service.py:1474`），不改 | `ops/service.py` 的 `ManagerOps.current_listing`（按轮过滤清单）、`_authorize`、`_operator_turn`、`_confirm` 和两处高风险检查；`ops/__init__.py` 的待确认 |
+| 平台工具的授权 | 只调用 `operator_call`（`ops/service.py:1474`），签名不变 | `ops/service.py` 的 `ManagerOps.current_listing`（按轮过滤清单）、`_authorize`、`_operator_turn`、`_confirm` 和两处高风险检查；`ops/__init__.py` 的待确认 |
 | 运行时与渠道 | 不碰 | 运行时的启动模式声明；渠道写 `sender_kind` |
 | 任务的开始与重启 | `projects` 的 `check_task_control`、`start_ready_task`、`control_task`、`store_chat_supplement`；`tiers/task.py` 的 `_handle_start`、`_handle_restart`、`_start` | 不碰 |
 | 规划者 | `tiers/planner.py` 的 `_restart_plan`、`_restart_message`（加 `[REOPEN]`） | 不碰 |
@@ -539,7 +592,7 @@ plan 模式和租约管的是 Looper 这一侧的动作和误操作，不是隔�
 | 共用的小改动 | `untrusted.Source` 加一个值 `TASK_REQUIREMENT`，只加不改 | 用 `untrusted.fence`，不改它 |
 
 - 本文第 2 步的「`reopen` 只给操作者的回合」因此在调用时判断，不靠按轮过滤工具清单：那篇 1b 要把那段改成按范围取清单。
-- 本文第 3 步要改上表右栏的代码（`SessionKind`、`SessionKey`、`manager_sessions`、`SessionRouter.target`），所以排在那篇 1b 合入之后，基于合入后的 `main` 开工，键带指纹（8.5）；键约束写成 8.5 的合并形式。
+- 本文第 3 步要改上表右栏的代码（`SessionKind`、`SessionKey`、`manager_sessions`、`SessionRouter.target`，以及 8.6 的 `Resolved`、`SessionScope` 和几条范围约束），所以排在那篇 1b 合入之后，基于合入后的 `main` 开工，键带指纹（8.5）；键约束写成 8.5 的合并形式。`task_session` 集合由第 3 步加，不进那篇 1b。
 - 迁移的序号在实现时按 `main` 和开放的 PR 重新核对，两边的迁移互不修改对方的表。
 
 ### 10.3 每步的验证（照开发计划第 1 节）
@@ -549,7 +602,7 @@ plan 模式和租约管的是 Looper 这一侧的动作和误操作，不是隔�
 - **第 1 步：** 5.2 表每行一个参数化测试；5.7 的解析每条规则一个参数化用例（id、`cwd` 在任务目录里和更深处、同一目录几个任务、最近列表、MR 的各种写法和仓库对不上、全角和大小写、多词都要命中、恰好一个、几个、没有），并确认没有模型调用；租约两种先后顺序各一个测试，被拒时说出持有者；带 `LOOPER_AGENT_RUN` 时拒绝；简报的截断和围栏（正文和标题里的尖括号、引号拆不开围栏）；10.2 左栏之外的文件没有改动（评审时按表核对）；真实 CLI 按 10.1 的「试一下」跑一遍，读回「上次离开以后」，并确认 `observe` 时在 plan 模式。
 - **第 2 步：** 7.2 表每行一个测试；完成的 worktree 任务以 `work` 进入时按需建回并记成 `operator`，启动清扫跳过它，重新打开后变回 `active`、未提交的改动还在；不进入也不重新打开时不建回；T 检出在别处时拒绝；到了上限不给新上限时拒绝，给了能开；`task_runs` 和 `task_outcomes` 对得上；7.8 每处一个测试；`[REOPEN]` 是新的模型可见内容，跑真实规划者评测；用全新数据库在非 8767 端口、临时 runtime root 上跑 `looper serve`：完成一个任务、重新打开、再完成，读回两次运行。
 - **1b：** 默认原地，未提交的改动在任务里；显式 worktree 且有未提交改动时拒绝；交接说明出现在规划者的第一轮里；一次性 serve 上读回任务和补充说明。
-- **第 3 步：** `answerer` 每个分支一个测试；`SessionKey` 的形状检查，三条 CHECK 各有一个写入被拒的负例，在一次性 PostgreSQL 上跑迁移，旧行保留；改投最多一次；任务会话的输入清单冻结，哨兵门禁证明输入里没有画像、台账、别的任务，并有本任务的正向对照；工具对别的任务答 `not_found`；受众是操作者时能读这个任务的目录、读不到目录外，没有受限只读时按只用平台工具启动；任务会话契约跑真实管家评测。
+- **第 3 步：** `answerer` 每个分支一个测试；`SessionKey` 的形状检查，8.1 和 8.6 的每条 CHECK 各有一个写入被拒的负例（含 `task` 会话的范围或受众为空、`task_session` 出现在群会话或群绑定上、`task` 会话受众是 `shared`），`Resolved` 和 `SessionScope` 的同一组负例，在一次性 PostgreSQL 上跑迁移，旧行保留；改投最多一次；任务会话的输入清单冻结，哨兵门禁证明输入里没有画像、台账、别的任务，并有本任务的正向对照；工具对别的任务答 `not_found`；受众是操作者时能读这个任务的目录、读不到目录外，没有受限只读时按只用平台工具启动；任务会话契约跑真实管家评测。
 - **第 5 步：** 无头浏览器上，运行中和结束后各发一条，截图一张。
 - **第 4 步：** 开工前先定 13.8，并核实群里的话题回复是否必须 @ bot，以及发送频率和编辑上限。渠道替身上：任务开始时发根帖，进度进话题，操作者的回复进任务会话，别人的回复走群路由，关卡帖的回复仍进关卡。
 
