@@ -1556,6 +1556,8 @@ class ManagerAgent:
             token.times.ack_at = turn_metrics.ack_board.take(channel_id, message_id)
             token.times.ack = AckKind.REACTION if token.times.ack_at is not None else (AckKind.NONE if known else AckKind.PENDING)
         metadata = token.times.to_metadata(delivery, TurnOrigin.USER, token.times.received_at < self._metrics_started_at)
+        if is_lark(origin["channel"]) and isinstance(ingress := token.envelope.metadata.get("lark_ingress"), dict):
+            metadata["lark_ingress"] = ingress
         return turn_metrics.background(prepared.run.recorder.annotate({"turn_metrics": metadata}))
 
     @manager_budget.after_reply

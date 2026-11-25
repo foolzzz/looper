@@ -36,6 +36,54 @@ def _adapter(tmp_path: Path, profile: str = "", **kwargs: Any) -> LarkChannelAda
                               allowlist=SenderAllowlist("channel-lark", frozenset({OPEN_ID})), **kwargs)
 
 
+@pytest.mark.parametrize("enabled,created", [(True, "1700000000123"), (True, None), (True, "invalid"), (False, "1700000000123")])
+def test_cli_ingress_timing_reads_stdout_without_additional_calls(
+    tmp_path, lark_cli_stand_in, monkeypatch, caplog, enabled, created,
+):
+    from datetime import datetime, timezone
+    from looper.agents import chat_settings
+
+    monkeypatch.setattr(chat_settings, "_metrics_enabled", enabled)
+    caplog.set_level("INFO", logger="looper.agents.channels.lark")
+    world_file = tmp_path / "world.json"
+    world = json.loads(world_file.read_text())
+    world["events"] = [{**world["events"][0], **({"create_time": created} if created is not None else {})}]
+    world_file.write_text(json.dumps(world))
+
+    async def main():
+        bus = MessageBus(runtime_root=tmp_path)
+        adapter = _adapter(tmp_path)
+        adapter._bus, adapter._running = bus, True
+        before = datetime.now(timezone.utc)
+        try:
+            await asyncio.wait_for(adapter._run_event_consumer(), 5)
+            await asyncio.gather(*adapter._reactions._pending)
+            (message,) = bus.journal.undelivered()
+            lines = [r.message for r in caplog.records if r.message.startswith("lark_ingress ")]
+            assert ("lark_ingress" in message.metadata) is enabled
+            assert len(lines) == int(enabled)
+            if enabled:
+                metrics = message.metadata["lark_ingress"]
+                read = datetime.fromisoformat(metrics["stdout_read_at"])
+                locked = datetime.fromisoformat(metrics["lock_acquired_at"])
+                routed = datetime.fromisoformat(metrics["route_decided_at"])
+                assert before <= read <= locked <= routed <= datetime.now(timezone.utc)
+                assert metrics["sender_name_lookup_ms"] == metrics["attachment_download_ms"] == 0
+                if created == "1700000000123":
+                    assert metrics["platform_sent_at"] == "2023-11-14T22:13:20.123000+00:00"
+                    sent = datetime.fromisoformat(metrics["platform_sent_at"])
+                    assert metrics["platform_to_stdout_ms"] == round((read - sent).total_seconds() * 1000)
+                else:
+                    assert "platform_sent_at" not in metrics and "platform_to_stdout_ms" not in metrics
+        finally:
+            await adapter.stop()
+            await bus.shutdown()
+
+    asyncio.run(main())
+    assert sorted(_calls(lark_cli_stand_in)) == sorted([
+        consume_command()[1:], reaction_command("om_9")[1:]])
+
+
 @pytest.mark.parametrize("profile", ["", "work"])
 def test_every_command_carries_the_profile_when_there_is_one(profile: str) -> None:
     head = ["lark-cli", *(["--profile", profile] if profile else [])]
