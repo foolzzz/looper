@@ -690,17 +690,17 @@ Once before a release, on the release candidate (`main` after every merge):
 - opus on the 24 Planner tasks: `run --mode real --model opus --reps 3
   --tasks planner --jobs 4 --max-budget-usd 3.0 --case-budget-usd 6.0
   --total-cap-usd 40` (the earlier baseline cost about $27.73);
-- haiku on all 93 dialogs: `dialogs --mode real --reps 3 --jobs 4
+- haiku on all 99 dialogs: `dialogs --mode real --reps 3 --jobs 4
   --max-budget-usd 1.0 --case-budget-usd 1.0 --total-cap-usd $HAIKU_DIALOG_CAP_USD`;
-- sonnet on all 93 dialogs: `dialogs --mode real --model sonnet --reps 3 --jobs 4
+- sonnet on all 99 dialogs: `dialogs --mode real --model sonnet --reps 3 --jobs 4
   --max-budget-usd 1.0 --case-budget-usd 1.0 --total-cap-usd $SONNET_DIALOG_CAP_USD`, refreshing
   `baselines/dialogs-real-sonnet.json`;
-- the opus xhigh Manager on all 93 dialogs: `dialogs --mode real --reps 3 --jobs 4
+- the opus xhigh Manager on all 99 dialogs: `dialogs --mode real --reps 3 --jobs 4
   --manager-model opus --manager-effort xhigh --max-budget-usd 3.0
   --case-budget-usd 3.0 --total-cap-usd $OPUS_DIALOG_CAP_USD`.
 
 Omitting `--dialogs` selects every dialog in `dialogs.select(None)`: currently
-93, or 279 case/reps per three-rep tier. A complete 93-dialog cost measurement is blocked
+99, or 297 case/reps per three-rep tier. A complete 99-dialog cost measurement is blocked
 pending evaluation credentials, a fresh disposable database/runtime root and
 an authorized budget. Set the three `*_DIALOG_CAP_USD` variables to explicitly
 authorized candidate measurement ceilings before running these commands;
@@ -709,8 +709,8 @@ until each tier completes. Do not extrapolate from the committed 24-dialog
 reports: at clean commit `c9ac42d5c562306259203790cb23766d9abed34f`,
 `dialogs-real-haiku.json` covers 72 rows / $4.226970 and
 `dialogs-real-opus.json` covers 72 rows / $8.426588 (other roles on haiku).
-Neither measures the current 93-dialog selection; no Sonnet dialog report exists.
-After each full real candidate run, verify all 93 IDs at reps 1–3, no cap stop,
+Neither measures the current 99-dialog selection; no Sonnet dialog report exists.
+After each full real candidate run, verify all 99 IDs at reps 1–3, no cap stop,
 skipped or error rows, and reconcile row costs with the report total. Record
 the candidate commit, models/Manager effort, selected IDs/count, repetitions,
 row count and measured total here before deriving numeric caps with headroom.
@@ -1222,7 +1222,7 @@ no reply within `--timeout` (`timeout`) or the eval itself failed (`harness`,
 such as the slow task not getting under way); after an error its remaining
 turns are not sent and the run goes on with the next dialog. Fake mode plays
 the Manager with the stand-in, which makes each message's scripted calls over
-MCP; it takes about two minutes. Real mode now selects all 93 dialogs by
+MCP; it takes about two minutes. Real mode now selects all 99 dialogs by
 default. The committed cost references cover only 24 dialogs (see the release
 tiers above), so neither they nor the default `--total-cap-usd` (0.50)
 establish a sufficient cap. Use an explicitly authorized measurement ceiling
@@ -1241,7 +1241,7 @@ content in `<untrusted>` blocks; compare with the same dialogs without it),
 `--claude <executable>` (the real Claude Code CLI; default `claude` on PATH),
 `--manager-model opus --manager-effort xhigh` (the Manager alone on that
 model, the other roles on `--model`; the historical 24-dialog Opus report
-does not establish a cap for the current 93 dialogs; give it
+does not establish a cap for the current 99 dialogs; give it
 `--max-budget-usd 3.0`, `--case-budget-usd 3.0` with `--jobs 4` and a
 `--total-cap-usd "$OPUS_DIALOG_CAP_USD"` authorized for candidate measurement),
 `--switch-agent SPEC.json` (`session_profile_switch`: register that spec as the profile `eval/switch`, while the
@@ -1880,3 +1880,60 @@ LOOPER_TEST_DSH_DENSITY_EXECUTABLE=/path/to/dsh \
 The installed test is skipped unless that executable is explicitly selected.
 Its skip is a validation gap, not a passed DSH measurement. Reports are ignored
 local artifacts; do not commit raw samples or requests from a workstation.
+
+### Conversation-scoped task dialogs
+
+`chat_tasks_list`, `chat_task_create`, `chat_task_stop`,
+`chat_other_create_refused`, `chat_other_task_refused` and
+`chat_dm_overview_refused` send synthetic messages through a native `lark-cli`
+stand-in and the real `CliTransport`. Dialog metadata names `session: group|dm`
+and `sender: operator|other`; the channel writes the sender into the envelope.
+Each disposable server enables routing and conversation tools before startup.
+The operator's list/create/stop must succeed, another sender must cause no
+write, and another chat's task marker must never appear in a reply. Fake mode
+checks the harness and database effects, not model quality.
+
+Real validation requires explicit approval. Run the same harness and six cases
+on the zero-tool baseline and candidate, with a real Claude binary supplied by
+`--claude-bin`. On each revision, use Sonnet twice and Opus once with the
+Manager's effort set to xhigh (36 cases over both revisions):
+
+```bash
+cases=chat_tasks_list,chat_task_create,chat_task_stop,chat_other_create_refused,chat_other_task_refused,chat_dm_overview_refused
+uv run --system-certs --python 3.11 --extra test python -m evals.prompt_regression dialogs --mode real --dialogs "$cases" --model sonnet --reps 2 --max-budget-usd 1 --total-cap-usd 4 --stable-context --claude-bin "$CLAUDE_BIN" --out-dir "$EVAL_OUT/sonnet"
+uv run --system-certs --python 3.11 --extra test python -m evals.prompt_regression dialogs --mode real --dialogs "$cases" --model opus --manager-model opus --manager-effort xhigh --reps 1 --max-budget-usd 1 --total-cap-usd 2 --stable-context --claude-bin "$CLAUDE_BIN" --out-dir "$EVAL_OUT/opus"
+```
+
+There is no separate source-root flag: the runner serves the source tree that
+contains its harness. To compare with the zero-tool baseline, first commit the
+candidate, then extract that baseline into a temporary source tree and overlay
+only the candidate's `evals` directory. Reuse the candidate's Python environment;
+run from the extracted tree so both the harness and server import the baseline's
+`looper` code:
+
+```bash
+candidate_ref="$(git rev-parse HEAD)"
+candidate_python="$PWD/.venv/bin/python"
+baseline_root="$(mktemp -d)"
+git archive origin/main | tar -x -C "$baseline_root"
+git archive "$candidate_ref" evals | tar -x -C "$baseline_root"
+(
+  cd "$baseline_root"
+  "$candidate_python" -m evals.prompt_regression dialogs --mode real --dialogs "$cases" --model sonnet --reps 2 --max-budget-usd 1 --total-cap-usd 4 --stable-context --claude-bin "$CLAUDE_BIN" --out-dir "$EVAL_OUT/baseline/sonnet"
+  "$candidate_python" -m evals.prompt_regression dialogs --mode real --dialogs "$cases" --model opus --manager-model opus --manager-effort xhigh --reps 1 --max-budget-usd 1 --total-cap-usd 2 --stable-context --claude-bin "$CLAUDE_BIN" --out-dir "$EVAL_OUT/baseline/opus"
+)
+```
+
+Record the baseline revision separately: an archive has no git metadata. The
+baseline's operator list/create/stop cases are expected to fail the candidate's
+capability checks because it grants zero tools; refusal/privacy cases still
+apply. Compare observed tool success and reply claims, without treating those
+expected capability failures as a harness error or a passing candidate.
+
+`LOOPER_EVAL_DATABASE_URL` must name a disposable database server; never an
+active Looper database. The caps above total $12 across both revisions;
+estimated spend is $4–11. Private-approval and schedule dialog validation is
+separate, estimated at $9–23 and capped at $26 for all three stages together.
+A claimed execution without a successful operation or any cross-chat disclosure
+fails validation. Native CLI init events must list only `mcp__looper__*`; an
+additional minimal real turn to inspect that list is estimated at $0.01.
