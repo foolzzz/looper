@@ -7,11 +7,11 @@ and a worker task that runs its messages in order, on that session (``ManagerAge
 one on the bus once handled, so a message handed on and not finished replays at restart. Sessions run in parallel.
 Messages that run no model turn stay in the loop.
 
-At most ``session_routing.max_resident()`` sessions keep a process. Before a session other than main starts one at
-the cap, the least recently active idle session other than main is stopped (its session id stays saved, and its
-next message resumes it); when none is idle, the message waits, with a status line, until a turn ends. Main never
-waits and is never stopped for another. With a cap of 1, a session other than main still runs its turn when only
-main holds a process, and stops it once the turn is over.
+The default Manager and ``per_chat`` Managers each use ``session_routing.max_resident()``: idle non-main sessions
+make room, busy starts wait, and main never waits (a cap of 1 also admits a non-main turn beside main).
+Scoped Managers use a machine-wide cap counting all Managers' processes and reservations: the oldest idle
+non-main session makes room with its session id kept for resumption, starts wait when none is idle, main never
+waits or gets evicted, and scoped non-main residents are reclaimed after the configured idle timeout.
 
 Switched off, new messages go to main again: main's worker keeps the messages it holds in order, the other workers
 finish theirs, and their processes stop once idle (``sweep``).
@@ -23,6 +23,7 @@ import asyncio
 import logging
 import time
 import uuid
+import weakref
 from collections import deque
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -125,6 +126,34 @@ class _Queues:
         return checks
 
 
+class ResidentPool:
+    """All Managers' residents and reservations, serialized for scoped starts."""
+
+    def __init__(self) -> None:
+        self.routers: weakref.WeakSet[SessionRouter] = weakref.WeakSet()
+        self._condition: asyncio.Condition | None = None
+        self._loop: asyncio.AbstractEventLoop | None = None
+        self.waits: deque[tuple[str, float]] = deque(maxlen=256)
+
+    @property
+    def condition(self) -> asyncio.Condition:
+        loop = asyncio.get_running_loop()
+        if self._condition is None or self._loop is not loop:
+            self._condition, self._loop = asyncio.Condition(), loop
+        return self._condition
+
+    def count(self, exclude: ManagerSession) -> int:
+        return sum(1 for router in self.routers for session in router._agent._sessions.values()
+                   if session is not exclude and (session.claude.started or session.key in router._reservations))
+
+    async def changed(self) -> None:
+        async with self.condition:
+            self.condition.notify_all()
+
+
+pool = ResidentPool()
+
+
 class SessionRouter:
     """The workers of a Manager's sessions, and its resident processes' cap."""
 
@@ -144,6 +173,7 @@ class SessionRouter:
         self._reconciling: dict[tuple[str, str], asyncio.Lock] = {}
         self._resolving: set[str] = set()
         self._ending: set[str] = set()
+        pool.routers.add(self)
 
     # --- Where a message goes ---
 
@@ -654,6 +684,9 @@ class SessionRouter:
         agent = self._agent
         if not session_routing.routes(agent.agent_id):
             return
+        if session_routing.scoped(agent.agent_id):
+            await self._admit_scoped(session, envelope)
+            return
         told = False
         async with self._resident:
             while True:
@@ -675,18 +708,48 @@ class SessionRouter:
                     await agent._send_status(envelope, WAITING_STATUS, phase=True)
                 await self._resident.wait()
 
+    async def _admit_scoped(self, session: ManagerSession, envelope: MessageEnvelope | None) -> None:
+        waiting_since = None
+        async with pool.condition:
+            while True:
+                if pool.count(exclude=session) < session_routing.max_resident_total():
+                    break
+                victims = sorted(((router, s) for router in pool.routers for s in router._agent._sessions.values()
+                                  if s is not session and s.key != MAIN_SESSION and s.claude.started
+                                  and s.retired is None and router.idle(s)), key=lambda item: item[1].last_activity)
+                # A victim is idle, so its lifecycle gate is free; the pool never awaits another session's turn lock.
+                for router, victim in victims:
+                    if await router._stop_idle(victim, notify=False):
+                        logger.info("%s: stopped the idle session %s for %s", router._agent._log,
+                                    victim.key, self._agent.agent_id)
+                        break
+                else:
+                    if session.key == MAIN_SESSION:
+                        break
+                    if waiting_since is None:
+                        waiting_since = time.monotonic()
+                        if envelope is not None:
+                            await self._agent._send_status(envelope, WAITING_STATUS, phase=True)
+                    await pool.condition.wait()
+            self._reservations.add(session.key)
+            if waiting_since is not None:
+                pool.waits.append((self._agent.agent_id, time.monotonic() - waiting_since))
+
     async def release(self, session: ManagerSession) -> None:
         """A start succeeded, failed or was cancelled: release its reservation and wake waiting starts."""
         async with self._resident:
             self._reservations.discard(session.key)
             self._resident.notify_all()
+        await pool.changed()
 
     async def _turn_ended(self, session: ManagerSession) -> None:
         """A message of ``session`` was handled: over the cap (a cap of 1), its own process stops; waiting starts
         are woken."""
         started = [s for s in self._agent._sessions.values() if s.claude.started]
+        over_cap = (pool.count(exclude=session) >= session_routing.max_resident_total()
+                    if session_routing.scoped(self._agent.agent_id) else len(started) > session_routing.max_resident())
         if session.key != MAIN_SESSION and session.claude.started \
-                and len(started) > session_routing.max_resident() and self.idle(session):
+                and over_cap and self.idle(session):
             await self._stop_idle(session, notify=False)
         await self.changed()
 
@@ -694,6 +757,7 @@ class SessionRouter:
         """A turn ended or a process stopped: a start waiting for room looks again."""
         async with self._resident:
             self._resident.notify_all()
+        await pool.changed()
 
     async def _stop_idle(self, session: ManagerSession, *, notify: bool = True) -> bool:
         """Stop ``session``'s process if it is idle and its runtime agrees (``try_stop_if_idle``): its session id
@@ -713,6 +777,16 @@ class SessionRouter:
         if stopped and notify:
             await self.changed()
         return stopped
+
+    async def reclaim_idle(self, now: float) -> None:
+        """Stop expired scoped residents, retaining their saved session ids; retirement owns its tree cleanup."""
+        timeout = session_routing.idle_reclaim_seconds()
+        if not session_routing.scoped(self._agent.agent_id) or not timeout:
+            return
+        for session in list(self._agent._sessions.values()):
+            if session.key != MAIN_SESSION and session.retired is None and session.claude.started \
+                    and self.idle(session) and now - session.last_activity >= timeout:
+                await self._stop_idle(session)
 
     async def sweep(self) -> None:
         """Routing off: stop the idle processes of the sessions other than main (the Manager's idle sweep)."""
