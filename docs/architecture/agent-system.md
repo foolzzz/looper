@@ -866,9 +866,9 @@ Manager has no tool for it. The dashboard shows the task page's 指标 card and 
   more), and starts no Planner. The Manager's `looper_task_create` writes the
   ready task itself
 - Creates a PlannerAgent when a task starts and destroys it when the task
-  ends. `TASK_START` (the dashboard's Start on a ready task, or the
-  Manager's `looper_task_control` start) moves a ready task to `pending` once
-  (`tasks.start_ready_task`, a conditional update: a task that is not ready
+  ends. `TASK_START` (the dashboard's Start on a ready task or draft, or the
+  Manager's `looper_task_control` start on a ready task) moves it to `pending` once
+  (`tasks.start_ready_task`, a conditional update: a task that is neither ready nor a draft
   is logged and left alone); the started task reports its plan and outcome
   to the chat it was asked for in
 - Handles task lifecycle: start, stop (pause), restart, cancel. A
@@ -891,7 +891,9 @@ Manager has no tool for it. The dashboard shows the task page's 指标 card and 
   (`ACTIVE_STATUSES`) whose plan is live (`executing` or `verifying`): each
   gets a new Planner and a `TASK_RESUME`. Any other task left active is
   marked "stopped". A ready task
-  is neither: it stays ready until someone starts it
+  is neither: it stays ready until someone starts it. A work-mode draft (`draft`)
+  is also never resumed or restarted and does not count as active. Only an operator
+  starts it, after giving it a requirement and a working directory (`draft` → `pending`).
 
 ### Planner (`looper/agents/tiers/planner.py`)
 
@@ -8516,7 +8518,7 @@ Planner decides in a `[RESTART]` turn how the task goes on. Starting it over
 (`start_over`) plans it anew instead, with its steps, plan and Planner session
 deleted.
 
-**Status values**, by group (`looper/db/tasks.py` `STATUS_GROUPS`, the one place that groups them): needs you `waiting_user` (the Planner reports it while a user gate of the plan waits for the user, whatever else runs; [User gates](#user-gates)); in progress `pending` (started, its Planner starting), `assigned`, `running`, and the Planner's own `planning`, `executing`, `verifying` and `stopping`, which the TaskRouter stores; ready `init` (created from the dashboard or by the Manager, never started; the dashboard labels it "Ready — not started"); needs attention `failed` and `stopped`; `completed`; `cancelled`. A status no group knows counts as `other`, on the Dashboard and in `GET /api/tasks?group=other`, never dropped.
+**Status values**, by group (`looper/db/tasks.py` `STATUS_GROUPS`, the one place that groups them): needs you `waiting_user` (the Planner reports it while a user gate of the plan waits for the user, whatever else runs; [User gates](#user-gates)); in progress `pending` (started, its Planner starting), `assigned`, `running`, and the Planner's own `planning`, `executing`, `verifying` and `stopping`, which the TaskRouter stores; draft `draft` (created in work mode, never handed to the background; may have no requirement; can be deleted or started as `pending` once it has a requirement and directory); ready `init` (created from the dashboard or by the Manager, never started; the dashboard labels it "Ready — not started"); needs attention `failed` and `stopped`; `completed`; `cancelled`. A status no group knows counts as `other`, on the Dashboard and in `GET /api/tasks?group=other`, never dropped.
 
 **Phase values** (finer-grained, set by planner): `pending`, `planning`, `executing`, `verifying`, `completed`, `failed`
 
@@ -9015,6 +9017,12 @@ individual paths and operation IDs in the same order; every JSON operation has d
 The OpenAPI document is authoritative for fields, authentication and errors. Provider identity uses
 `vendor_type`/`endpoints`; models are separate records, and profiles select `model_id` and return a structured model.
 
+`tasks.create_draft` is operator-only and requires `tasks.conversations.enabled` (default false).
+It creates a draft in an existing project, with an optional title and workspace selection, but no requirement,
+workflow, template, schedule or rule. A draft gets a ledger item only when it starts. The operator can edit
+its requirement through `tasks.requirement_update` and start it through `task_control.start`;
+the Manager and API clients retain their ready-only start contract.
+
 | Path | Method | operationId |
 |---|---|---|
 | `/api/v1/ops/{overview,task_create,task_instruct,task_update,concurrency,config_export,costs,task_pipeline}` | POST | `overview, task_create, task_instruct, task_update, concurrency, config_export, costs, task_pipeline` |
@@ -9034,7 +9042,8 @@ The OpenAPI document is authoritative for fields, authentication and errors. Pro
 | `/api/v1/auth/{set_password,clear_password}` | POST | `auth.{set_password,clear_password}` |
 | `/api/v1/system/{check,status,overview}` | POST | `system.{check,status,overview}` |
 | `/api/v1/config/{export,import_preview,import_apply,import_upload,import_cancel}` | POST | `config.{export,import_preview,import_apply,import_upload,import_cancel}` |
-| `/api/v1/tasks/{requirement_update,configure,move,agents,continue,role_update,room_view,activity,activity_detail,conversation,activity_stream,create,page,detail,delete}` | POST | `tasks.{requirement_update,configure,move,agents,continue,role_update,room_view,activity,activity_detail,conversation,activity_stream,create,page,detail,delete}` |
+| `/api/v1/tasks/{requirement_update,configure,move,agents,continue,role_update,room_view,activity,activity_detail,conversation,activity_stream,create,create_draft,page,detail,delete}` | POST | `tasks.{requirement_update,configure,move,agents,continue,role_update,room_view,activity,activity_detail,conversation,activity_stream,create,create_draft,page,detail,delete}` |
+| `/api/v1/task_conversations/{get,update}` | POST | `task_conversations.{get,update}` (operator-only; read or set `tasks.conversations.enabled`, default false; null restores false) |
 | `/api/v1/catalog_items/{list,get,update,delete}` | POST | `catalog_items.{list,get,update,delete}` |
 | `/api/v1/installs/{create,update,delete,project}` | POST | `installs.{create,update,delete,project}` |
 | `/api/v1/catalog_sources/{import_machine,import_mcp,upload,git_preview,git_import,create_skill,create_mcp}` | POST | `catalog_sources.{import_machine,import_mcp,upload,git_preview,git_import,create_skill,create_mcp}` |
