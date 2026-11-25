@@ -1624,6 +1624,18 @@ leads. It sends SIGTERM to those groups and to the tree's processes outside
 them, waits up to `TERM_GRACE_SEC` (3 s), then sends SIGKILL to what is
 left. It never signals the server's own process or group.
 
+`TurnTree` also samples the running tree every 0.5 s. After 5 s without a
+change to its live processes or groups, it samples every 5 s instead. A
+detected change or a new resident turn restores the 0.5 s interval. Stop
+paths always force a fresh snapshot; periodic discovery while idle can lag
+by up to 5 s.
+
+On macOS, process identities come directly from libproc's
+`proc_pidinfo(PROC_PIDTBSDINFO)`, without spawning `ps`. They retain the
+existing whitespace-normalized `LC_ALL=C`, `TZ=UTC` `ps -o lstart=` format,
+including in persisted records. Failed native reads fall back to `ps`;
+Linux and other platforms continue to use `ps` for identities.
+
 A resident Claude Code that is asked to exit (its stdin closed, then
 `STOP_GRACE_SEC`) has its tree read before its stdin closes, so what it
 started is still found after it has exited and its children have been
@@ -1674,8 +1686,8 @@ resumes, `proc_tree.sweep` reads every record:
   server that exited during an end (its shutdown deadline, a second signal)
   has the rest ended now, the agent's children that outlived it included;
 - a pid is signalled only while it still has the recorded start time, checked
-  again right before its SIGTERM and its SIGKILL: what is left is the one
-  `ps` call between that check and the signal;
+  again right before its SIGTERM and its SIGKILL: an identity lookup still
+  leaves a small window before the signal;
 - a record is removed once what it names has been ended, except one whose
   server still runs (another server on the same runtime root), which is
   left alone with its agent, and one whose start times could not be read,
