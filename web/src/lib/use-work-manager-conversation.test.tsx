@@ -6,6 +6,8 @@ import { WorkConversation } from "@/components/work-conversation";
 import { useWorkManagerConversation } from "@/lib/use-work-manager-conversation";
 import { ForeignConversationError, type DbChatMessage } from "@/lib/api";
 
+import { clearWorkConversationMemory, createWorkConversationStore, workConversationKey } from "@/lib/use-work-conversation-state";
+
 const api = vi.hoisted(() => ({
   fetchChatMessages: vi.fn(), fetchChatSettings: vi.fn(), fetchChatTurn: vi.fn(),
   sendChat: vi.fn(), streamChatReply: vi.fn(), watchChat: vi.fn(), stopChatReply: vi.fn(),
@@ -47,7 +49,7 @@ const stage = () => act(() => adapter.onStaged(["queued"]));
 const input = () => host.querySelector("textarea")!;
 
 beforeEach(() => {
-  vi.useFakeTimers(); vi.resetAllMocks(); localStorage.clear(); sessionStorage.clear(); localStorage.setItem(POINTER, SID);
+  vi.useFakeTimers(); vi.resetAllMocks(); clearWorkConversationMemory(); localStorage.clear(); sessionStorage.clear(); localStorage.setItem(POINTER, SID);
   api.fetchChatMessages.mockResolvedValue([]); api.fetchChatSettings.mockResolvedValue({ stop_enabled: true });
   api.fetchChatTurn.mockResolvedValue(null); api.sendChat.mockResolvedValue({ correlation_id: "reply" });
   api.watchChat.mockReturnValue(vi.fn()); api.streamChatReply.mockReturnValue(vi.fn());
@@ -109,6 +111,15 @@ describe("Work default Manager", () => {
     await act(async () => [...host.querySelectorAll("button")].find(b => b.textContent === "重试")!.click()); await flush();
     expect(input().disabled).toBe(false); expect(host.textContent).toContain("还没有对话");
   });
+  it("revalidates ownership when returning to an earlier Manager thread", async () => {
+    api.fetchChatMessages.mockResolvedValueOnce([row("private", "earlier thread")]); await mount();
+    await changeThread("session-b");
+    const pending = deferred<DbChatMessage[]>(); api.fetchChatMessages.mockReturnValue(pending.promise);
+    api.watchChat.mockClear(); await changeThread(SID); await send("blocked");
+    expect(host.textContent).not.toContain("earlier thread"); expect(input().disabled).toBe(true);
+    expect(api.watchChat).not.toHaveBeenCalled(); expect(api.sendChat).not.toHaveBeenCalled();
+    await act(async () => pending.resolve([])); expect(host.textContent).toContain("earlier thread");
+  });
   it("fails closed for malformed history and unread Stop settings", async () => {
     api.fetchChatMessages.mockResolvedValue({}); api.fetchChatSettings.mockRejectedValue(new Error("offline"));
     await mount(); await send("blocked");
@@ -132,7 +143,7 @@ describe("Work default Manager", () => {
     expect(adapter.replying).toBe(false); expect(input().value).toBe("queued"); expect(host.textContent).toContain("recovered");
   });
   it("shows a server turn on reload and never auto-sends its queue", async () => {
-    sessionStorage.setItem(`looper-work-staged:manager:${SID}`, '["waiting"]'); api.fetchChatTurn.mockResolvedValue(turn()); await mount();
+    createWorkConversationStore().patch(workConversationKey({ kind: "manager", sessionId: SID }), { staged: ["waiting"] }); api.fetchChatTurn.mockResolvedValue(turn()); await mount();
     expect(adapter.replying).toBe(true); expect(input().placeholder).toContain("Replying"); api.fetchChatTurn.mockResolvedValue(null);
     await act(async () => vi.advanceTimersByTimeAsync(3000)); expect(input().value).toBe("waiting"); expect(api.sendChat).not.toHaveBeenCalled();
   });
