@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 from urllib.parse import urlparse
 
+from ...chat_scopes import LaunchMode
 from ...llmrec import LlmrecRoute, no_proxy
 from .. import (
     ApiProtocol, AuthKind, Capability, CostSource, Launcher, Probe, PromptBlock, ProviderBinding,
@@ -79,7 +80,7 @@ class ApiRuntime(RuntimeAdapter):
     auth_kinds = frozenset({AuthKind.API_KEY})
     roles = frozenset({"manager"})
     in_process = True
-    supports_platform_tools_only = True
+    launch_modes = frozenset({LaunchMode.PLATFORM_TOOLS, LaunchMode.FULL})
     isolation_id = "api-v1"
     can_replace_system_prompt = True
     can_interrupt = True
