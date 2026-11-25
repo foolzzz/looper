@@ -52,7 +52,7 @@ def _run(test, monkeypatch):
 
 
 @asynccontextmanager
-async def _api(tmp_path, pool, *, registry=True, listen=True, managers=None, confirm_binding=True):
+async def _api(tmp_path, pool, *, registry=True, listen=True, managers=None):
     _, token = await api_clients.create("Routing validation", pool=pool)
     bus = MessageBus(runtime_root=tmp_path)
     channels = ChannelRegistry(bus) if registry else None
@@ -68,9 +68,6 @@ async def _api(tmp_path, pool, *, registry=True, listen=True, managers=None, con
             path = "/api/v1/" + operation.replace(".", "/")
             status, _, answer = await _send(server, "POST " + path, {
                 **_bearer(token if client else TOKEN), "X-Looper-Session": session}, json.dumps(body or {}))
-            if (confirm_binding and operation == "manager_chat_bindings.put" and status == 202
-                    and "default_scope" not in (body or {}) and "Anyone in this chat" not in answer.get("impact", "")):
-                status, answer = await call("confirm", {"confirmation_id": answer["confirmation_id"]}, client=client, session=session)
             if status == 200 and operation != "confirm":
                 api_v1.validate_arguments({"type": "object", "properties": {
                     "result": api_v1.find("POST", path).result}}, {"result": answer["result"]})
@@ -416,9 +413,6 @@ def test_tcp_disconnect_during_commit_still_publishes_before_next_http_write(tmp
         async with _serving(tmp_path, listen=True) as server:
             server._channels = registry
             server._client_ops = ClientOps(Platform(bus=None, task_router=server._task_router, runtime_root=tmp_path))
-            status, _, pending = await _send(server, "POST /api/v1/manager_chat_bindings/put",
-                                            _bearer(TOKEN), json.dumps(_binding()))
-            assert status == 202, pending
             entered, release = asyncio.Event(), asyncio.Event()
             waiting = _watch_contention(registry, monkeypatch)
             original = asyncpg.transaction.Transaction.commit
@@ -432,8 +426,8 @@ def test_tcp_disconnect_during_commit_still_publishes_before_next_http_write(tmp
             monkeypatch.setattr(asyncpg.transaction.Transaction, "commit", commit)
             _, writer = await asyncio.open_connection("127.0.0.1", server._port)
             try:
-                writer.write(_request(server._port, "POST /api/v1/confirm", _bearer(TOKEN),
-                                      json.dumps({"confirmation_id": pending["confirmation_id"]})).encode())
+                writer.write(_request(server._port, "POST /api/v1/manager_chat_bindings/put",
+                                      _bearer(TOKEN), json.dumps(_binding())).encode())
                 await writer.drain()
                 await entered.wait()
                 writer.close()
@@ -500,10 +494,11 @@ def test_concurrent_puts_each_return_the_binding_written_by_that_request(tmp_pat
             lock = registry.mutation_lock(BOT)
             original = domain._bindings
             reads, lock_requests = 0, 0
+            lock_channels = []
 
             def mutation_lock(channel_id):
                 nonlocal lock_requests
-                assert channel_id == BOT
+                lock_channels.append(channel_id)
                 lock_requests += 1
                 if lock_requests == 2:
                     second_attempted.set()
@@ -538,6 +533,7 @@ def test_concurrent_puts_each_return_the_binding_written_by_that_request(tmp_pat
                 await second_attempted.wait()
                 release.set()
                 first_answer, second_answer = await asyncio.gather(first, second)
+                assert lock_channels and all(channel_id == BOT for channel_id in lock_channels), lock_channels
                 assert [first_answer[0], second_answer[0]] == [200, 200]
                 first_binding = first_answer[1]["result"]["binding"]
                 second_binding = second_answer[1]["result"]["binding"]
@@ -680,7 +676,9 @@ def test_all_tools_chat_policy_requires_operator_confirmation_before_write(tmp_p
             registry.bindings_changed("channel-lark", await routing.load_snapshot("channel-lark"))
             status, answer = await call("manager_chat_bindings.put", _policy_binding(manager="manager"))
             assert status == 202 and answer["status"] == "needs_confirmation", answer
-            assert "Anyone in this chat" in answer["impact"] and "all tools" in answer["impact"]
+            assert answer["impact"] == (
+                "Anyone in this chat, including bots, can then reach a Manager with all tools. "
+                "This Manager can run commands on this machine. Open this chat to everyone?")
             assert await pool.fetchval("SELECT count(*) FROM manager_chat_bindings") == 0
             assert registry.resolve_chat("channel-lark", "oc_example").sender_policy is routing.SenderPolicy.LISTED
             status, confirmed = await call("confirm", {"confirmation_id": answer["confirmation_id"]})

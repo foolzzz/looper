@@ -9418,10 +9418,12 @@ Binding responses include `default_scope`, `effective_default_scope`, `legacy_al
 and `suggested_scope`. The optional `stop_now` (default false) interrupts running turns
 whose sessions the scope change retires; otherwise they finish their current turn.
 Settings → Managers shows each binding's scope select, the legacy notice with Adopt, and its
-overrides list; the same operator-only operations and the generated CLI configure them too.
-Override writes lock the binding and refuse sender ids
-owned by another principal. Scope writes require high-risk confirmation and reconcile
-the running Manager after commit; a stopped Manager reconciles on its next message.
+overrides list. Capability sets and person or bot overrides are configured through the same
+operator-only operations and the generated CLI. Override writes lock the binding and refuse
+sender ids owned by another principal. Override writes and changes to a binding's effective
+default scope require confirmation, including a Manager move that resets that scope. Binding
+saves with no effective scope change keep their existing confirmation behavior. Writes
+reconcile the running Manager after commit; a stopped Manager reconciles on its next message.
 `manager_sessions.list` accepts an optional `manager_id` (default: the default Manager)
 and returns its main and stored sessions, including `scope` (`id`, `version`, `audience`)
 or null and `retired`; `manager_sessions.reset` remains limited to the default Manager.
