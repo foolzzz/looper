@@ -87,7 +87,8 @@ def private_ca(tmp_path_factory):
                    check=True, capture_output=True, timeout=5)
     extensions = root / 'server.ext'
     extensions.write_text('subjectAltName=IP:127.0.0.1,DNS:model.example.invalid\nbasicConstraints=critical,CA:FALSE\n'
-                          'keyUsage=critical,digitalSignature\nextendedKeyUsage=serverAuth\n')
+                          'keyUsage=critical,digitalSignature\nextendedKeyUsage=serverAuth\n'
+                          'authorityKeyIdentifier=keyid,issuer\n')
     subprocess.run(['openssl', 'x509', '-req', '-in', str(csr), '-CA', str(cert), '-CAkey', str(ca_key),
                     '-set_serial', '2', '-out', str(leaf), '-days', '1', '-extfile', str(extensions)],
                    check=True, capture_output=True, timeout=5)
