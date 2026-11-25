@@ -846,6 +846,7 @@ class ManagerAgent:
     _session_loaded = session_field("session_loaded")
     _state_shown = session_field("state_shown")
     _state_lost = session_field("state_lost")
+    _state_pending_whole = session_field("state_pending_whole")
     _state_generation = session_field("state_generation")
     _stopped_notes = session_field("stopped_notes")
     _lock_owner = session_field("lock_owner")
@@ -3577,24 +3578,32 @@ class ManagerAgent:
             reason = "new process"
         elif shown is None:
             reason = self._state_lost
+        elif self._state_pending_whole is not None:
+            reason = self._state_pending_whole
         return state_view.render(sections, shown, session=session.session_id, whole_reason=reason)
 
     def _context_changed(self, reason: str) -> None:
         """The session may no longer hold the last whole block (``reason``: a compaction, a turn of its own)."""
         self._state_generation += 1
         self._state_shown, self._state_lost = None, reason
+        self._state_pending_whole = None
 
     def _state_turn_ended(self, run: RunState, *, seen: bool) -> None:
         """After a turn that started with the state: the session holds its whole block once the turn went through
         (``seen``) with the generation it was rendered for. A turn that did not go through leaves no block a later
         turn may refer to; a compaction or a turn of its own meanwhile forgot it already (``_context_changed``)."""
         session = self._session_now()
-        if run.state is None or run.persona_scope.isolated:
+        if run.state is None:
+            return
+        if run.persona_scope.isolated:
+            # Even a failed turn may have put its block in the resident history.
+            self._state_pending_whole = state_view.WholeReason.OTHER_AUDIENCE
             return
         if not seen:
             self._state_shown, self._state_lost = None, "the last turn did not go through"
         elif run.state_generation == self._state_generation:
             self._state_shown = replace(run.state.shown, session=session.session_id)
+            self._state_pending_whole = None
 
     async def _projects_section(self, listed: db_tasks.TaskFilter | None = None) -> list[str]:
         """The existing projects, so Claude can name a task's project."""
