@@ -234,7 +234,6 @@ CLI_CASES = [
 @pytest.mark.parametrize("operation_id,flags,body", CLI_CASES)
 def test_generated_cli_uses_transient_operator_auth_and_declared_request(tmp_path, capsys, operation_id, flags, body):
     def respond(handler, request):
-        assert request[2]["authorization"] == "Bearer " + TOKEN
         cli_send(handler, 200, api_v1.document() if request[1].endswith("openapi.json")
                  else {"status": "ok", "result": RESULTS[operation_id]})
 
@@ -249,6 +248,7 @@ def test_generated_cli_uses_transient_operator_auth_and_declared_request(tmp_pat
         argv = ["--client-file", str(client_file), "--json", group, action, *flags,
                 "--url", server.url, "--operator-token-file", str(token_file)]
         assert loopercli.main(argv) == 0
+        assert server.requests and all(request[2]["authorization"] == "Bearer " + TOKEN for request in server.requests)
         assert server.requests[-1][0:2] == ("POST", _path(operation_id))
         assert server.requests[-1][3] == body
         assert not client_file.exists()
@@ -287,7 +287,6 @@ def test_client_file_cannot_authorize_generated_operator_command(tmp_path, capsy
 
 def test_generated_operator_bootstrap_preserves_a_business_url_field(tmp_path, capsys):
     def respond(handler, request):
-        assert request[2]["authorization"] == "Bearer " + TOKEN
         cli_send(handler, 200, api_v1.document() if request[1].endswith("openapi.json")
                  else {"status": "ok", "result": {}})
 
@@ -300,6 +299,7 @@ def test_generated_operator_bootstrap_preserves_a_business_url_field(tmp_path, c
                                "--name", "example", "--transport", "http", "--command", "example",
                                "--url", "https://example.test/mcp", "--server-url", server.url,
                                "--operator-token-file", str(token)]) == 0
+        assert server.requests and all(request[2]["authorization"] == "Bearer " + TOKEN for request in server.requests)
         assert server.requests[-1][0:2] == ("POST", "/api/v1/catalog_sources/create_mcp")
         assert server.requests[-1][3] == {"name": "example", "transport": "http", "command": "example",
                                           "url": "https://example.test/mcp"}

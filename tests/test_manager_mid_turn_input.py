@@ -372,7 +372,7 @@ def test_buffered_result_queues_followup_once_without_merging_or_settling(enable
                 await dispatch_event(event, **kwargs)
             enabled.setattr(output, "_dispatch", dispatch)
             writer = process.stdin
-            writes = []
+            writes, drain_yielded, reader_waiting = [], [], []
             class Writer:
                 def __getattr__(self, name):
                     return getattr(writer, name)
@@ -391,7 +391,7 @@ def test_buffered_result_queues_followup_once_without_merging_or_settling(enable
                     loop.call_soon(resumed.append, True)
                     await writer.drain()
                     if kernel:
-                        assert not resumed  # short line: real drain did not yield
+                        drain_yielded.append(bool(resumed))  # short line: real drain must not yield
             process.stdin = Writer()
             write = resident.write_mid_turn
             async def followup(text, **kwargs):
@@ -409,7 +409,7 @@ def test_buffered_result_queues_followup_once_without_merging_or_settling(enable
                 # The result is already in stdout before B's admission check. In
                 # the drain case the reader deliberately cannot finish until B writes.
                 if timing == "kernel_before_write":
-                    assert output._stdout._waiter is not None
+                    reader_waiting.append(output._stdout._waiter is not None)
                     write_end.sendall(result)
                 elif not kernel:
                     output._stdout.feed_data(result)
@@ -451,6 +451,8 @@ def test_buffered_result_queues_followup_once_without_merging_or_settling(enable
             assert "已并入当前回复" not in statuses
             assert second.message_id in {e.message_id for e in rig.bus.journal.undelivered()}
             assert len(writes) == int(wrote_input)
+            assert drain_yielded == ([False] if kernel and wrote_input else [])
+            assert reader_waiting == ([True] if timing == "kernel_before_write" else [])
             assert process.returncode is None  # the queued UUID keeps the resident and its background work
             (tmp_path / "read-followup").touch()
             proceed.set()

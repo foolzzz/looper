@@ -139,17 +139,19 @@ def test_prompts_tools_and_commands_match_the_catalog_without_the_card(monkeypat
 
 
 def test_the_example_snapshot_is_the_card_text(monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture) -> None:
+    task_ids, project_ids, read_times = [], [], []
+
     async def names(ids: Any, **_: Any) -> dict[str, Any]:
-        assert set(ids) == {"t-login", "t-report"}
+        task_ids.append(set(ids))
         return {"t-login": {"name": "修登录", "project_id": "p-web"},
                 "t-report": {"name": "整理周报", "project_id": "p-docs"}}
 
     async def projects(ids: Any, **_: Any) -> dict[str, str]:
-        assert set(ids) == {"p-web", "p-docs"}
+        project_ids.append(set(ids))
         return {"p-web": "web", "p-docs": "docs"}
 
     async def overview(since: datetime, **_: Any) -> dict[str, Any]:
-        assert since == NOW
+        read_times.append(since)
         return {"upcoming": [{"id": "sched-daily", "name": "日报", "project_name": "web",
                               "next_fire_at": FIRE, "timezone": "Asia/Shanghai"}]}
 
@@ -190,6 +192,9 @@ def test_the_example_snapshot_is_the_card_text(monkeypatch: pytest.MonkeyPatch, 
     async def check() -> None:
         with caplog.at_level(logging.INFO, logger="looper.agents.status_card"):
             card = await status_card.snapshot(fleet=fleet, task_router=router, worker_pool=pool, now=NOW)
+        assert task_ids == [{"t-login", "t-report"}]
+        assert project_ids == [{"p-web", "p-docs"}]
+        assert read_times == [NOW]
         assert card["text"] == EXAMPLE
         assert card["read_at"] == NOW.isoformat()
         assert [section["name"] for section in card["sections"]] == [
@@ -474,8 +479,10 @@ def test_waiting_counts_errors_and_the_earliest_item(monkeypatch: pytest.MonkeyP
     async def on(**_: Any) -> bool:
         return True
 
+    earliest_kinds = []
+
     async def earliest(kind: str, **_: Any) -> dict[str, Any]:
-        assert kind == "gates"
+        earliest_kinds.append(kind)
         return {"key": "gate:early", "title": "早的关卡", "since": early}
 
     monkeypatch.setattr("looper.agents.attention.enabled", on)
@@ -489,6 +496,7 @@ def test_waiting_counts_errors_and_the_earliest_item(monkeypatch: pytest.MonkeyP
         assert "等你：关卡 1 · 确认这里读不到 · 失败的定时任务没能读取（发 /todo 看详情）" in card["text"]
         waiting = next(section for section in card["sections"] if section["name"] == "waiting")
         assert waiting["state"] == "ok"
+        assert earliest_kinds == ["gates"]
         earliest = next(kind for kind in waiting["kinds"] if kind["kind"] == "gates")["earliest"]
         assert earliest == {"key": "gate:early", "title": "早的关卡", "since": early.isoformat()}
 
@@ -543,12 +551,14 @@ def test_confirmations_follow_a_fleet_that_can_list_them(monkeypatch: pytest.Mon
             return [{"confirmation_id": "c-1", "impact": "发消息", "tool": "send", "waited_seconds": 10,
                      "chat": "1", "channel": "web", "expires_in_seconds": 60}]
 
+    ops_ids = []
+
     class _ConfirmFleet:
         def agents(self) -> list[Any]:
             return [_Agent([_idle()])]
 
         def ops(self, agent_id: str) -> _Ops:
-            assert agent_id == "manager"
+            ops_ids.append(agent_id)
             return _Ops()
 
     async def on(**_: Any) -> bool:
@@ -561,6 +571,7 @@ def test_confirmations_follow_a_fleet_that_can_list_them(monkeypatch: pytest.Mon
             fleet=_ConfirmFleet(), task_router=SimpleNamespace(running_planners=lambda: []),
             worker_pool=None, now=NOW)
         assert "确认 1" in card["text"] and "等你：没能读取" not in card["text"]
+        assert ops_ids and set(ops_ids) == {"manager"}
         card = await status_card.snapshot(
             fleet=status_card.SoloFleet(_Agent([_idle()])),
             task_router=SimpleNamespace(running_planners=lambda: []), worker_pool=None, now=NOW)

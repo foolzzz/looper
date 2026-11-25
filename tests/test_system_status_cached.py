@@ -63,9 +63,11 @@ def test_status_returns_during_slow_probes_and_publishes_their_results(server, m
             finally:
                 done.set()
         monkeypatch.setattr(module, 'probe_login', probe)
+    running = []
     async def slow_running(state):
+        running.append(state)
         await asyncio.to_thread(time.sleep, 5)
-        raise AssertionError('status must not inspect processes')
+        return False
     monkeypatch.setattr(owner, '_running', slow_running)
 
     async def run():
@@ -90,6 +92,7 @@ def test_status_returns_during_slow_probes_and_publishes_their_results(server, m
         checks = {c['id']: c for c in result['checks']}
         assert [checks[key]['status'] for key in ('codex_login', 'coco_login', 'cursor_login')] == ['ok', 'fail', 'ok']
         assert sorted(probes) == sorted(module.__name__ for module in (codex_login, coco_login, cursor_login))
+        assert running == []
     asyncio.run(run())
 
 
