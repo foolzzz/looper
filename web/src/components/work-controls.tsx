@@ -14,6 +14,8 @@ export type WorkControlResult = { phase: "idle" | "requesting" | "accepted" | "s
 type Request = { action: Action; before: TaskDetail; controller: AbortController; terminal?: string; reads: number; warning?: string; rejected?: boolean };
 type Props = {
   task: TaskDetail;
+  disabled?: boolean;
+  compact?: boolean;
   onRefresh: (signal?: AbortSignal) => Promise<TaskDetail | undefined>;
   onResult?: (result: WorkControlResult) => void;
 };
@@ -23,7 +25,7 @@ export function WorkControls(props: Props) {
   return <Controls key={props.task.task_id} {...props} />;
 }
 
-function Controls({ task, onRefresh, onResult }: Props) {
+function Controls({ task, onRefresh, onResult, disabled, compact }: Props) {
   const [result, setResult] = useState<WorkControlResult>({ phase: "idle" });
   const [unavailable, setUnavailable] = useState<Action | null>(null);
   const request = useRef<Request | null>(null);
@@ -91,7 +93,7 @@ function Controls({ task, onRefresh, onResult }: Props) {
   }, [result.phase]);
 
   const run = async (action: Action) => {
-    if (request.current) return; // Synchronous lock, before React disables the controls.
+    if (disabled || request.current) return; // Synchronous lock, before React disables the controls.
     const pending: Request = { action, before: task, controller: new AbortController(), reads: 0, rejected: true };
     request.current = pending;
     setResult({ phase: "requesting" });
@@ -142,7 +144,7 @@ function Controls({ task, onRefresh, onResult }: Props) {
   };
   const startable = task.status === "init" || task.status === "draft" || RESTARTABLE.has(task.status);
   const direct = startable || task.status === "completed";
-  const blocked = result.phase === "requesting" || result.phase === "accepted" || result.phase === "error";
+  const blocked = disabled || result.phase === "requesting" || result.phase === "accepted" || result.phase === "error";
   const draftReason = task.status === "draft" ? !task.requirement?.trim() ? "请先填写需求" : !task.work_dir?.trim() ? "请先选择有效目录" : "" : "";
   const startUnavailable = unavailable === "start" ? task.status === "draft" ? "此服务器尚未提供草稿开始入口" : "开始暂不可用" : "";
   return <section aria-labelledby="work-controls-title" className="min-w-0 p-4">
@@ -153,13 +155,13 @@ function Controls({ task, onRefresh, onResult }: Props) {
       </Button>}
       {ACTIVE.has(task.status) && <Button variant="outline" disabled={blocked || unavailable === "stop"} onClick={() => void run("stop")}>停止后台任务</Button>}
       {direct && <Button variant="outline" disabled={blocked || unavailable === "done" || task.status === "completed"} onClick={() => void run("done")}>完成</Button>}
-      {["暂停", "交给后台", "接手"].map(label => <Button key={label} variant="outline" disabled aria-describedby="work-future-control-reason">{label}</Button>)}
+      {!compact && ["暂停", "交给后台", "接手"].map(label => <Button key={label} variant="outline" disabled aria-describedby="work-future-control-reason">{label}</Button>)}
     </div>
     <p id="work-start-reason" className="mt-2 text-xs text-muted-foreground">{draftReason || startUnavailable}</p>
     {unavailable === "done" && <p className="mt-2 text-xs text-muted-foreground">完成暂不可用</p>}
     {unavailable === "stop" && <p className="mt-2 text-xs text-muted-foreground">停止后台任务暂不可用</p>}
     {!direct && !ACTIVE.has(task.status) && <p className="mt-2 text-xs text-muted-foreground">未知任务状态，控制暂不可用</p>}
-    <p id="work-future-control-reason" className="mt-2 text-xs text-muted-foreground">此控制将在后续步骤提供</p>
+    {!compact && <p id="work-future-control-reason" className="mt-2 text-xs text-muted-foreground">此控制将在后续步骤提供</p>}
     {result.phase !== "idle" && <p role="status" className="mt-2 text-sm">
       {result.phase === "requesting" ? "正在请求 · 操作尚未确认" : result.phase === "accepted" ? "服务器已接受 · 操作尚未确认" : result.phase === "settled" ? "操作已确认" : "操作尚未确认"}
     </p>}

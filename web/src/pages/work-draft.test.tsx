@@ -1,0 +1,175 @@
+// @vitest-environment happy-dom
+import { act } from "react";
+import { createRoot, type Root } from "react-dom/client";
+import { afterEach, beforeEach, expect, it, vi } from "vitest";
+import { WorkPage } from "@/pages/work";
+
+vi.mock("@/lib/use-projects", () => ({ useProjects: () => ({ projects: [] }) }));
+(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
+
+let host: HTMLDivElement;
+let root: Root;
+let task: Record<string, unknown>;
+let refuse: string;
+let pendingConfirmation: boolean;
+let failReadback: boolean;
+let releaseWrite: (() => Promise<void>) | undefined;
+const writes: { url: string; body: Record<string, unknown> }[] = [];
+const settle = async () => { for (let n = 0; n < 15; n++) await act(async () => { await Promise.resolve(); }); };
+const button = (label: string) => [...host.querySelectorAll("button")].find(item => item.textContent === label)!;
+const input = () => host.querySelector('textarea')!;
+async function send(text: string) {
+  act(() => {
+    Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")!.set!.call(input(), text);
+    input().dispatchEvent(new Event("input", { bubbles: true }));
+  });
+  act(() => input().dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true })));
+  await settle();
+}
+async function show() {
+  await act(async () => root.render(<WorkPage sub="task/task-draft" onNavigate={() => {}} />));
+  await settle();
+}
+
+beforeEach(() => {
+  sessionStorage.clear(); localStorage.clear(); writes.length = 0;
+  refuse = ""; pendingConfirmation = false; failReadback = false; releaseWrite = undefined;
+  task = { task_id: "task-draft", title: "", status: "draft", requirement: "", requirement_versions: [],
+    created_at: "2026-11-25T10:45:00Z", work_dir: "workspace", project_id: "p", project_name: "Demo",
+    steps: [], gates: [], cost: { runs: 0, running: 0 } };
+  vi.stubGlobal("fetch", vi.fn(async (path: string, init?: RequestInit) => {
+    const url = String(path);
+    const body = JSON.parse(String(init?.body ?? "{}"));
+    let result: unknown = {};
+    let status = 200;
+    if (url.includes("requirement_update")) {
+      writes.push({ url, body });
+      await releaseWrite?.();
+      if (pendingConfirmation) return new Response(JSON.stringify({ status: "needs_confirmation", impact: "Operator confirmation required", confirmation_id: "pending", expires_in_seconds: 60 }), { status: 202 });
+      if (refuse) return new Response(JSON.stringify({ status: "error", error: { code: "conflict", message: refuse } }), { status: 409 });
+      const versions = task.requirement_versions as { version: number; text: string }[];
+      const version = versions.length + 1;
+      task = { ...task, requirement: body.requirement, requirement_versions: [...versions, { version, text: body.requirement, via: "operator" }] };
+      result = { task_id: task.task_id, version, requirement: body.requirement };
+    } else if (url.includes("task_control")) {
+      writes.push({ url, body });
+      if (refuse) return new Response(JSON.stringify({ status: "error", error: { code: "conflict", message: refuse } }), { status: 409 });
+      task = { ...task, status: "running" }; result = { task_id: task.task_id, started: true };
+    } else if (url.includes("tasks/detail")) {
+      if (failReadback && writes.length) throw new TypeError("Readback offline");
+      result = task;
+    } else if (url.includes("work_list")) result = { items: body.section === "open" ? [{ ...task, title: task.title || task.task_id, last_seq: 0 }] : [], schedules: [], next_cursor: null };
+    else if (url.includes("tasks/activity")) result = { activity: [] };
+    else if (url.includes("chat/targets")) result = { targets: [{ id: "planner-task-draft", kind: "planner", task_id: "task-draft", can_send: task.status !== "draft" }] };
+    else if (url.includes("chat/messages")) result = { messages: [] };
+    else if (url.includes("task_conversations")) result = { enabled: true };
+    if (init?.method === "GET") status = 405;
+    return new Response(JSON.stringify({ status: "ok", result }), { status, headers: { "Content-Type": "application/json" } });
+  }));
+  host = document.createElement("div"); document.body.append(host); root = createRoot(host);
+});
+afterEach(() => { act(() => root.unmount()); host.remove(); vi.unstubAllGlobals(); vi.restoreAllMocks(); });
+
+it("appends two draft messages through requirement_update and restores the server text and version on reload", async () => {
+  await show();
+  expect(input().disabled).toBe(false);
+  expect(button("开始").disabled).toBe(true);
+  expect(host.textContent).not.toContain("This task has ended");
+  await send("First requirement");
+  expect(writes[0]).toEqual({ url: "/api/v1/tasks/requirement_update", body: { task_id: "task-draft", requirement: "First requirement" } });
+  expect(host.querySelector('[aria-label="需求草稿"]')?.textContent).toContain("First requirement");
+  expect(input().value).toBe("");
+  expect(button("开始").disabled).toBe(false);
+  await send("Second requirement");
+  expect(writes[1].body.requirement).toBe("First requirement\n\nSecond requirement");
+  expect(writes).toHaveLength(2);
+  act(() => root.unmount()); root = createRoot(host); await show();
+  const draft = host.querySelector('[aria-label="需求草稿"]')!;
+  expect(draft.textContent).toContain("First requirement\n\nSecond requirement");
+  expect(draft.textContent).toContain("版本 2");
+  expect(writes.some(write => write.url.includes("task_control"))).toBe(false);
+});
+
+it.each([false, true])("keeps a rejected draft message and shows the server reason (confirmation=%s)", async confirmation => {
+  pendingConfirmation = confirmation; refuse = "Draft changes are disabled by this server";
+  await show(); await send("Keep this requirement");
+  expect(host.textContent).toContain(confirmation ? "Operator confirmation required" : refuse);
+  expect(input().value).toBe("Keep this requirement");
+  expect(host.querySelector('[aria-label="需求草稿"]')?.textContent).not.toContain("Keep this requirement");
+  expect(writes).toHaveLength(1);
+});
+
+it("keeps an uncertain save locked until a readback confirms it, without repeating the write", async () => {
+  await show(); failReadback = true; await send("Persist once");
+  expect(host.textContent).toContain("Readback offline");
+  expect(input().value).toBe("Persist once");
+  expect(button("开始").disabled).toBe(true);
+  failReadback = false;
+  act(() => button("重新读取需求").click()); await settle();
+  expect(host.querySelector('[aria-label="需求草稿"]')?.textContent).toContain("Persist once");
+  expect(input().value).toBe("");
+  expect(writes).toHaveLength(1);
+});
+
+it("shows the identical timestamped untitled name in the list and header, without the internal id", async () => {
+  await show();
+  const heading = host.querySelector("h1")!.textContent!;
+  expect(heading).toContain("未命名任务");
+  expect(heading).toMatch(/\d/);
+  expect(heading).not.toContain("task-draft");
+  const row = host.querySelector('a[href="#work/task/task-draft"]')!;
+  expect(row.querySelector('[data-task-title]')?.textContent).toBe(heading);
+  expect(row.textContent).not.toContain("task-draft");
+});
+
+it("reuses Start and reports its server refusal next to the requirement", async () => {
+  task = { ...task, requirement: "Ready to plan" }; refuse = "Planner start refused by server";
+  await show();
+  act(() => button("开始").click()); await settle();
+  expect(writes.some(write => write.url.includes("task_control"))).toBe(true);
+  expect(host.textContent).toContain(refuse);
+  expect(task.status).toBe("draft");
+});
+
+it("confirms Start with server readback without remounting the control owner", async () => {
+  task = { ...task, requirement: "Ready to plan" };
+  await show();
+  act(() => button("开始").click()); await settle();
+  expect(task.status).toBe("running");
+  expect(host.textContent).toContain("操作已确认");
+  expect(host.querySelector('[aria-label="需求草稿"]')).toBeNull();
+  expect(writes).toHaveLength(1);
+});
+
+it("appends to a fresh requirement and blocks double-send and Start while saving", async () => {
+  await show();
+  task = { ...task, requirement: "Edited in the details panel" };
+  let finish!: () => void;
+  releaseWrite = () => new Promise<void>(resolve => { finish = resolve; });
+  await send("Append once");
+  expect(button("开始").disabled).toBe(true);
+  act(() => {
+    input().dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+    button("开始").click();
+  });
+  expect(writes).toHaveLength(1);
+  expect(writes[0].body.requirement).toBe("Edited in the details panel\n\nAppend once");
+  act(() => finish()); await settle();
+  expect(input().value).toBe("");
+  expect(button("开始").disabled).toBe(false);
+});
+
+it.each([false, true])("restores composer focus after saving unless the user moved it (moved=%s)", async moved => {
+  await show();
+  let finish!: () => void;
+  releaseWrite = () => new Promise<void>(resolve => { finish = resolve; });
+  act(() => input().focus());
+  await send("Continue typing after save");
+  // Browsers blur a focused input when it becomes disabled; emulate that in the DOM test.
+  act(() => { input().disabled = false; input().blur(); input().disabled = true; });
+  expect(document.activeElement).toBe(document.body);
+  const target = moved ? button("New task") : input();
+  if (moved) act(() => target.focus());
+  act(() => finish()); await settle();
+  expect(document.activeElement).toBe(target);
+});

@@ -269,9 +269,9 @@ describe("Work page shell", () => {
       expect(el.tabIndex).toBeGreaterThanOrEqual(0);
       expect(el.className).toContain("focus-visible:ring-ring");
     }
-    expect(row.textContent).toContain("Running");
+    expect(row.textContent).toContain("运行中");
     expect(row.textContent).toContain("Unseen");
-    expect(row.querySelector("svg")).not.toBeNull();
+    expect(row.querySelector('[aria-hidden="true"]')).not.toBeNull();
     button.focus();
     await act(async () => {
       window.dispatchEvent(new KeyboardEvent("keydown", { key: "k", ctrlKey: true }));

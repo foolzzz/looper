@@ -10,7 +10,8 @@ import { WorkRequirement } from "@/components/work-requirement";
 import { WorkSteps } from "@/components/work-steps";
 import { WorkTaskManagerModel } from "@/components/work-task-manager-model";
 import { WorkCost } from "@/components/work-cost";
-import { WorkControls } from "@/components/work-controls";
+import { WorkControls, type WorkControlResult } from "@/components/work-controls";
+import { WorkDraft } from "@/components/work-draft";
 import { openWorkGate } from "@/components/work-activity-feed";
 import { fetchTaskDetail, isActiveTask, TaskDetailError, type TaskDetail, type UserGate } from "@/lib/api";
 import { startPolling } from "@/lib/polling";
@@ -71,6 +72,12 @@ function WorkPageContent({
   const [finder, setFinder] = useState(true);
   const [panel, setPanel] = useState(false);
   const [wide, setWide] = useState(false);
+  const [draftControlId, setDraftControlId] = useState("");
+  const [draftSaving, setDraftSaving] = useState(false);
+  const [controlBusy, setControlBusy] = useState(false);
+  const onControlResult = useCallback((result: WorkControlResult) => {
+    setControlBusy(["requesting", "accepted", "error"].includes(result.phase));
+  }, []);
   const [gateTarget, setGateTarget] = useState<{ taskId: string; step: string } | null>(null);
   const [gateError, setGateError] = useState("");
   const conversation = useRef<HTMLDivElement>(null);
@@ -100,6 +107,12 @@ function WorkPageContent({
   const cacheKey = workConversationKey({ kind: "planner", taskId });
   const candidate = detail.id === taskId && detail.task ? detail.task : conversations.cached(cacheKey)?.task;
   const selected = candidate?.task_id === taskId ? candidate : undefined;
+  // Keep the same control owner through Start readback so its confirmed result survives the transition.
+  const draftControls = selected?.status === "draft" || draftControlId === taskId;
+  useEffect(() => {
+    if (selected?.status === "draft") setDraftControlId(taskId);
+  }, [taskId, selected?.status]);
+  useEffect(() => { setControlBusy(false); setDraftSaving(false); }, [taskId]);
   useEffect(() => {
     const media = window.matchMedia("(min-width: 1280px)");
     const update = () => { setWide(media.matches); setPanel(false); };
@@ -286,7 +299,7 @@ function WorkPageContent({
           ) : (
             <>
               <header aria-label="Selected task" className="shrink-0 space-y-3 border-b border-border p-4">
-                <h1 className="text-lg font-semibold">{taskTitle(selected.title)}</h1>
+                <h1 className="text-lg font-semibold">{taskTitle(selected.title, selected.created_at, selected.task_id)}</h1>
                 <TaskStatusMark status={selected.status} />
                 {selected.project_name && <p className="text-sm text-muted-foreground">{selected.project_name}</p>}
                 <a className={LINK} href={`#tasks/${encodeURIComponent(taskId)}`}>Open the task page</a>
@@ -295,9 +308,13 @@ function WorkPageContent({
                 {gateError && <p role="alert" className="text-sm text-destructive">{gateError}</p>}
                 {detail.error && <p role="alert" className="text-sm text-destructive">Task refresh failed: {detail.error}</p>}
               </header>
+              {draftControls && <WorkControls key={taskId} task={selected} onRefresh={refreshDetail}
+                disabled={draftSaving} compact onResult={onControlResult} />}
               <div ref={conversation} data-work-detail="" data-layout={shortColumn ? "scroll" : "split"}
                 className={shortColumn ? "work-short-conversation block" : "flex min-h-0 min-w-0 flex-1 flex-col"}>
-                <PlannerWorkConversation key={taskId} taskId={taskId} detail={selected} task={selected} onGateChanged={onGateChanged} />
+                {selected.status === "draft" ? <WorkDraft key={taskId} task={selected} onRefresh={refreshDetail}
+                  disabled={controlBusy} onBusy={setDraftSaving} />
+                  : <PlannerWorkConversation key={taskId} taskId={taskId} detail={selected} task={selected} onGateChanged={onGateChanged} />}
               </div>
             </>
           )}
@@ -319,7 +336,7 @@ function WorkPageContent({
         className={wide ? "min-h-0 w-72 shrink-0 overflow-y-auto border-l border-border"
           : "fixed inset-0 z-50 overflow-y-auto bg-background"}>
         {!wide && <div className="border-b border-border p-3"><Button variant="outline" onClick={closePanel}>关闭任务详情</Button></div>}
-        <WorkControls task={selected} onRefresh={refreshDetail} />
+        {!draftControls && <WorkControls task={selected} onRefresh={refreshDetail} />}
         <WorkRequirement task={selected} onRefresh={async () => { await refreshDetail(); }} />
         <WorkTaskManagerModel
           mode="task"

@@ -150,12 +150,12 @@ describe("Work list", () => {
     expect(headers[1]).toContain("Alpha");
     const links = [...open.querySelectorAll("a")].map((link) => link.textContent ?? "");
     expect(links[0]).toContain("Beta new");
-    expect(links[0]).toContain("Running");
+    expect(links[0]).toContain("运行中");
     expect(links[0]).toContain("Unseen");
-    expect(links[1]).toContain("Untitled task");
-    expect(links[1]).toContain("Ready — not started");
-    expect(links[2]).toContain("Waiting for you");
-    expect(links[2]).toContain("Waits for you (2)");
+    expect(links[1]).toContain("未命名任务");
+    expect(links[1]).toContain("待开始");
+    expect(links[2]).toContain("等你回复 (2)");
+    expect(links[2].match(/等你回复/g)).toHaveLength(1);
     const openCalls = calls.filter((call) => call.url.includes("work_list") && call.body.section === "open");
     const scheduleCalls = calls.filter((call) => call.url.includes("work_list") && call.body.section === "schedules");
     expect(openCalls).toHaveLength(1);

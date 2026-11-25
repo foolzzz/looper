@@ -10,6 +10,7 @@ export const FIND_UNAVAILABLE = "Finding a task is not available on this server 
 export interface WorkTask {
   task_id: string;
   title: string;
+  created_at?: string;
   project_id: string | null;
   project_name: string | null;
   status: string;
@@ -219,8 +220,10 @@ export function groupByProject(tasks: WorkTask[]): { id: string; name: string; t
   return groups;
 }
 
-export function taskTitle(title: string | null | undefined): string {
-  return title?.trim() ? title : "Untitled task";
+export function taskTitle(title: string | null | undefined, createdAt?: string, taskId?: string): string {
+  if (title?.trim() && title !== taskId) return title;
+  const when = formatWhen(createdAt ?? null);
+  return when ? `未命名任务 · ${when}` : "未命名任务";
 }
 
 export function unavailableCopy(section: "open" | "ended" | "schedules"): string {
