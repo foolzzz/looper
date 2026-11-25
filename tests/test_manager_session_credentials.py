@@ -9,6 +9,7 @@ from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock
 
+import httpx
 import pytest
 
 from looper.agents import chat_settings, session_routing
@@ -73,6 +74,58 @@ def test_session_entries_have_distinct_stable_credentials(tmp_path: Path) -> Non
     assert ops.server_config()["env"][service.TOKEN_ENV] == "main-token"
 
 
+@pytest.mark.parametrize("session_key", [GROUP, "dm:synthetic-bot:synthetic-sender"])
+def test_session_credentials_cannot_read_operator_v1_domains(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, session_key: str,
+) -> None:
+    from looper.agents.v1_domains import intent_rules, manager_retrieval, message_collection
+
+    private = "PRIVATE_OPERATOR_V1_SENTINEL"
+    reads = []
+    for domain in (manager_retrieval, intent_rules, message_collection):
+        read = AsyncMock(return_value={"private": private})
+        monkeypatch.setattr(domain, "run", read)
+        reads.append(read)
+    operations = (
+        ("manager_retrieval/vault_search", {"query": "synthetic"}),
+        ("manager_retrieval/vault_read", {"path": "synthetic.md"}),
+        ("manager_retrieval/leads_search", {"query": "synthetic"}),
+        ("intent_rules/list", {}),
+        ("intent_rule_hits/list", {}),
+        ("message_collection/get", {"source_id": "synthetic"}),
+    )
+
+    async def run() -> None:
+        ops, _ = _ops(tmp_path)
+        credential = ops.server_config(session_key=session_key)["env"][service.TOKEN_ENV]
+        server = AgentHTTPServer(host="127.0.0.1", port=0, operator_token="synthetic-operator-token",
+                                 runtime_root=tmp_path, manager_ops=ops, web_adapter=SimpleNamespace(),
+                                 supervisor=SimpleNamespace(), task_router=SimpleNamespace())
+        await server.start()
+        try:
+            assert server._port not in (0, 8767)
+            async with httpx.AsyncClient(base_url=f"http://127.0.0.1:{server._port}", trust_env=False) as client:
+                # Each read is reachable with the operator credential, proving the routes are live.
+                for path, arguments in operations:
+                    response = await client.post(f"/api/v1/{path}", json=arguments,
+                                                 headers={"Authorization": "Bearer synthetic-operator-token"})
+                    assert response.status_code == 200, response.text
+                    assert response.json()["result"]["private"] == private
+                before = [read.await_count for read in reads]
+                assert before == [3, 2, 1]
+                for path, arguments in operations:
+                    response = await client.post(f"/api/v1/{path}", json=arguments,
+                                                 headers={"Authorization": f"Bearer {credential}"})
+                    assert response.status_code == 401, (path, response.text)
+                    assert response.json()["error"]["code"] == "unauthorized"
+                    assert private not in response.text
+                assert [read.await_count for read in reads] == before
+        finally:
+            await server.stop()
+
+    asyncio.run(run())
+
+
 @pytest.mark.parametrize("forged", [False, True])
 def test_endpoint_refuses_another_sessions_binding(tmp_path: Path, forged: bool) -> None:
     async def run() -> None:
@@ -91,8 +144,11 @@ def test_endpoint_refuses_another_sessions_binding(tmp_path: Path, forged: bool)
         assert answer["error"]["code"] == "forbidden"
         assert any(row["reason"] == "other_session" for row in ops.binding_report()["by"])
         own = await _call(ops, credential, "group-binding" if forged else "main-binding")
-        assert own["status"] == "ok"
-        assert ran == ["group-message" if forged else "main-message"]
+        if forged:
+            assert own["status"] == "error" and own["error"]["code"] == "forbidden"
+            assert ran == []  # even its own binding cannot grant an unlisted tool
+        else:
+            assert own["status"] == "ok" and ran == ["main-message"]
 
     asyncio.run(run())
 
@@ -113,11 +169,11 @@ def test_switch_off_keeps_binding_enforced_until_routed_turn_ends(tmp_path: Path
         assert missing["status"] == "error" and ran == []
         credential = ops.server_config(session_key=GROUP)["env"][service.TOKEN_ENV]
         own = await _call(ops, credential, "group-binding")
-        assert own["status"] == "ok" and ran == ["group-message"]
+        assert own["status"] == "error" and own["error"]["code"] == "forbidden" and ran == []
         ops.end_turn(group)
         assert not ops.binding_report()["enforced"]
         resumed = await _call(ops, "main-token", None)
-        assert resumed["status"] == "ok" and ran == ["group-message", "main-message"]
+        assert resumed["status"] == "ok" and ran == ["main-message"]
 
     asyncio.run(run())
 
