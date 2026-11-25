@@ -4,6 +4,7 @@ import { WorkList } from "@/components/work-list";
 import { WorkSwitcher } from "@/components/work-switcher";
 import { WorkGates } from "@/components/work-gates";
 import { WorkSteps } from "@/components/work-steps";
+import { WorkCost } from "@/components/work-cost";
 import { openWorkGate } from "@/components/work-activity-feed";
 import { fetchTaskDetail, isActiveTask, TaskDetailError, type TaskDetail, type UserGate } from "@/lib/api";
 import { startPolling } from "@/lib/polling";
@@ -270,6 +271,7 @@ function WorkPageContent({
         {!wide && <div className="border-b border-border p-3"><Button variant="outline" onClick={closePanel}>关闭任务详情</Button></div>}
         <WorkSteps task={selected} onOpenGate={step => openGate(step.step_key)} />
         <WorkGates task={selected} onOpenGate={openGate} />
+        <WorkCost task={selected} />
       </aside>}
       <WorkSwitcher open={switcher && finder} onClose={closeSwitcher} onOpen={openTask} restore={restore} />
     </div>

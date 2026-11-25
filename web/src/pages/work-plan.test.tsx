@@ -92,6 +92,22 @@ afterEach(() => {
 });
 
 describe("Work plan on the page", () => {
+  it("renders one cost section from shared detail and replaces it on task selection", async () => {
+    api.fetchTaskDetail.mockResolvedValue({ ...detail(), task_budget_usd: 10, own_budget_usd: null, cost: {
+      cost_usd: 8, runs: 1, running: 0, unpriced_runs: 0, by_model: [], manager_by_model: [],
+      by_role: { planner: { cost_usd: 8, runs: 1 }, worker: { cost_usd: 0, runs: 0 }, reviewer: { cost_usd: 0, runs: 0 } },
+    } });
+    await show(<WorkPage sub="task/task%201" onNavigate={vi.fn()} />);
+    expect(host.querySelectorAll('[aria-labelledby="work-cost-title"]')).toHaveLength(1);
+    expect(host.querySelector('[aria-labelledby="work-cost-title"]')?.textContent).toContain("80% of $10.00 cap · near the cap");
+    expect(api.fetchTaskDetail).toHaveBeenCalledTimes(1);
+    api.fetchTaskDetail.mockResolvedValue({ ...detail(), task_id: "other", cost: null });
+    await show(<WorkPage sub="task/other" onNavigate={vi.fn()} />);
+    expect(host.querySelector('[aria-labelledby="work-cost-title"]')?.textContent).toContain("费用尚不可用");
+    expect(host.querySelector('[aria-labelledby="work-cost-title"]')?.textContent).not.toContain("$8.00");
+    expect(api.fetchTaskDetail).toHaveBeenCalledTimes(2);
+  });
+
   it("opens, scrolls to and focuses the one gate editor from a step", async () => {
     const scroll = vi.spyOn(HTMLElement.prototype, "scrollIntoView").mockImplementation(() => {});
     await show(<WorkPage sub="task/task%201" onNavigate={() => {}} />);
