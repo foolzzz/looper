@@ -1206,6 +1206,9 @@ class ManagerAgent:
             else:
                 kind = ChatKind.GROUP if origin["group"] else ChatKind.DIRECT
             token.times = TurnTimes(received_at=received, chat=kind)
+            if is_lark(origin["channel"]) and isinstance(ingress := envelope.metadata.get("lark_ingress"), dict):
+                if ack_received := ingress.get("received_at"):
+                    token.times.ack_received_at = datetime.fromisoformat(ack_received)
         return token
 
     async def _stop_from_chat(self, envelope: MessageEnvelope) -> None:

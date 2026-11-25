@@ -60,19 +60,25 @@ class TurnTimes:
     tool_calls: int = 0
     chat: ChatKind = ChatKind.DASHBOARD
     queued_behind: QueuedBehind | None = None
+    ack_received_at: datetime | None = None
 
     def to_metadata(self, delivery: TurnDelivery, origin: TurnOrigin, replayed: bool) -> dict[str, Any]:
         if origin in (TurnOrigin.COMPLETION, TurnOrigin.IDLE_CHECK, TurnOrigin.TRIAGE):
             return {'origin': origin.value, 'tool_calls': self.tool_calls, 'delivery': delivery.value}
         def elapsed(at: datetime | None) -> int | None:
             return None if at is None else round((at - self.received_at).total_seconds() * 1000)
+        # A channel can acknowledge before it finishes preparing the bus envelope.
+        ack_ms = None if self.ack_at is None else max(0, round(
+            (self.ack_at - (self.ack_received_at or self.received_at)).total_seconds() * 1000))
         record = {'v': 1, 'origin': origin.value, 'chat': self.chat.value,
                   'received_at': self.received_at.isoformat().replace('+00:00', 'Z'),
-                  'ack': self.ack.value, 'ack_ms': elapsed(self.ack_at),
+                  'ack': self.ack.value, 'ack_ms': ack_ms,
                   'first_reply_ms': elapsed(self.first_reply_at), 'tool_calls': self.tool_calls,
                   'delivery': delivery.value, 'replayed': replayed}
         if self.queued_behind is not None:
             record['queued_behind'] = self.queued_behind.value
+        if self.ack_received_at is not None:
+            record['ack_received_at'] = self.ack_received_at.isoformat().replace('+00:00', 'Z')
         return record
 
 
