@@ -1156,7 +1156,8 @@ class LarkChannelAdapter(ChannelAdapter):
     async def _handle_lark_event(self, event: dict[str, Any]) -> Literal["handled", "duplicate", "ignored", "too_old"]:
         metrics = None
         if chat_settings.metrics_enabled() and event.get("type") == RECEIVE_EVENT:
-            metrics = {"sender_name_lookup_ms": 0, "attachment_download_ms": 0}
+            metrics = {"received_at": event.get("_lark_stdout_read_at") or datetime.now(timezone.utc).isoformat(),
+                       "sender_name_lookup_ms": 0, "attachment_download_ms": 0}
             if read_at := event.get("_lark_stdout_read_at"):
                 metrics["stdout_read_at"] = read_at
             # The consumer's create_time is a millisecond epoch string; never substitute receipt time.
