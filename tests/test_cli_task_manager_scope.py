@@ -323,7 +323,7 @@ def test_process_boundary(tmp_path, argv, code):
     environment = {**os.environ, "HOME": str(tmp_path), "CLAUDE_CONFIG_DIR": str(tmp_path / "claude"),
                    child_env.TASK_MANAGER_ENV: "task-x", "LOOPER_AGENT_TOKEN": "operator-secret"}
     environment.pop(child_env.AGENT_RUN_ENV, None)
-    result = subprocess.run([sys.executable, "-c", "from looper.cli import main; raise SystemExit(main())", *argv], env=environment,
+    result = subprocess.run([sys.executable, "-m", "looper.cli", *argv], env=environment,
                             input="", text=True, capture_output=True, timeout=10)
     assert result.returncode == code
     assert result.stdout == ""

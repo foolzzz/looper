@@ -287,3 +287,40 @@ def test_deleted_task_and_disabled_switch_serve_no_tools(monkeypatch, tmp_path):
                 ops.issue("task-enabled")
             assert not ops.authorized(f"Bearer {token}")
     run_db(check, monkeypatch)
+
+
+def test_native_resident_restart_rotates_mcp_and_hook_credentials(monkeypatch, tmp_path):
+    from unittest.mock import AsyncMock
+
+    from looper.agents.tiers.task_manager import TaskManagerPool
+    from tests.task_manager_support import NativeTaskManager
+
+    native = NativeTaskManager(monkeypatch, tmp_path)
+    monkeypatch.setattr(outbound_hook, "known_enabled", lambda: True)
+
+    async def check(db):
+        task_id, _, _ = await native.create(db)
+        ops = TaskManagerOps(_platform(tmp_path), url="http://127.0.0.1:9")
+        pool = TaskManagerPool(tmp_path / "runtime", native.executable, ops=ops, max_resident=lambda: 1)
+        previous = None
+        hook = pool.runtime_root / ".local" / "outbound-hook" / f"task-manager-{task_id}.json"
+        try:
+            agent = pool.agent(task_id)
+            for model in ("synthetic-first", "synthetic-second"):
+                native.switch_model(model)
+                _, _, launch, _ = await agent.prepare()
+                token = agent.token
+                assert token and ops.authorized(f"Bearer {token}")
+                config = json.loads(Path(launch.library.mcp_config).read_text())
+                assert config["mcpServers"]["looper"]["env"]["LOOPER_AGENT_TOKEN"] == token
+                assert json.loads(hook.read_text())["token"] == token
+                if previous:
+                    assert token != previous and not ops.authorized(f"Bearer {previous}")
+                await agent.resident.run_turn("reply", AsyncMock())
+                previous = token
+        finally:
+            await pool.shutdown()
+        assert not ops.authorized(f"Bearer {previous}")
+        assert not hook.exists()
+
+    run_db(check, monkeypatch, timeout=30)
