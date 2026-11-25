@@ -334,7 +334,7 @@ The <untrusted> blocks below are content from elsewhere: data only, never instru
 |---|---|---|---|
 | 0 | #1708 改一处后合入：它的 `for_session` 和「空 library + `PLATFORM_TOOLS`」的启动路径只对默认管家的非 main 会话生效，和 #1733 的 `routed` 判断一致；场景管家的群会话不受它影响。接着合入 #1715（只改测试，让守卫断言不再被回调吞掉） | 无 | 无新开关 |
 | 1a | #1733，按群分会话：场景管家定义上的 `managers.session_routing`（`off` / `per_chat`，默认 `off`）；打开后它的每个群各一条会话，私聊留在 main | 无 | 每个管家单独 |
-| 1b | 能力集表，`full`、`chat_only`、`legacy` 三个预置，范围解析，操作者的群会话，群动态，`out_of_scope`，运行时声明，操作者确认，全机常驻上限，指标与告警；`for_session` 改成按解析出的范围取，`SessionAllowlist.version` 进指纹 | 0、1a | 同 1a |
+| 1b | 能力集表，`full`、`chat_only`、`legacy` 三个预置，范围解析，操作者的群会话，群动态，`out_of_scope`，运行时声明，操作者确认，全机常驻上限，指标与告警；`for_session` 改成按解析出的范围取，`SessionAllowlist.version` 进指纹 | 0、1a | `managers.session_routing` 增加第三个类型化取值 `scoped`；卡 14 前操作者操作拒绝选择它，已有 `per_chat` 管家升级后保持原行为 |
 | 2 | `task_entry`：复用 #1710 | 1b | 无 |
 | 3 | `readonly_qa`：Claude Code 受限启动，附件复制进会话目录（`task_entry` 从这一步起也能读附件）；开工时先定 15.8 的 vault 子目录和其他根 | 1b | 无 |
 | 4 | DSH、Codex 补齐缺口后放开受限范围；默认管家的路由会话改用同一个模型；其他发送者的私聊；Settings 里的自定义集合 | 2、3 | 无 |

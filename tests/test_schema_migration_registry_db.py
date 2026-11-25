@@ -236,6 +236,15 @@ def test_reminder_send_boundary_upgrades_after_brief_and_retrospective_migration
     ("memory_draft_queue", "DROP TABLE memory_draft_waits, memory_draft_lease"),
     ("channel_outbox", "DROP TABLE channel_outbox CASCADE"),
     ("manager_sessions", "DROP TABLE manager_sessions CASCADE"),
+    ("chat_scopes", """DROP TABLE binding_principal_scopes, capability_set_versions, capability_sets CASCADE;
+ALTER TABLE manager_chat_bindings DROP COLUMN default_scope, DROP COLUMN legacy_allowed, DROP COLUMN suggested_scope;
+ALTER TABLE manager_sessions DROP COLUMN scope_id, DROP COLUMN scope_version, DROP COLUMN audience,
+    DROP COLUMN scope_fingerprint, DROP COLUMN retired_at, DROP COLUMN retired_reason, DROP COLUMN activity_cursor,
+    DROP CONSTRAINT IF EXISTS manager_sessions_key,
+    ADD CONSTRAINT manager_sessions_key CHECK (session_key = kind || ':' || channel_id || ':' || chat);
+ALTER TABLE chat_messages DROP COLUMN manager_session, DROP COLUMN sender_kind, DROP COLUMN sender_name;
+ALTER TABLE managers DROP CONSTRAINT managers_session_routing_check,
+    ADD CONSTRAINT managers_session_routing_check CHECK (session_routing IN ('off', 'per_chat'));"""),
     ("scenario_session_routing", "ALTER TABLE managers DROP COLUMN session_routing"),
     ("provider_limit_windows", "DROP TABLE provider_limit_windows CASCADE"),
     ("provider_admission", "DROP TABLE provider_admission, provider_admission_events CASCADE"),

@@ -1468,11 +1468,16 @@ class ManagerAgent:
         answered all the same. One ``lark_quote`` line logs what was read, never its content."""
         started = time.monotonic()
         own = envelope.payload.get("attachments")
+        read = lark_quote.unread(ref, "cancelled")
         try:
             if self.read_quote is None:
                 raise lark_quote.QuoteUnavailable("no channel reads quotes here")
             async with asyncio.timeout(QUOTE_READ_SEC):
-                read = await self.read_quote(ref, after=len(own) if isinstance(own, list) else 0)
+                session = self._session_now()
+                identity = (lark_quote.QuoteSession(self.agent_id, session.key, session.session_id)
+                            if session.session_id else None)
+                read = await self.read_quote(replace(ref, session=identity),
+                                             after=len(own) if isinstance(own, list) else 0)
         except lark_quote.QuoteUnavailable as exc:
             logger.warning("%s: could not read what %s quotes: %s", self._log, ref.message_id, exc)
             read = lark_quote.unread(ref, "channel not running")
@@ -1481,14 +1486,15 @@ class ManagerAgent:
         except Exception:
             logger.warning("%s: could not read what %s quotes", self._log, ref.message_id, exc_info=True)
             read = lark_quote.unread(ref, "internal error")
-        errors = [quote.error for quote in read.quotes if quote.error]
-        logger.info("lark_quote channel=%s message=%s kind=%s quoted=%s messages=%d chars=%d attachments=%d "
-                    "outcome=%s seconds=%.1f read=%.1f names=%.1f files=%.1f", ref.channel_id, ref.message_id,
-                    ref.kind.value, ",".join(quote.message_id for quote in read.quotes),
-                    sum(quote.messages for quote in read.quotes),
-                    sum(len(line) for quote in read.quotes for line in quote.lines), len(read.attachments),
-                    ",".join(errors) or "read", time.monotonic() - started, read.read_seconds, read.names_seconds,
-                    read.files_seconds)
+        finally:
+            errors = [quote.error for quote in read.quotes if quote.error]
+            logger.info("lark_quote channel=%s message=%s kind=%s quoted=%s messages=%d chars=%d attachments=%d "
+                        "outcome=%s decision=%s seconds=%.1f read=%.1f names=%.1f files=%.1f", ref.channel_id, ref.message_id,
+                        ref.kind.value, ",".join(quote.message_id for quote in read.quotes),
+                        sum(quote.messages for quote in read.quotes),
+                        sum(len(line) for quote in read.quotes for line in quote.lines), len(read.attachments),
+                        ",".join(errors) or "read", read.decision.value, time.monotonic() - started, read.read_seconds,
+                        read.names_seconds, read.files_seconds)
         return read
 
     async def _persist_user(self, envelope: MessageEnvelope, text: str) -> None:
@@ -1690,7 +1696,8 @@ class ManagerAgent:
             return
         asked = self.ops is not None and self.ops.asks_in(envelope.message_id)
         await self._send_reply(envelope, _with_blocks(response, turn.blocks),
-                               outcome=ReplyOutcome.CONFIRM if asked else None, cards=turn.cards)
+                               outcome=ReplyOutcome.CONFIRM if asked else None, cards=turn.cards,
+                               resident_session_id=self.current_session_id if not turn.blocks and not turn.cards else None)
 
     async def _answer_gate_command(self, envelope: MessageEnvelope, text: str) -> None:
         answer = await self._gate_command(envelope, text)
@@ -3814,7 +3821,8 @@ class ManagerAgent:
 
     async def _send_reply(self, original: MessageEnvelope, text: str, *, error: str | None = None,
                           persist: bool = True, ephemeral: bool = False, outcome: ReplyOutcome | None = None,
-                          snapshot: str | None = None, cards: list[dict[str, Any]] | None = None) -> None:
+                          snapshot: str | None = None, cards: list[dict[str, Any]] | None = None,
+                          resident_session_id: str | None = None) -> None:
         """Answer ``original``; ``error`` says why the turn failed (a chat channel shows it on its status line).
         The channel keeps the answer in the chat's history once it has sent it; ``persist`` controls external chat
         history (a user gate keeps its own discussion). ``ephemeral`` is an enabled ``/status``: the web channel
@@ -3823,11 +3831,16 @@ class ManagerAgent:
         ``outcome`` is how the turn ended; by default
         failed with an ``error``, else answered."""
         assert self._bus is not None
+        resident_text = text
         text = self._group_safe(original, text)
         record = None if persist else {}
         outcome = outcome or (ReplyOutcome.FAILED if error else ReplyOutcome.ANSWERED)
-        await self._bus.publish(reply_envelope(original, text, self.agent_address, error=error, outcome=outcome,
-                                               record=record, snapshot=snapshot, cards=cards, ephemeral=ephemeral))
+        reply = reply_envelope(original, text, self.agent_address, error=error, outcome=outcome,
+                               record=record, snapshot=snapshot, cards=cards, ephemeral=ephemeral)
+        if resident_session_id and text == resident_text and is_lark(_message_origin(original)["channel"]):
+            reply = replace(reply, metadata={**reply.metadata, "quote_session": {
+                "manager_id": self.agent_id, "key": self._session_now().key, "session_id": resident_session_id}})
+        await self._bus.publish(reply)
         await self._mid_turn.reply(original, text, error=error, outcome=outcome)
         token = self._turns.find(original.message_id) or self._metrics_reply_tokens.get(original.message_id)
         if token is not None and token.message_id == original.message_id and token.times is not None and text and error is None:
