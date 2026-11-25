@@ -64,6 +64,7 @@ from ...db import ledger as db_ledger, manager_actions as db_actions, managers a
 from ..managers_api import DEFAULT_MANAGER_ID, ManagerDefinition, ManagerTools, TaskPolicy, TaskScope
 from ..message import BOT_CHANNEL_TYPES, MessageEnvelope, builtin_channel_id
 from ..operator_identity import is_operator, operator_sender_id
+from ..chat_scopes import ScopeAudience
 from .. import session_routing, session_visibility
 from ..reminders import reminders_on
 from ..tiers.manager_session import MAIN_SESSION, on_session_replaced
@@ -152,6 +153,7 @@ class _Pending:
     card: str | None = None  # its ``card_actions`` token, while card buttons are on
     asker: Turn | None = None  # the turn that asked: a button runs the call as in it
     impact: str = ""  # what it does, as the block says it
+    session_key: str | None = None
 
 
 # The Manager's tools (a task's Planner has its own, ``ops.planner``).
@@ -582,6 +584,7 @@ class ManagerOps:
         bound = self._bindings.get(binding) if binding else None
         self._observe_turn(name, binding, bound, enforced=enforced)
         turn = (bound if enforced else self._turn) or Turn(channel=None, chat=None)
+        resolved_session = session_key or (self._binding_sessions.get(binding) if binding else None) or MAIN_SESSION
         if _audience(tool) is Audience.OPERATOR:
             # Only the turn the call is bound to, whatever the stop switch: no binding, or one Looper did not give, is
             # Claude's own turn; a turn that ended refuses it (below).
@@ -616,10 +619,10 @@ class ManagerOps:
                     raise OpError(ErrorCode.NOT_THIS_TURN, "this call was not made in the running turn; it did not run")
                 _check_answering(turn)
             if tool.name == CONFIRM_TOOL:
-                if turn.speaker in (SpeakerKind.ALLOWED, SpeakerKind.MEMBER):
+                if _not_operator(turn):
                     self._lapse(self._pending.pop(turn.chat_key, None))
                     raise _OperatorOnly(turn)
-                return await self._confirm(arguments["confirmation_id"], turn)
+                return await self._confirm(arguments["confirmation_id"], turn, resolved_session)
             if risk is not Risk.READ and turn.autonomous:
                 raise OpError(ErrorCode.NEEDS_USER_TURN, "Looper changes things only in a turn that answers a user's "
                                                          "message; tell the user what you would do instead")
@@ -630,9 +633,10 @@ class ManagerOps:
             _check_answering(turn)  # stopped while escalate read: nothing runs and the user is asked nothing
             if impact is not None:
                 risk = Risk.HIGH
-                if turn.speaker in (SpeakerKind.ALLOWED, SpeakerKind.MEMBER):
+                if _not_operator(turn):
                     raise _OperatorOnly(turn)
-                pending = self._ask(tool, arguments, impact, turn, confirmation=call.confirmation)
+                pending = self._ask(tool, arguments, impact, turn, confirmation=call.confirmation,
+                                    session_key=resolved_session)
                 await self._card(pending, turn)
                 action_id = await self._record(turn, tool, arguments, risk, "needs_confirmation",
                                                confirmation_id=pending.id)
@@ -657,6 +661,7 @@ class ManagerOps:
         except OpError as exc:
             await self._record(turn, tool, arguments, risk, "error", error_code=exc.code.value,
                                result={"reason": "operator_only"} if isinstance(exc, _OperatorOnly)
+                               else {"reason": "not_initiator"} if isinstance(exc, _NotInitiator)
                                else {"message": str(exc)}, watch=watch)
             return _error(exc.code, str(exc), watch.shown)
         except Exception as exc:
@@ -676,7 +681,7 @@ class ManagerOps:
             result.setdefault("shown_to_user", watch.shown)  # after the record: the trail keeps the tool's own result
         return {"status": "ok", "result": result}
 
-    async def _confirm(self, confirmation_id: str, turn: Turn) -> dict[str, Any]:
+    async def _confirm(self, confirmation_id: str, turn: Turn, session_key: str = MAIN_SESSION) -> dict[str, Any]:
         if turn.autonomous:
             raise OpError(ErrorCode.NEEDS_USER_TURN, "only the user's own message confirms an operation")
         pending = self._pending.get(turn.chat_key)
@@ -686,6 +691,11 @@ class ManagerOps:
                                                   "its card's buttons; it does not run again")
             raise OpError(ErrorCode.NOT_FOUND, f"no operation waits for confirmation {confirmation_id} in this chat; "
                                                "run the tool again to ask the user")
+        if turn.principal is not None and (pending.session_key != session_key or pending.asker is None
+                                           or pending.asker.sender != turn.sender):
+            del self._pending[turn.chat_key]
+            self._lapse(pending)
+            raise _NotInitiator(turn)
         if pending.answer_turn != turn.message_id or self._clock() - pending.at > CONFIRMATION_SECONDS:
             del self._pending[turn.chat_key]
             self._lapse(pending)
@@ -763,7 +773,8 @@ class ManagerOps:
                 card_actions.Button("取消", card_actions.value(token, "cancel"))) if buttons else ())
             payload: dict[str, Any] = {"chat_key": list(turn.chat_key), "tool": pending.tool.name,
                                        "block": pending.block, "impact": pending.impact, "asked_in": pending.asked_in,
-                                       "turn": _turn_record(turn), "card": card.to_dict()}
+                                       "turn": _turn_record(turn), "card": card.to_dict(),
+                                       "session_key": pending.session_key}
             if (db_actions.masked(pending.arguments) == pending.arguments
                     and db_actions.masked(pending.confirmation) == pending.confirmation):
                 payload.update(arguments=pending.arguments, confirmation=pending.confirmation)
@@ -872,12 +883,13 @@ class ManagerOps:
                 id=row["subject"], tool=tool, arguments=dict(payload["arguments"]), block=str(payload["block"]),
                 asked_in=payload.get("asked_in"), at=self._clock() - float(row["age"]),
                 confirmation=dict(payload.get("confirmation") or {}), card=row["token"],
-                asker=_turn_from(payload.get("turn") or {}), impact=str(payload.get("impact") or payload["block"]))
+                asker=_turn_from(payload.get("turn") or {}), impact=str(payload.get("impact") or payload["block"]),
+                session_key=payload.get("session_key"))
             restored += 1
         return restored
 
     def _ask(self, tool: Tool, arguments: dict[str, Any], impact: str, turn: Turn, *,
-             confirmation: dict[str, Any]) -> _Pending:
+             confirmation: dict[str, Any], session_key: str | None = None) -> _Pending:
         """Register ``tool``'s call for the user to confirm, replacing the chat's earlier one, and show it."""
         earlier = self._pending.pop(turn.chat_key, None)
         self._lapse(earlier)
@@ -887,7 +899,7 @@ class ManagerOps:
         block = f"需要你确认：\n{impact}\n回复「确认」就执行；回复别的就不执行。"
         pending = _Pending(id=f"c-{uuid.uuid4().hex[:12]}", tool=tool, arguments=arguments, block=block,
                            asked_in=turn.message_id, at=self._clock(), confirmation=dict(confirmation),
-                           asker=turn, impact=impact)
+                           asker=turn, impact=impact, session_key=session_key)
         self._pending[turn.chat_key] = pending
         while len(self._pending) > CONFIRMATION_CHATS:
             self._lapse(self._pending.pop(next(iter(self._pending))))
@@ -1185,6 +1197,8 @@ class ManagerOps:
         pending = self._pending.get(turn.chat_key)
         if turn.autonomous or pending is None:
             return ""
+        if turn.principal is not None and pending.session_key != session_key:
+            return ""
         if pending.answer_turn is not None or self._clock() - pending.at > CONFIRMATION_SECONDS:
             del self._pending[turn.chat_key]
             self._lapse(pending)
@@ -1456,6 +1470,20 @@ class _Recorded(OpError):
     def __init__(self, error: OpError, shown: str | None = None) -> None:
         super().__init__(error.code, str(error))
         self.shown = shown  # the ``shown_to_user`` text of its receipt, if it got one
+
+
+def _not_operator(turn: Turn) -> bool:
+    if turn.principal is not None:
+        return turn.principal.audience is not ScopeAudience.OPERATOR
+    return turn.speaker in (SpeakerKind.ALLOWED, SpeakerKind.MEMBER)
+
+
+class _NotInitiator(OpError):
+    """A scoped confirmation belongs to the session and sender that asked."""
+
+    def __init__(self, turn: Turn) -> None:
+        super().__init__(ErrorCode.FORBIDDEN, "only the person who asked for this operation can confirm it: "
+                         "it was not run and nothing waits for confirmation; tell the speaker")
 
 
 class _OperatorOnly(OpError):
