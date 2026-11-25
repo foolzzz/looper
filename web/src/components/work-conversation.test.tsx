@@ -14,6 +14,8 @@ const api = vi.hoisted(() => ({
   streamChatReply: vi.fn(),
   stopChatReply: vi.fn(),
   fetchChatTurn: vi.fn(),
+  fetchChatSettings: vi.fn(),
+  watchChat: vi.fn(),
 }));
 const bridge = vi.hoisted(() => ({ real: null as typeof import("@/lib/api") | null }));
 vi.mock("@/lib/api", async (importOriginal) => {
@@ -27,6 +29,8 @@ vi.mock("@/lib/api", async (importOriginal) => {
     streamChatReply: api.streamChatReply,
     stopChatReply: api.stopChatReply,
     fetchChatTurn: api.fetchChatTurn,
+    fetchChatSettings: api.fetchChatSettings,
+    watchChat: api.watchChat,
   };
 });
 vi.mock("@/lib/use-projects", () => ({
@@ -120,6 +124,8 @@ describe("work conversation", () => {
     api.fetchChatTargets.mockResolvedValue([planner("t1"), planner("t2")]);
     api.stopChatReply.mockResolvedValue({ state: "stopping", method: "interrupt" });
     api.fetchChatTurn.mockResolvedValue(null);
+    api.fetchChatSettings.mockResolvedValue({ stop_enabled: false });
+    api.watchChat.mockReturnValue(() => {});
     container = document.createElement("div");
     document.body.append(container);
     root = createRoot(container);
@@ -133,7 +139,7 @@ describe("work conversation", () => {
     vi.restoreAllMocks();
   });
 
-  it("accepts an external adapter and renders nothing for the manager", async () => {
+  it("accepts external Planner and Manager adapters", async () => {
     const onSend = vi.fn();
     function Box() {
       const [draft, setDraft] = useState("");
@@ -177,12 +183,12 @@ describe("work conversation", () => {
         onSend={() => {}}
       />,
     );
-    expect(container.querySelector("textarea")).toBeNull();
+    expect(container.querySelector("textarea")).not.toBeNull();
     expect(container.textContent).not.toContain("任务管家");
-    expect(container.textContent).not.toContain("nope");
+    expect(container.textContent).toContain("nope");
   });
 
-  it("keeps the manager selection as a link to the existing chat", async () => {
+  it("mounts the default Manager conversation on the manager selection", async () => {
     vi.stubGlobal("fetch", vi.fn(async (url: string, init?: RequestInit) => {
       const path = String(url);
       let result: unknown = {};
@@ -195,8 +201,9 @@ describe("work conversation", () => {
       });
     }));
     await show(<WorkPage sub="manager" onNavigate={() => {}} />);
-    expect(container.querySelector('a[href="#chat"]')?.textContent).toBe("Open the Manager chat");
-    expect(container.querySelector("textarea")).toBeNull();
+    expect(container.querySelector('a[href="#chat"]')).toBeNull();
+    expect(container.querySelector("textarea")).not.toBeNull();
+    expect(api.watchChat).toHaveBeenCalledWith(localStorage.getItem("looper-chat-session-id"), expect.any(Function), "manager");
     expect(container.textContent).not.toContain("任务管家");
     expect(container.textContent).not.toContain("已接通");
   });
