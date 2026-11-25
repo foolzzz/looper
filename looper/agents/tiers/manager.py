@@ -874,6 +874,7 @@ class ManagerAgent:
         self._drain = drain
         self._tools_ready = tools_ready
         self._definition = definition or default_definition()
+        session_routing.set_scenario_routing(self._definition.id, self._definition.session_routing)
         self._log = self._definition.id
         # Set when the definition was turned off or deleted; the fleet (card 6) sets ``on_turned_off``.
         self._turned_off = False
@@ -969,7 +970,7 @@ class ManagerAgent:
         session = self._session_now()
         if session.key == MAIN_SESSION:
             return self._runtime_root
-        root = self._runtime_root / ".local" / "manager-sessions" / session_routing.key_digest(session.key)
+        root = self._runtime_root / ".local" / "manager-sessions" / session_routing.session_digest(self.agent_id, session.key)
         root.mkdir(mode=0o700, parents=True, exist_ok=True)
         return root
 
@@ -1133,6 +1134,7 @@ class ManagerAgent:
                 self._turned_off = True
                 return
             self._definition = ManagerDefinition.from_row(row)
+            session_routing.set_scenario_routing(self.agent_id, self._definition.session_routing)
             self._system_prompt = row["system_prompt"]
             self._prompt_recommended = False
             return
@@ -1819,7 +1821,7 @@ class ManagerAgent:
         if agent_settings.profile_error:  # answered as an error; never another profile
             raise ProfileUnavailable(agent_settings.profile_error, agent_settings.profile_source)
         await token.step("templates", self._read_templates())
-        routed = self._session_now().key != MAIN_SESSION
+        routed = self.agent_id == DEFAULT_MANAGER_ID and self._session_now().key != MAIN_SESSION
         library = EMPTY_LIBRARY if routed else await token.step("library", load_installed(
             self._runtime_root, AgentType.MANAGER.value, manager_id=self.agent_id))
         library = await token.step("library_server", self._library_with_server(library))
@@ -2494,8 +2496,9 @@ class ManagerAgent:
         """The Manager's agent settings (system and role layers), read now; the last ones read when they
         cannot be read (the built-in defaults before any). Without ``fallback`` the read error stays, so a turn
         never runs on a profile the user did not choose."""
-        # The profile chosen for the session (``select_session_profile``) is main's: the others follow the settings.
-        own = {} if self._session_now().key == MAIN_SESSION else {"manager_session": False}
+        # Scenario sessions share their Manager's profile choice; default routed sessions follow Settings.
+        own = ({"manager_session": False} if self.agent_id == DEFAULT_MANAGER_ID
+               and self._session_now().key != MAIN_SESSION else {})
         agent_settings = await load_agent_settings(AgentType.MANAGER, manager_id=self.agent_id, wait=wait, **own)
         if agent_settings.error is not None:
             return (self._agent_settings or agent_settings) if fallback else agent_settings
