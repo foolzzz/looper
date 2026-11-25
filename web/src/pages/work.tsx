@@ -3,7 +3,9 @@ import { Button } from "@/components/ui/button";
 import { WorkList } from "@/components/work-list";
 import { WorkSwitcher } from "@/components/work-switcher";
 import { WorkChanges } from "@/components/work-changes";
-import { fetchTaskDetail, isActiveTask, TaskDetailError, type TaskDetail, type UserGate } from "@/lib/api";
+import { fetchTaskDetail, isActiveTask, TaskDetailError, type TaskDetail, type TaskStep, type UserGate } from "@/lib/api";
+import { WorkSteps } from "@/components/work-steps";
+import { openWorkGate } from "@/components/work-activity-feed";
 import { startPolling } from "@/lib/polling";
 import { callV1, V1Error } from "@/lib/v1";
 import { errorText } from "@/lib/use-action";
@@ -13,6 +15,21 @@ import { isMissingOperation, markSeen, taskTitle, workSelection, workStorage } f
 import { WorkConversationStateProvider, useWorkConversationStore, workConversationKey } from "@/lib/use-work-conversation-state";
 
 const LINK = "text-sm text-primary underline-offset-2 hover:underline focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring";
+
+/** Below this height a stacked Work column cannot reserve a composer and a 40dvh plan without one painting over the other. */
+const SHORT_COLUMN = "(max-height: 32rem) and (max-width: 1023px)";
+
+function useMedia(query: string): boolean {
+  const [matches, setMatches] = useState(() => window.matchMedia(query).matches);
+  useEffect(() => {
+    const media = window.matchMedia(query);
+    const onChange = () => setMatches(media.matches);
+    onChange();
+    media.addEventListener("change", onChange);
+    return () => media.removeEventListener("change", onChange);
+  }, [query]);
+  return matches;
+}
 
 /** Centre is the default Manager or the selected task’s Planner conversation. */
 export function WorkPage({
@@ -43,6 +60,7 @@ function WorkPageContent({
   const seen = useRef("");
   const restored = useRef(false);
   const onFinder = useCallback((available: boolean) => setFinder(available), []);
+  const shortColumn = useMedia(SHORT_COLUMN);
 
   // A bare #work restores the last selection. #work/manager and #work/task/… win over storage.
   useEffect(() => {
@@ -137,6 +155,11 @@ function WorkPageContent({
     workStorage.setSelection(selection.kind === "manager" ? "manager" : taskId);
   }, [sub, selection.kind, taskId]);
 
+  // The activity feed owns the only gate editor. This locates it; it does not mount another.
+  const openGate = useCallback((step: TaskStep) => {
+    openWorkGate(step.step_key);
+  }, []);
+
   const openTask = useCallback((id: string) => {
     setPane("detail");
     onNavigate(`task/${encodeURIComponent(id)}`);
@@ -180,8 +203,8 @@ function WorkPageContent({
           onFind={openSwitcher}
         />
       </div>
-      <div className={`h-full min-h-0 min-w-0 flex-1 flex-col ${pane === "detail" ? "flex" : "hidden md:flex"}`}>
-        <div className="flex h-full min-h-0 flex-col">
+      <div className={`h-full min-h-0 min-w-0 flex-1 flex-col ${pane === "detail" ? "flex" : "hidden md:flex"} ${shortColumn ? "overflow-y-auto" : ""}`} data-work-scroll={shortColumn ? "" : undefined}>
+        <div className={shortColumn ? "flex h-auto min-h-full shrink-0 flex-col" : "flex h-full min-h-0 flex-col"}>
           <div className="shrink-0 border-b border-border p-3 md:hidden">
             <Button type="button" variant="outline" onClick={() => { setPane("list"); setPanelOpen(false); }}>Back to the list</Button>
           </div>
@@ -214,8 +237,9 @@ function WorkPageContent({
                   }}>任务详情</Button>
                 {detail.error && <p role="alert" className="text-sm text-destructive">Task refresh failed: {detail.error}</p>}
               </header>
-              <div className="flex min-h-0 flex-1 flex-col xl:flex-row">
-                <div className="flex min-h-0 min-w-0 flex-1 flex-col">
+              <div data-work-detail="" data-layout={shortColumn ? "scroll" : "split"}
+                className={shortColumn ? "block" : "flex min-h-0 flex-1 flex-col xl:flex-row"}>
+                <div className={shortColumn ? "work-short-conversation block" : "flex min-h-0 min-w-0 flex-1 flex-col"}>
                   <PlannerWorkConversation key={taskId} taskId={taskId} detail={selected} task={selected} onGateChanged={onGateChanged} />
                 </div>
                 {panelOpen && <Panel id="work-task-details" ref={node => { panelRef.current = node; }} tabIndex={-1} aria-label="任务详情"
@@ -225,6 +249,7 @@ function WorkPageContent({
                   onCancel={event => { event.preventDefault(); closePanel(); }}
                   onKeyDown={event => { if (event.key === "Escape") { event.preventDefault(); event.stopPropagation(); closePanel(); } }}>
                   <Button type="button" variant="outline" size="sm" onClick={closePanel}>关闭详情</Button>
+                  <WorkSteps task={selected} onOpenGate={openGate} />
                   <WorkChanges taskId={taskId} visible />
                 </Panel>}
               </div>
