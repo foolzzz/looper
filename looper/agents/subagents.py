@@ -519,9 +519,8 @@ class SpawnService:
             record = await llm_records.get_record(row["child_record_id"], pool=self.pool)
             known_cost = record.get("cost_usd")
             cost = float(known_cost) if known_cost is not None else (row["budget_usd"] if (row.get("child_process") or {}).get("pid") else 0)
-            # Cancellation won the spawn CAS, even when the final runtime event
-            # arrived while termination was in progress. Preserve its usage.
-            await self.pool.execute("UPDATE llm_records SET status='interrupted' WHERE id=$1", row["child_record_id"])
+            # The spawn cancellation and the recorded runtime outcome settle independently.
+            # A runtime that already ended keeps its final bill and status.
         moved = await agent_spawns.move(spawn_id, SpawnState.CANCELLED, expect=SpawnState.CANCELLING,
                                         spent_usd=cost, cancel_reason=row["cancel_reason"], pool=self.pool)
         return moved or await agent_spawns.get(spawn_id, pool=self.pool)

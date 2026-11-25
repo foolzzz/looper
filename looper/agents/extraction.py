@@ -521,7 +521,7 @@ async def _lock_sources(conn: asyncpg.Connection, source_id: str,
     any lead or intent is written. Either the exclusion committed first, and this reads it and writes nothing from
     the chat, or it waits for this transaction, and its delete then sees what this one wrote."""
     rows = await conn.fetch("SELECT seq, chat_id, sender_id, sender_kind, mention_ids, sent_at, ingested_at FROM source_events "
-                            "WHERE seq = ANY($1::bigint[]) FOR SHARE", sorted(set(seqs)))
+                            "WHERE seq = ANY($1::bigint[]) ORDER BY seq FOR SHARE", sorted(set(seqs)))
     events = {row["seq"]: dict(row) for row in rows}
     chats = await conn.fetch(
         "SELECT chat_id, inclusion = 'included' AND extraction = 'included' AS allowed FROM source_chats "
@@ -635,7 +635,7 @@ async def _lost_group_seqs(conn: asyncpg.Connection, source_id: str, seqs: Colle
 async def store_intents(conn: asyncpg.Connection, parsed: Parsed, *, source_id: str, schedule_id: str,
                         run_id: str | None, record_id: int | None, now: datetime, more: bool,
                         group: GroupStore | None = None, via: str = "subscription",
-                        recognition_id: int | None = None, rules_on: bool = False) -> dict[str, Any]:
+                        recognition_id: int | None = None, rules_on: bool = False, prepared_rules: Any = None) -> dict[str, Any]:
     """Write the parsed intents in the caller's transaction: ``pending``, or ``merged`` into the intent it is
     ``same_as`` when that one is pending or tasked within ``SAME_MATTER_WITHIN`` or rejected within
     ``REJECTED_WITHIN`` (a ``dropped`` one never: nothing is merged into it). One the check dropped is stored as
@@ -652,7 +652,7 @@ async def store_intents(conn: asyncpg.Connection, parsed: Parsed, *, source_id: 
     seen = set(parsed.instructions_seen_seqs)
     # Recheck only a run that started with classification on, after the source locks and before any insert.
     classification_on = await leads_model.rule_types_enabled(conn) if rules_on else False
-    for item in parsed.items:
+    for item_index, item in enumerate(parsed.items):
         sources = _live(item, events, revoked, counts)
         if sources is None or item["type"] not in versions:
             continue
@@ -668,7 +668,7 @@ async def store_intents(conn: asyncpg.Connection, parsed: Parsed, *, source_id: 
         verdict, reason, checked_by = _check_columns(item)
         dropped = verdict == "drop"
         target = None
-        if item["same_as"] is not None and not dropped:
+        if item["same_as"] is not None and not dropped and not (classification_on and item["type"] == leads_model.RULE_INTENT_TYPE):
             target = await conn.fetchval(
                 "SELECT id FROM intents WHERE id = $1 AND source_id = $2 AND ((state IN ('pending', 'tasked') "
                 "AND created_at >= $3) OR (state = 'rejected' AND created_at >= $4))",
@@ -687,6 +687,17 @@ async def store_intents(conn: asyncpg.Connection, parsed: Parsed, *, source_id: 
         # Only its own sources: the messages its text came from (a merged one's are not the target's).
         await conn.executemany("INSERT INTO intent_sources (intent_id, event_seq) VALUES ($1, $2) ON CONFLICT DO NOTHING",
                                [(intent_id, seq) for seq in sources])
+        if classification_on and not dropped and not target and via != "on_request" and prepared_rules is not None:
+            batch, snapshots = prepared_rules
+            candidate = next((c for c in batch.candidates if c.index == item_index), None)
+            if candidate is not None:
+                try:
+                    # A failed attachment rolls back itself, preserving the legacy pending intent and cursor.
+                    async with conn.transaction():
+                        from .intent_rule_engine import register_candidate
+                        await register_candidate(conn, intent_id, candidate, snapshots[item_index])
+                except Exception:
+                    logger.error("intent_rule_enqueue_failed intent=%s code=audit_unavailable", intent_id)
         if not dropped:
             counts["merged" if target else "new"] += 1
     return counts
@@ -1221,6 +1232,11 @@ async def execute(runs: Any, run_id: str, schedule: Mapping[str, Any], stream: M
                                left_s=float(timeout) - (time_.monotonic() - started))
         await db_subs.update_run(pool, run_id, check_record_id=checked.record_id)
 
+    prepared_rules = None
+    if kind == "intents" and rules_on:
+        from .intent_rule_engine import prepare_for_extraction
+        prepared_rules = await prepare_for_extraction(parsed, source_id=sub["source_id"], db=pool)
+
     async def store(conn: asyncpg.Connection) -> Mapping[str, Any]:
         if kind == "leads":
             counts = await store_leads(conn, parsed, source_id=sub["source_id"], run_id=run_id,
@@ -1235,7 +1251,7 @@ async def execute(runs: Any, run_id: str, schedule: Mapping[str, Any], stream: M
         else:
             counts = await store_intents(conn, parsed, source_id=sub["source_id"], schedule_id=schedule["id"],
                                          run_id=run_id, record_id=result.record_id, now=now, more=found.more,
-                                         group=group, rules_on=rules_on)
+                                         group=group, rules_on=rules_on, prepared_rules=prepared_rules)
         return {**counts, **checked.counts} if checked is not None else counts
 
     cost = asked.cost_usd

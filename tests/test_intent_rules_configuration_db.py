@@ -120,3 +120,46 @@ def test_export_excludes_configured_rules_and_enabled_switch(monkeypatch, tmp_pa
                 assert status == 200, staged
         assert await service.list_rules(principal=OPERATOR, db=pool) == before
     run_db(check, monkeypatch)
+
+
+@pytest.mark.parametrize("executable", ["synthetic-verifier", "./synthetic-verifier", "bin/synthetic-verifier"])
+def test_adapter_save_refuses_relative_executable_with_clear_400(monkeypatch, tmp_path, executable):
+    async def check(pool):
+        from tests.intent_rule_execution_support import ADAPTER
+        async with v1_api(tmp_path, pool) as call:
+            body = {"expected_generation": 0, "change": {"kind": "settings",
+                "adapter": {**ADAPTER, "executable": executable}}}
+            status, result = await call("intent_rules.preview", body)
+            assert status == 400, result
+            assert "absolute path" in result["error"]["message"]
+            assert await pool.fetchval("SELECT count(*) FROM intent_rule_previews") == 0
+            assert await pool.fetchval("SELECT count(*) FROM intent_rule_config") == 0
+            body["change"]["adapter"]["executable"] = "/opt/synthetic/verifier"
+            status, result = await call("intent_rules.preview", body)
+            assert status == 200, result
+            status, saved = await call("intent_rules.confirm", {
+                "preview_id": result["result"]["preview_id"],
+                "acceptance": result["result"]["required_acceptance"]})
+            assert status == 200, saved
+            assert saved["result"]["settings"]["adapter"]["executable"] == "/opt/synthetic/verifier"
+    run_db(check, monkeypatch)
+
+
+def test_adapter_confirm_revalidates_legacy_relative_path_even_when_disabling(monkeypatch, tmp_path):
+    async def check(pool):
+        from tests.intent_rule_execution_support import ADAPTER
+        async with v1_api(tmp_path, pool) as call:
+            status, staged = await call("intent_rules.preview", {"expected_generation": 0,
+                "change": {"kind": "settings", "enabled": False,
+                           "adapter": {**ADAPTER, "executable": "/opt/synthetic/verifier"}}})
+            assert status == 200, staged
+            token = staged["result"]["preview_id"]
+            # Simulate a preview persisted before absolute paths became mandatory.
+            await pool.execute("UPDATE intent_rule_previews SET command=jsonb_set(command,"
+                               "'{adapter,executable}',to_jsonb($2::text)) WHERE id=$1", token, "synthetic-verifier")
+            status, result = await call("intent_rules.confirm", {"preview_id": token, "acceptance": []})
+            assert status == 400, result
+            assert "absolute path" in result["error"]["message"]
+            assert await pool.fetchval("SELECT count(*) FROM intent_rule_config") == 0
+            assert await pool.fetchval("SELECT consumed_at FROM intent_rule_previews WHERE id=$1", token) is None
+    run_db(check, monkeypatch)

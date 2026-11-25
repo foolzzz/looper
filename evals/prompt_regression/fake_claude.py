@@ -92,6 +92,7 @@ import select
 import subprocess
 import sys
 import time
+from pathlib import Path
 from typing import Any
 
 # Names the real Claude Code in real mode (``main``).
@@ -269,6 +270,34 @@ def _mcp(args: list[str]) -> Any:
     return rpc
 
 
+_JOURNAL_REF = re.compile(r"<J:([^>]+)>")
+
+
+def _journal_label(message: str, text: str) -> str:
+    """The ``J<n>`` of the first journal line containing ``text``; a continuation uses the entry above it."""
+    lines = message.splitlines()
+    for index, line in enumerate(lines):
+        if text not in line:
+            continue
+        while index >= 0 and not lines[index].startswith("- J"):
+            index -= 1
+        if index >= 0:
+            return lines[index][2:].split(" ", 1)[0]
+        break
+    return ""
+
+
+def _bind_journal_refs(value: Any, message: str) -> Any:
+    """Replace ``<J:text>`` in a scripted memory reply with the journal label that line belongs to."""
+    if isinstance(value, str):
+        return _JOURNAL_REF.sub(lambda match: _journal_label(message, match.group(1)) or match.group(0), value)
+    if isinstance(value, list):
+        return [_bind_journal_refs(item, message) for item in value]
+    if isinstance(value, dict):
+        return {key: _bind_journal_refs(item, message) for key, item in value.items()}
+    return value
+
+
 def _planner(script: dict[str, Any], args: list[str], stdin: _Stdin) -> None:
     cost = 0.0
     broken = 0
@@ -312,6 +341,9 @@ def _planner(script: dict[str, Any], args: list[str], stdin: _Stdin) -> None:
         elif message.startswith("[WAIT]"):
             reply = {"reply": "Going on without it.", "action": "none",
                      "wait": {"action": "proceed", "resolution": "the wait ended without what it waited for"}}
+        elif message.startswith("[MEMORY]"):
+            reply = _bind_journal_refs(
+                script.get("memory_reply") or {"memory": [], "note": "nothing worth keeping"}, message)
         elif message.startswith("[VAULT]"):
             vault_calls = script.get("vault_calls") or []
             if vault_calls and rpc is None:
@@ -386,6 +418,9 @@ def _worker(script: dict[str, Any], system_prompt: str, stdin: _Stdin, args: lis
         if expected_diff not in diff:
             raise RuntimeError("the simulated PR does not contain the commit this review needs")
     files = dict(attempt.get("files") or {})
+    if attempt.get("run_verification"):
+        for command in ("configure.py", "verify.py"):
+            subprocess.run([sys.executable, command], check=True, timeout=10, capture_output=True)
     wait = (script.get("wait_for_input") or {}).get(label)
     if wait and attempt_no == 1:
         _emit({"type": "system", "subtype": "init", "session_id": "fake-worker", "model": "fake"})
@@ -427,6 +462,10 @@ def _worker(script: dict[str, Any], system_prompt: str, stdin: _Stdin, args: lis
               "deleted_files": [], "summary": attempt.get("summary") or f"step {label} attempt {attempt_no}"}
     if "learnings" in attempt:
         report["learnings"] = attempt["learnings"]
+    if scenario := attempt.get("lesson_scenario"):
+        ids = re.findall(r"^- (M-\d+) \(", system_prompt, re.MULTILINE)
+        if ids:
+            report["lessons_used" if scenario == "use" else "lessons_wrong"] = ids
     _answer("fake-worker", attempt.get("raw") or "Done.\n" + json.dumps(report), WORKER_RUN_COST)
 
 
@@ -545,6 +584,9 @@ def _manager(scenarios_path: str, args: list[str], stdin: _Stdin) -> None:
         for name, arguments in calls:
             if name == "__reply__":
                 reply = arguments["text"]
+                continue
+            if name == "__capture_context__":
+                Path(scenarios_path).with_suffix(".context.txt").write_text(content, encoding="utf-8")
                 continue
             if name == "__context__":
                 request_usage = {"usage": {"input_tokens": arguments["tokens"]}}

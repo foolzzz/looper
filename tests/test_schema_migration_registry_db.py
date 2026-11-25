@@ -12,6 +12,51 @@ from tests.db_support import DSN, fresh_connection
 pytestmark = pytest.mark.skipif(not DSN, reason="requires disposable LOOPER_TEST_DATABASE_URL")
 
 
+def test_failure_handling_upgrades_after_higher_order_retrospectives(monkeypatch):
+    from looper.db.migrations import step_failure_handling as failure
+
+    async def test():
+        async with fresh_connection() as upgraded, fresh_connection() as fresh:
+            previous = tuple(item for item in connection._MIGRATIONS if item.order <= 1910)
+            await upgraded.execute(migrations.schema_sql(connection.SCHEMA_PATH.read_text(), previous))
+            await upgraded.execute("INSERT INTO registry_schema_version(id,version) VALUES(TRUE,$1)",
+                                   connection.REGISTRY_SCHEMA_VERSION)
+            await upgraded.execute("INSERT INTO schema_migrations(name) VALUES($1)", bridge_upgrade.BASELINE)
+            # Apply the released retrospective migrations while 1920 is still absent.
+            with monkeypatch.context() as patch:
+                released = tuple(item for item in connection._MIGRATIONS if item.name != failure.name)
+                patch.setattr(connection, "_MIGRATIONS", released)
+                patch.setattr(connection, "_PENDING_MIGRATIONS", migrations.pending_migrations(released))
+                patch.setattr(connection, "_ONLINE_STEPS", migrations.online_steps(released))
+                await connection.ensure_schema(upgraded)
+                assert not await connection.schema_change_pending(upgraded)
+            markers = {row["name"] for row in await upgraded.fetch("SELECT name FROM schema_migrations")}
+            assert {"memory_retro_role", "memory_retro_role_online",
+                    "memory_retro_queue", "memory_retro_queue_online"} <= markers
+            assert failure.name not in markers
+            assert await upgraded.fetchval("SELECT to_regclass('step_holds') IS NULL")
+            await upgraded.execute("INSERT INTO projects(id,name) VALUES('upgrade-project','Kept project')")
+            await upgraded.execute("INSERT INTO tasks(id,project_id,requirement) "
+                                   "VALUES('upgrade-task','upgrade-project','Kept task')")
+            await upgraded.execute("INSERT INTO memory_retro_cursors(task_id,last_to_id) VALUES('upgrade-task',17)")
+
+            assert await connection.schema_change_pending(upgraded)
+            await connection.ensure_schema(upgraded)
+            await connection.ensure_schema(fresh)
+            assert await structure(upgraded) == await structure(fresh)
+            assert await upgraded.fetchval("SELECT requirement FROM tasks WHERE id='upgrade-task'") == "Kept task"
+            assert await upgraded.fetchval("SELECT last_to_id FROM memory_retro_cursors "
+                                           "WHERE task_id='upgrade-task'") == 17
+            assert markers | {failure.name, failure.online[0].marker} == {
+                row["name"] for row in await upgraded.fetch("SELECT name FROM schema_migrations")}
+            assert not await connection.schema_change_pending(upgraded)
+            saved = await witness(upgraded)
+            await connection.ensure_schema(upgraded)
+            assert await witness(upgraded) == saved
+
+    asyncio.run(test())
+
+
 _NEW_MIGRATION = '''\
 name = "registry_example_items"
 order = 10000
@@ -30,6 +75,66 @@ async def apply(conn, *, sql, state):
         await conn.execute(fresh_ddl)
         await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", name)
 '''
+
+
+@pytest.mark.parametrize("with_retrospectives", [False, True], ids=["without-retrospectives", "released-retrospectives"])
+def test_lesson_injection_upgrades_after_higher_order_retrospective_migrations(monkeypatch, with_retrospectives):
+    from looper.db.migrations import memory_lesson_injection as injection
+    from looper.db.migrations import memory_retro_queue, memory_retro_role
+
+    registry = connection._MIGRATIONS
+    retros = (memory_retro_role, memory_retro_queue)
+    assert [m.name for m in registry if m.order == 1940] == [injection.name]
+    assert [m.order for m in registry if m in (injection, *retros)] == [1940, 1980, 1990]
+
+    def install(modules):
+        monkeypatch.setattr(connection, "_MIGRATIONS", modules)
+        monkeypatch.setattr(connection, "_PENDING_MIGRATIONS", migrations.pending_migrations(modules))
+        monkeypatch.setattr(connection, "_ONLINE_STEPS", migrations.online_steps(modules))
+
+    async def check():
+        async with fresh_connection() as upgraded, fresh_connection() as fresh:
+            previous = tuple(m for m in registry if m.order <= 1910)
+            await upgraded.execute(migrations.schema_sql(connection.SCHEMA_PATH.read_text(), previous))
+            await upgraded.execute("INSERT INTO registry_schema_version(id,version) VALUES(TRUE,$1)",
+                                   connection.REGISTRY_SCHEMA_VERSION)
+            await upgraded.execute("INSERT INTO schema_migrations(name) VALUES($1)", bridge_upgrade.BASELINE)
+            # Apply 1920/1930 first; also cover a database predating the higher orders.
+            install(tuple(m for m in registry if m not in (injection, *retros)))
+            await connection.ensure_schema(upgraded)
+            if with_retrospectives:
+                install(tuple(m for m in registry if m is not injection))
+                await connection.ensure_schema(upgraded)
+            assert not await connection.schema_change_pending(upgraded)
+            existing_markers = await upgraded.fetch("SELECT * FROM schema_migrations ORDER BY name")
+            names = {row["name"] for row in existing_markers}
+            assert {"step_failure_handling", "step_failure_handling_online", "morning_brief_send_started"} <= names
+            retro_names = {m.name for m in retros} | {m.online[0].marker for m in retros}
+            assert names & retro_names == (retro_names if with_retrospectives else set())
+            await upgraded.execute("INSERT INTO system_settings(key,value) VALUES ('synthetic-upgrade','kept')")
+            assert await upgraded.fetchval("SELECT to_regclass('task_lesson_snapshot_sets')") is None
+
+            # Admission is read-only; a lower order addition must still run on a current DB.
+            install(registry)
+            before = await witness(upgraded)
+            assert await connection.schema_change_pending(upgraded)
+            assert await witness(upgraded) == before
+            await connection.ensure_schema(upgraded)
+            assert await upgraded.fetchval("SELECT count(*) FROM schema_migrations WHERE name = ANY($1)",
+                [injection.name, injection.online[0].marker]) == 2
+            assert await upgraded.fetch(
+                "SELECT * FROM schema_migrations WHERE name = ANY($1) ORDER BY name",
+                sorted(names)) == existing_markers
+            assert await upgraded.fetchval(
+                "SELECT value FROM system_settings WHERE key='synthetic-upgrade'") == "kept"
+            await connection.ensure_schema(fresh)
+            assert await structure(upgraded) == await structure(fresh)
+            assert not await connection.schema_change_pending(upgraded)
+            saved = await witness(upgraded)
+            await connection.ensure_schema(upgraded)
+            assert await witness(upgraded) == saved
+
+    asyncio.run(check())
 
 
 def test_new_migration_file_upgrades_and_initializes_the_same_schema(tmp_path, monkeypatch):
@@ -77,6 +182,47 @@ def test_new_migration_file_upgrades_and_initializes_the_same_schema(tmp_path, m
         sys.modules.pop(f"{migrations.__name__}.{module_name}", None)
 
 
+def test_reminder_send_boundary_upgrades_after_brief_and_retrospective_migrations(monkeypatch):
+    async def test():
+        async with fresh_connection() as conn:
+            previous = tuple(module for module in connection._MIGRATIONS if module.order < 1920)
+            with monkeypatch.context() as patch:
+                patch.setattr(connection, "_MIGRATIONS", previous)
+                patch.setattr(connection, "_PENDING_MIGRATIONS", migrations.pending_migrations(previous))
+                patch.setattr(connection, "_ONLINE_STEPS", migrations.online_steps(previous))
+                await connection.ensure_schema(conn)
+                assert not await connection.schema_change_pending(conn)
+
+            applied = []
+
+            def record(module):
+                original = module.apply
+
+                async def apply(conn, *, sql, state):
+                    pending = await module.pending(conn)
+                    await original(conn, sql=sql, state=state)
+                    if pending:
+                        assert state == "current"
+                        applied.append(module.order)
+
+                return apply
+
+            for module in connection._MIGRATIONS:
+                if module.order in (1920, 1930, 1980, 1990, 2020):
+                    monkeypatch.setattr(module, "apply", record(module))
+            assert await connection.schema_change_pending(conn)
+            await connection.ensure_schema(conn)
+            assert applied == [1920, 1930, 1980, 1990, 2020]
+            assert await conn.fetchval("SELECT count(*) FROM schema_migrations WHERE name = ANY($1)",
+                ["step_failure_handling", "morning_brief_send_started", "memory_retro_role", "memory_retro_queue",
+                 "reminder_post_started"]) == 5
+            assert not await connection.schema_change_pending(conn)
+            await connection.ensure_schema(conn)
+            assert applied == [1920, 1930, 1980, 1990, 2020]
+
+    asyncio.run(test())
+
+
 @pytest.mark.parametrize("migration_name,rollback", [
     ("task_origin_session", "ALTER TABLE tasks DROP COLUMN origin_session CASCADE"),
     ("skill_proposal_feedback", "ALTER TABLE skill_proposal_events DROP COLUMN told_at"),
@@ -91,6 +237,7 @@ def test_new_migration_file_upgrades_and_initializes_the_same_schema(tmp_path, m
     ("memory_draft_queue", "DROP TABLE memory_draft_waits, memory_draft_lease"),
     ("channel_outbox", "DROP TABLE channel_outbox CASCADE"),
     ("manager_sessions", "DROP TABLE manager_sessions CASCADE"),
+    ("scenario_session_routing", "ALTER TABLE managers DROP COLUMN session_routing"),
     ("provider_limit_windows", "DROP TABLE provider_limit_windows CASCADE"),
     ("provider_admission", "DROP TABLE provider_admission, provider_admission_events CASCADE"),
     ("cost_holds", "DROP TABLE cost_holds"),

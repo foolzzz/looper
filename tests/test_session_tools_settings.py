@@ -12,6 +12,21 @@ from looper.agents.ops.clients import ClientOps
 from tests.test_api_v1_auth import CLIENT_TOKEN, _bearer, _send, _serving, clients  # noqa: F401
 
 
+@pytest.mark.parametrize("enabled", [False, True])
+@pytest.mark.parametrize("manager_id", ["manager", "manager-synthetic"])
+@pytest.mark.parametrize("key", ["main", "group:channel-lark:synthetic", "dm:channel-lark:synthetic"])
+def test_tools_switch_only_changes_the_default_managers_non_main_sessions(monkeypatch, enabled, manager_id, key):
+    from looper.agents import session_visibility
+
+    monkeypatch.setattr(session_tools_settings, "_enabled", enabled)
+    policy = session_visibility.for_session(key, manager_id=manager_id)
+    if manager_id != "manager" or key == "main":
+        assert policy is None
+    else:
+        expected = session_visibility.NON_MAIN_WITH_TOOLS if enabled else session_visibility.NON_MAIN_ALLOWLIST
+        assert policy is expected
+
+
 def test_setting_defaults_persists_loads_and_resets(monkeypatch):
     stored = {}
 

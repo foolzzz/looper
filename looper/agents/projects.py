@@ -136,7 +136,7 @@ def json_object(body: bytes) -> dict[str, Any]:
     return data
 
 
-def project_view(row: dict[str, Any]) -> dict[str, Any]:
+def project_view(row: dict[str, Any], *, include_knowledge_dir: bool = False) -> dict[str, Any]:
     return {
         "project_id": row["id"],
         "name": row["name"],
@@ -144,6 +144,7 @@ def project_view(row: dict[str, Any]) -> dict[str, Any]:
         "work_dir": row["work_dir"],
         "background": row["background"],
         "default_workflow": row.get("default_workflow"),
+        **({"knowledge_dir": row["knowledge_dir"]} if include_knowledge_dir and row.get("knowledge_dir") is not None else {}),
         **ProjectExecution.from_row(row).view(),
         **({"memory_lessons": row["memory_lessons"]} if row.get("memory_lessons") is not None else {}),
         "created_at": row["created_at"],
@@ -153,6 +154,8 @@ def project_view(row: dict[str, Any]) -> dict[str, Any]:
         "schedule_count": row.get("schedule_count", 0),
         # Only a project that switched skill proposals on shows the key; every other view is as before.
         **({"skill_proposals": row["skill_proposals"]} if row.get("skill_proposals") else {}),
+        # Omitted while off. Operator-only; not an agent-writable execution field.
+        **({"memory_closeout": "on"} if row.get("memory_closeout") == "on" else {}),
     }
 
 
@@ -180,6 +183,12 @@ def _project_fields(data: dict[str, Any], *, update: bool) -> dict[str, Any]:
             if key is not None and (not isinstance(key, str) or not re.fullmatch(KEY_PATTERN, key) or key == "none"):
                 raise ValueError("default_workflow must be a workflow key or null")
             fields["default_workflow"] = key
+        if "knowledge_dir" in data:
+            from .vault import _path_problem
+            value = data["knowledge_dir"]
+            if value is not None and (problem := _path_problem(value)):
+                raise ValueError(f"knowledge_dir {problem}")
+            fields["knowledge_dir"] = value
         if execution := execution_fields(data):
             fields["execution"] = execution
     except ValueError as exc:
@@ -208,8 +217,9 @@ async def _existing_project(project_id: str, *, manager_id: str | None = None, p
     return project
 
 
-async def list_projects(*, manager_id: str | None = None, project_ids: Sequence[str] | None = None) -> dict[str, Any]:
-    return {"projects": [project_view(row) for row in await db_projects.list_projects(manager_id=manager_id, project_ids=project_ids)],
+async def list_projects(*, manager_id: str | None = None, project_ids: Sequence[str] | None = None,
+                        include_knowledge_dir: bool = False) -> dict[str, Any]:
+    return {"projects": [project_view(row, include_knowledge_dir=include_knowledge_dir) for row in await db_projects.list_projects(manager_id=manager_id, project_ids=project_ids)],
             "projects_root": projects_root()}
 
 
@@ -279,8 +289,23 @@ async def _create_project_row(fields: dict[str, Any], *, pool: Any = None,
         return row
 
 
-async def create_project(data: dict[str, Any]) -> dict[str, Any]:
+async def _validate_knowledge_dir(fields: dict[str, Any]) -> None:
+    if fields.get("knowledge_dir") is None:
+        return
+    from . import knowledge_directory, vault
+
+    config, problem = await vault.load()
+    if config is None:
+        raise RequestError(HTTP_400, problem or "the knowledge vault is not configured")
+    try:
+        knowledge_directory.validate(config, fields["knowledge_dir"])
+    except (ValueError, OSError, RuntimeError) as exc:
+        raise RequestError(HTTP_400, f"invalid knowledge_dir: {exc}") from None
+
+
+async def create_project(data: dict[str, Any], *, include_knowledge_dir: bool = False) -> dict[str, Any]:
     fields = _project_fields(data, update=False)
+    await _validate_knowledge_dir(fields)
     try:
         if projects_root() and not fields.get("work_dir"):
             with project_directories() as created:
@@ -292,7 +317,7 @@ async def create_project(data: dict[str, Any]) -> dict[str, Any]:
         raise _name_taken(fields["name"]) from None
     except asyncpg.ForeignKeyViolationError:
         raise RequestError(HTTP_400, "default_workflow must name an existing workflow") from None
-    return project_view(row)
+    return project_view(row, include_knowledge_dir=include_knowledge_dir)
 
 
 DIRECTORY_CHANGED = ("the project's directory or the command schedules that run in it changed; run the tool again "
@@ -323,8 +348,10 @@ async def directory_change(project: Mapping[str, Any], raw: Any, *, db: Any = No
 
 
 async def update_project(project_id: str, data: dict[str, Any], *, manager_id: str | None = None,
-                         expected_directory_version: str | None = None) -> dict[str, Any]:
+                         expected_directory_version: str | None = None,
+                         include_knowledge_dir: bool = False) -> dict[str, Any]:
     fields = _project_fields(data, update=True)
+    await _validate_knowledge_dir(fields)
     if not fields:
         raise RequestError(
             HTTP_400, "give at least one of " + ", ".join(("name", "description", "work_dir", "background",
@@ -347,7 +374,7 @@ async def update_project(project_id: str, data: dict[str, Any], *, manager_id: s
         raise RequestError(HTTP_400, "default_workflow must name an existing workflow") from None
     if not updated:
         raise RequestError(HTTP_404, f"project {project_id!r} not found")
-    return project_view(await _existing_project(project_id, manager_id=manager_id))
+    return project_view(await _existing_project(project_id, manager_id=manager_id), include_knowledge_dir=include_knowledge_dir)
 
 
 async def preview_project_move(project: Mapping[str, Any], data: Mapping[str, Any], *, db: Any = None):
@@ -936,7 +963,14 @@ async def task_detail(task_id: str, *, compact: bool = False) -> dict[str, Any]:
         # The room's numbers are help on the page: without them, the task still shows.
         logger.warning("cannot read the room of task %s", task_id, exc_info=True)
         room = None
+    from .failure_handling import get_service
+    failure_service = get_service()
+    failure_holds = await failure_service.holds_view(task_id) if failure_service is not None else None
+    if failure_holds is not None:
+        from .v1_domains.task_failures import hold_view
+        failure_holds = [hold_view(row) for row in failure_holds]
     return {
+        **({"holds": failure_holds} if failure_holds is not None else {}),
         "task_id": raw.get("id", ""),
         "requirement": raw.get("requirement", ""),
         "name": raw.get("name", ""),
@@ -1186,15 +1220,27 @@ async def start_ready_task(task_id: str, bus: MessageBus, source: AgentAddress, 
     if task["status"] != db_tasks.READY:
         raise RequestError(HTTP_400, f"the task is {task['status']}, not ready: only a task that was created and "
                                      "never started can be started")
-    await bus.publish(MessageEnvelope.create(
-        source=source, target=TASK_ROUTER_ADDRESS, message_type=MessageType.TASK_START, payload={"task_id": task_id},
-    ))
+    if (task.get("config") or {}).get("intent_rule_bound"):
+        from ..db import intent_rule_execution
+        from ..db.connection import _connection
+        async with _connection(pool or db_connection.get_pool()) as conn, conn.transaction():
+            await conn.fetchrow("SELECT id FROM tasks WHERE id=$1 FOR UPDATE", task_id)
+            execution = await intent_rule_execution.get_execution(conn, task_id=task_id, lock=True)
+            if execution is None or execution["revoke_state"] != "none":
+                raise RequestError(HTTP_409, "the rule task has been revoked")
+            await conn.fetchrow("SELECT task_id FROM intent_rule_task_starts WHERE task_id=$1 FOR UPDATE", task_id)
+            await bus.publish(MessageEnvelope.create(source=source, target=TASK_ROUTER_ADDRESS,
+                message_type=MessageType.TASK_START, payload={"task_id": task_id}))
+    else:
+        await bus.publish(MessageEnvelope.create(
+            source=source, target=TASK_ROUTER_ADDRESS, message_type=MessageType.TASK_START, payload={"task_id": task_id},
+        ))
     return {"started": task_id, "project_id": task["project_id"]}
 
 
-async def check_task_control(task_id: str, action: str) -> dict[str, Any]:
+async def check_task_control(task_id: str, action: str, *, pool: Any = None) -> dict[str, Any]:
     """The task when its state allows a control action, also used before asking for confirmation."""
-    task = await db_tasks.get_task(task_id)
+    task = await db_tasks.get_task(task_id, **({"pool": pool} if pool is not None else {}))
     if task is None:
         raise RequestError(HTTP_404, f"no task {task_id}: find its id with looper_tasks")
     status = task["status"]
@@ -1216,13 +1262,18 @@ async def check_task_control(task_id: str, action: str) -> dict[str, Any]:
 
 
 async def control_task(task_id: str, action: str, bus: MessageBus, source: AgentAddress, *,
-                       by: CancelBy = CancelBy.USER) -> None:
+                       by: CancelBy = CancelBy.USER, operator_actor: str | None = None) -> None:
     """Check a stop, cancel or restart and send it once to the TaskRouter."""
     await check_task_control(task_id, action)
     message_type = {"stop": MessageType.TASK_STOP, "cancel": MessageType.TASK_CANCEL,
                     "restart": MessageType.TASK_RESTART, "start_over": MessageType.TASK_RESTART}[action]
     payload: dict[str, Any] = {"task_id": task_id}
     if action in ("restart", "start_over"):
+        if operator_actor is not None:
+            from .failure_handling import get_service
+            service = get_service()
+            if service is not None and service.mode.value == "act":
+                await service.operator_reset(task_id, operator=True, actor=operator_actor)
         payload["mode"] = (RestartMode.START_OVER if action == "start_over" else RestartMode.CONTINUE).value
     await bus.publish(MessageEnvelope.create(
         source=source, target=TASK_ROUTER_ADDRESS, message_type=message_type, payload=payload,

@@ -13,7 +13,6 @@ import json
 import ntpath
 import os
 import re
-import secrets
 import signal
 import stat
 import subprocess
@@ -55,6 +54,7 @@ class VaultConfig:
     # The default Manager may search and read it in the user's own turns (``ops.manager_vault``); off by default.
     manager_read: bool = False
     profile_source: str = DEFAULT_PROFILE_SOURCE
+    worktree_root: Path | None = None
 
     def folders(self) -> str:
         return ", ".join(f"{w}/" for w in self.writable)
@@ -122,7 +122,7 @@ def check_config(raw: Mapping, *, validate_profile: bool = True) -> VaultConfig:
     if not isinstance(raw, Mapping):
         raise ValueError("the knowledge vault setting must be an object")
     for key in raw:
-        if key not in ("path", "writable", "rules_file", "manager_read", "profile_source"):
+        if key not in ("path", "writable", "rules_file", "manager_read", "profile_source", "worktree_root"):
             raise ValueError(f"unknown knowledge vault key {key!r}")
     manager_read = raw.get("manager_read", False)
     if not isinstance(manager_read, bool):
@@ -193,7 +193,13 @@ def check_config(raw: Mapping, *, validate_profile: bool = True) -> VaultConfig:
     # so removing a profile cannot disable unrelated vault tools.
     if validate_profile and ("profile_source" in raw or (root / source).exists() or (root / source).is_symlink()):
         profile_path(root, source)
-    return VaultConfig(root, tuple(folders), rules, manager_read, source)
+    worktree_root = raw.get("worktree_root")
+    if worktree_root is not None:
+        if not isinstance(worktree_root, str) or "\0" in worktree_root:
+            raise ValueError("worktree_root must be an absolute path")
+        from . import vault_commit
+        worktree_root = vault_commit.check_worktree_root(Path(worktree_root), root)
+    return VaultConfig(root, tuple(folders), rules, manager_read, source, worktree_root)
 
 
 async def load() -> tuple[VaultConfig | None, str | None]:
@@ -236,7 +242,8 @@ async def settings_view() -> dict:
     raw: Mapping = {}
     if config:
         raw = {"path": str(config.path), "writable": list(config.writable), "rules_file": config.rules_file,
-               "manager_read": config.manager_read, "profile_source": config.profile_source}
+               "manager_read": config.manager_read, "profile_source": config.profile_source,
+               **({"worktree_root": str(config.worktree_root)} if config.worktree_root else {})}
     elif problem:
         stored = await system_settings.get_settings([SETTING_KEY])
         try:
@@ -250,23 +257,24 @@ async def settings_view() -> dict:
     return {"configured": config is not None, "path": path, "writable": raw.get("writable") or [],
             "rules_file": raw.get("rules_file"), "manager_read": raw.get("manager_read") is True,
             "profile_source": raw.get("profile_source", DEFAULT_PROFILE_SOURCE), "git": is_git,
-            "problem": problem}
+            "problem": problem, **({"worktree_root": raw["worktree_root"]} if raw.get("worktree_root") else {})}
 
 
 async def update_settings(body: Mapping) -> dict:
     from . import projects
 
     try:
-        if ("path" in body and body["path"] is None and set(body) <= {"path", "writable", "rules_file", "manager_read"}
+        if ("path" in body and body["path"] is None and set(body) <= {"path", "writable", "rules_file", "manager_read", "worktree_root"}
                 and body.get("writable") in (None, []) and body.get("rules_file") in (None, "")
-                and not body.get("manager_read")):
+                and not body.get("manager_read") and body.get("worktree_root") is None):
             await system_settings.put_settings({SETTING_KEY: None})
         else:
             config = check_config(body)
             await system_settings.put_settings({SETTING_KEY: json.dumps({
                 "path": str(config.path), "writable": list(config.writable), "rules_file": config.rules_file,
                 **({"profile_source": config.profile_source} if config.profile_source != DEFAULT_PROFILE_SOURCE else {}),
-                **({"manager_read": True} if config.manager_read else {})})})
+                **({"manager_read": True} if config.manager_read else {}),
+                **({"worktree_root": str(config.worktree_root)} if config.worktree_root else {})})})
     except ValueError as exc:
         raise projects.RequestError(projects.HTTP_400, str(exc)) from None
     except PermissionError as exc:
@@ -507,139 +515,71 @@ async def write(config: VaultConfig, path: str, content: str, expected_sha256: s
         raise OpError(ErrorCode.INVALID, f"reason must be one line, from 1 to {REASON_MAX_CHARS} characters")
     reason = reason.strip()
 
-    def replace_note() -> dict:
-        fds: list[int] = []
+    from . import vault_commit
+
+    def validate(root: Path) -> bytes | None:
         try:
-            # The saved path is a real path, with no link on it: walk it from / without following any, so a link
-            # put anywhere on the way fails here rather than leading the write elsewhere.
-            try:
-                fds.extend(_open_real_path(config.path))
-            except OSError as exc:
-                if exc.errno in (errno.ELOOP, errno.ENOTDIR):
-                    raise OpError(ErrorCode.FORBIDDEN, "the vault folder changed since its setting was checked "
-                                                       "(a symbolic link?)") from None
-                raise
-            fd = fds[-1]
-            for index, part in enumerate(rel.parts[:-1]):
-                try:
-                    try:
-                        next_fd = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
-                    except FileNotFoundError:
-                        if index < len(folder.parts):
-                            raise
-                        try:
-                            os.mkdir(part, 0o755, dir_fd=fd)
-                        except FileExistsError:
-                            pass
-                        next_fd = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
-                except OSError as exc:
-                    if exc.errno in (errno.ELOOP, errno.ENOTDIR):
-                        raise OpError(ErrorCode.FORBIDDEN,
-                                      f"{rel} leaves the writable folder (a symbolic link?)") from None
-                    raise
-                fds.append(next_fd)
-                fd = next_fd
-            name = rel.name
-            try:
-                info = os.stat(name, dir_fd=fd, follow_symlinks=False)
-            except FileNotFoundError:
-                info = None
-            mode, current, old = 0o644, None, None
-            if info is not None:
-                if not stat.S_ISREG(info.st_mode):
-                    raise OpError(ErrorCode.FORBIDDEN, f"{rel} must be a regular file, not a symbolic link")
-                if info.st_size > READ_MAX_BYTES:
-                    raise OpError(ErrorCode.FORBIDDEN,
-                                  f"{rel} is larger than 64 KiB; it cannot be rewritten through this tool")
-                try:
-                    current_fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=fd)
-                except OSError as exc:
-                    if exc.errno == errno.ELOOP:
-                        raise OpError(ErrorCode.FORBIDDEN,
-                                      f"{rel} must be a regular file, not a symbolic link") from None
-                    raise
-                try:
-                    with os.fdopen(current_fd, "rb", closefd=False) as stream:
-                        opened = os.fstat(stream.fileno())
-                        if not stat.S_ISREG(opened.st_mode):
-                            raise OpError(ErrorCode.FORBIDDEN, f"{rel} must be a regular file, not a symbolic link")
-                        old = stream.read(READ_MAX_BYTES + 1)
-                finally:
-                    os.close(current_fd)
-                if len(old) > READ_MAX_BYTES:
-                    raise OpError(ErrorCode.FORBIDDEN,
-                                  f"{rel} is larger than 64 KiB; it cannot be rewritten through this tool")
-                current = hashlib.sha256(old).hexdigest()
-                mode = stat.S_IMODE(opened.st_mode)
-            if expected_sha256 is None and info is not None:
-                raise OpError(ErrorCode.CONFLICT, f"{rel} exists (sha256 {current}): read it and pass its sha256")
-            if expected_sha256 is not None and info is None:
-                raise OpError(ErrorCode.CONFLICT, f"{rel} does not exist: pass null for a new note")
-            if expected_sha256 != current:
-                raise OpError(ErrorCode.CONFLICT,
-                              f"{rel} changed since you read it (now sha256 {current}): read it again")
-            if old == data:
-                return {"path": rel.as_posix(), "sha256": current, "bytes": len(data), "commit": None,
-                        "unchanged": True, "note": "the note already has this text: nothing written"}
-            temporary = f".looper-{secrets.token_hex(8)}.tmp"
-            tfd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, mode, dir_fd=fd)
-            try:
-                try:
-                    with os.fdopen(tfd, "wb", closefd=False) as stream:
-                        stream.write(data)
-                        stream.flush()
-                        os.fsync(tfd)
-                        os.fchmod(tfd, mode)
-                finally:
-                    os.close(tfd)
-                os.replace(temporary, name, src_dir_fd=fd, dst_dir_fd=fd)
-            except BaseException:
-                try:
-                    os.unlink(temporary, dir_fd=fd)
-                except FileNotFoundError:
-                    pass
-                raise
-            return {"path": rel.as_posix(), "sha256": hashlib.sha256(data).hexdigest(),
-                    "bytes": len(data), "commit": None}
-        finally:
-            for fd in reversed(fds):
-                os.close(fd)
+            if root == config.path:
+                # Empty directories are absent from a worktree, but the configured writable boundary
+                # must still exist in the live vault, just as it did before worktree commits.
+                for fd in reversed(_open_real_path(root / folder)):
+                    os.close(fd)
+            old = vault_commit._read(root, rel.as_posix())
+        except OSError as exc:
+            if exc.errno in (errno.ELOOP, errno.ENOTDIR):
+                raise OpError(ErrorCode.FORBIDDEN, "the vault folder changed or the target passes through "
+                              "a symbolic link") from None
+            raise
+        except ValueError as exc:
+            raise OpError(ErrorCode.FORBIDDEN, str(exc)) from None
+        if old is not None and len(old) > READ_MAX_BYTES:
+            raise OpError(ErrorCode.FORBIDDEN, f"{rel} is larger than 64 KiB; it cannot be rewritten through this tool")
+        current = hashlib.sha256(old).hexdigest() if old is not None else None
+        if expected_sha256 is None and old is not None:
+            raise OpError(ErrorCode.CONFLICT, f"{rel} exists (sha256 {current}): read it and pass its sha256")
+        if expected_sha256 is not None and old is None:
+            raise OpError(ErrorCode.CONFLICT, f"{rel} does not exist: pass null for a new note")
+        if expected_sha256 != current:
+            raise OpError(ErrorCode.CONFLICT, f"{rel} changed since you read it (now sha256 {current}): read it again")
+        return old
 
-    with _LOCKS_LOCK:
-        lock = _LOCKS.setdefault(str(config.path), threading.Lock())
+    # Preserve input/refusal semantics even before Git checks a dirty target.
+    await asyncio.to_thread(validate, config.path)
+    result = {"path": rel.as_posix(), "sha256": hashlib.sha256(data).hexdigest(), "bytes": len(data), "commit": None}
 
-    def finish_write() -> dict:
-        with lock:
-            result = replace_note()
-            if result.get("unchanged"):
-                return result
-            try:
-                if _git_root_sync(config.path) is None:
-                    result["note"] = "the vault is not a git repository: written without a commit"
-                    result["git_status"] = "not_repository"
-                    return result
-                _git(config.path, "add", "--", rel.as_posix())
-                _git(config.path, "-c", "commit.gpgsign=false", "commit", "--quiet", "-m",
-                     f"looper: {task_id} {who}: {reason}", "--", rel.as_posix())
-                result["commit"] = _git(config.path, "rev-parse", "HEAD")
-            except subprocess.TimeoutExpired:
-                result.update(git_status="timed_out", note="written, but git timed out")
-            except subprocess.CalledProcessError as exc:
-                result.update(git_status="failed", git_exit=exc.returncode,
-                              note="written, but the commit failed: " + (exc.stderr or f"git exit {exc.returncode}"))
-            except OSError:
-                result.update(git_status="failed", git_exit=None, note="written, but git could not be started")
-            return result
+    def prepare(work_config):
+        validate(config.path)
+        before = validate(work_config.path)
+        return {rel.as_posix(): data}, {rel.as_posix(): before}
 
-    # Cancelling the await must wait for the entire transaction and its bookkeeping.
-    pending = asyncio.create_task(asyncio.to_thread(finish_write))
-    cancelled = False
-    while not pending.done():
+    async def run():
         try:
-            await asyncio.shield(pending)
-        except asyncio.CancelledError:
-            cancelled = True
-    result = pending.result()
-    if cancelled:
-        raise asyncio.CancelledError
-    return result
+            repo = await asyncio.to_thread(_git_root_sync, config.path)
+        except subprocess.TimeoutExpired:
+            return {**result, "bytes": 0, "state": "blocked", "git_status": "blocked", "reason": "git_timeout",
+                    "note": "the vault commit is blocked; operator attention is required"}
+        if repo is None:
+            # Non-git vaults retain their existing confined, locked file-write behavior.
+            def plain():
+                with vault_commit.thread_lock(config):
+                    old = validate(config.path)
+                    if old == data:
+                        return {**result, "unchanged": True, "note": "the note already has this text: nothing written"}
+                    vault_commit._replace(config.path, rel.as_posix(), data)
+                    return {**result, "git_status": "not_repository",
+                            "note": "the vault is not a git repository: written without a commit"}
+            return await asyncio.to_thread(plain)
+        written = await asyncio.to_thread(vault_commit.transaction, config, [rel.as_posix()],
+                                          f"looper: {task_id} {who}: {reason}", prepare=prepare)
+        if written.state is vault_commit.CommitState.BLOCKED:
+            if written.branch:
+                from . import vault_commit_attention
+                await vault_commit_attention.record(written, repo=repo)
+            return {**result, "bytes": 0, "state": written.state.value, "git_status": "blocked",
+                    "reason": written.reason, "branch": written.branch,
+                    "note": "the vault commit is blocked; operator attention is required"}
+        if written.state is vault_commit.CommitState.UNCHANGED:
+            return {**result, "unchanged": True, "note": "the note already has this text: nothing written"}
+        return {**result, "commit": written.commit}
+
+    return await vault_commit.finish(run())

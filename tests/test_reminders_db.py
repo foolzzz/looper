@@ -265,7 +265,7 @@ def test_a_reminder_set_on_the_dashboard_goes_to_the_users_direct_chat_with_a_bo
     run_with_channel_configs(test, monkeypatch)
 
 
-def test_the_user_lists_their_reminders_and_cancels_a_pending_one_only(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_the_user_lists_their_reminders_and_cancels_a_pending_one(monkeypatch: pytest.MonkeyPatch) -> None:
     async def test(pool: Any) -> None:
         await _operator(pool)
         await _switch(pool)
@@ -288,6 +288,29 @@ def test_the_user_lists_their_reminders_and_cancels_a_pending_one_only(monkeypat
             answer = await _call(_ops(), _dm(), ops_reminders.CANCEL, {"id": reminder_id})
             assert answer["error"]["code"] == code, answer
         assert (await _statuses(pool))[sent][0] == "delivered"
+
+    run_with_channel_configs(test, monkeypatch)
+
+
+@pytest.mark.parametrize("state", ["uncertain", "failed", "missed"])
+def test_the_user_cancels_a_terminal_reminder_without_resending_it(monkeypatch, state):
+    async def test(pool):
+        await _operator(pool, enabled=True)
+        await _switch(pool)
+        now = datetime.now(UTC)
+        reminder_id = await _stored("Check the application", now - timedelta(hours=2))
+        await store.settle(pool, reminder_id, state, now=now, from_status="pending")
+        turn = _dm()
+        answer = await _call(_ops(), turn, ops_reminders.CANCEL, {"id": reminder_id})
+        assert answer["status"] == "ok", answer
+        assert answer["result"]["reminder"]["status"] == "cancelled"
+        assert f"已取消提醒 #{reminder_id}" in turn.blocks[0]
+        channel = _Channel()
+        service = reminders.ReminderService(channel, clock=_Clock(now))
+        await service.run_once()
+        await service.run_once()
+        assert channel.posts == []
+        assert await pool.fetchval("SELECT count(*) FROM proactive_deliveries") == 0
 
     run_with_channel_configs(test, monkeypatch)
 
@@ -421,7 +444,7 @@ def test_a_send_cut_off_by_a_stop_is_never_sent_again(monkeypatch: pytest.Monkey
         now = datetime(2026, 11, 20, 23, 0, tzinfo=UTC)
         reminder_id = await _stored("看 PR", now - timedelta(seconds=30))
         # A server claimed it and stopped before the channel's answer was recorded.
-        await pool.execute("UPDATE reminders SET status = 'sending', attempts = 1 WHERE id = $1", reminder_id)
+        await pool.execute("UPDATE reminders SET status = 'sending', attempts = 1, post_started_at = now() WHERE id = $1", reminder_id)
         channel = _Channel()
         await reminders.ReminderService(channel, clock=_Clock(now)).run_once()
         assert channel.posts == []
@@ -429,6 +452,149 @@ def test_a_send_cut_off_by_a_stop_is_never_sent_again(monkeypatch: pytest.Monkey
             "uncertain", 1, "the sender stopped before recording the answer")
 
     run_with_channel_configs(test, monkeypatch)
+
+
+@pytest.mark.parametrize("layer,point", [(False, "claim"), (True, "claim"), (True, "decision"),
+                                        (False, "post"), (True, "post"), (True, "receipt")])
+def test_restart_recovers_only_reminders_that_never_started_post(monkeypatch, layer, point):
+    async def test(pool):
+        await _operator(pool, enabled=True)
+        await _switch(pool)
+        chat_settings.set_delivery_enabled(layer)
+        now = datetime(2026, 11, 20, 23, tzinfo=UTC)
+        reminder_id = await _stored("crash recovery", now)
+        key = f"looper-reminder-{reminder_id}"
+        channel = _Channel()
+        owner, method = {"claim": (store, "claim"), "decision": (delivery, "decide"),
+                         "post": (store, "settle"), "receipt": (deliveries, "record_receipt")}[point]
+        original = getattr(owner, method)
+
+        async def crash(*args, **kwargs):
+            if point in {"claim", "decision"}:
+                await original(*args, **kwargs)
+            raise asyncio.CancelledError
+
+        with monkeypatch.context() as patch:
+            patch.setattr(owner, method, crash)
+            with pytest.raises(asyncio.CancelledError):
+                await reminders.ReminderService(channel, clock=_Clock(now)).run_once()
+        before = await store.get(reminder_id)
+        assert before["status"] == ("delivered" if point == "receipt" else "sending")
+        assert len(channel.posts) == (1 if point in {"post", "receipt"} else 0)
+        decision_before = await deliveries.get(pool, key)
+        service = reminders.ReminderService(channel, clock=_Clock(now + timedelta(seconds=1)))
+        await service.run_once()
+        await service.run_once()
+        row = await store.get(reminder_id)
+        assert row["status"] == ("uncertain" if point == "post" else "delivered")
+        assert row["post_started_at"] is not None
+        assert row["attempts"] == (2 if point in {"claim", "decision"} else 1)
+        assert len(channel.posts) == 1
+        assert channel.posts[0]["key"] == key
+        decision = await deliveries.get(pool, key)
+        if layer:
+            assert decision["outcome"] == ("unknown" if point == "post" else "sent")
+            assert decision["sent_at"] is not None
+            if decision_before:
+                assert decision["id"] == decision_before["id"]
+                assert decision["decided_at"] == decision_before["decided_at"]
+            assert await pool.fetchval("SELECT count(*) FROM proactive_deliveries") == 1
+        else:
+            assert decision is None
+
+    run_with_channel_configs(test, monkeypatch)
+
+
+def test_restart_recovers_many_claims_and_finishes_all_started_decisions(monkeypatch):
+    async def test(pool):
+        await _operator(pool, enabled=True)
+        await _switch(pool)
+        chat_settings.set_delivery_enabled(True)
+        now = datetime(2026, 11, 20, 23, tzinfo=UTC)
+        ids = [await _stored(f"batch {n}", now) for n in range(120)]
+        for n, reminder_id in enumerate(ids):
+            await store.claim(pool, reminder_id, now)
+            await delivery.decide(
+                delivery.Delivery(delivery.DeliveryKind.USER_REMINDER, delivery.Urgency.USER_SET,
+                                  delivery.ChatKind.DIRECT),
+                dedupe_key=f"looper-reminder-{reminder_id}", channel_id="channel-lark", chat=OP,
+                source_ref=str(reminder_id), last_user_message_at=None, now=now)
+            if n % 2:
+                await pool.execute("UPDATE reminders SET post_started_at=$2 WHERE id=$1", reminder_id, now)
+                # A refused previous attempt must not hide an interrupted later attempt.
+                await deliveries.record_receipt(f"looper-reminder-{reminder_id}", "rejected")
+        channel = _Channel()
+        service = reminders.ReminderService(channel, clock=_Clock(now))
+        await service.run_once()
+        await service.run_once()
+        assert len(channel.posts) == 60
+        assert {post["key"] for post in channel.posts} == {f"looper-reminder-{rid}" for rid in ids[::2]}
+        statuses = await _statuses(pool)
+        assert all(statuses[rid][:2] == ("delivered", 2) for rid in ids[::2])
+        assert all(statuses[rid][:2] == ("uncertain", 1) for rid in ids[1::2])
+        outcomes = await pool.fetch("SELECT outcome, count(*) AS n FROM proactive_deliveries GROUP BY outcome")
+        assert {row["outcome"]: row["n"] for row in outcomes} == {"sent": 60, "unknown": 60}
+
+    run_with_channel_configs(test, monkeypatch)
+
+
+def test_recovery_rolls_back_reminder_state_when_decision_settlement_fails(monkeypatch):
+    import asyncpg
+
+    async def test(pool):
+        await _operator(pool, enabled=True)
+        await _switch(pool)
+        chat_settings.set_delivery_enabled(True)
+        now = datetime(2026, 11, 20, 23, tzinfo=UTC)
+        reminder_id = await _stored("atomic recovery", now)
+        channel = _Channel()
+
+        async def crash(*args, **kwargs):
+            raise asyncio.CancelledError
+
+        with monkeypatch.context() as patch:
+            patch.setattr(store, "settle", crash)
+            with pytest.raises(asyncio.CancelledError):
+                await reminders.ReminderService(channel, clock=_Clock(now)).run_once()
+        await pool.execute("CREATE FUNCTION refuse_recovery() RETURNS trigger LANGUAGE plpgsql AS $$ "
+                           "BEGIN RAISE EXCEPTION 'synthetic receipt failure'; END $$; "
+                           "CREATE TRIGGER refuse_recovery BEFORE UPDATE ON proactive_deliveries "
+                           "FOR EACH ROW EXECUTE FUNCTION refuse_recovery()")
+        service = reminders.ReminderService(channel, clock=_Clock(now))
+        with pytest.raises(asyncpg.RaiseError, match="synthetic receipt failure"):
+            await service.run_once()
+        assert (await store.get(reminder_id))["status"] == "sending"
+        assert (await deliveries.get(pool, f"looper-reminder-{reminder_id}"))["outcome"] is None
+        await pool.execute("DROP TRIGGER refuse_recovery ON proactive_deliveries")
+        await service.run_once()
+        assert (await store.get(reminder_id))["status"] == "uncertain"
+        assert (await deliveries.get(pool, f"looper-reminder-{reminder_id}"))["outcome"] == "unknown"
+        assert len(channel.posts) == 1
+
+    run_with_channel_configs(test, monkeypatch)
+
+
+def test_upgrade_preserves_unknown_legacy_sends_and_reapplies_idempotently(monkeypatch):
+    async def test(pool):
+        now = datetime.now(UTC)
+        pending = await _stored("pending", now)
+        sending = await _stored("legacy send", now)
+        await store.claim(pool, sending, now)
+        await pool.execute("ALTER TABLE reminders DROP COLUMN IF EXISTS post_started_at")
+        await pool.execute("DELETE FROM schema_migrations WHERE name='reminder_post_started'")
+        async with pool.acquire() as conn:
+            assert await connection.schema_change_pending(conn)
+        await connection.ensure_schema(pool)
+        row = await store.get(sending)
+        assert row["post_started_at"] == row["updated_at"]
+        assert (await store.get(pending))["post_started_at"] is None
+        await connection.ensure_schema(pool)
+        async with pool.acquire() as conn:
+            assert not await connection.schema_change_pending(conn)
+        assert await pool.fetchval("SELECT count(*) FROM schema_migrations WHERE name='reminder_post_started'") == 1
+        assert (await store.get(sending))["post_started_at"] == row["post_started_at"]
+
+    run_db(test, monkeypatch)
 
 
 def test_a_stop_lets_the_send_under_way_finish_and_starts_no_other(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -775,6 +941,6 @@ def test_reminder_delivery_record_failure_does_not_lose_or_repeat_urgent_send(mo
         assert len(channel.posts) == 1
         assert "synthetic recording failure" in caplog.text
         row = await deliveries.get(pool, f"looper-reminder-{reminder_id}")
-        assert row is None if failure == "decision" else row["outcome"] is None
+        assert row is None if failure == "decision" else row["outcome"] == "sent"
 
     run_with_channel_configs(test, monkeypatch)

@@ -17,6 +17,7 @@ from .projects import RequestError
 from .subscriptions import strip_mentions
 
 _BUILD = re.compile(r"建(?:\s*(I-?\d+))?(?:\s+(\d{1,2}))?", re.IGNORECASE)
+_REVOKE = re.compile(r"撤销\s+(task-[a-z0-9]+)", re.IGNORECASE)
 _REJECT = re.compile(r"驳回(?:\s*(I-?\d+))?(?:\s+(.{1,200}))?", re.IGNORECASE)
 _FORBIDDEN = "意图只能由你本人在私聊或意图页处理。"
 logger = logging.getLogger(__name__)
@@ -54,6 +55,9 @@ def is_reply(text: str) -> bool:
 
 
 async def route(envelope: MessageEnvelope, *, platform: Any) -> RouteResult | None:
+    revoke = _REVOKE.fullmatch(" ".join(str(envelope.payload.get("text") or "").split()))
+    if revoke:
+        return await _prepare_revoke(envelope, revoke.group(1).lower(), platform=platform)
     if not await leads_model.intents_enabled():
         return None
     text = " ".join(str(envelope.payload.get("text") or "").split())
@@ -147,3 +151,31 @@ async def _execute(envelope: MessageEnvelope, *, platform: Any, number: int, lab
         return state_reply or strip_mentions(str(exc))
     except (RequestError, ValueError) as exc:
         return f"无法建任务：{strip_mentions(str(exc))}"
+
+
+async def _prepare_revoke(envelope, task_id, *, platform):
+    # Preparation is read-only; Manager's existing final stop check owns execution.
+    context = envelope.payload.get("channel_context") or {}
+    channel = envelope.source.channel or ""
+    group = gate_routing._group(channel, context) if is_lark(channel) or channel == "telegram" else False
+    sender = context.get("sender_id") or context.get("user_id")
+    client = context.get("client") or {}
+    operator = await operator_identity.operator_sender_id(envelope.source.agent_id) if channel != "web" else None
+    if not operator_identity.is_operator(channel=channel, group=group, sender=str(sender) if sender else None,
+            client_id=client.get("id") if isinstance(client, dict) else None, operator_id=operator):
+        return RouteResult(_FORBIDDEN)
+    row = await get_pool().fetchrow("SELECT id FROM intent_rule_executions WHERE task_id=$1", task_id)
+    if row is None:
+        return None
+    async def execute():
+        from .api_v1 import OPERATOR
+        from .intent_rule_engine import revoke
+        result = await revoke(row["id"], principal=OPERATOR, platform=platform)
+        labels = {"stopped":"已停止", "requested":"已请求停止，等待任务确认", "already_terminal":"任务已经结束", "failed":"停止失败，请重试"}
+        return f"{task_id}：{labels[result['state']]}。已发出的评审评论无法撤回。"
+    return RouteResult(action=execute)
+
+
+async def is_bound_revoke(text: str) -> bool:
+    match = _REVOKE.fullmatch(" ".join(text.split()))
+    return bool(match and await get_pool().fetchval("SELECT true FROM intent_rule_executions WHERE task_id=$1", match.group(1).lower()))

@@ -38,6 +38,7 @@ PROJECT = _object({"project_id": _STR, "name": _STR, "description": _STR, "work_
     "task_count": _INT, "active_count": _INT, "schedule_count": _INT, **EXECUTION})
 PROJECT["required"] = [name for name in PROJECT["required"] if name not in (*SUBAGENT_FIELDS, "memory_lessons")]
 PROJECT["properties"]["acceptance_checks"] = ACCEPTANCE_CHECKS
+PROJECT["properties"]["knowledge_dir"] = _NULL_STR
 INPUT_EXECUTION = {}
 for field, schema in EXECUTION.items():
     if field in ("task_budget_usd", "room_consult_budget_usd"):
@@ -50,7 +51,7 @@ for field, schema in EXECUTION.items():
         schema = {"anyOf": [schema, {"const": ""}]}
     INPUT_EXECUTION[field] = schema
 PATCH_FIELDS = {"name": _STR, "description": _STR, "work_dir": _STR, "background": _STR,
-                "default_workflow": _NULL_STR, **INPUT_EXECUTION}
+                "default_workflow": _NULL_STR, "knowledge_dir": _NULL_STR, **INPUT_EXECUTION}
 PATCH = {**_object(PATCH_FIELDS, [], closed=True), "minProperties": 1}
 PROJECT_RESULT = _object({"project": PROJECT})
 DELETED = _object({"deleted": _STR})
@@ -59,7 +60,7 @@ MOVED = _object({"project": PROJECT, "old_dir": _STR, "new_dir": _STR, "link_old
     "notes": _object({"moved": _BOOL, "from": _STR, "to": _STR, "reason": _STR}, required=("moved",))})
 # The Manager's compact project leaves out the advisor's settings while the project's advisor is off (the advisor
 # RFC, section 13: what the model sees stays as it was).
-COMPACT_PROJECT = _object(PROJECT["properties"], [name for name in PROJECT["properties"] if name not in (*ADVISOR_FIELDS, *SUBAGENT_FIELDS, "acceptance_checks", "memory_lessons")])
+COMPACT_PROJECT = _object({key: value for key, value in PROJECT["properties"].items() if key != "knowledge_dir"}, [name for name in PROJECT["properties"] if name not in (*ADVISOR_FIELDS, *SUBAGENT_FIELDS, "acceptance_checks", "memory_lessons", "knowledge_dir")])
 COMPACT_PROJECT_RESULT = _object({"project": COMPACT_PROJECT})
 COMPACT_MOVED = {**MOVED, "properties": {**MOVED["properties"], "project": COMPACT_PROJECT}}
 MOVE_PREVIEW = _object({"old_dir": _STR, "new_dir": _STR, "impact": _STR, "move_version": _STR})
@@ -152,9 +153,9 @@ def _input_fields(fields):
 async def run(server, operation, arguments, principal, headers):
     action = operation.operation_id.rsplit(".", 1)[1]
     if action == "list":
-        return await core.list_projects()
+        return await core.list_projects(include_knowledge_dir=True)
     if action == "create":
-        return {"project": await answered(core.create_project(_input_fields(arguments)))}
+        return {"project": await answered(core.create_project(_input_fields(arguments), include_knowledge_dir=True))}
     if action == "preview_delete":
         return {"impact": await impact(server, operation, arguments, principal, headers)}
     if action == "preview_move_dir":
@@ -164,8 +165,10 @@ async def run(server, operation, arguments, principal, headers):
                 "move_version": move.version}
     if action == "move_dir":
         project = await _move_project(arguments)
-        return await core.move_project_dir(project["id"], arguments,
+        result = await core.move_project_dir(project["id"], arguments,
             expected_move_version=arguments.get("_move_version", arguments.get("move_version")))
+        result["project"] = core.project_view(await core._existing_project(project["id"]), include_knowledge_dir=True)
+        return result
     project_id = arguments["project_id"]
     if action == "delete":
         return await answered(core.delete_project(
@@ -178,10 +181,10 @@ async def run(server, operation, arguments, principal, headers):
         raise OpError(ErrorCode.INVALID, str(exc)) from None
     changes = {key: value for key, value in normalized.items() if key != "execution"}
     changes.update(normalized.get("execution", {}))
-    before = core.project_view(await answered(core._existing_project(project_id)))
+    before = core.project_view(await answered(core._existing_project(project_id)), include_knowledge_dir=True)
     # A confirmed directory update must reach the version check even if another writer set the same target.
     if arguments.get("_directory_version") is None and (
             not changes or all(before.get(key) == value for key, value in changes.items())):
         raise OpError(ErrorCode.INVALID, "give at least one changed project field")
     return {"project": await answered(core.update_project(
-        project_id, fields, expected_directory_version=arguments.get("_directory_version")))}
+        project_id, fields, expected_directory_version=arguments.get("_directory_version"), include_knowledge_dir=True))}

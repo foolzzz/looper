@@ -64,6 +64,7 @@ class _Process:
     signature: Any
     system_prompt: SystemPrompt
     launch: Launch
+    signature_components: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass(eq=False, kw_only=True)

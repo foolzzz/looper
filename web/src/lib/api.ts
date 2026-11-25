@@ -284,6 +284,8 @@ export type AcceptanceChecksMode = "off" | "local" | "network";
 export interface AcceptanceChecksSettings { acceptance_checks: AcceptanceChecksMode }
 
 export interface Project extends ProjectExecution {
+  /** Operator-selected directory relative to the knowledge vault; unset keeps current storage. */
+  knowledge_dir?: string | null;
   /** Omitted while off; permission is changed only through acceptance_checks operations. */
   acceptance_checks?: "local" | "network";
   project_id: string;
@@ -302,6 +304,8 @@ export interface Project extends ProjectExecution {
   schedule_count: number;
   /** Present only while agents may propose skills for the operator to confirm; absent means off. */
   skill_proposals?: "on";
+  /** Omitted while off. Ended tasks propose memories instead of writing vault notes. */
+  memory_closeout?: "on";
 }
 
 export interface ChatSendResponse {
@@ -1304,6 +1308,23 @@ export async function updateAcceptanceChecks(projectId: string, mode: Acceptance
   return result;
 }
 
+export type MemoryCloseoutMode = "off" | "on";
+export interface MemoryCloseoutSettings { memory_closeout: MemoryCloseoutMode }
+
+export async function getMemoryCloseout(projectId: string): Promise<MemoryCloseoutSettings> {
+  const result = await callV1<MemoryCloseoutSettings>("/api/v1/memory_closeout/get", { project_id: projectId });
+  if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
+  return result;
+}
+
+export async function updateMemoryCloseout(projectId: string, mode: MemoryCloseoutMode): Promise<MemoryCloseoutSettings> {
+  const result = await callV1<MemoryCloseoutSettings>("/api/v1/memory_closeout/update",
+    { project_id: projectId, memory_closeout: mode });
+  if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
+  notifyProjectsChanged();
+  return result;
+}
+
 export async function createProject(fields: NewProjectFields): Promise<Project> {
   const result = await callV1<{ project: Project }>("/api/v1/project_admin/create", fields);
   if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
@@ -1313,6 +1334,8 @@ export async function createProject(fields: NewProjectFields): Promise<Project> 
 
 /** The project fields an update can change; an execution setting set to null inherits again. */
 export type ProjectUpdate = Partial<Omit<NewProjectFields, "name">> & { name?: string } & {
+  knowledge_dir?: string | null;
+} & {
   [K in keyof ProjectExecution]?: ProjectExecution[K] | string;
 };
 
@@ -2608,7 +2631,9 @@ export interface TaskDetail extends TaskInfo {
   } | null;
   error: string | null;
   /** "task_budget": the task failed at its project's task spend cap and can continue with a higher one. */
-  fail_kind: "task_budget" | null;
+  fail_kind: "task_budget" | "quota_exhausted" | "environment" | null;
+  /** Present only with active failure handling or retained failure history. */
+  holds?: import("./api-task-failures").FailureHold[];
   /** The task's spend cap (USD): its own, else its project's per task; null for none. */
   task_budget_usd: number | null;
   /** The task's own cap (a scheduled run's), raised alone when it continues at its cap; null for none. */
@@ -3132,6 +3157,7 @@ export type JournalKind =
   | "gate_opened"
   | "gate_updated"
   | "gate_cancelled"
+  | "failure_hold"
   | "gate_closed";
 
 /** Where a task stood, as its Planner said with a decision or a periodic check. */
@@ -4739,7 +4765,7 @@ export type LibraryKind = "plugin" | "skill" | "mcp";
  * or an MCP server) or in a project. */
 export type ItemOrigin = "machine" | "upload" | "git" | "ui" | "project";
 export type AgentRole = "manager" | "planner" | "worker" | "reviewer" | "processor" | "advisor" | "advice_check"
-  | "leads_check" | "outbound_check";
+  | "leads_check" | "outbound_check" | "memory_retro";
 /** The roles whose runs have tools: every role but the processor, which runs with none. */
 export const TOOL_ROLES: readonly AgentRole[] = ["manager", "planner", "worker", "reviewer"];
 /** An install's roles: the built-in ones with tools, and "task_role", the roles a task's Planner defines: such an
@@ -5216,6 +5242,7 @@ export interface VaultSettings {
   rules_file: string | null;
   profile_source: string;
   manager_read?: boolean;
+  worktree_root?: string | null;
   git: boolean;
   problem: string | null;
 }
@@ -5232,6 +5259,7 @@ export async function updateVaultSettings(body: {
   rules_file?: string | null;
   profile_source?: string;
   manager_read?: boolean;
+  worktree_root?: string | null;
 }): Promise<VaultSettings> {
   const result = await callV1<VaultSettings>("/api/v1/knowledge_vault/update", body);
   if ("status" in result) throw new V1Error(202, "unavailable", result.impact);

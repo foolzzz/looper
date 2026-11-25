@@ -23,6 +23,21 @@ from .agent_settings import AgentType
 from .lanes import Lane
 
 logger = logging.getLogger(__name__)
+_recovery_recheck = None
+
+
+def configure_recovery_recheck(callback) -> None:
+    """Wake step quota waits after account state changes, outside the account lock."""
+    global _recovery_recheck
+    _recovery_recheck = callback
+
+
+async def _recheck_recovery() -> None:
+    if _recovery_recheck is not None:
+        try:
+            await _recovery_recheck()
+        except Exception:
+            logger.exception("Could not recheck step quota holds after account change")
 KEY = "engine.admission.enabled"
 # Share with usage_windows when its independently switched cost guard lands.
 BACKGROUND_PAUSE_UTILIZATION = 0.95
@@ -230,6 +245,7 @@ class Controller:
             state = await self._transition(provider_id, event)
             self.lock.notify_all()
         await self._send_notices()
+        await _recheck_recovery()
         return state
 
     def _background(self, coroutine) -> asyncio.Task:
@@ -280,6 +296,7 @@ class Controller:
                 await self._transition(provider_id, QuotaFailure(result.resets_at, None))
             self.lock.notify_all()
         await self._send_notices()
+        await _recheck_recovery()
 
     async def _transition(self, provider_id: str, event: Event) -> AdmissionState:
         account = self._state(provider_id)
@@ -431,6 +448,7 @@ class Controller:
                 for grant in self.running.values():
                     grant.lent_by = None
             self.lock.notify_all()
+        await _recheck_recovery()
 
     async def _background_paused(self, provider_id: str) -> bool:
         now = self.now()

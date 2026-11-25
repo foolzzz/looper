@@ -61,7 +61,7 @@ class FakeSupervisor:
         assert kind == "fake" and owner is None
         if self.failure is not None:
             raise self.failure
-        lease = SimpleNamespace(bridge=self.bridge, runner_id="fake-1", valid=True,
+        lease = SimpleNamespace(bridge=self.bridge, runner_id="fake-1", valid=True, wake_tree=lambda: None,
                                 session_id=None, state_dir=state_dir)
 
         async def open_session(params):

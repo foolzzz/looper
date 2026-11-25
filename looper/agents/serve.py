@@ -64,6 +64,7 @@ from .intent_push import IntentPushService
 from . import intent_recognition
 from .memory_write import MemoryWriteService
 from .memory_draft_service import MemoryDraftService
+from .memory_retro_service import MemoryRetroService, terminal_listener
 from .memory_push import MemoryPushService
 from .reminders import ReminderService
 from .idle_checks import IdleCheckService, PostFn
@@ -73,7 +74,7 @@ from .http_server import AgentHTTPServer
 from .loop_watch import LoopWatch
 from .log_redaction import log_to_stderr
 from .scheduler import Scheduler
-from .message import MessageType
+from .message import MessageEnvelope, MessageType, TASK_ROUTER_ADDRESS, planner_address
 from .runtimes.runner.supervisor import RunnerSupervisor
 from .supervisor import AgentSupervisor
 from .tiers import triage_background
@@ -382,6 +383,7 @@ async def seed_role_configs(pool: Any = None) -> None:
     from .explorer import EXPLORER_MAX_TURNS, EXPLORER_ROLE_PROMPT, EXPLORER_TIMEOUT_SEC
     from .outbound import OUTBOUND_ROLE_PROMPT, REVIEW_TIMEOUT_SEC as OUTBOUND_TIMEOUT_SEC
     from .memory_draft_role import ROLE_PROMPT as MEMORY_DRAFT_ROLE_PROMPT, TIMEOUT_SEC as MEMORY_DRAFT_TIMEOUT_SEC
+    from .memory_retro_role import ROLE_PROMPT as MEMORY_RETRO_ROLE_PROMPT, TIMEOUT_SEC as MEMORY_RETRO_TIMEOUT_SEC
     from .processor import PROCESSOR_ROLE_PROMPT, PROCESSOR_TIMEOUT_SEC
     from .tiers.manager import DEFAULT_SYSTEM_PROMPT
     from .tiers.planner import DEFAULT_SYSTEM_PROMPT as PLANNER_SYSTEM_PROMPT
@@ -441,6 +443,13 @@ async def seed_role_configs(pool: Any = None) -> None:
             "timeout_seconds": CHECK_TIMEOUT_SEC,  # at most, per check
             # Its instructions and reply contract follow it.
             "system_prompt": LEADS_CHECK_ROLE_PROMPT,
+        },
+        {
+            "role": "memory_retro",
+            "display_name": "Memory retro",
+            "timeout_seconds": MEMORY_RETRO_TIMEOUT_SEC,
+            "max_turns": 1,
+            "system_prompt": MEMORY_RETRO_ROLE_PROMPT,
         },
         {
             "role": "memory_draft",
@@ -513,6 +522,12 @@ async def _back_up_before_schema_change(pool: Any, ops: OpsConfig, runtime_root:
         logger.warning("BACKUP SKIPPED (--skip-backup): the database schema of %s changes now without a backup; "
                        "the columns and tables its migrations drop cannot be restored", shown)
         return
+    if not registry_upgrade:
+        async with pool.acquire() as conn:
+            online = await db_backup.reusable_upgrade_backup(conn, ops, runtime_root)
+        if online is not None:
+            logger.info("relying on verified online upgrade backup %s; writes after its snapshot are absent", online)
+            return
     check, dumper = await asyncio.to_thread(self_check.check_pg_dump, server_version_num, True, ops)
     if dumper is None:
         raise StartupCheckFailed(self_check.format_checks([check]))
@@ -795,6 +810,7 @@ async def _run_agent_system_watched(
     recognition_service: intent_recognition.IntentRecognitions | None = None
     memory_writer: MemoryWriteService | None = None
     memory_drafter: MemoryDraftService | None = None
+    memory_retro_service: MemoryRetroService | None = None
     memory_push_service: MemoryPushService | None = None
     mode = ShutdownMode.END_RUNS
     if ops.keeper_mode is KeeperMode.ON:
@@ -1009,8 +1025,31 @@ async def _run_agent_system_watched(
             # posts what the gates' discussions say to the chats their tasks came from.
             gate_reminders = GateReminders()
             gate_courier = GateCourier(registry.post, dashboard_url=dashboard_url, post_card=registry.post_card)
+            from . import memory_lessons
+            await memory_lessons.load()
+            memory_retro_service = MemoryRetroService(runtime_root, drain=drain, claude_bin=claude_bin,
+                                                      sender=registry.notify)
             task_router = TaskRouter(runtime_root=runtime_root, broadcaster=broadcaster, claude_bin=claude_bin,
-                                     on_task_end=scheduler.task_ended, dashboard_url=dashboard_url)
+                                     on_task_end=terminal_listener(scheduler.task_ended, memory_retro_service),
+                                     dashboard_url=dashboard_url)
+            from . import failure_handling, failure_notices, failures
+
+            async def failure_event(task_id, payload):
+                if payload.get("event") == "failure_hold_released" and payload.get("action") == "stop":
+                    await bus.publish(MessageEnvelope.create(source=TASK_ROUTER_ADDRESS,
+                        target=TASK_ROUTER_ADDRESS, message_type=MessageType.TASK_STOP,
+                        payload={"task_id": task_id}))
+                    return
+                await bus.publish(MessageEnvelope.create(source=TASK_ROUTER_ADDRESS,
+                    target=planner_address(task_id), message_type=MessageType.SYSTEM_EVENT, payload=payload))
+                if payload.get("event") in ("failure_hold_opened", "failure_hold_reminder"):
+                    await failure_notices.notify(task_id, payload, post=registry.post)
+
+            failure_service = failure_handling.FailureHandlingService(pool=pool, publish=failure_event,
+                mode=await failures.typing_mode(pool=pool))
+            failure_handling.configure(failure_service)
+            await failure_service.prepare_restore()
+            admission.configure_recovery_recheck(failure_service.recheck)
             wait_service = WaitService(bus=bus, has_planner=task_router.has_planner, dashboard_url=dashboard_url, drain=drain)
             from . import completion_events
             completion_events.set_scheduler(scheduler)
@@ -1026,7 +1065,8 @@ async def _run_agent_system_watched(
             memory_writer = MemoryWriteService(runtime_root=runtime_root, drain=drain)
             memory_push_service = MemoryPushService(registry, drain=drain, dashboard_url=dashboard_url)
             memory_drafter = MemoryDraftService(runtime_root, drain=drain, claude_bin=claude_bin, sender=registry.notify)
-            drain.add_source(lambda: {"starting": memory_writer.drain_waiting() + memory_drafter.drain_waiting()})
+            drain.add_source(lambda: {"starting": memory_writer.drain_waiting() + memory_drafter.drain_waiting() +
+                                      memory_retro_service.drain_waiting()})
             reminder_service = ReminderService(registry, drain=drain)
             ledger_reconciler = LedgerReconciler()
             supervisor.register(task_router)
@@ -1061,7 +1101,7 @@ async def _run_agent_system_watched(
             scheduler.manager_busy = lambda manager_id: bool((agent := fleet.get(manager_id)) is not None
                                                              and agent.busy)
             await fleet.load()
-            morning_brief_service = MorningBriefService(registry, drain=drain, managers=fleet)
+            morning_brief_service = MorningBriefService(registry, drain=drain, managers=fleet, dashboard_url=dashboard_url)
             metrics_alert_service = MetricsAlertService(registry)
             from .completion_service import CompletionService
             completion_service = CompletionService(
@@ -1154,6 +1194,10 @@ async def _run_agent_system_watched(
                 startup_steps=startup.steps,
                 loop_watch=loop_watch,
             )
+            from . import intent_rule_engine
+            intent_rule_service = intent_rule_engine.IntentRuleService(platform, registry, drain=drain, dashboard_url=dashboard_url)
+            intent_rule_engine.install(intent_rule_service)
+            http_server._intent_rule_executor = intent_rule_service
             http_server._memory_writer = memory_writer
             http_server._source_service = source_service
             http_server._memory_drafter = memory_drafter
@@ -1181,6 +1225,7 @@ async def _run_agent_system_watched(
             await supervisor.start_all()
             await fleet.sweep()
             await carry_on_tasks(task_router, left_running)
+            await failure_service.restore()
             if lease is not None:
                 worker_pool.schedule_candidate_expiry()
         except BaseException:
@@ -1196,9 +1241,11 @@ async def _run_agent_system_watched(
         await completion_service.start()
         # Sources that are off (the default) cost one query per tick.
         await source_service.start()
+        await intent_rule_service.start()
         await intent_push_service.start()
         await memory_writer.start()
         await memory_drafter.start(dsn)
+        await memory_retro_service.start(dsn)  # off ticks and terminal callbacks only check the in-memory switch
         await memory_push_service.start()
         await reminder_service.start()  # idle while reminders are off
         triage_background.configure(registry.post)
@@ -1275,8 +1322,11 @@ async def _run_agent_system_watched(
             await completion_service.stop()
             await source_service.stop()
             await recognition_service.stop()
+            await intent_rule_service.stop()
+            intent_rule_engine.install(None)
             await intent_push_service.stop()
             await memory_drafter.stop()
+            await memory_retro_service.stop()
             await memory_push_service.stop()
             await memory_writer.stop()
             await reminder_service.stop()
@@ -1292,6 +1342,9 @@ async def _run_agent_system_watched(
             for runner_supervisor in runner_supervisors:
                 await runner_supervisor.stop()
             await admission.stop()
+            await failure_service.close()
+            admission.configure_recovery_recheck(None)
+            failure_handling.configure(None)
             await registry.stop_all()
             await bus.shutdown()
             if control is not None:
@@ -1323,6 +1376,8 @@ async def _run_agent_system_watched(
                 await recognition_service.stop()
             if memory_drafter is not None:
                 await memory_drafter.stop()
+            if memory_retro_service is not None:
+                await memory_retro_service.stop()
             if memory_push_service is not None:
                 await memory_push_service.stop()
             if memory_writer is not None:
@@ -1349,6 +1404,10 @@ def _pending_advisory_checks() -> list[list[self_check.Check]]:
     )
     if admission.enabled():
         groups += ((("admission", "Account admission"),),)
+    from . import failure_handling, failures
+    service = failure_handling.get_service()
+    if service is not None and service.mode is failures.FailureTyping.ACT:
+        groups += ((("failure_handling", "Execution recovery"),),)
     return [[self_check.Check(id, label, self_check.PENDING, "Startup check in progress") for id, label in group]
             for group in groups]
 
@@ -1386,6 +1445,10 @@ async def _advisory_startup_checks(snapshot: list[dict[str, str]], database: sel
         # Keep the disabled path's checks unchanged; every enabled probe needs its own slots.
         if admission.enabled():
             probes += (self_check.admission_checks(),)
+        from . import failure_handling, failures
+        service = failure_handling.get_service()
+        if service is not None and service.mode is failures.FailureTyping.ACT:
+            probes += (self_check.failure_handling_checks(),)
         await asyncio.gather(*(record(index, probe) for index, probe in enumerate(probes)))
         self_check.log_problems([database, *(check for group in groups for check in group)])
     except Exception:

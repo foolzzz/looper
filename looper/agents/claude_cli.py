@@ -31,7 +31,7 @@ if TYPE_CHECKING:
     from .agent_settings import Launch
     from .knowledge import AgentKnowledge
     from .library import AgentLibrary
-    from .runtimes import RuntimeAdapter, StopMethod
+    from .runtimes import RunCost, RuntimeAdapter, StopMethod
     from .runtimes.cancel import TurnCancel
     from .runtimes.pricing import RunSpend
     from .system_prompt import SystemPrompt
@@ -541,6 +541,8 @@ def write_control(stdin: asyncio.StreamWriter, request: dict[str, Any]) -> str:
 
 # How long a resident Claude may take to end its turn after an interrupt request before it is killed.
 INTERRUPT_GRACE_SEC = 5.0
+# Stay below the Manager's 60-second preparation settlement deadline.
+RESERVED_INPUT_WAIT_SEC = 30.0
 # How long a stopping resident Claude may take to exit after its stdin closes before it is ended.
 STOP_GRACE_SEC = 5.0
 # How long the rest of an exited Claude's output may take to be read.
@@ -660,6 +662,10 @@ class _InputPhase(Enum):
     OPEN = "open"
     GENERATING = "generating"
     COMPLETE = "complete"
+
+
+class ReservedInputTimeout(RuntimeError):
+    """A preceding native input did not finish; admitting another prompt could repeat its effects."""
 
 
 @dataclass
@@ -1278,7 +1284,13 @@ class ResidentClaude:
             # later claim rather than writing that message into the transcript twice.
             if (message_id != keep_message_id and (owner := output.queued.get(message_id)) is not None
                     and not owner.completed.is_set()):
-                await self.discard_reserved_input(message_id)
+                try:
+                    async with asyncio.timeout(RESERVED_INPUT_WAIT_SEC):
+                        await owner.completed.wait()
+                except TimeoutError as exc:
+                    error = f"native input {message_id} did not complete within {RESERVED_INPUT_WAIT_SEC:g}s"
+                    logger.error("%s: %s; refusing to interrupt or rewrite it", self._label, error)
+                    raise ReservedInputTimeout(error) from exc
 
     async def discard_reserved_input(self, message_id: str | None) -> None:
         """A token ended without claiming: bounded withdrawal before this resident is reused."""
@@ -1863,6 +1875,8 @@ class ClaudeRunRecorder:
         # What its stream said about how it may fail, and what its close classifies (``failures``).
         self._evidence = failures.Evidence()
         self._failure_basis: tuple[dict[str, Any] | None, str | None, failures.Failure | None] | None = None
+        self._finished_status: str | None = None
+        self._finished_outcome: str | None = None
         self._admission_reported = False
         self._admission_quota_reported = False
         self._admission_report_version = 0
@@ -1886,6 +1900,17 @@ class ClaudeRunRecorder:
                                    launch.max_budget_usd if launch is not None else None)
         if spend is not None:
             self._spend = spend
+        # Worker processes can outlive their controller. Keep their reported bill on the same DB row,
+        # independently of the final settlement and its per-run soft cap.
+        self._checkpoint_spend: RunSpend | None = None
+        self._checkpoint_result: tuple[Usage, Usage] | None = None
+        self._checkpoint_runtime_cost = False
+        if whole_process and launch is not None and launch.role in ("worker", "reviewer"):
+            from .runtimes.pricing import RunSpend, pricer
+
+            self._checkpoint_spend = RunSpend(
+                launch.price or pricer(launch.settings.resolved_model, catalog=launch.settings.pricing_catalog),
+                launch.model, None)
 
     @classmethod
     async def resume(
@@ -2004,6 +2029,8 @@ class ClaudeRunRecorder:
 
     async def record(self, event: dict[str, Any]) -> None:
         self.account(event)
+        if self._checkpoint_spend is not None and event.get("type") in ("usage", "result"):
+            await self._checkpoint_usage()
         await self.persist(event)
 
     def account(self, event: dict[str, Any], *, replayed: bool = False) -> None:
@@ -2037,11 +2064,19 @@ class ClaudeRunRecorder:
                 self._spend.add(event)
             elif found is not None:
                 self._streamed = self._streamed.plus(found[1])
+            if self._checkpoint_spend is not None and found is not None and found[1] != Usage():
+                # A partial bill prices reported requests even when the stream cannot cover the whole run.
+                self._checkpoint_spend.add({**event, "usage_complete": True})
             return
         if event.get("type") == "stream_event":
             return
         if self._whole_process and event.get("type") == "result":
             self._result = event
+            if (self._checkpoint_spend is not None and not self._inherited_session
+                    and not event.get(SOFT_CAP) and not event.get(USER_STOP)):
+                totals = run_usage(event, price=self._launch.price)
+                self._checkpoint_result = totals, self._checkpoint_spend.usage
+                self._checkpoint_runtime_cost = self._launch.price is None and totals.cost_usd is not None
         if event.get("type") == "system" and event.get("subtype") == "init":
             self._model = event.get("model") or self._model
             self._model_display = event.get("model_display") or self._model_display
@@ -2185,6 +2220,30 @@ class ClaudeRunRecorder:
             return replace(usage, cost_usd=None)
         return usage
 
+    def _interrupted_bill(self) -> RunCost:
+        """The last reported totals plus requests since them, using the existing frozen price scope."""
+        from .runtimes import CostSource, RunCost
+
+        assert self._checkpoint_spend is not None
+        usage = self._checkpoint_spend.usage
+        if self._checkpoint_result is not None:
+            totals, baseline = self._checkpoint_result
+            usage = totals.filled_from(baseline).plus(usage.since(baseline))
+        return RunCost(usage, CostSource.RUNTIME if self._checkpoint_runtime_cost else CostSource.PROVIDER_PRICE)
+
+    async def _checkpoint_usage(self) -> None:
+        from ..db import llm_records
+
+        if self._record_id is None or self._closed:
+            return
+        bill = self._interrupted_bill()
+        if bill.usage == Usage():
+            return
+        try:
+            await llm_records.checkpoint_usage(self._record_id, bill.usage, bill.source.value)
+        except Exception:
+            logger.warning("could not checkpoint llm usage for %s", self._agent_id, exc_info=True)
+
     async def finish(
         self,
         *,
@@ -2249,6 +2308,23 @@ class ClaudeRunRecorder:
         """
         result, outcome, given = self._failure_basis or (self._result, None, None)
         return failures.classify(self._runtime(), result, self._evidence, outcome=outcome, given=given)
+
+    def execution_signal(self) -> dict[str, Any] | None:
+        """The finished execution's typed facts; callers must first check act mode.
+
+        This reads the same evidence as recording, without a record readback or a
+        second admission report. Detached and interrupted runs have no result.
+        """
+        if self._detached or self._finished_status in (None, "interrupted"):
+            return None
+        outcome = self._finished_outcome or "run_failed"
+        failed = self._finished_status == "failed" or outcome in failures.REPORT_OUTCOMES
+        found = self.failure_signal() if failed else None
+        return {"record_id": self.record_id,
+                "provider_id": self._launch.profile.provider.id if self._launch is not None else None,
+                "outcome": outcome,
+                "failure": ({"class": found.cls.value, "cause": found.cause.value,
+                             **found.metadata()} if found is not None else None)}
 
     async def report_admission(self, found: failures.Failure | None, *, interrupted: bool = False) -> None:
         """Apply one run's signal once, allowing a probe's quota evidence to upgrade an untyped result.
@@ -2324,6 +2400,8 @@ class ClaudeRunRecorder:
         stopped). Waiting is bounded by ``CLOSE_TIMEOUT_SEC`` even if the database
         ignores cancellation; a failed write is logged.
         """
+        if self._finished_status is None:
+            self._finished_status, self._finished_outcome = status.value, outcome
         self._untrack()
         if self._record_id is None or self._closed:
             return
@@ -2340,7 +2418,8 @@ class ClaudeRunRecorder:
 
         release(self._record_id, end_route=self._whole_process)
         try:
-            cost = self._runtime().cost(usage, self._provider())
+            cost = (self._interrupted_bill() if status is RecordStatus.INTERRUPTED and self._checkpoint_spend is not None
+                    else self._runtime().cost(usage, self._provider()))
             if self._inherited_session:
                 from .runtimes import CostSource
 

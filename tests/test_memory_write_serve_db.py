@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from datetime import datetime, timezone
+from dataclasses import replace
 import json
 from pathlib import Path
 import subprocess
@@ -33,7 +34,7 @@ async def _seed(url: str, repo: Path, *, enabled: bool) -> tuple[str, str]:
     conn = await asyncpg.connect(url)
     try:
         settings = model.MemorySettings(
-            root="mem", enabled=enabled, branch="main", commit_prefix="mem",
+            worktree_root=str(repo.parent / "worktrees"), root="mem", enabled=enabled, branch="main", commit_prefix="mem",
             rules_files=("mem/AGENTS.md",), targets={model.Kind.PREFERENCE: model.Target(
                 model.Shape.NOTE, folders=("prefs",), index="prefs/_index.md")})
         for key, value in (("knowledge_vault", {"path": str(repo)}), ("memory_write", settings.to_json())):
@@ -82,10 +83,14 @@ def test_memory_writes_through_serve(monkeypatch, tmp_path, enabled):
         script = binaries / name
         script.write_text(f"#!{sys.executable}\nimport sys\nsys.exit(76)\n")
         script.chmod(0o755)
+    isolated_port = runner.free_port()
+    assert isolated_port != runner.RESERVED_PORT
+    original_render = runner.ops_config.render
+    monkeypatch.setattr(runner.ops_config, "render", lambda ops: original_render(replace(ops, port=isolated_port)))
     with fresh_database_without_recording(str(DSN)) as (url, _):
         candidate, digest = asyncio.run(_seed(url, repo, enabled=enabled))
         with runner.running_server(database_url=url, runtime_root=runtime, bin_dir=binaries, home=home,
-                                   notes_root=home / "notes", log_path=tmp_path / "serve.log") as api:
+                                   notes_root=home / "notes", log_path=tmp_path / "serve.log", port=isolated_port) as api:
             assert not api.base_url.endswith(":8767")
             if not enabled:
                 # A persisted confirmation must remain inert while the switch is off.

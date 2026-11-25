@@ -21,7 +21,7 @@ KINDS = ("step_accepted", "step_failed", "step_retry", "decision", "supplement",
          "progress", "profile_choice", "profile_fallback", "concurrency_change", "role_defined", "gate_opened", "gate_updated",
          "gate_cancelled", "gate_closed", "wait_opened", "wait_extended", "wait_closed", "condition_blocked",
          "review_round", "late_review", "review_adjudicated",
-         "verification_round", "escalation")
+         "verification_round", "escalation", "failure_hold")
 
 _INSERT = """
 INSERT INTO task_journal (task_id, step_id, kind, summary, learnings, via, delivered_at)

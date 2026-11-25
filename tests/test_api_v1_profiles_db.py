@@ -46,7 +46,8 @@ async def _create(call, **fields):
 
 
 @pytest.mark.usefixtures("current_turn")
-def test_profiles_refuse_legacy_chat_endpoint_without_base_url(tmp_path, monkeypatch):
+@pytest.mark.parametrize("failure_mode", [None, "record", "act"])
+def test_profiles_refuse_legacy_chat_endpoint_without_base_url(tmp_path, monkeypatch, failure_mode):
     from unittest.mock import AsyncMock
 
     from looper.agents.llmrec import ROUTES_DIR, control
@@ -54,6 +55,9 @@ def test_profiles_refuse_legacy_chat_endpoint_without_base_url(tmp_path, monkeyp
     from tests.test_provider_binding_db import _task, _work
 
     async def run(pool):
+        from looper.db import system_settings
+
+        await system_settings.put_settings({"engine.failure_typing": failure_mode}, pool=pool)
         model = (await profile_registry.create_model({"provider_id": "prov-test", "name": "legacy-chat",
             "protocol": "openai-chat"}))["model"]
         profile = (await profile_registry.create_profile({"name": "Legacy chat", "runtime_id": "rt-claude-code",
@@ -84,6 +88,11 @@ def test_profiles_refuse_legacy_chat_endpoint_without_base_url(tmp_path, monkeyp
         task = await _task(tmp_path)
         outcome = await _work(str(tmp_path / "must-not-start-claude"), task, tmp_path)
         assert outcome["status"] == "failed" and diagnostic in outcome["error"], outcome
+        if failure_mode == "act":
+            assert outcome["engine_run"]["provider_id"] == "prov-test"
+            assert outcome["engine_run"]["failure"]["cause"] == "profile"
+        else:
+            assert "engine_run" not in outcome
         start.assert_not_awaited()
         assert not list((tmp_path / "runtime" / ROUTES_DIR).glob('*.json'))
 

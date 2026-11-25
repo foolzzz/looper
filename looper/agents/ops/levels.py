@@ -64,6 +64,7 @@ TOOL_LEVELS: Mapping[str, ActionLevel | LevelOf] = {
     "looper_task_create": INSIDE,  # its task's agents' own calls are reviewed where they run
     "looper_task_control": INSIDE, "looper_task_instruct": INSIDE, "looper_task_update": INSIDE,
     "looper_concurrency": INSIDE,
+    "looper_task_hold": INSIDE,  # changes only the task engine state; operator identity is checked separately
     "looper_task_gate_reply": ORIGIN,  # the Planner's answer goes back to the chat the task came from
     "looper_projects": _projects,
     "looper_agent_profiles": INSIDE, "looper_models": INSIDE,

@@ -159,6 +159,7 @@ def _composed(research: ResearchSources | None, *, leads: bool = False, agent_id
 
     settings = AgentSettings(profile=replace(builtin_resolved_profile(), custom_prompt=""))
     manager = SimpleNamespace(agent_id=agent_id, _system_prompt="ROLE", _prompt_recommended=False,
+                              _session_now=lambda: SimpleNamespace(key="main"),
                               _leads_on=leads, **({"_research": research} if research is not None else {}))
     return ManagerAgent._composed_prompt(manager, settings)
 
@@ -222,5 +223,6 @@ def _composed_with(research: ResearchSources, **fields: Any) -> Any:
 
     settings = AgentSettings(profile=replace(builtin_resolved_profile(), custom_prompt=""))
     manager = SimpleNamespace(agent_id="manager", _system_prompt="ROLE", _prompt_recommended=False, _leads_on=False,
+                              _session_now=lambda: SimpleNamespace(key="main"),
                               _research=research, **fields)
     return ManagerAgent._composed_prompt(manager, settings)

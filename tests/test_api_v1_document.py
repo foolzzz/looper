@@ -14,6 +14,25 @@ from looper.agents.ops.clients import CLIENT_TOOLS
 HAND = {"chat.send", "chat.messages", "chat.conversations", "confirm", "openapi", "llm_requests.export"}
 
 
+@pytest.mark.parametrize("path,field,values", [
+    ("attention/settings_update", "enabled", [True, False, None]),
+    ("reminders_settings/update", "enabled", [True, False, None]),
+    ("stable_context_settings/update", "enabled", [True, False, None]),
+    ("decision_snapshots_settings/update", "enabled", [True, False, None]),
+    ("leads_search_settings/update", "mode", ["words", "fulltext", None]),
+])
+def test_operator_switch_writes_have_closed_nullable_schemas(path, field, values):
+    operation = api_v1.find("POST", f"/api/v1/{path}")
+    assert operation is not None and operation.operator_only and operation.tool is None
+    assert operation.risk == "high" and operation.confirms
+    assert operation.request["additionalProperties"] is False
+    assert operation.request["required"] == [field]
+    for value in values:
+        assert api_v1.validate_arguments(operation.request, {field: value}) == {field: value}
+    documented = api_v1.document()["paths"][f"/{path}"]["post"]
+    assert documented["x-looper-operator-only"] and "202" in documented["responses"]
+
+
 def _actions(tool) -> list[str] | None:
     if "action" in (tool.schema.get("required") or ()):
         return tool.schema["properties"]["action"].get("enum") or None

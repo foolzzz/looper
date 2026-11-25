@@ -31,6 +31,7 @@ RFC_TABLE: dict[str, ActionLevel | str] = {
     "looper_ledger_add": INSIDE, "looper_ledger_update": INSIDE, "looper_leads_search": INSIDE,
     "looper_skill_propose": INSIDE, "looper_intents_recognize": OPERATOR,
     "looper_memory_propose": INSIDE,
+    "looper_task_hold": INSIDE,
     "looper_session_search": INSIDE,  # reads earlier conversations stored by Looper
     "looper_reminder_list": INSIDE, "looper_reminder_create": OPERATOR, "looper_reminder_cancel": OPERATOR,
     "looper_task_pipeline": INSIDE, "looper_gates": "args",
@@ -174,6 +175,8 @@ DECIDED_OPERATIONS: dict[str, ActionLevel] = {
     "limit_signals_settings.update": INSIDE,  # changes only Looper's collection switch
     "session_routing.get": INSIDE,  # reads Looper's own session routing controls
     "session_routing.update": INSIDE,  # stores session routing settings; sends no message
+    "scenario_session_routing.get": INSIDE,  # reads only a stored Manager definition
+    "scenario_session_routing.update": INSIDE,  # stores only a routing policy; sends no message
     "outbound_gateway.get": INSIDE,  # reads Looper's own gateway settings
     "outbound_gateway.update": INSIDE,  # stores gateway settings; sends no message
     "memory.list": INSIDE,  # reads stored candidates
@@ -199,6 +202,8 @@ DECIDED_OPERATIONS: dict[str, ActionLevel] = {
     "project_skills.proposals.reject": INSIDE,  # marks a stored proposal rejected; sends nothing
     "project_skills.proposals.restore": INSIDE,  # marks an expired stored proposal pending; sends nothing
     "project_skills.proposals.set_mode": INSIDE,  # stores a project's proposal switch; sends nothing
+    "memory_closeout.get": INSIDE,  # reads a project's memory closeout switch; sends nothing
+    "memory_closeout.update": INSIDE,  # stores a project flag; candidates still need the operator's confirmation
     "mcp_tool_levels.get": INSIDE,  # reads stored MCP trust declarations
     "mcp_tool_levels.put": INSIDE,  # stores MCP trust declarations; runs no MCP call
 
@@ -273,6 +278,18 @@ def test_in_a_group_turn_a_push_to_the_speakers_direct_chat_is_external(monkeypa
 
 # Every /api/v1 operation and its level: "args" where its arguments (or what it acts on) decide it.
 MANIFEST = Path(__file__).with_name("operation_levels.json")
+
+
+@pytest.mark.parametrize("operation_id", [
+    "attention.settings_update", "reminders_settings.get", "reminders_settings.update",
+    "stable_context_settings.get", "stable_context_settings.update", "decision_snapshots_settings.get",
+    "decision_snapshots_settings.update", "leads_search_settings.get", "leads_search_settings.update",
+])
+def test_operator_switch_settings_only_change_looper_state(operation_id):
+    from looper.agents import api_v1
+
+    operation = api_v1.find("POST", "/api/v1/" + operation_id.replace(".", "/"))
+    assert operation is not None and operation.level is INSIDE and operation.level_of is None
 
 
 def _declared(operations: Any) -> dict[str, str]:

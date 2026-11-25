@@ -76,6 +76,7 @@ from ..claude_cli import (
 )
 from .. import admission, turn_admission, session_visibility
 from ..session_visibility import Input as SessionInput
+from .. import failures
 from ..failures import FailureClass
 from .. import attention, chat_attachments, chat_commands, chat_settings, completion_events, gate_commands, ledger_routing, memory_routing, outbound_hook, status_card, turn_metrics
 from ..turn_metrics import TurnDelivery, TurnTimes, AckKind, ChatKind, ProactiveSource
@@ -460,6 +461,7 @@ class Prepared:
     launch: Any = None
     prompt_file: Any = None
     signature: Any = None
+    signature_components: dict[str, str] = field(default_factory=dict)
     switch: Any = None
     turn_text: str = ""
     run: RunState = field(default_factory=RunState)
@@ -755,6 +757,14 @@ class NoReply(RuntimeError):
     """The runtime ended the turn without a word of reply (not an exit, a cap or an error)."""
 
 
+def _typed_failure_reply(found: failures.Failure) -> str | None:
+    if found.cls is FailureClass.TRANSIENT:
+        return f"Manager 遇到瞬时故障（{found.cause.value}），这次回复没有完成；不会自动重试已执行的操作。"
+    if found.cls is FailureClass.ENVIRONMENT:
+        return f"Manager 遇到环境问题（{found.cause.value}），请检查运行时、登录或配置后再继续。"
+    return None
+
+
 class _CompletionNotTaken(Exception):
     """The Manager was turned off before its completion turn ran."""
 
@@ -866,6 +876,7 @@ class ManagerAgent:
         self._drain = drain
         self._tools_ready = tools_ready
         self._definition = definition or default_definition()
+        session_routing.set_scenario_routing(self._definition.id, self._definition.session_routing)
         self._log = self._definition.id
         # Set when the definition was turned off or deleted; the fleet (card 6) sets ``on_turned_off``.
         self._turned_off = False
@@ -961,7 +972,7 @@ class ManagerAgent:
         session = self._session_now()
         if session.key == MAIN_SESSION:
             return self._runtime_root
-        root = self._runtime_root / ".local" / "manager-sessions" / session_routing.key_digest(session.key)
+        root = self._runtime_root / ".local" / "manager-sessions" / session_routing.session_digest(self.agent_id, session.key)
         root.mkdir(mode=0o700, parents=True, exist_ok=True)
         return root
 
@@ -1032,7 +1043,7 @@ class ManagerAgent:
             session.session_provider = saved.get("provider_id")
             session.clean_start = bool(saved.get("clean_start"))
             session.pending_handoff = saved.get("pending_handoff")
-            if (policy := session_visibility.for_session(session.key)) is not None and (
+            if (policy := session_visibility.for_session(session.key, manager_id=self.agent_id)) is not None and (
                     saved.get("context_policy_version", 0) != policy.version):
                 session.session_id = None
                 session.pending_handoff = session.pending_switch = None
@@ -1055,13 +1066,14 @@ class ManagerAgent:
             handoff = None
         if session.key != MAIN_SESSION:
             route = session.route
+            policy = session_visibility.for_session(session.key, manager_id=self.agent_id)
             await db_manager_sessions.save({
                 "manager_id": self.agent_id, "session_key": session.key, "kind": route.kind.value,
                 "channel_id": route.channel_id, "chat": route.chat, "session_id": session.session_id,
                 "session_totals": session.session_totals.to_dict(), "runtime_type": session.session_runtime,
                 "profile_id": session.session_profile, "provider_id": session.session_provider,
                 "clean_start": session.clean_start, "pending_handoff": handoff,
-                "context_policy_version": session_visibility.NON_MAIN_ALLOWLIST.version}, pool=pool)
+                "context_policy_version": policy.version if policy is not None else 0}, pool=pool)
         else:
             await db_agent_sessions.save_session(self.agent_id, session.session_id, session.session_totals.to_dict(),
                                                  runtime_type=session.session_runtime,
@@ -1133,6 +1145,7 @@ class ManagerAgent:
                 self._turned_off = True
                 return
             self._definition = ManagerDefinition.from_row(row)
+            session_routing.set_scenario_routing(self.agent_id, self._definition.session_routing)
             self._system_prompt = row["system_prompt"]
             self._prompt_recommended = False
             return
@@ -1553,6 +1566,8 @@ class ManagerAgent:
             token.times.ack_at = turn_metrics.ack_board.take(channel_id, message_id)
             token.times.ack = AckKind.REACTION if token.times.ack_at is not None else (AckKind.NONE if known else AckKind.PENDING)
         metadata = token.times.to_metadata(delivery, TurnOrigin.USER, token.times.received_at < self._metrics_started_at)
+        if is_lark(origin["channel"]) and isinstance(ingress := token.envelope.metadata.get("lark_ingress"), dict):
+            metadata["lark_ingress"] = ingress
         return turn_metrics.background(prepared.run.recorder.annotate({"turn_metrics": metadata}))
 
     @manager_budget.after_reply
@@ -1654,6 +1669,13 @@ class ManagerAgent:
                 # Always answer: the chat stream waits for a final reply. What a tool did before is still shown.
                 cause = str(exc) or type(exc).__name__
                 logger.exception("%s failed to answer %s: %s", self._log, envelope.message_id, cause)
+                if await failures.typing_mode() is failures.FailureTyping.ACT:
+                    found = (failures.Failure(failures.FailureCause.PROFILE) if isinstance(exc, ProfileUnavailable)
+                             else failures.start_failure(exc) if isinstance(exc, OSError) else None)
+                    if found is not None and (typed_reply := _typed_failure_reply(found)) is not None:
+                        await self._send_reply(envelope, _with_blocks(typed_reply, turn.blocks),
+                                               error=f"{found.cls.value}/{found.cause.value}")
+                        return
                 hint = exc.hint() if isinstance(exc, ProfileUnavailable) else ""
                 await self._send_reply(
                     envelope, _with_blocks(f"Manager 出错，没能完成这次回复：{cause}{hint}", turn.blocks), error=cause)
@@ -1695,7 +1717,7 @@ class ManagerAgent:
         comes back as an ``action``), stored, the tools probed, then the Manager's role, session, agent settings,
         library, prompt and the message Claude is sent. With ``ask`` (the resume retry, or a caller without a chat
         message) only the second half runs."""
-        restricted = session_visibility.for_session(self._session_now().key) is not None
+        restricted = session_visibility.for_session(self._session_now().key, manager_id=self.agent_id) is not None
         if restricted and ask is not None and ask.turn is not None and (
                 lanes.manager_lane(ask.turn.origin) is lanes.Lane.BACKGROUND):
             raise _CompletionNotTaken()  # no background model input is on the allowlist
@@ -1710,7 +1732,7 @@ class ManagerAgent:
                 self._acting(token)
                 return Prepared(action=lambda: self._send_reply(envelope, chat_commands.help_text()))
             gate = NOT_A_REPLY
-            if session_visibility.for_session(self._session_now().key) is not None:
+            if session_visibility.for_session(self._session_now().key, manager_id=self.agent_id) is not None:
                 if (command := parse_profile_command(text)) is not None:
                     await token.keep("persist_user_message", self._persist_user(envelope, text), 10)
                     self._acting(token)
@@ -1719,7 +1741,7 @@ class ManagerAgent:
                     self._acting(token)
                     return Prepared(action=lambda: self._send_reply(
                         envelope, "此会话无法读取任务或待办，请操作员在自己的会话中查看。"))
-            if session_visibility.for_session(self._session_now().key) is None:
+            if session_visibility.for_session(self._session_now().key, manager_id=self.agent_id) is None:
                 # /todo while the "needs you" summary is on: answered by code, never by the model (off: a message).
                 if attention.is_command(text) and await token.step("attention_enabled", attention.enabled()):
                     await token.keep("persist_user_message", self._persist_user(envelope, text), 10)
@@ -1765,8 +1787,6 @@ class ManagerAgent:
             quote_ref = lark_quote.QuoteRef.from_payload(envelope.payload.get("quote_ref"))
             if not text.strip() and quote_ref is None:  # a bare forward or @-mention under a message is answered
                 return Prepared()
-            # Read here, in the message's turn: in order, stoppable, and again when a restart replays the message.
-            quoted = await token.step("read_quote", self._read_quote(envelope, quote_ref)) if quote_ref else None
             # Code-only replies do not claim the resident or replace its native tool binding.
             await token.keep("resident_settlement", self._settle_native_inputs(token), 60)
             origin = _message_origin(envelope)
@@ -1784,6 +1804,8 @@ class ManagerAgent:
             self._running_token = token
             await token.keep("persist_user_message", self._persist_user(envelope, text), 10)
             await token.step("status_thinking", self._send_status(envelope, "thinking", phase=True, activity="thinking"))
+            # Read after the status, in the message's turn: in order, stoppable, and again on restart replay.
+            quoted = await token.step("read_quote", self._read_quote(envelope, quote_ref)) if quote_ref else None
             # Claude can do nothing without Looper's tools, and might say it did: the user hears that they are down.
             problem = (await token.step("tools_probe", self._tools_problem())
                        if not (self._claude_runtime.in_process
@@ -1826,7 +1848,7 @@ class ManagerAgent:
             raise ProfileUnavailable(agent_settings.error, agent_settings.profile_source)
         if agent_settings.profile_error:  # answered as an error; never another profile
             raise ProfileUnavailable(agent_settings.profile_error, agent_settings.profile_source)
-        routed = self._session_now().key != MAIN_SESSION
+        routed = self.agent_id == DEFAULT_MANAGER_ID and self._session_now().key != MAIN_SESSION
         if not routed:
             await token.step("templates", self._read_templates())
         library = EMPTY_LIBRARY if routed else await token.step("library", load_installed(
@@ -1871,6 +1893,9 @@ class ManagerAgent:
             launch.library.sha256, launch.binding_sha256,
             launch.llmrec.url if isinstance(launch.llmrec, LlmrecRoute) else None,
         )
+        components = dict(zip(("launch_args", "system_prompt", "env", "library", "provider_binding", "llmrec_url"),
+                              signature))
+        components["tools"] = None
         has_workflows = any("workflow" in t["inputSchema"].get("properties", {}) for t in tools)
         has_leads = any(t["name"] in (ops_leads.LEADS_TOOL, *ops_vault.TOOL_NAMES) for t in tools)
         has_ledger = any(t["name"].startswith("looper_ledger_") for t in tools)
@@ -1882,6 +1907,11 @@ class ManagerAgent:
             # The MCP tool list is read when the process starts: a changed one restarts it.
             listing = json.dumps(tools, sort_keys=True) if self.ops is not None else ""
             signature += (hashlib.sha256(listing.encode("utf-8")).hexdigest(),)
+            components["tools"] = signature[-1]
+        # Diagnostic hashes are separate from the unchanged resident comparison. Hash even absent components
+        # and existing digests so no command, URL or provider binding value can reach the restart log.
+        signature_components = {name: hashlib.sha256(json.dumps(value).encode("utf-8")).hexdigest()
+                                for name, value in components.items()}
         session = self._session_now()
         switch = session_switch.profile_switch(session.session_id, session.session_runtime, self._session_profile,
                                                launch, session_provider=self._session_provider,
@@ -1895,7 +1925,7 @@ class ManagerAgent:
             command = await token.step("claude_command", asyncio.to_thread(self._claude_command, prompt_file, launch))
             await token.step("claude_start", self._restore_resident(token, session, envelope, command,
                                                                    signature, launch, seconds=10))
-            self._process = _Process(command, signature, system_prompt, launch)
+            self._process = _Process(command, signature, system_prompt, launch, signature_components)
             if self.ops is not None:
                 self.ops.activate_tool_hook(launch.tool_hook, session_key=self._session_now().key)
         if switch is None and session.session_id and session.session_runtime == "api" \
@@ -1907,7 +1937,7 @@ class ManagerAgent:
             with self._runtime_start_budget(launch) as seconds:
                 await token.step("claude_start", self._restore_resident(token, session, envelope, command,
                                                                        signature, launch, seconds=seconds))
-            self._process = _Process(command, signature, system_prompt, launch)
+            self._process = _Process(command, signature, system_prompt, launch, signature_components)
             if self.ops is not None:
                 self.ops.activate_tool_hook(launch.tool_hook, session_key=self._session_now().key)
         if switch is None and session.session_id and isinstance(self._claude, ReportsContext) \
@@ -1936,6 +1966,7 @@ class ManagerAgent:
         return Prepared(
             envelope=envelope, turn=ask.turn, message=ask.message, note=ask.note, retried=ask.retried, system_prompt=system_prompt,
             launch=launch, prompt_file=prompt_file, signature=signature, switch=switch, turn_text=turn_text,
+            signature_components=signature_components,
             run=RunState(persona_scope=persona_scope), quoted=ask.quoted,
             state=tuple(state) if state is not None else None, session=session)
 
@@ -2008,6 +2039,15 @@ class ManagerAgent:
         else:
             await self._claude.stop(kill=True)
 
+    def _log_signature_change(self, prepared: Prepared) -> None:
+        previous = self._process
+        if previous is not None and previous.signature != prepared.signature and previous.signature_components:
+            changed = ", ".join(f"{name}={previous.signature_components[name][:8]}->{value[:8]}"
+                                for name, value in prepared.signature_components.items()
+                                if previous.signature_components[name] != value)
+            logger.info("Manager %s session=%s restarting: signature changed: %s",
+                        self.agent_id, prepared.session.key, changed)
+
     async def _start_turn(self, token: TurnToken, prepared: Prepared) -> None:
         """The prepared turn gets its process: the session switch, the runtime swap and the stale process's stop,
         the resume brief, the record and Claude's start. ``prepared.run`` holds what the run needs afterwards."""
@@ -2036,7 +2076,11 @@ class ManagerAgent:
             await token.keep("claude_stop", self._stop_replaced_session(whole_tree=unhooked), 30)
             self._claude, self._claude_runtime = launch.runtime.resident_session(self._resident_label()), launch.runtime
         if self._claude.stale(signature):
+            self._log_signature_change(prepared)
             await token.keep("claude_stop", self._stop_replaced_session(whole_tree=unhooked), 30)
+        elif not self._claude.started:
+            # An idle library refresh may already have closed the resident before reaching this point.
+            self._log_signature_change(prepared)
         if not self._claude.started and session_routing.routes(self.agent_id):
             # Room under the resident cap, or a wait for it (``SessionRouter.admit``).
             await token.step("resident_admission", self._router.admit(session, envelope))
@@ -2092,7 +2136,8 @@ class ManagerAgent:
                             autonomous=self._autonomous_turns(command, prepared.system_prompt, launch),
                             price=launch.price), seconds, undo=lambda: self._claude.stop(kill=True))
                 except TurnStopped:
-                    self._process = _Process(self._claude.command or command, signature, prepared.system_prompt, launch)
+                    self._process = _Process(self._claude.command or command, signature, prepared.system_prompt, launch,
+                                             prepared.signature_components)
                     if self.ops is not None:
                         self.ops.activate_tool_hook(launch.tool_hook, session_key=self._session_now().key)
                     raise
@@ -2112,7 +2157,7 @@ class ManagerAgent:
                     # A per-turn runtime may materialize its owner's home at start.
                     command = self._claude.command
                     await token.step("recorder_annotate", recorder.annotate({"command": command}))
-                self._process = _Process(command, signature, prepared.system_prompt, launch)
+                self._process = _Process(command, signature, prepared.system_prompt, launch, prepared.signature_components)
                 if self.ops is not None:
                     self.ops.activate_tool_hook(launch.tool_hook, session_key=self._session_now().key)
         except TurnStopped:
@@ -2157,6 +2202,7 @@ class ManagerAgent:
                         # launch in this turn's record and retry the capability refresh next turn.
                         prepared = replace(prepared, launch=previous.launch, system_prompt=previous.system_prompt,
                                            signature=previous.signature,
+                                           signature_components=previous.signature_components,
                                            prompt_file=previous.system_prompt.write_file(self._session_root()))
                         if prepared.turn is not None:
                             prepared.turn.blocks.append(notice)
@@ -2479,8 +2525,9 @@ class ManagerAgent:
         """The Manager's agent settings (system and role layers), read now; the last ones read when they
         cannot be read (the built-in defaults before any). Without ``fallback`` the read error stays, so a turn
         never runs on a profile the user did not choose."""
-        # The profile chosen for the session (``select_session_profile``) is main's: the others follow the settings.
-        own = {} if self._session_now().key == MAIN_SESSION else {"manager_session": False}
+        # Scenario sessions share their Manager's profile choice; default routed sessions follow Settings.
+        own = ({"manager_session": False} if self.agent_id == DEFAULT_MANAGER_ID
+               and self._session_now().key != MAIN_SESSION else {})
         agent_settings = await load_agent_settings(AgentType.MANAGER, manager_id=self.agent_id, wait=wait, **own)
         if agent_settings.error is not None:
             return (self._agent_settings or agent_settings) if fallback else agent_settings
@@ -2502,7 +2549,7 @@ class ManagerAgent:
 
     def _composed_prompt(self, agent_settings: AgentSettings) -> SystemPrompt:
         """The Manager's harness, its role prompt, then how to use Looper's tools (no project, no task)."""
-        if (policy := session_visibility.for_session(self._session_now().key)) is not None:
+        if (policy := session_visibility.for_session(self._session_now().key, manager_id=self.agent_id)) is not None:
             contract = (state_view.STABLE_CONTEXT_CONTRACT
                         if self._stable_context and SessionInput.STABLE_BLOCK in policy.inputs else "")
             return build_system_prompt(
@@ -2819,6 +2866,10 @@ class ManagerAgent:
                 except Exception:
                     logger.debug("failed to record manager activity", exc_info=True)
             await self._link_turn_task(recorder, ops_turn)
+            if await failures.typing_mode() is failures.FailureTyping.ACT:
+                found = recorder.failure_signal()
+                if reply := _typed_failure_reply(found):
+                    raise TurnFailed(reply, f"{found.cls.value}/{found.cause.value}") from None
             raise
 
         context_overflow = isinstance(self._claude, ReportsContext) and self._claude.context_full
@@ -2934,6 +2985,10 @@ class ManagerAgent:
 
         if over_cap:
             raise OverCap(over_cap)
+        if not replied and await failures.typing_mode() is failures.FailureTyping.ACT:
+            found = recorder.failure_signal()
+            if reply := _typed_failure_reply(found):
+                raise TurnFailed(reply, f"{found.cls.value}/{found.cause.value}")
         if failed:
             raise RuntimeError(failed)
         if not replied:
@@ -3321,14 +3376,14 @@ class ManagerAgent:
                 return ""
         switch, handoff = self._pending_switch, self._pending_handoff
         if session.key != MAIN_SESSION:  # a group's or another sender's chat: only its own (``group_session``)
-            policy = session_visibility.NON_MAIN_ALLOWLIST
-            if SessionInput.CHAT_OPENING not in policy.inputs:
+            policy = session_visibility.for_session(session.key, manager_id=self.agent_id)
+            if policy is not None and SessionInput.CHAT_OPENING not in policy.inputs:
                 return ""
             lines = (await group_session.excerpt(_session_key(envelope), message, kind=session.route.kind)
-                     if SessionInput.CHAT_HISTORY in policy.inputs else [])
+                     if policy is None or SessionInput.CHAT_HISTORY in policy.inputs else [])
             return group_session.brief(session.route.kind, _message_origin(envelope)["channel"], lines,
                                        switch=switch,
-                                       handoff=handoff if SessionInput.CHAT_HANDOFF in policy.inputs else None,
+                                       handoff=handoff if policy is None or SessionInput.CHAT_HANDOFF in policy.inputs else None,
                                        new=session.session_id is None)
         conversations = await self._recent_conversations(envelope, message)
         if switch is None and not handoff and not conversations:
@@ -3490,7 +3545,7 @@ class ManagerAgent:
                                   image_input: ImageInput = ImageInput.NONE, sections: bool = True,
                                   turn: Turn | None = None,
                                   persona_scope: manager_persona_context.Scope | None = None) -> str:
-        policy = session_visibility.for_session(self._session_now().key)
+        policy = session_visibility.for_session(self._session_now().key, manager_id=self.agent_id)
         def allowed(item: SessionInput) -> bool:
             return policy is None or item in policy.inputs
 
@@ -3533,7 +3588,7 @@ class ManagerAgent:
                         persona_scope: manager_persona_context.Scope | None = None) -> list[str]:
         """What every user turn starts with: persona, operator profile, projects, task templates, workflows, ready tasks, open gates
         and active goals, each section ending with a blank line."""
-        if (policy := session_visibility.for_session(self._session_now().key)) is not None:
+        if (policy := session_visibility.for_session(self._session_now().key, manager_id=self.agent_id)) is not None:
             return (manager_persona_context.section(self.agent_id, manager_persona_context.Scope.NAME)
                     if SessionInput.PERSONA_NAME in policy.inputs else [])
         if persona_scope is None:
@@ -3567,10 +3622,12 @@ class ManagerAgent:
         last one: a new session (``/new``, a switch such as a full context, none saved), a new process (a server
         restart, an idle close), or a runtime whose resident session does not report its compactions."""
         session = self._session_now()
-        if persona_scope is manager_persona_context.Scope.OMIT:
-            # Never diff private main state into a shared group/other-sender turn, even as removed lines.
+        if persona_scope.isolated:
+            # Never diff private main state into another audience's turn, even as removed lines.
             return state_view.render(sections, None, session=session.session_id,
-                                     whole_reason="persona omitted for shared turn")
+                                     whole_reason="persona omitted for shared turn"
+                                     if persona_scope is manager_persona_context.Scope.OMIT
+                                     else "operator profile omitted for client turn")
         shown = self._state_shown
         reason = None
         if not launch.runtime.resident_compaction_events:
@@ -3593,7 +3650,7 @@ class ManagerAgent:
         (``seen``) with the generation it was rendered for. A turn that did not go through leaves no block a later
         turn may refer to; a compaction or a turn of its own meanwhile forgot it already (``_context_changed``)."""
         session = self._session_now()
-        if run.state is None or run.persona_scope is manager_persona_context.Scope.OMIT:
+        if run.state is None or run.persona_scope.isolated:
             return
         if not seen:
             self._state_shown, self._state_lost = None, "the last turn did not go through"

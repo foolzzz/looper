@@ -467,6 +467,15 @@ async def _confirming(call: Call) -> str | None:
     """What cancelling a task or starting it over does, for the user to confirm; None for the other actions
     (``write``)."""
     action = call.arguments["action"]
+    from ..failures import FailureTyping, typing_mode
+    from .service import operator_call
+    if action in ("restart", "start_over") and await typing_mode() is FailureTyping.ACT and await operator_call(call.turn):
+        call.confirmation["failure_reset_operator"] = True
+        call.confirmation["failure_reset_actor"] = call.turn.sender or "console operator"
+        if action == "restart":
+            task = await _restartable(call.arguments["task_id"])
+            return (f"要重启任务「{task['name']}」（{task['id']}）吗？保留已完成步骤，并清零各步骤连续失败计数；"
+                    "失败历史保留，这次操作者重启会写入审计。")
     if action == "cancel":
         task = await _cancellable(call.arguments["task_id"])
         return (f"要取消任务「{task['name']}」（{task['id']}，现在 {task['status']}）吗？它的 Planner 和正在运行的 "
@@ -519,7 +528,9 @@ async def _control(call: Call, *, by: CancelBy = CancelBy.MANAGER) -> dict[str, 
                 call.turn.blocks[index] = f"任务已创建：\n{configuration}"
         return {"task_id": task_id, "started": True}
     try:
-        await control_task(task_id, action, call.platform.bus, call.manager_address, by=by)
+        trusted_reset = call.confirmation.get("failure_reset_operator") is True
+        await control_task(task_id, action, call.platform.bus, call.manager_address, by=by,
+            **({"operator_actor": str(call.confirmation["failure_reset_actor"])} if trusted_reset else {}))
     except RequestError as exc:
         raise _request_error(exc) from None
     if action == "stop":

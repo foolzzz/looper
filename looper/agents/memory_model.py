@@ -476,7 +476,7 @@ class MemorySettings:
     required_frontmatter: tuple[str, ...] = ()
     sources: Sources = Sources()
     branch: str | None = None  # the main checkout's branch when the setting was saved
-    worktree_root: str | None = None  # None: <runtime root>/vault-worktrees
+    worktree_root: str | None = None  # None: the home worktrees directory
     commit_prefix: str | None = None  # None until saved: the memory root's first folder below the repository
     push_channel: str | None = None
     pending_days: int = DEFAULT_PENDING_DAYS

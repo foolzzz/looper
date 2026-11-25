@@ -468,3 +468,32 @@ def test_startup_blocks_interrupted_writes_when_preflight_cannot_run(monkeypatch
         assert row["confirmed_event_id"] is not None
         assert not (repo / sup.NOTE["path"]).exists()
     run_db(check, monkeypatch, timeout=40)
+
+
+def test_blocked_merge_keeps_memory_attempt_and_operator_attention_through_cleanup(monkeypatch, tmp_path):
+    from looper.agents import vault_commit_attention
+    repo = repo_at(tmp_path)
+    real_git = vault._git
+
+    def edit_after_commit(root, *args):
+        result = real_git(root, *args)
+        if 'commit' in args and root != repo:
+            (repo / sup.NOTE['path']).write_text('operator uncommitted note\n')
+        return result
+
+    async def check(pool):
+        cid = await setup(pool, repo, tmp_path)
+        monkeypatch.setattr(vault, '_git', edit_after_commit)
+        service = writer.MemoryWriteService(tmp_path / 'runtime', db=pool)
+        assert await service.run_once()
+        candidate = (await store.get(cid, db=pool))['candidate']
+        assert (candidate['state'], candidate['reason']) == ('blocked', 'dirty_target')
+        notices = await vault_commit_attention.pending(db=pool)
+        assert len(notices) == 1
+        worktree, branch = writer._names(candidate, repo, (await memory_settings.load(pool))[0], tmp_path / 'runtime')
+        assert notices[0]['branch'] == branch and (worktree / sup.NOTE['path']).read_text() == sup.NOTE['content']
+        await service.cleanup()
+        assert worktree.exists() and git(repo, 'rev-parse', branch) == notices[0]['commit']
+        assert (repo / sup.NOTE['path']).read_text() == 'operator uncommitted note\n'
+        assert git(repo, 'stash', 'list') == ''
+    run_db(check, monkeypatch, timeout=40)

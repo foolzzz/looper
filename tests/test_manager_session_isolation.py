@@ -168,20 +168,20 @@ def test_routing_on_with_chat_tools_off_keeps_the_empty_tools_public_prompt(monk
     session = manager._router.session(SessionKey(SessionKind.GROUP, "channel-lark", "oc_synthetic_freeze"))
     manager._current.set(session)
     manager._stable_context = False
-    version = session_visibility.for_session(session.key).version
+    version = session_visibility.for_session(session.key, manager_id=manager.agent_id).version
     ops = ManagerOps(Platform(bus=None, task_router=None), url="http://127.0.0.1:9", token="synthetic-token")
     assert {tool["name"] for tool in asyncio.run(ops.current_listing(session_key=session.key))} == set(
         session_visibility.SESSION_TOOL_RULES)
     assert session_visibility.PUBLIC_PROMPT_TOOLS in manager._composed_prompt(
         AgentSettings(profile=builtin_resolved_profile())).text
     monkeypatch.setattr(session_tools_settings, "_enabled", False)
-    assert session_visibility.for_session(session.key).version == version
+    assert session_visibility.for_session(session.key, manager_id=manager.agent_id).version == version
     expected = (
         "You are Looper's chat assistant for this conversation. Answer the current message using only this chat. "
         "You have no access to the operator's projects, tasks, settings, memories or other conversations, and no "
         "platform tools. Do not claim to read or change them. Ask the operator to use their own chat for those actions."
     )
-    assert session_visibility.for_session(session.key) is session_visibility.NON_MAIN_ALLOWLIST
+    assert session_visibility.for_session(session.key, manager_id=manager.agent_id) is session_visibility.NON_MAIN_ALLOWLIST
     assert manager._composed_prompt(AgentSettings(profile=builtin_resolved_profile())).text.encode() == expected.encode()
     assert asyncio.run(ops.current_listing(session_key=session.key)) == []
 
