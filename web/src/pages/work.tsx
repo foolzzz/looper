@@ -2,7 +2,8 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { WorkList } from "@/components/work-list";
 import { WorkSwitcher } from "@/components/work-switcher";
-import { fetchTaskDetail, TaskDetailError, type TaskDetail } from "@/lib/api";
+import { fetchTaskDetail, isActiveTask, TaskDetailError, type TaskDetail, type UserGate } from "@/lib/api";
+import { startPolling } from "@/lib/polling";
 import { callV1, V1Error } from "@/lib/v1";
 import { errorText } from "@/lib/use-action";
 import { ManagerWorkConversation, PlannerWorkConversation } from "@/components/work-conversation";
@@ -44,6 +45,31 @@ export function WorkPage({
   const selection = explicit ?? { kind: "manager" as const };
   const taskId = selection.kind === "task" ? selection.taskId : "";
   const selected = detail.id === taskId ? detail.task : undefined;
+  const detailRevision = useRef(0);
+  // Gate replies already return the new gate. Update the one shared detail without remounting its editor.
+  const onGateChanged = useCallback((gate: UserGate) => {
+    detailRevision.current += 1;
+    setDetail(current => current.id !== taskId || !current.task ? current : {
+      ...current, task: { ...current.task, gates: current.task.gates?.map(item => item.step_id === gate.step_id ? gate : item) },
+    });
+  }, [taskId]);
+  const active = !!selected && isActiveTask(selected);
+  useEffect(() => {
+    if (!taskId || !active) return;
+    // One shared reader observes gates opened/closed by the Planner, not one poller per feed row.
+    return startPolling(async signal => {
+      const revision = detailRevision.current;
+      try {
+        const task = await fetchTaskDetail(taskId, signal);
+        if (signal.aborted || revision !== detailRevision.current) return;
+        setDetail(current => current.id === taskId ? { id: taskId, task } : current);
+        return !isActiveTask(task);
+      } catch (err) {
+        if (!signal.aborted && revision === detailRevision.current)
+          setDetail(current => current.id === taskId ? { ...current, error: errorText(err) } : current);
+      }
+    }, 2000);
+  }, [taskId, active]);
   useEffect(() => {
     if (!taskId) return;
     const ctrl = new AbortController();
@@ -145,8 +171,9 @@ export function WorkPage({
                 <TaskStatusMark status={selected.status} />
                 {selected.project_name && <p className="text-sm text-muted-foreground">{selected.project_name}</p>}
                 <a className={LINK} href={`#tasks/${encodeURIComponent(taskId)}`}>Open the task page</a>
+                {detail.error && <p role="alert" className="text-sm text-destructive">Task refresh failed: {detail.error}</p>}
               </header>
-              <PlannerWorkConversation key={taskId} taskId={taskId} detail={selected} />
+              <PlannerWorkConversation key={taskId} taskId={taskId} detail={selected} task={selected} onGateChanged={onGateChanged} />
             </>
           )}
         </div>
