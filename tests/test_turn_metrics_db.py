@@ -67,6 +67,8 @@ def test_manager_turn_records_delivery(delivery, channel, replayed, disable_mid,
                 message_type=MessageType.USER_MESSAGE, payload={"text":"hi", "channel_context":{"session_id":"chat-metrics"}}, correlation_id="metrics-turn")
             if channel != "web":
                 envelope.payload["channel_context"] = {"chat_id":"chat-metrics","chat_type":"p2p","sender_id":"operator-metrics","message_id":"message-metrics"}
+                envelope.metadata["lark_ingress"] = {"lock_wait_ms": 2500, "attachment_download_ms": 0,
+                                                     "stdout_read_at": "2026-11-24T12:00:00+00:00"}
                 from looper.agents.channels.status_line import Reactions
                 if channel == "lark":
                     await Reactions(channel="channel-lark", react=AsyncMock())._call("chat-metrics", "message-metrics")
@@ -94,6 +96,8 @@ def test_manager_turn_records_delivery(delivery, channel, replayed, disable_mid,
             assert reply[-1].payload["text"] == "hello"
             return
         metrics = metadata["turn_metrics"]
+        if channel != "web":
+            assert metrics.pop("lark_ingress") == envelope.metadata["lark_ingress"]
         assert set(metrics) == {"v", "origin", "chat", "received_at", "ack", "ack_ms", "first_reply_ms", "tool_calls", "delivery", "replayed", "queued_behind"}
         assert metrics["queued_behind"] == "none"
         assert metrics["delivery"] == delivery

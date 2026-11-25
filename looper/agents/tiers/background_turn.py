@@ -12,7 +12,7 @@ from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any
 
 from ...db import connection as db_connection, llm_records as db_llm_records, manager_events as db_manager_events
-from .. import chat_settings, completion_events, lanes, lanes_settings, turn_metrics
+from .. import chat_settings, completion_events, lanes, lanes_settings, turn_metrics, session_visibility
 from .. import delivery_guard_manager as delivery_guard
 from ..channels.base import PostOutcome
 from ..message import AgentAddress, MessageEnvelope, MessageType, channel_address, parse_channel_id
@@ -221,6 +221,11 @@ async def _tell_completion(self, rows: list[dict[str, Any]], batch: uuid.UUID) -
     the way ``/stop`` stops it; one that cannot runs to its end, and its reply only stays on its record."""
     from .manager import NoReply, OverCap, _CompletionNotTaken
 
+    if session_visibility.for_session(self._session_now().key, manager_id=self.agent_id) is not None:
+        # Existing completion prompts add project/cost facts with no chat-safe projection.
+        # Their already routed code notices still go to the originating chat.
+        await self._fall_back_completion(batch, "session_allowlist", {"rows": rows})
+        return
     if rows and rows[0].get("kind") == "triage":  # its own settling: no code notice, no task links
         from . import triage_background
 
