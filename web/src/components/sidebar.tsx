@@ -9,6 +9,7 @@ import {
   Bot,
   CalendarClock,
   Radio,
+  Layers,
   ListChecks,
   BellRing,
   BrainCircuit,
@@ -30,11 +31,12 @@ import { useProjects } from "@/lib/use-projects";
 import { useWaitingGates } from "@/lib/use-waiting-gates";
 import { useLedger } from "@/lib/use-ledger";
 import { startPolling } from "@/lib/polling";
+import { taskConversationsGet } from "@/lib/work";
 import { cn } from "@/lib/utils";
 
 /** "history" is one agent's session, or every run of one role; "projects" is one project, from the
  * sidebar's project list; "settings" is one of the Settings pages, from the group at the bottom. */
-export type Page = "dashboard" | "todo" | "chat" | "tasks" | "ledger" | "gates" | "projects" | "schedules" | "messages" | "intents" | "memory" | "settings" | "history";
+export type Page = "dashboard" | "todo" | "chat" | "work" | "tasks" | "ledger" | "gates" | "projects" | "schedules" | "messages" | "intents" | "memory" | "settings" | "history";
 
 const NAV_ITEMS: { page: Page; label: string; icon: React.ElementType }[] = [
   { page: "dashboard", label: "Dashboard", icon: LayoutDashboard },
@@ -58,6 +60,8 @@ interface SidebarProps {
   /** Below the lg breakpoint the sidebar is a drawer: shown only while open. */
   open: boolean;
   onClose: () => void;
+  /** `null` until the conversations switch has been read. Off, or a failed read, is false. */
+  onWorkEnabled?: (enabled: boolean | null) => void;
 }
 
 export const SIDEBAR_ID = "app-sidebar";
@@ -71,6 +75,7 @@ export function Sidebar({
   onOpenSettings,
   open,
   onClose,
+  onWorkEnabled,
 }: SidebarProps) {
   const waitingGates = useWaitingGates();
   const ledger = useLedger();
@@ -103,10 +108,24 @@ export function Sidebar({
       if (isAttentionOff(err)) setTodoOn(false);
     }
   }, 30_000), []);
+  const [workOn, setWorkOn] = useState<boolean | null>(null);
+  useEffect(() => startPolling(async (signal) => {
+    try {
+      const settings = await taskConversationsGet(signal);
+      if (signal.aborted) return;
+      setWorkOn(settings.enabled === true);
+    } catch {
+      if (signal.aborted) return;
+      setWorkOn(false);
+    }
+  }, 30_000), []);
+  useEffect(() => { onWorkEnabled?.(workOn); }, [workOn, onWorkEnabled]);
   const navItems = [
     ...NAV_ITEMS.slice(0, 1),
     ...(todoOn ? [{ page: "todo" as const, label: "Needs you", icon: BellRing }] : []),
-    ...NAV_ITEMS.slice(1, 3),
+    ...NAV_ITEMS.slice(1, 2),
+    ...(workOn === true ? [{ page: "work" as const, label: "Work", icon: Layers }] : []),
+    ...NAV_ITEMS.slice(2, 3),
     ...(ledger.enabled ? [{ page: "ledger" as const, label: "Ledger 账本", icon: BookOpen }] : []),
     ...NAV_ITEMS.slice(3),
     ...(intentsOn ? [{ page: "intents" as const, label: "Intents 意图", icon: ListChecks }] : []),
@@ -162,6 +181,7 @@ export function Sidebar({
             onClick={() => onNavigate(page)}
             className={cn(
               "flex w-full items-center gap-3 rounded-md px-3 py-2 pointer-coarse:py-3 text-sm font-medium transition-colors",
+              page === "work" && "focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring",
               activePage === page
                 ? "bg-primary/10 text-primary"
                 : "text-muted-foreground hover:bg-accent hover:text-foreground"

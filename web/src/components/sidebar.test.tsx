@@ -20,6 +20,7 @@ vi.mock("@/lib/api-attention", () => ({ attentionSettingsGet: vi.fn(), fetchAtte
 vi.mock("@/lib/use-ledger", () => ({ useLedger: vi.fn() }));
 vi.mock("@/components/sign-out", () => ({ SignOut: () => null }));
 vi.mock("@/components/project-dialog", () => ({ ProjectDialog: () => <div role="dialog" /> }));
+vi.mock("@/lib/work", () => ({ taskConversationsGet: vi.fn(async () => ({ enabled: false })) }));
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
 const gates = (waiting: number): GateList => ({
