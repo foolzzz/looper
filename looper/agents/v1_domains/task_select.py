@@ -175,7 +175,7 @@ def _pack(rows, presented, searched, hint) -> dict[str, Any]:
 def _ancestors(cwd: str) -> list[str]:
     """Normpath ancestors of the real working directory, the directory itself first.
 
-    ``realpath`` runs once, on the query. Stored paths were resolved when they were written.
+    Stable stored paths use cached keys; symlinks and missing paths are re-resolved.
     """
     current = os.path.normpath(os.path.realpath(cwd))
     found = []
@@ -257,26 +257,40 @@ def _check_ref(spec: Any) -> pure.MrRef | None:
     return pure.MrRef(number, repo if isinstance(repo, str) and repo.strip() else None)
 
 
-# Equality on the stored real path. The partial indexes require the ``<> ''`` predicate.
+# Index probes for cached ancestors plus the partial index of paths needing re-resolution.
+# Do not cap this set: all matches are needed for ambiguity and the exact ``more`` count.
 _DIRECTORY_HITS = """
-SELECT id, path FROM (
-    SELECT id, work_dir_real AS path FROM tasks
-    WHERE work_dir_real <> '' AND work_dir_real = ANY($1::text[])
+SELECT id, raw_path, path, recheck FROM (
+    SELECT id, work_dir AS raw_path, work_dir_real AS path, work_dir_recheck AS recheck FROM tasks
+    WHERE (work_dir_real <> '' AND work_dir_real = ANY($1::text[]))
+       OR work_dir_recheck
     UNION ALL
-    SELECT id, workspace_dir_real FROM tasks
-    WHERE workspace_dir_real <> '' AND workspace_dir_real = ANY($1::text[])
+    SELECT id, workspace_dir, workspace_dir_real, workspace_dir_recheck FROM tasks
+    WHERE (workspace_dir_real <> '' AND workspace_dir_real = ANY($1::text[]))
+       OR workspace_dir_recheck
     UNION ALL
-    SELECT task_id, path_real FROM task_worktrees
-    WHERE state = 'active' AND path_real <> '' AND path_real = ANY($1::text[])
+    SELECT task_id, path, path_real, path_recheck FROM task_worktrees
+    WHERE state = 'active' AND (
+        (path_real <> '' AND path_real = ANY($1::text[]))
+        OR path_recheck)
 ) hit
 """
 
 
 async def _directory_pairs(pool, ancestors: list[str]) -> list[tuple[str, str]]:
-    """Tasks whose stored real work_dir, workspace_dir or active worktree contains the directory."""
+    """Read only cached ancestor hits and potentially changed paths, then confirm ancestry."""
     known = set(ancestors)
-    return [(row["id"], row["path"]) for row in await pool.fetch(_DIRECTORY_HITS, ancestors)
-            if row["path"] in known]
+    pairs = []
+    for row in await pool.fetch(_DIRECTORY_HITS, ancestors):
+        path = row["path"]
+        raw = row["raw_path"]
+        if row["recheck"]:
+            if not os.path.isabs(raw):
+                continue
+            path = os.path.normpath(os.path.realpath(raw))
+        if path in known:
+            pairs.append((row["id"], path))
+    return pairs
 
 
 async def _recent(pool, see_all: bool) -> dict[str, Any]:

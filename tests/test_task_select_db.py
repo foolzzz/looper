@@ -178,6 +178,55 @@ def test_stored_directory_resolves_to_one_task(source, monkeypatch, tmp_path):
     run_db(check, monkeypatch)
 
 
+@pytest.mark.parametrize("source", ["work_dir", "workspace_dir", "worktree"])
+@pytest.mark.parametrize("change", ["retarget", "create"])
+@pytest.mark.parametrize("count,more", [(2, 0), (11, 1)])
+def test_changed_symlink_keeps_complete_directory_candidates(source, change, count, more, monkeypatch, tmp_path):
+    async def check(pool):
+        project_id = await _project(pool)
+        old, target, alias = tmp_path / "old", tmp_path / "target", tmp_path / "alias"
+        old.mkdir()
+        target.mkdir()
+        if change == "retarget":
+            alias.symlink_to(old, target_is_directory=True)
+        ids = [f"task-{index:012x}" for index in range(1, count + 1)]
+        fields = {source: str(alias)} if source != "worktree" else {}
+        await _task(pool, project_id, ids[0], title="dynamic", status="running", **fields)
+        if source == "worktree":
+            await _worktree(pool, ids[0], str(alias))
+        for task_id in ids[1:]:
+            await _task(pool, project_id, task_id, work_dir=str(target), title="target", status="running")
+        await _stamp(pool, ids)
+        if change == "retarget":
+            alias.unlink()
+        alias.symlink_to(target, target_is_directory=True)
+
+        _candidates(await _select({"cwd": str(target)}), ids[:10], more=more)
+
+    run_db(check, monkeypatch)
+
+
+@pytest.mark.parametrize("source", ["work_dir", "workspace_dir", "worktree"])
+def test_retargeted_symlink_no_longer_matches_its_old_target(source, monkeypatch, tmp_path):
+    async def check(pool):
+        project_id = await _project(pool)
+        old, target, alias = tmp_path / "old", tmp_path / "target", tmp_path / "alias"
+        old.mkdir()
+        target.mkdir()
+        alias.symlink_to(old, target_is_directory=True)
+        fields = {source: str(alias)} if source != "worktree" else {}
+        await _task(pool, project_id, "task-dynamic", title="dynamic", status="running", **fields)
+        if source == "worktree":
+            await _worktree(pool, "task-dynamic", str(alias))
+        await _backdate(pool, ["task-dynamic"], "30 days")
+        alias.unlink()
+        alias.symlink_to(target, target_is_directory=True)
+
+        _none(await _select({"cwd": str(old)}), ["last_activity_at"], 14, False, _HINT_RECENT)
+
+    run_db(check, monkeypatch)
+
+
 def test_deepest_directory_wins(monkeypatch, tmp_path):
     async def check(pool):
         project_id = await _project(pool)
@@ -233,7 +282,8 @@ def test_directory_lookup_uses_the_canonical_indexes(monkeypatch, tmp_path):
             rows = await conn.fetch("EXPLAIN " + domain._DIRECTORY_HITS, domain._ancestors(str(root)))
         plan = "\n".join(row["QUERY PLAN"] for row in rows)
         for index in ("idx_tasks_select_work_dir_real", "idx_tasks_select_workspace_dir_real",
-                      "idx_task_worktrees_select_path_real"):
+                      "idx_task_worktrees_select_path_real", "idx_tasks_select_work_dir_recheck",
+                      "idx_tasks_select_workspace_dir_recheck", "idx_task_worktrees_select_path_recheck"):
             assert index in plan
         assert "Seq Scan" not in plan
 
@@ -302,7 +352,7 @@ def test_recent_window_excludes_older_activity(monkeypatch, tmp_path):
 
 
 
-def test_task_id(monkeypatch):
+def test_task_id_hit_ignores_the_activity_window(monkeypatch):
     async def check(pool):
         project_id = (await projects.create_project(name="select", pool=pool))["id"]
         await _task(pool, project_id, "task-abc123def456", title="named", status="running")
@@ -310,8 +360,17 @@ def test_task_id(monkeypatch):
         found = await _select({"selection": "TASK-ABC123DEF456"})
         _one(found, "task-abc123def456")
         assert found["task"]["group"] == "in_progress" and found["task"]["status"] == "running"
-        _none(await _select({"selection": "task-000000000000"}), ["task_id"], None, False, _HINT_ID)
-        _none(await _select({"selection": "task-000000000000", "all": True}), ["task_id"], None, True, _HINT_ID)
+
+    run_db(check, monkeypatch)
+
+
+@pytest.mark.parametrize("see_all", [False, True])
+def test_task_id_miss_reports_the_searched_fields(see_all, monkeypatch):
+    async def check(pool):
+        project_id = await _project(pool)
+        await _task(pool, project_id, "task-abc123def456", title="named", status="running")
+        _none(await _select({"selection": "task-000000000000", "all": see_all}),
+              ["task_id"], None, see_all, _HINT_ID)
 
     run_db(check, monkeypatch)
 
@@ -457,30 +516,37 @@ def test_text_percent_and_underscore_are_literal(monkeypatch):
     run_db(check, monkeypatch)
 
 
-def test_ambiguity_lists_candidates_and_says_when_none(monkeypatch):
+def test_text_ambiguity_lists_both_candidates(monkeypatch):
     async def check(pool):
-        project_id = (await projects.create_project(name="select", pool=pool))["id"]
-        stamp = datetime(2026, 11, 1, tzinfo=timezone.utc)
-        await _task(pool, project_id, "task-pair-a", title="amber quartz", status="running")
-        await _task(pool, project_id, "task-pair-b", title="amber quartz", status="running")
-        await pool.execute("UPDATE tasks SET updated_at = $2 WHERE id = ANY($1::text[])",
-                           ["task-pair-a", "task-pair-b"], stamp)
-        pair = await _select({"selection": "amber quartz"})
-        _candidates(pair, ["task-pair-a", "task-pair-b"])
-        assert pair["kind"] != "one"
+        project_id = await _project(pool)
+        ids = ["task-pair-a", "task-pair-b"]
+        for task_id in ids:
+            await _task(pool, project_id, task_id, title="amber quartz", status="running")
+        await _stamp(pool, ids)
+        _candidates(await _select({"selection": "amber quartz"}), ids)
 
+    run_db(check, monkeypatch)
+
+
+def test_text_candidates_are_capped_with_exact_more(monkeypatch):
+    async def check(pool):
+        project_id = await _project(pool)
         ids = [f"task-{index:012x}" for index in range(1, 12)]
         for task_id in ids:
             await _task(pool, project_id, task_id, title="shared token", requirement="other", status="running")
-        await pool.execute("UPDATE tasks SET updated_at = $2 WHERE id = ANY($1::text[])", ids, stamp)
-        listed = await _select({"selection": "shared token"})
-        _candidates(listed, ids[:10], more=1)
-        assert ids[-1] not in _ids(listed)
+        await _stamp(pool, ids)
+        _candidates(await _select({"selection": "shared token"}), ids[:10], more=1)
 
-        _none(await _select({"selection": "zzzz-not-present"}),
-              ["title", "requirement"], 90, False, _HINT_TEXT)
-        _none(await _select({"selection": "zzzz-not-present", "all": True}),
-              ["title", "requirement"], None, True, _HINT_TEXT)
+    run_db(check, monkeypatch)
+
+
+@pytest.mark.parametrize("see_all", [False, True])
+def test_text_miss_reports_the_searched_fields(see_all, monkeypatch):
+    async def check(pool):
+        project_id = await _project(pool)
+        await _task(pool, project_id, "task-other", title="unrelated", status="running")
+        _none(await _select({"selection": "zzzz-not-present", "all": see_all}),
+              ["title", "requirement"], None if see_all else 90, see_all, _HINT_TEXT)
 
     run_db(check, monkeypatch)
 

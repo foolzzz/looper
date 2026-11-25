@@ -1,4 +1,4 @@
-"""Stored real directories for an index lookup. Resolved once per write, not per search."""
+"""Cached directory keys; symlinks and unresolved paths are rechecked on selection."""
 
 from __future__ import annotations
 
@@ -8,17 +8,20 @@ import asyncpg
 
 
 def canonical_directory(path: object) -> str:
-    """The real absolute directory, or '' when ``path`` is empty or not absolute.
+    """The real absolute directory, or '' when no existing absolute path can be cached.
 
-    ``realpath`` runs once. A relative path is not a directory key: resolving it would
-    depend on the process's current directory.
+    An empty key for a missing path keeps it in the indexed recheck set: it may be
+    created as a symlink later. A raw path differing from its key also stays in that
+    set, so retargeting a symlink never relies on its old destination.
     """
     if not isinstance(path, str) or not os.path.isabs(path):
         return ""
     try:
+        if not os.path.exists(path):
+            return ""
         return os.path.normpath(os.path.realpath(path))
     except OSError:
-        return os.path.normpath(path)
+        return ""
 
 
 async def refresh_project_directories(conn: asyncpg.Connection, project_id: str) -> None:

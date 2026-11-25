@@ -1,8 +1,8 @@
 """Canonical directories for tasks.select, looked up by index.
 
 ``work_dir``, ``workspace_dir`` and an active worktree path are stored again as
-``realpath`` when they are written. The selection resolves the working directory
-once and compares that form. Python still decides which directory is deepest.
+``realpath`` when they exist. Missing paths have an empty key. Generated recheck
+flags retain paths differing from their key, with statistics for sparse indexes.
 """
 
 from . import OnlineStep
@@ -16,6 +16,12 @@ _COLUMNS = """
 ALTER TABLE tasks ADD COLUMN IF NOT EXISTS work_dir_real TEXT NOT NULL DEFAULT '';
 ALTER TABLE tasks ADD COLUMN IF NOT EXISTS workspace_dir_real TEXT NOT NULL DEFAULT '';
 ALTER TABLE task_worktrees ADD COLUMN IF NOT EXISTS path_real TEXT NOT NULL DEFAULT '';
+ALTER TABLE tasks ADD COLUMN IF NOT EXISTS work_dir_recheck BOOLEAN GENERATED ALWAYS AS
+    (work_dir <> '' AND (work_dir_real = '' OR work_dir <> work_dir_real)) STORED;
+ALTER TABLE tasks ADD COLUMN IF NOT EXISTS workspace_dir_recheck BOOLEAN GENERATED ALWAYS AS
+    (workspace_dir <> '' AND (workspace_dir_real = '' OR workspace_dir <> workspace_dir_real)) STORED;
+ALTER TABLE task_worktrees ADD COLUMN IF NOT EXISTS path_recheck BOOLEAN GENERATED ALWAYS AS
+    (path <> '' AND (path_real = '' OR path <> path_real)) STORED;
 """
 # The raw path indexes from task_select_reads do not match a symlink's real path.
 _DROP_RAW = """
@@ -28,6 +34,12 @@ INDEXES = (
     ("idx_tasks_select_workspace_dir_real", "ON tasks (workspace_dir_real) WHERE workspace_dir_real <> ''"),
     ("idx_task_worktrees_select_path_real",
      "ON task_worktrees (path_real) WHERE state = 'active' AND path_real <> ''"),
+    ("idx_tasks_select_work_dir_recheck",
+     "ON tasks (id) WHERE work_dir_recheck"),
+    ("idx_tasks_select_workspace_dir_recheck",
+     "ON tasks (id) WHERE workspace_dir_recheck"),
+    ("idx_task_worktrees_select_path_recheck",
+     "ON task_worktrees (task_id) WHERE state = 'active' AND path_recheck"),
 )
 fresh_ddl = _COLUMNS + _DROP_RAW + "".join(
     f"CREATE INDEX IF NOT EXISTS {index} {definition};\n" for index, definition in INDEXES)
