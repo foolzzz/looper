@@ -160,9 +160,24 @@ Manager has no tool for it. The dashboard shows the task page's 指标 card and 
     so two Managers cannot share runtime files). Its MCP entry carries a distinct
     credential: the server checks that a binding belongs to that credential's
     session, so learning another binding cannot authorize its calls. For the default Manager, only
-    tools granted by `session_visibility.NON_MAIN_ALLOWLIST` are available
-    (currently none): no local file or shell tools,
-    catalog MCP servers, plugins, skills or subagents. Claude Code and the
+    tools granted by `session_visibility.for_session()` are available. With
+    `manager.session_tools.enabled` off (the default), its
+    `NON_MAIN_ALLOWLIST` grants no tools. With it on, the following conversation-scoped
+    tools are granted by `SESSION_TOOL_RULES`:
+
+    | Tool | Access in this conversation |
+    | --- | --- |
+    | `looper_chat_tasks` | List or read owned tasks: title, status, timestamps, step/gate counts and the completion notice. |
+    | `looper_chat_task_create` | The operator creates a task in an existing project. |
+    | `looper_chat_task_control` | The operator starts, stops or restarts an owned task. Cancel and start-over are refused here. |
+    | `looper_chat_task_instruct` | The operator sends instructions to an owned task. |
+
+    Other senders can read owned tasks; their writes are refused with a fixed
+    operator-only explanation. The sender is read from the channel envelope and
+    compared with the bot's freshly read operator id; message text cannot confer
+    authority. A missing identity fails closed. No local file or shell tools,
+    catalog MCP servers, plugins, skills or subagents are available, including
+    when the operator speaks in a group. Claude Code and the
     in-process API runtime support this mode; other runtimes refuse a
     non-main turn without falling back to main. Main's launch is unchanged.
     Claude Code shares only its CLI login with the operator (the original
@@ -220,10 +235,17 @@ Manager has no tool for it. The dashboard shows the task page's 指标 card and 
     Operator-customized prompts, harness and profile text, projects, directories,
     templates, workflows, tasks, gates, goals, knowledge, leads, memory, intents,
     reminders, ledger, confirmations, settings and cost views are excluded.
-    New global sections and tools are excluded by default. Existing Manager tools
-    lack complete chat scopes, so none are registered or callable, including by
-    guessing a tool name or omitting a binding. Tasks cannot be created or controlled
-    from these model sessions. `/gates` and `/todo` return a fixed refusal;
+    New global sections and tools are excluded by default. Global Manager tools
+    are never registered or callable, including by guessing a tool name. Every
+    conversation tool call requires a binding for that credential's session.
+    Ownership is only `tasks.origin_session = SessionKey.text` together with the
+    current Manager id; notification targets, replies and threads grant no access.
+    A task's origin is written once at creation; main tasks keep null. Another
+    session's id, a main task id and an unknown id return the identical
+    `not_found: no such task in this chat`. Requirements, progress, plans, room
+    messages, projects, directories, profiles and costs are never returned.
+    The result text is exactly that task's completion notice for the chat kind.
+    `/gates` and `/todo` return a fixed refusal;
     `/profile` keeps its existing refusal. Operator command routers are bypassed.
     Completion events use their originating chat's code notices instead of a model
     turn that would read global project/cost facts. Old routed histories and handoffs
@@ -233,6 +255,20 @@ Manager has no tool for it. The dashboard shows the task page's 指标 card and 
     retain their own prompt, Agent Profile, tools, installed library and saved
     context: this boundary is step 0 of the [chat scopes RFC, section 12](rfcs/chat-scopes-v0.zh-CN.md#12-分步计划),
     whose intermediate-state table keeps scenario capabilities unchanged until scope resolution ships.
+    `session_tools.get/update` are separate operator-only operations;
+    null restores the tools switch to off, and turning it off restores the original
+    public prompt and zero tools without changing the context-policy version.
+    Keep the switch off until private approval support has also shipped.
+
+    Turning routing on hides pre-routing tasks from groups and other senders'
+    direct chats: they have no proven origin and are not backfilled. Their
+    notifications still deliver. The operator can control them from main or the
+    dashboard, or explicitly assign a particular unowned task once with
+    `loopercli manager-sessions assign-task --task-id <id> --session <key> --acknowledge`.
+    This operator-only, audited operation records the operator's ownership
+    acknowledgement and refuses tasks already assigned. All topics of a group
+    share ownership; a Telegram upgrade to supergroup changes its chat id, so the
+    new session loses access to the old chat's tasks (fail closed).
     A reply out of a dm session goes
     through the group backstop (`ops.leads.for_group`), like a group's. With the untrusted
     fence enabled, stored user messages in this excerpt use the same typed group or direct-message
@@ -7249,16 +7285,26 @@ intent edits and fallback replies, subscription alerts and failure notices,
 task progress, completion turns, the dashboard chat and other senders retain
 their existing paths. The delivery settings UI is not delivered here.
 Design: [proactive delivery RFC](rfcs/proactive-delivery-v0.zh-CN.md).
-A morning brief (`source` `morning_brief`) is sent uncounted and is never
-deferred: it is the digest. The brief has its own switch and still calls `deliver`
-while the delivery switch is off.
+A morning brief (`source` `morning_brief`) is a scheduled delivery: quiet hours
+apply even after a recent reply, while the daily cap neither blocks nor counts it.
+A quiet brief waits for an eligible tick before its catch-up cutoff; otherwise its
+unconsumed digest stays for the next workday. The brief has its own switch and
+still calls `deliver` while the delivery switch is off.
 
 ### Morning brief
 
 On a workday (Monday to Friday; a weekday holiday still sends), at
 `morning_brief.time` (09:15 by default) in `user.timezone` (else the server's
 zone, `turn_context.zone()`), one brief goes to each enabled bot's operator
-direct chat. It names what waits (the needs-you summary), reminders due that
+direct chat. A missed send can catch up only before `morning_brief.cutoff`
+(12:00 local by default); the cutoff itself is excluded. Quiet hours always
+block the brief. It can resume when they end only if still before the cutoff.
+The sender rechecks the current local date, time window and quiet hours before
+posting, so collection that crosses a boundary cannot cause a late send.
+A quiet or expired tick preserves the first unread date without consuming digest
+or triage ids or spending a send attempt. The next eligible workday reads from
+that same boundary, and consumes only the ids it actually sends. It names what
+waits (the needs-you summary), reminders due that
 local day, and proactive messages deferred into the digest (`decision`
 `digest`). Every brief reads from the first attempt's dates (Monday also
 Saturday and Sunday) through the day being sent, except digest rows already
@@ -7290,10 +7336,25 @@ channel is enabled and who the operator is are read again after the summary is
 collected and again immediately before the post. The switch is read again after
 the operator
 query returns. A fresh claim that then fails that check is deleted; a claim
-that continued a refusal is put back as that refusal, with the attempt count
-it had. The switch
+that continued a refusal or a zero-attempt deferral is restored with its prior
+attempt count and first unread date. The switch
 `morning_brief.enabled` is off by default and operator-only
-(`morning_brief.get`, `morning_brief.update`); off, a tick reads the in-memory
+(`morning_brief.get`, `morning_brief.update`). Those operations, the generated
+CLI and Settings → Chat expose `enabled`, `time` and `cutoff`; stored times use `HH:MM`.
+An explicit cutoff must be later than send time. An absent or null cutoff derives
+12:00 for sends before noon, otherwise send time plus three hours, capped at the
+end of the local day (24:00, exclusive). Thus 21:30 derives 24:00, and 23:59 has
+a catch-up window until midnight; quiet hours still block it and preserve its
+unconsumed digest for the next eligible workday.
+On load, a stored cutoff not later than send time is ignored with one warning and
+the same derivation applies. Readback includes the effective `cutoff` and
+`cutoff_source` (`stored` or `derived`). The `cutoff` result is either an `HH:MM`
+string or the typed boundary `{"kind":"end_of_day"}` for exclusive local 24:00;
+it is never a `"24:00"` time string. Internally that boundary is
+`MorningBriefBoundary.END_OF_DAY`, distinct from a wall-clock `time`.
+Updates accept only `HH:MM` or null for cutoff; null keeps derivation, including
+when the dashboard displays the end-of-day boundary. Other null fields restore their defaults.
+An invalid update changes nothing. Off, a tick reads the in-memory
 switch and does nothing else. One `morning_briefs` row per local date and chat
 makes a restart and a second server send it at most once. A send that stops
 mid-way is `uncertain` and is not sent again. Upgrades conservatively mark old
