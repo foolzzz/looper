@@ -7229,12 +7229,20 @@ that continued a refusal or a zero-attempt deferral is restored with its prior
 attempt count and first unread date. The switch
 `morning_brief.enabled` is off by default and operator-only
 (`morning_brief.get`, `morning_brief.update`). Those operations, the generated
-CLI and Settings → Chat expose `enabled`, `time` and `cutoff`; times use `HH:MM`.
+CLI and Settings → Chat expose `enabled`, `time` and `cutoff`; stored times use `HH:MM`.
 An explicit cutoff must be later than send time. An absent or null cutoff derives
-12:00 for sends before noon, otherwise send time plus three hours, capped at 23:59.
+12:00 for sends before noon, otherwise send time plus three hours, capped at the
+end of the local day (24:00, exclusive). Thus 21:30 derives 24:00, and 23:59 has
+a catch-up window until midnight; quiet hours still block it and preserve its
+unconsumed digest for the next eligible workday.
 On load, a stored cutoff not later than send time is ignored with one warning and
 the same derivation applies. Readback includes the effective `cutoff` and
-`cutoff_source` (`stored` or `derived`). Other null fields restore their defaults.
+`cutoff_source` (`stored` or `derived`). The `cutoff` result is either an `HH:MM`
+string or the typed boundary `{"kind":"end_of_day"}` for exclusive local 24:00;
+it is never a `"24:00"` time string. Internally that boundary is
+`MorningBriefBoundary.END_OF_DAY`, distinct from a wall-clock `time`.
+Updates accept only `HH:MM` or null for cutoff; null keeps derivation, including
+when the dashboard displays the end-of-day boundary. Other null fields restore their defaults.
 An invalid update changes nothing. Off, a tick reads the in-memory
 switch and does nothing else. One `morning_briefs` row per local date and chat
 makes a restart and a second server send it at most once. A send that stops
