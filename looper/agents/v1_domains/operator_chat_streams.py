@@ -27,7 +27,24 @@ SCHEMAS = {
     "OperatorChatAgentPhase": _object({"label": _STR, "activity": _STR, "tool": _STR}, ["label"], closed=True),
     "OperatorChatAgentTool": _object({"tool_use_id": _STR, "name": _STR, "args": _STR, "result": _STR,
         "is_error": {"type": "boolean"}}, closed=True),
-    "OperatorChatTaskEvent": _object({"kind": _STR}, closed=True),
+    "OperatorChatTaskEvent": {"oneOf": [
+        _object({"kind": {"const": "accepted"}, "reason": {"const": "duplicate"}}, closed=True),
+        _object({"kind": {"const": "starting"}, "status": _STR}, closed=True),
+        _object({"kind": {"const": "command"}, "command": {"enum": [
+            "/stop", "/done", "/pause", "/background", "/takeover", "/start"]}}, closed=True),
+        _object({"kind": {"const": "queued"}, "reason": {"enum": ["cap", "turn"]},
+                 "position": {"type": "integer"}}, closed=True),
+        _object({"kind": {"const": "session_fresh"}, "reason": {"enum": [
+            "context_bound", "read_only_open", "resume_failed"]}, "detail": _STR}, closed=True),
+        _object({"kind": {"const": "stopped"}, "method": {"enum": ["control", "cancel", "kill"]}}, closed=True),
+        _object({"kind": {"const": "turn_summary"}, "files": _array(_STR),
+                 "commit": {"type": ["string", "null"]},
+                 "mode": {"enum": ["direct", "orchestrated"]}}, closed=True),
+        _object({"kind": {"const": "refused"}, "reason": {"const": "orchestrated"}, "status": _STR}, closed=True),
+        _object({"kind": {"const": "refused"}, "reason": {"enum": [
+            "work_mode_off", "runtime_unsupported", "budget", "outbound_review_unavailable", "workspace",
+            "shutting_down", "review_hook_disabled", "cli_unverified"]}}, closed=True),
+    ]},
     "OperatorChatMessage": _object({"message_id": _STR, "role": {"const": "assistant"},
         "content": _STR, "created_at": _STR}, closed=True),
     "OperatorChatHeartbeat": _object({}, closed=True),
