@@ -418,6 +418,7 @@
  "tasks.activity_detail": "inside",
  "tasks.activity_stream": "inside",
  "tasks.agents": "inside",
+ "tasks.changes": "machine",
  "tasks.configure": "inside",
  "tasks.continue": "inside",
  "tasks.conversation": "inside",
