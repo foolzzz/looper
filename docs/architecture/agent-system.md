@@ -31,8 +31,10 @@ Unscoped records are unchanged.
 Four alerts go to the operator's direct chat. An invariant violation is sent
 every time (critical). A runtime start refusal is sent once per manager, chat
 and scope per hour (high). Ten `out_of_scope` refusals in one chat in one hour
-are sent once per chat per local day (medium). Scope resolution retrying for at
-least five minutes is sent once until recovery (medium). A queue wait over two
+are sent once per chat per local day, and a later local day is checked again
+while that hour window stays full (medium). Scope resolution retrying for at
+least five minutes is sent once for that attempt until the attempt ends; a
+parallel session keeps its own attempt (medium). A queue wait over two
 minutes is only on `scopes.residents.max_wait_s_24h`. Legacy bindings are counted
 and never alerted.
 Housekeeping retains proactive rows for 90 days whether or not
