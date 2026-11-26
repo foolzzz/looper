@@ -1,15 +1,15 @@
-"""Restore annotations are bounded, per-agent and per-session persistent state."""
+"""Restore annotations are per-agent and per-session persistent state."""
 
 import json
 
 import pytest
 
-from looper.agents import compaction_restore as restore
+from looper.agents import chat_settings, compaction_restore as restore
 from looper.db import llm_records, system_settings
 from tests.db_support import run_db
 
 
-def test_latest_restore_follows_annotations_and_limits_lookback(monkeypatch):
+def test_latest_restore_follows_annotations_across_busy_chats(monkeypatch):
     async def check(pool):
         async def add(state=None, *, agent="planner-task", session="session", **facts):
             metadata = {"compaction_restore": {"state": state, **facts}} if state else {}
@@ -32,8 +32,10 @@ def test_latest_restore_follows_annotations_and_limits_lookback(monkeypatch):
         await add("due", agent="other")
         assert await latest() == restore.Due(due, "auto")
         await pool.execute("UPDATE llm_records SET created_at='2020-01-01'")
-        for _ in range(llm_records.RESTORE_LOOKBACK):
+        for _ in range(501):
             await add(session="other")
+        assert await latest() == restore.Due(due, "auto")
+        await add("sent", due_record=due)
         assert await latest() is None
 
     run_db(check, monkeypatch, timeout=30)
@@ -45,4 +47,6 @@ def test_setting_only_accepts_exact_stored_true(monkeypatch, value, expected):
         if value is not None:
             await system_settings.put_settings({restore.KEY: value}, pool=pool)
         assert await restore.enabled(pool) is expected
+        await chat_settings.load()
+        assert restore.cached_enabled() is expected
     run_db(check, monkeypatch, timeout=30)

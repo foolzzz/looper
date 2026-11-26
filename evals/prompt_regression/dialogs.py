@@ -93,7 +93,7 @@ from .routed_dialogs import cases as _routed_cases
 from .metrics import runner_evidence
 from .runner import (
     INTERRUPTED, Api, ErrorClass, EvalError, Outcome, _git, aborted_reason, check_case_budget, error_row,
-    planned_runtime_types, require_claude,
+    _confirmed, planned_runtime_types, require_claude,
     _all_events, fresh_database, install_claude, model_name, register_agent, run_suite, running_server, select_agent, write_result,
 )
 
@@ -4488,7 +4488,7 @@ def run(
                                                    if manager_model else picked)
                     project_id = api.post("/api/v1/project_admin/create", {"name": PROJECT, "work_dir": str(work_dir)})["result"]["project"]["project_id"]
                     if compaction_restore:
-                        _turn_on(database_url, "compaction_restore.enabled")
+                        _confirmed(api, "/api/v1/compaction_restore_settings/update", {"enabled": True})
                     if stable_context:
                         _turn_on(database_url, "manager.stable_context")
                     if leads_fulltext:

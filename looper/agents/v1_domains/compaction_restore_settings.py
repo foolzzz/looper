@@ -40,4 +40,5 @@ async def run(server, operation, arguments, principal, headers):
     if operation.operation_id == "compaction_restore_settings.update":
         value = arguments["enabled"]
         await system_settings.put_settings({compaction_restore.KEY: None if value is None else str(value).lower()})
+        compaction_restore.apply_stored(None if value is None else str(value).lower())
     return {"enabled": await compaction_restore.enabled()}

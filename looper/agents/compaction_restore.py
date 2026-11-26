@@ -8,6 +8,7 @@ from enum import Enum
 from typing import Any
 
 KEY = "compaction_restore.enabled"
+_enabled = False
 PLANNER_MAX_CHARS = 16_000
 MANAGER_MAX_CHARS = 6_000
 THREADS_LEFT_OUT = "The discussions so far of the waiting gates are too long to repeat here; their agendas above are current."
@@ -60,6 +61,16 @@ async def enabled(db: Any = None) -> bool:
     from ..db import system_settings
 
     return (await system_settings.get_settings([KEY], pool=db)).get(KEY) == "true"
+
+
+def cached_enabled() -> bool:
+    """Read the switch loaded at startup and refreshed by settings changes, without turn-time I/O."""
+    return _enabled
+
+
+def apply_stored(value: str | None) -> None:
+    global _enabled
+    _enabled = value == "true"
 
 
 def command(role: Role) -> str:

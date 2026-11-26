@@ -1481,7 +1481,7 @@ def run(
             if any(task.gh_pr_fix_files or task.gh_pr_views for task in tasks):
                 api.post("/api/v1/wait_settings/update", {"min_check_seconds": 10})
             if compaction_restore:
-                _set_true(database_url, "compaction_restore.enabled")
+                _confirmed(api, "/api/v1/compaction_restore_settings/update", {"enabled": True})
             if untrusted_fence:
                 _set_true(database_url, "untrusted_fence.enabled")
             if vault_dir is not None:

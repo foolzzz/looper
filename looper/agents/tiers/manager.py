@@ -1134,10 +1134,7 @@ class ManagerAgent:
             self._stable_context = await state_view.enabled()
         except Exception:
             logger.debug("could not read manager.stable_context; keeping the last value", exc_info=True)
-        try:
-            self._compaction_restore = await compaction_restore.enabled()
-        except Exception:
-            logger.debug("could not read compaction_restore.enabled; keeping the last value", exc_info=True)
+        self._compaction_restore = compaction_restore.cached_enabled()
         try:
             self._profile_enabled = await operator_profile.enabled()
         except Exception:

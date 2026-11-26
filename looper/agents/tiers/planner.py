@@ -1017,7 +1017,7 @@ class PlannerAgent:
         self._plan_shown: PlanShown | None = None
         self._plan_staged: PlanShown | None = None
         self._plan_compacted = False
-        self._restore_on = False
+        self._last_compaction: Mapping[str, Any] | None = None
         # What the task's template said when the task was created (None for a task from none); it never changes.
         self._template: Mapping[str, Any] | None = None
         self._workflow: Mapping[str, Any] | None = None
@@ -5352,11 +5352,6 @@ class PlannerAgent:
         # Compose the shared role guidance after resolving the launch; its runtime keeps its reading tools
         # and read-only controls, and a saved custom role prompt is still loaded unchanged.
         settings = await load_settings()
-        try:
-            self._restore_on = await compaction_restore.enabled()
-        except Exception:
-            self._restore_on = False
-            logger.debug("planner %s cannot read compaction restore setting", self.agent_id, exc_info=True)
         system_prompt = self._system_prompt(plan, settings, knowledge, launch.settings.harness,
                                             custom_prompt=launch.profile.custom_prompt)
         await self._note_background(plan.project_background)
@@ -5495,7 +5490,8 @@ class PlannerAgent:
             try:
                 await self._exchange(
                     compaction_restore.command(compaction_restore.Role.PLANNER)
-                    if self._restore_on and compaction_restore.applies(process.launch.runtime) else "/compact",
+                    if (compaction_restore.cached_enabled()
+                        and compaction_restore.applies(process.launch.runtime)) else "/compact",
                     process, settings.timeout_seconds, maintenance=True)
             except PlannerTurnError as exc:
                 if exc.fail_kind is FailKind.QUOTA_EXHAUSTED:
@@ -5508,7 +5504,7 @@ class PlannerAgent:
             await self._record_schedule_bound(bound, "compacted", self._schedule_compacted_tokens)
 
         offer = None
-        if (self._restore_on and not brief and plan.session_id
+        if (compaction_restore.cached_enabled() and not brief and plan.session_id
                 and compaction_restore.applies(process.launch.runtime)):
             offer = await self._restore_offer(plan)
 
@@ -5760,7 +5756,7 @@ class PlannerAgent:
                 if (boundary := compaction(event)) is not None:
                     compacted = boundary
                     self._last_compaction = boundary
-                    if self._restore_on and compaction_restore.applies(process.launch.runtime):
+                    if compaction_restore.cached_enabled() and compaction_restore.applies(process.launch.runtime):
                         await recorder.annotate(compaction_restore.due_metadata(boundary))
                 if event.get("type") == "system" and event.get("subtype") == "compact_boundary":
                     self._plan_compacted = True

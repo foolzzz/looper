@@ -10,6 +10,7 @@ from unittest.mock import AsyncMock
 import pytest
 
 from looper.agents.schedule_session import BoundReason, SessionBound
+from looper.agents import chat_settings
 from looper.agents.tiers import planner as p
 from looper.agents.tiers.planner_protocol import DecisionContext, ResultKind
 from looper.agents.user_gates import AgendaItem, Gate, GateState
@@ -65,6 +66,7 @@ async def _seed(pool, agent):
     agent._plan.status = "executing"
     await agent._save(agent._plan, *agent._plan.steps, plan_row=True)
     await pool.execute("INSERT INTO system_settings (key,value) VALUES ('compaction_restore.enabled','true')")
+    await chat_settings.load()
 
 
 async def _records(pool):
@@ -219,6 +221,56 @@ def test_boundary_during_snapshot_replaces_the_previous_due(monkeypatch, tmp_pat
     run_db(test, monkeypatch)
 
 
+def test_disabled_turns_do_not_read_the_restore_setting(monkeypatch, tmp_path, planner_claude):
+    from looper.agents import chat_settings, compaction_restore as restore
+    reader = AsyncMock(side_effect=RuntimeError("turns must use the settings cache"))
+    claude = planner_claude("ack")
+    agent = _agent(tmp_path, claude)
+
+    async def test(pool):
+        await _seed(pool, agent)
+        await pool.execute("DELETE FROM system_settings WHERE key=$1", restore.KEY)
+        await chat_settings.load()
+        monkeypatch.setattr(restore, "enabled", reader)
+        try:
+            await agent._turn(_decision(agent))
+            await agent._turn(_decision(agent))
+        finally:
+            await agent._claude.stop()
+        reader.assert_not_awaited()
+
+    run_db(test, monkeypatch)
+
+
+@pytest.mark.parametrize("enabled", [False, True])
+def test_handoff_uses_the_current_switch_without_run_turn(monkeypatch, tmp_path, planner_claude, enabled):
+    from looper.agents import chat_settings, compaction_restore as restore
+    from looper.db import system_settings
+    claude = planner_claude("ack")
+    _script(claude, automatic=(2,))
+    agent = _agent(tmp_path, claude)
+
+    async def test(pool):
+        await _seed(pool, agent)
+        await system_settings.put_settings({restore.KEY: str(not enabled).lower()})
+        await chat_settings.load()
+        try:
+            await agent._turn(_decision(agent))
+            await system_settings.put_settings({restore.KEY: str(enabled).lower()})
+            await chat_settings.load()
+            await agent._ask(p.TurnKind.HANDOFF, "[HANDOFF] Preserve the task facts", lambda text: text,
+                             run=lambda text: agent._exchange(text, agent._process, 30))
+        finally:
+            await agent._claude.stop()
+        records = await _records(pool)
+        assert len(records) == 2
+        assert ("compaction_restore" in records[1]["metadata"]) is enabled
+        if enabled:
+            assert records[1]["metadata"]["compaction_restore"]["state"] == "due"
+
+    run_db(test, monkeypatch)
+
+
 @pytest.mark.parametrize("failure", [None, "versions", "latest"])
 def test_snapshot_reads_delivered_versions_and_tolerates_read_errors(monkeypatch, tmp_path, planner_claude, failure):
     claude = planner_claude("ack")
@@ -292,6 +344,7 @@ def test_disabled_values_preserve_every_model_input(monkeypatch, tmp_path, plann
             await pool.execute("DELETE FROM system_settings WHERE key=$1", restore.KEY)
             if value is not None:
                 await pool.execute("INSERT INTO system_settings(key,value) VALUES ($1,$2)", restore.KEY, value)
+            await chat_settings.load()
             if value != "true":
                 monkeypatch.setattr(p.db_llm_records, "latest_compaction_restore", reader)
             else:

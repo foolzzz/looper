@@ -1,6 +1,7 @@
 """Resident Claude compactions restore only their own session's next eligible turn."""
 
 import json
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -15,6 +16,7 @@ pytestmark = pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not
 async def _enabled(pool, value="true"):
     await pool.execute("INSERT INTO system_settings (key, value) VALUES ('compaction_restore.enabled', $1) "
                        "ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value", value)
+    await chat_settings.load()
 
 
 async def _records(pool):
@@ -24,6 +26,22 @@ async def _records(pool):
 
 def _inputs(root):
     return [json.loads(line) for line in (root / "inputs.jsonl").read_text().splitlines()]
+
+
+def test_disabled_turns_do_not_read_the_restore_setting(monkeypatch, tmp_path):
+    from looper.agents import compaction_restore as restore
+    reader = AsyncMock(side_effect=RuntimeError("turns must use the settings cache"))
+
+    async def check(pool):
+        await chat_settings.load()
+        monkeypatch.setattr(restore, "enabled", reader)
+        async with manager(pool, tmp_path, monkeypatch, context=100) as chat:
+            await chat.ask()
+            await chat.ask("continue")
+        assert len(_inputs(tmp_path)) == 2
+        reader.assert_not_awaited()
+
+    run_db(check, monkeypatch, timeout=45)
 
 
 @pytest.mark.parametrize("stable", [False, True])
