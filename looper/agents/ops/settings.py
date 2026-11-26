@@ -75,7 +75,7 @@ class _Place:
         """Every role whose settings it changes, the processor's too: a cap it raises for any of them is confirmed."""
         if self.role is not None:
             return (self.role,)
-        return PROJECT_ROLES if self.project else tuple(AgentType)
+        return PROJECT_ROLES if self.project else agent_settings.GLOBAL_ROLES
 
     @property
     def name(self) -> str:

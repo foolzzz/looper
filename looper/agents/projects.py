@@ -516,6 +516,9 @@ async def delete_task(task_id: str, runtime_root: Path | None, *,
         raise RequestError(HTTP_404, "task not found")
     if task.get("status", "") in db_tasks.ACTIVE_STATUSES:
         raise _TaskActive()
+    from .tiers.task_manager import current_pool
+    if manager_pool := current_pool():
+        await manager_pool.forget(task_id)
     async with db_connection.transaction() as conn:
         # Serialize cleanup with start_ready_task's UPDATE, using this connection throughout
         # so cleanup cannot wait for another connection while holding the row lock.
@@ -1226,6 +1229,9 @@ async def start_ready_task(task_id: str, bus: MessageBus, source: AgentAddress, 
     task = await db_tasks.get_task(task_id, **({"pool": pool} if pool is not None else {}))
     if task is None:
         raise RequestError(HTTP_404, "task not found")
+    from .tiers.task_manager import current_pool
+    if (managers := current_pool()) is not None and managers.in_turn(task_id):
+        raise RequestError(HTTP_409, "the task Manager is working in this task: stop its turn first")
     if task["status"] not in (db_tasks.READY, db_tasks.DRAFT):
         raise RequestError(HTTP_400, f"the task is {task['status']}, not ready: only a task that was created and "
                                      "never started can be started")

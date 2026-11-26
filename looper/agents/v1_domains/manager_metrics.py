@@ -25,6 +25,9 @@ SUMMARY = _object({"enabled": _BOOL, "window_days": _INT,
     "proactive": _object({"per_day": _array(_object({"date": _STR, "by_source": _COUNTS})),
         "reply_rate": _object({"all": _NUMBER, "by_source": {"type": "object", "additionalProperties": _NUMBER}})})},
     closed=True)
+SUMMARY["properties"]["work_mode"] = _object({"task_manager_launch_refusals_total": _array(_object({
+    "reason": {"enum": ["review_hook_disabled", "cli_unverified"]},
+    "phase": {"enum": ["launch", "resume"]}, "cli_version": _STR, "count": _INT}, closed=True))}, closed=True)
 RESULTS = {}
 OPERATIONS = (
     Operation("manager_metrics.get", "POST", "/api/v1/manager_metrics/get",
@@ -71,4 +74,9 @@ async def run(server, operation, arguments, principal, headers):
     result["outbound"] = await outbound_metrics.summary(server, db)
     result["outbound_started_at"] = server._started_at.isoformat()
     result["outbound_since_start"] = datetime.now(timezone.utc) - server._started_at < timedelta(days=1)
+    from .. import task_conversations_settings, task_manager_safety
+    if task_conversations_settings.enabled():
+        result["work_mode"] = {"task_manager_launch_refusals_total": [
+            {"reason": reason, "phase": phase, "cli_version": version, "count": count}
+            for (reason, phase, version), count in sorted(task_manager_safety.refusal_counts.items())]}
     return result
