@@ -173,10 +173,17 @@ Manager has no tool for it. The dashboard shows the task page's 指标 card and 
     the Sessions list (`manager_sessions.list`) does not list client sessions, and `/new` and `reset` work on
     the operator's sessions only. The operator's `looper_session_search` already left client threads out.
   - Residents: a client session is admitted under `manager.sessions.max_resident` with the main process and the
-    routed sessions (main never waits; a busy start waits with 「排队中：其他会话正忙」), whether routing is on
-    or off. With routing on it stays resident until another session needs the slot, like a routed session;
-    with routing off its process stops when its turn queue is empty. Its session id is kept in `manager_sessions`
-    (kind `client`, migration `manager_session_client_kind`) and resumes on its next message.
+    routed sessions (main never waits), whether routing is on or off. At the cap the longest idle other session is
+    stopped, whatever its runtime (the Messages API session closes its loop when idle and resumes from its saved
+    history). When none can be stopped the start waits with 「排队中：其他会话正忙」 for at most
+    `RESIDENT_WAIT_SECONDS` (60 s) and is then refused with a busy reply (`TurnFailed`, error `resident_busy`); it
+    never waits for ever and never starts over the cap. This holds for routed group sessions too. With routing on a client session stays
+    resident until another session needs the slot; with routing off its process stops when its turn queue is
+    empty. Its session id is kept in `manager_sessions` (kind `client`, migration `manager_session_client_kind`,
+    no downgrade: delete the `kind='client'` rows before rolling back to an older release) and resumes on its next message.
+  - Limits to know: the isolation is of chat text. `looper_tasks` and the task tools still reach every task (also the
+    operator's titles and requirements, as in `main` before), so task content can reach a client session through
+    tool results. A client with no per-client task scope is a follow-up.
   - The API stays as it was: the same endpoints and response shapes. Only the session that answers changed, so
     a client no longer sees what the operator said in `main`, and its tools are the list above.
 - <a id="manager-session-routing"></a>**Session routing**
