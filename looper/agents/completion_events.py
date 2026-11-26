@@ -13,8 +13,11 @@ back and their notices go out exactly as recorded; a Manager that starts does th
 left ``running`` (``recover``). A group chat's end is ``skipped`` (``group_chat``), and so is
 one whose report reached another Manager (``manager_off``). An end whose turn would run in the operator's main session
 but whose chat is not the operator's (an API client's dashboard thread, another person's direct chat) is ``skipped``
-too (``withheld_not_operator``): its notice goes out, and no model reply is written for it. A schedule's run message is recorded ``skipped``
-(``off``) whatever the switch says: its turn is not built yet.
+too (``withheld_not_operator``): its notice goes out, and no model reply is written for it. With session
+routing on, another sender's direct chat runs in its own session. That completion does not build the model turn
+(the completion prompt is outside the session allowlist): the claimed events fall back with ``session_allowlist``
+and the recorded notice is delivered. A schedule run whose message was claimed in that session does the same.
+While ``manager.completion_turns`` is off, a schedule run message is ``skipped`` (``off``).
 
 A replayed message finds its row: it is not sent again, unless the first attempt never handed the notice to the
 channel. When the database cannot be written, the notice is sent anyway.
