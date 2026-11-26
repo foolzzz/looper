@@ -4,7 +4,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from looper.db import network_pauses, plans
+from looper.db import network_pauses, plans, tasks as db_tasks
 from looper.agents import attention, metrics, projects
 from tests.db_support import run_db
 
@@ -92,6 +92,47 @@ def test_detail_projects_pause_phase_before_task_status_converges(monkeypatch, s
         released = await projects.task_detail('task')
         assert 'network_pause' not in released
         assert released['phase'] == 'executing'
+    run_db(body, monkeypatch)
+
+
+def test_detail_projects_pause_phase_from_the_status_read_with_the_pause(monkeypatch):
+    """A detail request can load the task before it is active and the pause row later.
+
+    Start only queues the task. The pause is committed while that request is still
+    reading. Phase follows the status read with the pause, not the earlier snapshot.
+    """
+    async def body(pool):
+        await pool.execute("INSERT INTO projects(id,name) VALUES ('project','Network recovery')")
+        await pool.execute("INSERT INTO tasks(id,project_id,requirement,status,phase) VALUES "
+                           "('task','project','Keep the workspace','pending','pending')")
+        await pool.execute("INSERT INTO system_settings(key,value) VALUES ('engine.network_pause.enabled','true')")
+        await network_pauses.put('task', {'reason': 'Model API network unavailable; waiting for connectivity',
+            'deadline': datetime.now(timezone.utc) + timedelta(hours=1)}, pool=pool)
+        real = db_tasks.get_task_with_steps
+
+        async def early_snapshot(task_id, *, pool=None):
+            raw = await real(task_id, pool=pool)
+            return {**raw, 'status': 'init', 'phase': 'pending'}
+
+        monkeypatch.setattr(db_tasks, 'get_task_with_steps', early_snapshot)
+        detail = await projects.task_detail('task')
+        assert detail['network_pause']['state'] == 'paused'
+        assert detail['phase'] == 'waiting'
+        assert detail['status'] == 'pending'
+        assert detail['group'] == 'in_progress'
+        stored = await pool.fetchrow('SELECT status,phase FROM tasks WHERE id=$1', 'task')
+        assert dict(stored) == {'status': 'pending', 'phase': 'pending'}
+
+        async def stale_active(task_id, *, pool=None):
+            raw = await real(task_id, pool=pool)
+            return {**raw, 'status': 'executing', 'phase': 'executing'}
+
+        monkeypatch.setattr(db_tasks, 'get_task_with_steps', stale_active)
+        await pool.execute("UPDATE tasks SET status='stopped',phase='planning' WHERE id='task'")
+        stopped = await projects.task_detail('task')
+        assert stopped['network_pause']['state'] == 'paused'
+        assert stopped['status'] == 'stopped'
+        assert stopped['phase'] == 'planning'
     run_db(body, monkeypatch)
 
 

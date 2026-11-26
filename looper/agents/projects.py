@@ -983,11 +983,19 @@ async def task_detail(task_id: str, *, compact: bool = False) -> dict[str, Any]:
         failure_holds = [hold_view(row) for row in failure_holds]
     from ..db import network_pauses
     from . import network_pause_settings
-    network_pause = await network_pauses.get(task_id) if (await network_pause_settings.load()).enabled else None
+    status = raw.get("status", "pending")
     phase = raw.get("phase", "pending")
-    if network_pause is not None and raw.get("status") in db_tasks.ACTIVE_STATUSES:
-        # The pause is durable before the TaskRouter consumes the Planner's status message.
-        phase = "waiting" if network_pause['state'] == network_pauses.State.PAUSED else "waiting_user"
+    network_pause = None
+    if (await network_pause_settings.load()).enabled:
+        # One statement: the pause can land while this request still holds the pre-start task row.
+        current = await network_pauses.get_with_task(task_id)
+        if current is not None and current["pause"] is not None:
+            network_pause = current["pause"]
+            status = current["status"]
+            phase = current["phase"]
+            if status in db_tasks.ACTIVE_STATUSES:
+                # The pause is durable before the TaskRouter consumes the Planner's status message.
+                phase = "waiting" if network_pause["state"] == network_pauses.State.PAUSED else "waiting_user"
     return {
         **({"holds": failure_holds} if failure_holds is not None else {}),
         **({"network_pause": network_pauses.view(network_pause)} if network_pause is not None else {}),
@@ -1014,8 +1022,8 @@ async def task_detail(task_id: str, *, compact: bool = False) -> dict[str, Any]:
         "goal_id": raw.get("goal_id", ""),
         "project_id": raw.get("project_id", ""),
         "project_name": raw.get("project_name", ""),
-        "status": raw.get("status", "pending"),
-        "group": db_tasks.task_group(raw.get("status")).value,
+        "status": status,
+        "group": db_tasks.task_group(status).value,
         "phase": phase,
         "planner_id": raw.get("planner_id"),
         "correlation_id": raw.get("correlation_id", ""),
