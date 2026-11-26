@@ -16,7 +16,7 @@ from typing import Any, Literal, Protocol
 
 from ...db import activity, agent_sessions, projects, tasks
 from .. import operator_mcp, outbound_hook, step_workspaces, task_budget, task_conversations_settings
-from .. import task_manager_safety, task_manager_settings, task_workspaces
+from .. import task_manager_project_instructions, task_manager_safety, task_manager_settings, task_workspaces
 from ..agent_settings import Access, Launch
 from ..claude_cli import ClaudeRunRecorder, ResidentClaude
 from ..library import EMPTY_LIBRARY
@@ -327,8 +327,12 @@ class TaskManagerAgent:
         from ...db.connection import get_pool
         recent = await get_pool().fetch("SELECT summary FROM activity WHERE task_id=$1 ORDER BY seq DESC LIMIT 20",
                                         self.task_id)
+        # Direct mode reads the project's instruction files every turn; the orchestrated prompt stays as it was.
+        conventions = task_manager_project_instructions.section(
+            task_manager_project_instructions.read(reopened.work_dir)[0]) if direct else ""
         prompt = SystemPrompt(instructions(self.mode) + "\n\n" + brief(task, recent_activity=list(reversed(recent)),
-                                                                    reopened=reopened))
+                                                                    reopened=reopened)
+                              + (f"\n\n{conventions}" if conventions else ""))
         root = self.pool.runtime_root / "task-managers" / self.task_id
         prompt_file = prompt.write_file(root)
         launch = await configure()
