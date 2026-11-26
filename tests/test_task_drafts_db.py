@@ -336,7 +336,12 @@ def test_work_mode_off_freeze(monkeypatch, tmp_path):
         "tasks.task_manager_profile_get", "tasks.task_manager_profile_set",
         "network_pause.get", "network_pause.update",
         # worker.interrupted_hint.enabled (default off; these only read and store it)
-        "worker_interrupted_hint.get", "worker_interrupted_hint.update"}
+        "worker_interrupted_hint.get", "worker_interrupted_hint.update",
+        # Chat-scope members, all operator-only with no Manager tool; they read or write settings that only act
+        # once scoped routing is on (operations member: capability_sets.*, chat_scope_overrides.*; resident-cap
+        # member: resident_limits.*).
+        "capability_sets.get", "capability_sets.list", "chat_scope_overrides.delete", "chat_scope_overrides.list",
+        "chat_scope_overrides.put", "resident_limits.get", "resident_limits.update"}
     assert old - ids == set()
     async def check(pool):
         owner = await projects.create_project(name="Frozen project", work_dir=str(tmp_path), pool=pool)

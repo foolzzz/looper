@@ -1,5 +1,6 @@
 import { afterEach, expect, it, vi } from "vitest";
-import { ChatBindingConfirmation, confirmChatBinding, deleteChatBinding, fetchChannelChats, fetchChatBindings, putChatBinding, setBoundChatsOnly,
+import { ChatBindingConfirmation, confirmChatBinding, deleteChatBinding, deleteOverride, fetchChannelChats, fetchChatBindings,
+  listCapabilitySets, listOverrides, putChatBinding, putDefaultScope, putOverride, setBoundChatsOnly,
   type Binding, type ChannelChats } from "./chat-bindings-api";
 import { V1Error } from "@/lib/v1";
 
@@ -9,6 +10,7 @@ const binding: Binding = {
   channel_id: "bot-example", chat_id: "-100123", manager_id: "manager-review",
   created_at: "2026-10-25T10:00:00+00:00", channel_type: "telegram", bot_name: "Example",
   chat_name: null, manager_name: "Review", manager_enabled: false, manager_deleted: true, allowed_senders: [], sender_policy: "listed",
+  default_scope: null, effective_default_scope: "chat_only", legacy_allowed: false, suggested_scope: null,
 };
 const catalog: ChannelChats = {
   channel_id: binding.channel_id, bot_manager_id: "manager-owner", bound_chats_only: false,
@@ -86,6 +88,48 @@ it.each([
   expect(fetcher).toHaveBeenCalledTimes(1);
 });
 
+
+it("sends capability set, group default and override bodies", async () => {
+  const calls: unknown[] = [];
+  const created = { principal_id: "ou_one", principal_kind: "bot" as const, sender_ids: ["ou_one", "cli_two"],
+    scope_id: "chat_only", created_at: binding.created_at };
+  const answers = [{ sets: [] }, { binding }, { overrides: [] }, created, { deleted: true }];
+  vi.stubGlobal("fetch", vi.fn(async (url: string, init: RequestInit) => {
+    calls.push([url, JSON.parse(String(init.body))]);
+    return Response.json({ status: "ok", result: answers.shift() });
+  }));
+  await listCapabilitySets();
+  await expect(putDefaultScope(binding, null, true)).resolves.toEqual({ binding });
+  await listOverrides(binding);
+  await putOverride(binding, { principal_kind: "bot", sender_ids: ["ou_one", "cli_two"], scope_id: "chat_only", stop_now: false });
+  await deleteOverride(binding, "ou_one", false);
+  expect(calls).toEqual([
+    ["/api/v1/capability_sets/list", {}],
+    ["/api/v1/manager_chat_bindings/put", { channel_id: binding.channel_id, chat_id: binding.chat_id,
+      manager_id: binding.manager_id, default_scope: null, stop_now: true }],
+    ["/api/v1/chat_scope_overrides/list", { channel_id: binding.channel_id, chat_id: binding.chat_id }],
+    ["/api/v1/chat_scope_overrides/put", { channel_id: binding.channel_id, chat_id: binding.chat_id,
+      principal_kind: "bot", sender_ids: ["ou_one", "cli_two"], scope_id: "chat_only", stop_now: false }],
+    ["/api/v1/chat_scope_overrides/delete", { channel_id: binding.channel_id, chat_id: binding.chat_id,
+      principal_id: "ou_one", stop_now: false }],
+  ]);
+});
+
+it("leaves a scope write pending until the operator confirms it, then returns the saved binding", async () => {
+  const saved = { ...binding, default_scope: "chat_only", effective_default_scope: "chat_only" };
+  const fetcher = vi.fn()
+    .mockResolvedValueOnce(Response.json({ status: "needs_confirmation", confirmation_id: "pending-scope",
+      impact: "Set the group default of 42 to chat_only.", expires_in_seconds: 60 }, { status: 202 }))
+    .mockResolvedValueOnce(Response.json({ status: "ok", result: { binding: saved } }));
+  vi.stubGlobal("fetch", fetcher);
+  const error = await putDefaultScope(binding, "chat_only", false).catch((caught) => caught);
+  expect(error).toBeInstanceOf(ChatBindingConfirmation);
+  expect(fetcher).toHaveBeenCalledTimes(1);
+  await expect(confirmChatBinding(error.confirmation)).resolves.toEqual({ binding: saved });
+  expect(fetcher.mock.calls[1][0]).toBe("/api/v1/confirm");
+  expect(JSON.parse(fetcher.mock.calls[1][1].body)).toEqual({ confirmation_id: "pending-scope" });
+  expect(fetcher.mock.calls[1][1].headers["X-Looper-Session"]).toBe(fetcher.mock.calls[0][1].headers["X-Looper-Session"]);
+});
 
 it.each([{ senders: undefined }, { senders: [] }, { senders: ["ou_example"] }])("sends extra senders only when supplied: %j", async ({ senders }) => {
   const fetcher = vi.fn(async (_url: RequestInfo | URL, _init?: RequestInit) => Response.json({ status: "ok", result: { binding } }));

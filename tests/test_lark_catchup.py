@@ -153,7 +153,7 @@ def test_gap_group_mention_reaches_bound_manager_once_after_start(tmp_path: Path
             assert message.payload["channel_context"] == {
                 "chat_id": "oc_synthetic_group", "chat_type": "group", "sender_id": OPEN_ID,
                 "message_id": "om_synthetic_gap", "reply_to": "om_synthetic_parent", "root_id": "om_synthetic_root",
-                "sender_name": "Ada Lovelace",
+                "sender_name": "Ada Lovelace", "sender_kind": "person",
             }
             assert transport.list_calls[0]["start"] == pytest.approx(now - 70, abs=0.1)
             summaries = [record.message for record in caplog.records if "lark_catchup " in record.message]

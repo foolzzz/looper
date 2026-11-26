@@ -55,7 +55,9 @@ def dashboard(dashboard_url):
                 result = {"manager_chat_bindings/list": {"bindings": []}, "project_admin/list": {"projects": []},
                           "task_conversations/get": {"enabled": False},
                           "system/overview": {}, "system/status": {}, "ops/gates/list": {"gates": [], "total": 0},
-                          "chat_settings/get": {"stop_enabled": False},
+                          "chat_settings/get": {"stop_enabled": False}, "capability_sets/list": {"sets": []},
+                          "chat_scope_overrides/list": {"overrides": []},
+                          "manager_sessions/list": {"routing_enabled": False, "sessions": []},
                           "registry/view": {"profiles": [], "models": [], "runtimes": [], "providers": []}}.get(path)
                 if result is None:
                     route.fulfill(status=503, json={"status": "error", "error": {

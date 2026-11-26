@@ -94,7 +94,12 @@ def _setup(name: str, manager: ManagerAgent, session: _Session, agent_db: Any,
     return session
 
 
-@pytest.mark.parametrize("name", PREPARATION_STEPS)
+# Reached only by a scoped group session that shows group activity; it has its own stop test in
+# test_group_activity_db.py (a stop while the activity is read) and an off-path check there.
+_SCOPED_ONLY_STEPS = ("group_activity",)
+
+
+@pytest.mark.parametrize("name", [name for name in PREPARATION_STEPS if name not in _SCOPED_ONLY_STEPS])
 def test_a_stop_at_each_preparation_step(name: str, agent_db: Any, monkeypatch: pytest.MonkeyPatch) -> None:
     async def run() -> None:
         with tempfile.TemporaryDirectory() as tmp:

@@ -126,18 +126,21 @@ export function FormFooter({
   submit,
   onCancel,
   onSubmit,
+  submitDisabled = false,
 }: {
   error: string;
   busy: boolean;
   submit: string;
   onCancel: () => void;
   onSubmit?: () => void;
+  /** Keeps Cancel usable when the submit itself is not allowed yet. */
+  submitDisabled?: boolean;
 }) {
   return (
     <>
       {error && <p role="alert" className="text-xs text-destructive">{error}</p>}
       <div className="flex gap-2">
-        <Button type={onSubmit ? "button" : "submit"} onClick={onSubmit} size="sm" disabled={busy}>
+        <Button type={onSubmit ? "button" : "submit"} onClick={onSubmit} size="sm" disabled={busy || submitDisabled}>
           {busy && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
           {submit}
         </Button>

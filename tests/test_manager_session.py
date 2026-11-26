@@ -37,7 +37,8 @@ def test_a_new_manager_has_only_main_with_the_old_defaults(tmp_path: Path) -> No
         "state_lost": "no whole block yet", "state_pending_whole": None, "state_generation": 0, "stopped_notes": [], "lock_owner": None,
         "last_user_turn_ended_at": None, "last_background_turn_ended_at": None,
         "running_token": None, "research": None, "agent_settings": None, "last_activity": 7.0,
-        "turn_ended_at": None, "budget": None}
+        "turn_ended_at": None, "budget": None,
+        "scope": None, "retired": None, "activity_cursor": None}  # chat-scope routing members: None on the unscoped main session
     assert not main.lifecycle_gate.locked() and main.lifecycle_gate is not main.turn_lock
 
 

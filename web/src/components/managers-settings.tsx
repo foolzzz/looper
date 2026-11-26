@@ -36,6 +36,7 @@ import {
   type TemplateInput,
 } from "@/lib/api";
 import { ManagerChatBindings, useManagerChatBindings } from "@/components/manager-chat-bindings";
+import { ManagerSessions } from "@/components/manager-sessions";
 import { ManagerCleanup } from "@/components/manager-cleanup";
 import { ManagerInstalls } from "@/components/manager-installs";
 import type { Binding } from "@/lib/chat-bindings-api";
@@ -695,6 +696,7 @@ function ManagerRow({ manager, managers, bindings, snapshot, reload }: {
             </RegistryList>
           )}
           <ManagerChatBindings manager={manager} managers={managers} bindings={bindings} snapshot={snapshot} reload={reload} />
+          {!manager.builtin && <ManagerSessions managerId={manager.id} />}
           <ManagerInstalls manager={manager} hasScenarios={managers.some((item) => !item.builtin)} />
         </>
       }

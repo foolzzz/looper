@@ -600,6 +600,18 @@ def _no_live_runs(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 @pytest.fixture(autouse=True)
+def _own_resident_pool(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The resident pool lists the routers of the Managers alive in this process. A Manager an earlier test built with
+    a stand-in session stays in the process-wide pool until the garbage collector frees it, and the metrics API's
+    resident count then failed on the stand-in (503) in whichever test ran next in that worker. Each test gets its own."""
+    manager_routing = sys.modules.get("looper.agents.tiers.manager_routing")
+    if manager_routing is None:
+        return
+
+    monkeypatch.setattr(manager_routing, "pool", manager_routing.ResidentPool())
+
+
+@pytest.fixture(autouse=True)
 def _chat_stop_default_off(monkeypatch: pytest.MonkeyPatch) -> None:
     """Every test starts with the chat's settings at their defaults (``chat_settings``: stopping a reply, completion
     turns, the delivery layer and the morning brief off), whatever an earlier one set."""
