@@ -333,7 +333,12 @@ def test_work_mode_off_freeze(monkeypatch, tmp_path):
     old = set(frozen["operation_ids"])
     assert ids - old == {
         "tasks.create_draft", "task_conversations.get", "task_conversations.update", "tasks.done",
-        "tasks.task_manager_profile_set"}
+        "tasks.task_manager_profile_set",
+        # Chat-scope members, all operator-only with no Manager tool; they read or write settings that only act
+        # once scoped routing is on (operations member: capability_sets.*, chat_scope_overrides.*; resident-cap
+        # member: resident_limits.*).
+        "capability_sets.get", "capability_sets.list", "chat_scope_overrides.delete", "chat_scope_overrides.list",
+        "chat_scope_overrides.put", "resident_limits.get", "resident_limits.update"}
     assert old - ids == set()
     async def check(pool):
         owner = await projects.create_project(name="Frozen project", work_dir=str(tmp_path), pool=pool)
