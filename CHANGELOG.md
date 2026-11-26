@@ -18,6 +18,14 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.15.41] - 2026-11-25
+
+Contains exactly v2.15.40 at `1d90572f1` plus [#1818](https://github.com/foolzzz/looper/pull/1818), frozen at `322834fb6`, and release metadata. Tag this release PR's own head after merge, not the later main merge commit. No product behavior, migration or setting changes. From v2.15.38 or earlier, upgrade straight to v2.15.41; it includes all of [v2.15.40](docs/releases/v2.15.40.md) and [v2.15.39](docs/releases/v2.15.39.md), whose notes list two startup migrations. See [the release notes](docs/releases/v2.15.41.md) for validation and exclusions.
+
+### Fixed
+
+- **Keep source-ref dashboard builds self-contained.** ([#1818](https://github.com/foolzzz/looper/pull/1818)) Upgrading an installed Looper with `looper service upgrade --to v2.15.39` or `--to v2.15.40` failed at the dashboard build before the service stopped: a web test imported a shared fixture outside the exported `web/` directory. The running service was unaffected. The unchanged fixture now lives in `web/`, both test suites reference it there, and a regression scans `web/src` imports and file reads for boundary violations, with explicit exceptions for existing test-only reads. Source-ref upgrades to v2.15.39 and v2.15.40 remain affected; target v2.15.41 instead. Installs from the published wheel are not affected.
+
 ## [2.15.40] - 2026-11-25
 
 Contains all of v2.15.39 at `38d92f469` plus exactly [#1807](https://github.com/foolzzz/looper/pull/1807) (including #1803 and #1806), then [#1809](https://github.com/foolzzz/looper/pull/1809), with two normal merges and release metadata. Tag this release PR's own head after merge, not the later main merge commit. No migration is added over v2.15.39; upgrades from v2.15.38 or earlier inherit [v2.15.39's two migrations and behavior changes](docs/releases/v2.15.39.md). See [the release notes](docs/releases/v2.15.40.md) for activation, validation and exclusions.
