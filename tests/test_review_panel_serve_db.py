@@ -113,7 +113,7 @@ def _pipeline_screenshot(api, task_id):
 
 
 @pytest.mark.installed
-def test_panel_task_completes_on_serve_with_distinct_runtime_profiles(monkeypatch):
+def test_panel_task_completes_on_serve_with_distinct_runtime_profiles(monkeypatch, staged_dashboard_dir):
     from evals.prompt_regression import runner
 
     monkeypatch.setattr(runner, '_SERVE',
