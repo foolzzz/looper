@@ -181,12 +181,13 @@ def test_intent_decision_and_channel_retry_share_one_delivery_row(monkeypatch, m
             await env.service.run_once()
             await asyncio.gather(*turn_metrics._pending)
             rows = await pool.fetch("SELECT * FROM proactive_deliveries")
-            assert len(rows) == int(enabled or metrics)
+            assert len(rows) == 1  # Body capture is independent of the metrics and delivery switches.
             if rows:
                 row = rows[0]
                 pid = await pool.fetchval("SELECT id FROM intent_posts WHERE intent_id=$1", iid)
                 assert (row["dedupe_key"], row["source"], row["source_ref"]) == (
                     f"intent-{iid}-{pid}", "intent", str(iid))
+                assert row["body"] == env.channels.posts[-1][2]
                 assert (row["decision"], row["counted"]) == (("send", True) if enabled else (None, None))
                 assert row["outcome"] == outcome and row["sent_at"] is not None
                 assert row["external_id"] == ("om_push_2" if outcome == "sent" else None)

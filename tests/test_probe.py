@@ -26,10 +26,10 @@ HEALTH = {"status": "ok", "scheduler": {"running": True, "last_ok_tick_age_secon
 
 @contextmanager
 def serving(body=HEALTH, code=200, host="127.0.0.1"):
+    requests = []
     class Handler(BaseHTTPRequestHandler):
         def do_POST(self):
-            assert self.path == "/api/v1/system/health"
-            assert self.rfile.read(int(self.headers["Content-Length"])) == b"{}"
+            requests.append((self.path, self.rfile.read(int(self.headers["Content-Length"]))))
             self.server.authorization = self.headers.get("Authorization")
             self.send_response(code)
             self.end_headers()
@@ -50,6 +50,7 @@ def serving(body=HEALTH, code=200, host="127.0.0.1"):
             server.shutdown()
             thread.join(timeout=5)
             assert not thread.is_alive()
+            assert all(path == "/api/v1/system/health" and payload == b"{}" for path, payload in requests)
 
 
 @pytest.mark.parametrize(("state", "verdict", "at", "action", "first_bad"), [
@@ -209,12 +210,7 @@ def test_bot_falls_back_to_credentials_cache(tmp_path, monkeypatch, cached):
     def respond(request):
         calls.append(request)
         if request.url.path == "/open-apis/auth/v3/tenant_access_token/internal":
-            assert json.loads(request.content) == {"app_id": "test-app", "app_secret": "test-secret"}
             return httpx.Response(200, json={"code": 0, "tenant_access_token": "tenant-test", "expire": 7200})
-        assert request.url.path == "/open-apis/im/v1/messages"
-        assert request.headers["Authorization"] == "Bearer tenant-test"
-        assert request.url.params["receive_id_type"] == "open_id"
-        assert json.loads(request.content)["uuid"] == "looper-probe-123"
         return httpx.Response(200, json={"code": 0, "data": {"message_id": "om_test"}})
 
     api_type = lark_api.LarkApi
@@ -229,6 +225,12 @@ def test_bot_falls_back_to_credentials_cache(tmp_path, monkeypatch, cached):
     if cached:
         assert error is None
         assert len(calls) == 2
+        auth, message = calls
+        assert json.loads(auth.content) == {"app_id": "test-app", "app_secret": "test-secret"}
+        assert message.url.path == "/open-apis/im/v1/messages"
+        assert message.headers["Authorization"] == "Bearer tenant-test"
+        assert message.url.params["receive_id_type"] == "open_id"
+        assert json.loads(message.content)["uuid"] == "looper-probe-123"
         assert clients[0].is_closed
     else:
         assert error == "no lark_bot credentials: the database is unreachable and no cached copy exists"
@@ -246,12 +248,12 @@ def test_bot_credentials_cache_is_private_and_survives_connection_close_failure(
         cache.parent.mkdir(parents=True, mode=0o700)
         cache.write_text(json.dumps(credentials))
         cache.chmod(0o600)
-    terminated = []
+    terminated, queries, timeouts = [], [], []
     class Connection:
         async def fetch(self, query):
+            queries.append(query)
             if close_fails:
                 raise ConnectionError("database lost")
-            assert "lark_bot" in query
             return [{"channel_id": "channel-lark_bot-2", "config": json.dumps({"app_id": "test-app", "domain": "lark"}),
                      "bot_token": "test-secret"}]
 
@@ -263,7 +265,7 @@ def test_bot_credentials_cache_is_private_and_survives_connection_close_failure(
             terminated.append(True)
 
     async def connect(*args, **kwargs):
-        assert kwargs["timeout"] == 5
+        timeouts.append(kwargs["timeout"])
         return Connection()
 
     monkeypatch.setattr(asyncpg, "connect", connect)
@@ -272,6 +274,8 @@ def test_bot_credentials_cache_is_private_and_survives_connection_close_failure(
     assert stat.S_IMODE(cache.stat().st_mode) == 0o600
     assert stat.S_IMODE(cache.parent.stat().st_mode) == 0o700
     assert bool(terminated) == close_fails
+    assert timeouts == [5]
+    assert len(queries) == 1 and "lark_bot" in queries[0]
 
 
 @pytest.mark.parametrize(("profile", "rows", "selected"), [
@@ -284,9 +288,10 @@ def test_bot_credentials_cache_is_private_and_survives_connection_close_failure(
 def test_bot_credentials_select_the_configured_channel(tmp_path, monkeypatch, profile, rows, selected):
     import asyncio
     import asyncpg
+    queries = []
     class Connection:
         async def fetch(self, query):
-            assert "lark_bot" in query
+            queries.append(query)
             return [{"channel_id": name, "config": json.dumps({"profile": value, "app_id": name}),
                      "bot_token": "secret"} for name, value in rows]
         async def close(self, timeout):
@@ -296,6 +301,7 @@ def test_bot_credentials_select_the_configured_channel(tmp_path, monkeypatch, pr
     monkeypatch.setattr(asyncpg, "connect", connect)
     credentials = asyncio.run(probe._bot_credentials(ops(tmp_path, probe_lark_profile=profile), tmp_path))
     assert (credentials["app_id"] if credentials else None) == selected
+    assert len(queries) == 1 and "lark_bot" in queries[0]
 
 
 def test_bot_cache_is_not_reused_for_another_profile(tmp_path, monkeypatch):
@@ -326,9 +332,10 @@ def test_healthy_sample_primes_and_refreshes_bot_cache_before_database_outage(tm
         if not online:
             raise ConnectionError("database stopped")
         return Connection()
+    credentials_used = []
     class Api:
         def __init__(self, app_id, app_secret, **kwargs):
-            assert app_id == "test-app" and app_secret == "rotated-secret"
+            credentials_used.append((app_id, app_secret))
         async def send(self, **kwargs):
             sends.append(kwargs)
         async def aclose(self):
@@ -357,6 +364,7 @@ def test_healthy_sample_primes_and_refreshes_bot_cache_before_database_outage(tm
         Clock.current += MINUTE
         assert probe.run(config, tmp_path) == 0
     assert len(sends) == 1 and "告警：" in sends[0]["text"]
+    assert credentials_used == [("test-app", "rotated-secret")]
     state = json.loads((tmp_path / ".local/probe/state.json").read_text())
     assert state["alert_started_at"] and state["last_send_error"] is None
 

@@ -191,6 +191,8 @@ export interface TaskCost {
   /** Runs Looper priced at their provider's prices. */
   provider_price_runs?: number;
   by_role: Record<TaskRole, { cost_usd: number; runs: number }> & {
+    /** When supplied, already included in the task total; distinct from manager_by_model. */
+    task_manager?: { cost_usd: number; runs: number };
     explorer?: { cost_usd: number; runs: number };
     consult?: { cost_usd: number; runs: number };
   };
@@ -585,9 +587,10 @@ export interface ChatTargetInfo {
   task_role?: RunRole;
 }
 
-export async function fetchChatTargets(): Promise<ChatTargetInfo[]> {
-  const result = await callV1<{ targets: ChatTargetInfo[] }>("/api/v1/operator_chat/targets", {});
+export async function fetchChatTargets(signal?: AbortSignal): Promise<ChatTargetInfo[]> {
+  const result = await callV1<{ targets: ChatTargetInfo[] }>("/api/v1/operator_chat/targets", {}, { signal });
   if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
+  if (!Array.isArray(result.targets)) throw new V1Error(200, "unavailable", "The server returned invalid chat targets.");
   return result.targets;
 }
 

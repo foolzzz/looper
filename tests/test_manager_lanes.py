@@ -86,6 +86,7 @@ def test_user_overtakes_waiting_completion_and_metrics_only_count_turns_that_ran
         seen = []
         monkeypatch.setattr(chat_settings, "_metrics_enabled", True)
         received = datetime.now(timezone.utc)
+        queued_behind = []
         async def handle(e):
             seen.append(e.payload["text"])
             if e is first:
@@ -93,7 +94,7 @@ def test_user_overtakes_waiting_completion_and_metrics_only_count_turns_that_ran
                 turn_metrics.note_lock_end(session, session.lock_owner, TurnOrigin.USER)
                 session.lock_owner = None
             else:
-                assert turn_metrics.queued_behind(session, received) is turn_metrics.QueuedBehind.USER
+                queued_behind.append(turn_metrics.queued_behind(session, received))
         async def tell(*args):
             seen.append("completion")
         agent._handle, agent._tell_completion = handle, tell
@@ -106,6 +107,7 @@ def test_user_overtakes_waiting_completion_and_metrics_only_count_turns_that_ran
         try:
             await wait_settled(settled, 3)
             assert seen == ["user-1", "user-2", "completion"]
+            assert queued_behind == [turn_metrics.QueuedBehind.USER]
             assert not agent._router.holds(session)
         finally:
             await agent._router.stop()
@@ -119,11 +121,12 @@ def test_deadline_falls_back_without_worker_and_settles_after_write(monkeypatch,
         monkeypatch.setattr(manager_events, "QUEUE_SECONDS", 0.03)
         started, release = asyncio.Event(), asyncio.Event()
         fallback_started, fallback_release = asyncio.Event(), asyncio.Event()
+        fallback_reasons = []
         async def handle(e):
             started.set()
             await release.wait()
         async def fallback(batch, reason, state):
-            assert reason == "queue_deadline"
+            fallback_reasons.append(reason)
             fallback_started.set()
             await fallback_release.wait()
         agent._handle, agent._fall_back_completion = handle, fallback
@@ -143,6 +146,7 @@ def test_deadline_falls_back_without_worker_and_settles_after_write(monkeypatch,
             fallback_release.set()
             await wait_settled(settled, 1)
             assert settled == [wake.message_id]
+            assert fallback_reasons == ["queue_deadline"]
             release.set()
             await wait_settled(settled, 2)
             agent._tell_completion.assert_not_awaited()

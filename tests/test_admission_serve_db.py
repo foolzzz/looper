@@ -235,7 +235,10 @@ def test_serve_serializes_freezes_probes_then_operator_clear(tmp_path, monkeypat
             assert not _events(state, "serial")
             assert not _query(url, "SELECT id FROM llm_records WHERE task_id=$1", serial)
             assert len((state / "alerts.jsonl").read_text().splitlines()) == 1
-            (state / "offset").write_text("65")
+            # The server reads concurrently; never expose a truncated clock value.
+            offset = state / "offset-next"
+            offset.write_text("65")
+            offset.replace(state / "offset")
             first_worker = _until(lambda: _events(state, "serial"), "Planner probe succeeds before Workers")
             assert len(first_worker) == 1 and _limits(api)["state"] == "open"
             planner = _query(url, "SELECT status,metadata FROM llm_records WHERE task_id=$1 AND agent_id=$2",

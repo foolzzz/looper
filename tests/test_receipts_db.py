@@ -729,19 +729,25 @@ def test_a_reset_named_session_does_not_read_the_notes_left_in_it(monkeypatch: p
         ops = _ops()
         press = _presser(monkeypatch, ops)
 
-        async def ask_and_press() -> None:
+        async def ask_and_press(session_key: str = "main") -> None:
             turn = _turn("om_ask")
-            ops.begin_turn(turn, "b-ask", session_key="group:g1")
-            asked = await ops.call("looper_projects", DELETE, binding="b-ask", session_key="group:g1")
+            ops.begin_turn(turn, "b-ask")
+            asked = await ops.call("looper_projects", DELETE, binding="b-ask")
             ops.end_turn(turn)
             assert asked["status"] == "needs_confirmation", asked
+            # Model a confirmation left before non-main tools were restricted.
+            ops._chat_sessions[turn.chat_key] = session_key
             await (await press(_value(turn))).later
 
         await ask_and_press()
-        assert ops.begin_turn(_turn("om_main"), session_key="main") == ""  # another session never reads it
-        assert _begin(ops, _turn("om_g1"), session_key="group:g1").startswith("[Looper] After your last reply")
+        assert _begin(ops, _turn("om_next")).startswith("[Looper] After your last reply")
         await _sample(pool)
-        await ask_and_press()
+        await ask_and_press("group:g1")
+        (note,) = ops._button_notes[_turn("om_ask").chat_key]
+        assert note[1] == "group:g1" and note[4].startswith("[Looper] After your last reply")
+        assert ops.begin_turn(_turn("om_main"), session_key="main") == ""  # another session never reads it
+        assert _begin(ops, _turn("om_g1"), session_key="group:g1") == ""  # legacy notes are not allowlisted
+        assert ops._button_notes[_turn("om_ask").chat_key] == [note]
         ops.forget_session("group:g1")  # what the Manager does when that session is reset
         assert ops.begin_turn(_turn("om_g1b"), session_key="group:g1") == ""
         assert ops._button_notes == {}

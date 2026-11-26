@@ -280,9 +280,9 @@ class NoticeDispatcher:
             return
         external = None
         try:
-            receipt = await self._registry.post(channel, push_target(channel, chat), notice_text(context, dashboard_url=self._dashboard_url),
-                                                idempotency_key=key, **turn_metrics.proactive_kwargs(
-                                                    turn_metrics.ProactiveSource.INTENT, ref))
+            with turn_metrics.proactive_send(turn_metrics.ProactiveSource.INTENT, ref):
+                receipt = await self._registry.post(channel, push_target(channel, chat), notice_text(context, dashboard_url=self._dashboard_url),
+                                                    idempotency_key=key)
             outcome = receipt.result
             external = receipt.external_ids[0] if receipt.external_ids else None
         except Exception:

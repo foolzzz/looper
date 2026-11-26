@@ -29,6 +29,7 @@ def platform(monkeypatch: pytest.MonkeyPatch) -> Any:
         identities: list[tuple[str, str, str]] = []
         failure: str | None = None
         names_failure = False
+        search_queries: list[str] = []
 
         def __init__(self, app_id: str, secret: str, *, base_url: str) -> None:
             self.app_id, self.secret, self.base_url = app_id, secret, base_url
@@ -49,7 +50,7 @@ def platform(monkeypatch: pytest.MonkeyPatch) -> Any:
         async def search_people(self, query: str) -> tuple[list[dict[str, str]], bool]:
             if self.failure:
                 raise lark_api.LarkApiError(self.failure)
-            assert query == "alan"
+            self.search_queries.append(query)
             return [{"open_id": OTHER, "name": "Alan Turing", "email": "alan@example.test",
                      "department": "Research"}], False
 
@@ -61,6 +62,7 @@ def platform(monkeypatch: pytest.MonkeyPatch) -> Any:
     yield Api
     lark_bot_settings.forget()
     assert all(api.closed for api in Api.instances)
+    assert all(query == "alan" for query in Api.search_queries), Api.search_queries
 
 
 @requires_db
@@ -259,8 +261,10 @@ def test_config_secret_api_rejection_does_not_reach_storage(monkeypatch: pytest.
     row = {"channel_id": "channel-lark_bot", "channel_type": "lark_bot", "config": CONFIG,
            "enabled": False, "has_bot_token": False}
 
+    requested_channels = []
+
     async def get_config(channel_id: str) -> dict[str, Any]:
-        assert channel_id == row["channel_id"]
+        requested_channels.append(channel_id)
         return row
 
     async def list_configs() -> list[dict[str, Any]]:
@@ -289,6 +293,7 @@ def test_config_secret_api_rejection_does_not_reach_storage(monkeypatch: pytest.
                 assert answer["config"] == CONFIG
 
     asyncio.run(test())
+    assert requested_channels and all(channel_id == row["channel_id"] for channel_id in requested_channels)
 
 
 @requires_db

@@ -112,6 +112,117 @@ def test_manager_turn_records_delivery(delivery, channel, replayed, disable_mid,
     run_db(test, monkeypatch, timeout=90)
 
 
+@pytest.mark.parametrize("stdout_receipt", [True, False])
+def test_group_ack_precedes_envelope_on_a_resident_session(
+    monkeypatch, tmp_path, lark_cli_stand_in, stdout_receipt,
+):
+    from datetime import timedelta
+    from lark_cli_stand_in import BOT_MENTION, BOT_OPEN_ID, OPEN_ID
+    from looper.agents import chat_settings, message, turn_metrics
+    from looper.agents.bus import MessageBus
+    from looper.agents.channels import lark, lark_transport, status_line
+    from looper.agents.channels.allowlist import SenderAllowlist
+    from looper.agents.managers_api import ManagerDefinition
+    from looper.agents.tiers import manager as manager_module
+    from tests.db_support import until
+
+    received = datetime.now(timezone.utc)
+    clock = [received - timedelta(seconds=1)]
+
+    class Clock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return clock[0]
+
+    for module in (lark, lark_transport, status_line, manager_module):
+        monkeypatch.setattr(module, "datetime", Clock)
+    monkeypatch.setattr(message, "_make_timestamp", lambda: clock[0].isoformat())
+    monkeypatch.setattr(chat_settings, "_metrics_enabled", True)
+    monkeypatch.setattr(turn_metrics, "ack_board", turn_metrics.AckBoard())
+
+    async def test(pool):
+        nonlocal received
+        row = await pool.fetchrow(
+            "INSERT INTO managers (id, name, system_prompt, session_routing) "
+            "VALUES ('manager-metrics', 'Metrics', 'Answer briefly.', 'per_chat') RETURNING *")
+        body = """import sys,json
+for line in sys.stdin:
+ print(json.dumps({'type':'system','subtype':'init','session_id':'group-metrics'}),flush=True)
+ print(json.dumps({'type':'result','subtype':'success','is_error':False,'result':'hello','session_id':'group-metrics'}),flush=True)
+"""
+        manager = manager_module.ManagerAgent(
+            config=manager_module.ManagerConfig(claude_bin=fake_claude(tmp_path / "runtime", body), work_dir=tmp_path),
+            definition=ManagerDefinition.from_row(dict(row)), runtime_root=tmp_path)
+        bus = MessageBus(runtime_root=tmp_path)
+        adapter = lark.LarkChannelAdapter(
+            runtime_root=tmp_path, bot_open_id=BOT_OPEN_ID, manager_id=manager.agent_id,
+            allowlist=SenderAllowlist("channel-lark", frozenset({OPEN_ID})))
+        adapter._bus, adapter._running = bus, True
+        sender_name, react, converse = adapter._sender_name, adapter._react, manager._converse
+
+        async def reacted(chat, message_id):
+            await react(chat, message_id)  # native CLI stand-in; nothing reaches a platform
+            clock[0] = received + timedelta(milliseconds=80)
+
+        async def named(sender):
+            # Guarantee the acknowledgement completes during lookup, before envelope creation.
+            await asyncio.gather(*adapter._reactions._pending)
+            clock[0] = received + timedelta(milliseconds=500)
+            return await sender_name(sender)
+
+        async def answered(token, prepared):
+            result = await converse(token, prepared)
+            clock[0] = received + timedelta(milliseconds=700)
+            return result
+
+        monkeypatch.setattr(adapter._reactions, "_react", reacted)
+        monkeypatch.setattr(adapter, "_sender_name", named)
+        monkeypatch.setattr(manager, "_converse", answered)
+        residents = []
+        await bus.start()
+        adapter._outbound_task = asyncio.create_task(adapter._outbound_loop())
+        try:
+            async with manager_endpoint(manager, bus, SimpleNamespace(has_planner=lambda _: False), tmp_path):
+                await manager.start(bus)
+                for index in range(2):
+                    clock[0] = received
+                    world_file = tmp_path / "world.json"
+                    world = json.loads(world_file.read_text())
+                    world["events"] = [{**world["events"][0], "chat_id": "oc_metrics_group", "chat_type": "group",
+                                        "message_id": f"om_metrics_{index}", "mentions": [BOT_MENTION],
+                                        "create_time": "1700000000123"}]
+                    world_file.write_text(json.dumps(world))
+                    async for event in adapter._transport.events():
+                        if not stdout_receipt:
+                            event.pop("_lark_stdout_read_at", None)
+                        else:
+                            clock[0] = received + timedelta(milliseconds=20)
+                        await adapter._handle_lark_event(event)
+                    await until(lambda: not bus.journal.undelivered(), "routed group turn settled")
+                    await asyncio.gather(*turn_metrics._pending)
+                    metadata = json.loads(await pool.fetchval(
+                        "SELECT metadata::text FROM llm_records WHERE agent_id = 'manager-metrics' ORDER BY id DESC LIMIT 1"))
+                    resident = manager._sessions["group:channel-lark:oc_metrics_group"].claude
+                    residents.append((resident, resident.pid))
+                    metrics = metadata["turn_metrics"]
+                    assert metrics["ack_ms"] == 80
+                    assert metrics["ack_received_at"] == received.isoformat().replace("+00:00", "Z")
+                    assert metrics["received_at"] == (received + timedelta(milliseconds=500)).isoformat().replace("+00:00", "Z")
+                    assert metrics["first_reply_ms"] == 200
+                    assert (metrics["chat"], metrics["ack"], metrics["queued_behind"], metrics["replayed"],
+                            metrics["tool_calls"], metrics["delivery"]) == ("group", "reaction", "none", False, 0, "reply")
+                    received += timedelta(seconds=10)
+        finally:
+            await adapter.stop()
+            await manager.stop()
+            await bus.shutdown()
+        assert residents[0] == residents[1] and residents[0][1] is not None
+        calls = [json.loads(line) for line in lark_cli_stand_in.read_text().splitlines()]
+        assert sum(call[:3] == ["im", "reactions", "create"] for call in calls) == 2
+
+    run_db(test, monkeypatch, timeout=90)
+
+
 @pytest.mark.parametrize("group,sender,targets", [(True,"operator",["group-metrics"]), (True,"other",[]), (False,"operator",["direct-metrics","operator"])])
 def test_operator_reply_marks_only_the_operator_chat(group, sender, targets, monkeypatch, tmp_path):
     from looper.agents import operator_identity

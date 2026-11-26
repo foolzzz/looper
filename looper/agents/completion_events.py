@@ -426,8 +426,6 @@ async def send_reply(bus: Any, source: AgentAddress, rows: Sequence[Mapping[str,
 
 
 def _metrics_metadata(source: ProactiveSource, row: Mapping[str, Any]) -> dict[str, Any]:
-    if not chat_settings.metrics_enabled():
-        return {}
     return {"proactive": {"source": source.value, "source_ref": row.get("task_id"), "manager_id": row.get("manager_id")}}
 
 

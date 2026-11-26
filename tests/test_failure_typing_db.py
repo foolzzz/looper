@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import timedelta
 
 import asyncpg
 import pytest
@@ -111,7 +111,7 @@ def test_engine_settings_switch_failure_typing(tmp_path, monkeypatch):
     run_db(body, monkeypatch, timeout=60)
 
 
-def test_failure_counts_and_run_reads(tmp_path, monkeypatch):
+def test_failure_counts_and_run_reads(tmp_path, monkeypatch, fixed_clock):
     async def body(pool):
         await _failed(pool, "worker-1", "quota", "usage_limit")
         await _failed(pool, "worker-2", "transient", "connection_failed", runtime="codex")
@@ -119,6 +119,9 @@ def test_failure_counts_and_run_reads(tmp_path, monkeypatch):
         await _failed(pool, "planner-task-f", "quota", "usage_limit")
         await _failed(pool, "worker-3", "environment", "runtime_missing", days_ago=10)  # outside the default week
         unclassified = await _failed(pool, "worker-4", None, None)
+        # SQL grouping and the API lookback use the same explicitly seeded instant.
+        await pool.execute("UPDATE llm_records SET created_at=$1::timestamptz - CASE WHEN agent_id='worker-3' "
+                           "THEN interval '10 days' ELSE interval '0 days' END", fixed_clock())
         async with v1_api(tmp_path, pool) as call:
             status, answer = await call("runs.failures")
             assert status == 200, answer
@@ -128,7 +131,7 @@ def test_failure_counts_and_run_reads(tmp_path, monkeypatch):
             assert stats["by_class"] == {"quota": 2, "transient": 1, "environment": 0, "judgment": 1}
             # The Workers' and Reviewers' failures go to their Planner: two of their three were not a judgment.
             assert stats["steps"] == {"failed": 3, "not_judgment": 2}
-            today = datetime.now(timezone.utc).date().isoformat()
+            today = fixed_clock().date().isoformat()
             assert {(row["run_kind"], row["runtime"], row["failure_cause"], row["runs"]) for row in stats["rows"]} == {
                 ("worker", "claude-code", "usage_limit", 1), ("worker", "codex", "connection_failed", 1),
                 ("reviewer", "claude-code", "report", 1), ("planner", "claude-code", "usage_limit", 1)}

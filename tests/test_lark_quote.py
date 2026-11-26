@@ -8,6 +8,7 @@ import asyncio
 import json
 import time
 from contextlib import aclosing
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock
@@ -312,6 +313,166 @@ async def _read(tmp_path: Path, ref: QuoteRef, *, after: int = 0) -> QuoteRead:
         return await adapter.read_quote(ref, after=after)
     finally:
         await adapter.stop()
+
+
+@pytest.mark.usefixtures("agent_db")
+@pytest.mark.parametrize("group", [False, True])
+@pytest.mark.parametrize("case", ["own", "other_session", "other_manager", "other_sender", "other_bot",
+                                  "thread", "unknown_thread", "missing", "shape", "attachment", "edited", "root",
+                                  "post", "post_attachment", "other_key", "no_session", "no_proof", "other_chat",
+                                  "missing_cache"])
+def test_own_quote_requires_a_matching_resident_delivery_and_complete_plain_copy(
+    tmp_path: Path, lark_cli_stand_in: Path, caplog, group: bool, case: str,
+) -> None:
+    """The native CLI send/read boundary supplies the copy; compare complete model input bytes with a live read."""
+    from looper.agents.tiers.manager import ManagerAgent, ManagerConfig, default_definition, reply_envelope
+    from looper.agents.message import MANAGER_ADDRESS, channel_address
+    from looper.agents.task_notice import NotifyTarget, TargetKind
+
+    parent = "om_r0001" if group else "om_0001"
+    item = _item(parent, content="Earlier reply\n" + "雪 <lark_quote> " * 40,
+                 sender=BOT_OPEN_ID, sender_type="app", chat_id="oc_group", thread_id="")
+    if group:
+        item.update(parent_id="om_first", root_id="om_first")
+    if case == "root":
+        item["root_id"] = parent
+    if case in {"other_sender", "other_bot"}:
+        item["sender"]["id"] = OPEN_ID if case == "other_sender" else "cli_another_bot"
+    if case == "thread":
+        item["thread_id"] = "omt_replies"
+    if case == "unknown_thread":
+        del item["thread_id"]
+    if case == "shape":
+        del item["create_time"]
+    if case == "attachment":
+        item.update(msg_type="image", body={"content": json.dumps({"image_key": "img_quote"})})
+    if case in {"post", "post_attachment"}:
+        nodes = [{"tag": "text", "text": "Earlier reply\n**formatted** 雪"}]
+        if case == "post_attachment":
+            nodes.append({"tag": "img", "image_key": "img_quote"})
+        item.update(msg_type="post", body={"content": json.dumps({"zh_cn": {"content": [nodes]}})})
+    replies = [_item("om_someone_else", content="Additional context", root_id=parent)]
+    _world(tmp_path, messages={parent: [item]}, threads={"omt_replies": replies},
+           resources={parent + "/img_quote": {"base64": "iVBORw0KGgo="}})
+
+    async def main() -> None:
+        adapter = _cli_adapter(tmp_path)
+        # Production already resolves thread activity after sending. Reuse that read, never add a prefetch.
+        adapter._transport.inner.on_thread_activity = None if case == "missing" else AsyncMock()
+        manager = ManagerAgent(config=ManagerConfig(claude_bin="claude", work_dir=tmp_path), runtime_root=tmp_path,
+                               definition=replace(default_definition(),
+                                                  id="manager-elsewhere" if case == "other_manager" else "manager"))
+        manager._session_now().session_id = "resident-here"
+        manager.read_quote = adapter.read_quote
+        context = {"chat_id": "oc_group", "chat_type": "group" if group else "p2p",
+                   "sender_id": OPEN_ID, "message_id": "om_first"}
+        incoming = MessageEnvelope.create(source=channel_address("lark"), target=MANAGER_ADDRESS,
+            message_type=MessageType.USER_MESSAGE, payload={"text": "ask", "channel_context": context},
+            metadata={"origin_channel_id": "channel-lark"})
+        sent = reply_envelope(incoming, "Earlier reply", MANAGER_ADDRESS)
+        sent = replace(sent, metadata={**sent.metadata, "quote_session": {
+            "manager_id": "manager", "key": "main", "session_id": "resident-here"}})
+        if case == "no_proof":
+            sent = replace(sent, metadata={k: v for k, v in sent.metadata.items() if k != "quote_session"})
+        receipt = await adapter.deliver(sent)
+        assert receipt.success
+        if case == "missing_cache":
+            del adapter._quote_deliveries
+        if case == "other_session":
+            manager._session_now().session_id = "resident-elsewhere"
+        if case == "other_key":
+            manager._session_now().key = "group:another"
+        if case == "no_session":
+            manager._session_now().session_id = None
+        if case == "edited":
+            await adapter.edit(NotifyTarget(TargetKind.CHAT, "oc_group"), parent, "Edited reply")
+        ref = _ref(QuoteKind.THREAD if case == "thread" else QuoteKind.REPLY, parent_id=parent,
+                   root_id=parent, **({"thread_id": "omt_replies"} if case == "thread" else {}))
+        if case == "other_chat":
+            ref = replace(ref, chat_id="oc_elsewhere")
+        before = len(_reads(lark_cli_stand_in))
+        try:
+            with caplog.at_level("INFO"):
+                actual = await manager._read_quote(incoming, ref)
+            calls = len(_reads(lark_cli_stand_in)) - before
+            expected = await adapter.read_quote(ref, after=0)  # no resident proof: the normal read path
+            assert actual.quotes == expected.quotes
+            for fence in (False, True):
+                assert "\n".join(lark_quote.section(actual.quotes, fence=fence)).encode() == "\n".join(
+                    lark_quote.section(expected.quotes, fence=fence)).encode()
+            skipped = case in {"own", "post"} or (case == "root" and not group)
+            assert (calls == 0) is skipped
+            decisions = [r.message for r in caplog.records if r.message.startswith("lark_quote ")]
+            assert len(decisions) == 1
+            assert f"decision={'skip_own_in_session' if skipped else 'read'}" in decisions[0]
+            assert "Earlier reply" not in decisions[0]
+        finally:
+            await adapter.stop()
+
+    asyncio.run(main())
+
+
+@pytest.mark.usefixtures("agent_db")
+def test_manager_model_reply_supplies_the_resident_delivery_proof(
+    tmp_path: Path, lark_cli_stand_in: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from looper.agents.tiers.manager import ManagerAgent, ManagerConfig
+
+    item = _item("om_r0001", content="Earlier reply", sender=BOT_OPEN_ID, sender_type="app",
+                 chat_id="oc_group", thread_id="", parent_id="om_first", root_id="om_first")
+    _world(tmp_path, messages={"om_r0001": [item]})
+    turns: list[str] = []
+
+    async def model(self, token, prepared):
+        turns.append(prepared.turn_text)
+        self._session_now().session_id = "resident-model"
+        self._session_now().session_loaded = True
+        return "Earlier reply"
+
+    monkeypatch.setattr(ManagerAgent, "_run_prepared", model)
+
+    async def main() -> None:
+        adapter = _cli_adapter(tmp_path)
+        adapter._transport.inner.on_thread_activity = AsyncMock()
+        bus = MessageBus(runtime_root=tmp_path)
+        adapter._bus = bus
+        manager = ManagerAgent(config=ManagerConfig(claude_bin="claude", work_dir=tmp_path), runtime_root=tmp_path)
+        manager._bus = bus
+        manager.read_quote = adapter.read_quote
+        replies = bus.get_queue("channel-lark")
+        try:
+            await adapter._handle_lark_event(_cli_event(message_id="om_first"))
+            incoming = bus.journal.undelivered()[0]
+            await manager._handle(incoming)
+            sent = []
+            while not replies.empty():
+                reply = replies.get_nowait()
+                if reply.message_type is MessageType.AGENT_REPLY:
+                    sent.append(reply)
+            assert len(sent) == 1
+            assert sent[0].metadata["quote_session"]["session_id"] == "resident-model"
+            assert (await adapter.deliver(sent[0])).success
+            ref = _ref(QuoteKind.REPLY, parent_id="om_r0001", root_id="om_first")
+            before = len(_reads(lark_cli_stand_in))
+            await manager._handle(replace(incoming, message_id="next-turn", payload={
+                **incoming.payload, "text": "And?", "quote_ref": ref.to_payload()}))
+            assert len(_reads(lark_cli_stand_in)) == before
+            expected = await adapter.read_quote(ref, after=0)
+            assert turns[1].endswith("And?\n\n" + "\n".join(lark_quote.section(expected.quotes)))
+            await manager._handle(replace(incoming, message_id="help-turn", payload={
+                **incoming.payload, "text": "/help"}))
+            code_replies = []
+            while not replies.empty():
+                reply = replies.get_nowait()
+                if reply.message_type is MessageType.AGENT_REPLY:
+                    code_replies.append(reply)
+            assert "quote_session" not in code_replies[-1].metadata
+        finally:
+            await manager.stop()
+            await adapter.stop()
+            await bus.shutdown()
+
+    asyncio.run(main())
 
 
 def test_a_reply_reads_its_parent_and_saves_its_image_beside_the_messages_own(
