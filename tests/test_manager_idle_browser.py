@@ -53,6 +53,7 @@ def dashboard(dashboard_url):
                 result = {"manager": row}
             else:
                 result = {"manager_chat_bindings/list": {"bindings": []}, "project_admin/list": {"projects": []},
+                          "task_conversations/get": {"enabled": False},
                           "system/overview": {}, "system/status": {}, "ops/gates/list": {"gates": [], "total": 0},
                           "chat_settings/get": {"stop_enabled": False},
                           "registry/view": {"profiles": [], "models": [], "runtimes": [], "providers": []}}.get(path)

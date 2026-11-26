@@ -113,6 +113,7 @@ def channels_dashboard(dashboard_url):  # noqa: F811 - pytest injects the shared
                 result = body
             else:
                 result = {"gate_settings/get": {"targets": [], "dashboard_target": None},
+                          "task_conversations/get": {"enabled": False},
                           "project_admin/list": {"projects": []}, "system/overview": {},
                           "system/status": {}, "ops/gates/list": {"gates": [], "total": 0},
                           "chat_settings/get": {"stop_enabled": False}}.get(path)

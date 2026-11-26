@@ -299,7 +299,7 @@ def test_configured_file_reuses_frontmatter_handling_and_cap(tmp_path: Path) -> 
     _note(tmp_path, "记忆/画像.md", "---\nsummary: Ignored metadata\n---\n## 名字\nAda\n"
           "- Working on a compiler [kind:: fact]\n")
     compiled = compile_profile(tmp_path, source="记忆/画像.md")
-    assert compiled.text == "Name: Ada\nStanding rules:\n- Working on a compiler"
+    assert compiled.text == "Name: Ada\nAbout:\n- Working on a compiler"
     assert compiled.sources == ("记忆/画像.md",)
     assert compiled.fields["name"]["line"] == 4
     _note(tmp_path, "记忆/画像.md", "---\nsummary: metadata\n---\n## Name\n" + "名" * 1600)
@@ -327,7 +327,8 @@ def test_inline_entries_are_classified_by_kind_and_cite_the_line(tmp_path: Path)
         "value": "回复用中文", "path": "关于我.md", "heading": "关于我", "line": 3, "kind": "preference"}
     assert compiled.fields["communication_preferences"][1]["kind"] == "habit"
     assert compiled.fields["communication_preferences"][1]["line"] == 4
-    assert compiled.fields["standing_rules"] == [{
+    assert compiled.fields["standing_rules"] == []
+    assert compiled.fields["about"] == [{
         "value": "在上海", "path": "关于我.md", "heading": "关于我", "line": 5, "kind": "fact"}]
     assert compiled.fields["communication_preferences"][-1] == {
         "value": "回复用中文", "path": "偏好/nested/reply.md", "heading": "preference", "line": 1,
@@ -337,6 +338,53 @@ def test_inline_entries_are_classified_by_kind_and_cite_the_line(tmp_path: Path)
     blob = compiled.text + repr(compiled.payload())
     for hidden in ("旧称呼", "神秘", "[kind::", "[source::", "对话 2026-11-20", "`"):
         assert hidden not in blob
+
+
+@pytest.mark.parametrize("source", [None, "关于我.md"])
+def test_no_facts_keep_the_main_compiled_text(tmp_path: Path, source: str | None) -> None:
+    _note(tmp_path, "关于我.md", "## Name\nAda\n## Address\nAda\n## Reply language\nEnglish\n"
+          "## Time zone\nUTC\n## Working hours\n09:00-17:00\n"
+          "- Be concise [kind:: preference]\n- Reply in bullets [kind:: habit]\n"
+          "- Ask Lee [kind:: person]\n- Use Python [kind:: decision]\n"
+          "- Review the patch [kind:: commitment]\n- Explain errors [kind:: request]\n"
+          "- Due Friday [kind:: deadline]\n")
+    # Captured on origin/main ce0ddfbb1 from this synthetic note.
+    expected = ("Name: Ada\nAddress: Ada\nReply language: English\nTime zone: UTC\n"
+                "Working hours: 09:00-17:00\nCommunication:\n- Be concise\n- Reply in bullets\n"
+                "Standing rules:\n- Ask Lee\n- Use Python\n- Review the patch\n- Explain errors\n- Due Friday")
+    assert compile_profile(tmp_path, source=source).text.encode() == expected.encode()
+
+
+def test_cap_drops_about_before_standing_rules(tmp_path: Path) -> None:
+    rule = "r" * (CAP - len("Standing rules:\n- "))
+    _note(tmp_path, "关于我.md", f"# Profile\n- Builds compilers [kind:: fact]\n- {rule} [kind:: request]\n")
+    compiled = compile_profile(tmp_path, source="关于我.md")
+    assert compiled.text == f"Standing rules:\n- {rule}"
+    assert compiled.fields["about"] == []
+    assert compiled.fields["standing_rules"][0]["value"] == rule
+    assert compiled.omitted == ({"field": "about", "path": "关于我.md", "heading": "Profile", "line": 2},)
+    assert compiled.sources == ("关于我.md",)
+
+
+def test_an_oversized_fact_uses_the_group_truncation_marker(tmp_path: Path) -> None:
+    _note(tmp_path, "关于我.md", "- " + "f" * CAP + " [kind:: fact]\n")
+    compiled = compile_profile(tmp_path, source="关于我.md")
+    assert compiled.text == "About:\n- " + "f" * (CAP - len("About:\n- ") - 1) + "…"
+    assert compiled.fields["about"] == [{
+        "value": compiled.text.removeprefix("About:\n- "), "path": "关于我.md", "heading": "fact",
+        "line": 1, "kind": "fact", "truncated": True}]
+    assert compiled.omitted == ()
+
+
+def test_inactive_facts_and_unknown_kinds_stay_out(tmp_path: Path) -> None:
+    _note(tmp_path, "关于我.md", "- Builds compilers [kind:: fact]\n"
+          "- Old role [kind:: fact] [status:: superseded]\n"
+          "- Removed city [kind:: fact] [status:: deleted]\n- Unknown entry [kind:: mystery]\n")
+    compiled = compile_profile(tmp_path, source="关于我.md")
+    assert compiled.text == "About:\n- Builds compilers"
+    assert compiled.fields["about"][0]["kind"] == "fact"
+    assert compiled.skipped == ({"path": "关于我.md", "reason": "unknown kind"},)
+    assert all(value not in repr(compiled.payload()) for value in ("Old role", "Removed city", "Unknown entry"))
 
 
 def test_a_preference_note_does_not_need_a_summary_when_it_has_entries(tmp_path: Path) -> None:
