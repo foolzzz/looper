@@ -183,7 +183,8 @@ async def _seed(url: str, work_dir: Path) -> None:
     conn = await asyncpg.connect(url)
     try:
         await conn.execute(
-            "INSERT INTO system_settings (key, value) VALUES ('tasks.conversations.enabled', 'true')"
+            "INSERT INTO system_settings (key, value) VALUES "
+            "('tasks.conversations.enabled', 'true'), ('tasks.conversations.manager_answers', 'true')"
         )
         project = await projects.create_project(
             name="Task conversation serve", work_dir=str(work_dir), pool=conn
@@ -259,10 +260,8 @@ def test_served_task_conversation_streams_a_tool_then_stop_reloads_history(monke
                 ).get("port")
                 assert bound == port and stored == port and port != _RESERVED_PORT
                 api.timeout = 60
-                assert (
-                    _result(api.post("/api/v1/task_conversations/get", {}))["enabled"]
-                    is True
-                )
+                switches = _result(api.post("/api/v1/task_conversations/get", {}))
+                assert (switches["enabled"], switches["manager_answers"]) == (True, True)
                 settings = _result(api.post("/api/v1/chat_settings/get", {}))
                 assert settings["stop_enabled"] is False
                 sent = _result(
