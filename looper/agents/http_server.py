@@ -1779,10 +1779,11 @@ class AgentHTTPServer:
     async def _answer_task_command(self, task_id: str, command: Any, sink: Any) -> None:
         """Answer a fixed command in the task thread. The model is not called.
 
-        ``/stop`` and ``/done`` read live state. Every other member has its own sentence in
-        ``fixed_command_reply``; a member with no sentence raises.
+        ``/stop`` and ``/done`` read live state. ``/start`` reads the task status and does not start it.
+        Every other member has its own sentence in ``fixed_command_reply``; a member with no sentence raises.
         """
-        from .task_commands import TaskCommand, fixed_command_reply
+        from ..db.tasks import get_task
+        from .task_commands import START_FALLBACK, TaskCommand, fixed_command_reply, start_reply
         from .tiers.task_manager import current_pool
 
         if command is TaskCommand.STOP:
@@ -1798,6 +1799,19 @@ class AgentHTTPServer:
                 text = "任务已完成" if done.changed else "任务已经是完成状态"
                 if done.warning:
                     text = f"{text}\n{done.warning}"
+        elif command is TaskCommand.START:
+            try:
+                task = await get_task(task_id)
+            except Exception as exc:
+                logger.warning("task /start reply could not read status task_id=%s error=%s",
+                               task_id, type(exc).__name__)
+                text = START_FALLBACK
+            else:
+                status = task.get("status") if task is not None else None
+                text = start_reply(status if isinstance(status, str) else None)
+                if text == START_FALLBACK:
+                    logger.warning("task /start reply has no control for status task_id=%s status=%s",
+                                   task_id, status)
         else:
             text = fixed_command_reply(command)
         await sink.event("command", {"command": command.value})

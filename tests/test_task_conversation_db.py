@@ -3,7 +3,9 @@
 import asyncio
 import copy
 import hashlib
+import inspect
 import json
+import logging
 import uuid
 from contextlib import asynccontextmanager
 from types import SimpleNamespace
@@ -328,7 +330,10 @@ def test_commands_never_reach_pool(monkeypatch, tmp_path):
             assert final_text(warning)["text"] == "任务已完成\nkept the worktree"
             assert "branch line" not in final_text(warning)["text"]
             assert pool.calls == []
-            for word, reply_text in UNAVAILABLE_REPLIES.items():
+            # /done above completed this task, so /start names that state.
+            later = dict(UNAVAILABLE_REPLIES)
+            later["/start"] = "任务已经完成"
+            for word, reply_text in later.items():
                 status, answer = await send(server, task_id, word, "later-" + word[1:])
                 assert status == 200, answer
                 events = await reply(server, answer["result"]["correlation_id"])
@@ -352,6 +357,77 @@ def test_commands_never_reach_pool(monkeypatch, tmp_path):
             assert final_text(idle)["text"] == "现在没有在进行的回合"
             assert pool.calls == [{"task_id": task_id, "text": "work", "message_id": "running",
                                    "history": pool.calls[0]["history"]}]
+    run_db(check, monkeypatch, timeout=60)
+
+
+def test_start_reply_follows_the_task_status(monkeypatch, tmp_path, caplog):
+    """One real row per status group, plus an unknown status and a failed read. Exact reply text."""
+    from looper.db import tasks as db_tasks
+
+    pool = Pool()
+    use_pool(monkeypatch, pool)
+    caplog.set_level(logging.WARNING, logger="looper.agents.http_server")
+    cases = (
+        ("draft", "请用上方的「开始」按钮启动任务", False),
+        ("init", "请用上方的「开始」按钮启动任务", False),
+        ("executing", "任务已经在进行中", False),
+        ("waiting_user", "任务已经在进行中", False),
+        ("failed", "请用「任务详情」里的「继续后台任务」按钮继续", False),
+        ("cancelled", "请用「任务详情」里的「继续后台任务」按钮继续", False),
+        ("completed", "任务已经完成", False),
+        ("not-a-status", "请用任务控制里的按钮操作", True),
+    )
+
+    async def check(conn):
+        work_on()
+        async with opened(tmp_path) as server:
+            warned = []
+            for status_name, reply_text, expect_warning in cases:
+                task_id = await make_task(conn, tmp_path, status=status_name)
+                before = len(caplog.records)
+                status, answer = await send(server, task_id, " /START ", "start-" + status_name)
+                assert status == 200, answer
+                events = await reply(server, answer["result"]["correlation_id"])
+                assert final_text(events)["text"] == reply_text
+                assert final_text(events)["outcome"] == "command"
+                command_event(events, "/start")
+                fresh = [record for record in caplog.records[before:]
+                         if record.levelno == logging.WARNING and record.name == "looper.agents.http_server"
+                         and "task /start reply" in record.getMessage()]
+                if expect_warning:
+                    assert len(fresh) == 1
+                    assert task_id in fresh[0].getMessage()
+                    assert status_name in fresh[0].getMessage()
+                    warned.append(task_id)
+                else:
+                    assert fresh == []
+                assert await conn.fetchval("SELECT status FROM tasks WHERE id = $1", task_id) == status_name
+            assert pool.calls == []
+
+            broken = await make_task(conn, tmp_path, status="running")
+            real_get = db_tasks.get_task
+
+            async def unreadable(task_id, *args, **kwargs):
+                # Accepting the message reads the row first. Only the reply's own read fails.
+                if task_id == broken and any(
+                        frame.function == "_answer_task_command" for frame in inspect.stack()):
+                    raise RuntimeError("status unreadable")
+                return await real_get(task_id, *args, **kwargs)
+
+            monkeypatch.setattr(db_tasks, "get_task", unreadable)
+            before = len(caplog.records)
+            status, answer = await send(server, broken, "/start", "start-unreadable")
+            assert status == 200, answer
+            events = await reply(server, answer["result"]["correlation_id"])
+            assert final_text(events)["text"] == "请用任务控制里的按钮操作"
+            assert final_text(events)["outcome"] == "command"
+            fresh = [record for record in caplog.records[before:]
+                     if record.levelno == logging.WARNING and "could not read status" in record.getMessage()]
+            assert len(fresh) == 1
+            assert broken in fresh[0].getMessage()
+            assert "RuntimeError" in fresh[0].getMessage()
+            assert pool.calls == []
+            assert warned
     run_db(check, monkeypatch, timeout=60)
 
 
@@ -705,7 +781,8 @@ def test_fixed_commands_never_submit_or_enter_history(monkeypatch, tmp_path):
                 TaskCommand.PAUSE: LATER_CONTROL_REPLY,
                 TaskCommand.BACKGROUND: BACKGROUND_REPLY,
                 TaskCommand.TAKEOVER: LATER_CONTROL_REPLY,
-                TaskCommand.START: START_REPLY,
+                # /done is sent before /start, so this task is already completed.
+                TaskCommand.START: "任务已经完成",
             }
             assert set(expected) == set(TaskCommand)
             for command in TaskCommand:
@@ -724,7 +801,8 @@ def test_fixed_commands_never_submit_or_enter_history(monkeypatch, tmp_path):
             for command in TaskCommand:
                 assert command.value not in blob
                 assert f"\n  {command.value.upper()}  " not in blob
-            for phrase in ("现在没有在进行的回合", "任务已完成", BACKGROUND_REPLY, START_REPLY, LATER_CONTROL_REPLY):
+            for phrase in ("现在没有在进行的回合", "任务已完成", "任务已经完成", BACKGROUND_REPLY, START_REPLY,
+                           LATER_CONTROL_REPLY):
                 assert phrase not in blob
             assert conn is not None
     run_db(check, monkeypatch, timeout=60)
