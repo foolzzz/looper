@@ -1507,6 +1507,12 @@ def serve_agent(
 
     resolved_work_dir = work_dir or Path.cwd()
 
+    # Eagerly import the API domain modules while no event loop runs: their first import is slow (some pull
+    # in heavy dependencies) and would otherwise block the loop for seconds inside the http startup step.
+    from .api_v1 import preload_domains
+
+    preload_domains()
+
     try:
         asyncio.run(
             _run_agent_system(
