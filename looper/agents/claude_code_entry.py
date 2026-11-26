@@ -145,10 +145,19 @@ def _is_looper_handler(handler) -> bool:
     return any(tuple(argv[i:i + len(HOOK_ARGS)]) == HOOK_ARGS for i in range(len(argv)))
 
 
-def desired_handler(runtime_root: Path, config: str | None) -> dict:
+def _isolated_command() -> list[str]:
+    """``looper_command`` for a process started in a session's working directory, which an agent can write to:
+    without a console script, ``python -I -m looper.cli`` keeps that directory off ``sys.path``."""
     from .service import looper_command
 
-    argv = [*looper_command(sys.executable), *HOOK_ARGS, "--runtime-root", str(runtime_root)]
+    argv = looper_command(sys.executable)
+    if argv[1:] == ["-m", "looper.cli"]:
+        argv.insert(1, "-I")
+    return argv
+
+
+def desired_handler(runtime_root: Path, config: str | None) -> dict:
+    argv = [*_isolated_command(), *HOOK_ARGS, "--runtime-root", str(runtime_root)]
     if config:
         argv += ["--config", str(Path(config).expanduser().absolute())]
     return {"type": "command", "command": shlex.join(argv) + " 2>/dev/null || true", "timeout": HOOK_TIMEOUT_SECONDS}
@@ -224,12 +233,7 @@ def _loopback(host: str) -> str | None:
 
 
 def mcp_entry(runtime_root: Path, config: str | None) -> dict:
-    from .service import looper_command
-
-    argv = looper_command(sys.executable)
-    if argv[1:] == ["-m", "looper.cli"]:  # no console script: ``-I`` keeps the session's directory off sys.path
-        argv.insert(1, "-I")
-    argv = [*argv, "claude-code", "mcp", "--runtime-root", str(runtime_root)]
+    argv = [*_isolated_command(), "claude-code", "mcp", "--runtime-root", str(runtime_root)]
     if config:
         argv += ["--config", str(Path(config).expanduser().absolute())]
     return {"type": "stdio", "command": argv[0], "args": argv[1:]}

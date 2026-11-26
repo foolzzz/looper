@@ -75,3 +75,35 @@ def test_the_claude_code_entry_never_leaves_the_module_form_unisolated(tmp_path:
 
     assert entry["command"] == str(python)
     assert entry["args"][:3] == ["-I", "-m", "looper.cli"]
+
+
+def test_the_session_start_hook_fallback_never_imports_the_working_directory(tmp_path: Path, monkeypatch) -> None:
+    from looper.agents import service
+
+    runtime, work = tmp_path / "runtime", tmp_path / "work"
+    runtime.mkdir()
+    work.mkdir()
+    marker = _plant(work)
+    monkeypatch.setattr(service, "looper_command", lambda executable: [executable, "-m", "looper.cli"])
+    command = claude_code_entry.desired_handler(runtime, None)["command"]
+
+    assert " -I -m looper.cli " in command
+    subprocess.run(["sh", "-c", command], cwd=work, env={"PATH": os.environ.get("PATH", ""), "HOME": str(tmp_path)},
+                   capture_output=True, timeout=60)
+
+    assert not marker.exists()
+
+
+def test_the_profile_reader_never_imports_the_working_directory(tmp_path: Path, monkeypatch) -> None:
+    from types import SimpleNamespace
+
+    from looper.agents import profile_commands
+
+    work = tmp_path / "work"
+    work.mkdir()
+    marker = _plant(work)
+    monkeypatch.chdir(work)
+    monkeypatch.delenv("PYTHONPATH", raising=False)  # the suite's own guard imports looper before the cwd counts
+    profile_commands.read_text(SimpleNamespace(runtime_root=str(tmp_path / "runtime"), config=None))
+
+    assert not marker.exists()
