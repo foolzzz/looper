@@ -13,6 +13,7 @@ import os
 from pathlib import Path
 import shutil
 import subprocess
+import tempfile
 import sys
 import tomllib
 import zipfile
@@ -283,8 +284,19 @@ def test_ignored_web_files_allow_dashboard_and_full_upgrade_on_real_serve(tmp_pa
         if argv[:3] == [sys.executable, "-I", "-c"]:
             return subprocess.run(argv, text=True, capture_output=True, timeout=10)
         if argv[:2] == ["uv", "sync"]:
-            assert kwargs["env"]["UV_PROJECT_ENVIRONMENT"] == str(Path(sys.prefix).resolve())
             assert argv[argv.index("--python") + 1] == sys.executable
+            if state.running:
+                # Pre-drain: the target's tree into a throwaway environment outside the checkout, with network.
+                environment = Path(kwargs["env"]["UV_PROJECT_ENVIRONMENT"])
+                project = Path(argv[argv.index("--project") + 1])
+                assert environment.is_relative_to(tempfile.gettempdir()) and not environment.is_relative_to(source)
+                assert project != source and (project / "pyproject.toml").is_file()
+                assert "UV_OFFLINE" not in kwargs["env"]
+            else:
+                # After the stop: the service's own environment, offline.
+                assert kwargs["env"]["UV_PROJECT_ENVIRONMENT"] == str(Path(sys.prefix).resolve())
+                assert kwargs["env"]["UV_OFFLINE"] == "1"
+                assert Path(argv[argv.index("--project") + 1]) == source
             return subprocess.CompletedProcess(argv, 0, "", "")
         assert Path(argv[0]).name in ("git", "npm", "env")
         return subprocess.run(argv, cwd=source, text=True, capture_output=True, timeout=30,
@@ -343,4 +355,4 @@ def test_ignored_web_files_allow_dashboard_and_full_upgrade_on_real_serve(tmp_pa
                          timeout=5) as response:
                 assert response.status == 200 and label in response.read().decode()
 
-    assert sum(argv[:2] == ["uv", "sync"] for argv in installed_commands) == 1
+    assert sum(argv[:2] == ["uv", "sync"] for argv in installed_commands) == 2  # pre-drain and post-stop
