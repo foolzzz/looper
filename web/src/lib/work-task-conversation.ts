@@ -57,7 +57,7 @@ type TaskEvent =
   | { kind: "model_switch_rejected"; profile_id: string | null; reason: (typeof SWITCH_REASONS)[number] }
   | { kind: "session_fresh"; reason: (typeof FRESH_REASONS)[number]; detail: string }
   | { kind: "stopped"; method: (typeof STOP_METHODS)[number] }
-  | { kind: "turn_summary"; files: string[]; commit: string | null; mode: (typeof SUMMARY_MODES)[number] }
+  | { kind: "turn_summary"; files: string[]; commit: string | null; mode: (typeof SUMMARY_MODES)[number]; uncommitted?: string[] }
   | { kind: "refused"; reason: "orchestrated"; status: string }
   | { kind: "refused"; reason: (typeof REFUSED)[number] };
 
@@ -144,9 +144,12 @@ function asEvent(value: unknown): TaskEvent | null {
     case "stopped":
       return exactKeys(value, ["kind", "method"]) && oneOf(value.method, STOP_METHODS) ? { kind: "stopped", method: value.method } : null;
     case "turn_summary":
-      return exactKeys(value, ["kind", "files", "commit", "mode"]) && Array.isArray(value.files) && value.files.every(isString)
-        && (value.commit === null || isString(value.commit)) && oneOf(value.mode, SUMMARY_MODES)
-        ? { kind: "turn_summary", files: value.files, commit: value.commit, mode: value.mode } : null;
+      if (!(exactKeys(value, ["kind", "files", "commit", "mode"]) || exactKeys(value, ["kind", "files", "commit", "mode", "uncommitted"]))
+        || !Array.isArray(value.files) || !value.files.every(isString)
+        || !(value.commit === null || isString(value.commit)) || !oneOf(value.mode, SUMMARY_MODES)) return null;
+      if (!("uncommitted" in value)) return { kind: "turn_summary", files: value.files, commit: value.commit, mode: value.mode };
+      return Array.isArray(value.uncommitted) && value.uncommitted.every(isString)
+        ? { kind: "turn_summary", files: value.files, commit: value.commit, mode: value.mode, uncommitted: value.uncommitted } : null;
     case "refused":
       if (exactKeys(value, ["kind", "reason", "status"]) && value.reason === "orchestrated" && isString(value.status)) {
         return { kind: "refused", reason: "orchestrated", status: value.status };
@@ -178,7 +181,8 @@ function taskEventText(event: TaskEvent): string {
     case "turn_summary": {
       const files = event.files.length ? ` · ${event.files.join("、")}` : "";
       const commit = event.commit ? ` · ${event.commit}` : "";
-      return `${event.mode}${files}${commit}`;
+      const kept = event.uncommitted?.length ? ` · 以下文件在本轮开始前就有未提交改动，未自动提交：${event.uncommitted.join("、")}` : "";
+      return `${event.mode}${files}${commit}${kept}`;
     }
     case "refused":
       return "status" in event ? `已拒绝（${event.reason}：${event.status}）` : `已拒绝（${event.reason}）`;

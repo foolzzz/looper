@@ -216,6 +216,7 @@ describe("task conversation", () => {
       { kind: "command", command: "/pause" },
       { kind: "stopped", method: "control" },
       { kind: "turn_summary", files: ["src/a.ts"], commit: "abc123", mode: "direct" },
+      { kind: "turn_summary", files: ["src/b.ts"], commit: null, mode: "direct", uncommitted: ["src/b.ts"] },
       { kind: "refused", reason: "orchestrated", status: "running" },
       ...["work_mode_off", "runtime_unsupported", "budget", "outbound_review_unavailable", "workspace", "shutting_down", "review_hook_disabled", "cli_unverified"].map((reason) => ({ kind: "refused", reason })),
       { kind: "queued", reason: "cap", position: 1, active: 6, type: "queued" },
@@ -236,6 +237,7 @@ describe("task conversation", () => {
     expect(text).toContain("model_switched · 模型已切换：a → b");
     expect(text).not.toContain("model_switched · 模型已切换：same → same");
     expect(container.querySelectorAll('[data-feed-key^="task-event:"]').length).toBe(events.length);
+    expect(text).toContain("以下文件在本轮开始前就有未提交改动，未自动提交：src/b.ts");
     expect(text).toContain("模型未切换（busy）");
     expect(text).toContain("模型未切换（invalid_profile：profile-a）");
     expect(text).toContain("模型未切换（runtime_unsupported：profile-b）");
