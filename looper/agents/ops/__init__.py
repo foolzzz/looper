@@ -67,6 +67,7 @@ class ErrorCode(str, Enum):
     FORBIDDEN = "forbidden"
     UNAUTHORIZED = "unauthorized"  # /api/v1 without a valid client token (the Manager never sees it)
     CONFLICT = "conflict"  # the target's state does not allow it (an ended task, a task not started)
+    REQUIREMENT_CHANGED = "requirement_changed"  # a conditional requirement edit has an obsolete version
     TASK_MANAGER_BUSY = "task_manager_busy"  # stop the task Manager's active turn before changing its profile
     TASK_MANAGER_RUNTIME_UNSUPPORTED = "task_manager_runtime_unsupported"  # v0 requires Claude Code
     EXPIRED = "expired"  # a confirmation past its time or its turn
@@ -78,6 +79,7 @@ class ErrorCode(str, Enum):
 
 
 class ErrorDetails(TypedDict, total=False):
+    current_version: int
     manager_id: str
     state: str
     phase: str | None
