@@ -11,7 +11,7 @@ from ..ops import ErrorCode, OpError
 from ..ops.config import answered
 from ..ops.settings import _Place, _checked, _layers, _raises_a_cap, _shown_value, LIMIT_NOTE
 
-ROLE = {"type": "string", "enum": [role.value for role in agent_settings.AgentType]}
+ROLE = {"type": "string", "enum": [role.value for role in agent_settings.GLOBAL_ROLES]}
 SETTING_LAYER = {"type": "string", "enum": ["builtin", "system", "role", "project", "role_project"]}
 SETTING_SOURCE = {"type": "string", "enum": [*SETTING_LAYER["enum"], "session", "profile", "task",
                                            "planner_task", "planner_step"]}
@@ -156,7 +156,7 @@ async def run(server, operation, arguments, principal, headers):
     _require_outbound_operator(operation, arguments, principal)
     name = operation.operation_id
     if name == "roles.list":
-        return {"configs": await role_configs.list_configs()}
+        return {"configs": [row for row in await role_configs.list_configs() if row["role"] in ROLE["enum"]]}
     if name.startswith("roles."):
         role = arguments["role"]
         if name == "roles.update":

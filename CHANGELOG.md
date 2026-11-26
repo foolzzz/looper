@@ -18,6 +18,44 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.15.41] - 2026-11-25
+
+Contains exactly v2.15.40 at `1d90572f1` plus [#1818](https://github.com/foolzzz/looper/pull/1818), frozen at `322834fb6`, and release metadata. Tag this release PR's own head after merge, not the later main merge commit. No product behavior, migration or setting changes. From v2.15.38 or earlier, upgrade straight to v2.15.41; it includes all of [v2.15.40](docs/releases/v2.15.40.md) and [v2.15.39](docs/releases/v2.15.39.md), whose notes list two startup migrations. See [the release notes](docs/releases/v2.15.41.md) for validation and exclusions.
+
+### Fixed
+
+- **Keep source-ref dashboard builds self-contained.** ([#1818](https://github.com/foolzzz/looper/pull/1818)) Upgrading an installed Looper with `looper service upgrade --to v2.15.39` or `--to v2.15.40` failed at the dashboard build before the service stopped: a web test imported a shared fixture outside the exported `web/` directory. The running service was unaffected. The unchanged fixture now lives in `web/`, both test suites reference it there, and a regression scans `web/src` imports and file reads for boundary violations, with explicit exceptions for existing test-only reads. Source-ref upgrades to v2.15.39 and v2.15.40 remain affected; target v2.15.41 instead. Installs from the published wheel are not affected.
+
+## [2.15.40] - 2026-11-25
+
+Contains all of v2.15.39 at `38d92f469` plus exactly [#1807](https://github.com/foolzzz/looper/pull/1807) (including #1803 and #1806), then [#1809](https://github.com/foolzzz/looper/pull/1809), with two normal merges and release metadata. Tag this release PR's own head after merge, not the later main merge commit. No migration is added over v2.15.39; upgrades from v2.15.38 or earlier inherit [v2.15.39's two migrations and behavior changes](docs/releases/v2.15.39.md). See [the release notes](docs/releases/v2.15.40.md) for activation, validation and exclusions.
+
+### Added
+
+- **Work lifecycle controls and requirement composition, still off by default.** Behind `tasks.conversations.enabled`, the Work page adds Start/continue, stop-background and direct-completion controls with state readback. Draft and ready-task messages append to the saved requirement with version-conflict recovery; only the explicit Start control launches their Planner.
+
+### Changed
+
+- **Consistent Work presentation.** The Chinese page name is 工作台, the sidebar says Work 工作台, the pinned main conversation is 管家 and task conversations keep their task names with counterpart 任务管家. Untitled names match between list and detail, list rows use two lines, controls use Chinese, event rows collapse, draft/non-Git changes states are neutral, unsupported task-Manager model controls hide, and composer notices reflect each task status. The task conversation still uses the Planner; the task Manager chain is excluded.
+- **Optional requirement precondition, without a switch.** `tasks.requirement_update` accepts `expected_version`; a stale value returns HTTP 409 `requirement_changed` with `current_version` and writes nothing. Omitting the field preserves existing behavior.
+- **Private-details guidance, only with per-turn context on.** Behind default-off `manager.turn_context.enabled`, one added contract sentence tells the Manager not to share the operator's account, email address or machine paths with a non-operator speaker. This is model guidance, not an output filter; the real-model eval is attached to #1809.
+
+## [2.15.39] - 2026-11-25
+
+Frozen at `6aa7f3474`, containing all of v2.15.38 and 23 additional merged PRs. Tag the release PR's own head after merge because main has moved beyond the freeze. Startup adds `task_drafts` (2050, a constraint and online validation on the existing tasks table) and `proactive_bodies` (2110, body columns on proactive deliveries), even with optional features off. See [the release notes](docs/releases/v2.15.39.md) for every included PR, activation instructions, behavior changes and exclusions; upgrades from v2.15.37 or earlier also inherit [v2.15.38](docs/releases/v2.15.38.md).
+
+### Added
+
+- **Work console, now activatable and still off by default.** `tasks.conversations.enabled` is controlled by operator-only `task_conversations.get/update`, with confirmation for changes. Work adds draft creation, requirement editing, conversation-state retention and task context panels; task conversations still use the Planner. The task Manager chain, model switching and lifecycle buttons are not included.
+- **Proactive send history.** Operator-only `proactive_sends.list` reads retained text and receipts. Capture runs by default, independently of metrics, with no separate switch: text is capped at 32 KiB, cleared after 14 days, and delivery rows are purged after 90 days. Storage is best effort with a one-second timeout before sending.
+- **Installable dashboard.** Chrome/Edge can install the dashboard on a supported secure origin. The manifest and icons are public, and sign-in CSP permits same-origin manifest/images; existing authentication remains required for protected pages and APIs. No offline mode is added.
+
+### Fixed
+
+- **HTTP, shutdown and handover.** Explicit `Connection: close` fixes a reuse race under the existing one-request-per-connection policy. Keeper, HTTP and recording-proxy shutdown settle active connections before awaiting listeners; Worker dispatch waits through drain and kept-run handover waits for startup readiness.
+- **Safer diagnostics, files and accounting.** Attention/self-check and Needs you displays redact credential-like diagnostics; static files resolving outside the dashboard root return 404. Manager acknowledgement metrics use actual acknowledgement timing and cannot be negative. Custom backup commands tolerate missing source labels; restart cleanup and claiming use one row lock.
+- **Foundations and tests.** Typed chat-scope/runtime launch types ship without activating scoped routing; the outbox deadline regression becomes deterministic without changing production behavior.
+
 ## [2.15.38] - 2026-11-25
 
 Contains exactly v2.15.37 plus [#1785](https://github.com/foolzzz/looper/pull/1785), frozen at `e98913682`, and release metadata. From v2.15.37, this is frontend only: no new migration, setting or server change. Upgrading from v2.15.36 or earlier also includes all of v2.15.37: read [its release notes](docs/releases/v2.15.37.md) first for migrations, backup requirements and breaking changes. See [the v2.15.38 release notes](docs/releases/v2.15.38.md) for the frozen scope and exclusions.

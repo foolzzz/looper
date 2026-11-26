@@ -111,6 +111,19 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
+it("sends the version the editor opened with even after a newer detail arrives", async () => {
+  const initial = task({ requirement_versions: [version({ version: 5, text: "Ship the parser." })] });
+  show(initial);
+  await click("编辑");
+  await typeInto("My edit");
+  show({ ...initial, requirement: "Other edit", requirement_versions: [version({ version: 6, text: "Other edit" })] });
+  api.editTaskRequirement.mockRejectedValue(new V1Error(409, "requirement_changed", "Changed elsewhere"));
+  await click("保存");
+  expect(api.editTaskRequirement).toHaveBeenCalledWith("task-a", "My edit", 5);
+  expect((host.querySelector("textarea") as HTMLTextAreaElement).value).toBe("My edit");
+  expect(button("保存")!.disabled).toBe(false);
+});
+
 describe("Work requirement text and versions", () => {
   it("shows the original text, and an empty requirement without inventing a version", () => {
     show(task({ requirement: "Ship the parser.\nKeep this line." }));
@@ -235,7 +248,7 @@ describe("Work requirement editing", () => {
       save.click();
     });
     expect(api.editTaskRequirement).toHaveBeenCalledTimes(1);
-    expect(api.editTaskRequirement).toHaveBeenCalledWith("task-a", "  Ship the parser.  ");
+    expect(api.editTaskRequirement).toHaveBeenCalledWith("task-a", "  Ship the parser.  ", 1);
     expect(button("保存中…")!.disabled).toBe(true);
     expect(button("保存")).toBeUndefined();
     await act(async () => { button("保存中…")!.dispatchEvent(new MouseEvent("click", { bubbles: true })); });
@@ -540,7 +553,7 @@ describe("Work requirement on the page", () => {
     await typeInto("alpha changed");
     await click("保存");
     expect(api.fetchTaskDetail).toHaveBeenCalledWith("A");
-    expect(api.editTaskRequirement).toHaveBeenCalledWith("A", "alpha changed");
+    expect(api.editTaskRequirement).toHaveBeenCalledWith("A", "alpha changed", 1);
     await showPage(<WorkPage sub="task/B" onNavigate={vi.fn()} />);
     expect(host.querySelector("[data-requirement-body]")?.textContent).toBe("beta");
     late.resolve(task({
@@ -649,7 +662,7 @@ describe("Work requirement on the page", () => {
     await typeInto("alpha changed");
     await click("保存");
     await showPage(<WorkPage sub="task/B" onNavigate={vi.fn()} />);
-    expect(host.textContent).toContain("Loading task…");
+    expect(host.textContent).toContain("正在加载任务…");
     const callsAtSwitch = api.fetchTaskDetail.mock.calls.length;
     save.resolve();
     await act(async () => { await save.promise; });
@@ -658,7 +671,7 @@ describe("Work requirement on the page", () => {
     loadB.resolve(task({ task_id: "B", requirement: "beta", title: "Task B" }));
     await settle();
     expect(host.querySelector("[data-requirement-body]")?.textContent).toBe("beta");
-    expect(host.textContent).not.toContain("Loading task…");
+    expect(host.textContent).not.toContain("正在加载任务…");
     expect(host.textContent).not.toContain("alpha-late");
     expect(host.textContent).not.toContain("alpha changed");
   });

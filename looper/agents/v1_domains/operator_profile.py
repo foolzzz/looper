@@ -11,7 +11,7 @@ _ITEM = {"type": "object", "properties": {
 _FIELD = {**_ITEM, "type": ["object", "null"]}
 _FIELDS = _object({
     "name": _FIELD, "address": _FIELD, "working_hours": _FIELD, "time_zone": _FIELD, "reply_language": _FIELD,
-    "communication_preferences": _array(_ITEM), "standing_rules": _array(_ITEM),
+    "communication_preferences": _array(_ITEM), "standing_rules": _array(_ITEM), "about": _array(_ITEM),
 }, closed=True)
 _CITE = _object({"field": _STR, "path": _STR, "heading": _STR, "line": _INT}, closed=True)
 _SKIP = _object({"path": _STR, "reason": _STR}, closed=True)

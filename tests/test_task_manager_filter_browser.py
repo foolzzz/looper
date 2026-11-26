@@ -50,6 +50,8 @@ def dashboard(dashboard_url):  # noqa: F811
             state["calls"].append((path, body))
             if path == "managers/list":
                 result = {"managers": state["managers"], "max_enabled": 10}
+            elif path == "task_conversations/get":
+                result = {"enabled": False}
             elif path == "project_admin/list":
                 result = {"projects": [{"project_id": "demo", "name": "Demo", "work_dir": ""}]}
             elif path == "tasks/page":

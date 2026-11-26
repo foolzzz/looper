@@ -109,7 +109,7 @@ describe("Work quick switcher", () => {
     await enter();
     expect(navigated).toEqual([]);
     expect(dialog().querySelectorAll('[role="option"]')).toHaveLength(0);
-    expect(dialog().querySelector('[role="status"]')?.textContent).toContain("Loading");
+    expect(dialog().querySelector('[role="status"]')?.textContent).toContain("正在加载");
     await act(async () => { await vi.advanceTimersByTimeAsync(SELECT_DEBOUNCE_MS); });
     await enter();
     expect(navigated).toEqual([]);
@@ -129,7 +129,7 @@ describe("Work quick switcher", () => {
   it("quick switcher", async () => {
     await act(async () => { root.render(<Harness />); });
     await settle();
-    const opener = [...host.querySelectorAll("button")].find((item) => item.textContent === "New task") as HTMLButtonElement;
+    const opener = [...host.querySelectorAll("button")].find((item) => item.textContent === "新建任务") as HTMLButtonElement;
     opener.focus();
     await act(async () => { window.dispatchEvent(new KeyboardEvent("keydown", { key: "k", ctrlKey: true })); });
     await act(async () => { await vi.advanceTimersByTimeAsync(0); });
@@ -161,7 +161,7 @@ describe("Work quick switcher", () => {
     await act(async () => { await vi.advanceTimersByTimeAsync(1); });
     expect(calls.filter((call) => call.url.includes("tasks/select") && call.body.selection === "pay")).toHaveLength(1);
     expect(calls.filter((call) => call.url.includes("tasks/select")).length).toBe(before + 1);
-    expect(dialog().textContent).toContain("3 more not shown");
+    expect(dialog().textContent).toContain("还有 3 项未显示");
     const options = () => [...dialog().querySelectorAll('[role="option"]')];
     expect(options()[0].getAttribute("aria-selected")).toBe("true");
     await act(async () => { input().dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true })); });
@@ -171,7 +171,7 @@ describe("Work quick switcher", () => {
     expect(navigated).toContain("task/c2");
     expect(window.location.hash).toBe("#work/task/c2");
     await settle();
-    expect(host.querySelector("h1")?.textContent).toBe("Selected c2");
+    expect(host.querySelector('[aria-label="当前任务"] h1')?.textContent).toBe("Selected c2");
     expect(calls.some(call => call.url.includes("mark_seen") && call.body.task_id === "c2" && call.body.seq === 901)).toBe(true);
 
     selectResult = { kind: "one", task: { task_id: "only", title: "Only one", project_name: "Beta", status: "running", group: "in_progress", last_activity_at: null } };

@@ -101,7 +101,7 @@ describe("Work plan on the page", () => {
     } });
     await show(<WorkPage sub="task/task%201" onNavigate={vi.fn()} />);
     expect(host.querySelectorAll('[aria-labelledby="work-cost-title"]')).toHaveLength(1);
-    expect(host.querySelector('[aria-labelledby="work-cost-title"]')?.textContent).toContain("80% of $10.00 cap · near the cap");
+    expect(host.querySelector('[aria-labelledby="work-cost-title"]')?.textContent).toContain("已使用 $10.00 上限的 80% · 接近上限");
     expect(api.fetchTaskDetail).toHaveBeenCalledTimes(1);
     api.fetchTaskDetail.mockResolvedValue({ ...detail(), task_id: "other", cost: null });
     await show(<WorkPage sub="task/other" onNavigate={vi.fn()} />);
@@ -138,8 +138,8 @@ describe("Work plan on the page", () => {
     await show(<WorkPage sub="task/task%201" onNavigate={() => {}} />);
     const column = host.querySelector("[data-work-scroll]") as HTMLElement;
     const detail = host.querySelector("[data-work-detail]") as HTMLElement;
-    const composer = host.querySelector('textarea[aria-label="Message"]') as HTMLElement;
-    const conversation = host.querySelector('section[aria-label="Conversation"]') as HTMLElement;
+    const composer = host.querySelector('textarea[aria-label="消息"]') as HTMLElement;
+    const conversation = host.querySelector('section[aria-label="对话"]') as HTMLElement;
     expect(column).not.toBeNull();
     expect(column.className).toContain("overflow-y-auto");
     expect(detail.getAttribute("data-layout")).toBe("scroll");
@@ -150,7 +150,7 @@ describe("Work plan on the page", () => {
     await act(async () => opener.click());
     const panel = host.querySelector('[role="dialog"]') as HTMLElement;
     const title = panel.querySelector("#work-steps-title") as HTMLElement;
-    expect(panel.contains(host.querySelector('[aria-label="关卡"]'))).toBe(true);
+    expect(panel.querySelector('[aria-label="关卡"]')).not.toBeNull();
     expect(panel.querySelectorAll('[aria-label="改动文件"]')).toHaveLength(1);
     expect(panel.className).toContain("overflow-y-auto");
     expect(panel.className).not.toContain("40dvh");
