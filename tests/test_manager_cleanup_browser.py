@@ -56,6 +56,7 @@ def dashboard(dashboard_url):  # noqa: F811 — imported shared fixture
             else:
                 result = {"managers/list": {"managers": [manager("manager", "Default")], "max_enabled": 8},
                           "manager_chat_bindings/list": {"bindings": []},
+                          "task_conversations/get": {"enabled": False},
                           "project_admin/list": {"projects": []}, "operator_chat/targets": {"targets": []},
                           "system/overview": {}, "system/status": {}, "ops/gates/list": {"gates": [], "total": 0},
                           "chat_settings/get": {"stop_enabled": False},

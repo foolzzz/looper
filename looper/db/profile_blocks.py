@@ -1,4 +1,4 @@
-"""The compiled operator profile: one row, replaced only when the compiled body changes."""
+"""The compiled operator profile: one row, versioned only when the compiled text changes."""
 
 from __future__ import annotations
 
@@ -29,14 +29,14 @@ async def clear_source(key: str) -> None:
 
 
 async def retain_or_replace(*, text: str, body: dict[str, Any]) -> int:
-    """The stored version when ``body`` is already stored; the next version when it is not."""
+    """Refresh citations without advancing the version unless the compiled text changes."""
     encoded = json.dumps(body, ensure_ascii=False, sort_keys=True)
     pool = get_pool()
     async with pool.acquire() as conn, conn.transaction():
         row = await conn.fetchrow("SELECT version, text, body FROM profile_blocks WHERE id = TRUE FOR UPDATE")
         if row is not None and row["text"] == text and _body(row["body"]) == body:
             return int(row["version"])
-        version = 1 if row is None else int(row["version"]) + 1
+        version = 1 if row is None else int(row["version"]) + int(row["text"] != text)
         await conn.execute(
             """
             INSERT INTO profile_blocks (id, version, text, body)

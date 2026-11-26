@@ -39,23 +39,23 @@ _FIELDS = {
 # ``source`` and ``confidence`` stay in the note. ``kind`` chooses the field. Case-sensitive.
 _KIND_FIELD = {
     "preference": "communication_preferences", "habit": "communication_preferences",
-    "fact": "standing_rules", "decision": "standing_rules", "commitment": "standing_rules",
+    "fact": "about", "decision": "standing_rules", "commitment": "standing_rules",
     "request": "standing_rules", "deadline": "standing_rules", "person": "standing_rules",
 }
 _INACTIVE = frozenset({"superseded", "deleted"})
 # Highest priority first. A profile over CAP drops from the end of this order.
 _ORDER = ("name", "address", "reply_language", "time_zone", "working_hours",
-          "communication_preferences", "standing_rules")
+          "communication_preferences", "standing_rules", "about")
 _LABELS = {
     "name": "Name", "address": "Address", "reply_language": "Reply language",
     "time_zone": "Time zone", "working_hours": "Working hours",
 }
-_HEADERS = {"communication_preferences": "Communication:", "standing_rules": "Standing rules:"}
+_HEADERS = {"communication_preferences": "Communication:", "standing_rules": "Standing rules:", "about": "About:"}
 _GROUPS = frozenset(_HEADERS)
 def _blank_fields() -> dict[str, Any]:
     return {
         "name": None, "address": None, "working_hours": None, "time_zone": None, "reply_language": None,
-        "communication_preferences": [], "standing_rules": [],
+        "communication_preferences": [], "standing_rules": [], "about": [],
     }
 
 
@@ -516,7 +516,7 @@ async def resident_text() -> str:
 
 
 async def profile_view() -> dict[str, Any]:
-    """Read the same compiled profile, retaining the version when its body is unchanged."""
+    """Read the same compiled profile, retaining the version when its text is unchanged."""
     compiled = await compiled_profile()
     if compiled is None:
         return _unconfigured()
