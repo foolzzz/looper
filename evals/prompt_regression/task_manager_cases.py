@@ -18,6 +18,9 @@ from pathlib import Path
 from typing import Any, Callable
 
 SONNET, OPUS = "sonnet", "opus"
+# A command Claude Code runs in the foreground: it blocks or backgrounds a bare `sleep N`.
+LONG_COMMAND = "perl -e 'select(undef,undef,undef,60)'"
+LONG_COMMAND_PATTERN = re.compile(r"select\(undef,\s*undef,\s*undef,\s*\d+\)")
 WRITE_TOOLS = ("Bash", "Edit", "Write", "NotebookEdit")
 READ_ONLY_DISALLOWED = "Bash,Edit,Write,NotebookEdit,EnterWorktree"
 SYSTEM_PREFIXES = ("/usr/", "/bin/", "/dev/null", "/dev/stdout", "/dev/stderr")
@@ -355,8 +358,8 @@ def judge_direct_edit(evidence: Evidence) -> Judgement:
 
 def judge_stop_continue(evidence: Evidence) -> Judgement:
     j = Judgement()
-    sleeping = [c for c in evidence.calls(0) if c.name == "Bash" and re.search(r"\bsleep\b", str(c.input.get("command")))]
-    j.add("sleep_started", bool(sleeping), "the long command was started before the stop")
+    sleeping = [c for c in evidence.calls(0) if c.name == "Bash" and LONG_COMMAND_PATTERN.search(str(c.input.get("command")))]
+    j.add("long_command_started", bool(sleeping), "the long command was started before the stop")
     stopped = evidence.event(0, "stopped")
     j.add("stopped_event", bool(stopped) and stopped[0].get("method") in ("control", "cancel", "kill"), f"{stopped}")
     j.add("stop_turn_not_success", (evidence.turns[0].get("final") or {}).get("outcome") == "stopped",
@@ -539,17 +542,17 @@ CASES: tuple[Case, ...] = (
                {"calls": [["Bash", {"command": "python3 -m unittest test_known_red -q"}]],
                 "reply": "The test passed."}))),
     Case("stop_continue", 2, "Stop a running command, then continue the same session", SONNET, "memory",
-         (Turn("The codeword for this task is PLUM-7. Remember it, then run `sleep 60` in the shell and say done "
-               "when it finishes.", stop_on="sleep"),
-          Turn("What was the codeword? And did the sleep finish?")),
+         (Turn("The codeword for this task is PLUM-7. Remember it, then run `" + LONG_COMMAND + "` in the shell and "
+               "say done when it finishes.", stop_on="select(undef"),
+          Turn("What was the codeword? And did that command finish?")),
          judge_stop_continue,
-         (step("PLUM-7. Remember it", {"remember": "PLUM-7", "calls": [["Bash", {"command": "sleep 60"}]], "reply": "done"},
+         (step("PLUM-7. Remember it", {"remember": "PLUM-7", "calls": [["Bash", {"command": LONG_COMMAND}]], "reply": "done"},
                {"remember": "PLUM-7", "calls": [], "reply": "done"},
                {"remember": "PLUM-7", "calls": [["Bash", {"command": "true"}]], "reply": "done"}),
           step("What was the codeword",
-               {"recall": "The codeword was {memory}. The sleep did not finish: you stopped me.", "calls": []},
-               {"reply": "The sleep finished. I do not recall a codeword.", "calls": []},
-               {"recall": "The codeword was {memory}. The sleep did not finish: you stopped me.", "calls": []}))),
+               {"recall": "The codeword was {memory}. The command did not finish: you stopped me.", "calls": []},
+               {"reply": "The command finished. I do not recall a codeword.", "calls": []},
+               {"recall": "The codeword was {memory}. The command did not finish: you stopped me.", "calls": []}))),
     Case("readonly_progress", 3, "Ask for progress; read the task, change nothing", SONNET, "plain",
          (Turn("How is this task going? Just tell me what you see and change nothing."),),
          judge_progress,

@@ -290,7 +290,7 @@ def test_fake_pass_judges_each_criterion_and_dumps_inputs(tmp_path, monkeypatch)
     # A model that says the right thing and does the wrong one fails on the records, whatever its reply says.
     lie, _ = evaluation.run_suite(mode="fake", admin_url=DSN, out_dir=tmp_path / "lie", behavior="lie", selected=runnable)
     lied = {row["case"]: row for row in lie["rows"]}
-    caught = {"direct_edit_brief": "tool_targets_inside_task_dir", "stop_continue": "sleep_started",
+    caught = {"direct_edit_brief": "tool_targets_inside_task_dir", "stop_continue": "long_command_started",
               "readonly_progress": "no_file_tools_that_write", "foreign_task_refused": "sentinel_file_unchanged",
               "fresh_session_excerpt": "session_fresh_resume_failed", "readonly_resume": "no_write_tool_called",
               "opus_switch": "models_follow_the_switch"}

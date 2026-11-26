@@ -129,7 +129,8 @@ class Scripted:
         ident = f"toolu_{self.calls:04d}"
         _emit({"type": "assistant", "session_id": self.session, "message": {"role": "assistant", "content": [
             {"type": "tool_use", "id": ident, "name": name, "input": arguments}]}})
-        waiting = re.fullmatch(r"sleep (\d+)", str(arguments.get("command", ""))) if name == "Bash" else None
+        waiting = (re.search(r"select\(undef,\s*undef,\s*undef,\s*(\d+)\)", str(arguments.get("command", "")))
+                   if name == "Bash" else None)
         if waiting and self.sleep(float(waiting.group(1))):
             return True
         content, is_error = ("", False) if waiting else self.run(name, arguments)
