@@ -30,6 +30,9 @@ _LEASE_SECONDS = _CALL_SECONDS + 30
 # Independent of the vault writer's repository lock; only drafting spends this daily allowance.
 _LOCK = 741934
 _WAKE = "looper_memory_draft"
+# The LISTEN session only shortens the wait for new seeds; the loop polls every tick without it.
+CONNECT_ATTEMPTS = 3
+CONNECT_RETRY_SECONDS = 1.0
 _NOTICE = "memory_draft_budget_notice"
 
 
@@ -41,6 +44,7 @@ class MemoryDraftService:
         self._woken = asyncio.Event()
         self._task: asyncio.Task | None = None
         self._listener: Any = None
+        self._database_url: str | None = None
         self._stopping = False
         self._busy = False
         self._pass_lock = asyncio.Lock()
@@ -57,10 +61,31 @@ class MemoryDraftService:
     async def start(self, database_url: str) -> None:
         if self._task is None:
             self._stopping = False
-            # LISTEN owns a session for the service's lifetime; leave pooled slots for short queries.
-            self._listener = await asyncpg.connect(database_url, timeout=10)
-            await self._listener.add_listener(_WAKE, self._notified)
+            self._database_url = database_url
+            await self._attach(CONNECT_ATTEMPTS)
             self._task = asyncio.create_task(self._loop(), name="memory-draft")
+
+    async def _attach(self, attempts: int) -> None:
+        """LISTEN owns a session for the service's lifetime; leave pooled slots for short queries.
+
+        An optional wake-up channel must not stop the service: a failed connection (a refused socket, a timeout or
+        the OSError a client-certificate probe can raise) is logged and drafting falls back to ticks.
+        """
+        for attempt in range(1, attempts + 1):
+            listener = None
+            try:
+                listener = await asyncpg.connect(self._database_url, timeout=10)
+                await listener.add_listener(_WAKE, self._notified)
+                self._listener = listener
+                return
+            except Exception as error:
+                if listener is not None:
+                    with contextlib.suppress(Exception):
+                        await listener.close()
+                logger.warning("memory drafter listener unavailable (attempt %d/%d, %s); drafting polls instead",
+                               attempt, attempts, type(error).__name__)
+                if attempt < attempts and not self._stopping:
+                    await asyncio.sleep(CONNECT_RETRY_SECONDS)
 
     async def stop(self) -> None:
         self._stopping = True
@@ -75,6 +100,8 @@ class MemoryDraftService:
     async def _loop(self) -> None:
         while not self._stopping:
             self._woken.clear()
+            if self._listener is None:
+                await self._attach(1)
             try:
                 processed = await self.run_once()
             except Exception:
