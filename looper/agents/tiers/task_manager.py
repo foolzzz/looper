@@ -68,6 +68,21 @@ class RefuseReason(str, Enum):
     CLI_UNVERIFIED = "cli_unverified"
     MANAGER_ANSWERS_OFF = "manager_answers_off"
     MCP_UNRESOLVED = "mcp_unresolved"
+    # The direct session's sandbox boundary (``task_manager_sandbox``); other changes raise most of these.
+    SANDBOX_UNAVAILABLE = "sandbox_unavailable"
+    READBACK_UNAVAILABLE = "readback_unavailable"
+    LAUNCH_SETTING_MISMATCH = "launch_setting_mismatch"
+    MCP_SET_MISMATCH = "mcp_set_mismatch"
+    MCP_LAUNCHER_UNSAFE = "mcp_launcher_unsafe"
+    NETWORK_POLICY_INVALID = "network_policy_invalid"
+    WORKSPACE_NOT_REPO_ROOT = "workspace_not_repo_root"
+    WORKSPACE_IS_HOME = "workspace_is_home"
+    WORKSPACE_CONTAINS_TRUSTED_CONFIG = "workspace_contains_trusted_config"
+    WORKSPACE_IN_SYSTEM_DIR = "workspace_in_system_dir"
+    WORKSPACE_OVERLAPS_SESSION = "workspace_overlaps_session"
+    WORKTREE_UNSUPPORTED = "worktree_unsupported"
+    HEAD_MOVED = "head_moved"
+    HEAD_DETACHED = "head_detached"
 
 
 def _off_text(reason: RefuseReason) -> str:
