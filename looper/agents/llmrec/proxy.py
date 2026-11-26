@@ -283,13 +283,15 @@ class Proxy:
     async def close(self, grace_s=30):
         if self._server:
             self._server.close()
-            await self._server.wait_closed()
         handlers = list(self._handlers)
         if handlers:
             _, pending = await asyncio.wait(handlers, timeout=grace_s)
             for task in pending:
                 task.cancel()
             await asyncio.gather(*handlers, return_exceptions=True)
+        if self._server:
+            # Python 3.12.1+ waits for active connections as well as the listener.
+            await self._server.wait_closed()
         if self._client:
             await self._client.aclose()
 
