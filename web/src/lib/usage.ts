@@ -28,7 +28,11 @@ export function compactionChange(c: Compaction): string {
 }
 
 /** What a task's total does not hold yet: runs still going, and runs that ended without a cost. */
-export function costCaveats(cost: TaskCost): string[] {
+export function costCaveats(cost: TaskCost, language?: "zh-CN"): string[] {
+  if (language === "zh-CN") return [
+    cost.running ? `${cost.running} 次仍在运行` : "",
+    cost.unpriced_runs ? `${cost.unpriced_runs} 次费用未知（无结果或无定价，仅记录用量）` : "",
+  ].filter(Boolean);
   return [
     cost.running ? `${cost.running} still running` : "",
     cost.unpriced_runs ? `${cost.unpriced_runs} without a cost (no result, or no price: tokens only)` : "",
@@ -36,7 +40,12 @@ export function costCaveats(cost: TaskCost): string[] {
 }
 
 /** Runs still going, without a cost or interrupted, for one model. */
-export function modelRunCaveats(row: TaskModelCost): string {
+export function modelRunCaveats(row: TaskModelCost, language?: "zh-CN"): string {
+  if (language === "zh-CN") return [
+    row.running ? `${row.running} 次运行中` : "",
+    row.unpriced_runs ? `${row.unpriced_runs} 次费用未知` : "",
+    row.interrupted_runs ? `${row.interrupted_runs} 次已中断` : "",
+  ].filter(Boolean).join("，");
   return [
     row.running ? `${row.running} running` : "",
     row.unpriced_runs ? `${row.unpriced_runs} without a cost` : "",
@@ -45,9 +54,14 @@ export function modelRunCaveats(row: TaskModelCost): string {
 }
 
 /** How a task's cost was priced: a subscription's usage at API prices ("equivalent"), the providers' prices, or both. */
-export function costBasis(cost: TaskCost): string {
+export function costBasis(cost: TaskCost, language?: "zh-CN"): string {
   const equivalent = cost.equivalent_runs ?? 0;
   const provider = cost.provider_price_runs ?? 0;
+  if (language === "zh-CN") {
+    if (equivalent && provider) return `${equivalent} 次按订阅等价计算，${provider} 次按服务商价格计费`;
+    if (equivalent) return "订阅等价费用";
+    return provider ? "按服务商价格计费" : "";
+  }
   if (equivalent && provider) return `${equivalent} subscription-equivalent, ${provider} at provider prices`;
   if (equivalent) return "subscription equivalent";
   return provider ? "at provider prices" : "";

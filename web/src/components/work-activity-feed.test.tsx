@@ -203,6 +203,33 @@ describe("Work activity feed", () => {
     expect(container.querySelector('[data-feed-key="activity:1"] button')).toBeNull();
   });
 
+  it("collapses phase text repeated by a reply into an inspectable status line", async () => {
+    const reply = "Planner 已收到需求，会按新的方向继续。";
+    const summary = `Planner answered a change to the task (none): ${reply}`;
+    api.fetchTaskActivityWindow.mockResolvedValue({ events: [activity(1, { kind: "phase", summary, detail: "Request accepted" })], hasMore: false });
+    await show(feed(task(), [{ id: "answer", role: "assistant", content: reply, created_at: time }]));
+    const event = container.querySelector('[data-feed-key="activity:1"] details')!;
+    expect(event.hasAttribute("open")).toBe(false);
+    expect(event.querySelector("summary")?.textContent).toBe("进度更新");
+    expect(event.querySelector("summary")?.textContent).not.toContain(reply);
+    expect(container.querySelector('[data-message-id="answer"]')?.textContent).toContain(reply);
+    await click(event.querySelector("summary")!);
+    expect(event.hasAttribute("open")).toBe(true);
+    expect(event.textContent).toContain(summary);
+    expect(event.textContent).toContain("Request accepted");
+  });
+
+  it("keeps task event protocol text behind a short expandable status", async () => {
+    const raw = "Planner answered: Here is the same answer";
+    await show(feed(task(), [], [{ source: "task-event", id: "change", kind: "phase", text: raw }]));
+    const event = container.querySelector('[data-feed-key="task-event:change"] details')!;
+    expect(event).not.toBeNull();
+    expect(event.hasAttribute("open")).toBe(false);
+    expect(event.querySelector("summary")?.textContent).toBe("任务事件");
+    await click(event.querySelector("summary")!);
+    expect(event.textContent).toContain(raw);
+  });
+
   it("mounts one gate editor/thread, keeps a failed reply draft, and uses gate APIs for reply and end", async () => {
     const detail = task("A", { gates: [gate()] });
     await show(feed(detail));
@@ -212,17 +239,17 @@ describe("Work activity feed", () => {
     expect(api.fetchGateThread).toHaveBeenCalledTimes(1);
     type(input, "Keep this answer");
     api.postGateMessage.mockRejectedValueOnce(new Error("send failed"));
-    await click(button("Send"));
+    await click(button("发送"));
     expect(input.value).toBe("Keep this answer");
     expect(container.textContent).toContain("send failed");
     const updated = gate({ state: "discussing", waiting_on: "planner" });
     const posted = { gate: updated, message: { id: 1, role: "user", text: "Keep this answer", created_at: time }, delivered: "sent" };
     api.postGateMessage.mockResolvedValueOnce(posted);
-    await click(button("Send"));
+    await click(button("发送"));
     expect(api.postGateMessage).toHaveBeenLastCalledWith("A", "decision", { text: "Keep this answer" });
     expect(input.value).toBe(""); expect(onGateChanged).toHaveBeenCalledWith(updated);
     type(input, "Conclude now"); api.endGateDiscussion.mockResolvedValueOnce(posted);
-    await click(button("End discussion, go on with current conclusions"));
+    await click(button("结束讨论，按当前结论继续"));
     expect(api.endGateDiscussion).toHaveBeenLastCalledWith("A", "decision", "Conclude now");
     expect(input.value).toBe("");
   });
@@ -247,8 +274,8 @@ describe("Work activity feed", () => {
       gates: [gate(closed ? { state: state as "passed" | "cancelled", closed_at: time } : {})],
     })));
     expect(container.querySelector("textarea, form")).toBeNull();
-    expect(button("Send")).toBeUndefined();
-    expect(button("End discussion, go on with current conclusions")).toBeUndefined();
+    expect(button("发送")).toBeUndefined();
+    expect(button("结束讨论，按当前结论继续")).toBeUndefined();
     act(() => openWorkGate("decision"));
     const anchor = container.querySelector("#gate-decision")!;
     expect(document.activeElement === anchor || anchor.contains(document.activeElement)).toBe(true);
@@ -276,7 +303,7 @@ describe("Work activity feed", () => {
     type(input, "My answer");
     const updated = gate({ topic: "Updated shared gate", state: "discussing", waiting_on: "planner" });
     api.postGateMessage.mockResolvedValue({ gate: updated, message: { id: 1, role: "user", text: "My answer", created_at: time }, delivered: "sent" });
-    await click(button("Send"));
+    await click(button("发送"));
     expect(container.textContent).toContain("Updated shared gate");
     expect(container.querySelector("#gate-decision-text")).toBe(input);
     expect(container.querySelectorAll("#gate-decision")).toHaveLength(1);
@@ -296,7 +323,7 @@ describe("Work activity feed", () => {
     type(container.querySelector("#gate-decision-text")!, "My answer");
     const updated = gate({ topic: "Fresh answer", state: "discussing" });
     api.postGateMessage.mockResolvedValue({ gate: updated, message: { id: 1, role: "user", text: "My answer", created_at: time }, delivered: "kept" });
-    await click(button("Send"));
+    await click(button("发送"));
     await act(async () => stale.resolve(before));
     expect(container.textContent).toContain("Fresh answer");
     expect(container.textContent).not.toContain("Choose a direction");

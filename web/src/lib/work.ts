@@ -3,13 +3,19 @@ import { errorText } from "@/lib/use-action";
 import { callV1, V1Error, type V1PendingConfirmation } from "@/lib/v1";
 
 /** Shown when `tasks.create_draft` is missing, or the conversations switch is off. */
-export const DRAFTS_UNAVAILABLE = "Drafts are not available on this server yet";
+export const DRAFTS_UNAVAILABLE = "此服务器尚不支持草稿任务";
 
-export const FIND_UNAVAILABLE = "Finding a task is not available on this server yet.";
+export const FIND_UNAVAILABLE = "此服务器尚不支持查找任务。";
+
+/** Both statuses keep messages in the requirement until the user explicitly starts the task. */
+export function isUnstartedTask(status: string | undefined): boolean {
+  return status === "draft" || status === "init";
+}
 
 export interface WorkTask {
   task_id: string;
   title: string;
+  created_at?: string;
   project_id: string | null;
   project_name: string | null;
   status: string;
@@ -123,7 +129,7 @@ export const workStorage = {
 
 function done<T>(value: T | V1PendingConfirmation): T {
   if (value && typeof value === "object" && "status" in value && value.status === "needs_confirmation") {
-    throw new V1Error(202, "unavailable", "This action needs confirmation.");
+    throw new V1Error(202, "unavailable", "此操作需要确认。");
   }
   return value as T;
 }
@@ -190,11 +196,25 @@ export async function createDraft(projectId: string): Promise<{ task_id: string;
   return done(await callV1<{ task_id: string; project_id: string }>("/api/v1/tasks/create_draft", { project_id: projectId }));
 }
 
+const WORK_STATUS: Record<string, string> = {
+  draft: "草稿", init: "待开始", running: "运行中", assigned: "已分配", planning: "规划中",
+  executing: "执行中", verifying: "验证中", stopping: "停止中", waiting: "等待中", pending: "排队中",
+  waiting_user: "等你回复", awaiting_budget: "等你决定花费", completed: "已完成", failed: "失败",
+  stopped: "已停止", cancelled: "已取消", queued: "排队中", gating: "检查中", succeeded: "成功",
+  interrupted: "已中断", timed_out: "已超时", skipped_overlap: "已跳过：任务重叠",
+  skipped_missed: "已跳过：错过时间", skipped_gate: "已跳过：无新内容", gate_failed: "检查失败",
+  skipped_budget: "已跳过：每日预算", skipped_busy: "已跳过：管家繁忙",
+};
+
+export function workStatusLabel(status: string): string {
+  return WORK_STATUS[status] ?? status;
+}
+
 export function formatWhen(iso: string | null): string {
   if (!iso) return "";
   const date = new Date(iso);
   if (Number.isNaN(date.getTime())) return iso;
-  return date.toLocaleString(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
+  return date.toLocaleString("zh-CN", { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
 }
 
 /** `#work` is null so the page can restore the stored selection. Any other sub is manager or one task. */
@@ -211,7 +231,7 @@ export function groupByProject(tasks: WorkTask[]): { id: string; name: string; t
     const id = task.project_id ?? "";
     let group = groups.find((item) => item.id === id);
     if (!group) {
-      group = { id, name: task.project_name || "No project", tasks: [] };
+      group = { id, name: task.project_name || "无项目", tasks: [] };
       groups.push(group);
     }
     group.tasks.push(task);
@@ -219,13 +239,15 @@ export function groupByProject(tasks: WorkTask[]): { id: string; name: string; t
   return groups;
 }
 
-export function taskTitle(title: string | null | undefined): string {
-  return title?.trim() ? title : "Untitled task";
+export function taskTitle(title: string | null | undefined, createdAt?: string, taskId?: string): string {
+  if (title?.trim() && title !== taskId) return title;
+  const when = formatWhen(createdAt ?? null);
+  return when ? `未命名任务 · ${when}` : "未命名任务";
 }
 
 export function unavailableCopy(section: "open" | "ended" | "schedules"): string {
-  const name = section === "open" ? "Open tasks" : section === "schedules" ? "Schedules" : "Ended tasks";
-  return `${name} are not available on this server yet.`;
+  const name = section === "open" ? "进行中任务" : section === "schedules" ? "定时任务" : "已结束任务";
+  return `此服务器尚不支持${name}。`;
 }
 
 export interface WorkSection<T> {

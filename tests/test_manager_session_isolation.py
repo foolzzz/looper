@@ -11,6 +11,7 @@ import pytest
 
 from looper.agents import session_routing
 from looper.agents.agent_settings import Access, AgentSettings, Launch
+from looper.agents.chat_scopes import LaunchMode
 from looper.agents.profile_registry import builtin_resolved_profile
 from looper.agents.ops.service import ManagerOps, Platform
 from looper.agents.library import AgentLibrary
@@ -84,7 +85,7 @@ def test_routed_launches_have_only_platform_tools_and_separate_files(monkeypatch
 def test_unverified_tool_restriction_refuses_routed_turn_without_fallback(monkeypatch: pytest.MonkeyPatch,
                                                                        tmp_path: Path) -> None:
     monkeypatch.setattr(session_routing, "_routing_enabled", True)
-    monkeypatch.setattr(CLAUDE_CODE, "supports_platform_tools_only", False)
+    monkeypatch.setattr(CLAUDE_CODE, "launch_modes", frozenset({LaunchMode.FULL}))
 
     async def body(pool: Any) -> None:
         rig = _Rig(tmp_path)
@@ -151,7 +152,7 @@ def test_unverified_platform_restriction_refuses_launch_without_a_database(monke
     from looper.agents.runtimes import RuntimeUnsupported
 
     launch = Launch(AgentSettings(profile=builtin_resolved_profile()), access=Access.PLATFORM_TOOLS)
-    monkeypatch.setattr(CLAUDE_CODE, "supports_platform_tools_only", False)
+    monkeypatch.setattr(CLAUDE_CODE, "launch_modes", frozenset({LaunchMode.FULL}))
     with pytest.raises(RuntimeUnsupported, match="cannot restrict a routed Manager session"):
         launch.args()
 
