@@ -231,7 +231,8 @@ def test_error_details_are_optional_and_typed():
     assert details["additionalProperties"] is False and "required" not in details
     assert details["properties"] == {"manager_id": {"type": "string"}, "state": {"type": "string"},
         "phase": {"type": ["string", "null"]}, "method": {"type": ["string", "null"]},
-        "current_version": {"type": "integer"}}
+        "current_version": {"type": "integer"},
+        "requested_runtime": {"type": "string"}, "supported": {"type": "string"}}
 
 
 def test_requirement_expected_version_is_optional_and_not_a_tool():

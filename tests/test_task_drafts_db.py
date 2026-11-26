@@ -61,7 +61,7 @@ def test_create_draft(monkeypatch, tmp_path):
             status, body = await call("tasks.create_draft", {"project_id": owner["id"]})
             assert status == 200, body
             made = body["result"]
-            assert set(made) == {"task_id", "status", "created_at", "project_id", "workspace"}
+            assert set(made) == {"task_id", "status", "created_at", "project_id", "workspace", "task_manager_profile"}
             assert made["status"] == "draft" and made["project_id"] == owner["id"]
             row = await tasks.get_task(made["task_id"])
             assert row["requirement"] == "" and row["title"] is None
@@ -333,7 +333,10 @@ def test_work_mode_off_freeze(monkeypatch, tmp_path):
     old = set(frozen["operation_ids"])
     assert ids - old == {
         "tasks.create_draft", "task_conversations.get", "task_conversations.update", "tasks.done",
-        "tasks.task_manager_profile_set"}
+        "tasks.task_manager_profile_get", "tasks.task_manager_profile_set",
+        "network_pause.get", "network_pause.update",
+        # worker.interrupted_hint.enabled (default off; these only read and store it)
+        "worker_interrupted_hint.get", "worker_interrupted_hint.update"}
     assert old - ids == set()
     async def check(pool):
         owner = await projects.create_project(name="Frozen project", work_dir=str(tmp_path), pool=pool)

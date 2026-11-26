@@ -48,6 +48,7 @@ from .ops import Call, ErrorCode, OpError, PublicOpError, Risk, Tool, check_argu
 from .ops.clients import DEFAULT_SESSION, ClientOps
 from .ops.planner import PlannerOps
 from .ops.room import GrantState, RoomOps
+from .ops.task_manager import TaskManagerOps
 from .managers import ManagerFleet
 from .ops.service import ManagerOps
 from .tiers.manager import ManagerAgent
@@ -242,6 +243,7 @@ class AgentHTTPServer:
         manager_ops: ManagerOps | None = None,
         managers: ManagerFleet | None = None,
         planner_ops: PlannerOps | None = None,
+        task_manager_ops: TaskManagerOps | None = None,
         room_ops: RoomOps | None = None,
         client_ops: ClientOps | None = None,
         ops_config: OpsConfig | None = None,
@@ -301,6 +303,7 @@ class AgentHTTPServer:
         self._client_ops = client_ops
         self._managers = managers
         self._planner_ops = planner_ops
+        self._task_manager_ops = task_manager_ops
         # The agent room's tools of the steps' runs, each with a token of its own (``run.``).
         self._room_ops = room_ops
         # Configuration files uploaded for import, waiting to be applied (under the runtime root).
@@ -416,6 +419,9 @@ class AgentHTTPServer:
                     for task in pending:
                         task.cancel()
         if self._server:
+            # The snapshot above misses a connection whose callback has not registered.
+            # Python 3.12.1+ then waits for that connection inside wait_closed.
+            await self._abort_late_arrivals(handlers)
             # Python 3.12.1+ waits for active connections as well as the listener.
             await self._server.wait_closed()
             self._server = None
@@ -425,6 +431,61 @@ class AgentHTTPServer:
             self._address_publication = None
         if self._config_imports:
             self._config_imports.clear()
+
+    def _orphan_transports(self) -> list[asyncio.BaseTransport]:
+        """Accepted connections whose handlers are not registered yet."""
+        transports = getattr(asyncio.get_running_loop(), "_transports", None)
+        if not transports or self._server is None:
+            return []
+        tracked = {writer.transport for writer in self._handlers.values()}
+        return [
+            transport for transport in list(transports.values())
+            if getattr(transport, "_server", None) is self._server
+            and transport not in tracked and not transport.is_closing()
+        ]
+
+    def _abort_visible_late_arrivals(self, seen: dict[asyncio.Task, asyncio.StreamWriter]) -> None:
+        late = {task: writer for task, writer in self._handlers.items() if task not in seen}
+        orphans = self._orphan_transports()
+        if late:
+            logger.warning("HTTP shutdown grace expired; aborting %d HTTP connection(s)", len(late))
+            for task, writer in late.items():
+                transport = writer.transport
+                if transport is not None and not transport.is_closing():
+                    transport.abort()
+                task.cancel()
+            seen.update(late)
+        if orphans:
+            logger.warning("HTTP shutdown grace expired; aborting %d HTTP connection(s)", len(orphans))
+            for transport in orphans:
+                transport.abort()
+
+    async def _abort_late_arrivals(self, seen: dict[asyncio.Task, asyncio.StreamWriter]) -> None:
+        """Abort connections that attached after ``seen`` was snapshotted.
+
+        ``wait_closed`` on Python 3.12 waits while the server's active count
+        is non-zero. Yielding lets an accept that already left the listening
+        socket attach, and lets ``abort`` drop the count, before that wait.
+        """
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + HTTP_SHUTDOWN_CLEANUP_SECONDS
+        quiet = 0
+        while quiet < 2 and loop.time() < deadline:
+            await asyncio.sleep(0)
+            self._abort_visible_late_arrivals(seen)
+            active = self._server._active_count if self._server is not None else 0
+            if active:
+                quiet = 0
+            else:
+                quiet += 1
+        active = self._server._active_count if self._server is not None else 0
+        if active:
+            self._abort_visible_late_arrivals(seen)
+            pending = [task for task in self._handlers if not task.done()]
+            if pending:
+                logger.warning("HTTP shutdown cleanup expired; cancelling %d handler(s)", len(pending))
+                for task in pending:
+                    task.cancel()
 
     async def _handle_connection(
         self,
@@ -1214,6 +1275,9 @@ class AgentHTTPServer:
         if self._room_ops is not None and self._room_ops.claims(headers.get("authorization")):
             await self._handle_room_api(method, path, headers, body, writer)
             return
+        if self._task_manager_ops is not None and self._task_manager_ops.claims(headers.get("authorization")):
+            await self._handle_task_manager_api(method, path, headers, body, writer)
+            return
         authorization = headers.get("authorization")
         ops = self._managers.ops_for(authorization) if self._managers is not None else self._manager_ops
         if ops is None or not ops.authorized(authorization):
@@ -1244,6 +1308,29 @@ class AgentHTTPServer:
             writer.write(_json_response(HTTP_200, await ops.call(
                 m.group(1), arguments, binding=headers.get("x-looper-turn"), call_id=headers.get("x-looper-call"),
                 session_key=ops.session_for(authorization))))
+        else:
+            writer.write(_json_response(HTTP_404, {"error": f"no {method} {path}"}))
+        await writer.drain()
+
+    async def _handle_task_manager_api(
+        self, method: str, path: str, headers: dict[str, str], body: bytes, writer: asyncio.StreamWriter,
+    ) -> None:
+        """Task-bound tools and outbound checks share the resident's credential."""
+        ops, header = self._task_manager_ops, headers.get("authorization")
+        assert ops is not None
+        if not ops.authorized(header) or not await ops.task_exists(header):
+            writer.write(_json_response(HTTP_401, {"error": "this task Manager's token no longer works"}))
+        elif path == f"{AGENT_API}tools" and method == "GET":
+            writer.write(_json_response(HTTP_200, {"tools": await ops.listing(header)}))
+        elif method == "POST" and (path == f"{AGENT_API}outbound/check" or _RE_AGENT_OP.match(path)):
+            try:
+                payload = json.loads(body.decode("utf-8")) if body.strip() else {}
+            except (json.JSONDecodeError, UnicodeDecodeError):
+                payload = None
+            answer = (await ops.check_outbound(header, payload) if path == f"{AGENT_API}outbound/check" else
+                      await ops.call(header, _RE_AGENT_OP.match(path).group(1), payload,
+                                     call_id=headers.get("x-looper-call")))
+            writer.write(_json_response(HTTP_200, answer))
         else:
             writer.write(_json_response(HTTP_404, {"error": f"no {method} {path}"}))
         await writer.drain()
@@ -1977,19 +2064,21 @@ class AgentHTTPServer:
         page = path in ("/", "/index.html")
         file_path = self._static_dir / ("index.html" if path == "/" else path.lstrip("/"))
 
-        if not file_path.is_file():
-            index_path = self._static_dir / "index.html"
-            if index_path.is_file():
-                file_path = index_path
-                page = True
-            else:
-                writer.write(_json_response(HTTP_404, {"error": "not found"}))
-                await writer.drain()
-                return
-
         try:
+            # is_file() reports an embedded NUL as missing and raises only for an
+            # overlong name, so resolve before the dashboard-page fallback.
             resolved = file_path.resolve()
             static_resolved = self._static_dir.resolve()
+            if not file_path.is_file():
+                index_path = self._static_dir / "index.html"
+                if index_path.is_file():
+                    file_path = index_path
+                    resolved = index_path.resolve()
+                    page = True
+                else:
+                    writer.write(_json_response(HTTP_404, {"error": "not found"}))
+                    await writer.drain()
+                    return
             if not resolved.is_relative_to(static_resolved):
                 writer.write(_json_response(HTTP_404, {"error": "not found"}))
                 await writer.drain()

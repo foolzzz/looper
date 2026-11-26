@@ -2,6 +2,7 @@
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
+import { taskConversationHint } from "@/components/work-conversation";
 import { WorkPage } from "@/pages/work";
 
 vi.mock("@/lib/use-projects", () => ({ useProjects: () => ({ projects: [] }) }));
@@ -144,7 +145,10 @@ it.each(["draft", "init"])("enables the %s requirement composer and explains the
   task = { ...task, status, requirement: "Saved requirement", requirement_versions: [{ version: 4, text: "Saved requirement" }] };
   await show();
   expect(input().disabled).toBe(false);
-  expect(host.textContent).toContain("继续发送会追加到需求。点击「开始」后，规划者才会启动。");
+  expect(taskConversationHint("zh", "before_start")).toBe("继续发送会追加到需求。点击「开始」后，这个任务的规划者才会启动。");
+  expect(taskConversationHint("en", "before_start")).toBe("Further messages append to the requirement. This task's Planner starts only after you click Start.");
+  expect(host.textContent).toContain(taskConversationHint("zh", "before_start"));
+  expect(host.textContent).not.toContain("Planner");
   const requirement = host.querySelector('[aria-label="需求草稿"]')!;
   expect(requirement.textContent).toContain("Saved requirement");
   expect(requirement.textContent).toContain("版本 4");
@@ -156,13 +160,18 @@ it.each(["pending", "assigned", "running", "planning", "executing", "verifying",
   task = { ...task, status };
   await show();
   expect(input().disabled).toBe(false);
-  expect(host.textContent).toContain("发送消息与任务管家对话。");
+  expect(host.textContent).toContain(taskConversationHint("zh", "ready"));
+  expect(host.textContent).toContain("发送消息与这个任务的规划者对话。");
   expect(host.querySelector('[data-work-detail]')?.textContent).not.toContain("任务已结束");
   act(() => root.unmount()); root = createRoot(host);
   plannerAvailable = false;
   await show();
   expect(input().disabled).toBe(true);
-  expect(host.textContent).toContain("任务管家当前不可用，暂时无法接收消息。");
+  expect(taskConversationHint("zh", "unavailable")).toBe("这个任务的规划者当前不可用，暂时无法接收消息。");
+  const unavailable = host.querySelector("[data-work-detail]")!;
+  expect(unavailable.textContent).toContain(taskConversationHint("zh", "unavailable"));
+  expect(unavailable.textContent).not.toContain("任务管家");
+  expect(unavailable.textContent).not.toContain("Planner");
   expect(host.querySelector('[data-work-detail]')?.textContent).not.toContain("任务已结束");
 });
 
@@ -170,15 +179,25 @@ it.each(["completed", "failed", "cancelled", "stopped"])("disables the %s compos
   task = { ...task, status };
   await show();
   expect(input().disabled).toBe(true);
-  expect(host.textContent).toContain("任务已结束，任务管家不再接收消息。");
+  expect(taskConversationHint("zh", "ended")).toBe("任务已结束，这个任务的规划者不再接收消息。");
+  const ended = host.querySelector("[data-work-detail]")!;
+  expect(ended.textContent).toContain(taskConversationHint("zh", "ended"));
+  expect(ended.textContent).not.toContain("任务管家");
+  expect(ended.textContent).not.toContain("Planner");
 });
 
 it.each(["handing_back", "unknown"])("does not describe unavailable %s as ended", async status => {
   task = { ...task, status };
   await show();
   expect(input().disabled).toBe(true);
-  expect(host.textContent).toContain(status === "handing_back"
-    ? "任务正在交还，任务管家暂时不接收消息。" : "任务管家当前不可用，暂时无法接收消息。");
+  const state = status === "handing_back" ? "handing_back" : "unavailable";
+  expect(taskConversationHint("zh", state)).toBe(status === "handing_back"
+    ? "任务正在交还，这个任务的规划者暂时不接收消息。"
+    : "这个任务的规划者当前不可用，暂时无法接收消息。");
+  const detail = host.querySelector("[data-work-detail]")!;
+  expect(detail.textContent).toContain(taskConversationHint("zh", state));
+  expect(detail.textContent).not.toContain("任务管家");
+  expect(detail.textContent).not.toContain("Planner");
   expect(host.querySelector('[data-work-detail]')?.textContent).not.toContain("任务已结束");
 });
 

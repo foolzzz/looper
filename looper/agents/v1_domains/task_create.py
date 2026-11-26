@@ -1,7 +1,8 @@
 """Full dashboard task creation through the shared task core; no Manager Tool changes."""
 
 from ...db import agent_setting_layers, tasks, workflows as db_workflows
-from .. import projects, workflows, task_conversations_settings
+from .. import projects, workflows, task_conversations_settings, task_manager_settings
+from .task_direct import PROFILE_VIEW
 from ..action_levels import ActionLevel
 from ..api_v1 import Operation, _array, _object, _STR, _NULL_STR, _INT, _BOOL
 from ..ops import ErrorCode, OpError
@@ -75,13 +76,15 @@ OPERATIONS = (Operation(
     Operation("tasks.create_draft", "POST", "/api/v1/tasks/create_draft",
               "Create a draft task in an existing project.",
               "Create a draft task in an existing project. Work mode must be enabled. "
-              "A draft may have no requirement and never starts automatically.",
+              "A draft may have no requirement and never starts automatically. An optional task_manager_profile_id "
+              "is validated before creation; task_manager_profile returns the effective selection and choices.",
               _object({"project_id": {"type": "string", "minLength": 1}, "title": _STR,
                        "work_dir": _STR, "workspace_mode": WORKSPACE_MODE,
-                       "base": {"type": "string", "maxLength": projects.BASE_MAX_CHARS}},
+                       "base": {"type": "string", "maxLength": projects.BASE_MAX_CHARS},
+                       "task_manager_profile_id": {"type": ["string", "null"], "minLength": 1}},
                       ["project_id"], closed=True),
               _object({"task_id": _STR, "status": _STR, "created_at": _STR,
-                       "project_id": _STR, "workspace": WORKSPACE_CHECK}),
+                       "project_id": _STR, "workspace": WORKSPACE_CHECK, "task_manager_profile": PROFILE_VIEW}),
               risk="write", operator_only=True,
               level=ActionLevel.INSIDE),  # writes only Looper's own task rows
 )
@@ -217,9 +220,14 @@ async def run(server, operation, arguments, principal, headers):
     if operation.operation_id == "tasks.create_draft":
         if not task_conversations_settings.enabled():
             raise OpError(ErrorCode.CONFLICT, "work mode is off (tasks.conversations.enabled)")
+        profile_id = arguments.get("task_manager_profile_id")
+        await task_manager_settings.validate_task_manager_profile(profile_id)
         result = await answered(projects.create_task_core(
-            arguments, draft=True, task_fields={"manager_id": "manager", "client_id": principal.client_id}))
-        return {key: result[key] for key in ("task_id", "status", "created_at", "project_id", "workspace")}
+            arguments, draft=True, profiles={"task_manager": profile_id} if profile_id else {},
+            task_fields={"manager_id": "manager", "client_id": principal.client_id}))
+        view = await task_manager_settings.task_manager_profile_get(await tasks.get_task(result["task_id"]))
+        return {**{key: result[key] for key in ("task_id", "status", "created_at", "project_id", "workspace")},
+                "task_manager_profile": view}
     chosen = await answered(projects._profile_overrides(arguments.get("profile_overrides")))
     result = await answered(projects.create_task_core(
         arguments, profiles=chosen, task_fields={"manager_id": "manager", "client_id": principal.client_id}))
