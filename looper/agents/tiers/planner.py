@@ -5677,6 +5677,18 @@ class PlannerAgent:
             cwd=plan.work_dir, signature=process.signature, env=process.launch.environment(),
             totals=plan.session_totals, price=process.launch.price)
 
+    async def _exchange_network_unavailable(self, recorder) -> bool:
+        """Classify a failed exchange only while network recovery is enabled.
+
+        ``network_pause_settings.load`` is the switch. No row, any other value, or an unreadable
+        setting (it warns and reports off) skips classification and everything recovery would do next.
+        """
+        from .. import network_pause_settings
+
+        if not (await network_pause_settings.load()).enabled:
+            return False
+        return recorder.network_unavailable()
+
     async def _exchange(self, text: str, process: _Process, limit: int, **kwargs: Any) -> str:
         from .. import network_pause, network_pause_settings
         while True:
@@ -5890,7 +5902,7 @@ class PlannerAgent:
                 error = f"reading Claude failed: {type(exc).__name__}: {exc}"
                 await recorder.finish(output_text=None, result_event=None, error=error)
                 raise PlannerTurnError(error, failure=recorder.failure_signal() if _delivery is not None else None,
-                                       network_unavailable=recorder.network_unavailable()) from None
+                                       network_unavailable=await self._exchange_network_unavailable(recorder)) from None
             finally:
                 if lesson_claims:
                     outcomes = await asyncio.gather(*lesson_claims, return_exceptions=True)
@@ -5990,7 +6002,7 @@ class PlannerAgent:
                     logger.exception("cannot record schedule Planner usage for %s", self._task_id)
             if error:
                 raise PlannerTurnError(error, failure=recorder.failure_signal() if _delivery is not None else None,
-                                       network_unavailable=recorder.network_unavailable())
+                                       network_unavailable=await self._exchange_network_unavailable(recorder))
             return final_text
 
     # --- The Planner changes no file ---

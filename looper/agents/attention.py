@@ -412,10 +412,10 @@ async def _earliest_deliveries(_: Any) -> dict[str, Any] | None:
 
 
 async def _failure_holds(_: Any) -> Read:
-    from . import failures
+    from . import failures, network_pause_settings
     from ..db import network_pauses, step_failures
     typing_on = await failures.typing_mode() is failures.FailureTyping.ACT
-    network_on = (await db_settings.get_settings(['engine.network_pause.enabled'])).get('engine.network_pause.enabled') == 'true'
+    network_on = (await network_pause_settings.load()).enabled
     if not typing_on and not network_on:
         return NotRead.OFF
     rows = ([row for row in await step_failures.list_holds() if row["kind"] in ("environment", "breaker")]
