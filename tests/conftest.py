@@ -143,12 +143,23 @@ def _staged_dashboard_environment():
         yield
 
 
+def _require_staged_dashboard(directory: Path) -> Path:
+    if not (directory / "index.html").is_file():
+        if os.environ.get("CI") or os.environ.get("GITHUB_ACTIONS"):
+            # A skip would leave the job green even though no browser/serve test ran.
+            pytest.fail(
+                "staged dashboard missing at "
+                f"{directory / 'index.html'}; the 'Build the dashboard' step "
+                "(scripts/stage-dashboard.sh) must produce it before pytest"
+            )
+        pytest.skip("UNTESTED: staged dashboard missing; run scripts/stage-dashboard.sh")
+    return directory
+
+
 @pytest.fixture(scope="session")
 def staged_dashboard_dir() -> Path:
     """Use the wheel's dashboard, built once before pytest, never rebuild it in workers."""
-    directory = _STAGED_DASHBOARD_DIR
-    assert (directory / "index.html").is_file(), "Run scripts/stage-dashboard.sh before browser tests"
-    return directory
+    return _require_staged_dashboard(_STAGED_DASHBOARD_DIR)
 
 
 def pytest_sessionstart(session: pytest.Session) -> None:
