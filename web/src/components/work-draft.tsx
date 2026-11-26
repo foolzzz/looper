@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { WORK_COMPOSER_COPY } from "@/components/work-conversation";
+import { taskConversationHint, WORK_COMPOSER_COPY } from "@/components/work-conversation";
 import { ChatComposer } from "@/components/chat-composer";
 import { Button } from "@/components/ui/button";
 import { editTaskRequirement, type TaskDetail } from "@/lib/api";
@@ -106,7 +106,7 @@ export function WorkDraft({ task, onRefresh, disabled, onBusy }: {
       </section>
     </div>
     <div ref={footer} className="shrink-0 space-y-2 border-t border-border p-4">
-      <p className="text-xs text-muted-foreground">继续发送会追加到需求。点击「开始」后，Planner 才会启动。</p>
+      <p className="text-xs text-muted-foreground">{taskConversationHint("zh", "before_start")}</p>
       {error && <p role="alert" className="break-words text-sm text-destructive">{error}</p>}
       {uncertain && <Button variant="outline" onClick={() => void retry()}>重新读取需求</Button>}
       {busy && !uncertain && <p role="status" className="text-xs text-muted-foreground">正在保存需求…</p>}
