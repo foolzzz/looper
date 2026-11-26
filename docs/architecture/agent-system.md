@@ -519,7 +519,9 @@ Manager has no tool for it. The dashboard shows the task page's 指标 card and 
   tools or returning a previously cached profile.
   The compiler preserves typed fields — name, address, reply language, time zone, working hours, communication
   preferences and standing rules — with relative-path, heading and line citations. Inline `[kind:: …]` bullets
-  keep their existing classification and inactive-entry filtering. Frontmatter and fenced code are excluded;
+  keep their existing classification and inactive-entry filtering. An inline bullet that also carries
+  `[share:: hook]` (exact, case-sensitive) is shared with local sessions; the field never reaches compiled text.
+  Frontmatter and fenced code are excluded;
   backticks are normalized. Duplicate single-value fields fail compilation. The text stays within 1500 Unicode
   characters, dropping lower-priority fields first and truncating a remaining oversized field with `…`.
   `profile.get` caches the compiled block in `profile_blocks`, retaining its version when the body is unchanged.
@@ -533,12 +535,14 @@ Manager has no tool for it. The dashboard shows the task page's 指标 card and 
   otherwise it is its own resident section before Projects. Shared and API-client turns never receive private
   profile text in stable-state removal lines either. This does not erase profile text already present in a
   shared resident session's history.
-  `looper profile show [--runtime-root …] [--config …]` reads the same file with the same compiler and prints
-  exactly the resident section's body, with no added newline, whether injection is on or off. It makes no model
+  `looper profile show [--runtime-root …] [--config …]` reads the same file with the same compiler, validates the
+  whole note, and prints only the active inline entries marked `[share:: hook]`, under the same 1500-character
+  cap, with no added newline, whether injection is on or off. Heading fields, plain rules and unmarked entries
+  stay in the Manager's resident section only; a note without markers prints nothing. It makes no model
   call or schema/cache write. Its worker has a 1-second deadline covering imports, settings and file I/O;
   missing settings, an unavailable database, an invalid profile or timeout prints nothing and exits 0.
   Output is bounded by the compiler's 1500-character cap (at most 6000 UTF-8 bytes).
-  `looper claude-code profile` prints the same text for the operator's own Claude Code
+  `looper claude-code profile` prints that shared subset for the operator's own Claude Code
   ([session-start hook](#the-operators-own-claude-code-profile-at-session-start)). Lark and Telegram share the
   Manager path and need no new configuration command. Real-model evaluation remains pending maintainer approval.
   See the [operator profile RFC](rfcs/operator-profile-v0.zh-CN.md) for the original compiler design.
@@ -1448,7 +1452,8 @@ runs without the shared leader; OMP 18.4.3).
 ### The operator's own Claude Code: profile at session start
 
 `looper claude-code profile` reuses `looper profile show` and the Manager's single compiler; it reads the
-configured vault note locally through the database, without an HTTP request, model call or cache write.
+configured vault note locally through the database, without an HTTP request, model call or cache write, and
+keeps only entries marked `[share:: hook]` (the rest stays available on demand through `vault_read`).
 `--hook` returns SessionStart JSON whose `additionalContext` is that same text, capped at 3000 characters.
 The shared reader has a 1-second deadline (within the 2-second hook budget); an unavailable or empty profile,
 errors and timeouts produce no stdout or stderr and exit 0. A stopped HTTP server alone does not prevent a read.

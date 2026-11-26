@@ -59,8 +59,8 @@ def fetch_profile(runtime_root: str | None, config: str | None, *,
         return Fetched(REFUSED, reason="refused inside a Looper agent run")
     text = profile_commands.read_text(SimpleNamespace(runtime_root=runtime_root, config=config))
     if not text.strip():
-        return Fetched(EMPTY, reason="profile unavailable or empty (check knowledge_vault.profile_source "
-                                    "and database settings)")
+        return Fetched(EMPTY, reason="profile unavailable or empty (check knowledge_vault.profile_source, "
+                                    "database settings and that entries carry [share:: hook])")
     return Fetched(OK, text=_cap(text, MAX_CONTEXT_CHARS))
 
 

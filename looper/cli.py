@@ -86,7 +86,8 @@ def build_parser() -> argparse.ArgumentParser:
     profile = commands.add_parser("profile", allow_abbrev=False, help="Read the operator profile locally.")
     profile_sub = profile.add_subparsers(dest="profile_command", required=True)
     show = profile_sub.add_parser(
-        "show", allow_abbrev=False, help="Print the compiled profile; silently exit 0 when unavailable (within 2 s).")
+        "show", allow_abbrev=False,
+        help="Print the profile entries marked [share:: hook]; silently exit 0 when unavailable (within 2 s).")
     _add_location_flags(show)
     commands.add_parser(
         "mcp-server",
@@ -102,12 +103,12 @@ def build_parser() -> argparse.ArgumentParser:
 def _add_claude_code_parser(commands: argparse._SubParsersAction) -> None:
     cc = commands.add_parser(
         "claude-code", allow_abbrev=False,
-        help="Give your own Claude Code the Manager's profile and read-only retrieval (opt-in).",
+        help="Give your own Claude Code the profile entries marked [share:: hook] and read-only retrieval (opt-in).",
         description="Reuse looper profile show for your own Claude Code. Nothing is installed until install "
                     "shows the change and you confirm it.")
     sub = cc.add_subparsers(dest="claude_code_command", required=True)
     profile = sub.add_parser(
-        "profile", allow_abbrev=False, help="Print the compiled operator profile.",
+        "profile", allow_abbrev=False, help="Print the profile entries marked [share:: hook].",
         description="Reads the same local profile as looper profile show (2 s at most). Exit codes: "
                     "0 printed, 1 unavailable or empty, 2 usage, 4 inside an agent run. "
                     "With --hook: print SessionStart JSON or nothing, never write stderr, always exit 0.")
