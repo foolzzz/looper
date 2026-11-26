@@ -18,6 +18,26 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.15.43] - 2026-11-26
+
+Frozen at `45fc80461` (the merge of [#1840](https://github.com/foolzzz/looper/pull/1840)): everything merged to main after v2.15.42's freeze `0ad334847`, up to that commit. Tag this release PR's own head after merge if main has moved beyond the freeze. Startup adds two migrations over v2.15.42: `chat_message_entry_kind` (2100) and `network_pauses` (2120); both run even with optional features off. From v2.15.38 or earlier, also read [v2.15.42](docs/releases/v2.15.42.md), [v2.15.41](docs/releases/v2.15.41.md), [v2.15.40](docs/releases/v2.15.40.md) and [v2.15.39](docs/releases/v2.15.39.md). See [the release notes](docs/releases/v2.15.43.md) for validation and exclusions.
+
+### Added
+
+- **Task Manager answers, off by default.** ([#1771](https://github.com/foolzzz/looper/pull/1771), [#1773](https://github.com/foolzzz/looper/pull/1773), [#1820](https://github.com/foolzzz/looper/pull/1820), [#1825](https://github.com/foolzzz/looper/pull/1825), [#1831](https://github.com/foolzzz/looper/pull/1831), [#1841](https://github.com/foolzzz/looper/pull/1841)) With `tasks.conversations.enabled` and the new `tasks.conversations.manager_answers` both on, a task has its own conversation answered by the task Manager, with task-bound tools, fixed commands and a Work centre pane. With `manager_answers` off, a task target is refused with `task_manager_off` and the Planner keeps the conversation. An unstarted Work draft can pick the task Manager model.
+- **Network pause, off by default.** ([#1802](https://github.com/foolzzz/looper/pull/1802), [#1812](https://github.com/foolzzz/looper/pull/1812)) `engine.network_pause.enabled` pauses a task on structured model-connection failures and resumes it without spending a step retry. Migration `network_pauses` (2120).
+- **Interrupted-attempt hint, off by default.** ([#1731](https://github.com/foolzzz/looper/pull/1731)) `worker.interrupted_hint.enabled` adds one fixed line to a re-dispatched Worker's prompt.
+- **Chat-scope code, not for use yet.** ([#1837](https://github.com/foolzzz/looper/pull/1837), [#1842](https://github.com/foolzzz/looper/pull/1842)) Included with every scope setting off and the default routing unchanged; `scoped` cannot be selected.
+
+### Changed
+
+- **Chat history paging and task-thread columns.** ([#1820](https://github.com/foolzzz/looper/pull/1820)) `operator_chat.messages` returns `has_more` and `next_before` on every call. Migration `chat_message_entry_kind` (2100).
+- **Startup timing.** ([#1757](https://github.com/foolzzz/looper/pull/1757)) Startup logs one timing line for each migration or online step that does work.
+
+### Internal
+
+- Evals and tests with no product change: real-mode task Manager eval runner and cases ([#1840](https://github.com/foolzzz/looper/pull/1840)), a same-profile reselect test ([#1838](https://github.com/foolzzz/looper/pull/1838)).
+
 ## [2.15.42] - 2026-11-26
 
 Frozen at `0ad334847` (the merge of [#1804](https://github.com/foolzzz/looper/pull/1804)): everything merged to main after what v2.15.41 shipped, up to that commit. Tag this release PR's own head after merge if main has moved beyond the freeze. Startup adds three migrations over v2.15.41: `task_manager_role` (2090), `main_session_egress` (2130) and `completion_session_allowlist` (2140), each widening an existing check; all three run even with optional features off. From v2.15.38 or earlier, also read [v2.15.41](docs/releases/v2.15.41.md), [v2.15.40](docs/releases/v2.15.40.md) and [v2.15.39](docs/releases/v2.15.39.md). See [the release notes](docs/releases/v2.15.42.md) for validation and exclusions.
