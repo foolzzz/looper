@@ -98,7 +98,9 @@ async def run_tool(config: VaultConfig, name: str, arguments: Mapping[str, Any],
                                                 "at most 256 KiB per run")
         result = await vault.write(config, arguments["path"], content, arguments.get("expected_sha256"),
                                    arguments["reason"], task_id=task_id, who=who)
-        if not result.get("unchanged"):
+        if result.get("state") == "blocked":
+            await _activity(task_id, worker, f"Vault: {who}'s commit of {result['path']} blocked: {result['reason']}")
+        elif not result.get("unchanged"):
             usage.written_bytes += result["bytes"]
             commit = result.get("commit")
             if commit:

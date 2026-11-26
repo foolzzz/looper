@@ -7,9 +7,9 @@
 
 ## 1. 什么时候发
 
-- 开关 `morning_brief.enabled`（默认 `false`）和时间 `morning_brief.time`（`HH:MM`，默认 `09:15`）。只有操作者能读写，经 `morning_brief.get` 和 `morning_brief.update`（高风险，要确认）。不进客户端看得到的 `chat_settings`，Manager 的工具里也没有。
+- 开关 `morning_brief.enabled`（默认 `false`）、时间 `morning_brief.time`（`HH:MM`，默认 `09:15`）和补发截止时间 `morning_brief.cutoff`。未存截止时间时，发送时间早于 12:00 则截止为 12:00，否则为发送时间加三小时、最晚本地日末 24:00（不含）；21:30 推导为 24:00，23:59 也有到午夜前的非空窗口。显式存储的截止时间仍用 `HH:MM`，必须晚于发送时间；存量截止时间不满足时忽略并告警一次，采用同一推导规则。只有操作者能读写，经 `morning_brief.get` 和 `morning_brief.update`（高风险，要确认）；读回给出有效 `cutoff` 和 `cutoff_source`（`stored` 或 `derived`），`cutoff` 为 `HH:MM` 字符串或类型化边界 `{"kind":"end_of_day"}`（24:00，不含），内部对应 `MorningBriefBoundary.END_OF_DAY`，不用特殊时间字符串。`cutoff: null` 恢复推导。不进客户端看得到的 `chat_settings`，Manager 的工具里也没有。
 - 时区是 `user.timezone`，由每轮上下文保管（`turn_context.zone()`，和送达层同一个）；没有或不认识时用服务器时区。晨报不另存一份时区。
-- 工作日是周一到周五，没有节假日：周一到周五的假日照发。本地时间到达设定的时分就发；当天晚些时候才醒来，这一天仍发一次。钟拨过那个分钟时，缺口后的第一次检查补发；同一个本地日期重复的那一小时只发一次（行的键是本地日期）。
+- 工作日是周一到周五，没有节假日：周一到周五的假日照发。本地时间到达设定的时分后，只在截止时间之前补发（不含截止时间本身）。免打扰始终拦截晨报；结束时仍在窗口内才补发，否则未消费摘要留到下一工作日；即使截止为日末，跨午夜的免打扰也不会延长当天窗口。钟拨过那个分钟时，缺口后仍在窗口内的第一次检查补发；同一个本地日期重复的那一小时只发一次（行的键是本地日期）。
 - 周末不发，也不写行。
 
 ## 2. 内容
@@ -26,9 +26,9 @@
 
 ## 3. 送达层
 
-晨报走 `deliver()`。`silent`（所有节都空）是 `drop`，不发。有内容时 `source` 是 `morning_brief`：在静默规则之后、紧急类之前命中，结果是 `decision = send`、`reason = within_limits`、不计数，免打扰时段和每日上限都不能把它再推进摘要。
+晨报走 `deliver()`。`silent`（所有节都空）是 `drop`，不发。有内容时 `source` 是 `morning_brief`：在静默规则之后、紧急类之前先检查免打扰，命中时 `decision = digest`、`reason = quiet_hours`，不消费摘要；不在免打扰且仍在补发窗口内才发送，`decision = send`、`reason = within_limits`。晨报不受每日上限拦截，也不占每日额度，最近回复不能绕过免打扰。送达层开关关闭时也遵守免打扰和截止时间。
 
-`decide()` 只在 `delivery.enabled` 开着时把这次判断写进那条消息的 `proactive_deliveries` 行。去重键 `morning_brief:<本地日期>:<channel_id>:<chat>` 也是这次 `post` 的幂等键。发出后 `record_receipt()` 把渠道回执写回同一行（`outcome`、`sent_at`、`external_id`）。同一键上先前的 `rejected` 回执会被这次的结果替换。已经记下的 `sent` 或 `unknown`，这三个字段保持不动。送达层关着时晨报照发，那张表不变。
+`decide()` 只在 `delivery.enabled` 开着时把这次判断写进那条消息的 `proactive_deliveries` 行。去重键 `morning_brief:<本地日期>:<channel_id>:<chat>` 也是这次 `post` 的幂等键。发出后 `record_receipt()` 把渠道回执写回同一行（`outcome`、`sent_at`、`external_id`）。同一键上先前的 `rejected` 回执会被这次的结果替换。已经记下的 `sent` 或 `unknown`，这三个字段保持不动。送达层关着时仍遵守免打扰和截止时间，只是不往那张表记录判断。
 
 已经建过 `proactive_deliveries` 的库不会重放建表语句，所以另有一次迁移把 `source` 检查放宽到包含 `morning_brief`。
 

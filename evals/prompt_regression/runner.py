@@ -474,6 +474,12 @@ def running_server(*, database_url: str, runtime_root: Path, bin_dir: Path, log_
                                pi_runtime=pi_runtime, dsh_runtime=dsh_runtime,
                                keeper_mode=ops_config.KeeperMode(keeper_mode))
     ops_config.write_private(ops.path, ops_config.render(ops))
+    stored_port = ops_config.read_file(ops.path, required=True).get("port")
+    if stored_port != port or stored_port == RESERVED_PORT:
+        raise EvalError("eval ops file must name its isolated server port")
+    api = Api(f"http://127.0.0.1:{port}")
+    if urllib.parse.urlsplit(api.base_url).port == RESERVED_PORT:
+        raise EvalError("eval clients require an isolated server")
     # None of the operator's ops variables: the file names the eval's database.
     server_env = {**{k: v for k, v in os.environ.items() if k not in ops_config.VARIABLES},
                   "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}",
@@ -487,7 +493,6 @@ def running_server(*, database_url: str, runtime_root: Path, bin_dir: Path, log_
          *([reminder_now.isoformat()] if reminder_now is not None else [])],
         cwd=str(runtime_root), env=server_env, stdout=log, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
     )
-    api = Api(f"http://127.0.0.1:{port}")
     try:
         deadline = time.monotonic() + startup_timeout
         while True:
@@ -655,6 +660,37 @@ def _all_events(api: Api, record_id: int) -> list[dict[str, Any]]:
             return events
 
 
+def _seed_project_lessons(database_url: str, project_id: str, task: EvalTask) -> None:
+    """Synthetic journal-backed candidates, only in this eval's freshly created database."""
+    async def seed():
+        import asyncpg
+        from looper.agents.memory_model import fingerprint
+
+        conn = await asyncpg.connect(database_url, timeout=10)
+        try:
+            async with conn.transaction():
+                await conn.execute("INSERT INTO system_settings(key,value) VALUES ('memory_lessons',$1) "
+                                   "ON CONFLICT(key) DO UPDATE SET value=EXCLUDED.value", json.dumps({"enabled": True}))
+                await conn.execute("UPDATE projects SET memory_lessons=$2 WHERE id=$1", project_id, task.lesson_mode)
+                source = "lesson-evidence-" + uuid.uuid4().hex[:12]
+                await conn.execute("INSERT INTO tasks(id,requirement,project_id,status) "
+                                   "VALUES ($1,'Synthetic verified evidence',$2,'completed')", source, project_id)
+                journal = await conn.fetchval("INSERT INTO task_journal(task_id,step_id,kind,summary) "
+                    "VALUES ($1,'s1','step_accepted','Synthetic verification') RETURNING id", source)
+                for statement, why in task.lesson_seeds:
+                    candidate = await conn.fetchval("INSERT INTO memory_candidates(kind,source_kind,source_class,"
+                        "destination,state,statement,why,fingerprint,project_id,valid_until) VALUES "
+                        "('lesson','task','agent','looper','in_effect',$1,$2,$3,$4,now()+interval '90 days') RETURNING id",
+                        statement, why, fingerprint("lesson", statement), project_id)
+                    await conn.execute("INSERT INTO memory_candidate_sources(candidate_id,kind,journal_id) "
+                                       "VALUES ($1,'journal',$2)", candidate, journal)
+                    await conn.execute("INSERT INTO memory_candidate_events(candidate_id,action,actor_kind,via) "
+                                       "VALUES ($1,'activate','system','system')", candidate)
+        finally:
+            await conn.close()
+    asyncio.run(seed())
+
+
 def run_task(
     api: Api,
     task: EvalTask,
@@ -674,6 +710,7 @@ def run_task(
     vault_dir: Path | None = None,
     fake: bool = False,
     review_profile_id: str | None = None,
+    lesson_database_url: str | None = None,
 ) -> dict[str, Any]:
     """Create and start ``task`` in ``work_dir``, wait until it ends, and read back what it shows.
 
@@ -733,6 +770,11 @@ def run_task(
         return project_id
 
     try:
+        if task.lesson_seeds:
+            if lesson_database_url is None:
+                raise EvalError("lesson scenarios need their disposable database URL")
+            _seed_project_lessons(lesson_database_url, require_project(), task)
+
         if task.failure_handling:
             _confirmed(api, "/api/v1/engine_settings/update", {"failure_typing": "act"})
         if task.planner_may_choose:
@@ -887,6 +929,18 @@ def run_task(
             record_completion_checks=record_completion_checks,
         )
         result.update(metrics.attempt_fields(attempts_view))
+        if task.lesson_seeds:
+            lessons = api.post("/api/v1/memory/task_lessons", {"task_id": task_id, "limit": 200})["result"]
+            result["lesson_readback"] = lessons
+            items = [item for injection in lessons["injections"] if injection["state"] == "delivered"
+                     for item in injection["items"]]
+            if task.lesson_mode == "off" and lessons["injections"]:
+                result["problems"].append("disabled lesson scenario wrote injection history")
+            if task.lesson_mode == "on":
+                flag = "cited" if task.id == "memory_lessons_use" else "wrong"
+                if not any(item[flag] for item in items):
+                    result["problems"].append(f"no delivered lesson item was reported as {flag}")
+            result["success"] = bool(result["success"] and not result["problems"])
         if step_workspaces:
             result["looper_commits"] = looper_commits(work_dir, task_id)
     except Exception as exc:
@@ -1365,6 +1419,7 @@ def run(
                                                      planner_roles=planner_roles,
                                                      record_completion_checks=planner_roles is not None or worker_agent is not None,
                                                      review_profile_id=review_profile_id,
+                                                     lesson_database_url=database_url,
                                                      notes_root=notes_root, vault_dir=vault_dir, fake=mode == "fake"),
                 total_cap_usd=total_cap_usd,
                 reps=reps,

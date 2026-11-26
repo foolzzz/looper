@@ -1,4 +1,4 @@
-"""The default Manager's sessions while session routing is on (``session_routing``): a worker per session, and the
+"""A Manager's sessions while its session routing is on (``session_routing``): a worker per session, and the
 cap on resident processes.
 
 The Manager's message loop asks ``SessionRouter.target`` for each message. With routing on, a user message goes to
@@ -203,6 +203,10 @@ class SessionRouter:
 
         origin = _message_origin(envelope)
         client_id, _ = _message_client(envelope)
+        from ..managers_api import DEFAULT_MANAGER_ID
+
+        if self._agent.agent_id != DEFAULT_MANAGER_ID and not origin["group"]:
+            return session_routing.MAIN_KEY
         operator = await self._operator_id(origin["channel_id"]) if not origin["group"] else None
         return session_routing.session_key_for(origin, client_id=client_id, operator_id=operator)
 
@@ -223,6 +227,10 @@ class SessionRouter:
             key = SessionKey(SessionKind.DM, origin["channel_id"], origin["chat"])
         else:
             key = session_routing.session_key_for(origin, client_id=None, operator_id=operator)
+        from ..managers_api import DEFAULT_MANAGER_ID
+
+        if self._agent.agent_id != DEFAULT_MANAGER_ID and not origin["group"]:
+            key = session_routing.MAIN_KEY
         session = (self.session(key) if session_routing.routes(self._agent.agent_id)
                    else self._agent._sessions[MAIN_SESSION])
         item = _Completion(envelope, rows, batch)

@@ -381,6 +381,7 @@ def test_runtime_handshake_preserves_the_post_write_acceptance_budget(
             pool._inputs.pop("w1")
             pool._input_ready.pop("w1")
             reading, handshake = asyncio.Event(), asyncio.Event()
+            startup_lines = []
             factory = runtime_adapter.run_channel
 
             def channel_factory(*args: Any, **kwargs: Any) -> Any:
@@ -398,7 +399,7 @@ def test_runtime_handshake_preserves_the_post_write_acceptance_budget(
                     await wait_input_ready()
 
                 async def delayed_events():
-                    assert await args[0].stdout.readline() == b"STARTED\n"
+                    startup_lines.append(await args[0].stdout.readline())
                     reading.set()
                     await handshake.wait()
                     async for event in events():
@@ -417,6 +418,7 @@ def test_runtime_handshake_preserves_the_post_write_acceptance_budget(
                 payload={"task_id": "s1", "instruction": "write it", "context": {"work_dir": str(tmp_path)}},
             ))
             await asyncio.wait_for(reading.wait(), 3)
+            assert startup_lines == [b"STARTED\n"]
             now = loop.time()
             try:
                 with monkeypatch.context() as clock:

@@ -45,6 +45,22 @@ def test_only_the_default_managers_group_turns_are_isolated_while_routing_is_on(
     assert session_routing.group_isolation("manager-review") is GroupIsolation.SHARED
 
 
+def test_scenario_per_chat_selects_a_group_session_without_the_global_switch(tmp_path) -> None:
+    import asyncio
+
+    from looper.agents.managers_api import ManagerDefinition
+    from looper.agents.tiers.manager import ManagerAgent, ManagerConfig
+    from tests.test_manager_session_routing_db import _lark
+
+    definition = ManagerDefinition.from_row({
+        "id": "manager-synthetic", "name": "Synthetic", "tools": "all", "task_scope": "own",
+        "task_policy": "free", "enabled": True, "session_routing": "per_chat",
+    })
+    agent = ManagerAgent(config=ManagerConfig(work_dir=tmp_path), runtime_root=tmp_path, definition=definition)
+    target = asyncio.run(agent._router.target(_lark("synthetic question", "oc_synthetic", OTHER, group=True)))
+    assert target is not None and target.key == "group:channel-lark:oc_synthetic"
+
+
 def test_a_completion_turn_runs_in_the_session_of_the_chat_it_tells(monkeypatch, tmp_path) -> None:
     """The actually claimed event's chat decides: another sender's DM stays apart from the operator's main."""
     import asyncio

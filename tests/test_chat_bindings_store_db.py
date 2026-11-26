@@ -687,7 +687,8 @@ def test_extra_senders_upgrade_once_preserves_bindings_and_matches_fresh():
             assert await witness(old) == before and await structure(old) == shape
             await connection.ensure_schema(old)
             assert dict(await old.fetchrow("SELECT * FROM manager_chat_bindings")) == {
-                **before["manager_chat_bindings"][0], "allowed_senders": []}
+                **before["manager_chat_bindings"][0], "allowed_senders": [],
+                "default_scope": "legacy", "legacy_allowed": True, "suggested_scope": None}
             await connection.ensure_schema(fresh)
             assert await structure(old) == await structure(fresh)
             after, shape = await witness(old), await structure(old)

@@ -1,7 +1,7 @@
 import { callV1, V1Error } from "@/lib/v1";
 
 /** The sections of the "needs you" summary (`attention.summary`), in the order the server lists them. */
-export type AttentionKind = "gates" | "confirmations" | "schedules" | "logins" | "intents" | "ledger" | "deliveries" | "cost" | "failure_holds";
+export type AttentionKind = "gates" | "confirmations" | "schedules" | "logins" | "intents" | "ledger" | "deliveries" | "cost" | "failure_holds" | "reminders" | "vault_commits";
 
 /** One thing that waits for the operator. `facts` are the kind's own (`looper/agents/attention.py`). */
 export interface AttentionItem {
@@ -34,8 +34,8 @@ export interface AttentionSummary {
 }
 
 /** Read the feature setting without collecting a summary or provoking an off-state 409. */
-export async function attentionSettingsGet(): Promise<{ enabled: boolean }> {
-  const result = await callV1<{ enabled: boolean }>("/api/v1/attention/settings_get", {});
+export async function attentionSettingsGet(signal?: AbortSignal): Promise<{ enabled: boolean }> {
+  const result = await callV1<{ enabled: boolean }>("/api/v1/attention/settings_get", {}, { signal });
   if ("status" in result && result.status === "needs_confirmation")
     throw new V1Error(202, "unavailable", "The server asked to confirm a read.");
   return result as { enabled: boolean };

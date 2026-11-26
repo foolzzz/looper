@@ -59,6 +59,9 @@ from ..bus import MessageBus
 from ..claude_cli import ClaudeRunRecorder, RecordNotResumable, TurnBlocked, budget_error, ended_by, prompt_block
 from .. import admission, attempts, cost_guard, cost_dispatch, failures, outbound_hook, proc_tree, reported_files, vault
 from ...db import tasks as db_tasks
+from ...db import memory_lesson_injection as db_lesson_injection
+from .. import memory_lesson_injection as lesson_injection
+from ..memory_model import format_id
 from .. import keeper, kept_dirs
 from .. import worker_interruption
 from ..keeper.client import KeeperGone
@@ -370,6 +373,39 @@ async def _waiting_sleep(seconds: float) -> None:
 
 
 def judge_result(
+    result_event: dict[str, Any] | None,
+    *,
+    work_dir: Path,
+    is_verify: bool,
+    started_at: datetime | None = None,
+    runtime_label: str = "Claude Code",
+    runtime_type: str | None = None,
+    failure_detail: str | None = None,
+    severity: bool = False,
+    lesson_ids: Collection[int] = (),
+) -> dict[str, Any]:
+    """Judge the ordinary report, retaining only references this run received.
+
+    A malformed optional reference never turns an otherwise useful report into
+    a task failure. The delivered injection remains the authority for accounting.
+    """
+    outcome = _judge_result(result_event, work_dir=work_dir, is_verify=is_verify,
+                            started_at=started_at, runtime_label=runtime_label, runtime_type=runtime_type,
+                            failure_detail=failure_detail, severity=severity)
+    if lesson_ids:
+        report = (extract_report(str((result_event or {}).get("result") or ""),
+                                 "passed" if is_verify else "status") or {}) if (
+            result_event and result_event.get("subtype") == "success" and not result_event.get("is_error")) else {}
+        refs = lesson_injection.parse_references(report, lesson_ids)
+        outcome.update(lessons_used=[format_id(i) for i in refs.used],
+                       lessons_wrong=[format_id(i) for i in refs.wrong])
+        if refs.invalid or refs.conflicts:
+            outcome["lesson_reference_diagnostics"] = {
+                "invalid": list(refs.invalid), "conflicts": [format_id(i) for i in refs.conflicts]}
+    return outcome
+
+
+def _judge_result(
     result_event: dict[str, Any] | None,
     *,
     work_dir: Path,
@@ -701,6 +737,9 @@ class RunContext:
     attempt_id: int | None = None
     run_failure: attempts.RunFailure | None = None
     outcome: RunOutcome = RunOutcome.RUN_FAILED
+    lesson_block: lesson_injection.LessonBlock = lesson_injection.EMPTY_BLOCK
+    lesson_injection_id: int | None = None
+    lesson_delivered: bool = False
 
 
 def _verification_paths(work_dir: str) -> tuple[Path, list[str]]:
@@ -1113,6 +1152,9 @@ class WorkerPool:
         # The Planner exposes a dispatched step before its run has an input channel.
         # Corrections in that window must wait for startup rather than look like a finished run.
         self._input_ready: dict[str, asyncio.Event] = {}
+        # Once launch begins, shutdown must let its initial input finish before detaching.
+        self._launching_kept: dict[str, tuple[KeptRun, asyncio.Event]] = {}
+        self._detaching_kept = False
         self._input_deliveries: set[asyncio.Task[None]] = set()
         # The agent room's tools for the runs (``ops.room.RoomOps``); without them a run has no room.
         self.room_ops: Any = None
@@ -1275,6 +1317,23 @@ class WorkerPool:
                 wp.handle.fence()
 
     async def detach_kept(self, *, epoch: int, timeout: float = 3.0) -> dict[DetachKind, list[str]]:
+        self._detaching_kept = True
+        starting = []
+        for wid, wp in list(self._active.items()):
+            if not isinstance(wp.handle, KeptRun) or wid not in self._tasks:
+                continue
+            launching = self._launching_kept.get(wid)
+            if launching is not None and launching[0] is wp.handle:
+                ready = launching[1]
+                if not ready.is_set():
+                    starting.append(asyncio.create_task(ready.wait()))
+            elif wp.handle.state is KeptRunState.STARTING:
+                # No launch has begun: cancellation leaves the persisted step for re-dispatch.
+                self._tasks[wid].cancel()
+        if starting:
+            # Launch and channel.start have their own timeouts. Never cancel a launch that may
+            # already have spawned its child just because the detach transport budget expired.
+            await asyncio.gather(*starting)
         deadline = asyncio.get_running_loop().time() + KEPT_DETACH_BUDGET_SEC
 
         def remaining():
@@ -1404,6 +1463,15 @@ class WorkerPool:
                              verification=manifest.get("verification"),
                              verification_source=manifest.get("verification_source"),
                              attempt_id=record.get("attempt_id"))
+            lesson_id = manifest.get("lesson_injection_id") or (record.get("metadata") or {}).get("lesson_injection_id")
+            if type(lesson_id) is int:
+                delivery = await db_lesson_injection.get_injection(lesson_id)
+                if delivery is not None and delivery["task_id"] == task_id and delivery["agent_kind"] == agent.value:
+                    ctx.lesson_injection_id = lesson_id
+                    ctx.lesson_block = delivery["block"]
+                    ctx.lesson_delivered = delivery["state"] == "delivered"
+                    if delivery["state"] == "prepared":
+                        await db_lesson_injection.mark_uncertain(lesson_id)
             wp = WorkerProcess(worker_id=run_id, task_id=step_id, plan_id=manifest.get("plan_id") or "",
                                role=agent, parent_task_id=task_id, step=manifest.get("step_key") or "",
                                instruction=manifest.get("instruction") or "", task_role=run_role(manifest.get("task_role")),
@@ -1862,14 +1930,19 @@ class WorkerPool:
             logger.debug("worker %s already active, skipping", worker_id)
             return
 
-        role = "reviewer" if envelope.message_type is MessageType.VERIFY_REQUEST else "worker"
-        logger.info("dispatching %s %s%s (active=%d)", role, worker_id,
-                    _task_step_log(envelope.payload.get("parent_task_id", ""), envelope.payload.get("task_id")),
-                    len(self._active))
         self._input_ready[worker_id] = asyncio.Event()
-        task = asyncio.create_task(self._run_worker(envelope))
+        task = asyncio.create_task(self._dispatch_when_serving(envelope))
         self._tasks[worker_id] = task
         task.add_done_callback(lambda t: self._cleanup_worker(worker_id))
+
+    async def _dispatch_when_serving(self, envelope: MessageEnvelope) -> None:
+        if self._drain is not None:
+            await self._drain.wait_serving()
+        role = "reviewer" if envelope.message_type is MessageType.VERIFY_REQUEST else "worker"
+        logger.info("dispatching %s %s%s (active=%d)", role, envelope.target.agent_id,
+                    _task_step_log(envelope.payload.get("parent_task_id", ""), envelope.payload.get("task_id")),
+                    len(self._active))
+        await self._run_worker(envelope)
 
     def _cleanup_worker(self, worker_id: str) -> None:
         if ready := self._input_ready.pop(worker_id, None):
@@ -1877,6 +1950,8 @@ class WorkerPool:
         self._tasks.pop(worker_id, None)
         self._active.pop(worker_id, None)
         self._admission_waiting.discard(worker_id)
+        if launching := self._launching_kept.pop(worker_id, None):
+            launching[1].set()
         held = self._slots.pop(worker_id, None)
         if held is not None:
             self._wake_slot_waiters(held)
@@ -1891,10 +1966,20 @@ class WorkerPool:
     def drain_waiting(self) -> dict[str, Any]:
         # Keep the slot counted through result publication, not just subprocess completion.
         return {"runs": [{"worker_id": wp.worker_id, "task_id": wp.parent_task_id or wp.task_id,
-                          "role": wp.role.value, "since": wp.since.isoformat(), "keepable": wp.keepable,
+                          "role": wp.role.value, "since": wp.since.isoformat(),
+                          "keepable": wp.keepable and self._ready_to_keep(wid, wp.handle),
                           "runtime_id": wp.runtime_id, "runtime_type": wp.runtime_type}
                          for wid, wp in self._active.items()
                          if wid in self._slots and wid not in self._admission_waiting]}
+
+    def _ready_to_keep(self, worker_id: str, handle: RunHandle | None) -> bool:
+        if isinstance(handle, KeptRun) and handle.state is KeptRunState.STARTING:
+            return False
+        launching = self._launching_kept.get(worker_id)
+        if launching is not None and launching[0] is handle:
+            return launching[1].is_set()
+        ready = self._input_ready.get(worker_id)
+        return ready is None or ready.is_set()
 
     async def recheck(self) -> None:
         """Let every run waiting for room in its task check its task's limit again (a limit changed)."""
@@ -2321,6 +2406,15 @@ class WorkerPool:
                                             room=False, kept=kept)
             launch = replace(launch, tool_hook=self.room_ops.tool_hook(token, worker_id, self._runtime_root,
                                                                        self._config.claude_bin, launch.library))
+        lesson_block = lesson_injection.EMPTY_BLOCK
+        lesson_delivery = None
+        if parent_task_id and project_id and (project or {}).get("memory_lessons") == "on":
+            lesson_block = await lesson_injection.render_for_run(parent_task_id, project_id, agent.value)
+            if lesson_block.text:
+                lesson_delivery = await db_lesson_injection.prepare_injection(
+                    parent_task_id, agent.value, f"run:{uuid.uuid4().hex}", lesson_block,
+                    project_id=project_id, step_id=payload.get("task_id") or None)
+                lesson_block = lesson_delivery["block"] if lesson_delivery else lesson_injection.EMPTY_BLOCK
         background = str((project or {}).get("background") or "")
         if task_role is None:
             system_prompt = build_system_prompt(
@@ -2335,11 +2429,13 @@ class WorkerPool:
                 step_id=payload.get("task_id") or None,
                 task=self._task_section(payload, work_dir, is_verify=is_verify),
                 contract_name="REVIEW_CONTRACT" if is_verify else "WORK_CONTRACT",
-                contract=(review_contract(payload.get("severity") is True, evidence=bool(payload.get("evidence")))
-                          if is_verify else work_contract(runtime)),
+                contract=(review_contract(payload.get("severity") is True, evidence=bool(payload.get("evidence")),
+                                          lessons=lesson_block.text)
+                          if is_verify else work_contract(runtime, lessons=lesson_block.text)),
                 knowledge=knowledge,
                 room=room_text,
                 vault=vault_text,
+                lessons=lesson_block.text,
             )
         else:
             system_prompt = build_role_prompt(
@@ -2353,11 +2449,13 @@ class WorkerPool:
                 step_id=payload.get("task_id") or None,
                 task=self._task_section(payload, work_dir, is_verify=is_verify),
                 contract_name="REVIEW_CONTRACT" if is_verify else "WORK_CONTRACT",
-                contract=(review_contract(payload.get("severity") is True, evidence=bool(payload.get("evidence")))
-                          if is_verify else work_contract(runtime)),
+                contract=(review_contract(payload.get("severity") is True, evidence=bool(payload.get("evidence")),
+                                          lessons=lesson_block.text)
+                          if is_verify else work_contract(runtime, lessons=lesson_block.text)),
                 knowledge=knowledge,
                 room=room_text,
                 vault=vault_text,
+                lessons=lesson_block.text,
             )
             if parent_task_id:
                 await self._activity(parent_task_id, worker_id, "phase",
@@ -2389,6 +2487,8 @@ class WorkerPool:
         try:
             prompt_file = system_prompt.write_file(self._runtime_root)
         except OSError as exc:
+            if lesson_delivery:
+                await db_lesson_injection.abandon_injection(lesson_delivery["id"])
             problem = f"Cannot write the system prompt file: {exc}"
             logger.error("worker %s: %s", worker_id, problem)
             if is_verify:
@@ -2431,6 +2531,8 @@ class WorkerPool:
                                     "launcher": launch.profile.runtime.launcher.value,
                                     "max_budget_usd": launch.max_budget_usd},
                     })
+                    if lesson_delivery:
+                        handle.manifest["lesson_injection_id"] = lesson_delivery["id"]
                     if verification is not None:
                         handle.manifest["verification"] = verification
                         handle.manifest["verification_source"] = verification_source
@@ -2444,6 +2546,8 @@ class WorkerPool:
                                         task_budget_usd=execution.task_budget_usd if parent_task_id else None,
                                         label=f"worker {worker_id}")
         except (RuntimeUnsupported, OSError) as exc:
+            if lesson_delivery:
+                await db_lesson_injection.abandon_injection(lesson_delivery["id"])
             problem = f"Cannot prepare {runtime.label}: {exc}"
             logger.error("worker %s: %s", worker_id, problem)
             if parent_task_id:
@@ -2477,7 +2581,9 @@ class WorkerPool:
                           verification=verification, verification_source=verification_source,
                           advisor_consult=consult if isinstance(consult := payload.get("advisor_consult"), int)
                           and not isinstance(consult, bool) else None,
-                          attempt_id=attempt if type(attempt := payload.get("attempt_id")) is int else None)
+                          attempt_id=attempt if type(attempt := payload.get("attempt_id")) is int else None,
+                          lesson_block=lesson_block,
+                          lesson_injection_id=lesson_delivery["id"] if lesson_delivery else None)
 
     async def _execute(self, envelope: MessageEnvelope, *, is_verify: bool = False,
                        started_at: datetime | None = None) -> dict[str, Any]:
@@ -2542,6 +2648,10 @@ class WorkerPool:
                 break
             finally:
                 self._admission_waiting.discard(ctx.worker_id)
+                if ctx.lesson_injection_id is not None and not ctx.lesson_delivered:
+                    # Admission or setup may exit before the transport even starts.
+                    # The store changes only prepared rows; unknown sends stay uncertain.
+                    await db_lesson_injection.abandon_injection(ctx.lesson_injection_id)
                 if not admission_refused and not is_verify and not (isinstance(ctx.handle, KeptRun)
                                           and ctx.handle.state is KeptRunState.DETACHED):
                     await attempts.worker_finished(ctx.attempt_id, ctx.outcome, ctx.run_failure)
@@ -2660,6 +2770,8 @@ class WorkerPool:
         role = "reviewer" if is_verify else "worker"
         task_step = _task_step_log(parent_task_id, ctx.step_id)
         assert handle is not None
+        if isinstance(handle, KeptRun) and self._detaching_kept:
+            raise asyncio.CancelledError  # shutdown won admission before this attempt could spawn
         recorder = ClaudeRunRecorder(
             agent_id=worker_id,
             task_id=parent_task_id,
@@ -2673,6 +2785,9 @@ class WorkerPool:
             pid_of=lambda: handle.pid,
         )
         async with self._record_run(worker_id, recorder):
+            if ctx.lesson_injection_id is not None:
+                await db_lesson_injection.bind_injection_record(ctx.lesson_injection_id, recorder.record_id)
+                await recorder.annotate({"lesson_injection_id": ctx.lesson_injection_id})
             if is_verify:
                 await attempts.link_record(ctx.attempt_id, recorder.record_id)
             else:
@@ -2696,6 +2811,8 @@ class WorkerPool:
                         logger.warning("worker %s cannot start verification write monitoring", worker_id, exc_info=True)
                         if ctx.verification_writes is not None:
                             ctx.verification_writes.close()
+                        if ctx.lesson_injection_id is not None:
+                            await db_lesson_injection.abandon_injection(ctx.lesson_injection_id)
                         error = "Verification write monitoring unavailable; the agent was not started."
                         await handle.end()
                         await recorder.finish(output_text=None, result_event=None, error=error,
@@ -2704,6 +2821,7 @@ class WorkerPool:
                                 "summary": error, "verification": ctx.verification}
                 if isinstance(handle, KeptRun):
                     handle.set_record(recorder.record_id)
+                    self._launching_kept[worker_id] = (handle, asyncio.Event())
                 await handle.launch()
                 if runtime.type == "acp":
                     await recorder.annotate(handle.launch_record)
@@ -2714,6 +2832,8 @@ class WorkerPool:
                     if isinstance(handle, ProcessRun):
                         wp.process = handle.process
             except RuntimeUnsupported as exc:
+                if ctx.lesson_injection_id is not None:
+                    await db_lesson_injection.abandon_injection(ctx.lesson_injection_id)
                 ctx.fallback_reason = "start_error"
                 await handle.end()
                 error = f"Cannot prepare {runtime.label}: {exc}"
@@ -2722,6 +2842,8 @@ class WorkerPool:
                 result = _verify_failed(error) if is_verify else _work_failed(error)
                 return await self._verification_result(ctx, result) if ctx.verification is not None else result
             except RunStartError as exc:
+                if ctx.lesson_injection_id is not None:
+                    await db_lesson_injection.abandon_injection(ctx.lesson_injection_id)
                 ctx.fallback_reason = None if runtime.type == "acp" else "start_error"
                 if runtime.type == "acp":
                     await recorder.annotate(handle.launch_record)
@@ -2737,6 +2859,8 @@ class WorkerPool:
                     result["acp_write_policy"] = handle.launch_record.get("acp_write_policy")
                 return await self._verification_result(ctx, result) if ctx.verification is not None else result
             except BaseException as exc:
+                if ctx.lesson_injection_id is not None:
+                    await db_lesson_injection.mark_uncertain(ctx.lesson_injection_id)
                 # Launch can fail after it has started a process. Stop it before
                 # draining writes, just as the consuming path does on interruption.
                 await handle.end()
@@ -2861,7 +2985,9 @@ class WorkerPool:
             nonlocal result_event, finished, last_result, replay_events
             nonlocal waiting, waiting_turn, waiting_deadline, repairs
             async for event in channel.events():
-                ctx.model_events += int(runtime.is_model_event(event))
+                model_event = runtime.is_model_event(event)
+                ctx.model_events += int(model_event)
+                # Replayed output cannot confirm a delivery left uncertain by a host crash.
                 replaying = isinstance(handle, KeptRun) and handle.replaying
                 if replaying:
                     recorder.account(event, replayed=True)
@@ -3114,6 +3240,10 @@ class WorkerPool:
                             await channel.start(CONTINUATION_PROMPT, resume=True)
                         else:
                             await channel.start(prompt)
+                        if ctx.lesson_injection_id is not None and not ctx.lesson_delivered:
+                            await db_lesson_injection.mark_delivered(ctx.lesson_injection_id,
+                                                                    record_id=recorder.record_id)
+                            ctx.lesson_delivered = True
                     self._inputs[worker_id] = channel
                     if ready := self._input_ready.get(worker_id):
                         ready.set()
@@ -3122,10 +3252,15 @@ class WorkerPool:
                             parent_task_id, seat, receipt=push,
                             receipt_fallback=runtime.room_receipt_fallback))
                 except (BrokenPipeError, ConnectionResetError):
+                    if ctx.lesson_injection_id is not None and not ctx.lesson_delivered:
+                        await db_lesson_injection.mark_uncertain(ctx.lesson_injection_id)
                     # The process exited before reading; its output decides the outcome.
                     logger.warning("worker %s: Claude closed stdin before the prompt was sent", worker_id)
                 if (ready := self._input_ready.get(worker_id)) is not None:
                     ready.set()
+                launching = self._launching_kept.get(worker_id)
+                if launching is not None and launching[0] is handle:
+                    launching[1].set()
 
                 await asyncio.wait_for(_read_output(), timeout=max(0, deadline - time.monotonic())
                                        if deadline is not None else None)
@@ -3184,6 +3319,8 @@ class WorkerPool:
                 if (wp := self._active.get(worker_id)) is not None:
                     wp.handle, wp.process = handle, handle.process
         except BaseException as exc:
+            if ctx.lesson_injection_id is not None and not ctx.lesson_delivered:
+                await db_lesson_injection.mark_uncertain(ctx.lesson_injection_id)
             if isinstance(handle, KeptRun) and handle.state is KeptRunState.DETACHED:
                 recorder.detach()
                 raise
@@ -3292,7 +3429,16 @@ class WorkerPool:
         outcome = await asyncio.to_thread(judge_result, result_event, work_dir=Path(work_dir), is_verify=is_verify,
                                           started_at=started_at, runtime_label=runtime.label, runtime_type=runtime.type,
                                           failure_detail=detail,
-                                          severity=ctx.severity)
+                                          severity=ctx.severity,
+                                          **({"lesson_ids": ctx.lesson_block.candidate_ids}
+                                             if ctx.lesson_delivered else {}))
+        if ctx.lesson_delivered and ctx.lesson_injection_id is not None:
+            report = (extract_report(str((result_event or {}).get("result") or ""),
+                                     "passed" if is_verify else "status") or {}) if (
+                result_event and result_event.get("subtype") == "success" and not result_event.get("is_error")) else {}
+            refs = lesson_injection.parse_references(report, ctx.lesson_block.candidate_ids)
+            reference_result = await db_lesson_injection.apply_references(ctx.lesson_injection_id, refs)
+            await recorder.annotate({"lesson_references": reference_result})
         if not is_verify:
             outcome.update(head=await asyncio.to_thread(_git_head, work_dir), runtime_id=launch.profile.runtime.id)
         elif ctx.head is not None and await asyncio.to_thread(_git_head, work_dir) != ctx.head:

@@ -64,7 +64,7 @@ from ...db import ledger as db_ledger, manager_actions as db_actions, managers a
 from ..managers_api import DEFAULT_MANAGER_ID, ManagerDefinition, ManagerTools, TaskPolicy, TaskScope
 from ..message import BOT_CHANNEL_TYPES, MessageEnvelope, builtin_channel_id
 from ..operator_identity import is_operator, operator_sender_id
-from .. import session_routing
+from .. import session_routing, session_visibility
 from ..reminders import reminders_on
 from ..tiers.manager_session import MAIN_SESSION, on_session_replaced
 from ..turn_context import SpeakerKind
@@ -467,11 +467,20 @@ class ManagerOps:
         listed only in such a turn, never with no turn running."""
         turn = (turn or self._turn) if session_key is None else (
             self._session_turns.get(session_key) or Turn(channel=None, chat=None))
+        key = session_key if session_key is not None else self._session_of(turn)
+        if (policy := session_visibility.for_session(key, manager_id=self._scope.manager_id)) is not None:
+            # Filter before reading any global schemas (templates, workflows, settings).
+            from .session_tools import TOOLS as SESSION_TOOLS
+
+            return [tool.listing() for tool in SESSION_TOOLS if tool.name in policy.tools]
         tools = list((await self.current_scope()).tools.values())
         if any(_audience(tool) is Audience.OPERATOR for tool in tools) and not (
                 turn is not None and await _operator_turn(turn)):
             tools = [tool for tool in tools if _audience(tool) is Audience.ANY]
         return [task_directory_tool(project_tool(tool)).listing() for tool in tools]
+
+    def _session_of(self, turn: Turn | None) -> str:
+        return next((key for key, active in self._session_turns.items() if active is turn), MAIN_SESSION)
 
     async def _authorize(self, scope: OpsScope, name: str, arguments: Mapping[str, Any]) -> Tool:
         """The one check of what ``scope`` allows: the tool is among its tools, a read-only tool is only read, and
@@ -550,6 +559,15 @@ class ManagerOps:
         binding only observes: the call runs in the turn running when it comes, as it did before turns were bound,
         and each disagreement is logged and counted (``binding_report``), never refused. An authenticated session
         can only use its own bindings, in either mode."""
+        bound = self._bindings.get(binding) if binding else None
+        if bound is not None and session_key is not None and self._binding_sessions.get(binding) != session_key:
+            self._mismatch("other_session", bound, name, enforced=True)
+            return _error(ErrorCode.FORBIDDEN, "this turn belongs to another session; the call did not run")
+        key = session_key if session_key is not None else self._binding_sessions.get(
+            binding or "", self._session_of(bound or self._turn))
+        if (policy := session_visibility.for_session(key, manager_id=self._scope.manager_id)) is not None:
+            return await self._call_session(name, raw, binding=binding, call_id=call_id, session_key=key,
+                                            policy=policy)
         tool = self._scope.tools.get(name) or _MANAGER_TOOL_NAMES.get(name) or _LEDGER_TOOLS.get(name)
         if tool is None:
             from .planner import TOOLS as PLANNER_TOOLS
@@ -562,9 +580,6 @@ class ManagerOps:
         enforced = (chat_settings.stop_enabled() or session_routing.routes(self._scope.manager_id)
                     or bool(self._routed_turns) or session_key not in (None, MAIN_SESSION))
         bound = self._bindings.get(binding) if binding else None
-        if bound is not None and session_key is not None and self._binding_sessions.get(binding) != session_key:
-            self._mismatch("other_session", bound, name, enforced=True)
-            return _error(ErrorCode.FORBIDDEN, "this turn belongs to another session; the call did not run")
         self._observe_turn(name, binding, bound, enforced=enforced)
         turn = (bound if enforced else self._turn) or Turn(channel=None, chat=None)
         if _audience(tool) is Audience.OPERATOR:
@@ -659,6 +674,61 @@ class ManagerOps:
                 return _error(exc.code, str(exc), watch.shown)
         if watch.shown is not None and isinstance(result, dict):
             result.setdefault("shown_to_user", watch.shown)  # after the record: the trail keeps the tool's own result
+        return {"status": "ok", "result": result}
+
+    async def _call_session(self, name: str, raw: Any, *, binding: str | None, call_id: str | None,
+                            session_key: str, policy: session_visibility.SessionAllowlist) -> dict[str, Any]:
+        from . import session_tools
+        from ...db.connection import get_pool
+
+        turn = self._bindings.get(binding) if binding else None
+        if turn is None or self._binding_sessions.get(binding) != session_key:
+            return _error(ErrorCode.FORBIDDEN, session_tools.SESSION_ERRORS[ErrorCode.FORBIDDEN])
+        tool = next((t for t in session_tools.TOOLS if t.name == name and name in policy.tools), None)
+        if tool is None:
+            return _error(ErrorCode.FORBIDDEN, session_tools.SESSION_ERRORS[ErrorCode.FORBIDDEN])
+        arguments, risk = {}, tool.risk
+        try:
+            arguments = check_arguments(tool.schema, raw)
+            rule = session_visibility.SESSION_TOOL_RULES[name]
+            task_id = tool.task_id(arguments)
+            if task_id is not None or (name == "looper_chat_tasks" and arguments["action"] == "get"):
+                await session_tools._owned_task(get_pool(), task_id or "", session_key, self._scope.manager_id)
+            actor = await session_tools.initiator(turn)
+            _check_answering(turn)
+            if risk is not Risk.READ:
+                if actor is session_tools.Initiator.NONE:
+                    raise OpError(ErrorCode.NEEDS_USER_TURN, session_tools.SESSION_ERRORS[ErrorCode.NEEDS_USER_TURN])
+                if actor is not session_tools.Initiator.OPERATOR:
+                    # Reuse the refusal contract, deriving missing identity from this read only.
+                    refusal = _OperatorOnly(replace(turn, operator_id_missing=actor is session_tools.Initiator.NO_OPERATOR_ID))
+                    raise refusal
+                if rule.operator is not session_visibility.WriteGate.RUN:
+                    raise OpError(ErrorCode.FORBIDDEN, session_tools.HIGH_REFUSAL)
+                if turn.require_match and not await self._matched(binding, name, arguments, call_id):
+                    raise OpError(ErrorCode.NOT_THIS_TURN, session_tools.SESSION_ERRORS[ErrorCode.NOT_THIS_TURN])
+                _check_answering(turn)
+                if await self._outbound_check(tool, arguments, turn, risk):
+                    raise OpError(ErrorCode.BLOCKED, session_tools.SESSION_ERRORS[ErrorCode.BLOCKED])
+            call = Call(arguments, turn, self._platform, scope=self._scope,
+                        confirmation={"session_key": session_key})
+            if tool.escalate is not None and await tool.escalate(call) is not None:
+                risk = Risk.HIGH
+                raise OpError(ErrorCode.FORBIDDEN, session_tools.HIGH_REFUSAL)
+            _check_answering(turn)
+            answer = await tool.run(call)
+            result = _plain(session_tools.project(name, arguments, answer))
+        except OpError as exc:
+            message = str(exc) if isinstance(exc, _OperatorOnly) or str(exc) == session_tools.HIGH_REFUSAL else (
+                session_tools.SESSION_ERRORS[exc.code])
+            await self._record(turn, tool, arguments, risk, "error", error_code=exc.code.value,
+                               result={"reason": "operator_only"} if isinstance(exc, _OperatorOnly) else {"message": message})
+            return _error(exc.code, message)
+        except Exception:
+            logger.exception("session task tool failed: %s", name)
+            await self._record(turn, tool, arguments, risk, "error", error_code=ErrorCode.UNAVAILABLE.value)
+            return _error(ErrorCode.UNAVAILABLE, session_tools.SESSION_ERRORS[ErrorCode.UNAVAILABLE])
+        await self._record(turn, tool, arguments, risk, "ok", result=None if risk is Risk.READ else result)
         return {"status": "ok", "result": result}
 
     async def _confirm(self, confirmation_id: str, turn: Turn) -> dict[str, Any]:
@@ -1037,7 +1107,7 @@ class ManagerOps:
             raise ValueError("a Manager session needs a key")
         if session_key == MAIN_SESSION or self._turn_file is None:
             return self._turn_file
-        return (self._turn_file.parent / "manager-sessions" / session_routing.key_digest(session_key)
+        return (self._turn_file.parent / "manager-sessions" / session_routing.session_digest(self._scope.manager_id, session_key)
                 / ".local" / "manager-turn.json")
 
     def publish_binding(self, binding: str | None, *, session_key: str = MAIN_SESSION) -> None:
@@ -1075,6 +1145,8 @@ class ManagerOps:
         """``turn`` runs now; the note its message starts with (``_begin_turn``), then, in a user turn, what the
         operator's card buttons did in this chat since its last one (``_note_button``)."""
         note = self._begin_turn(turn, binding, session_key=session_key)
+        if session_visibility.for_session(session_key, manager_id=self._scope.manager_id) is not None:
+            return ""
         return "\n".join(part for part in (note, *self._take_button_notes(turn, session_key)) if part)
 
     def _take_button_notes(self, turn: Turn, session_key: str) -> list[str]:
@@ -1163,6 +1235,8 @@ class ManagerOps:
             self._routed_turns[id(turn)] = turn
         if binding:
             self.register(turn, binding, session_key=session_key)
+        if session_visibility.for_session(session_key, manager_id=self._scope.manager_id) is not None:
+            return ""
         pending = self._pending.get(turn.chat_key)
         if turn.autonomous or pending is None:
             return ""

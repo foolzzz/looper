@@ -70,6 +70,7 @@ from typing import TYPE_CHECKING, Any
 from urllib.parse import urlsplit
 
 from .. import child_env
+from .chat_scopes import LaunchMode
 from .llmrec import LlmrecRoute, LlmrecSkip, SkipReason
 from .model_names import MODEL_MAX_CHARS, MODEL_NAME
 
@@ -1152,7 +1153,7 @@ class Launch:
     def _check_binding(self) -> None:
         from .runtimes import RuntimeUnsupported
 
-        if self.platform_tools_only and not self.runtime.supports_platform_tools_only:
+        if self.platform_tools_only and LaunchMode.PLATFORM_TOOLS not in self.runtime.launch_modes:
             raise RuntimeUnsupported(f"{self.runtime.label} cannot restrict a routed Manager session to platform tools")
         if self.settings.profile_error:
             raise RuntimeUnsupported(self.settings.profile_error)

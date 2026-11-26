@@ -76,6 +76,7 @@ def test_the_built_in_lark_rows_of_one_app_both_run_and_an_added_bot_of_it_does_
 class _Registry:
     def __init__(self) -> None:
         self.adapters: list[Any] = []
+        self.routing_requests = []
 
     async def start_bot(self, channel_id, start):
         try:
@@ -84,7 +85,8 @@ class _Registry:
             pass
 
     def resolve_chat(self, channel_id: str, chat_id: str):
-        raise AssertionError("this construction-only registry does not receive ingress")
+        self.routing_requests.append((channel_id, chat_id))
+        raise RuntimeError("this construction-only registry does not receive ingress")
 
     async def register(self, adapter: Any) -> None:
         self.adapters.append(adapter)
@@ -122,6 +124,7 @@ async def _pass(types: tuple[str, ...], tmp_path: Path, running: Any = lambda ma
         pass
 
     await serve._register_bots(registry, rows, tmp_path, running, types, stop_chat=stop)  # type: ignore[arg-type]
+    assert registry.routing_requests == []
     assert all(a._resolve_chat == registry.resolve_chat and a._stop_chat is stop for a in registry.adapters)
     return registry.adapters
 
@@ -516,6 +519,8 @@ def test_startup_bot_backlog_reaches_only_an_enabled_manager(
         incoming: list[str] = ["sent while offline"] if channel_type == "telegram" else []
         bot, transport = _Bot(), StubTransport()
         pending = incoming.copy()
+        polling_drops = []
+        readiness = []
         update_id = 0
         stopped_at = int(time.time()) - 1200
 
@@ -567,7 +572,7 @@ def test_startup_bot_backlog_reaches_only_an_enabled_manager(
                 await inbox.close()
 
                 async def start_polling(*, drop_pending_updates: bool) -> None:
-                    assert drop_pending_updates is False
+                    polling_drops.append(drop_pending_updates)
                     for text in pending:
                         await telegram_update(adapter, text, sent_at=stopped_at + 10, duplicate=True)
                     await telegram_update(adapter, "stale private content", sent_at=stopped_at - 601)
@@ -640,7 +645,7 @@ def test_startup_bot_backlog_reaches_only_an_enabled_manager(
 
         async def ready(supervisor: Any, agent_id: str) -> None:
             # The real start_all has replayed the journal; inspect before any agent consumes its queue.
-            assert len(servers) == 1 and servers[0]._server.is_serving()
+            readiness.append(len(servers) == 1 and servers[0]._server.is_serving())
             await asyncio.wait_for(checks_logged.wait(), 3)
             raise Started
 
@@ -671,6 +676,8 @@ def test_startup_bot_backlog_reaches_only_an_enabled_manager(
             with pytest.raises(Started):
                 await asyncio.wait_for(serve._run_agent_system(ops=ops, runtime_root=tmp_path, work_dir=tmp_path,
                                                                skip_backup=True), 30)
+            assert readiness == [True]
+            assert polling_drops == ([False] if channel_type == "telegram" else [])
             assert adapters and incoming
             if first_fails:
                 assert all(registry.get(f"channel-{channel_type}") is None for registry in registries)

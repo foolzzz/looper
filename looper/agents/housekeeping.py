@@ -43,6 +43,7 @@ class Report:
     provider_admission_events: int = 0
     decision_snapshots: int = 0
     proactive_deliveries: int = 0
+    proactive_bodies: int = 0
     idle_checks: int = 0
     logs: int = 0
     log_bytes: int = 0
@@ -54,6 +55,8 @@ class Report:
     chat_attachments: int = 0
     skill_tombstones: int = 0
     skill_proposals_expired: int = 0
+    lessons_expired: int = 0
+    lesson_injections: int = 0
     rotated: list[str] = field(default_factory=list)
     failed_steps: dict[str, str] = field(default_factory=dict)
 
@@ -291,6 +294,13 @@ async def run_once(runtime_root: Path, now: datetime, *, current_runner: Path | 
         async with db_connection.transaction() as conn:
             report.skill_proposals_expired = await expire_due(conn, now)
         await notify_pending(now=now)
+    with _step(report, "project lessons"):
+        from . import memory_lessons
+        from ..db import memory_lesson_injection
+
+        if (await memory_lessons.settings_view())["enabled"]:
+            report.lessons_expired = await memory_lesson_injection.expire_due(now=now)
+            report.lesson_injections = await memory_lesson_injection.purge_logs(now=now)
     with _step(report, "decision snapshots"):
         # Off, nothing writes the table, this cleanup included: rows of an earlier window stay with their task.
         async with db_connection.transaction() as conn:
@@ -301,6 +311,11 @@ async def run_once(runtime_root: Path, now: datetime, *, current_runner: Path | 
             report.decision_snapshots += count
             if count == 0:
                 break
+
+    with _step(report, "proactive bodies"):
+        while (count := await proactive_deliveries.clear_bodies(
+                now - timedelta(days=proactive_deliveries.BODY_RETENTION_DAYS))):
+            report.proactive_bodies += count
 
     # Delivery writes this table while metrics are off, so the 90-day cleanup follows the rows.
     with _step(report, "proactive deliveries"):
@@ -345,11 +360,11 @@ async def run_once(runtime_root: Path, now: datetime, *, current_runner: Path | 
         with _step(report, f"log rotation {name}"):
             if await asyncio.to_thread(rotate, runtime_root / "logs" / name, at_bytes=ROTATE_AT_BYTES, keep=ROTATE_KEEP):
                 report.rotated.append(name)
-    logger.info("housekeeping runs_deleted=%d notifications_deleted=%d manager_events_deleted=%d "
+    logger.info("housekeeping proactive_bodies_cleared=%d runs_deleted=%d notifications_deleted=%d manager_events_deleted=%d "
                 "decision_snapshots_deleted=%d logs_deleted=%d log_bytes=%d "
                 "run_dirs=%d runner_files=%d llm_requests=%d llm_routes=%d llm_route_files=%d chat_attachments=%d "
                 "skill_tombstones=%d provider_admission_events=%d rotated=%s failed_steps=%s",
-                report.runs, report.notifications, report.manager_events, report.decision_snapshots, report.logs,
+                report.proactive_bodies, report.runs, report.notifications, report.manager_events, report.decision_snapshots, report.logs,
                 report.log_bytes, report.run_dirs, report.runner_files,
                 report.llm_requests, report.llm_routes, report.llm_route_files, report.chat_attachments,
                 report.skill_tombstones, report.provider_admission_events, ",".join(report.rotated), report.failed_steps)

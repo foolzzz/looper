@@ -29,8 +29,8 @@ WAIT_SETTING = _object({
 WAIT_SETTINGS = _object({name: WAIT_SETTING for name in ("max_wait_seconds", "min_check_seconds")}, closed=True)
 VAULT_SETTINGS = _object({
     "configured": _BOOL, "path": _NULL_STR, "writable": _array(_STR), "rules_file": _NULL_STR,
-    "manager_read": _BOOL, "profile_source": _STR, "git": _BOOL, "problem": _NULL_STR,
-}, closed=True)
+    "manager_read": _BOOL, "profile_source": _STR, "worktree_root": _NULL_STR, "git": _BOOL, "problem": _NULL_STR,
+}, ["configured", "path", "writable", "rules_file", "manager_read", "profile_source", "git", "problem"], closed=True)
 SCHEMAS = {"SchedulerSetting": SCHEDULER_SETTING, "SchedulerSettings": SCHEDULER_SETTINGS,
            "WaitSetting": WAIT_SETTING, "WaitSettings": WAIT_SETTINGS, "VaultSettings": VAULT_SETTINGS}
 
@@ -40,7 +40,7 @@ LLMREC_LIMIT = _object({"value": {"type": "number"}, "built_in": {"type": "numbe
 LLMREC_LIMITS = _object({name: LLMREC_LIMIT for name in ("retention_days", "max_total_mb")}, closed=True)
 
 _COMPACT_VAULT = _object({name: schema for name, schema in VAULT_SETTINGS["properties"].items()
-                          if name not in ("git", "manager_read", "profile_source")}, closed=True)
+                          if name not in ("git", "manager_read", "profile_source", "worktree_root")}, closed=True)
 _COMPACT_GATEWAY = _object({name: GATEWAY_SETTINGS["properties"][name] for name in
                            ("enabled", "port", "aliases")}, closed=True)
 RESULTS = {
@@ -81,7 +81,7 @@ _WAIT_UPDATE = _object({
     "min_check_seconds": _seconds(*waits.MIN_CHECK_RANGE),
 }, [], closed=True) | {"minProperties": 1}
 _VAULT_UPDATE = _object({"path": _NULL_STR, "writable": _array(_STR), "rules_file": _NULL_STR,
-                         "manager_read": _BOOL, "profile_source": _STR}, ["path"], closed=True)
+                         "manager_read": _BOOL, "profile_source": _STR, "worktree_root": _NULL_STR}, ["path"], closed=True)
 
 OPERATIONS = (
     _operation("scheduler_settings.get", "Read scheduler settings and their effective sources.",

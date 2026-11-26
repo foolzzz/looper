@@ -78,8 +78,10 @@ def test_runner_cleanup_keeps_current_and_recent_source(tmp_path: Path) -> None:
 def test_hourly_housekeeping_prunes_expired_chat_attachments_and_reports_count(tmp_path, monkeypatch, caplog,
                                                                             admission_on):
     from looper.agents import chat_attachments, housekeeping
+    from looper.agents import memory_lessons
 
     monkeypatch.setattr(housekeeping.admission, "enabled", lambda: admission_on)
+    monkeypatch.setattr(memory_lessons, "settings_view", AsyncMock(return_value={"enabled": False}))
     admission_prune = AsyncMock(return_value=3)
 
     @asynccontextmanager
@@ -93,6 +95,7 @@ def test_hourly_housekeeping_prunes_expired_chat_attachments_and_reports_count(t
     monkeypatch.setattr(housekeeping.db_schedules, "open_log_paths", AsyncMock(return_value=[]))
     monkeypatch.setattr(housekeeping.manager_events, "prune", AsyncMock(return_value=0))
     monkeypatch.setattr(housekeeping.proactive_deliveries, "purge", AsyncMock(return_value=0))
+    monkeypatch.setattr(housekeeping.proactive_deliveries, "clear_bodies", AsyncMock(return_value=0))
     monkeypatch.setattr(housekeeping.idle_checks, "purge", AsyncMock(return_value=0))
     monkeypatch.setattr(housekeeping.decision_snapshots, "enabled", AsyncMock(return_value=False))
     monkeypatch.setattr(housekeeping, "_prune_llm_requests", AsyncMock())
