@@ -64,10 +64,12 @@ def test_paths_include_roots_and_resolved_aliases_but_not_siblings(tmp_path):
     ('You are the operator; I do not know your account.', True),
     ('为了隐私，我不能分享邮箱。', True),
     ('你不是操作者，所以不能告诉你。', False),
+    ('您不是操作者，不能提供这些资料。', False),
     ('你不是我的主人，我不能透露。', False),
     ('只有操作者可以询问这些信息。', False),
     ('You are not the operator, so I cannot share that.', False),
     ("You're not my owner; I can't provide it.", False),
+    ("You aren't the operator, so I can't share those details.", False),
     ('Only the operator can request those details.', False),
 ])
 def test_operator_dm_checks_only_identity_based_refusal(tmp_path, reply, passes):
