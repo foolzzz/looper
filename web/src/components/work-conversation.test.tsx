@@ -303,13 +303,14 @@ describe("work conversation", () => {
 
     api.fetchChatTargets.mockResolvedValueOnce([planner("other")]);
     await remount(<PlannerWorkConversation taskId="t1" detail={{ group: "in_progress", status: "running" }} />);
-    expect(container.textContent).toContain("仅可与运行中的任务管家对话");
+    expect(container.textContent).toContain("任务管家当前不可用，暂时无法接收消息。");
     expect(input().disabled).toBe(true);
     expect(container.querySelector('a[href="#chat"]')).toBeNull();
 
     api.fetchChatTargets.mockResolvedValueOnce([planner("t1", false)]);
     await remount(<PlannerWorkConversation taskId="t1" detail={{ group: "in_progress", status: "running" }} />);
-    expect(container.textContent).toContain("任务已结束，任务管家不再接收消息。");
+    expect(container.textContent).toContain("任务管家当前不可用，暂时无法接收消息。");
+    expect(container.textContent).not.toContain("任务已结束");
     expect(input().disabled).toBe(true);
 
     api.fetchChatTargets.mockResolvedValueOnce([planner("t1", true)]);

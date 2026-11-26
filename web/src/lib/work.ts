@@ -7,6 +7,11 @@ export const DRAFTS_UNAVAILABLE = "此服务器尚不支持草稿任务";
 
 export const FIND_UNAVAILABLE = "此服务器尚不支持查找任务。";
 
+/** Both statuses keep messages in the requirement until the user explicitly starts the task. */
+export function isUnstartedTask(status: string | undefined): boolean {
+  return status === "draft" || status === "init";
+}
+
 export interface WorkTask {
   task_id: string;
   title: string;

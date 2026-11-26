@@ -81,8 +81,9 @@ const READ_FAILED = "对话读取失败";
 const NOT_FOUND = "任务不存在";
 const CHECKING = "正在检查对话可用性";
 const CHECK_FAILED = "无法检查对话可用性";
-const NO_PLANNER = "仅可与运行中的任务管家对话";
+const NO_PLANNER = "任务管家当前不可用，暂时无法接收消息。";
 const PLANNER_ENDED = "任务已结束，任务管家不再接收消息。";
+const TERMINAL = new Set(["completed", "failed", "cancelled", "stopped"]);
 const CONNECT_FAILED = "连接失败，请检查服务器是否运行。";
 const STREAM_LOST = "回复流已断开，服务端可能仍在运行";
 
@@ -293,6 +294,7 @@ export function PlannerWorkConversation({
   const finalSeen = useRef(false);
   const sendRef = useRef<(text: string) => void>(() => {});
   const backgroundActive = detail?.group === "in_progress" || detail?.group === "needs_you";
+  const taskStatus = detail?.status;
 
   useEffect(() => () => { replyRef.current.cancel(); }, [taskId]);
 
@@ -304,13 +306,12 @@ export function PlannerWorkConversation({
     fetchChatTargets(ctrl.signal).then((targets) => {
       if (ctrl.signal.aborted || turn !== gen.current || taskRef.current !== taskId) return;
       const planner = targets.find((target) => target.kind === "planner" && target.task_id === taskId);
-      if (!planner) {
-        setAvailability({ canSend: false, reason: NO_PLANNER });
-        return;
-      }
+      const status = taskStatus ?? planner?.status ?? "";
+      const unavailable = TERMINAL.has(status) ? PLANNER_ENDED : status === "handing_back"
+        ? "任务正在交还，任务管家暂时不接收消息。" : NO_PLANNER;
       setAvailability({
-        canSend: planner.can_send,
-        reason: planner.can_send ? "" : PLANNER_ENDED,
+        canSend: planner?.can_send ?? false,
+        reason: planner?.can_send ? "发送消息与任务管家对话。" : unavailable,
       });
     }).catch((error: unknown) => {
       if (ctrl.signal.aborted || turn !== gen.current || (error instanceof Error && error.name === "AbortError")) return;
@@ -318,7 +319,7 @@ export function PlannerWorkConversation({
       setAvailability({ canSend: false, reason: reason || CHECK_FAILED });
     });
     return () => ctrl.abort();
-  }, [taskId, missing, backgroundActive]);
+  }, [taskId, missing, backgroundActive, taskStatus]);
 
   useEffect(() => {
     if (missing) return;

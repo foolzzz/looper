@@ -18,7 +18,7 @@ import { startPolling } from "@/lib/polling";
 import { callV1, V1Error } from "@/lib/v1";
 import { errorText } from "@/lib/use-action";
 import { TaskStatusMark } from "@/pages/tasks";
-import { isMissingOperation, markSeen, taskTitle, workStatusLabel, workSelection, workStorage } from "@/lib/work";
+import { isMissingOperation, isUnstartedTask, markSeen, taskTitle, workStatusLabel, workSelection, workStorage } from "@/lib/work";
 import { isGateShown } from "@/lib/gates";
 import { WorkConversationStateProvider, useWorkConversationStore, workConversationKey } from "@/lib/use-work-conversation-state";
 
@@ -108,9 +108,9 @@ function WorkPageContent({
   const candidate = detail.id === taskId && detail.task ? detail.task : conversations.cached(cacheKey)?.task;
   const selected = candidate?.task_id === taskId ? candidate : undefined;
   // Keep the same control owner through Start readback so its confirmed result survives the transition.
-  const draftControls = selected?.status === "draft" || draftControlId === taskId;
+  const draftControls = isUnstartedTask(selected?.status) || draftControlId === taskId;
   useEffect(() => {
-    if (selected?.status === "draft") setDraftControlId(taskId);
+    if (isUnstartedTask(selected?.status)) setDraftControlId(taskId);
   }, [taskId, selected?.status]);
   useEffect(() => { setControlBusy(false); setDraftSaving(false); }, [taskId]);
   useEffect(() => {
@@ -312,7 +312,7 @@ function WorkPageContent({
                 disabled={draftSaving} compact onResult={onControlResult} />}
               <div ref={conversation} data-work-detail="" data-layout={shortColumn ? "scroll" : "split"}
                 className={shortColumn ? "work-short-conversation block" : "flex min-h-0 min-w-0 flex-1 flex-col"}>
-                {selected.status === "draft" ? <WorkDraft key={taskId} task={selected} onRefresh={refreshDetail}
+                {isUnstartedTask(selected.status) ? <WorkDraft key={taskId} task={selected} onRefresh={refreshDetail}
                   disabled={controlBusy} onBusy={setDraftSaving} />
                   : <PlannerWorkConversation key={taskId} taskId={taskId} detail={selected} task={selected} onGateChanged={onGateChanged} />}
               </div>

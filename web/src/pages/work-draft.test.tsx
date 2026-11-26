@@ -14,6 +14,7 @@ let refuse: string;
 let pendingConfirmation: boolean;
 let failReadback: boolean;
 let releaseWrite: (() => Promise<void>) | undefined;
+let plannerAvailable: boolean;
 const writes: { url: string; body: Record<string, unknown> }[] = [];
 const settle = async () => { for (let n = 0; n < 15; n++) await act(async () => { await Promise.resolve(); }); };
 const button = (label: string) => [...host.querySelectorAll("button")].find(item => item.textContent === label)!;
@@ -34,6 +35,7 @@ async function show() {
 beforeEach(() => {
   sessionStorage.clear(); localStorage.clear(); writes.length = 0;
   refuse = ""; pendingConfirmation = false; failReadback = false; releaseWrite = undefined;
+  plannerAvailable = true;
   task = { task_id: "task-draft", title: "", status: "draft", requirement: "", requirement_versions: [],
     created_at: "2026-11-25T10:45:00Z", work_dir: "workspace", project_id: "p", project_name: "Demo",
     steps: [], gates: [], cost: { runs: 0, running: 0 } };
@@ -63,7 +65,8 @@ beforeEach(() => {
       result = task;
     } else if (url.includes("work_list")) result = { items: body.section === "open" ? [{ ...task, title: task.title || task.task_id, last_seq: 0 }] : [], schedules: [], next_cursor: null };
     else if (url.includes("tasks/activity")) result = { activity: [] };
-    else if (url.includes("chat/targets")) result = { targets: [{ id: "planner-task-draft", kind: "planner", task_id: "task-draft", can_send: task.status !== "draft" }] };
+    else if (url.includes("chat/targets")) result = { targets: [{ id: "planner-task-draft", kind: "planner", task_id: "task-draft", status: task.status,
+      can_send: plannerAvailable && ["pending", "assigned", "running", "planning", "executing", "verifying", "stopping", "waiting", "waiting_user", "awaiting_budget"].includes(String(task.status)) }] };
     else if (url.includes("chat/messages")) result = { messages: [] };
     else if (url.includes("task_conversations")) result = { enabled: true };
     if (init?.method === "GET") status = 405;
@@ -73,18 +76,21 @@ beforeEach(() => {
 });
 afterEach(() => { act(() => root.unmount()); host.remove(); vi.unstubAllGlobals(); vi.restoreAllMocks(); });
 
-it("appends two draft messages through requirement_update and restores the server text and version on reload", async () => {
+it.each(["draft", "init"])("appends two %s messages through requirement_update and restores the server text and version on reload", async status => {
+  const initial = status === "init" ? "Existing requirement\n\n" : "";
+  task = { ...task, status, requirement: initial.trim() };
   await show();
   expect(input().disabled).toBe(false);
-  expect(button("开始").disabled).toBe(true);
-  expect(host.textContent).not.toContain("This task has ended");
+  expect(button("开始").disabled).toBe(status === "draft");
+  expect(host.querySelector('[data-work-detail]')?.textContent).not.toContain("任务已结束");
+  if (status === "init") expect(host.querySelector('[aria-label="需求草稿"]')?.textContent).toContain("版本 1");
   await send("First requirement");
-  expect(writes[0]).toEqual({ url: "/api/v1/tasks/requirement_update", body: { task_id: "task-draft", requirement: "First requirement", expected_version: 1 } });
+  expect(writes[0]).toEqual({ url: "/api/v1/tasks/requirement_update", body: { task_id: "task-draft", requirement: `${initial}First requirement`, expected_version: 1 } });
   expect(host.querySelector('[aria-label="需求草稿"]')?.textContent).toContain("First requirement");
   expect(input().value).toBe("");
   expect(button("开始").disabled).toBe(false);
   await send("Second requirement");
-  expect(writes[1].body.requirement).toBe("First requirement\n\nSecond requirement");
+  expect(writes[1].body).toMatchObject({ requirement: `${initial}First requirement\n\nSecond requirement`, expected_version: 2 });
   expect(writes).toHaveLength(2);
   act(() => root.unmount()); root = createRoot(host); await show();
   const draft = host.querySelector('[aria-label="需求草稿"]')!;
@@ -115,8 +121,8 @@ it("unlocks an uncertain save and can confirm it by readback without repeating t
   expect(writes).toHaveLength(1);
 });
 
-it("reloads a two-tab conflict, keeps unsent text and appends to the latest version on resend", async () => {
-  task = { ...task, requirement: "Original" };
+it.each(["draft", "init"])("reloads a %s two-tab conflict, keeps unsent text and appends to the latest version on resend", async status => {
+  task = { ...task, status, requirement: "Original" };
   await show();
   releaseWrite = async () => {
     releaseWrite = undefined;
@@ -132,6 +138,48 @@ it("reloads a two-tab conflict, keeps unsent text and appends to the latest vers
   expect(writes[1].body).toMatchObject({ expected_version: 2, requirement: "Original\n\nOther tab\n\nMy addition" });
   expect(task.requirement).toBe("Original\n\nOther tab\n\nMy addition");
   expect(input().value).toBe("");
+});
+
+it.each(["draft", "init"])("enables the %s requirement composer and explains the separate Start action", async status => {
+  task = { ...task, status, requirement: "Saved requirement", requirement_versions: [{ version: 4, text: "Saved requirement" }] };
+  await show();
+  expect(input().disabled).toBe(false);
+  expect(host.textContent).toContain("继续发送会追加到需求。点击「开始」后，Planner 才会启动。");
+  const requirement = host.querySelector('[aria-label="需求草稿"]')!;
+  expect(requirement.textContent).toContain("Saved requirement");
+  expect(requirement.textContent).toContain("版本 4");
+  expect(host.querySelector('[data-work-detail]')?.textContent).not.toContain("任务已结束");
+  expect(writes).toHaveLength(0);
+});
+
+it.each(["pending", "assigned", "running", "planning", "executing", "verifying", "stopping", "waiting", "waiting_user", "awaiting_budget"])("enables the %s composer only when its Planner is available", async status => {
+  task = { ...task, status };
+  await show();
+  expect(input().disabled).toBe(false);
+  expect(host.textContent).toContain("发送消息与任务管家对话。");
+  expect(host.querySelector('[data-work-detail]')?.textContent).not.toContain("任务已结束");
+  act(() => root.unmount()); root = createRoot(host);
+  plannerAvailable = false;
+  await show();
+  expect(input().disabled).toBe(true);
+  expect(host.textContent).toContain("任务管家当前不可用，暂时无法接收消息。");
+  expect(host.querySelector('[data-work-detail]')?.textContent).not.toContain("任务已结束");
+});
+
+it.each(["completed", "failed", "cancelled", "stopped"])("disables the %s composer with an ended hint", async status => {
+  task = { ...task, status };
+  await show();
+  expect(input().disabled).toBe(true);
+  expect(host.textContent).toContain("任务已结束，任务管家不再接收消息。");
+});
+
+it.each(["handing_back", "unknown"])("does not describe unavailable %s as ended", async status => {
+  task = { ...task, status };
+  await show();
+  expect(input().disabled).toBe(true);
+  expect(host.textContent).toContain(status === "handing_back"
+    ? "任务正在交还，任务管家暂时不接收消息。" : "任务管家当前不可用，暂时无法接收消息。");
+  expect(host.querySelector('[data-work-detail]')?.textContent).not.toContain("任务已结束");
 });
 
 it("unlocks and keeps input when a successful write is replaced before readback", async () => {
@@ -170,8 +218,8 @@ it("reuses Start and reports its server refusal next to the requirement", async 
   expect(task.status).toBe("draft");
 });
 
-it("confirms Start with server readback without remounting the control owner", async () => {
-  task = { ...task, requirement: "Ready to plan" };
+it.each(["draft", "init"])("confirms %s Start with server readback without remounting the control owner", async status => {
+  task = { ...task, status, requirement: "Ready to plan" };
   await show();
   act(() => button("开始").click()); await settle();
   expect(task.status).toBe("running");
@@ -180,7 +228,8 @@ it("confirms Start with server readback without remounting the control owner", a
   expect(writes).toHaveLength(1);
 });
 
-it("appends to a fresh requirement and blocks double-send and Start while saving", async () => {
+it.each(["draft", "init"])("appends to a fresh %s requirement and blocks double-send and Start while saving", async status => {
+  task = { ...task, status, requirement: "Initial requirement" };
   await show();
   task = { ...task, requirement: "Edited in the details panel" };
   let finish!: () => void;
