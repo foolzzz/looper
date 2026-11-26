@@ -176,9 +176,10 @@ def test_client_requirement_edit_writes_one_version_and_audit(tmp_path, monkeypa
 
 
 @pytest.mark.parametrize("expected", [1, None])
-def test_requirement_version_precondition_and_stale_write(tmp_path, monkeypatch, expected):
+@pytest.mark.parametrize("state", ["draft", "init"])
+def test_requirement_version_precondition_and_stale_write(tmp_path, monkeypatch, expected, state):
     async def run(pool):
-        await _task(pool, "draft")
+        await _task(pool, state)
         async with _controls(tmp_path, planner=True) as (_, bus, post):
             before = await tasks.get_task("task-a", pool=pool)
             status, answer = await post("/api/v1/tasks/requirement_update",
@@ -196,6 +197,8 @@ def test_requirement_version_precondition_and_stale_write(tmp_path, monkeypatch,
             _messages(bus, "planner-task-a")
             before = await tasks.get_task("task-a", pool=pool)
             versions = await task_changes.requirement_versions("task-a", pool=pool)
+            assert before["requirement"] == "Build v2"
+            assert [(v["version"], v["text"]) for v in versions] == [(1, "build calc"), (2, "Build v2")]
             # Even an identical text with an obsolete version is a stale write.
             for text in ("Build v2", "Build v3"):
                 status, answer = await post("/api/v1/tasks/requirement_update",
@@ -208,6 +211,9 @@ def test_requirement_version_precondition_and_stale_write(tmp_path, monkeypatch,
             status, answer = await post("/api/v1/tasks/requirement_update",
                 {"task_id": "task-a", "requirement": "Build v3", "expected_version": 2})
             assert status == 200 and answer["result"]["version"] == 3
+            assert (await tasks.get_task("task-a", pool=pool))["requirement"] == "Build v3"
+            assert [(v["version"], v["text"]) for v in await task_changes.requirement_versions("task-a", pool=pool)] == [
+                (1, "build calc"), (2, "Build v2"), (3, "Build v3")]
     run_db(run, monkeypatch, timeout=20)
 
 
