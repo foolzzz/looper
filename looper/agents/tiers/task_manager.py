@@ -6,6 +6,7 @@ import asyncio
 import hashlib
 import json
 import logging
+import os
 import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
@@ -16,12 +17,14 @@ from typing import Any, Literal, Protocol
 
 from ...db import activity, agent_sessions, projects, tasks
 from .. import operator_mcp, outbound_hook, step_workspaces, task_budget, task_conversations_settings
-from .. import task_manager_safety, task_manager_settings, task_workspaces
+from .. import task_manager_alerts, task_manager_readback, task_manager_safety, task_manager_sandbox, task_manager_settings
+from .. import task_workspaces
 from ..agent_settings import Access, Launch
 from ..claude_cli import ClaudeRunRecorder, ResidentClaude
 from ..library import EMPTY_LIBRARY
 from ..project_execution import ProjectExecution
 from ..run_usage import Usage
+from ..runtimes import library_mcp_servers
 from ..runtimes.cancel import TurnCancel
 from ..system_prompt import SystemPrompt
 from ..task_manager_brief import brief, instructions
@@ -265,6 +268,7 @@ class TaskManagerAgent:
         self.running: asyncio.Task[None] | None = None
         self.mcp_fingerprints: dict[str, str] = {}  # of the allowed servers launched, to compare with what ran
         self.mcp_files: set[str] = set()  # generated configs holding the operator's server definitions
+        self.started_for_turn: Literal["launch", "resume"] | None = None  # what the turn's ``prepare`` started
 
     async def prepare(self, *, sink: TurnSink | None = None) -> tuple[Mapping[str, Any], Any, Launch, SystemPrompt]:
         """Read configuration afresh; no launch bypasses the direct-mode review checks."""
@@ -373,7 +377,9 @@ class TaskManagerAgent:
             if self.pool.closing:
                 raise Refused(RefuseReason.SHUTTING_DOWN, "The task Manager is shutting down.")
             restarting = not self.resident.started or self.resident.stale(signature)
+            self.started_for_turn = None
             if restarting:
+                self.started_for_turn = "resume" if self.session_id else "launch"
                 await self.resident.stop()
                 launch = await configure()
                 command = command_for(launch)
@@ -391,6 +397,38 @@ class TaskManagerAgent:
             self.last_used = self.pool.clock()
         return task, reopened, launch, prompt
 
+    async def _verify(self, launch: Launch, reopened: Any) -> None:
+        """Read back the CLI's effective settings before the turn's user message is written (direct sessions): any
+        difference from what the launch injected, or a readback that cannot be done, refuses the turn and ends the
+        process. At a launch or resume it is the first thing after the process starts."""
+        if self.mode != "direct":
+            return
+        phase = self.started_for_turn or "turn"
+        env = launch.runtime.environment(launch)
+        work_dir, private_dir = Path(reopened.work_dir), operator_mcp.private_cwd(self.pool.runtime_root)
+        expected = task_manager_readback.Expected(
+            private_dir=private_dir,
+            pins=task_manager_sandbox.pins(work_dir, allowed_domains=self.allowed_domains, read_deny=self.read_deny),
+            fs_allow_write=frozenset(),
+            writes_allowed=task_manager_readback.writes_allowed(
+                env.get("HOME") or str(Path.home()), os.getuid(), env.get("CLAUDE_CODE_TMPDIR")),
+            mcp=task_manager_readback.expected_mcp(library_mcp_servers(launch.library), private_dir),
+            known_tools=task_manager_readback.KNOWN_BUILTIN_TOOLS[task_manager_safety.VERIFIED_CLI_VERSION])
+        try:
+            mismatches = task_manager_readback.compare(await task_manager_readback.read(self.resident, phase), expected)
+        except task_manager_readback.ReadbackUnavailable as exc:
+            mismatches = [task_manager_readback.Mismatch(task_manager_safety.Reason.READBACK_UNAVAILABLE, exc.item,
+                                                         None, None, task_manager_readback.Source.UNKNOWN)]
+        if not mismatches:
+            return
+        reason = mismatches[0].reason
+        task_manager_safety.record_refusal(reason, phase, task_manager_safety.VERIFIED_CLI_VERSION)
+        await self.resident.stop(kill=True)
+        if reason is not task_manager_safety.Reason.SANDBOX_UNAVAILABLE:
+            await task_manager_alerts.invariant_violation(self.task_id, reason.value, mismatches[0].item)
+        raise Refused(RefuseReason(reason.value),
+                      task_manager_readback.notice(mismatches, task_manager_safety.VERIFIED_CLI_VERSION))
+
     async def turn(self, request: _Request) -> None:
         try:
             gate = await task_budget.gate(self.task_id)
@@ -405,6 +443,7 @@ class TaskManagerAgent:
             await activity.insert_activity(task_id=self.task_id, kind="error",
                 summary="Warning: task Manager cost is unknown for " + ", ".join(gate.unknown_models))
         task, reopened, launch, prompt = await self.prepare()
+        await self._verify(launch, reopened)
         if not request.admitted.done():
             request.admitted.set_result(Submitted("started"))
         rotating = self.context_rotation_pending
@@ -486,6 +525,7 @@ class TaskManagerAgent:
                                                 {"reason": "resume_failed", "detail": str(exc)})
                         # Re-run all configuration and review gates before the one fresh attempt.
                         task, reopened, launch, prompt = await self.prepare()
+                        await self._verify(launch, reopened)
                         continue
                     text = str((result.result_event or {}).get("result") or "".join(pieces))
                     outcome = ("stopped" if result.stopped else "success"
