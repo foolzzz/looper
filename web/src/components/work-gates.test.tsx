@@ -3,6 +3,7 @@ import { act, type ReactNode } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { WorkGates } from "./work-gates";
+import { TaskGates } from "./task-gates";
 import { WorkPage } from "@/pages/work";
 import type { TaskDetail, UserGate } from "@/lib/api";
 import { gateAnchor } from "@/lib/gates";
@@ -42,6 +43,16 @@ beforeEach(() => {
 afterEach(() => { act(() => root.unmount()); host.remove(); vi.useRealTimers(); vi.restoreAllMocks(); vi.unstubAllGlobals(); });
 
 describe("Work gate summaries", () => {
+  it("uses Chinese in Work gate cards while preserving the task page default", async () => {
+    await show(<TaskGates task={task()} onChanged={vi.fn()} language="zh-CN" />);
+    for (const text of ["等你回复", "暂停原因", "讨论", "发送", "结束讨论，按当前结论继续", "还没有消息。"])
+      expect(host.textContent).toContain(text);
+    expect(host.querySelector("textarea")?.placeholder).toBe("回答、追问，或补充规划助手需要知道的信息");
+    await show(<TaskGates task={task()} onChanged={vi.fn()} />);
+    expect(host.textContent).toContain("Your turn");
+    expect(host.textContent).toContain("Why it stopped");
+  });
+
   it("shows an empty section without gate reads or writes", async () => {
     await show(<WorkGates task={task({ gates: [] })} onOpenGate={vi.fn()} />);
     expect(host.textContent).toContain("关卡"); expect(host.textContent).toContain("没有关卡");
@@ -49,10 +60,10 @@ describe("Work gate summaries", () => {
     expect(api.fetchGateThread).not.toHaveBeenCalled(); expect(api.postGateMessage).not.toHaveBeenCalled();
   });
   it.each([
-    ["open", "user", "Waiting for you"], ["discussing", "user", "Your turn"],
-    ["discussing", "planner", "Planner answering"], ["passed", null, "Passed"],
-    ["cancelled", null, "Cancelled"], ["pending", null, "Not open yet"],
-    ["skipped", null, "Skipped"], ["future", null, "状态未知"],
+    ["open", "user", "等你回复"], ["discussing", "user", "等你回复"],
+    ["discussing", "planner", "规划助手回复中"], ["passed", null, "已通过"],
+    ["cancelled", null, "已取消"], ["pending", null, "尚未开启"],
+    ["skipped", null, "已跳过"], ["future", null, "状态未知"],
   ])("uses the gate fields for %s/%s", async (state, waiting_on, label) => {
     const value = gate({ state, waiting_on } as Partial<UserGate>);
     await show(<WorkGates task={task({ gates: [value] })} onOpenGate={vi.fn()} />);

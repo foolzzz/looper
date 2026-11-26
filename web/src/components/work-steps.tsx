@@ -61,7 +61,7 @@ function KindMark({ kind }: { kind: string }) {
   return (
     <span className="inline-flex shrink-0 items-center gap-1 text-xs text-muted-foreground">
       {Icon && <Icon className="h-4 w-4" aria-hidden="true" />}
-      <span>{kind}</span>
+      <span>{({ work: "执行", gate: "关卡", wait: "等待", review: "评审" } as Record<string, string>)[kind] ?? kind}</span>
     </span>
   );
 }
@@ -118,8 +118,8 @@ export function WorkSteps({ task, onOpenGate }: {
                     ) : (
                       <a className={CONTROL} href={workStepHref(task.task_id, step.id)}>{name}</a>
                     )}
-                    {step.kind === "wait" ? <WaitBadge state={waits.get(step.id)?.state ?? "pending"} /> :
-                      gate ? <GateBadge gate={gate} active={active} /> :
+                    {step.kind === "wait" ? <WaitBadge state={waits.get(step.id)?.state ?? "pending"} language="zh-CN" /> :
+                      gate ? <GateBadge gate={gate} active={active} language="zh-CN" /> :
                         <span data-status-text className="text-xs">{workStatusText(step.status)}</span>}
                   </div>
                   <ExpandableInstruction text={step.instruction ?? ""} />
