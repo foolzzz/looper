@@ -133,7 +133,12 @@ def test_a_worker_runs_through_a_keeper(variant):
                                                 f"{status['child_pid']}.json")
                 assert process_record['server_pid'] == status['keeper_pid']
                 assert process_record['pid'] == status['child_pid']
-                assert api.post('/api/v1/system/drain_status', {})['result']['waiting']['runs'][0]['keepable']
+                # A running keeper can still be delivering the Worker's initial input.
+                waiting = _until(
+                    lambda: (runs := api.post('/api/v1/system/drain_status', {})['result']['waiting']['runs'])
+                    and runs[0]['worker_id'] == run_id and runs[0]['keepable'] and runs,
+                    'the Worker being ready to keep')
+                assert waiting[0]['keepable']
                 (state / 'release-s1').touch()
             else:
                 directory, status = next(iter(_running(server['runtime_root'], role='reviewer').values()))
