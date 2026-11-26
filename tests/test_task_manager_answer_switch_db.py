@@ -12,6 +12,7 @@ import pytest
 
 from looper.agents import projects as project_service, task_conversations_settings as settings
 from looper.agents.message import channel_address
+from looper.agents.ops import OpError
 from looper.agents.tiers import task_manager as tm
 from looper.db import chat, task_chat, tasks
 from tests.db_support import run_db, until
@@ -121,3 +122,19 @@ def test_entries_that_are_not_a_message_never_start_a_task_manager(monkeypatch, 
             await pool.shutdown()
         assert tm.current_pool() is None
     run_db(check, monkeypatch, timeout=30)
+
+
+def test_tool_tokens_stop_working_when_the_switch_goes_off(monkeypatch):
+    from looper.agents.ops.task_manager import TaskManagerOps
+
+    monkeypatch.setattr(settings, "_enabled", True)
+    monkeypatch.setattr(settings, "_manager_answers", True)
+    ops = TaskManagerOps(None, url="http://127.0.0.1:1")
+    token = ops.issue("task-one")
+    assert ops.authorized(f"Bearer {token}")
+    settings.set_manager_answers(False)
+    assert not ops.authorized(f"Bearer {token}")
+    with pytest.raises(OpError):
+        ops.issue("task-one")
+    settings.set_manager_answers(True)
+    assert ops.authorized(f"Bearer {token}")  # negative control: the grant itself was never revoked

@@ -812,6 +812,11 @@ answers `409 task_manager_off` and stores nothing, and the pool refuses at
 starts, no `agent_sessions` row is written and no model is called. Nothing else
 starts a task Manager: task start, delete, profile change, the status read and a
 restart only read or stop one. Tasks keep being answered by the Planner.
+Turning the switch off ends new work only: it does not stop a task Manager that
+is already resident or inside a turn (that turn finishes, and the process is
+reclaimed by the idle ticker or by closing the task). The tool tokens it holds
+(`ops/task_manager.py`) check both switches, so once it is off the running turn's
+further tool calls are refused with the token's usual rejection.
 The independent `task_manager` role defaults to Sonnet; task profile overrides take
 precedence over that role and never inherit the owning Manager's profile. Other
 runtimes are refused rather than substituted.

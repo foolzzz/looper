@@ -43,7 +43,7 @@ SCHEMAS = {
         _object({"kind": {"const": "refused"}, "reason": {"const": "orchestrated"}, "status": _STR}, closed=True),
         _object({"kind": {"const": "refused"}, "reason": {"enum": [
             "work_mode_off", "runtime_unsupported", "budget", "outbound_review_unavailable", "workspace",
-            "shutting_down", "review_hook_disabled", "cli_unverified"]}}, closed=True),
+            "shutting_down", "review_hook_disabled", "cli_unverified", "manager_answers_off"]}}, closed=True),
     ]},
     "OperatorChatMessage": _object({"message_id": _STR, "role": {"const": "assistant"},
         "content": _STR, "created_at": _STR}, closed=True),
