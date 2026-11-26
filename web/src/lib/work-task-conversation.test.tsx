@@ -219,7 +219,7 @@ describe("task conversation", () => {
       { kind: "turn_summary", files: ["src/b.ts"], commit: null, mode: "direct", uncommitted: ["src/b.ts"] },
       { kind: "turn_summary", files: ["src/c.ts"], commit: null, mode: "direct", unverified: ["src/c.ts"] },
       { kind: "refused", reason: "orchestrated", status: "running" },
-      ...["work_mode_off", "runtime_unsupported", "budget", "outbound_review_unavailable", "workspace", "shutting_down", "review_hook_disabled", "cli_unverified"].map((reason) => ({ kind: "refused", reason })),
+      ...["work_mode_off", "runtime_unsupported", "budget", "outbound_review_unavailable", "workspace", "shutting_down", "review_hook_disabled", "cli_unverified", "manager_answers_off", "mcp_unresolved"].map((reason) => ({ kind: "refused", reason })),
       { kind: "queued", reason: "cap", position: 1, active: 6, type: "queued" },
     ];
     const messages = [
@@ -250,6 +250,8 @@ describe("task conversation", () => {
     expect(text).toContain("direct · src/a.ts · abc123");
     expect(text).toContain("已拒绝（orchestrated：running）");
     expect(text).toContain("已拒绝（budget）");
+    expect(text).toContain("已拒绝（manager_answers_off）");
+    expect(text).toContain("已拒绝（mcp_unresolved）");
     expect(text).toContain("无法读取这条事件");
     expect(text).not.toContain("模型已切换：hidden");
     expect(container.querySelector('[data-role="assistant"]')?.textContent).toContain("已停止");
