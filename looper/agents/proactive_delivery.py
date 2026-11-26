@@ -8,9 +8,9 @@ and the chat's state now (``DeliveryState``), and gets a ``Decision``: an outcom
 it, so "why didn't you tell me" has an answer. The rules, first match wins:
 
 1. a source that said it has nothing to tell (``silent``): dropped;
-2. the morning brief (``morning_brief``), which is the digest: sent, never throttled, not counted;
-3. a gate that holds back a task, or a reminder the user set themselves: sent, never throttled, not counted;
-4. outside the source's own active hours (a schedule's or subscription's throttle field): into the digest;
+2. a gate that holds back a task, or a reminder the user set themselves: sent, never throttled, not counted;
+3. outside the source's own active hours (a schedule's or subscription's throttle field): into the digest;
+4. the scheduled morning brief: quiet hours apply, but it bypasses the daily cap and is not counted;
 5. the user wrote in this chat in the last ``recent_reply`` (5 minutes): sent, not counted;
 6. inside the quiet hours (22:00–08:00 in the user's timezone): into the digest;
 7. a direct chat that already had ``dm_daily_cap`` (5) counted messages today: into the digest;
@@ -203,15 +203,18 @@ def deliver(delivery: Delivery, policy: DeliveryPolicy, state: DeliveryState) ->
     """Decide what happens to ``delivery`` now (the module docstring has the rules)."""
     if delivery.silent:
         return Decision(Outcome.DROP, Reason.SILENT)
-    # The morning brief is the digest. Quiet hours and the daily cap must not defer it or count it.
-    if delivery.kind is DeliveryKind.MORNING_BRIEF:
-        return Decision(Outcome.SEND, Reason.WITHIN_LIMITS, counted=False)
-    if delivery.urgency in EXEMPT:
+    if delivery.urgency in EXEMPT and delivery.kind is not DeliveryKind.MORNING_BRIEF:
         return Decision(Outcome.SEND, Reason.URGENT)
     source = delivery.source
     if source is not None and source.active_hours is not None and \
             not source.active_hours.contains(state.now.astimezone(source.timezone).time()):
         return _later(Reason.OUTSIDE_ACTIVE_HOURS, policy, state)
+    # A scheduled brief always respects quiet hours, including after a recent reply. As the digest
+    # itself, it bypasses the cap and never consumes a counted proactive message.
+    if delivery.kind is DeliveryKind.MORNING_BRIEF:
+        if policy.quiet_hours is not None and policy.quiet_hours.contains(state.now.astimezone(policy.timezone).time()):
+            return _later(Reason.QUIET_HOURS, policy, state)
+        return Decision(Outcome.SEND, Reason.WITHIN_LIMITS)
     spoke = state.last_user_message_at
     # In UTC: two times of one ZoneInfo subtract as wall clocks, an hour off across a DST change. A later one (clocks
     # apart) is still recent.

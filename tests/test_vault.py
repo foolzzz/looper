@@ -32,6 +32,10 @@ def config(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> vault.VaultConfig
     (root / "mine").mkdir()
     (tmp_path / "outside").mkdir()
     git(root, "init")
+    # Keep commits from spawning background jobs that race filesystem assertions.
+    git(root, "config", "maintenance.auto", "false")
+    git(root, "config", "gc.auto", "0")
+    git(root, "config", "core.fsmonitor", "false")
     git(root, "config", "user.name", "Vault Tester")
     git(root, "config", "user.email", "vault@example.test")
     git(root, "config", "core.hooksPath", str(root / ".git/hooks"))
@@ -918,12 +922,22 @@ def test_search_under_refuses_invalid_boundaries(config: vault.VaultConfig, unde
 
 def test_empty_writable_list_never_starts_a_commit(config, monkeypatch):
     from dataclasses import replace
+
+    def paths():
+        # Git locks (including objects/maintenance.lock) are transient, not vault changes.
+        return sorted(path for path in (entry.relative_to(config.path) for entry in config.path.rglob('*'))
+                      if not (path.parts[0] == '.git' and path.name.endswith('.lock')))
+
     monkeypatch.setattr(vault, '_git_root_sync', lambda *args: pytest.fail('read-only write reached git'))
-    before = sorted(path.relative_to(config.path) for path in config.path.rglob('*'))
+    before = paths()
+    head = git(config.path, 'rev-parse', 'HEAD')
+    refs = git(config.path, 'for-each-ref', '--format=%(refname) %(objectname) %(symref)')
     with pytest.raises(OpError) as error:
         write(replace(config, writable=()))
     assert error.value.code is ErrorCode.FORBIDDEN
-    assert sorted(path.relative_to(config.path) for path in config.path.rglob('*')) == before
+    assert git(config.path, 'rev-parse', 'HEAD') == head
+    assert git(config.path, 'for-each-ref', '--format=%(refname) %(objectname) %(symref)') == refs
+    assert paths() == before
 
 
 def test_missing_writable_boundary_is_not_recreated(config):

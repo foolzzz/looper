@@ -48,6 +48,7 @@ from ..db import system_settings as db_settings
 from ..db import reminders as db_reminders
 from . import card_actions, gate_routing, gate_service, leads_model, operator_identity
 from .message import MessageEnvelope, is_lark, parse_channel_id
+from .log_redaction import redact_diagnostic
 
 logger = logging.getLogger(__name__)
 
@@ -104,6 +105,8 @@ def _item(key: str, title: str, *, context: str = "", since: datetime | None = N
           ref: str | None = None, **facts: Any) -> dict[str, Any]:
     """One thing that waits: what it is (``title``), where it belongs (``context``: a task, a project), since when,
     where the dashboard shows it (``href``), what a chat calls it (``ref``) and the kind's own ``facts``."""
+    facts = {name: redact_diagnostic(value) if name in ("detail", "fix") and isinstance(value, str) else value
+             for name, value in facts.items()}
     return {"key": key, "title": title, "context": context, "since": since, "href": href, "ref": ref, "facts": facts}
 
 

@@ -612,20 +612,19 @@ def test_repeated_import_is_unchanged_and_notifies_only_after_commit(monkeypatch
     from looper.agents import managers_api
 
     async def test(pool: Any) -> None:
-        observed: list[str] = []
+        observed: list[tuple[str, bool]] = []
 
         async def changed(identity: str) -> None:
             # Separate connection sees the committed template when the listener runs.
-            assert await managers.get_template(identity, "review", pool=pool) is not None
-            observed.append(identity)
+            observed.append((identity, await managers.get_template(identity, "review", pool=pool) is not None))
 
         monkeypatch.setattr(managers_api, "_listener", changed)
         document = _document(_manager(templates=[_template()]))
         await _run(pool, document)
-        assert observed == ["manager-review"]
+        assert observed == [("manager-review", True)]
         before = await _snapshot(pool)
         plan = await _run(pool, document)
-        assert plan.writes == 0 and observed == ["manager-review"]
+        assert plan.writes == 0 and observed == [("manager-review", True)]
         assert await _snapshot(pool) == before
 
     run_db(test, monkeypatch, timeout=20)

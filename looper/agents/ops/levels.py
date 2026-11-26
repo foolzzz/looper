@@ -56,6 +56,9 @@ async def _gates(arguments: Mapping[str, Any], turn: Turn) -> ActionLevel:
 
 TOOL_LEVELS: Mapping[str, ActionLevel | LevelOf] = {
     # The Manager's (and an API client's)
+    # Chat task operations stay inside Looper; task agents are reviewed where they run.
+    "looper_chat_tasks": INSIDE, "looper_chat_task_create": INSIDE,
+    "looper_chat_task_control": INSIDE, "looper_chat_task_instruct": INSIDE,
     "looper_overview": INSIDE, "looper_tasks": INSIDE, "looper_costs": INSIDE,
     "looper_config_export": INSIDE,  # written under the runtime root
     "looper_task_create": INSIDE,  # its task's agents' own calls are reviewed where they run

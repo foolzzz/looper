@@ -125,7 +125,7 @@ def _events(state: Path, kind: str, variant: str | None = None):
 def _fixture(root: Path, *, restart_steps=("s1", "s2")):
     # Match the repository's disposable-server policy before creating any database.
     require_disposable_database(str(DSN), served=False)
-    assert urlsplit(str(DSN)).port in (5432, 54329)
+    assert urlsplit(str(DSN)).port in (5432, 54329, 54331)
     state, bin_dir, runtime, home = (root / part for part in ("state", "bin", "runtime", "home"))
     for directory in (state, bin_dir, runtime, home):
         directory.mkdir()
