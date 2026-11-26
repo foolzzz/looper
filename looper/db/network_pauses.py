@@ -39,6 +39,28 @@ async def get(task_id: str, *, pool=None) -> dict[str, Any] | None:
         'SELECT * FROM task_network_pauses WHERE task_id=$1 AND ended_at IS NULL', task_id))
 
 
+async def get_with_task(task_id: str, *, pool=None) -> dict[str, Any] | None:
+    """The active pause and the task's status and phase, from one statement.
+
+    Task detail reads the task, then does more work, then reads the pause. Start only
+    queues the task, so the first read can still show it as not active when the pause
+    row is committed. Phase projection has to use the status from this read.
+    """
+    row = await (pool or get_pool()).fetchrow(
+        'SELECT t.status AS task_status, t.phase AS task_phase, n.id, n.task_id, n.state, n.reason, '
+        'n.started_at, n.deadline, n.continuation, n.ended_at, n.end_reason '
+        'FROM tasks t LEFT JOIN task_network_pauses n ON n.task_id=t.id AND n.ended_at IS NULL '
+        'WHERE t.id=$1', task_id)
+    if row is None:
+        return None
+    found = dict(row)
+    pause = None
+    if found['id'] is not None:
+        pause = _row({key: found[key] for key in (
+            'id', 'task_id', 'state', 'reason', 'started_at', 'deadline', 'continuation', 'ended_at', 'end_reason')})
+    return {'status': found['task_status'], 'phase': found['task_phase'], 'pause': pause}
+
+
 async def put(task_id: str, value: Mapping[str, Any], *, pool=None) -> dict[str, Any]:
     """Open a pause, or update its continuation without extending its original deadline."""
     state = State(value.get('state', State.PAUSED))
