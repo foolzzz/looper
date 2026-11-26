@@ -35,6 +35,7 @@ import contextvars
 import hashlib
 import json
 import logging
+import os
 import sys
 import time
 import uuid
@@ -2797,6 +2798,7 @@ class ManagerAgent:
                 await token.step("recorder_annotate", recorder.annotate(run.state.annotation()))
             # (Nothing is awaited from here until the message is written: a later change shows in the generation.)
             text = prepared.turn_text if run.state is None else "\n".join([*run.state.lines, prepared.turn_text])
+            _capture_eval_inputs(None if run.state is None else run.state.lines, prepared.turn_text)
             turn_text = f"{brief}\n\n{text}" if brief else text
             turn_text = self.ops.live_note(prepared.turn, turn_text) if self.ops is not None else turn_text
             if token.cancel.requested:
@@ -3952,3 +3954,32 @@ class ManagerAgent:
                 token.times.ack_at, token.times.ack = now, AckKind.STATUS
             if delta and text and token.times.first_reply_at is None:
                 token.times.first_reply_at = now
+
+
+def _capture_eval_inputs(state_lines: Sequence[str] | None, turn_text: str) -> None:
+    """Append this turn's state block and Turn context when ``LOOPER_EVAL_TURN_CAPTURE`` names a file.
+
+    A production server leaves the variable unset and writes nothing. The dialog runner copies the file into
+    the run's JSON; the file itself is removed with the case's disposable tree.
+    """
+    path = os.environ.get("LOOPER_EVAL_TURN_CAPTURE")
+    if not path:
+        return
+    record = {"state_block": None if state_lines is None else "\n".join(state_lines),
+              "turn_context": _turn_context_block(turn_text)}
+    try:
+        with open(path, "a", encoding="utf-8") as handle:
+            handle.write(json.dumps(record, ensure_ascii=False) + "\n")
+    except OSError:
+        logger.warning("could not record the eval turn's state block", exc_info=True)
+
+
+def _turn_context_block(turn_text: str) -> str | None:
+    """The ``[Turn context]`` block inside ``turn_text``, through its trailing blank line, or None."""
+    marker = "[Turn context]\n"
+    start = turn_text.find(marker)
+    if start < 0:
+        return None
+    lines = turn_text[start:].split("\n")
+    blank = next((index for index, line in enumerate(lines[1:], start=1) if line == ""), len(lines) - 1)
+    return "\n".join(lines[:blank + 1])
