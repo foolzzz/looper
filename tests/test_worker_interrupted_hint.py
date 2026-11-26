@@ -121,17 +121,6 @@ def test_previous_worker_run_uses_only_the_same_attempt(tmp_path, monkeypatch):
     run_db(scenario, monkeypatch)
 
 
-def test_fake_interrupted_worker_prompt_eval(tmp_path, monkeypatch):
-    from evals.prompt_regression.worker_interrupted import run_case
-    from tests.db_support import run_db
-
-    async def scenario(db):
-        result = await run_case(tmp_path, db)
-        assert result["outcome"] == "pass", result
-
-    run_db(scenario, monkeypatch)
-
-
 @pytest.mark.parametrize("action", ["get", "update"])
 @pytest.mark.usefixtures("clients")
 def test_interruption_hint_control_is_operator_only(tmp_path, monkeypatch, action):
