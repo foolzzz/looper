@@ -2012,8 +2012,9 @@ class ManagerAgent:
                       activity_cursor=activity_cursor)
         else:
             await token.keep("resident_settlement", self._settle_native_inputs(token), 60)
-        if restricted:
-            ask = replace(ask, note=ask.stop_notice)
+        if restricted and session_visibility.for_session(
+                self._session_now().key, manager_id=self.agent_id) is not session_visibility.CLIENT_ALLOWLIST:
+            ask = replace(ask, note=ask.stop_notice)  # a client session keeps the note of its own confirmation
         token.prepared_ask = ask
         await token.step("load_db_config", self._load_db_config())
         if self._turned_off:  # the fleet has not stopped this instance yet: it must not act as the Manager

@@ -1222,7 +1222,8 @@ class ManagerOps:
         """``turn`` runs now; the note its message starts with (``_begin_turn``), then, in a user turn, what the
         operator's card buttons did in this chat since its last one (``_note_button``)."""
         note = self._begin_turn(turn, binding, session_key=session_key)
-        if session_visibility.for_session(session_key, manager_id=self._scope.manager_id) is not None:
+        policy = session_visibility.for_session(session_key, manager_id=self._scope.manager_id)
+        if policy is not None and policy is not session_visibility.CLIENT_ALLOWLIST:
             return ""
         return "\n".join(part for part in (note, *self._take_button_notes(turn, session_key)) if part)
 
@@ -1317,8 +1318,9 @@ class ManagerOps:
             self._routed_turns[id(turn)] = turn
         if binding:
             self.register(turn, binding, session_key=session_key)
-        if session_visibility.for_session(session_key, manager_id=self._scope.manager_id) is not None:
-            return ""
+        restricted = session_visibility.for_session(session_key, manager_id=self._scope.manager_id)
+        if restricted is not None and restricted is not session_visibility.CLIENT_ALLOWLIST:
+            return ""  # a client session is told of its own pending confirmation, as main is
         pending = self._pending.get(turn.chat_key)
         if turn.autonomous or pending is None:
             return ""

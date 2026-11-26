@@ -3632,22 +3632,20 @@ FAILURE_DIALOGS = tuple(_hold_dialog(action) for action in ("retry", "planner", 
 
 
 FAKE_DIALOGS: tuple[Dialog, ...] = (
-    # The third turn must resend the whole block because the client turn was another audience, in the same
-    # resident. A new process would also resend it, and would pass a view-only check on a build without the
-    # pending-whole recovery.
-    Dialog("stable_whole_after_client", (
+    # An API client's turn runs in a session of its own: it starts its own whole block (no operator profile), and
+    # the operator's session is neither told to resend its block nor shown the client's.
+    Dialog("stable_client_session_apart", (
         Say("请说出我的称呼和你的名字。", _stable_audience(("whole", "new session")),
             (("__reply__", {"text": "你是 Eval Operator，我是 Atlas。"}),)),
         Say("作为 API 客户端，只查询你叫什么。", _stable_audience(
-            ("whole", "new session"), ("whole", "operator profile omitted for client turn")),
+            ("whole", "new session"), ("whole", "new session")),
             (("__reply__", {"text": "我是 Atlas。"}),), client=True),
         Say("再说一次我的称呼和你的名字。", _stable_audience(
-            ("whole", "new session"), ("whole", "operator profile omitted for client turn"),
-            ("whole", "another audience's block came after the last shown state")),
+            ("whole", "new session"), ("whole", "new session"), ("unchanged", "unchanged")),
             (("__reply__", {"text": "你是 Eval Operator，我是 Atlas。"}),)),
         Say("继续保持当前称呼。", _stable_audience(
-            ("whole", "new session"), ("whole", "operator profile omitted for client turn"),
-            ("whole", "another audience's block came after the last shown state"), ("unchanged", "unchanged")),
+            ("whole", "new session"), ("whole", "new session"), ("unchanged", "unchanged"),
+            ("unchanged", "unchanged")),
             (("__reply__", {"text": "好的。"}),)),
     ), seed=_seed_stable_audience, tags=("manager", "stable_context", "audience")),
     Dialog("scoped_group_activity", (
@@ -4263,7 +4261,7 @@ def run_dialog(api: Api, dialog: Dialog, *, database_url: str, project_id: str, 
             api.post("/api/v1/session_budget/update", {"turn_budget_usd": 4})
             api.post("/api/v1/scheduler_settings/update", {"session_context_max_tokens": 40000})
             _seed_session_bound_task(database_url, project_id)
-        if dialog.id == "stable_whole_after_client":
+        if dialog.id == "stable_client_session_apart":
             _turn_on(database_url, "manager.stable_context")
         registry_before = api.post("/api/v1/registry/view", {})["result"] if dialog.id in {
             "model_login_runtime", "model_missing_endpoint"} else None

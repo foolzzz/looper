@@ -216,7 +216,7 @@ def test_a_client_session_lists_only_the_allowlisted_tools_and_refuses_the_rest(
             binding = rig.manager._running_token.binding
             seen["listing"] = sorted(item["name"] for item in await ops.current_listing(session_key=_key("client-a")))
             for name, arguments in (("looper_settings", {"action": "get"}), ("looper_projects", {"action": "list"}),
-                                    ("looper_overview", {}), ("looper_confirm", {"confirmation_id": "x"}),
+                                    ("looper_overview", {}), ("looper_task_gate_reply", {"gate": "g1", "task_id": "t"}),
                                     ("looper_session_search", {"query": "x"}), (future.name, {})):
                 seen["calls"].append((name, await ops.call(name, arguments, binding=binding,
                                                             session_key=_key("client-a"))))
