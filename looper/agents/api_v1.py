@@ -418,6 +418,16 @@ def domains() -> tuple[Any, ...]:
     return _DOMAINS
 
 
+def preload_domains() -> None:
+    """Import every discovered domain module before the event loop starts.
+
+    The first import loads the whole domain package (over a hundred modules, some pulling in heavy
+    dependencies); the synchronous serve entrypoint calls this while no loop runs, so that cost is
+    never charged to the loop as a block during the http startup step. Later calls hit the cache.
+    """
+    domains()
+
+
 def domain_for(operation: Operation) -> Any | None:
     return next((domain for domain in domains() if operation in domain.OPERATIONS), None)
 
