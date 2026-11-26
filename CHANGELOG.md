@@ -18,6 +18,31 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.15.42] - 2026-11-26
+
+Frozen at `0ad334847` (the merge of [#1804](https://github.com/foolzzz/looper/pull/1804)): everything merged to main after what v2.15.41 shipped, up to that commit. Tag this release PR's own head after merge if main has moved beyond the freeze. Startup adds three migrations over v2.15.41: `task_manager_role` (2090), `main_session_egress` (2130) and `completion_session_allowlist` (2140), each widening an existing check; all three run even with optional features off. From v2.15.38 or earlier, also read [v2.15.41](docs/releases/v2.15.41.md), [v2.15.40](docs/releases/v2.15.40.md) and [v2.15.39](docs/releases/v2.15.39.md). See [the release notes](docs/releases/v2.15.42.md) for validation and exclusions.
+
+### Changed
+
+- **The main Manager session only answers the operator.** ([#1824](https://github.com/foolzzz/looper/pull/1824)) In the default Manager, an autonomous reply (after a background job) is sent only when the last turn was the operator's own. A group, another person's direct chat or an API client's dashboard thread no longer receives it; it is recorded as a `manager_events` row of kind `autonomous` with reason `withheld_not_operator`. With completion turns on, another person's direct chat, an API client's dashboard thread and a schedule run whose direct-chat target is not the operator get the code notice instead of a main-session model reply. A bot without `operator_sender_id` is treated as not the operator's. Routed sessions, the operator's own chats and groups' completion handling are unchanged. Migration `main_session_egress` (2130) widens the `manager_events` kind and reason checks.
+- **Routed completion fallback is recorded as `session_allowlist`.** ([#1830](https://github.com/foolzzz/looper/pull/1830)) With session routing on and completion turns `dm_only`, a task asked in another sender's own session takes the fallback and delivers the code notice. Before, the reason write failed and the event stayed `running`, so no notice was sent. Migration `completion_session_allowlist` (2140) adds the reason. Routing off and the `withheld_not_operator` skip are unchanged.
+- **Operator profile facts render under About.** ([#1730](https://github.com/foolzzz/looper/pull/1730)) With profile injection on, `kind: fact` entries no longer appear as standing rules; they are compiled under `About:`, dropped first when the 1500-character cap is exceeded. Profiles without facts keep their compiled bytes.
+- **Work labels and states.** ([#1817](https://github.com/foolzzz/looper/pull/1817), [#1823](https://github.com/foolzzz/looper/pull/1823), [#1827](https://github.com/foolzzz/looper/pull/1827)) Behind `tasks.conversations.enabled`, the right panel shows a neutral message for unstarted draft, ready, pending and assigned tasks instead of an error, `handing_back` reads 交回中, and every task-composer hint names the Planner (规划者) from one answerer value.
+
+### Added
+
+- **Task Manager foundations, off by default.** ([#1768](https://github.com/foolzzz/looper/pull/1768), [#1770](https://github.com/foolzzz/looper/pull/1770), [#1804](https://github.com/foolzzz/looper/pull/1804)) Behind `tasks.conversations.enabled`, a task can own a Claude Code resident with launch checks that fail closed, a resident cap `tasks.managers.max_resident` (default 6, range 1-20), queued budgeted turns, session resume and per-turn commits. An independent `task_manager` role defaults to Sonnet. Operator-only `tasks.task_manager_profile_get` and `tasks.task_manager_profile_set` read and change a task's profile; `tasks.create_draft` accepts `task_manager_profile_id`. No conversation transport or UI uses it yet, and task conversations still go to the Planner. Migration `task_manager_role` (2090) allows the new role.
+
+### Fixed
+
+- **Stable state after isolated turns.** ([#1732](https://github.com/foolzzz/looper/pull/1732)) With stable context on, an operator turn that follows an isolated turn (a shared chat or an API client) now resends the whole block.
+- **Shutdown cannot hang on a stuck connection.** ([#1826](https://github.com/foolzzz/looper/pull/1826)) The recording proxy and the HTTP server abort connections that outlive the grace period, including ones accepted during stop.
+- **Dashboard static paths.** ([#1828](https://github.com/foolzzz/looper/pull/1828)) An overlong or NUL-containing path answers 404 instead of 500 or the dashboard page.
+
+### Internal
+
+- Test and tooling changes with no product behavior change: keeper, outbox, Grok steering and database schema-setup test timing ([#1800](https://github.com/foolzzz/looper/pull/1800), [#1801](https://github.com/foolzzz/looper/pull/1801), [#1805](https://github.com/foolzzz/looper/pull/1805), [#1833](https://github.com/foolzzz/looper/pull/1833)); web source-boundary controls ([#1821](https://github.com/foolzzz/looper/pull/1821)); a synthetic path in a test fixture ([#1829](https://github.com/foolzzz/looper/pull/1829)); browser fixtures for the Work sidebar probe ([#1813](https://github.com/foolzzz/looper/pull/1813)); eval checks and an offline rescore for the resident profile ([#1808](https://github.com/foolzzz/looper/pull/1808)) and private-details ([#1814](https://github.com/foolzzz/looper/pull/1814)); and the browser/desktop RFC ([#1810](https://github.com/foolzzz/looper/pull/1810)).
+
 ## [2.15.41] - 2026-11-25
 
 Contains exactly v2.15.40 at `1d90572f1` plus [#1818](https://github.com/foolzzz/looper/pull/1818), frozen at `322834fb6`, and release metadata. Tag this release PR's own head after merge, not the later main merge commit. No product behavior, migration or setting changes. From v2.15.38 or earlier, upgrade straight to v2.15.41; it includes all of [v2.15.40](docs/releases/v2.15.40.md) and [v2.15.39](docs/releases/v2.15.39.md), whose notes list two startup migrations. See [the release notes](docs/releases/v2.15.41.md) for validation and exclusions.
