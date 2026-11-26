@@ -58,13 +58,42 @@ describe("Manager sessions", () => {
     await act(async () => row.querySelector("button")!.click());
     expect(container.querySelector("[role=dialog]")!.textContent).toContain(
       "重置这个会话？管家会忘掉这里之前的对话，下一条消息开一个新会话。");
-    expect(vi.mocked(callV1).mock.calls.map((call) => call[0])).toEqual(["/api/v1/manager_sessions/list"]);
+    expect(vi.mocked(callV1).mock.calls.map((call) => [call[0], call[1]])).toEqual([
+      ["/api/v1/manager_sessions/list", {}],
+    ]);
     vi.mocked(callV1).mockResolvedValueOnce({ ...LIST.sessions[1], resident: false, cost_usd: null });
     const confirm = [...container.querySelectorAll("button")].find(
       (button) => button.closest("[role=dialog]") !== null && button.textContent === "重置") as HTMLButtonElement;
     await act(async () => confirm.click());
     expect(vi.mocked(callV1).mock.calls[1]).toEqual([
       "/api/v1/manager_sessions/reset", { key: "group:channel-lark:oc_synthroom01" }]);
+  });
+
+  it("shows a scenario Manager's sessions without offering reset", async () => {
+    await act(async () => { root.render(<ManagerSessions managerId="review" />); });
+    expect(container.textContent).toContain("主会话");
+    expect(container.querySelector("button")).toBeNull();
+    expect(container.querySelector("[role=dialog]")).toBeNull();
+    expect(vi.mocked(callV1).mock.calls.map((call) => call[0])).toEqual(["/api/v1/manager_sessions/list"]);
+  });
+
+  it("sends manager_id and shows scope, audience and retirement", async () => {
+    vi.mocked(callV1).mockResolvedValue({
+      routing_enabled: true,
+      sessions: [
+        { ...LIST.sessions[0], scope: { id: "full", version: 1, audience: "operator" }, retired: false },
+        { ...LIST.sessions[1], scope: { id: "chat_only", version: 1, audience: "shared" }, retired: true },
+      ],
+    });
+    await act(async () => { root.render(<ManagerSessions managerId="review" />); });
+    expect(vi.mocked(callV1).mock.calls[0][0]).toBe("/api/v1/manager_sessions/list");
+    expect(vi.mocked(callV1).mock.calls[0][1]).toEqual({ manager_id: "review" });
+    const text = container.textContent!;
+    expect(text).toContain("full");
+    expect(text).toContain("操作者");
+    expect(text).toContain("chat_only");
+    expect(text).toContain("共享");
+    expect(text).toContain("已停用");
   });
 
   it("shows only main and a note when per-chat sessions are off", async () => {
