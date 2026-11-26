@@ -26,9 +26,10 @@ CHAT_RECORD = "chat_record"
 DELIVERY_ERROR_MAX_CHARS = 500
 
 
-def chat_record(session_id: str, message_id: str) -> dict[str, str]:
+def chat_record(session_id: str, message_id: str, *, manager_session: str | None = None) -> dict[str, str]:
     """The metadata entry that has the channel store an answer under ``session_id`` as ``message_id``."""
-    return {"session_id": session_id, "message_id": message_id}
+    return {"session_id": session_id, "message_id": message_id,
+            **({"manager_session": manager_session} if manager_session is not None else {})}
 
 
 async def record_reply(channel: str, envelope: MessageEnvelope, receipt: DeliveryReceipt, *,
@@ -52,6 +53,6 @@ async def record_reply(channel: str, envelope: MessageEnvelope, receipt: Deliver
         await db_chat.save_channel_message(session_id=record["session_id"], message_id=record["message_id"],
                                            role="assistant", content=text, channel=channel,
                                            manager_id=envelope.source.agent_id, delivery_failure=failure,
-                                           delivery_error=error)
+                                           delivery_error=error, manager_session=record.get("manager_session"))
     except Exception:
         logger.warning("could not store a %s answer in %s", channel, record["session_id"], exc_info=True)

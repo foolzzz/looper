@@ -61,7 +61,7 @@ def test_native_cli_group_message_runs_in_a_scoped_session(monkeypatch, tmp_path
             assert len(resident.turns) == 1 and "synthetic scoped question" in resident.turns[0]
             assert not rig.main.turns
             assert principals == [chat_scopes.Principal(chat_scopes.ScopeAudience.SHARED,
-                                  chat_scopes.PrincipalKind.BOT, chat_scopes.CHAT_ONLY, 1)]
+                                  chat_scopes.PrincipalKind.PERSON, chat_scopes.CHAT_ONLY, 1)]
             recorded = calls()
             assert ["event", "consume", "im.message.receive_v1", "--as", "bot"] in recorded
             reply = next(call for call in recorded if "+messages-reply" in call and "synthetic scoped reply" in call)

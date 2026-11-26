@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
 
@@ -29,6 +30,9 @@ async def save_message(
     channel: str = "web",
     delivery_failure: str | None = None,
     delivery_error: str | None = None,
+    manager_session: str | None = None,
+    sender_kind: str | None = None,
+    sender_name: str | None = None,
     pool: asyncpg.Pool | asyncpg.Connection | None = None,
 ) -> None:
     """Store a message; a Telegram or Lark answer its channel could not send with why (``delivery_failure``, a
@@ -37,14 +41,15 @@ async def save_message(
     await pool.execute(
         """
         INSERT INTO chat_messages (session_id, message_id, role, content, channel, created_at, delivery_failure,
-                                   delivery_error)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+                                   delivery_error, manager_session, sender_kind, sender_name)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
         ON CONFLICT (session_id, message_id) DO UPDATE
         SET content = EXCLUDED.content, delivery_failure = EXCLUDED.delivery_failure,
             delivery_error = EXCLUDED.delivery_error
         """,
         session_id, message_id, role, content, channel,
         datetime.now(timezone.utc), delivery_failure, delivery_error,
+        manager_session, sender_kind, sender_name,
     )
 
 
@@ -58,6 +63,9 @@ async def save_channel_message(
     channel: str,
     delivery_failure: str | None = None,
     delivery_error: str | None = None,
+    manager_session: str | None = None,
+    sender_kind: str | None = None,
+    sender_name: str | None = None,
     pool: asyncpg.Pool | None = None,
 ) -> None:
     """Claim/check a channel thread and write together; a different owner rejects the entire write.
@@ -73,6 +81,7 @@ async def save_channel_message(
             raise ValueError(f"chat thread belongs to {owner}")
         await save_message(session_id=session_id, message_id=message_id, role=role, content=content,
                            channel=channel, delivery_failure=delivery_failure, delivery_error=delivery_error,
+                           manager_session=manager_session, sender_kind=sender_kind, sender_name=sender_name,
                            pool=conn)
 
 
@@ -160,6 +169,41 @@ async def recent_messages(session_id: str, limit: int, *, pool: asyncpg.Pool | N
         "SELECT id, role, content, created_at, delivery_failure FROM chat_messages WHERE session_id = $1 "
         "ORDER BY id DESC LIMIT $2) m ORDER BY id ASC", session_id, limit)
     return [dict(row) for row in rows]
+
+
+@dataclass(frozen=True)
+class Activity:
+    """Another session's recent rows, oldest first, omitted count and the thread's new cursor."""
+
+    rows: list[dict[str, Any]]
+    hidden: int
+    last_id: int | None
+
+
+async def latest_id(session_id: str, *, pool: asyncpg.Pool | asyncpg.Connection | None = None) -> int | None:
+    """The highest stored id of a thread, or None before its first message."""
+    return await (pool or get_pool()).fetchval(
+        "SELECT max(id) FROM chat_messages WHERE session_id = $1", session_id)
+
+
+async def activity_since(session_id: str, *, after_id: int, exclude_session: str,
+                         exclude_message_id: str | None, limit: int, pool: asyncpg.Pool | None = None) -> Activity:
+    """Read other sessions' activity and the thread's cursor in one read-only snapshot.
+
+    BIGSERIAL ids can commit out of order: a row committed after a higher id was read can be skipped once.
+    Group activity is a convenience, not a ledger. NULL manager_session belongs to another session too.
+    """
+    pool = pool or get_pool()
+    async with pool.acquire() as conn, conn.transaction(isolation="repeatable_read", readonly=True):
+        last_id = await latest_id(session_id, pool=conn)
+        where = ("session_id = $1 AND id > $2 AND id <= $3 "
+                 "AND manager_session IS DISTINCT FROM $4 AND message_id IS DISTINCT FROM $5")
+        args = (session_id, after_id, last_id, exclude_session, exclude_message_id)
+        rows = await conn.fetch(
+            "SELECT id, role, content, created_at, sender_kind, sender_name FROM chat_messages WHERE "
+            + where + " ORDER BY id DESC LIMIT $6", *args, limit)
+        count = await conn.fetchval("SELECT count(*) FROM chat_messages WHERE " + where, *args)
+        return Activity(rows=[dict(row) for row in reversed(rows)], hidden=count - len(rows), last_id=last_id)
 
 
 async def recent_conversations(

@@ -880,7 +880,8 @@ class TelegramChannelAdapter(ChannelAdapter):
 
         context: dict[str, Any] = {"chat_id": chat_id}
         if not status:
-            context.update(user_id=update.effective_user.id, username=update.effective_user.username or "")
+            context.update(user_id=update.effective_user.id, username=update.effective_user.username or "",
+                           sender_kind="bot" if getattr(update.effective_user, "is_bot", False) is True else "person")
             if update.message is not None:  # None for an edited /new
                 context["message_id"] = str(update.message.message_id)
                 # Keep provenance without copying the original sender's identity or quoted content.

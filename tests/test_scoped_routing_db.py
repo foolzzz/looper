@@ -329,6 +329,29 @@ def test_unusable_set_answers_and_starts_nothing(items: Any, monkeypatch: Any, t
     run_db(body, monkeypatch, timeout=90)
 
 
+def test_unknown_sender_kind_is_held_not_routed(monkeypatch: Any, tmp_path: Path, caplog: Any) -> None:
+    """Routing reads the channel's sender kind strictly: a value that is neither person nor bot never reaches
+    scope resolution (stored provenance tolerates it, authority does not)."""
+    from looper.agents.tiers.manager import _sender_kind
+
+    async def body(pool: Any) -> None:
+        rig, residents = await _setup(pool, tmp_path, monkeypatch)
+        invalid = _message(rig, "held", kind="robot")
+        with pytest.raises(scopes.ScopeInvariantViolation):
+            _sender_kind(invalid)
+        await rig.start()
+        try:
+            held = await _published(rig, invalid)
+            await _send(rig, "next")
+            rig.collect()
+            assert held.message_id not in rig.replies and len(residents[0].turns) == 1
+            assert "held" not in residents[0].turns[0]
+            assert any(record.levelno == logging.CRITICAL for record in caplog.records)
+        finally:
+            await rig.close()
+    run_db(body, monkeypatch, timeout=90)
+
+
 def test_invariant_holds_the_message(monkeypatch: Any, tmp_path: Path, caplog: Any) -> None:
     async def body(pool: Any) -> None:
         rig, residents = await _setup(pool, tmp_path, monkeypatch)

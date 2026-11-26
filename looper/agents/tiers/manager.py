@@ -53,6 +53,7 @@ from ..drain import DrainState
 from ..bus import MessageBus
 from ..channels import lark_quote
 from ..channels.chat_history import CHAT_RECORD, chat_record
+from ..chat_scopes import PrincipalKind
 from ..supervisor import cancel_and_wait
 from ..agent_settings import Access, AgentSettings, AgentType, Harness, Launch, Layer, load_agent_settings
 from ..session_profile import (
@@ -591,6 +592,16 @@ def _looper_call(name: Any, raw: Any) -> tuple[str, dict[str, Any]]:
     return name, arguments
 
 
+def _recorded_sender_kind(envelope: MessageEnvelope) -> PrincipalKind | None:
+    """The sender kind kept as provenance on a stored message: None for absent or unknown values, so a bad value
+    never loses the message. Routing authority never reads this; it fails closed on its own strict reader."""
+    context = envelope.payload.get("channel_context")
+    try:
+        return PrincipalKind(context.get("sender_kind") if isinstance(context, dict) else None)
+    except (ValueError, TypeError):
+        return None
+
+
 def _message_origin(envelope: MessageEnvelope) -> dict[str, Any]:
     """The channel a message came from, its sender (Lark's open_id, Telegram's user id; the web chat names none),
     its chat (the Lark or Telegram chat, the web chat session) and whether that is a group chat: a Lark chat says
@@ -723,14 +734,14 @@ def _session_key(envelope: MessageEnvelope) -> str | None:
     return None
 
 
-def _chat_record(envelope: MessageEnvelope, message_id: str) -> dict[str, Any]:
+def _chat_record(envelope: MessageEnvelope, message_id: str, *, manager_session: str | None = None) -> dict[str, Any]:
     """The metadata that has a Telegram or Lark channel store an answer to ``envelope`` as ``message_id`` once it
     has tried to send it (``channels.chat_history``); nothing for the web chat, which stores its own, and for a chat
     whose turns are not stored."""
     key = _session_key(envelope)
     if _message_origin(envelope)["channel"] == "web" or not key:
         return {}
-    return {CHAT_RECORD: chat_record(key, message_id)}
+    return {CHAT_RECORD: chat_record(key, message_id, manager_session=manager_session)}
 
 
 def _reply_route(envelope: MessageEnvelope) -> dict[str, Any]:
@@ -842,12 +853,13 @@ class GoalSnapshot:
 def reply_envelope(original: MessageEnvelope, text: str, source: AgentAddress, *, error: str | None = None,
                    outcome: ReplyOutcome | None = None, record: dict[str, Any] | None = None,
                    snapshot: str | None = None, cards: list[dict[str, Any]] | None = None,
-                   ephemeral: bool = False) -> MessageEnvelope:
+                   ephemeral: bool = False, manager_session: str = MAIN_SESSION) -> MessageEnvelope:
     """The reply from ``source`` to ``original``, addressed to the channel it came from; by default it is kept in
-    the chat's history (``record``). ``cards`` are blocks of ``text`` a channel with buttons sends as cards."""
+    the chat's history (``record``). Code-owned replies without a running session belong to main; callers answering
+    a session's interrupted turn pass its key. ``cards`` are blocks of ``text`` a channel with buttons sends as cards."""
     outcome = outcome or (ReplyOutcome.FAILED if error else ReplyOutcome.ANSWERED)
     if record is None:
-        record = _chat_record(original, f"{original.message_id}:reply")
+        record = _chat_record(original, f"{original.message_id}:reply", manager_session=manager_session)
     return MessageEnvelope.create(
         source=source,
         target=original.source,
@@ -962,6 +974,7 @@ class ManagerAgent:
         # hands them over when it retires this Manager).
         self._handling: MessageEnvelope | None = None
         self.stopped_in_flight: tuple[tuple[MessageEnvelope, str], ...] = ()
+        self.stopped_in_flight_sessions: dict[str, str] = {}
 
     @property
     def name(self) -> str:
@@ -1315,9 +1328,18 @@ class ManagerAgent:
         self._running = False
         # Before the cancel: it runs the handlers' finally blocks, which end the tokens and clear ``_handling``.
         tokens = self._turns.live()
+        # Preserve ownership before cancellation clears worker/token state; unrouted fleet replies use main.
+        self.stopped_in_flight_sessions = {
+            envelope.message_id: key for key, envelope in self._router._handling.items()}
+        for key, queue in self._router._queues.items():
+            for _, item in (*queue.interactive, *queue.background):
+                if isinstance(item, MessageEnvelope):
+                    self.stopped_in_flight_sessions[item.message_id] = key
         for session in self._sessions.values():  # every session's
             if session.running_token is not None:
                 tokens.append(session.running_token)  # settled while its record finishes, but still answering the chat
+                if session.running_token.envelope is not None:
+                    self.stopped_in_flight_sessions[session.running_token.envelope.message_id] = session.key
         handling = ([self._handling] if self._handling is not None else []) + self._router.handling()
         pending = [(e, "") for e in handling] + [(t.envelope, t.partial) for t in tokens if t.envelope is not None]
         self.stopped_in_flight = tuple({e.message_id: (e, partial) for e, partial in pending}.values())
@@ -3645,7 +3667,7 @@ class ManagerAgent:
             correlation_id=last.correlation_id,
             metadata={"origin_channel_id": last.metadata.get("origin_channel_id"),
                       **_reply_route(last),
-                      **_chat_record(last, f"auto-{uuid.uuid4().hex[:12]}"),
+                      **_chat_record(last, f"auto-{uuid.uuid4().hex[:12]}", manager_session=self._session_now().key),
                       **self._proactive_metadata(ProactiveSource.AUTONOMOUS)},
         ))
 
@@ -3953,9 +3975,14 @@ class ManagerAgent:
             key = _session_key(env)
             if not key:
                 return
+            context = env.payload.get("channel_context")
+            context = context if isinstance(context, dict) else {}
+            kind = _recorded_sender_kind(env)
             await db_chat.save_channel_message(
                 session_id=key, message_id=message_id,
                 role=role, content=content, channel=channel, manager_id=self.agent_id,
+                **({"manager_session": self._session_now().key, "sender_kind": kind.value if kind else None,
+                    "sender_name": context.get("sender_name")} if role == "user" else {}),
             )
             await ops_sessions.note_direct_thread(key, _message_origin(env))
         except Exception:
@@ -3975,7 +4002,8 @@ class ManagerAgent:
         assert self._bus is not None
         resident_text = text
         text = self._group_safe(original, text)
-        record = None if persist else {}
+        record = (_chat_record(original, f"{original.message_id}:reply", manager_session=self._session_now().key)
+                  if persist else {})
         outcome = outcome or (ReplyOutcome.FAILED if error else ReplyOutcome.ANSWERED)
         reply = reply_envelope(original, text, self.agent_address, error=error, outcome=outcome,
                                record=record, snapshot=snapshot, cards=cards, ephemeral=ephemeral)
