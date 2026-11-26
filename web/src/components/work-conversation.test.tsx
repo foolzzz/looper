@@ -3,7 +3,14 @@ import { createWorkConversationStore, workConversationKey } from "@/lib/use-work
 import { act, useState, type ReactNode } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { clearWorkComposerMemory, PlannerWorkConversation, WorkConversation, type WorkConversationProps } from "@/components/work-conversation";
+import {
+  clearWorkComposerMemory,
+  PlannerWorkConversation,
+  taskConversationAddress,
+  taskConversationHint,
+  WorkConversation,
+  type WorkConversationProps,
+} from "@/components/work-conversation";
 import { WorkPage } from "@/pages/work";
 
 type Handler = (event: { kind: string; payload: Record<string, unknown> }) => void;
@@ -222,6 +229,30 @@ describe("work conversation", () => {
     expect(api.watchChat).toHaveBeenCalledWith(localStorage.getItem("looper-chat-session-id"), expect.any(Function), "manager");
     expect(container.querySelector('[aria-label="任务管家模型"]')).toBeNull();
     expect(container.textContent).not.toContain("已接通");
+    expect(container.textContent).toContain("还没有对话");
+    expect(container.textContent).not.toContain(taskConversationHint("zh"));
+    expect(container.textContent).not.toContain(taskConversationHint("en"));
+  });
+
+  it("names the Planner who answers a task, in Chinese and English, and sends there", async () => {
+    expect(taskConversationHint("zh")).toBe("发送消息与这个任务的规划者对话。");
+    expect(taskConversationHint("en")).toBe("Send a message to this task's Planner.");
+    expect(taskConversationAddress("t1")).toEqual({
+      target: { kind: "planner", task_id: "t1" },
+      threadId: "planner-t1",
+    });
+    await show(<TaskPane taskId="t1" />);
+    expect(container.textContent).toContain(taskConversationHint("zh"));
+    expect(container.textContent).not.toContain("任务管家");
+    await say("ask");
+    const address = taskConversationAddress("t1");
+    expect(api.sendChat).toHaveBeenCalledWith(
+      "ask",
+      address.threadId,
+      expect.any(String),
+      address.target,
+      expect.anything(),
+    );
   });
 
   it("sends the original text to the planner thread with the original message id", async () => {

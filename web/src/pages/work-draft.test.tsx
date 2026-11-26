@@ -156,7 +156,7 @@ it.each(["pending", "assigned", "running", "planning", "executing", "verifying",
   task = { ...task, status };
   await show();
   expect(input().disabled).toBe(false);
-  expect(host.textContent).toContain("发送消息与任务管家对话。");
+  expect(host.textContent).toContain("发送消息与这个任务的规划者对话。");
   expect(host.querySelector('[data-work-detail]')?.textContent).not.toContain("任务已结束");
   act(() => root.unmount()); root = createRoot(host);
   plannerAvailable = false;

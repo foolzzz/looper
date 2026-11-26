@@ -87,6 +87,30 @@ const TERMINAL = new Set(["completed", "failed", "cancelled", "stopped"]);
 const CONNECT_FAILED = "连接失败，请检查服务器是否运行。";
 const STREAM_LOST = "回复流已断开，服务端可能仍在运行";
 
+/**
+ * Who a Work task conversation addresses. The send target and both hint
+ * languages read this one value, so a later switch to the task Manager
+ * changes them together.
+ */
+const TASK_CONVERSATION_ANSWERER = {
+  kind: "planner",
+  zh: "规划者",
+  en: "Planner",
+} as const;
+
+export function taskConversationAddress(taskId: string): { target: ChatTarget; threadId: string } {
+  const kind = TASK_CONVERSATION_ANSWERER.kind;
+  return { target: { kind, task_id: taskId }, threadId: `${kind}-${taskId}` };
+}
+
+/** Work renders Chinese. English is the same answerer's other language. */
+export function taskConversationHint(language: "zh" | "en"): string {
+  const name = TASK_CONVERSATION_ANSWERER[language];
+  return language === "zh"
+    ? `发送消息与这个任务的${name}对话。`
+    : `Send a message to this task's ${name}.`;
+}
+
 export const clearWorkComposerMemory = clearWorkConversationMemory;
 
 function fromDb(rows: DbChatMessage[]): WorkPaneMessage[] {
@@ -207,8 +231,8 @@ export function ManagerWorkConversation() {
 }
 
 /**
- * Planner adapter for one selected task. The thread is `planner-<task id>` and the
- * send target is `{kind:'planner', task_id}`. There is no Stop and no turn poll.
+ * Adapter for one selected task. The thread, send target and composer hint
+ * come from `taskConversationAddress`. There is no Stop and no turn poll.
  */
 export function PlannerWorkConversation({
   taskId,
@@ -232,7 +256,7 @@ export function PlannerWorkConversation({
     genTask.current = taskId;
     gen.current += 1;
   }
-  const reply = useReplyStream(() => ({ id: taskRef.current, threadId: `planner-${taskRef.current}` }));
+  const reply = useReplyStream(() => ({ id: taskRef.current, threadId: taskConversationAddress(taskRef.current).threadId }));
   const replyRef = useRef(reply);
   replyRef.current = reply;
 
@@ -305,13 +329,14 @@ export function PlannerWorkConversation({
     setAvailability({ canSend: false, reason: CHECKING });
     fetchChatTargets(ctrl.signal).then((targets) => {
       if (ctrl.signal.aborted || turn !== gen.current || taskRef.current !== taskId) return;
-      const planner = targets.find((target) => target.kind === "planner" && target.task_id === taskId);
-      const status = taskStatus ?? planner?.status ?? "";
+      const address = taskConversationAddress(taskId);
+      const party = targets.find((target) => target.kind === address.target.kind && target.task_id === taskId);
+      const status = taskStatus ?? party?.status ?? "";
       const unavailable = TERMINAL.has(status) ? PLANNER_ENDED : status === "handing_back"
         ? "任务正在交还，任务管家暂时不接收消息。" : NO_PLANNER;
       setAvailability({
-        canSend: planner?.can_send ?? false,
-        reason: planner?.can_send ? "发送消息与任务管家对话。" : unavailable,
+        canSend: party?.can_send ?? false,
+        reason: party?.can_send ? taskConversationHint("zh") : unavailable,
       });
     }).catch((error: unknown) => {
       if (ctrl.signal.aborted || turn !== gen.current || (error instanceof Error && error.name === "AbortError")) return;
@@ -327,7 +352,7 @@ export function PlannerWorkConversation({
     const turn = gen.current;
     const sent = sendGen.current;
     setLive((current) => current.taskId !== taskId ? current : { ...current, history: store.cached(cacheKey)?.messagesLoaded ? current.history : "loading", historyError: "" });
-    fetchChatMessages(`planner-${taskId}`, ctrl.signal).then((rows) => {
+    fetchChatMessages(taskConversationAddress(taskId).threadId, ctrl.signal).then((rows) => {
       if (ctrl.signal.aborted || turn !== gen.current || taskRef.current !== taskId) return;
       if (!Array.isArray(rows)) throw new Error("服务器返回了无效的对话消息。");
       if (sent !== sendGen.current) return;
@@ -365,8 +390,7 @@ export function PlannerWorkConversation({
   const send = (text: string) => {
     if (!text.trim() || !canSendRef.current || missing || taskRef.current !== taskId) return;
     const turn = gen.current;
-    const sid = `planner-${taskId}`;
-    const target: ChatTarget = { kind: "planner", task_id: taskId };
+    const { threadId: sid, target } = taskConversationAddress(taskId);
     sendGen.current += 1;
     finalSeen.current = false;
     reply.cancel();
