@@ -45,8 +45,9 @@ SUMMARY = _object({"enabled": _BOOL, "window_days": _INT,
     "scopes": _SCOPES},
     closed=True)
 SUMMARY["properties"]["work_mode"] = _object({"task_manager_launch_refusals_total": _array(_object({
-    "reason": {"enum": ["review_hook_disabled", "cli_unverified"]},
-    "phase": {"enum": ["launch", "resume"]}, "cli_version": _STR, "count": _INT}, closed=True))}, closed=True)
+    "reason": {"enum": ["review_hook_disabled", "cli_unverified",
+        "sandbox_unavailable", "readback_unavailable", "launch_setting_mismatch", "mcp_set_mismatch", "mcp_launcher_unsafe", "network_policy_invalid", "workspace_not_repo_root", "workspace_is_home", "workspace_contains_trusted_config", "workspace_in_system_dir", "workspace_overlaps_session", "worktree_unsupported", "head_moved", "head_detached"]},
+    "phase": {"enum": ["launch", "resume", "turn"]}, "cli_version": _STR, "count": _INT}, closed=True))}, closed=True)
 _TASK_MEASUREMENT = _object({"task_id": _STR, "record_id": _INT,
     "model": {"type": ["string", "null"]}, "mode": {"enum": ["direct", "orchestrated"]},
     "maintenance": _BOOL, "value": _NUMBER}, closed=True)
