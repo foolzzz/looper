@@ -45,6 +45,7 @@ class Reason(StrEnum):
     DELIVERY_DEFERRED = "delivery_deferred"
     DAILY_CAP = "daily_cap"
     WITHHELD_NOT_OPERATOR = "withheld_not_operator"
+    SESSION_ALLOWLIST = "session_allowlist"
 
 
 RETENTION_DAYS = 30
