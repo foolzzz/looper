@@ -18,6 +18,7 @@ import {
   X,
 } from "lucide-react";
 import { FailedChecksLine } from "@/components/failed-checks-line";
+import { TaskChatEntry, useTaskChatTargets } from "@/components/task-chat-entry";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
@@ -112,6 +113,16 @@ function statusIcon(status: string) {
     default:
       return <Clock className="h-4 w-4 text-muted-foreground" />;
   }
+}
+
+/** The Tasks page's status icon plus its wording, so another page cannot invent a label. */
+export function TaskStatusMark({ status }: { status: string }) {
+  return (
+    <span className="inline-flex items-center gap-1.5">
+      {statusIcon(status)}
+      {statusBadge(status)}
+    </span>
+  );
 }
 
 const RESTARTABLE_STATUSES = ["stopped", "failed", "cancelled", READY_STATUS];
@@ -329,6 +340,7 @@ export function TasksPage({ sub, query, onNavigate }: TasksPageProps) {
   const [scheduleNames, setScheduleNames] = useState<Record<string, string>>({});
   const [taskPath, taskQuery = ""] = (sub || "").split("?");
   const selectedTaskId = taskPath ? decodeURIComponent(taskPath) : null;
+  const chatAvailability = useTaskChatTargets(!selectedTaskId);
   const taskParams = new URLSearchParams(taskQuery);
   const gateStep = taskParams.get("gate");
   const tabParam = taskParams.get("tab");
@@ -872,6 +884,7 @@ export function TasksPage({ sub, query, onNavigate }: TasksPageProps) {
                   </div>
                 </div>
                 <div className="shrink-0 flex flex-wrap items-center gap-1 max-sm:pl-7">
+                  <TaskChatEntry taskId={task.task_id} availability={chatAvailability} />
                   {isActiveTask(task) && (
                     <button
                       type="button"

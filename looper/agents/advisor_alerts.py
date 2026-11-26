@@ -102,9 +102,7 @@ async def _send(text: str, task_id: str | None = None) -> None:
     chat = await dashboard_target()
     if chat is None or _sender is None:
         return
-    proactive = turn_metrics.proactive_kwargs(turn_metrics.ProactiveSource.ADVISOR_ALERT, task_id)
-    sent, error = await _sender(
-        chat.channel_id, chat.target.id, text,
-        **({**proactive, "group": chat.target.group} if proactive else {}))
+    with turn_metrics.proactive_send(turn_metrics.ProactiveSource.ADVISOR_ALERT, task_id, group=chat.target.group):
+        sent, error = await _sender(chat.channel_id, chat.target.id, text)
     if not sent:
         logger.warning("cannot send the advisor alert to %s: %s", chat.channel_id, error)

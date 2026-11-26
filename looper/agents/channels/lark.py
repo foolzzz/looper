@@ -9,6 +9,7 @@ and reply references for routing and idempotent retries.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import math
 import re
@@ -42,7 +43,7 @@ from .. import chat_settings
 from .allowlist import SenderAllowlist
 from .base import ChannelAdapter, DeliveryFailure, DeliveryReceipt, PostOutcome, PostReceipt
 from .chat_history import record_reply
-from .proactive import record_delivery
+from .proactive import record_delivery, store_envelope_body
 from .chat_routing import ChatResolver, RouteAction, RouteDecision, SenderPolicy, observe_chat, log_route
 from . import lark_content, lark_quote
 from .lark_cli import MESSAGE_GONE_CODES, RECEIVE_EVENT, LarkCliError, LarkCliOutputError, mention
@@ -242,6 +243,8 @@ class LarkChannelAdapter(ChannelAdapter):
         # The bot's own open_id: a group message is handled only when it @-mentions this; none, none is.
         self._bot_open_id = bot_open_id
         self._bot_app_id = bot_app_id
+        # Delivery records are resident-only and bounded. Restart/eviction safely restores normal reads.
+        self._quote_deliveries: dict[str, lark_quote.OwnDelivery] = {}
         self._bot_turns: dict[str, deque[float]] = {}
         self._bot_refusals: dict[tuple[str, str], float] = {}
         # One status message per message answered, edited in place (``status_line``), keyed by correlation id:
@@ -354,7 +357,20 @@ class LarkChannelAdapter(ChannelAdapter):
         route = raw_route if isinstance(raw_route, dict) else {}
         chat = self._correlation_chat.get(envelope.correlation_id) or route.get("chat_id")
         with self._transport.message_scope(envelope.message_id, source=source, chat=chat):
-            return await task_notice_delivery.send(envelope, self._deliver)
+            with lark_quote.capture_delivery() as items:
+                receipt = await task_notice_delivery.send(envelope, self._deliver)
+            session = lark_quote.QuoteSession.from_payload(envelope.metadata.get("quote_session"))
+            if (receipt.success and session is not None and session.manager_id == envelope.source.agent_id
+                    and envelope.source.agent_type == "manager" and envelope.message_type is MessageType.AGENT_REPLY
+                    and not envelope.metadata.get("cards") and len(items) == 1):
+                group = envelope.correlation_id in self._group_message or bool(route.get("reply_to"))
+                delivery = lark_quote.own_delivery(session, items[0], own=(self._bot_open_id, self._bot_app_id),
+                                                   group=group)
+                if delivery is not None and delivery.chat_id == chat:
+                    self._quote_deliveries[delivery.message_id] = delivery
+                    while len(self._quote_deliveries) > _THREAD_MESSAGES_KEPT:
+                        del self._quote_deliveries[next(iter(self._quote_deliveries))]
+            return receipt
 
     async def _deliver(self, envelope: MessageEnvelope) -> DeliveryReceipt:
         """Show a phase on the message's status line, send task progress or a task's end notice as a message of
@@ -370,9 +386,9 @@ class LarkChannelAdapter(ChannelAdapter):
             notice = Notice.from_payload(envelope.payload)
             if notice is None:
                 return DeliveryReceipt(channel=self.channel_type, success=False, error="a notice without a Lark target")
-            return await self._send_notice(notice.target,
-                                           for_group(notice.text) if notice.target.group else notice.text,
-                                           **receipt_kwargs)
+            text = for_group(notice.text) if notice.target.group else notice.text
+            await store_envelope_body(self.channel_id, envelope, text)
+            return await self._send_notice(notice.target, text, **receipt_kwargs)
         corr_id = envelope.correlation_id
         chat_id = self._correlation_chat.get(corr_id)
         if chat_id is None and envelope.target == self._address:
@@ -383,6 +399,8 @@ class LarkChannelAdapter(ChannelAdapter):
                         and status_kind(envelope.payload) is StatusKind.PROGRESS
                         and isinstance(route.get("reply_to"), str) and route["reply_to"]):
                     # A recovered task report answers its original message without changing live routing.
+                    await store_envelope_body(self.channel_id, envelope, str(envelope.payload["text"]),
+                                              chat=route["chat_id"], group=True)
                     try:
                         await self._reply(route["reply_to"], markdown=str(envelope.payload["text"]))
                     except LarkCliError as exc:
@@ -412,6 +430,8 @@ class LarkChannelAdapter(ChannelAdapter):
                     await self._status.update(corr_id, corr_id, envelope.payload)
                 case StatusKind.PROGRESS:
                     # Task progress leaves the status line alone.
+                    await store_envelope_body(self.channel_id, envelope, str(envelope.payload["text"]),
+                                              chat=chat_id, group=corr_id in self._group_message)
                     return await self._send_message(chat_id, str(envelope.payload["text"]), **receipt_kwargs)
             return DeliveryReceipt(channel=self.channel_type, success=True)
 
@@ -422,6 +442,9 @@ class LarkChannelAdapter(ChannelAdapter):
         cards: list[card_actions.Card] = []
         if self._cards is not None and envelope.metadata.get("cards"):
             text, cards = card_actions.shown(text, envelope.metadata["cards"])
+        if text:
+            await store_envelope_body(self.channel_id, envelope, text, chat=chat_id,
+                                      group=corr_id in self._group_message)
         receipt = DeliveryReceipt(channel=self.channel_type, success=True)
         if text and corr_id in self._group_message:
             receipt = await self._send_reply(corr_id, text, **receipt_kwargs)
@@ -725,6 +748,7 @@ class LarkChannelAdapter(ChannelAdapter):
         return PostReceipt(True, external_ids=(external_id,))
 
     async def edit(self, target: NotifyTarget, external_id: str, text: str) -> PostReceipt:
+        getattr(self, "_quote_deliveries", {}).pop(external_id, None)  # even an uncertain edit invalidates the stored copy
         text = files.redact(text, self._runtime_root)
         try:
             await self._transport.edit(external_id, markdown=text)
@@ -1137,36 +1161,66 @@ class LarkChannelAdapter(ChannelAdapter):
             await self._inbox.remember_thread(chat_id, thread_id, time())
 
     async def _handle_lark_event(self, event: dict[str, Any]) -> Literal["handled", "duplicate", "ignored", "too_old"]:
+        metrics = None
+        if chat_settings.metrics_enabled() and event.get("type") == RECEIVE_EVENT:
+            metrics = {"received_at": event.get("_lark_stdout_read_at") or datetime.now(timezone.utc).isoformat(),
+                       "sender_name_lookup_ms": 0, "attachment_download_ms": 0}
+            if read_at := event.get("_lark_stdout_read_at"):
+                metrics["stdout_read_at"] = read_at
+            # The consumer's create_time is a millisecond epoch string; never substitute receipt time.
+            try:
+                raw = event.get("create_time")
+                if isinstance(raw, (str, int)) and not isinstance(raw, bool):
+                    sent = datetime.fromtimestamp(int(raw) / 1000, timezone.utc)
+                    metrics["platform_sent_at"] = sent.isoformat()
+                    if read_at:
+                        metrics["platform_to_stdout_ms"] = round(
+                            (datetime.fromisoformat(read_at) - sent).total_seconds() * 1000)
+            except (ValueError, OverflowError, OSError):
+                pass
+        waiting = monotonic() if metrics is not None else None
         async with self._ingress_lock:
-            message_id = event.get("message_id")
-            if self._inbox is not None and message_id and await self._inbox.processed(message_id):
-                return "duplicate"
-            created = event.get("_catchup_created_at")
-            if (self._inbox is not None and event.get("type") == RECEIVE_EVENT
-                    and created is None and event.get("sender_type") in {"app", "bot"} and event.get("chat_id")):
-                await self._inbox.remember_bot(event["chat_id"], time())
-            if self._own_message(event):
-                event["_bot_outcome"] = "own_message"
-                handled = False
-            elif event.get("chat_type") == "group" and not self._bot_mentions(event):
-                handled = False
-            elif created is not None and created.before(time() - _CATCHUP_MAX_AGE):
-                if self._inbox is not None:
-                    await self._inbox.drop_window(event.get("chat_id") or "", created.at, created.at,
-                                                  CatchupDropReason.STALE)
-                    if message_id:
-                        await self._inbox.finish(message_id)
-                return "too_old"
-            else:
-                handled = await self._process_lark_event(event)
-            if event.get("sender_type") in {"app", "bot"}:
-                logger.info("lark_bot_message chat=%s bot_id=%s message_id=%s outcome=%s",
-                            event.get("chat_id"), event.get("sender_id"), message_id,
-                            "handled" if handled else event.get("_bot_outcome", "ignored"))
-            if self._inbox is not None and message_id and event.get("type") == RECEIVE_EVENT:
-                await self._inbox.finish(message_id, chat_id=event.get("chat_id") or "",
-                                   thread_id=(event.get("thread_id") or "") if handled else "", at=time())
-            return "handled" if handled else "ignored"
+            if metrics is not None:
+                metrics["lock_wait_ms"] = round((monotonic() - waiting) * 1000)
+                metrics["lock_acquired_at"] = datetime.now(timezone.utc).isoformat()
+                event["_lark_ingress"] = metrics
+            try:
+                return await self._handle_locked_lark_event(event)
+            finally:
+                if metrics is not None:
+                    logger.info("lark_ingress %s", json.dumps({"channel_id": self.channel_id,
+                                "message_id": event.get("message_id"), **metrics}, separators=(",", ":")))
+
+    async def _handle_locked_lark_event(self, event: dict[str, Any]) -> Literal["handled", "duplicate", "ignored", "too_old"]:
+        message_id = event.get("message_id")
+        if self._inbox is not None and message_id and await self._inbox.processed(message_id):
+            return "duplicate"
+        created = event.get("_catchup_created_at")
+        if (self._inbox is not None and event.get("type") == RECEIVE_EVENT
+                and created is None and event.get("sender_type") in {"app", "bot"} and event.get("chat_id")):
+            await self._inbox.remember_bot(event["chat_id"], time())
+        if self._own_message(event):
+            event["_bot_outcome"] = "own_message"
+            handled = False
+        elif event.get("chat_type") == "group" and not self._bot_mentions(event):
+            handled = False
+        elif created is not None and created.before(time() - _CATCHUP_MAX_AGE):
+            if self._inbox is not None:
+                await self._inbox.drop_window(event.get("chat_id") or "", created.at, created.at,
+                                              CatchupDropReason.STALE)
+                if message_id:
+                    await self._inbox.finish(message_id)
+            return "too_old"
+        else:
+            handled = await self._process_lark_event(event)
+        if event.get("sender_type") in {"app", "bot"}:
+            logger.info("lark_bot_message chat=%s bot_id=%s message_id=%s outcome=%s",
+                        event.get("chat_id"), event.get("sender_id"), message_id,
+                        "handled" if handled else event.get("_bot_outcome", "ignored"))
+        if self._inbox is not None and message_id and event.get("type") == RECEIVE_EVENT:
+            await self._inbox.finish(message_id, chat_id=event.get("chat_id") or "",
+                               thread_id=(event.get("thread_id") or "") if handled else "", at=time())
+        return "handled" if handled else "ignored"
 
     async def _process_lark_event(self, event: dict[str, Any]) -> bool | None:
         with self._transport.message_scope(event.get("message_id") or str(_uuid.uuid4()),
@@ -1247,6 +1301,9 @@ class LarkChannelAdapter(ChannelAdapter):
                 del self._thread_messages[next(iter(self._thread_messages))]
         manager_id, explicit = self._manager_id, False
         metadata = {"origin_channel_id": self.channel_id}
+        ingress = event.get("_lark_ingress")
+        if ingress is not None:
+            metadata["lark_ingress"] = ingress
         if decision is not None:
             manager_id, explicit = decision.manager_id, decision.explicit
             silent = decision.action is RouteAction.SILENT
@@ -1255,6 +1312,8 @@ class LarkChannelAdapter(ChannelAdapter):
                 metadata["channel_manager_id"] = self._manager_id
             await observe_chat(self.channel_id, chat_id, suppressed=silent)
             if silent:
+                if ingress is not None:
+                    ingress["route_decided_at"] = datetime.now(timezone.utc).isoformat()
                 log_route(logger, self.channel_id, chat_id, decision)
                 return
         from ..tiers.manager import is_stop_command
@@ -1274,6 +1333,8 @@ class LarkChannelAdapter(ChannelAdapter):
             return
         if bot:
             turns.append(now)
+        if ingress is not None:
+            ingress["route_decided_at"] = datetime.now(timezone.utc).isoformat()
         log_route(logger, self.channel_id, chat_id, decision or RouteDecision(RouteAction.ADMIT, manager_id, explicit),
                   via_chat_senders=sender_open_id not in self._allowlist.ids)
         if inbound.kind is lark_content.ContentKind.UNSUPPORTED:
@@ -1290,7 +1351,12 @@ class LarkChannelAdapter(ChannelAdapter):
                                chat_id, exc_info=True)
             return True
         self._reactions.add(chat_id, message_id)  # the bot saw it; in the background, the Manager gets it now
-        attachments = await self._collect(message_id, inbound.resources) if inbound.resources else []
+        downloading = monotonic() if ingress is not None else None
+        try:
+            attachments = await self._collect(message_id, inbound.resources) if inbound.resources else []
+        finally:
+            if ingress is not None and inbound.resources:
+                ingress["attachment_download_ms"] = round((monotonic() - downloading) * 1000)
         if any(item.state is not AttachmentState.SAVED for item in attachments):
             try:
                 reply = _not_received(attachments)
@@ -1313,7 +1379,12 @@ class LarkChannelAdapter(ChannelAdapter):
         if group:
             if message_id:
                 self._group_message[correlation_id] = message_id
-            context["sender_name"] = await self._sender_name(sender_open_id or "")
+            looking_up = monotonic() if ingress is not None else None
+            try:
+                context["sender_name"] = await self._sender_name(sender_open_id or "")
+            finally:
+                if ingress is not None:
+                    ingress["sender_name_lookup_ms"] = round((monotonic() - looking_up) * 1000)
         # What it quotes is read by the Manager, as it prepares the turn (``read_quote``); a /stop reads nothing.
         quote_ref = None if stop else QuoteRef.received(
             self.channel_id, event, forward=inbound.kind is lark_content.ContentKind.FORWARD)
@@ -1342,6 +1413,12 @@ class LarkChannelAdapter(ChannelAdapter):
         names included; a read that fails becomes a line saying why. The images and files in it are saved beside
         the message's own, numbered after its ``after`` and within its limits (``_collect``). The Manager calls it
         while it prepares the message's turn (``lark_quote.QuoteReader``)."""
+        delivery = getattr(self, "_quote_deliveries", {}).get(ref.parent_id)
+        if (ref.kind is QuoteKind.REPLY and not ref.thread_id and delivery is not None
+                and ref.session is not None and delivery.session == ref.session and delivery.chat_id == ref.chat_id):
+            quote, _ = lark_quote.build(QuoteKind.REPLY, ref.parent_id, [delivery.item],
+                                        own=(self._bot_open_id, self._bot_app_id), after=after)
+            return QuoteRead((quote,), decision=lark_quote.QuoteDecision.SKIP_OWN_IN_SESSION)
         read = self._transport.get_message  # type: ignore[attr-defined]
         wanted = ref.targets()
         started = monotonic()
@@ -1457,7 +1534,7 @@ class LarkChannelAdapter(ChannelAdapter):
                 # An answer is stored once it was sent, or as not delivered (the Manager names its record).
                 receipt = await self.deliver(envelope)
                 self.record_envelope_delivery(envelope, receipt)
-                if chat_settings.metrics_enabled() and envelope.metadata.get("proactive"):
+                if envelope.metadata.get("proactive"):
                     route = envelope.metadata.get("reply_route")
                     route = route if isinstance(route, dict) else {}
                     chat = str(route.get("chat_id") or self._correlation_chat.get(envelope.correlation_id) or "")

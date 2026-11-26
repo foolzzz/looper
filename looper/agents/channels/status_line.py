@@ -5,9 +5,10 @@ The Manager reports what it is doing as it answers (``STATUS_UPDATE`` with
 line; a chat channel used to send each as a message of its own, so one answer
 came after a stream of small messages. Instead, the first phase of a message
 sends one status message (「⏳ 处理中：思考中 · 0s」), and later phases edit it:
-only when the text changed, at most once every ``EDIT_INTERVAL_SECONDS`` (a
+only when the text changed, with a growing gap after the first 30 seconds (a
 phase that arrives sooner is shown by one trailing edit), and at most
-``MAX_PROGRESS_EDITS`` times; after that the line is left as it is. The
+``MAX_PROGRESS_EDITS`` times; the last says it is still running, with the
+elapsed minutes, and is left until the answer. The
 answer goes as a new message, so the user is notified, and then the status
 message is edited a last time: 「✅ 完成 · 用时 Ns · 工具 N 次」, or 「❌ 出错：…」
 when the turn failed. A failed send or edit is logged once and the line is
@@ -45,6 +46,9 @@ from typing import Any
 logger = logging.getLogger(__name__)
 
 EDIT_INTERVAL_SECONDS = 3.0
+# Keep ten 3 s edits, then grow by 1.8: 30 * 1.8**8 = 3306 s (~55 min) for 18 edits.
+PROGRESS_WARMUP_SECONDS = 30.0
+PROGRESS_ELAPSED_RATIO = 0.8
 # Feishu edits one message at most 20 times (open.feishu.cn, 编辑消息): 18 progress edits, the closing edit, one spare.
 MAX_PROGRESS_EDITS = 18
 OPEN_MAX = 200  # status messages being edited
@@ -133,6 +137,8 @@ class StatusLines:
         self._finished: OrderedDict[str, None] = OrderedDict()
 
     def _text(self, line: _Line) -> str:
+        if line.message_id is not None and line.edits == self._max_edits - 1:
+            return f"⏳ 仍在处理（已用时 {int((self._clock() - line.started) // 60)} 分钟）"
         return f"⏳ 处理中：{line.label} · {int(self._clock() - line.started)}s"
 
     async def update(self, correlation_id: str, chat: str, payload: Mapping[str, Any]) -> None:
@@ -165,16 +171,18 @@ class StatusLines:
 
     async def _progress(self, line: _Line) -> None:
         """Edit the line now if one is allowed and due; else leave one trailing edit for when it is."""
-        if line.broken or line.done or line.edits >= self._max_edits:
-            return
-        wait = self._interval - (self._clock() - line.last_edit)
-        if wait > 0:
-            if line.trailing is None or line.trailing.done():
-                line.trailing = asyncio.ensure_future(self._trail(line, wait))
-            return
         async with line.lock:
-            if not (line.broken or line.done or line.edits >= self._max_edits):
-                await self._apply(line, self._text(line), progress=True)
+            if line.broken or line.done or line.edits >= self._max_edits:
+                return
+            elapsed = line.last_edit - line.started
+            gap = (max(self._interval, PROGRESS_ELAPSED_RATIO * elapsed)
+                   if elapsed >= PROGRESS_WARMUP_SECONDS else self._interval)
+            wait = gap - (self._clock() - line.last_edit)
+            if wait > 0:
+                if line.trailing is None or line.trailing.done():
+                    line.trailing = asyncio.ensure_future(self._trail(line, wait))
+                return
+            await self._apply(line, self._text(line), progress=True)
 
     async def _trail(self, line: _Line, wait: float) -> None:
         try:
@@ -182,9 +190,8 @@ class StatusLines:
             return  # answered meanwhile: the closing edit shows the end
         except asyncio.TimeoutError:
             pass
-        async with line.lock:
-            if not (line.broken or line.done or line.edits >= self._max_edits):
-                await self._apply(line, self._text(line), progress=True)
+        line.trailing = None
+        await self._progress(line)
 
     async def _apply(self, line: _Line, text: str, *, progress: bool) -> None:
         if line.message_id is None or text == line.shown:

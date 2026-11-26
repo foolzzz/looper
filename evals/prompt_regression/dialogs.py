@@ -88,6 +88,8 @@ from looper.agents.delivery_guard import FOLLOWUP_MESSAGE
 from looper.agents.tiers.manager import _looper_call
 
 from .compare import outcome
+from . import group_dialogs
+from .routed_dialogs import cases as _routed_cases
 from .metrics import runner_evidence
 from .runner import (
     INTERRUPTED, Api, ErrorClass, EvalError, Outcome, _git, aborted_reason, check_case_budget, error_row,
@@ -176,6 +178,7 @@ class Say:
     profile_after: Literal["switch", "settings"] | None = None  # A code-only session profile selection.
     attachments: tuple[tuple[str, bytes], ...] = ()
     client: bool = False  # this turn alone uses the API client; other turns keep the dialog's audience
+    sender: Literal["operator", "member", "bot"] = "operator"
 
 
 @dataclass(frozen=True)
@@ -190,6 +193,8 @@ class Dialog:
     seed: Callable[[Api, str], None] | None = None
     manager: str | None = None  # the key of the scenario Manager the dialog talks to (its seed creates it)
     client: bool = False  # the dialog talks to the default Manager as an API client (``/api/v1/chat/send``)
+    routing: Literal["per_chat", "scoped"] | None = None
+    manager_seed: dict[str, Any] | None = None  # Group Manager fields, inserted before server startup.
     tags: tuple[str, ...] = field(default=())
     projects_root: bool = False  # the server has [projects] root set to a directory of the case
     fake_task: dict[str, Any] | None = None  # fake mode: the stand-in Planner's script for its tasks (else slow)
@@ -199,8 +204,11 @@ class Dialog:
     research: bool = False  # the Manager's research order is on (Settings → Chat, ``research_order``)
     # The session search is on, and the database holds the synthetic history (``_seed_sessions``).
     sessions: bool = False
+    session: Literal["group", "dm"] | None = None  # Native CLI envelope, rather than dashboard input.
+    sender: Literal["operator", "other"] = "operator"
     failure_hold: bool = False  # create an act-mode environment hold before the first Manager turn
     memory: bool = False  # an enabled synthetic memory vault, without a drafting budget or push channel
+    resident_profile: Literal["present-off", "present-on", "absent-off", "absent-on"] | None = None
 
 
 # The gate the gate dialogs' running task waits at, and what it asks.
@@ -3523,6 +3531,9 @@ DIALOGS: tuple[Dialog, ...] = (
 )
 
 
+DIALOGS += _routed_cases(Dialog, Say, PROJECT)
+
+
 # Context measurements are scripted here, so these cases are selected explicitly in fake mode only.
 FAILURE_DIALOGS = tuple(_hold_dialog(action) for action in ("retry", "planner", "stop")) + (
     Dialog("task_hold_operator_boundary", (
@@ -3544,6 +3555,17 @@ FAKE_DIALOGS: tuple[Dialog, ...] = (
         Say("继续保持当前称呼。", _stable_audience_view("whole", "whole", "whole", "unchanged"),
             (("__reply__", {"text": "好的。"}),)),
     ), seed=_seed_stable_audience, tags=("manager", "stable_context", "audience")),
+    Dialog("group_per_chat_smoke", (
+        Say("Operator greeting.", group_dialogs.smoke_check,
+            (("__reply__", {"text": f"Received in {group_dialogs.CHAT}."}),)),
+        Say("Member greeting.", group_dialogs.smoke_check,
+            (("__reply__", {"text": f"Received in {group_dialogs.CHAT}."}),), sender="member",
+            attachments=(("greeting.txt", b"Synthetic group attachment.\n"),)),
+        Say("Bot greeting.", group_dialogs.smoke_check,
+            (("__reply__", {"text": f"Received in {group_dialogs.CHAT}."}),), sender="bot"),
+    ), session="group", routing="per_chat", manager="group-smoke", manager_seed={
+        "name": "Eval group desk", "tools": "all",
+        "system_prompt": "Answer the messages addressed to you in this group."}),
     Dialog("session_bound_rotate", (
         Say("先记住这一轮。", lambda look: None,
             (("__context__", {"tokens": 40001}), ("__reply__", {"text": "已记住。"}))),
@@ -4062,6 +4084,11 @@ def run_dialog(api: Api, dialog: Dialog, *, database_url: str, project_id: str, 
                                                   manager_profile=manager_profile)
         elif dialog.seed is not None:
             dialog.seed(api, project_id)
+        if dialog.resident_profile is not None:
+            from .resident_profile import seed
+            if runtime_root is None:
+                raise EvalError("resident-profile dialogs need a disposable runtime root")
+            seed(api, runtime_root, dialog.resident_profile)
         api_manager = (manager_profile or {}).get("runtime_type") == "api"
         api_turn = api_manager
         last_model_api = api_manager
@@ -4109,6 +4136,13 @@ def run_dialog(api: Api, dialog: Dialog, *, database_url: str, project_id: str, 
             created = api.post("/api/v1/clients/create", {"name": f"eval-{uuid.uuid4().hex[:6]}"})["result"]
             client_id = created["client"]["id"]
             client_api = Api(api.base_url, token=created["token"], timeout=api.timeout)
+        other_task = None
+        if dialog.session and dialog.routing:
+            group_dialogs.prepare(api, scenarios.parent, dialog, database_url)
+        elif dialog.session:
+            from .routed_dialogs import prepare
+
+            other_task = prepare(api, dialog, database_url, project_id, task)
         known = frozenset(t["task_id"] for t in api.post("/api/v1/tasks/page", {})["result"]["tasks"])
         # Setup uses audited operator operations too; only the dialog's actions belong to its checks.
         since = _last_action(database_url)
@@ -4116,14 +4150,14 @@ def run_dialog(api: Api, dialog: Dialog, *, database_url: str, project_id: str, 
         for number, say in enumerate(dialog.says, 1):
             turn_now = REMINDER_NOW if mode == "fake" and dialog.id == "reminder_tools" else datetime.now(timezone.utc)
             text = say.text_from(previous) if say.text_from and previous else say.text
-            text = text.replace("<task>", task or "")
+            text = text.replace("<task>", task or "").replace("<other task>", other_task or "")
             if fixture_hold:
                 text = text.replace("<hold_step>", fixture_hold["step_id"]).replace("<hold_failure>", str(fixture_hold["failure_id"]))
             if mode == "fake":
                 data = json.loads(scenarios.read_text(encoding="utf-8"))
                 scripted = []
                 for name, arguments in say.fake:
-                    rendered = json.dumps(arguments).replace("<task>", task or "")
+                    rendered = json.dumps(arguments).replace("<task>", task or "").replace("<other task>", other_task or "")
                     if fixture_hold:
                         rendered = rendered.replace("<hold_step>", fixture_hold["step_id"]).replace(
                             '"<hold_failure>"', str(fixture_hold["failure_id"]))
@@ -4132,13 +4166,29 @@ def run_dialog(api: Api, dialog: Dialog, *, database_url: str, project_id: str, 
                         rendered = rendered.replace("<lead>", _memory_lead(previous, kind)["id"])
                     scripted.append([name, json.loads(rendered)])
                 data.setdefault("manager", {})[text] = scripted
+                if dialog.session and say.attachments:
+                    # Rich resource placeholders and the saved-attachment section follow this exact prefix.
+                    prefix = text + "\n" + "\n".join(
+                        f"[file {i}: {name}]" for i, (name, _) in enumerate(say.attachments, 1))
+                    data.setdefault("manager_prefix", {})[prefix + "\n\n"] = scripted
                 if dialog.id == "tools_only_no_text":
                     data["manager"][FOLLOWUP_MESSAGE] = [["__reply__", {"text": "已查到项目：eval-calc。"}]]
                 scenarios.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
             before = _last_action(database_url, agent)
             expects_api = api_turn and not (say.code_only or say.stop or say.withdraw)
             before_run = _newest_run(api, agent) if expects_api else 0
-            if client_api is not None and (dialog.client or say.client):
+            manager_session = None
+            stored_messages = []
+            if dialog.session and dialog.routing:
+                reply, manager_session, stored_messages = group_dialogs.ask(
+                    api, scenarios.parent / "lark", dialog, text, sender=say.sender,
+                    database_url=database_url, timeout=timeout, attachments=say.attachments, **budget_args)
+            elif dialog.session:
+                from .routed_dialogs import ask
+
+                reply = ask(api, scenarios.parent / "lark", dialog, text, database_url=database_url,
+                            timeout=timeout, **budget_args)
+            elif client_api is not None and (dialog.client or say.client):
                 reply, conversation = _ask_client(client_api, api, conversation, text, timeout=timeout,
                                                   database_url=database_url, **budget_args)
             else:
@@ -4161,7 +4211,9 @@ def run_dialog(api: Api, dialog: Dialog, *, database_url: str, project_id: str, 
             # What a refused call was told, and the arguments it came with: what to fix in a tool or its description.
             errors = [{"tool": a["tool"], "arguments": a["arguments"], "message": (a["result"] or {}).get("message")}
                       for a in trail if a["status"] == "error"]
-            turns.append({"text": text, "reply": reply[:2000], "calls": calls, "errors": errors, "problem": problem})
+            turns.append({"text": text, "reply": reply[:2000], "calls": calls, "errors": errors, "problem": problem,
+                          **({"sender": say.sender, "manager_session": manager_session,
+                              "stored_messages": stored_messages} if dialog.session and dialog.routing else {})})
             if problem:
                 break
         check_budget()
@@ -4187,6 +4239,8 @@ def run_dialog(api: Api, dialog: Dialog, *, database_url: str, project_id: str, 
     passed = not problems and len(turns) == len(dialog.says)
     return {"id": dialog.id, **(error or {"outcome": (Outcome.PASS if passed else Outcome.FAIL).value,
                                           "success": passed}),
+            **({"transport": "lark-cli CliTransport", "session": dialog.session} if dialog.session else {}),
+            **({"sender": dialog.sender} if dialog.session and not dialog.routing else {}),
             "problems": problems, "turns": turns,
             "calls": sum(len(t["calls"]) for t in turns), "duration_s": round(time.monotonic() - started, 1)}
 
@@ -4334,6 +4388,10 @@ def run(
             install_claude(case / "bin", mode=mode, scenarios=scenarios,
                            max_budget_usd=None if register is not None else max_budget_usd,
                            real_claude=real_claude, **({"failure_injection": True} if dialog.failure_hold else {}))
+            if dialog.session:
+                from .fake_lark import install
+
+                install(case / "bin", case / "lark")
             (case / "runtime").mkdir(mode=0o700)
             home = case / "home" if mode == "fake" else None
             if home is not None:
@@ -4342,6 +4400,19 @@ def run(
             if projects_root is not None:
                 projects_root.mkdir()
             with fresh_database(admin_url) as (database_url, _), _clean_command_runners(case / "runtime"):
+                if dialog.session:
+                    if dialog.routing:
+                        group_dialogs.enable_channel(database_url)
+                        if not dialog.manager:
+                            raise EvalError("group dialogs need a scenario Manager and an explicit routing mode")
+                        if dialog.manager_seed is not None:
+                            group_dialogs.seed_manager(database_url, manager=f"manager-{dialog.manager}",
+                                                       values=dialog.manager_seed)
+                        group_dialogs.seed_server(database_url, manager=f"manager-{dialog.manager}", routing=dialog.routing)
+                    else:
+                        from .routed_dialogs import seed_server
+
+                        seed_server(database_url)
                 reminder_now = REMINDER_NOW if mode == "fake" and dialog.id == "reminder_tools" else None
                 with running_server(database_url=database_url, runtime_root=case / "runtime", bin_dir=case / "bin",
                                     log_path=logs / f"{dialog.id}-{rep}.log", home=home,
@@ -4386,6 +4457,9 @@ def run(
                     if mode == "real" and register is not None and register.get("runtime", {}).get("type") == "dsh":
                         row["runtime_evidence"] = runtime_evidence(api)
                 cost, models = _usage(database_url)
+                if dialog.resident_profile is not None:
+                    from .resident_profile import reported_models
+                    row["resolved_models"] = reported_models(database_url)
                 if stable_context:
                     row["state_views"] = _state_views(database_url)
                 if "runtime_evidence" in row:

@@ -92,6 +92,7 @@ import select
 import subprocess
 import sys
 import time
+from pathlib import Path
 from typing import Any
 
 # Names the real Claude Code in real mode (``main``).
@@ -417,6 +418,9 @@ def _worker(script: dict[str, Any], system_prompt: str, stdin: _Stdin, args: lis
         if expected_diff not in diff:
             raise RuntimeError("the simulated PR does not contain the commit this review needs")
     files = dict(attempt.get("files") or {})
+    if attempt.get("run_verification"):
+        for command in ("configure.py", "verify.py"):
+            subprocess.run([sys.executable, command], check=True, timeout=10, capture_output=True)
     wait = (script.get("wait_for_input") or {}).get(label)
     if wait and attempt_no == 1:
         _emit({"type": "system", "subtype": "init", "session_id": "fake-worker", "model": "fake"})
@@ -458,6 +462,10 @@ def _worker(script: dict[str, Any], system_prompt: str, stdin: _Stdin, args: lis
               "deleted_files": [], "summary": attempt.get("summary") or f"step {label} attempt {attempt_no}"}
     if "learnings" in attempt:
         report["learnings"] = attempt["learnings"]
+    if scenario := attempt.get("lesson_scenario"):
+        ids = re.findall(r"^- (M-\d+) \(", system_prompt, re.MULTILINE)
+        if ids:
+            report["lessons_used" if scenario == "use" else "lessons_wrong"] = ids
     _answer("fake-worker", attempt.get("raw") or "Done.\n" + json.dumps(report), WORKER_RUN_COST)
 
 
@@ -571,11 +579,21 @@ def _manager(scenarios_path: str, args: list[str], stdin: _Stdin) -> None:
         message = content[channel.end():] if channel else content
         named = re.search(r"confirmation_id (c-[0-9a-f]+)", content)
         with open(scenarios_path, encoding="utf-8") as handle:
-            calls = (json.load(handle).get("manager") or {}).get(message.strip(), [])
+            scenarios = json.load(handle)
+        calls = (scenarios.get("manager") or {}).get(message.strip())
+        if calls is None:
+            matches = [script for prefix, script in (scenarios.get("manager_prefix") or {}).items()
+                       if message.startswith(prefix)]
+            if len(matches) > 1:
+                raise ValueError("ambiguous scripted Manager prefixes")
+            calls = matches[0] if matches else []
         answers, held, reply, request_usage = [], False, None, None
         for name, arguments in calls:
             if name == "__reply__":
                 reply = arguments["text"]
+                continue
+            if name == "__capture_context__":
+                Path(scenarios_path).with_suffix(".context.txt").write_text(content, encoding="utf-8")
                 continue
             if name == "__context__":
                 request_usage = {"usage": {"input_tokens": arguments["tokens"]}}
@@ -654,7 +672,8 @@ def main(argv: list[str]) -> int:
     stdin = _Stdin()
     # The role is in the task section: a Reviewer's names the step under review, a Worker's its step; the
     # Manager's prompt ends with Looper's tools contract.
-    if "## Looper's tools (required)" in system_prompt:
+    if ("## Looper's tools (required)" in system_prompt
+            or "You are Looper's chat assistant for this conversation." in system_prompt):
         _manager(scenarios_path, args, stdin)
     elif "## Your answer (required; code reads it)" in system_prompt:  # a consult of a run's session
         _consult(script, stdin)

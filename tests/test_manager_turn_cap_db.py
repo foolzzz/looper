@@ -97,12 +97,13 @@ def test_reply_metrics_finish_before_budget_maintenance_releases_the_lock(monkey
             writing, release, written = asyncio.Event(), asyncio.Event(), asyncio.Event()
             annotate = ClaudeRunRecorder.annotate
             bound = chat.manager._bound_session
+            observed = []
 
             async def slow_metrics(recorder, metadata):
                 if "turn_metrics" in metadata:
                     writing.set()
                     await release.wait()
-                    assert chat.manager._turn_lock.locked()
+                    observed.append(("metrics", chat.manager._turn_lock.locked()))
                 await annotate(recorder, metadata)
                 if "turn_metrics" in metadata:
                     written.set()
@@ -123,6 +124,7 @@ def test_reply_metrics_finish_before_budget_maintenance_releases_the_lock(monkey
                 release.set()
                 await asyncio.gather(reply, *turn_metrics._pending)
             assert reply.result() == ["answer"]
+            assert observed == [("metrics", True)]
             assert not chat.manager._turn_lock.locked()
             metadata = json.loads(await pool.fetchval("SELECT metadata FROM llm_records ORDER BY id DESC LIMIT 1"))
             assert metadata["turn_metrics"]["delivery"] == "reply"

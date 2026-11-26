@@ -19,7 +19,8 @@ nothing is sent. The switch, the channel and the operator are read again after t
 immediately before the post. The switch is read once more after the operator query returns: it can be turned
 off while that query runs. A fresh claim that then fails the check is deleted. A claim that continued a refusal
 is put back as that refusal, with the attempt count it had, so a later day still sees the first attempt. A
-brief with something to say is sent uncounted and never deferred: it is the digest. ``decide`` records that
+brief with something to say is sent uncounted outside quiet hours and before the local cutoff (12:00 by
+default). Quiet or expired ticks retain the first unread date and consume nothing for the next eligible brief. ``decide`` records that
 only while ``delivery.enabled`` is on, under the same key as the post, and the channel receipt is written on
 that row. A later try replaces a rejected receipt on that row. One already recorded as sent or unknown keeps
 its outcome, sent time and external id.
@@ -34,12 +35,13 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from datetime import date, datetime, time, timedelta, timezone
 from typing import Any
 from zoneinfo import ZoneInfo
 
 from ..db import connection, morning_briefs as store, proactive_deliveries as deliveries, triage_events
+from ..db import reminders as reminder_store
 from ..db.triage_events import BriefEvent
 from . import attention, chat_settings, proactive_delivery, triage_settings, turn_metrics
 from .channels.base import PostOutcome
@@ -83,12 +85,16 @@ def digest_dates_through(origin: date, day: date) -> tuple[date, ...]:
     return tuple(start + timedelta(days=offset) for offset in range((day - start).days + 1))
 
 
-def is_due(local: datetime, send_at: time) -> bool:
-    """Whether ``local`` (in the operator's zone) is a workday at or after ``send_at``. A minute the clocks skip
+def is_due(local: datetime, send_at: time, cutoff: time | chat_settings.MorningBriefBoundary | None = None) -> bool:
+    """Whether ``local`` is a workday at or after ``send_at`` and strictly before ``cutoff``. A minute the clocks skip
     is due on the first tick after the gap; a repeated hour is still the same local date, so the row sends once."""
     if local.weekday() >= 5:
         return False
-    return local.time().replace(tzinfo=None) >= send_at.replace(tzinfo=None)
+    if cutoff is None:
+        cutoff = chat_settings.derived_morning_brief_cutoff(send_at.strftime("%H:%M"))
+    local_time = local.time().replace(tzinfo=None)
+    return send_at.replace(tzinfo=None) <= local_time and (
+        cutoff is chat_settings.MorningBriefBoundary.END_OF_DAY or local_time < cutoff.replace(tzinfo=None))
 
 
 def _plain(text: str) -> str:
@@ -183,10 +189,18 @@ def _fold_same_source(needs: str | None, digests: list[Mapping[str, Any]], summa
 
 
 def render(*, day: date, needs: str | None, reminders: list[Mapping[str, Any]], digests: list[Mapping[str, Any]],
-           tz: ZoneInfo, triage: list[BriefEvent] = (), triage_more: int = 0,
-           summary: Mapping[str, Any] | None = None, dashboard_url: str = "") -> str | None:
+           tz: ZoneInfo, triage: list[BriefEvent] = (), triage_more: int = 0, dashboard_url: str = "",
+           summary: Mapping[str, Any] | None = None, failed_reminders: Sequence[Mapping[str, Any]] = ()) -> str | None:
     """The brief, or None when every section is empty. ``needs`` is the needs-you summary; the empty summary is
-    not a section. With ``summary``, a digest row for a schedule that summary lists is folded into that line."""
+    not a section. Fold reminder digests into their needs/fallback lines, then schedule digests into their
+    schedule lines, without changing the consumed ids."""
+    listed = {item["key"] for section in (summary or {}).get("sections", ())
+              if section["kind"] == "reminders" and section["state"] == "ok" for item in section["items"]
+              } if needs and needs != attention.NOTHING else set()
+    failures = [attention._reminder_item(row) for row in failed_reminders if f"reminder:{row['id']}" not in listed]
+    shown = listed | {item["key"] for item in failures}
+    digests = [row for row in digests if not (
+        row["kind"] == "user_reminder" and f"reminder:{row.get('source_ref')}" in shown)]
     if summary is not None:
         needs, digests = _fold_same_source(needs, digests, summary)
     sections: list[str] = []
@@ -194,6 +208,10 @@ def render(*, day: date, needs: str | None, reminders: list[Mapping[str, Any]], 
         sections.append(needs)
     if reminders:
         sections.append("今天的提醒\n" + "\n".join(_reminder_line(row, tz) for row in reminders))
+    if failures:
+        sections.append("未确认送达的提醒\n" + "\n".join(
+            attention._line("reminders", item, datetime.now(timezone.utc))
+            + f"；回复「取消提醒 {item['ref']}」处理" for item in failures))
     if digests:
         sections.append("推迟到这份晨报的消息\n" + "\n".join(_digest_line(row, tz, dashboard_url=dashboard_url) for row in digests))
     if triage:
@@ -205,6 +223,14 @@ def render(*, day: date, needs: str | None, reminders: list[Mapping[str, Any]], 
         return None
     title = f"晨报 · {day:%m-%d}（周{_WEEKDAYS[day.weekday()]}）"
     return "\n\n".join([title, *sections])
+
+
+async def _brief_summary(summary: dict[str, Any]) -> dict[str, Any]:
+    """With attention off, terminal reminders use their own brief lines; keep other brief sources unchanged."""
+    if await attention.enabled():
+        return summary
+    sections = [section for section in summary["sections"] if section["kind"] != "reminders"]
+    return {**summary, "sections": sections, "total": sum(s["count"] for s in sections if s["state"] == "ok")}
 
 
 def _triage_line(event: BriefEvent, tz: ZoneInfo) -> str:
@@ -301,6 +327,16 @@ class MorningBriefService:
         current = (channel_id, chat) in await operator_targets()
         return current and self._running()
 
+    def _can_send(self, day: date) -> bool:
+        now = self._clock()
+        policy = proactive_delivery.load_policy()
+        local = now.astimezone(policy.timezone)
+        cutoff = chat_settings.morning_brief_cutoff()
+        if local.date() != day or not is_due(local, _send_at(), cutoff):
+            return False
+        delivery = Delivery(DeliveryKind.MORNING_BRIEF, Urgency.NORMAL, ChatKind.DIRECT)
+        return proactive_delivery.deliver(delivery, policy, DeliveryState(now)).outcome is Outcome.SEND
+
     async def _loop(self) -> None:
         while not self._stopping.is_set():
             try:
@@ -327,7 +363,7 @@ class MorningBriefService:
         now = self._clock()
         policy = proactive_delivery.load_policy()
         local = now.astimezone(policy.timezone)
-        if not is_due(local, _send_at()):
+        if local.weekday() >= 5 or local.time().replace(tzinfo=None) < _send_at():
             return
         day = local.date()
         if await store.orphans_uncertain(conn, now):
@@ -335,6 +371,10 @@ class MorningBriefService:
         targets = await operator_targets()
         if not targets:
             await store.skip(conn, day, "", "", now, "no operator direct chat")
+            return
+        if not self._can_send(day):
+            for channel_id, chat in targets:
+                await store.defer(conn, day, channel_id, chat, now, "outside brief delivery window")
             return
         # A date already sent, skipped or left uncertain is not read again. A refusal under the attempt limit is.
         # This is read before the summary: a day with nothing left to send does not collect.
@@ -345,7 +385,7 @@ class MorningBriefService:
                 break
         if not pending:
             return
-        summary = await attention.collect(managers=self._managers)
+        summary = await _brief_summary(await attention.collect(managers=self._managers))
         # The switch, the channel and the operator can change while the summary is read.
         if not self._running():
             return
@@ -385,7 +425,7 @@ class MorningBriefService:
         async with confirmation_locks(conn, intent_ids), discovery_locks(conn, discovery_ids):
             # Keep all non-intent sections current too. The final refresh cannot
             # reintroduce a handled candidate while its execution gate is held.
-            summary = await attention.collect(managers=self._managers)
+            summary = await _brief_summary(await attention.collect(managers=self._managers))
             intent_section = next((section for section in summary['sections'] if section['kind'] == 'intents'), None)
             if intent_section and intent_section.get('state') == 'ok':
                 intent_section['items'] = [item for item in intent_section['items']
@@ -406,12 +446,14 @@ class MorningBriefService:
             return
         reminders = await store.reminders_today(conn, channel_id=channel_id, chat=chat, start=start,
                                                 end=start + timedelta(days=1))
+        failures = await reminder_store.needing_attention(now=now, db=conn, channel_id=channel_id, chat=chat)
         # The window stays the first attempt's dates through today. Rows already read are excluded by id, so a
         # custom time does not drop a message held later that morning and does not repeat one. The claim stores
         # this read's ids; a refusal records none. An insert that has not committed is not among them, so the
         # next brief still reads it, including when recovery runs after the sender stops before settle.
-        origin = await store.first_attempt_date(conn, channel_id, chat) or day
-        dates = list(digest_dates_through(origin, day))
+        origin = await store.first_attempt_date(conn, channel_id, chat)
+        preserve_date = origin == day  # A zero-attempt deferral already established this first unread date.
+        dates = list(digest_dates_through(origin or day, day))
         deferred = await store.digests(
             conn, channel_id=channel_id, chat=chat, until=now, dates=dates)
         if protected_intents is not None:
@@ -430,12 +472,16 @@ class MorningBriefService:
                 dates_start = datetime.combine(min(dates), time.min, tzinfo=policy.timezone)
                 triage, triage_more = await triage_events.for_brief(conn, dates_start=dates_start)
         text = render(day=day, needs=needs, reminders=reminders, digests=deferred, tz=policy.timezone,
-                      triage=triage, triage_more=triage_more, summary=summary, dashboard_url=self._dashboard_url)
+                      triage=triage, triage_more=triage_more, dashboard_url=self._dashboard_url,
+                      summary=summary, failed_reminders=failures)
         delivery = Delivery(DeliveryKind.MORNING_BRIEF, Urgency.NORMAL, ChatKind.DIRECT, silent=text is None)
         decision = proactive_delivery.deliver(delivery, policy, DeliveryState(now))
         if not await self._accepts(channel_id, chat):
             return
-        if text is None or decision.outcome is not Outcome.SEND:
+        if not self._can_send(day) or (text is not None and decision.outcome is not Outcome.SEND):
+            await store.defer(conn, day, channel_id, chat, now, "outside brief delivery window")
+            return
+        if text is None:
             await store.skip(conn, day, channel_id, chat, now, "nothing to say")
             return
         # Folding a row into its schedule's needs line drops it from the digest section only. The id is still
@@ -455,26 +501,42 @@ class MorningBriefService:
             except Exception:
                 logger.warning("morning brief delivery decision failed; sending anyway", exc_info=True)
         if not await self._accepts(channel_id, chat):
-            await store.release(conn, day, channel_id, chat)
+            await store.release(conn, day, channel_id, chat, preserve_date=preserve_date)
             return
         if any(row.get('source_ref') for row in deferred):
             deferred = await store.filter_rule_digests(conn, deferred, channel_id=channel_id, chat=chat)
             text = render(day=day, needs=needs, reminders=reminders, digests=deferred, tz=policy.timezone,
-                          triage=triage, triage_more=triage_more, summary=summary, dashboard_url=self._dashboard_url)
+                          triage=triage, triage_more=triage_more, dashboard_url=self._dashboard_url,
+                          summary=summary, failed_reminders=failures)
             read_ids = [row['id'] for row in deferred]
             if text is None:
-                await store.release(conn, day, channel_id, chat)
+                await store.release(conn, day, channel_id, chat, preserve_date=preserve_date)
                 return
             # Recovery consumes exactly what is still present in this final rendering.
             await conn.execute('UPDATE morning_briefs SET read_ids=$4::bigint[] WHERE local_date=$1 '
                                "AND channel_id=$2 AND chat=$3 AND status='sending'", day, channel_id, chat, read_ids)
+        # Collection, identity checks and persistence may cross the cutoff or quiet-hours boundary.
+        if not self._can_send(day):
+            await store.release(conn, day, channel_id, chat, preserve_date=preserve_date)
+            await store.defer(conn, day, channel_id, chat, self._clock(), "outside brief delivery window")
+            return
         if not await store.mark_send_started(conn, day, channel_id, chat, self._clock()):
+            return
+        if not self._can_send(day):
+            # No channel call occurred. Under the sender lock it is safe to undo this marker,
+            # preserving crash recovery's distinction between an unposted and a possibly sent brief.
+            async with conn.transaction():
+                await conn.execute("UPDATE morning_briefs SET send_started_at = NULL "
+                                   "WHERE local_date = $1 AND channel_id = $2 AND chat = $3 AND status = 'sending'",
+                                   day, channel_id, chat)
+                await store.release(conn, day, channel_id, chat, preserve_date=preserve_date)
+                await store.defer(conn, day, channel_id, chat, self._clock(), "outside brief delivery window")
             return
         external: str | None = None
         try:
-            receipt = await self._registry.post(
-                channel_id, target(chat), text, idempotency_key=key, **turn_metrics.proactive_kwargs(
-                    turn_metrics.ProactiveSource.MORNING_BRIEF, dedupe_key=key))
+            with turn_metrics.proactive_send(turn_metrics.ProactiveSource.MORNING_BRIEF, dedupe_key=key):
+                receipt = await self._registry.post(
+                    channel_id, target(chat), text, idempotency_key=key)
             outcome, error = receipt.result, receipt.error
             external = receipt.external_ids[0] if receipt.external_ids else None
         except Exception as exc:

@@ -95,8 +95,10 @@ def test_telegram_admission_preserves_chat_and_thread_identity(tmp_path: Path, m
 @pytest.mark.parametrize("running", [False, None])
 def test_explicit_telegram_unavailable_target_fails_closed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
                                                          running: bool | None, handler: str) -> None:
+    managers = []
+
     def available(manager: str) -> bool:
-        assert manager == "manager-beta"
+        managers.append(manager)
         if running is None:
             raise RuntimeError("availability unavailable")
         return running
@@ -113,6 +115,7 @@ def test_explicit_telegram_unavailable_target_fails_closed(tmp_path: Path, monke
         assert not adapter._correlation_chat
         await bus.shutdown()
     asyncio.run(main())
+    assert managers == ["manager-beta"]
 
 def test_telegram_pins_before_observation_and_keeps_admitted_replies(tmp_path: Path,
                                                                    monkeypatch: pytest.MonkeyPatch) -> None:

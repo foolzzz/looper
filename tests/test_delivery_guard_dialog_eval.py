@@ -53,6 +53,7 @@ def test_tools_only_check_requires_reply_and_a_recorded_followup(monkeypatch, fa
 
 def test_guard_option_enables_each_disposable_server_and_reports_followups(monkeypatch, tmp_path):
     apis = {}
+    posts_at_turn = []
 
     class GuardApi(DialogApi):
         def post(self, path, body):
@@ -74,7 +75,7 @@ def test_guard_option_enables_each_disposable_server_and_reports_followups(monke
         yield apis[database_url]
 
     def answer(api, dialog, **_):
-        assert ("/api/v1/delivery_guard/update", {"enabled": True}) in api.posts
+        posts_at_turn.append(deepcopy(api.posts))
         return {"id": dialog.id, "outcome": "pass", "success": True, "turns": [], "problems": []}
 
     monkeypatch.setattr(dialogs, "fresh_database", database)
@@ -88,4 +89,6 @@ def test_guard_option_enables_each_disposable_server_and_reports_followups(monke
     assert result["aborted"] is None
     assert result["delivery_guard"] is True
     assert len(apis) == 2
+    assert len(posts_at_turn) == 2
+    assert all(("/api/v1/delivery_guard/update", {"enabled": True}) in posts for posts in posts_at_turn)
     assert [row["followups"] for row in result["dialogs"]] == [1, 1]

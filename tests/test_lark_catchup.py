@@ -22,6 +22,8 @@ from test_lark_transport import BOT_ID, BOT_MENTION, OPEN_ID, StubTransport, _ev
 class HistoryTransport(StubTransport):
     """Keep live ingress open while tests release a deterministic history page."""
 
+    instances: list[HistoryTransport] = []
+
     def __init__(self) -> None:
         super().__init__()
         self.incoming: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
@@ -30,6 +32,8 @@ class HistoryTransport(StubTransport):
         self.before_names: asyncio.Event | None = None
         self.release_names: asyncio.Event | None = None
         self.list_calls: list[dict[str, Any]] = []
+        self.consumer_readiness: list[bool] = []
+        self.instances.append(self)
         self.pages: dict[str, list[dict[str, Any] | Exception]] = {}
         self.before_list: asyncio.Event | None = None
         self.release_list: asyncio.Event | None = None
@@ -55,7 +59,7 @@ class HistoryTransport(StubTransport):
     async def list_messages(
         self, chat_id: str, *, start: float, end: float, page_token: str = "",
     ) -> dict[str, Any]:
-        assert self.consumer_started.is_set(), "history must wait for the live consumer"
+        self.consumer_readiness.append(self.consumer_started.is_set())
         self.list_calls.append({"chat_id": chat_id, "start": start, "end": end, "page_token": page_token})
         if self.before_list is not None:
             self.before_list.set()
@@ -110,7 +114,7 @@ async def catchup_done(instance: LarkChannelAdapter, transport: HistoryTransport
 
 
 @pytest.fixture(autouse=True)
-def isolate_observation(monkeypatch: pytest.MonkeyPatch) -> None:
+def isolate_observation(monkeypatch: pytest.MonkeyPatch):
     # serve loads the Manager before starting adapters. Keep that cold import
     # outside the scenarios' deadlock watchdog, as it is in the real service.
     importlib.import_module("looper.agents.tiers.manager")
@@ -121,8 +125,12 @@ def isolate_observation(monkeypatch: pytest.MonkeyPatch) -> None:
     async def chats(self: LarkChannelAdapter) -> list[str]:
         return ["oc_synthetic_group"]
 
+    monkeypatch.setattr(HistoryTransport, "instances", [])
     monkeypatch.setattr("looper.agents.channels.lark.observe_chat", observe)
     monkeypatch.setattr(LarkChannelAdapter, "_catchup_chats", chats, raising=False)
+    yield
+    assert all(ready for transport in HistoryTransport.instances for ready in transport.consumer_readiness), (
+        "history must wait for the live consumer")
 
 
 def test_gap_group_mention_reaches_bound_manager_once_after_start(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
@@ -292,6 +300,8 @@ def test_thread_reply_keeps_raw_references_for_gate_routing(
     from looper.agents.tiers.manager import ManagerAgent
     from types import SimpleNamespace
 
+    cli_calls = []
+
     async def run() -> None:
         now = time.time()
         await seed_boundary(tmp_path, now - 60)
@@ -301,7 +311,7 @@ def test_thread_reply_keeps_raw_references_for_gate_routing(
         async def run_json(argv):
             import json
 
-            assert "+messages-search" not in argv
+            cli_calls.append(list(argv))
             if "/open-apis/im/v1/chats/oc_synthetic_group" in argv:
                 return {"data": {"chat_mode": "group"}}
             params = json.loads(argv[argv.index("--params") + 1])
@@ -314,9 +324,10 @@ def test_thread_reply_keeps_raw_references_for_gate_routing(
             return {"data": {"items": items, "has_more": False}}
 
         posted = []
+        references = []
 
         async def find_reference(channel, chat, refs, **kwargs):
-            assert refs == ["om_gate_question"]
+            references.append(list(refs))
             return {"task_id": "task-synthetic", "step_key": "g1", "state": "open"}
 
         async def post_message(*args, **kwargs):
@@ -349,6 +360,7 @@ def test_thread_reply_keeps_raw_references_for_gate_routing(
             assert message.payload["channel_context"]["root_id"] == raw["root_id"]
             # Exercise the Manager's real pre-model branch, exactly as live ingress does.
             manager = SimpleNamespace(
+                agent_id="manager-helper", _session_now=lambda: SimpleNamespace(key="main"),
                 _bus=bus, ops=SimpleNamespace(platform=SimpleNamespace(
                     task_router=SimpleNamespace(has_planner=lambda _: True))),
                 agent_address=manager_address("manager-helper"), _acting=lambda _: None)
@@ -360,6 +372,7 @@ def test_thread_reply_keeps_raw_references_for_gate_routing(
             prepared = await ManagerAgent._prepare_turn(
                 manager, SimpleNamespace(check=lambda: None, step=step), message)
             assert prepared.turn is None and prepared.launch is None, "a gate reply must never prepare a Manager model turn"
+            assert references == [["om_gate_question"]]
             assert posted[0][0] == ("task-synthetic", "g1", {"text": "hello"})
             assert posted[0][1]["has_planner"] is True
             assert posted[0][1]["origin"]["external_id"] == "om_answer"
@@ -368,6 +381,7 @@ def test_thread_reply_keeps_raw_references_for_gate_routing(
             await bus.shutdown()
 
     asyncio.run(asyncio.wait_for(run(), 5))
+    assert cli_calls and all("+messages-search" not in argv for argv in cli_calls)
 
 
 @pytest.mark.parametrize("mode", ["group", "topic"])
@@ -379,6 +393,8 @@ def test_restart_recovers_nested_and_old_thread_mentions(
     from looper.agents.channels import lark_cli
     from looper.agents.channels.lark_transport import CliTransport
 
+    cli_calls = []
+
     async def run() -> None:
         now = time.time()
         await seed_boundary(tmp_path, now - 60)
@@ -388,24 +404,19 @@ def test_restart_recovers_nested_and_old_thread_mentions(
 
         async def run_json(argv):
             calls.append(argv)
-            assert "+messages-search" not in argv
+            cli_calls.append(list(argv))
             if "/open-apis/im/v1/chats/oc_synthetic_group" in argv:
                 return {"data": {"chat_mode": mode}}
             params = json.loads(argv[argv.index("--params") + 1])
-            assert params["page_size"] == 50
             token = params.get("page_token")
             if "start_time" in params:
                 items = [raw_message(history_message("om_recent", at=now - 50, mentioned=False,
                                                      thread_replies=[nested]))]
                 return {"data": {"items": items, "has_more": False}}
             if params["container_id_type"] == "chat":
-                assert params["sort_type"] == "ByCreateTimeDesc"
                 return {"data": {"items": [{"thread_id": "omt_old" if token else "omt_recent",
                                              "create_time": str(int((now - (3600 if token else 50)) * 1000))}],
                                  "has_more": not token, "page_token": "roots-next"}}
-            assert params["container_id_type"] == "thread"
-            assert params["sort_type"] == "ByCreateTimeDesc"
-            assert "start_time" not in params and "end_time" not in params
             if params["container_id"] == "omt_recent":
                 messages = [nested]
                 more = False
@@ -416,7 +427,6 @@ def test_restart_recovers_nested_and_old_thread_mentions(
                             history_message("om_denied", at=now - 20, sender={"id": "ou_denied", "sender_type": "user"})]
                 more = True
             else:
-                assert token == "replies-next"
                 messages = [old_reply, history_message("om_expired", at=now - 86400)]
                 more = True
             return {"data": {"items": [raw_message(m) for m in messages], "has_more": more,
@@ -448,6 +458,20 @@ def test_restart_recovers_nested_and_old_thread_mentions(
             await bus.shutdown()
 
     asyncio.run(asyncio.wait_for(run(), 5))
+    assert cli_calls and all("+messages-search" not in argv for argv in cli_calls)
+    for argv in cli_calls:
+        if "--params" not in argv:
+            continue
+        params = json.loads(argv[argv.index("--params") + 1])
+        assert params["page_size"] == 50
+        if params["container_id_type"] == "chat" and "start_time" in params:
+            continue
+        assert params["sort_type"] == "ByCreateTimeDesc"
+        if params["container_id_type"] != "chat":
+            assert params["container_id_type"] == "thread"
+            assert "start_time" not in params and "end_time" not in params
+            if params.get("page_token"):
+                assert params["page_token"] == "replies-next"
 
 
 @pytest.mark.parametrize("mode", ["group", "topic"])
@@ -459,6 +483,8 @@ def test_busy_roots_do_not_hide_recent_replies_or_stall_next_restart(
     from looper.agents.channels import lark_cli
     from looper.agents.channels.lark_inbox import LarkInbox
     from looper.agents.channels.lark_transport import CliTransport
+
+    cli_calls = []
 
     async def run() -> None:
         clock = [time.time()]
@@ -474,7 +500,7 @@ def test_busy_roots_do_not_hide_recent_replies_or_stall_next_restart(
             root_pages = []
 
             async def run_json(argv):
-                assert "+messages-search" not in argv
+                cli_calls.append(list(argv))
                 if "/open-apis/im/v1/chats/oc_synthetic_group" in argv:
                     return {"data": {"chat_mode": mode}}
                 params = json.loads(argv[argv.index("--params") + 1])
@@ -521,6 +547,7 @@ def test_busy_roots_do_not_hide_recent_replies_or_stall_next_restart(
         await bus.shutdown()
 
     asyncio.run(asyncio.wait_for(run(), 8))
+    assert cli_calls and all("+messages-search" not in argv for argv in cli_calls)
 
 
 @pytest.mark.parametrize("failure", ["root_error", "root_limit"])
@@ -547,8 +574,11 @@ def test_only_root_discovery_errors_preserve_debt_while_live_boundary_advances(
                 raise LarkCliError("synthetic root read failure")
             return {"roots": [], "has_more": True, "page_token": "next"}
 
+        thread_requests = []
+
         async def list_thread_messages(thread_id, *, page_token=""):
-            raise AssertionError("there are no candidate threads")
+            thread_requests.append((thread_id, page_token))
+            return {"messages": [], "has_more": False}
 
         transport.list_threads = list_threads
         transport.list_thread_messages = list_thread_messages
@@ -568,6 +598,7 @@ def test_only_root_discovery_errors_preserve_debt_while_live_boundary_advances(
             release.set()
             await catchup_done(instance, transport)
             await asyncio.wait_for(saved.wait(), 1)
+            assert thread_requests == []
             assert instance._inbox.boundary > boundary
             assert bool((await instance._inbox.debts())) == (failure == "root_error")
             if failure == "root_error":
@@ -1257,13 +1288,15 @@ def test_recent_thread_activity_survives_restart_and_recovers_old_thread_once(
     from looper.agents.channels.lark_transport import CliTransport
     from looper.agents.task_notice import NotifyTarget, TargetKind
 
+    cli_calls = []
+
     async def run():
         clock = [time.time()]
         monkeypatch.setattr("looper.agents.channels.lark.time", lambda: clock[0])
         listed = []
 
         async def run_json(argv):
-            assert "--as" in argv and argv[argv.index("--as") + 1] == "bot"
+            cli_calls.append(list(argv))
             metadata = {"chat_id": "oc_synthetic_group", "thread_id": "omt_synthetic_active"}
             if "+messages-reply" in argv or "+messages-send" in argv:
                 return {"data": {"message_id": "om_synthetic_sent", **(
@@ -1332,6 +1365,7 @@ def test_recent_thread_activity_survives_restart_and_recovers_old_thread_once(
             await bus.shutdown()
 
     asyncio.run(asyncio.wait_for(run(), 5))
+    assert cli_calls and all("--as" in argv and argv[argv.index("--as") + 1] == "bot" for argv in cli_calls)
 
 
 def test_thread_activity_is_durable_scoped_recent_and_bounded(tmp_path, monkeypatch):
@@ -1638,14 +1672,18 @@ def test_no_catchup_debt_starts_no_retry_or_extra_history(tmp_path, monkeypatch,
         transport.pages["oc_synthetic_group"] = [{"chat_type": "group", "messages": [], "has_more": False}]
         instance = adapter(tmp_path, transport)
 
+        retry_waits = []
+
         async def wait(delay):
-            raise AssertionError("no retry should run without debt")
+            retry_waits.append(delay)
+            await asyncio.Event().wait()
 
         monkeypatch.setattr(instance, "_catchup_retry_wait", wait)
         bus = MessageBus(runtime_root=tmp_path)
         try:
             await instance.start(bus)
             await catchup_done(instance, transport)
+            assert retry_waits == []
             assert instance._catchup_retry_task is None
             assert len(transport.list_calls) == int(existing_gap)
         finally:

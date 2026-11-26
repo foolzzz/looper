@@ -6,6 +6,7 @@ import {
   attentionSettingsGet, fetchAttention, isAttentionOff, type AttentionItem, type AttentionKind, type AttentionSection,
   type AttentionSummary,
 } from "@/lib/api-attention";
+import { displayText as text } from "@/lib/attention-display";
 import { channelLabel } from "@/lib/chat-channels";
 import { sinceText } from "@/lib/gates";
 import { startPolling } from "@/lib/polling";
@@ -28,7 +29,9 @@ const TITLES: Record<AttentionKind, string> = {
   intents: "Intents 意图",
   ledger: "Ledger items waiting for you",
   deliveries: "Messages that may not have arrived",
+  reminders: "未确认送达的提醒",
   cost: "花费等你决定",
+  vault_commits: "知识库提交受阻",
 };
 
 /** What to do about a section, said once under its heading. */
@@ -40,6 +43,8 @@ const HOW: Partial<Record<AttentionKind, string>> = {
   intents: "Build or reject each one on the Intents page, or reply 建 / 驳回 with its number in your chat.",
   ledger: "Confirm, close or amend them through the Manager, or with looper ledger on this machine.",
   deliveries: "Looper never sends these again: check the chat, and resend by hand if it is missing.",
+  reminders: "在聊天里回复「取消提醒 #编号」移除此项；重新安排时取消旧提醒，再设置新提醒。最多展示 7 天。",
+  vault_commits: "提交与工作区已保留。先处理知识库里的未提交改动，再检查并合入保留分支；不会自动覆盖你的改动。",
 };
 
 const ALERTS: Record<string, string> = {
@@ -53,13 +58,14 @@ const DELIVERY_SOURCES: Record<string, string> = {
   message_stream: "消息流采集/对账需处理",
 };
 
-const text = (value: unknown) => (typeof value === "string" ? value : "");
 const count = (value: unknown) => (typeof value === "number" ? value : 0);
 const plural = (n: number, one: string) => `${n} ${one}${n === 1 ? "" : "s"}`;
 
 /** The second line of an item: what it belongs to and the kind's own facts, in words. */
 function details(kind: AttentionKind, item: AttentionItem): { line: string; badges: string[] } {
-  const { facts, context, ref } = item;
+  const { facts } = item;
+  const context = text(item.context);
+  const ref = text(item.ref);
   const parts = (...values: (string | null | false | undefined)[]) => values.filter(Boolean).join(" · ");
   switch (kind) {
     case "failure_holds":
@@ -74,7 +80,7 @@ function details(kind: AttentionKind, item: AttentionItem): { line: string; badg
     }
     case "schedules": {
       const failures = count(facts.failures);
-      const alerts = Array.isArray(facts.alerts) ? facts.alerts.map((a) => ALERTS[String(a)] ?? String(a)) : [];
+      const alerts = Array.isArray(facts.alerts) ? facts.alerts.map((a) => text(ALERTS[String(a)] ?? String(a))) : [];
       return { line: context, badges: [...(failures > 0 ? [`${plural(failures, "failure")} in a row`] : []), ...alerts] };
     }
     case "logins":
@@ -84,6 +90,8 @@ function details(kind: AttentionKind, item: AttentionItem): { line: string; badg
     case "ledger":
       return { line: parts(ref, LEDGER_KINDS[text(facts.kind)] ?? text(facts.kind)),
         badges: facts.overdue === true ? ["overdue"] : [] };
+    case "reminders":
+      return { line: parts(ref, context), badges: [] };
     case "cost":
       if (facts.reason === "unanswered") {
         return { line: parts(ref, context, count(facts.pushes) > 0 && `${count(facts.pushes)} 条推送没人回`), badges: [] };
@@ -99,6 +107,8 @@ function details(kind: AttentionKind, item: AttentionItem): { line: string; badg
       return { line: parts(DELIVERY_SOURCES[text(facts.source)] ?? text(facts.source), ref,
         text(facts.channel) && `${facts.source === "catchup" ? "from" : "to"} ${channelLabel(text(facts.channel))}`,
         text(facts.fix)), badges: [] };
+    case "vault_commits":
+      return { line: parts(context, text(facts.reason), text(facts.branch), text(facts.worktree)), badges: ["受阻"] };
   }
 }
 
@@ -131,9 +141,9 @@ function Item({ kind, item, onResumed }: { kind: AttentionKind; item: AttentionI
         {item.href ? (
           <a href={item.href} className={cn(
             "font-medium [overflow-wrap:anywhere] pointer-coarse:inline-flex pointer-coarse:min-h-11 pointer-coarse:items-center",
-            linkClass)}>{item.title}</a>
+            linkClass)}>{text(item.title)}</a>
         ) : (
-          <span className="font-medium [overflow-wrap:anywhere]">{item.title}</span>
+          <span className="font-medium [overflow-wrap:anywhere]">{text(item.title)}</span>
         )}
         {(line || badges.length > 0) && (
           <div className="flex flex-wrap items-center gap-1.5 text-xs text-muted-foreground">
@@ -156,7 +166,7 @@ function Item({ kind, item, onResumed }: { kind: AttentionKind; item: AttentionI
         <Button type="button" variant="outline" size="sm" className="shrink-0" disabled={busy}
           onClick={() => void resume()}>恢复</Button>
       )}
-      {resumeError && <p role="alert" className="w-full min-w-0 text-xs text-destructive [overflow-wrap:anywhere]">{resumeError}</p>}
+      {resumeError && <p role="alert" className="w-full min-w-0 text-xs text-destructive [overflow-wrap:anywhere]">{text(resumeError)}</p>}
     </li>
   );
 }
@@ -175,7 +185,7 @@ function Section({ section, onResumed }: { section: AttentionSection; onResumed:
       {state === "error" ? (
         <p role="alert" className="mt-2 flex gap-2 text-sm text-destructive [overflow-wrap:anywhere]">
           <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" aria-hidden="true" />
-          Could not read this: {section.error}
+          Could not read this: {text(section.error)}
         </p>
       ) : (
         <>
@@ -253,7 +263,7 @@ export function NeedsYouPage() {
       )}
       {error && (
         <div role="alert" className="flex flex-wrap items-center gap-3 text-sm text-destructive [overflow-wrap:anywhere]">
-          <span>Cannot load what needs you ({error}){summary && "; this is the last summary read."}</span>
+          <span>Cannot load what needs you ({text(error)}){summary && "; this is the last summary read."}</span>
           <Button type="button" variant="outline" size="sm" className="min-h-11" onClick={() => void read()}>
             Retry
           </Button>

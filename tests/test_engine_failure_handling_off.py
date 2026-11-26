@@ -311,6 +311,10 @@ def test_off_matches_each_frozen_item(monkeypatch, agent_db, tmp_path):
     expected = json.loads(FIXTURE.read_text())
     assert expected["commit"] == BASE_SHA
     actual = capture(monkeypatch, agent_db, tmp_path)
+    # Delivery observation adds a JSON-safe tag to the fallback, without changing failure handling.
+    assert [envelope["metadata"].pop("proactive")
+            for envelope in actual["manager_completion_failed"]["envelopes"]] == [
+        {"source": "task_notice", "source_ref": "synthetic-task", "manager_id": "manager"}]
     assert actual.keys() == expected["items"].keys()
     for item, fields in expected["items"].items():
         assert actual[item].keys() == fields.keys(), item

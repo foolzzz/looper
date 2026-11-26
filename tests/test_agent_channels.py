@@ -330,6 +330,8 @@ class TestServeChannelWiring:
         from looper.agents.channels.base import ChannelAdapter, DeliveryReceipt
         from looper.agents.serve import _register_optional_channel
 
+        deliveries = []
+
         class _FailingAdapter(ChannelAdapter):
             stopped = False
 
@@ -348,7 +350,8 @@ class TestServeChannelWiring:
                 type(self).stopped = True
 
             async def deliver(self, envelope: MessageEnvelope) -> DeliveryReceipt:
-                raise AssertionError("not started")
+                deliveries.append(envelope)
+                return DeliveryReceipt("failing", False, error="not started")
 
         async def _run() -> None:
             with tempfile.TemporaryDirectory() as tmp:
@@ -357,6 +360,7 @@ class TestServeChannelWiring:
                 await _register_optional_channel(registry, _FailingAdapter())
                 assert registry.list_channels() == []
                 assert _FailingAdapter.stopped
+                assert deliveries == []
                 await bus.shutdown()
 
         asyncio.run(_run())

@@ -119,26 +119,31 @@ def test_restart_rechecks_an_unstarted_planning_turn_instead_of_failing_it(monke
 
 
 def test_a_window_refused_before_start_never_records_a_failed_attempt(monkeypatch, tmp_path):
-    from types import SimpleNamespace
     from looper.agents import attempts
-    from looper.agents.tiers.worker import RunOutcome, WorkerConfig, WorkerPool
+    from looper.agents.tiers.worker import RunContext, WorkerConfig, WorkerPool
+    from looper.db import memory_lesson_injection
     from tests.runtime_model_helpers import builtin_launch
 
     async def check():
         pool = WorkerPool(config=WorkerConfig(), runtime_root=tmp_path)
-        context = SimpleNamespace(verification=None, handle=None, attempt_id=42,
-                                  worker_id='worker-window', parent_task_id='task-window', launch=builtin_launch(),
-                                  outcome=RunOutcome.RUN_FAILED, run_failure=None, verification_writes=None)
+        launch = builtin_launch()
+        context = RunContext(worker_id='worker-window', parent_task_id='task-window', step_id=None,
+                             work_dir=str(tmp_path), prompt='', is_verify=False, launch=launch,
+                             runtime=launch.runtime, seat=None, run_timeout=0, started_at=NOW,
+                             hosted=False, command=[], attempt_id=42)
         pool._prepare = AsyncMock(return_value=context)
         pool._execute_once = AsyncMock(side_effect=cg.Held(NOW + timedelta(minutes=5), 'rejected'))
         finished = AsyncMock()
         monkeypatch.setattr(attempts, 'worker_finished', finished)
+        delivered = AsyncMock()
+        monkeypatch.setattr(memory_lesson_injection, 'mark_delivered', delivered)
         with pytest.raises(cg.Held):
             await pool._execute(MessageEnvelope.create(source=planner_address('task-window'),
                                                       target=planner_address('task-window'),
                                                       message_type=MessageType.WORK_ITEM, payload={}))
         pool._prepare.assert_awaited_once()
         finished.assert_not_awaited()
+        delivered.assert_not_awaited()
     asyncio.run(check())
 
 

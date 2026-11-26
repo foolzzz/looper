@@ -71,6 +71,18 @@ async def skip(conn: Any, local_date: date, channel_id: str, chat: str, now: dat
         local_date, channel_id, chat, detail, now)
 
 
+async def defer(conn: Any, local_date: date, channel_id: str, chat: str, now: datetime, detail: str) -> None:
+    """Keep the first unread date without claiming an attempt or consuming any ids.
+
+    A quiet or expired first tick must leave the same digest boundary for the next eligible brief.
+    Existing claims and outcomes are left untouched, including recovered send-started claims.
+    """
+    await conn.execute(
+        "INSERT INTO morning_briefs (local_date, channel_id, chat, status, attempts, detail, updated_at) "
+        "VALUES ($1, $2, $3, 'failed', 0, $4, $5) ON CONFLICT DO NOTHING",
+        local_date, channel_id, chat, detail, now)
+
+
 async def claim(conn: Any, local_date: date, channel_id: str, chat: str, now: datetime, *,
                 attempts_limit: int, read_ids: list[int] | None = None,
                 triage_ids: list[int] | None = None) -> bool:
@@ -106,18 +118,19 @@ async def mark_send_started(conn: Any, local_date: date, channel_id: str, chat: 
         "AND send_started_at IS NULL RETURNING true", local_date, channel_id, chat, now) is True
 
 
-async def release(conn: Any, local_date: date, channel_id: str, chat: str) -> None:
+async def release(conn: Any, local_date: date, channel_id: str, chat: str, *, preserve_date: bool = False) -> None:
     """Drop a claim that was not sent, so a later tick can take the day.
 
     A fresh claim (this date had no row; its attempt count is 1) is deleted. A claim that continued a refusal
     is put back as that refusal, with the attempt count it had before this claim. Deleting it would hide the
-    first attempt, and the next day would no longer read that attempt's digests."""
+    first attempt, and the next day would no longer read that attempt's digests.
+    ``preserve_date`` also restores a zero-attempt deferral that established the first unread date."""
     restored = await conn.fetchval(
         "UPDATE morning_briefs SET status = 'failed', attempts = attempts - 1, read_ids = '{}', triage_ids = '{}' "
         "WHERE local_date = $1 AND channel_id = $2 AND chat = $3 AND status = 'sending' "
-        "AND send_started_at IS NULL AND attempts > 1 "
+        "AND send_started_at IS NULL AND (attempts > 1 OR $4) "
         "RETURNING true",
-        local_date, channel_id, chat)
+        local_date, channel_id, chat, preserve_date)
     if restored:
         return
     await conn.execute(
@@ -206,9 +219,8 @@ async def digests(conn: Any, *, channel_id: str, chat: str, until: datetime,
     # stay deferred here, rather than escaping through the independent brief switch.
     rule_filter = ("" if rules_on else "AND NOT (source='intent' AND COALESCE(source_ref,'') "
                    "~ '^rule-(created|discovery|fault):[0-9]+$') ")
-    reference = ",source_ref" if rules_on else ""
     rows = await conn.fetch(
-        "SELECT id, source AS kind, reason, decided_at, task_id, schedule_id" + reference + " FROM proactive_deliveries "
+        "SELECT id, source AS kind, reason, decided_at, task_id, schedule_id, source_ref FROM proactive_deliveries "
         "WHERE decision = 'digest' AND channel_id = $1 AND chat = $2 AND source <> 'morning_brief' "
         + triage_filter + rule_filter + "AND decided_at <= $3 AND digest_date = ANY($4::date[]) "
         "AND NOT EXISTS (SELECT 1 FROM morning_brief_consumed c WHERE c.delivery_id = proactive_deliveries.id) "

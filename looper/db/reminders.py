@@ -3,18 +3,19 @@
 A reminder is ``pending`` until it is due. Only the delivery (``agents.reminders.ReminderService``) moves it on: it
 claims one as ``sending`` (committed before the channel is asked) and settles it ``delivered``, ``failed`` or
 ``uncertain``, or settles one Looper could not send on time as ``missed``. Only the user cancels one
-(``cancelled``), and only while it is ``pending``.
+(``cancelled``), while it is ``pending`` or to dismiss a terminal not-delivered state.
 """
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any
 
 from .connection import get_pool
 
 STATUSES = ("pending", "sending", "delivered", "failed", "uncertain", "missed", "cancelled")
 LIST_DEFAULT, LIST_MAX = 20, 50
+ATTENTION_WINDOW = timedelta(days=7)
 
 
 def _db(db: Any) -> Any:
@@ -57,13 +58,28 @@ async def next_pending(*, db: Any = None) -> dict[str, Any] | None:
     return dict(row) if row is not None else None
 
 
+async def needing_attention(*, now: datetime, db: Any = None, channel_id: str | None = None,
+                            chat: str | None = None) -> list[dict[str, Any]]:
+    """Uncancelled terminal failures, for seven days after settlement; one row per reminder, oldest first.
+
+    The brief can narrow this read to its target. Reading never retries or records a delivery.
+    """
+    rows = await _db(db).fetch(
+        "SELECT * FROM reminders WHERE status IN ('uncertain', 'failed', 'missed') "
+        "AND settled_at > $1 AND settled_at <= $2 "
+        "AND ($3::text IS NULL OR channel_id = $3) AND ($4::text IS NULL OR chat = $4) "
+        "ORDER BY settled_at, id", now - ATTENTION_WINDOW, now, channel_id, chat)
+    return [dict(row) for row in rows]
+
+
 async def cancel(reminder_id: int, *, now: datetime, db: Any = None) -> tuple[dict[str, Any] | None, bool]:
-    """Cancel a pending reminder: (the reminder as it now is, whether this call cancelled it); (None, False) when
-    there is none."""
+    """Cancel a pending reminder or dismiss a terminal failure: (readback, changed); (None, False) if absent."""
     pool = _db(db)
     row = await pool.fetchrow(
-        "UPDATE reminders SET status = 'cancelled', detail = 'cancelled by the user', settled_at = $2, "
-        "updated_at = $2 WHERE id = $1 AND status = 'pending' RETURNING *", reminder_id, now)
+        "UPDATE reminders SET status = 'cancelled', detail = CASE WHEN status = 'pending' "
+        "THEN 'cancelled by the user' ELSE 'cancelled by the user after ' || status END, settled_at = $2, "
+        "updated_at = $2 WHERE id = $1 AND status IN ('pending', 'uncertain', 'failed', 'missed') RETURNING *",
+        reminder_id, now)
     if row is not None:
         return dict(row), True
     return await get(reminder_id, db=pool), False
@@ -71,13 +87,28 @@ async def cancel(reminder_id: int, *, now: datetime, db: Any = None) -> tuple[di
 
 # The delivery's steps; each runs on the connection that holds the delivery's lock.
 
-async def orphans_uncertain(conn: Any, now: datetime) -> int:
-    """Settle as ``uncertain`` what a sender claimed and never settled (it stopped mid-send): it may have been sent,
-    so it is never sent again. Only the lock's holder sends, so under the lock no claim is a live one."""
-    done = await conn.execute(
-        "UPDATE reminders SET status = 'uncertain', detail = 'the sender stopped before recording the answer', "
-        "settled_at = $1, updated_at = $1 WHERE status = 'sending'", now)
-    return int(done.split()[-1])
+async def recover(conn: Any, now: datetime) -> tuple[int, int]:
+    """Recover under the sender lock: unstarted claims retry; started sends never repeat.
+
+    Reminder states and existing decision receipts commit together, including a receipt lost after settle.
+    No decision is invented when the delivery layer was off or its decision write failed.
+    """
+    async with conn.transaction():
+        retried = await conn.execute(
+            "UPDATE reminders SET status = 'pending', updated_at = $1 "
+            "WHERE status = 'sending' AND post_started_at IS NULL", now)
+        uncertain = await conn.execute(
+            "UPDATE reminders SET status = 'uncertain', detail = 'the sender stopped before recording the answer', "
+            "settled_at = $1, updated_at = $1 WHERE status = 'sending' AND post_started_at IS NOT NULL", now)
+        await conn.execute(
+            "UPDATE proactive_deliveries d SET outcome = CASE r.status "
+            "WHEN 'delivered' THEN 'sent' WHEN 'failed' THEN 'rejected' ELSE 'unknown' END, "
+            "sent_at = r.settled_at, external_id = r.external_id FROM reminders r "
+            "WHERE d.dedupe_key = 'looper-reminder-' || r.id::text AND d.decision = 'send' "
+            "AND (d.outcome IS NULL OR (d.outcome = 'rejected' AND r.status <> 'failed')) "
+            "AND r.post_started_at IS NOT NULL "
+            "AND r.status IN ('delivered', 'failed', 'uncertain')")
+    return int(retried.split()[-1]), int(uncertain.split()[-1])
 
 
 async def due(conn: Any, now: datetime) -> list[dict[str, Any]]:
@@ -98,11 +129,17 @@ async def settle(conn: Any, reminder_id: int, status: str, *, now: datetime, det
 async def claim(conn: Any, reminder_id: int, now: datetime) -> bool:
     """Take a pending reminder for one send (committed before the channel is asked)."""
     return await conn.fetchval(
-        "UPDATE reminders SET status = 'sending', attempts = attempts + 1, updated_at = $2 "
+        "UPDATE reminders SET status = 'sending', attempts = attempts + 1, post_started_at = NULL, updated_at = $2 "
         "WHERE id = $1 AND status = 'pending' RETURNING true", reminder_id, now) is True
+
+
+async def start_post(conn: Any, reminder_id: int, now: datetime) -> None:
+    """Commit before invoking the channel; an unknown result after this point must never retry."""
+    await conn.execute("UPDATE reminders SET post_started_at = $2, updated_at = $2 "
+                       "WHERE id = $1 AND status = 'sending'", reminder_id, now)
 
 
 async def release(conn: Any, reminder_id: int, *, now: datetime, error: str | None) -> None:
     """The channel said it did not send it: pending again, to be tried at the next tick."""
-    await conn.execute("UPDATE reminders SET status = 'pending', detail = $2, updated_at = $3 "
+    await conn.execute("UPDATE reminders SET status = 'pending', post_started_at = NULL, detail = $2, updated_at = $3 "
                        "WHERE id = $1 AND status = 'sending'", reminder_id, error, now)

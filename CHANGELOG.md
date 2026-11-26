@@ -18,6 +18,77 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.15.38] - 2026-11-25
+
+Contains exactly v2.15.37 plus [#1785](https://github.com/foolzzz/looper/pull/1785), frozen at `e98913682`, and release metadata. From v2.15.37, this is frontend only: no new migration, setting or server change. Upgrading from v2.15.36 or earlier also includes all of v2.15.37: read [its release notes](docs/releases/v2.15.37.md) first for migrations, backup requirements and breaking changes. See [the v2.15.38 release notes](docs/releases/v2.15.38.md) for the frozen scope and exclusions.
+
+### Fixed
+
+- **Stop repeated probes for an absent Work operation.** ([#1785](https://github.com/foolzzz/looper/pull/1785)) The dashboard sidebar previously requested `task_conversations/get` every 30 seconds indefinitely on servers that do not register the operation, including every released server through v2.15.37. It now probes once per page load and keeps Work hidden when the operation is absent. Registered operations retain their existing polling, visibility and transient-error recovery behavior. Telegram, Lark and the CLI do not run this dashboard poll and need no change.
+
+## [2.15.37] - 2026-11-25
+
+Cut from main at `4ad331978`, with no later changes included. Upgrade from v2.15.36. Startup applies seven migrations (1970, 2000, 2010, 2040, 2060, 2070, 2080) and four online steps after the usual pre-migration backup, even with every optional switch off. Migration 2080 adds stored generated columns that rewrite the task tables before backfill; the online steps validate checks and build indexes concurrently. No feature setting turns itself on. The release workflow rebuilds the dashboard bundle. Installations older than the bridge must upgrade to v2.13.165 first. See [the release notes](docs/releases/v2.15.37.md) for upgrade boundaries and activation instructions.
+
+### Added
+
+- **Routed chat task tools, off by default.** ([#1710](https://github.com/foolzzz/looper/pull/1710)) With routing and `manager.session_tools.enabled` on, four bounded chat tools expose only that session's tasks; only the authenticated operator may write. `manager_sessions.assign_task` can assign an unassigned legacy task once. Rollback accepts `false` or null with confirmation.
+- **Work console foundations, hidden and not yet activatable.** ([#1754](https://github.com/foolzzz/looper/pull/1754), [#1762](https://github.com/foolzzz/looper/pull/1762), [#1774](https://github.com/foolzzz/looper/pull/1774), [#1764](https://github.com/foolzzz/looper/pull/1764), [#1772](https://github.com/foolzzz/looper/pull/1772), [#1776](https://github.com/foolzzz/looper/pull/1776)) Three operator-only reads (`tasks.work_list`, `tasks.select`, `tasks.changes`) and the `tasks.mark_seen` watermark write support the default-off shell and Planner/default-Manager conversation panes. This tree does not serve `task_conversations.get`, so Work stays hidden. File changes return names and status, never contents or patches.
+- **Explicit project knowledge export.** ([#1700](https://github.com/foolzzz/looper/pull/1700)) `looper knowledge migrate --project NAME` previews without changing content; `--execute` backs up, exports through one vault transaction and verifies the files. Both modes require a configured vault and `projects.knowledge_dir`; source rows are untouched.
+- **Dormant chat-scope storage.** ([#1743](https://github.com/foolzzz/looper/pull/1743)) Adds capability, binding, session and message-provenance fields. Existing bindings become `legacy` only when `legacy_allowed` is first added; `scoped` routing remains unavailable to operator operations. The online checks scan `chat_messages` and `managers`.
+- **Lark ingress timing under the existing metrics switch.** ([#1737](https://github.com/foolzzz/looper/pull/1737)) Records send/receipt timestamps, lock-wait, sender-lookup and attachment-download durations, and the routing timestamp `route_decided_at` when reached, without message content.
+
+### Changed
+
+- **Breaking for routed default-Manager sessions.** ([#1708](https://github.com/foolzzz/looper/pull/1708)) Non-main default-Manager sessions use a default-deny allowlist, public chat context and zero Manager tools unless session tools are explicitly enabled; incompatible restricted context resets. Scenario Managers and routing-off behavior stay unchanged.
+- **Morning brief catch-up respects a cutoff and quiet hours.** ([#1740](https://github.com/foolzzz/looper/pull/1740)) A null cutoff derives 12:00 for send times before noon, otherwise three hours after the send time or an end-of-day boundary. The default 09:15 send time therefore derives 12:00. A stored cutoff must be strictly later than the send time. Unconsumed digests roll into the next workday.
+- **Vault writes use owned worktrees and fast-forward-only merges.** ([#1700](https://github.com/foolzzz/looper/pull/1700)) Blocked merges retain recovery state and appear in Needs you when attention is enabled; non-git vault writes keep their confinement.
+- **Interrupted Worker and Reviewer usage counts toward spend and caps.** ([#1728](https://github.com/foolzzz/looper/pull/1728)) Cumulative reported usage checkpoints as a typed partial bill and settles once; no schema change.
+- **Long Manager turns keep their status line informative for about 55 minutes.** ([#1735](https://github.com/foolzzz/looper/pull/1735)) Edits widen after 30 seconds within the channel edit limit; initial status precedes quoted-thread preparation.
+- **Proven own-session Lark replies reuse their send copy.** ([#1738](https://github.com/foolzzz/looper/pull/1738)) Quoted model-facing bytes stay identical; content-free logs record `decision=read` or `decision=skip_own_in_session`.
+- **Dashboard task navigation and reminder labels.** ([#1736](https://github.com/foolzzz/looper/pull/1736), [#1756](https://github.com/foolzzz/looper/pull/1756)) Task rows and details link to the live Planner through its authoritative availability read; terminal reminders have readable bilingual status-card labels.
+- **Behavior-preserving frontend extractions.** ([#1766](https://github.com/foolzzz/looper/pull/1766), [#1767](https://github.com/foolzzz/looper/pull/1767)) Reuses the Live Activity component and Chat reply-stream hook without changing existing pages.
+- **Documentation, tests and evals.** (#1741, #1759, #1715, #1744, #1750, #1751, #1769, #1745, #1777) No product behavior changes. Real-model comparisons remain pending; this release PR runs the documentation gate, not a model evaluation.
+
+## [2.15.36] - 2026-11-24
+
+Cut from main at `21fb4d682`. Upgrade from v2.15.35 (or v2.15.34, which has the same schema). From a database that has finished v2.15.35, startup applies five migrations and two online steps with every optional switch off, after the usual pre-migration `pg_dump` (unless `--skip-backup`). The migrations add empty or small tables, columns and checks, and 1930 and 2020 backfill only rows still being sent; the dump dominates the outage. Migration 1940 refuses to start while the existing `task_lesson_snapshots` table holds any row (`legacy lesson snapshots contain no frozen text; operator inspection is required`). The startup transaction then rolls back after the backup, and v2.15.35 still starts on the unchanged schema. No released version writes that table. No feature setting turns itself on, and an upgrade does not insert a feature-setting row. `web/` changed, so the release workflow rebuilds the dashboard bundle. Installations older than the bridge must upgrade to v2.13.165 first. #1724 and #1727 already shipped in v2.15.35, and their main merges change no file. #1723 and #1729 are release pull requests. #1734 is a documentation-only RFC.
+
+### Added
+
+- **Execution failure recovery stays off until `act`.** ([#1686](https://github.com/foolzzz/looper/pull/1686))
+  - Migration `step_failure_handling` (1920) creates the failure state, run, failure, hold, release and quota-wait tables. It widens `tasks_fail_kind_check` and `task_journal_kind_check` `NOT VALID`. Online step `step_failure_handling_online` validates them, scanning `tasks` and `task_journal`.
+  - `engine_settings.update` now accepts `act`, and every change asks for confirmation. Under `act`:
+    - quota and transient Worker and Reviewer failures retry only the failed unit, after bounded waits;
+    - environment failures and a third consecutive failure hold the step (`waiting_user`, a source notice, and Needs you while attention is on);
+    - operator-only `tasks.failure_history`, `tasks.holds` and `tasks.hold_release`, and the act-only Manager tool `looper_task_hold`, read and release holds.
+  - Outside `act`, startup builds the service and reads its settings. Only a database read error of `engine.failure_pending_recovery` at startup fails it, when the database is unavailable to the rest of startup anyway. No stored value of either setting fails startup: an unknown `engine.failure_typing` counts as `off`, with a warning, and any `engine.failure_pending_recovery` other than `true` counts as false. Several paths read `engine.failure_typing` once more each, and model-visible bytes are unchanged. The dashboard always shows the engine failure handling card under Settings → LLM Providers.
+- **Project lessons are injected where the lesson settings are already on.** ([#1690](https://github.com/foolzzz/looper/pull/1690))
+  - Migration `memory_lesson_injection` (1940) adds the snapshot set, wrong-report and Planner-state tables, three snapshot columns, seven injection columns and four `NOT VALID` checks. Online step `memory_lesson_injection_online` validates them and builds three indexes concurrently.
+  - Startup fails, after the pre-migration backup, while the existing `task_lesson_snapshots` table holds any row (`legacy lesson snapshots contain no frozen text; operator inspection is required`). The whole startup transaction rolls back. Inspect the rows and keep v2.15.35, which still starts on that schema. An incompatible index also fails startup.
+  - With `memory_lessons.enabled` and a project's `memory_lessons` on, in-effect lessons are frozen at the task's first PLAN and injected into Planner PLAN and new-session RESUME messages and into Worker prompts. There is no separate switch: `inject.planner` and `inject.worker` default to true.
+  - New operator-only `memory.task_lessons`, `memory.revoke` and `memory.renew`, and the local commands `looper memory lessons|revoke|renew`.
+  - While lessons are off, each Planner turn still reads the lesson settings and the empty injection tables, and model-visible bytes are unchanged.
+- **Scenario Managers can give each group its own resident session.** ([#1733](https://github.com/foolzzz/looper/pull/1733)) Migration `scenario_session_routing` (2030) adds `managers.session_routing` (`off` by default, or `per_chat`). It is set through the operator-only, high-risk, confirmed `scenario_session_routing.get/update` and the generated `loopercli scenario-session-routing` commands. Non-group turns stay in main. Enabling does not migrate history. With `off`, message bytes, session keys and process signatures are unchanged.
+- **Optional online upgrade backup.** ([#1714](https://github.com/foolzzz/looper/pull/1714))
+  - `looper service upgrade --backup-before-stop` takes the verified migration dump before drain. The new process reuses it once, within 15 minutes, when the target version, control-plane fingerprint, database and schema state match.
+  - Registry upgrades always dump at startup. Writes after the snapshot are not in that backup.
+  - The installed CLI parses the option, so the upgrade to v2.15.36 itself still backs up at startup. Startup lists `backups/` for the metadata before dumping.
+
+### Changed
+
+- **Breaking, for the engine settings write, for servers that already store lesson settings on, for a database with legacy lesson snapshot rows, and for needs-you with attention on.** ([#1686](https://github.com/foolzzz/looper/pull/1686), [#1690](https://github.com/foolzzz/looper/pull/1690), [#1716](https://github.com/foolzzz/looper/pull/1716)) See the release notes.
+- **A morning brief claimed but not yet sent is retried after a restart.** ([#1707](https://github.com/foolzzz/looper/pull/1707))
+  - Migration `morning_brief_send_started` (1930, no online step) adds `morning_briefs.send_started_at` and marks pre-upgrade `sending` rows started.
+  - The marker is committed before the channel call. A claim without it refunds its attempt and consumes nothing. One with it stays uncertain and is never resent.
+- **One-time reminders recover their restart boundary, and terminal ones wait in Needs you.** ([#1716](https://github.com/foolzzz/looper/pull/1716))
+  - Migration `reminder_post_started` (2020, no online step) adds `reminders.post_started_at` and marks pre-upgrade `sending` rows started.
+  - With reminders on, an unstarted claim returns to `pending`. A possibly started post becomes `uncertain` with an `unknown` receipt and is never resent. The list and cancel tool descriptions change, and cancel also dismisses `uncertain`, `failed` and `missed` reminders.
+  - With attention on, Needs you, `/todo` and the morning brief list those reminders for seven days after settlement, whether or not reminders are on. Idle checks do not push them. Brief digest rows now always carry `source_ref`, and matching reminder digests fold into the reminder line.
+- **Stable process trees are sampled every five seconds.** ([#1722](https://github.com/foolzzz/looper/pull/1722)) After five seconds without a change, the sampling interval grows from 0.5 to 5 seconds. A new resident turn or a detected change restores fast sampling. macOS start times are read without `ps`, with `ps` as the fallback. Stored identities are unchanged.
+- **Manager restarts name the changed signature components.** ([#1721](https://github.com/foolzzz/looper/pull/1721)) One INFO line with component names and 8-character hashes, never their contents.
+- **Tests, evals and docs.** ([#1725](https://github.com/foolzzz/looper/pull/1725), [#1718](https://github.com/foolzzz/looper/pull/1718), [#1720](https://github.com/foolzzz/looper/pull/1720), [#1726](https://github.com/foolzzz/looper/pull/1726), [#1734](https://github.com/foolzzz/looper/pull/1734)) No product behavior on upgrade. #1725 runs the intent-rule serve checks at a daytime local hour. #1718 restores the installed-runtime checks. #1720 pins serve startup with missing optional runtimes. #1726 adds a budgeted resident-profile Manager eval. #1734 adds the chat scopes RFC.
+
 ## [2.15.35] - 2026-11-24
 
 Cut from the v2.15.34 tag with #1724 and #1727 applied on top. Upgrade from v2.15.34. No migration, no online step, and no feature setting turns itself on; `web/` is unchanged. Installations older than the bridge must upgrade to v2.13.165 first. #1707, #1686 and the other pulls merged into main after v2.15.34 ship next.

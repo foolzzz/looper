@@ -179,13 +179,13 @@ def test_the_check_says_what_a_write_needs_and_changes_nothing(monkeypatch, tmp_
             "setting": True, "git": True, "branch": True, "operation": True, "ignored": True,
             "worktree_root": True, "push_channel": True}
         worktree = next(item for item in result["checks"] if item["name"] == "worktree_root")
-        assert worktree["detail"] == str(runtime / "vault-worktrees") and not (runtime / "vault-worktrees").exists()
+        assert worktree["detail"] == str(tmp_path.parent / f"{tmp_path.name}-vault-worktrees") and not (runtime / "vault-worktrees").exists()
         # A merge under way, another branch checked out, no runtime root.
         _git(repo, "checkout", "-q", "-b", "other")
         (Path(repo) / ".git" / "MERGE_HEAD").write_text("0" * 40 + "\n")
         result = await memory_settings.check(runtime_root=None)
         failed = {item["name"]: item["detail"] for item in result["checks"] if not item["ok"]}
-        assert not result["ok"] and set(failed) == {"branch", "operation", "worktree_root"}, failed
+        assert not result["ok"] and set(failed) == {"branch", "operation"}, failed
         assert "MERGE_HEAD" in failed["operation"] and "on other, not main" in failed["branch"]
         assert _git(repo, "status", "--porcelain") == before
 

@@ -73,6 +73,7 @@ from urllib.parse import urlsplit
 
 from ... import child_env
 from .. import claude_cli
+from ..chat_scopes import LaunchMode
 from ..llmrec import TRANSLATED_BACKEND_ENV
 from . import (
     ApiProtocol, AuthKind, Capability, CostSource, ImageInput, Launcher, LoadedSources, ManagedHooks, Probe,
@@ -162,7 +163,7 @@ class ClaudeCodeRuntime(RuntimeAdapter):
     # Verified against Claude Code 2.1.329: /compact and an automatic compaction in the resident stream-json session
     # each write a compact_boundary event before the turn's result.
     resident_compaction_events = True
-    supports_platform_tools_only = True
+    launch_modes = frozenset({LaunchMode.PLATFORM_TOOLS, LaunchMode.FULL})
     room_push = RoomPush.USER_TURN
     run_input = True  # stdin can stay open between a Worker's waiting turns
     keepable = True

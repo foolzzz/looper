@@ -108,7 +108,7 @@ def test_unanswered_pause_migrations_keep_unique_relative_order():
 def test_current_baseline_additions_have_upgrade_and_admission_migrations():
     discovered = migrations.discover()
     expected = {"mcp_tool_levels", "failure_typing", "memory_candidates", "channel_outbox",
-                "memory_draft_role", "memory_draft_queue"}
+                "memory_draft_role", "memory_draft_queue", "scenario_session_routing", "chat_scopes"}
     assert expected <= {migration.name for migration in discovered}
     assert expected <= {migration.name for migration in migrations.pending_migrations(discovered)}
     steps = migrations.online_steps(discovered)
@@ -141,3 +141,11 @@ def test_retrospective_migrations_use_their_reserved_orders(name, order):
     for field in ("order", "pending_order", "online_order"):
         assert getattr(migration, field) == order
         assert sum(getattr(item, field, None) == order for item in discovered) == 1
+
+
+def test_proactive_bodies_uses_its_unoccupied_order():
+    discovered = migrations.discover()
+    migration = next(item for item in discovered if item.name == "proactive_bodies")
+    for field in ("order", "pending_order"):
+        assert getattr(migration, field) == 2110
+        assert sum(getattr(item, field, None) == 2110 for item in discovered) == 1

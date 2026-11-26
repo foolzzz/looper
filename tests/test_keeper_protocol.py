@@ -50,6 +50,25 @@ def short_directory():
         shutil.rmtree(directory)
 
 
+@pytest.fixture(autouse=True)
+def notification_assertions(monkeypatch):
+    failures = []
+    callback = KeeperClient._callback
+
+    async def checked(client, handler, *args):
+        try:
+            await callback(client, handler, *args)
+        except AssertionError as error:
+            failures.append(error)
+            raise
+
+    monkeypatch.setattr(KeeperClient, "_callback", checked)
+    yield
+    # The client may close and log a callback error; pytest must still see it.
+    if failures:
+        raise failures[0]
+
+
 def exercise(coroutine) -> None:
     asyncio.run(asyncio.wait_for(coroutine, 35))
 
@@ -244,6 +263,32 @@ async def request(reader, writer, method, params, request_id=1):
 async def close_writer(writer) -> None:
     writer.close()
     await asyncio.wait_for(writer.wait_closed(), 5)
+
+
+def test_server_shutdown_closes_an_open_connection() -> None:
+    from looper.agents.keeper.server import KeeperServer
+
+    async def check():
+        with short_directory() as directory:
+            held = SimpleNamespace(run_dir=directory, child=None, _write_state=lambda **fields: None)
+            server = KeeperServer(held)
+            await server.start()
+            reader, writer = await asyncio.open_unix_connection(server.path)
+            try:
+                await eventually(lambda: server.connections)
+                connection, = server.connections
+                # The client stays open until the server finishes shutting down.
+                await asyncio.wait_for(server.close(), 3)
+                assert await asyncio.wait_for(reader.read(), 1) == b""
+                assert connection.closed.is_set()
+                assert connection.task.done()
+                assert not server.connections
+                assert not server.path.exists()
+            finally:
+                await close_writer(writer)
+                await server.close()
+
+    exercise(check())
 
 
 def test_versions_are_negotiated(launch) -> None:
@@ -1232,13 +1277,13 @@ async def fake_server(handler):
             yield path
         finally:
             server.close()
-            await server.wait_closed()
             for writer in writers:
                 await close_writer(writer)
             for task in tasks:
                 if not task.done():
                     task.cancel()
             outcomes = await asyncio.gather(*tasks, return_exceptions=True)
+            await server.wait_closed()
             for outcome in outcomes:
                 if isinstance(outcome, BaseException) and not isinstance(outcome, asyncio.CancelledError):
                     raise outcome

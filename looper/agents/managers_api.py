@@ -61,6 +61,11 @@ class TaskPolicy(str, Enum):
     TEMPLATES_ONLY = "templates_only"
 
 
+class ScenarioSessionRouting(str, Enum):
+    OFF = "off"
+    PER_CHAT = "per_chat"
+
+
 @dataclass(frozen=True)
 class ManagerDefinition:
     id: str
@@ -76,6 +81,7 @@ class ManagerDefinition:
     revision: int
     idle_timeout_seconds: int = 1800
     scope_project_ids: tuple[str, ...] = ()
+    session_routing: ScenarioSessionRouting = ScenarioSessionRouting.OFF
 
     def tool_tasks(self) -> TaskFilter:
         if self.task_scope is TaskScope.PROJECTS:
@@ -97,7 +103,8 @@ class ManagerDefinition:
                    task_policy=TaskPolicy(row["task_policy"]), enabled=bool(row["enabled"]),
                    builtin=row["id"] == DEFAULT_MANAGER_ID, revision=int(row.get("revision") or 0),
                    idle_timeout_seconds=row.get("idle_timeout_seconds", 0 if row["id"] == DEFAULT_MANAGER_ID else 1800),
-                   scope_project_ids=tuple(row.get("scope_project_ids") or ()))
+                   scope_project_ids=tuple(row.get("scope_project_ids") or ()),
+                   session_routing=ScenarioSessionRouting(row.get("session_routing", "off")))
 
 
 _listener: Callable[[str], Awaitable[None]] | None = None
@@ -370,6 +377,31 @@ async def open_chats(manager_id: str, *, conn: asyncpg.Connection | None = None)
         "SELECT channel_id, chat_id FROM manager_chat_bindings "
         "WHERE manager_id = $1 AND sender_policy = 'chat' ORDER BY channel_id, chat_id", manager_id)
     return [(row["channel_id"], row["chat_id"]) for row in rows]
+
+
+async def scenario_session_routing_view(manager_id: str) -> dict[str, str]:
+    if manager_id == DEFAULT_MANAGER_ID:
+        raise _refuse("the default Manager uses session_routing.get/update")
+    row = await db_managers.get_manager(manager_id)
+    if row is None:
+        raise _refuse(f"no Manager {manager_id!r}", HTTP_404)
+    return {"manager_id": manager_id, "session_routing": row["session_routing"]}
+
+
+async def update_scenario_session_routing(manager_id: str, value: str | None) -> dict[str, str]:
+    if manager_id == DEFAULT_MANAGER_ID:
+        raise _refuse("the default Manager uses session_routing.get/update")
+    try:
+        routing = ScenarioSessionRouting.OFF if value is None else ScenarioSessionRouting(value)
+    except (TypeError, ValueError):
+        raise _refuse("session_routing must be off, per_chat or null") from None
+    async with db_connection.transaction() as conn:
+        updated = await db_managers.update_manager(manager_id, {"session_routing": routing.value},
+                                                   conn=conn, only_if_changed=True)
+        if updated is None:
+            raise _refuse(f"no Manager {manager_id!r}", HTTP_404)
+    await _on_change(manager_id)
+    return await scenario_session_routing_view(manager_id)
 
 
 async def update_manager(manager_id: str, data: Mapping[str, Any], *,

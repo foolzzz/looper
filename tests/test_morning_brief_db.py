@@ -115,6 +115,80 @@ async def _rows(pool: Any) -> list[dict[str, Any]]:
         "SELECT local_date, channel_id, chat, status, attempts FROM morning_briefs ORDER BY channel_id, chat")]
 
 
+@pytest.mark.parametrize("state", ["uncertain", "failed", "missed"])
+@pytest.mark.parametrize("attention_on", [True, False])
+@pytest.mark.parametrize("schedule_fold", [False, True])
+def test_terminal_reminder_is_in_the_brief_once_even_with_a_digest(
+        monkeypatch, tmp_path, lark_cli_stand_in, state, attention_on, schedule_fold):
+    from looper.agents.channels.allowlist import SenderAllowlist
+    from looper.agents.channels.lark import LarkChannelAdapter
+    from looper.agents.channels.registry import ChannelRegistry
+
+    async def test(pool):
+        await _zone(pool)
+        who = "ou_x"
+        await _operator(pool, who=who)
+        await pool.execute("INSERT INTO system_settings (key,value) VALUES ('attention.enabled',$1)",
+                           "true" if attention_on else "false")
+        now = MONDAY
+        local = now.astimezone(ZONE)
+        # Attention and the brief must read terminal reminders at the same fixed instant.
+        read_reminders = reminder_store.needing_attention
+
+        async def needing_attention(**kwargs):
+            return await read_reminders(**{**kwargs, "now": now})
+
+        monkeypatch.setattr(reminder_store, "needing_attention", needing_attention)
+        row = await reminder_store.create(text="Review the application", due_at=now - timedelta(hours=2),
+                                          timezone=str(ZONE), channel_id="channel-lark", chat=who,
+                                          created_channel="web", created_message_id=None)
+        await reminder_store.settle(pool, row["id"], state, now=now, from_status="pending")
+        await _digest(pool, "held-reminder", local.date(), kind="user_reminder", hour=0, chat=who)
+        await pool.execute("UPDATE proactive_deliveries SET source_ref=$1 WHERE dedupe_key='held-reminder'",
+                           str(row["id"]))
+        digest_id = await pool.fetchval("SELECT id FROM proactive_deliveries WHERE dedupe_key='held-reminder'")
+        digest_ids = [digest_id]
+        if schedule_fold:
+            await pool.execute("INSERT INTO projects (id, name) VALUES ('proj', 'Demo')")
+            await _schedule(pool, "sched-alpha", "Alpha report", "proj", 1)
+            await pool.execute("UPDATE proactive_deliveries SET schedule_id='sched-alpha' WHERE id=$1", digest_id)
+            digest_ids.append(await _digest(pool, "alpha", local.date(), kind="subscription", hour=0,
+                                            schedule_id="sched-alpha", chat=who))
+        monkeypatch.setattr(chat_settings, "_delivery_enabled", True)
+        adapter = LarkChannelAdapter(runtime_root=tmp_path,
+                                     allowlist=SenderAllowlist("channel-lark", frozenset({who})))
+        registry = ChannelRegistry(SimpleNamespace())
+        registry._channels[adapter.channel_id] = adapter
+        service = _service(registry, now)
+        await service.run_once()
+        await service.run_once()
+        calls = [json.loads(line) for line in lark_cli_stand_in.read_text().splitlines()]
+        send, = [call for call in calls if "+messages-send" in call]
+        assert send[send.index("--as") + 1] == "bot"
+        text = send[send.index("--markdown") + 1]
+        assert len(Path(str(lark_cli_stand_in) + ".delivered.jsonl").read_text().splitlines()) == 1
+        assert text.count(row["text"]) == 1 and state in text
+        assert row["due_at"].astimezone(ZONE).strftime("%Y-%m-%d %H:%M") in text
+        assert "推迟到这份晨报的消息" not in text
+        if schedule_fold:
+            assert text.count("Alpha report") == 1
+            assert "另有 1 条推迟的推送" in text
+            assert "另有 2 条推迟的推送" not in text
+        heading = "未确认送达的提醒"
+        assert heading in text
+        before = text.split(row["text"])[0]
+        assert (heading + " 1：" in before) is attention_on
+        if state == "uncertain":
+            assert "可能未送达" in text
+        assert await pool.fetchval("SELECT read_ids FROM morning_briefs") == digest_ids
+        assert [r["delivery_id"] for r in await pool.fetch(
+            "SELECT delivery_id FROM morning_brief_consumed ORDER BY delivery_id")] == digest_ids
+        assert await pool.fetchval("SELECT count(*) FROM proactive_deliveries") == len(digest_ids) + 1
+        assert await pool.fetchval("SELECT count(*) FROM proactive_deliveries WHERE source='morning_brief'") == 1
+
+    run_with_channel_configs(test, monkeypatch)
+
+
 @pytest.mark.parametrize(("outbound", "failure"), [(False, None), (False, "validation"), (False, "not_started"),
                                                 (True, None), (True, "validation")])
 def test_lark_brief_long_key_and_pre_send_retry(monkeypatch, tmp_path, lark_cli_stand_in, failure, outbound) -> None:
@@ -215,20 +289,13 @@ def test_nothing_to_say_sends_nothing_and_is_not_tried_again(monkeypatch: pytest
     async def test(pool: Any) -> None:
         await _zone(pool)
         await _operator(pool)
-        monkeypatch.setattr(attention, "collect", _collect(_summary("ok")))
-        calls: list[Any] = []
-        real_deliver = proactive_delivery.deliver
-
-        def deliver(delivery, policy, state):
-            calls.append(delivery)
-            return real_deliver(delivery, policy, state)
-
-        monkeypatch.setattr(proactive_delivery, "deliver", deliver)
+        collections = []
+        monkeypatch.setattr(attention, "collect", _collect(_summary("ok"), collections))
         channel = _Channel()
         await _service(channel, MONDAY).run_once()
         await _service(channel, MONDAY).run_once()
         assert channel.posts == []
-        assert [call.silent for call in calls] == [True]
+        assert len(collections) == 1
         assert await _rows(pool) == [{"local_date": MONDAY.date(), "channel_id": "channel-lark", "chat": OP,
                                       "status": "skipped", "attempts": 0}]
         assert await pool.fetchval("SELECT count(*) FROM proactive_deliveries WHERE source = 'morning_brief'") == 0
@@ -312,6 +379,7 @@ def test_before_the_time_and_on_a_weekend_writes_nothing(monkeypatch: pytest.Mon
         await _service(channel, MONDAY - timedelta(minutes=1)).run_once()
         await _service(channel, datetime(2026, 11, 22, 12, 0, tzinfo=ZONE)).run_once()
         chat_settings.set_morning_brief_time("15:00")
+        chat_settings.set_morning_brief_cutoff("16:00")
         await _service(channel, datetime(2026, 11, 23, 14, 59, tzinfo=ZONE)).run_once()
         assert channel.posts == [] and await _rows(pool) == []
         monkeypatch.setattr(attention, "collect", _collect(_summary("error", "db down")))
@@ -694,6 +762,9 @@ def test_a_refused_retry_switched_off_keeps_that_days_digest_for_the_next(
         await _zone(pool)
         await _operator(pool)
         chat_settings.set_morning_brief_time("07:00")
+        from dataclasses import replace
+        policy = replace(proactive_delivery.load_policy(), quiet_hours=None)
+        monkeypatch.setattr(proactive_delivery, "load_policy", lambda: policy)
         monkeypatch.setattr(attention, "collect", _collect(_summary("error", "db down")))
         tuesday = datetime(2026, 11, 24, 7, 0, tzinfo=ZONE)
         await _digest(pool, "early", tuesday.date(), hour=6, minute=30)
@@ -753,6 +824,9 @@ def test_a_message_held_after_an_early_brief_is_read_by_a_later_one(monkeypatch:
         await _zone(pool)
         await _operator(pool)
         chat_settings.set_morning_brief_time("07:00")
+        from dataclasses import replace
+        policy = replace(proactive_delivery.load_policy(), quiet_hours=None)
+        monkeypatch.setattr(proactive_delivery, "load_policy", lambda: policy)
         monkeypatch.setattr(attention, "collect", _collect(_summary("error", "db down")))
         tuesday = datetime(2026, 11, 24, 7, 0, tzinfo=ZONE)
         await _digest(pool, "before", tuesday.date(), hour=6)
@@ -780,6 +854,9 @@ def test_a_rejected_first_brief_keeps_that_days_digest_on_the_next(
         await _zone(pool)
         await _operator(pool)
         chat_settings.set_morning_brief_time("07:00")
+        from dataclasses import replace
+        policy = replace(proactive_delivery.load_policy(), quiet_hours=None)
+        monkeypatch.setattr(proactive_delivery, "load_policy", lambda: policy)
         monkeypatch.setattr(attention, "collect", _collect(_summary("error", "db down")))
         tuesday = datetime(2026, 11, 24, 7, 0, tzinfo=ZONE)
         await _digest(pool, "early", tuesday.date(), hour=6, minute=30)
@@ -934,12 +1011,11 @@ def test_delivery_on_records_the_receipt_on_the_decision_row(monkeypatch: pytest
         key = f"morning_brief:{MONDAY.date().isoformat()}:channel-lark:{OP}"
         (post,) = channel.posts
         assert post["key"] == key
-        assert post["proactive"].source.value == "morning_brief"
-        assert post["proactive"].dedupe_key == key
-        rows = await pool.fetch("SELECT dedupe_key, decision, outcome, external_id, sent_at IS NOT NULL AS sent "
+        rows = await pool.fetch("SELECT dedupe_key, source, decision, outcome, external_id, sent_at IS NOT NULL AS sent "
                                 "FROM proactive_deliveries")
         assert [dict(row) for row in rows] == [
-            {"dedupe_key": key, "decision": "send", "outcome": "sent", "external_id": "om_1", "sent": True}]
+            {"dedupe_key": key, "source": "morning_brief", "decision": "send", "outcome": "sent",
+             "external_id": "om_1", "sent": True}]
 
     run_with_channel_configs(test, monkeypatch)
 
@@ -973,10 +1049,11 @@ def test_a_successful_retry_replaces_a_rejected_receipt_when_metrics_are_off(
         service = _service(channel, MONDAY)
         await service.run_once()
         key = f"morning_brief:{MONDAY.date().isoformat()}:channel-lark:{OP}"
-        assert channel.posts[0]["proactive"] is None and channel.posts[0]["key"] == key
+        assert channel.posts[0]["key"] == key
         rejected = await pool.fetchrow(
-            "SELECT decision, outcome, external_id FROM proactive_deliveries WHERE dedupe_key = $1", key)
-        assert dict(rejected) == {"decision": "send", "outcome": "rejected", "external_id": "om_rejected"}
+            "SELECT source, decision, outcome, external_id FROM proactive_deliveries WHERE dedupe_key = $1", key)
+        assert dict(rejected) == {"source": "morning_brief", "decision": "send", "outcome": "rejected",
+                                  "external_id": "om_rejected"}
         stale = datetime(2020, 1, 1, tzinfo=timezone.utc)
         await pool.execute("UPDATE proactive_deliveries SET sent_at = $1 WHERE dedupe_key = $2", stale, key)
         await service.run_once()
@@ -1024,6 +1101,9 @@ def test_a_clock_gap_sends_on_the_next_tick_and_a_repeated_hour_sends_once(
                            "ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value")
         await chat_settings.load()
         chat_settings.set_morning_brief_time("02:15")
+        from dataclasses import replace
+        policy = replace(proactive_delivery.load_policy(), quiet_hours=None)
+        monkeypatch.setattr(proactive_delivery, "load_policy", lambda: policy)
         await _operator(pool)
         monkeypatch.setattr(attention, "collect", _collect(_summary("error", "db down")))
         zone = ZoneInfo("Asia/Jerusalem")
@@ -1039,6 +1119,10 @@ def test_a_clock_gap_sends_on_the_next_tick_and_a_repeated_hour_sends_once(
                            "ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value")
         await chat_settings.load()
         chat_settings.set_morning_brief_time("23:30")
+        chat_settings.set_morning_brief_cutoff("23:59")
+        from dataclasses import replace
+        policy = replace(proactive_delivery.DeliveryPolicy(timezone=ZoneInfo("Africa/Cairo")), quiet_hours=None)
+        monkeypatch.setattr(proactive_delivery, "load_policy", lambda: policy)
         await _operator(pool)
         monkeypatch.setattr(attention, "collect", _collect(_summary("error", "db down")))
         zone = ZoneInfo("Africa/Cairo")
@@ -1243,4 +1327,240 @@ def test_the_brief_off_leaves_a_failed_schedules_deferred_push(monkeypatch: pyte
         assert await pool.fetchval("SELECT count(*) FROM morning_brief_consumed") == 0
         assert await pool.fetchval("SELECT id FROM proactive_deliveries WHERE decision = 'digest'") == delivery_id
 
+    run_with_channel_configs(test, monkeypatch)
+
+
+@pytest.mark.parametrize(("send", "hour", "minute"), [
+    ("09:15", 11, 59), ("09:15", 12, 0), ("09:15", 12, 1), ("09:15", 23, 0),
+    ("15:00", 15, 0), ("15:00", 17, 59), ("15:00", 18, 0),
+])
+def test_first_tick_catch_up_keeps_unconsumed_digest(monkeypatch, tmp_path, lark_cli_stand_in, send, hour, minute):
+    from looper.agents.channels.allowlist import SenderAllowlist
+    from looper.agents.channels.lark import LarkChannelAdapter
+    from looper.agents.channels.registry import ChannelRegistry
+
+    def posts():
+        calls = [json.loads(line) for line in lark_cli_stand_in.read_text().splitlines()] if lark_cli_stand_in.exists() else []
+        return [call[call.index("--markdown") + 1] for call in calls if "+messages-send" in call]
+
+    async def test(pool):
+        await pool.execute("INSERT INTO system_settings (key, value) VALUES ('morning_brief.time', $1)", send)
+        await _zone(pool)
+        await _operator(pool)
+        monkeypatch.setattr(chat_settings, "_delivery_enabled", True)
+        monkeypatch.setattr(attention, "collect", _collect(_summary("ok")))
+        item = await _digest(pool, "deferred", MONDAY.date(), hour=7)
+        channel = ChannelRegistry(SimpleNamespace())
+        adapter = LarkChannelAdapter(runtime_root=tmp_path,
+                                     allowlist=SenderAllowlist("channel-lark", frozenset({OP})))
+        channel._channels[adapter.channel_id] = adapter
+        service = _service(channel, MONDAY.replace(hour=hour, minute=minute))
+        await service.run_once()
+        await service.run_once()
+        catches_up = hour < (12 if send == "09:15" else 18)
+        assert len(posts()) == int(catches_up)
+        assert await pool.fetchval("SELECT count(*) FROM morning_brief_consumed") == int(catches_up)
+        assert await pool.fetchval("SELECT count(*) FROM proactive_deliveries WHERE counted") == 0
+        next_day = (MONDAY + timedelta(days=1)).replace(hour=int(send[:2]), minute=int(send[3:]))
+        await _service(channel, next_day).run_once()
+        await _service(channel, next_day).run_once()
+        assert len(posts()) == 1
+        assert "11-23 07:00" in posts()[0]
+        assert [r["delivery_id"] for r in await pool.fetch("SELECT delivery_id FROM morning_brief_consumed")] == [item]
+    run_with_channel_configs(test, monkeypatch)
+
+
+@pytest.mark.parametrize("quiet_end", [11, 13])
+def test_quiet_hours_wait_only_until_cutoff(monkeypatch, quiet_end):
+    from dataclasses import replace
+    from datetime import time
+
+    async def test(pool):
+        await _zone(pool)
+        await _operator(pool)
+        monkeypatch.setattr(attention, "collect", _collect(_summary("ok")))
+        policy = replace(proactive_delivery.load_policy(), quiet_hours=proactive_delivery.DailyWindow(time(8), time(quiet_end)))
+        monkeypatch.setattr(proactive_delivery, "load_policy", lambda: policy)
+        await _digest(pool, "held", MONDAY.date(), hour=7)
+        channel = _Channel()
+        service = _service(channel, MONDAY)
+        await service.run_once()
+        assert channel.posts == []
+        assert await pool.fetchval("SELECT count(*) FROM morning_brief_consumed") == 0
+        service._clock.now = MONDAY.replace(hour=quiet_end, minute=0)
+        await service.run_once()
+        await service.run_once()
+        assert len(channel.posts) == int(quiet_end < 12)
+        assert await pool.fetchval("SELECT count(*) FROM morning_brief_consumed") == int(quiet_end < 12)
+    run_with_channel_configs(test, monkeypatch)
+
+
+@pytest.mark.parametrize("when", ["09:15", "15:00", "21:30", "23:59"])
+def test_stored_send_without_cutoff_keeps_sending_over_a_week(monkeypatch, when):
+    from dataclasses import replace
+    from datetime import time
+
+    async def test(pool):
+        await _zone(pool)
+        await _operator(pool)
+        await pool.execute("INSERT INTO system_settings (key, value) VALUES ('morning_brief.time', $1)", when)
+        await chat_settings.load()
+        policy = replace(proactive_delivery.load_policy(), quiet_hours=None)
+        monkeypatch.setattr(proactive_delivery, "load_policy", lambda: policy)
+        monkeypatch.setattr(attention, "collect", _collect(_summary("ok")))
+        send = time.fromisoformat(when)
+        channel = _Channel()
+        service = _service(channel, MONDAY)
+        workdays = 0
+        for offset in range(7):
+            day = MONDAY + timedelta(days=offset)
+            await _digest(pool, f"held-{offset}", day.date(), hour=7)
+            service._clock.now = day.replace(hour=send.hour, minute=send.minute) - timedelta(minutes=1)
+            await service.run_once()
+            assert len(channel.posts) == workdays
+            # A delayed tick must still leave an eligible window, even for 23:59.
+            service._clock.now += timedelta(minutes=1, seconds=30)
+            await service.run_once()
+            await service.run_once()
+            workdays += int(day.weekday() < 5)
+            assert len(channel.posts) == workdays
+        assert workdays == 5
+        assert await pool.fetchval("SELECT count(*) FROM morning_briefs WHERE status = 'sent'") == 5
+        assert await pool.fetchval("SELECT count(*) FROM morning_brief_consumed") == 5
+    run_with_channel_configs(test, monkeypatch)
+
+
+@pytest.mark.parametrize("quiet_end", ["23:59", "08:00"])
+def test_end_of_day_cutoff_respects_quiet_hours_and_keeps_digest(monkeypatch, tmp_path, lark_cli_stand_in, quiet_end):
+    from dataclasses import replace
+    from datetime import time
+    from looper.agents.channels.allowlist import SenderAllowlist
+    from looper.agents.channels.lark import LarkChannelAdapter
+    from looper.agents.channels.registry import ChannelRegistry
+
+    def posts():
+        calls = [json.loads(line) for line in lark_cli_stand_in.read_text().splitlines()] if lark_cli_stand_in.exists() else []
+        return [call[call.index("--markdown") + 1] for call in calls if "+messages-send" in call]
+
+    async def test(pool):
+        await pool.execute("INSERT INTO system_settings (key, value) VALUES ('morning_brief.time', '23:59')")
+        await _zone(pool)
+        await _operator(pool)
+        policy = replace(proactive_delivery.load_policy(),
+                         quiet_hours=proactive_delivery.DailyWindow(time(22), time.fromisoformat(quiet_end)))
+        monkeypatch.setattr(proactive_delivery, "load_policy", lambda: policy)
+        monkeypatch.setattr(attention, "collect", _collect(_summary("ok")))
+        item = await _digest(pool, "held-at-midnight", MONDAY.date(), hour=7)
+        channel = ChannelRegistry(SimpleNamespace())
+        adapter = LarkChannelAdapter(runtime_root=tmp_path,
+                                     allowlist=SenderAllowlist("channel-lark", frozenset({OP})))
+        channel._channels[adapter.channel_id] = adapter
+        service = _service(channel, MONDAY.replace(hour=23, minute=59, second=30))
+        await service.run_once()
+        assert len(posts()) == int(quiet_end == "23:59")
+        assert await pool.fetchval("SELECT count(*) FROM morning_brief_consumed") == int(quiet_end == "23:59")
+        service._clock.now = (MONDAY + timedelta(days=1)).replace(hour=0, minute=0)
+        await service.run_once()
+        assert len(posts()) == int(quiet_end == "23:59")
+        # Quiet hours ending after midnight cannot extend the previous day's window.
+        service._clock.now = service._clock.now.replace(hour=8)
+        await service.run_once()
+        assert len(posts()) == int(quiet_end == "23:59")
+        monkeypatch.setattr(proactive_delivery, "load_policy", lambda: replace(policy, quiet_hours=None))
+        service._clock.now = service._clock.now.replace(hour=23, minute=59)
+        await service.run_once()
+        await service.run_once()
+        assert len(posts()) == 1
+        assert "11-23 07:00" in posts()[0]
+        assert [row["delivery_id"] for row in await pool.fetch("SELECT delivery_id FROM morning_brief_consumed")] == [item]
+    run_with_channel_configs(test, monkeypatch)
+
+
+@pytest.mark.parametrize("boundary", ["cutoff", "quiet"])
+@pytest.mark.parametrize("stage", ["collection", "send-marker"])
+def test_send_rechecks_time_before_channel_call(monkeypatch, boundary, stage):
+    from dataclasses import replace
+    from datetime import time
+
+    async def test(pool):
+        await _zone(pool)
+        await _operator(pool)
+        await _digest(pool, "held", MONDAY.date(), hour=7)
+        channel = _Channel()
+        service = _service(channel, MONDAY.replace(hour=11, minute=59))
+        if boundary == "quiet":
+            policy = replace(proactive_delivery.load_policy(), quiet_hours=proactive_delivery.DailyWindow(time(10), time(11)))
+            monkeypatch.setattr(proactive_delivery, "load_policy", lambda: policy)
+        def advance():
+            service._clock.now = MONDAY.replace(hour=12, minute=0) if boundary == "cutoff" else MONDAY.replace(hour=10, minute=0)
+        if stage == "collection":
+            async def collect(**kwargs):
+                advance()
+                return _summary("ok")
+            monkeypatch.setattr(attention, "collect", collect)
+        else:
+            monkeypatch.setattr(attention, "collect", _collect(_summary("ok")))
+            real_mark = morning_brief.store.mark_send_started
+            async def mark(*args):
+                marked = await real_mark(*args)
+                advance()
+                return marked
+            monkeypatch.setattr(morning_brief.store, "mark_send_started", mark)
+        await service.run_once()
+        assert channel.posts == []
+        assert await pool.fetchval("SELECT count(*) FROM morning_brief_consumed") == 0
+        assert await pool.fetchval("SELECT count(*) FROM morning_briefs WHERE send_started_at IS NOT NULL") == 0
+    run_with_channel_configs(test, monkeypatch)
+
+
+@pytest.mark.parametrize("started", [False, True])
+def test_late_tick_recovers_send_boundary_without_sending(monkeypatch, started):
+    async def test(pool):
+        await _zone(pool)
+        await _operator(pool)
+        monkeypatch.setattr(attention, "collect", _collect(_summary("ok")))
+        item = await _digest(pool, "held", MONDAY.date(), hour=7)
+        await pool.execute("INSERT INTO morning_briefs (local_date, channel_id, chat, status, attempts, updated_at, read_ids, send_started_at) "
+                           "VALUES ($1, 'channel-lark', $2, 'sending', 1, $3, $4::bigint[], $5)",
+                           MONDAY.date(), OP, MONDAY, [item], MONDAY if started else None)
+        channel = _Channel()
+        await _service(channel, MONDAY.replace(hour=12, minute=1)).run_once()
+        assert channel.posts == []
+        row = await pool.fetchrow("SELECT status, attempts FROM morning_briefs")
+        assert dict(row) == {"status": "uncertain" if started else "failed", "attempts": int(started)}
+        assert await pool.fetchval("SELECT count(*) FROM morning_brief_consumed") == int(started)
+        await _service(channel, MONDAY + timedelta(days=1)).run_once()
+        assert len(channel.posts) == int(not started)
+        assert await pool.fetchval("SELECT count(*) FROM morning_brief_consumed") == 1
+    run_with_channel_configs(test, monkeypatch)
+
+
+def test_quiet_deferral_survives_a_released_first_claim(monkeypatch):
+    from dataclasses import replace
+    from datetime import time
+
+    async def test(pool):
+        await _zone(pool)
+        await _operator(pool)
+        monkeypatch.setattr(attention, "collect", _collect(_summary("ok")))
+        policy = replace(proactive_delivery.load_policy(), quiet_hours=proactive_delivery.DailyWindow(time(8), time(10)))
+        monkeypatch.setattr(proactive_delivery, "load_policy", lambda: policy)
+        await _digest(pool, "held", MONDAY.date(), hour=7)
+        channel = _Channel()
+        service = _service(channel, MONDAY)
+        await service.run_once()
+        service._clock.now = MONDAY.replace(hour=10, minute=0)
+        real_claim = morning_brief.store.claim
+        async def claim(*args, **kwargs):
+            result = await real_claim(*args, **kwargs)
+            chat_settings.set_morning_brief_enabled(False)
+            return result
+        with monkeypatch.context() as patch:
+            patch.setattr(morning_brief.store, "claim", claim)
+            await service.run_once()
+        assert channel.posts == []
+        assert await pool.fetchval("SELECT count(*) FROM morning_brief_consumed") == 0
+        await _service(channel, MONDAY + timedelta(days=1, hours=1)).run_once()
+        assert len(channel.posts) == 1 and "11-23 07:00" in channel.posts[0]["text"]
+        assert await pool.fetchval("SELECT count(*) FROM morning_brief_consumed") == 1
     run_with_channel_configs(test, monkeypatch)
