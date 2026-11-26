@@ -561,6 +561,7 @@ M7 先让计划状态有唯一来源（M7a），再在其上加任务记忆（M7
 
 | 日期 | 事项 |
 |---|---|
+| 2026-11-26 | 工作模式 RFC 卡片 2.6 的 Planner 阶段验证通过（在 v2.15.43 冻结点 `45fc80461` 上，一次性数据库含 2,000 个任务，真实隔离的 HTTP 服务）：服务端 `tasks.work_list`（进行中、定时、已结束）和 `tasks.select` 的中位数 1.1–13.8 ms，目标 100–150 ms；浏览器每项 5 次取样，首个文档中位数 155 ms（目标 1000）、首次可输入的输入框中位数 89 ms、最大 176 ms（目标 800）、热切换任务中位数 39 ms（目标 300）。60 项浏览器检查通过、0 项失败、7 项未测，因为需要任务 Manager 阶段或真实模型，列在 §5.2。没有产品变化。 |
 | 2026-11-26 | CI 分片改为 8 个，重文件按测试拆分（[#1846](https://github.com/foolzzz/looper/pull/1846)，已合入，只改 CI）：一个文件的记录时长超过 300 秒才按收集顺序拆成连续的块，目前只有 `tests/test_prompt_eval.py`（约 1216 秒，5 块）；块用同一条最长处理时间优先规则分配，`Agent system tests` 汇总检查名不变。重放确认 8 是同时满足两条余量线的最小分片数；拆开后串行时间多约 6.7%。分片逻辑测试 120 项通过，8 个分片的收集结果合起来与不分片逐项一致、没有重复。没有运行时变化，没有迁移。 |
 | 2026-11-26 | 发布 [v2.15.43](../releases/v2.15.43.md)（[#1845](https://github.com/foolzzz/looper/pull/1845)）：自 v2.15.42 起 23 个拉取请求，合并批次按成员计数。任务 Manager 回答、网络暂停和中断尝试提示默认关闭；聊天范围的代码已包含但尚不可用；启动日志逐条记迁移耗时。新迁移 2100、2120（2100 校验 `chat_messages` 上的约束）；新增运行时依赖 `cryptography` 46.x，源码升级在服务停止期间安装，需要此刻能访问包索引。发布说明用就绪文档 smoke 校验，各拉取请求的产品测试沿用其自己的记录，没有在发布头上重跑。 |
 | 2026-11-26 | 任务 Manager 回答任务聊天（[#1771](https://github.com/foolzzz/looper/pull/1771)、[#1773](https://github.com/foolzzz/looper/pull/1773)、[#1820](https://github.com/foolzzz/looper/pull/1820)、[#1831](https://github.com/foolzzz/looper/pull/1831)、[#1825](https://github.com/foolzzz/looper/pull/1825)、[#1841](https://github.com/foolzzz/looper/pull/1841)，已合入，默认关闭）：`tasks.conversations.enabled` 与 `tasks.conversations.manager_answers` 都为 `true` 才回答；只开工作模式时，发到任务的消息返回 409 `task_manager_off`，不存储、不起进程。开启后，任务聊天（`task-chat:<task_id>`）支持 `/stop`、`/done`、`/pause`、`/background`、`/takeover`、`/start` 由代码直接回答，任务绑定工具 `task_status`、`task_requirement_set` 与本地命令策略；`operator_chat.messages` 增加分页并总是返回 `has_more`、`next_before`；Work 中间栏仅在两个开关都开时改用任务聊天，草稿在启动前可选任务 Manager 的 Profile。迁移 `chat_message_entry_kind`（2100）。真实模式的任务 Manager 评测跑法由 [#1840](https://github.com/foolzzz/looper/pull/1840) 提供（仅评测，无产品变化）。 |
@@ -1203,6 +1204,7 @@ M7 先让计划状态有唯一来源（M7a），再在其上加任务记忆（M7
 
 ### 5.2 工程待办
 
+- **Work 页验证的 B 阶段缺口（卡片 2.6 的 7 项未测）**：Planner 阶段已通过（见 §4 2026-11-26）；以下 7 项需要任务 Manager 阶段或真实模型，仍未验证：ArrowUp 发送历史、历史向前追加、回复期间排队输入、会话 Stop、任务 Stop、后台任务进度、Profile 错误提示。
 - **`looper service upgrade` 先停服务再装依赖**：升级在停止服务之后才安装目标版本的依赖；安装失败会留下无法启动的新代码。[#1849](https://github.com/foolzzz/looper/pull/1849)（评审中）把安装挪到排空之前，停服后离线安装。
 - **任务 Manager 的回合提交 worktree 任务里所有待提交的改动**：[#1848](https://github.com/foolzzz/looper/pull/1848)（评审中）改为只提交本回合自己的改动，回合开始前就有改动的路径不动。
 - **任务 Manager 继承操作者的 Claude Code 配置，包括所有 MCP 服务器**：已提出显式的 MCP 允许清单，决定待定。
