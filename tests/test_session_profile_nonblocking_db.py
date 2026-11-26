@@ -126,9 +126,11 @@ def test_choices_read_profiles_once(monkeypatch, tmp_path):
         listed = AsyncMock(wraps=original)
         monkeypatch.setattr(db_registry, "list_profiles", listed)
         settings = await load_agent_settings(AgentType.MANAGER, wait=False)
-        monkeypatch.setattr(db_registry, "get_profile", AsyncMock(side_effect=AssertionError("N+1 read")))
+        single = AsyncMock(side_effect=AssertionError("N+1 read"))
+        monkeypatch.setattr(db_registry, "get_profile", single)
         assert await session_profile.choices(None, settings)
         assert listed.await_count == 1
+        single.assert_not_awaited()
 
     run_db(body, monkeypatch, timeout=120)
 

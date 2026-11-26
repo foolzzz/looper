@@ -9,6 +9,7 @@ import { intentsSettingsGet } from "@/lib/api-leads";
 import { attentionSettingsGet, fetchAttention, type AttentionSummary } from "@/lib/api-attention";
 import { V1Error } from "@/lib/v1";
 import { useLedger } from "@/lib/use-ledger";
+import { taskConversationsGet } from "@/lib/work";
 
 vi.mock("@/lib/api", async (original) => ({
   ...await original<typeof import("@/lib/api")>(),
@@ -20,6 +21,9 @@ vi.mock("@/lib/api-attention", () => ({ attentionSettingsGet: vi.fn(), fetchAtte
 vi.mock("@/lib/use-ledger", () => ({ useLedger: vi.fn() }));
 vi.mock("@/components/sign-out", () => ({ SignOut: () => null }));
 vi.mock("@/components/project-dialog", () => ({ ProjectDialog: () => <div role="dialog" /> }));
+vi.mock("@/lib/work", async (original) => ({
+  ...await original<typeof import("@/lib/work")>(), taskConversationsGet: vi.fn(),
+}));
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
 const gates = (waiting: number): GateList => ({
@@ -57,6 +61,7 @@ beforeEach(() => {
   vi.mocked(fetchGates).mockResolvedValue(gates(2));
   vi.mocked(intentsSettingsGet).mockResolvedValue({ enabled: false, subscriptions: [] });
   vi.mocked(attentionSettingsGet).mockResolvedValue({ enabled: false });
+  vi.mocked(taskConversationsGet).mockResolvedValue({ enabled: false });
   vi.mocked(fetchAttention).mockRejectedValue(new Error("summary is off"));
   vi.mocked(useLedger).mockReturnValue({ enabled: false, count: null, stale: false, error: null,
     revision: 0, refresh: vi.fn(), changed: vi.fn() });
@@ -253,6 +258,53 @@ describe("Sidebar Needs you item", () => {
     await render();
     expect(host.textContent).not.toContain("Needs you");
     expect(fetchAttention).not.toHaveBeenCalled();
+  });
+});
+
+describe("Sidebar Work item", () => {
+  const workButton = () => [...host.querySelectorAll("nav button")].find((b) => b.textContent === "Work");
+
+  it("stops probing a missing operation after the first request", async () => {
+    vi.mocked(taskConversationsGet).mockRejectedValue(
+      new V1Error(404, "not_found", "no POST /api/v1/task_conversations/get"),
+    );
+    await render();
+    expect(taskConversationsGet).toHaveBeenCalledTimes(1);
+    expect(workButton()).toBeUndefined();
+    await act(async () => { await vi.advanceTimersByTimeAsync(150_000); });
+    expect(taskConversationsGet).toHaveBeenCalledTimes(1);
+    expect(workButton()).toBeUndefined();
+  });
+
+  it("keeps polling while disabled and observes the switch turning on", async () => {
+    await render();
+    expect(taskConversationsGet).toHaveBeenCalledTimes(1);
+    expect(workButton()).toBeUndefined();
+    await act(async () => { await vi.advanceTimersByTimeAsync(90_000); });
+    expect(taskConversationsGet).toHaveBeenCalledTimes(4);
+    expect(workButton()).toBeUndefined();
+    vi.mocked(taskConversationsGet).mockResolvedValue({ enabled: true });
+    await act(async () => { await vi.advanceTimersByTimeAsync(30_000); });
+    expect(workButton()).toBeDefined();
+  });
+
+  it("shows Work when enabled", async () => {
+    vi.mocked(taskConversationsGet).mockResolvedValue({ enabled: true });
+    await render();
+    expect(workButton()).toBeDefined();
+  });
+
+  it("hides Work after a server error and keeps polling to recover", async () => {
+    vi.mocked(taskConversationsGet).mockResolvedValue({ enabled: true });
+    await render();
+    expect(workButton()).toBeDefined();
+    vi.mocked(taskConversationsGet).mockRejectedValue(new V1Error(500, "internal", "unavailable"));
+    await act(async () => { await vi.advanceTimersByTimeAsync(90_000); });
+    expect(taskConversationsGet).toHaveBeenCalledTimes(4);
+    expect(workButton()).toBeUndefined();
+    vi.mocked(taskConversationsGet).mockResolvedValue({ enabled: true });
+    await act(async () => { await vi.advanceTimersByTimeAsync(30_000); });
+    expect(workButton()).toBeDefined();
   });
 });
 

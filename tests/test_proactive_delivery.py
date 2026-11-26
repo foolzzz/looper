@@ -182,15 +182,17 @@ BRIEF = Delivery(DeliveryKind.MORNING_BRIEF, Urgency.NORMAL, ChatKind.DIRECT)
 @pytest.mark.parametrize(("delivery", "state", "expected"), [
     # 2. Nothing to say is still dropped, ahead of the morning brief's exemption.
     (replace(BRIEF, silent=True), DeliveryState(NIGHT, sent_today=9), Decision(Outcome.DROP, Reason.SILENT)),
-    # A morning brief is the digest: sent, uncounted, at night, over the cap, and outside a source's hours.
-    (BRIEF, DeliveryState(NIGHT, sent_today=9), Decision(Outcome.SEND, Reason.WITHIN_LIMITS, counted=False)),
-    (BRIEF, DeliveryState(EARLY, sent_today=9), Decision(Outcome.SEND, Reason.WITHIN_LIMITS, counted=False)),
+    # A scheduled brief obeys quiet and source hours, but is exempt from the cap.
+    (BRIEF, DeliveryState(NIGHT, sent_today=9),
+     Decision(Outcome.DIGEST, Reason.QUIET_HOURS, digest_date=TOMORROW)),
+    (BRIEF, DeliveryState(EARLY, sent_today=9),
+     Decision(Outcome.DIGEST, Reason.QUIET_HOURS, digest_date=EARLY.date())),
     (BRIEF, DeliveryState(DAY, sent_today=9), Decision(Outcome.SEND, Reason.WITHIN_LIMITS, counted=False)),
     (BRIEF, DeliveryState(DAY, last_user_message_at=DAY), Decision(Outcome.SEND, Reason.WITHIN_LIMITS, counted=False)),
-    (replace(BRIEF, chat=ChatKind.GROUP), DeliveryState(NIGHT, sent_today=9),
-     Decision(Outcome.SEND, Reason.WITHIN_LIMITS, counted=False)),
+    (BRIEF, DeliveryState(NIGHT, last_user_message_at=NIGHT),
+     Decision(Outcome.DIGEST, Reason.QUIET_HOURS, digest_date=TOMORROW)),
     (replace(BRIEF, source=SOURCE_9_TO_18), DeliveryState(at(20, 3)),
-     Decision(Outcome.SEND, Reason.WITHIN_LIMITS, counted=False)),
+     Decision(Outcome.DIGEST, Reason.OUTSIDE_ACTIVE_HOURS, digest_date=EARLY.date())),
     # A normal notice at the same moment still waits for the digest.
     (notice(), DeliveryState(NIGHT), Decision(Outcome.DIGEST, Reason.QUIET_HOURS, digest_date=TOMORROW)),
 ])

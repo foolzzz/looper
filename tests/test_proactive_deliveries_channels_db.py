@@ -32,22 +32,25 @@ def test_channel_receipt_updates_the_existing_gate_reminder_decision(monkeypatch
                                      allowlist=SenderAllowlist("channel-lark", frozenset({OPEN_ID})))
         registry = ChannelRegistry(SimpleNamespace())
         registry._channels[adapter.channel_id] = adapter
-        receipt = await registry.post(adapter.channel_id, NotifyTarget(TargetKind.USER, OPEN_ID), "A reminder",
-            idempotency_key="gate-17", **turn_metrics.proactive_kwargs(
-                turn_metrics.ProactiveSource.GATE_REMINDER, "synthetic-gate", dedupe_key="gate_message:17"))
+        with turn_metrics.proactive_send(turn_metrics.ProactiveSource.GATE_REMINDER, "synthetic-gate",
+                                         dedupe_key="gate_message:17"):
+            receipt = await registry.post(adapter.channel_id, NotifyTarget(TargetKind.USER, OPEN_ID), "A reminder",
+                                          idempotency_key="gate-17")
         assert receipt.success and receipt.external_ids
         await asyncio.gather(*turn_metrics._pending)
         rows = await pool.fetch("SELECT * FROM proactive_deliveries")
         assert len(rows) == 1
         row = dict(rows[0])
         assert now <= row["sent_at"] <= datetime.now(timezone.utc)
-        assert row == {**decision, "outcome": "sent", "external_id": receipt.external_ids[0], "sent_at": row["sent_at"]}
+        assert row == {**decision, "outcome": "sent", "external_id": receipt.external_ids[0], "sent_at": row["sent_at"],
+                       "body": "A reminder", "body_stored_at": row["body_stored_at"]}
 
     run_db(check, monkeypatch)
 
 
-def test_registry_and_bus_notice_record_their_typed_sources(monkeypatch, tmp_path, lark_cli_stand_in):
-    monkeypatch.setattr(chat_settings, "_metrics_enabled", True)
+@pytest.mark.parametrize("metrics_on", [False, True])
+def test_registry_and_bus_notice_record_their_typed_sources(monkeypatch, tmp_path, lark_cli_stand_in, metrics_on):
+    monkeypatch.setattr(chat_settings, "_metrics_enabled", metrics_on)
 
     async def run(pool):
         adapter = LarkChannelAdapter(runtime_root=tmp_path,
@@ -72,18 +75,20 @@ def test_registry_and_bus_notice_record_their_typed_sources(monkeypatch, tmp_pat
         adapter._running = True
         await adapter._outbound_loop()
         await asyncio.gather(*turn_metrics._pending)
-        rows = await pool.fetch("SELECT source, source_ref, chat, outcome, external_id FROM proactive_deliveries ORDER BY id")
-        assert [(r["source"], r["source_ref"], r["chat"], r["outcome"]) for r in rows] == [
-            ("gate", "gate-a", OPEN_ID, "sent"), ("task_notice", "task-a", OPEN_ID, "sent")]
-        assert all(r["external_id"] for r in rows)
+        rows = await pool.fetch("SELECT source, source_ref, chat, outcome, external_id, body FROM proactive_deliveries ORDER BY id")
+        assert [(r["source"], r["source_ref"], r["chat"], r["outcome"], r["body"]) for r in rows] == [
+            ("gate", "gate-a", OPEN_ID, "sent", "A question"),
+            ("task_notice", "task-a", OPEN_ID, "sent", "The task ended")]
+        if metrics_on:
+            assert all(r["external_id"] for r in rows)
 
     run_db(run, monkeypatch)
 
 
-def test_off_gate_and_subscription_keep_the_original_calls_and_write_no_metrics(
+def test_off_gate_and_subscription_keep_the_sent_text_and_record_bodies(
         monkeypatch, tmp_path, lark_cli_stand_in):
     from datetime import datetime, timezone
-    from unittest.mock import AsyncMock, call
+    from unittest.mock import AsyncMock
     from looper.agents import gate_courier, subscription_runs, subscriptions
 
     monkeypatch.setattr(chat_settings, "_metrics_enabled", False)
@@ -118,10 +123,14 @@ def test_off_gate_and_subscription_keep_the_original_calls_and_write_no_metrics(
         monkeypatch.setattr(runs, "_refusal", AsyncMock(return_value=None))
         monkeypatch.setattr(runs, "_finish_push", AsyncMock())
         await runs._push("run-a")
-        assert post.call_args_list == [
-            call("channel-lark", target, "A question", reply_to=None, idempotency_key="gate-1"),
-            call("channel-lark", target, "A digest", idempotency_key=subscriptions.idempotency_keys("run-a", 1)[0])]
-        assert await pool.fetchval("SELECT count(*) FROM proactive_deliveries") == 0
+        assert [args.args for args in post.call_args_list] == [
+            ("channel-lark", target, "A question"), ("channel-lark", target, "A digest")]
+        assert [args.kwargs["idempotency_key"] for args in post.call_args_list] == [
+            "gate-1", subscriptions.idempotency_keys("run-a", 1)[0]]
+        await asyncio.gather(*turn_metrics._pending)
+        assert [tuple(row) for row in await pool.fetch(
+            "SELECT source, body, decision FROM proactive_deliveries ORDER BY id")] == [
+                ("gate", "A question", None), ("subscription", "A digest", None)]
 
     run_db(run, monkeypatch)
 

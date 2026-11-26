@@ -53,21 +53,20 @@ def test_created_task_start_question_in_manager_reply(
         manager.ops = ops
         monkeypatch.setattr(manager, "_tools_problem", AsyncMock(return_value=None))
 
+        created_results, started_results = [], []
+
         async def model_turn(token: Any, prepared: Any) -> str:
             created = await ops.call("looper_task_create", {
                 "title": "计算器", "requirement": "build a calculator", "project": "calc", **workflow_args})
-            assert created["status"] == "ok", created
+            created_results.append(created)
             if start != "none":
                 if start == "another-task":
                     created = await ops.call("looper_task_create", {
                         "title": "另一个任务", "requirement": "another task", "project": "calc", **workflow_args})
-                    assert created["status"] == "ok", created
+                    created_results.append(created)
                 started = await ops.call("looper_task_control", {
                     "task_id": created["result"]["task_id"], "action": "start"})
-                if start == "failed":
-                    assert started["status"] == "error" and started["error"]["code"] == "conflict", started
-                else:
-                    assert started["status"] == "ok" and started["result"]["started"], started
+                started_results.append(started)
             return "已启动" if start == "same-task" else "已创建"
 
         monkeypatch.setattr(manager, "_run_prepared", model_turn)
@@ -76,6 +75,16 @@ def test_created_task_start_question_in_manager_reply(
             await manager._handle(MessageEnvelope.create(
                 source=web, target=MANAGER_ADDRESS, message_type=MessageType.USER_MESSAGE,
                 payload={"text": "在 calc 里创建计算器任务"}))
+            assert len(created_results) == (2 if start == "another-task" else 1)
+            assert all(created["status"] == "ok" for created in created_results), created_results
+            if start == "none":
+                assert started_results == []
+            else:
+                started, = started_results
+                if start == "failed":
+                    assert started["status"] == "error" and started["error"]["code"] == "conflict", started
+                else:
+                    assert started["status"] == "ok" and started["result"]["started"], started
             replies = []
             queue = bus.get_queue(web.agent_id)
             while not queue.empty():

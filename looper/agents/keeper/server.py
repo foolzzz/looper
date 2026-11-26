@@ -82,12 +82,14 @@ class KeeperServer:
     async def close(self):
         if self.listener is not None:
             self.listener.close()
-            await self.listener.wait_closed()
-            self.path.unlink(missing_ok=True)
         for connection in tuple(self.connections):
             if not connection.task.cancelling():
                 connection.task.cancel()
         await asyncio.gather(*(c.closed.wait() for c in tuple(self.connections)))
+        if self.listener is not None:
+            # Python 3.12.1+ waits for active connections as well as the listener.
+            await self.listener.wait_closed()
+            self.path.unlink(missing_ok=True)
 
 
 class _Connection:

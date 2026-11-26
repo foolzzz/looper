@@ -49,6 +49,21 @@ body {
   input, select, textarea { font-size: 16px; }
 }
 
+/* A short, narrow Work column scrolls as one column. The conversation stays in normal flow, tall enough for its
+   composer, instead of shrinking to nothing and painting that composer over the plan. Unlayered, so it wins over
+   the conversation's h-full / flex-1 utilities. */
+@media (max-height: 32rem) and (max-width: 1023px) {
+  .work-short-conversation > section {
+    height: auto;
+    min-height: 16rem;
+    flex: none;
+  }
+  .work-short-conversation > section > :first-child {
+    flex: none;
+    overflow: visible;
+  }
+}
+
 ::-webkit-scrollbar {
   width: 6px;
 }
