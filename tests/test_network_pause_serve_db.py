@@ -13,7 +13,7 @@ import subprocess
 import sys
 import time
 import tomllib
-from urllib.parse import urlsplit
+from urllib.parse import unquote, urlsplit
 
 import pytest
 
@@ -103,6 +103,46 @@ def _until(check, label, timeout=30):
         time.sleep(.1)
 
 
+def _assert_isolated_serve(port: int, database_url: str, *, disposable_url: str | None = None) -> None:
+    """Refuse the live dashboard and any database this test's fixture did not create.
+
+    ``fresh_database`` keeps the server from ``LOOPER_TEST_DATABASE_URL`` and replaces
+    only the database name. The port is that server's port, never a literal.
+    """
+    source = DSN if disposable_url is None else disposable_url
+    assert port != 8767
+    assert source
+    admin = urlsplit(source)
+    target = urlsplit(database_url)
+    # Host, port and role only. Leave the password out of the assertion so a failure does not print it.
+    assert (target.scheme, target.hostname, target.port, target.username) == (
+        admin.scheme, admin.hostname, admin.port, admin.username)
+    assert not target.query and not target.fragment
+    name = unquote(target.path.lstrip("/"))
+    admin_name = unquote(admin.path.lstrip("/"))
+    assert name.startswith("looper_eval_") and len(name) == len("looper_eval_") + 12 and name != admin_name
+
+
+def test_isolation_guard_accepts_the_fixture_database_on_the_ci_port():
+    disposable = "postgresql://postgres:postgres@localhost:5432/postgres"
+    _assert_isolated_serve(24107, "postgresql://postgres:postgres@localhost:5432/looper_eval_0123456789ab",
+                           disposable_url=disposable)
+
+
+def test_isolation_guard_refuses_live_dashboard_and_database():
+    disposable = "postgresql://postgres:postgres@localhost:5432/postgres"
+    fixture = "postgresql://postgres:postgres@localhost:5432/looper_eval_0123456789ab"
+    with pytest.raises(AssertionError):
+        _assert_isolated_serve(8767, fixture, disposable_url=disposable)
+    for live in ("postgresql://postgres:postgres@127.0.0.1:54329/looper",
+                 "postgresql://postgres:postgres@127.0.0.1:54331/looper_eval_0123456789ab",
+                 "postgresql://postgres:postgres@localhost:5432/looper",
+                 "postgresql://postgres:postgres@localhost:5432/loopx",
+                 disposable):
+        with pytest.raises(AssertionError):
+            _assert_isolated_serve(24107, live, disposable_url=disposable)
+
+
 @contextmanager
 def _serve(root, url):
     from evals.prompt_regression.runner import Api, free_port
@@ -121,8 +161,8 @@ def _serve(root, url):
              else '-c "import sys; sys.exit(76)"\n'))
         executable.chmod(0o755)
     port = free_port()
-    assert port != 8767 and urlsplit(url).port == 54331
-    assert urlsplit(url).path != urlsplit(DSN).path
+    _assert_isolated_serve(port, url)
+    assert unquote(urlsplit(url).path.lstrip("/")) != unquote(urlsplit(str(DSN)).path.lstrip("/"))
     config = ops_config.OpsConfig(runtime_root=runtime, path=runtime / ops_config.FILE, database_url=url,
         host="127.0.0.1", port=port, operator_notes_root=str(home / "notes"), pi_runtime="cli", dsh_runtime="cli")
     ops_config.write_private(config.path, ops_config.render(config))
@@ -196,6 +236,7 @@ def test_isolated_serve_network_pause_resume_and_expiry(tmp_path, variant):
         "-c", "user.name=Example", "-c", "user.email=dev@example.org", "commit", "--allow-empty", "-qm", "Initial"],
         cwd=work, check=True, capture_output=True)
     with socket.socket() as endpoint, fresh_database_without_recording(str(DSN)) as (url, _):
+        assert _query(url, "SELECT current_database() AS name")[0]["name"] == unquote(urlsplit(url).path.lstrip("/"))
         endpoint.bind(("127.0.0.1", 0))  # Bound but not listening: the model endpoint is unavailable.
         endpoint_url = f"http://127.0.0.1:{endpoint.getsockname()[1]}"
         _query(url, "INSERT INTO agent_setting_layers(scope,env) VALUES('system',$1::jsonb) RETURNING scope",
