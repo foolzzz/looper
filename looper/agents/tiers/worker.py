@@ -2169,14 +2169,20 @@ class WorkerPool:
     async def _record_run(self, worker_id: str, recorder: ClaudeRunRecorder) -> AsyncIterator[None]:
         self._recorders[worker_id] = recorder
         try:
+            from .. import network_pause
+            if recorder.task_id:
+                await network_pause.existing(recorder.task_id)
             async with recorder:
                 yield
         finally:
             self._recorders.pop(worker_id, None)
+            from .. import network_pause_settings
+            if (await network_pause_settings.load()).enabled and recorder.network_unavailable():
+                self._engine_runs[worker_id] = {'network_unavailable': {'endpoint': recorder.network_endpoint()}}
             if await failures.typing_mode() is failures.FailureTyping.ACT:
                 signal = recorder.execution_signal()
                 if signal is not None:
-                    self._engine_runs[worker_id] = signal
+                    self._engine_runs[worker_id] = {**self._engine_runs.get(worker_id, {}), **signal}
 
     @staticmethod
     async def _control_failure(result: dict[str, Any], found: failures.Failure, *,
@@ -2659,6 +2665,8 @@ class WorkerPool:
                     ctx.verification_writes.close()
             if timeout is None and result.get("failure") in ("verification_changed_code", "verification_unavailable"):
                 break
+            if self._engine_runs.get(ctx.worker_id, {}).get('network_unavailable') is not None:
+                break  # Network recovery must run before any profile fallback can spend another model call.
             if ctx.fallback_reason is None:
                 if timeout is not None:
                     if not fallbacks:

@@ -2389,6 +2389,14 @@ function TaskDetailPage({ taskId, gateStep, tab: tabParam, focusStep, onTab, roo
           )}
         </div>
         {actionError && <p role="alert" className="mt-1 text-xs text-destructive">{actionError}</p>}
+        {task?.network_pause && <div role="status" aria-label="网络暂停状态"
+          className="mt-2 space-y-1 rounded-md border border-warning/50 p-3 text-sm break-words">
+          <p className="font-medium text-warning">{task.network_pause.state === "paused" ? "网络暂停" : "等待人工处理"}</p>
+          <p>{task.network_pause.reason}</p>
+          <p className="text-xs text-muted-foreground">{task.network_pause.state === "paused"
+            ? "连接恢复后自动继续；暂停期间不调用模型。"
+            : "网络暂停已达到时限，请检查网络后停止并重新启动任务。"}</p>
+        </div>}
 
         {/* Tabs */}
         <TabStrip label="Task" selected={tab} className="mt-2 gap-1 lg:mt-3 [--gutter:--spacing(5)]">

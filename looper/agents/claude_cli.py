@@ -2336,6 +2336,15 @@ class ClaudeRunRecorder:
         result, outcome, given = self._failure_basis or (self._result, None, None)
         return failures.classify(self._runtime(), result, self._evidence, outcome=outcome, given=given)
 
+    def network_unavailable(self) -> bool:
+        """Structured model-transport evidence, independently of failure typing."""
+        result, _, given = self._failure_basis or (self._result, None, None)
+        return failures.network_unavailable(self._runtime(), result, self._evidence, given=given)
+
+    def network_endpoint(self) -> dict | None:
+        from .network_pause import endpoint
+        return endpoint(self._launch) if self._launch is not None else None
+
     def execution_signal(self) -> dict[str, Any] | None:
         """The finished execution's typed facts; callers must first check act mode.
 
