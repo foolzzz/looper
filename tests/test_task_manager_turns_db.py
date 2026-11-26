@@ -64,6 +64,8 @@ def test_refusals_start_no_process_and_keep_status(monkeypatch, tmp_path, native
                 assert await db.fetchval("SELECT count(*) FROM agent_sessions WHERE agent_id LIKE 'task-manager-%'") == 0
                 assert not pool.agent(task_id).resident.started
             assert (await tasks.get_task(task_id, pool=db))["status"] == "draft"
+            if reason == "manager_answers_off":
+                assert "tasks.conversations.manager_answers" in sink.finals[0][0] and "task_conversations.update" in sink.finals[0][0]
             if reason == "runtime_unsupported":
                 assert native.settings.profile.name in sink.finals[0][0] and "Claude Code" in sink.finals[0][0]
             if reason == "budget":

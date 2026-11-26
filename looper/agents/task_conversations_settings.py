@@ -6,6 +6,8 @@ KEY = "tasks.conversations.enabled"
 MANAGER_ANSWERS_KEY = "tasks.conversations.manager_answers"
 MAX_RESIDENT_KEY = "tasks.managers.max_resident"
 DEFAULT_MAX_RESIDENT = 6
+MANAGER_OFF_TEXT = ("the task Manager does not answer: tasks.conversations.manager_answers is off. "
+                    "Turn it on with task_conversations.update (manager_answers: true).")
 _enabled = False
 _manager_answers = False
 _max_resident = DEFAULT_MAX_RESIDENT
@@ -25,6 +27,11 @@ def set_enabled(value: bool) -> None:
 def manager_answers() -> bool:
     """Whether the task Manager answers task messages. Independent of ``enabled``; only the string ``true`` is on."""
     return _manager_answers
+
+
+def manager_active() -> bool:
+    """Work mode and the task Manager's own switch, both on: the one test for starting or serving a task Manager."""
+    return _enabled and _manager_answers
 
 
 def set_manager_answers(value: bool) -> None:

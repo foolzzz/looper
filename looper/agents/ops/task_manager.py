@@ -96,7 +96,7 @@ class TaskManagerOps:
         self._grants: dict[str, _Grant] = {}
 
     def issue(self, task_id: str) -> str:
-        if not task_conversations_settings.enabled():
+        if not task_conversations_settings.manager_active():
             raise OpError(ErrorCode.FORBIDDEN, "Task conversations are disabled.")
         for digest, grant in list(self._grants.items()):
             if grant.task_id == task_id:
@@ -118,7 +118,7 @@ class TaskManagerOps:
         return _bearer(header).startswith(TOKEN_PREFIX)
 
     def _grant(self, header: str | None) -> _Grant | None:
-        if not task_conversations_settings.enabled() or not self.claims(header):
+        if not task_conversations_settings.manager_active() or not self.claims(header):
             return None
         return self._grants.get(_digest(_bearer(header)))
 
