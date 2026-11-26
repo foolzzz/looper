@@ -53,6 +53,16 @@ def _client(text: str, client_id: str, thread: str) -> MessageEnvelope:
                                                    "client": {"id": client_id, "name": f"name-{client_id}"}}})
 
 
+async def _sent(rig: _Rig, pool: Any, message: MessageEnvelope) -> MessageEnvelope:
+    """Publish ``message``; a web message is stored first, as the web channel's own path stores it before the Manager
+    sees it (the Manager stores the other channels' messages itself)."""
+    context = message.payload["channel_context"]
+    if message.source == WEB:
+        await db_chat.save_message(session_id=context["session_id"], message_id=message.message_id, role="user",
+                                   content=message.payload["text"], pool=pool)
+    return await _published(rig, message)
+
+
 def _key(client_id: str) -> str:
     return session_routing.client_key(client_id).text
 
@@ -114,16 +124,16 @@ def test_operator_markers_never_reach_a_client_turn(mode: pytest.MonkeyPatch, tm
                                    content=f"seeded {OPERATOR_OTHER_CHAT_MARKER}", pool=pool)
         a = _client_resident(rig, "client-a", _Resident("sess-a"))
         # The operator's own turns first: the dashboard and a direct chat; their text is stored.
-        await rig.reply(await _published(rig, _web(f"dashboard {DASHBOARD_MARKER}")))
-        await rig.reply(await _published(rig, _lark(f"dm {DM_MARKER}", "oc_operator_dm", OPEN_ID, group=False)))
+        await rig.reply(await _sent(rig, pool, _web(f"dashboard {DASHBOARD_MARKER}")))
+        await rig.reply(await _sent(rig, pool, _lark(f"dm {DM_MARKER}", "oc_operator_dm", OPEN_ID, group=False)))
         main_input = capture.complete("main", rig.main)
         # Positive controls: the capture sees the operator's markers in main's input, and main's new-session brief
         # carries other chats' stored text; so the client's absence below is not an empty capture.
         assert DASHBOARD_MARKER in main_input and DM_MARKER in main_input
         assert OPERATOR_OTHER_CHAT_MARKER in main_input
         # Then the client's first turn (a new session), and a later one.
-        await rig.reply(await _published(rig, _client(f"hello {CLIENT_A_MARKER}", "client-a", "thread-a")))
-        await rig.reply(await _published(rig, _client("again", "client-a", "thread-a")))
+        await rig.reply(await _sent(rig, pool, _client(f"hello {CLIENT_A_MARKER}", "client-a", "thread-a")))
+        await rig.reply(await _sent(rig, pool, _client("again", "client-a", "thread-a")))
         a_input = capture.complete(_key("client-a"), a)
         assert CLIENT_A_MARKER in a_input and len(a.turns) == 2
         for marker in (DASHBOARD_MARKER, DM_MARKER, OPERATOR_OTHER_CHAT_MARKER):
@@ -143,11 +153,11 @@ def test_a_client_marker_never_reaches_mains_input(mode: pytest.MonkeyPatch, tmp
         await db_chat.save_message(session_id="thread-other", message_id="m0", role="user",
                                    content=f"seeded {OPERATOR_OTHER_CHAT_MARKER}", pool=pool)
         a = _client_resident(rig, "client-a", _Resident("sess-a"))
-        await rig.reply(await _published(rig, _client(f"hello {CLIENT_A_MARKER}", "client-a", "thread-a")))
+        await rig.reply(await _sent(rig, pool, _client(f"hello {CLIENT_A_MARKER}", "client-a", "thread-a")))
         assert CLIENT_A_MARKER in capture.complete(_key("client-a"), a)  # positive control
         # Main's first turn builds its resume brief from the stored chats, the client's among them.
-        await rig.reply(await _published(rig, _web(f"dashboard {DASHBOARD_MARKER}")))
-        await rig.reply(await _published(rig, _lark(f"dm {DM_MARKER}", "oc_operator_dm", OPEN_ID, group=False)))
+        await rig.reply(await _sent(rig, pool, _web(f"dashboard {DASHBOARD_MARKER}")))
+        await rig.reply(await _sent(rig, pool, _lark(f"dm {DM_MARKER}", "oc_operator_dm", OPEN_ID, group=False)))
         main_input = capture.complete("main", rig.main)
         assert OPERATOR_OTHER_CHAT_MARKER in main_input and DASHBOARD_MARKER in main_input  # positive controls
         assert main_input.count(CLIENT_A_MARKER) == 0
@@ -162,9 +172,9 @@ def test_a_client_never_sees_another_clients_turns(mode: pytest.MonkeyPatch, tmp
         await _thread(pool, "thread-b", "client-b")
         a = _client_resident(rig, "client-a", _Resident("sess-a"))
         b = _client_resident(rig, "client-b", _Resident("sess-b"))
-        await rig.reply(await _published(rig, _client(f"A says {CLIENT_A_MARKER}", "client-a", "thread-a")))
-        await rig.reply(await _published(rig, _client(f"B says {CLIENT_B_MARKER}", "client-b", "thread-b")))
-        await rig.reply(await _published(rig, _client("A again", "client-a", "thread-a")))
+        await rig.reply(await _sent(rig, pool, _client(f"A says {CLIENT_A_MARKER}", "client-a", "thread-a")))
+        await rig.reply(await _sent(rig, pool, _client(f"B says {CLIENT_B_MARKER}", "client-b", "thread-b")))
+        await rig.reply(await _sent(rig, pool, _client("A again", "client-a", "thread-a")))
         a_input, b_input = capture.complete(_key("client-a"), a), capture.complete(_key("client-b"), b)
         assert CLIENT_A_MARKER in a_input and CLIENT_B_MARKER in b_input  # positive controls
         assert CLIENT_B_MARKER not in a_input
@@ -207,7 +217,7 @@ def test_a_client_session_lists_only_the_allowlisted_tools_and_refuses_the_rest(
                                            session_key=_key("client-a"))
 
         a.on_turn = calls
-        await rig.reply(await _published(rig, _client("list my tasks", "client-a", "thread-a")))
+        await rig.reply(await _sent(rig, pool, _client("list my tasks", "client-a", "thread-a")))
         assert seen["listing"] == sorted(session_visibility.CLIENT_TOOLS)
         assert len(seen["calls"]) == 6
         for name, answer in seen["calls"]:
@@ -227,12 +237,12 @@ def test_client_sessions_count_toward_the_resident_limit_and_are_reclaimed(
         await _thread(pool, "thread-b", "client-b")
         a = _client_resident(rig, "client-a", _Resident("sess-a", hold=True))
         b = _client_resident(rig, "client-b", _Resident("sess-b"))
-        await rig.reply(await _published(rig, _web("你好")))  # main holds a process
+        await rig.reply(await _sent(rig, pool, _web("你好")))  # main holds a process
         assert rig.main.started
-        first = await _published(rig, _client("one", "client-a", "thread-a"))
+        first = await _sent(rig, pool, _client("one", "client-a", "thread-a"))
         await asyncio.wait_for(a.running.wait(), 20)
         assert a.started
-        second = await _published(rig, _client("two", "client-b", "thread-b"))
+        second = await _sent(rig, pool, _client("two", "client-b", "thread-b"))
         await asyncio.sleep(0.5)
         # main and client A hold the two process slots and A is busy: B waits.
         assert not b.turns and not b.started
@@ -257,7 +267,7 @@ def test_the_operators_session_list_does_not_show_client_sessions(mode: pytest.M
     async def test(rig: _Rig, pool: Any) -> None:
         await _thread(pool, "thread-a", "client-a")
         _client_resident(rig, "client-a", _Resident("sess-a"))
-        await rig.reply(await _published(rig, _client("hi", "client-a", "thread-a")))
+        await rig.reply(await _sent(rig, pool, _client("hi", "client-a", "thread-a")))
         assert await manager_sessions.get("manager", _key("client-a")) is not None
         rows = await sessions_view._rows(rig.manager)
         assert [row["key"] for row in rows] == ["main"]
@@ -291,12 +301,12 @@ def test_a_client_turn_carries_no_operator_profile_persona_or_prompt_layers(
         await pool.execute("UPDATE agent_profiles SET custom_prompt = $1", sentinels["custom_prompt"])
         await _thread(pool, "thread-a", "client-a")
         a = _client_resident(rig, "client-a", _Resident("sess-a"))
-        await rig.reply(await _published(rig, _web("operator turn")))
+        await rig.reply(await _sent(rig, pool, _web("operator turn")))
         main_input = capture.complete("main", rig.main)
         for name, sentinel in sentinels.items():  # positive controls: main has every one of them
             assert sentinel in main_input, name
-        await rig.reply(await _published(rig, _client("hello", "client-a", "thread-a")))
-        await rig.reply(await _published(rig, _client("again", "client-a", "thread-a")))
+        await rig.reply(await _sent(rig, pool, _client("hello", "client-a", "thread-a")))
+        await rig.reply(await _sent(rig, pool, _client("again", "client-a", "thread-a")))
         a_input = capture.complete(_key("client-a"), a)
         for name, sentinel in sentinels.items():
             assert sentinel not in a_input, name
