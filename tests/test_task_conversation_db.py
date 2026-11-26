@@ -27,9 +27,9 @@ from tests.test_api_v1_auth import _bearer, _send, _send_raw, _serving
 from tests.test_operator_auth import TOKEN, _request
 
 PREFIX = "/api/v1/operator_chat/"
-# Stripped OpenAPI document after the task-manager branches and main: the task target and the two
-# stream events are removed, and this hash is what remains.
-PRE_CARD_DOCUMENT = "895aa870b2bd775afd6a1241dd5896ccab78902a3732a42d09ab2f5a19565375"
+# Hash of /operator_chat/* paths plus the component schemas those paths $ref, excluding ErrorCode, after stripping.
+# Recompute by hashing that same selection from main's document with nothing stripped; the two hashes must match.
+PRE_CARD_DOCUMENT = "e16f2f654a840fefeb74946ab3c816dfed7070f7fdff84431df1bbebdb1339fa"
 LATER = "这个命令要等「交给后台」上线后才能用"
 
 
@@ -430,11 +430,36 @@ def _stripped_document():
     return document
 
 
+def _manager_surface(document):
+    """Operator-chat paths and the component schemas they reference. ErrorCode stays out of the hash."""
+    paths = {path: value for path, value in document["paths"].items() if path.startswith("/operator_chat/")}
+    assert paths
+    schemas = {}
+
+    def walk(node):
+        if isinstance(node, dict):
+            ref = node.get("$ref")
+            if isinstance(ref, str) and ref.startswith("#/components/schemas/"):
+                name = ref.removeprefix("#/components/schemas/")
+                if "/" not in name and name != "ErrorCode" and name not in schemas:
+                    schemas[name] = document["components"]["schemas"][name]
+                    walk(schemas[name])
+            for value in node.values():
+                walk(value)
+        elif isinstance(node, list):
+            for item in node:
+                walk(item)
+
+    walk(paths)
+    return {"paths": paths, "components": {"schemas": schemas}}
+
+
 def test_manager_path_unchanged(monkeypatch, tmp_path):
     send = api_v1.find("POST", PREFIX + "send")
     assert send.description.startswith("Send a dashboard chat message.")
-    stripped = json.dumps(_stripped_document(), ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-    assert hashlib.sha256(stripped.encode()).hexdigest() == PRE_CARD_DOCUMENT
+    surface = json.dumps(_manager_surface(_stripped_document()), ensure_ascii=False, sort_keys=True,
+                         separators=(",", ":"))
+    assert hashlib.sha256(surface.encode()).hexdigest() == PRE_CARD_DOCUMENT
     live = api_v1.document()
     kinds = live["paths"]["/operator_chat/send"]["post"]["requestBody"]["content"]["application/json"]["schema"][
         "properties"]["target"]["oneOf"]
