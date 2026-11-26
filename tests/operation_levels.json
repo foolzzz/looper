@@ -248,6 +248,8 @@
  "models.update": "inside",
  "morning_brief.get": "inside",
  "morning_brief.update": "inside",
+ "network_pause.get": "inside",
+ "network_pause.update": "inside",
  "openapi": "inside",
  "operator_chat.messages": "inside",
  "operator_chat.reply_events": "inside",
@@ -457,6 +459,8 @@
  "waits.cancel": "inside",
  "waits.resume": "inside",
  "whoami": "inside",
+ "worker_interrupted_hint.get": "inside",
+ "worker_interrupted_hint.update": "inside",
  "workflows.delete": "inside",
  "workflows.get": "inside",
  "workflows.list": "inside",
@@ -468,5 +472,6 @@
  "task_conversations.get": "inside",
  "task_conversations.update": "inside",
  "tasks.done": "inside",
+ "tasks.task_manager_profile_get": "inside",
  "tasks.task_manager_profile_set": "inside"
 }

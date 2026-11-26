@@ -48,6 +48,7 @@ from .ops import Call, ErrorCode, OpError, PublicOpError, Risk, Tool, check_argu
 from .ops.clients import DEFAULT_SESSION, ClientOps
 from .ops.planner import PlannerOps
 from .ops.room import GrantState, RoomOps
+from .ops.task_manager import TaskManagerOps
 from .managers import ManagerFleet
 from .ops.service import ManagerOps
 from .tiers.manager import ManagerAgent
@@ -227,6 +228,7 @@ class AgentHTTPServer:
         manager_ops: ManagerOps | None = None,
         managers: ManagerFleet | None = None,
         planner_ops: PlannerOps | None = None,
+        task_manager_ops: TaskManagerOps | None = None,
         room_ops: RoomOps | None = None,
         client_ops: ClientOps | None = None,
         ops_config: OpsConfig | None = None,
@@ -286,6 +288,7 @@ class AgentHTTPServer:
         self._client_ops = client_ops
         self._managers = managers
         self._planner_ops = planner_ops
+        self._task_manager_ops = task_manager_ops
         # The agent room's tools of the steps' runs, each with a token of its own (``run.``).
         self._room_ops = room_ops
         # Configuration files uploaded for import, waiting to be applied (under the runtime root).
@@ -1255,6 +1258,9 @@ class AgentHTTPServer:
         if self._room_ops is not None and self._room_ops.claims(headers.get("authorization")):
             await self._handle_room_api(method, path, headers, body, writer)
             return
+        if self._task_manager_ops is not None and self._task_manager_ops.claims(headers.get("authorization")):
+            await self._handle_task_manager_api(method, path, headers, body, writer)
+            return
         authorization = headers.get("authorization")
         ops = self._managers.ops_for(authorization) if self._managers is not None else self._manager_ops
         if ops is None or not ops.authorized(authorization):
@@ -1285,6 +1291,29 @@ class AgentHTTPServer:
             writer.write(_json_response(HTTP_200, await ops.call(
                 m.group(1), arguments, binding=headers.get("x-looper-turn"), call_id=headers.get("x-looper-call"),
                 session_key=ops.session_for(authorization))))
+        else:
+            writer.write(_json_response(HTTP_404, {"error": f"no {method} {path}"}))
+        await writer.drain()
+
+    async def _handle_task_manager_api(
+        self, method: str, path: str, headers: dict[str, str], body: bytes, writer: asyncio.StreamWriter,
+    ) -> None:
+        """Task-bound tools and outbound checks share the resident's credential."""
+        ops, header = self._task_manager_ops, headers.get("authorization")
+        assert ops is not None
+        if not ops.authorized(header) or not await ops.task_exists(header):
+            writer.write(_json_response(HTTP_401, {"error": "this task Manager's token no longer works"}))
+        elif path == f"{AGENT_API}tools" and method == "GET":
+            writer.write(_json_response(HTTP_200, {"tools": await ops.listing(header)}))
+        elif method == "POST" and (path == f"{AGENT_API}outbound/check" or _RE_AGENT_OP.match(path)):
+            try:
+                payload = json.loads(body.decode("utf-8")) if body.strip() else {}
+            except (json.JSONDecodeError, UnicodeDecodeError):
+                payload = None
+            answer = (await ops.check_outbound(header, payload) if path == f"{AGENT_API}outbound/check" else
+                      await ops.call(header, _RE_AGENT_OP.match(path).group(1), payload,
+                                     call_id=headers.get("x-looper-call")))
+            writer.write(_json_response(HTTP_200, answer))
         else:
             writer.write(_json_response(HTTP_404, {"error": f"no {method} {path}"}))
         await writer.drain()

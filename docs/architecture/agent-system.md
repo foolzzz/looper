@@ -915,12 +915,23 @@ interrupt with kill fallback. Sessions and cumulative usage are saved under
 as init reports it. A changed mode, model, effort, provider, workspace or prompt
 restarts the process with the saved session. The operator-only
 `tasks.task_manager_profile_set` selects or clears this task's profile, refuses a
-busy turn with 409, and stops an idle process before the next resume. A failed resume
+busy turn with `task_manager_busy` (409) without writing, and stops an idle process before the next resume.
+It returns the same view as the operator-only `tasks.task_manager_profile_get`:
+`task_id`, nullable `override_profile_id`, `effective` (`profile_id`, model, runtime
+type, provider id and nullable effort), `source` (`task`, `role` or `default`) and
+registered role-compatible `choices` (profile id, label, model and runtime type).
+`tasks.create_draft` accepts optional `task_manager_profile_id`, validates it before
+creating anything and stores the task override in the same transaction as the draft.
+Its existing result fields are preserved, with this view added as `task_manager_profile`.
+An omitted or null choice uses the role or built-in default. Unsupported runtimes return
+`task_manager_runtime_unsupported` with `details.requested_runtime` and
+`details.supported = "claude_code"`; unknown profiles return `invalid`.
+All three operations require the operator and enabled work mode; unknown task ids
+on get/set return `not_found`. They add no agent tools or prompts. A failed resume
 retries once fresh with the caller's last 20 fenced thread messages and emits
 `session_fresh` with a bounded diagnostic. Server restart never replays a cut turn.
 Worktree turns commit pending changes with the task trailer; in-place turns list
-changed files without committing. No conversation transport or task-bound MCP
-tools are included yet.
+changed files without committing. No conversation transport is included yet.
 
 After every turn, measurements come from that turn's `llm_records` row and replace
 `agent_sessions` measurements, with unknown values stored as NULL. The shared
@@ -933,6 +944,34 @@ including after restart, emits `session_fresh(reason=context_bound)` and receive
 the task brief plus fenced thread excerpts. The work-mode metrics include
 per-record context and cost series and compaction/rotation counts by reason and
 result. Maintenance retains the turn's write exclusion.
+
+**Tools.** Each process receives a task-bound `taskmgr.` credential for Looper's
+MCP server; the tool service stores only its hash. `task_status` reads compact
+task detail, fenced requirement
+and activity, interaction mode and git workspace state (at most 50 changed paths,
+plus the total uncommitted count). In direct mode, `task_requirement_set` versions
+the requirement through the existing edit path, only for draft or ready tasks
+and only during a turn Looper sent. Orchestrated mode lists only `task_status`
+and refuses requirement writes. Completion keeps the credential valid; process
+replacement, close, eviction, idle reclaim, shutdown and deletion revoke it.
+The same credential carries outbound review through the task's placement; its
+private hook file is removed on revocation and unanswered checks fail closed.
+With task conversations off, no credential is issued and no tool is served.
+
+**Local commands.** With `LOOPER_TASK_MANAGER` set, the CLI checks a typed table
+before dispatch and repeats the policy at callable entries, following
+[RFC section 18](rfcs/task-sessions-v0.zh-CN.md#18-安全). Only `version` is globally
+allowed. `mcp-server` is own-task only: it requires a task Manager credential,
+never falls back to the operator token, and the server checks the task binding
+on every tool call. All other leaves, including global profile, ledger, leads,
+and memory reads and `claude-code status/mcp`, are refused with exit 4.
+`profile show` instead returns empty output with exit 0; `claude-code profile
+--hook` also prints nothing and exits 0, so SessionStart cannot inject the
+operator's profile. Unlisted commands are refused too; no `task` command group
+is added yet. Existing `LOOPER_AGENT_RUN` refusals take precedence when both
+markers are set. This guard is a speed bump: the task
+Manager shares the operator's account and can read its token file or call HTTP
+directly. It is not an isolation boundary.
 
 ### TaskRouter (`looper/agents/tiers/task.py`)
 
@@ -1328,9 +1367,22 @@ result. Maintenance retains the turn's write exclusion.
   activity; the task stays completed. `off` (the default) writes nothing.
 - After a server restart (`TASK_RESUME`), a new Planner reads its plan and
   session back and carries on without planning again: a step whose Worker was
-  running runs again as the same attempt with its feedback, a step in review
-  gets a new Reviewer, a decision the stop cut off is taken again from the
-  step's saved result, and Claude resumes its session from its saved totals.
+  running and cannot be adopted runs again as the same attempt with its feedback
+  and workspace kept. With `worker.interrupted_hint.enabled` on (default off),
+  only when that attempt's latest Worker record ended `interrupted`, its new
+  Worker's first user message adds one fixed English line immediately after
+  "Start your step": it names a typed, short reason (`deploy drain`,
+  `restart not adopted` or `run stopped`), warns about partial workspace changes,
+  asks it to inspect git status and the files it will touch, and to check whether
+  external side effects already happened before repeating them. Free-form errors
+  never reach this line. First runs, normal failures, new attempts and other
+  roles' prompts stay unchanged. The operator-only `worker_interrupted_hint.get`
+  and `worker_interrupted_hint.update` operations read/store the switch; null
+  restores off. These operations also provide the generated CLI control;
+  dashboard and channel task entry points need no companion changes because
+  they share Worker dispatch. A step in review gets a new Reviewer, a decision
+  the stop cut off is taken again from the step's saved result, and Claude
+  resumes its session from its saved totals.
   Continuing a task that failed at its spend cap reads the same rows.
 - Each turn is one `llm_records` row with agent_id `planner-<task_id>`, the
   `task_id`, its own cost and tokens, its context at the end, `metadata.pid` and the system prompt's record
@@ -1413,7 +1465,8 @@ answer to an edit on the task page goes.
   Claude's own, each with a result: the Worker reads the output to
   its end, and the run's last result is its outcome, its report and its cost
   ("Worker finished" goes to the task's activity once, from it)
-- The step is the system prompt; only other agents' output is the user turn:
+- The step is in the system prompt; other agents' output and, when enabled,
+  the fixed interruption guidance above are in the first user turn:
   - system prompt: the harness (resolved for the Worker or Reviewer in its
     project; a Reviewer without its own takes the Workers'), the
     role prompt of the `worker` or `reviewer` row (the default when the
@@ -5340,6 +5393,54 @@ values. Task outcome metrics add act-only hold counts, longest wait, automatic r
 role/class/streak distributions; self-check warns above five breakers per UTC day. Environment holds have one
 durable reminder after an hour. See [validation](../validation/failure-handling.md) for measured coverage and
 pending real-model evaluations.
+
+### Pausing model network outages
+
+`network_pause.get/update` is an independent operator-only policy. Its single
+`enabled` switch defaults to false; `max_pause_seconds` defaults to 7200 and
+accepts 1–86400. Updates require confirmation; null restores either default.
+The generated CLI exposes `network-pause get/update`. Chat settings, prompts,
+tool descriptions and runtime command lines are unchanged.
+
+When enabled, a failed Planner, Worker or Reviewer run pauses its task only
+when structured runtime evidence identifies a model API connection failure.
+The existing typed connection classifier is reused, alongside exact API error
+codes `ENOTFOUND`, `ECONNRESET`, `EAI_AGAIN` and `ECONNREFUSED`. Tool output,
+free text, authentication failures, quota errors and HTTP server errors do not
+qualify. This policy works with failure typing off and takes precedence over
+its transient retries when both policies are enabled. The runtime's own
+internal retries still finish before Looper receives the final failure.
+
+The task projects `waiting`, retains its plan, workspace and Planner session,
+and starts no new model executions while paused. Already running parallel
+executions are not interrupted. A DNS plus TCP/TLS connection probe uses the
+failed launch's configured endpoint (or the known runtime default), sends no
+HTTP or model request, and backs off from 5 to 60 seconds with jitter and a
+5-second connection timeout. An unknown endpoint cannot count as success.
+Successful connectivity resumes the same Planner turn or redispatches the
+failed step/review in the same attempt, without spending a step retry. A
+persisted pause is restored before task work resumes after a server restart.
+
+At the original deadline the task becomes `waiting_user`, stops probing and
+appears once in the existing failure-holds section of Needs you when attention
+is enabled. The operator can check connectivity, stop and restart the task, or
+disable this policy to release existing waits on their next settings check.
+The task detail API and dashboard show the pause reason and deadline. During
+an active task's pause, `network_pause.state` is authoritative: task detail
+projects `phase` as `waiting` for `paused`, or `waiting_user` after expiry,
+as soon as it reads the pause row. The persisted `tasks.status` converges
+asynchronously through the Planner's status message and TaskRouter; consumers
+must not rely on it to detect the start or expiry of a network pause. With
+the policy disabled, task detail does not query pause storage.
+Lark and Telegram use the existing task controls and Needs you
+summary; neither needs a new chat command.
+
+Migration `network_pauses` stores pause history with pause-ID-fenced releases.
+Logs record pause, resume and expiry. While enabled, `metrics.task_outcomes`
+adds global lifetime `network_pause` counts, active paused/human waits and total
+pause duration in seconds (bounded by each pause deadline); those counters
+are independent of the task metric window and project filters. With the
+switch off, ordinary failure and retry behavior is unchanged.
 
 ### Translated models (local gateway)
 

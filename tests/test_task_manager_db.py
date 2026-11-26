@@ -1,6 +1,8 @@
 """Task residents on a disposable database and a scripted stream-json process."""
 from __future__ import annotations
 
+import json
+from pathlib import Path
 from unittest.mock import AsyncMock
 
 import pytest
@@ -76,6 +78,36 @@ def test_pool_constructs_without_a_process(monkeypatch, tmp_path, setup_manager)
     run_db(check, monkeypatch)
 
 
+@pytest.mark.parametrize("failure", ["hook", "gate", "spawn"])
+def test_failed_tool_launch_revokes_credential(monkeypatch, tmp_path, setup_manager, failure):
+    from types import SimpleNamespace
+    from looper.agents.ops.service import Platform
+    from looper.agents.ops.task_manager import TaskManagerOps
+
+    async def check(db):
+        executable, create = setup_manager
+        task_id = await create(db)
+        ops = TaskManagerOps(Platform(bus=AsyncMock(), task_router=SimpleNamespace(has_planner=lambda _: False)),
+                             url="http://127.0.0.1:18915")
+        pool = tm.TaskManagerPool(tmp_path / "runtime", executable, ops=ops, max_resident=lambda: 1)
+        try:
+            if failure == "hook":
+                monkeypatch.setattr(outbound_hook, "known_enabled", lambda: True)
+                monkeypatch.setattr(ops, "tool_hook", lambda *args: None)
+            elif failure == "gate":
+                monkeypatch.setattr(safety, "gate", AsyncMock(return_value=SimpleNamespace(
+                    reason=tm.RefuseReason.CLI_UNVERIFIED, notice="Unverified synthetic version")))
+            else:
+                monkeypatch.setattr(tm.ResidentClaude, "start", AsyncMock(side_effect=OSError("Synthetic spawn failure")))
+            with pytest.raises((tm.Refused, OSError)):
+                await pool.agent(task_id).prepare()
+            assert not ops._grants
+            assert not pool.agent(task_id).resident.started
+        finally:
+            await pool.shutdown()
+    run_db(check, monkeypatch)
+
+
 def test_prepare_operator_and_read_only_commands(monkeypatch, tmp_path, setup_manager):
     async def check(db):
         executable, create = setup_manager
@@ -96,4 +128,70 @@ def test_prepare_operator_and_read_only_commands(monkeypatch, tmp_path, setup_ma
             assert readonly[-2:] == ['--resume', 'task-session']
         finally:
             await pool.shutdown()
+    run_db(check, monkeypatch)
+
+
+@pytest.mark.parametrize("review_on", [False, True])
+def test_task_tools_follow_process_and_turn_lifetime(monkeypatch, tmp_path, setup_manager, review_on):
+    from types import SimpleNamespace
+    from looper.agents.ops.service import Platform
+    from looper.agents.ops.task_manager import TaskManagerOps
+    monkeypatch.setattr(outbound_hook, "known_enabled", lambda: review_on)
+
+    async def check(db):
+        executable, create = setup_manager
+        task_id = await create(db)
+        ops = TaskManagerOps(Platform(bus=AsyncMock(), task_router=SimpleNamespace(has_planner=lambda _: False)),
+                             url="http://127.0.0.1:18915")
+        pool = tm.TaskManagerPool(tmp_path / "runtime", executable, ops=ops, max_resident=lambda: 1,
+                                  clock=lambda: 2000)
+
+        async def token_for(agent):
+            _, _, launch, _ = await agent.prepare()
+            config = json.loads(Path(launch.library.mcp_config).read_text())
+            token = config["mcpServers"]["looper"]["env"]["LOOPER_AGENT_TOKEN"]
+            if review_on:
+                hook = pool.runtime_root / ".local" / "outbound-hook" / f"task-manager-{agent.task_id}.json"
+                assert json.loads(hook.read_text())["token"] == token
+            return token
+
+        async def ignore(event):
+            pass
+
+        try:
+            agent = pool.agent(task_id)
+            token = await token_for(agent)
+            header = "Bearer " + token
+            assert ops.authorized(header)
+            assert await token_for(agent) == token
+            replies = []
+
+            async def on_event(event):
+                if event.get("type") == "system":
+                    replies.append(await ops.call(header, "task_requirement_set", {"requirement": "Updated"}))
+
+            await agent.resident.run_turn("read", on_event)
+            assert replies[0]["status"] == "ok"
+            assert (await ops.call(header, "task_requirement_set", {"requirement": "Outside"}))["error"]["code"] == "forbidden"
+            await pool.close(task_id)
+            assert not ops.authorized(header)
+            assert not (pool.runtime_root / ".local" / "outbound-hook" / f"task-manager-{task_id}.json").exists()
+            token = await token_for(agent)
+            assert token != header.removeprefix("Bearer ")
+            await agent.resident.run_turn("read", ignore)
+            agent.last_used = 0
+            await pool.reclaim()
+            assert not ops.authorized("Bearer " + token)
+            token = await token_for(agent)
+            await agent.resident.run_turn("read", ignore)
+            other_id = await create(db, "task-two")
+            assert await pool._slot(pool.agent(other_id))
+            assert not ops.authorized("Bearer " + token)
+            token = await token_for(agent)
+            await pool.forget(task_id)
+            assert not ops.authorized("Bearer " + token)
+            token = await token_for(pool.agent(other_id))
+        finally:
+            await pool.shutdown()
+        assert not ops.authorized("Bearer " + token)
     run_db(check, monkeypatch)

@@ -191,7 +191,9 @@ async def resumable_task_ids(
     rows = await pool.fetch(
         """
         SELECT t.id FROM tasks t JOIN task_plans p ON p.task_id = t.id
-        WHERE t.status = ANY($1::text[]) AND t.completed_at IS NULL AND p.status = ANY($2::text[])
+        WHERE t.status = ANY($1::text[]) AND t.completed_at IS NULL
+          AND (p.status = ANY($2::text[]) OR (p.status = 'planning' AND EXISTS (
+            SELECT 1 FROM task_network_pauses n WHERE n.task_id=t.id AND n.ended_at IS NULL)))
         ORDER BY t.created_at, t.id
         """,
         list(active_statuses), list(LIVE_STATUSES),

@@ -410,10 +410,11 @@ class PlannerTurnError(Exception):
     """A Planner turn produced no valid reply, retaining its runtime's typed cause."""
 
     def __init__(self, message: str, *, failure: failures.Failure | None = None,
-                 fail_kind: FailKind | None = None) -> None:
+                 fail_kind: FailKind | None = None, network_unavailable: bool = False) -> None:
         super().__init__(message)
         self.failure = failure
         self.fail_kind = fail_kind
+        self.network_unavailable = network_unavailable
 
 
 @dataclass
@@ -580,6 +581,8 @@ class TaskPlan:
     # With step workspaces: the task directory's branch and its commit when the task dispatched its first step.
     start_branch: str = ""
     start_commit: str = ""
+    # Runtime projection only: never serialized into the plan or model context.
+    network_pause: dict[str, Any] | None = None
 
     @property
     def is_complete(self) -> bool:
@@ -919,6 +922,8 @@ _NOT_DONE = {"pending": "not started", "dispatched": "was running", "deciding": 
 def _reported_status(plan: TaskPlan) -> str:
     """The task status a progress report publishes: a gate waiting for the user, else an open wait with nothing
     in flight, else the plan's own status."""
+    if plan.network_pause is not None:
+        return 'waiting_user' if plan.network_pause['state'] == 'waiting_user' else 'waiting'
     if plan.status not in _LIVE:
         return plan.status
     if plan.waiting_gates() or any(s.failure_hold and s.failure_hold.get("kind") in ("environment", "breaker")
@@ -1302,6 +1307,7 @@ class PlannerAgent:
 
     async def _plan_and_dispatch(self, envelope: MessageEnvelope) -> None:
         assert self._bus is not None
+        await self._clear_network_pause('restarted')
         payload = envelope.payload
         await update_task_phase(self._task_id, "planning")
         await self._activity("phase", "Planner started: analyzing requirement")
@@ -1495,6 +1501,8 @@ class PlannerAgent:
 
     async def _dispatch_ready(self, plan: TaskPlan) -> None:
         from ..scheduler import project_dispatch
+
+        await self._wait_network()
 
         if self._execution.advisor_on:
             # Before the project's dispatch lock: a consult takes a minute, and other tasks dispatch meanwhile.
@@ -3001,6 +3009,18 @@ class PlannerAgent:
         """
         from .. import failure_handling, failures
 
+        network = (envelope.payload.get('engine_run') or {}).get('network_unavailable')
+        if network is not None and await self._pause_network(network.get('endpoint'), kind='step'):
+            if review:
+                if unit.reviews:
+                    await self._dispatch_review(plan, unit, same_attempt=True)
+                else:
+                    await self._spawn_reviewer(plan, unit, same_attempt=True)
+            else:
+                unit.status = 'pending'
+                await self._save(plan, unit)
+                await self._dispatch_step(plan, unit, same_attempt=True)
+            return True
         if await failures.typing_mode() is not failures.FailureTyping.ACT:
             return False
         result = envelope.payload
@@ -4208,6 +4228,18 @@ class PlannerAgent:
             return
         if plan.status in ("completed", "failed"):
             return  # it ended before this turn (at its spend cap)
+        from ...db import network_pauses
+        from .. import network_pause_settings, network_pause
+        network_recovery = (await network_pauses.get(self._task_id)
+                            if (await network_pause_settings.load()).enabled else None)
+        if network_recovery is not None:
+            await network_pause.wait(self._task_id, changed=self._network_changed)
+            if plan.status == 'planning' and not plan.steps:
+                # Resume the saved plan and session, without allocating a new workspace or plan id.
+                reply = await self._ask(TurnKind.PLAN, self._plan_message(plan, await self._template_lines(plan)),
+                                        await self._asking(plan, None, self._plan_parser()))
+                await self._planned(plan, reply, await self._pending_changes(), envelope)
+                return
         if plan.status == "planning" and not plan.steps and await self._plan_consulted():
             await self._plan_after_interrupted_consult(plan, envelope)
             return
@@ -4399,6 +4431,7 @@ class PlannerAgent:
         the steps not started as they are, ``add_steps`` and ``replan`` change them first; a turn that fails
         leaves them as they are. A task without a plan to go on from is planned anew.
         """
+        await self._clear_network_pause('restarted')
         self._plan = None
         await self._load_plan(db_plans.STATUSES)
         plan = self._plan
@@ -4521,6 +4554,7 @@ class PlannerAgent:
 
     async def _clear_failure_holds(self) -> None:
         from .. import failure_handling, failures
+        await self._clear_network_pause('stopped')
 
         if await failures.typing_mode() is failures.FailureTyping.ACT:
             await failure_handling.get_service().cancel_task(self._task_id)
@@ -5025,6 +5059,7 @@ class PlannerAgent:
         run: Callable[[str], Awaitable[str]] | None = None,
     ) -> T:
         """One logical protocol request, sharing runtime-retry bounds with its one repair turn."""
+        await self._wait_network()
         self._turn_kind = kind
         previous = getattr(self, "_failure_retry", None)
         self._failure_retry = previous or _TurnFailureContext()
@@ -5593,7 +5628,80 @@ class PlannerAgent:
                     raise PlannerTurnError(error, failure=found) from None
                 self._admission_recovered = True
 
+    async def _network_changed(self, row) -> None:
+        plan = self._plan
+        if plan is None:
+            return
+        previous = plan.network_pause
+        plan.network_pause = row
+        if row is not None:
+            await update_task_phase(self._task_id, _reported_status(plan))
+            if previous is None or previous['state'] != row['state']:
+                await self._activity('phase', row['reason'])
+        else:
+            await update_task_phase(self._task_id, _reported_status(plan))
+            if previous is not None:
+                await self._activity('phase', 'Model API connectivity recovered; resuming saved work')
+        await self._report_progress(plan)
+
+    async def _clear_network_pause(self, reason) -> None:
+        from .. import network_pause_settings
+        from ...db import network_pauses
+        if (await network_pause_settings.load()).enabled:
+            await network_pauses.clear(self._task_id, reason=reason)
+        if self._plan is not None:
+            self._plan.network_pause = None
+
+    async def _wait_network(self) -> None:
+        from .. import network_pause, network_pause_settings
+        from ...db import network_pauses
+        if not (await network_pause_settings.load()).enabled:
+            return
+        if await network_pauses.get(self._task_id) is not None:
+            await network_pause.wait(self._task_id, changed=self._network_changed)
+
+    async def _pause_network(self, target, *, kind) -> bool:
+        from .. import network_pause
+        return await network_pause.wait(self._task_id, target=target, kind=kind, changed=self._network_changed)
+
+    async def _restart_network_process(self, text, process) -> None:
+        """Resume the frozen launch/session after connectivity returned, without a model-visible recovery hint."""
+        await self._claude.stop()
+        plan = self._plan
+        assert plan is not None
+        resume = process.launch.runtime.resume_args(plan.session_id) if plan.session_id else []
+        command = process.command
+        if resume and command[-len(resume):] != resume:
+            command = [*command, *resume]
+        await self._start_for_turn(command, plan=plan, text=text, process=process,
+            cwd=plan.work_dir, signature=process.signature, env=process.launch.environment(),
+            totals=plan.session_totals, price=process.launch.price)
+
+    async def _exchange_network_unavailable(self, recorder) -> bool:
+        """Classify a failed exchange only while network recovery is enabled.
+
+        ``network_pause_settings.load`` is the switch. No row, any other value, or an unreadable
+        setting (it warns and reports off) skips classification and everything recovery would do next.
+        """
+        from .. import network_pause_settings
+
+        if not (await network_pause_settings.load()).enabled:
+            return False
+        return recorder.network_unavailable()
+
     async def _exchange(self, text: str, process: _Process, limit: int, **kwargs: Any) -> str:
+        from .. import network_pause, network_pause_settings
+        while True:
+            try:
+                return await self._exchange_with_failure_recovery(text, process, limit, **kwargs)
+            except PlannerTurnError as exc:
+                if not exc.network_unavailable or not (await network_pause_settings.load()).enabled:
+                    raise
+                if not await self._pause_network(network_pause.endpoint(process.launch), kind='planner'):
+                    raise
+                await self._restart_network_process(text, process)
+
+    async def _exchange_with_failure_recovery(self, text: str, process: _Process, limit: int, **kwargs: Any) -> str:
         """Retry a failed runtime exchange outside admission, preserving the prepared message and process."""
         if await failures.typing_mode() is not failures.FailureTyping.ACT:
             return await self._exchange_once(text, process, limit, **kwargs)
@@ -5610,6 +5718,9 @@ class PlannerAgent:
                 result = await self._exchange_once(text, process, limit, **kwargs)
                 return result
             except PlannerTurnError as exc:
+                from .. import network_pause_settings
+                if exc.network_unavailable and (await network_pause_settings.load()).enabled:
+                    raise  # The connectivity probe owns recovery, independently of transient retry bounds.
                 found = exc.failure
                 if found is None or exc.fail_kind is FailKind.QUOTA_EXHAUSTED:
                     raise
@@ -5790,7 +5901,8 @@ class PlannerAgent:
             except Exception as exc:
                 error = f"reading Claude failed: {type(exc).__name__}: {exc}"
                 await recorder.finish(output_text=None, result_event=None, error=error)
-                raise PlannerTurnError(error, failure=recorder.failure_signal() if _delivery is not None else None) from None
+                raise PlannerTurnError(error, failure=recorder.failure_signal() if _delivery is not None else None,
+                                       network_unavailable=await self._exchange_network_unavailable(recorder)) from None
             finally:
                 if lesson_claims:
                     outcomes = await asyncio.gather(*lesson_claims, return_exceptions=True)
@@ -5889,7 +6001,8 @@ class PlannerAgent:
                 except Exception:
                     logger.exception("cannot record schedule Planner usage for %s", self._task_id)
             if error:
-                raise PlannerTurnError(error, failure=recorder.failure_signal() if _delivery is not None else None)
+                raise PlannerTurnError(error, failure=recorder.failure_signal() if _delivery is not None else None,
+                                       network_unavailable=await self._exchange_network_unavailable(recorder))
             return final_text
 
     # --- The Planner changes no file ---
@@ -6917,6 +7030,7 @@ class PlannerAgent:
         its result came after the cap), a step in review with a new Reviewer. The plan, its steps with
         what they reported, and the session are read back from the database.
         """
+        await self._clear_network_pause('restarted')
         self._plan = None
         await self._load_plan(("failed",))
         plan = self._plan

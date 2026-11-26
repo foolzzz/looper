@@ -1143,6 +1143,9 @@ async def _run_agent_system_watched(
             from .ops.clients import ClientOps
             client_ops = ClientOps(platform)
             planner_ops = PlannerOps(platform, url=_local_url(host, port), dashboard_url=dashboard_url)
+            from .ops.task_manager import TaskManagerOps
+            task_manager_ops = TaskManagerOps(platform, url=_local_url(host, port))
+            task_managers.ops = task_manager_ops
             task_router.planner_ops = planner_ops
             # Each task's agent room: its Planner's tools (with its token) and its runs' (each with a token of its own).
             from .ops.room import RoomOps
@@ -1198,6 +1201,7 @@ async def _run_agent_system_watched(
                 manager_ops=manager_ops,
                 managers=fleet,
                 planner_ops=planner_ops,
+                task_manager_ops=task_manager_ops,
                 room_ops=room_ops,
                 client_ops=client_ops,
                 ops_config=ops,
