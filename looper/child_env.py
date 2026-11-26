@@ -58,6 +58,8 @@ BACKUP_NAMES = frozenset({"DOCKER_HOST", "DOCKER_CONTEXT", "DOCKER_CONFIG", "DOC
 # Set by ``Launch.environment()`` on every agent run, to the run's role: ``looper ledger`` refuses to write when it
 # is set. It is not inherited from the server's environment (no ``LOOPER_*`` is), only added to a run's.
 AGENT_RUN_ENV = "LOOPER_AGENT_RUN"
+# Set only for a task's own Manager. Like AGENT_RUN_ENV it is never inherited, only added to that child's run.
+TASK_MANAGER_ENV = "LOOPER_TASK_MANAGER"
 
 _allowed: set[str] = set(NAMES)
 

@@ -846,8 +846,11 @@ async def _run_agent_system_watched(
                 await scheduler_settings.load()
                 await waits.load()
                 await chat_settings.load()
-                from . import lanes_settings
+                from . import lanes_settings, session_tools_settings
                 await lanes_settings.load()
+                await session_tools_settings.load()
+                from . import task_conversations_settings
+                await task_conversations_settings.load()
                 await admission.initialize()
                 await persona.load()
                 from .channels import down_alert_settings
@@ -936,6 +939,14 @@ async def _run_agent_system_watched(
                     logger.info("removed %d task worktree(s) of tasks that ended", swept)
             except Exception:
                 logger.exception("could not sweep the task worktrees")
+
+        from . import task_conversations_settings, task_manager_settings
+        from .tiers.task_manager import TaskManagerPool
+        await task_manager_settings.seed_defaults(pool=pool)
+        task_managers = TaskManagerPool(runtime_root, claude_bin,
+                                        max_resident=task_conversations_settings.max_resident)
+        if ownership is not None:
+            ownership.push_async_callback(task_managers.shutdown)
 
         # A Codex, Grok or coco login that forked in a run the previous server did not see end (before the session
         # directories it may be in are reclaimed).
@@ -1301,6 +1312,7 @@ async def _run_agent_system_watched(
         # --- Shutdown ---
 
         async def shut_down() -> None:
+            await task_managers.shutdown()
             advisory_checks.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await advisory_checks

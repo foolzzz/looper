@@ -139,6 +139,29 @@ def clear_private_settings(runtime_root: Path) -> int:
     return removed
 
 
+def _private_settings_file(settings_dir: Path, content: str) -> Path:
+    """Atomically write content-addressed launch settings, readable only by their owner."""
+    settings_dir = settings_dir.absolute()
+    settings_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+    target = settings_dir / f"{hashlib.sha256(content.encode('utf-8')).hexdigest()}.json"
+    fd, temporary = tempfile.mkstemp(prefix=".settings-", dir=settings_dir)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            os.fchmod(handle.fileno(), 0o600)
+            handle.write(content)
+        os.replace(temporary, target)
+    finally:
+        Path(temporary).unlink(missing_ok=True)
+    return target
+
+
+def operator_settings_args(settings_dir: Path, hooks: dict[str, Any] | None) -> list[str]:
+    """Merge only peer refusal and the review hook into the operator's normal settings sources."""
+    content = json.dumps({"crossSessionInbound": "refuse", "hooks": hooks or {}},
+                         ensure_ascii=False, separators=(",", ":"))
+    return ["--settings", str(_private_settings_file(settings_dir, content))]
+
+
 def isolation_args(cwd: str | os.PathLike[str], *, env: dict[str, str] | None = None,
                    settings_dir: Path | None = None, sealed: bool = False,
                    hooks: dict[str, Any] | None = None) -> list[str]:
@@ -174,19 +197,7 @@ def isolation_args(cwd: str | os.PathLike[str], *, env: dict[str, str] | None = 
     if env is not None:
         if settings_dir is None:
             raise ValueError("runtime settings with environment values require a private settings directory")
-        settings_dir = settings_dir.absolute()
-        settings_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
-        target = settings_dir / f"{hashlib.sha256(content.encode('utf-8')).hexdigest()}.json"
-        # Atomic replacement keeps concurrent launches from reading partial settings and repairs damaged files.
-        fd, temporary = tempfile.mkstemp(prefix=".settings-", dir=settings_dir)
-        try:
-            with os.fdopen(fd, "w", encoding="utf-8") as handle:
-                os.fchmod(handle.fileno(), 0o600)
-                handle.write(content)
-            os.replace(temporary, target)
-        finally:
-            Path(temporary).unlink(missing_ok=True)
-        content = str(target)
+        content = str(_private_settings_file(settings_dir, content))
     return [
         "--setting-sources", "" if sealed or hooks is not None else "project",
         "--strict-mcp-config",
@@ -1055,6 +1066,8 @@ class ResidentClaude:
         self._cwd = ""
         self._controls: dict[str, asyncio.Future[dict[str, Any]]] = {}
         self._withdrawals: dict[str, asyncio.Task[bool]] = {}
+        self._stderr_tail = b""
+        self._stderr_reader: asyncio.Task[None] | None = None
 
     @property
     def label(self) -> str:
@@ -1102,6 +1115,7 @@ class ResidentClaude:
     async def start(
         self, command: list[str], *, cwd: str, signature: Any, env: dict[str, str] | None = None,
         totals: Usage | None = None, autonomous: AutonomousHandler | None = None, price: Price | None = None,
+        capture_stderr: bool = False,
     ) -> None:
         """Start the process (with ``env``, else the server's environment); raises ``OSError`` when it cannot run.
 
@@ -1118,8 +1132,10 @@ class ResidentClaude:
             env=env,
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.PIPE if capture_stderr else asyncio.subprocess.DEVNULL,
         )
+        self._stderr_tail = b""
+        self._stderr_reader = asyncio.create_task(self._read_stderr(process.stderr)) if process.stderr else None
         assert process.stdout is not None
         self._process, self._command, self._signature = process, command, signature
         self._cwd = cwd
@@ -1128,6 +1144,17 @@ class ResidentClaude:
         self._tree = proc_tree.track(process, label=self._label)
         self._tree.start_ticker()
         logger.info("%s started Claude Code (pid=%s)", self._label, process.pid)
+
+    async def _read_stderr(self, stream: asyncio.StreamReader) -> None:
+        while chunk := await stream.read(4096):
+            self._stderr_tail = (self._stderr_tail + chunk)[-8192:]
+
+    async def stderr_tail(self) -> str:
+        """Bounded diagnostics for opt-in owners; existing residents still discard stderr."""
+        if self._stderr_reader and self._process and self._process.returncode is not None:
+            await self._stderr_reader
+        lines = self._stderr_tail.decode("utf-8", "replace").strip().splitlines()
+        return lines[-1][-1024:] if lines else ""
 
     async def run_turn(
         self,

@@ -4,6 +4,7 @@ from datetime import datetime, timezone
 import gzip
 import json
 import os
+import socket
 import ssl
 import subprocess
 
@@ -45,6 +46,78 @@ def events():
             {'type': 'message_stop'}]
 
 
+def test_shutdown_closes_an_open_keepalive_connection(tmp_path):
+    async def check():
+        proxy = Proxy(tmp_path, sink=Sink())
+        await proxy.start()
+        assert proxy.port != 8767
+        reader, writer = await asyncio.open_connection('127.0.0.1', proxy.port)
+        try:
+            writer.write(b'GET /llmrec/health HTTP/1.1\r\nHost: localhost\r\n\r\n')
+            await writer.drain()
+            headers = await asyncio.wait_for(reader.readuntil(b'\r\n\r\n'), 1)
+            assert headers.startswith(b'HTTP/1.1 200')
+            fields = dict(line.split(b':', 1) for line in headers.lower().split(b'\r\n')[1:] if b':' in line)
+            body = await asyncio.wait_for(reader.readexactly(int(fields[b'content-length'])), 1)
+            assert json.loads(body)['instance'] == proxy.instance
+            handlers = list(proxy._handlers)
+            assert handlers and all(not task.done() for task in handlers)
+            # The client stays connected beyond the proxy's existing grace period.
+            await asyncio.wait_for(proxy.close(grace_s=.05), 2)
+            assert await asyncio.wait_for(reader.read(), 1) == b''
+            assert not proxy._handlers and all(task.done() for task in handlers)
+            assert proxy._client.is_closed
+        finally:
+            writer.close()
+            await writer.wait_closed()
+            await asyncio.wait_for(proxy.close(grace_s=0), 2)
+    asyncio.run(check())
+
+
+def test_shutdown_aborts_a_connection_whose_peer_never_reads(tmp_path, monkeypatch, caplog):
+    async def check():
+        proxy = Proxy(tmp_path, sink=Sink())
+        await proxy.start()
+        assert proxy.port != 8767
+        blocked = asyncio.Event()
+        writers = []
+
+        async def flood(connection, reader, writer, request, body, stamped):
+            writers.append(writer)
+            writer.get_extra_info('socket').setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 4096)
+            while True:
+                writer.write(b'x' * (1024 * 1024))
+                if writer.transport.get_write_buffer_size():
+                    blocked.set()
+                await writer.drain()
+
+        monkeypatch.setattr(proxy, '_request', flood)
+        peer = socket.socket()
+        peer.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 4096)
+        peer.setblocking(False)
+        try:
+            loop = asyncio.get_running_loop()
+            await loop.sock_connect(peer, ('127.0.0.1', proxy.port))
+            await loop.sock_sendall(peer, b'GET /llmrec/health HTTP/1.1\r\nHost: localhost\r\n\r\n')
+            await asyncio.wait_for(blocked.wait(), 2)
+            handlers = list(proxy._handlers)
+            assert handlers and not handlers[0].done()
+            assert writers[0].transport.get_write_buffer_size() > 0
+            await asyncio.wait_for(proxy.close(grace_s=.05), 2)
+            assert writers[0].transport.is_closing()
+            assert writers[0].transport.get_write_buffer_size() == 0
+            assert not proxy._handlers and all(task.done() for task in handlers)
+            assert proxy._client.is_closed
+            assert 'aborting 1 connection' in caplog.text
+        finally:
+            for writer in writers:
+                if writer.transport is not None:
+                    writer.transport.abort()
+            peer.close()
+            await asyncio.wait_for(proxy.close(grace_s=0), 2)
+    asyncio.run(check())
+
+
 @pytest.fixture(scope='module')
 def private_ca(tmp_path_factory):
     root = tmp_path_factory.mktemp('llmrec-ca')
@@ -59,7 +132,8 @@ def private_ca(tmp_path_factory):
                    check=True, capture_output=True, timeout=5)
     extensions = root / 'server.ext'
     extensions.write_text('subjectAltName=IP:127.0.0.1,DNS:model.example.invalid\nbasicConstraints=critical,CA:FALSE\n'
-                          'keyUsage=critical,digitalSignature\nextendedKeyUsage=serverAuth\n')
+                          'keyUsage=critical,digitalSignature\nextendedKeyUsage=serverAuth\n'
+                          'authorityKeyIdentifier=keyid,issuer\n')
     subprocess.run(['openssl', 'x509', '-req', '-in', str(csr), '-CA', str(cert), '-CAkey', str(ca_key),
                     '-set_serial', '2', '-out', str(leaf), '-days', '1', '-extfile', str(extensions)],
                    check=True, capture_output=True, timeout=5)

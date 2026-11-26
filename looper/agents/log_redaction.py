@@ -49,6 +49,36 @@ def redact(text: str) -> str:
     return _BOT_TOKEN_IN_PATH.sub(MASK, text)
 
 
+_DIAGNOSTIC_MASK = "[redacted]"
+# Keep these display rules aligned with web/src/lib/attention-display.ts.
+_SECRET_SEGMENT = (r"(?:api[_-]?key|private[_-]?key|passwd|password|authorization|bearer|cookie|session|"
+                   r"token|secret|credential|key)")
+_SECRET_KEY = rf"(?:[A-Za-z0-9]+[_-])*{_SECRET_SEGMENT}(?:[_-][A-Za-z0-9]+)*"
+_ASSIGNMENT = re.compile(
+    rf'''(?<![A-Za-z0-9_-])((?:"{_SECRET_KEY}"|'{_SECRET_KEY}'|{_SECRET_KEY})\s*[:=]\s*)'''
+    r'''("(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|\[redacted\]|[^\s,;&?#{}\[\]"'<>]+)''',
+    re.IGNORECASE | re.ASCII,
+)
+_AUTH_HEADER = re.compile(r"\b(?:Bearer|Basic)\s+[A-Za-z0-9\-._~+/=]+", re.IGNORECASE | re.ASCII)
+_TOKEN_PREFIX = re.compile(r"\b(?:sk|rk|pk|ghp|gho|github_pat|xox[baprs]|AKIA)[-_][A-Za-z0-9_\-]{8,}\b",
+                           re.IGNORECASE | re.ASCII)
+_JWT = re.compile(r"\b[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b", re.ASCII)
+_OPAQUE = re.compile(r"(?<![A-Za-z0-9+/_-])[A-Za-z0-9+/_-]{40,}={0,2}")
+
+
+def redact_diagnostic(text: str) -> str:
+    """Mask credential values in attention/self-check facts, keeping unassigned diagnoses readable.
+
+    Unlike log redaction, this is independent of configured secrets. The shared
+    Python/web cases live in web/src/test-fixtures/attention-redaction.json.
+    """
+    text = _AUTH_HEADER.sub(_DIAGNOSTIC_MASK, text)
+    text = _ASSIGNMENT.sub(lambda match: match[1] + _DIAGNOSTIC_MASK, text)
+    for pattern in (_TOKEN_PREFIX, _JWT, _OPAQUE):
+        text = pattern.sub(_DIAGNOSTIC_MASK, text)
+    return text
+
+
 def strip_ansi(text: str) -> str:
     """Remove terminal escape sequences before retaining CLI diagnostics."""
     return _ANSI_ESCAPE.sub("", text)

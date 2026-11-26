@@ -1489,7 +1489,7 @@ def test_a_server_that_exits_before_answering_shows_its_log(tmp_path: Path, monk
     monkeypatch.setattr(runner, "free_port", lambda: 49152)
     monkeypatch.setattr(runner.subprocess, "Popen", exits)
     with pytest.raises(runner.EvalError, match=r"exited \(1\)"), runner.running_server(
-        database_url="unused", runtime_root=tmp_path / "runtime", bin_dir=tmp_path / "bin",
+        database_url="postgresql://eval@127.0.0.1:54331/unused", runtime_root=tmp_path / "runtime", bin_dir=tmp_path / "bin",
         log_path=tmp_path / "serve.log",
     ):
         pytest.fail("no server may start")
@@ -1507,7 +1507,7 @@ def test_eval_server_projects_root_preserves_default_ops(tmp_path, monkeypatch, 
     monkeypatch.setattr(runner.subprocess, "Popen", lambda *_, **__: SimpleNamespace(
         poll=lambda: 0, returncode=0))
     with pytest.raises(runner.EvalError, match="server exited"), runner.running_server(
-        database_url="unused", runtime_root=runtime, bin_dir=tmp_path / "bin",
+        database_url="postgresql://eval@127.0.0.1:54331/unused", runtime_root=runtime, bin_dir=tmp_path / "bin",
         log_path=tmp_path / "serve.log", projects_root=root,
     ):
         pytest.fail("no server may start")
@@ -1518,7 +1518,7 @@ def test_eval_server_projects_root_preserves_default_ops(tmp_path, monkeypatch, 
         assert "projects" not in tomllib.loads(text)
         # Other defaults stay byte-identical; the address names the isolated listener.
         assert text == ops_config.render(ops_config.OpsConfig(
-            runtime_root=runtime, path=runtime / ops_config.FILE, database_url="unused",
+            runtime_root=runtime, path=runtime / ops_config.FILE, database_url="postgresql://eval@127.0.0.1:54331/unused",
             host="127.0.0.1", port=49152,
             pi_runtime="cli", dsh_runtime="cli", keeper_mode=ops_config.KeeperMode.OFF))
 
@@ -2912,6 +2912,96 @@ def test_dialog_selection_keeps_fake_only_and_unavailable_cases_explicit(monkeyp
         dialogs.select([fake.id, unavailable.id])
 
 
+@pytest.mark.parametrize("missing", ["enum", "check"])
+def test_scoped_group_seed_requires_chat_scopes_schema(monkeypatch, missing):
+    import asyncpg
+    from enum import Enum
+    from evals.prompt_regression import group_dialogs
+    from looper.agents import managers_api
+
+    values = {"SCOPED": "scoped"} if missing == "check" else {"OFF": "off", "PER_CHAT": "per_chat"}
+    monkeypatch.setattr(managers_api, "ScenarioSessionRouting", Enum("Routing", values))
+    reads = []
+
+    class Connection:
+        async def fetch(self, *_):
+            reads.append("write")
+            raise asyncpg.CheckViolationError("scoped is not allowed")
+
+        async def close(self):
+            pass
+
+    async def connect(*_, **__):
+        return Connection()
+
+    monkeypatch.setattr(asyncpg, "connect", connect)
+    with pytest.raises(runner.EvalError, match=r"chat-scopes schema \(#1743\).*card 14"):
+        group_dialogs.seed_server("disposable", manager="manager-eval", routing="scoped")
+    assert reads == (["write"] if missing == "check" else [])
+
+
+def test_group_routing_is_seeded_before_server_start(tmp_path, monkeypatch):
+    from contextlib import contextmanager, nullcontext
+    from enum import Enum
+    from evals.prompt_regression import dialogs, group_dialogs
+    from looper.agents import managers_api
+
+    order = []
+    dialog = dialogs.Dialog("scoped-seed", (), session="group", routing="scoped", manager="eval",
+                           manager_seed={"name": "Eval", "system_prompt": "Reply in this group."})
+    monkeypatch.setattr(dialogs, "_git", lambda: {})
+    monkeypatch.setattr(dialogs, "fresh_database", lambda *_: nullcontext(("disposable", None)))
+    monkeypatch.setattr(dialogs, "_clean_command_runners", lambda *_: nullcontext())
+    monkeypatch.setattr(dialogs, "install_claude", lambda bin_dir, **_: bin_dir.mkdir())
+    monkeypatch.setattr(group_dialogs, "enable_channel", lambda *_: None)
+    monkeypatch.setattr(group_dialogs, "seed_manager", lambda *_, **__: order.append("manager"))
+    monkeypatch.setattr(managers_api, "ScenarioSessionRouting", Enum("Routing", {"SCOPED": "scoped"}))
+
+    def write(_url, query, manager):
+        assert query.startswith("UPDATE managers SET session_routing = 'scoped'")
+        assert manager == "manager-eval"
+        order.append("write routing")
+        return [{"id": manager}]
+
+    monkeypatch.setattr(group_dialogs, "_read", write)
+
+    @contextmanager
+    def start(**_):
+        order.append("start")
+        raise runner.EvalError("stop before any turn")
+        yield
+
+    monkeypatch.setattr(dialogs, "running_server", start)
+    result, _ = dialogs.run(mode="fake", dialogs=(dialog,), admin_url="disposable", out_dir=tmp_path)
+    assert order == ["manager", "write routing", "start"]
+    assert result["aborted"]
+
+
+@pytest.mark.parametrize("stored_routing", ["off", "scoped"])
+def test_scoped_group_prepare_reads_routing_without_writing(monkeypatch, tmp_path, stored_routing):
+    from types import SimpleNamespace
+    from evals.prompt_regression import group_dialogs
+
+    monkeypatch.setattr(group_dialogs, "_isolated", lambda *_: None)
+    queries = []
+    operations = []
+
+    def read(_url, query, *_):
+        queries.append(query)
+        return [{"session_routing": stored_routing}]
+
+    monkeypatch.setattr(group_dialogs, "_read", read)
+    monkeypatch.setattr(group_dialogs, "_confirmed", lambda *args: operations.append(args))
+    dialog = SimpleNamespace(manager="eval", routing="scoped")
+    if stored_routing == "off":
+        with pytest.raises(runner.EvalError, match="expected scoped"):
+            group_dialogs.prepare(None, tmp_path, dialog, "disposable")
+    else:
+        group_dialogs.prepare(None, tmp_path, dialog, "disposable")
+    assert all(query.startswith("SELECT") for query in queries)
+    assert [args[1] for args in operations] == ([] if stored_routing == "off" else ["/api/v1/manager_chat_bindings/put"])
+
+
 @pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
 @pytest.mark.parametrize("dialog", MANAGER_DIALOGS, ids=lambda dialog: dialog.id)
 def test_the_managers_dialog_passes_in_fake_mode(tmp_path: Path, dialog: Any) -> None:
@@ -3392,7 +3482,7 @@ def test_eval_server_renders_dsh_runner_only_when_requested(tmp_path, monkeypatc
     monkeypatch.setattr(runner, "free_port", lambda: 49152)
     monkeypatch.setattr(runner.subprocess, "Popen", disabled)
     with pytest.raises(RuntimeError, match="server deliberately disabled"), runner.running_server(
-        database_url="unused", runtime_root=tmp_path / "runtime", bin_dir=tmp_path / "bin",
+        database_url="postgresql://eval@127.0.0.1:54331/unused", runtime_root=tmp_path / "runtime", bin_dir=tmp_path / "bin",
         log_path=tmp_path / "serve.log", **({"dsh_runtime": "runner"} if dsh_runtime == "runner" else {}),
     ):
         pytest.fail("no server may start")

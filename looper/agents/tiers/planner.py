@@ -139,7 +139,7 @@ from ..claude_cli import (
 )
 from .. import knowledge as project_knowledge
 from .. import attempts, failures, session_switch
-from .. import untrusted
+from .. import untrusted, task_budget
 from .. import scheduler_settings
 from ..schedule_session import SessionBound, session_bound
 from ..llmrec import LlmrecRoute, control as llmrec
@@ -6864,26 +6864,21 @@ class PlannerAgent:
         if plan.status not in _LIVE:
             return False  # stopping or ended already
         try:
-            costs = (await db_llm_records.task_costs([self._task_id]))[self._task_id]
-            spent = float(costs["cost_usd"])
+            budget = await task_budget.gate(self._task_id, execution=self._execution)
+            spent, cap = budget.spent, budget.cap
         except Exception as exc:
             logger.warning("planner %s cannot read its task's cost", self.agent_id, exc_info=True)
             await self._activity("error", f"Warning: the task's cost is unavailable ({exc}); its spend cap "
                                           "is not checked this time"[:500])
             return True
-        from ..run_usage import CostStatus
-
-        if costs.get("cost_status") == CostStatus.UNKNOWN.value:
-            models = tuple(sorted(costs.get("unknown_models", [
-                str(row["model"]) for row in costs["by_model"] if row["unpriced_runs"] and any(
-                    row.get(key, 0) for key in ("input_tokens", "output_tokens", "cache_read_tokens", "cache_creation_tokens"))])))
-            if models and models != self._unknown_budget_models:
-                self._unknown_budget_models = models
-                await self._activity("error", f"Warning: the task spend cap cannot be verified: unknown cost for "
-                                             f"models {', '.join(models)}; ${format_usd(spent)} is only the known subtotal"[:500])
-        else:
+        models = budget.unknown_models
+        if models and models != self._unknown_budget_models:
+            self._unknown_budget_models = models
+            await self._activity("error", f"Warning: the task spend cap cannot be verified: unknown cost for "
+                                         f"models {', '.join(models)}; ${format_usd(spent)} is only the known subtotal"[:500])
+        elif not models:
             self._unknown_budget_models = ()
-        if spent < cap:
+        if budget.allowed:
             return True
         held = self._adopted_runs | self._ending_runs
         if any((step.status == "dispatched" and step.worker_id in held)

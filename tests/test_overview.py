@@ -19,7 +19,7 @@ def test_running_filter_covers_planner_phases_and_other_filters_cover_themselves
     }
     assert {name: statuses for name, statuses in STATUS_FILTERS.items() if name != "running"} == {
         name: (name,) for name in (
-            "init", "waiting", "waiting_user", "awaiting_budget", "pending", "completed", "failed", "cancelled", "stopped",
+            "init", "draft", "waiting", "waiting_user", "awaiting_budget", "pending", "completed", "failed", "cancelled", "stopped",
         )
     }
 
@@ -30,6 +30,7 @@ def test_running_filter_covers_planner_phases_and_other_filters_cover_themselves
                                                       "verifying", "stopping")],
     ("awaiting_budget", TaskGroup.NEEDS_YOU),
     ("init", TaskGroup.READY),
+    ("draft", TaskGroup.DRAFT),
     ("failed", TaskGroup.ATTENTION),
     ("stopped", TaskGroup.ATTENTION),
     ("completed", TaskGroup.COMPLETED),
@@ -52,7 +53,8 @@ def test_counts_add_up_every_task_and_name_the_unknown_statuses() -> None:
     counts = group_counts(rows)
     assert (counts["in_progress"], counts["completed"], counts["other"], counts["total"]) == (3, 4, 3, 10)
     assert counts["other_statuses"] == {"archived": 3}
-    assert {group.value for group in TaskGroup} <= set(counts)
+    assert {group.value for group in TaskGroup if group is not TaskGroup.DRAFT} <= set(counts)
+    assert "draft" not in counts  # keep the existing response when there are no drafts
 
 
 @pytest.mark.parametrize(("manager_id", "project_ids", "expected_tasks"), [

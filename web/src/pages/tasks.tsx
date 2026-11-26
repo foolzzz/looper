@@ -62,32 +62,34 @@ export const DEFAULT_STATUS_FILTERS = ["init", "running", "waiting", "waiting_us
 
 const STATUS_CHIPS: readonly StatusChip[] = STATUS_FILTERS.filter((name): name is StatusChip => name !== "all");
 
-function statusBadge(status: string) {
+function statusBadge(status: string, label?: string) {
   switch (status) {
     case "waiting":
-      return <Badge variant="outline">Waiting</Badge>;
+      return <Badge variant="outline">{label ?? "Waiting"}</Badge>;
     case "running":
-      return <Badge variant="default">Running</Badge>;
+      return <Badge variant="default">{label ?? "Running"}</Badge>;
     case "pending":
-      return <Badge variant="warning">Pending</Badge>;
+      return <Badge variant="warning">{label ?? "Pending"}</Badge>;
     case "completed":
-      return <Badge variant="success">Completed</Badge>;
+      return <Badge variant="success">{label ?? "Completed"}</Badge>;
     case "failed":
-      return <Badge variant="destructive">Failed</Badge>;
+      return <Badge variant="destructive">{label ?? "Failed"}</Badge>;
     case "cancelled":
-      return <Badge variant="outline">Cancelled</Badge>;
+      return <Badge variant="outline">{label ?? "Cancelled"}</Badge>;
     case "stopped":
-      return <Badge variant="warning">Stopped</Badge>;
+      return <Badge variant="warning">{label ?? "Stopped"}</Badge>;
     case READY_STATUS:
-      return <Badge variant="outline">{READY_LABEL}</Badge>;
+      return <Badge variant="outline">{label ?? READY_LABEL}</Badge>;
     case "executing":
-      return <Badge variant="default">Executing</Badge>;
+      return <Badge variant="default">{label ?? "Executing"}</Badge>;
     case "awaiting_budget":
-      return <Badge variant="warning">等你决定花费</Badge>;
+      return <Badge variant="warning">{label ?? "等你决定花费"}</Badge>;
     case "waiting_user":
-      return <Badge variant="warning">Waiting for you</Badge>;
+      return <Badge variant="warning">{label ?? "Waiting for you"}</Badge>;
+    case "handing_back":
+      return <Badge variant="outline">{label ?? "Handing back"}</Badge>;
     default:
-      return <Badge variant="outline">{status}</Badge>;
+      return <Badge variant="outline">{label ?? status}</Badge>;
   }
 }
 
@@ -113,6 +115,16 @@ function statusIcon(status: string) {
     default:
       return <Clock className="h-4 w-4 text-muted-foreground" />;
   }
+}
+
+/** Task status icon and badge; a caller may supply its own display wording. */
+export function TaskStatusMark({ status, label }: { status: string; label?: string }) {
+  return (
+    <span className="inline-flex items-center gap-1.5">
+      {statusIcon(status)}
+      {statusBadge(status, label)}
+    </span>
+  );
 }
 
 const RESTARTABLE_STATUSES = ["stopped", "failed", "cancelled", READY_STATUS];

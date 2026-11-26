@@ -34,8 +34,8 @@ export interface AttentionSummary {
 }
 
 /** Read the feature setting without collecting a summary or provoking an off-state 409. */
-export async function attentionSettingsGet(): Promise<{ enabled: boolean }> {
-  const result = await callV1<{ enabled: boolean }>("/api/v1/attention/settings_get", {});
+export async function attentionSettingsGet(signal?: AbortSignal): Promise<{ enabled: boolean }> {
+  const result = await callV1<{ enabled: boolean }>("/api/v1/attention/settings_get", {}, { signal });
   if ("status" in result && result.status === "needs_confirmation")
     throw new V1Error(202, "unavailable", "The server asked to confirm a read.");
   return result as { enabled: boolean };

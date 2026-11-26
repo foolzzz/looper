@@ -575,11 +575,18 @@ def _manager(scenarios_path: str, args: list[str], stdin: _Stdin) -> None:
         if not line.strip():
             continue
         content = _user_text(line)
-        channel = re.search(r"^Channel: .*\n\n", content, re.MULTILINE)
+        channel = re.search(r"^Channel: [^\n]*\n\n|^\[Turn context\]\n(?:[^\n]+\n)+\n", content, re.MULTILINE)
         message = content[channel.end():] if channel else content
         named = re.search(r"confirmation_id (c-[0-9a-f]+)", content)
         with open(scenarios_path, encoding="utf-8") as handle:
-            calls = (json.load(handle).get("manager") or {}).get(message.strip(), [])
+            scenarios = json.load(handle)
+        calls = (scenarios.get("manager") or {}).get(message.strip())
+        if calls is None:
+            matches = [script for prefix, script in (scenarios.get("manager_prefix") or {}).items()
+                       if message.startswith(prefix)]
+            if len(matches) > 1:
+                raise ValueError("ambiguous scripted Manager prefixes")
+            calls = matches[0] if matches else []
         answers, held, reply, request_usage = [], False, None, None
         for name, arguments in calls:
             if name == "__reply__":
@@ -665,7 +672,8 @@ def main(argv: list[str]) -> int:
     stdin = _Stdin()
     # The role is in the task section: a Reviewer's names the step under review, a Worker's its step; the
     # Manager's prompt ends with Looper's tools contract.
-    if "## Looper's tools (required)" in system_prompt:
+    if ("## Looper's tools (required)" in system_prompt
+            or "You are Looper's chat assistant for this conversation." in system_prompt):
         _manager(scenarios_path, args, stdin)
     elif "## Your answer (required; code reads it)" in system_prompt:  # a consult of a run's session
         _consult(script, stdin)

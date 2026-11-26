@@ -37,6 +37,8 @@ from .translate_stream import StreamTranslator, sse_events
 
 log = logging.getLogger(__name__)
 PING_INTERVAL_S = 15
+# After grace, stop waiting for a peer that no longer reads. Same bound as HTTP shutdown.
+PROXY_SHUTDOWN_CLEANUP_SECONDS = 1.0
 HOP = {'connection', 'keep-alive', 'proxy-authenticate', 'proxy-authorization', 'te', 'trailer',
        'transfer-encoding', 'upgrade'}
 
@@ -252,7 +254,7 @@ class Proxy:
         self._auth_failures = 0
         self._alias_usage = {}
         self._routes = {}
-        self._handlers = set()
+        self._handlers = {}
         self._server = None
         self._client = None
         self._code_sha256 = None
@@ -283,13 +285,25 @@ class Proxy:
     async def close(self, grace_s=30):
         if self._server:
             self._server.close()
-            await self._server.wait_closed()
-        handlers = list(self._handlers)
+        handlers = dict(self._handlers)
         if handlers:
             _, pending = await asyncio.wait(handlers, timeout=grace_s)
-            for task in pending:
-                task.cancel()
-            await asyncio.gather(*handlers, return_exceptions=True)
+            if pending:
+                log.warning('Recording proxy shutdown grace expired; aborting %d connection(s)', len(pending))
+                for task in pending:
+                    # close()/wait_closed() can wait forever for a peer that never reads.
+                    transport = handlers[task].transport
+                    if transport is not None:
+                        transport.abort()
+                    task.cancel()
+                _, pending = await asyncio.wait(pending, timeout=PROXY_SHUTDOWN_CLEANUP_SECONDS)
+                if pending:
+                    log.warning('Recording proxy shutdown cleanup expired; cancelling %d handler(s)', len(pending))
+                    for task in pending:
+                        task.cancel()
+        if self._server:
+            # Python 3.12.1+ waits for active connections as well as the listener.
+            await self._server.wait_closed()
         if self._client:
             await self._client.aclose()
 
@@ -319,7 +333,7 @@ class Proxy:
 
     async def _handle(self, reader, writer):
         task = asyncio.current_task()
-        self._handlers.add(task)
+        self._handlers[task] = writer
         connection = h11.Connection(h11.SERVER, max_incomplete_event_size=1024 * 1024)
         try:
             request, body, stamped = None, bytearray(), None
@@ -366,7 +380,7 @@ class Proxy:
                 await writer.wait_closed()
             except (ConnectionError, asyncio.CancelledError):
                 pass
-            self._handlers.discard(task)
+            self._handlers.pop(task, None)
 
     async def _request(self, connection, reader, writer, request, body, stamped):
         target = request.target.decode('ascii', errors='surrogateescape')

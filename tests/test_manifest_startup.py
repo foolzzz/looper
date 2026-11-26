@@ -12,7 +12,7 @@ import pytest
 from looper import components, db, ops_config
 from looper.agents import (
     acceptance_runner, chat_settings, keeper, kept_dirs, lanes_settings, persona, proc_tree, profile_registry,
-    scheduler_settings, serve, waits,
+    scheduler_settings, serve, session_tools_settings, task_conversations_settings, waits,
 )
 from looper.agents.channels import down_alert_settings
 from looper.agents.http_server import AgentHTTPServer
@@ -46,7 +46,8 @@ def test_startup_warms_manifest_before_kept_scan_without_blocking(monkeypatch, t
     for module, name in ((db, "ensure_schema"), (db, "close_pool"),
                          (serve, "_back_up_before_schema_change"), (serve, "seed_role_configs"),
                          (serve, "seed_channel_configs"), (scheduler_settings, "load"),
-                         (chat_settings, "load"), (lanes_settings, "load"), (persona, "load"),
+                         (chat_settings, "load"), (lanes_settings, "load"), (session_tools_settings, "load"),
+                         (persona, "load"), (task_conversations_settings, "load"),
                          (down_alert_settings, "load"), (waits, "load"),
                          (proc_tree, "sweep"), (acceptance_runner, "recover")):
         monkeypatch.setattr(module, name, AsyncMock())

@@ -60,10 +60,10 @@ def test_retired_routes_have_authenticated_v1_positive_controls(tmp_path, monkey
     run_db(run, monkeypatch, timeout=30)
 
 
-def test_list_includes_runtime_pending_error_and_spend(tmp_path, monkeypatch):
+def test_list_includes_runtime_pending_error_and_spend(tmp_path, monkeypatch, fixed_clock):
     async def run(pool):
         await managers_api.create_manager(_body("review"))
-        await pool.execute("INSERT INTO llm_records (agent_id, status, cost_usd) VALUES ('manager-review', 'completed', 2.5)")
+        await pool.execute("INSERT INTO llm_records (agent_id, status, cost_usd, created_at) VALUES ('manager-review', 'completed', 2.5, $1)", fixed_clock())
         async with _api(tmp_path, pool) as call:
             status, answer = await call("managers.list", client=True)
             assert status == 200

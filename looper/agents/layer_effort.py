@@ -205,6 +205,10 @@ def convert(layers: Mapping[Key, Before], profiles: Iterable[AgentProfile],
             conversion.layers[key] = choice
     for task_id, (project, chosen) in (tasks or {}).items():
         for role, profile in chosen.items():
+            # The task Manager came after layer efforts; its independent task
+            # profile never inherited their effort.
+            if role is AgentType.TASK_MANAGER:
+                continue
             chain = [SYSTEM, (Layer.ROLE, role, None)]
             if project:
                 chain += [(Layer.PROJECT, None, project), (Layer.ROLE_PROJECT, role, project)]

@@ -73,6 +73,7 @@ from urllib.parse import urlsplit
 
 from ... import child_env
 from .. import claude_cli
+from ..chat_scopes import LaunchMode
 from ..llmrec import TRANSLATED_BACKEND_ENV
 from . import (
     ApiProtocol, AuthKind, Capability, CostSource, ImageInput, Launcher, LoadedSources, ManagedHooks, Probe,
@@ -162,7 +163,7 @@ class ClaudeCodeRuntime(RuntimeAdapter):
     # Verified against Claude Code 2.1.329: /compact and an automatic compaction in the resident stream-json session
     # each write a compact_boundary event before the turn's result.
     resident_compaction_events = True
-    supports_platform_tools_only = True
+    launch_modes = frozenset({LaunchMode.PLATFORM_TOOLS, LaunchMode.FULL})
     room_push = RoomPush.USER_TURN
     run_input = True  # stdin can stay open between a Worker's waiting turns
     keepable = True
@@ -427,6 +428,24 @@ class ClaudeCodeRuntime(RuntimeAdapter):
             *_prompt_input(launch, prompt_file=prompt_file)[0],
             *self.launch_args(launch, cwd=cwd),
             *(["--max-turns", str(max_turns)] if max_turns > 0 else []),
+        ]
+
+    def operator_resident_command(self, executable: str, *, cwd: str | Path, prompt_file: Path,
+                                  launch: Launch, settings_dir: Path) -> list[str]:
+        """A task Manager's direct session keeps the operator's settings, memory, skills and MCP servers."""
+        from ..claude_cli import budget_args, operator_settings_args, peer_args, permission_args, system_prompt_args
+
+        provider = launch.profile.provider
+        hook = launch.tool_hook
+        return [
+            executable, "--print", "--verbose", "--output-format", "stream-json",
+            "--input-format", "stream-json", "--include-partial-messages", "--replay-user-messages",
+            *operator_settings_args(settings_dir, hook.settings() if hook is not None else None),
+            *system_prompt_args(prompt_file), *permission_args(), *peer_args(False),
+            "--model", launch.model, *(["--effort", launch.effort] if launch.effort else []),
+            *(["--mcp-config", launch.library.mcp_config] if launch.library.mcp_config else []),
+            *(budget_args(launch.max_budget_usd) if self.cost_source(provider) is CostSource.RUNTIME else []),
+            *self.bind_provider(provider, launch.model, launch.effort).args,
         ]
 
     def resume_args(self, session_id: str) -> list[str]:

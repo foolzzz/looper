@@ -3,6 +3,12 @@ import { useEffect, useLayoutEffect, useRef, type KeyboardEvent } from "react";
 import { Button } from "@/components/ui/button";
 import { composerKeyAction, joinStaged, pullBack, STAGED_MAX, type ComposerState } from "@/lib/composer";
 
+export interface ComposerCopy {
+  idle: string; replying: string; stoppable: string; full: string;
+  queued: string; edit: string; remove: string; message: string;
+  stop: string; stopReason: string; queue: string; queueButton: string; send: string;
+}
+
 export interface ChatComposerProps {
   draft: string;
   onDraft: (draft: string) => void;
@@ -17,16 +23,26 @@ export interface ChatComposerProps {
   onStop: () => void;
   notice?: string;
   disabled?: boolean;
+  /** Send and Queue stay primary unless a page asks for neutral controls. */
+  controls?: "primary" | "neutral";
+  copy?: ComposerCopy;
 }
 
 const IDLE_PLACEHOLDER = "Type a message... (Shift+Enter for a new line)";
 const REPLYING_PLACEHOLDER = "Replying… Enter queues";
 const REPLYING_STOPPABLE_PLACEHOLDER = "Replying… Enter queues, Esc stops";
 const FULL_NOTICE = "Queue is full";
+const DEFAULT_COPY: ComposerCopy = {
+  idle: IDLE_PLACEHOLDER, replying: REPLYING_PLACEHOLDER, stoppable: REPLYING_STOPPABLE_PLACEHOLDER,
+  full: FULL_NOTICE, queued: "Queued · sent when the reply ends", edit: "Edit", remove: "Remove queued message",
+  message: "Message", stop: "Stop the reply (Esc)", stopReason: "Stop the reply", queue: "Queue message", queueButton: "Queue", send: "Send",
+};
 
 export function ChatComposer(props: ChatComposerProps) {
-  const { draft, onDraft, staged, onStaged, history, replying, canStop, stopRefusal, onSend, onStop, notice, disabled } =
+  const { draft, onDraft, staged, onStaged, history, replying, canStop, stopRefusal, onSend, onStop, notice, disabled, controls } =
     props;
+  const copy = props.copy ?? DEFAULT_COPY;
+  const submitVariant = controls === "neutral" ? "outline" as const : undefined;
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const browsingRef = useRef<{ index: number; saved: string } | null>(null);
   const shownRef = useRef<string | null>(null);
@@ -121,7 +137,7 @@ export function ChatComposer(props: ChatComposerProps) {
 
   const hasDraft = draft.trim() !== "";
   const full = replying && hasDraft && staged.length >= STAGED_MAX;
-  const shownNotice = notice ?? (full ? FULL_NOTICE : undefined);
+  const shownNotice = notice ?? (full ? copy.full : undefined);
 
   const submit = () => {
     if (!hasDraft) return;
@@ -139,9 +155,9 @@ export function ChatComposer(props: ChatComposerProps) {
       {staged.length > 0 && (
         <div className="rounded-lg border border-border bg-muted/40 p-2 transition-opacity duration-150 motion-reduce:transition-none">
           <div className="mb-1 flex items-center justify-between gap-2">
-            <span className="text-xs font-medium text-muted-foreground">Queued · sent when the reply ends</span>
+            <span className="text-xs font-medium text-muted-foreground">{copy.queued}</span>
             <Button type="button" variant="ghost" size="sm" className="min-h-11" onClick={() => pull(pullBack(staged, draft))}>
-              Edit
+              {copy.edit}
             </Button>
           </div>
           <ul className="flex max-h-[30vh] flex-col gap-1 overflow-y-auto">
@@ -153,7 +169,7 @@ export function ChatComposer(props: ChatComposerProps) {
                   variant="ghost"
                   size="icon"
                   className="h-11 w-11 shrink-0"
-                  aria-label="Remove queued message"
+                  aria-label={copy.remove}
                   onClick={() => onStaged(staged.filter((_, j) => j !== i))}
                 >
                   <X className="h-4 w-4" aria-hidden="true" />
@@ -180,33 +196,33 @@ export function ChatComposer(props: ChatComposerProps) {
             onDraft(e.target.value);
           }}
           onKeyDown={onKeyDown}
-          placeholder={replying ? (canStop ? REPLYING_STOPPABLE_PLACEHOLDER : REPLYING_PLACEHOLDER) : IDLE_PLACEHOLDER}
-          aria-label="Message"
+          placeholder={replying ? (canStop ? copy.stoppable : copy.replying) : copy.idle}
+          aria-label={copy.message}
           className="max-h-40 min-h-11 flex-1 resize-none overflow-y-auto rounded-lg border border-input bg-background px-4 py-2.5 text-sm leading-5 text-foreground placeholder:text-muted-foreground outline-none focus:ring-2 focus:ring-ring"
           autoFocus
         />
         {replying ? (
           <>
             {canStop ? (
-              <Button type="button" variant="destructive" className="h-11 w-11 shrink-0 p-0" aria-label="Stop the reply (Esc)" onClick={onStop}>
+              <Button type="button" variant="destructive" className="h-11 w-11 shrink-0 p-0" aria-label={copy.stop} onClick={onStop}>
                 <Square className="h-4 w-4 fill-current" aria-hidden="true" />
               </Button>
             ) : (
               stopRefusal && (
                 // A disabled button gets no pointer events: the wrapper carries the tooltip.
                 <span title={stopRefusal} className="shrink-0">
-                  <Button type="button" variant="destructive" className="h-11 w-11 p-0" aria-label={`Stop the reply: ${stopRefusal}`} disabled>
+                  <Button type="button" variant="destructive" className="h-11 w-11 p-0" aria-label={`${copy.stopReason}: ${stopRefusal}`} disabled>
                     <Square className="h-4 w-4 fill-current" aria-hidden="true" />
                   </Button>
                 </span>
               )
             )}
-            <Button type="submit" className="h-11 min-w-11 shrink-0" aria-label="Queue message" disabled={disabled || !hasDraft || full}>
-              Queue
+            <Button type="submit" variant={submitVariant} className="h-11 min-w-11 shrink-0" aria-label={copy.queue} disabled={disabled || !hasDraft || full}>
+              {copy.queueButton}
             </Button>
           </>
         ) : (
-          <Button type="submit" className="h-11 w-11 p-0" aria-label="Send" disabled={disabled || !hasDraft}>
+          <Button type="submit" variant={submitVariant} className="h-11 w-11 p-0" aria-label={copy.send} disabled={disabled || !hasDraft}>
             <Send className="h-4 w-4" aria-hidden="true" />
           </Button>
         )}

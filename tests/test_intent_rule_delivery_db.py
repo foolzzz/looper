@@ -254,6 +254,8 @@ def test_orphan_notice_send_is_uncertain_and_never_retried(monkeypatch):
 
 @pytest.mark.parametrize('handled', [False, True])
 def test_brief_rechecks_a_confirmation_after_its_summary_was_built(monkeypatch, handled):
+    # Reach summary collection inside the brief window so the confirmation race is exercised.
+    monkeypatch.setattr(f'{__name__}.NOW', NOW.replace(hour=11))
     async def check(pool):
         env = await setup(pool, monkeypatch)
         wid = await work(pool, env.iid, decision='push_for_confirmation')

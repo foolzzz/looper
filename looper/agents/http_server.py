@@ -64,6 +64,9 @@ logger = logging.getLogger(__name__)
 API_SLOW_SECONDS = 2.0
 API_SUMMARY_SECONDS = 600
 API_LATENCY_SAMPLES = 20_000
+# Leave most of serve's 15-second shutdown deadline for agents and the database.
+HTTP_SHUTDOWN_GRACE_SECONDS = 1.0
+HTTP_SHUTDOWN_CLEANUP_SECONDS = 1.0
 _PACKAGE_ROOT = Path(__file__).resolve().parents[1]
 
 
@@ -146,7 +149,7 @@ HTTP_503 = "503 Service Unavailable"
 # which the same-origin check refuses. Nothing leaves for another site either way.
 SIGN_IN_HEADERS = {
     "Cache-Control": "no-store", "Referrer-Policy": "same-origin",
-    "Content-Security-Policy": "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'",
+    "Content-Security-Policy": "default-src 'none'; manifest-src 'self'; img-src 'self'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'",
 }
 
 V1_HEADERS = {"Cache-Control": "no-store"}
@@ -168,13 +171,21 @@ _INT64_MAX = 2**63 - 1
 REQUEST_BODY_MAX_BYTES = 4 * knowledge.DOCUMENT_MAX_BYTES
 
 
+def _header_block(headers: Mapping[str, str] | None = None) -> str:
+    # One request per connection, then the handler closes. HTTP/1.1 reuses the socket
+    # unless the response says Connection: close, and the client then races that close.
+    fields = [(key, value) for key, value in (headers or {}).items() if key.lower() != "connection"]
+    fields.append(("Connection", "close"))
+    return "".join(f"{key}: {value}\r\n" for key, value in fields)
+
+
 def _json_response(status: str, body: Any, *, headers: Mapping[str, str] | None = None) -> bytes:
     payload = json.dumps(body, ensure_ascii=False).encode("utf-8")
     head = (
         f"HTTP/1.1 {status}\r\n"
         f"Content-Type: application/json; charset=utf-8\r\n"
         f"Content-Length: {len(payload)}\r\n"
-        + "".join(f"{key}: {value}\r\n" for key, value in (headers or {}).items())
+        + _header_block(headers)
         + "\r\n"
     )
     return head.encode("utf-8") + payload
@@ -182,7 +193,7 @@ def _json_response(status: str, body: Any, *, headers: Mapping[str, str] | None 
 
 def _no_content() -> bytes:
     # Same-origin requests never preflight, so an allowed OPTIONS gets no CORS headers.
-    return b"HTTP/1.1 204 No Content\r\nContent-Length: 0\r\n\r\n"
+    return b"HTTP/1.1 204 No Content\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
 
 
 def _with_run_role(record: dict[str, Any]) -> dict[str, Any]:
@@ -280,6 +291,7 @@ class AgentHTTPServer:
         # Configuration files uploaded for import, waiting to be applied (under the runtime root).
         self._config_imports = config_imports.ConfigImports(runtime_root) if runtime_root else None
         self._server: asyncio.Server | None = None
+        self._handlers: dict[asyncio.Task, asyncio.StreamWriter] = {}
         self._address_publication: Publication | None = None
         self._components: components.Manifest | None = None
 
@@ -371,6 +383,25 @@ class AgentHTTPServer:
             self._summary_task = None
         if self._server:
             self._server.close()
+        handlers = dict(self._handlers)
+        if handlers:
+            _, pending = await asyncio.wait(handlers, timeout=HTTP_SHUTDOWN_GRACE_SECONDS)
+            if pending:
+                logger.warning("HTTP shutdown grace expired; aborting %d HTTP connection(s)", len(pending))
+                for task in pending:
+                    # close()/wait_closed() can wait forever for a peer that never reads.
+                    handlers[task].transport.abort()
+                    task.cancel()
+                _, pending = await asyncio.wait(pending, timeout=HTTP_SHUTDOWN_CLEANUP_SECONDS)
+                if pending:
+                    logger.warning("HTTP shutdown cleanup expired; cancelling %d handler(s)", len(pending))
+                    for task in pending:
+                        task.cancel()
+        if self._server:
+            # The snapshot above misses a connection whose callback has not registered.
+            # Python 3.12.1+ then waits for that connection inside wait_closed.
+            await self._abort_late_arrivals(handlers)
+            # Python 3.12.1+ waits for active connections as well as the listener.
             await self._server.wait_closed()
             self._server = None
             logger.info("HTTP server stopped")
@@ -380,11 +411,68 @@ class AgentHTTPServer:
         if self._config_imports:
             self._config_imports.clear()
 
+    def _orphan_transports(self) -> list[asyncio.BaseTransport]:
+        """Accepted connections whose handlers are not registered yet."""
+        transports = getattr(asyncio.get_running_loop(), "_transports", None)
+        if not transports or self._server is None:
+            return []
+        tracked = {writer.transport for writer in self._handlers.values()}
+        return [
+            transport for transport in list(transports.values())
+            if getattr(transport, "_server", None) is self._server
+            and transport not in tracked and not transport.is_closing()
+        ]
+
+    def _abort_visible_late_arrivals(self, seen: dict[asyncio.Task, asyncio.StreamWriter]) -> None:
+        late = {task: writer for task, writer in self._handlers.items() if task not in seen}
+        orphans = self._orphan_transports()
+        if late:
+            logger.warning("HTTP shutdown grace expired; aborting %d HTTP connection(s)", len(late))
+            for task, writer in late.items():
+                transport = writer.transport
+                if transport is not None and not transport.is_closing():
+                    transport.abort()
+                task.cancel()
+            seen.update(late)
+        if orphans:
+            logger.warning("HTTP shutdown grace expired; aborting %d HTTP connection(s)", len(orphans))
+            for transport in orphans:
+                transport.abort()
+
+    async def _abort_late_arrivals(self, seen: dict[asyncio.Task, asyncio.StreamWriter]) -> None:
+        """Abort connections that attached after ``seen`` was snapshotted.
+
+        ``wait_closed`` on Python 3.12 waits while the server's active count
+        is non-zero. Yielding lets an accept that already left the listening
+        socket attach, and lets ``abort`` drop the count, before that wait.
+        """
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + HTTP_SHUTDOWN_CLEANUP_SECONDS
+        quiet = 0
+        while quiet < 2 and loop.time() < deadline:
+            await asyncio.sleep(0)
+            self._abort_visible_late_arrivals(seen)
+            active = self._server._active_count if self._server is not None else 0
+            if active:
+                quiet = 0
+            else:
+                quiet += 1
+        active = self._server._active_count if self._server is not None else 0
+        if active:
+            self._abort_visible_late_arrivals(seen)
+            pending = [task for task in self._handlers if not task.done()]
+            if pending:
+                logger.warning("HTTP shutdown cleanup expired; cancelling %d handler(s)", len(pending))
+                for task in pending:
+                    task.cancel()
+
     async def _handle_connection(
         self,
         reader: asyncio.StreamReader,
         writer: asyncio.StreamWriter,
     ) -> None:
+        connection_task = asyncio.current_task()
+        self._handlers[connection_task] = writer
         peer = writer.get_extra_info("peername")
         peer_host = peer[0] if peer else None
         sign_in_headers = None
@@ -558,6 +646,8 @@ class AgentHTTPServer:
                 await writer.wait_closed()
             except Exception:
                 pass
+            finally:
+                self._handlers.pop(connection_task, None)
 
     async def _client_principal(self, headers: Mapping[str, str], peer_host: str | None) -> api_v1.Principal | None:
         """Who calls ``/api/v1``: the operator, an API client (a local, direct caller with an ``lpc_`` bearer token),
@@ -1127,6 +1217,7 @@ class AgentHTTPServer:
             f"Content-Security-Policy: sandbox\r\n"
             f"Content-Disposition: {disposition}\r\n"
             f"Cache-Control: no-store\r\n"
+            f"Connection: close\r\n"
             f"\r\n"
         )
         writer.write(head.encode("utf-8") + data)
@@ -1663,7 +1754,7 @@ class AgentHTTPServer:
         fields = {**SIGN_IN_HEADERS, **(headers or {})}
         writer.write((f"HTTP/1.1 {status}\r\nContent-Type: text/html; charset=utf-8\r\n"
                       f"Content-Length: {len(data)}\r\n"
-                      + "".join(f"{key}: {value}\r\n" for key, value in fields.items())
+                      + _header_block(fields)
                       + "".join(f"Set-Cookie: {cookie}\r\n" for cookie in cookies)
                       + "\r\n").encode() + data)
         await writer.drain()
@@ -1685,6 +1776,7 @@ class AgentHTTPServer:
                 "or open the dashboard there.</p>" if not unusable else "")
         page = ("<!doctype html><html lang=\"en\"><meta charset=\"utf-8\">"
                 "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\"><title>Looper</title>"
+                "<link rel=\"manifest\" href=\"/manifest.webmanifest\"><meta name=\"theme-color\" content=\"#0a0a0f\">"
                 "<style>:root{color-scheme:light dark;font:16px system-ui;background:#f4f5f7;color:#202124}"
                 "body{max-width:24rem;margin:12vh auto;padding:2rem}form,label{display:grid;gap:.6rem}"
                 "form{gap:1.2rem}input,button{font:inherit;padding:.7rem;border:1px solid #888;border-radius:.4rem}"
@@ -1772,20 +1864,22 @@ class AgentHTTPServer:
         page = path in ("/", "/index.html")
         file_path = self._static_dir / ("index.html" if path == "/" else path.lstrip("/"))
 
-        if not file_path.is_file():
-            index_path = self._static_dir / "index.html"
-            if index_path.is_file():
-                file_path = index_path
-                page = True
-            else:
-                writer.write(_json_response(HTTP_404, {"error": "not found"}))
-                await writer.drain()
-                return
-
         try:
+            # is_file() reports an embedded NUL as missing and raises only for an
+            # overlong name, so resolve before the dashboard-page fallback.
             resolved = file_path.resolve()
             static_resolved = self._static_dir.resolve()
-            if not str(resolved).startswith(str(static_resolved)):
+            if not file_path.is_file():
+                index_path = self._static_dir / "index.html"
+                if index_path.is_file():
+                    file_path = index_path
+                    resolved = index_path.resolve()
+                    page = True
+                else:
+                    writer.write(_json_response(HTTP_404, {"error": "not found"}))
+                    await writer.drain()
+                    return
+            if not resolved.is_relative_to(static_resolved):
                 writer.write(_json_response(HTTP_404, {"error": "not found"}))
                 await writer.drain()
                 return
@@ -1800,7 +1894,9 @@ class AgentHTTPServer:
             await self._login_page(writer)
             return
 
-        content_type, _ = mimetypes.guess_type(str(file_path))
+        # Keep the manifest MIME type consistent across host MIME databases.
+        content_type = ("application/manifest+json" if file_path.suffix == ".webmanifest"
+                        else mimetypes.guess_type(str(file_path))[0])
         if content_type is None:
             content_type = "application/octet-stream"
 
@@ -1814,6 +1910,7 @@ class AgentHTTPServer:
             f"Content-Type: {content_type}\r\n"
             f"Content-Length: {len(data)}\r\n"
             f"Cache-Control: {'no-store' if page else 'public, max-age=3600'}\r\n"
+            f"Connection: close\r\n"
             f"{policy}{cookie}"
             f"\r\n"
         )

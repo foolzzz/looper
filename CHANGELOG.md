@@ -18,6 +18,76 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.15.41] - 2026-11-25
+
+Contains exactly v2.15.40 at `1d90572f1` plus [#1818](https://github.com/foolzzz/looper/pull/1818), frozen at `322834fb6`, and release metadata. Tag this release PR's own head after merge, not the later main merge commit. No product behavior, migration or setting changes. From v2.15.38 or earlier, upgrade straight to v2.15.41; it includes all of [v2.15.40](docs/releases/v2.15.40.md) and [v2.15.39](docs/releases/v2.15.39.md), whose notes list two startup migrations. See [the release notes](docs/releases/v2.15.41.md) for validation and exclusions.
+
+### Fixed
+
+- **Keep source-ref dashboard builds self-contained.** ([#1818](https://github.com/foolzzz/looper/pull/1818)) Upgrading an installed Looper with `looper service upgrade --to v2.15.39` or `--to v2.15.40` failed at the dashboard build before the service stopped: a web test imported a shared fixture outside the exported `web/` directory. The running service was unaffected. The unchanged fixture now lives in `web/`, both test suites reference it there, and a regression scans `web/src` imports and file reads for boundary violations, with explicit exceptions for existing test-only reads. Source-ref upgrades to v2.15.39 and v2.15.40 remain affected; target v2.15.41 instead. Installs from the published wheel are not affected.
+
+## [2.15.40] - 2026-11-25
+
+Contains all of v2.15.39 at `38d92f469` plus exactly [#1807](https://github.com/foolzzz/looper/pull/1807) (including #1803 and #1806), then [#1809](https://github.com/foolzzz/looper/pull/1809), with two normal merges and release metadata. Tag this release PR's own head after merge, not the later main merge commit. No migration is added over v2.15.39; upgrades from v2.15.38 or earlier inherit [v2.15.39's two migrations and behavior changes](docs/releases/v2.15.39.md). See [the release notes](docs/releases/v2.15.40.md) for activation, validation and exclusions.
+
+### Added
+
+- **Work lifecycle controls and requirement composition, still off by default.** Behind `tasks.conversations.enabled`, the Work page adds Start/continue, stop-background and direct-completion controls with state readback. Draft and ready-task messages append to the saved requirement with version-conflict recovery; only the explicit Start control launches their Planner.
+
+### Changed
+
+- **Consistent Work presentation.** The Chinese page name is 工作台, the sidebar says Work 工作台, the pinned main conversation is 管家 and task conversations keep their task names with counterpart 任务管家. Untitled names match between list and detail, list rows use two lines, controls use Chinese, event rows collapse, draft/non-Git changes states are neutral, unsupported task-Manager model controls hide, and composer notices reflect each task status. The task conversation still uses the Planner; the task Manager chain is excluded.
+- **Optional requirement precondition, without a switch.** `tasks.requirement_update` accepts `expected_version`; a stale value returns HTTP 409 `requirement_changed` with `current_version` and writes nothing. Omitting the field preserves existing behavior.
+- **Private-details guidance, only with per-turn context on.** Behind default-off `manager.turn_context.enabled`, one added contract sentence tells the Manager not to share the operator's account, email address or machine paths with a non-operator speaker. This is model guidance, not an output filter; the real-model eval is attached to #1809.
+
+## [2.15.39] - 2026-11-25
+
+Frozen at `6aa7f3474`, containing all of v2.15.38 and 23 additional merged PRs. Tag the release PR's own head after merge because main has moved beyond the freeze. Startup adds `task_drafts` (2050, a constraint and online validation on the existing tasks table) and `proactive_bodies` (2110, body columns on proactive deliveries), even with optional features off. See [the release notes](docs/releases/v2.15.39.md) for every included PR, activation instructions, behavior changes and exclusions; upgrades from v2.15.37 or earlier also inherit [v2.15.38](docs/releases/v2.15.38.md).
+
+### Added
+
+- **Work console, now activatable and still off by default.** `tasks.conversations.enabled` is controlled by operator-only `task_conversations.get/update`, with confirmation for changes. Work adds draft creation, requirement editing, conversation-state retention and task context panels; task conversations still use the Planner. The task Manager chain, model switching and lifecycle buttons are not included.
+- **Proactive send history.** Operator-only `proactive_sends.list` reads retained text and receipts. Capture runs by default, independently of metrics, with no separate switch: text is capped at 32 KiB, cleared after 14 days, and delivery rows are purged after 90 days. Storage is best effort with a one-second timeout before sending.
+- **Installable dashboard.** Chrome/Edge can install the dashboard on a supported secure origin. The manifest and icons are public, and sign-in CSP permits same-origin manifest/images; existing authentication remains required for protected pages and APIs. No offline mode is added.
+
+### Fixed
+
+- **HTTP, shutdown and handover.** Explicit `Connection: close` fixes a reuse race under the existing one-request-per-connection policy. Keeper, HTTP and recording-proxy shutdown settle active connections before awaiting listeners; Worker dispatch waits through drain and kept-run handover waits for startup readiness.
+- **Safer diagnostics, files and accounting.** Attention/self-check and Needs you displays redact credential-like diagnostics; static files resolving outside the dashboard root return 404. Manager acknowledgement metrics use actual acknowledgement timing and cannot be negative. Custom backup commands tolerate missing source labels; restart cleanup and claiming use one row lock.
+- **Foundations and tests.** Typed chat-scope/runtime launch types ship without activating scoped routing; the outbox deadline regression becomes deterministic without changing production behavior.
+
+## [2.15.38] - 2026-11-25
+
+Contains exactly v2.15.37 plus [#1785](https://github.com/foolzzz/looper/pull/1785), frozen at `e98913682`, and release metadata. From v2.15.37, this is frontend only: no new migration, setting or server change. Upgrading from v2.15.36 or earlier also includes all of v2.15.37: read [its release notes](docs/releases/v2.15.37.md) first for migrations, backup requirements and breaking changes. See [the v2.15.38 release notes](docs/releases/v2.15.38.md) for the frozen scope and exclusions.
+
+### Fixed
+
+- **Stop repeated probes for an absent Work operation.** ([#1785](https://github.com/foolzzz/looper/pull/1785)) The dashboard sidebar previously requested `task_conversations/get` every 30 seconds indefinitely on servers that do not register the operation, including every released server through v2.15.37. It now probes once per page load and keeps Work hidden when the operation is absent. Registered operations retain their existing polling, visibility and transient-error recovery behavior. Telegram, Lark and the CLI do not run this dashboard poll and need no change.
+
+## [2.15.37] - 2026-11-25
+
+Cut from main at `4ad331978`, with no later changes included. Upgrade from v2.15.36. Startup applies seven migrations (1970, 2000, 2010, 2040, 2060, 2070, 2080) and four online steps after the usual pre-migration backup, even with every optional switch off. Migration 2080 adds stored generated columns that rewrite the task tables before backfill; the online steps validate checks and build indexes concurrently. No feature setting turns itself on. The release workflow rebuilds the dashboard bundle. Installations older than the bridge must upgrade to v2.13.165 first. See [the release notes](docs/releases/v2.15.37.md) for upgrade boundaries and activation instructions.
+
+### Added
+
+- **Routed chat task tools, off by default.** ([#1710](https://github.com/foolzzz/looper/pull/1710)) With routing and `manager.session_tools.enabled` on, four bounded chat tools expose only that session's tasks; only the authenticated operator may write. `manager_sessions.assign_task` can assign an unassigned legacy task once. Rollback accepts `false` or null with confirmation.
+- **Work console foundations, hidden and not yet activatable.** ([#1754](https://github.com/foolzzz/looper/pull/1754), [#1762](https://github.com/foolzzz/looper/pull/1762), [#1774](https://github.com/foolzzz/looper/pull/1774), [#1764](https://github.com/foolzzz/looper/pull/1764), [#1772](https://github.com/foolzzz/looper/pull/1772), [#1776](https://github.com/foolzzz/looper/pull/1776)) Three operator-only reads (`tasks.work_list`, `tasks.select`, `tasks.changes`) and the `tasks.mark_seen` watermark write support the default-off shell and Planner/default-Manager conversation panes. This tree does not serve `task_conversations.get`, so Work stays hidden. File changes return names and status, never contents or patches.
+- **Explicit project knowledge export.** ([#1700](https://github.com/foolzzz/looper/pull/1700)) `looper knowledge migrate --project NAME` previews without changing content; `--execute` backs up, exports through one vault transaction and verifies the files. Both modes require a configured vault and `projects.knowledge_dir`; source rows are untouched.
+- **Dormant chat-scope storage.** ([#1743](https://github.com/foolzzz/looper/pull/1743)) Adds capability, binding, session and message-provenance fields. Existing bindings become `legacy` only when `legacy_allowed` is first added; `scoped` routing remains unavailable to operator operations. The online checks scan `chat_messages` and `managers`.
+- **Lark ingress timing under the existing metrics switch.** ([#1737](https://github.com/foolzzz/looper/pull/1737)) Records send/receipt timestamps, lock-wait, sender-lookup and attachment-download durations, and the routing timestamp `route_decided_at` when reached, without message content.
+
+### Changed
+
+- **Breaking for routed default-Manager sessions.** ([#1708](https://github.com/foolzzz/looper/pull/1708)) Non-main default-Manager sessions use a default-deny allowlist, public chat context and zero Manager tools unless session tools are explicitly enabled; incompatible restricted context resets. Scenario Managers and routing-off behavior stay unchanged.
+- **Morning brief catch-up respects a cutoff and quiet hours.** ([#1740](https://github.com/foolzzz/looper/pull/1740)) A null cutoff derives 12:00 for send times before noon, otherwise three hours after the send time or an end-of-day boundary. The default 09:15 send time therefore derives 12:00. A stored cutoff must be strictly later than the send time. Unconsumed digests roll into the next workday.
+- **Vault writes use owned worktrees and fast-forward-only merges.** ([#1700](https://github.com/foolzzz/looper/pull/1700)) Blocked merges retain recovery state and appear in Needs you when attention is enabled; non-git vault writes keep their confinement.
+- **Interrupted Worker and Reviewer usage counts toward spend and caps.** ([#1728](https://github.com/foolzzz/looper/pull/1728)) Cumulative reported usage checkpoints as a typed partial bill and settles once; no schema change.
+- **Long Manager turns keep their status line informative for about 55 minutes.** ([#1735](https://github.com/foolzzz/looper/pull/1735)) Edits widen after 30 seconds within the channel edit limit; initial status precedes quoted-thread preparation.
+- **Proven own-session Lark replies reuse their send copy.** ([#1738](https://github.com/foolzzz/looper/pull/1738)) Quoted model-facing bytes stay identical; content-free logs record `decision=read` or `decision=skip_own_in_session`.
+- **Dashboard task navigation and reminder labels.** ([#1736](https://github.com/foolzzz/looper/pull/1736), [#1756](https://github.com/foolzzz/looper/pull/1756)) Task rows and details link to the live Planner through its authoritative availability read; terminal reminders have readable bilingual status-card labels.
+- **Behavior-preserving frontend extractions.** ([#1766](https://github.com/foolzzz/looper/pull/1766), [#1767](https://github.com/foolzzz/looper/pull/1767)) Reuses the Live Activity component and Chat reply-stream hook without changing existing pages.
+- **Documentation, tests and evals.** (#1741, #1759, #1715, #1744, #1750, #1751, #1769, #1745, #1777) No product behavior changes. Real-model comparisons remain pending; this release PR runs the documentation gate, not a model evaluation.
+
 ## [2.15.36] - 2026-11-24
 
 Cut from main at `21fb4d682`. Upgrade from v2.15.35 (or v2.15.34, which has the same schema). From a database that has finished v2.15.35, startup applies five migrations and two online steps with every optional switch off, after the usual pre-migration `pg_dump` (unless `--skip-backup`). The migrations add empty or small tables, columns and checks, and 1930 and 2020 backfill only rows still being sent; the dump dominates the outage. Migration 1940 refuses to start while the existing `task_lesson_snapshots` table holds any row (`legacy lesson snapshots contain no frozen text; operator inspection is required`). The startup transaction then rolls back after the backup, and v2.15.35 still starts on the unchanged schema. No released version writes that table. No feature setting turns itself on, and an upgrade does not insert a feature-setting row. `web/` changed, so the release workflow rebuilds the dashboard bundle. Installations older than the bridge must upgrade to v2.13.165 first. #1724 and #1727 already shipped in v2.15.35, and their main merges change no file. #1723 and #1729 are release pull requests. #1734 is a documentation-only RFC.

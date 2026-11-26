@@ -88,6 +88,8 @@ from looper.agents.delivery_guard import FOLLOWUP_MESSAGE
 from looper.agents.tiers.manager import _looper_call
 
 from .compare import outcome
+from . import group_dialogs
+from .routed_dialogs import cases as _routed_cases
 from .metrics import runner_evidence
 from .runner import (
     INTERRUPTED, Api, ErrorClass, EvalError, Outcome, _git, aborted_reason, check_case_budget, error_row,
@@ -175,6 +177,8 @@ class Say:
     code_only: bool = False  # Looper answers the step without calling the model (for example, /profile).
     profile_after: Literal["switch", "settings"] | None = None  # A code-only session profile selection.
     attachments: tuple[tuple[str, bytes], ...] = ()
+    client: bool = False  # this turn alone uses the API client; other turns keep the dialog's audience
+    sender: Literal["operator", "member", "bot"] = "operator"
 
 
 @dataclass(frozen=True)
@@ -189,6 +193,8 @@ class Dialog:
     seed: Callable[[Api, str], None] | None = None
     manager: str | None = None  # the key of the scenario Manager the dialog talks to (its seed creates it)
     client: bool = False  # the dialog talks to the default Manager as an API client (``/api/v1/chat/send``)
+    routing: Literal["per_chat", "scoped"] | None = None
+    manager_seed: dict[str, Any] | None = None  # Group Manager fields, inserted before server startup.
     tags: tuple[str, ...] = field(default=())
     projects_root: bool = False  # the server has [projects] root set to a directory of the case
     fake_task: dict[str, Any] | None = None  # fake mode: the stand-in Planner's script for its tasks (else slow)
@@ -198,6 +204,8 @@ class Dialog:
     research: bool = False  # the Manager's research order is on (Settings → Chat, ``research_order``)
     # The session search is on, and the database holds the synthetic history (``_seed_sessions``).
     sessions: bool = False
+    session: Literal["group", "dm"] | None = None  # Native CLI envelope, rather than dashboard input.
+    sender: Literal["operator", "other"] = "operator"
     failure_hold: bool = False  # create an act-mode environment hold before the first Manager turn
     memory: bool = False  # an enabled synthetic memory vault, without a drafting budget or push channel
     resident_profile: Literal["present-off", "present-on", "absent-off", "absent-on"] | None = None
@@ -363,6 +371,109 @@ def _state_views(database_url: str) -> list[str]:
         return [row["view"] for row in rows]
 
     return asyncio.run(read())
+
+
+def _state_turns(database_url: str) -> list[tuple[str | None, str | None]]:
+    """``(view, reason)`` of each Manager turn that started with a state block, in order."""
+    import asyncpg
+
+    async def read() -> list[tuple[str | None, str | None]]:
+        conn = await asyncpg.connect(database_url)
+        try:
+            rows = await conn.fetch("SELECT metadata->'looper_state'->>'view' AS view, "
+                                    "metadata->'looper_state'->>'reason' AS reason FROM llm_records "
+                                    "WHERE agent_id LIKE 'manager%' AND metadata ? 'looper_state' ORDER BY id")
+        finally:
+            await conn.close()
+        return [(row["view"], row["reason"]) for row in rows]
+
+    return asyncio.run(read())
+
+
+def _json_field(value: Any) -> Any:
+    return json.loads(value) if isinstance(value, str) else value
+
+
+def _model_input_records(database_url: str) -> list[dict[str, Any]]:
+    """What each Manager run recorded for an input comparison: the prompt hash, its layers and ``looper_state``."""
+    import asyncpg
+
+    async def read() -> list[dict[str, Any]]:
+        conn = await asyncpg.connect(database_url)
+        try:
+            rows = await conn.fetch(
+                "SELECT metadata->>'system_prompt_sha256' AS system_prompt_sha256, "
+                "metadata->'prompt_layers' AS prompt_layers, metadata->'looper_state' AS looper_state "
+                "FROM llm_records WHERE agent_id LIKE 'manager%' ORDER BY id")
+        finally:
+            await conn.close()
+        return [{"system_prompt_sha256": row["system_prompt_sha256"],
+                 "prompt_layers": _json_field(row["prompt_layers"]),
+                 "looper_state": _json_field(row["looper_state"])} for row in rows]
+
+    return asyncio.run(read())
+
+
+def _captured_turn_inputs(path: Path) -> list[dict[str, Any]]:
+    """State-block bodies and Turn context blocks the server appended for this case, in turn order."""
+    if not path.is_file():
+        return []
+    return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+
+
+def _postgres_url(database_url: str) -> bool:
+    """True when ``database_url`` is a PostgreSQL URL. A stub dialog yields a label, or nothing."""
+    return database_url.startswith(("postgres://", "postgresql://"))
+
+
+def _attach_model_inputs(row: dict[str, Any], database_url: str, capture: Path, *,
+                         capture_enabled: bool) -> None:
+    """Copy each turn's comparison inputs onto ``row`` before the disposable database is dropped.
+
+    The user text is already ``turns[].text``. The run record holds the system-prompt sha256, ``prompt_layers``
+    and the ``looper_state`` view; the capture file holds the state-block body and the Turn context, which the
+    record does not. A run with no database URL, or one that did not enable the per-turn capture, records
+    ``inputs_captured`` false and does not open a connection. A null field on a captured turn was read and empty.
+    """
+    if not capture_enabled or not _postgres_url(database_url):
+        row["inputs_captured"] = False
+        return
+    records, captured = _model_input_records(database_url), _captured_turn_inputs(capture)
+    for index, turn in enumerate(row.get("turns") or []):
+        if index < len(records):
+            turn.update(records[index])
+        if index < len(captured):
+            turn["state_block"] = captured[index].get("state_block")
+            turn["turn_context"] = captured[index].get("turn_context")
+    row["inputs_captured"] = True
+
+
+def _stable_audience(*turns: tuple[str, str]) -> Callable[[Look], str | None]:
+    """The Manager turns so far started with these ``(view, reason)`` pairs, in order."""
+    def check(look: Look) -> str | None:
+        actual = _state_turns(look.database_url)
+        return None if actual == list(turns) else f"state turns: {actual}, expected {list(turns)}"
+    return check
+
+
+def _seed_stable_audience(api: Api, project_id: str) -> None:
+    """A private profile and a persona, with the vault's Manager reads off.
+
+    Operator-only vault tools change the resident's tool-list signature between an operator turn and a client
+    turn, so the next operator turn would start a new process and resend the whole block for that reason.
+    Leaving ``manager_read`` off keeps the tool list, and the resident, the same.
+    """
+    import atexit
+
+    from .runner import _confirmed
+
+    root = Path(tempfile.mkdtemp(prefix="looper-eval-profile-"))
+    atexit.register(shutil.rmtree, root, True)
+    (root / "关于我.md").write_text("## Name\nEval Operator\n", encoding="utf-8")
+    api.post("/api/v1/knowledge_vault/update", {"path": str(root), "writable": [], "rules_file": None,
+                                                "manager_read": False})
+    api.post("/api/v1/manager_persona/update", {"name": "Atlas", "tone": "concise"})
+    _confirmed(api, "/api/v1/profile_settings/update", {"enabled": True})
 
 
 # --- One-time reminders (looper_reminder_*): reminders on, the user named as the Lark bot's operator ---
@@ -3507,6 +3618,9 @@ DIALOGS: tuple[Dialog, ...] = (
 )
 
 
+DIALOGS += _routed_cases(Dialog, Say, PROJECT)
+
+
 # Context measurements are scripted here, so these cases are selected explicitly in fake mode only.
 FAILURE_DIALOGS = tuple(_hold_dialog(action) for action in ("retry", "planner", "stop")) + (
     Dialog("task_hold_operator_boundary", (
@@ -3518,6 +3632,35 @@ FAILURE_DIALOGS = tuple(_hold_dialog(action) for action in ("retry", "planner", 
 
 
 FAKE_DIALOGS: tuple[Dialog, ...] = (
+    # The third turn must resend the whole block because the client turn was another audience, in the same
+    # resident. A new process would also resend it, and would pass a view-only check on a build without the
+    # pending-whole recovery.
+    Dialog("stable_whole_after_client", (
+        Say("请说出我的称呼和你的名字。", _stable_audience(("whole", "new session")),
+            (("__reply__", {"text": "你是 Eval Operator，我是 Atlas。"}),)),
+        Say("作为 API 客户端，只查询你叫什么。", _stable_audience(
+            ("whole", "new session"), ("whole", "operator profile omitted for client turn")),
+            (("__reply__", {"text": "我是 Atlas。"}),), client=True),
+        Say("再说一次我的称呼和你的名字。", _stable_audience(
+            ("whole", "new session"), ("whole", "operator profile omitted for client turn"),
+            ("whole", "another audience's block came after the last shown state")),
+            (("__reply__", {"text": "你是 Eval Operator，我是 Atlas。"}),)),
+        Say("继续保持当前称呼。", _stable_audience(
+            ("whole", "new session"), ("whole", "operator profile omitted for client turn"),
+            ("whole", "another audience's block came after the last shown state"), ("unchanged", "unchanged")),
+            (("__reply__", {"text": "好的。"}),)),
+    ), seed=_seed_stable_audience, tags=("manager", "stable_context", "audience")),
+    Dialog("group_per_chat_smoke", (
+        Say("Operator greeting.", group_dialogs.smoke_check,
+            (("__reply__", {"text": f"Received in {group_dialogs.CHAT}."}),)),
+        Say("Member greeting.", group_dialogs.smoke_check,
+            (("__reply__", {"text": f"Received in {group_dialogs.CHAT}."}),), sender="member",
+            attachments=(("greeting.txt", b"Synthetic group attachment.\n"),)),
+        Say("Bot greeting.", group_dialogs.smoke_check,
+            (("__reply__", {"text": f"Received in {group_dialogs.CHAT}."}),), sender="bot"),
+    ), session="group", routing="per_chat", manager="group-smoke", manager_seed={
+        "name": "Eval group desk", "tools": "all",
+        "system_prompt": "Answer the messages addressed to you in this group."}),
     Dialog("session_bound_rotate", (
         Say("先记住这一轮。", lambda look: None,
             (("__context__", {"tokens": 40001}), ("__reply__", {"text": "已记住。"}))),
@@ -4000,7 +4143,7 @@ def run_dialog(api: Api, dialog: Dialog, *, database_url: str, project_id: str, 
     budget_args = {"check_budget": check_budget} if cap_left is not None else {}
     client_id: str | None = None  # the API client a client dialog made; its token stays in this function
     try:
-        if dialog.client and any(say.stop or say.withdraw for say in dialog.says):
+        if any((dialog.client or say.client) and (say.stop or say.withdraw) for say in dialog.says):
             raise EvalError("stop and withdraw are not supported in client dialogs")
         fixture_hold = None
         if dialog.failure_hold:
@@ -4077,15 +4220,24 @@ def run_dialog(api: Api, dialog: Dialog, *, database_url: str, project_id: str, 
             api.post("/api/v1/session_budget/update", {"turn_budget_usd": 4})
             api.post("/api/v1/scheduler_settings/update", {"session_context_max_tokens": 40000})
             _seed_session_bound_task(database_url, project_id)
+        if dialog.id == "stable_whole_after_client":
+            _turn_on(database_url, "manager.stable_context")
         registry_before = api.post("/api/v1/registry/view", {})["result"] if dialog.id in {
             "model_login_runtime", "model_missing_endpoint"} else None
         session = f"eval-{dialog.id}-{uuid.uuid4().hex[:6]}"
         client_api: Api | None = None
         conversation: str | None = None
-        if dialog.client:
+        if dialog.client or any(say.client for say in dialog.says):
             created = api.post("/api/v1/clients/create", {"name": f"eval-{uuid.uuid4().hex[:6]}"})["result"]
             client_id = created["client"]["id"]
             client_api = Api(api.base_url, token=created["token"], timeout=api.timeout)
+        other_task = None
+        if dialog.session and dialog.routing:
+            group_dialogs.prepare(api, scenarios.parent, dialog, database_url)
+        elif dialog.session:
+            from .routed_dialogs import prepare
+
+            other_task = prepare(api, dialog, database_url, project_id, task)
         known = frozenset(t["task_id"] for t in api.post("/api/v1/tasks/page", {})["result"]["tasks"])
         # Setup uses audited operator operations too; only the dialog's actions belong to its checks.
         since = _last_action(database_url)
@@ -4093,14 +4245,14 @@ def run_dialog(api: Api, dialog: Dialog, *, database_url: str, project_id: str, 
         for number, say in enumerate(dialog.says, 1):
             turn_now = REMINDER_NOW if mode == "fake" and dialog.id == "reminder_tools" else datetime.now(timezone.utc)
             text = say.text_from(previous) if say.text_from and previous else say.text
-            text = text.replace("<task>", task or "")
+            text = text.replace("<task>", task or "").replace("<other task>", other_task or "")
             if fixture_hold:
                 text = text.replace("<hold_step>", fixture_hold["step_id"]).replace("<hold_failure>", str(fixture_hold["failure_id"]))
             if mode == "fake":
                 data = json.loads(scenarios.read_text(encoding="utf-8"))
                 scripted = []
                 for name, arguments in say.fake:
-                    rendered = json.dumps(arguments).replace("<task>", task or "")
+                    rendered = json.dumps(arguments).replace("<task>", task or "").replace("<other task>", other_task or "")
                     if fixture_hold:
                         rendered = rendered.replace("<hold_step>", fixture_hold["step_id"]).replace(
                             '"<hold_failure>"', str(fixture_hold["failure_id"]))
@@ -4109,13 +4261,29 @@ def run_dialog(api: Api, dialog: Dialog, *, database_url: str, project_id: str, 
                         rendered = rendered.replace("<lead>", _memory_lead(previous, kind)["id"])
                     scripted.append([name, json.loads(rendered)])
                 data.setdefault("manager", {})[text] = scripted
+                if dialog.session and say.attachments:
+                    # Rich resource placeholders and the saved-attachment section follow this exact prefix.
+                    prefix = text + "\n" + "\n".join(
+                        f"[file {i}: {name}]" for i, (name, _) in enumerate(say.attachments, 1))
+                    data.setdefault("manager_prefix", {})[prefix + "\n\n"] = scripted
                 if dialog.id == "tools_only_no_text":
                     data["manager"][FOLLOWUP_MESSAGE] = [["__reply__", {"text": "已查到项目：eval-calc。"}]]
                 scenarios.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
             before = _last_action(database_url, agent)
             expects_api = api_turn and not (say.code_only or say.stop or say.withdraw)
             before_run = _newest_run(api, agent) if expects_api else 0
-            if client_api is not None:
+            manager_session = None
+            stored_messages = []
+            if dialog.session and dialog.routing:
+                reply, manager_session, stored_messages = group_dialogs.ask(
+                    api, scenarios.parent / "lark", dialog, text, sender=say.sender,
+                    database_url=database_url, timeout=timeout, attachments=say.attachments, **budget_args)
+            elif dialog.session:
+                from .routed_dialogs import ask
+
+                reply = ask(api, scenarios.parent / "lark", dialog, text, database_url=database_url,
+                            timeout=timeout, **budget_args)
+            elif client_api is not None and (dialog.client or say.client):
                 reply, conversation = _ask_client(client_api, api, conversation, text, timeout=timeout,
                                                   database_url=database_url, **budget_args)
             else:
@@ -4138,7 +4306,9 @@ def run_dialog(api: Api, dialog: Dialog, *, database_url: str, project_id: str, 
             # What a refused call was told, and the arguments it came with: what to fix in a tool or its description.
             errors = [{"tool": a["tool"], "arguments": a["arguments"], "message": (a["result"] or {}).get("message")}
                       for a in trail if a["status"] == "error"]
-            turns.append({"text": text, "reply": reply[:2000], "calls": calls, "errors": errors, "problem": problem})
+            turns.append({"text": text, "reply": reply[:2000], "calls": calls, "errors": errors, "problem": problem,
+                          **({"sender": say.sender, "manager_session": manager_session,
+                              "stored_messages": stored_messages} if dialog.session and dialog.routing else {})})
             if problem:
                 break
         check_budget()
@@ -4164,6 +4334,8 @@ def run_dialog(api: Api, dialog: Dialog, *, database_url: str, project_id: str, 
     passed = not problems and len(turns) == len(dialog.says)
     return {"id": dialog.id, **(error or {"outcome": (Outcome.PASS if passed else Outcome.FAIL).value,
                                           "success": passed}),
+            **({"transport": "lark-cli CliTransport", "session": dialog.session} if dialog.session else {}),
+            **({"sender": dialog.sender} if dialog.session and not dialog.routing else {}),
             "problems": problems, "turns": turns,
             "calls": sum(len(t["calls"]) for t in turns), "duration_s": round(time.monotonic() - started, 1)}
 
@@ -4269,7 +4441,11 @@ def run(
     with that model and ``manager_effort``. A failure to set a dialog's server up stops the run, as it would stop
     every dialog after it. ``manager_agent`` registers a spec for the Manager's role layer only. With
     ``stable_context`` every dialog's database has ``manager.stable_context`` on, and each row lists what the
-    Manager's turns started with (``state_views``). With ``leads_fulltext`` it has ``leads.search_mode``
+    Manager's turns started with (``state_views``). Each turn also keeps the system-prompt sha256, ``prompt_layers``
+    and ``looper_state`` from its run record, plus the state-block body and the Turn context (null when that
+    setting is off). Those fields are attached only when the run has a database URL and the per-turn capture is
+    enabled; otherwise the row records ``inputs_captured`` false and the database is not opened for them.
+    With ``leads_fulltext`` it has ``leads.search_mode``
     ``fulltext``. ``delivery_guard`` enables the operator-only recovery setting in each disposable server and
     reports how many hidden follow-ups ran. With ``untrusted_fence`` every dialog's database has
     ``untrusted_fence.enabled`` on."""
@@ -4311,6 +4487,10 @@ def run(
             install_claude(case / "bin", mode=mode, scenarios=scenarios,
                            max_budget_usd=None if register is not None else max_budget_usd,
                            real_claude=real_claude, **({"failure_injection": True} if dialog.failure_hold else {}))
+            if dialog.session:
+                from .fake_lark import install
+
+                install(case / "bin", case / "lark")
             (case / "runtime").mkdir(mode=0o700)
             home = case / "home" if mode == "fake" else None
             if home is not None:
@@ -4319,13 +4499,29 @@ def run(
             if projects_root is not None:
                 projects_root.mkdir()
             with fresh_database(admin_url) as (database_url, _), _clean_command_runners(case / "runtime"):
+                if dialog.session:
+                    if dialog.routing:
+                        group_dialogs.enable_channel(database_url)
+                        if not dialog.manager:
+                            raise EvalError("group dialogs need a scenario Manager and an explicit routing mode")
+                        if dialog.manager_seed is not None:
+                            group_dialogs.seed_manager(database_url, manager=f"manager-{dialog.manager}",
+                                                       values=dialog.manager_seed)
+                        group_dialogs.seed_server(database_url, manager=f"manager-{dialog.manager}", routing=dialog.routing)
+                    else:
+                        from .routed_dialogs import seed_server
+
+                        seed_server(database_url)
                 reminder_now = REMINDER_NOW if mode == "fake" and dialog.id == "reminder_tools" else None
+                capture_file = case / "turn-inputs.jsonl"
+                server_env = {"LOOPER_EVAL_TURN_CAPTURE": str(capture_file),
+                              **({"TZ": REMINDER_ZONE} if reminder_now is not None else {})}
                 with running_server(database_url=database_url, runtime_root=case / "runtime", bin_dir=case / "bin",
                                     log_path=logs / f"{dialog.id}-{rep}.log", home=home,
                                     projects_root=projects_root,
                                     pi_runtime=pi_runtime, dsh_runtime=dsh_runtime,
                                     reminder_now=reminder_now,
-                                    env={"TZ": REMINDER_ZONE} if reminder_now is not None else None) as api:
+                                    env=server_env) as api:
                     named = register_agent(api, register)["name"] if register is not None else agent
                     picked = select_agent(api, agent=named, model=model)
                     require_claude(mode, real_claude, [picked.get("runtime_type")])
@@ -4368,6 +4564,8 @@ def run(
                     row["resolved_models"] = reported_models(database_url)
                 if stable_context:
                     row["state_views"] = _state_views(database_url)
+                _attach_model_inputs(row, database_url, capture_file,
+                                     capture_enabled=bool(server_env.get("LOOPER_EVAL_TURN_CAPTURE")))
                 if "runtime_evidence" in row:
                     # DSH's full bill is unknown. Use reported root spend for the
                     # suite's observable soft cap rather than a null bill as zero.

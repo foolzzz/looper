@@ -470,7 +470,9 @@ class ManagerOps:
         key = session_key if session_key is not None else self._session_of(turn)
         if (policy := session_visibility.for_session(key, manager_id=self._scope.manager_id)) is not None:
             # Filter before reading any global schemas (templates, workflows, settings).
-            return [tool.listing() for name, tool in self._scope.tools.items() if name in policy.tools]
+            from .session_tools import TOOLS as SESSION_TOOLS
+
+            return [tool.listing() for tool in SESSION_TOOLS if tool.name in policy.tools]
         tools = list((await self.current_scope()).tools.values())
         if any(_audience(tool) is Audience.OPERATOR for tool in tools) and not (
                 turn is not None and await _operator_turn(turn)):
@@ -563,11 +565,9 @@ class ManagerOps:
             return _error(ErrorCode.FORBIDDEN, "this turn belongs to another session; the call did not run")
         key = session_key if session_key is not None else self._binding_sessions.get(
             binding or "", self._session_of(bound or self._turn))
-        if (policy := session_visibility.for_session(key, manager_id=self._scope.manager_id)) is not None and name not in policy.tools:
-            # Also deny guessed, unknown and stale tool names, without revealing global
-            # schemas, validation errors or return values. Authenticated sessions cannot
-            # acquire main's access by omitting their binding.
-            return _error(ErrorCode.FORBIDDEN, "this session has no access to that tool")
+        if (policy := session_visibility.for_session(key, manager_id=self._scope.manager_id)) is not None:
+            return await self._call_session(name, raw, binding=binding, call_id=call_id, session_key=key,
+                                            policy=policy)
         tool = self._scope.tools.get(name) or _MANAGER_TOOL_NAMES.get(name) or _LEDGER_TOOLS.get(name)
         if tool is None:
             from .planner import TOOLS as PLANNER_TOOLS
@@ -674,6 +674,61 @@ class ManagerOps:
                 return _error(exc.code, str(exc), watch.shown)
         if watch.shown is not None and isinstance(result, dict):
             result.setdefault("shown_to_user", watch.shown)  # after the record: the trail keeps the tool's own result
+        return {"status": "ok", "result": result}
+
+    async def _call_session(self, name: str, raw: Any, *, binding: str | None, call_id: str | None,
+                            session_key: str, policy: session_visibility.SessionAllowlist) -> dict[str, Any]:
+        from . import session_tools
+        from ...db.connection import get_pool
+
+        turn = self._bindings.get(binding) if binding else None
+        if turn is None or self._binding_sessions.get(binding) != session_key:
+            return _error(ErrorCode.FORBIDDEN, session_tools.SESSION_ERRORS[ErrorCode.FORBIDDEN])
+        tool = next((t for t in session_tools.TOOLS if t.name == name and name in policy.tools), None)
+        if tool is None:
+            return _error(ErrorCode.FORBIDDEN, session_tools.SESSION_ERRORS[ErrorCode.FORBIDDEN])
+        arguments, risk = {}, tool.risk
+        try:
+            arguments = check_arguments(tool.schema, raw)
+            rule = session_visibility.SESSION_TOOL_RULES[name]
+            task_id = tool.task_id(arguments)
+            if task_id is not None or (name == "looper_chat_tasks" and arguments["action"] == "get"):
+                await session_tools._owned_task(get_pool(), task_id or "", session_key, self._scope.manager_id)
+            actor = await session_tools.initiator(turn)
+            _check_answering(turn)
+            if risk is not Risk.READ:
+                if actor is session_tools.Initiator.NONE:
+                    raise OpError(ErrorCode.NEEDS_USER_TURN, session_tools.SESSION_ERRORS[ErrorCode.NEEDS_USER_TURN])
+                if actor is not session_tools.Initiator.OPERATOR:
+                    # Reuse the refusal contract, deriving missing identity from this read only.
+                    refusal = _OperatorOnly(replace(turn, operator_id_missing=actor is session_tools.Initiator.NO_OPERATOR_ID))
+                    raise refusal
+                if rule.operator is not session_visibility.WriteGate.RUN:
+                    raise OpError(ErrorCode.FORBIDDEN, session_tools.HIGH_REFUSAL)
+                if turn.require_match and not await self._matched(binding, name, arguments, call_id):
+                    raise OpError(ErrorCode.NOT_THIS_TURN, session_tools.SESSION_ERRORS[ErrorCode.NOT_THIS_TURN])
+                _check_answering(turn)
+                if await self._outbound_check(tool, arguments, turn, risk):
+                    raise OpError(ErrorCode.BLOCKED, session_tools.SESSION_ERRORS[ErrorCode.BLOCKED])
+            call = Call(arguments, turn, self._platform, scope=self._scope,
+                        confirmation={"session_key": session_key})
+            if tool.escalate is not None and await tool.escalate(call) is not None:
+                risk = Risk.HIGH
+                raise OpError(ErrorCode.FORBIDDEN, session_tools.HIGH_REFUSAL)
+            _check_answering(turn)
+            answer = await tool.run(call)
+            result = _plain(session_tools.project(name, arguments, answer))
+        except OpError as exc:
+            message = str(exc) if isinstance(exc, _OperatorOnly) or str(exc) == session_tools.HIGH_REFUSAL else (
+                session_tools.SESSION_ERRORS[exc.code])
+            await self._record(turn, tool, arguments, risk, "error", error_code=exc.code.value,
+                               result={"reason": "operator_only"} if isinstance(exc, _OperatorOnly) else {"message": message})
+            return _error(exc.code, message)
+        except Exception:
+            logger.exception("session task tool failed: %s", name)
+            await self._record(turn, tool, arguments, risk, "error", error_code=ErrorCode.UNAVAILABLE.value)
+            return _error(ErrorCode.UNAVAILABLE, session_tools.SESSION_ERRORS[ErrorCode.UNAVAILABLE])
+        await self._record(turn, tool, arguments, risk, "ok", result=None if risk is Risk.READ else result)
         return {"status": "ok", "result": result}
 
     async def _confirm(self, confirmation_id: str, turn: Turn) -> dict[str, Any]:
