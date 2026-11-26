@@ -143,6 +143,40 @@ def test_completion_dm_audience(monkeypatch, tmp_path, routing, recipient):
     run_db(check, monkeypatch, timeout=120)
 
 
+def test_routed_dm_completion_falls_back_with_the_code_notice(monkeypatch, tmp_path):
+    """Another sender's DM session does not run the completion model; its code notice still goes out."""
+    monkeypatch.setattr(session_routing, "_routing_enabled", True)
+    monkeypatch.setattr(chat_settings, "_completion_turns", chat_settings.CompletionTurns.DM_ONLY)
+
+    async def check(pool):
+        async with _manager(pool, tmp_path, monkeypatch,
+                            [ResponseScript(events=text_events(MODEL_REPLY, usage=USAGE))]) as chat:
+            await pool.execute("INSERT INTO channel_configs (channel_id, channel_type, enabled, config) "
+                               "VALUES ('channel-lark', 'lark', TRUE, $1::jsonb)",
+                               json.dumps({"allowed_open_ids": [OPERATOR, OTHER], "operator_sender_id": OPERATOR}))
+            notice = Notice(NotifyChannel.LARK, NotifyTarget(TargetKind.USER, OTHER), "Synthetic code notice",
+                            channel_id="channel-lark")
+            await chat.manager._handle_goal_status(await task_end(pool, tmp_path, notice=notice))
+            await finish_pending(chat)
+
+            def dm_settled() -> bool:
+                sessions = [session for key, session in chat.manager._sessions.items() if key.startswith("dm:")]
+                return bool(sessions) and all(not chat.manager._router.holds(session) for session in sessions)
+
+            await until(dm_settled, "routed DM completion")
+            row = await pool.fetchrow("SELECT state, reason, delivery, sent_at, batch FROM manager_events")
+            assert (row["state"], row["reason"]) == ("fallback", "session_allowlist")
+            assert row["batch"] is not None and row["delivery"] == "sent" and row["sent_at"] is not None
+            messages = drain(chat.bus, "channel-lark")
+            assert len(messages) == 1
+            assert messages[0].message_type is MessageType.CHAT_NOTICE
+            assert messages[0].payload["chat"] == OTHER
+            assert messages[0].payload["text"] == notice.text
+            assert chat.model.requests == []
+
+    run_db(check, monkeypatch, timeout=120)
+
+
 @pytest.mark.parametrize("recipient", ["operator", "other", "unconfigured"])
 def test_schedule_dm_audience(monkeypatch, tmp_path, routing, recipient):
     async def check(env):
