@@ -834,7 +834,19 @@ interrupt with kill fallback. Sessions and cumulative usage are saved under
 as init reports it. A changed mode, model, effort, provider, workspace or prompt
 restarts the process with the saved session. The operator-only
 `tasks.task_manager_profile_set` selects or clears this task's profile, refuses a
-busy turn with 409, and stops an idle process before the next resume. A failed resume
+busy turn with `task_manager_busy` (409) without writing, and stops an idle process before the next resume.
+It returns the same view as the operator-only `tasks.task_manager_profile_get`:
+`task_id`, nullable `override_profile_id`, `effective` (`profile_id`, model, runtime
+type, provider id and nullable effort), `source` (`task`, `role` or `default`) and
+registered role-compatible `choices` (profile id, label, model and runtime type).
+`tasks.create_draft` accepts optional `task_manager_profile_id`, validates it before
+creating anything and stores the task override in the same transaction as the draft.
+Its existing result fields are preserved, with this view added as `task_manager_profile`.
+An omitted or null choice uses the role or built-in default. Unsupported runtimes return
+`task_manager_runtime_unsupported` with `details.requested_runtime` and
+`details.supported = "claude_code"`; unknown profiles return `invalid`.
+All three operations require the operator and enabled work mode; unknown task ids
+on get/set return `not_found`. They add no agent tools or prompts. A failed resume
 retries once fresh with the caller's last 20 fenced thread messages and emits
 `session_fresh` with a bounded diagnostic. Server restart never replays a cut turn.
 Worktree turns commit pending changes with the task trailer; in-place turns list
