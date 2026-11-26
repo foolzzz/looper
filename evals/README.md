@@ -913,17 +913,35 @@ Exit status is 0 only for a complete passing run, 1 for failures, 2 for an abort
 or cap stop. Fake costs/model names are scripted, not measurements of real models.
 
 Checks use deterministic English/Chinese assertion and abstention patterns,
-without a judge model. Affirmative answers must name the synthetic identity or
-project; restriction answers must prohibit proactive messages, preserve the
-22:00 → 08:00 direction and name the time zone. Abstentions match the whole
-reply, rejecting a disclaimer followed by invented facts. Supported wording is
-deliberately conservative: valid paraphrases, translations, equivalent clock
-formats or time-zone conversions may fail. Patterns cannot establish general
-truthfulness or exclude every contradictory extra clause; review failed replies
-and keep the original verdicts. This is a recall/abstention eval, not a privacy
+without a judge model. Affirmative answers must state the synthetic identity or
+project. Restriction answers must prohibit proactive messages and preserve the
+22:00 → 08:00 direction; ranges, “between … and …” and “from … to …” are accepted,
+with or without the time zone (an explicitly different zone fails). Abstentions
+can include account details, Looper's seeded project list and general runtime
+rules. Every off/absent reply is checked for synthetic profile values and
+unsupported personal identity, project or restriction claims, even after an
+abstention. The seeded `eval-calc` project is operational state, not a profile
+claim. Patterns cannot establish general truthfulness or exclude every
+contradictory extra clause; unfamiliar paraphrases or time-zone conversions may
+still need manual review. This is a recall/abstention eval, not a privacy
 boundary or proactive-message scheduling test. Dashboard, Telegram and Lark
 share the Manager implementation; this suite exercises dashboard HTTP chat,
 and adds only an eval CLI command, with no product UI/channel changes.
+
+Re-score a saved aggregate report offline after updating the checks:
+
+```sh
+python -m evals.prompt_regression resident-profile --rescore RUN.json --out NEW.json
+```
+
+This makes no model, server or database calls and needs no PostgreSQL URL.
+It prints the same summary table as a new run, with before/after scores.
+`--out` is optional; omitting it only prints the table. The input file cannot
+be overwritten. Saved replies, costs, attempts and model evidence are retained;
+`original_scoring` preserves each scored row's first verdict, with rescore time
+and code revision recorded separately. Only reply checks are reapplied: source,
+injection and session readback failures, harness errors, skipped rows, aborts
+and cap stops remain. This does not repeat the original runtime wiring checks.
 
 #### Manager capability installs
 
