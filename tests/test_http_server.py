@@ -8,6 +8,7 @@ that writes the next request before it sees the close races the server and gets
 from __future__ import annotations
 
 import asyncio
+import socket
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -15,8 +16,109 @@ import httpx
 import pytest
 
 from looper.agents.http_server import AgentHTTPServer
+from looper.agents import http_server
 
 TOKEN = "operator_" + "a" * 32
+
+
+def test_shutdown_aborts_a_stream_whose_peer_never_reads(tmp_path, monkeypatch, caplog):
+    async def run():
+        monkeypatch.setattr(http_server, "HTTP_SHUTDOWN_GRACE_SECONDS", .05, raising=False)
+        monkeypatch.setattr(http_server, "HTTP_SHUTDOWN_CLEANUP_SECONDS", .05, raising=False)
+        server = AgentHTTPServer(port=0, runtime_root=tmp_path,
+            web_adapter=SimpleNamespace(), task_router=SimpleNamespace(), supervisor=SimpleNamespace())
+        blocked = asyncio.Event()
+        writers = []
+
+        async def stream(path, writer, **kwargs):
+            writers.append(writer)
+            writer.get_extra_info("socket").setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 4096)
+            writer.write(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n\r\n")
+            # A real TCP peer never reads, so drain and then wait_closed cannot flush.
+            while True:
+                writer.write(b"data: " + b"x" * (1024 * 1024) + b"\n\n")
+                if writer.transport.get_write_buffer_size():
+                    blocked.set()
+                await writer.drain()
+
+        monkeypatch.setattr(server, "_serve_static", stream)
+        await server.start()
+        assert server._port != 8767
+        peer = socket.socket()
+        peer.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 4096)
+        peer.setblocking(False)
+        stopping = None
+        try:
+            loop = asyncio.get_running_loop()
+            await loop.sock_connect(peer, ("127.0.0.1", server._port))
+            await loop.sock_sendall(peer, b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n")
+            await asyncio.wait_for(blocked.wait(), 2)
+            handlers = list(server._handlers)
+            assert handlers and not handlers[0].done()
+            assert writers[0].transport.get_write_buffer_size() > 0
+            stopping = asyncio.create_task(server.stop())
+            await asyncio.wait_for(asyncio.shield(stopping), .5)
+            assert not server._handlers
+            assert writers[0].transport.get_write_buffer_size() == 0
+            assert "aborting 1 HTTP connection" in caplog.text
+        finally:
+            for writer in writers:
+                writer.transport.abort()
+            peer.close()
+            if stopping is not None:
+                await asyncio.wait_for(stopping, 1)
+            else:
+                await server.stop()
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("finish", [True, False])
+def test_shutdown_gives_inflight_requests_a_grace_period(tmp_path, monkeypatch, finish):
+    async def run():
+        monkeypatch.setattr(http_server, "HTTP_SHUTDOWN_GRACE_SECONDS", .1, raising=False)
+        server = AgentHTTPServer(port=0, runtime_root=tmp_path,
+            web_adapter=SimpleNamespace(), task_router=SimpleNamespace(), supervisor=SimpleNamespace())
+        entered, release, cancelled = asyncio.Event(), asyncio.Event(), asyncio.Event()
+
+        async def response(path, writer, **kwargs):
+            entered.set()
+            try:
+                await release.wait()
+            except asyncio.CancelledError:
+                cancelled.set()
+                raise
+            writer.write(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok")
+            await writer.drain()
+
+        monkeypatch.setattr(server, "_serve_static", response)
+        await server.start()
+        assert server._port != 8767
+        reader, writer = await asyncio.open_connection("127.0.0.1", server._port)
+        stopping = None
+        try:
+            writer.write(b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n")
+            await writer.drain()
+            await asyncio.wait_for(entered.wait(), 1)
+            stopping = asyncio.create_task(server.stop())
+            await asyncio.sleep(.02)
+            assert not cancelled.is_set() and not stopping.done()
+            if finish:
+                release.set()
+            reply = await asyncio.wait_for(reader.read(), 1)
+            await asyncio.wait_for(stopping, 1)
+            assert cancelled.is_set() is (not finish)
+            assert reply.endswith(b"\r\n\r\nok") if finish else reply == b""
+            assert not server._handlers
+        finally:
+            release.set()
+            writer.close()
+            await writer.wait_closed()
+            if stopping is not None:
+                await stopping
+            await server.stop()
+
+    asyncio.run(run())
 
 
 def test_keepalive_client_is_told_when_the_server_closes(tmp_path: Path) -> None:
