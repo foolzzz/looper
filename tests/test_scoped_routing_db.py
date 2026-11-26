@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import uuid
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
@@ -10,9 +11,9 @@ from typing import Any
 import pytest
 
 from looper.agents import chat_scopes as scopes, completion_events, session_routing
-from looper.agents.message import MessageEnvelope
+from looper.agents.message import MessageEnvelope, MessageType
 from looper.agents.tiers.manager_routing import RouteOutcome, SCOPE_UNAVAILABLE_REPLY
-from looper.db import capability_sets, chat_bindings, manager_sessions
+from looper.db import capability_sets, chat_bindings, manager_events, manager_sessions
 from tests.db_support import DSN, run_db, until
 from tests.test_manager_session_routing_db import GROUP_A, LARK, OTHER, _Resident, _lark, _published
 from tests.test_scenario_session_routing_db import MANAGER, _scenario, _to
@@ -106,15 +107,60 @@ def test_no_operator_id_means_no_full_session(monkeypatch: Any, tmp_path: Path) 
 
 
 @pytest.mark.parametrize("default,kind,expected", [("legacy", "bot", "legacy"), (None, "bot", "chat_only"),
-                                                   (None, None, "chat_only")])
+                                                   (None, None, "chat_only"), (None, "unknown", "chat_only")])
 def test_bot_senders(default: str | None, kind: str | None, expected: str, monkeypatch: Any, tmp_path: Path) -> None:
     async def body(pool: Any) -> None:
-        rig, _ = await _setup(pool, tmp_path, monkeypatch, default=default)
+        rig, residents = await _setup(pool, tmp_path, monkeypatch, default=default)
+        # Check routing directly too: a bad classification must not turn into a held bus message.
+        session = await rig.manager._router.target(_message(rig, "classification", OPERATOR, kind))
+        assert session.scope.resolved.audience is scopes.ScopeAudience.SHARED
         await rig.start()
         try:
             await _send(rig, "bot", OPERATOR, kind)
             rows = await manager_sessions.list(MANAGER)
             assert len(rows) == 1 and rows[0]["scope_id"] == expected and rows[0]["audience"] == "shared"
+            assert len(residents[0].turns) == 1 and not rig.manager._router.pending()
+        finally:
+            await rig.close()
+    run_db(body, monkeypatch, timeout=90)
+
+
+def test_unknown_sender_kind_completion_settles_batch(monkeypatch: Any, tmp_path: Path) -> None:
+    from looper.agents.tiers.manager import _message_origin, _sender_kind
+
+    async def body(pool: Any) -> None:
+        rig, residents = await _setup(pool, tmp_path, monkeypatch)
+        notice = {"channel": "lark", "channel_id": LARK.agent_id, "text": "Synthetic completion notice",
+                  "target": {"kind": "chat", "id": GROUP_A}}
+        await pool.execute("INSERT INTO projects(id, name, work_dir) VALUES('unknown-kind-project', 'Synthetic', $1)", str(tmp_path))
+        await pool.execute("INSERT INTO tasks(id, requirement, status, project_id) "
+                           "VALUES('unknown-kind-task', 'Synthetic', 'completed', 'unknown-kind-project')")
+        await manager_events.record(manager_id=MANAGER, task_id="unknown-kind-task", origin="chat", target_kind="dm",
+            channel_id=LARK.agent_id, chat=GROUP_A, dedupe_key="unknown-kind-completion",
+            payload={"chat_id": GROUP_A}, fallback=[{"via": "notice", "notice": notice}], state="pending", reason=None)
+        await rig.start()
+        try:
+            batch = uuid.uuid4()
+            rows = await manager_events.claim(MANAGER, LARK.agent_id, GROUP_A, batch)
+            assert len(rows) == 1 and rows[0]["state"] == "running"
+            envelope = replace(_message(rig, "completion", kind="unknown"), message_type=MessageType.COMPLETION_DUE)
+            assert _sender_kind(envelope) is None
+            key = await rig.manager._router.completion_key(_message_origin(envelope))
+            settled: list[str] = []
+            settle = rig.bus.settle_handled
+
+            def record(message: Any) -> None:
+                settled.append(message.message_id)
+                settle(message)
+
+            monkeypatch.setattr(rig.bus, "settle_handled", record)
+            rig.manager._router.dispatch_completion(envelope, rows, batch, None, key=key)
+            await until(lambda: envelope.message_id in settled)
+            row = await pool.fetchrow("SELECT state, reason FROM manager_events WHERE task_id='unknown-kind-task'")
+            assert dict(row) == {"state": "fallback", "reason": "group_chat"}
+            assert settled.count(envelope.message_id) == 1
+            assert not rig.manager._router.pending()
+            assert not any(resident.starts or resident.turns for resident in residents)
         finally:
             await rig.close()
     run_db(body, monkeypatch, timeout=90)

@@ -140,6 +140,17 @@ def test_section(image_input, last):
     assert files.section([], image_input) == []
 
 
+@pytest.mark.parametrize("image_input", [ImageInput.READ_TOOL, ImageInput.NONE])
+def test_unreadable_attachment_section_preserves_payload_without_file_instructions(image_input):
+    item = files.Attachment(1, files.AttachmentKind.FILE, files.AttachmentState.SAVED, "notes.txt", "lark",
+                            path="/notes.txt", mime="text/plain", size=12)
+    readable = files.section([item], image_input, fence=True)
+    unreadable = files.section([item], image_input, fence=True, readable=False)
+    assert unreadable[:-1] == readable[:-1]
+    assert unreadable[-1] == "This session cannot open attachments; if the message needs one, say so."
+    assert files.section([], image_input, readable=False) == []
+
+
 @pytest.mark.parametrize("state,reason,expected", [
     (files.AttachmentState.FAILED, None, "the download failed"),
     (files.AttachmentState.FAILED, "no longer available", "no longer available"),

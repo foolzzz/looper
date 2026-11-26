@@ -25,7 +25,7 @@ import time
 import uuid
 import weakref
 from collections import deque
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from enum import StrEnum
 from typing import TYPE_CHECKING, Any
@@ -245,7 +245,7 @@ class SessionRouter:
                                                 claude_runtime=CLAUDE_CODE, last_activity=self._agent._clock(), scope=scope)
             if scope is not None and scope.mode is chat_scopes.LaunchMode.PLATFORM_TOOLS:
                 session_visibility.register_scoped(self._agent.agent_id, key.text,
-                                                   session_visibility.SCOPED_CHAT_ALLOWLIST)
+                                                   session_visibility.inputs_for(scope))
         session = sessions[key.text]
         if (session.scope.fingerprint if session.scope else None) != (scope.fingerprint if scope else None):
             raise ScopeInvariantViolation("session scope differs from its key")
@@ -312,10 +312,14 @@ class SessionRouter:
         if resolved.scope_id not in sets:
             raise ScopeUnavailable(resolved.scope_id, "set is missing or deleted")
         version, items = sets[resolved.scope_id]
+        # Resolve the launch mode first; only the final, versioned fingerprint becomes a session key.
         scope = chat_scopes.session_scope(resolved, version, items, self._agent._definition,
-            supported=frozenset(chat_scopes.LaunchMode), inputs_version=chat_scopes.inputs_version(resolved))
+            supported=frozenset(chat_scopes.LaunchMode), inputs_version=0)
         if any(isinstance(item, chat_scopes.FilesRead) and not item.required for item in scope.effective.items):
             raise ScopeUnavailable(resolved.scope_id, "optional items need the session's runtime at routing")
+        scope = replace(scope, fingerprint=chat_scopes.fingerprint(
+            scope_id=resolved.scope_id, version=version, eff=scope.effective, audience=resolved.audience,
+            inputs_version=session_visibility.inputs_for(scope).version, mode=scope.mode))
         return scope
 
     async def reconcile(self, channel_id: str, chat: str, *, config: chat_scopes.ScopeConfig,
