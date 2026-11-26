@@ -560,8 +560,8 @@ export async function fetchTasks(
   return result;
 }
 
-/** Who a chat message goes to: the global Manager or a running task's Planner. */
-export type ChatTarget = { kind: "manager"; id?: string } | { kind: "planner"; task_id: string };
+/** Who a chat message goes to: the Manager, a running task's Planner, or that task's own thread. */
+export type ChatTarget = { kind: "manager"; id?: string } | { kind: "planner"; task_id: string } | { kind: "task"; task_id: string };
 
 /**
  * An agent on the Chat page: the global Manager, each task's Planner and the
@@ -944,6 +944,42 @@ export async function fetchChatMessages(
     }, { signal });
     if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
     return result.messages;
+  } catch (error) {
+    throw foreignConversation(error) ?? error;
+  }
+}
+
+/** Task-thread turn, present only on a `task-chat:` read. Other sessions omit it. */
+export type TaskTurnState = "idle" | "running" | "interrupted";
+
+/** One `operator_chat.messages` page. `before` is the server cursor, returned unchanged as `next_before`. */
+export interface ChatHistoryPage {
+  messages: DbChatMessage[];
+  has_more: boolean;
+  next_before: string | null;
+  turn_state?: TaskTurnState;
+}
+
+/** A session page, oldest first. Pass `before` back exactly; this does not invent a cursor from timestamps. */
+export async function fetchChatHistory(
+  sessionId: string,
+  options: { before?: string | null; limit?: number; signal?: AbortSignal; managerId?: string } = {},
+): Promise<ChatHistoryPage> {
+  try {
+    const result = await callV1<ChatHistoryPage>("/api/v1/operator_chat/messages", {
+      session_id: sessionId,
+      ...(options.before ? { before: options.before } : {}),
+      ...(options.limit ? { limit: options.limit } : {}),
+      ...(options.managerId ? { manager: options.managerId } : {}),
+    }, { signal: options.signal });
+    if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
+    const turn = result.turn_state;
+    if (!Array.isArray(result.messages) || typeof result.has_more !== "boolean" || !("next_before" in result)
+      || (result.next_before !== null && typeof result.next_before !== "string")
+      || (turn !== undefined && turn !== "idle" && turn !== "running" && turn !== "interrupted")) {
+      throw new V1Error(200, "unavailable", "服务器返回了无效的对话分页。");
+    }
+    return result;
   } catch (error) {
     throw foreignConversation(error) ?? error;
   }

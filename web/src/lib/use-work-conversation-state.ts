@@ -23,8 +23,8 @@ interface CachedConversation {
 const initial = (): ConversationState => ({ version: 1, draft: "", staged: [], history: [],
   view: { anchor: null, top: 0, bottom: true }, left: null });
 export function workConversationKey(identity: WorkIdentity): string {
-  const owner = identity.kind === "planner" ? identity.taskId : identity.managerId ?? "manager";
-  const sid = identity.sessionId ?? (identity.kind === "planner" ? `planner-${owner}` : "");
+  const owner = identity.kind === "manager" ? identity.managerId ?? "manager" : identity.taskId;
+  const sid = identity.sessionId ?? (identity.kind === "planner" ? `planner-${owner}` : identity.kind === "task" ? `task-chat:${owner}` : "");
   return `looper.work.conversation.v1.${encodeURIComponent(JSON.stringify([identity.kind, owner, sid]))}`;
 }
 const strings = (value: unknown): value is string[] => Array.isArray(value) && value.every(item => typeof item === "string");

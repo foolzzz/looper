@@ -81,6 +81,18 @@ def test_off_prompts_tools_commands_and_signatures_match_main(tmp_path, monkeypa
     assert snapshot["commands"] == baseline
 
 
+def test_work_on_and_task_manager_switch_off_prompts_and_tools_match_main(monkeypatch):
+    """With work mode on and tasks.conversations.manager_answers off, nothing the Planner or Manager sees changes."""
+    from looper.agents import task_conversations_settings as conversations
+
+    monkeypatch.setattr(conversations, "_enabled", True)
+    monkeypatch.setattr(conversations, "_manager_answers", False)
+    expected = json.loads((Path(__file__).parent / "fixtures/acp/default_off.json").read_text())["sha256"]
+    snapshot = off_snapshot()
+    assert {key: value for key, value in snapshot.items() if key != "commands"} == {
+        key: value for key, value in expected.items() if key != "commands"}
+
+
 async def _seed(pool):
     # Seed stored rows directly so guards also cover pre-existing/stale bindings.
     await pool.execute("""

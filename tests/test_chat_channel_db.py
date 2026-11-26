@@ -63,6 +63,25 @@ def test_a_channel_is_stored_and_returned() -> None:
     asyncio.run(_main())
 
 
+def test_a_later_save_that_omits_entry_kind_keeps_the_stored_kind() -> None:
+    """A second save of the same row that does not classify it leaves the stored kind."""
+    from looper.db import chat as db_chat
+    from looper.db import connection
+
+    async def _main() -> None:
+        async with fresh_schema() as pool:
+            await connection.ensure_schema(pool)
+            await db_chat.save_message(session_id="s", message_id="m", role="user", content="first",
+                                       entry_kind="command", pool=pool)
+            await db_chat.save_message(session_id="s", message_id="m", role="user", content="second", pool=pool)
+            kind = await pool.fetchval(
+                "SELECT entry_kind FROM chat_messages WHERE session_id = 's' AND message_id = 'm'")
+            assert kind == "command"
+            assert (await db_chat.list_messages("s", pool=pool))[0]["content"] == "second"
+
+    asyncio.run(_main())
+
+
 def test_a_telegram_resume_brief_excludes_the_current_message() -> None:
     """The message a turn answers must not also appear as history, for Telegram/Lark too
     (they have no session_id; the exclusion keys on <channel>:<chat_id>)."""
