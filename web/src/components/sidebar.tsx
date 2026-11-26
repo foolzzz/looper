@@ -125,7 +125,7 @@ export function Sidebar({
     ...NAV_ITEMS.slice(0, 1),
     ...(todoOn ? [{ page: "todo" as const, label: "Needs you", icon: BellRing }] : []),
     ...NAV_ITEMS.slice(1, 2),
-    ...(workOn === true ? [{ page: "work" as const, label: "Work", icon: Layers }] : []),
+    ...(workOn === true ? [{ page: "work" as const, label: "Work 工作台", icon: Layers }] : []),
     ...NAV_ITEMS.slice(2, 3),
     ...(ledger.enabled ? [{ page: "ledger" as const, label: "Ledger 账本", icon: BookOpen }] : []),
     ...NAV_ITEMS.slice(3),

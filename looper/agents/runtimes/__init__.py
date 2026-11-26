@@ -67,6 +67,7 @@ from enum import Enum
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, ClassVar, Literal, Protocol, runtime_checkable
 
+from ..chat_scopes import LaunchMode
 from ..system_prompt_mode import SystemPromptMode as SystemPromptMode
 from .channel import RunChannel as RunChannel, StreamChannel as StreamChannel
 from .channel import Fork, RunHandle
@@ -478,8 +479,8 @@ class RuntimeAdapter(ABC):
     # Runs and calls tools inside looper serve, with no executable to find or probe.
     in_process: ClassVar[bool] = False
     platform_tools_in_process: ClassVar[bool] = False
-    # Verified to expose only the session's server tools, without file, shell, plugin or subagent access.
-    supports_platform_tools_only: ClassVar[bool] = False
+    # Verified launch modes; narrower modes must be declared explicitly by each runtime.
+    launch_modes: ClassVar[frozenset[LaunchMode]] = frozenset({LaunchMode.FULL})
     # Worker, Reviewer and consult runs use hosted_run instead of their own process. Their platform tools
     # are passed in process by the caller, without an MCP entry.
     hosts_runs: ClassVar[bool] = False

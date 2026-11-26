@@ -37,11 +37,11 @@ function readError(error: unknown): string {
 }
 
 /** A bounded metadata read, owned only by the visible Work details section. */
-export function WorkChanges({ taskId, visible }: { taskId: string; visible: boolean }) {
+export function WorkChanges({ taskId, visible, pendingWorkspace = false }: { taskId: string; visible: boolean; pendingWorkspace?: boolean }) {
   const [read, setRead] = useState<{ taskId: string; loading: boolean; result?: TaskChanges; error?: string }>();
   const [revision, setRevision] = useState(0);
   useEffect(() => {
-    if (!visible) return;
+    if (!visible || pendingWorkspace) return;
     const ctrl = new AbortController();
     setRead(previous => ({ taskId, loading: true, result: previous?.taskId === taskId ? previous.result : undefined }));
     readChanges(taskId, ctrl.signal).then(result => {
@@ -50,15 +50,20 @@ export function WorkChanges({ taskId, visible }: { taskId: string; visible: bool
       if (!ctrl.signal.aborted) setRead(previous => ({ ...previous, taskId, loading: false, error: readError(error) }));
     });
     return () => ctrl.abort();
-  }, [taskId, visible, revision]);
+  }, [taskId, visible, pendingWorkspace, revision]);
 
   if (!visible) return null;
+  if (pendingWorkspace) return <section aria-label="改动文件" className="min-w-0 space-y-3 text-sm">
+    <h2 className="font-medium">改动文件</h2>
+    <p role="status" className="text-muted-foreground">开始后可查看改动</p>
+  </section>;
   // Guard during render too: effects run after a selection has already painted.
   const current = read?.taskId === taskId ? read : undefined;
   const result = current?.result;
   const loading = !current || current.loading;
   const files = result?.kind === "ok" ? result.files : undefined;
-  const error = current?.error ?? (!loading && result?.kind === "unavailable"
+  const neutral = !loading && result?.kind === "unavailable" && result.reason === "not_git";
+  const error = current?.error ?? (!loading && result?.kind === "unavailable" && !neutral
     ? `无法读取改动：${result.reason ? REASON[result.reason] : "原因未知"}` : undefined);
 
   return (
@@ -70,6 +75,7 @@ export function WorkChanges({ taskId, visible }: { taskId: string; visible: bool
         </Button>
       </div>
       {loading && <p role="status" className="text-muted-foreground">{result ? "正在刷新" : "正在读取改动…"}</p>}
+      {neutral && !error && <p role="status" className="text-muted-foreground">工作目录不是 Git 仓库，无法展示 Git 改动</p>}
       {error && <p role="alert" className="text-destructive [overflow-wrap:anywhere]">{files ? "刷新失败：" : ""}{error}</p>}
       {files && result && <>
         <p className="text-muted-foreground">{result.scope === "task_branch" ? "任务分支改动" : "当前未提交改动（目录可能由多个任务共用）"}</p>

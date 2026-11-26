@@ -5,6 +5,7 @@ from ..run_usage import CostStatus
 from ..api_v1 import Operation, STATUS, _array, _object, _STR, _NULL_STR, _INT, _BOOL
 from ..ops import ErrorCode, OpError
 from ..system_prompt import TASK_REQUIREMENT_LIMIT
+from ...db import task_changes
 
 ORDER = 2
 
@@ -77,9 +78,11 @@ OPERATIONS = (
     Operation("system.overview", "POST", "/api/v1/system/overview", "Read the full dashboard overview.",
               "Read the full dashboard overview.", _object({}, closed=True), _OVERVIEW, risk="read"),
     Operation("tasks.requirement_update", "POST", "/api/v1/tasks/requirement_update", "Edit a task's requirement.",
-              "Edit a task's requirement. Keep its version and notify its Planner once.",
+              "Edit a task's requirement. Keep its version and notify its Planner once. "
+              "Optional expected_version refuses a stale edit with requirement_changed (409) and current_version.",
               _object({"task_id": {"type": "string", "minLength": 1},
-                       "requirement": {"type": "string", "minLength": 1, "maxLength": TASK_REQUIREMENT_LIMIT}}, closed=True),
+                       "requirement": {"type": "string", "minLength": 1, "maxLength": TASK_REQUIREMENT_LIMIT},
+                       "expected_version": _INT}, ["task_id", "requirement"], closed=True),
               _object({"task_id": _STR, "version": _INT, "requirement": _STR}), risk="write", confirms=True),
 )
 
@@ -96,6 +99,9 @@ async def run(server, operation, arguments, principal, headers):
         return await projects.edit_requirement(
             arguments["task_id"], arguments, task_router=server._task_router, bus=server._supervisor.bus,
             source=server._web_adapter._address, via=f"client:{principal.client_name or 'operator'}")
+    except task_changes.RequirementChanged as exc:
+        raise OpError(ErrorCode.REQUIREMENT_CHANGED, str(exc),
+                      details={"current_version": exc.current_version}) from None
     except projects.RequestError as exc:
         code = next((code for code, status in STATUS.items() if status == exc.status), ErrorCode.INVALID)
         raise OpError(code, str(exc)) from None

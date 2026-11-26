@@ -735,7 +735,7 @@ def _policies(headers: dict[str, str]) -> None:
     assert headers["cache-control"] == "no-store"
     assert headers["referrer-policy"] == "same-origin"  # no-referrer would send Origin: null
     assert headers["content-security-policy"] == (
-        "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'")
+        "default-src 'none'; manifest-src 'self'; img-src 'self'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'")
 
 
 async def _password_login(server: AgentHTTPServer, user: str = USER, password: str = PASSWORD,

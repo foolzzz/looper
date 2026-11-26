@@ -108,6 +108,8 @@ def test_overview_keeps_running_waiting_spend_health_and_fleet(tmp_path, monkeyp
     (["system", "overview"], "/api/v1/system/overview", {}),
     (["tasks", "requirement-update", "--task-id", "task-a", "--requirement", "Build demo"],
      "/api/v1/tasks/requirement_update", {"task_id": "task-a", "requirement": "Build demo"}),
+    (["tasks", "requirement-update", "--task-id", "task-a", "--requirement", "Build demo", "--expected-version", "2"],
+     "/api/v1/tasks/requirement_update", {"task_id": "task-a", "requirement": "Build demo", "expected_version": 2}),
 ])
 def test_generated_cli_builds_new_ordinary_requests(arguments, path, body):
     args = loopercli.build_parser(api_v1.document()).parse_args(arguments)

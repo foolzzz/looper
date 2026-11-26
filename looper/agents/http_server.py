@@ -64,6 +64,9 @@ logger = logging.getLogger(__name__)
 API_SLOW_SECONDS = 2.0
 API_SUMMARY_SECONDS = 600
 API_LATENCY_SAMPLES = 20_000
+# Leave most of serve's 15-second shutdown deadline for agents and the database.
+HTTP_SHUTDOWN_GRACE_SECONDS = 1.0
+HTTP_SHUTDOWN_CLEANUP_SECONDS = 1.0
 _PACKAGE_ROOT = Path(__file__).resolve().parents[1]
 
 
@@ -146,7 +149,7 @@ HTTP_503 = "503 Service Unavailable"
 # which the same-origin check refuses. Nothing leaves for another site either way.
 SIGN_IN_HEADERS = {
     "Cache-Control": "no-store", "Referrer-Policy": "same-origin",
-    "Content-Security-Policy": "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'",
+    "Content-Security-Policy": "default-src 'none'; manifest-src 'self'; img-src 'self'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'",
 }
 
 V1_HEADERS = {"Cache-Control": "no-store"}
@@ -288,6 +291,7 @@ class AgentHTTPServer:
         # Configuration files uploaded for import, waiting to be applied (under the runtime root).
         self._config_imports = config_imports.ConfigImports(runtime_root) if runtime_root else None
         self._server: asyncio.Server | None = None
+        self._handlers: dict[asyncio.Task, asyncio.StreamWriter] = {}
         self._address_publication: Publication | None = None
         self._components: components.Manifest | None = None
 
@@ -379,6 +383,22 @@ class AgentHTTPServer:
             self._summary_task = None
         if self._server:
             self._server.close()
+        handlers = dict(self._handlers)
+        if handlers:
+            _, pending = await asyncio.wait(handlers, timeout=HTTP_SHUTDOWN_GRACE_SECONDS)
+            if pending:
+                logger.warning("HTTP shutdown grace expired; aborting %d HTTP connection(s)", len(pending))
+                for task in pending:
+                    # close()/wait_closed() can wait forever for a peer that never reads.
+                    handlers[task].transport.abort()
+                    task.cancel()
+                _, pending = await asyncio.wait(pending, timeout=HTTP_SHUTDOWN_CLEANUP_SECONDS)
+                if pending:
+                    logger.warning("HTTP shutdown cleanup expired; cancelling %d handler(s)", len(pending))
+                    for task in pending:
+                        task.cancel()
+        if self._server:
+            # Python 3.12.1+ waits for active connections as well as the listener.
             await self._server.wait_closed()
             self._server = None
             logger.info("HTTP server stopped")
@@ -393,6 +413,8 @@ class AgentHTTPServer:
         reader: asyncio.StreamReader,
         writer: asyncio.StreamWriter,
     ) -> None:
+        connection_task = asyncio.current_task()
+        self._handlers[connection_task] = writer
         peer = writer.get_extra_info("peername")
         peer_host = peer[0] if peer else None
         sign_in_headers = None
@@ -566,6 +588,8 @@ class AgentHTTPServer:
                 await writer.wait_closed()
             except Exception:
                 pass
+            finally:
+                self._handlers.pop(connection_task, None)
 
     async def _client_principal(self, headers: Mapping[str, str], peer_host: str | None) -> api_v1.Principal | None:
         """Who calls ``/api/v1``: the operator, an API client (a local, direct caller with an ``lpc_`` bearer token),
@@ -1694,6 +1718,7 @@ class AgentHTTPServer:
                 "or open the dashboard there.</p>" if not unusable else "")
         page = ("<!doctype html><html lang=\"en\"><meta charset=\"utf-8\">"
                 "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\"><title>Looper</title>"
+                "<link rel=\"manifest\" href=\"/manifest.webmanifest\"><meta name=\"theme-color\" content=\"#0a0a0f\">"
                 "<style>:root{color-scheme:light dark;font:16px system-ui;background:#f4f5f7;color:#202124}"
                 "body{max-width:24rem;margin:12vh auto;padding:2rem}form,label{display:grid;gap:.6rem}"
                 "form{gap:1.2rem}input,button{font:inherit;padding:.7rem;border:1px solid #888;border-radius:.4rem}"
@@ -1794,7 +1819,7 @@ class AgentHTTPServer:
         try:
             resolved = file_path.resolve()
             static_resolved = self._static_dir.resolve()
-            if not str(resolved).startswith(str(static_resolved)):
+            if not resolved.is_relative_to(static_resolved):
                 writer.write(_json_response(HTTP_404, {"error": "not found"}))
                 await writer.drain()
                 return
@@ -1809,7 +1834,9 @@ class AgentHTTPServer:
             await self._login_page(writer)
             return
 
-        content_type, _ = mimetypes.guess_type(str(file_path))
+        # Keep the manifest MIME type consistent across host MIME databases.
+        content_type = ("application/manifest+json" if file_path.suffix == ".webmanifest"
+                        else mimetypes.guess_type(str(file_path))[0])
         if content_type is None:
             content_type = "application/octet-stream"
 
