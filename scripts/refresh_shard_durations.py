@@ -19,8 +19,8 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 
 def _read_durations(directory: Path) -> dict[str, float]:
     durations: dict[str, float] = defaultdict(float)
-    for shard in range(1, 7):
-        report = directory / f"agent-shard-junit-{shard}-of-6/agent-shard-junit.xml"
+    for shard in range(1, 9):
+        report = directory / f"agent-shard-junit-{shard}-of-8/agent-shard-junit.xml"
         cases = list(ET.parse(report).iter("testcase"))
         if not cases:
             raise ValueError(f"No test cases in {report.name} for shard {shard}")

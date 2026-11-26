@@ -182,19 +182,81 @@ def _load_shard_durations(path: Path) -> dict[str, float]:
         raise pytest.UsageError(f"Cannot load shard durations from {path}: {exc}") from exc
 
 
-def _assign_test_shards(counts: dict[str, int], durations: dict[str, float], total: int) -> dict[str, int]:
-    rates = [durations[path] / count for path, count in counts.items() if path in durations]
+# A file heavier than this is split into consecutive chunks so one file cannot
+# fill a shard. 300s sits above every other file in the duration table. The
+# shard replay clears its headroom bars at the smallest shard count with this
+# split; leaving the heavy file in only two chunks does not. A file at or under
+# this weight stays one unit.
+HEAVY_FILE_SPLIT_SECONDS = 300.0
+
+
+def _item_weights(counts: dict[str, int], durations: dict[str, float]) -> dict[str, float]:
+    rates = [durations[path] / count for path, count in counts.items() if path in durations and count]
     # A selection containing only new files has no measured item counts; estimate one item per recorded file.
     seconds_per_item = median(rates) if rates else median(durations.values())
-    weights = {path: durations.get(path, count * seconds_per_item) for path, count in counts.items()}
+    return {path: durations.get(path, count * seconds_per_item) for path, count in counts.items()}
+
+
+def _chunk_count(weight: float, count: int, threshold: float) -> int:
+    """How many consecutive chunks a file becomes. One, when it is at or under the threshold."""
+    if count <= 1 or weight <= threshold:
+        return 1
+    return min(count, math.ceil(weight / threshold))
+
+
+def _chunk_spans(count: int, chunks: int) -> list[tuple[int, int]]:
+    """Half-open item indexes in collection order. Chunks differ in length by at most one."""
+    return [(index * count // chunks, (index + 1) * count // chunks) for index in range(chunks)]
+
+
+def _file_spans(
+    counts: dict[str, int], durations: dict[str, float], threshold: float = HEAVY_FILE_SPLIT_SECONDS,
+) -> dict[str, list[tuple[int, int]]]:
+    weights = _item_weights(counts, durations)
+    return {
+        path: _chunk_spans(count, _chunk_count(weights[path], count, threshold))
+        for path, count in counts.items()
+    }
+
+
+def _assign_shard_units(
+    counts: dict[str, int],
+    durations: dict[str, float],
+    total: int,
+    threshold: float = HEAVY_FILE_SPLIT_SECONDS,
+) -> dict[tuple[str, int], int]:
+    """Map ``(path, chunk index)`` to a 1-based shard.
+
+    A file heavier than ``threshold`` becomes ``ceil(weight / threshold)`` consecutive
+    chunks of its collected items (never more chunks than items). Each chunk weighs
+    the file weight times that chunk's share of the items. Every other file is one
+    chunk. Largest chunks are placed first. Equal weights break ties by path, then
+    chunk index, then the lower shard index, so every worker selects the same node ids.
+    """
+    weights = _item_weights(counts, durations)
+    units: list[tuple[tuple[str, int], float]] = []
+    for path, count in counts.items():
+        weight = weights[path]
+        chunks = _chunk_count(weight, count, threshold)
+        if chunks == 1:
+            units.append(((path, 0), weight))
+            continue
+        for index, (start, end) in enumerate(_chunk_spans(count, chunks)):
+            units.append(((path, index), weight * (end - start) / count))
     loads = [0.0] * total
-    assigned = {}
-    # Largest files first, with stable ties so every xdist worker collects the same node IDs.
-    for path in sorted(weights, key=lambda path: (-weights[path], path)):
+    assigned: dict[tuple[str, int], int] = {}
+    # Largest chunks first. The key (path, chunk index) makes ties identical on every worker.
+    for key, weight in sorted(units, key=lambda item: (-item[1], item[0])):
         group = min(range(total), key=loads.__getitem__)
-        assigned[path] = group + 1
-        loads[group] += weights[path]
+        assigned[key] = group + 1
+        loads[group] += weight
     return assigned
+
+
+def _assign_test_shards(counts: dict[str, int], durations: dict[str, float], total: int) -> dict[str, int]:
+    """Whole-file assignment, for callers that pass only files at or under the split threshold."""
+    assigned = _assign_shard_units(counts, durations, total, threshold=math.inf)
+    return {path: shard for (path, _index), shard in assigned.items()}
 
 
 @pytest.hookimpl(trylast=True)
@@ -202,12 +264,18 @@ def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item
     if _TEST_SHARD not in config.stash:
         return
     shard, total = config.stash[_TEST_SHARD]
-    counts = Counter(item.path.relative_to(config.rootpath).as_posix() for item in items)
-    assigned = _assign_test_shards(counts, config.stash[_SHARD_DURATIONS], total)
+    paths = [item.path.relative_to(config.rootpath).as_posix() for item in items]
+    counts = Counter(paths)
+    durations = config.stash[_SHARD_DURATIONS]
+    assigned = _assign_shard_units(counts, durations, total)
+    spans = _file_spans(counts, durations)
+    seen: Counter[str] = Counter()
     selected, deselected = [], []
-    for item in items:
-        path = item.path.relative_to(config.rootpath).as_posix()
-        (selected if assigned[path] == shard else deselected).append(item)
+    for item, path in zip(items, paths):
+        index = seen[path]
+        seen[path] += 1
+        chunk = next(number for number, (start, end) in enumerate(spans[path]) if start <= index < end)
+        (selected if assigned[(path, chunk)] == shard else deselected).append(item)
     items[:] = selected
     config.hook.pytest_deselected(items=deselected)
 
