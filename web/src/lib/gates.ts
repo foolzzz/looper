@@ -34,9 +34,14 @@ export const gateTurn = (gate: Pick<UserGate, "state" | "waiting_on">, active: b
   gate.state === "discussing" ? gateWaitsOn(gate, active) : null;
 
 /** How a gate reads: by its state, but a discussing one by whose turn it is. */
-export function gateLook(gate: Pick<UserGate, "state" | "waiting_on">, active: boolean): GateLook {
+export function gateLook(gate: Pick<UserGate, "state" | "waiting_on">, active: boolean, language?: "zh-CN"): GateLook {
   const turn = gateTurn(gate, active);
-  return turn ? GATE_TURNS[turn] : GATE_STATES[gate.state];
+  const look = turn ? GATE_TURNS[turn] : GATE_STATES[gate.state];
+  if (language !== "zh-CN") return look;
+  const states: Record<GateState, string> = {
+    pending: "尚未开启", open: "等你回复", discussing: "讨论中", passed: "已通过", cancelled: "已取消", skipped: "已跳过",
+  };
+  return { ...look, label: turn === "planner" ? "规划助手回复中" : turn === "user" ? "等你回复" : states[gate.state] };
 }
 
 /** A gate that waits for the user: open, or discussing. */
@@ -53,10 +58,18 @@ export const gateAnchor = (step: string) => `gate-${step}`;
 export const stepAnchor = (stepId: string) => `step-${stepId}`;
 
 /** How long since `iso`, for people: 45 s, 12 min, 2 h 5 min, 3 d 4 h. */
-export function sinceText(iso: string | null): string {
+export function sinceText(iso: string | null, language?: "zh-CN"): string {
   if (!iso) return "";
   const seconds = Math.max(0, Math.floor((Date.now() - new Date(iso).getTime()) / 1000));
   if (!Number.isFinite(seconds)) return "";
+  if (language === "zh-CN") {
+    if (seconds < 60) return `${seconds} 秒`;
+    const minutes = Math.floor(seconds / 60);
+    if (minutes < 60) return `${minutes} 分钟`;
+    const hours = Math.floor(minutes / 60);
+    if (hours < 24) return `${hours} 小时${minutes % 60 ? ` ${minutes % 60} 分钟` : ""}`;
+    return `${Math.floor(hours / 24)} 天${hours % 24 ? ` ${hours % 24} 小时` : ""}`;
+  }
   if (seconds < 60) return `${seconds} s`;
   const minutes = Math.floor(seconds / 60);
   if (minutes < 60) return `${minutes} min`;
@@ -72,13 +85,15 @@ export const POST_ERROR_SHOWN_CHARS = 200;
  * with the latest reason (`failure`, clipped; the whole reason in `error`). null when they go to no chat. */
 export function gatePostsText(
   posts: GateChannelPosts | null,
+  language?: "zh-CN",
 ): { where: string; failure: string | null; error: string } | null {
   if (!posts) return null;
-  const where = `Also in ${posts.target}`;
+  const where = language === "zh-CN" ? `同时发送到 ${posts.target}` : `Also in ${posts.target}`;
   if (posts.failed <= 0) return { where, failure: null, error: "" };
   const channel = channelLabel(posts.channel);
   const error = posts.last_error?.trim() ?? "";
   const shown = error.length > POST_ERROR_SHOWN_CHARS ? `${error.slice(0, POST_ERROR_SHOWN_CHARS)}…` : error;
+  if (language === "zh-CN") return { where, failure: `${posts.failed} 条消息未能发送到 ${channel}${shown ? `：${shown}` : "。"}`, error };
   const count = posts.failed === 1 ? "1 message" : `${posts.failed} messages`;
   return { where, failure: `${count} could not be sent to ${channel}${shown ? `: ${shown}` : "."}`, error };
 }

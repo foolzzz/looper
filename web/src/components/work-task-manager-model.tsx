@@ -66,7 +66,7 @@ function sourceLabel(source: string): string {
 
 function blockReason(choice: TaskManagerChoice): string | null {
   if (typeof choice.problem === "string" && choice.problem) return choice.problem;
-  if (choice.compatible === false) return "此 Profile 与任务管家不兼容";
+  if (choice.compatible === false) return "此配置与任务管家不兼容";
   return null;
 }
 
@@ -183,14 +183,15 @@ export function WorkTaskManagerModel(props: Props) {
   const effective = snapshot?.effective;
   const draftDiffers = !!effective && requested !== effective.profile_id;
 
+  if (!snapshot) return null;
+
   return (
     <section aria-label="任务管家模型" className="space-y-3 border-b border-border p-4">
       <h2 className="text-sm font-semibold">任务管家模型</h2>
-      {!snapshot && <p role="status">此服务器尚不支持任务模型切换</p>}
       {snapshot && snapshot.choices.length === 0 && <p className="text-sm">没有可用的任务管家模型</p>}
       {snapshot && snapshot.choices.length > 0 && (
         <fieldset disabled={writesLocked} className="min-w-0 space-y-2 border-0 p-0">
-          <legend className="sr-only">任务管家 Profile</legend>
+          <legend className="sr-only">任务管家配置</legend>
           {snapshot.inherit && (
             <label data-choice="inherit" className="block rounded-md border border-border p-3 text-sm pointer-coarse:min-h-11 has-[:focus-visible]:ring-2 has-[:focus-visible]:ring-ring">
               <span className="flex items-center gap-2">
@@ -227,7 +228,7 @@ export function WorkTaskManagerModel(props: Props) {
                     <span className="block">来源 {sourceLabel(choice.source)}</span>
                     <span className="block">模型 {choice.model}</span>
                     <span className="block">运行时 {choice.runtime}</span>
-                    <span className="block">Provider {choice.provider}</span>
+                    <span className="block">提供商 {choice.provider}</span>
                     {reason && <span className="block text-destructive">{reason}</span>}
                   </span>
                 </span>
@@ -238,10 +239,10 @@ export function WorkTaskManagerModel(props: Props) {
       )}
       {effective && (
         <div className="space-y-1 text-sm [overflow-wrap:anywhere]">
-          <p>Profile <span data-field="profile-id">{effective.profile_id}</span></p>
+          <p>配置 <span data-field="profile-id">{effective.profile_id}</span></p>
           <p>模型 <span data-field="model">{effective.model}</span></p>
           <p>运行时 <span data-field="runtime">{effective.runtime}</span></p>
-          <p>Provider <span data-field="provider">{effective.provider}</span></p>
+          <p>提供商 <span data-field="provider">{effective.provider}</span></p>
           <p>来源 <span data-field="source">{sourceLabel(effective.source)}</span></p>
         </div>
       )}
@@ -261,7 +262,7 @@ export function WorkTaskManagerModel(props: Props) {
           <Button type="button" variant="outline" onClick={reread} disabled={pending !== null}>重新读取</Button>
         </div>
       )}
-      {outcome?.kind === "mismatch" && <p role="alert" className="text-sm text-destructive">读回的 Profile 是 {outcome.readId}</p>}
+      {outcome?.kind === "mismatch" && <p role="alert" className="text-sm text-destructive">读回的配置是 {outcome.readId}</p>}
       {outcome?.kind === "success" && <p role="status">已按读回更新</p>}
     </section>
   );
