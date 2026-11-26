@@ -29,7 +29,7 @@ from tests.test_operator_auth import TOKEN, _request
 PREFIX = "/api/v1/operator_chat/"
 # Stripped OpenAPI document after the task-manager branches and main: the task target and the two
 # stream events are removed, and this hash is what remains.
-PRE_CARD_DOCUMENT = "f0c17bf7a7dd86b154a73ce200238626bfb8579c1512ff9242965312880d0dd3"
+PRE_CARD_DOCUMENT = "895aa870b2bd775afd6a1241dd5896ccab78902a3732a42d09ab2f5a19565375"
 LATER = "这个命令要等「交给后台」上线后才能用"
 
 
