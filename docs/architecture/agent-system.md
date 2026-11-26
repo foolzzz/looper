@@ -863,13 +863,41 @@ and key or CLI version, and increment a reason/phase/version counter visible in
 
 `tasks.managers.max_resident` defaults to 6 (1–20). Admission can reclaim the least
 recently used idle process; a 60-second ticker reclaims processes idle for 30
-minutes, measured from the end of the last turn. Admission, including preparation,
-shares the pool gate; all-busy messages queue visibly, and an active turn prevents
-starting the task in the background. Shutdown stops owned processes; deleting a
-task forgets its resident and session. This foundation provides the scheduling and
-native-turn primitive, with no conversation transport or task-bound MCP tools.
-Session persistence, per-task profile switching and turn accounting belong to the
-stacked turn implementation.
+minutes, measured from the last turn ending. All preparation shares the admission
+gate. A busy turn prevents background start. Closing and shutdown detach queued
+requests under that gate, then join interrupted drivers outside it. Deleting a
+task forgets its resident and session. Messages for a busy task queue in FIFO order; when every resident is busy,
+the oldest eligible waiting message gets the next slot. Each turn rechecks the
+work-mode switch and the shared task budget. Unknown model cost emits a warning;
+a cost-read failure records `budget_unverifiable` and allows the turn; a reached
+cap refuses only that turn without changing task status. A running task
+Manager prevents starting that task's background execution.
+
+Turns stream text and bounded code-generated tool summaries to a sink and record
+their task-attributed usage in `llm_records`. Stop uses the resident's control
+interrupt with kill fallback. Sessions and cumulative usage are saved under
+`task-manager-<task_id>` in `agent_sessions`, including the native session id as soon
+as init reports it. A changed mode, model, effort, provider, workspace or prompt
+restarts the process with the saved session. The operator-only
+`tasks.task_manager_profile_set` selects or clears this task's profile, refuses a
+busy turn with 409, and stops an idle process before the next resume. A failed resume
+retries once fresh with the caller's last 20 fenced thread messages and emits
+`session_fresh` with a bounded diagnostic. Server restart never replays a cut turn.
+Worktree turns commit pending changes with the task trailer; in-place turns list
+changed files without committing. No conversation transport or task-bound MCP
+tools are included yet.
+
+After every turn, measurements come from that turn's `llm_records` row and replace
+`agent_sessions` measurements, with unknown values stored as NULL. The shared
+`session_budget` policy uses the role's turn budget and scheduler context bound.
+Headless `/compact` runs in the same queue, session and permission mode, with a
+120-second limit and a task-attributed maintenance record. Only a confirmed
+compaction within the bound retains the session. Failure, timeout, unknown
+post-size or a rotation decision saves a fresh-session marker; the next turn,
+including after restart, emits `session_fresh(reason=context_bound)` and receives
+the task brief plus fenced thread excerpts. The work-mode metrics include
+per-record context and cost series and compaction/rotation counts by reason and
+result. Maintenance retains the turn's write exclusion.
 
 ### TaskRouter (`looper/agents/tiers/task.py`)
 
