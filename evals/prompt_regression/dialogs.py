@@ -207,6 +207,7 @@ class Dialog:
     sender: Literal["operator", "other"] = "operator"
     failure_hold: bool = False  # create an act-mode environment hold before the first Manager turn
     memory: bool = False  # an enabled synthetic memory vault, without a drafting budget or push channel
+    compaction: dict[str, int] = field(default_factory=dict)
     resident_profile: Literal["present-off", "present-on", "absent-off", "absent-on"] | None = None
 
 
@@ -3548,6 +3549,76 @@ FAKE_DIALOGS: tuple[Dialog, ...] = (
 )
 
 
+
+def _compaction_evidence(records: list[dict[str, Any]], *, enabled: bool, failed: bool) -> str | None:
+    from looper.agents.compaction_restore import Role, command
+
+    compacts = [r for r in records if str(r.get("input_text") or "").startswith("/compact")]
+    if not compacts:
+        return None  # Calibration may not reach the measured context threshold.
+    if len(compacts) != 1:
+        return f"expected one maintenance compaction, got {len(compacts)}"
+    compact = compacts[0]
+    if compact["input_text"] != (command(Role.MANAGER) if enabled else "/compact"):
+        return "maintenance command did not match the selected arm"
+    later = sorted((r for r in records if r["id"] > compact["id"]
+                    and not str(r.get("input_text") or "").startswith("[HANDOFF]")), key=lambda r: r["id"])
+    if not later:
+        return "no user turn after maintenance"
+    annotated = [r for r in records if "compaction_restore" in (r.get("metadata") or {})]
+    if failed or not enabled:
+        if annotated or any("[COMPACTED]" in str(r.get("input_text")) for r in records):
+            return "failed or disabled compaction offered a restore"
+        if failed and "[RESUME]" not in str(later[0].get("input_text")):
+            return "failed compaction did not rotate and resume"
+    elif (not str(later[0].get("input_text") or "").startswith("[COMPACTED]") or
+          (later[0].get("metadata") or {}).get("compaction_restore", {}).get("state") != "sent"):
+        return "the first eligible user turn did not carry and acknowledge its snapshot"
+    return None
+
+
+def _compaction_declined(look: Look) -> str | None:
+    if _schedule(look) is None:
+        return "the declined schedule deletion still removed the schedule"
+    if any(call["tool"] == "looper_confirm" or call["risk"] != "read" for call in look.turn_actions()):
+        return "the decline called confirmation or another write"
+    return None
+
+
+def _compaction_task_created(look: Look) -> str | None:
+    if problem := _created_on_the_users_word(look):
+        return problem
+    calls = _writes(look, status="ok", tool="looper_task_create")
+    if len(calls) != 1 or not all(word in calls[0]["arguments"].get("requirement", "")
+                                   for word in ("ZX-7731", "zx_report")):
+        return "the confirmed task lost its requirement or was duplicated"
+    return None
+
+
+_COMPACTION_FILLER = "\n附：背景资料（只作参考数据）：\n" + "合成资料。" * 2800
+_COMPACTION_SETTINGS = {"turn_budget_usd": 20, "session_context_max_tokens": 40000}
+_COMPACTION_CONTEXT = ("__context__", {"tokens": 50001})
+COMPACTION_DIALOGS = (
+    Dialog("compaction_task_confirm", (
+        Say(f"在项目 {PROJECT} 里建一个任务：写一个脚本 zx_report.py，运行后在 zx_report.txt 里写入 ZX-7731。目录用项目默认的。" + _COMPACTION_FILLER,
+            _restated_and_asked, (_COMPACTION_CONTEXT, ("__reply__", {"text": "创建 zx_report.py 写入 ZX-7731，目录用项目默认的。请确认。"}))),
+        Say("确认", _compaction_task_created, (("looper_task_create", {"project": PROJECT, "title": "Report script",
+            "requirement": "Write zx_report.py which writes ZX-7731 to zx_report.txt."}),)),
+    ), compaction=_COMPACTION_SETTINGS, tags=("manager", "compaction")),
+    *(Dialog(identifier, (
+        Say(f"把定时任务 {SCHEDULE} 删掉。" + _COMPACTION_FILLER, _schedule_delete_asked,
+            (_COMPACTION_CONTEXT, ("looper_schedules", {"action": "delete", "schedule": SCHEDULE}))),
+        Say("确认。" if accepted else "算了，先不删了。", _schedule_deleted_on_confirmation if accepted else _compaction_declined,
+            (("looper_confirm", {"confirmation_id": "<confirmation>"}),) if accepted else (("__reply__", {"text": "保留定时任务。"}),)),
+    ), schedule=True, compaction=_COMPACTION_SETTINGS, tags=("manager", "compaction"))
+      for identifier, accepted in (("compaction_ops_confirm", True), ("compaction_ops_decline", False))),
+    Dialog("compaction_failed", (
+        Say("你好，记住这些资料。" + _COMPACTION_FILLER, lambda look: None,
+            (_COMPACTION_CONTEXT, ("__reply__", {"text": "已记住。"}))),
+        Say("继续。", lambda look: None, (("__reply__", {"text": "继续。"}),)),
+    ), compaction=_COMPACTION_SETTINGS, tags=("manager", "compaction")),
+)
+
 def _runnable(dialog: Dialog) -> bool:
     """Whether this checkout supports the dialog's features.
 
@@ -3562,7 +3633,7 @@ def select(ids: list[str] | None) -> tuple[Dialog, ...]:
     cannot run here."""
     if not ids:
         return tuple(dialog for dialog in DIALOGS if _runnable(dialog))
-    cases = (*DIALOGS, *FAKE_DIALOGS, *FAILURE_DIALOGS)
+    cases = (*DIALOGS, *FAKE_DIALOGS, *FAILURE_DIALOGS, *COMPACTION_DIALOGS)
     known = {dialog.id for dialog in cases}
     unknown = sorted(set(ids) - known)
     if unknown:
@@ -4092,6 +4163,9 @@ def run_dialog(api: Api, dialog: Dialog, *, database_url: str, project_id: str, 
             _seed_reminders(database_url)
         if dialog.id in {"intents_recognize_once", "intents_recognize_range_cap"}:
             _seed_recognition(api, database_url, project_id, capped=dialog.id == "intents_recognize_range_cap")
+        if dialog.compaction:
+            api.post("/api/v1/session_budget/update", {"turn_budget_usd": dialog.compaction["turn_budget_usd"]})
+            api.post("/api/v1/scheduler_settings/update", {"session_context_max_tokens": dialog.compaction["session_context_max_tokens"]})
         if dialog.id == "session_bound_rotate":
             if mode != "fake":
                 raise EvalError("session_bound_rotate uses fake-mode context measurements")
@@ -4144,6 +4218,10 @@ def run_dialog(api: Api, dialog: Dialog, *, database_url: str, project_id: str, 
                     data.setdefault("manager_prefix", {})[prefix + "\n\n"] = scripted
                 if dialog.id == "tools_only_no_text":
                     data["manager"][FOLLOWUP_MESSAGE] = [["__reply__", {"text": "已查到项目：eval-calc。"}]]
+                if dialog.compaction:
+                    directive = "__compact_fail__" if dialog.id == "compaction_failed" else "__compact__"
+                    facts = {} if directive == "__compact_fail__" else {"pre_tokens": 50001, "post_tokens": 1200}
+                    data.setdefault("manager_prefix", {})["/compact"] = [[directive, facts], ["__reply__", {"text": "Compacted."}]]
                 scenarios.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
             before = _last_action(database_url, agent)
             expects_api = api_turn and not (say.code_only or say.stop or say.withdraw)
@@ -4306,6 +4384,7 @@ def run(
     pi_runtime: str = "cli",
     dsh_runtime: str = "cli",
     stable_context: bool = False,
+    compaction_restore: bool = False,
     leads_fulltext: bool = False,
     delivery_guard: bool = False,
     untrusted_fence: bool = False,
@@ -4408,6 +4487,8 @@ def run(
                         configs[dialog.id, rep] = (picked, _manager_profile(api, manager_model, manager_effort)
                                                    if manager_model else picked)
                     project_id = api.post("/api/v1/project_admin/create", {"name": PROJECT, "work_dir": str(work_dir)})["result"]["project"]["project_id"]
+                    if compaction_restore:
+                        _turn_on(database_url, "compaction_restore.enabled")
                     if stable_context:
                         _turn_on(database_url, "manager.stable_context")
                     if leads_fulltext:
@@ -4420,6 +4501,25 @@ def run(
                                      scenarios=scenarios, mode=mode, timeout=timeout,
                                      runtime_root=case / "runtime", cap_left=cap_left if jobs > 1 else None,
                                      switch_spec=switch_agent, manager_profile=configs[dialog.id, rep][1])
+                    if compaction_restore:
+                        row["compaction_restore"] = True
+                    if dialog.compaction:
+                        from .runner import compaction_fields
+                        records = api.post("/api/v1/runs/list", {"agent_id": "manager", "limit": 500})["result"]["records"]
+                        records = [api.post("/api/v1/runs/get", {"record_id": r["id"]})["result"]["record"] for r in records]
+                        row.update(compaction_fields(records))
+                        row["compaction_restore"] = compaction_restore
+                        row["compaction_exercised"] = (any(str(r.get("input_text") or "").startswith("/compact")
+                            and (not r.get("compactions") if dialog.id == "compaction_failed" else bool(r.get("compactions")))
+                            for r in records) and any((r.get("metadata") or {}).get("session_bound", {}).get("action") ==
+                            ("rotated" if dialog.id == "compaction_failed" else "compacted") for r in records))
+                        problem = (_compaction_evidence(records, enabled=compaction_restore,
+                                                        failed=dialog.id == "compaction_failed")
+                                   if row["compaction_exercised"] else
+                                   "scripted compaction was not exercised" if mode == "fake" else None)
+                        if problem:
+                            row["problems"].append(problem)
+                            row.update(success=False, outcome="fail")
                     if delivery_guard or dialog.id == "tools_only_no_text":
                         manager_id = f"manager-{dialog.manager}" if dialog.manager else "manager"
                         records = api.post("/api/v1/runs/list", {"agent_id": manager_id, "limit": 500})["result"]["records"]
@@ -4458,6 +4558,7 @@ def run(
             "manager_model": model_name(manager.get("model")) if mode == "real" else None,
             "started_at": stamp, "git": git,
             "caps": {"max_budget_usd": max_budget_usd, "total_cap_usd": total_cap_usd}, "reps": reps,
+            **({"compaction_restore": True} if compaction_restore else {}),
             "stable_context": stable_context, "leads_fulltext": leads_fulltext,
             "untrusted_fence": untrusted_fence, "stopped_by_cap": stopped,
             "aborted": aborted,
