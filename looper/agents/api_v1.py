@@ -31,12 +31,17 @@ ACCEPTED = "202 Accepted"
 STATUS: dict[ErrorCode, str] = {
     ErrorCode.INTERNAL: "500 Internal Server Error",
     ErrorCode.INVALID: "400 Bad Request",
+    ErrorCode.INVALID_CURSOR: "400 Bad Request",
+    ErrorCode.CURSOR_SESSION_MISMATCH: "400 Bad Request",
     ErrorCode.UNAUTHORIZED: "401 Unauthorized",
     ErrorCode.FORBIDDEN: "403 Forbidden",
     ErrorCode.BLOCKED: "403 Forbidden",
     ErrorCode.NOT_FOUND: "404 Not Found",
     ErrorCode.CONFLICT: "409 Conflict",
     ErrorCode.REQUIREMENT_CHANGED: "409 Conflict",
+    ErrorCode.TASK_MANAGER_OFF: "409 Conflict",
+    ErrorCode.TASK_MANAGER_BUSY: "409 Conflict",
+    ErrorCode.TASK_MANAGER_RUNTIME_UNSUPPORTED: "400 Bad Request",
     ErrorCode.EXPIRED: "410 Gone",
     ErrorCode.RATE_LIMITED: "429 Too Many Requests",
     ErrorCode.UNAVAILABLE: "503 Service Unavailable",
@@ -565,7 +570,8 @@ def _document(ops: Sequence[Operation]) -> dict[str, Any]:
                 "OpError": _object({"status": {"const": "error"}, "error": _object({
                     "code": {"$ref": "#/components/schemas/ErrorCode"}, "message": _STR, "field": _STR,
                     "details": _object({"manager_id": _STR, "state": _STR, "phase": _NULL_STR,
-                                        "method": _NULL_STR, "current_version": _INT}, [], closed=True)}, ["code", "message"])}),
+                                        "method": _NULL_STR, "current_version": _INT, "requested_runtime": _STR,
+                                        "supported": _STR}, [], closed=True)}, ["code", "message"])}),
                 "OpOk": _object({"status": {"const": "ok"}, "result": _OBJ, "notes": _array(_STR)},
                                 ["status", "result"]),
                 "OpNeedsConfirmation": _object({

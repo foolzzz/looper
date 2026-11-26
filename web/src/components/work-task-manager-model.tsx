@@ -7,6 +7,7 @@ import {
 
 const SOURCE_GLOSS: Record<string, string> = {
   builtin: "内置默认",
+  default: "内置默认",
   role: "角色配置",
   task: "本任务",
 };
@@ -41,7 +42,7 @@ export interface TaskManagerSnapshot {
 
 type Outcome =
   | { kind: "saving" }
-  | { kind: "busy" }
+  | { kind: "busy"; message: string }
   | { kind: "invalid"; message: string }
   | { kind: "failure"; message: string }
   | { kind: "uncertain" }
@@ -78,7 +79,7 @@ function viewMatches(requested: string | null, profile: TaskManagerSnapshot): bo
 
 function outcomeFrom(result: ProfileSetResult): Outcome {
   if (result.ok || result.reason === "missing") return null;
-  if (result.reason === "busy") return { kind: "busy" };
+  if (result.reason === "busy") return { kind: "busy", message: result.message };
   if (result.reason === "invalid") return { kind: "invalid", message: result.message };
   if (result.reason === "failure") return { kind: "failure", message: result.message };
   return { kind: "uncertain" };
@@ -225,10 +226,10 @@ export function WorkTaskManagerModel(props: Props) {
                   <span className="min-w-0 space-y-1 [overflow-wrap:anywhere]">
                     <span className="block font-medium">{choice.name}</span>
                     <span className="block font-mono text-xs text-muted-foreground">{choice.profile_id}</span>
-                    <span className="block">来源 {sourceLabel(choice.source)}</span>
+                    {choice.source ? <span className="block">来源 {sourceLabel(choice.source)}</span> : null}
                     <span className="block">模型 {choice.model}</span>
                     <span className="block">运行时 {choice.runtime}</span>
-                    <span className="block">提供商 {choice.provider}</span>
+                    {choice.provider ? <span className="block">提供商 {choice.provider}</span> : null}
                     {reason && <span className="block text-destructive">{reason}</span>}
                   </span>
                 </span>
@@ -253,7 +254,7 @@ export function WorkTaskManagerModel(props: Props) {
         <Button type="button" variant="outline" disabled={!submittable} onClick={save}>切换模型</Button>
       )}
       {outcome?.kind === "saving" && <p role="status">正在切换…</p>}
-      {outcome?.kind === "busy" && <p role="alert" className="text-sm text-destructive">请先停止当前回复再切换模型</p>}
+      {outcome?.kind === "busy" && <p role="alert" className="text-sm text-destructive">请先停止当前回复再切换模型 {outcome.message}</p>}
       {outcome?.kind === "invalid" && <p role="alert" className="text-sm text-destructive">{outcome.message}</p>}
       {outcome?.kind === "failure" && <p role="alert" className="text-sm text-destructive">切换失败 {outcome.message}</p>}
       {(outcome?.kind === "uncertain" || outcome?.kind === "readback-failed") && (

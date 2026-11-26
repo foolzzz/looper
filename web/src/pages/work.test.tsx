@@ -161,6 +161,8 @@ describe("Work page shell", () => {
     expect(calls.some(call => call.url.includes("tasks/changes"))).toBe(false);
     expect(host.querySelector('[aria-label="改动文件"]')).toBeNull();
     expect(host.querySelector('[aria-labelledby="work-controls-title"]')).toBeNull();
+    expect(host.querySelector('[aria-label="任务管家模型"]')).toBeNull();
+    expect(calls.some(call => call.url.includes("task_manager_profile"))).toBe(false);
     expect(calls.some(call => call.url.includes("ops/task_control") || call.url.endsWith("tasks/done"))).toBe(false);
   });
 
@@ -210,6 +212,32 @@ describe("Work page shell", () => {
     expect(host.querySelector("nav")!.textContent).not.toContain("Work");
     expect(host.querySelector('[aria-labelledby="work-cost-title"]')).toBeNull();
     expect(calls.filter(call => /\/tasks\//.test(call.url))).toEqual([]);
+  });
+
+  // The task thread needs work mode and the task Manager's own switch; every other pair keeps the Planner.
+  it.each([
+    { enabled: true, manager_answers: true, thread: "task-chat:t-b1" },
+    { enabled: true, manager_answers: false, thread: "planner-t-b1" },
+    { enabled: true, manager_answers: undefined, thread: "planner-t-b1" },
+  ])("opens $thread when work mode is $enabled and the task Manager answers $manager_answers", async ({ enabled, manager_answers, thread }) => {
+    handler = (url, method, body) => url.includes("task_conversations/get")
+      ? { status: 200, body: { status: "ok", result: { enabled, ...(manager_answers === undefined ? {} : { manager_answers }) } } }
+      : workHandler(url, method, body);
+    window.history.replaceState(null, "", "#work/task/t-b1");
+    await render(<App />);
+    const threads = calls.filter(call => call.url.includes("operator_chat/messages")).map(call => call.body.session_id);
+    expect(threads.length).toBeGreaterThan(0);
+    expect(new Set(threads)).toEqual(new Set([thread]));
+  });
+
+  it("keeps the task thread closed when the task Manager's switch is on but work mode is off", async () => {
+    handler = (url, method, body) => url.includes("task_conversations/get")
+      ? { status: 200, body: { status: "ok", result: { enabled: false, manager_answers: true } } }
+      : workHandler(url, method, body);
+    window.history.replaceState(null, "", "#work/task/t-b1");
+    await render(<App />);
+    expect(window.location.hash).toBe("#dashboard");
+    expect(calls.some(call => call.url.includes("operator_chat/messages") || call.url.includes("operator_chat/send"))).toBe(false);
   });
 
   it("selection", async () => {

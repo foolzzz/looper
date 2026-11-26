@@ -1,19 +1,127 @@
 """The ``looper`` command: ``serve`` starts the agent system, ``service`` runs it in the background, ``doctor``
-checks what it needs, ``mcp-server`` serves the Manager's platform tools, ``version`` prints the version."""
+checks what it needs, ``mcp-server`` serves the Manager's platform tools, ``version`` prints the version.
+
+The task Manager's command guard is a speed bump, not isolation: it runs as the operator's account, so it can
+read the operator's token file and call the HTTP API directly.
+"""
 
 from __future__ import annotations
 
 import argparse
 import json
+import os
 import shutil
 import sys
+from collections.abc import Mapping
+from enum import Enum
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from . import __version__
+from . import __version__, child_env
 
 if TYPE_CHECKING:
     from .ops_config import OpsConfig
+
+
+class CommandScope(str, Enum):
+    ALLOW = "allow"
+    OWN_TASK = "own_task"
+    REFUSE = "refuse"
+
+
+TASK_MANAGER_SCOPE: Mapping[tuple[str, str | None], CommandScope] = {
+    ("version", None): CommandScope.ALLOW,
+    ("profile", "show"): CommandScope.REFUSE,
+    ("claude-code", "profile"): CommandScope.REFUSE,
+    ("claude-code", "mcp"): CommandScope.REFUSE,
+    ("claude-code", "status"): CommandScope.REFUSE,
+    ("ledger", "list"): CommandScope.REFUSE,
+    ("ledger", "show"): CommandScope.REFUSE,
+    ("leads", "search"): CommandScope.REFUSE,
+    ("memory", "list"): CommandScope.REFUSE,
+    ("memory", "show"): CommandScope.REFUSE,
+    ("memory", "lessons"): CommandScope.REFUSE,
+    ("mcp-server", None): CommandScope.OWN_TASK,
+    ("serve", None): CommandScope.REFUSE,
+    ("doctor", None): CommandScope.REFUSE,
+    ("auth", "set-password"): CommandScope.REFUSE,
+    ("auth", "clear-password"): CommandScope.REFUSE,
+    ("config", "init-ops"): CommandScope.REFUSE,
+    ("service", "install"): CommandScope.REFUSE,
+    ("service", "probe"): CommandScope.REFUSE,
+    ("service", "restart"): CommandScope.REFUSE,
+    ("service", "upgrade"): CommandScope.REFUSE,
+    ("service", "status"): CommandScope.REFUSE,
+    ("service", "uninstall"): CommandScope.REFUSE,
+    ("claude-code", "install"): CommandScope.REFUSE,
+    ("claude-code", "uninstall"): CommandScope.REFUSE,
+    ("ledger", "add"): CommandScope.REFUSE,
+    ("ledger", "close"): CommandScope.REFUSE,
+    ("ledger", "confirm"): CommandScope.REFUSE,
+    ("leads", "mark"): CommandScope.REFUSE,
+    ("leads", "delete"): CommandScope.REFUSE,
+    ("leads", "eval-export"): CommandScope.REFUSE,
+    ("memory", "check"): CommandScope.REFUSE,
+    ("memory", "reject"): CommandScope.REFUSE,
+    ("memory", "retry"): CommandScope.REFUSE,
+    ("memory", "revoke"): CommandScope.REFUSE,
+    ("memory", "renew"): CommandScope.REFUSE,
+    ("memory", "delete"): CommandScope.REFUSE,
+    ("knowledge", "migrate"): CommandScope.REFUSE,
+    ("msgflow", "import"): CommandScope.REFUSE,
+    ("msgflow", "parity"): CommandScope.REFUSE,
+    ("msgflow", "delete"): CommandScope.REFUSE,
+    ("msgflow", "leads-backfill"): CommandScope.REFUSE,
+    ("msgflow", "why"): CommandScope.REFUSE,
+    ("decisions", "replay"): CommandScope.REFUSE,
+}
+
+
+def task_manager_denial(command: str, subcommand: str | None = None, *, hook: bool = False,
+                        task: str | None = None, environ: Mapping[str, str] | None = None) -> tuple[int, str] | None:
+    """The CLI and callable entries share the RFC's policy; None means continue dispatch."""
+    environ = os.environ if environ is None else environ
+    task_id = environ.get(child_env.TASK_MANAGER_ENV)
+    if not task_id:
+        return None
+    # Let the existing entry guards apply their original output and exit codes first.
+    if environ.get(child_env.AGENT_RUN_ENV) and (
+        command in {"profile", "leads", "memory", "knowledge"}
+        or command == "ledger" and subcommand in {"add", "close", "confirm"}
+        or command == "claude-code" and subcommand in {"profile", "mcp", "install", "uninstall"}
+    ):
+        return None
+    scope = TASK_MANAGER_SCOPE.get((command, subcommand), CommandScope.REFUSE)
+    if scope is CommandScope.ALLOW:
+        return None
+    if scope is CommandScope.OWN_TASK:
+        if command == "mcp-server":
+            from .agents.ops.task_manager import TOKEN_PREFIX
+
+            token = environ.get("LOOPER_AGENT_TOKEN", "").strip()
+            if token.startswith(TOKEN_PREFIX) and len(token) > len(TOKEN_PREFIX):
+                return None  # The server authenticates the token and checks its task on every call.
+            return 4, "error: looper mcp-server needs a task Manager credential; operator tokens are refused."
+        if task == task_id:
+            return None
+    if (command, subcommand) == ("profile", "show") or (
+        (command, subcommand) == ("claude-code", "profile") and hook
+    ):
+        return 0, ""
+    name = " ".join(filter(None, (command, subcommand)))
+    ownership = "only this task's" if scope is CommandScope.OWN_TASK else "the operator's own"
+    return 4, (f"error: looper {name} is {ownership}; inside a task Manager it is refused. "
+               "Run it in your own terminal.")
+
+
+def task_manager_guard(command: str, subcommand: str | None = None, *, hook: bool = False,
+                       task: str | None = None, environ: Mapping[str, str] | None = None) -> int | None:
+    if denial := task_manager_denial(command, subcommand, hook=hook, task=task, environ=environ):
+        code, message = denial
+        if message:
+            print(message, file=sys.stderr)
+        return code
+    return None
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -419,6 +527,10 @@ def main(argv: list[str] | None = None) -> int:
     argv = sys.argv[1:] if argv is None else argv
     parser = build_parser()
     args = parser.parse_args(argv)
+    subcommand = next((value for name, value in vars(args).items() if name.endswith("_command")), None)
+    if (code := task_manager_guard(args.command, subcommand, hook=getattr(args, "hook", False),
+                                   task=getattr(args, "task", None))) is not None:
+        return code
     if args.command == "version":
         payload = {"ok": True, "schema_version": "looper_version_v0", "name": "looper", "version": __version__}
         print(json.dumps(payload, indent=2) if args.format == "json" else f"looper {__version__}")

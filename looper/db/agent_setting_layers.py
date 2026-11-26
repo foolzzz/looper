@@ -19,6 +19,7 @@ only stores rows.
 from __future__ import annotations
 
 import json
+from contextlib import nullcontext
 from collections.abc import Mapping
 from typing import Any
 
@@ -185,12 +186,13 @@ async def set_task_limits(conn: asyncpg.Connection, task_id: str, limits: Mappin
 
 async def set_task_layer(task_id: str, *, profiles: Mapping[str, str | None] | None = None,
                          limits: Mapping[str, int | None] | None = None,
-                         modes: Mapping[str, str | None] | None = None, pool: asyncpg.Pool | None = None) -> None:
+                         modes: Mapping[str, str | None] | None = None,
+                         pool: asyncpg.Pool | asyncpg.Connection | None = None) -> None:
     """Change task ``task_id``'s own choices, in one transaction: its Agent Profile of each role in ``profiles``
     (role -> profile id) and its concurrency limit of each role in ``limits`` (role -> limit) and its system prompt mode of each role in ``modes`` (role -> append or replace); None drops the task's
     choice of that role. Raises ``asyncpg.ForeignKeyViolationError`` for an unknown task or profile."""
     pool = pool or get_pool()
-    async with pool.acquire() as conn, conn.transaction():
+    async with (pool.acquire() if isinstance(pool, asyncpg.Pool) else nullcontext(pool)) as conn, conn.transaction():
         for table, column, values in (("task_profile_overrides", "profile_id", profiles or {}),
                                       ("task_concurrency_limits", "max_concurrency", limits or {}),
                                       ("task_system_prompt_modes", "system_prompt_mode", modes or {})):

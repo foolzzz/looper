@@ -164,8 +164,8 @@ export async function operationExists(path: string, signal?: AbortSignal): Promi
   return !(message.startsWith("no get ") || message.includes("no operation"));
 }
 
-export async function taskConversationsGet(signal?: AbortSignal): Promise<{ enabled: boolean }> {
-  return done(await callV1<{ enabled: boolean }>("/api/v1/task_conversations/get", {}, { signal }));
+export async function taskConversationsGet(signal?: AbortSignal): Promise<{ enabled: boolean; manager_answers?: boolean }> {
+  return done(await callV1<{ enabled: boolean; manager_answers?: boolean }>("/api/v1/task_conversations/get", {}, { signal }));
 }
 
 export async function workList(

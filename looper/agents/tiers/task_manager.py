@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import inspect
 import json
 import logging
 import time
@@ -24,6 +23,7 @@ from ..run_usage import Usage
 from ..runtimes.cancel import TurnCancel
 from ..system_prompt import SystemPrompt
 from ..task_manager_brief import brief, instructions
+from ..task_commands import history_for_model
 from ..untrusted import Source, fence
 
 logger = logging.getLogger(__name__)
@@ -35,6 +35,8 @@ class TaskManagerEvent(str, Enum):
     TURN_SUMMARY = "turn_summary"
     REFUSED = "refused"
     STOPPED = "stopped"
+    MODEL_SWITCHED = "model_switched"
+    MODEL_SWITCH_REJECTED = "model_switch_rejected"
 
 
 @dataclass(frozen=True)
@@ -62,12 +64,70 @@ class RefuseReason(str, Enum):
     SHUTTING_DOWN = "shutting_down"
     REVIEW_HOOK_DISABLED = "review_hook_disabled"
     CLI_UNVERIFIED = "cli_unverified"
+    MANAGER_ANSWERS_OFF = "manager_answers_off"
+
+
+def _off_text(reason: RefuseReason) -> str:
+    if reason is RefuseReason.MANAGER_ANSWERS_OFF:
+        return task_conversations_settings.MANAGER_OFF_TEXT
+    return "Task conversations are disabled (tasks.conversations.enabled is off)."
+
+
+def _off_reason() -> RefuseReason | None:
+    """Why no task Manager may start now: work mode, or its own switch (default off), is off."""
+    if not task_conversations_settings.enabled():
+        return RefuseReason.WORK_MODE_OFF
+    if not task_conversations_settings.manager_answers():
+        return RefuseReason.MANAGER_ANSWERS_OFF
+    return None
+
+
+def _visible_history_item(item: Any) -> str:
+    if isinstance(item, str):
+        return item
+    visible = {key: value for key, value in dict(item).items() if key != "entry_kind"}
+    return json.dumps(visible, ensure_ascii=False)
+
+
+def resume_message(text: str, history: Sequence[Any]) -> str:
+    """The text a fresh or rotating turn sends. Fixed commands and their code replies are matched and left out."""
+    kept = history_for_model(history)[-20:]
+    if not kept:
+        return text
+    rendered = "\n".join(_visible_history_item(item) for item in kept)
+    return fence(rendered, source=Source.CHAT_HISTORY) + "\n\n" + text
 
 
 class Refused(Exception):
     def __init__(self, reason: RefuseReason, text: str) -> None:
         super().__init__(text)
         self.reason = reason
+
+
+class _TaskResident(ResidentClaude):
+    """Keep credentials aligned with every resident exit and every Looper-sent turn."""
+
+    def __init__(self, owner: TaskManagerAgent) -> None:
+        super().__init__(label=f"task-manager-{owner.task_id}")
+        self.owner = owner
+
+    async def run_turn(self, *args: Any, **kwargs: Any) -> Any:
+        ops, token = self.owner.pool.ops, self.owner.token
+        if ops is not None and token is not None:
+            ops.begin_turn(token)
+        try:
+            return await super().run_turn(*args, **kwargs)
+        finally:
+            if ops is not None and token is not None:
+                ops.end_turn(token)
+
+    async def stop(self, **kwargs: Any) -> None:
+        try:
+            await super().stop(**kwargs)
+        finally:
+            if self.owner.token is not None:
+                self.owner.pool.ops.revoke(self.owner.token)
+                self.owner.token = None
 
 
 @dataclass(frozen=True)
@@ -121,7 +181,8 @@ async def _files(cwd: str) -> dict[str, tuple[Any, ...]]:
 class TaskManagerAgent:
     def __init__(self, pool: TaskManagerPool, task_id: str) -> None:
         self.pool, self.task_id = pool, task_id
-        self.resident = ResidentClaude(label=f"task-manager-{task_id}")
+        self.token: str | None = None
+        self.resident = _TaskResident(self)
         self.last_used = pool.clock()
         self.busy = False
         self.session_id: str | None = None
@@ -132,8 +193,16 @@ class TaskManagerAgent:
 
     async def prepare(self, *, sink: TurnSink | None = None) -> tuple[Mapping[str, Any], Any, Launch, SystemPrompt]:
         """Read configuration afresh; no launch bypasses the direct-mode review checks."""
-        if not task_conversations_settings.enabled():
-            raise Refused(RefuseReason.WORK_MODE_OFF, "Task conversations are disabled.")
+        try:
+            return await self._prepare()
+        except BaseException:
+            if not self.resident.started:
+                await self.resident.stop(kill=True)
+            raise
+
+    async def _prepare(self) -> tuple[Mapping[str, Any], Any, Launch, SystemPrompt]:
+        if (off := _off_reason()) is not None:
+            raise Refused(off, _off_text(off))
         if self.pool.closing:
             raise Refused(RefuseReason.SHUTTING_DOWN, "The task Manager is shutting down.")
         if not self.loaded:
@@ -166,20 +235,22 @@ class TaskManagerAgent:
         direct = (tasks.interaction_mode(task["status"]) is tasks.InteractionMode.DIRECT
                   and reopened.mode is task_workspaces.ReopenMode.WRITE)
         self.mode = "direct" if direct else "orchestrated"
-        library = getattr(self.pool.ops, "library", EMPTY_LIBRARY)
-        hook = None
-        if outbound_hook.known_enabled():
-            try:
-                hook = self.pool.ops.tool_hook(self.task_id, runtime_root=self.pool.runtime_root,
-                                               claude_bin=self.pool.claude_bin) if self.pool.ops else None
-                if inspect.isawaitable(hook):
-                    hook = await hook
-            except Exception as exc:
-                raise Refused(RefuseReason.OUTBOUND_REVIEW_UNAVAILABLE, "The outbound review hook is unavailable.") from exc
-            if hook is None:
-                raise Refused(RefuseReason.OUTBOUND_REVIEW_UNAVAILABLE, "The outbound review hook is unavailable.")
-        launch = Launch(settings=settings, library=library, role=None,
-                        access=Access.FULL if direct else Access.READ_ONLY, tool_hook=hook)
+        async def configure() -> Launch:
+            library, hook = EMPTY_LIBRARY, None
+            if self.pool.ops is not None:
+                if self.token is None:
+                    self.token = self.pool.ops.issue(self.task_id)
+                library = await self.pool.ops.library_with_server(library, self.pool.runtime_root, self.token)
+            if outbound_hook.known_enabled():
+                try:
+                    hook = (self.pool.ops.tool_hook(self.token, self.task_id, self.pool.runtime_root,
+                                                   self.pool.claude_bin, library) if self.pool.ops else None)
+                except Exception as exc:
+                    raise Refused(RefuseReason.OUTBOUND_REVIEW_UNAVAILABLE, "The outbound review hook is unavailable.") from exc
+                if hook is None:
+                    raise Refused(RefuseReason.OUTBOUND_REVIEW_UNAVAILABLE, "The outbound review hook is unavailable.")
+            return Launch(settings=settings, library=library, role=None,
+                          access=Access.FULL if direct else Access.READ_ONLY, tool_hook=hook)
         # Query newest summaries directly, so a long-lived task never gets its oldest activity as its brief.
         from ...db.connection import get_pool
         recent = await get_pool().fetch("SELECT summary FROM activity WHERE task_id=$1 ORDER BY seq DESC LIMIT 20",
@@ -188,11 +259,16 @@ class TaskManagerAgent:
                                                                     reopened=reopened))
         root = self.pool.runtime_root / "task-managers" / self.task_id
         prompt_file = prompt.write_file(root)
+        launch = await configure()
         executable = launch.executable(self.pool.claude_bin)
-        command = (launch.runtime.operator_resident_command(executable, cwd=reopened.work_dir, prompt_file=prompt_file,
-                                                            launch=launch, settings_dir=root / "settings")
-                   if direct else launch.runtime.resident_command(executable, cwd=reopened.work_dir,
-                                                                  prompt_file=prompt_file, launch=launch))
+
+        def command_for(launch: Launch) -> list[str]:
+            return (launch.runtime.operator_resident_command(executable, cwd=reopened.work_dir, prompt_file=prompt_file,
+                                                             launch=launch, settings_dir=root / "settings")
+                    if direct else launch.runtime.resident_command(executable, cwd=reopened.work_dir,
+                                                                   prompt_file=prompt_file, launch=launch))
+
+        command = command_for(launch)
         env = task_manager_safety.environment(launch, self.task_id)
         settings_file = command[command.index("--settings") + 1] if "--settings" in command else ""
         signature = (self.mode, reopened.work_dir, launch.profile.id, launch.model, launch.effort, launch.profile.provider, prompt.sha256, settings_file)
@@ -202,20 +278,24 @@ class TaskManagerAgent:
                 if self.pool.closing:
                     raise Refused(RefuseReason.SHUTTING_DOWN, "The task Manager is shutting down.")
                 if sink is not None and not notified:
-                    await sink.event(TaskManagerEvent.QUEUED, {"reason": "cap", "position": 1})
+                    await sink.event(TaskManagerEvent.QUEUED, {"reason": "cap", "position": 1,
+                                                              "active": self.pool.working_count()})
                     notified = True
                 await self.pool._available.wait()
             if self.pool.closing:
                 raise Refused(RefuseReason.SHUTTING_DOWN, "The task Manager is shutting down.")
             restarting = not self.resident.started or self.resident.stale(signature)
             if restarting:
+                await self.resident.stop()
+                launch = await configure()
+                command = command_for(launch)
+                env = task_manager_safety.environment(launch, self.task_id)
                 if direct:
                     problem = await task_manager_safety.gate(executable, cwd=reopened.work_dir, environment=launch.runtime.environment(launch),
                         phase="resume" if self.session_id else "launch", settings_file=Path(settings_file))
                     if problem is not None:
                         await self.resident.stop(kill=True)
                         raise Refused(RefuseReason(problem.reason.value), problem.notice)
-                await self.resident.stop()
                 if self.session_id:
                     command += ["--resume", self.session_id]
                 await self.resident.start(command, cwd=reopened.work_dir, signature=signature, env=env,
@@ -295,9 +375,7 @@ class TaskManagerAgent:
 
                 message = request.text
                 if (attempt or rotating) and request.history:
-                    history = "\n".join(item if isinstance(item, str) else json.dumps(dict(item), ensure_ascii=False)
-                                        for item in request.history[-20:])
-                    message = fence(history, source=Source.CHAT_HISTORY) + "\n\n" + message
+                    message = resume_message(request.text, request.history)
                 retry_detail = ""
                 async with ClaudeRunRecorder(agent_id=f"task-manager-{self.task_id}", task_id=self.task_id,
                     command=self.resident.command, cwd=reopened.work_dir, input_text=message,
@@ -381,6 +459,9 @@ class TaskManagerPool:
         agent = self.agents.get(task_id)
         return bool(agent and agent.busy)
 
+    def working_count(self) -> int:
+        return sum(agent.busy for agent in self.agents.values())
+
     async def _slot(self, agent: TaskManagerAgent) -> bool:
         """Called under the pool gate; an idle eviction never races a turn admission."""
         if agent.resident.started:
@@ -404,17 +485,19 @@ class TaskManagerPool:
         request = _Request(task_id, text, message_id, sink, history, asyncio.get_running_loop().create_future())
         async with self._lock:
             reason = (RefuseReason.SHUTTING_DOWN if self.closing or task_id in self._closing_tasks
-                      else RefuseReason.WORK_MODE_OFF if not task_conversations_settings.enabled() else None)
+                      else _off_reason())
             if reason is None:
                 self._pending.append(request)
                 await self._dispatch()
                 if request in self._pending:
                     busy = self.in_turn(task_id)
                     position = sum(r.task_id == task_id for r in self._pending) if busy else len(self._pending)
-                    await sink.event(TaskManagerEvent.QUEUED, {"reason": "turn" if busy else "cap", "position": position})
+                    await sink.event(TaskManagerEvent.QUEUED, {"reason": "turn" if busy else "cap", "position": position,
+                                                              "active": self.working_count()})
                     return Submitted("queued")
         if reason is not None:
-            await self._refuse(request, reason, "Task conversations are disabled or shutting down.")
+            await self._refuse(request, reason, "The task Manager is shutting down." if reason is RefuseReason.SHUTTING_DOWN
+                               else _off_text(reason))
             return request.admitted.result()
         return await asyncio.shield(request.admitted)
 
@@ -434,8 +517,8 @@ class TaskManagerPool:
 
     async def _drive(self, agent: TaskManagerAgent, request: _Request) -> None:
         try:
-            if not task_conversations_settings.enabled():
-                raise Refused(RefuseReason.WORK_MODE_OFF, "Task conversations are disabled.")
+            if (off := _off_reason()) is not None:
+                raise Refused(off, _off_text(off))
             await agent.turn(request)
         except Refused as exc:
             await self._refuse(request, exc.reason, str(exc))
@@ -455,6 +538,23 @@ class TaskManagerPool:
                 self._active.pop(request.task_id, None)
                 self._available.notify_all()
                 await self._dispatch()
+
+    async def stop_current(self, task_id: str) -> bool:
+        """Stop the turn running for ``task_id``. A turn that is only queued stays queued."""
+        active = self._active.get(task_id)
+        if active is None:
+            return False
+        return await self.stop_turn(task_id, active.message_id)
+
+    async def stop_by_message(self, message_id: str) -> bool:
+        """Stop the running or queued turn whose message id this is."""
+        for task_id, active in list(self._active.items()):
+            if active.message_id == message_id:
+                return await self.stop_turn(task_id, message_id)
+        queued = next((request for request in self._pending if request.message_id == message_id), None)
+        if queued is None:
+            return False
+        return await self.stop_turn(queued.task_id, message_id)
 
     async def stop_turn(self, task_id: str, message_id: str) -> bool:
         active = self._active.get(task_id)

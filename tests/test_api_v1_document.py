@@ -14,6 +14,16 @@ from looper.agents.ops.clients import CLIENT_TOOLS
 HAND = {"chat.send", "chat.messages", "chat.conversations", "confirm", "openapi", "llm_requests.export"}
 
 
+def test_operator_history_paging_is_closed_and_has_no_model_tool():
+    operation = api_v1.find("POST", "/api/v1/operator_chat/messages")
+    assert operation.operator_only and operation.tool is None
+    assert operation.request["additionalProperties"] is False
+    assert operation.result["additionalProperties"] is False
+    assert set(operation.request["properties"]) == {"session_id", "manager", "before", "limit"}
+    assert set(operation.result["properties"]) == {"messages", "has_more", "next_before", "turn_state"}
+    assert operation.result["required"] == ["messages", "has_more", "next_before"]
+
+
 @pytest.mark.parametrize("path,field,values", [
     ("attention/settings_update", "enabled", [True, False, None]),
     ("reminders_settings/update", "enabled", [True, False, None]),
@@ -231,7 +241,8 @@ def test_error_details_are_optional_and_typed():
     assert details["additionalProperties"] is False and "required" not in details
     assert details["properties"] == {"manager_id": {"type": "string"}, "state": {"type": "string"},
         "phase": {"type": ["string", "null"]}, "method": {"type": ["string", "null"]},
-        "current_version": {"type": "integer"}}
+        "current_version": {"type": "integer"},
+        "requested_runtime": {"type": "string"}, "supported": {"type": "string"}}
 
 
 def test_requirement_expected_version_is_optional_and_not_a_tool():
@@ -240,6 +251,7 @@ def test_requirement_expected_version_is_optional_and_not_a_tool():
     assert operation.request["required"] == ["task_id", "requirement"]
     assert operation.request["properties"]["expected_version"] == {"type": "integer"}
     assert api_v1.STATUS[ErrorCode.REQUIREMENT_CHANGED] == "409 Conflict"
+    assert api_v1.STATUS[ErrorCode.TASK_MANAGER_OFF] == "409 Conflict"
 
 
 def test_acceptance_permission_has_only_operator_operations():

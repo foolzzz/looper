@@ -12,6 +12,22 @@ from tests.db_support import run_db, until
 from tests.task_manager_support import NativeTaskManager, Sink, submit_and_wait
 
 
+def test_queued_active_counts_working_managers_not_residents(monkeypatch, tmp_path):
+    native = NativeTaskManager(monkeypatch, tmp_path)
+    async def check(db):
+        task_id, _, _ = await native.create(db)
+        pool = tm.TaskManagerPool(tmp_path / "runtime", native.executable, max_resident=lambda: 1)
+        # Admission can wait for an occupied resident even when no Manager has a turn.
+        monkeypatch.setattr(pool, "_slot", AsyncMock(return_value=False))
+        try:
+            sink = Sink()
+            assert (await pool.submit(task_id, "reply", message_id="queued", sink=sink)).state == "queued"
+            assert sink.events == [("queued", {"reason": "cap", "position": 1, "active": 0})]
+        finally:
+            await pool.shutdown()
+    run_db(check, monkeypatch)
+
+
 def test_prepare_obeys_cap_and_reclaims_lru(monkeypatch, tmp_path):
     native = NativeTaskManager(monkeypatch, tmp_path)
     async def check(db):
@@ -69,9 +85,9 @@ def test_real_turn_busy_queue_and_write_exclusion(monkeypatch, tmp_path):
             assert error.value.status.startswith("409")
             bus.publish.assert_not_awaited()
             assert (await pool.submit(task_id, "second", message_id="second", sink=second)).state == "queued"
-            assert ("queued", {"reason": "turn", "position": 1}) in second.events
+            assert ("queued", {"reason": "turn", "position": 1, "active": 1}) in second.events
             assert (await pool.submit(other, "third", message_id="third", sink=third)).state == "queued"
-            assert ("queued", {"reason": "cap", "position": 2}) in third.events
+            assert ("queued", {"reason": "cap", "position": 2, "active": 1}) in third.events
             assert await pool.stop_turn(task_id, "first")
             await second.done()
             await third.done()

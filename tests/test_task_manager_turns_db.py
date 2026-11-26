@@ -26,7 +26,7 @@ def native(monkeypatch, tmp_path):
     return NativeTaskManager(monkeypatch, tmp_path)
 
 
-@pytest.mark.parametrize("reason", ["work_mode_off", "runtime_unsupported", "budget", "outbound_review_unavailable", "workspace", "shutting_down", "review_hook_disabled", "cli_unverified"])
+@pytest.mark.parametrize("reason", ["work_mode_off", "manager_answers_off", "runtime_unsupported", "budget", "outbound_review_unavailable", "workspace", "shutting_down", "review_hook_disabled", "cli_unverified"])
 def test_refusals_start_no_process_and_keep_status(monkeypatch, tmp_path, native, reason):
     async def check(db):
         task_id, project_id, _ = await native.create(db)
@@ -34,6 +34,8 @@ def test_refusals_start_no_process_and_keep_status(monkeypatch, tmp_path, native
         try:
             if reason == "work_mode_off":
                 monkeypatch.setattr(task_conversations_settings, "_enabled", False)
+            elif reason == "manager_answers_off":
+                monkeypatch.setattr(task_conversations_settings, "_manager_answers", False)
             elif reason == "runtime_unsupported":
                 profile = native.settings.profile
                 native.settings = replace(native.settings, profile=replace(profile,
@@ -58,7 +60,12 @@ def test_refusals_start_no_process_and_keep_status(monkeypatch, tmp_path, native
             await sink.done()
             assert ("refused", {"reason": result.reason}) in sink.events
             assert native.records("launch") == []
+            if reason in ("work_mode_off", "manager_answers_off"):
+                assert await db.fetchval("SELECT count(*) FROM agent_sessions WHERE agent_id LIKE 'task-manager-%'") == 0
+                assert not pool.agent(task_id).resident.started
             assert (await tasks.get_task(task_id, pool=db))["status"] == "draft"
+            if reason == "manager_answers_off":
+                assert "tasks.conversations.manager_answers" in sink.finals[0][0] and "task_conversations.update" in sink.finals[0][0]
             if reason == "runtime_unsupported":
                 assert native.settings.profile.name in sink.finals[0][0] and "Claude Code" in sink.finals[0][0]
             if reason == "budget":
@@ -129,7 +136,7 @@ def test_fifo_stop_then_next_turn_and_start_exclusion(monkeypatch, tmp_path, nat
             bus.publish.assert_not_awaited()
             result = await pool.submit(task_id, "second", message_id="two", sink=second)
             assert result.state == "queued"
-            assert ("queued", {"reason": "turn", "position": 1}) in second.events
+            assert ("queued", {"reason": "turn", "position": 1, "active": 1}) in second.events
             canceled = Sink()
             assert (await pool.submit(task_id, "never written", message_id="three", sink=canceled)).state == "queued"
             assert await stop(pool, task_id, "three")
@@ -184,7 +191,7 @@ def test_busy_cap_queue_uses_freed_slot(monkeypatch, tmp_path, native):
                 result = await pool.submit(task_id, "wait" if index < 2 else "reply", message_id=str(index), sink=sinks[index])
                 assert result.state == ("started" if index < 2 else "queued")
             await until(lambda: len(native.records("input")) == 2)
-            assert any(kind == "queued" and payload["reason"] == "cap" for kind, payload in sinks[2].events)
+            assert ("queued", {"reason": "cap", "position": 1, "active": 2}) in sinks[2].events
             assert await stop(pool, "task-0", "0")
             await sinks[2].done()
             await sinks[3].done()

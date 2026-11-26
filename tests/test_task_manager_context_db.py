@@ -7,7 +7,9 @@ from unittest.mock import AsyncMock
 import pytest
 
 from looper.agents import projects as project_service, scheduler_settings, task_manager_settings
+from looper.agents.api_v1 import STATUS
 from looper.agents.message import channel_address
+from looper.agents.ops import ErrorCode, OpError
 from looper.agents.tiers import task_manager as tm
 from looper.db import agent_sessions
 from tests.db_support import run_db, until, v1_api
@@ -91,16 +93,18 @@ def test_maintenance_holds_turn_lease_and_queues_the_next_input(monkeypatch, tmp
             await until(lambda: any(row["text"] == "/compact" for row in native.records("input")))
             assert pool.in_turn(task_id)
             assert (await pool.submit(task_id, "second", message_id="second", sink=second)).state == "queued"
-            assert ("queued", {"reason": "turn", "position": 1}) in second.events
+            assert ("queued", {"reason": "turn", "position": 1, "active": 1}) in second.events
             assert [row["text"] for row in native.records("input")] == ["reply", "/compact"]
             bus = SimpleNamespace(publish=AsyncMock())
             with pytest.raises(project_service.RequestError) as start_error:
                 await project_service.start_ready_task(task_id, bus, channel_address("web"), pool=db)
             assert start_error.value.status.startswith("409")
             bus.publish.assert_not_awaited()
-            with pytest.raises(project_service.RequestError) as profile_error:
+            with pytest.raises(OpError) as profile_error:
                 await task_manager_settings.set_task_manager_profile(task_id, None)
-            assert profile_error.value.status.startswith("409")
+            assert profile_error.value.code is ErrorCode.TASK_MANAGER_BUSY
+            assert STATUS[profile_error.value.code].startswith("409")
+            assert str(profile_error.value) == "the task Manager is working in this task: stop its turn first"
             config.write_text(json.dumps({"context_tokens": 20}))
             assert await pool.stop_turn(task_id, "first")
             await second.done()

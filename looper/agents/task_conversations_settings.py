@@ -3,9 +3,13 @@
 from ..db import system_settings as db_settings
 
 KEY = "tasks.conversations.enabled"
+MANAGER_ANSWERS_KEY = "tasks.conversations.manager_answers"
 MAX_RESIDENT_KEY = "tasks.managers.max_resident"
 DEFAULT_MAX_RESIDENT = 6
+MANAGER_OFF_TEXT = ("the task Manager does not answer: tasks.conversations.manager_answers is off. "
+                    "Turn it on with task_conversations.update (manager_answers: true).")
 _enabled = False
+_manager_answers = False
 _max_resident = DEFAULT_MAX_RESIDENT
 _UNSET = object()
 
@@ -20,10 +24,26 @@ def set_enabled(value: bool) -> None:
     _enabled = value
 
 
+def manager_answers() -> bool:
+    """Whether the task Manager answers task messages. Independent of ``enabled``; only the string ``true`` is on."""
+    return _manager_answers
+
+
+def manager_active() -> bool:
+    """Work mode and the task Manager's own switch, both on: the one test for starting or serving a task Manager."""
+    return _enabled and _manager_answers
+
+
+def set_manager_answers(value: bool) -> None:
+    global _manager_answers
+    _manager_answers = value
+
+
 async def load() -> None:
     global _max_resident
-    stored = await db_settings.get_settings([KEY, MAX_RESIDENT_KEY])
+    stored = await db_settings.get_settings([KEY, MANAGER_ANSWERS_KEY, MAX_RESIDENT_KEY])
     set_enabled(stored.get(KEY) == "true")
+    set_manager_answers(stored.get(MANAGER_ANSWERS_KEY) == "true")
     _max_resident = int(stored.get(MAX_RESIDENT_KEY, DEFAULT_MAX_RESIDENT))
     _checked_max_resident(_max_resident)
 
@@ -33,12 +53,12 @@ def max_resident() -> int:
 
 
 def view() -> dict[str, bool | int]:
-    return {"enabled": enabled(), "max_resident": max_resident()}
+    return {"enabled": enabled(), "manager_answers": manager_answers(), "max_resident": max_resident()}
 
 
-def _stored(value: bool | None) -> str | None:
+def _stored(value: bool | None, name: str = "enabled") -> str | None:
     if value is not None and not isinstance(value, bool):
-        raise ValueError("enabled must be true, false or null")
+        raise ValueError(f"{name} must be true, false or null")
     return None if value is None else ("true" if value else "false")
 
 
@@ -50,18 +70,22 @@ def _checked_max_resident(value: object) -> str | None:
     return str(value)
 
 
-async def update(value: bool | None | object = _UNSET, *, max_resident: int | None | object = _UNSET
-                 ) -> dict[str, bool | int]:
+async def update(value: bool | None | object = _UNSET, *, max_resident: int | None | object = _UNSET,
+                 manager_answers: bool | None | object = _UNSET) -> dict[str, bool | int]:
     """Persist first: a failed write leaves the effective setting unchanged."""
     global _max_resident
     fields = {}
     if value is not _UNSET:
         fields[KEY] = _stored(value)
+    if manager_answers is not _UNSET:
+        fields[MANAGER_ANSWERS_KEY] = _stored(manager_answers, "manager_answers")
     if max_resident is not _UNSET:
         fields[MAX_RESIDENT_KEY] = _checked_max_resident(max_resident)
     await db_settings.put_settings(fields)
     if value is not _UNSET:
         set_enabled(False if value is None else value)
+    if manager_answers is not _UNSET:
+        set_manager_answers(False if manager_answers is None else manager_answers)
     if max_resident is not _UNSET:
         _max_resident = DEFAULT_MAX_RESIDENT if max_resident is None else max_resident
     return view()

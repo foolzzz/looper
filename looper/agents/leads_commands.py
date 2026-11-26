@@ -285,6 +285,10 @@ async def _run(database_url: str, args: Any) -> tuple[int, str]:
 
 
 def run(args: Any, load_ops: Any) -> int:
+    from ..cli import task_manager_guard
+
+    if (code := task_manager_guard("leads", args.leads_command)) is not None:
+        return code
     if os.environ.get(child_env.AGENT_RUN_ENV):
         logger.warning("leads cli refused reason=agent_run")
         print("消息线索只供操作者查询和修改，请在自己的终端运行", file=sys.stderr)
