@@ -286,7 +286,9 @@ def test_resident_queue_wait_is_metric_only(monkeypatch: pytest.MonkeyPatch, tmp
         monkeypatch.setattr(session_routing, "_max_resident_total", 3)
         real_monotonic = manager_routing.time.monotonic
         offset = {"n": 0.0}
-        monkeypatch.setattr(manager_routing.time, "monotonic", lambda: real_monotonic() + offset["n"])
+        # Only the router's own clock moves: patching the shared time module would also advance the event loop's
+        # clock and fire the harness's phase deadline.
+        monkeypatch.setattr(manager_routing, "time", SimpleNamespace(monotonic=lambda: real_monotonic() + offset["n"]))
 
         def make(name: str) -> ManagerAgent:
             definition = replace(default_definition(), id=name, name=name, idle_timeout_seconds=0,
