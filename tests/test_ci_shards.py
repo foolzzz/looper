@@ -64,8 +64,17 @@ def test_shards_partition_pr_collection(collection) -> None:
     assert any(node.startswith("tests/test_prompt_eval.py::") for node in baseline)
     file_counts = Counter(node.split("::", 1)[0] for node in baseline)
     durations = json.loads((ROOT / "tests/shard_durations.json").read_text(encoding="utf-8"))
-    assigned = conftest._assign_shard_units(dict(file_counts), durations, 8)
-    spans = conftest._file_spans(dict(file_counts), durations)
+    per_test_path = ROOT / "tests/shard_test_durations.json"
+    test_durations = (
+        json.loads(per_test_path.read_text(encoding="utf-8")) if per_test_path.is_file() else {}
+    )
+    nodes: dict[str, list[str]] = {}
+    for node in baseline:
+        nodes.setdefault(node.split("::", 1)[0], []).append(node)
+    assigned = conftest._assign_shard_units(
+        dict(file_counts), durations, 8, nodes=nodes, test_durations=test_durations)
+    spans = conftest._file_spans(
+        dict(file_counts), durations, nodes=nodes, test_durations=test_durations)
     seen: Counter[str] = Counter()
     node_shard: dict[str, int] = {}
     for node in baseline:
@@ -213,6 +222,126 @@ def test_chunks_follow_collection_order_and_item_share() -> None:
     spans = conftest._file_spans({"tests/test_heavy.py": 10}, {"tests/test_heavy.py": 1000.0})
     weights = [1000.0 * (end - start) / 10 for start, end in spans["tests/test_heavy.py"]]
     assert weights == pytest.approx([200.0, 300.0, 200.0, 300.0])
+
+
+def _nodeids(path: str, count: int) -> list[str]:
+    return [f"{path}::test_{index}" for index in range(count)]
+
+
+def test_heavy_file_chunks_follow_cumulative_seconds() -> None:
+    # Three slow tests, then seven fast ones. 370s is two chunks. Item counts would be 5 and 5.
+    path = "tests/test_heavy.py"
+    seconds = [100.0, 100.0, 100.0, *([10.0] * 7)]
+    nodeids = _nodeids(path, len(seconds))
+    spans = conftest._file_spans(
+        {path: len(seconds)}, {path: float(sum(seconds))},
+        nodes={path: nodeids}, test_durations={path: dict(zip(nodeids, seconds, strict=True))},
+    )
+    assert spans[path] == [(0, 2), (2, 10)]
+    chunk_seconds = [sum(seconds[start:end]) for start, end in spans[path]]
+    assert chunk_seconds == [200.0, 170.0]
+    assert [end - start for start, end in spans[path]] == [2, 8]
+
+
+def test_unknown_test_uses_the_file_median_per_test_time() -> None:
+    # Recorded 1, 3 and 100. The median is 3, not the mean (about 34.7) and not zero.
+    path = "tests/test_heavy.py"
+    recorded = {
+        f"{path}::test_a": 1.0,
+        f"{path}::test_c": 100.0,
+        f"{path}::test_d": 3.0,
+    }
+    nodeids = [f"{path}::test_a", f"{path}::test_new", f"{path}::test_c", f"{path}::test_d"]
+    assert conftest._per_test_seconds(path, nodeids, {path: recorded}) == [1.0, 3.0, 100.0, 3.0]
+
+
+def test_light_file_is_not_split_by_per_test_times() -> None:
+    path = "tests/test_light.py"
+    nodeids = _nodeids(path, 6)
+    recorded = dict(zip(nodeids, [1000.0, 0.0, 0.0, 0.0, 0.0, 0.0], strict=True))
+    spans = conftest._file_spans(
+        {path: 6}, {path: 10.0}, nodes={path: nodeids}, test_durations={path: recorded},
+    )
+    assert spans == {path: [(0, 6)]}
+    assigned = conftest._assign_shard_units(
+        {path: 6}, {path: 10.0}, 4, nodes={path: nodeids}, test_durations={path: recorded},
+    )
+    assert [key for key in assigned if key[0] == path] == [(path, 0)]
+
+
+def test_per_test_chunks_cover_every_item_once() -> None:
+    heavy = "tests/test_heavy.py"
+    seconds = [100.0, 100.0, 100.0, *([10.0] * 7)]
+    nodeids = _nodeids(heavy, len(seconds))
+    counts = {heavy: len(seconds), "tests/test_light.py": 4, "tests/test_other.py": 3}
+    durations = {heavy: float(sum(seconds)), "tests/test_light.py": 12.0, "tests/test_other.py": 300.0}
+    recorded = {heavy: dict(zip(nodeids, seconds, strict=True))}
+    nodes = {heavy: nodeids}
+    total = 4
+    assigned = conftest._assign_shard_units(
+        counts, durations, total, nodes=nodes, test_durations=recorded)
+    spans = conftest._file_spans(counts, durations, nodes=nodes, test_durations=recorded)
+    covered: dict[str, list[int]] = {}
+    for path, count in counts.items():
+        indexes: list[int] = []
+        for chunk, (start, end) in enumerate(spans[path]):
+            assert (path, chunk) in assigned
+            assert 1 <= assigned[(path, chunk)] <= total
+            assert end > start
+            indexes.extend(range(start, end))
+        assert indexes == list(range(count))
+        covered[path] = indexes
+    assert covered[heavy] == list(range(len(seconds)))
+    assert sorted(assigned) == sorted(set(assigned))
+    again = conftest._assign_shard_units(
+        dict(reversed(list(counts.items()))), dict(reversed(list(durations.items()))), total,
+        nodes=nodes, test_durations=recorded,
+    )
+    assert again == assigned
+
+
+def test_uniform_per_test_times_keep_item_count_chunks() -> None:
+    path = "tests/test_heavy.py"
+    nodeids = _nodeids(path, 10)
+    recorded = {path: dict.fromkeys(nodeids, 100.0)}
+    spans = conftest._file_spans(
+        {path: 10}, {path: 1000.0}, nodes={path: nodeids}, test_durations=recorded,
+    )
+    assert spans[path] == [(0, 2), (2, 5), (5, 7), (7, 10)]
+    with_map = conftest._assign_shard_units(
+        {path: 10, "tests/test_other.py": 2}, {path: 1000.0, "tests/test_other.py": 50.0}, 4,
+        nodes={path: nodeids}, test_durations=recorded,
+    )
+    without = conftest._assign_shard_units(
+        {path: 10, "tests/test_other.py": 2}, {path: 1000.0, "tests/test_other.py": 50.0}, 4,
+    )
+    assert with_map == without
+
+
+def test_chunk_scheduling_weight_follows_recorded_seconds() -> None:
+    # Time split is 200s then 170s. A 180s rival fits between those weights.
+    # Item-count weights would be 185s and 185s, and the rival would land on the other shard.
+    heavy, rival = "tests/test_heavy.py", "tests/test_rival.py"
+    seconds = [100.0, 100.0, 100.0, *([10.0] * 7)]
+    nodeids = _nodeids(heavy, len(seconds))
+    counts = {heavy: len(seconds), rival: 1}
+    durations = {heavy: float(sum(seconds)), rival: 180.0}
+    assigned = conftest._assign_shard_units(
+        counts, durations, 2,
+        nodes={heavy: nodeids}, test_durations={heavy: dict(zip(nodeids, seconds, strict=True))},
+    )
+    assert assigned[(heavy, 0)] == 1
+    assert assigned[(heavy, 1)] == 2
+    assert assigned[(rival, 0)] == 2
+
+
+def test_missing_per_test_map_keeps_item_count_chunks() -> None:
+    path = "tests/test_heavy.py"
+    spans = conftest._file_spans(
+        {path: 10}, {path: 1000.0},
+        nodes={path: _nodeids(path, 10)}, test_durations={},
+    )
+    assert spans[path] == [(0, 2), (2, 5), (5, 7), (7, 10)]
 
 
 def test_collection_of_only_new_files_can_still_be_sharded() -> None:
