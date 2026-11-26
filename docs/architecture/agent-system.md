@@ -518,11 +518,15 @@ Manager has no tool for it. The dashboard shows the task page's 指标 card and 
   a missing, invalid or unreadable source logs a warning and yields no profile, without disabling other vault
   tools or returning a previously cached profile.
   The compiler preserves typed fields — name, address, reply language, time zone, working hours, communication
-  preferences and standing rules — with relative-path, heading and line citations. Inline `[kind:: …]` bullets
-  keep their existing classification and inactive-entry filtering. Frontmatter and fenced code are excluded;
+  preferences, standing rules and background facts (`about`) — with relative-path, heading and line citations.
+  Inline `[kind:: fact]` bullets compile under `About:`; `person`, `decision`, `commitment`, `request` and
+  `deadline` remain under `Standing rules:`, while `preference` and `habit` remain under `Communication:`.
+  Superseded and deleted entries, frontmatter and fenced code are excluded; unknown kinds are skipped;
   backticks are normalized. Duplicate single-value fields fail compilation. The text stays within 1500 Unicode
-  characters, dropping lower-priority fields first and truncating a remaining oversized field with `…`.
-  `profile.get` caches the compiled block in `profile_blocks`, retaining its version when the body is unchanged.
+  characters, dropping lower-priority fields first (`About:` before `Standing rules:`) and truncating a remaining
+  oversized value with `…`. Profiles without facts keep exactly the same compiled text.
+  `profile.get` caches the compiled block in `profile_blocks`, advancing its version only when the text changes;
+  citation and field metadata refreshes alone retain the version.
   Manager and CLI reads do not write that cache.
   The independent operator-only `profile_settings.get/update` operations control `manager.profile.enabled`
   (default off; null restores off). Settings → Knowledge vault exposes its confirmed switch. Off, the Manager
@@ -777,6 +781,37 @@ Manager has no tool for it. The dashboard shows the task page's 指标 card and 
   channel adds the reply to that chat's history (`chat_messages`, shown when
   the chat is opened) instead of a message's stream; Lark and Telegram send it
   to the chat. With no message before it, the reply is only recorded
+
+### Task Manager (`looper/agents/tiers/task_manager.py`)
+
+Each task can own a Claude Code resident, separate from the operator's Manager.
+The pool is constructed after workspace recovery, before HTTP admission; constructing
+it starts no model process. `tasks.conversations.enabled` remains off by default.
+The independent `task_manager` role defaults to Sonnet; task profile overrides take
+precedence over that role and never inherit the owning Manager's profile. Other
+runtimes are refused rather than substituted.
+
+Direct launches append the fixed task instructions and a bounded, fenced brief.
+They retain the operator's settings, memory and MCP servers. Orchestrated or
+unrecoverable workspaces use the existing isolated read-only command. The child
+receives `LOOPER_TASK_MANAGER`, never `LOOPER_AGENT_RUN`. An enabled outbound review
+requires an actual review hook. Before every direct launch or resume, a typed
+settings-source table rejects hook-disabling settings and environment variables;
+unreadable settings also fail closed. Managed policy checks are statically
+confirmed only. Claude Code must match the verified version constant; upgrading
+it requires rerunning the local fake-model launch probe. Refusals name the file
+and key or CLI version, and increment a reason/phase/version counter visible in
+`manager_metrics.get` while work mode is enabled.
+
+`tasks.managers.max_resident` defaults to 6 (1–20). Admission can reclaim the least
+recently used idle process; a 60-second ticker reclaims processes idle for 30
+minutes, measured from the end of the last turn. Admission, including preparation,
+shares the pool gate; all-busy messages queue visibly, and an active turn prevents
+starting the task in the background. Shutdown stops owned processes; deleting a
+task forgets its resident and session. This foundation provides the scheduling and
+native-turn primitive, with no conversation transport or task-bound MCP tools.
+Session persistence, per-task profile switching and turn accounting belong to the
+stacked turn implementation.
 
 ### TaskRouter (`looper/agents/tiers/task.py`)
 

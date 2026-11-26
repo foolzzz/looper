@@ -178,6 +178,8 @@ def _parser() -> argparse.ArgumentParser:
     profile.add_argument("--pg-url", default=env.get("LOOPER_EVAL_DATABASE_URL"))
     profile.add_argument("--out-dir", type=Path, default=runner.DEFAULT_OUT_DIR / "resident-profile")
     profile.add_argument("--timeout", type=_case_budget)
+    profile.add_argument("--rescore", type=Path, metavar="RUN.json", help="recheck saved replies offline; no model or database calls")
+    profile.add_argument("--out", type=Path, metavar="NEW.json", help="save the rescored report (requires --rescore)")
 
     cmp = sub.add_parser("compare", help="Print the comparison table of two run files.")
     cmp.add_argument("new", type=Path)
@@ -246,6 +248,24 @@ def main(argv: list[str] | None = None) -> int:
             print("\n" + dialogs.markdown(new))
         return 0
 
+    if args.command == "resident-profile" and args.rescore:
+        try:
+            if args.out and (args.out.resolve() == args.rescore.resolve()
+                             or args.out.exists() and args.out.samefile(args.rescore)):
+                raise ValueError("--out must differ from the saved run; preserve the original evidence")
+            saved = json.loads(args.rescore.read_text(encoding="utf-8"))
+            result = resident_profile.rescore(saved)
+            if args.out:
+                args.out.write_text(json.dumps(result, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+                print(f"Rescore written to {args.out}")
+        except (ValueError, OSError) as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 2
+        print(compare.markdown(result, saved))
+        return 2 if result.get("stopped_by_cap") else exit_code(result)
+    if args.command == "resident-profile" and args.out:
+        print("error: --out requires --rescore", file=sys.stderr)
+        return 2
     if not args.pg_url:
         print("error: give --pg-url (or set LOOPER_EVAL_DATABASE_URL)", file=sys.stderr)
         return 2
@@ -261,6 +281,7 @@ def main(argv: list[str] | None = None) -> int:
             print(f"error: {exc}", file=sys.stderr)
             return 2
         print(f"Run written to {path}\nTotal cost: {result['total_cost_usd']:.4f} USD")
+        print(compare.markdown(result))
         return 2 if result["stopped_by_cap"] else exit_code(result)
     if args.command == "dialogs":
         return _dialogs(args)
