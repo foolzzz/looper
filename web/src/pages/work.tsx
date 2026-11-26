@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
-import { ManagerWorkConversation, PlannerWorkConversation } from "@/components/work-conversation";
+import { ManagerWorkConversation, PlannerWorkConversation, TaskWorkConversation } from "@/components/work-conversation";
 import { WorkAttention } from "@/components/work-attention";
 import { WorkList } from "@/components/work-list";
 import { WorkSwitcher } from "@/components/work-switcher";
@@ -18,7 +18,7 @@ import { startPolling } from "@/lib/polling";
 import { callV1, V1Error } from "@/lib/v1";
 import { errorText } from "@/lib/use-action";
 import { TaskStatusMark } from "@/pages/tasks";
-import { isMissingOperation, isUnstartedTask, markSeen, taskTitle, workStatusLabel, workSelection, workStorage } from "@/lib/work";
+import { isMissingOperation, isUnstartedTask, markSeen, taskConversationsGet, taskTitle, workStatusLabel, workSelection, workStorage } from "@/lib/work";
 import { isGateShown } from "@/lib/gates";
 import { WorkConversationStateProvider, useWorkConversationStore, workConversationKey } from "@/lib/use-work-conversation-state";
 
@@ -50,7 +50,7 @@ function useMedia(query: string): boolean {
   return matches;
 }
 
-/** Centre shows the selected task’s Planner conversation, or Manager with the needs-you summary. */
+/** Centre shows Manager, or the selected task. Task conversations on uses the task thread; off keeps the Planner. */
 export function WorkPage({
   sub, onNavigate,
 }: { sub: string; onNavigate: (sub: string, replace?: boolean) => void }) {
@@ -104,6 +104,18 @@ function WorkPageContent({
   const explicit = workSelection(sub);
   const selection = explicit ?? { kind: "manager" as const };
   const taskId = selection.kind === "task" ? selection.taskId : "";
+  const [conversationMode, setConversationMode] = useState<Record<string, "task" | "planner">>({});
+  useEffect(() => {
+    if (!taskId) return;
+    const ctrl = new AbortController();
+    let alive = true;
+    taskConversationsGet(ctrl.signal).then((result) => {
+      if (alive) setConversationMode((current) => ({ ...current, [taskId]: result.enabled === true ? "task" : "planner" }));
+    }).catch(() => {
+      if (alive) setConversationMode((current) => ({ ...current, [taskId]: "planner" }));
+    });
+    return () => { alive = false; ctrl.abort(); };
+  }, [taskId]);
   const cacheKey = workConversationKey({ kind: "planner", taskId });
   const candidate = detail.id === taskId && detail.task ? detail.task : conversations.cached(cacheKey)?.task;
   const selected = candidate?.task_id === taskId ? candidate : undefined;
@@ -314,7 +326,10 @@ function WorkPageContent({
                 className={shortColumn ? "work-short-conversation block" : "flex min-h-0 min-w-0 flex-1 flex-col"}>
                 {isUnstartedTask(selected.status) ? <WorkDraft key={taskId} task={selected} onRefresh={refreshDetail}
                   disabled={controlBusy} onBusy={setDraftSaving} />
-                  : <PlannerWorkConversation key={taskId} taskId={taskId} detail={selected} task={selected} onGateChanged={onGateChanged} />}
+                  : !conversationMode[taskId] ? <p role="status">正在检查对话可用性</p>
+                  : conversationMode[taskId] === "task"
+                    ? <TaskWorkConversation key={taskId} taskId={taskId} detail={selected} task={selected} onGateChanged={onGateChanged} />
+                    : <PlannerWorkConversation key={taskId} taskId={taskId} detail={selected} task={selected} onGateChanged={onGateChanged} />}
               </div>
             </>
           )}

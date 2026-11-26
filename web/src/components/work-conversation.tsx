@@ -15,11 +15,15 @@ import { historyFrom, joinStaged, pullBack } from "@/lib/composer";
 import { randomId } from "@/lib/ids";
 import { useReplyStream } from "@/lib/use-reply-stream";
 import { useWorkManagerConversation } from "@/lib/use-work-manager-conversation";
+import { useWorkTaskConversation, type TaskConversationInput } from "@/lib/work-task-conversation";
 import { errorText } from "@/lib/use-action";
 import { clearWorkConversationMemory, useWorkConversationState, useWorkConversationViewport } from "@/lib/use-work-conversation-state";
 
 /** The owner of the conversation shown in the pane. */
-export type WorkIdentity = { kind: "manager"; managerId?: string; sessionId?: string } | { kind: "planner"; taskId: string; sessionId?: string };
+export type WorkIdentity =
+  | { kind: "manager"; managerId?: string; sessionId?: string }
+  | { kind: "planner"; taskId: string; sessionId?: string }
+  | { kind: "task"; taskId: string; sessionId?: string };
 
 export interface WorkPaneMessage {
   id: string;
@@ -65,6 +69,13 @@ export interface WorkConversationProps {
   notice?: string;
   canStop?: boolean;
   stopRefusal?: string;
+  /** Task thread only. Omitted, the pane keeps the Planner "recent messages" line and no earlier page. */
+  earlier?: "hidden" | "ready" | "loading" | "error";
+  earlierError?: string;
+  onLoadEarlier?: () => void;
+  /** Server `turn_state`. Absent unless this pane is a task thread. */
+  turnState?: "idle" | "running" | "interrupted";
+  banner?: string;
 }
 
 export const WORK_COMPOSER_COPY: ComposerCopy = {
@@ -142,7 +153,7 @@ export function WorkConversation(props: WorkConversationProps) {
     identity, missing, canSend, refusal, detail, messages, events, history, historyError, loadingText, onRetry,
     phase, replying, draft, onDraft, staged, onStaged, inputHistory, onSend, onStop, notice, canStop, stopRefusal,
   } = props;
-  const ownerKey = identity.kind === "manager" ? `manager:${identity.sessionId ?? ""}` : `planner:${identity.taskId}`;
+  const ownerKey = identity.kind === "manager" ? `manager:${identity.sessionId ?? ""}` : `${identity.kind}:${identity.taskId}`;
   const position = useWorkConversationViewport(identity, history === "ready" || history === "empty" || messages.length > 0);
   if (missing) return <p role="status" data-identity={ownerKey}>{NOT_FOUND}</p>;
 
@@ -156,6 +167,7 @@ export function WorkConversation(props: WorkConversationProps) {
       aria-label="对话"
       data-identity={ownerKey}
       data-task-status={detail?.status ?? ""}
+      data-turn-state={props.turnState}
       className="flex h-full min-h-0 flex-1 flex-col"
     >
       <div ref={position.viewport} aria-label="对话历史" className="flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto p-4 [overflow-anchor:none]">
@@ -166,7 +178,16 @@ export function WorkConversation(props: WorkConversationProps) {
             <Button type="button" variant="outline" size="sm" onClick={onRetry}>重试</Button>
           </p>
         )}
-        {loaded && <p className="text-center text-xs text-muted-foreground">{RECENT}</p>}
+        {props.banner && <p role="status" className="text-sm text-muted-foreground">{props.banner}</p>}
+        {(props.earlier === "ready" || props.earlier === "loading" || props.earlier === "error") && (
+          <div className="flex flex-wrap items-center gap-2">
+            {props.earlier === "error" && <p role="alert" className="text-sm text-destructive">更早的对话读取失败 {props.earlierError}</p>}
+            <Button type="button" variant="outline" size="sm" disabled={props.earlier === "loading"} onClick={props.onLoadEarlier}>
+              {props.earlier === "loading" ? "正在加载更早对话…" : "加载更早对话"}
+            </Button>
+          </div>
+        )}
+        {loaded && props.earlier === undefined && <p className="text-center text-xs text-muted-foreground">{RECENT}</p>}
         {loaded && shown.length === 0 && <p role="status">{EMPTY}</p>}
         {props.task ? <WorkActivityFeed identity={identity} task={props.task} messages={shown}
           onGateChanged={props.onGateChanged} records={props.records} dividerBefore={position.divider} />
@@ -204,6 +225,11 @@ export function WorkConversation(props: WorkConversationProps) {
 /** Manager adapter mounts only while the gated Work page selects Manager. */
 export function ManagerWorkConversation() {
   return <WorkConversation {...useWorkManagerConversation()} />;
+}
+
+/** Task-thread adapter. The Work page mounts it only while `tasks.conversations.enabled` is on. */
+export function TaskWorkConversation(props: TaskConversationInput) {
+  return <WorkConversation {...useWorkTaskConversation(props)} />;
 }
 
 /**

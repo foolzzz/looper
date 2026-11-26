@@ -68,7 +68,7 @@ beforeEach(() => {
     else if (url.includes("chat/targets")) result = { targets: [{ id: "planner-task-draft", kind: "planner", task_id: "task-draft", status: task.status,
       can_send: plannerAvailable && ["pending", "assigned", "running", "planning", "executing", "verifying", "stopping", "waiting", "waiting_user", "awaiting_budget"].includes(String(task.status)) }] };
     else if (url.includes("chat/messages")) result = { messages: [] };
-    else if (url.includes("task_conversations")) result = { enabled: true };
+    else if (url.includes("task_conversations")) result = { enabled: false };
     if (init?.method === "GET") status = 405;
     return new Response(JSON.stringify({ status: "ok", result }), { status, headers: { "Content-Type": "application/json" } });
   }));

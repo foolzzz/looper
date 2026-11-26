@@ -72,8 +72,8 @@ export function WorkActivityFeed({ identity, messages, task, onGateChanged, reco
   const store = useWorkConversationStore();
   const cacheKey = workConversationKey(identity);
   const cached = store.cached(cacheKey);
-  const owner = identity.kind === "planner" ? `planner:${identity.taskId}` : `manager:${identity.sessionId ?? ""}`;
-  const taskId = identity.kind === "planner" ? identity.taskId : "";
+  const owner = identity.kind === "manager" ? `manager:${identity.sessionId ?? ""}` : `${identity.kind}:${identity.taskId}`;
+  const taskId = identity.kind === "manager" ? "" : identity.taskId;
   const shared = task?.task_id === taskId ? task : undefined;
   const active = !!shared && isActiveTask(shared);
   const current = useRef(owner);

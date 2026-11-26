@@ -8933,7 +8933,9 @@ is not done.
 The Work page is called 工作台 in the Chinese UI, with the bilingual sidebar label
 “Work 工作台”, matching “Ledger 账本”. Its pinned main Manager conversation is
 labelled 管家; task conversations use their task names and call the counterpart
-任务管家.
+任务管家. With `tasks.conversations.enabled` on, a started task's centre pane
+reads and sends on `task-chat:<task_id>` (the opaque history cursor, `turn_state`,
+and persisted tool and task-event rows). Off, that pane stays the Planner thread.
 
 In Work, one task details column lists the plan and gate summaries from the
 selected task's shared detail. Both gate entry points locate the conversation's
