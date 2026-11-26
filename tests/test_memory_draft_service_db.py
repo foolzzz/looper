@@ -2,7 +2,6 @@
 
 import asyncio
 import json
-from datetime import datetime, timezone
 
 import pytest
 
@@ -154,7 +153,7 @@ def test_off_has_exactly_no_effects(monkeypatch, tmp_path):
     run_db(check, monkeypatch)
 
 
-def test_daily_budget_pauses_and_resumes_next_day(monkeypatch, tmp_path):
+def test_daily_budget_pauses_and_resumes_next_day(monkeypatch, tmp_path, fixed_clock):
     from looper.agents.memory_draft_service import MemoryDraftService
 
     repo = sup.synthetic_vault(tmp_path)
@@ -167,9 +166,9 @@ def test_daily_budget_pauses_and_resumes_next_day(monkeypatch, tmp_path):
             return "synthetic-operator"
         monkeypatch.setattr("looper.agents.operator_identity.operator_sender_id", operator)
         cid = await sup.candidate(pool)
-        now = datetime.now(timezone.utc)
-        await pool.execute("INSERT INTO llm_records(agent_id,run_kind,status,cost_usd) "
-                           "VALUES('memory_draft-synthetic','memory_draft','completed',1)")
+        now = fixed_clock()
+        await pool.execute("INSERT INTO llm_records(agent_id,run_kind,status,cost_usd,created_at) "
+                           "VALUES('memory_draft-synthetic','memory_draft','completed',1,$1)", now)
         backend = Backend(reply())
         notices = []
         async def notify(*args):

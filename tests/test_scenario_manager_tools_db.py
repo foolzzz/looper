@@ -11,7 +11,7 @@ from __future__ import annotations
 import asyncio
 import json
 from dataclasses import replace
-from datetime import datetime, timedelta, timezone
+from datetime import timedelta
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -381,7 +381,7 @@ def test_a_scoped_manager_acts_only_on_its_own_tasks(monkeypatch: pytest.MonkeyP
 
 
 def test_the_overview_of_a_scoped_manager_counts_its_own_tasks(monkeypatch: pytest.MonkeyPatch,
-                                                               tmp_path: Path) -> None:
+                                                               tmp_path: Path, fixed_clock) -> None:
     async def test(pool: Any) -> None:
         from looper.db import llm_records, plans
 
@@ -391,8 +391,8 @@ def test_the_overview_of_a_scoped_manager_counts_its_own_tasks(monkeypatch: pyte
             step_id = f"step-{task_id}"
             await plans.save(task_id, plan={"plan_id": f"plan-{task_id}", "status": "executing"},
                              steps=[{**_gate_step(step_id), "status": "waiting_user"}],
-                             gates=[_gate(step_id, state="open", opened_at=datetime.now(timezone.utc))])
-        now = datetime.now(timezone.utc)
+                             gates=[_gate(step_id, state="open", opened_at=fixed_clock())])
+        now = fixed_clock()
 
         def run(agent_id: str, task_id: str, role: str) -> dict[str, Any]:
             return {"agent_id": agent_id, "role": role, "task_id": task_id, "project_id": project["id"],
@@ -420,6 +420,8 @@ def test_the_overview_of_a_scoped_manager_counts_its_own_tasks(monkeypatch: pyte
             await llm_records.finish_record(record, status="completed", cost_usd=1.0, input_tokens=1, output_tokens=1,
                                             cache_read_tokens=0, cache_creation_tokens=0, context_tokens=None,
                                             compactions=[], pool=pool)
+
+        await pool.execute("UPDATE llm_records SET created_at=$1", now)
 
         scoped = _ok((await chat.say("x", ("looper_overview", {})))[0])
         full = _ok((await default.say("x", ("looper_overview", {})))[0])

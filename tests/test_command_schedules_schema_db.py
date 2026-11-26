@@ -117,6 +117,9 @@ def test_existing_baseline_upgrades_once_preserves_data_and_matches_fresh():
                 {**row, "manager_event_id": None} for row in before["schedule_notifications"]]
             await connection.ensure_schema(fresh)
             assert await structure(old) == await structure(fresh)
+            assert {row["column_name"] for row in await fresh.fetch(
+                "SELECT column_name FROM information_schema.columns WHERE table_schema=current_schema() "
+                "AND table_name='proactive_deliveries'")} >= {"body", "body_truncated", "body_stored_at"}
             assert [row["name"] for row in await fresh.fetch("SELECT name FROM schema_migrations")] == ["post_bridge_baseline"]
             after, shape = await witness(old), await structure(old)
             assert not await connection.schema_change_pending(old)

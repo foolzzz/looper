@@ -6,6 +6,7 @@ import {
   attentionSettingsGet, fetchAttention, isAttentionOff, type AttentionItem, type AttentionKind, type AttentionSection,
   type AttentionSummary,
 } from "@/lib/api-attention";
+import { displayText as text } from "@/lib/attention-display";
 import { channelLabel } from "@/lib/chat-channels";
 import { sinceText } from "@/lib/gates";
 import { startPolling } from "@/lib/polling";
@@ -57,13 +58,14 @@ const DELIVERY_SOURCES: Record<string, string> = {
   message_stream: "消息流采集/对账需处理",
 };
 
-const text = (value: unknown) => (typeof value === "string" ? value : "");
 const count = (value: unknown) => (typeof value === "number" ? value : 0);
 const plural = (n: number, one: string) => `${n} ${one}${n === 1 ? "" : "s"}`;
 
 /** The second line of an item: what it belongs to and the kind's own facts, in words. */
 function details(kind: AttentionKind, item: AttentionItem): { line: string; badges: string[] } {
-  const { facts, context, ref } = item;
+  const { facts } = item;
+  const context = text(item.context);
+  const ref = text(item.ref);
   const parts = (...values: (string | null | false | undefined)[]) => values.filter(Boolean).join(" · ");
   switch (kind) {
     case "failure_holds":
@@ -78,7 +80,7 @@ function details(kind: AttentionKind, item: AttentionItem): { line: string; badg
     }
     case "schedules": {
       const failures = count(facts.failures);
-      const alerts = Array.isArray(facts.alerts) ? facts.alerts.map((a) => ALERTS[String(a)] ?? String(a)) : [];
+      const alerts = Array.isArray(facts.alerts) ? facts.alerts.map((a) => text(ALERTS[String(a)] ?? String(a))) : [];
       return { line: context, badges: [...(failures > 0 ? [`${plural(failures, "failure")} in a row`] : []), ...alerts] };
     }
     case "logins":
@@ -139,9 +141,9 @@ function Item({ kind, item, onResumed }: { kind: AttentionKind; item: AttentionI
         {item.href ? (
           <a href={item.href} className={cn(
             "font-medium [overflow-wrap:anywhere] pointer-coarse:inline-flex pointer-coarse:min-h-11 pointer-coarse:items-center",
-            linkClass)}>{item.title}</a>
+            linkClass)}>{text(item.title)}</a>
         ) : (
-          <span className="font-medium [overflow-wrap:anywhere]">{item.title}</span>
+          <span className="font-medium [overflow-wrap:anywhere]">{text(item.title)}</span>
         )}
         {(line || badges.length > 0) && (
           <div className="flex flex-wrap items-center gap-1.5 text-xs text-muted-foreground">
@@ -164,7 +166,7 @@ function Item({ kind, item, onResumed }: { kind: AttentionKind; item: AttentionI
         <Button type="button" variant="outline" size="sm" className="shrink-0" disabled={busy}
           onClick={() => void resume()}>恢复</Button>
       )}
-      {resumeError && <p role="alert" className="w-full min-w-0 text-xs text-destructive [overflow-wrap:anywhere]">{resumeError}</p>}
+      {resumeError && <p role="alert" className="w-full min-w-0 text-xs text-destructive [overflow-wrap:anywhere]">{text(resumeError)}</p>}
     </li>
   );
 }
@@ -183,7 +185,7 @@ function Section({ section, onResumed }: { section: AttentionSection; onResumed:
       {state === "error" ? (
         <p role="alert" className="mt-2 flex gap-2 text-sm text-destructive [overflow-wrap:anywhere]">
           <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" aria-hidden="true" />
-          Could not read this: {section.error}
+          Could not read this: {text(section.error)}
         </p>
       ) : (
         <>
@@ -261,7 +263,7 @@ export function NeedsYouPage() {
       )}
       {error && (
         <div role="alert" className="flex flex-wrap items-center gap-3 text-sm text-destructive [overflow-wrap:anywhere]">
-          <span>Cannot load what needs you ({error}){summary && "; this is the last summary read."}</span>
+          <span>Cannot load what needs you ({text(error)}){summary && "; this is the last summary read."}</span>
           <Button type="button" variant="outline" size="sm" className="min-h-11" onClick={() => void read()}>
             Retry
           </Button>

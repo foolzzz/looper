@@ -322,8 +322,8 @@ class MetricsAlertService:
                 return decision.outcome is Outcome.DIGEST
         if not _enabled or self._stopping.is_set():
             return False
-        sent, error = await self._registry.notify(chat.channel_id, chat.target.id, text, group=chat.in_group,
-            **turn_metrics.proactive_kwargs(turn_metrics.ProactiveSource.METRICS_ALERT, dedupe_key=key))
+        with turn_metrics.proactive_send(turn_metrics.ProactiveSource.METRICS_ALERT, dedupe_key=key):
+            sent, error = await self._registry.notify(chat.channel_id, chat.target.id, text, group=chat.in_group)
         if decided:
             await proactive_deliveries.record_receipt(key, "sent" if sent else "rejected")
         if not sent:

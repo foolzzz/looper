@@ -60,6 +60,8 @@ def group_counts(rows: list[dict[str, Any]]) -> dict[str, Any]:
         if group is TaskGroup.OTHER:
             other[row["status"]] = other.get(row["status"], 0) + row["count"]
     counts["total"] = sum(counts[group.value] for group in TaskGroup)
+    if counts[TaskGroup.DRAFT.value] == 0:
+        del counts[TaskGroup.DRAFT.value]  # preserve existing responses when no draft exists
     counts["other_statuses"] = other
     return counts
 

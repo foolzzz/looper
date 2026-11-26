@@ -228,7 +228,7 @@ def test_the_agents_running_now_and_each_active_projects_load(monkeypatch: pytes
 
 @pytest.mark.parametrize("model_metadata", [False, True])
 def test_todays_spend_keeps_money_apart_from_the_subscription_equivalent(
-    monkeypatch: pytest.MonkeyPatch, model_metadata: bool,
+    monkeypatch: pytest.MonkeyPatch, model_metadata: bool, fixed_clock,
 ) -> None:
     from looper.agents.agent_settings import AgentSettings, Launch
     from looper.agents.overview import local_midnight
@@ -247,8 +247,8 @@ def test_todays_spend_keeps_money_apart_from_the_subscription_equivalent(
                 metadata=metadata or None)
             if status != "running":
                 await llm_records.finish_record(record_id, status=status, cost_usd=cost, cost_source=source, pool=pool)
-            if at is not None:
-                await pool.execute("UPDATE llm_records SET created_at = $2 WHERE id = $1", record_id, at)
+            at = at if at is not None else fixed_clock()
+            await pool.execute("UPDATE llm_records SET created_at = $2 WHERE id = $1", record_id, at)
 
         await record("oauth", "runtime", 1.0)  # Claude Code's login
         await record("oauth", "provider_price", 0.5)  # Codex's login, at the built-in prices
@@ -488,7 +488,7 @@ def test_project_filters_bound_reads_and_keep_the_running_filter(monkeypatch):
 
 
 @pytest.mark.parametrize("empty", [False, True])
-def test_project_overview_keeps_cross_creator_planners_runs_and_own_health(monkeypatch, empty):
+def test_project_overview_keeps_cross_creator_planners_runs_and_own_health(monkeypatch, empty, fixed_clock):
     from looper.agents.overview import build_overview
     from looper.db import llm_records, projects, tasks
     from tests.test_managers_schema_db import _manager
@@ -504,10 +504,11 @@ def test_project_overview_keeps_cross_creator_planners_runs_and_own_health(monke
             planners.append({"planner_id": f"planner-{task_id}", "task_id": task_id, "project_id": project["id"],
                              "requirement": task_id, "name": task_id})
             runs.append({"agent_id": f"worker-{task_id}", "task_id": task_id, "project_id": project["id"],
-                         "role": "worker", "state": "running", "since": datetime.now(timezone.utc),
+                         "role": "worker", "state": "running", "since": fixed_clock(),
                          "step": "work", "instruction": "work"})
             await llm_records.start_record(agent_id=f"planner-{task_id}", task_id=task_id, pool=pool)
         await llm_records.start_record(agent_id="manager-review", pool=pool)
+        await pool.execute("UPDATE llm_records SET created_at=$1", fixed_clock())
         health = {"healthy": False, "state": "down", "up": False, "restart_count": 1,
                   "last_crash_at": None, "next_restart_at": None}
         overview = await build_overview(task_router=SimpleNamespace(running_planners=lambda: planners),
