@@ -81,6 +81,7 @@ def dashboard(request):
                 result = {"deleted": "manager-import"}
             else:
                 result = {"project_admin/list": {"projects": []}, "system/overview": {}, "system/status": {},
+                          "task_conversations/get": {"enabled": False},
                           "ops/gates/list": {"gates": [], "total": 0},
                           "chat_settings/get": {"stop_enabled": False}}.get(path)
                 if result is None:

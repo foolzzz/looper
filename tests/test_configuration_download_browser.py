@@ -53,6 +53,7 @@ def dashboard(dashboard_url):
                 pending.append(route)
                 return
             result = {"project_admin/list": {"projects": []}, "system/overview": {},
+                      "task_conversations/get": {"enabled": False},
                       "system/status": {}, "ops/gates/list": {"gates": [], "total": 0},
                       "chat_settings/get": {"stop_enabled": False}}.get(path)
             if result is None:
