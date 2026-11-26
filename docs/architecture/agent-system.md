@@ -850,8 +850,7 @@ on get/set return `not_found`. They add no agent tools or prompts. A failed resu
 retries once fresh with the caller's last 20 fenced thread messages and emits
 `session_fresh` with a bounded diagnostic. Server restart never replays a cut turn.
 Worktree turns commit pending changes with the task trailer; in-place turns list
-changed files without committing. No conversation transport or task-bound MCP
-tools are included yet.
+changed files without committing. No conversation transport is included yet.
 
 After every turn, measurements come from that turn's `llm_records` row and replace
 `agent_sessions` measurements, with unknown values stored as NULL. The shared
@@ -864,6 +863,34 @@ including after restart, emits `session_fresh(reason=context_bound)` and receive
 the task brief plus fenced thread excerpts. The work-mode metrics include
 per-record context and cost series and compaction/rotation counts by reason and
 result. Maintenance retains the turn's write exclusion.
+
+**Tools.** Each process receives a task-bound `taskmgr.` credential for Looper's
+MCP server; the tool service stores only its hash. `task_status` reads compact
+task detail, fenced requirement
+and activity, interaction mode and git workspace state (at most 50 changed paths,
+plus the total uncommitted count). In direct mode, `task_requirement_set` versions
+the requirement through the existing edit path, only for draft or ready tasks
+and only during a turn Looper sent. Orchestrated mode lists only `task_status`
+and refuses requirement writes. Completion keeps the credential valid; process
+replacement, close, eviction, idle reclaim, shutdown and deletion revoke it.
+The same credential carries outbound review through the task's placement; its
+private hook file is removed on revocation and unanswered checks fail closed.
+With task conversations off, no credential is issued and no tool is served.
+
+**Local commands.** With `LOOPER_TASK_MANAGER` set, the CLI checks a typed table
+before dispatch and repeats the policy at callable entries, following
+[RFC section 18](rfcs/task-sessions-v0.zh-CN.md#18-安全). Only `version` is globally
+allowed. `mcp-server` is own-task only: it requires a task Manager credential,
+never falls back to the operator token, and the server checks the task binding
+on every tool call. All other leaves, including global profile, ledger, leads,
+and memory reads and `claude-code status/mcp`, are refused with exit 4.
+`profile show` instead returns empty output with exit 0; `claude-code profile
+--hook` also prints nothing and exits 0, so SessionStart cannot inject the
+operator's profile. Unlisted commands are refused too; no `task` command group
+is added yet. Existing `LOOPER_AGENT_RUN` refusals take precedence when both
+markers are set. This guard is a speed bump: the task
+Manager shares the operator's account and can read its token file or call HTTP
+directly. It is not an isolation boundary.
 
 ### TaskRouter (`looper/agents/tiers/task.py`)
 

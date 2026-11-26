@@ -41,6 +41,10 @@ async def _run(database_url: str, args: Any) -> tuple[int, str]:
 
 
 def run(args: Any, load_ops: Any) -> int:
+    from ..cli import task_manager_guard
+
+    if (code := task_manager_guard("knowledge", args.knowledge_command)) is not None:
+        return code
     if os.environ.get(child_env.AGENT_RUN_ENV):
         print("知识迁移只供操作者运行，请在自己的终端运行", file=sys.stderr)
         return 4

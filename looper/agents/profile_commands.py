@@ -17,8 +17,9 @@ MAX_OUTPUT_BYTES = 6000  # the compiler's 1500 Unicode characters, at most four 
 def read_text(args: Any) -> str:
     """Read the same resident text for every local CLI consumer; no writes or model calls."""
     from .. import child_env
+    from ..cli import task_manager_denial
 
-    if os.environ.get(child_env.AGENT_RUN_ENV):
+    if os.environ.get(child_env.AGENT_RUN_ENV) or task_manager_denial("profile", "show") is not None:
         return ""
     command = [sys.executable, "-m", __name__]
     for flag in ("runtime_root", "config"):

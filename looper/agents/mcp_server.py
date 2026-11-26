@@ -349,6 +349,10 @@ def serve(client: Client, stdin: BinaryIO, stdout: BinaryIO, *, name: str = "loo
 
 def main() -> int:
     """Serve the Manager on stdin/stdout until EOF; 2 when LOOPER_AGENT_URL or LOOPER_AGENT_TOKEN is not usable."""
+    from ..cli import task_manager_guard
+
+    if (code := task_manager_guard("mcp-server")) is not None:
+        return code
     log_to_stderr(logging.INFO, "looper mcp-server %(levelname)s %(message)s")
     url = os.environ.get("LOOPER_AGENT_URL", "").strip()
     token = os.environ.get("LOOPER_AGENT_TOKEN", "").strip()

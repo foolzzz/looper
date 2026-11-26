@@ -863,6 +863,23 @@ requires the operator turn after the API client to resend the whole block becaus
 after the last shown state, in the same resident; a whole block resent for a new process does not pass. Run the
 Manager PR commands above with `--stable-context`, and compare them with the same dialogs without it.
 
+#### Task Manager tools (scripted fake case)
+
+`task_manager_status_and_requirement` in `prompt_regression/task_manager_tools.py`
+scripts a status question and an agreed requirement through `tools/list` and
+`tools/call`. It checks the exact descriptions, closed argument schemas, fenced
+requirement, workspace shape and requirement readback. Run it with:
+
+```bash
+uv run --extra test python -m pytest -q -n 2 tests/test_task_manager_tools_eval.py
+```
+
+Set `LOOPER_TEST_DATABASE_URL` to a disposable PostgreSQL database first. This
+uses the real MCP subprocess and isolated HTTP server with a scripted caller;
+it makes no model calls. Passing proves protocol behavior, not whether a model
+chooses the right tools. Task Manager model evaluation belongs to the following
+work-mode evaluation stage.
+
 #### Manager resident profile
 
 `resident-profile` implements the comparison planned in #1658. It creates only

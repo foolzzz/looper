@@ -57,6 +57,10 @@ def fetch_profile(runtime_root: str | None, config: str | None, *,
 
     if environ.get(child_env.AGENT_RUN_ENV):
         return Fetched(REFUSED, reason="refused inside a Looper agent run")
+    from ..cli import task_manager_denial
+
+    if denial := task_manager_denial("claude-code", "profile", environ=environ):
+        return Fetched(denial[0], reason=denial[1])
     text = profile_commands.read_text(SimpleNamespace(runtime_root=runtime_root, config=config))
     if not text.strip():
         return Fetched(EMPTY, reason="profile unavailable or empty (check knowledge_vault.profile_source "
@@ -65,6 +69,10 @@ def fetch_profile(runtime_root: str | None, config: str | None, *,
 
 
 def profile_command(args) -> int:
+    from ..cli import task_manager_guard
+
+    if (code := task_manager_guard("claude-code", "profile", hook=args.hook)) is not None:
+        return code
     fetched = fetch_profile(args.runtime_root, args.config)
     if args.hook:
         if fetched.code == OK:
@@ -317,6 +325,10 @@ def _retrieval_settings(args) -> tuple[dict, dict]:
 
 def edit_settings(change: Callable[[dict], tuple[dict, str] | None], *, yes: bool, dry_run: bool,
                   confirm: Callable[[str], bool] | None = None, out=None, environ=os.environ) -> int:
+    from ..cli import task_manager_guard
+
+    if (code := task_manager_guard("claude-code", "install", environ=environ)) is not None:
+        return code
     from .. import child_env
 
     out = sys.stdout if out is None else out
@@ -396,6 +408,10 @@ def edit_settings(change: Callable[[dict], tuple[dict, str] | None], *, yes: boo
 
 
 def status_command(args, *, out=None) -> int:
+    from ..cli import task_manager_guard
+
+    if (code := task_manager_guard("claude-code", "status")) is not None:
+        return code
     out = sys.stdout if out is None else out
     path = settings_path()
     print(f"Claude Code user settings: {path}", file=out)
@@ -454,6 +470,10 @@ def status_command(args, *, out=None) -> int:
 
 
 def run(args, *, confirm=None, out=None) -> int:
+    from ..cli import task_manager_guard
+
+    if (code := task_manager_guard("claude-code", args.claude_code_command, hook=getattr(args, "hook", False))) is not None:
+        return code
     out = sys.stdout if out is None else out
     if args.claude_code_command == "mcp":
         from . import claude_code_mcp
