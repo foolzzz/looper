@@ -418,6 +418,8 @@ class TaskManagerAgent:
         try:
             mismatches = task_manager_readback.compare(await task_manager_readback.read(self.resident, phase), expected)
         except task_manager_readback.ReadbackUnavailable as exc:
+            if phase == "resume" and not self.resident.running:
+                return  # a resume that exited at once is the turn's own ``_ResumeFailed`` (a fresh session follows)
             mismatches = [task_manager_readback.Mismatch(task_manager_safety.Reason.READBACK_UNAVAILABLE, exc.item,
                                                          None, None, task_manager_readback.Source.UNKNOWN)]
         if not mismatches:

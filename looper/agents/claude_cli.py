@@ -558,6 +558,7 @@ RESERVED_INPUT_WAIT_SEC = 30.0
 # started may (it queues behind the CLI's own startup).
 CONTROL_TIMEOUT_SEC = 5.0
 CONTROL_STARTUP_SEC = 30.0
+_CONTROL_POLL_SEC = 0.25  # how often a waiting control request checks that its process still runs
 # How long a stopping resident Claude may take to exit after its stdin closes before it is ended.
 STOP_GRACE_SEC = 5.0
 # How long the rest of an exited Claude's output may take to be read.
@@ -1099,6 +1100,12 @@ class ResidentClaude:
         return self._process is not None
 
     @property
+    def running(self) -> bool:
+        """True while the process runs and its output has not ended."""
+        process = self._process
+        return process is not None and process.returncode is None and not (self._output is not None and self._output.ended)
+
+    @property
     def command(self) -> list[str]:
         """The running process's command; empty when none runs."""
         return self._command
@@ -1500,15 +1507,24 @@ class ResidentClaude:
             raise ControlUnavailable(subtype, "no running process")
         if self._output is not None:
             self._output.read()  # the answer is read from the process's output, which a turn would otherwise start
-        waiter: asyncio.Future[dict[str, Any]] = asyncio.get_running_loop().create_future()
+        loop = asyncio.get_running_loop()
+        waiter: asyncio.Future[dict[str, Any]] = loop.create_future()
         request_id = ""
+        deadline = loop.time() + timeout
         try:
             try:
                 request_id = write_control(process.stdin, request)
                 self._controls[request_id] = waiter
                 async with asyncio.timeout(timeout):
                     await process.stdin.drain()
-                    response = await asyncio.shield(waiter)
+                while not waiter.done():
+                    # A process that exits answers nothing: stop waiting for it as soon as it is gone.
+                    if process.returncode is not None or (self._output is not None and self._output.ended):
+                        raise ControlUnavailable(subtype, "the process exited")
+                    if (left := deadline - loop.time()) <= 0:
+                        raise TimeoutError
+                    await asyncio.wait({waiter}, timeout=min(left, _CONTROL_POLL_SEC))
+                response = waiter.result()
             except TimeoutError:
                 raise ControlUnavailable(subtype, f"no answer within {timeout:g} s") from None
             except OSError as exc:
