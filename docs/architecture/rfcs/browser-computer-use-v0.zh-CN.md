@@ -66,7 +66,7 @@
 | D8 | **模式 B：** 桌面服务经 Chrome DevTools 协议（CDP）连到操作者正在用的 Chrome，不用浏览器扩展；只在操作者在场时用，无人值守的任务只能用模式 A；每次由操作者开口开启，30 分钟没有动作自动断开，使用期间对话里一直显示「正在使用你的浏览器」 |
 | D9 | **模式 B 的边界：** 只在自己新开的窗口里操作，不读也不碰已打开的标签页。Looper 的 CDP 代理按白名单放行方法：`Page.navigate`、`Page.captureScreenshot`、`DOM`、`DOMSnapshot`、`Accessibility` 里只读的方法，以及 `Input.dispatch*`。其余一律拒绝，包括 `Runtime.*`、`Network.getCookies`、`Storage.*`、`DOMStorage.*`、`IndexedDB.*`、`Page.addScriptToEvaluateOnNewDocument`。连不上时提示，或改用模式 A，不去改操作者的 Chrome 设置 |
 | D10 | **模式 C：** 浏览器的读和写都做完以后再开工；Looper 自己做桌面工具层，和模型无关：先读 macOS 的无障碍树（AX）按元素操作，找不到才退回截图加坐标，而且只对能看图的 Profile 开放。默认把动作投递给目标进程和窗口，不移动系统鼠标、不改变前台 app；驱动做不到时，每次经操作者确认才退回前台模式。浏览器 app 一律不写、不截、不读，网页操作交给 A 或 B |
-| D11 | **桌面服务和模式 C 的规则：** 每台电脑只有一个桌面服务，只有它拿辅助功能和录屏权限；所有角色、所有运行时的 B、C 都只调用它。它统一管跨进程的机器级独占锁、app 批准和禁用名单、观察 id 和目标重找、审计和截图、使用指示和一键停止。读权限按会话批准，控制权限按回合批准；终端、IDE、系统设置、密码管理器默认禁用。第二个会话明确返回 `in use by <session>`。在场和开启规则同 B；写后重读，接管时暂停动作和截图。Looper 启动的所有运行时会话关闭各自内置的桌面 / computer use 能力；不协调操作者在 Looper 之外运行的桌面控制工具。模式 A 不受桌面服务约束。沙箱桌面以后作为另一个后端，共用动作格式 |
+| D11 | **桌面服务和模式 C 的规则：** 每台电脑只有一个桌面服务，只有它拿辅助功能和录屏权限；所有角色、所有运行时的 B、C 都只调用它。它统一管跨进程的机器级独占锁、app 批准和禁用名单、观察 id 和目标重找、审计和截图、使用指示和一键停止。读权限按会话批准，控制权限按回合批准；终端、IDE、系统设置、密码管理器默认禁用。第二个会话明确返回 `in use by <session>`。在场和开启规则同 B；写后重读，接管时暂停动作和截图。Looper 启动的运行时会话不带各自内置的桌面 / computer use 能力（预期今天已是如此，按第 11 节第 8 项逐一核实；若某个运行时今天带有，关闭它是单独列出的变更，见第 4.5 节「运行时边界」）；不协调操作者在 Looper 之外运行的桌面控制工具。模式 A 不受桌面服务约束。沙箱桌面以后作为另一个后端，共用动作格式 |
 | D12 | **模式 C 的确认和驱动：** Manager 回合（含 `direct` 模式的任务 Manager）复用 `needs_confirmation`；任务里的其他确认复用用户关卡。已选窄幅复用 [anionex/dsh-computer-use 的原生 Swift 源码](https://github.com/anionex/dsh-computer-use/tree/a60de93b6091d92c9d3fdd4a06a88869795bbfaf/native/macos/Sources/Helper)，在复制的文件中保留 MIT copyright 和 permission notice，改为一个稳定签名身份的常驻原生服务。策略、机器级锁、批准、确认、审计和保留由 Looper 自己实现，不引入 DSH/Cordis 运行时。驱动接口由 Looper 定义且保持可替换；Looper 自写 helper 为后备，不在每个运行时进程里加载桌面插件 |
 | D13 | **动作分级：** 读动作是打开、跳转、读页面结构、截图、提取文字、跟随链接；写动作是点击、输入、选择、提交。写动作按策略处理：只读、每次确认、按域名白名单三种 |
 | D14 | 页面和 app 界面的内容是不可信输入，进上下文前套围栏；每个动作记审计和截图 |
@@ -443,7 +443,7 @@ ALTER TABLE tasks ADD COLUMN initiator TEXT
 |---|---|---|---|---|
 | PR0 开工前验证 | 第 11 节各项的实测结论写回本文；不改代码 | — | — | 否 |
 | PR1 模式 A 只读 | 浏览器进程和配置；登录流程和登录过期检测；读工具；URL 和白名单检查；快照和正文的围栏；审计和截图；凭据隔离（路径拒绝、钥匙串）；`browser_profiles`、`browser_sessions`、`browser_actions`；Settings 页；只给操作者本人的 Manager 回合 | `browser.enabled` | — | 是：Manager 的工具，要评测 |
-| PR1a 桌面服务 | 先按独立 GUI LaunchAgent 的进程形态设计，每台电脑唯一、固定安装位置和稳定签名身份；权限自检；跨进程的机器级独占锁；app 批准和禁用名单；观察 id 和目标重找；审计行和截图；使用指示和一键停止；关闭各运行时内置桌面能力；先全部用假驱动证明 | `browser.enabled` + B 或 C 的开关 | PR0；可与 PR1 并行，不依赖 PR1 的表先建好 | 是：工具可见性，要评测 |
+| PR1a 桌面服务 | 先按独立 GUI LaunchAgent 的进程形态设计，每台电脑唯一、固定安装位置和稳定签名身份；权限自检；跨进程的机器级独占锁；app 批准和禁用名单；观察 id 和目标重找；审计行和截图；使用指示和一键停止；核实各运行时会话不带内置桌面能力（若某个运行时带有，关闭它另开 PR，见第 4.5 节）；先全部用假驱动证明 | `browser.enabled` + B 或 C 的开关 | PR0；可与 PR1 并行，不依赖 PR1 的表先建好 | 是：工具可见性，要评测 |
 | PR2 写动作 | 写工具；写动作策略；`effect`；`ActionLevel` 和审查接入；Manager 的确认（绑定参数和页面状态）；任务里的系统确认 | 同上 + `write_policy` | PR1 | 是 |
 | PR3 接入任务 | `tasks.initiator`；项目 `browser`；任务 Manager、Worker、Planner、Reviewer 的工具（按第 4.2 节）；`direct` 准入和交到后台收回的检查；工具说明；注入评测 | 项目 `browser` | PR1（写动作要 PR2） | 是 |
 | PR4 模式 B | 桌面服务接 CDP 代理和方法白名单；开启、指示、空闲断开；默认 Manager 和 `direct` 模式的任务 Manager 在场时使用，交到后台断开 | `browser.user_chrome` | PR1、PR1a、PR2、PR3，以及 Q8 的验证 | 是 |
