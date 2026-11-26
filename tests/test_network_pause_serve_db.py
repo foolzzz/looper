@@ -50,11 +50,19 @@ for line in sys.stdin:
     count=state/(role+'.count')
     previous=int(count.read_text()) if count.exists() else 0
     count.write_text(str(previous+1))
-    should_fail=(worker and variant in ('worker','expiry','off')) or (not worker and variant=='planner' and '[PLAN]' in text)
+    should_fail=(worker and variant in ('worker','expiry','off','recovered')) or (not worker and variant=='planner' and '[PLAN]' in text)
     if should_fail and previous==0:
         emit(dict(type='system',subtype='init',session_id='network-fixture',model='synthetic'))
+        if variant=='recovered':
+            emit(dict(type='system',subtype='api_error',api_error=dict(code='ECONNRESET')))
+            emit(dict(type='system',subtype='api_retry'))
+            emit(dict(type='assistant',message=dict(role='assistant',content=[dict(type='text',text='Recovered response.')])))
+            emit(dict(type='result',subtype='error_during_execution',is_error=True,
+                result='Unrelated execution failure',total_cost_usd=.001))
+            sys.exit(1)
         emit(dict(type='result',subtype='error_during_execution',is_error=True,
-            api_error_code='ENOTFOUND',result='Controlled model API network failure',total_cost_usd=.001))
+            api_error_code='ECONNRESET' if variant=='worker' else 'ENOTFOUND',
+            result='Controlled model API network failure',total_cost_usd=.001))
         sys.exit(1)
     if worker:
         answer(dict(status='completed',changed_files={},deleted_files=[],summary='Synthetic work completed.'))
@@ -63,7 +71,7 @@ for line in sys.stdin:
         answer(dict(steps=[dict(id='work',instruction='Complete the synthetic work.',
             acceptance_criteria=['A result is available.'],depends_on=[],review=False)]))
     elif text.startswith('[DECISION]'):
-        if variant=='off':
+        if variant in ('off','recovered'):
             answer(dict(decision='fail',reason='The failed execution followed the original decision path.'))
             continue
         answer(dict(decision='accept',reason='Synthetic work succeeded.',summary='Completed.',
@@ -218,7 +226,7 @@ sys.exit(main(sys.argv[1:]))
         log.close()
 
 
-@pytest.mark.parametrize("variant", ["planner", "worker", "expiry", "off"])
+@pytest.mark.parametrize("variant", ["planner", "worker", "expiry", "off", "recovered"])
 def test_isolated_serve_network_pause_resume_and_expiry(tmp_path, variant):
     work = tmp_path / "work"
     work.mkdir()
@@ -255,6 +263,12 @@ def test_isolated_serve_network_pause_resume_and_expiry(tmp_path, variant):
             task_id = call("tasks.create", {"project_id": project,
                 "requirement": "Synthetic network_variant=" + variant})["result"]["task_id"]
             confirmed("ops.task_control.start", {"task_id": task_id})
+            if variant == 'recovered':
+                failed = _until(lambda: (row if (row := detail())['status'] == 'failed' else None), 'unrelated failure path')
+                assert failed.get('network_pause') is None
+                assert int((state / 'worker.count').read_text()) == 1
+                assert _query(url, 'SELECT count(*) AS total FROM task_network_pauses')[0]['total'] == 0
+                return
             if variant == 'off':
                 failed = _until(lambda: (row if (row := detail())['status'] == 'failed' else None), 'original failure path')
                 assert failed.get('network_pause') is None
