@@ -184,6 +184,9 @@ Manager has no tool for it. The dashboard shows the task page's 指标 card and 
     and mode. A launch invariant rejects permission bypasses in non-full modes, or wider access / installed
     capabilities in platform-tools mode, fails the turn with `scope_invariant` and logs a critical event.
     Retirement revokes the session's MCP credential before removing its registered scope grant.
+    Operator-only `manager_chat_bindings.put` sets the group default, and `chat_scope_overrides.list/put/delete`
+    manages person or bot overrides; committed changes reconcile running sessions at once, with `stop_now`
+    explicitly interrupting a retiring session's running turn.
   - Sessions run in parallel; inside one, messages run in order. The message
     loop hands each user message to its session's worker. Completion wake-ups
     resolve the bot's identity before claiming events, then use the event
@@ -9236,6 +9239,9 @@ notify a channel, or call the task-end listener. A task the background is workin
 | `/api/v1/schedule_admin/{list,project_list,get,preview,runs,notifications,create,update,delete,reset_planner_session,run,confirm_target,reset_cursor}` | POST | `schedule_admin.{list,project_list,get,preview,runs,notifications,create,update,delete,reset_planner_session,run,confirm_target,reset_cursor}` |
 | `/api/v1/channel_configs/{list,get,create,update,delete}` | POST | `channel_configs.{list,get,create,update,delete}` |
 | `/api/v1/manager_chat_bindings/{list,put,delete}` | POST | `manager_chat_bindings.{list,put,delete}` (operator-only) |
+| `/api/v1/capability_sets/{list,get}` | POST | `capability_sets.{list,get}` (operator-only) |
+| `/api/v1/chat_scope_overrides/{list,put,delete}` | POST | `chat_scope_overrides.{list,put,delete}` (operator-only) |
+| `/api/v1/manager_sessions/{list,reset}` | POST | `manager_sessions.{list,reset}` (operator-only) |
 | `/api/v1/channel_chats/{list,set_policy}` | POST | `channel_chats.{list,set_policy}` (operator-only) |
 | `/api/v1/manager_session/{get,select_profile}` | POST | `manager_session.{get,select_profile}` |
 | `/api/v1/operator_chat/{turn,stop,targets,sessions,messages,save_message,send,reply_events,thread_events}` | POST | `operator_chat.{turn,stop,targets,sessions,messages,save_message,send,reply_events,thread_events}` |
@@ -9632,7 +9638,23 @@ to native ids. Observation starts after upgrade, only for eligible admitted
 messages; it stores metadata, never message bodies. The exact bot/chat pair is the
 routing key. An explicit binding may also carry extra senders
 (`allowed_senders`, the bot type's sender ids, at most 100), changed only through
-`manager_chat_bindings.put` (Settings → Managers, loopercli). A message in exactly
+`manager_chat_bindings.put` (Settings → Managers, loopercli). Its optional `default_scope`
+sets the group default; null means `chat_only`, omission keeps it for the same Manager,
+and rebinding resets it unless explicitly supplied. `full` is reserved for the operator's
+own session; `legacy` is accepted only on bindings retained from before scopes.
+Binding responses include `default_scope`, `effective_default_scope`, `legacy_allowed`
+and `suggested_scope`. The optional `stop_now` (default false) interrupts running turns
+whose sessions the scope change retires; otherwise they finish their current turn.
+Capability sets and person or bot overrides are configured through operator-only API
+operations and the generated CLI. Override writes lock the binding and refuse sender ids
+owned by another principal. Override writes and changes to a binding's effective default
+scope require confirmation, including a Manager move that resets that scope. Binding
+saves with no effective scope change keep their existing confirmation behavior. Writes
+reconcile the running Manager after commit; a stopped Manager reconciles on its next message.
+`manager_sessions.list` accepts an optional `manager_id` (default: the default Manager)
+and returns its main and stored sessions, including `scope` (`id`, `version`, `audience`)
+or null and `retired`; `manager_sessions.reset` remains limited to the default Manager.
+A message in exactly
 that bot/chat pair is admitted when its sender is on the bot's allowlist or on that
 binding's extra senders; the adapter takes one decision from the committed snapshot
 for both admission and destination. Anywhere else, a direct message or another chat,
