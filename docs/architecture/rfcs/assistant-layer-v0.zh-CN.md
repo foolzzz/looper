@@ -105,9 +105,10 @@ D1–D6 是批准产品设计时定的；D7–D16 是维护者对本文第 16 �
 |---|---|---|
 | `origin` | `user`、`completion` | 回答用户消息的回合，或收尾回合（收尾回合只记 `tool_calls`、`delivery`，不进延迟统计） |
 | `chat` | `dashboard`、`client`、`direct`、`group` | 控制台聊天、loopercli 客户端、飞书和 Telegram 私聊、群（含话题） |
-| `received_at` | 时间 | 渠道收到消息、建信封的时间（`MessageEnvelope.timestamp`） |
+| `received_at` | 时间 | 渠道建信封的时间（`MessageEnvelope.timestamp`）；保留为首回复延迟、排队归因和重放判断的起点 |
 | `ack` | `reaction`、`status`、`none`、`pending` | 飞书和 Telegram 用表情回执的完成时间；控制台用第一条状态（「思考中」）发布的时间；`none` 是渠道没加表情（失败或达到上限）；`pending` 是回合结束时表情还没加上 |
-| `ack_ms` | 整数或 null | 回执时间减 `received_at`；`none`、`pending` 时为 null |
+| `ack_received_at` | 时间，可省略 | 飞书回执计时的本地接收时间：CLI 读取事件 stdout 的时间；没有该时间时，使用进入事件处理器、等待入站锁之前的时间。早于附件下载和群成员姓名查询；不使用平台 `create_time`，不改变信封时间 |
+| `ack_ms` | 非负整数或 null | 回执时间减 `ack_received_at`（没有时减 `received_at`）；UTC wall clock 回拨导致的负差值记为 0；`none`、`pending` 时为 null。`received_at`、`first_reply_ms`、`queued_behind` 和 `replayed` 仍使用原来的信封时间 |
 | `first_reply_ms` | 整数或 null | 用户第一次能读到这一轮的文字的时间减 `received_at`。控制台：第一段顶层文字增量发布的时间；飞书和 Telegram：回复交给渠道（`_send_reply` 发布）的时间。不含渠道自己发送的耗时；没有文字时为 null |
 | `tool_calls` | 整数 | 这一轮顶层的 `tool_use` 块数（子 agent 的不算） |
 | `delivery` | `reply`、`empty`、`failed`、`stopped`、`over_cap` | 有模型文字并交给了渠道；成功结束但没有文字（`NoReply`）；出错；被用户停止；到了花费上限 |
@@ -378,7 +379,7 @@ Persona (set by the operator: your name, how you address them, your tone; Looper
 
 ### 5.3 1.3 会话路由（第一版）
 
-**开关：** `manager.session_routing.enabled`（默认关）、`manager.sessions.max_resident`（整数 1–16，默认 2，依据第 4.2 节的实测：按需恢复只比常驻慢 1–2 秒；1 表示只有 `main` 常驻）。只对默认管家生效。场景管家默认只有一个会话；打开它自己的按聊天会话路由（#1733，`managers.session_routing = per_chat`，默认 `off`）后，每个绑定的群各有一条会话。[群聊能力范围 RFC](chat-scopes-v0.zh-CN.md) 在此基础上按范围分会话。
+**开关：** `manager.session_routing.enabled`（默认关）、`manager.sessions.max_resident`（整数 1–16，默认 2，依据第 4.2 节的实测：按需恢复只比常驻慢 1–2 秒；1 表示只有 `main` 常驻）。只对默认管家生效。场景管家默认只有 `main` 一条会话；把它自己的按聊天会话路由开关（#1733，`managers.session_routing`，取值 `off` / `per_chat`，默认 `off`）设为 `per_chat` 后，在 `main` 之外每个绑定的群各有一条会话，私聊仍留在 `main`。[群聊能力范围 RFC](chat-scopes-v0.zh-CN.md) 在此基础上按范围分会话。
 
 #### 5.3.1 会话键
 

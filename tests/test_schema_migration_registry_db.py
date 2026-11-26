@@ -208,22 +208,23 @@ def test_reminder_send_boundary_upgrades_after_brief_and_retrospective_migration
                 return apply
 
             for module in connection._MIGRATIONS:
-                if module.order in (1920, 1930, 1980, 1990, 2020):
+                if module.order in (1920, 1930, 1980, 1990, 2020, 2110):
                     monkeypatch.setattr(module, "apply", record(module))
             assert await connection.schema_change_pending(conn)
             await connection.ensure_schema(conn)
-            assert applied == [1920, 1930, 1980, 1990, 2020]
+            assert applied == [1920, 1930, 1980, 1990, 2020, 2110]
             assert await conn.fetchval("SELECT count(*) FROM schema_migrations WHERE name = ANY($1)",
                 ["step_failure_handling", "morning_brief_send_started", "memory_retro_role", "memory_retro_queue",
-                 "reminder_post_started"]) == 5
+                 "reminder_post_started", "proactive_bodies"]) == 6
             assert not await connection.schema_change_pending(conn)
             await connection.ensure_schema(conn)
-            assert applied == [1920, 1930, 1980, 1990, 2020]
+            assert applied == [1920, 1930, 1980, 1990, 2020, 2110]
 
     asyncio.run(test())
 
 
 @pytest.mark.parametrize("migration_name,rollback", [
+    ("task_origin_session", "ALTER TABLE tasks DROP COLUMN origin_session CASCADE"),
     ("skill_proposal_feedback", "ALTER TABLE skill_proposal_events DROP COLUMN told_at"),
     ("mcp_tool_levels", "DROP TABLE mcp_tool_levels CASCADE"),
     ("failure_typing", "ALTER TABLE llm_records DROP COLUMN failure_class, DROP COLUMN failure_cause"),

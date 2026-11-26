@@ -244,6 +244,8 @@ def test_rules_off_companion_outputs_match_main_per_item(monkeypatch, tmp_path, 
     from looper.agents.ops import TurnOrigin
     from looper.agents.tiers.turn_token import TurnToken, TurnPhase
 
+    # Exercise companion output before the brief cutoff, independently of timing policy.
+    monkeypatch.setattr(f"{__name__}._NOW", _NOW.replace(hour=11))
     monkeypatch.setattr(attention, "datetime", FixedDatetime)
     monkeypatch.setattr(attention, "_status_checks", None)
     monkeypatch.setattr(attention, "_catchup_checks", None)

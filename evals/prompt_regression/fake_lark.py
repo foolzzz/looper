@@ -1,4 +1,4 @@
-"""Native CLI stand-in used only by group dialogs; never contacts a network."""
+"""Native CLI stand-in used only by Lark dialogs; never contacts a network."""
 
 from __future__ import annotations
 

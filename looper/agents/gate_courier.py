@@ -239,16 +239,16 @@ class GateCourier:
             return True
         reply_to = await self._reply_to(row, chat)
         key = _key(row)
-        proactive = turn_metrics.proactive_kwargs(
-            turn_metrics.ProactiveSource.GATE_REMINDER if MessageKind(row["kind"]) is MessageKind.REMINDER
-            else turn_metrics.ProactiveSource.GATE, row["step_id"], row.get("manager_id"), dedupe_key=key)
         card = await self._card(row, chat, text)
         post = self._post if card is None else self._post_card
         body: Any = text if card is None else card
-        receipt = await post(chat.channel_id, chat.target, body, reply_to=reply_to, idempotency_key=key, **proactive)
-        if receipt.parent_gone:
-            # The message it replies to was recalled (or deleted, which Lark counts as recalled): post it on its own.
-            receipt = await post(chat.channel_id, chat.target, body, reply_to=None, idempotency_key=f"{key}-own", **proactive)
+        with turn_metrics.proactive_send(
+                turn_metrics.ProactiveSource.GATE_REMINDER if MessageKind(row["kind"]) is MessageKind.REMINDER
+                else turn_metrics.ProactiveSource.GATE, row["step_id"], row.get("manager_id"), dedupe_key=key):
+            receipt = await post(chat.channel_id, chat.target, body, reply_to=reply_to, idempotency_key=key)
+            if receipt.parent_gone:
+                # The message it replies to was recalled (or deleted, which Lark counts as recalled): post it on its own.
+                receipt = await post(chat.channel_id, chat.target, body, reply_to=None, idempotency_key=f"{key}-own")
         attempt = int(row.get("post_attempts") or 0) + 1
         if not receipt.success and not receipt.external_ids and attempt < POST_ATTEMPTS:
             await db_user_gates.record_retry(row["id"], receipt.error or "not sent", datetime.now(timezone.utc)

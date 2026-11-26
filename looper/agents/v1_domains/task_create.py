@@ -1,7 +1,8 @@
 """Full dashboard task creation through the shared task core; no Manager Tool changes."""
 
 from ...db import agent_setting_layers, tasks, workflows as db_workflows
-from .. import projects, workflows
+from .. import projects, workflows, task_conversations_settings
+from ..action_levels import ActionLevel
 from ..api_v1 import Operation, _array, _object, _STR, _NULL_STR, _INT, _BOOL
 from ..ops import ErrorCode, OpError
 from ..ops.config import answered
@@ -70,7 +71,20 @@ OPERATIONS = (Operation(
     "a client creating a new project must confirm in the same session.",
     REQUEST, _object({"task_id": _STR, "status": _STR, "created_at": _STR,
                       "project_id": _STR, "workspace": WORKSPACE_CHECK}), risk="write", confirms=True,
-    audit_operator=False),)
+    audit_operator=False),
+    Operation("tasks.create_draft", "POST", "/api/v1/tasks/create_draft",
+              "Create a draft task in an existing project.",
+              "Create a draft task in an existing project. Work mode must be enabled. "
+              "A draft may have no requirement and never starts automatically.",
+              _object({"project_id": {"type": "string", "minLength": 1}, "title": _STR,
+                       "work_dir": _STR, "workspace_mode": WORKSPACE_MODE,
+                       "base": {"type": "string", "maxLength": projects.BASE_MAX_CHARS}},
+                      ["project_id"], closed=True),
+              _object({"task_id": _STR, "status": _STR, "created_at": _STR,
+                       "project_id": _STR, "workspace": WORKSPACE_CHECK}),
+              risk="write", operator_only=True,
+              level=ActionLevel.INSIDE),  # writes only Looper's own task rows
+)
 
 
 async def impact(server, operation, arguments, principal, headers):
@@ -200,6 +214,12 @@ def _execution_impact(execution: ProjectExecution, submitted: dict) -> str:
 
 
 async def run(server, operation, arguments, principal, headers):
+    if operation.operation_id == "tasks.create_draft":
+        if not task_conversations_settings.enabled():
+            raise OpError(ErrorCode.CONFLICT, "work mode is off (tasks.conversations.enabled)")
+        result = await answered(projects.create_task_core(
+            arguments, draft=True, task_fields={"manager_id": "manager", "client_id": principal.client_id}))
+        return {key: result[key] for key in ("task_id", "status", "created_at", "project_id", "workspace")}
     chosen = await answered(projects._profile_overrides(arguments.get("profile_overrides")))
     result = await answered(projects.create_task_core(
         arguments, profiles=chosen, task_fields={"manager_id": "manager", "client_id": principal.client_id}))
