@@ -25,6 +25,7 @@ Db = asyncpg.Pool | asyncpg.Connection
 class EventKind(StrEnum):
     TASK_END = "task_end"
     TRIAGE = "triage"
+    AUTONOMOUS = "autonomous"
 
 
 class Reason(StrEnum):
@@ -43,6 +44,7 @@ class Reason(StrEnum):
     MANAGER_SILENT = "manager_silent"
     DELIVERY_DEFERRED = "delivery_deferred"
     DAILY_CAP = "daily_cap"
+    WITHHELD_NOT_OPERATOR = "withheld_not_operator"
 
 
 RETENTION_DAYS = 30
@@ -86,7 +88,7 @@ class Recorded:
         return self.inserted or row["sent_at"] is None
 
 
-async def record(*, manager_id: str, task_id: str, origin: str, target_kind: str, channel_id: str, chat: str,
+async def record(*, manager_id: str, task_id: str | None, origin: str, target_kind: str, channel_id: str, chat: str,
                  dedupe_key: str, payload: dict[str, Any], fallback: list[dict[str, Any]], state: str,
                  reason: str | None, schedule_run_id: str | None = None, session_key: str | None = None,
                  kind: str = "task_end", pool: Db | None = None) -> Recorded:

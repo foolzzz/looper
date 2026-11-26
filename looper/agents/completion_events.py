@@ -11,7 +11,9 @@ notice: ``no_chat``). Whatever goes wrong (the turn fails, runs past ``TURN_SECO
 nothing, or the reply cannot be handed to the channel; the Manager or the switch was turned off), the events fall
 back and their notices go out exactly as recorded; a Manager that starts does the same for the events a restart
 left ``running`` (``recover``). A group chat's end is ``skipped`` (``group_chat``), and so is
-one whose report reached another Manager (``manager_off``). A schedule's run message is recorded ``skipped``
+one whose report reached another Manager (``manager_off``). An end whose turn would run in the operator's main session
+but whose chat is not the operator's (an API client's dashboard thread, another person's direct chat) is ``skipped``
+too (``withheld_not_operator``): its notice goes out, and no model reply is written for it. A schedule's run message is recorded ``skipped``
 (``off``) whatever the switch says: its turn is not built yet.
 
 A replayed message finds its row: it is not sent again, unless the first attempt never handed the notice to the
@@ -30,7 +32,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 
-from ..db import manager_events as store, tasks as db_tasks
+from ..db import chat as db_chat, manager_events as store, tasks as db_tasks
 from . import chat_settings
 from .turn_metrics import ProactiveSource
 from .links import task_link
@@ -101,6 +103,34 @@ def facts(envelope: MessageEnvelope, *, name: str = "", chat_id: str | None = No
             "chat_id": chat_id}
 
 
+async def _dm_reaches_main(manager_id: str, channel_id: str, recipient: str, *, own_session: bool) -> bool:
+    """Whether a completion turn for a direct chat with ``recipient`` would run in the operator's main session
+    although the recipient is not the operator (``operator_identity``). Only the default Manager's main session is
+    the operator's private conversation. With session routing on, another sender's direct chat runs in its own
+    session; a bot with no operator id cannot tell them apart, so its direct chats run in main
+    (``session_routing.session_key_for``), unless ``own_session``: the end's chat never goes to main then."""
+    from . import session_routing
+    from .managers_api import DEFAULT_MANAGER_ID
+    from .operator_identity import operator_sender_id
+
+    if manager_id != DEFAULT_MANAGER_ID:
+        return False
+    operator = await operator_sender_id(channel_id)
+    if operator is not None and recipient == operator:
+        return False
+    if not session_routing.routes(manager_id):
+        return True
+    return operator is None and not own_session
+
+
+async def _web_thread_of_client(manager_id: str, thread: str) -> bool:
+    """Whether the dashboard thread belongs to an API client: its messages are read through ``chat/messages`` by
+    that client, so the operator's main session never writes into it."""
+    from .managers_api import DEFAULT_MANAGER_ID
+
+    return manager_id == DEFAULT_MANAGER_ID and await db_chat.thread_client(thread) is not None
+
+
 async def _initial_state(manager_id: str, envelope: MessageEnvelope, target: str, *,
                          available: bool) -> tuple[str, str | None]:
     """Whether an end waits for the Manager's completion turn (``pending``), or is told by its notice at once
@@ -151,6 +181,9 @@ async def record_notice_end(manager_id: str, envelope: MessageEnvelope, notice: 
 
     async def decide() -> tuple[str, str | None]:
         state, reason = await _initial_state(manager_id, envelope, kind, available=available)
+        if state == "pending" and kind == "dm" and await _dm_reaches_main(
+                manager_id, notice.channel_id, notice.target.id, own_session=False):
+            return "skipped", store.Reason.WITHHELD_NOT_OPERATOR.value
         if state == "pending" and not payload.get("chat_id"):
             # The turn must run in the direct chat itself: its /stop, its history and its replies are keyed by it.
             payload["chat_id"] = await _direct_chat(notice)
@@ -176,22 +209,33 @@ async def _direct_chat(notice: Notice) -> str | None:
 async def record_web_end(manager_id: str, envelope: MessageEnvelope, thread: str, text: str, *,
                          available: bool = True) -> store.Recorded | None:
     """A dashboard chat task's end, to be told in the chat session ``thread`` as ``text``."""
+
+    async def decide() -> tuple[str, str | None]:
+        state, reason = await _initial_state(manager_id, envelope, "web", available=available)
+        if state == "pending" and await _web_thread_of_client(manager_id, thread):
+            return "skipped", store.Reason.WITHHELD_NOT_OPERATOR.value
+        return state, reason
+
     return await _record(
         manager_id, envelope.payload.get("task_id"), origin="chat", target_kind="web", channel_id=WEB_CHANNEL_ID,
         chat=thread, session_key=thread, dedupe_key=envelope.message_id,
-        decide=lambda: _initial_state(manager_id, envelope, "web", available=available),
+        decide=decide,
         payload=facts(envelope, name=envelope.metadata.get("task_title") or "", chat_id=thread),
         fallback=[{"via": "web_thread", "thread": thread, "text": text, "correlation_id": envelope.correlation_id,
                    "origin_channel_id": envelope.metadata.get("origin_channel_id")}])
 
 
-async def _schedule_state(target: str) -> tuple[str, str | None]:
-    """A schedule run's end waits for the default Manager's completion turn when its message goes to a direct
-    chat; to a chat bound to a Manager (a group) it is sent at once."""
+async def _schedule_state(manager_id: str, target: str, channel_id: str, chat: str) -> tuple[str, str | None]:
+    """A schedule run's end waits for the default Manager's completion turn when its message goes to the operator's
+    direct chat; to a chat bound to a Manager (a group) it is sent at once, and so is one to another person's
+    direct chat while the turn would run in the operator's main session."""
     if chat_settings.completion_turns() is chat_settings.CompletionTurns.OFF:
         return "skipped", "off"
     if target != "dm":
         return "skipped", "group_chat"
+    # A schedule's direct chat is never main's when sessions are routed (``dispatch_completion``).
+    if await _dm_reaches_main(manager_id, channel_id, chat, own_session=True):
+        return "skipped", store.Reason.WITHHELD_NOT_OPERATOR.value
     return "pending", None
 
 
@@ -204,7 +248,7 @@ async def record_schedule_run(manager_id: str, *, task_id: str | None, run_id: s
                                "schedule_run_id": run_id, "result": {"lead": ""}}
 
     async def decide() -> tuple[str, str | None]:
-        state, reason = await _schedule_state(target)
+        state, reason = await _schedule_state(manager_id, target, channel_id, chat)
         if state == "pending" and task_id:
             task = await db_tasks.get_task(task_id) or {}
             payload["result"]["lead"] = lead(task.get("result_summary") or task.get("error"))[:LEAD_CHARS]
