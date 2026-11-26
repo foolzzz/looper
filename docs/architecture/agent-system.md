@@ -907,18 +907,18 @@ They retain the operator's settings, memory and skills, but load MCP servers onl
 a generated `--mcp-config` file under `--strict-mcp-config`: Looper's own server plus the
 operator's servers named in `tasks.conversations.manager_mcp` (default none; read and written
 through `task_conversations.get` and `task_conversations.update`, operator-only; up to 20 unique
-names). Each name is resolved as Claude Code does for the task's working directory (local scope,
-then a project `.mcp.json`, then user scope; with `CLAUDE_CONFIG_DIR` set, that directory's
-`.claude.json`) and its definition is copied into the file. The local scope is keyed by the
-git repository root of the working directory (the main repository's, for a git worktree), else by
-the directory itself, never by a parent directory (verified with Claude Code 2.1.332). `${VAR}`
+names). Each name is resolved from the user scope only (the top-level `mcpServers` of the user's
+`.claude.json`; `$CLAUDE_CONFIG_DIR/.claude.json` when set) and its definition is copied into the file. A
+task's project `.mcp.json` and the local scope tied to its path are never read: MCP servers run outside
+the sandbox with the operator's rights and the task directory is not trusted. `${VAR}`
 references in a definition are expanded by Claude Code from the task Manager's environment, so a
 variable that exists only in the operator's shell expands empty. The generated file can hold server
-secrets and is deleted when the session ends or is replaced. A name with no definition makes the
+secrets and is deleted when the session ends or is replaced. Each launched definition has a
+fingerprint (transport, command, args, the names of its variables and headers; no values), kept on
+the agent as `mcp_fingerprints` for a later comparison with what the CLI launched. A name with no definition makes the
 task Manager refuse to start with `mcp_unresolved` (visible in the task thread like the other start
 refusals); none is skipped. A plugin's own MCP servers never load under strict mode (verified
-with Claude Code 2.1.332), so they cannot be allowed by name; configure the server as a user or
-project server instead. A changed list restarts the resident on its next turn. Orchestrated or
+with Claude Code 2.1.332), so they cannot be allowed by name; configure the server as a user server instead. A changed list restarts the resident on its next turn. Orchestrated or
 unrecoverable workspaces use the existing isolated read-only command. The child
 receives `LOOPER_TASK_MANAGER`, never `LOOPER_AGENT_RUN`. An enabled outbound review
 requires an actual review hook. Before every direct launch or resume, a typed
