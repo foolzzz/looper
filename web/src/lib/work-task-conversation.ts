@@ -45,7 +45,7 @@ const SWITCH_REASONS = ["busy", "invalid_profile", "runtime_unsupported"] as con
 const FRESH_REASONS = ["context_bound", "read_only_open", "resume_failed"] as const;
 const STOP_METHODS = ["control", "cancel", "kill"] as const;
 const SUMMARY_MODES = ["direct", "orchestrated"] as const;
-const REFUSED = ["work_mode_off", "runtime_unsupported", "budget", "outbound_review_unavailable", "workspace", "shutting_down", "review_hook_disabled", "cli_unverified", "manager_answers_off", "mcp_unresolved"] as const;
+const REFUSED = ["work_mode_off", "runtime_unsupported", "budget", "outbound_review_unavailable", "workspace", "shutting_down", "review_hook_disabled", "cli_unverified", "manager_answers_off", "mcp_unresolved", "sandbox_unavailable", "readback_unavailable", "launch_setting_mismatch", "mcp_set_mismatch", "mcp_launcher_unsafe", "network_policy_invalid", "workspace_not_repo_root", "workspace_is_home", "workspace_contains_trusted_config", "workspace_in_system_dir", "workspace_overlaps_session", "worktree_unsupported", "head_moved", "head_detached"] as const;
 
 type ToolPayload = { tool_use_id: string; name: string; args: string; result: string; is_error: boolean };
 type TaskEvent =
