@@ -2,6 +2,7 @@ import { isSessionEnded, SessionEndedError, subscribeSessionEnded } from "@/lib/
 import { randomId } from "@/lib/ids";
 
 export interface V1ErrorDetails {
+  current_version?: number;
   manager_id?: string;
   state?: string;
   phase?: string | null;

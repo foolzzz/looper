@@ -3,7 +3,7 @@ import { Markdown } from "@/components/markdown";
 import { TaskGates } from "@/components/task-gates";
 import { Button } from "@/components/ui/button";
 import { fetchTaskActivityWindow, isActiveTask, streamTaskActivity, type ActivityEvent, type TaskDetail, type UserGate } from "@/lib/api";
-import { formatTime } from "@/lib/activity";
+import { formatWhen } from "@/lib/work";
 import { gateAnchor, isGateShown } from "@/lib/gates";
 import { cn } from "@/lib/utils";
 import type { WorkIdentity, WorkPaneMessage } from "./work-conversation";
@@ -50,7 +50,7 @@ export function WorkMessageRow({ message }: { message: WorkPaneMessage }) {
           : known ? "bg-muted text-foreground" : "text-muted-foreground")}>
         {message.role === "assistant" ? <Markdown>{message.content}</Markdown>
           : <p className="whitespace-pre-wrap">{message.content}</p>}
-        {message.outcome === "stopped" && <p className="mt-1.5 text-xs text-muted-foreground">Stopped</p>}
+        {message.outcome === "stopped" && <p className="mt-1.5 text-xs text-muted-foreground">已停止</p>}
       </div>
     </div>
   );
@@ -183,14 +183,18 @@ export function WorkActivityFeed({ identity, messages, task, onGateChanged, reco
         return <div key={row.key} data-feed-key={row.key} data-row-time={Number.isFinite(row.time) ? row.time : undefined} data-activity-seq={row.source === "activity" ? row.id : undefined} className="relative min-w-0 shrink-0">
           {dividerBefore === row.key && <WorkSinceAway />}
           {row.source === "message" ? <WorkMessageRow message={row.message} />
-            : row.source === "gates" ? <TaskGates task={shared!} onChanged={onGateChanged!} />
-              : row.source === "task-event" ? <p className="text-xs text-muted-foreground whitespace-pre-wrap [overflow-wrap:anywhere]">事件 · {row.kind} · {row.text}</p>
+            : row.source === "gates" ? <TaskGates task={shared!} onChanged={onGateChanged!} language="zh-CN" />
+              : row.source === "task-event" ? <details className="rounded border border-border text-xs text-muted-foreground">
+                  <summary className="min-h-11 cursor-pointer px-3 py-2 focus-visible:ring-2 focus-visible:ring-ring">任务事件</summary>
+                  <p className="px-3 pb-2 whitespace-pre-wrap [overflow-wrap:anywhere]">{row.kind} · {row.text}</p>
+                </details>
                 : <details className="rounded border border-border text-xs text-muted-foreground">
                   <summary className="min-h-11 cursor-pointer px-3 py-2 [overflow-wrap:anywhere] focus-visible:ring-2 focus-visible:ring-ring">
-                    {row.activity.kind} · {row.activity.summary || "事件"}
+                    {row.activity.kind === "phase" ? "进度更新" : row.activity.summary || "活动事件"}
                   </summary>
                   <p className="px-3 pb-2 whitespace-pre-wrap [overflow-wrap:anywhere]">
-                    {row.activity.worker || "system"} · {formatTime(row.activity.created_at)}
+                    {row.activity.kind} · {row.activity.worker || "系统"} · {formatWhen(row.activity.created_at)}
+                    {row.activity.kind === "phase" && `\n${row.activity.summary}`}
                     {row.activity.detail && `\n${row.activity.detail}`}
                   </p>
                 </details>}

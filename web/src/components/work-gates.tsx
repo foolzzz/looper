@@ -21,7 +21,7 @@ export function WorkGates({ task, onOpenGate }: { task: TaskDetail; onOpenGate: 
           <span className="flex flex-wrap items-center gap-2">
             <span className="font-mono text-xs text-muted-foreground">{gate.step}</span>
             {Object.hasOwn(GATE_STATES, gate.state) && (gate.state !== "discussing" || gate.waiting_on === "user" || gate.waiting_on === "planner")
-              ? <GateBadge gate={gate} active={isActiveTask(task)} /> : <Badge variant="outline">状态未知</Badge>}
+              ? <GateBadge gate={gate} active={isActiveTask(task)} language="zh-CN" /> : <Badge variant="outline">状态未知</Badge>}
           </span>
           <span className="line-clamp-2 block">{gate.topic}</span>
           {!gate.step && <span className="block text-destructive">关卡已更新，请刷新</span>}

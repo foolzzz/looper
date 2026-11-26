@@ -18,6 +18,20 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.15.40] - 2026-11-25
+
+Contains all of v2.15.39 at `38d92f469` plus exactly [#1807](https://github.com/foolzzz/looper/pull/1807) (including #1803 and #1806), then [#1809](https://github.com/foolzzz/looper/pull/1809), with two normal merges and release metadata. Tag this release PR's own head after merge, not the later main merge commit. No migration is added over v2.15.39; upgrades from v2.15.38 or earlier inherit [v2.15.39's two migrations and behavior changes](docs/releases/v2.15.39.md). See [the release notes](docs/releases/v2.15.40.md) for activation, validation and exclusions.
+
+### Added
+
+- **Work lifecycle controls and requirement composition, still off by default.** Behind `tasks.conversations.enabled`, the Work page adds Start/continue, stop-background and direct-completion controls with state readback. Draft and ready-task messages append to the saved requirement with version-conflict recovery; only the explicit Start control launches their Planner.
+
+### Changed
+
+- **Consistent Work presentation.** The Chinese page name is 工作台, the sidebar says Work 工作台, the pinned main conversation is 管家 and task conversations keep their task names with counterpart 任务管家. Untitled names match between list and detail, list rows use two lines, controls use Chinese, event rows collapse, draft/non-Git changes states are neutral, unsupported task-Manager model controls hide, and composer notices reflect each task status. The task conversation still uses the Planner; the task Manager chain is excluded.
+- **Optional requirement precondition, without a switch.** `tasks.requirement_update` accepts `expected_version`; a stale value returns HTTP 409 `requirement_changed` with `current_version` and writes nothing. Omitting the field preserves existing behavior.
+- **Private-details guidance, only with per-turn context on.** Behind default-off `manager.turn_context.enabled`, one added contract sentence tells the Manager not to share the operator's account, email address or machine paths with a non-operator speaker. This is model guidance, not an output filter; the real-model eval is attached to #1809.
+
 ## [2.15.39] - 2026-11-25
 
 Frozen at `6aa7f3474`, containing all of v2.15.38 and 23 additional merged PRs. Tag the release PR's own head after merge because main has moved beyond the freeze. Startup adds `task_drafts` (2050, a constraint and online validation on the existing tasks table) and `proactive_bodies` (2110, body columns on proactive deliveries), even with optional features off. See [the release notes](docs/releases/v2.15.39.md) for every included PR, activation instructions, behavior changes and exclusions; upgrades from v2.15.37 or earlier also inherit [v2.15.38](docs/releases/v2.15.38.md).
