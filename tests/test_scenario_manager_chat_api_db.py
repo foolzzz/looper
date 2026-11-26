@@ -269,7 +269,7 @@ def test_another_managers_thread_is_named_never_listed_or_read_as_a_new_one(monk
         assert await get("/api/v1/operator_chat/sessions", {"manager": "manager-review", "session_id": "s-new"}) == (
             200, {"sessions": []})
         assert await get("/api/v1/operator_chat/messages", {"manager": "manager-review", "session_id": "s-new"}) == (
-            200, {"messages": []})
+            200, {"messages": [], "has_more": False, "next_before": None})
         # No `manager` is the default Manager: a scenario Manager's thread is not read through it, by messages or events.
         await _say(pool, "s-rev")
         await chat.claim_thread("s-rev", "manager-review")
