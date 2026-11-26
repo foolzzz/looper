@@ -463,16 +463,18 @@ describe("task conversation", () => {
   });
 
   it.each([
-    [true, "task:t1"],
-    [false, "planner:t1"],
-  ])("selects the work conversation for switch enabled=%s", async (enabled, identity) => {
+    [true, true, "task:t1"],
+    [true, false, "planner:t1"],
+    [false, true, "planner:t1"],
+    [false, false, "planner:t1"],
+  ])("selects the work conversation for enabled=%s and manager_answers=%s", async (enabled, answers, identity) => {
     vi.stubGlobal("fetch", vi.fn(async (url: string, init?: RequestInit) => {
       const path = String(url);
       if (init?.method === "GET") {
         return new Response(JSON.stringify({ status: "error", error: { code: "invalid", message: "use POST" } }), { status: 405 });
       }
       let result: unknown = {};
-      if (path.includes("task_conversations")) result = { enabled };
+      if (path.includes("task_conversations")) result = { enabled, manager_answers: answers };
       else if (path.includes("tasks/detail")) result = { ...taskOf("t1"), requirement: "ship", name: "Beta", title: "Beta" };
       else if (path.includes("work_list")) result = { items: [], schedules: [], next_cursor: null };
       else if (path.includes("tasks/activity")) result = { activity: [] };
@@ -485,7 +487,7 @@ describe("task conversation", () => {
       await flush();
     }
     expect(container.querySelector("[data-identity]")?.getAttribute("data-identity")).toBe(identity);
-    if (enabled) {
+    if (identity === "task:t1") {
       expect(api.fetchChatHistory).toHaveBeenCalledWith("task-chat:t1", expect.anything());
       expect(api.fetchChatMessages).not.toHaveBeenCalled();
     } else {
