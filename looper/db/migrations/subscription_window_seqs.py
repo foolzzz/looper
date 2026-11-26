@@ -25,11 +25,12 @@ async def pending(conn) -> bool:
     return not await conn.fetchval("SELECT to_regclass($1) IS NOT NULL", _INDEX[0])
 
 
-async def apply(conn, *, sql, state):
+async def apply(conn, *, sql, state) -> bool:
     if not await pending(conn):
-        return
+        return False
     # The column already exists. The index is built in the online step, outside this transaction.
     await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", name)
+    return True
 
 
 online_order = 1030

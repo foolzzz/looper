@@ -182,15 +182,18 @@ async def pending(conn):
     return bool(await _missing(conn)) or await _widen_check.pending(conn, _TABLE, "source", _ADD)
 
 
-async def apply(conn, *, sql, state):
+async def apply(conn, *, sql, state) -> bool:
+    did_work = False
     repairs = await _missing(conn)
     widen = await _widen_check.pending(conn, _TABLE, "source", _ADD)
     from .. import connection
     unvalidated = await connection._unvalidated(conn, name)
     if repairs or widen or unvalidated:
+        did_work = True
         for ddl in repairs:
             await conn.execute(ddl)
         if widen:
             await conn.execute(_WIDEN)
         await conn.execute("INSERT INTO schema_migrations(name) VALUES($1) ON CONFLICT DO NOTHING", name)
         await conn.execute("DELETE FROM schema_migrations WHERE name=$1", online[0].marker)
+    return did_work

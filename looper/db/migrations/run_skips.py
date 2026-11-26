@@ -13,10 +13,12 @@ async def pending(conn):
     return await legacy._run_skips_pending(conn)
 
 
-async def apply(conn, *, sql, state):
+async def apply(conn, *, sql, state) -> bool:
+    did_work = False
     from .. import connection as legacy
 
     if await legacy._run_skips_pending(conn):
+        did_work = True
         await conn.execute(legacy._run_skips_ddl())
         await conn.execute(
             "INSERT INTO schema_migrations (name) VALUES ($1) ON CONFLICT DO NOTHING",
@@ -26,9 +28,11 @@ async def apply(conn, *, sql, state):
             "DELETE FROM schema_migrations WHERE name = $1", legacy._RUN_SKIPS_ONLINE
         )
     elif state == "empty":
+        did_work = True
         for table, constraint in legacy._online_step(legacy._RUN_SKIPS).validate:
             await conn.execute(f"ALTER TABLE {table} VALIDATE CONSTRAINT {constraint}")
     elif await legacy._unvalidated(conn, legacy._RUN_SKIPS):
+        did_work = True
         await conn.execute(
             "INSERT INTO schema_migrations (name) VALUES ($1) ON CONFLICT DO NOTHING",
             legacy._RUN_SKIPS,
@@ -36,6 +40,7 @@ async def apply(conn, *, sql, state):
         await conn.execute(
             "DELETE FROM schema_migrations WHERE name = $1", legacy._RUN_SKIPS_ONLINE
         )
+    return did_work
 
 
 online_order = 70

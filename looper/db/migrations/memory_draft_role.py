@@ -21,12 +21,15 @@ async def pending(conn):
     return bool(await statements(conn))
 
 
-async def apply(conn, *, sql, state):
+async def apply(conn, *, sql, state) -> bool:
+    did_work = False
     if ddl := await statements(conn):
+        did_work = True
         for statement in ddl:
             await conn.execute(statement)
         await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1) ON CONFLICT DO NOTHING", name)
         await conn.execute("DELETE FROM schema_migrations WHERE name = $1", online[0].marker)
+    return did_work
 
 
 online_order = 1830

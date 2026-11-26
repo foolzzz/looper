@@ -18,9 +18,9 @@ async def pending(conn):
             or await connection._column_pending(conn, name, "subscription_runs", "retry_record_id"))
 
 
-async def apply(conn, *, sql, state):
+async def apply(conn, *, sql, state) -> bool:
     if not await pending(conn):
-        return
+        return False
     await conn.execute(fresh_ddl)
     # Scan historical metadata once on upgrade, never once per firing in a spend read.
     await conn.execute("""
@@ -42,3 +42,4 @@ async def apply(conn, *, sql, state):
         WHERE sr.run_id = retries.run_id AND sr.retry_record_id IS NULL AND sr.record_id <> retries.id
     """)
     await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", name)
+    return True

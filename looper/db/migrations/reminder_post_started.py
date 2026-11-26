@@ -12,10 +12,11 @@ async def pending(conn):
     return await connection._column_pending(conn, name, "reminders", "post_started_at")
 
 
-async def apply(conn, *, sql, state):
+async def apply(conn, *, sql, state) -> bool:
     if not await pending(conn):
-        return
+        return False
     await conn.execute(fresh_ddl)
     # Old claims have no evidence that the channel was never called: preserve at-most-once recovery.
     await conn.execute("UPDATE reminders SET post_started_at = updated_at WHERE status = 'sending'")
     await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", name)
+    return True
