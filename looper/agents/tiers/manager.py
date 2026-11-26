@@ -591,8 +591,9 @@ def _looper_call(name: Any, raw: Any) -> tuple[str, dict[str, Any]]:
     return name, arguments
 
 
-def _sender_kind(envelope: MessageEnvelope) -> PrincipalKind | None:
-    """The channel's trusted sender kind, or None for absent or unknown values."""
+def _recorded_sender_kind(envelope: MessageEnvelope) -> PrincipalKind | None:
+    """The sender kind kept as provenance on a stored message: None for absent or unknown values, so a bad value
+    never loses the message. Routing authority never reads this; it fails closed on its own strict reader."""
     context = envelope.payload.get("channel_context")
     try:
         return PrincipalKind(context.get("sender_kind") if isinstance(context, dict) else None)
@@ -3836,7 +3837,7 @@ class ManagerAgent:
                 return
             context = env.payload.get("channel_context")
             context = context if isinstance(context, dict) else {}
-            kind = _sender_kind(env)
+            kind = _recorded_sender_kind(env)
             await db_chat.save_channel_message(
                 session_id=key, message_id=message_id,
                 role=role, content=content, channel=channel, manager_id=self.agent_id,
