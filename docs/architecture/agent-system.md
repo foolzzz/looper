@@ -4971,8 +4971,9 @@ snapshot reads the delivered requirement version, plan, gates, open agendas and
 gate discussions; the Manager snapshot reads the stored conversations allowed
 for that session. These are data and grant no permission. A failed snapshot
 turn is offered again until one succeeds; a new boundary supersedes that offer.
-The latest annotation in `llm_records.metadata.compaction_restore`, within the
-agent's last 500 records, survives process restarts. A new session id cannot
+The latest annotation for the same agent and session in
+`llm_records.metadata.compaction_restore` survives process restarts, regardless
+of traffic in other chats. A new session id cannot
 inherit an old annotation, and record retention may discard pending restores.
 Completion turns can arm a restore but, like hidden delivery follow-ups, do not
 carry one. Default Manager routed sessions are excluded; scenario per-chat
@@ -4980,6 +4981,10 @@ sessions use only their own excerpt. Autonomous turns, Workers, Reviewers,
 automatic-compaction hooks and other runtimes remain outside this behavior.
 When off, maintenance keeps bare `/compact`, model inputs remain unchanged and
 no restore annotation is read or written.
+The switch is loaded with the cached settings at startup and refreshed by
+operator updates and configuration imports; turns do not query it in the database.
+Every Planner compaction decision reads that cache, including HANDOFF exchanges
+that bypass normal turn preparation.
 
 So:
 
