@@ -41,7 +41,8 @@ async def run(server, operation, arguments, principal, headers):
             from ..task_manager_settings import set_task_manager_profile
             if await tasks.get_task(arguments["task_id"]) is None:
                 raise OpError(ErrorCode.NOT_FOUND, "task not found")
-            await set_task_manager_profile(arguments["task_id"], arguments["profile_id"])
+            await set_task_manager_profile(arguments["task_id"], arguments["profile_id"],
+                                           publish=getattr(server._web_adapter, "publish_task_event", None))
             return {"task_id": arguments["task_id"], "profile_id": arguments["profile_id"]}
         done = await server._task_router.complete_direct(arguments["task_id"])
     except projects.RequestError as exc:

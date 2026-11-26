@@ -107,6 +107,25 @@ async def list_messages(
     return [dict(r) for r in rows]
 
 
+async def older_messages(session_id: str, *, before: int | None = None, limit: int = 200,
+                         pool: asyncpg.Pool | None = None) -> tuple[list[dict[str, Any]], bool, int | None]:
+    """Backward storage-order page, with the internal row id used only for the next cursor.
+
+    Storage order preserves the legacy newest-200 read, including timestamp ties. Fetching one extra row
+    determines whether the next page exists without a separate count or a racy existence check.
+    """
+    rows = await (pool or get_pool()).fetch(
+        "SELECT id, message_id, role, content, channel, created_at, delivery_failure, delivery_error "
+        "FROM chat_messages WHERE session_id = $1 AND ($2::bigint IS NULL OR id < $2) "
+        "ORDER BY id DESC LIMIT $3", session_id, before, limit + 1)
+    has_more = len(rows) > limit
+    page = [dict(row) for row in reversed(rows[:limit])]
+    next_id = page[0]["id"] if page and has_more else None
+    for row in page:
+        row.pop("id")
+    return page, has_more, next_id
+
+
 # The web chat keeps each task's Planner thread under that Planner's agent id, ``planner-<task_id>``
 # (web/src/pages/chat.tsx ``sessionFor``); every other chat session is a conversation with the Manager.
 PLANNER_THREAD_PREFIX = "planner-"

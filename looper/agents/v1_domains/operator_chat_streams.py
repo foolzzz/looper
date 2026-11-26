@@ -12,6 +12,7 @@ from ..api_v1 import Operation, _array, _object, _STR
 from ..chat_targets import HTTP_409, ChatTargetError, resolve_chat_target
 from ..ops import ErrorCode, OpError
 from ..tiers.manager import is_new_session_command
+from ..task_manager_settings import ModelSwitchRejection
 
 
 _ID = {"type": "string", "minLength": 1}
@@ -33,7 +34,10 @@ SCHEMAS = {
         _object({"kind": {"const": "command"}, "command": {"enum": [
             "/stop", "/done", "/pause", "/background", "/takeover", "/start"]}}, closed=True),
         _object({"kind": {"const": "queued"}, "reason": {"enum": ["cap", "turn"]},
-                 "position": {"type": "integer"}}, closed=True),
+                 "position": {"type": "integer"}, "active": {"type": "integer", "minimum": 0}}, closed=True),
+        _object({"type": {"const": "model_switched"}, "from_profile_id": _STR, "to_profile_id": _STR}, closed=True),
+        _object({"type": {"const": "model_switch_rejected"}, "profile_id": {"type": ["string", "null"]},
+                 "reason": {"enum": [reason.value for reason in ModelSwitchRejection]}}, closed=True),
         _object({"kind": {"const": "session_fresh"}, "reason": {"enum": [
             "context_bound", "read_only_open", "resume_failed"]}, "detail": _STR}, closed=True),
         _object({"kind": {"const": "stopped"}, "method": {"enum": ["control", "cancel", "kill"]}}, closed=True),
@@ -85,7 +89,7 @@ OPERATIONS = (
         ("answer.delta", "answer.final", "agent.phase", "heartbeat", "system.event", "agent.tool", "task.event")),
     _stream("thread_events", {"session_id": _ID, "manager": _STR}, ["session_id"],
         "Follow saved answers and autonomous messages in an open dashboard thread, checking its Manager owner.",
-        ("chat.message", "heartbeat")),
+        ("chat.message", "task.event", "heartbeat")),
 )
 
 

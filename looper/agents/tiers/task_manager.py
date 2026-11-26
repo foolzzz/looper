@@ -36,6 +36,8 @@ class TaskManagerEvent(str, Enum):
     TURN_SUMMARY = "turn_summary"
     REFUSED = "refused"
     STOPPED = "stopped"
+    MODEL_SWITCHED = "model_switched"
+    MODEL_SWITCH_REJECTED = "model_switch_rejected"
 
 
 @dataclass(frozen=True)
@@ -219,7 +221,8 @@ class TaskManagerAgent:
                 if self.pool.closing:
                     raise Refused(RefuseReason.SHUTTING_DOWN, "The task Manager is shutting down.")
                 if sink is not None and not notified:
-                    await sink.event(TaskManagerEvent.QUEUED, {"reason": "cap", "position": 1})
+                    await sink.event(TaskManagerEvent.QUEUED, {"reason": "cap", "position": 1,
+                                                              "active": self.pool.working_count()})
                     notified = True
                 await self.pool._available.wait()
             if self.pool.closing:
@@ -396,6 +399,9 @@ class TaskManagerPool:
         agent = self.agents.get(task_id)
         return bool(agent and agent.busy)
 
+    def working_count(self) -> int:
+        return sum(agent.busy for agent in self.agents.values())
+
     async def _slot(self, agent: TaskManagerAgent) -> bool:
         """Called under the pool gate; an idle eviction never races a turn admission."""
         if agent.resident.started:
@@ -426,7 +432,8 @@ class TaskManagerPool:
                 if request in self._pending:
                     busy = self.in_turn(task_id)
                     position = sum(r.task_id == task_id for r in self._pending) if busy else len(self._pending)
-                    await sink.event(TaskManagerEvent.QUEUED, {"reason": "turn" if busy else "cap", "position": position})
+                    await sink.event(TaskManagerEvent.QUEUED, {"reason": "turn" if busy else "cap", "position": position,
+                                                              "active": self.working_count()})
                     return Submitted("queued")
         if reason is not None:
             await self._refuse(request, reason, "Task conversations are disabled or shutting down.")

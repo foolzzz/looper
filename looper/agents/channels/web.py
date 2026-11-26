@@ -183,6 +183,12 @@ class WebChannelAdapter(ChannelAdapter):
         record_delivery("web", envelope, DeliveryReceipt(channel="web", success=True), chat=session_id)
         return receipt
 
+    async def publish_task_event(self, task_id: str, payload: Mapping[str, Any]) -> None:
+        """Fan out an already-persisted task conversation event to open thread subscribers."""
+        from ...db.chat import task_thread
+
+        self._chats.publish(task_thread(task_id), {"kind": "task.event", "payload": dict(payload)})
+
     def iter_chat_events(self, session_id: str, *, heartbeat: float = 15.0) -> AsyncGenerator[dict[str, Any], None]:
         """The events of the chat ``session_id`` that belong to no message's stream, for as long as it is read.
 

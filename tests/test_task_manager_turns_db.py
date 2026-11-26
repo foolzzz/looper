@@ -129,7 +129,7 @@ def test_fifo_stop_then_next_turn_and_start_exclusion(monkeypatch, tmp_path, nat
             bus.publish.assert_not_awaited()
             result = await pool.submit(task_id, "second", message_id="two", sink=second)
             assert result.state == "queued"
-            assert ("queued", {"reason": "turn", "position": 1}) in second.events
+            assert ("queued", {"reason": "turn", "position": 1, "active": 1}) in second.events
             canceled = Sink()
             assert (await pool.submit(task_id, "never written", message_id="three", sink=canceled)).state == "queued"
             assert await stop(pool, task_id, "three")
@@ -184,7 +184,7 @@ def test_busy_cap_queue_uses_freed_slot(monkeypatch, tmp_path, native):
                 result = await pool.submit(task_id, "wait" if index < 2 else "reply", message_id=str(index), sink=sinks[index])
                 assert result.state == ("started" if index < 2 else "queued")
             await until(lambda: len(native.records("input")) == 2)
-            assert any(kind == "queued" and payload["reason"] == "cap" for kind, payload in sinks[2].events)
+            assert ("queued", {"reason": "cap", "position": 1, "active": 2}) in sinks[2].events
             assert await stop(pool, "task-0", "0")
             await sinks[2].done()
             await sinks[3].done()

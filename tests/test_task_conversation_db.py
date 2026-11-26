@@ -426,7 +426,19 @@ def _stripped_document():
     schemas.pop("OperatorChatTaskEvent")
     thread = document["paths"]["/operator_chat/thread_events"]["post"]["responses"]["200"]["content"][
         "text/event-stream"]["schema"]["x-looper-events"]
-    assert "agent.tool" not in thread and "task.event" not in thread
+    assert "agent.tool" not in thread and "task.event" in thread
+    thread.pop("task.event")
+    history = document["paths"]["/operator_chat/messages"]["post"]
+    request = history["requestBody"]["content"]["application/json"]["schema"]["properties"]
+    for key in ("before", "limit"):
+        request.pop(key)
+    result = history["responses"]["200"]["content"]["application/json"]["schema"]["allOf"][1]["properties"]["result"]
+    for key in ("has_more", "next_before", "turn_state"):
+        result["properties"].pop(key)
+    result["required"] = ["messages"]
+    result["additionalProperties"] = True
+    for code in ("invalid_cursor", "cursor_session_mismatch"):
+        document["components"]["schemas"]["ErrorCode"]["enum"].remove(code)
     return document
 
 

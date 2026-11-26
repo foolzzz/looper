@@ -5,7 +5,13 @@ save failures return unavailable instead of claiming persistence succeeded.
 Client-owned ``chat.*`` operations and channel delivery are unchanged.
 """
 
-from ...db import chat, managers as db_managers
+import base64
+import hashlib
+import json
+
+from cryptography.fernet import Fernet, InvalidToken
+
+from ...db import chat, managers as db_managers, task_chat
 from ..api_v1 import Operation, _array, _object, _STR, _NULL_STR, _INT, _BOOL
 from ..chat_targets import list_chat_targets
 from ..ops import ErrorCode, OpError
@@ -43,12 +49,43 @@ def _op(action, fields, result, required=None, risk="read"):
 OPERATIONS = (
     _op("targets", {}, _object({"targets": _array(CHAT_TARGET_INFO)})),
     _op("sessions", {"manager": _STR, "session_id": _STR}, _object({"sessions": _array(CHAT_SESSION)}), []),
-    _op("messages", {"session_id": _ID, "manager": _STR}, _object({"messages": _array(DB_CHAT_MESSAGE)}),
+    _op("messages", {"session_id": _ID, "manager": _STR, "before": _STR,
+        "limit": {"type": "integer", "minimum": 1, "maximum": 200, "default": 200}},
+        _object({"messages": _array(DB_CHAT_MESSAGE), "has_more": _BOOL, "next_before": _NULL_STR,
+                 "turn_state": {"enum": ["idle", "running", "interrupted"]}},
+                ["messages", "has_more", "next_before"], closed=True),
         ["session_id"]),
     _op("save_message", {"session_id": _ID, "message_id": _ID, "role": _ID, "content": _STR},
         _object({"ok": _BOOL}), risk="write"),
 )
 RESULTS = {}
+
+
+def _cursor_codec(server):
+    # The operator credential survives restarts. Domain separation keeps cursor encryption independent of auth.
+    if server._operator_token:
+        key = hashlib.sha256(("operator-chat-cursor-v1:" + server._operator_token).encode()).digest()
+        return Fernet(base64.urlsafe_b64encode(key))
+    # In-process servers without an operator credential still need an unpredictable key.
+    if not hasattr(server, "_history_cursor_codec"):
+        server._history_cursor_codec = Fernet(Fernet.generate_key())
+    return server._history_cursor_codec
+
+
+def _read_cursor(server, cursor, session_id):
+    try:
+        if len(cursor) > 4096 or not cursor.startswith("v1."):
+            raise ValueError
+        data = json.loads(_cursor_codec(server).decrypt(cursor[3:].encode()))
+        if (not isinstance(data, dict) or set(data) != {"id", "session"}
+                or type(data["id"]) is not int or not 0 < data["id"] < 2**63
+                or not isinstance(data["session"], str)):
+            raise ValueError
+    except (InvalidToken, ValueError, UnicodeError):
+        raise OpError(ErrorCode.INVALID_CURSOR, "invalid history cursor") from None
+    if data["session"] != session_id:
+        raise OpError(ErrorCode.CURSOR_SESSION_MISMATCH, "history cursor belongs to another session")
+    return data["id"]
 
 
 async def run(server, operation, arguments, principal, headers):
@@ -74,4 +111,11 @@ async def run(server, operation, arguments, principal, headers):
             client_id, client_name = session.pop("client_id"), session.pop("client_name")
             session["client"] = {"id": client_id, "name": client_name} if client_id is not None else None
         return _plain({"sessions": sessions})
-    return _plain({"messages": await chat.list_messages(session_id)})
+    before = _read_cursor(server, arguments["before"], session_id) if "before" in arguments else None
+    messages, has_more, next_id = await chat.older_messages(session_id, before=before, limit=arguments.get("limit", 200))
+    next_before = ("v1." + _cursor_codec(server).encrypt(json.dumps({"id": next_id, "session": session_id}).encode()).decode()
+                   if next_id is not None else None)
+    result = {"messages": messages, "has_more": has_more, "next_before": next_before}
+    if task_thread:
+        result["turn_state"] = await task_chat.turn_state(session_id.removeprefix(chat.TASK_THREAD_PREFIX))
+    return _plain(result)

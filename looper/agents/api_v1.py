@@ -31,6 +31,8 @@ ACCEPTED = "202 Accepted"
 STATUS: dict[ErrorCode, str] = {
     ErrorCode.INTERNAL: "500 Internal Server Error",
     ErrorCode.INVALID: "400 Bad Request",
+    ErrorCode.INVALID_CURSOR: "400 Bad Request",
+    ErrorCode.CURSOR_SESSION_MISMATCH: "400 Bad Request",
     ErrorCode.UNAUTHORIZED: "401 Unauthorized",
     ErrorCode.FORBIDDEN: "403 Forbidden",
     ErrorCode.BLOCKED: "403 Forbidden",

@@ -63,6 +63,8 @@ class ErrorCode(str, Enum):
     INTERNAL = "internal"  # a stored exchange cannot be reconstructed completely
     NOT_FOUND = "not_found"
     INVALID = "invalid"
+    INVALID_CURSOR = "invalid_cursor"
+    CURSOR_SESSION_MISMATCH = "cursor_session_mismatch"
     NEEDS_USER_TURN = "needs_user_turn"  # a change outside a turn that answers the user
     FORBIDDEN = "forbidden"
     UNAUTHORIZED = "unauthorized"  # /api/v1 without a valid client token (the Manager never sees it)
