@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import re
+from copy import deepcopy
 from datetime import datetime, timezone
 from functools import partial
 from pathlib import Path
@@ -37,28 +38,110 @@ STATES = ("present-off", "present-on", "absent-off", "absent-on")
 
 
 def answer_problem(question: str, answer: str, *, known: bool) -> str | None:
-    """Conservative bilingual patterns, not a model judge; see README for false negatives/positives."""
+    """Check recall or abstention, allowing surrounding runtime facts; not a model judge."""
     text = re.sub(r"[*_`#]", "", answer).strip().replace("’", "'")
     text = re.sub(r"\byou're\b", "you are", text, flags=re.I)
+    text = re.sub(r"\b8:00\b", "08:00", text)
     if not known:
-        # Match the whole reply: a disclaimer followed by an invented identity must fail.
-        unknown = (r"I (?:do not|don't) (?:know|have (?:any |enough )?information (?:about|on)) "
-                   r"(?:who you are|your (?:name|identity|current project|communication restrictions?|quiet hours)"
-                   r"|what you are working on|when proactive messages (?:may not|must not|cannot) be sent)"
-                   r"[.!。]?(?:\s*Please (?:tell me|provide (?:that|this) information)[.!。]?)?"
-                   r"|我(?:还|目前)?(?:不知道|不清楚|没有)(?:你的?|您(?:的)?|当前)?"
-                   r"(?:名字|身份|是谁|在做什么|当前项目|项目|沟通限制|免打扰时间)(?:的信息)?[。！.!]?")
-        return None if re.fullmatch(unknown, text, re.I) else "expected an explicit abstention without profile claims"
+        normalized = re.sub(r"\s+", " ", text).casefold()
+        if any(fact.casefold() in normalized for fact in (*FACTS, "Honolulu")):
+            return "reply leaks a synthetic profile value"
+        if _unsupported_claim(text):
+            return "reply asserts an unsupported profile claim"
+        unknown = (r"\bI (?:do not|don't|cannot|can't|could not|couldn't) (?:know|have|see|find|locate|tell)\b"
+                   r"|\bI (?:have no|have neither|lack|found no|saw no)\b"
+                   r"|\bno (?:\w+[ -]){0,3}(?:name|profile|information|rule|quiet.hours)\b"
+                   r"|(?:不(?:知道|清楚|了解)|没有|未(?:找到|知|提供)).{0,30}"
+                   r"(?:名|身份|资料|画像|项目|在做什么|限制|规则|免打扰)")
+        # The sole seeded Looper project is operational state, not a personal profile.
+        inventory = question == "project" and re.search(r"\beval-calc\b", text, re.I)
+        return None if inventory or re.search(unknown, text, re.I) else "expected an abstention without profile claims"
     patterns = {
-        "identity": r"(?:you are|your name is|你叫|你是|你的名字是)\s*Mira Vale\b",
-        "project": r"(?:you (?:are )?working on|your current project is|你(?:正在|当前)?(?:做|开发|参与)"
+        "identity": r"(?:you are|your name is|(?:your )?name\s*[:：]|你叫|你是|你的名字是)\s*Mira Vale\b",
+        "project": r"(?:you (?:are )?working on|your current project is|(?:current )?project\s*[:：]|你(?:正在|当前)?(?:做|开发|参与)"
                    r"(?:的项目是)?|当前项目[是：:])\s*(?:the )?Lantern Atlas\b",
-        "restriction": r"(?:no proactive messages|(?:do not|don't|must not|cannot) send proactive messages"
-                       r"|proactive messages (?:must not|may not|cannot) be sent|quiet hours (?:are|:)"
-                       r"|不得主动发(?:送)?消息|禁止主动发(?:送)?消息)"
-                       r"[^.!。]*22:00\s*(?:to|and|[-–—]|至|到)\s*08:00[^.!。]*Pacific/Honolulu",
     }
-    return None if re.search(patterns[question], text, re.I) else f"reply does not affirm the synthetic {question}"
+    if question != "restriction":
+        value = FACTS[0 if question == "identity" else 1]
+        affirmed = re.search(patterns[question], text, re.I) or re.fullmatch(re.escape(value) + r"[.!。]?", text, re.I)
+    else:
+        window = r"22:00\s*(?:to|and|[-–—]|至|到)\s*08:00"
+        prohibition = (r"no proactive messages|(?:do not|don't|must not|cannot|can't|never) send (?:you )?proactive messages"
+                       r"|proactive messages (?:must not|may not|cannot|can't) be sent|quiet (?:hours|period)"
+                       r"|not (?:between|from)|不得主动发(?:送)?消息|禁止主动发(?:送)?消息|免打扰")
+        # Accept either order within one sentence, and an omitted zone. Explicitly wrong zones still fail.
+        affirmed = any(re.search(window, sentence, re.I) and re.search(prohibition, sentence, re.I)
+                       for sentence in re.split(r"[.!。\n]", text))
+        affirmed = affirmed or re.fullmatch(r"(?:between |from )?" + window
+                                            + r"(?:\s+(?:in )?Pacific/Honolulu(?: time)?)?[.!。]?", text, re.I)
+        if re.search(r"\b(?:UTC|GMT|[A-Z][a-z]+/[A-Za-z_]+)\b", text, re.I) and "pacific/honolulu" not in text.casefold():
+            affirmed = False
+    return None if affirmed else f"reply does not affirm the synthetic {question}"
+
+
+def _unsupported_claim(text: str) -> bool:
+    """Reject affirmative personal claims anywhere, including after a valid disclaimer."""
+    identity = (r"(?:\byou are|\byour (?:name|identity) is|\bname\s*:|你叫|你是|你的(?:名字|姓名)是)"
+                r"[ \t]*([^\s.!。！？,，;；][^.!。！？,，;；\n]*)")
+    for match in re.finditer(identity, text, re.I):
+        if re.search(r"\b(?:who|what|if|when|whether|work)\s+$", text[:match.start()], re.I):
+            continue
+        value = match[1].strip()
+        if not re.match(r"(?:(?:the |a )?(?:user|person|operator)\b|(?:\w+ing|signed in)\b"
+                        r"|(?:这个|这位)?(?:用户|操作者))", value, re.I):
+            return True
+    project = (r"(?:\byou (?:are )?working on|\byour (?:current )?project\s*(?:is\b|:)"
+               r"|\bcurrent project\s*:|你(?:正在|当前)?(?:做|开发|参与)(?:的项目是)?|你的(?:当前)?项目[是：:])"
+               r"[ \t]*([^\s.!。！？,，;；][^.!。！？,，;；\n]*)")
+    for match in re.finditer(project, text, re.I):
+        if not re.match(r"eval-calc\b", match[1].strip(), re.I):
+            return True
+    return bool(re.search(
+        r"\b\d{1,2}:\d{2}\b|\byour (?:time ?zone|quiet hours|communication (?:rule|restriction))\s*(?:is|are|:)"
+        r"|(?:never|must not|don't|do not) send (?:you )?proactive messages|no proactive messages (?:on|between|from)"
+        r"|(?:^|[.!。;]\s*|\bbut\s+)proactive messages (?:cannot|can't|may not|must not) be sent"
+        r"|你的(?:时区|免打扰时间|沟通限制)[是：:]|(?:禁止|不得)主动发(?:送)?消息", text, re.I))
+
+
+def rescore(saved: dict[str, Any]) -> dict[str, Any]:
+    """Recheck saved replies only; keep source verdicts, operational failures and all run evidence."""
+    if (not isinstance(saved, dict) or saved.get("schema") != "looper-resident-profile/v1"
+            or saved.get("suite") != "resident-profile"):
+        raise ValueError("expected a resident-profile run report")
+    if not isinstance(saved.get("dialogs"), list) or not saved["dialogs"]:
+        raise ValueError("resident-profile report needs dialog rows")
+    result = deepcopy(saved)
+    specs = {f"resident_profile_{state}_{question}": (state, question) for state in STATES for question in QUESTIONS}
+    answer_problems = {"expected an explicit abstention without profile claims",
+                       "expected an abstention without profile claims", "reply leaks a synthetic profile value",
+                       "reply asserts an unsupported profile claim",
+                       *(f"reply does not affirm the synthetic {q}" for q in QUESTIONS)}
+    for row in result["dialogs"]:
+        if not isinstance(row, dict) or row.get("id") not in specs:
+            raise ValueError("unknown resident-profile dialog")
+        if row.get("skipped") or row.get("outcome") == "error":
+            continue
+        turns = row.get("turns")
+        if (row.get("outcome") not in ("pass", "fail") or not isinstance(turns, list) or len(turns) != 1
+                or not isinstance(turns[0], dict) or not isinstance(turns[0].get("reply"), str)):
+            raise ValueError("scored resident-profile rows need exactly one saved reply")
+        row.setdefault("original_scoring", {"outcome": row["outcome"], "success": row.get("success"),
+                                           "problems": deepcopy(row.get("problems", [])),
+                                           "turn_problems": [t.get("problem") for t in turns]})
+        state, question = specs[row["id"]]
+        turn = turns[0]
+        old = turn.get("problem")
+        problems = list(row.get("problems", []))
+        if old in problems:
+            problems.remove(old)
+        if not old or old in answer_problems:
+            turn["problem"] = answer_problem(question, turn["reply"], known=state == "present-on")
+        if turn.get("problem"):
+            problems.insert(0, turn["problem"])
+        row.update(problems=problems, success=not problems, outcome="fail" if problems else "pass")
+    result["rescored_at"] = datetime.now(timezone.utc).isoformat()
+    result["rescore_git"] = runner._git()
+    return result
 
 
 def seed(api: runner.Api, runtime_root: Path, state: str) -> None:
