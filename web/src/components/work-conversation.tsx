@@ -81,8 +81,8 @@ const READ_FAILED = "对话读取失败";
 const NOT_FOUND = "任务不存在";
 const CHECKING = "正在检查对话可用性";
 const CHECK_FAILED = "无法检查对话可用性";
-const NO_PLANNER = "仅可与 Planner 运行中的任务对话";
-const PLANNER_ENDED = "任务已结束，Planner 不再接收消息。";
+const NO_PLANNER = "仅可与运行中的任务管家对话";
+const PLANNER_ENDED = "任务已结束，任务管家不再接收消息。";
 const CONNECT_FAILED = "连接失败，请检查服务器是否运行。";
 const STREAM_LOST = "回复流已断开，服务端可能仍在运行";
 

@@ -61,12 +61,12 @@ it("reaches the eleventh scheduled run through the server cursor", async () => {
 
 it("reads deep-linked and reloaded tasks independently with the latest watermark", async () => {
   await show("task/outside");
-  expect(host.querySelector("h1")?.textContent).toBe("Outside first screen");
+  expect(host.querySelector('[aria-label="当前任务"] h1')?.textContent).toBe("Outside first screen");
   expect(host.querySelector('a[href="#chat?target=planner-outside"]')).toBeNull();
   expect(host.querySelector('textarea[aria-label="消息"]')).not.toBeNull();
   expect(calls.filter(c => c.path.includes("mark_seen")).map(c => c.body)).toEqual([{ task_id: "outside", seq: 1501 }]);
   await remount("task/outside");
-  expect(host.querySelector("h1")?.textContent).toBe("Outside first screen");
+  expect(host.querySelector('[aria-label="当前任务"] h1')?.textContent).toBe("Outside first screen");
 });
 
 it("distinguishes selected task loading, missing and error states without marking seen", async () => {
@@ -84,10 +84,10 @@ it("rebuilds loaded pages and expanded schedule runs before restoring delayed co
   await show(); await click("Nightly"); await click("已结束");
   const ended = host.querySelector('[aria-label="已结束"]')!;
   await act(async () => { [...ended.querySelectorAll("button")].find(el => el.textContent === "加载更多")!.click(); }); await settle();
-  const list = host.querySelector('[aria-label="工作任务"]') as HTMLElement;
+  const list = host.querySelector('[aria-label="工作台任务"]') as HTMLElement;
   list.scrollTop = 600; await act(async () => { list.dispatchEvent(new Event("scroll")); });
   held = true; await remount();
-  const reloaded = host.querySelector('[aria-label="工作任务"]') as HTMLElement;
+  const reloaded = host.querySelector('[aria-label="工作台任务"]') as HTMLElement;
   expect(reloaded.scrollTop).toBe(0);
   expect(sessionStorage.getItem("looper.work.scroll")).toBe("600");
   held = false; await act(async () => { releases.splice(0).forEach(resolve => resolve()); }); await settle();
@@ -128,7 +128,7 @@ it("waits for a hidden narrow-screen list to have layout before restoring", asyn
   });
   sessionStorage.setItem("looper.work.scroll", "600");
   await show("task/outside");
-  const list = host.querySelector('[aria-label="工作任务"]') as HTMLElement;
+  const list = host.querySelector('[aria-label="工作台任务"]') as HTMLElement;
   expect(list.scrollTop).toBe(0);
   height.mockReturnValue(600);
   await act(async () => { resized(); });

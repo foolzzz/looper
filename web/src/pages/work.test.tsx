@@ -227,7 +227,7 @@ describe("Work page shell", () => {
       );
     }
     await render(<Harness initial="" />);
-    const scroller = host.querySelector('[aria-label="工作任务"]') as HTMLElement;
+    const scroller = host.querySelector('[aria-label="工作台任务"]') as HTMLElement;
     scroller.scrollTop = 120;
     const link = [...host.querySelectorAll("a")].find((a) => a.textContent?.includes("Beta new"))!;
     await act(async () => { link.dispatchEvent(new MouseEvent("click", { bubbles: true })); });
@@ -243,12 +243,12 @@ describe("Work page shell", () => {
     root = createRoot(host);
     navigated.length = 0;
     await render(<Harness initial="task/t-b1" />);
-    expect(host.querySelector("h1")!.textContent).toBe("Beta new");
+    expect(host.querySelector('[aria-label="当前任务"] h1')!.textContent).toBe("Beta new");
     expect(host.querySelector('a[href="#tasks/t-b1"]')!.textContent).toBe("打开任务页面");
     expect(host.querySelector('a[href="#chat?target=planner-t-b1"]')).toBeNull();
     expect(host.querySelector('textarea[aria-label="消息"]')).not.toBeNull();
     expect(host.textContent).not.toContain("Talk to its Planner");
-    expect((host.querySelector('[aria-label="工作任务"]') as HTMLElement).scrollTop).toBe(120);
+    expect((host.querySelector('[aria-label="工作台任务"]') as HTMLElement).scrollTop).toBe(120);
 
     act(() => root.unmount());
     root = createRoot(host);

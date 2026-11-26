@@ -152,7 +152,7 @@ it("unlocks and keeps input when a successful write is replaced before readback"
 
 it("shows the identical timestamped untitled name in the list and header, without the internal id", async () => {
   await show();
-  const heading = host.querySelector("h1")!.textContent!;
+  const heading = host.querySelector('[aria-label="当前任务"] h1')!.textContent!;
   expect(heading).toContain("未命名任务");
   expect(heading).toMatch(/\d/);
   expect(heading).not.toContain("task-draft");

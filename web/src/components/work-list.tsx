@@ -168,6 +168,7 @@ export function WorkList({
   return (
     <div className="flex h-full min-h-0 flex-col">
       <div className="shrink-0 space-y-2 border-b border-border p-3">
+        <h1 className="text-lg font-semibold">工作台</h1>
         <Button ref={newButton} type="button" className="w-full" disabled={drafts === false || !projectId || creating} onClick={() => void onNew()}
           aria-describedby={draftReason ? "work-draft-reason" : undefined}>
           新建任务
@@ -199,7 +200,7 @@ export function WorkList({
           管家
         </a>
       </div>
-      <div ref={scroller} aria-label="工作任务" onScroll={saveScroll} className="min-h-0 flex-1 overflow-y-auto overscroll-contain">
+      <div ref={scroller} aria-label="工作台任务" onScroll={saveScroll} className="min-h-0 flex-1 overflow-y-auto overscroll-contain">
         <section aria-label="进行中任务" aria-busy={open.loading} className="border-b border-border pb-2">
           <h2 className="px-3 pt-3 text-xs font-medium text-muted-foreground">进行中</h2>
           <SectionState section="open" state={open} empty="暂无进行中任务" />

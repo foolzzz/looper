@@ -171,7 +171,7 @@ describe("Work quick switcher", () => {
     expect(navigated).toContain("task/c2");
     expect(window.location.hash).toBe("#work/task/c2");
     await settle();
-    expect(host.querySelector("h1")?.textContent).toBe("Selected c2");
+    expect(host.querySelector('[aria-label="当前任务"] h1')?.textContent).toBe("Selected c2");
     expect(calls.some(call => call.url.includes("mark_seen") && call.body.task_id === "c2" && call.body.seq === 901)).toBe(true);
 
     selectResult = { kind: "one", task: { task_id: "only", title: "Only one", project_name: "Beta", status: "running", group: "in_progress", last_activity_at: null } };

@@ -130,6 +130,17 @@ afterEach(() => {
 });
 
 describe("Work list", () => {
+  it("names the page 工作台 and pins 管家 before conversations named after their tasks", async () => {
+    await show();
+    expect(host.querySelector("h1")?.textContent).toBe("工作台");
+    const links = [...host.querySelectorAll("a")];
+    expect(links[0].textContent?.trim()).toBe("管家");
+    expect(links[0].getAttribute("href")).toBe("#work/manager");
+    const list = host.querySelector('[aria-label="工作台任务"]')!;
+    expect(list.contains(links[0])).toBe(false);
+    expect(links[1].querySelector("[data-task-title]")?.textContent).toBe("Beta new");
+  });
+
   it("uses Chinese for list controls and schedule status", async () => {
     await show();
     for (const text of ["新建任务", "查找任务", "管家", "进行中", "定时任务", "已结束", "连续失败 3 次"]) {
