@@ -13,10 +13,12 @@ async def pending(conn):
     return await legacy._manager_event_delivery_pending(conn)
 
 
-async def apply(conn, *, sql, state):
+async def apply(conn, *, sql, state) -> bool:
+    did_work = False
     from .. import connection as legacy
 
     if await legacy._manager_event_delivery_pending(conn):
+        did_work = True
         await conn.execute(
             "ALTER TABLE manager_events ADD COLUMN IF NOT EXISTS delivery TEXT, ADD COLUMN IF NOT EXISTS "
             "delivery_attempts INTEGER NOT NULL DEFAULT 0, ADD COLUMN IF NOT EXISTS delivery_at TIMESTAMPTZ, "
@@ -28,6 +30,7 @@ async def apply(conn, *, sql, state):
             "INSERT INTO schema_migrations (name) VALUES ($1)",
             legacy._MANAGER_EVENT_DELIVERY,
         )
+    return did_work
 
 
 online_order = 50

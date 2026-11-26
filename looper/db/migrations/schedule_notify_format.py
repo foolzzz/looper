@@ -11,10 +11,12 @@ async def pending(conn):
     return await legacy._schedule_notify_format_pending(conn)
 
 
-async def apply(conn, *, sql, state):
+async def apply(conn, *, sql, state) -> bool:
+    did_work = False
     from .. import connection as legacy
 
     if await legacy._schedule_notify_format_pending(conn):
+        did_work = True
         await conn.execute(
             "ALTER TABLE schedules ADD COLUMN notify_format TEXT NOT NULL DEFAULT 'report' "
             "CHECK (notify_format IN ('report', 'deliverable'))"
@@ -27,3 +29,4 @@ async def apply(conn, *, sql, state):
             "INSERT INTO schema_migrations (name) VALUES ($1)",
             legacy._SCHEDULE_NOTIFY_FORMAT,
         )
+    return did_work

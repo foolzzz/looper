@@ -4996,6 +4996,9 @@ of contention the starter logs a warning and continues; the owner or a later
 start finishes any unmarked steps. A caller that already holds a transaction
 also defers the online steps with a warning until a start outside one. The lock
 is released on completion, failure or cancellation (and on connection loss).
+Each migration or online step that actually runs emits one info log line with
+its name, order and duration in seconds (three decimals); already-applied
+items log nothing.
 
 #### Adding a named migration
 

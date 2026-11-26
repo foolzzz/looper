@@ -22,7 +22,10 @@ async def pending(conn: asyncpg.Connection) -> bool:
         "AND attname IN ('context_tokens', 'last_turn_cost_usd') AND attnum > 0 AND NOT attisdropped")
 
 
-async def apply(conn: asyncpg.Connection, *, sql: str, state: str) -> None:
+async def apply(conn: asyncpg.Connection, *, sql: str, state: str) -> bool:
+    did_work = False
     if await pending(conn):
+        did_work = True
         await conn.execute(fresh_ddl)
         await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", name)
+    return did_work

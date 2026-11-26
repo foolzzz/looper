@@ -20,8 +20,11 @@ async def pending(conn):
     return await connection._column_pending(conn, name, "tasks", "untrusted_inputs")
 
 
-async def apply(conn, *, sql, state):
+async def apply(conn, *, sql, state) -> bool:
+    did_work = False
     if await pending(conn):
+        did_work = True
         await conn.execute(f"ALTER TABLE tasks ADD COLUMN {_TAINT}")
         await conn.execute("ALTER TABLE agent_sessions ADD COLUMN leads_session_id TEXT")
         await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", name)
+    return did_work

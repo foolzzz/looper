@@ -17,7 +17,10 @@ async def pending(conn: asyncpg.Connection) -> bool:
     return await connection._column_pending(conn, name, "proactive_deliveries", "body")
 
 
-async def apply(conn: asyncpg.Connection, *, sql: str, state: str) -> None:
+async def apply(conn: asyncpg.Connection, *, sql: str, state: str) -> bool:
+    did_work = False
     if await pending(conn):
+        did_work = True
         await conn.execute(fresh_ddl)
         await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", name)
+    return did_work

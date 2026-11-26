@@ -13,14 +13,17 @@ async def pending(conn):
     return await legacy._mid_turn_input_pending(conn)
 
 
-async def apply(conn, *, sql, state):
+async def apply(conn, *, sql, state) -> bool:
+    did_work = False
     from .. import connection as legacy
 
     if await legacy._mid_turn_input_pending(conn):
+        did_work = True
         await conn.execute(legacy._MID_TURN_INPUT_DDL)
         await conn.execute(
             "INSERT INTO schema_migrations (name) VALUES ($1)", legacy._MID_TURN_INPUT
         )
+    return did_work
 
 
 online_order = 80

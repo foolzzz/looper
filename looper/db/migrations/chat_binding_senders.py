@@ -11,10 +11,12 @@ async def pending(conn):
     return await legacy._chat_binding_senders_pending(conn)
 
 
-async def apply(conn, *, sql, state):
+async def apply(conn, *, sql, state) -> bool:
+    did_work = False
     from .. import connection as legacy
 
     if await legacy._chat_binding_senders_pending(conn):
+        did_work = True
         await conn.execute(
             "ALTER TABLE manager_chat_bindings ADD COLUMN allowed_senders TEXT[] NOT NULL "
             "DEFAULT '{}' CONSTRAINT manager_chat_bindings_allowed_senders_check "
@@ -24,3 +26,4 @@ async def apply(conn, *, sql, state):
             "INSERT INTO schema_migrations (name) VALUES ($1)",
             legacy._CHAT_BINDING_SENDERS,
         )
+    return did_work

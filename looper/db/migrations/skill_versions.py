@@ -54,12 +54,13 @@ async def pending(conn):
         "AND attname = 'skill_version' AND NOT attisdropped)")
 
 
-async def apply(conn, *, sql, state):
+async def apply(conn, *, sql, state) -> bool:
     if not await pending(conn):
-        return
+        return False
     for statement in _STATEMENTS:
         await conn.execute(statement)
     from ...agents.skill_versions import backfill
 
     await backfill(conn)
     await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", name)
+    return True

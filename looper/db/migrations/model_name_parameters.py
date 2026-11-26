@@ -13,13 +13,15 @@ async def pending(conn):
     return await legacy._model_name_parameters_pending(conn)
 
 
-async def apply(conn, *, sql, state):
+async def apply(conn, *, sql, state) -> bool:
+    did_work = False
     from .. import connection as legacy
 
     if await legacy._model_name_parameters_pending(conn):
         # Use the application's grammar rather than maintaining a second
         # regex in SQL. NOT VALID preserves historical malformed names on
         # upgrade; all new inserts/updates still enforce the new grammar.
+        did_work = True
         pattern = legacy.MODEL_NAME_PATTERN.replace("'", "''")
         for field in ("name", "background_model"):
             constraint = f"llm_models_{field}_check"
@@ -40,3 +42,4 @@ async def apply(conn, *, sql, state):
                 "INSERT INTO schema_migrations (name) VALUES ($1)",
                 legacy._MODEL_NAME_PARAMETERS,
             )
+    return did_work
