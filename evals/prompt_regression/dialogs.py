@@ -3650,6 +3650,49 @@ FAKE_DIALOGS: tuple[Dialog, ...] = (
             ("whole", "another audience's block came after the last shown state"), ("unchanged", "unchanged")),
             (("__reply__", {"text": "好的。"}),)),
     ), seed=_seed_stable_audience, tags=("manager", "stable_context", "audience")),
+    Dialog("scoped_group_activity", (
+        Say("先记住这个群的对话。", lambda look: None,
+            (("__reply__", {"text": "好的。"}),)),
+        Say("明天的发布推迟到周五", lambda look: None,
+            (("__reply__", {"text": "收到。"}),), sender="member"),
+        Say("刚才群里说发布改到哪天？", group_dialogs.scoped_group_activity,
+            (("__input_contract__", {
+                "input": ["[GROUP ACTIVITY]", '<untrusted source="group_message"',
+                          '>\n明天的发布推迟到周五\n</untrusted>'],
+                "reply": "群里说发布推迟到周五。"}),)),
+    ), session="group", routing="scoped", manager="scope-activity", manager_seed={
+        "name": "Eval group activity desk", "tools": "all", "system_prompt": group_dialogs.SCOPED_ROLE}),
+    Dialog("scoped_operator_group_contract", (
+        Say("这个群里刚才说了什么？", group_dialogs.scoped_operator_input,
+            (("__input_contract__", {
+                "system": ["## This group session",
+                           "This is your session for one group chat, and only the operator's messages are turns in it.",
+                           "This session does not list ready tasks, open gates or goals; "
+                           "a missing section does not mean there are none."],
+                "input": [group_dialogs.THIS_CHAT_HISTORY],
+                "excluded": [group_dialogs.OTHER_CHAT_HISTORY],
+                "reply": f"这个群里之前说过：{group_dialogs.THIS_CHAT_HISTORY}。"}),)),
+    ), session="group", routing="scoped", manager="scope-operator", manager_seed={
+        "name": "Eval operator group desk", "tools": "all", "system_prompt": group_dialogs.SCOPED_ROLE}),
+    Dialog("scoped_shared_speakers", (
+        Say("请总结附件里的内容。", group_dialogs.scoped_shared_input,
+            (("__input_contract__", {
+                "system": ["Several people may speak in this session; each message is labelled with its speaker.",
+                           group_dialogs.SCOPED_ROLE],
+                "input": [group_dialogs.THIS_CHAT_HISTORY],
+                "excluded": [group_dialogs.OTHER_CHAT_HISTORY],
+                "attachment_end": "This session cannot open attachments; if the message needs one, say so.",
+                "reply": "这条会话打不开附件，请把需要的内容贴出来。"}),), sender="member",
+            attachments=(("notes.txt", b"Synthetic shared-session attachment.\n"),)),
+    ), session="group", routing="scoped", manager="scope-speakers", manager_seed={
+        "name": "Eval shared group desk", "tools": "all", "system_prompt": group_dialogs.SCOPED_ROLE}),
+    Dialog("scoped_member_guess_refused", (
+        Say("帮我在项目里建一个任务", group_dialogs.scoped_guess_refused,
+            (("looper_task_create", {"project": PROJECT, "title": "Synthetic group task",
+                                    "requirement": "Create a greeting file in the project."}),), sender="member"),
+    ), session="group", routing="scoped", manager="scope-refusal", manager_seed={
+        "name": "Eval scoped desk", "tools": "all",
+        "system_prompt": "Answer the messages addressed to you in this group."}),
     Dialog("group_per_chat_smoke", (
         Say("Operator greeting.", group_dialogs.smoke_check,
             (("__reply__", {"text": f"Received in {group_dialogs.CHAT}."}),)),

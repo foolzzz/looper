@@ -391,6 +391,7 @@ async def load() -> bool:
         MID_TURN_INPUT_KEY,
         TURN_CONTEXT_KEY, TIMEZONE_KEY, REPLY_LANGUAGE_KEY, OUTBOUND_ENABLED_KEY, DELIVERY_ENABLED_KEY,
         session_routing.ROUTING_KEY, session_routing.MAX_RESIDENT_KEY, status_card.ENABLED_KEY,
+        session_routing.MAX_RESIDENT_TOTAL_KEY, session_routing.IDLE_RECLAIM_KEY,
         receipts_settings.ENABLED_KEY,
         *("channels.outbound." + key for key in OUTBOUND_DEFAULTS),
         MORNING_BRIEF_ENABLED_KEY, MORNING_BRIEF_TIME_KEY, MORNING_BRIEF_CUTOFF_KEY,

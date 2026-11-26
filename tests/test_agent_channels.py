@@ -593,13 +593,14 @@ class TestTelegramAllowlist:
     ) -> None:
         (message,) = self._run(tmp_path, handler, _tg_update(7, "选 A", message_id=41, replies_to=replies_to), "7")
         assert message.payload["channel_context"] == {"chat_id": 99, "user_id": 7, "username": "someone",
-                                                      "message_id": "41", **refs}
+                                                      "message_id": "41", "sender_kind": "person", **refs}
 
     def test_an_edited_new_has_no_message_to_name(self, tmp_path: Path) -> None:
         update = _tg_update(7, "/new")
         update.message = None  # how python-telegram-bot gives an edited message: as edited_message
         (message,) = self._run(tmp_path, "_cmd_new", update, "7")
-        assert message.payload["channel_context"] == {"chat_id": 99, "user_id": 7, "username": "someone"}
+        assert message.payload["channel_context"] == {"chat_id": 99, "user_id": 7, "username": "someone",
+                                                      "sender_kind": "person"}
 
     @pytest.mark.parametrize("on", [True, False])
     def test_todo_forwards_only_while_the_needs_you_summary_is_on(
@@ -806,7 +807,7 @@ class TestLarkAllowlist:
         assert message.payload["text"] == "what runs now?"
         assert message.payload["channel_context"] == {"chat_id": "oc_team", "chat_type": "group",
                                                       "sender_id": OPEN_ID, "message_id": "om_7",
-                                                      "sender_name": "Ada Lovelace"}
+                                                      "sender_name": "Ada Lovelace", "sender_kind": "person"}
         # Seen at once; its answer replies to it in the group.
         assert seen.reacted == ["om_7"] and seen.replies_to == {message.correlation_id: "om_7"}
 
@@ -855,7 +856,7 @@ class TestLarkAllowlist:
         assert message.payload["text"] == "选 A"
         assert message.payload["channel_context"] == {
             "chat_id": "oc_1", "chat_type": "group" if group else "p2p", "sender_id": OPEN_ID, "message_id": "om_7",
-            **({"sender_name": "Ada Lovelace"} if group else {}), **seen}
+            "sender_kind": "person", **({"sender_name": "Ada Lovelace"} if group else {}), **seen}
 
     @pytest.mark.parametrize("reference", ["reply_to", "root_id"])
     def test_a_mention_only_reply_in_a_group_reaches_the_manager(
@@ -890,7 +891,8 @@ class TestLarkAllowlist:
         (message,) = seen.messages
         assert seen.conversations == {message.correlation_id: "oc_team"}
         assert message.payload["channel_context"] == {"chat_id": "oc_team", "chat_type": "p2p",
-                                                      "sender_id": OPEN_ID, "message_id": "om_1"}
+                                                      "sender_id": OPEN_ID, "message_id": "om_1",
+                                                      "sender_kind": "person"}
 
     def test_an_empty_allowlist_keeps_the_channel_from_starting(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture,

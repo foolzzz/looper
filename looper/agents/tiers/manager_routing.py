@@ -7,11 +7,11 @@ and a worker task that runs its messages in order, on that session (``ManagerAge
 one on the bus once handled, so a message handed on and not finished replays at restart. Sessions run in parallel.
 Messages that run no model turn stay in the loop.
 
-At most ``session_routing.max_resident()`` sessions keep a process. Before a session other than main starts one at
-the cap, the least recently active idle session other than main is stopped (its session id stays saved, and its
-next message resumes it); when none is idle, the message waits, with a status line, until a turn ends. Main never
-waits and is never stopped for another. With a cap of 1, a session other than main still runs its turn when only
-main holds a process, and stops it once the turn is over.
+The default Manager and ``per_chat`` Managers each use ``session_routing.max_resident()``: idle non-main sessions
+make room, busy starts wait, and main never waits (a cap of 1 also admits a non-main turn beside main).
+Scoped Managers use a machine-wide cap counting all Managers' processes and reservations: the oldest idle
+non-main session makes room with its session id kept for resumption, starts wait when none is idle, main never
+waits or gets evicted, and scoped non-main residents are reclaimed after the configured idle timeout.
 
 Switched off, new messages go to main again: main's worker keeps the messages it holds in order, the other workers
 finish theirs, and their processes stop once idle (``sweep``).
@@ -23,18 +23,20 @@ import asyncio
 import logging
 import time
 import uuid
+import weakref
 from collections import deque
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from enum import StrEnum
 from typing import TYPE_CHECKING, Any
 
-from .. import admission, lanes_settings, mid_turn_input, session_routing
+from .. import admission, chat_scopes, lanes_settings, mid_turn_input, session_routing, session_visibility
 from ..lanes import Lane
 from ..message import MessageEnvelope, MessageType
 from ..runtimes import CLAUDE_CODE
 from ..session_routing import SessionKey, SessionKind
-from .manager_session import MAIN_SESSION, ManagerSession
+from .manager_session import MAIN_SESSION, ManagerSession, Retirement
+from ..chat_scopes import ScopeInvariantViolation, ScopeUnavailable
 
 if TYPE_CHECKING:
     from .manager import ManagerAgent
@@ -43,6 +45,14 @@ logger = logging.getLogger(__name__)
 
 OPERATOR_ID_SECONDS = 30.0  # how long a bot's operator id is reused before it is read again
 WAITING_STATUS = "排队中：其他会话正忙"
+
+
+SCOPE_UNAVAILABLE_REPLY = "这个群的能力范围设置现在用不了，没有执行任何操作；请操作者检查这个群的范围。"
+
+
+class RouteOutcome(StrEnum):
+    ANSWERED = "answered"
+    HELD = "held"
 
 
 class IdentityUnavailable(Exception):
@@ -116,6 +126,34 @@ class _Queues:
         return checks
 
 
+class ResidentPool:
+    """All Managers' residents and reservations, serialized for scoped starts."""
+
+    def __init__(self) -> None:
+        self.routers: weakref.WeakSet[SessionRouter] = weakref.WeakSet()
+        self._condition: asyncio.Condition | None = None
+        self._loop: asyncio.AbstractEventLoop | None = None
+        self.waits: deque[tuple[str, float]] = deque(maxlen=256)
+
+    @property
+    def condition(self) -> asyncio.Condition:
+        loop = asyncio.get_running_loop()
+        if self._condition is None or self._loop is not loop:
+            self._condition, self._loop = asyncio.Condition(), loop
+        return self._condition
+
+    def count(self, exclude: ManagerSession) -> int:
+        return sum(1 for router in self.routers for session in router._agent._sessions.values()
+                   if session is not exclude and (session.claude.started or session.key in router._reservations))
+
+    async def changed(self) -> None:
+        async with self.condition:
+            self.condition.notify_all()
+
+
+pool = ResidentPool()
+
+
 class SessionRouter:
     """The workers of a Manager's sessions, and its resident processes' cap."""
 
@@ -130,10 +168,16 @@ class SessionRouter:
         self._resident = asyncio.Condition()
         self._reservations: set[str] = set()
         self._completion_ids: set[str] = set()
+        self._principals: dict[str, tuple[chat_scopes.Principal, chat_scopes.SessionScope]] = {}
+        self._completion_scopes: dict[str, chat_scopes.SessionScope] = {}
+        self._reconciling: dict[tuple[str, str], asyncio.Lock] = {}
+        self._resolving: set[str] = set()
+        self._ending: set[str] = set()
+        pool.routers.add(self)
 
     # --- Where a message goes ---
 
-    async def target(self, envelope: MessageEnvelope) -> ManagerSession | None:
+    async def target(self, envelope: MessageEnvelope) -> ManagerSession | RouteOutcome | None:
         """The session whose worker takes ``envelope``; None when the message loop handles it itself: one that runs
         no model turn, or any message while routing is off and main's worker holds none."""
         kind = envelope.message_type
@@ -153,12 +197,28 @@ class SessionRouter:
             return None  # claim first in the handler; only that event can name the session
         from .. import completion_events
 
-        while True:
-            try:
-                return self.session(await self._user_key(envelope))
-            except IdentityUnavailable:
-                # Not settled on the bus: shutdown/restart also retries this message.
-                await asyncio.sleep(completion_events.RETRY_SECONDS)
+        retried = False
+        episode = self._scope_attempt(envelope)
+        try:
+            while True:
+                try:
+                    key = await self._user_key(envelope)
+                    found = self.session(key, self._scope(envelope))
+                    if retried and episode is not None:
+                        self._observe_recovered(episode)
+                    return found
+                except (ScopeUnavailable, ScopeInvariantViolation) as exc:
+                    if isinstance(exc, ScopeInvariantViolation):
+                        await self._observe_invariant(envelope, exc, default="resolve")
+                    return await self._scope_error(envelope, exc)
+                except IdentityUnavailable:
+                    # Not settled on the bus: shutdown/restart also retries this message.
+                    retried = True
+                    if episode is not None:
+                        await self._observe_retry(envelope, episode)
+                    await asyncio.sleep(completion_events.RETRY_SECONDS)
+        finally:
+            self._finish_scope_attempt(episode)
 
     def dispatch(self, session: ManagerSession, envelope: MessageEnvelope) -> None:
         """Queue ``envelope`` for ``session``'s worker, started on first use."""
@@ -188,25 +248,286 @@ class SessionRouter:
         if worker is None or worker.done():
             self._workers[session.key] = asyncio.create_task(self._work(session), name=f"manager-session:{session.key}")
 
-    def session(self, key: SessionKey) -> ManagerSession:
+    def session(self, key: SessionKey, scope: chat_scopes.SessionScope | None = None) -> ManagerSession:
         """The Manager's session of ``key``, made (not started) on first use; its saved state is read before its
         first turn (``ManagerAgent._load_session_state``)."""
         sessions = self._agent._sessions
         if key.text not in sessions:
             label = session_routing.resident_label(self._agent.agent_id, key)
             sessions[key.text] = ManagerSession(key=key.text, route=key, claude=CLAUDE_CODE.resident_session(label),
-                                                claude_runtime=CLAUDE_CODE, last_activity=self._agent._clock())
-        return sessions[key.text]
+                                                claude_runtime=CLAUDE_CODE, last_activity=self._agent._clock(), scope=scope)
+            if scope is not None and scope.mode is chat_scopes.LaunchMode.PLATFORM_TOOLS:
+                session_visibility.register_scoped(self._agent.agent_id, key.text,
+                                                   session_visibility.inputs_for(scope))
+        session = sessions[key.text]
+        if (session.scope.fingerprint if session.scope else None) != (scope.fingerprint if scope else None):
+            from ..chat_scope_metrics import MarkedInvariant
+
+            raise MarkedInvariant("session", "session scope differs from its key")
+        if session.retired is not None or session.key in self._ending:
+            raise IdentityUnavailable("the previous session is still retiring")
+        return session
+
+    def _scope(self, envelope: MessageEnvelope) -> chat_scopes.SessionScope | None:
+        recorded = self._principals.get(envelope.message_id)
+        return recorded[1] if recorded else None
+
+    def principal(self, envelope: MessageEnvelope, session: ManagerSession) -> chat_scopes.Principal:
+        recorded = self._principals.get(envelope.message_id)
+        if recorded is None or session.scope is None or recorded[1].fingerprint != session.scope.fingerprint:
+            from ..chat_scope_metrics import MarkedInvariant
+
+            raise MarkedInvariant("prepare", "turn principal differs from its session scope")
+        return recorded[0]
+
+    async def _scope_error(self, envelope: MessageEnvelope, exc: Exception) -> RouteOutcome:
+        from .manager import _message_origin
+
+        origin = _message_origin(envelope)
+        digest = session_routing.key_digest(str(origin["chat"]))
+        self._principals.pop(envelope.message_id, None)
+        if isinstance(exc, ScopeUnavailable):
+            logger.warning("%s: chat %s scope %s unavailable: %s", self._agent.agent_id, digest, exc.scope, exc.reason)
+            await self._agent._send_reply(envelope, SCOPE_UNAVAILABLE_REPLY, error="scope_unavailable")
+            return RouteOutcome.ANSWERED
+        logger.critical("%s: chat %s scope invariant: %s", self._agent.agent_id, digest, exc)
+        return RouteOutcome.HELD
+
+    async def _observe_invariant(self, envelope: MessageEnvelope, exc: BaseException, *, default: str,
+                                 scope: str | None = None) -> None:
+        from .. import chat_scope_alerts, chat_scope_metrics
+        from .manager import _message_origin
+
+        where = getattr(exc, "where", default)
+        if where not in ("resolve", "launch", "session", "prepare"):
+            where = default
+        chat_scope_metrics.invariant(self._agent.agent_id, where)
+        if scope is None and (recorded := self._principals.get(envelope.message_id)) is not None:
+            item = recorded[1]
+            scope = f"{item.resolved.scope_id}@{item.version}"
+        origin = _message_origin(envelope)
+        await chat_scope_alerts.invariant_violation(
+            self._agent.agent_id, where, channel_id=origin.get("channel_id"), chat=origin.get("chat"), scope=scope)
+
+    def _scope_attempt(self, envelope: MessageEnvelope) -> str | None:
+        """The message id when this delivery resolves a scoped group. Other identity retries stay uncounted."""
+        from .manager import _message_origin
+
+        origin = _message_origin(envelope)
+        if session_routing.scoped(self._agent.agent_id) and origin["group"]:
+            return envelope.message_id
+        return None
+
+    def _finish_scope_attempt(self, episode: str | None) -> None:
+        if episode is None:
+            return
+        from .. import chat_scope_alerts
+
+        chat_scope_alerts.clear_retry(self._agent.agent_id, episode)
+
+    async def _observe_retry(self, envelope: MessageEnvelope, episode: str) -> None:
+        from .. import chat_scope_alerts, chat_scope_metrics
+        from .manager import _message_origin
+
+        chat_scope_metrics.resolution_retry(self._agent.agent_id)
+        origin = _message_origin(envelope)
+        await chat_scope_alerts.resolution_retrying(
+            self._agent.agent_id, episode=episode, channel_id=origin.get("channel_id"), chat=origin.get("chat"))
+
+    def _observe_recovered(self, episode: str) -> None:
+        from .. import chat_scope_metrics
+
+        chat_scope_metrics.resolution_recovered(self._agent.agent_id, episode)
+
+    async def _scoped_key(self, envelope: MessageEnvelope) -> SessionKey:
+        from .manager import _message_origin, _sender_kind
+
+        origin = _message_origin(envelope)
+        key, scope = await self._resolve_scope(origin, _sender_kind(envelope))
+        resolved = scope.resolved
+        self._principals[envelope.message_id] = (chat_scopes.Principal(
+            resolved.audience, resolved.principal_kind, resolved.scope_id, scope.version), scope)
+        return key
+
+    async def _resolve_scope(self, origin: dict[str, Any], kind: chat_scopes.PrincipalKind | None
+                             ) -> tuple[SessionKey, chat_scopes.SessionScope]:
+        from ...db import chat_bindings
+
+        channel, chat = origin["channel_id"], origin["chat"]
+        operator = await self._operator_id(channel)
+        try:
+            config = await chat_bindings.scope_config(channel, chat, self._agent.agent_id)
+        except Exception as exc:
+            raise IdentityUnavailable("cannot read the chat scope") from exc
+        resolved = chat_scopes.resolve(sender=origin["sender"], sender_kind=kind, operator_id=operator, config=config)
+        scope = await self._session_scope(resolved)
+        key = SessionKey(SessionKind.GROUP, channel, chat, scope_fingerprint=scope.fingerprint)
+        await self.reconcile(channel, chat, config=config, operator_id=operator)
+        return key, scope
+
+    async def _session_scope(self, resolved: chat_scopes.Resolved) -> chat_scopes.SessionScope:
+        from ...db import capability_sets
+
+        try:
+            sets = await capability_sets.current([resolved.scope_id])
+        except Exception as exc:
+            raise IdentityUnavailable("cannot read the capability set") from exc
+        if resolved.scope_id not in sets:
+            raise ScopeUnavailable(resolved.scope_id, "set is missing or deleted")
+        version, items = sets[resolved.scope_id]
+        # Resolve the launch mode first; only the final, versioned fingerprint becomes a session key.
+        scope = chat_scopes.session_scope(resolved, version, items, self._agent._definition,
+            supported=frozenset(chat_scopes.LaunchMode), inputs_version=0)
+        if any(isinstance(item, chat_scopes.FilesRead) and not item.required for item in scope.effective.items):
+            raise ScopeUnavailable(resolved.scope_id, "optional items need the session's runtime at routing")
+        scope = replace(scope, fingerprint=chat_scopes.fingerprint(
+            scope_id=resolved.scope_id, version=version, eff=scope.effective, audience=resolved.audience,
+            inputs_version=session_visibility.inputs_for(scope).version, mode=scope.mode))
+        return scope
+
+    async def reconcile(self, channel_id: str, chat: str, *, config: chat_scopes.ScopeConfig,
+                        operator_id: str | None, stop_now: bool = False) -> None:
+        from ...db import manager_sessions
+
+        retired = []
+        async with self._reconciling.setdefault((channel_id, chat), asyncio.Lock()):
+            resolutions = [chat_scopes.resolve(sender=None, sender_kind=kind, operator_id=None, config=config)
+                           for kind in chat_scopes.PrincipalKind]
+            if operator_id:
+                resolutions.append(chat_scopes.resolve(sender=operator_id, sender_kind=chat_scopes.PrincipalKind.PERSON,
+                                                       operator_id=operator_id, config=config))
+            for sender, override in config.overrides.items():
+                resolutions.append(chat_scopes.resolve(sender=sender, sender_kind=override.kind,
+                                                       operator_id=operator_id, config=config))
+            reachable = {(await self._session_scope(resolved)).fingerprint for resolved in resolutions}
+            try:
+                rows = await manager_sessions.active_for_chat(self._agent.agent_id, channel_id, chat)
+                keys = [key for key, fingerprint in rows if fingerprint not in reachable]
+                await manager_sessions.retire(self._agent.agent_id, keys, Retirement.SCOPE_CHANGED.value)
+            except Exception as exc:
+                raise IdentityUnavailable("cannot retire obsolete sessions") from exc
+            from .. import chat_scope_metrics
+
+            for _key, fingerprint in rows:
+                if fingerprint is None:
+                    chat_scope_metrics.session_opened(self._agent.agent_id, "scope_changed")
+            for session in list(self._agent._sessions.values()):
+                if session.route.kind is not SessionKind.GROUP or session.route.channel_id != channel_id \
+                        or session.route.chat != chat:
+                    continue
+                if session.scope is None or session.scope.fingerprint not in reachable:
+                    session.retired = Retirement.SCOPE_CHANGED
+                if session.retired is not None:
+                    retired.append(session)
+        for session in retired:
+            if self.idle(session):
+                await self._end_retired(session)
+            elif stop_now and (token := session.running_token) is not None:
+                await self._agent.stop_turn(token.message_id, via="scope_change")
+
+    async def _end_retired(self, session: ManagerSession, first: MessageEnvelope | _Completion | None = None) -> None:
+        if session.key in self._ending or self._agent._sessions.get(session.key) is not session:
+            return
+        from ...db import manager_sessions
+
+        self._ending.add(session.key)
+        queue = self._queues.get(session.key)
+        pending = [first] if first is not None else []
+        while queue is not None and not queue.empty():
+            pending.append(await queue.get())
+        try:
+            # Transfer queues before ending the process. A return to this same key waits until the old tree
+            # is gone, so it cannot resume or share the retiring resident.
+            deferred = [item for item in pending if not await self._redispatch(item, retiring_key=session.key)]
+            async with session.lifecycle_gate:
+                await session.claude.stop(kill=True)
+            # The last turn may have inserted its first row after reconcile's UPDATE.
+            await manager_sessions.retire(self._agent.agent_id, [session.key], Retirement.SCOPE_CHANGED.value)
+            if self._agent.ops is not None:
+                self._agent.ops.retire_session(session.key)
+            session_visibility.forget_scoped(self._agent.agent_id, session.key)
+            worker = self._workers.get(session.key)
+            if worker is not None and worker is not asyncio.current_task():
+                worker.cancel()
+                await asyncio.gather(worker, return_exceptions=True)
+            if self._workers.get(session.key) is worker:
+                self._workers.pop(session.key, None)
+            self._agent._sessions.pop(session.key, None)
+            self._queues.pop(session.key, None)
+            self._completion_scopes.pop(session.key, None)
+            for item in deferred:
+                if isinstance(item, MessageEnvelope):
+                    self._principals.pop(item.message_id, None)
+            await self.changed()
+            self._ending.discard(session.key)
+            for item in deferred:
+                await self._redispatch(item)
+        finally:
+            self._ending.discard(session.key)
+
+    async def _redispatch(self, item: MessageEnvelope | _Completion, *, retiring_key: str | None = None) -> bool:
+        from .manager import _completion_origin
+        from .. import completion_events
+
+        while True:
+            try:
+                if not session_routing.routes(self._agent.agent_id):
+                    key, scope = session_routing.MAIN_KEY, None
+                elif isinstance(item, _Completion):
+                    key = await self.completion_key(_completion_origin(item.rows[0], self._agent.agent_address, item.batch))
+                    scope = self._completion_scopes.get(key.text)
+                else:
+                    key = await self._user_key(item)
+                    scope = self._scope(item)
+                if key.text == retiring_key:
+                    return False
+                target = self.session(key, scope)
+                break
+            except IdentityUnavailable:
+                await asyncio.sleep(completion_events.RETRY_SECONDS)
+            except (ScopeUnavailable, ScopeInvariantViolation) as exc:
+                if isinstance(item, _Completion):
+                    logger.critical("%s: completion scope unavailable while retiring: %s", self._agent.agent_id, exc)
+                    return True  # held unsettled; restart recovers the claimed batch
+                outcome = await self._scope_error(item, exc)
+                if outcome is RouteOutcome.ANSWERED and self._agent._bus is not None:
+                    self._agent._bus.settle_handled(item)
+                return True
+        remaining = item.deadline.when() - asyncio.get_running_loop().time() if isinstance(item, _Completion) \
+            and item.deadline else None
+        if isinstance(item, _Completion):
+            self._cancel_deadline(item)
+        self._enqueue(target, item)
+        if remaining is not None:
+            item.deadline = asyncio.get_running_loop().call_later(max(0, remaining), self._expire_completion, target, item)
+            self._deadlines.add(item.deadline)
+        return True
+
+    async def completion_key(self, origin: dict[str, Any]) -> SessionKey:
+        if session_routing.scoped(self._agent.agent_id) and origin["group"]:
+            kind = chat_scopes.PrincipalKind.PERSON if origin["sender"] else chat_scopes.PrincipalKind.BOT
+            key, scope = await self._resolve_scope(origin, kind)
+            self._completion_scopes[key.text] = scope
+            return key
+        from ..managers_api import DEFAULT_MANAGER_ID
+
+        if self._agent.agent_id != DEFAULT_MANAGER_ID and not origin["group"]:
+            return session_routing.MAIN_KEY
+        operator = await self._operator_id(origin["channel_id"]) if not origin["group"] else None
+        return session_routing.session_key_for(origin, client_id=None, operator_id=operator)
 
     async def _user_key(self, envelope: MessageEnvelope) -> SessionKey:
         from .manager import _message_client, _message_origin
 
+        self._principals.pop(envelope.message_id, None)
         origin = _message_origin(envelope)
         client_id, _ = _message_client(envelope)
         from ..managers_api import DEFAULT_MANAGER_ID
 
         if self._agent.agent_id != DEFAULT_MANAGER_ID and not origin["group"]:
             return session_routing.MAIN_KEY
+        if session_routing.scoped(self._agent.agent_id) and origin["group"]:
+            return await self._scoped_key(envelope)
         operator = await self._operator_id(origin["channel_id"]) if not origin["group"] else None
         return session_routing.session_key_for(origin, client_id=client_id, operator_id=operator)
 
@@ -215,23 +536,24 @@ class SessionRouter:
         return await self._operator_id(channel_id)
 
     def dispatch_completion(self, envelope: MessageEnvelope, rows: list[dict[str, Any]], batch: uuid.UUID,
-                            operator: str | None) -> None:
+                            operator: str | None, *, key: SessionKey | None = None) -> None:
         """Queue a claimed batch on the session of the event actually taken, never an earlier peek."""
-        from .manager import _completion_context, _message_origin
+        from .manager import _completion_origin
 
-        origin = _message_origin(_completion_context(rows[0], self._agent.agent_address, batch))
-        if origin["sender"] is None and origin["channel"] == "telegram" and not origin["group"]:
-            origin["sender"] = origin["chat"]
-        if origin["sender"] is None and not origin["group"] and origin["channel"] != "web" \
-                and origin["channel_id"] and origin["chat"]:
-            key = SessionKey(SessionKind.DM, origin["channel_id"], origin["chat"])
-        else:
-            key = session_routing.session_key_for(origin, client_id=None, operator_id=operator)
-        from ..managers_api import DEFAULT_MANAGER_ID
+        origin = _completion_origin(rows[0], self._agent.agent_address, batch)
+        if key is None:
+            if origin["sender"] is None and origin["channel"] == "telegram" and not origin["group"]:
+                origin["sender"] = origin["chat"]
+            if origin["sender"] is None and not origin["group"] and origin["channel"] != "web" \
+                    and origin["channel_id"] and origin["chat"]:
+                key = SessionKey(SessionKind.DM, origin["channel_id"], origin["chat"])
+            else:
+                key = session_routing.session_key_for(origin, client_id=None, operator_id=operator)
+            from ..managers_api import DEFAULT_MANAGER_ID
 
-        if self._agent.agent_id != DEFAULT_MANAGER_ID and not origin["group"]:
-            key = session_routing.MAIN_KEY
-        session = (self.session(key) if session_routing.routes(self._agent.agent_id)
+            if self._agent.agent_id != DEFAULT_MANAGER_ID and not origin["group"]:
+                key = session_routing.MAIN_KEY
+        session = (self.session(key, self._completion_scopes.get(key.text)) if session_routing.routes(self._agent.agent_id)
                    else self._agent._sessions[MAIN_SESSION])
         item = _Completion(envelope, rows, batch)
         self._completion_ids.add(envelope.message_id)
@@ -294,7 +616,7 @@ class SessionRouter:
             value = await operator_sender_id(channel_id)
         except Exception:
             logger.warning("%s: cannot read the operator id of %s", self._agent._log, channel_id, exc_info=True)
-            if cached is not None and cached[1] is not None:
+            if cached is not None and cached[1] is not None and not session_routing.scoped(self._agent.agent_id):
                 return cached[1]
             raise IdentityUnavailable(channel_id) from None
         self._operator_ids[channel_id] = (now, value)
@@ -311,12 +633,60 @@ class SessionRouter:
                 if queue.empty() and not session_routing.routes(agent.agent_id):
                     break  # switched off: nothing left to keep in order here
                 item = await queue.get()
+                if session.retired is not None:
+                    await self._end_retired(session, first=item)
+                    break
                 if isinstance(item, _Completion):
                     if item.state is not CompletionState.QUEUED:
                         continue
                     item.state = CompletionState.STARTED
                     self._cancel_deadline(item)
                 envelope = item.envelope if isinstance(item, _Completion) else item
+                if not isinstance(item, _Completion) and envelope.message_type is MessageType.USER_MESSAGE \
+                        and session_routing.scoped(agent.agent_id):
+                    self._resolving.add(session.key)
+                    episode = None
+                    try:
+                        from .. import completion_events
+
+                        episode = self._scope_attempt(envelope)
+                        retried = False
+                        while True:
+                            try:
+                                key = await self._user_key(envelope)
+                                if session.retired is not None:
+                                    break
+                                target = self.session(key, self._scope(envelope))
+                                if retried and episode is not None:
+                                    self._observe_recovered(episode)
+                                break
+                            except (ScopeUnavailable, ScopeInvariantViolation) as exc:
+                                if isinstance(exc, ScopeInvariantViolation):
+                                    await self._observe_invariant(envelope, exc, default="resolve")
+                                target = await self._scope_error(envelope, exc)
+                                break
+                            except IdentityUnavailable:
+                                if session.retired is not None:
+                                    break
+                                retried = True
+                                if episode is not None:
+                                    await self._observe_retry(envelope, episode)
+                                await asyncio.sleep(completion_events.RETRY_SECONDS)
+                    finally:
+                        self._finish_scope_attempt(episode)
+                        self._resolving.discard(session.key)
+                    if session.retired is not None:
+                        await self._end_retired(session, first=item)
+                        break
+                    if target is not session:
+                        if isinstance(target, ManagerSession):
+                            self._enqueue(target, envelope)
+                        elif target is RouteOutcome.ANSWERED and agent._bus is not None:
+                            agent._bus.settle_handled(envelope)
+                        if session.retired is not None and self.idle(session):
+                            await self._end_retired(session)
+                            break
+                        continue
                 self._handling[session.key] = envelope
                 try:
                     if isinstance(item, _Completion):
@@ -336,7 +706,11 @@ class SessionRouter:
                     if agent._bus is not None:
                         agent._bus.settle_handled(envelope)
                     self._completion_ids.discard(envelope.message_id)
+                self._principals.pop(envelope.message_id, None)
                 await self._turn_ended(session)
+                if session.retired is not None and self.idle(session):
+                    await self._end_retired(session)
+                    break
         finally:
             if self._workers.get(session.key) is asyncio.current_task():
                 del self._workers[session.key]
@@ -368,7 +742,7 @@ class SessionRouter:
 
     def idle(self, session: ManagerSession) -> bool:
         """Whether ``session`` runs nothing and holds nothing: its process may be stopped."""
-        return not (session.key in self._reservations or self.holds(session)
+        return not (session.key in self._reservations or session.key in self._resolving or session.key in self._ending or self.holds(session)
                     or session.turn_lock.locked() or session.running_token is not None
                     or session.lifecycle_gate.locked())
 
@@ -393,6 +767,9 @@ class SessionRouter:
         agent = self._agent
         if not session_routing.routes(agent.agent_id):
             return
+        if session_routing.scoped(agent.agent_id):
+            await self._admit_scoped(session, envelope)
+            return
         told = False
         async with self._resident:
             while True:
@@ -414,18 +791,48 @@ class SessionRouter:
                     await agent._send_status(envelope, WAITING_STATUS, phase=True)
                 await self._resident.wait()
 
+    async def _admit_scoped(self, session: ManagerSession, envelope: MessageEnvelope | None) -> None:
+        waiting_since = None
+        async with pool.condition:
+            while True:
+                if pool.count(exclude=session) < session_routing.max_resident_total():
+                    break
+                victims = sorted(((router, s) for router in pool.routers for s in router._agent._sessions.values()
+                                  if s is not session and s.key != MAIN_SESSION and s.claude.started
+                                  and s.retired is None and router.idle(s)), key=lambda item: item[1].last_activity)
+                # A victim is idle, so its lifecycle gate is free; the pool never awaits another session's turn lock.
+                for router, victim in victims:
+                    if await router._stop_idle(victim, notify=False):
+                        logger.info("%s: stopped the idle session %s for %s", router._agent._log,
+                                    victim.key, self._agent.agent_id)
+                        break
+                else:
+                    if session.key == MAIN_SESSION:
+                        break
+                    if waiting_since is None:
+                        waiting_since = time.monotonic()
+                        if envelope is not None:
+                            await self._agent._send_status(envelope, WAITING_STATUS, phase=True)
+                    await pool.condition.wait()
+            self._reservations.add(session.key)
+            if waiting_since is not None:
+                pool.waits.append((self._agent.agent_id, time.monotonic() - waiting_since))
+
     async def release(self, session: ManagerSession) -> None:
         """A start succeeded, failed or was cancelled: release its reservation and wake waiting starts."""
         async with self._resident:
             self._reservations.discard(session.key)
             self._resident.notify_all()
+        await pool.changed()
 
     async def _turn_ended(self, session: ManagerSession) -> None:
         """A message of ``session`` was handled: over the cap (a cap of 1), its own process stops; waiting starts
         are woken."""
         started = [s for s in self._agent._sessions.values() if s.claude.started]
+        over_cap = (pool.count(exclude=session) >= session_routing.max_resident_total()
+                    if session_routing.scoped(self._agent.agent_id) else len(started) > session_routing.max_resident())
         if session.key != MAIN_SESSION and session.claude.started \
-                and len(started) > session_routing.max_resident() and self.idle(session):
+                and over_cap and self.idle(session):
             await self._stop_idle(session, notify=False)
         await self.changed()
 
@@ -433,6 +840,7 @@ class SessionRouter:
         """A turn ended or a process stopped: a start waiting for room looks again."""
         async with self._resident:
             self._resident.notify_all()
+        await pool.changed()
 
     async def _stop_idle(self, session: ManagerSession, *, notify: bool = True) -> bool:
         """Stop ``session``'s process if it is idle and its runtime agrees (``try_stop_if_idle``): its session id
@@ -452,6 +860,16 @@ class SessionRouter:
         if stopped and notify:
             await self.changed()
         return stopped
+
+    async def reclaim_idle(self, now: float) -> None:
+        """Stop expired scoped residents, retaining their saved session ids; retirement owns its tree cleanup."""
+        timeout = session_routing.idle_reclaim_seconds()
+        if not session_routing.scoped(self._agent.agent_id) or not timeout:
+            return
+        for session in list(self._agent._sessions.values()):
+            if session.key != MAIN_SESSION and session.retired is None and session.claude.started \
+                    and self.idle(session) and now - session.last_activity >= timeout:
+                await self._stop_idle(session)
 
     async def sweep(self) -> None:
         """Routing off: stop the idle processes of the sessions other than main (the Manager's idle sweep)."""

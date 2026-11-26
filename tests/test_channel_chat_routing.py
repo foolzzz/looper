@@ -85,7 +85,8 @@ def test_telegram_admission_preserves_chat_and_thread_identity(tmp_path: Path, m
         assert message.metadata == {"origin_channel_id": channel_id, "channel_manager_id": "manager-alpha",
                                     "channel_thread_id": channel_thread_id(channel_id, chat_id, target, "manager-alpha")}
         assert message.payload["channel_context"] == {"chat_id": chat_id, "user_id": 7, "username": "someone",
-                                                       "message_id": "41", "reply_to_message_id": "17"}
+                                                       "message_id": "41", "reply_to_message_id": "17",
+                                                       "sender_kind": "person"}
         assert type(message.payload["channel_context"]["chat_id"]) is int
         observed.assert_awaited_once_with(channel_id, str(chat_id), suppressed=False)
         await bus.shutdown()

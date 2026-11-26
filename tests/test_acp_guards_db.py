@@ -35,12 +35,15 @@ def off_snapshot():
         bindings.append(launch.binding_sha256)
     # These are the actual inputs that decide whether a resident process is restarted.
     signatures = []
+    # The chat-scope launch member adds this one node, guarded by `scope is not None` (shown in
+    # test_chat_scope_signature_off_path.py); with routing off it never runs, so main's list stays the frozen one.
+    scope_node = ast.dump(ast.parse("signature += (scope.fingerprint, scope.mode.value)").body[0], include_attributes=False)
     for method in (manager.ManagerAgent._prepare_turn, planner_tier.PlannerAgent._run_turn):
         tree = ast.parse(textwrap.dedent(inspect.getsource(method)))
         signatures.extend(ast.dump(node, include_attributes=False) for node in ast.walk(tree)
             if isinstance(node, (ast.Assign, ast.AugAssign)) and any(isinstance(part, ast.Name) and part.id == "signature"
                 for target in ([node.target] if isinstance(node, ast.AugAssign) else node.targets)
-                for part in ast.walk(target)))
+                for part in ast.walk(target)) and ast.dump(node, include_attributes=False) != scope_node)
     values = {"prompts": [manager.DEFAULT_SYSTEM_PROMPT, planner_tier.DEFAULT_SYSTEM_PROMPT,
                 worker.DEFAULT_SYSTEM_PROMPT, agent_settings.DEFAULT_HARNESS_PROMPT, system_prompt.REVIEW_CONTRACT],
         "tools": [(t.name, t.description, t.schema) for t in (*service.MANAGER_TOOLS, *clients.CLIENT_TOOLS,

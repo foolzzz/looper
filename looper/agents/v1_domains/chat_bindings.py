@@ -8,6 +8,7 @@ from ..api_v1 import Operation, _array, _object, _BOOL, _NULL_STR, _STR
 from ..channels import chat_routing
 from ..channels.allowlist import AllowlistError
 from ..ops import ErrorCode, OpError
+from .chat_scopes import STOP_NOW, reconcile, scope_impact
 
 _ID = {"type": "string", "minLength": 1}
 _TIME = {"type": "string", "format": "date-time"}
@@ -18,6 +19,7 @@ BINDING = _object({
     "channel_type": {"type": "string", "enum": ["telegram", "lark", "lark_bot"]},
     "bot_name": _STR, "chat_name": _NULL_STR, "manager_name": _STR,
     "manager_enabled": _BOOL, "manager_deleted": _BOOL, "allowed_senders": _array(_STR), "sender_policy": _SENDER_POLICY,
+    "default_scope": _NULL_STR, "effective_default_scope": _STR, "legacy_allowed": _BOOL, "suggested_scope": _NULL_STR,
 }, closed=True)
 UNBOUND_CHAT = _object({"chat_id": _ID, "name": _NULL_STR, "count": _COUNT, "last_at": _TIME}, closed=True)
 SEEN_CHAT = _object({
@@ -45,6 +47,9 @@ OPERATIONS = (
         _object({"channel_id": _ID, "chat_id": _ID, "manager_id": _ID,
                  "sender_policy": {**_SENDER_POLICY, "description": "Lark only: listed admits the channel and chat sender lists; "
                      "chat admits everyone posting in this bound chat. Omit to keep it, or reset to listed when rebinding."},
+                 "default_scope": {**_NULL_STR, "description": "Group default scope id; null is the system default chat_only. "
+                     "Omit to keep it (reset when the chat moves to another Manager)."},
+                 "stop_now": STOP_NOW,
                  "allowed_senders": {"type": "array", "items": {"type": "string", "minLength": 1}, "maxItems": 100,
                      "description": "Senders admitted only in this chat besides the bot's allowlist: Lark open_ids or bot app ids, "
                          "or Telegram user IDs. Omit to keep them (cleared when the chat moves to another Manager); [] clears."}},
@@ -67,6 +72,7 @@ RESULTS = {}
 
 _BINDINGS = """
     SELECT b.channel_id, b.chat_id, b.manager_id, b.created_at, b.allowed_senders, b.sender_policy, c.channel_type,
+           b.default_scope, coalesce(b.default_scope, 'chat_only') AS effective_default_scope, b.legacy_allowed, b.suggested_scope,
            c.display_name AS bot_name, s.name AS chat_name, m.name AS manager_name,
            (m.enabled AND m.deleted_at IS NULL) AS manager_enabled,
            (m.deleted_at IS NOT NULL) AS manager_deleted
@@ -131,10 +137,10 @@ async def impact(server, operation, arguments, principal, headers, confirmation=
         return None
     if server._channels is None:
         raise OpError(ErrorCode.UNAVAILABLE, "live channel routing is not available")
-    if storage._kind(arguments["channel_id"]) == "telegram":
+    telegram = storage._kind(arguments["channel_id"]) == "telegram"
+    if telegram:
         if arguments.get("sender_policy") == "chat":
             raise OpError(ErrorCode.INVALID, "sender_policy: chat is only supported for Lark")
-        return None
     storage._chat_id(arguments["channel_id"], arguments["chat_id"])
     storage._manager_id(arguments["manager_id"])
     async with get_pool().acquire() as conn:
@@ -144,19 +150,29 @@ async def impact(server, operation, arguments, principal, headers, confirmation=
             raise OpError(ErrorCode.NOT_FOUND, "Manager not found")
         if confirmation is not None:
             confirmation["manager_revision"] = manager["revision"]
+        previous = await conn.fetchrow("SELECT default_scope, legacy_allowed, manager_id FROM manager_chat_bindings "
+            "WHERE channel_id = $1 AND chat_id = $2", arguments["channel_id"], arguments["chat_id"])
         policy = arguments.get("sender_policy")
         if policy is None:
             policy = await conn.fetchval("SELECT sender_policy FROM manager_chat_bindings "
                 "WHERE channel_id = $1 AND chat_id = $2 AND manager_id = $3",
                 arguments["channel_id"], arguments["chat_id"], arguments["manager_id"])
-    if policy == "chat" and manager["tools"] == "all":
-        return ("Anyone in this chat, including bots, can then reach a Manager with all tools. "
-                "This Manager can run commands on this machine. Open this chat to everyone?")
-    return None
+    value = arguments.get("default_scope", previous["default_scope"] if previous and
+                          previous["manager_id"] == arguments["manager_id"] else None)
+    previous_scope = (previous["default_scope"] if previous else None) or "chat_only"
+    text = None
+    if (value or "chat_only") != previous_scope:
+        text = scope_impact(arguments["chat_id"], value or "chat_only", arguments.get("stop_now", False),
+                            legacy=previous_scope == "legacy")
+    if not telegram and policy == "chat" and manager["tools"] == "all":
+        warning = ("Anyone in this chat, including bots, can then reach a Manager with all tools. "
+                   "This Manager can run commands on this machine. Open this chat to everyone?")
+        text = f"{text} {warning}" if text else warning
+    return text
 
 
 async def run(server, operation, arguments, principal, headers, confirmation=None):
-    if operation.risk == "write" and server._channels is None:
+    if operation.risk in ("write", "high") and server._channels is None:
         raise OpError(ErrorCode.UNAVAILABLE, "live channel routing is not available")
     try:
         # Reuse native identity validation at the service boundary, before any write.
@@ -169,11 +185,19 @@ async def run(server, operation, arguments, principal, headers, confirmation=Non
                 storage._chat_id(arguments["channel_id"], arguments[field])
         name = operation.operation_id
         if name == "manager_chat_bindings.put":
+            if "default_scope" in arguments:
+                async with get_pool().acquire() as conn:
+                    legacy = await conn.fetchval("SELECT legacy_allowed FROM manager_chat_bindings "
+                        "WHERE channel_id = $1 AND chat_id = $2 AND manager_id = $3",
+                        arguments["channel_id"], arguments["chat_id"], arguments["manager_id"])
+                    await storage.validate_default_scope(conn, arguments["default_scope"], bool(legacy))
             bindings = []
             async def readback(conn):
                 bindings.extend(await _bindings(conn, arguments["channel_id"], chat_ids=[arguments["chat_id"]]))
-            await chat_routing.bind_chat(**arguments, registry=server._channels, principal_kind=principal.kind, readback=readback,
+            await chat_routing.bind_chat(**{key: value for key, value in arguments.items() if key != "stop_now"},
+                registry=server._channels, principal_kind=principal.kind, readback=readback,
                 expected_manager_revision=(confirmation or {}).get("manager_revision"))
+            await reconcile(server, arguments["manager_id"], arguments)
             return {"binding": bindings[0]}
         if name == "manager_chat_bindings.delete":
             deleted = await chat_routing.unbind_chat(**arguments, registry=server._channels, principal_kind=principal.kind)
@@ -196,5 +220,5 @@ async def run(server, operation, arguments, principal, headers, confirmation=Non
         raise OpError(ErrorCode.INVALID, f"allowed_senders: {exc}") from None
     except storage.ManagerPermissionsChanged as exc:
         raise OpError(ErrorCode.CONFLICT, str(exc)) from None
-    except ValueError:
-        raise OpError(ErrorCode.INVALID, "invalid native chat routing request") from None
+    except ValueError as exc:
+        raise OpError(ErrorCode.INVALID, str(exc)) from None

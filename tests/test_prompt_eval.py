@@ -2992,7 +2992,7 @@ def test_scoped_group_prepare_reads_routing_without_writing(monkeypatch, tmp_pat
 
     monkeypatch.setattr(group_dialogs, "_read", read)
     monkeypatch.setattr(group_dialogs, "_confirmed", lambda *args: operations.append(args))
-    dialog = SimpleNamespace(manager="eval", routing="scoped")
+    dialog = SimpleNamespace(id="scoped-seed", manager="eval", routing="scoped")
     if stored_routing == "off":
         with pytest.raises(runner.EvalError, match="expected scoped"):
             group_dialogs.prepare(None, tmp_path, dialog, "disposable")

@@ -12,6 +12,7 @@ import logging
 import weakref
 from collections.abc import Callable
 from dataclasses import dataclass, field, fields
+from enum import StrEnum
 from typing import TYPE_CHECKING, Any
 
 from ..run_usage import Usage
@@ -21,6 +22,7 @@ if TYPE_CHECKING:
     from datetime import datetime
 
     from ..agent_settings import AgentSettings, Launch
+    from ..chat_scopes import SessionScope
     from ..research_order import ResearchSources
     from ..runtimes import ResidentSession, RuntimeAdapter
     from ..session_switch import SessionSwitch
@@ -32,6 +34,10 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 MAIN_SESSION = "main"
+
+
+class Retirement(StrEnum):
+    SCOPE_CHANGED = "scope_changed"
 
 
 _REPLACED: list[weakref.WeakMethod[Callable[[str], None]]] = []
@@ -74,6 +80,9 @@ class ManagerSession:
 
     key: str
     route: SessionKey = MAIN_KEY  # the conversation it holds (``session_routing.session_key_for``); key is its text
+    scope: SessionScope | None = None
+    retired: Retirement | None = None
+    activity_cursor: int | None = None
     # The resident Claude: started on the first chat message, then fed one
     # user turn per message; restarted when its system prompt changes.
     claude: ResidentSession
