@@ -5794,8 +5794,13 @@ notice. The default Manager's main session is the operator's conversation, so
 its turn does not write to anyone else: an end whose turn would run there but
 whose chat is an API client's dashboard thread, or another person's direct chat
 (session routing off, or on with no operator id on the bot), is `skipped` with
-`withheld_not_operator` and gets the notice. A schedule's run message to an
-allowlisted direct chat (only a run that
+`withheld_not_operator` and gets the notice. With session routing on, another
+sender's direct chat runs in its own session. That session does not build the
+completion model turn, because the completion prompt is outside the session
+allowlist. The claimed events fall back with `session_allowlist` and the
+recorded code notice is delivered; a schedule run whose message waits in that
+session does the same. This reason is not one of the failing-turn warnings.
+A schedule's run message to an allowlisted direct chat (only a run that
 ended its task, and only when `notify` sends it) is `pending` for the default
 Manager (`skipped` with `withheld_not_operator` when that chat is not the
 operator's and session routing is off); to a chat bound to a Manager it is
@@ -5873,8 +5878,9 @@ and binding released and a fresh runtime used, and whenever it ends it writes
 only its record: never the session, the runtime, the binding or the token of
 the turn after it),
 `turn_stopped`, `empty_reply`, `send_failed` (the reply could not be handed to
-the channel), and, at the claim, `off` (the setting was turned off) or
-`manager_off` (the Manager was turned off). A wake-up whose events cannot be
+the channel), `session_allowlist` (a routed session refused the model turn
+before it was built; the recorded notice is delivered), and, at the claim, `off`
+(the setting was turned off) or `manager_off` (the Manager was turned off). A wake-up whose events cannot be
 read (the database fails) queues a new `COMPLETION_DUE` after 5 seconds, before
 it is acknowledged. When a Manager starts, before its message loop, the events
 its earlier turns left `running` fall back with `restart`, their notices
