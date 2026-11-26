@@ -29,14 +29,21 @@ from tests.test_operator_auth import TOKEN, _request
 PREFIX = "/api/v1/operator_chat/"
 # Hash of /operator_chat/* paths plus the component schemas those paths $ref, excluding ErrorCode, after stripping.
 # Recompute by hashing that same selection from main's document with nothing stripped; the two hashes must match.
-PRE_CARD_DOCUMENT = "e16f2f654a840fefeb74946ab3c816dfed7070f7fdff84431df1bbebdb1339fa"
+PRE_CARD_DOCUMENT = "424bc93c721eb5b547483ae0db286f0ed88910b265bf60ba87488fec88e12a61"
 LATER = "这个命令要等「交给后台」上线后才能用"
 
 
 @pytest.fixture(autouse=True)
 def defaults(monkeypatch):
     monkeypatch.setattr(settings, "_enabled", False)
+    monkeypatch.setattr(settings, "_manager_answers", False)
     monkeypatch.setattr(chat_settings, "_stop_enabled", False)
+
+
+def work_on():
+    """Work mode and the task Manager's own switch, both on."""
+    settings.set_enabled(True)
+    settings.set_manager_answers(True)
 
 
 class Pool:
@@ -185,7 +192,7 @@ def test_send_to_task(monkeypatch, tmp_path):
     use_pool(monkeypatch, pool)
 
     async def check(conn):
-        settings.set_enabled(True)
+        work_on()
         task_id = await make_task(conn, tmp_path)
         async with opened(tmp_path) as server:
             status, answer = await send(server, task_id, "please look", "m1")
@@ -247,7 +254,10 @@ def test_send_task_refusals(monkeypatch, tmp_path):
 
             await refused({"text": "hi", "message_id": "m", "target": target(task_id)}, "conflict",
                           "work mode is off (tasks.conversations.enabled)")
-            settings.set_enabled(True)
+            settings.set_enabled(True)  # work mode alone does not let the task Manager answer
+            await refused({"text": "hi", "message_id": "m", "target": target(task_id)}, "task_manager_off")
+            assert settings.manager_answers() is False
+            work_on()
             await refused({"text": "hi", "message_id": "m", "target": target("missing-task")}, "invalid",
                           "no task missing-task")
             await refused({"text": "hi", "message_id": "m", "target": target(task_id), "session_id": "other"},
@@ -272,7 +282,7 @@ def test_commands_never_reach_pool(monkeypatch, tmp_path):
     use_pool(monkeypatch, pool)
 
     async def check(conn):
-        settings.set_enabled(True)
+        work_on()
         task_id = await make_task(conn, tmp_path)
         orchestrated = await make_task(conn, tmp_path, status="executing")
         warned = await make_task(conn, tmp_path)
@@ -347,7 +357,7 @@ def test_stop_entry(monkeypatch, tmp_path):
     manager = Manager()
 
     async def check(conn):
-        settings.set_enabled(True)
+        work_on()
         chat_settings.set_stop_enabled(False)
         task_id = await make_task(conn, tmp_path)
         async with opened(tmp_path) as server:
@@ -524,7 +534,7 @@ def test_task_text_kept_verbatim(monkeypatch, tmp_path):
     monkeypatch.setattr("looper.agents.http_server.projects.add_task_supplement", supplement)
 
     async def check(conn):
-        settings.set_enabled(True)
+        work_on()
         task_id = await make_task(conn, tmp_path)
         async with opened(tmp_path) as server:
             server._task_router.has_planner = lambda wanted: wanted == task_id
@@ -565,7 +575,7 @@ def test_task_message_retry_claims_once(monkeypatch, tmp_path):
     use_pool(monkeypatch, pool)
 
     async def check(conn):
-        settings.set_enabled(True)
+        work_on()
         task_id = await make_task(conn, tmp_path)
         async with opened(tmp_path) as server:
             text = "  retry me\n    again\n"
@@ -615,7 +625,7 @@ def test_task_message_routes_by_status(monkeypatch, tmp_path):
     use_pool(monkeypatch, pool)
 
     async def check(conn):
-        settings.set_enabled(True)
+        work_on()
         async with opened(tmp_path) as server:
             for status_name in ("pending", "assigned"):
                 task_id = await make_task(conn, tmp_path, status=status_name)
@@ -668,7 +678,7 @@ def test_fixed_commands_never_submit_or_enter_history(monkeypatch, tmp_path):
     use_pool(monkeypatch, pool)
 
     async def check(conn):
-        settings.set_enabled(True)
+        work_on()
         task_id = await make_task(conn, tmp_path)
         async with opened(tmp_path) as server:
             for command in TaskCommand:
@@ -700,7 +710,7 @@ def test_command_rows_keep_a_typed_kind_and_leave_model_history(monkeypatch, tmp
     use_pool(monkeypatch, pool)
 
     async def check(conn):
-        settings.set_enabled(True)
+        work_on()
         task_id = await make_task(conn, tmp_path)
         thread = task_thread(task_id)
         async with opened(tmp_path) as server:
@@ -762,7 +772,7 @@ def test_task_thread_is_claimed_by_the_tasks_manager(monkeypatch, tmp_path):
             await writer.wait_closed()
 
     async def check(conn):
-        settings.set_enabled(True)
+        work_on()
         manager = await _manager(conn, "review")
         task_id = await make_task(conn, tmp_path, manager_id=manager["id"])
         thread = task_thread(task_id)

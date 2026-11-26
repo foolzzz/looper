@@ -23,6 +23,7 @@ from tests.db_support import run_db
 def test_task_manager_tools_fake_eval(monkeypatch, tmp_path):
     async def check(pool):
         monkeypatch.setattr(task_conversations_settings, "_enabled", True)
+        monkeypatch.setattr(task_conversations_settings, "_manager_answers", True)
         project = await projects.create_project(name="Synthetic task tools", work_dir=str(tmp_path), pool=pool)
         await tasks.create_task(task_id="task-tools-eval", requirement="Original synthetic requirement",
             title="Synthetic task", status="draft", project_id=project["id"], work_dir=str(tmp_path), pool=pool)

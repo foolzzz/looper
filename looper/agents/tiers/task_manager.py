@@ -62,6 +62,16 @@ class RefuseReason(str, Enum):
     SHUTTING_DOWN = "shutting_down"
     REVIEW_HOOK_DISABLED = "review_hook_disabled"
     CLI_UNVERIFIED = "cli_unverified"
+    MANAGER_ANSWERS_OFF = "manager_answers_off"
+
+
+def _off_reason() -> RefuseReason | None:
+    """Why no task Manager may start now: work mode, or its own switch (default off), is off."""
+    if not task_conversations_settings.enabled():
+        return RefuseReason.WORK_MODE_OFF
+    if not task_conversations_settings.manager_answers():
+        return RefuseReason.MANAGER_ANSWERS_OFF
+    return None
 
 
 def _visible_history_item(item: Any) -> str:
@@ -183,8 +193,8 @@ class TaskManagerAgent:
             raise
 
     async def _prepare(self) -> tuple[Mapping[str, Any], Any, Launch, SystemPrompt]:
-        if not task_conversations_settings.enabled():
-            raise Refused(RefuseReason.WORK_MODE_OFF, "Task conversations are disabled.")
+        if (off := _off_reason()) is not None:
+            raise Refused(off, "Task conversations are disabled.")
         if self.pool.closing:
             raise Refused(RefuseReason.SHUTTING_DOWN, "The task Manager is shutting down.")
         if not self.loaded:
@@ -463,7 +473,7 @@ class TaskManagerPool:
         request = _Request(task_id, text, message_id, sink, history, asyncio.get_running_loop().create_future())
         async with self._lock:
             reason = (RefuseReason.SHUTTING_DOWN if self.closing or task_id in self._closing_tasks
-                      else RefuseReason.WORK_MODE_OFF if not task_conversations_settings.enabled() else None)
+                      else _off_reason())
             if reason is None:
                 self._pending.append(request)
                 await self._dispatch()
@@ -493,8 +503,8 @@ class TaskManagerPool:
 
     async def _drive(self, agent: TaskManagerAgent, request: _Request) -> None:
         try:
-            if not task_conversations_settings.enabled():
-                raise Refused(RefuseReason.WORK_MODE_OFF, "Task conversations are disabled.")
+            if (off := _off_reason()) is not None:
+                raise Refused(off, "Task conversations are disabled.")
             await agent.turn(request)
         except Refused as exc:
             await self._refuse(request, exc.reason, str(exc))

@@ -20,6 +20,7 @@ from tests.fake_claude import fake_claude
 @pytest.fixture
 def setup_manager(monkeypatch, tmp_path):
     monkeypatch.setattr(settings, "_enabled", True)
+    monkeypatch.setattr(settings, "_manager_answers", True)
     monkeypatch.setattr(outbound_hook, "known_enabled", lambda: False)
     monkeypatch.setattr(task_manager_settings, "load_task_manager_settings", AsyncMock(return_value=AgentSettings(profile=builtin_resolved_profile())))
     monkeypatch.setattr(safety, "gate", AsyncMock(return_value=None))

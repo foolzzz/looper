@@ -30,6 +30,7 @@ pytestmark = pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not
 @pytest.fixture(autouse=True)
 def work_mode(monkeypatch):
     monkeypatch.setattr(settings, "_enabled", True)
+    monkeypatch.setattr(settings, "_manager_answers", True)
 
 
 def _platform(tmp_path):
