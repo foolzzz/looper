@@ -45,8 +45,13 @@ from .runner import (DEFAULT_OUT_DIR, REPO_ROOT, Api, EvalError, _confirmed, fre
 from .task_manager_cases import Case, Outcome, Turn
 
 CREDENTIAL_ENV = {"oauth": "CLAUDE_CODE_OAUTH_TOKEN", "api-key": "ANTHROPIC_API_KEY"}
-SCRUBBED_PREFIXES = ("ANTHROPIC_", "CLAUDE", "CODEX_", "GROK_", "OPENAI_", "LOOPER_", "LOOPX_", "XDG_", "TRAE_",
-                     "COPILOT_", "GIT_CONFIG", "GIT_AUTHOR", "GIT_COMMITTER")
+# The only variables of the operator's environment the eval and its children keep: locale and terminal basics, and
+# the network settings a proxy needs. Everything else (ssh agent, git and cloud tokens, every credential) is dropped.
+KEPT_VARIABLES = frozenset({
+    "TMPDIR", "TERM", "TZ", "LANG", "LANGUAGE", "USER", "LOGNAME", "SHELL",
+    "HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "no_proxy", "all_proxy",
+    "SSL_CERT_FILE", "SSL_CERT_DIR", "NODE_EXTRA_CA_CERTS", "REQUESTS_CA_BUNDLE", "CURL_CA_BUNDLE"})
+KEPT_PREFIXES = ("LC_",)
 MINIMAL_PATH = "/usr/bin:/bin:/usr/sbin:/sbin"
 SYNTHETIC_SETTINGS = {"includeCoAuthoredBy": False, "cleanupPeriodDays": 1}
 TURN_TIMEOUT = {"fake": 90.0, "real": 360.0}
@@ -76,8 +81,8 @@ def resolve_credential(choice: str | None, environ: dict[str, str] | None = None
 @contextmanager
 def isolated_environment(root: Path, credential: tuple[str, str] | None) -> Iterator[Path]:
     """This process's environment, replaced for the run: a throwaway HOME and CLAUDE_CONFIG_DIR with fixed
-    synthetic settings, a PATH without the operator's own tools (``loopercli`` among them), none of the operator's
-    credentials or ``LOOPER_*`` variables, and the one chosen credential. Restored afterwards."""
+    synthetic settings, a PATH without the operator's own tools (``loopercli`` among them), only the variables in
+    ``KEPT_VARIABLES`` (no ssh agent, no token of any kind) and the one chosen credential. Restored afterwards."""
     saved = dict(os.environ)
     home, config = root / "home", root / "claude-config"
     home.mkdir(parents=True)
@@ -85,7 +90,7 @@ def isolated_environment(root: Path, credential: tuple[str, str] | None) -> Iter
     (config / "settings.json").write_text(json.dumps(SYNTHETIC_SETTINGS, indent=2) + "\n")
     try:
         for name in list(os.environ):
-            if name.startswith(SCRUBBED_PREFIXES):
+            if name not in KEPT_VARIABLES and not name.startswith(KEPT_PREFIXES):
                 del os.environ[name]
         os.environ.update(HOME=str(home), CLAUDE_CONFIG_DIR=str(config), PATH=MINIMAL_PATH,
                           GIT_TERMINAL_PROMPT="0", DISABLE_AUTOUPDATER="1", DISABLE_TELEMETRY="1")
@@ -103,31 +108,51 @@ def isolated_environment(root: Path, credential: tuple[str, str] | None) -> Iter
 
 
 class Ledger:
-    """Append-only spend log. A run that reuses the file starts from what it already holds, so a new process cannot
-    reset the cap."""
+    """Append-only spend log. A case is reserved (its whole budget counts as spent) before it starts and settled with
+    its actual spend afterwards; a run that dies in between leaves the reservation. The file is read when the ledger
+    opens, so a new process starts from what it holds and cannot reset the cap."""
 
     def __init__(self, path: Path, *, total_cap: float, opus_cap: float) -> None:
         self.path, self.total_cap, self.opus_cap = path, total_cap, opus_cap
         self.rows = ([json.loads(line) for line in path.read_text().splitlines() if line.strip()]
                      if path.exists() else [])
 
-    def spent(self, model: str | None = None) -> float:
-        return sum(float(r["spent_usd"]) for r in self.rows if model is None or r["model"] == model)
+    def _latest(self) -> list[dict[str, Any]]:
+        latest: dict[str, dict[str, Any]] = {}
+        for row in self.rows:
+            latest[row["run"]] = row  # a settled row replaces its reservation
+        return list(latest.values())
 
-    def admit(self, model: str, budget: float) -> None:
+    def spent(self, model: str | None = None) -> float:
+        return sum(float(r["spent_usd"]) for r in self._latest() if model is None or r["model"] == model)
+
+    def _append(self, row: dict[str, Any]) -> None:
+        self.rows.append(row)
+        with self.path.open("a") as stream:
+            stream.write(json.dumps(row) + "\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+
+    def reserve(self, case: str, rep: int, model: str, budget: float) -> str:
+        """Refuse what could exceed a cap, else write the reservation row and return the run's id."""
         if self.spent() + budget > self.total_cap:
             raise BudgetRefusal(f"total cap: spent {self.spent():.4f} + case budget {budget:g} exceeds "
                                 f"{self.total_cap:g}")
         if model == cases.OPUS and self.spent(cases.OPUS) + budget > self.opus_cap:
             raise BudgetRefusal(f"Opus cap: spent {self.spent(cases.OPUS):.4f} + case budget {budget:g} exceeds "
                                 f"{self.opus_cap:g}")
+        run = uuid.uuid4().hex
+        self._append({"run": run, "case": case, "rep": rep, "model": model, "spent_usd": round(budget, 6),
+                      "outcome": "reserved", "at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())})
+        return run
 
-    def record(self, case: str, rep: int, model: str, spent: float, outcome: str) -> None:
-        row = {"case": case, "rep": rep, "model": model, "spent_usd": round(spent, 6), "outcome": outcome,
-               "at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}
-        self.rows.append(row)
-        with self.path.open("a") as stream:
-            stream.write(json.dumps(row) + "\n")
+    def settle(self, run: str, spent: float, outcome: str) -> None:
+        """Replace the reservation with what the case spent. A case that did not finish keeps its whole reservation:
+        what a killed process spent is not known."""
+        held = next(r for r in self._latest() if r["run"] == run)
+        known = outcome in ("pass", "fail", "unparsed")
+        self._append({**held, "spent_usd": round(spent if known else max(spent, held["spent_usd"]), 6),
+                      "outcome": outcome, "at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())})
 
 
 def positive(name: str, value: float | None) -> float:
@@ -502,7 +527,7 @@ def run_case(case: Case, rep: int, *, mode: str, behavior: str, admin_url: str, 
                 run.seed["sentinel_before"] = run.sentinel()
                 run.seed["listing_before"] = run.listing()
                 for index, turn in enumerate(case.turns):
-                    for action in turn.actions(behavior == "bad"):
+                    for action in turn.actions(behavior):
                         run.act(action)
                     run.turns.append(run.send(turn, index))
                     row["cost_usd"] = run.case_cost()
@@ -619,10 +644,10 @@ def run_suite(*, mode: str, admin_url: str, out_dir: Path, selected: list[Case] 
               total_cap_usd: float | None = None, case_budget_usd: float | None = None,
               opus_case_budget_usd: float | None = None, opus_cap_usd: float = 6.0, ledger_path: Path | None = None,
               dump_dir: Path | None = None) -> tuple[dict[str, Any], Path]:
-    if mode not in ("fake", "real") or reps < 1 or behavior not in ("ok", "bad"):
-        raise EvalError("mode must be fake/real, behavior ok/bad and reps positive")
+    if mode not in ("fake", "real") or reps < 1 or behavior not in ("ok", "bad", "lie"):
+        raise EvalError("mode must be fake/real, behavior ok/bad/lie and reps positive")
     if mode == "real" and behavior != "ok":
-        raise EvalError("the scripted bad behavior is a fake-mode control")
+        raise EvalError("the scripted bad and lie behaviors are fake-mode controls")
     if mode == "real" and dump_dir is not None:
         raise EvalError("the input dump is free and runs in fake mode only")
     selected = selected or list(cases.CASES)
@@ -670,13 +695,17 @@ def run_suite(*, mode: str, admin_url: str, out_dir: Path, selected: list[Case] 
         for rep in range(1, reps + 1):
             for case in plan:
                 budget = budgets[case.model] or 0.0
-                if ledger is not None:
-                    ledger.admit(case.model, budget)
-                row = run_case(case, rep, mode=mode, behavior=behavior, admin_url=admin_url, out_dir=out_dir,
-                               claude_bin=claude_bin, credential=credential, budget=budget)
+                reservation = ledger.reserve(case.id, rep, case.model, budget) if ledger is not None else None
+                try:
+                    row = run_case(case, rep, mode=mode, behavior=behavior, admin_url=admin_url, out_dir=out_dir,
+                                   claude_bin=claude_bin, credential=credential, budget=budget)
+                except BaseException:
+                    if ledger is not None:
+                        ledger.settle(reservation, 0.0, "interrupted")  # keeps the whole reservation
+                    raise
                 rows.append(row)
                 if ledger is not None:
-                    ledger.record(case.id, rep, case.model, row["cost_usd"], row["outcome"])
+                    ledger.settle(reservation, row["cost_usd"], row["outcome"])
                 if dumps and (out_dir / f"{case.id}-{rep}" / "evidence.json").exists() and rep == 1:
                     data = json.loads((out_dir / f"{case.id}-{rep}" / "evidence.json").read_text())
                     dump_inputs(data, dumps, data["seed"].get("root", ""))
@@ -685,6 +714,18 @@ def run_suite(*, mode: str, admin_url: str, out_dir: Path, selected: list[Case] 
         checkpoint(True, f"{type(exc).__name__}: {exc}")
         raise
     return checkpoint(True), path
+
+
+def build_info() -> dict[str, Any]:
+    """Which build was evaluated: the commit the runner's checkout is at, whether it has uncommitted changes, and
+    the file the ``looper`` package was loaded from (the server's PYTHONPATH is this checkout)."""
+    import looper
+
+    def git(*args: str) -> str:
+        return subprocess.run(["git", *args], cwd=REPO_ROOT, capture_output=True, text=True, timeout=30).stdout.strip()
+
+    return {"git_head": git("rev-parse", "HEAD") or None, "dirty": bool(git("status", "--porcelain", "--untracked-files=no")),
+            "looper_file": looper.__file__}
 
 
 def summarize(rows: list[dict[str, Any]], *, mode: str, behavior: str, reps: int, aborted: str | None, done: bool,
@@ -700,7 +741,7 @@ def summarize(rows: list[dict[str, Any]], *, mode: str, behavior: str, reps: int
         overall = "incomplete"  # never a pass while any case was not judged
     else:
         overall = "pass"
-    return {"suite": "task-manager", "mode": mode, "behavior": behavior, "reps": reps, "outcome": overall,
+    return {"suite": "task-manager", "build": build_info(), "mode": mode, "behavior": behavior, "reps": reps, "outcome": overall,
             "counts": counts, "aborted": aborted, "cost_usd": round(sum(r["cost_usd"] for r in rows), 6),
             "total_cap_usd": total_cap, "ledger_spent_usd": round(ledger.spent(), 6) if ledger else None,
             "cost_coverage": "run records of finished runs; an interrupted run may have unreported charges",
@@ -723,8 +764,9 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--opus-case-budget-usd", type=float, help="real mode: the most the Opus case may spend")
     parser.add_argument("--opus-cap-usd", type=float, default=6.0, help="real mode: all Opus spend, ledger included")
     parser.add_argument("--ledger", type=Path, help="real mode: spend log, kept between runs (default OUT_DIR/ledger.jsonl)")
-    parser.add_argument("--fake-behavior", choices=["ok", "bad"], default="ok",
-                        help="fake mode: the scripted model does the task (ok) or breaks every criterion (bad)")
+    parser.add_argument("--fake-behavior", choices=["ok", "bad", "lie"], default="ok",
+                        help="fake mode: the scripted model does the task (ok), breaks every criterion in word and deed "
+                             "(bad), or says the right thing while doing the wrong one (lie)")
     parser.add_argument("--dump-inputs", type=Path, metavar="DIR",
                         help="free: fake mode only; write each case's model inputs (system prompt, tool definitions, "
                              "first message, launch arguments) to DIR")

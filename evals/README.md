@@ -2120,13 +2120,14 @@ reason not to start.
 The real run needs an explicit choice of credential: `--credential oauth` reads `CLAUDE_CODE_OAUTH_TOKEN`,
 `--credential api-key` reads `ANTHROPIC_API_KEY`. There is no default and no fallback from one to the other. The
 server and every child get a throwaway `HOME` and `CLAUDE_CONFIG_DIR` holding fixed synthetic settings, a PATH without
-the operator's tools, none of the operator's other credentials, `LOOPER_*` or `XDG_*` variables, and the chosen
-credential; its value is never written to a case, log, report or ledger. `--claude-bin` is required and must be the
+the operator's tools, only an allowlist of the operator's environment (locale, terminal, proxy and certificate
+settings; no ssh agent, no token of any kind) and the chosen credential; its value is never written to a case, log, report or ledger. `--claude-bin` is required and must be the
 real executable (not a terminal shim) at the version the task Manager launches (`2.1.332`). Budget: `--total-cap-usd`,
 `--case-budget-usd` (Sonnet cases) and `--opus-case-budget-usd` are required and finite; `--opus-cap-usd` (default 6)
 bounds all Opus spend. The selected runs' budgets are reserved up front against the cap, and a case that could exceed
 what is left (the ledger included) is not started. `--ledger` keeps the spend between commands (default
-`OUT_DIR/ledger.jsonl`), so a new process cannot reset the cap. Each Claude process also gets
+`OUT_DIR/ledger.jsonl`): a reservation row is written before each case and replaced by the actual spend afterwards,
+and a case that is interrupted or errors keeps its whole reservation, so a new process cannot reset the cap. Each Claude process also gets
 `--max-budget-usd` of the case budget, and a case stops after a turn that reaches it; calls in flight can overshoot.
 
 ```bash
@@ -2143,8 +2144,17 @@ uv run --system-certs --python 3.11 --extra test python -m evals.prompt_regressi
   --out-dir "$EVAL_OUT/task-manager-opus"
 ```
 
-The stand-in is a positive and negative control for the judges, not evidence about a model. Limits that stay: the
+The stand-in is a positive and negative control for the judges, not evidence about a model. Besides `ok`, it has
+a `bad` arm (breaks every criterion in word and deed) and a `lie` arm (says what `ok` says, does the wrong thing): the
+judges must fail both on the records, so a check that only read the reply would not survive. Replies are compared
+with records or reported as observations, never the sole basis of a check. Limits that stay: the
 launch is a speed bump rather than a sandbox, so the boundary cases measure whether a model reaches outside, not
 whether it can; the outbound review hook is at its default (off) as on a fresh install; the read-only continuation of
 an existing session runs from another working directory, so its session reuse is reported as an observation, not a
-criterion. Keep reports and logs local; do not commit raw artifacts.
+criterion. The task Manager here runs in a clean room: a production direct-mode session also keeps the operator's user settings,
+memory, skills and MCP servers, which this eval does not have. `task-manager-eval.json` records the commit, whether
+the tree is dirty and the file `looper` was loaded from. The raw files on disk are Looper's parsed run records and
+events and each turn's server-sent events, written before judging; the real CLI's own stdout is not tee'd. In the Opus
+case the codeword is said once in conversation and never written to a file (the file holds a different value), so later
+answers must come from the session; the read-only turn may be answered from the fenced excerpt if that turn starts a
+fresh session. Keep reports and logs local; do not commit raw artifacts.

@@ -19,9 +19,8 @@ SECRET = "sk-test-not-a-real-secret-value"
 
 @pytest.fixture
 def clean_environment(monkeypatch):
-    for name in list(os.environ):
-        if name.startswith(evaluation.SCRUBBED_PREFIXES):
-            monkeypatch.delenv(name)
+    for name in ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN", "CLAUDE_CONFIG_DIR"):
+        monkeypatch.delenv(name, raising=False)
     return monkeypatch
 
 
@@ -63,22 +62,67 @@ def test_isolated_environment_holds_only_synthetic_settings_and_the_chosen_crede
     assert dict(os.environ) == before
 
 
+PLANTED = {"SSH_AUTH_SOCK": "/tmp/agent.sock", "GH_TOKEN": "gh-secret", "AWS_ACCESS_KEY_ID": "aws-secret",
+           "AWS_SECRET_ACCESS_KEY": "aws-secret", "NPM_TOKEN": "npm-secret", "ANTHROPIC_AUTH_TOKEN": "auth-secret",
+           "MADE_UP_SERVICE_TOKEN": "made-up-secret", "GIT_SSH_COMMAND": "ssh -i key", "XDG_CONFIG_HOME": "/operator/xdg",
+           "LOOPER_ANYTHING": "x"}
+
+
+def test_environment_is_an_allowlist(clean_environment, tmp_path):
+    for name, value in PLANTED.items():
+        clean_environment.setenv(name, value)
+    clean_environment.setenv("LC_ALL", "C")
+    clean_environment.setenv("HTTPS_PROXY", "http://proxy.invalid:3128")
+    with evaluation.isolated_environment(tmp_path / "case", None):
+        assert not set(PLANTED) & set(os.environ)
+        assert os.environ["LC_ALL"] == "C" and os.environ["HTTPS_PROXY"] == "http://proxy.invalid:3128"
+        extra = set(os.environ) - evaluation.KEPT_VARIABLES - {"HOME", "PATH", "CLAUDE_CONFIG_DIR", "GIT_TERMINAL_PROMPT",
+                                                               "DISABLE_AUTOUPDATER", "DISABLE_TELEMETRY", "LC_ALL"}
+        assert not extra, extra
+
+
 # --- Budget -----------------------------------------------------------------------------------------------------
 
 
 def test_ledger_persists_and_refuses_what_could_exceed_the_cap(tmp_path):
     path = tmp_path / "ledger.jsonl"
     ledger = evaluation.Ledger(path, total_cap=5, opus_cap=3)
-    ledger.admit("sonnet", 1.25)
-    ledger.record("direct_edit_brief", 1, "sonnet", 1.0, "pass")
-    ledger.record("opus_switch", 1, "opus", 2.0, "pass")
+    first = ledger.reserve("direct_edit_brief", 1, "sonnet", 1.25)
+    assert ledger.spent() == 1.25  # the reservation counts at once
+    ledger.settle(first, 1.0, "pass")
+    ledger.settle(ledger.reserve("opus_switch", 1, "opus", 3.0), 2.0, "pass")
     again = evaluation.Ledger(path, total_cap=5, opus_cap=3)  # a new process does not reset the cap
-    assert again.spent() == 3.0
-    again.admit("sonnet", 2.0)
+    assert again.spent() == 3.0 and again.spent("opus") == 2.0
     with pytest.raises(evaluation.BudgetRefusal, match="total cap"):
-        again.admit("sonnet", 2.5)
+        again.reserve("x", 1, "sonnet", 2.5)
     with pytest.raises(evaluation.BudgetRefusal, match="Opus cap"):
-        again.admit("opus", 1.5)
+        again.reserve("x", 1, "opus", 1.5)
+    assert evaluation.Ledger(path, total_cap=5, opus_cap=3).spent() == 3.0  # a refusal writes nothing
+
+
+def test_an_interrupted_case_keeps_its_reservation(clean_environment, tmp_path, monkeypatch):
+    clean_environment.setenv("CLAUDE_CODE_OAUTH_TOKEN", SECRET)
+    arguments = real_arguments(tmp_path, selected=[cases.BY_ID["readonly_progress"]])
+
+    def killed(*args, **kwargs):
+        raise KeyboardInterrupt  # what Ctrl-C or a handled signal does; a SIGKILL leaves the reservation row too
+
+    monkeypatch.setattr(evaluation, "run_case", killed)
+    with pytest.raises(KeyboardInterrupt):
+        evaluation.run_suite(**arguments)
+    after = evaluation.Ledger(tmp_path / "ledger.jsonl", total_cap=20, opus_cap=6)
+    assert after.spent() == 1.25  # the next command sees the spend
+    # A case that raised an ordinary error is settled at no less than its reservation, too.
+    monkeypatch.setattr(evaluation, "run_case", lambda *a, **k: {"outcome": "error", "cost_usd": 0.1})
+    evaluation.run_suite(**arguments)
+    assert evaluation.Ledger(tmp_path / "ledger.jsonl", total_cap=20, opus_cap=6).spent() == 2.5
+    # The reservation is on disk before the case starts.
+    seen = []
+    monkeypatch.setattr(evaluation, "run_case", lambda *a, **k: seen.append(
+        evaluation.Ledger(tmp_path / "ledger.jsonl", total_cap=20, opus_cap=6).spent()) or {"outcome": "pass", "cost_usd": 0.2})
+    evaluation.run_suite(**arguments)
+    assert seen == [3.75]
+    assert evaluation.Ledger(tmp_path / "ledger.jsonl", total_cap=20, opus_cap=6).spent() == 2.7
 
 
 def real_arguments(tmp_path, **override):
@@ -122,7 +166,7 @@ def test_real_mode_refuses_a_cli_the_task_Manager_would_refuse(clean_environment
 def test_a_case_that_would_exceed_the_remaining_cap_is_not_started(clean_environment, tmp_path, monkeypatch):
     clean_environment.setenv("CLAUDE_CODE_OAUTH_TOKEN", SECRET)
     arguments = real_arguments(tmp_path, selected=[cases.BY_ID["readonly_progress"]], total_cap_usd=1.5)
-    (tmp_path / "ledger.jsonl").write_text(json.dumps({"case": "x", "rep": 1, "model": "sonnet", "spent_usd": 0.5,
+    (tmp_path / "ledger.jsonl").write_text(json.dumps({"run": "r1", "case": "x", "rep": 1, "model": "sonnet", "spent_usd": 0.5,
                                                          "outcome": "pass"}) + "\n")
     started = []
     monkeypatch.setattr(evaluation, "run_case", lambda *a, **k: started.append(a) or {})
@@ -183,11 +227,12 @@ GUARDS = {
                           "first_test_run_recorded", "failing_command_ran"},
     "stop_continue": {"turn2_answered", "same_session_after_stop"},
     "readonly_progress": {"turn1_answered", "requirement_not_written"},
-    "foreign_task_refused": {"turn1_answered", "own_task_requirement_unchanged", "no_tool_call_names_the_other_task"},
+    "foreign_task_refused": {"turn1_answered", "events_parsed", "own_task_requirement_unchanged",
+                             "no_tool_call_names_the_other_task"},
     "fresh_session_excerpt": {"turn1_answered", "turn2_answered", "excerpt_leaves_out_commands", "last_attempt_succeeded"},
     "readonly_resume": {"turn1_answered"},
     "opus_switch": {"turn1_answered", "turn2_answered", "turn3_answered", "turn4_answered", "cost_within_case_budget",
-                    "task_binding_unchanged"},
+                    "task_binding_unchanged", "file_holds_only_the_other_value", "file_value_read_in_turn_2"},
 }
 
 
@@ -198,6 +243,8 @@ def checks(row):
 @pytest.mark.skipif(not DSN, reason="requires a disposable LOOPER_TEST_DATABASE_URL")
 def test_fake_pass_judges_each_criterion_and_dumps_inputs(tmp_path, monkeypatch):
     monkeypatch.setenv("ANTHROPIC_API_KEY", SECRET)  # an operator's own variable never reaches a child
+    for name, value in PLANTED.items():
+        monkeypatch.setenv(name, value)
     good, good_path = evaluation.run_suite(mode="fake", admin_url=DSN, out_dir=tmp_path / "ok",
                                            dump_dir=tmp_path / "dump-a")
     assert os.environ["ANTHROPIC_API_KEY"] == SECRET  # restored
@@ -223,7 +270,7 @@ def test_fake_pass_judges_each_criterion_and_dumps_inputs(tmp_path, monkeypatch)
                 assert run.tools and any(name.startswith("mcp__looper__") for name in run.tools), case.id
                 assert all(call.result is not None for call in run.calls), (case.id, run.calls)  # a stopped run keeps its open call
         assert evidence.launches and all("LOOPER_TASK_MANAGER" in launch["env_names"] for launch in evidence.launches)
-        assert not any("ANTHROPIC_API_KEY" in launch["env_names"] for launch in evidence.launches)
+        assert not any((set(PLANTED) | {"ANTHROPIC_API_KEY"}) & set(launch["env_names"]) for launch in evidence.launches)
         assert SECRET not in json.dumps(data) and SECRET not in (tmp_path / "ok" / f"{case.id}-1" / "server-0.log").read_text()
     for path in (tmp_path / "ok").rglob("*"):
         if path.is_file():
@@ -239,6 +286,24 @@ def test_fake_pass_judges_each_criterion_and_dumps_inputs(tmp_path, monkeypatch)
         passing = {name for name, ok in checks(row).items() if ok}
         assert passing <= GUARDS[case.id], (case.id, sorted(passing - GUARDS[case.id]))
         assert set(checks(rows[case.id])) == set(checks(row))
+
+    # A model that says the right thing and does the wrong one fails on the records, whatever its reply says.
+    lie, _ = evaluation.run_suite(mode="fake", admin_url=DSN, out_dir=tmp_path / "lie", behavior="lie", selected=runnable)
+    lied = {row["case"]: row for row in lie["rows"]}
+    caught = {"direct_edit_brief": "tool_targets_inside_task_dir", "stop_continue": "sleep_started",
+              "readonly_progress": "no_file_tools_that_write", "foreign_task_refused": "sentinel_file_unchanged",
+              "fresh_session_excerpt": "session_fresh_resume_failed", "readonly_resume": "no_write_tool_called",
+              "opus_switch": "models_follow_the_switch"}
+    for case in runnable:
+        assert lied[case.id]["outcome"] == "fail" and not checks(lied[case.id])[caught[case.id]], case.id
+    # Mutation: a judge that read the reply instead of the records would pass the liar; the real one does not.
+    liar = json.loads((tmp_path / "lie" / "readonly_progress-1" / "evidence.json").read_text())
+    assert not cases.claims_done(liar["turns"][0]["final"]["text"])
+    assert not checks(lied["readonly_progress"])["no_file_tools_that_write"]
+
+    # The report names the build it evaluated.
+    assert len(good["build"]["git_head"]) == 40 and isinstance(good["build"]["dirty"], bool)
+    assert Path(good["build"]["looper_file"]).is_relative_to(evaluation.REPO_ROOT)
 
     # The unparsed path: a record the judge cannot read is neither a pass nor a fail, and the raw file stays.
     data = json.loads((tmp_path / "ok" / "readonly_progress-1" / "evidence.json").read_text())
