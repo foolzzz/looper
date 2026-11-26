@@ -26,6 +26,9 @@ async def values(conn, table, column):
     ("triage_source", "proactive_deliveries", "source", {"triage"}, {"morning_brief", "idle_check"}),
     ("triage_handoff_reasons", "manager_events", "reason", {"delivery_deferred", "daily_cap"},
      {"morning_brief", "idle_check", "brief_failed"}),
+    ("main_session_egress", "manager_events", "reason", {"withheld_not_operator"}, {"future_reason"}),
+    ("completion_session_allowlist", "manager_events", "reason", {"session_allowlist"}, {"future_reason"}),
+    ("main_session_egress", "manager_events", "kind", {"autonomous"}, {"future_kind"}),
 ])
 def test_a_widening_adds_its_values_to_the_check_the_database_has_now(name, table, column, added, others):
     import asyncio

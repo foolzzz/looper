@@ -34,7 +34,7 @@ def test_a_new_manager_has_only_main_with_the_old_defaults(tmp_path: Path) -> No
         "key": MAIN_SESSION, "route": MAIN_KEY, "session_id": None, "session_totals": Usage(), "session_runtime": None,
         "session_profile": None, "session_provider": None, "process": None, "pending_switch": None,
         "pending_handoff": None, "clean_start": False, "session_loaded": False, "state_shown": None,
-        "state_lost": "no whole block yet", "state_generation": 0, "stopped_notes": [], "lock_owner": None,
+        "state_lost": "no whole block yet", "state_pending_whole": None, "state_generation": 0, "stopped_notes": [], "lock_owner": None,
         "last_user_turn_ended_at": None, "last_background_turn_ended_at": None,
         "running_token": None, "research": None, "agent_settings": None, "last_activity": 7.0,
         "turn_ended_at": None, "budget": None}
@@ -70,7 +70,7 @@ def test_the_old_names_read_and_write_the_session_the_context_sets(tmp_path: Pat
 @pytest.mark.parametrize("name", (
     "claude", "claude_runtime", "session_totals", "session_profile", "session_provider", "turn_lock",
     "process", "pending_switch", "pending_handoff", "clean_start", "session_loaded", "state_shown",
-    "state_lost", "state_generation", "stopped_notes", "lock_owner", "running_token", "lifecycle_gate",
+    "state_lost", "state_pending_whole", "state_generation", "stopped_notes", "lock_owner", "running_token", "lifecycle_gate",
     "research", "agent_settings", "last_activity",
 ))
 def test_each_forwarding_property_reads_and_writes_only_the_selected_session(tmp_path: Path, name: str) -> None:
