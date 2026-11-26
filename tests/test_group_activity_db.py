@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import replace
 from datetime import datetime, timezone
 import logging
@@ -13,12 +14,13 @@ from looper.agents.claude_cli import ResidentTurn
 from looper.agents.message import channel_address, channel_thread_id
 from looper.agents.channels.base import DeliveryReceipt
 from looper.agents.channels.chat_history import record_reply
+from looper.agents import session_routing
 from looper.agents.tiers import group_session
 from looper.agents.tiers.manager import ManagerAgent, ManagerConfig
 from looper.db import chat, manager_sessions
 from tests.db_support import DSN, run_db, until
-from tests.test_manager_session_routing_db import GROUP_A, LARK, OTHER, _Resident, _published
-from tests.test_scenario_session_routing_db import MANAGER
+from tests.test_manager_session_routing_db import GROUP_A, LARK, OTHER, _Resident, _published, _web
+from tests.test_scenario_session_routing_db import MANAGER, _to
 from tests.test_scoped_routing_db import OPERATOR, _message, _send as _bus_send, _setup
 
 pytestmark = pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
@@ -321,6 +323,54 @@ def test_telegram_has_no_block_and_says_so(monkeypatch, tmp_path) -> None:
             assert TELEGRAM_NOTE in session.claude.turns[0] and HEADER not in session.claude.turns[0]
             assert session.activity_cursor is None
             assert not await pool.fetchval("SELECT EXISTS (SELECT 1 FROM chat_messages WHERE channel = 'telegram')")
+        finally:
+            await rig.close()
+    run_db(body, monkeypatch, timeout=90)
+
+
+def test_a_stop_while_group_activity_is_read_ends_the_turn(monkeypatch, tmp_path) -> None:
+    from looper.agents.tiers.manager import StopResult
+    from tests.stop_faults import hold_at
+
+    async def body(pool):
+        rig, _ = await _setup(pool, tmp_path, monkeypatch)
+        hold = hold_at(monkeypatch, "group_activity")
+        await rig.start()
+        try:
+            message = _message(rig, "held at the activity read", OPERATOR)
+            await _published(rig, message)
+            await asyncio.wait_for(hold.reached.wait(), 10)
+            assert await rig.manager.stop_turn(message.message_id, via="web") is StopResult.STOPPING
+            hold.release()
+            await until(lambda: rig.collect() or message.message_id in rig.replies)
+            assert rig.replies[message.message_id][-1].payload["outcome"] == "stopped"
+            assert rig.manager.turn_for(message.message_id) is None
+            assert all("held at the activity read" not in turn for item in rig.manager._sessions.values()
+                       if item.claude is not None for turn in getattr(item.claude, "turns", []))
+        finally:
+            await rig.close()
+    run_db(body, monkeypatch, timeout=90)
+
+
+def test_routing_off_never_enters_the_activity_step(monkeypatch, tmp_path) -> None:
+    from looper.agents.tiers import turn_token
+
+    async def body(pool):
+        rig, _ = await _setup(pool, tmp_path, monkeypatch)
+        entered: list[str] = []
+
+        async def record(name: str) -> None:
+            entered.append(name)
+
+        monkeypatch.setattr(turn_token, "FAULTS", record)
+        monkeypatch.setattr(session_routing, "_routing_enabled", False)
+        main = rig.manager._sessions["main"].claude = _Resident("sess-main")
+        await rig.start()
+        try:
+            await _published(rig, _to(rig, _web("hello on the unrouted path")))
+            await until(lambda: len(main.turns) == 1)
+            assert entered and "persist_user_message" in entered
+            assert "group_activity" not in entered
         finally:
             await rig.close()
     run_db(body, monkeypatch, timeout=90)
