@@ -210,6 +210,7 @@ async def bind_chat(channel_id: str, chat_id: str, manager_id: str, *,
                     readback: Callable[[Any], Awaitable[None]] | None = None,
                     allowed_senders: Sequence[str] | None = None,
                     sender_policy: SenderPolicy | str | None = None,
+                    default_scope: object | None | str = storage._KEEP,
                     expected_manager_revision: int | None = None) -> RoutingSnapshot:
     """Capture any response under the same lock as the write, before commit/publication."""
     ids = (list(allowlist.sender_ids(storage._kind(channel_id), list(allowed_senders)))
@@ -220,6 +221,7 @@ async def bind_chat(channel_id: str, chat_id: str, manager_id: str, *,
         nonlocal stored
         stored = await storage.put_binding(channel_id, chat_id, manager_id, conn=conn, before_write=capture,
                                            allowed_senders=ids, sender_policy=sender_policy,
+                                           default_scope=default_scope,
                                            expected_manager_revision=expected_manager_revision)
         if readback is not None:
             await readback(conn)

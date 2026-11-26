@@ -37,11 +37,14 @@ function readError(error: unknown): string {
 }
 
 /** A bounded metadata read, owned only by the visible Work details section. */
-export function WorkChanges({ taskId, visible, pendingWorkspace = false }: { taskId: string; visible: boolean; pendingWorkspace?: boolean }) {
+export function WorkChanges({ taskId, visible, pendingWorkspace = false, awaitingWorkspace = false }: {
+  taskId: string; visible: boolean; pendingWorkspace?: boolean; awaitingWorkspace?: boolean;
+}) {
   const [read, setRead] = useState<{ taskId: string; loading: boolean; result?: TaskChanges; error?: string }>();
   const [revision, setRevision] = useState(0);
+  const held = pendingWorkspace || awaitingWorkspace;
   useEffect(() => {
-    if (!visible || pendingWorkspace) return;
+    if (!visible || held) return;
     const ctrl = new AbortController();
     setRead(previous => ({ taskId, loading: true, result: previous?.taskId === taskId ? previous.result : undefined }));
     readChanges(taskId, ctrl.signal).then(result => {
@@ -50,12 +53,12 @@ export function WorkChanges({ taskId, visible, pendingWorkspace = false }: { tas
       if (!ctrl.signal.aborted) setRead(previous => ({ ...previous, taskId, loading: false, error: readError(error) }));
     });
     return () => ctrl.abort();
-  }, [taskId, visible, pendingWorkspace, revision]);
+  }, [taskId, visible, held, revision]);
 
   if (!visible) return null;
-  if (pendingWorkspace) return <section aria-label="改动文件" className="min-w-0 space-y-3 text-sm">
+  if (held) return <section aria-label="改动文件" className="min-w-0 space-y-3 text-sm">
     <h2 className="font-medium">改动文件</h2>
-    <p role="status" className="text-muted-foreground">开始后可查看改动</p>
+    <p role="status" className="text-muted-foreground">{pendingWorkspace ? "任务开始后显示改动" : "工作目录就绪后显示改动"}</p>
   </section>;
   // Guard during render too: effects run after a selection has already painted.
   const current = read?.taskId === taskId ? read : undefined;

@@ -86,6 +86,8 @@ function statusBadge(status: string, label?: string) {
       return <Badge variant="warning">{label ?? "等你决定花费"}</Badge>;
     case "waiting_user":
       return <Badge variant="warning">{label ?? "Waiting for you"}</Badge>;
+    case "handing_back":
+      return <Badge variant="outline">{label ?? "Handing back"}</Badge>;
     default:
       return <Badge variant="outline">{label ?? status}</Badge>;
   }
