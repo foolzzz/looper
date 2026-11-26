@@ -226,7 +226,10 @@ def _loopback(host: str) -> str | None:
 def mcp_entry(runtime_root: Path, config: str | None) -> dict:
     from .service import looper_command
 
-    argv = [*looper_command(sys.executable), "claude-code", "mcp", "--runtime-root", str(runtime_root)]
+    argv = looper_command(sys.executable)
+    if argv[1:] == ["-m", "looper.cli"]:  # no console script: ``-I`` keeps the session's directory off sys.path
+        argv.insert(1, "-I")
+    argv = [*argv, "claude-code", "mcp", "--runtime-root", str(runtime_root)]
     if config:
         argv += ["--config", str(Path(config).expanduser().absolute())]
     return {"type": "stdio", "command": argv[0], "args": argv[1:]}

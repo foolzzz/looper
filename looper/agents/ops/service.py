@@ -1540,7 +1540,9 @@ def server_config(url: str, token: str, *, reconnect_seconds: int | None = None)
     env = {URL_ENV: url, TOKEN_ENV: token}
     if reconnect_seconds is not None:
         env["LOOPER_AGENT_RECONNECT_SECONDS"] = str(reconnect_seconds)
-    return {"command": sys.executable, "args": ["-m", "looper.cli", "mcp-server"], "env": env}
+    # ``-I`` keeps the session's working directory (which the agent can write to) and PYTHON* variables off
+    # ``sys.path``, so a planted ``looper`` package there cannot replace this server's code.
+    return {"command": os.path.abspath(sys.executable), "args": ["-I", "-m", "looper.cli", "mcp-server"], "env": env}
 
 
 async def library_with_server(library: Any, runtime_root: Path, config: Mapping[str, Any], *, who: str) -> Any:

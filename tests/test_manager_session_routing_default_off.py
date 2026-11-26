@@ -28,7 +28,7 @@ pytestmark = pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not
 
 # Computed on origin/main with this test's turns (``_command``, ``_entry``).
 COMMAND_SHA256 = "5e061eeb979d5c7fe9a14e358758921fd245a8d209a6da69c3185cb50f319234"
-ENTRY = {"command": "<python>", "args": ["-m", "looper.cli", "mcp-server"],
+ENTRY = {"command": "<python>", "args": ["-I", "-m", "looper.cli", "mcp-server"],
          "env": {"LOOPER_AGENT_URL": "http://127.0.0.1:9", "LOOPER_AGENT_TOKEN": "tok",
                  "LOOPER_AGENT_TURN_FILE": "<root>/.local/manager-turn.json"}}
 
