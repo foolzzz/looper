@@ -251,6 +251,7 @@ def test_requirement_expected_version_is_optional_and_not_a_tool():
     assert operation.request["required"] == ["task_id", "requirement"]
     assert operation.request["properties"]["expected_version"] == {"type": "integer"}
     assert api_v1.STATUS[ErrorCode.REQUIREMENT_CHANGED] == "409 Conflict"
+    assert api_v1.STATUS[ErrorCode.TASK_MANAGER_OFF] == "409 Conflict"
 
 
 def test_acceptance_permission_has_only_operator_operations():

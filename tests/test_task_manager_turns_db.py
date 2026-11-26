@@ -26,7 +26,7 @@ def native(monkeypatch, tmp_path):
     return NativeTaskManager(monkeypatch, tmp_path)
 
 
-@pytest.mark.parametrize("reason", ["work_mode_off", "runtime_unsupported", "budget", "outbound_review_unavailable", "workspace", "shutting_down", "review_hook_disabled", "cli_unverified"])
+@pytest.mark.parametrize("reason", ["work_mode_off", "manager_answers_off", "runtime_unsupported", "budget", "outbound_review_unavailable", "workspace", "shutting_down", "review_hook_disabled", "cli_unverified"])
 def test_refusals_start_no_process_and_keep_status(monkeypatch, tmp_path, native, reason):
     async def check(db):
         task_id, project_id, _ = await native.create(db)
@@ -34,6 +34,8 @@ def test_refusals_start_no_process_and_keep_status(monkeypatch, tmp_path, native
         try:
             if reason == "work_mode_off":
                 monkeypatch.setattr(task_conversations_settings, "_enabled", False)
+            elif reason == "manager_answers_off":
+                monkeypatch.setattr(task_conversations_settings, "_manager_answers", False)
             elif reason == "runtime_unsupported":
                 profile = native.settings.profile
                 native.settings = replace(native.settings, profile=replace(profile,
@@ -58,6 +60,9 @@ def test_refusals_start_no_process_and_keep_status(monkeypatch, tmp_path, native
             await sink.done()
             assert ("refused", {"reason": result.reason}) in sink.events
             assert native.records("launch") == []
+            if reason in ("work_mode_off", "manager_answers_off"):
+                assert await db.fetchval("SELECT count(*) FROM agent_sessions WHERE agent_id LIKE 'task-manager-%'") == 0
+                assert not pool.agent(task_id).resident.started
             assert (await tasks.get_task(task_id, pool=db))["status"] == "draft"
             if reason == "runtime_unsupported":
                 assert native.settings.profile.name in sink.finals[0][0] and "Claude Code" in sink.finals[0][0]
