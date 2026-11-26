@@ -113,7 +113,9 @@ function WorkPageContent({
     const ctrl = new AbortController();
     let alive = true;
     taskConversationsGet(ctrl.signal).then((result) => {
-      if (alive) setConversationMode((current) => ({ ...current, [taskId]: result.enabled === true ? "task" : "planner" }));
+      // The task thread needs work mode and the task Manager's own switch; anything else keeps the Planner.
+      const answers = result.enabled === true && result.manager_answers === true;
+      if (alive) setConversationMode((current) => ({ ...current, [taskId]: answers ? "task" : "planner" }));
     }).catch(() => {
       if (alive) setConversationMode((current) => ({ ...current, [taskId]: "planner" }));
     });
