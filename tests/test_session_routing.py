@@ -38,6 +38,39 @@ def test_a_key_names_a_chat_exactly_when_it_is_not_main() -> None:
             SessionKey(kind, channel_id, chat)
 
 
+@pytest.mark.parametrize(("kind", "fingerprint"), [
+    (SessionKind.MAIN, "0123456789abcdef"), (SessionKind.DM, "0123456789abcdef"),
+    (SessionKind.GROUP, "0123456789abcde"), (SessionKind.GROUP, "0123456789abcdef0"),
+    (SessionKind.GROUP, "0123456789abcdeg"), (SessionKind.GROUP, "0123456789abcdeF"),
+    (SessionKind.GROUP, ""), (SessionKind.GROUP, "0123456789abcdef\n"),
+])
+def test_fingerprints_only_name_group_scopes(kind: SessionKind, fingerprint: str) -> None:
+    args = {} if kind is SessionKind.MAIN else {"channel_id": LARK, "chat": "oc_group"}
+    with pytest.raises(ValueError):
+        SessionKey(kind, scope_fingerprint=fingerprint, **args)
+
+
+def test_group_fingerprint_is_part_of_the_session_identity() -> None:
+    key = SessionKey(SessionKind.GROUP, LARK, "oc_group", scope_fingerprint="0123456789abcdef")
+    plain = SessionKey(SessionKind.GROUP, LARK, "oc_group")
+    assert key.text == f"{plain.text}~0123456789abcdef"
+    assert session_routing.resident_label("manager-synthetic", key) != session_routing.resident_label(
+        "manager-synthetic", plain)
+
+
+def test_scoped_is_independent_of_the_default_manager_switch(monkeypatch) -> None:
+    monkeypatch.setattr(session_routing, "_scenario_routing", {})
+    monkeypatch.setattr(session_routing, "_routing_enabled", False)
+    session_routing.set_scenario_routing("manager-synthetic", "scoped")
+    assert session_routing.routes("manager-synthetic") and session_routing.scoped("manager-synthetic")
+    assert session_routing.group_isolation("manager-synthetic") is GroupIsolation.ISOLATED
+    assert not session_routing.scoped("manager") and not session_routing.routes("manager")
+    session_routing.set_scenario_routing("manager-synthetic", "per_chat")
+    assert session_routing.routes("manager-synthetic") and not session_routing.scoped("manager-synthetic")
+    session_routing.set_scenario_routing("manager-synthetic", "off")
+    assert not session_routing.routes("manager-synthetic")
+
+
 def test_only_the_default_managers_group_turns_are_isolated_while_routing_is_on(monkeypatch) -> None:
     assert session_routing.group_isolation("manager") is GroupIsolation.SHARED
     monkeypatch.setattr(session_routing, "_routing_enabled", True)

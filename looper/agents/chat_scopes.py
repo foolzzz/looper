@@ -371,3 +371,8 @@ class Principal:
     kind: PrincipalKind
     scope_id: str
     scope_version: int
+
+
+def inputs_version(resolved: Resolved) -> int:
+    """Version of the session inputs; audience-specific allowlists are wired separately."""
+    return 1
