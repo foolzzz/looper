@@ -155,10 +155,10 @@ def test_invalid_caps_fail_without_saving_fields(tmp_path, monkeypatch, fields):
     run_db(run, monkeypatch, timeout=30)
 
 
-def test_client_enable_and_cap_raise_wait_for_confirmation_and_disable_clears_fire(tmp_path, monkeypatch):
+def test_client_enable_and_cap_raise_wait_for_confirmation_and_disable_clears_fire(tmp_path, monkeypatch, fixed_clock):
     async def run(pool):
         _, sid = await _seed(pool, run_budget_usd=1)
-        async with _api(tmp_path, pool) as call:
+        async with _api(tmp_path, pool, scheduler=Scheduler(bus=Bus(), clock=fixed_clock)) as call:
             for fields in ({"enabled": True}, {"run_budget_usd": 2}, {"run_budget_usd": None}):
                 before = await db_schedules.get_schedule(sid)
                 status, pending = await call("update", {"schedule_id": sid, "fields": fields}, client=True)
@@ -168,7 +168,7 @@ def test_client_enable_and_cap_raise_wait_for_confirmation_and_disable_clears_fi
                 assert (await call("/api/v1/confirm", confirmation, client=True, session="other"))[0] == 404
                 assert (await call("/api/v1/confirm", confirmation, client=True))[0] == 200
             row = await db_schedules.get_schedule(sid)
-            assert row["enabled"] and row["next_fire_at"] > datetime.now(timezone.utc)
+            assert row["enabled"] and row["next_fire_at"] > fixed_clock()
             status, result = await call("update", {"schedule_id": sid, "fields": {"enabled": False}}, client=True)
             assert status == 200 and result["schedule"]["next_fire_at"] is None
     run_db(run, monkeypatch, timeout=30)

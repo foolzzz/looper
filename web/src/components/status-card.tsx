@@ -7,7 +7,8 @@ import { cn } from "@/lib/utils";
 const REFRESH_MS = 15_000;
 const linkClass = "underline-offset-2 hover:underline focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring rounded-sm";
 const WAITING = { gates: "gates", confirmations: "confirmations", schedules: "failed schedules", logins: "logins",
-  intents: "intents", ledger: "to-dos", deliveries: "possibly undelivered" } as Record<string, string>;
+  intents: "intents", ledger: "to-dos", deliveries: "possibly undelivered",
+  reminders: "reminders not confirmed delivered" } as Record<string, string>;
 const BACKGROUND = { completion: "wrapping up a task", own: "its own turn" } as Record<string, string>;
 
 const time = (iso: string) => new Date(iso).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });

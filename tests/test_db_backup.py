@@ -468,6 +468,12 @@ def test_a_backup_command_runs_as_given_with_the_database_filled_in(
     assert path.read_bytes() == b"PGDMP offline" and "listed" in checked
 
 
+def test_missing_configured_pg_dump_without_source_reports_no_dumper(tmp_path):
+    ops = ops_config.OpsConfig(tmp_path, tmp_path / ops_config.FILE, pg_dump=str(tmp_path / "missing-pg_dump"))
+    with pytest.raises(db_backup.NoDumper, match="backup.pg_dump names .*not an executable"):
+        db_backup.find_dumper(16, ops)
+
+
 def test_a_backup_command_is_shown_by_its_program_only(tmp_path: Path) -> None:
     """The command's arguments can hold a password: the detail the startup log and ``looper doctor`` show names the
     source and the program, never the arguments."""
@@ -739,6 +745,37 @@ def test_online_backup_records_verified_private_metadata_and_is_consumed_once(on
         case.conn, case.ops, case.root, case.target, now=case.now)) is None
     case.read_state.assert_not_awaited()
     # One initial verification and one startup verification, both on the archive.
+    assert len((case.root.parent / "restore-calls").read_text().splitlines()) == 2
+
+
+def test_serve_reuses_online_command_backup_loaded_from_unit_ops(online_backup, monkeypatch):
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock, MagicMock, Mock
+    from looper import components
+    from looper.agents import serve, service
+    from looper.db import connection
+
+    case = online_backup
+    serve_ops = _ops(case.root.parent,
+        command=[str(case.root.parent / "bin/pg_dump"), "--dbname={dbname}"],
+        verify_command=[str(case.root.parent / "bin/pg_restore"), "--list"])
+    mgr = SimpleNamespace(host=SimpleNamespace(cwd=case.root), unit_argv=lambda: [
+        "looper", "serve", "--config", str(serve_ops.path), "--runtime-root", str(case.root)])
+    upgrade_ops = service._Manager.ops(mgr)
+    path = asyncio.run(db_backup.online_upgrade_backup(upgrade_ops, case.root, case.target))
+    monkeypatch.setattr(components, "prepare_loaded_manifest", AsyncMock(return_value=case.target))
+    monkeypatch.setattr(connection, "schema_change_pending", AsyncMock(return_value=True))
+    monkeypatch.setattr(connection, "check_registry_schema_version", AsyncMock(
+        return_value=connection.REGISTRY_SCHEMA_VERSION))
+    dump = Mock(side_effect=AssertionError("serve must reuse the online backup"))
+    monkeypatch.setattr(db_backup, "back_up", dump)
+    pool = MagicMock()
+    pool.acquire.return_value.__aenter__.return_value = case.conn
+
+    asyncio.run(serve._back_up_before_schema_change(pool, serve_ops, case.root, skip_backup=False))
+
+    dump.assert_not_called()
+    assert path.exists() and not path.with_suffix(".dump.json").exists()
     assert len((case.root.parent / "restore-calls").read_text().splitlines()) == 2
 
 

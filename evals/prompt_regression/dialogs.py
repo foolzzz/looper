@@ -89,6 +89,7 @@ from looper.agents.tiers.manager import _looper_call
 
 from .compare import outcome
 from . import group_dialogs
+from .routed_dialogs import cases as _routed_cases
 from .metrics import runner_evidence
 from .runner import (
     INTERRUPTED, Api, ErrorClass, EvalError, Outcome, _git, aborted_reason, check_case_budget, error_row,
@@ -191,7 +192,6 @@ class Dialog:
     seed: Callable[[Api, str], None] | None = None
     manager: str | None = None  # the key of the scenario Manager the dialog talks to (its seed creates it)
     client: bool = False  # the dialog talks to the default Manager as an API client (``/api/v1/chat/send``)
-    session: Literal["group"] | None = None  # Uses the native Lark CLI transport.
     routing: Literal["per_chat", "scoped"] | None = None
     manager_seed: dict[str, Any] | None = None  # Group Manager fields, inserted before server startup.
     tags: tuple[str, ...] = field(default=())
@@ -203,6 +203,8 @@ class Dialog:
     research: bool = False  # the Manager's research order is on (Settings → Chat, ``research_order``)
     # The session search is on, and the database holds the synthetic history (``_seed_sessions``).
     sessions: bool = False
+    session: Literal["group", "dm"] | None = None  # Native CLI envelope, rather than dashboard input.
+    sender: Literal["operator", "other"] = "operator"
     failure_hold: bool = False  # create an act-mode environment hold before the first Manager turn
     memory: bool = False  # an enabled synthetic memory vault, without a drafting budget or push channel
     resident_profile: Literal["present-off", "present-on", "absent-off", "absent-on"] | None = None
@@ -3512,6 +3514,9 @@ DIALOGS: tuple[Dialog, ...] = (
 )
 
 
+DIALOGS += _routed_cases(Dialog, Say, PROJECT)
+
+
 # Context measurements are scripted here, so these cases are selected explicitly in fake mode only.
 FAILURE_DIALOGS = tuple(_hold_dialog(action) for action in ("retry", "planner", "stop")) + (
     Dialog("task_hold_operator_boundary", (
@@ -4133,8 +4138,13 @@ def run_dialog(api: Api, dialog: Dialog, *, database_url: str, project_id: str, 
             created = api.post("/api/v1/clients/create", {"name": f"eval-{uuid.uuid4().hex[:6]}"})["result"]
             client_id = created["client"]["id"]
             client_api = Api(api.base_url, token=created["token"], timeout=api.timeout)
-        if dialog.session:
+        other_task = None
+        if dialog.session and dialog.routing:
             group_dialogs.prepare(api, scenarios.parent, dialog, database_url)
+        elif dialog.session:
+            from .routed_dialogs import prepare
+
+            other_task = prepare(api, dialog, database_url, project_id, task)
         known = frozenset(t["task_id"] for t in api.post("/api/v1/tasks/page", {})["result"]["tasks"])
         # Setup uses audited operator operations too; only the dialog's actions belong to its checks.
         since = _last_action(database_url)
@@ -4142,14 +4152,14 @@ def run_dialog(api: Api, dialog: Dialog, *, database_url: str, project_id: str, 
         for number, say in enumerate(dialog.says, 1):
             turn_now = REMINDER_NOW if mode == "fake" and dialog.id == "reminder_tools" else datetime.now(timezone.utc)
             text = say.text_from(previous) if say.text_from and previous else say.text
-            text = text.replace("<task>", task or "")
+            text = text.replace("<task>", task or "").replace("<other task>", other_task or "")
             if fixture_hold:
                 text = text.replace("<hold_step>", fixture_hold["step_id"]).replace("<hold_failure>", str(fixture_hold["failure_id"]))
             if mode == "fake":
                 data = json.loads(scenarios.read_text(encoding="utf-8"))
                 scripted = []
                 for name, arguments in say.fake:
-                    rendered = json.dumps(arguments).replace("<task>", task or "")
+                    rendered = json.dumps(arguments).replace("<task>", task or "").replace("<other task>", other_task or "")
                     if fixture_hold:
                         rendered = rendered.replace("<hold_step>", fixture_hold["step_id"]).replace(
                             '"<hold_failure>"', str(fixture_hold["failure_id"]))
@@ -4171,10 +4181,15 @@ def run_dialog(api: Api, dialog: Dialog, *, database_url: str, project_id: str, 
             before_run = _newest_run(api, agent) if expects_api else 0
             manager_session = None
             stored_messages = []
-            if dialog.session:
+            if dialog.session and dialog.routing:
                 reply, manager_session, stored_messages = group_dialogs.ask(
                     api, scenarios.parent / "lark", dialog, text, sender=say.sender,
                     database_url=database_url, timeout=timeout, attachments=say.attachments, **budget_args)
+            elif dialog.session:
+                from .routed_dialogs import ask
+
+                reply = ask(api, scenarios.parent / "lark", dialog, text, database_url=database_url,
+                            timeout=timeout, **budget_args)
             elif client_api is not None:
                 reply, conversation = _ask_client(client_api, api, conversation, text, timeout=timeout,
                                                   database_url=database_url, **budget_args)
@@ -4200,7 +4215,7 @@ def run_dialog(api: Api, dialog: Dialog, *, database_url: str, project_id: str, 
                       for a in trail if a["status"] == "error"]
             turns.append({"text": text, "reply": reply[:2000], "calls": calls, "errors": errors, "problem": problem,
                           **({"sender": say.sender, "manager_session": manager_session,
-                              "stored_messages": stored_messages} if dialog.session else {})})
+                              "stored_messages": stored_messages} if dialog.session and dialog.routing else {})})
             if problem:
                 break
         check_budget()
@@ -4227,6 +4242,7 @@ def run_dialog(api: Api, dialog: Dialog, *, database_url: str, project_id: str, 
     return {"id": dialog.id, **(error or {"outcome": (Outcome.PASS if passed else Outcome.FAIL).value,
                                           "success": passed}),
             **({"transport": "lark-cli CliTransport", "session": dialog.session} if dialog.session else {}),
+            **({"sender": dialog.sender} if dialog.session and not dialog.routing else {}),
             "problems": problems, "turns": turns,
             "calls": sum(len(t["calls"]) for t in turns), "duration_s": round(time.monotonic() - started, 1)}
 
@@ -4387,13 +4403,18 @@ def run(
                 projects_root.mkdir()
             with fresh_database(admin_url) as (database_url, _), _clean_command_runners(case / "runtime"):
                 if dialog.session:
-                    group_dialogs.enable_channel(database_url)
-                    if not dialog.manager or not dialog.routing:
-                        raise EvalError("group dialogs need a scenario Manager and an explicit routing mode")
-                    if dialog.manager_seed is not None:
-                        group_dialogs.seed_manager(database_url, manager=f"manager-{dialog.manager}",
-                                                   values=dialog.manager_seed)
-                    group_dialogs.seed_server(database_url, manager=f"manager-{dialog.manager}", routing=dialog.routing)
+                    if dialog.routing:
+                        group_dialogs.enable_channel(database_url)
+                        if not dialog.manager:
+                            raise EvalError("group dialogs need a scenario Manager and an explicit routing mode")
+                        if dialog.manager_seed is not None:
+                            group_dialogs.seed_manager(database_url, manager=f"manager-{dialog.manager}",
+                                                       values=dialog.manager_seed)
+                        group_dialogs.seed_server(database_url, manager=f"manager-{dialog.manager}", routing=dialog.routing)
+                    else:
+                        from .routed_dialogs import seed_server
+
+                        seed_server(database_url)
                 reminder_now = REMINDER_NOW if mode == "fake" and dialog.id == "reminder_tools" else None
                 with running_server(database_url=database_url, runtime_root=case / "runtime", bin_dir=case / "bin",
                                     log_path=logs / f"{dialog.id}-{rep}.log", home=home,

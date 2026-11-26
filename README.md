@@ -413,6 +413,20 @@ release wheel serves the copy packaged with it.
 | **Agent history** | One agent's launch command, full transcript (text, thinking, tool calls and results) and activity; follows a running agent and flags one with no output for 2 minutes |
 | **Settings** | A folding group at the bottom of the sidebar, one page each: **LLM Providers**; **Agent Runtimes** (read-only: each runtime type, found on the server's PATH or not, with Re-detect, and the planned ones); **Agent Profiles** (runtime, provider and model, the roles each can run and where it is used); **Roles** (one collapsible row for the shared defaults, then one per role with its overrides, prompt and limits); **Workflows**; **Managers**; **API clients**; **Skills & MCP**; **Channels**; **Chat**; **Scheduler**; **Knowledge vault**; **Request recording**; **Local gateway**; **Import / Export** |
 
+#### Install as an app
+
+On macOS or Windows, open the dashboard in Chrome or Edge over HTTPS (or
+`localhost` / `127.0.0.1` on the server's machine). In Chrome, click the address
+bar's **Install** icon, or **⋮ → Cast, save, and share → Install page as app**.
+In Edge, click **App available → Install** in the address bar. Looper opens in
+its own window; pin its icon to the macOS Dock or Windows taskbar to reopen it.
+Sign in as usual. The server must stay running; the app has no offline mode.
+Reload the window after upgrading Looper to load the new dashboard.
+
+To uninstall, use the app window's menu → **Uninstall Looper** in Chrome,
+or open `edge://apps` → Looper → **Details → Uninstall** in Edge. This removes
+the browser app, not the Looper server or its stored tasks.
+
 ### HTTP API
 
 The dashboard uses operator authentication: a local browser signs in automatically; a remote browser uses the
