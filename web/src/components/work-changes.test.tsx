@@ -115,7 +115,19 @@ it.each(["draft", "init"])("keeps the %s right panel neutral before the task sta
   expect(host.querySelector('[aria-labelledby="work-cost-title"]')?.textContent).toContain("费用尚不可用");
 });
 
-it.each(["pending", "assigned", "running", "planning", "executing", "verifying", "stopping", "waiting", "waiting_user", "awaiting_budget", "handing_back", "completed", "failed", "cancelled", "stopped"])(
+it.each(["pending", "assigned"])("keeps %s workspace_missing neutral until a workspace exists", async status => {
+  taskStatus = status;
+  respond = () => answer(ok("a", [], { kind: "unavailable", scope: null, reason: "workspace_missing" }));
+  await show(<WorkPage sub="task/a" onNavigate={vi.fn()} />);
+  await click("任务详情");
+  const changes = host.querySelector('[aria-label="改动文件"]')!;
+  expect(changes.textContent).toContain("工作目录就绪后显示改动");
+  expect(changes.textContent).not.toContain("无法读取改动");
+  expect(changes.querySelector("button, [role=alert], .text-destructive")).toBeNull();
+  expect(calls.filter(call => call.path.endsWith("/changes"))).toHaveLength(0);
+});
+
+it.each(["running", "planning", "executing", "verifying", "stopping", "waiting", "waiting_user", "awaiting_budget", "handing_back", "completed", "failed", "cancelled", "stopped"])(
   "keeps real changes failures distinct from the other empty %s panel blocks", async status => {
     taskStatus = status;
     respond = () => answer(ok("a", [], { kind: "unavailable", scope: null, reason: "workspace_missing" }));
@@ -124,6 +136,9 @@ it.each(["pending", "assigned", "running", "planning", "executing", "verifying",
     const changes = host.querySelector('[aria-label="改动文件"]')!;
     expect(changes.querySelector('[role="alert"]')?.textContent).toContain("无法读取改动：工作目录不存在");
     expect(changes.querySelector("button")?.textContent).toBe("重试");
+    expect(changes.textContent).not.toContain("工作目录就绪后显示改动");
+    expect(changes.textContent).not.toContain("任务开始后显示改动");
+    expect(calls.filter(call => call.path.endsWith("/changes"))).toHaveLength(1);
     for (const selector of ["#work-steps", '[aria-label="关卡"]', '[aria-labelledby="work-cost-title"]']) {
       const block = host.querySelector(selector)!;
       expect(block.querySelector('[role="alert"], .text-destructive')).toBeNull();

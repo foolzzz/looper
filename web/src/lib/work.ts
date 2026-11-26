@@ -12,6 +12,12 @@ export function isUnstartedTask(status: string | undefined): boolean {
   return status === "draft" || status === "init";
 }
 
+/** `pending` is stored before the task workspace is prepared. `assigned` is not the status a start stores after that
+ * preparation (`running` is), so a missing directory here is not a failed read. */
+export function awaitingTaskWorkspace(status: string | undefined): boolean {
+  return status === "pending" || status === "assigned";
+}
+
 export interface WorkTask {
   task_id: string;
   title: string;
@@ -199,7 +205,7 @@ export async function createDraft(projectId: string): Promise<{ task_id: string;
 const WORK_STATUS: Record<string, string> = {
   draft: "草稿", init: "待开始", running: "运行中", assigned: "已分配", planning: "规划中",
   executing: "执行中", verifying: "验证中", stopping: "停止中", waiting: "等待中", pending: "排队中",
-  waiting_user: "等你回复", awaiting_budget: "等你决定花费", completed: "已完成", failed: "失败",
+  waiting_user: "等你回复", awaiting_budget: "等你决定花费", handing_back: "交回中", completed: "已完成", failed: "失败",
   stopped: "已停止", cancelled: "已取消", queued: "排队中", gating: "检查中", succeeded: "成功",
   interrupted: "已中断", timed_out: "已超时", skipped_overlap: "已跳过：任务重叠",
   skipped_missed: "已跳过：错过时间", skipped_gate: "已跳过：无新内容", gate_failed: "检查失败",
