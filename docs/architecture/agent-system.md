@@ -5216,11 +5216,17 @@ At the original deadline the task becomes `waiting_user`, stops probing and
 appears once in the existing failure-holds section of Needs you when attention
 is enabled. The operator can check connectivity, stop and restart the task, or
 disable this policy to release existing waits on their next settings check.
-The task detail API and dashboard show the pause reason
-and deadline. Lark and Telegram use the existing task controls and Needs you
+The task detail API and dashboard show the pause reason and deadline. During
+an active task's pause, `network_pause.state` is authoritative: task detail
+projects `phase` as `waiting` for `paused`, or `waiting_user` after expiry,
+as soon as it reads the pause row. The persisted `tasks.status` converges
+asynchronously through the Planner's status message and TaskRouter; consumers
+must not rely on it to detect the start or expiry of a network pause. With
+the policy disabled, task detail does not query pause storage.
+Lark and Telegram use the existing task controls and Needs you
 summary; neither needs a new chat command.
 
-Migration `network_pauses` stores pause history with version-fenced releases.
+Migration `network_pauses` stores pause history with pause-ID-fenced releases.
 Logs record pause, resume and expiry. While enabled, `metrics.task_outcomes`
 adds global lifetime `network_pause` counts, active paused/human waits and total
 pause duration in seconds (bounded by each pause deadline); those counters
