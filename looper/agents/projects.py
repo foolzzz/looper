@@ -1234,6 +1234,9 @@ async def move_task(task_id: str, data: dict[str, Any], task_router: TaskRouter)
 async def start_ready_task(task_id: str, bus: MessageBus, source: AgentAddress, *, pool: Any = None) -> dict[str, Any]:
     """Have the TaskRouter start a ready task (created, never started; ``TASK_START``), from the dashboard or the
     Manager: 404 for an unknown task, 400 for one that is not ready. It runs at once."""
+    from .tiers.task_manager import current_pool
+    if (manager_pool := current_pool()) and manager_pool.in_turn(task_id):
+        raise RequestError(HTTP_409, "the task Manager is working in this task: stop its turn first")
     task = await db_tasks.get_task(task_id, **({"pool": pool} if pool is not None else {}))
     if task is None:
         raise RequestError(HTTP_404, "task not found")
