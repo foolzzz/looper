@@ -248,6 +248,7 @@ class TaskManagerAgent:
         self.loaded = False
         self.context_rotation_pending = False
         self.running: asyncio.Task[None] | None = None
+        self.mcp_fingerprints: dict[str, str] = {}  # of the allowed servers launched, to compare with what ran
         self.mcp_files: set[str] = set()  # generated configs holding the operator's server definitions
 
     async def prepare(self, *, sink: TurnSink | None = None) -> tuple[Mapping[str, Any], Any, Launch, SystemPrompt]:
@@ -313,11 +314,14 @@ class TaskManagerAgent:
             if direct and (allowed := task_conversations_settings.manager_mcp()):
                 try:
                     run = replace(run, library=await operator_mcp.library_with_allowed(
-                        library, self.pool.runtime_root, allowed, cwd=reopened.work_dir,
+                        library, self.pool.runtime_root, allowed,
                         environment=run.runtime.environment(run)))
                 except operator_mcp.UnresolvedServers as exc:
                     raise Refused(RefuseReason.MCP_UNRESOLVED, str(exc)) from exc
                 self.mcp_files.add(run.library.mcp_config)
+                self.mcp_fingerprints = operator_mcp.fingerprints(run.library, allowed)
+            else:
+                self.mcp_fingerprints = {}
             return run
         # Query newest summaries directly, so a long-lived task never gets its oldest activity as its brief.
         from ...db.connection import get_pool
