@@ -796,9 +796,21 @@ class SessionRouter:
                     return
                 idle = sorted((s for s in others if s.key != MAIN_SESSION and self.idle(s)),
                               key=lambda s: s.last_activity)
-                if idle and await self._stop_idle(idle[0], notify=False):
-                    logger.info("%s: stopped the idle session %s for %s", agent._log, idle[0].key, session.key)
+                stopped = None
+                for victim in idle:  # the least recently active first; one whose runtime keeps its process is skipped
+                    if await self._stop_idle(victim, notify=False):
+                        stopped = victim
+                        break
+                if stopped is not None:
+                    logger.info("%s: stopped the idle session %s for %s", agent._log, stopped.key, session.key)
                     continue
+                if idle:
+                    # Idle sessions whose runtime cannot close them hold the slots, and no turn is left to end and
+                    # free one: waiting would never finish. Go over the cap instead.
+                    logger.warning("%s: no idle session could be stopped for %s; starting it over the cap of %d",
+                                   agent._log, session.key, session_routing.max_resident())
+                    self._reservations.add(session.key)
+                    return
                 if session.key == MAIN_SESSION or not any(s.key != MAIN_SESSION for s in others):
                     self._reservations.add(session.key)
                     return  # main never waits; nor does a session when only main holds a process

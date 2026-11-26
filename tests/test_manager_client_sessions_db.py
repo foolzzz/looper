@@ -99,6 +99,13 @@ class _Capture:
         return "\n".join(parts)
 
 
+class _Pinned(_Resident):
+    """A runtime that keeps its process when idle (the Messages API runtime): it cannot be stopped to make room."""
+
+    async def try_stop_if_idle(self) -> bool:
+        return False
+
+
 def _run(test: Any, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     async def body(pool: Any) -> None:
         rig = _Rig(tmp_path)
@@ -259,6 +266,23 @@ def test_client_sessions_count_toward_the_resident_limit_and_are_reclaimed(
             assert not a.started and not b.started
         assert rig.main.started  # main is never stopped for a client
         assert not rig.main.turns[1:]
+
+    _run(test, mode, tmp_path)
+
+
+def test_a_start_does_not_wait_forever_for_idle_sessions_that_cannot_be_stopped(
+        mode: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    async def test(rig: _Rig, pool: Any) -> None:
+        await _thread(pool, "thread-a", "client-a")
+        await _thread(pool, "thread-b", "client-b")
+        a = _client_resident(rig, "client-a", _Pinned("sess-a"))
+        b = _client_resident(rig, "client-b", _Pinned("sess-b"))
+        await rig.reply(await _sent(rig, pool, _web("你好")))
+        await rig.reply(await _sent(rig, pool, _client("one", "client-a", "thread-a")))
+        # Main and A (which keeps its process) fill the cap of 2; A is idle, so B's start must not wait for it.
+        assert await rig.reply(await _sent(rig, pool, _client("two", "client-b", "thread-b")), timeout=10) \
+            == "sess-b 回复 1"
+        assert len(a.turns) == 1 and len(b.turns) == 1
 
     _run(test, mode, tmp_path)
 
