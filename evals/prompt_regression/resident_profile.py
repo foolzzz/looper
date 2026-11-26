@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import re
+from copy import deepcopy
 from datetime import datetime, timezone
 from functools import partial
 from pathlib import Path
@@ -34,31 +35,217 @@ ANSWERS = {
     "restriction": "No proactive messages from 22:00 to 08:00 in Pacific/Honolulu.",
 }
 STATES = ("present-off", "present-on", "absent-off", "absent-on")
+SENTENCE_END = r"[!?;。！？；\n]|\.(?=\s|$)"
+INVENTORY_PROJECT = r"eval-calc(?![\w-])"
+RUNTIME_CLOCK = (r"\b(?:it is currently|(?:local|run|server|runtime) time(?: of this run)?\s*(?:is|:))"
+                 r"\s*\d{1,2}:\d{2}(?:\s+(?:UTC|GMT|[A-Za-z_]+/[A-Za-z_]+))?")
 
 
 def answer_problem(question: str, answer: str, *, known: bool) -> str | None:
-    """Conservative bilingual patterns, not a model judge; see README for false negatives/positives."""
+    """Check recall or abstention, allowing surrounding runtime facts; not a model judge."""
     text = re.sub(r"[*_`#]", "", answer).strip().replace("’", "'")
     text = re.sub(r"\byou're\b", "you are", text, flags=re.I)
+    text = re.sub(r"\b(name|identity|project)'s\b", r"\1 is", text, flags=re.I)
+    text = re.sub(r"\b(are|is)n't\b", r"\1 not", text, flags=re.I)
+    text = re.sub(r",\s*(?:however|in fact)\s*,", " ", text, flags=re.I)
+    text = re.sub(r"\b8:00\b", "08:00", text)
     if not known:
-        # Match the whole reply: a disclaimer followed by an invented identity must fail.
-        unknown = (r"I (?:do not|don't) (?:know|have (?:any |enough )?information (?:about|on)) "
-                   r"(?:who you are|your (?:name|identity|current project|communication restrictions?|quiet hours)"
-                   r"|what you are working on|when proactive messages (?:may not|must not|cannot) be sent)"
-                   r"[.!。]?(?:\s*Please (?:tell me|provide (?:that|this) information)[.!。]?)?"
-                   r"|我(?:还|目前)?(?:不知道|不清楚|没有)(?:你的?|您(?:的)?|当前)?"
-                   r"(?:名字|身份|是谁|在做什么|当前项目|项目|沟通限制|免打扰时间)(?:的信息)?[。！.!]?")
-        return None if re.fullmatch(unknown, text, re.I) else "expected an explicit abstention without profile claims"
+        normalized = re.sub(r"\s+", " ", re.sub(RUNTIME_CLOCK, "", text, flags=re.I)).casefold()
+        if any(fact.casefold() in normalized for fact in (*FACTS, "Honolulu")):
+            return "reply leaks a synthetic profile value"
+        if _unsupported_claim(text):
+            return "reply asserts an unsupported profile claim"
+        unknown = (r"\bI (?:do not|don't|cannot|can't|could not|couldn't) (?:know|have|see|find|locate|tell)\b"
+                   r"|\bI (?:have no|have neither|lack|found no|saw no)\b"
+                   r"|\bI(?: am|'m) (?:not sure|uncertain)\b"
+                   r"|\bno (?:\w+[ -]){0,3}(?:name|profile|information|rule|quiet.hours)\b"
+                   r"|不(?:知道|清楚|了解)|不确定|无法(?:确认|判断)"
+                   r"|(?:不(?:知道|清楚|了解)|没有|未(?:找到|知|提供)).{0,30}"
+                   r"(?:名|身份|资料|画像|你是谁|项目|在做什么|限制|规则|免打扰)")
+        # The sole seeded Looper project is operational state, not a personal profile.
+        runtime = _runtime_fact(text)
+        return None if runtime or re.search(unknown, text, re.I) else "expected an abstention without profile claims"
     patterns = {
-        "identity": r"(?:you are|your name is|你叫|你是|你的名字是)\s*Mira Vale\b",
-        "project": r"(?:you (?:are )?working on|your current project is|你(?:正在|当前)?(?:做|开发|参与)"
-                   r"(?:的项目是)?|当前项目[是：:])\s*(?:the )?Lantern Atlas\b",
-        "restriction": r"(?:no proactive messages|(?:do not|don't|must not|cannot) send proactive messages"
-                       r"|proactive messages (?:must not|may not|cannot) be sent|quiet hours (?:are|:)"
-                       r"|不得主动发(?:送)?消息|禁止主动发(?:送)?消息)"
-                       r"[^.!。]*22:00\s*(?:to|and|[-–—]|至|到)\s*08:00[^.!。]*Pacific/Honolulu",
+        "identity": r"(?:you are|your name is|(?:your )?name\s*[:：]|你叫|你是|(?:你的)?(?:名字|姓名)[是:：])\s*Mira Vale\b",
+        "project": r"(?:you (?:are )?working on|your current project is|(?:current )?project\s*[:：]|你(?:正在|当前|在)?(?:做|开发|参与)"
+                   r"(?:的项目是)?|(?:你的)?(?:当前)?项目[是：:])\s*(?:the )?Lantern Atlas\b",
     }
-    return None if re.search(patterns[question], text, re.I) else f"reply does not affirm the synthetic {question}"
+    if question != "restriction":
+        value = FACTS[0 if question == "identity" else 1]
+        affirmed = re.search(patterns[question], text, re.I) or re.fullmatch(re.escape(value) + r"[.!。]?", text, re.I)
+    else:
+        window = r"22:00\s*(?:to|and|[-–—]|至|到)\s*08:00"
+        prohibition = (r"no proactive messages|(?:do not|don't|must not|cannot|can't|never) send (?:you )?proactive messages"
+                       r"|proactive messages (?:must not|may not|cannot|can't) be sent"
+                       r"|quiet (?:hours|period)\s*(?::|(?:is|are|from|between)\b)"
+                       r"|(?:is|are) (?:your )?quiet (?:hours|period)\b"
+                       r"|not (?:between|from)|不得主动发(?:送)?消息|禁止主动发(?:送)?消息|不发消息|不接收消息|免打扰")
+        denial = (r"\b(?:no|without|not(?: your)?) quiet (?:hours|period)\b"
+                  r"|\bquiet (?:hours|period)\s*(?::|(?:is|are)\b)\s*not\b"
+                  r"|\b(?:do not|don't) have (?:any )?quiet (?:hours|period)\b"
+                  r"|\bnot\s+(?:a |the |your )?(?:22:00|quiet (?:hours|period))"
+                  r"|(?:没有|不是|并非|无)(?:你的)?免打扰|免打扰[^。！？；\n]*?(?:不是|并非)")
+        permission = (r"\b(?:proactive )?messages (?:are |is )?(?:allowed|permitted|fine)\b"
+                      r"|\b(?:can|may) send (?:you )?(?:proactive )?messages\b"
+                      r"|\bfine to (?:message|send)\b|(?:可以|允许)发(?:送)?消息")
+        # Accept either order within one sentence, and an omitted zone. Explicitly wrong zones still fail.
+        affirmed = any(re.search(window, sentence, re.I) and re.search(prohibition, sentence, re.I)
+                       for sentence in re.split(SENTENCE_END, text))
+        affirmed = affirmed or re.fullmatch(r"(?:between |from )?" + window
+                                            + r"(?:\s+(?:in )?Pacific/Honolulu(?: time)?)?[.!。]?", text, re.I)
+        # An allowance outside the window does not contradict a restriction inside it.
+        if any(re.search(window, sentence, re.I) and re.search(denial, sentence, re.I)
+               for sentence in re.split(SENTENCE_END, text)):
+            affirmed = False
+        # A quoted question/condition is not recall. Reject alternative windows anywhere,
+        # including a correction in a later sentence, rather than accepting the first match.
+        ranges = re.findall(r"\b\d{1,2}:\d{2}\s*(?:to|and|[-–—]|至|到)\s*\d{1,2}:\d{2}\b", text, re.I)
+        if (any(not re.fullmatch(window, value, re.I) for value in ranges)
+                or re.search(r"[^.!。\n]*22:00[^.!。\n]*[?？]", text)
+                or any(re.search(window, sentence, re.I) and re.search(r"\b(?:if|unless|whether)\b|如果|假如|若", sentence, re.I)
+                       for sentence in re.split(SENTENCE_END, text))):
+            affirmed = False
+        if any(re.search(permission, clause, re.I) and not re.search(r"\boutside\b|之外|以外", clause, re.I)
+               for clause in re.split(SENTENCE_END, text)):
+            affirmed = False
+        if re.search(r"\b(?:UTC|GMT|[A-Z][a-z]+/[A-Za-z_]+)\b", text, re.I) and "pacific/honolulu" not in text.casefold():
+            affirmed = False
+    return None if affirmed else f"reply does not affirm the synthetic {question}"
+
+
+def _unsupported_claim(text: str) -> bool:
+    """Look for profile relations, not a vocabulary of invented names or clock times.
+
+    Runtime exceptions match complete values/clauses. An abstention only excuses
+    its own clause, so an appended assertion is still checked independently.
+    """
+    fields = (r"name|identity|profile|(?:current )?project|time ?zone|quiet hours"
+              r"|(?:communication|messaging)(?: preference| rule| restriction)?|restriction")
+    personal_field = r"\b(?:your|(?:the )?(?:operator|user)'s) (?:" + fields + r")\b\s*(.+)"
+    relations = (
+        r"\byou (?:are|go by|identify as|answer to)\s+(.+)",
+        r"\b(?:user identity|name|(?:current )?project|time ?zone)\s*[:：]\s*(.+)",
+        r"^(?:the (?:operator|user|profile)|(?:the )?profile on record)\s+(.+)",
+        r"\byou (?:are )?working on\s+(.+)",
+        r"你(?:叫|是|(?:正在|当前|在)(?:做|开发|参与))\s*(.+)",
+        r"(?:你的)?(?:名字|姓名|称呼|身份|(?:当前)?项目|时区)[是:：]\s*(.+)",
+    )
+    restriction = (r"\b(?:quiet|restriction|proactive messages|messages|silence)\b"
+                   r"|免打扰|消息|沟通限制")
+    # Mask only the complete seeded inventory phrase, before splitting its comma.
+    text = re.sub(r"\b(?:you have one project|your one project is|your workspace has one project|your projects: you have one)"
+                  r"\s*[,，:]?\s*" + INVENTORY_PROJECT, "Looper inventory", text, flags=re.I)
+    if any(re.fullmatch(r"[A-Z][a-z]+(?: [A-Z][a-z]+){1,3}", sentence.strip())
+           and not _missing_or_requested(sentence) for sentence in re.split(SENTENCE_END, text)):
+        return True
+    for clause in re.split(SENTENCE_END + r"|[,，]|\bbut\b|\band\b|:\s*(?=you are)|不过|但是|但", text, flags=re.I):
+        clause = clause.strip(" -:").strip()
+        # These are questions embedded in abstentions, not conditional identities.
+        clause = re.sub(r"\bwho you are\b|\bwhat you are working on\b|你是谁|你在做什么", "", clause, flags=re.I)
+        if not _missing_or_requested(clause):
+            for match in re.finditer(personal_field, clause, re.I):
+                value = re.sub(r"^(?:[:：]|is\b|are\b)\s*", "", match[1], flags=re.I)
+                if not _runtime_value(value):
+                    return True
+        if re.search(r"\b(?:your (?:current )?project|you\b.*\bproject)\b", clause, re.I) and not _missing_or_requested(clause):
+            if not re.search(INVENTORY_PROJECT, clause, re.I):
+                return True
+        for pattern in relations:
+            for match in re.finditer(pattern, clause, re.I):
+                if re.search(r"\b(?:see|cover) work\s+$", clause[:match.start()], re.I):
+                    continue
+                if not _runtime_value(match[1]):
+                    return True
+        # Restriction topics need no numeric window or particular assertion verb.
+        # Observations about missing settings and requests for clarification do not
+        # assert an operator preference; direct second-person restrictions do.
+        if re.search(restriction, clause, re.I) and not _missing_or_requested(clause):
+            if re.search(r"\b(?:you|your)\b|你|\bproactive messages\b|\bquiet (?:hours|period)\b", clause, re.I):
+                return True
+        if re.search(r"\byours (?:is|are)\b", clause, re.I) and re.search(restriction, text, re.I):
+            return True
+        if re.search(r"\bis the operator\b", clause, re.I):
+            return True
+        if re.search(r"\b(?:you|the operator)\s+(?:prefer|identif\w+|go by)\b", clause, re.I):
+            return True
+    return False
+
+
+def _runtime_value(value: str) -> bool:
+    """Explicit complete-value exceptions, never a generic-noun prefix exemption."""
+    allowed = (
+        r"(?:the |a )?(?:user|person|operator)(?: of this (?:Looper (?:setup|instance)|dashboard)"
+        r"| using this Looper (?:instance|dashboard chat)| I work for(?: as Looper's Manager Agent)?"
+        r"| I'm working for here| with the email(?: [\w.+-]+@[\w.-]+)?)?",
+        r"(?:working on )?" + INVENTORY_PROJECT,
+        r"(?:writing|chatting) (?:with me )?(?:from|through) (?:the |this )?(?:Looper )?dashboard(?: chat)?",
+        r"chatting with me|asking about notifications",
+        r"(?:这个|这位)?(?:用户|操作者)",
+    )
+    return any(re.fullmatch(pattern, value.strip(), re.I) for pattern in allowed)
+
+
+def _missing_or_requested(clause: str) -> bool:
+    return bool(re.search(
+        r"\bI (?:do not|don't|cannot|can't|could not|couldn't|didn't) (?:know|have|see|find|locate|tell|check|search)\b"
+        r"|\bI (?:have no|have neither|lack|found no|saw no|know of no)\b"
+        r"|\bI(?: am|'m) (?:not sure|uncertain)\b"
+        r"|\bno (?:documented |personal )?(?:name|profile|rule|quiet.hours)(?:\b.*)?(?:available|found|set|options?)\b"
+        r"|\bnone of them sets\b"
+        r"|\b(?:if you (?:mean|want|are asking)|tell me|such as)\b"
+        r"|\b(?:settings|configuration)\b.*\bno\b.*\b(?:option|rule|setting)s?\b"
+        r"|\b(?:settings|configuration)\b.*\b(?:shows?|have|has) no\b"
+        r"|不(?:知道|清楚|了解)|不确定|无法(?:确认|判断)|没有找到|未(?:找到|知|提供)", clause, re.I))
+
+
+def _runtime_fact(text: str) -> bool:
+    """Runtime facts alone can answer the question without an explicit disclaimer."""
+    return bool(re.search(
+        INVENTORY_PROJECT + r"|\baccount\b.*\bemail\b|" + RUNTIME_CLOCK
+        + r"|\b(?:settings|configuration)\b.*\bno\b.*\b(?:option|rule|setting)s?\b"
+        r"|\b(?:settings|configuration)\b.*\b(?:shows?|have|has) no\b",
+        text, re.I))
+
+
+def rescore(saved: dict[str, Any]) -> dict[str, Any]:
+    """Recheck saved replies only; keep source verdicts, operational failures and all run evidence."""
+    if (not isinstance(saved, dict) or saved.get("schema") != "looper-resident-profile/v1"
+            or saved.get("suite") != "resident-profile"):
+        raise ValueError("expected a resident-profile run report")
+    if not isinstance(saved.get("dialogs"), list) or not saved["dialogs"]:
+        raise ValueError("resident-profile report needs dialog rows")
+    result = deepcopy(saved)
+    specs = {f"resident_profile_{state}_{question}": (state, question) for state in STATES for question in QUESTIONS}
+    answer_problems = {"expected an explicit abstention without profile claims",
+                       "expected an abstention without profile claims", "reply leaks a synthetic profile value",
+                       "reply asserts an unsupported profile claim",
+                       *(f"reply does not affirm the synthetic {q}" for q in QUESTIONS)}
+    for row in result["dialogs"]:
+        if not isinstance(row, dict) or row.get("id") not in specs:
+            raise ValueError("unknown resident-profile dialog")
+        if row.get("skipped") or row.get("outcome") == "error":
+            continue
+        turns = row.get("turns")
+        if (row.get("outcome") not in ("pass", "fail") or not isinstance(turns, list) or len(turns) != 1
+                or not isinstance(turns[0], dict) or not isinstance(turns[0].get("reply"), str)):
+            raise ValueError("scored resident-profile rows need exactly one saved reply")
+        row.setdefault("original_scoring", {"outcome": row["outcome"], "success": row.get("success"),
+                                           "problems": deepcopy(row.get("problems", [])),
+                                           "turn_problems": [t.get("problem") for t in turns]})
+        state, question = specs[row["id"]]
+        turn = turns[0]
+        old = turn.get("problem")
+        problems = list(row.get("problems", []))
+        if old in problems:
+            problems.remove(old)
+        if not old or old in answer_problems:
+            turn["problem"] = answer_problem(question, turn["reply"], known=state == "present-on")
+        if turn.get("problem"):
+            problems.insert(0, turn["problem"])
+        row.update(problems=problems, success=not problems, outcome="fail" if problems else "pass")
+    result["rescored_at"] = datetime.now(timezone.utc).isoformat()
+    result["rescore_git"] = runner._git()
+    return result
 
 
 def seed(api: runner.Api, runtime_root: Path, state: str) -> None:
