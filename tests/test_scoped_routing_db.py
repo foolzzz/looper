@@ -107,11 +107,12 @@ def test_no_operator_id_means_no_full_session(monkeypatch: Any, tmp_path: Path) 
 
 
 @pytest.mark.parametrize("default,kind,expected", [("legacy", "bot", "legacy"), (None, "bot", "chat_only"),
-                                                   (None, None, "chat_only"), (None, "unknown", "chat_only")])
+                                                   (None, None, "chat_only")])
 def test_bot_senders(default: str | None, kind: str | None, expected: str, monkeypatch: Any, tmp_path: Path) -> None:
     async def body(pool: Any) -> None:
         rig, residents = await _setup(pool, tmp_path, monkeypatch, default=default)
-        # Check routing directly too: a bad classification must not turn into a held bus message.
+        # Check routing directly too. An absent kind is a shared non-person sender; an unknown kind is held, not
+        # routed (test_unknown_sender_kind_is_held_not_routed).
         session = await rig.manager._router.target(_message(rig, "classification", OPERATOR, kind))
         assert session.scope.resolved.audience is scopes.ScopeAudience.SHARED
         await rig.start()
@@ -144,7 +145,8 @@ def test_unknown_sender_kind_completion_settles_batch(monkeypatch: Any, tmp_path
             rows = await manager_events.claim(MANAGER, LARK.agent_id, GROUP_A, batch)
             assert len(rows) == 1 and rows[0]["state"] == "running"
             envelope = replace(_message(rig, "completion", kind="unknown"), message_type=MessageType.COMPLETION_DUE)
-            assert _sender_kind(envelope) is None
+            with pytest.raises(scopes.ScopeInvariantViolation):  # routing reads the kind strictly; completions never do
+                _sender_kind(envelope)
             key = await rig.manager._router.completion_key(_message_origin(envelope))
             settled: list[str] = []
             settle = rig.bus.settle_handled
