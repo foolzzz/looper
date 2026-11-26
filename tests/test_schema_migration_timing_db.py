@@ -502,6 +502,11 @@ async def _restore_older_check(conn, table, constraint, token):
     await conn.execute(f"ALTER TABLE {table} ADD CONSTRAINT {constraint} {updated}")
 
 
+# Their schema.sql block is present on a fresh database, so pending() stays false; apply's
+# first True is the NOT VALID constraint repair, judged through connection._unvalidated.
+_CONSTRAINT_REPAIR_MIGRATIONS = ("leads_check", "run_skips")
+
+
 @pytest.mark.parametrize("migration_name", _CONVERTED_MIGRATIONS)
 def test_converted_migration_apply_returns_true_then_false(migration_name, monkeypatch):
     migration = next(item for item in connection._MIGRATIONS if item.name == migration_name)
@@ -522,8 +527,17 @@ def test_converted_migration_apply_returns_true_then_false(migration_name, monke
             if migration.name in _UPGRADE_FROM:
                 await conn.execute("DELETE FROM schema_migrations WHERE name = ANY($1::text[])",
                                    [migration.name, f"{migration.name}_online"])
-            # Some upgrades do their work while pending() is already false (a constraint
-            # repair). The result that startup logs is apply's, so that is what this pins.
+            # Pin the state behind apply's bool too: without this, a fixture that had
+            # already applied the migration could make "True then False" pass for the
+            # wrong reason. Most migrations are catalog-pending; the two constraint-repair
+            # migrations ship their block in the baseline as NOT VALID, so pending() is
+            # already false and the open work apply() reports is the unvalidated
+            # constraints, which is exactly the branch its apply takes.
+            if migration.name in _CONSTRAINT_REPAIR_MIGRATIONS:
+                assert await migration.pending(conn) is False
+                assert await connection._unvalidated(conn, migration.name) is True
+            else:
+                assert await migration.pending(conn) is True
             assert await migration.apply(conn, sql=schema, state="current") is True
             await _validate_online(conn, migration)
             # These three keep reporting work until their own online indexes exist. The
@@ -533,5 +547,10 @@ def test_converted_migration_apply_returns_true_then_false(migration_name, monke
                 assert not conn.is_in_transaction()
                 await connection._finish_online(conn)
             assert await migration.apply(conn, sql=schema, state="current") is False
+            # Settled on every path: the catalog probe is closed, and a repair migration
+            # no longer has an unvalidated constraint for its apply branch to report.
+            assert await migration.pending(conn) is False
+            if migration.name in _CONSTRAINT_REPAIR_MIGRATIONS:
+                assert await connection._unvalidated(conn, migration.name) is False
 
     asyncio.run(test())
