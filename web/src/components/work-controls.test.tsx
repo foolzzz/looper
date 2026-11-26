@@ -66,6 +66,44 @@ it.each([["", "workspace", "请先填写需求"], ["need", "", "请先选择有�
   await click("开始"); expect(writes).toEqual([]);
 });
 
+it("locks both baseline reads and writes while a double click waits for its first refresh", async () => {
+  let release!: (value: TaskDetail) => void;
+  refresh.mockImplementationOnce(() => new Promise(resolve => { release = resolve; }));
+  await show();
+  await click("开始", true);
+  expect(refresh).toHaveBeenCalledTimes(1);
+  expect(writes).toEqual([]);
+  reads = [task("running")];
+  await act(async () => release(task())); await settle();
+  expect(writes).toEqual(["/api/v1/ops/task_control/start"]);
+  expect(host.textContent).toContain("操作已确认");
+});
+
+it("a rejected draft start explains the unavailable draft entry point", async () => {
+  reads = [task("draft")]; await show(task("draft"));
+  writeResponse = async () => Response.json({ status: "error", error: { code: "conflict", message: "task is not init" } }, { status: 409 });
+  await click("开始");
+  expect(host.querySelector("[role='alert']")?.textContent).toContain("此服务器尚未提供草稿开始入口");
+  expect(host.textContent).toContain("task is not init");
+  expect(host.textContent).not.toContain("先停止这一轮");
+  expect(writes).toEqual(["/api/v1/ops/task_control/start"]);
+});
+
+it("keeps a 4xx refusal visible after rereading until the next action", async () => {
+  writeResponse = async () => Response.json({ status: "error", error: { code: "invalid_request", message: "specific refusal" } }, { status: 400 });
+  await show(); await click("开始");
+  expect(button("开始").disabled).toBe(true);
+  await click("重新读取");
+  expect(button("开始").disabled).toBe(false);
+  expect(host.querySelector("[role='alert']")?.textContent).toContain("specific refusal");
+  expect(writes).toHaveLength(1);
+  let release!: (response: Response) => void;
+  writeResponse = () => new Promise(resolve => { release = resolve; });
+  await click("开始");
+  expect(host.textContent).not.toContain("specific refusal");
+  await act(async () => release(ok({ task_id: "a", started: true }))); await settle();
+});
+
 it("a missing draft API never uses restart", async () => {
   reads = [task("draft")]; await show(task("draft"));
   writeResponse = async () => Response.json({ status: "error", error: { code: "not_found", message: "no operation" } }, { status: 404 });

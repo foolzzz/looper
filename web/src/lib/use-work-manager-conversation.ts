@@ -11,10 +11,10 @@ import { useReplyStream } from "@/lib/use-reply-stream";
 
 const POINTER = "looper-chat-session-id";
 const POLL_MS = 3000;
-const STOP_DISABLED = "Stopping a reply is off (Settings → Chat).";
-const OTHER_MESSAGE = "The Manager is answering another message first; this one has not started.";
-const CANNOT_INTERRUPT = "This runtime cannot interrupt a reply.";
-const FOREIGN = "The saved conversation belongs to another Manager, so this is a new conversation.";
+const STOP_DISABLED = "停止回复未开启（设置 → 对话）。";
+const OTHER_MESSAGE = "管家正在回答另一条消息，本条尚未开始。";
+const CANNOT_INTERRUPT = "此运行时无法中断回复。";
+const FOREIGN = "保存的对话属于另一位管家，已新建对话。";
 const newThread = () => `session-${randomId().slice(0, 8)}`;
 
 // Same default pointer and creation policy as Chat; Work also tolerates blocked storage.
@@ -221,7 +221,7 @@ export function useWorkManagerConversation(): WorkConversationProps {
           else if (event.kind === "answer.final") {
             finalSeen = true;
             const outcome = String(event.payload.outcome || "answered");
-            updateReply(message => ({ ...message, content: String(event.payload.text || message.content || "Done."),
+            updateReply(message => ({ ...message, content: String(event.payload.text || message.content || "已完成。"),
               streaming: false, outcome: outcome === "stopped" ? "stopped" : undefined }));
             thread.sending = false; thread.phase = ""; clearTimeout(capabilityTimer);
             const staged = thread.staged;
@@ -243,7 +243,7 @@ export function useWorkManagerConversation(): WorkConversationProps {
         },
         onError: error => {
           if (!current()) return;
-          const reason = error instanceof TypeError || !(error instanceof Error) ? "Failed to connect. Is the server running?" : error.message;
+          const reason = error instanceof TypeError || !(error instanceof Error) ? "连接失败，请检查服务器是否运行。" : error.message;
           thread.sending = false; clearTimeout(capabilityTimer);
           if (text.toLowerCase() === "/new") updateReply(message => ({ ...message, content: reason, streaming: false }));
           else {
@@ -259,7 +259,7 @@ export function useWorkManagerConversation(): WorkConversationProps {
     publish();
     fetchChatMessages(sid, controller.signal, "manager").then(rows => {
       if (!fresh()) return;
-      if (!Array.isArray(rows)) throw new Error("The server returned invalid chat messages.");
+      if (!Array.isArray(rows)) throw new Error("服务器返回了无效的对话消息。");
       if (!thread.owned) thread.messages = store.cached(cacheKey)?.messages ?? [];
       saved(rows); thread.owned = true; confirmed.current = sid; thread.history = rows.length ? "ready" : "empty"; publish();
       closeWatch = watchChat(sid, message => { if (fresh()) { saved([message]); publish(); } }, "manager");

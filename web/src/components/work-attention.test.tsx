@@ -64,6 +64,18 @@ afterEach(() => {
 });
 
 describe("Work attention settings", () => {
+  it("uses Chinese titles and explanatory facts in the Work summary", async () => {
+    vi.mocked(fetchAttention).mockResolvedValue(summary([
+      section({ kind: "gates", state: "ok", items: [item({ key: "g", title: "选择", facts: { questions: 2 } })] }),
+      section({ kind: "schedules", state: "ok", items: [item({ key: "s", title: "巡检", facts: { failures: 3, alerts: ["deadline"] } })] }),
+    ]));
+    await render();
+    expect(host.textContent).toContain("等待你回答的关卡");
+    expect(host.textContent).toContain("2 个未回答的问题");
+    expect(host.textContent).toContain("连续失败 3 次");
+    expect(host.textContent).toContain("已超过截止时间");
+  });
+
   it("reads the summary when the setting is on", async () => {
     vi.mocked(fetchAttention).mockResolvedValue(summary([
       section({ kind: "gates", state: "ok", count: 1, items: [item({ key: "g1", title: "Pick a database", href: "#tasks/task-1" })] }),
@@ -144,7 +156,7 @@ describe("Work attention sections", () => {
     expect(host.textContent).toContain("暂时没有需要你处理的事");
     expect(host.textContent).toContain("没有待办");
     const labels = [...host.querySelectorAll("section")].map((node) => node.getAttribute("aria-label"));
-    expect(labels).toEqual(["Gates waiting for your answer", "Ledger items waiting for you"]);
+    expect(labels).toEqual(["等待你回答的关卡", "待处理的账本事项"]);
   });
 
   it("keeps an empty source list from claiming that nothing needs attention", async () => {
@@ -167,20 +179,20 @@ describe("Work attention sections", () => {
     await render();
     const labels = [...host.querySelectorAll("section")].map((node) => node.getAttribute("aria-label"));
     expect(labels).toEqual([
-      "Ledger items waiting for you",
-      "Messages that may not have arrived",
-      "Operations to confirm",
-      "Gates waiting for your answer",
+      "待处理的账本事项",
+      "可能未送达的消息",
+      "待确认的操作",
+      "等待你回答的关卡",
     ]);
     expect(host.textContent).toContain("Write the report");
     expect(host.textContent).toContain("Weekly");
     expect(host.textContent).toContain("L-0003");
-    expect(host.textContent).toContain("overdue");
-    const failed = host.querySelector('section[aria-label="Messages that may not have arrived"]');
+    expect(host.textContent).toContain("已逾期");
+    const failed = host.querySelector('section[aria-label="可能未送达的消息"]');
     expect(failed?.textContent).toContain("database down");
     expect(failed?.querySelector("button")?.textContent).toBe("重试");
     expect(host.textContent).toContain("此来源状态未知");
-    expect(host.querySelector('section[aria-label="Gates waiting for your answer"]')?.textContent).toContain("没有待办");
+    expect(host.querySelector('section[aria-label="等待你回答的关卡"]')?.textContent).toContain("没有待办");
     expect(host.textContent).not.toContain("暂时没有需要你处理的事");
     expect(host.textContent).toContain("Write the report");
   });
@@ -239,7 +251,7 @@ describe("Work attention links and actions", () => {
     expect(host.querySelector('a[href="#tasks/task-1/steps"]')).not.toBeNull();
     expect(host.textContent).toContain("Login rewrite");
     expect(host.textContent).toContain("s2");
-    expect(host.textContent).toContain("1 open question");
+    expect(host.textContent).toContain("1 个未回答的问题");
     expect(host.textContent).not.toContain("super-secret-token");
     expect(host.textContent).not.toContain("hidden-pass");
     expect(host.innerHTML).not.toContain('{"token"');
@@ -272,10 +284,10 @@ describe("Work attention links and actions", () => {
       section({ kind: "deliveries", state: "ok", count: 0, items: [] }),
       section({ kind: "gates", state: "ok", count: 1, items: [item({ key: "g1", title: "Pick a database" })] }),
     ], 1));
-    const button = host.querySelector('section[aria-label="Messages that may not have arrived"] button') as HTMLButtonElement;
+    const button = host.querySelector('section[aria-label="可能未送达的消息"] button') as HTMLButtonElement;
     await act(async () => { button.click(); });
     expect(vi.mocked(fetchAttention).mock.calls.length).toBeGreaterThanOrEqual(2);
-    expect(host.querySelector('section[aria-label="Messages that may not have arrived"]')?.textContent).toContain("没有待办");
+    expect(host.querySelector('section[aria-label="可能未送达的消息"]')?.textContent).toContain("没有待办");
     expect(host.textContent).toContain("Pick a database");
   });
 });
@@ -431,8 +443,8 @@ describe("Work attention on the manager column", () => {
     const column = aside?.parentElement;
     const manager = column?.children[0];
     const title = host.querySelector("header");
-    const conversation = host.querySelector('section[aria-label="Conversation"]');
-    const back = [...host.querySelectorAll("button")].find((button) => button.textContent === "Back to the list");
+    const conversation = host.querySelector('section[aria-label="对话"]');
+    const back = [...host.querySelectorAll("button")].find((button) => button.textContent === "返回列表");
     const names = (node: Element | null | undefined) => (node?.className ?? "").split(/\s+/);
     // Below xl the conversation and list share the height. Both must shrink and scroll
     // so the live conversation cannot push the summary outside the viewport.
@@ -449,8 +461,8 @@ describe("Work attention on the manager column", () => {
     expect(conversation?.parentElement).toBe(manager);
     expect(conversation?.getAttribute("data-identity")).toMatch(/^manager:/);
     expect(conversation?.textContent).toContain("Manager conversation stays");
-    expect(host.querySelectorAll('section[aria-label="Conversation"]')).toHaveLength(1);
-    expect(host.querySelectorAll('textarea[aria-label="Message"]')).toHaveLength(1);
+    expect(host.querySelectorAll('section[aria-label="对话"]')).toHaveLength(1);
+    expect(host.querySelectorAll('textarea[aria-label="消息"]')).toHaveLength(1);
     expect(host.querySelector('a[href="#chat"]')).toBeNull();
     expect(names(back?.parentElement)).toContain("shrink-0");
   });
@@ -507,7 +519,7 @@ describe("Work attention narrow column", () => {
     });
     await render(<WorkPage sub="manager" onNavigate={() => {}} />);
     expect(host.querySelector('aside[aria-label="需要你处理"]')).not.toBeNull();
-    const back = [...host.querySelectorAll("button")].find((button) => button.textContent === "Back to the list");
+    const back = [...host.querySelectorAll("button")].find((button) => button.textContent === "返回列表");
     await act(async () => { back?.click(); });
     expect(signal?.aborted).toBe(true);
     expect(host.querySelector('aside[aria-label="需要你处理"]')).toBeNull();

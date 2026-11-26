@@ -106,15 +106,18 @@ describe("attention display redaction", () => {
       workRoot.render(<WorkAttention />);
       needsRoot.render(<NeedsYouPage />);
     });
-    for (const host of [workHost, needsHost]) {
+    for (const { host, deliveryTitle, deliverySource } of [
+      { host: workHost, deliveryTitle: "可能未送达的消息", deliverySource: "订阅推送" },
+      { host: needsHost, deliveryTitle: "Messages that may not have arrived", deliverySource: "Subscription push" },
+    ]) {
       expect(detail(host, "运行失败等你处理")).toBe(`${expected} · 连续失败 2 次`);
-      expect(detail(host, "Messages that may not have arrived")).toBe(`Subscription push · ${expected}`);
+      expect(detail(host, deliveryTitle)).toBe(`${deliverySource} · ${expected}`);
       for (const secret of secrets) {
         expect(host.textContent).not.toContain(secret);
         expect(host.innerHTML).not.toContain(secret);
       }
     }
     // Needs you leaves successful login reads to the startup banner; exercise the panel's detail/fix path too.
-    expect(detail(workHost, "Logins that fail")).toBe(`${expected} · To fix: ${expected}`);
+    expect(detail(workHost, "登录异常")).toBe(`${expected} · 处理方法：${expected}`);
   });
 });

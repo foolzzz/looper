@@ -94,7 +94,7 @@ function geometry() {
     return [...this.querySelectorAll<HTMLElement>("[data-feed-key]")].reduce((total, row) => total + size(row), 0);
   });
   vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockImplementation(function(this: HTMLElement) {
-    const viewport = this.closest('[aria-label="Conversation history"]') as HTMLElement | null;
+    const viewport = this.closest('[aria-label="对话历史"]') as HTMLElement | null;
     const rows = viewport ? [...viewport.querySelectorAll<HTMLElement>("[data-feed-key]")] : [];
     const index = rows.indexOf(this);
     const top = index < 0 ? 0 : rows.slice(0, index).reduce((total, row) => total + size(row), 0) - viewport!.scrollTop;
@@ -112,7 +112,7 @@ const pane = (identity: WorkIdentity, ids: string[], extra: Partial<WorkConversa
 it("restores hidden anchors, keeps prepends and live updates steady, and does not move the departure watermark", async () => {
   const layout = geometry();
   await act(async () => root.render(pane(a, ["1", "2", "3", "4", "5"]))); await flush();
-  const viewport = () => host.querySelector('[aria-label="Conversation history"]') as HTMLElement;
+  const viewport = () => host.querySelector('[aria-label="对话历史"]') as HTMLElement;
   viewport().scrollTop = 72; act(() => viewport().dispatchEvent(new Event("scroll")));
   await act(async () => root.render(pane(b, ["b"])));
   layout.hide(); await act(async () => root.render(pane(a, ["1", "2", "3", "4", "5", "new"]))); await flush();
@@ -133,7 +133,7 @@ it("keeps the viewport steady when a late tool result grows above it, then follo
   const task = { task_id: "a", status: "completed", gates: [] } as unknown as TaskDetail;
   const record = { source: "tool" as const, id: "tool", name: "lookup", created_at: "2025-01-01T00:00:00Z" };
   await act(async () => root.render(pane(a, ["1", "2", "3", "4", "5"], { task, records: [record] }))); await flush();
-  const viewport = () => host.querySelector('[aria-label="Conversation history"]') as HTMLElement;
+  const viewport = () => host.querySelector('[aria-label="对话历史"]') as HTMLElement;
   viewport().scrollTop = 132; act(() => viewport().dispatchEvent(new Event("scroll")));
   layout.expand("tool:tool", 180);
   await act(async () => root.render(pane(a, ["1", "2", "3", "4", "5"], { task, records: [{ ...record, result: "late result" }] })));
@@ -141,7 +141,7 @@ it("keeps the viewport steady when a late tool result grows above it, then follo
   await act(async () => root.render(pane(b, ["b1", "b2", "b3", "b4"]))); await flush();
   viewport().scrollTop = 30; act(() => viewport().dispatchEvent(new Event("scroll")));
   await act(async () => root.render(pane(a, ["1", "2", "3", "4", "5"], { draft: "send", task, records: [record] }))); await flush();
-  act(() => host.querySelector<HTMLButtonElement>('button[aria-label="Send"]')!.click());
+  act(() => host.querySelector<HTMLButtonElement>('button[aria-label="发送"]')!.click());
   expect(viewport().scrollTop).toBe(viewport().scrollHeight);
   await act(async () => root.render(pane(b, ["b1", "b2", "b3", "b4"]))); await flush();
   expect(viewport().scrollTop).toBe(30); expect(api.stopChatReply).not.toHaveBeenCalled();
@@ -150,7 +150,7 @@ it("keeps the viewport steady when a late tool result grows above it, then follo
 it("restores the departure anchor even when it used to be the bottom before new rows arrived", async () => {
   geometry();
   await act(async () => root.render(pane(a, ["1", "2", "3", "4", "5"]))); await flush();
-  const viewport = () => host.querySelector('[aria-label="Conversation history"]') as HTMLElement;
+  const viewport = () => host.querySelector('[aria-label="对话历史"]') as HTMLElement;
   viewport().scrollTop = 180; act(() => viewport().dispatchEvent(new Event("scroll")));
   await act(async () => root.render(pane(b, ["b"])));
   await act(async () => root.render(pane(a, ["1", "2", "3", "4", "5"]))); await flush();
@@ -169,7 +169,7 @@ it("reloads only composer and view state, falls back when an anchor is absent, a
   expect(host.querySelector("textarea")?.value).toBe("unsent"); expect(host.querySelectorAll("[data-message-id]")).toHaveLength(0);
   expect(api.fetchChatMessages).toHaveBeenCalledWith("planner-a", expect.any(AbortSignal));
   await act(async () => pending.resolve([dbRow("fresh", "user"), ...["2", "3", "4", "5"].map(id => dbRow(id))])); await flush();
-  expect((host.querySelector('[aria-label="Conversation history"]') as HTMLElement).scrollTop).toBe(77);
+  expect((host.querySelector('[aria-label="对话历史"]') as HTMLElement).scrollTop).toBe(77);
   expect(host.textContent).toContain("queued"); expect(host.textContent).toContain("fresh");
 });
 afterEach(() => { act(() => root.unmount()); host.remove(); vi.restoreAllMocks(); vi.unstubAllGlobals(); });

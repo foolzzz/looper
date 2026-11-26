@@ -27,6 +27,14 @@ from .connection import get_pool
 SUPPLEMENT = "supplement"
 
 
+class RequirementChanged(Exception):
+    """A conditional edit lost to a newer requirement; no task or version was written."""
+
+    def __init__(self, current_version: int) -> None:
+        super().__init__("the requirement changed elsewhere; reload it before saving")
+        self.current_version = current_version
+
+
 @dataclass(frozen=True)
 class Supplement:
     id: int
@@ -74,7 +82,8 @@ async def add_supplement(
 
 
 async def edit_requirement(
-    task_id: str, text: str, *, via: str, delivered: bool, pool: asyncpg.Pool | None = None,
+    task_id: str, text: str, *, via: str, delivered: bool, expected_version: int | None = None,
+    pool: asyncpg.Pool | None = None,
 ) -> int | None:
     """Make ``text`` the task's requirement and keep the old one; the new version's number, or None when there is
     no such task. The first edit also writes version 1, the text the task had. ``delivered``: the task has no
@@ -86,6 +95,12 @@ async def edit_requirement(
             return None
         latest = await conn.fetchval(
             "SELECT max(version) FROM task_requirement_versions WHERE task_id = $1", task_id)
+        # The task lock serializes the check with every requirement write, including the first edit.
+        if expected_version is not None:
+            if expected_version != (latest or 1):
+                raise RequirementChanged(latest or 1)
+            if text == current["requirement"]:
+                raise ValueError("the requirement is unchanged")
         if latest is None:
             await conn.execute(
                 "INSERT INTO task_requirement_versions (task_id, version, text, via, created_at, delivered_at) "
