@@ -62,7 +62,7 @@ async def resolve_chat_target(raw: Any, task_router: TaskRouter, fleet: Any = No
             raise ChatTargetError(HTTP_409, "work mode is off (tasks.conversations.enabled)")
         if not task_conversations_settings.manager_answers():
             raise OpError(ErrorCode.TASK_MANAGER_OFF,
-                          "the task Manager does not answer (tasks.conversations.manager_answers is off)")
+                          task_conversations_settings.MANAGER_OFF_TEXT)
         task_id = str(target.get("task_id") or "")
         if await db_tasks.get_task(task_id) is None:
             raise ChatTargetError(HTTP_400, f"no task {task_id}")

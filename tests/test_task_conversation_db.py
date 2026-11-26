@@ -255,7 +255,8 @@ def test_send_task_refusals(monkeypatch, tmp_path):
             await refused({"text": "hi", "message_id": "m", "target": target(task_id)}, "conflict",
                           "work mode is off (tasks.conversations.enabled)")
             settings.set_enabled(True)  # work mode alone does not let the task Manager answer
-            await refused({"text": "hi", "message_id": "m", "target": target(task_id)}, "task_manager_off")
+            await refused({"text": "hi", "message_id": "m", "target": target(task_id)}, "task_manager_off",
+                          settings.MANAGER_OFF_TEXT)
             assert settings.manager_answers() is False
             work_on()
             await refused({"text": "hi", "message_id": "m", "target": target("missing-task")}, "invalid",
@@ -806,4 +807,44 @@ def test_task_thread_is_claimed_by_the_tasks_manager(monkeypatch, tmp_path):
             status, _, messages = await post(server, "messages", {"session_id": thread, "manager": manager["id"]})
             assert status == 200, messages
             assert any(row["message_id"] == "owned" for row in messages["result"]["messages"])
+    run_db(check, monkeypatch, timeout=60)
+
+
+def test_work_on_and_switch_off_keeps_the_planner_and_requirement_paths(monkeypatch, tmp_path):
+    """enabled=true, manager_answers=false: the Work page's Planner send and requirement edits behave as on main."""
+    pool = Pool()
+    use_pool(monkeypatch, pool)
+    recorded = []
+
+    async def supplement(task_id, text, **kwargs):
+        recorded.append((task_id, text))
+        return await kwargs["wake"](1)
+
+    monkeypatch.setattr("looper.agents.http_server.projects.add_task_supplement", supplement)
+
+    async def check(conn):
+        settings.set_enabled(True)
+        assert settings.manager_answers() is False
+        running = await make_task(conn, tmp_path, status="running")
+        drafted = await make_task(conn, tmp_path, status="draft")
+        ready = await make_task(conn, tmp_path, status="init")
+        async with opened(tmp_path) as server:
+            server._task_router.has_planner = lambda wanted: wanted == running
+            server._supervisor = SimpleNamespace(bus=server._web_adapter._bus)
+            status, _, answer = await post(server, "send", {
+                "text": "  tighten the scope \n", "message_id": "pl1", "session_id": f"planner-{running}",
+                "target": {"kind": "planner", "task_id": running}})
+            assert status == 200 and answer["result"]["correlation_id"], answer
+            assert recorded == [(running, "tighten the scope")]
+            assert await conn.fetchval("SELECT content FROM chat_messages WHERE message_id = 'pl1'") == "tighten the scope"
+            status, _, answer = await post(server, "send", {"text": "hi", "message_id": "tk1", "target": target(running)})
+            assert status == 409 and answer["error"]["code"] == "task_manager_off", answer
+            for task_id, text in ((drafted, "draft work\n\nplus one more thing"), (ready, "draft work\n\nand another")):
+                status, _, answer = await _send(server, "POST /api/v1/tasks/requirement_update", _bearer(TOKEN),
+                                               json.dumps({"task_id": task_id, "requirement": text}))
+                assert status == 200 and answer["result"]["requirement"] == text, answer
+                assert (await tasks.get_task(task_id, pool=conn))["requirement"] == text
+            assert pool.calls == []
+            assert await conn.fetchval("SELECT count(*) FROM agent_sessions WHERE agent_id LIKE 'task-manager-%'") == 0
+            assert await conn.fetchval("SELECT count(*) FROM chat_messages WHERE session_id LIKE 'task-chat:%'") == 0
     run_db(check, monkeypatch, timeout=60)

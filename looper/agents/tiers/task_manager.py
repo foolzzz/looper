@@ -67,6 +67,12 @@ class RefuseReason(str, Enum):
     MANAGER_ANSWERS_OFF = "manager_answers_off"
 
 
+def _off_text(reason: RefuseReason) -> str:
+    if reason is RefuseReason.MANAGER_ANSWERS_OFF:
+        return task_conversations_settings.MANAGER_OFF_TEXT
+    return "Task conversations are disabled (tasks.conversations.enabled is off)."
+
+
 def _off_reason() -> RefuseReason | None:
     """Why no task Manager may start now: work mode, or its own switch (default off), is off."""
     if not task_conversations_settings.enabled():
@@ -196,7 +202,7 @@ class TaskManagerAgent:
 
     async def _prepare(self) -> tuple[Mapping[str, Any], Any, Launch, SystemPrompt]:
         if (off := _off_reason()) is not None:
-            raise Refused(off, "Task conversations are disabled.")
+            raise Refused(off, _off_text(off))
         if self.pool.closing:
             raise Refused(RefuseReason.SHUTTING_DOWN, "The task Manager is shutting down.")
         if not self.loaded:
@@ -490,7 +496,8 @@ class TaskManagerPool:
                                                               "active": self.working_count()})
                     return Submitted("queued")
         if reason is not None:
-            await self._refuse(request, reason, "Task conversations are disabled or shutting down.")
+            await self._refuse(request, reason, "The task Manager is shutting down." if reason is RefuseReason.SHUTTING_DOWN
+                               else _off_text(reason))
             return request.admitted.result()
         return await asyncio.shield(request.admitted)
 
@@ -511,7 +518,7 @@ class TaskManagerPool:
     async def _drive(self, agent: TaskManagerAgent, request: _Request) -> None:
         try:
             if (off := _off_reason()) is not None:
-                raise Refused(off, "Task conversations are disabled.")
+                raise Refused(off, _off_text(off))
             await agent.turn(request)
         except Refused as exc:
             await self._refuse(request, exc.reason, str(exc))
