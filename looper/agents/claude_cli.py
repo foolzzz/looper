@@ -554,6 +554,10 @@ def write_control(stdin: asyncio.StreamWriter, request: dict[str, Any]) -> str:
 INTERRUPT_GRACE_SEC = 5.0
 # Stay below the Manager's 60-second preparation settlement deadline.
 RESERVED_INPUT_WAIT_SEC = 30.0
+# How long a control request between turns may take to be answered, and how long the first one after the process
+# started may (it queues behind the CLI's own startup).
+CONTROL_TIMEOUT_SEC = 5.0
+CONTROL_STARTUP_SEC = 30.0
 # How long a stopping resident Claude may take to exit after its stdin closes before it is ended.
 STOP_GRACE_SEC = 5.0
 # How long the rest of an exited Claude's output may take to be read.
@@ -1025,6 +1029,15 @@ class _Output:
         self._between.clear()
 
 
+class ControlUnavailable(Exception):
+    """A control request got no usable answer (no process, closing stdin, a timeout or an error response)."""
+
+    def __init__(self, subtype: str, detail: str) -> None:
+        super().__init__(f"{subtype}: {detail}")
+        self.subtype = subtype
+        self.detail = detail
+
+
 class ResidentClaude:
     """One long-lived ``claude --input-format stream-json`` process, fed one user turn at a time.
 
@@ -1473,6 +1486,38 @@ class ResidentClaude:
             pending = asyncio.create_task(self._request_cancel_input(uuid))
             self._withdrawals[uuid] = pending
         return await asyncio.shield(pending)
+
+    async def control(self, request: dict[str, Any], *, timeout: float = CONTROL_TIMEOUT_SEC) -> dict[str, Any]:
+        """Send one control request and return the body of its success response.
+
+        Raises ``ControlUnavailable`` when no process runs, its stdin is closing, no answer comes within
+        ``timeout`` or the answer is an error. Only for use between turns."""
+        subtype = str(request.get("subtype", ""))
+        assert self._user_turn is None, "control() must not be called while a user turn runs"
+        process = self._process
+        if (process is None or process.stdin is None or process.returncode is not None
+                or process.stdin.is_closing()):
+            raise ControlUnavailable(subtype, "no running process")
+        waiter: asyncio.Future[dict[str, Any]] = asyncio.get_running_loop().create_future()
+        request_id = ""
+        try:
+            try:
+                request_id = write_control(process.stdin, request)
+                self._controls[request_id] = waiter
+                async with asyncio.timeout(timeout):
+                    await process.stdin.drain()
+                    response = await asyncio.shield(waiter)
+            except TimeoutError:
+                raise ControlUnavailable(subtype, f"no answer within {timeout:g} s") from None
+            except OSError as exc:
+                raise ControlUnavailable(subtype, f"stdin failed: {type(exc).__name__}") from None
+        finally:
+            self._controls.pop(request_id, None)
+        body = response.get("response")
+        if response.get("subtype") != "success" or not isinstance(body, dict):
+            error = response.get("error")
+            raise ControlUnavailable(subtype, f"error response: {str(error)[:200]}" if error else "error response")
+        return body
 
     async def _request_cancel_input(self, uuid: str) -> bool:
         """Claude Code's stream-json per-UUID withdrawal (2.1.331), bounded by the control grace."""
