@@ -13,10 +13,12 @@ async def pending(conn):
     return await legacy._manager_event_reasons_pending(conn)
 
 
-async def apply(conn, *, sql, state):
+async def apply(conn, *, sql, state) -> bool:
+    did_work = False
     from .. import connection as legacy
 
     if await legacy._manager_event_reasons_pending(conn):
+        did_work = True
         reasons = ", ".join(f"'{reason}'" for reason in legacy._MANAGER_EVENT_REASONS)
         # NOT VALID: no scan under this transaction's lock; the online step validates it after the commit.
         await conn.execute(
@@ -27,6 +29,7 @@ async def apply(conn, *, sql, state):
             "INSERT INTO schema_migrations (name) VALUES ($1)",
             legacy._MANAGER_EVENT_REASONS_MIGRATION,
         )
+    return did_work
 
 
 online_order = 40

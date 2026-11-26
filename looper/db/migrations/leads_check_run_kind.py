@@ -23,11 +23,14 @@ async def pending(conn):
     )
 
 
-async def apply(conn, *, sql, state):
+async def apply(conn, *, sql, state) -> bool:
+    did_work = False
     if await pending(conn):
         # Validate after commit; the large record table is not scanned under ACCESS EXCLUSIVE.
+        did_work = True
         await conn.execute(_DDL + " NOT VALID")
         await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", name)
+    return did_work
 
 
 online_order = 160

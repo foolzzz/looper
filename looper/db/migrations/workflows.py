@@ -11,10 +11,12 @@ async def pending(conn):
     return await legacy._workflows_pending(conn)
 
 
-async def apply(conn, *, sql, state):
+async def apply(conn, *, sql, state) -> bool:
+    did_work = False
     from .. import connection as legacy
 
     if await legacy._workflows_pending(conn):
+        did_work = True
         await conn.execute("""CREATE TABLE workflows (
                 key TEXT PRIMARY KEY CHECK (key ~ '^[a-z][a-z0-9_-]{0,31}$' AND key <> 'none'),
                 name TEXT NOT NULL CHECK (btrim(name) <> '' AND length(name) <= 60),
@@ -30,3 +32,4 @@ async def apply(conn, *, sql, state):
         await conn.execute(
             "INSERT INTO schema_migrations (name) VALUES ($1)", legacy._WORKFLOWS
         )
+    return did_work

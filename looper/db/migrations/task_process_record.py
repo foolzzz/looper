@@ -11,10 +11,12 @@ async def pending(conn):
     return await legacy._task_process_record_pending(conn)
 
 
-async def apply(conn, *, sql, state):
+async def apply(conn, *, sql, state) -> bool:
+    did_work = False
     from .. import connection as legacy
 
     if await legacy._task_process_record_pending(conn):
+        did_work = True
         await conn.execute(
             "ALTER TABLE tasks ADD COLUMN process_record JSONB "
             "CHECK (jsonb_typeof(process_record) = 'object')"
@@ -23,3 +25,4 @@ async def apply(conn, *, sql, state):
             "INSERT INTO schema_migrations (name) VALUES ($1)",
             legacy._TASK_PROCESS_RECORD,
         )
+    return did_work

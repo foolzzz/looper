@@ -11,10 +11,12 @@ async def pending(conn):
     return await legacy._workflow_rules_pending(conn)
 
 
-async def apply(conn, *, sql, state):
+async def apply(conn, *, sql, state) -> bool:
+    did_work = False
     from .. import connection as legacy
 
     if await legacy._workflow_rules_pending(conn):
+        did_work = True
         constraint = legacy.re.search(
             r"CONSTRAINT task_journal_kind_check (CHECK \(kind IN \(.*?\)\))",
             sql,
@@ -30,3 +32,4 @@ async def apply(conn, *, sql, state):
         await conn.execute(
             "INSERT INTO schema_migrations (name) VALUES ($1)", legacy._WORKFLOW_RULES
         )
+    return did_work

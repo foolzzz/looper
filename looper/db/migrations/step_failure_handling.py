@@ -160,9 +160,9 @@ async def pending(conn):
     return False
 
 
-async def apply(conn, *, sql, state):
+async def apply(conn, *, sql, state) -> bool:
     if not await pending(conn):
-        return
+        return False
     # Restore objects even when a previous installation already wrote the marker.
     # Columns and checks are inspected separately: CREATE TABLE IF NOT EXISTS alone cannot repair a partial restore.
     for table, columns in _COLUMNS.items():
@@ -193,3 +193,4 @@ async def apply(conn, *, sql, state):
             await conn.execute(f"ALTER TABLE {table} ADD CONSTRAINT {constraint} CHECK ({column} IN ({literals})) NOT VALID")
     await conn.execute("INSERT INTO schema_migrations(name) VALUES($1) ON CONFLICT DO NOTHING", name)
     await conn.execute("DELETE FROM schema_migrations WHERE name='step_failure_handling_online'")
+    return True

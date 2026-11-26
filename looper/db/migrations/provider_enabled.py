@@ -11,13 +11,16 @@ async def pending(conn):
     return await legacy._provider_enabled_pending(conn)
 
 
-async def apply(conn, *, sql, state):
+async def apply(conn, *, sql, state) -> bool:
+    did_work = False
     from .. import connection as legacy
 
     if await legacy._provider_enabled_pending(conn):
+        did_work = True
         await conn.execute(
             "ALTER TABLE llm_providers ADD COLUMN enabled BOOLEAN NOT NULL DEFAULT true"
         )
         await conn.execute(
             "INSERT INTO schema_migrations (name) VALUES ($1)", legacy._PROVIDER_ENABLED
         )
+    return did_work

@@ -24,16 +24,21 @@ async def pending(conn):
         "AND strpos(pg_get_constraintdef(oid), $2) > 0)", "'intent'", "'ledger'")
 
 
-async def apply(conn, *, sql, state):
+async def apply(conn, *, sql, state) -> bool:
+    did_work = False
     from .. import connection as legacy
 
     if await pending(conn):
+        did_work = True
         await conn.execute(fresh_ddl)
         await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", name)
         await conn.execute("DELETE FROM schema_migrations WHERE name = $1", online[0].marker)
     elif state == "empty":
+        did_work = True
         for table, constraint in online[0].validate:
             await conn.execute(f"ALTER TABLE {table} VALIDATE CONSTRAINT {constraint}")
     elif await legacy._unvalidated(conn, name):
+        did_work = True
         await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1) ON CONFLICT DO NOTHING", name)
         await conn.execute("DELETE FROM schema_migrations WHERE name = $1", online[0].marker)
+    return did_work

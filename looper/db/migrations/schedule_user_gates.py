@@ -11,10 +11,12 @@ async def pending(conn):
     return await legacy._schedule_user_gates_pending(conn)
 
 
-async def apply(conn, *, sql, state):
+async def apply(conn, *, sql, state) -> bool:
+    did_work = False
     from .. import connection as legacy
 
     if await legacy._schedule_user_gates_pending(conn):
+        did_work = True
         await conn.execute(
             "ALTER TABLE schedules ADD COLUMN IF NOT EXISTS user_gates "
             "TEXT NOT NULL DEFAULT 'off' CHECK (user_gates IN ('off', 'on'))"
@@ -23,3 +25,4 @@ async def apply(conn, *, sql, state):
             "INSERT INTO schema_migrations (name) VALUES ($1)",
             legacy._SCHEDULE_USER_GATES,
         )
+    return did_work

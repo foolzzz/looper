@@ -27,7 +27,10 @@ async def pending(conn):
         "AND strpos(pg_get_constraintdef(oid), $1) = 0)", "'digest'")
 
 
-async def apply(conn, *, sql, state):
+async def apply(conn, *, sql, state) -> bool:
+    did_work = False
     if await pending(conn):
+        did_work = True
         await conn.execute(_DDL)
         await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", name)
+    return did_work

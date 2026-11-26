@@ -137,9 +137,9 @@ async def pending(conn):
     return await _widen_check.pending(conn, "managers", "session_routing", ("scoped",))
 
 
-async def apply(conn, *, sql, state):
+async def apply(conn, *, sql, state) -> bool:
     if not await pending(conn):
-        return
+        return False
     backfill = not await conn.fetchval(
         "SELECT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = current_schema() "
         "AND table_name = 'manager_chat_bindings' AND column_name = 'legacy_allowed')")
@@ -160,3 +160,4 @@ async def apply(conn, *, sql, state):
     await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1) ON CONFLICT DO NOTHING", name)
     # The sender check is rebuilt NOT VALID; both validations must run again after commit.
     await conn.execute("DELETE FROM schema_migrations WHERE name = $1", online[0].marker)
+    return True

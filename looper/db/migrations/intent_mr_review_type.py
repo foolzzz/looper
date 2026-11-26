@@ -38,9 +38,9 @@ async def pending(conn):
     return not row["builtin"]
 
 
-async def apply(conn, *, sql, state):
+async def apply(conn, *, sql, state) -> bool:
     if not await pending(conn):
-        return
+        return False
     row = await conn.fetchrow("SELECT builtin FROM intent_types WHERE key = $1 FOR UPDATE", _KEY)
     if row is not None:
         raise RuntimeError(
@@ -52,3 +52,4 @@ async def apply(conn, *, sql, state):
         "INSERT INTO intent_type_versions (type_key, version, name, guidance, priority, edited_via) "
         "VALUES ($1, 1, $2, $3, 'normal', 'builtin')", _KEY, _NAME, _GUIDANCE)
     await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1) ON CONFLICT DO NOTHING", name)
+    return True
