@@ -84,11 +84,15 @@ class Refusal:
 refusal_counts: Counter[tuple[str, str, str]] = Counter()
 
 
-def environment(launch: Launch, task_id: str) -> dict[str, str]:
+def environment(launch: Launch, task_id: str, *, edit_dir: Path | None = None) -> dict[str, str]:
+    """The task Manager CLI's environment; a direct session's ``edit_dir`` (``task_manager_edit.edit_bin``) goes first
+    on PATH so its sandboxed Bash finds ``looper-edit``."""
     env = launch.runtime.environment(launch)
     for key in (*HOOK_ENV, child_env.AGENT_RUN_ENV):
         env.pop(key, None)
     env[child_env.TASK_MANAGER_ENV] = task_id
+    if edit_dir is not None:
+        env["PATH"] = f"{edit_dir}{os.pathsep}{env['PATH']}" if env.get("PATH") else str(edit_dir)
     return env
 
 
