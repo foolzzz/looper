@@ -108,11 +108,13 @@ for line in sys.stdin:
     if text == 'write':
         Path('changed.txt').write_text('changed')
     if text.startswith(('mv:', 'gitmv:')):
-        old, new = text.split(':', 1)[1].split('>')
+        old, new = text.split(':', 1)[1].rstrip('!').split('>')
         if text.startswith('gitmv:'):
             subprocess.run(['git', 'mv', old, new], check=True)
         else:
             os.rename(old, new)
+        if text.endswith('!'):
+            Path(new).write_text('moved and edited by the turn\\n')
     if text.startswith('revert:'):
         subprocess.run(['git', 'checkout', '--', text[7:]], check=True)
     if text.startswith('edit:'):

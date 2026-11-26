@@ -435,6 +435,37 @@ def test_renaming_a_file_that_was_dirty_commits_nothing(monkeypatch, tmp_path, n
     assert "moved.txt" in got["summary"]["uncommitted"]
 
 
+def test_staged_rename_of_a_dirty_file_that_the_turn_also_edited_commits_nothing(monkeypatch, tmp_path, native):
+    got = _run_scoped_turn(monkeypatch, tmp_path, native, "gitmv:pre_dirty_edited.txt>moved.txt!",
+                           dirty=("pre_dirty_edited.txt",))
+    assert got["summary"]["commit"] is None and got["new_head"] == got["head"]
+    assert set(got["summary"]["uncommitted"]) == {"moved.txt", "pre_dirty_edited.txt"}
+
+
+def test_renaming_a_dirty_file_past_the_hashing_budget_is_reported_not_committed(monkeypatch, tmp_path, native):
+    monkeypatch.setattr(tm, "_DIGEST_BUDGET", 4)
+    got = _run_scoped_turn(monkeypatch, tmp_path, native, "mv:pre_dirty_edited.txt>moved.txt",
+                           dirty=("pre_dirty_edited.txt",))
+    assert got["summary"]["commit"] is None and got["new_head"] == got["head"]
+    assert got["summary"]["unverified"] == ["moved.txt"]
+
+
+def test_digests_stay_inside_the_byte_budget_on_a_large_untracked_tree(tmp_path):
+    import asyncio
+    import time
+    for index in range(400):
+        (tmp_path / f"f{index}.bin").write_bytes(b"x" * 100_000)
+    started = time.monotonic()
+    found, unknown = asyncio.run(tm._digests(str(tmp_path), [f"f{index}.bin" for index in range(400)]))
+    assert len(found) * 100_000 <= tm._DIGEST_BUDGET and len(found) + len(unknown) == 400 and unknown
+    assert time.monotonic() - started < 2
+
+
+def test_equal_content_files_are_not_mistaken_for_a_move(monkeypatch, tmp_path, native):
+    got = _run_scoped_turn(monkeypatch, tmp_path, native, "edit:fresh.txt", dirty=("pre_dirty_idle.txt",))
+    assert got["commit_files"] == ["fresh.txt"] and "unverified" not in got["summary"]
+
+
 def test_a_dirty_file_the_turn_reverted_is_not_listed_as_uncommitted(monkeypatch, tmp_path, native):
     got = _run_scoped_turn(monkeypatch, tmp_path, native, "revert:pre_dirty_edited.txt",
                            dirty=("pre_dirty_edited.txt",))

@@ -57,7 +57,7 @@ type TaskEvent =
   | { kind: "model_switch_rejected"; profile_id: string | null; reason: (typeof SWITCH_REASONS)[number] }
   | { kind: "session_fresh"; reason: (typeof FRESH_REASONS)[number]; detail: string }
   | { kind: "stopped"; method: (typeof STOP_METHODS)[number] }
-  | { kind: "turn_summary"; files: string[]; commit: string | null; mode: (typeof SUMMARY_MODES)[number]; uncommitted?: string[] }
+  | { kind: "turn_summary"; files: string[]; commit: string | null; mode: (typeof SUMMARY_MODES)[number]; uncommitted?: string[]; unverified?: string[] }
   | { kind: "refused"; reason: "orchestrated"; status: string }
   | { kind: "refused"; reason: (typeof REFUSED)[number] };
 
@@ -89,6 +89,8 @@ const isString = (value: unknown): value is string => typeof value === "string";
 const isInteger = (value: unknown): value is number => typeof value === "number" && Number.isInteger(value);
 const oneOf = <T extends string>(value: unknown, options: readonly T[]): value is T =>
   typeof value === "string" && (options as readonly string[]).includes(value);
+const SUMMARY_KEYS = ["kind", "files", "commit", "mode"] as const;
+const SUMMARY_OPTIONAL = ["uncommitted", "unverified"] as const;
 const exactKeys = (value: Record<string, unknown>, expected: readonly string[]) => {
   const got = Object.keys(value);
   return got.length === expected.length && expected.every((key) => got.includes(key));
@@ -144,12 +146,13 @@ function asEvent(value: unknown): TaskEvent | null {
     case "stopped":
       return exactKeys(value, ["kind", "method"]) && oneOf(value.method, STOP_METHODS) ? { kind: "stopped", method: value.method } : null;
     case "turn_summary":
-      if (!(exactKeys(value, ["kind", "files", "commit", "mode"]) || exactKeys(value, ["kind", "files", "commit", "mode", "uncommitted"]))
+      if (!exactKeys(value, [...SUMMARY_KEYS, ...SUMMARY_OPTIONAL.filter((key) => key in value)])
         || !Array.isArray(value.files) || !value.files.every(isString)
         || !(value.commit === null || isString(value.commit)) || !oneOf(value.mode, SUMMARY_MODES)) return null;
-      if (!("uncommitted" in value)) return { kind: "turn_summary", files: value.files, commit: value.commit, mode: value.mode };
-      return Array.isArray(value.uncommitted) && value.uncommitted.every(isString)
-        ? { kind: "turn_summary", files: value.files, commit: value.commit, mode: value.mode, uncommitted: value.uncommitted } : null;
+      if (!SUMMARY_OPTIONAL.every((key) => !(key in value) || (Array.isArray(value[key]) && (value[key] as unknown[]).every(isString)))) return null;
+      return { kind: "turn_summary", files: value.files, commit: value.commit, mode: value.mode,
+        ...("uncommitted" in value ? { uncommitted: value.uncommitted as string[] } : {}),
+        ...("unverified" in value ? { unverified: value.unverified as string[] } : {}) };
     case "refused":
       if (exactKeys(value, ["kind", "reason", "status"]) && value.reason === "orchestrated" && isString(value.status)) {
         return { kind: "refused", reason: "orchestrated", status: value.status };
@@ -182,7 +185,8 @@ function taskEventText(event: TaskEvent): string {
       const files = event.files.length ? ` · ${event.files.join("、")}` : "";
       const commit = event.commit ? ` · ${event.commit}` : "";
       const kept = event.uncommitted?.length ? ` · 以下文件在本轮开始前就有未提交改动，未自动提交：${event.uncommitted.join("、")}` : "";
-      return `${event.mode}${files}${commit}${kept}`;
+      const unsure = event.unverified?.length ? ` · 以下文件无法确认是否为本轮前已有的改动（文件过大或数量过多），未自动提交：${event.unverified.join("、")}` : "";
+      return `${event.mode}${files}${commit}${kept}${unsure}`;
     }
     case "refused":
       return "status" in event ? `已拒绝（${event.reason}：${event.status}）` : `已拒绝（${event.reason}）`;

@@ -153,11 +153,13 @@ class _ResumeFailed(Exception):
     pass
 
 
-_DIGEST_LIMIT = 1 << 20
+_DIGEST_FILE = 1 << 20  # a file larger than this is never hashed
+_DIGEST_BUDGET = 8 << 20  # total bytes one decision may hash
 
 
 async def _files(cwd: str) -> dict[str, tuple[Any, ...]]:
-    """Status plus file metadata distinguishes another edit without reading large files."""
+    """Status plus file metadata distinguishes another edit without reading large files. A staged rename is one
+    change of two paths: both are recorded, each naming the other as its partner (second field)."""
     status = await step_workspaces._git(cwd, "status", "--porcelain", "-z", "--untracked-files=all", check=False)
     if status.returncode:
         return {}
@@ -170,20 +172,63 @@ async def _files(cwd: str) -> dict[str, tuple[Any, ...]]:
                 continue
             name = entry[3:]
             origin = next(entries, "") if "R" in entry[:2] or "C" in entry[:2] else ""
-            # A staged rename is one change of two paths; a copy leaves its origin alone.
-            for path, partner in ((name, origin if "R" in entry[:2] else ""), *(((origin, name),) if "R" in entry[:2] else ())):
-                digest = ""
+            pairs = ((name, origin), (origin, name)) if "R" in entry[:2] else ((name, ""),)
+            for path, partner in pairs:
                 try:
                     stat = (Path(cwd) / path).lstat()
                     value = (stat.st_mtime_ns, stat.st_ctime_ns, stat.st_size)
-                    if S_ISREG(stat.st_mode) and stat.st_size <= _DIGEST_LIMIT:
-                        digest = hashlib.sha1((Path(cwd) / path).read_bytes()).hexdigest()
                 except OSError:
                     value = ()
-                found[path] = (entry[:2], partner, digest, *value)
+                found[path] = (entry[:2], partner, *value)
         return found
 
     return await asyncio.to_thread(snapshot)
+
+
+async def _digests(cwd: str, names: Sequence[str]) -> tuple[dict[str, str], set[str]]:
+    """Content hashes of the non-empty regular files among ``names``, at most ``_DIGEST_BUDGET`` bytes in all and
+    ``_DIGEST_FILE`` each; the second value holds the files that were skipped for size or budget (unknown content)."""
+    def hashed() -> tuple[dict[str, str], set[str]]:
+        found, unknown, spent = {}, set(), 0
+        for name in sorted(names):
+            try:
+                path = Path(cwd) / name
+                stat = path.lstat()
+                if not S_ISREG(stat.st_mode) or not stat.st_size:
+                    continue
+                if stat.st_size > _DIGEST_FILE or spent + stat.st_size > _DIGEST_BUDGET:
+                    unknown.add(name)
+                    continue
+                found[name] = hashlib.sha1(path.read_bytes()).hexdigest()
+                spent += stat.st_size
+            except OSError:
+                continue
+        return found, unknown
+    return await asyncio.to_thread(hashed)
+
+
+async def _own_paths(cwd: str, files: Sequence[str], before: Mapping[str, tuple[Any, ...]],
+                     after: Mapping[str, tuple[Any, ...]], before_digests: Mapping[str, str],
+                     before_unknown: set[str]) -> tuple[list[str], list[str], list[str]]:
+    """Split the turn's changed ``files`` into the paths it owns (safe to commit), the ones that were the user's
+    before it began, and the ones whose owner could not be settled within the hashing budget (never committed)."""
+    def partner(snapshot: Mapping[str, tuple[Any, ...]], name: str) -> str:
+        return snapshot[name][1] if name in snapshot else ""
+    theirs = [name for name in files if name in before or partner(after, name) in before]
+    rest = [name for name in files if name not in theirs]
+    # An unstaged rename shows as a deletion plus a new file: a new file holding the content of a path that was
+    # dirty before the turn, and is gone now, is that path's, moved.
+    vanished = [name for name in before if name not in after or "D" in after[name][0]]
+    candidates = [name for name in rest if "?" in after[name][0] or "A" in after[name][0]] if vanished else []
+    unverified: list[str] = []
+    if candidates:
+        now, now_unknown = await _digests(cwd, candidates)
+        moved = {before_digests[name] for name in vanished if name in before_digests}
+        theirs += [name for name in candidates if now.get(name) in moved]
+        if now_unknown or any(name in before_unknown for name in vanished):
+            unverified = [name for name in candidates if name not in theirs and (
+                name in now_unknown or any(v in before_unknown for v in vanished))]
+    return ([name for name in rest if name not in theirs and name not in unverified], theirs, unverified)
 
 
 class TaskManagerAgent:
@@ -335,6 +380,7 @@ class TaskManagerAgent:
             await request.sink.event(TaskManagerEvent.SESSION_FRESH,
                                      {"reason": "read_only_open", "detail": reopened.reason})
         before = await _files(reopened.work_dir)
+        before_digests, before_unknown = await _digests(reopened.work_dir, list(before))
         text, outcome = "", "failed"
         written = False
         record_id = None
@@ -427,16 +473,12 @@ class TaskManagerAgent:
             if written and task.get("workspace_mode") == "worktree" and self.mode == "direct":
                 # A path that already had uncommitted changes when the turn began belongs to the user: it is never
                 # committed here, even when this turn edited it too.
-                # A rename is its old and new path together: it is the user's when either side was already dirty.
-                # An unstaged rename shows as a deletion plus a new file: a new file holding the content of a
-                # path that was dirty before the turn is that path's, moved.
-                moved = {value[2] for value in before.values() if value[2]}
-                theirs = [name for name in files if name in before or after.get(name, ("", ""))[1] in before
-                          or before.get(name, ("", ""))[1] in before
-                          or after.get(name, ("", "", ""))[2] in moved]
-                own = [name for name in files if name not in theirs]
+                own, theirs, unverified = await _own_paths(reopened.work_dir, files, before, after,
+                                                           before_digests, before_unknown)
                 if kept := [name for name in theirs if name in after]:
                     summary["uncommitted"] = kept
+                if unverified:
+                    summary["unverified"] = unverified
                 if own:
                     commit = await step_workspaces.commit_paths(Path(reopened.work_dir), own, self.links,
                         f"looper: task Manager turn of task {self.task_id}\n\nLooper-Task: {self.task_id}")
