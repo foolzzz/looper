@@ -44,6 +44,44 @@ def test_stream_evidence_ignores_tool_results_and_free_text(event, expected):
     assert failures.network_unavailable(ADAPTERS["claude-code"], result, evidence) is expected
 
 
+@pytest.mark.parametrize("later", [
+    {"type": "assistant", "message": {"content": [{"type": "text", "text": "Recovered"}]}},
+    {"type": "user", "message": {"content": [{"type": "tool_result", "content": "Done"}]}},
+    {"type": "tool_result", "content": "Done"},
+    {"type": "assistant", "error": "api_error", "api_error_code": "EINVAL"},
+    {"type": "system", "subtype": "api_error", "api_error": {"code": "EINVAL"}},
+    {"type": "result", "is_error": True, "api_error_code": "EINVAL"},
+    {"type": "result", "is_error": True, "error_kind": "other"},
+    {"type": "result", "subtype": "error_max_turns", "is_error": True},
+    {"type": "result", "subtype": "success", "is_error": False},
+])
+def test_recovered_or_superseded_transport_error_does_not_pause(later):
+    evidence = Evidence()
+    evidence.observe({"type": "system", "subtype": "api_error", "api_error": {"code": "ECONNRESET"}})
+    evidence.observe(later)
+    result = {"type": "result", "is_error": True, "subtype": "error_during_execution",
+              "errors": ["Unrelated execution failure"]}
+    evidence.observe(result)
+    assert failures.network_unavailable(ADAPTERS["claude-code"], result, evidence) is False
+
+
+@pytest.mark.parametrize("tail", [
+    [],
+    [{"type": "system", "subtype": "api_retry"}],
+    [{"type": "system", "subtype": "status", "status": "idle"}],
+    [{"type": "user", "message": {"content": "Continue"}}],
+])
+def test_terminal_transport_error_survives_bookkeeping_and_generic_result(tail):
+    evidence = Evidence()
+    evidence.observe({"type": "assistant", "message": {"content": [{"type": "text", "text": "Progress"}]}})
+    evidence.observe({"type": "assistant", "error": "api_error", "api_error_code": "ECONNRESET"})
+    for event in tail:
+        evidence.observe(event)
+    result = {"type": "result", "is_error": True, "subtype": "error_during_execution"}
+    evidence.observe(result)
+    assert failures.network_unavailable(ADAPTERS["claude-code"], result, evidence) is True
+
+
 def test_success_and_local_failure_override_prior_network_evidence():
     evidence = Evidence()
     evidence.observe({"type": "assistant", "error": "api_error", "api_error_code": "ENOTFOUND"})

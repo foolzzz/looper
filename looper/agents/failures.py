@@ -159,10 +159,23 @@ class Evidence:
 
     def observe(self, event: Mapping[str, Any]) -> None:
         kind = event.get("type")
-        if ((kind == "assistant" and isinstance(event.get("error"), str))
-                or (kind == "system" and event.get("subtype") == "api_error")
-                or (kind == "result" and _failed(event))):
-            self.network_error_code = _network_code(event) or self.network_error_code
+        if kind == "assistant" or (kind == "system" and event.get("subtype") == "api_error"):
+            # A response or a different API error supersedes the failed request, even after an internal retry.
+            self.network_error_code = (_network_code(event)
+                                       if isinstance(event.get("error"), str) or kind == "system" else None)
+        elif kind == "result":
+            code = _network_code(event)
+            # A generic failure result can wrap the last API error; a specific result replaces it.
+            if (code is not None or not _failed(event)
+                    or event.get("subtype") not in (None, "error_during_execution")
+                    or any(event.get(key) is not None for key in
+                           ("api_error", "api_error_code", "api_error_type", "api_error_status",
+                            "error_source", "error_kind", "codex_error_info"))):
+                self.network_error_code = code
+        elif kind == "tool_result" or (kind == "user" and isinstance(event.get("message"), Mapping)
+                and isinstance(content := event["message"].get("content"), list)
+                and any(isinstance(block, Mapping) and block.get("type") == "tool_result" for block in content)):
+            self.network_error_code = None
         if kind == "rate_limit_event":
             self._rate_limit(event.get("rate_limit_info"))
         elif kind == "assistant" and isinstance(event.get("error"), str):
