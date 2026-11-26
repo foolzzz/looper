@@ -70,7 +70,7 @@ def redact_diagnostic(text: str) -> str:
     """Mask credential values in attention/self-check facts, keeping unassigned diagnoses readable.
 
     Unlike log redaction, this is independent of configured secrets. The shared
-    Python/web cases live in tests/fixtures/attention-redaction.json.
+    Python/web cases live in web/src/test-fixtures/attention-redaction.json.
     """
     text = _AUTH_HEADER.sub(_DIAGNOSTIC_MASK, text)
     text = _ASSIGNMENT.sub(lambda match: match[1] + _DIAGNOSTIC_MASK, text)
