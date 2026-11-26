@@ -48,6 +48,8 @@ logger = logging.getLogger(__name__)
 
 OPERATOR_ID_SECONDS = 30.0  # how long a bot's operator id is reused before it is read again
 WAITING_STATUS = "排队中：其他会话正忙"
+RESIDENT_WAIT_SECONDS = 60.0  # how long a start waits for a free resident slot before it is refused as busy
+BUSY_REPLY = "现在同时运行的会话已满，这条消息没有处理，请稍后再发。"
 
 
 SCOPE_UNAVAILABLE_REPLY = "这个群的能力范围设置现在用不了，没有执行任何操作；请操作者检查这个群的范围。"
@@ -787,6 +789,7 @@ class SessionRouter:
             await self._admit_scoped(session, envelope)
             return
         told = False
+        deadline = time.monotonic() + RESIDENT_WAIT_SECONDS
         async with self._resident:
             while True:
                 others = [s for s in agent._sessions.values() if s is not session
@@ -804,23 +807,31 @@ class SessionRouter:
                 if stopped is not None:
                     logger.info("%s: stopped the idle session %s for %s", agent._log, stopped.key, session.key)
                     continue
-                if idle:
-                    # Idle sessions whose runtime cannot close them hold the slots, and no turn is left to end and
-                    # free one: waiting would never finish. Go over the cap instead.
-                    logger.warning("%s: no idle session could be stopped for %s; starting it over the cap of %d",
-                                   agent._log, session.key, session_routing.max_resident())
-                    self._reservations.add(session.key)
-                    return
                 if session.key == MAIN_SESSION or not any(s.key != MAIN_SESSION for s in others):
                     self._reservations.add(session.key)
                     return  # main never waits; nor does a session when only main holds a process
                 if not told and envelope is not None:
                     told = True
                     await agent._send_status(envelope, WAITING_STATUS, phase=True)
-                await self._resident.wait()
+                await self._wait_for_room(self._resident, deadline)
+
+    async def _wait_for_room(self, condition: asyncio.Condition, deadline: float) -> None:
+        """Wait for a turn to end or a process to stop, until ``deadline``; then the start is refused as busy, never
+        waited on for ever and never made over the cap."""
+        remaining = deadline - time.monotonic()
+        try:
+            if remaining <= 0:
+                raise TimeoutError
+            await asyncio.wait_for(condition.wait(), remaining)
+        except TimeoutError:
+            from .manager import TurnFailed
+
+            logger.warning("%s: no resident slot became free within %.0f s", self._agent._log, RESIDENT_WAIT_SECONDS)
+            raise TurnFailed(BUSY_REPLY, "resident_busy") from None
 
     async def _admit_scoped(self, session: ManagerSession, envelope: MessageEnvelope | None) -> None:
         waiting_since = None
+        deadline = time.monotonic() + RESIDENT_WAIT_SECONDS
         async with pool.condition:
             while True:
                 if pool.count(exclude=session) < session_routing.max_resident_total():
@@ -841,7 +852,7 @@ class SessionRouter:
                         waiting_since = time.monotonic()
                         if envelope is not None:
                             await self._agent._send_status(envelope, WAITING_STATUS, phase=True)
-                    await pool.condition.wait()
+                    await self._wait_for_room(pool.condition, deadline)
             self._reservations.add(session.key)
             if waiting_since is not None:
                 pool.waits.append((self._agent.agent_id, time.monotonic() - waiting_since))

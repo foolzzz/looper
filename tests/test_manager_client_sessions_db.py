@@ -270,8 +270,12 @@ def test_client_sessions_count_toward_the_resident_limit_and_are_reclaimed(
     _run(test, mode, tmp_path)
 
 
-def test_a_start_does_not_wait_forever_for_idle_sessions_that_cannot_be_stopped(
+def test_an_idle_session_that_cannot_be_stopped_makes_a_start_wait_a_bounded_time_then_busy(
         mode: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    from looper.agents.tiers import manager_routing
+
+    mode.setattr(manager_routing, "RESIDENT_WAIT_SECONDS", 1.0)
+
     async def test(rig: _Rig, pool: Any) -> None:
         await _thread(pool, "thread-a", "client-a")
         await _thread(pool, "thread-b", "client-b")
@@ -279,10 +283,32 @@ def test_a_start_does_not_wait_forever_for_idle_sessions_that_cannot_be_stopped(
         b = _client_resident(rig, "client-b", _Pinned("sess-b"))
         await rig.reply(await _sent(rig, pool, _web("你好")))
         await rig.reply(await _sent(rig, pool, _client("one", "client-a", "thread-a")))
-        # Main and A (which keeps its process) fill the cap of 2; A is idle, so B's start must not wait for it.
-        assert await rig.reply(await _sent(rig, pool, _client("two", "client-b", "thread-b")), timeout=10) \
-            == "sess-b 回复 1"
-        assert len(a.turns) == 1 and len(b.turns) == 1
+        # Main and A (which cannot be stopped) fill the cap of 2: B waits a bounded time, then is told it is busy.
+        reply = await rig.reply(await _sent(rig, pool, _client("two", "client-b", "thread-b")), timeout=15)
+        assert reply == manager_routing.BUSY_REPLY
+        started = [r for r in (rig.main, a, b) if r.started]
+        assert b not in started and not b.turns and len(started) <= session_routing.max_resident()
+
+    _run(test, mode, tmp_path)
+
+
+def test_an_idle_reclaimable_session_is_stopped_at_the_limit_for_the_longest_idle_first(
+        mode: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    async def test(rig: _Rig, pool: Any) -> None:
+        for name in ("a", "b", "c"):
+            await _thread(pool, f"thread-{name}", f"client-{name}")
+        residents = {name: _client_resident(rig, f"client-{name}", _Resident(f"sess-{name}")) for name in "abc"}
+        await rig.reply(await _sent(rig, pool, _web("你好")))
+        await rig.reply(await _sent(rig, pool, _client("one", "client-a", "thread-a")))
+        await rig.reply(await _sent(rig, pool, _client("two", "client-b", "thread-b")))
+        await rig.reply(await _sent(rig, pool, _client("three", "client-c", "thread-c")))
+        assert rig.main.started
+        if session_routing.routing_enabled():  # each start stopped the one idle before it: longest idle first
+            assert [residents[n].started for n in "abc"] == [False, False, True]
+            assert [len(residents[n].starts) for n in "abc"] == [1, 1, 1]
+        else:
+            assert not any(r.started for r in residents.values())
+        assert sum(r.started for r in (rig.main, *residents.values())) <= session_routing.max_resident()
 
     _run(test, mode, tmp_path)
 
