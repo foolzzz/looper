@@ -572,11 +572,12 @@ class ManagerOps:
             # schemas, validation errors or return values. Authenticated sessions cannot
             # acquire main's access by omitting their binding.
             if session_visibility.scoped_for(self._scope.manager_id, key) is not None:
-                if name not in policy.tools:
+                # A granted tool takes the session path (initiator and confirmation checks); one with no session
+                # implementation is refused as out of scope, never run through main's generic path.
+                if name not in policy.tools or name not in session_visibility.SESSION_TOOL_RULES:
                     return await self._out_of_scope(name, raw, bound or self._session_turns.get(key), key)
-            else:
-                return await self._call_session(name, raw, binding=binding, call_id=call_id, session_key=key,
-                                                policy=policy)
+            return await self._call_session(name, raw, binding=binding, call_id=call_id, session_key=key,
+                                            policy=policy)
         tool = self._scope.tools.get(name) or _MANAGER_TOOL_NAMES.get(name) or _LEDGER_TOOLS.get(name)
         if tool is None:
             from .planner import TOOLS as PLANNER_TOOLS
