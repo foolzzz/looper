@@ -398,6 +398,9 @@ class AgentHTTPServer:
                     for task in pending:
                         task.cancel()
         if self._server:
+            # The snapshot above misses a connection whose callback has not registered.
+            # Python 3.12.1+ then waits for that connection inside wait_closed.
+            await self._abort_late_arrivals(handlers)
             # Python 3.12.1+ waits for active connections as well as the listener.
             await self._server.wait_closed()
             self._server = None
@@ -407,6 +410,61 @@ class AgentHTTPServer:
             self._address_publication = None
         if self._config_imports:
             self._config_imports.clear()
+
+    def _orphan_transports(self) -> list[asyncio.BaseTransport]:
+        """Accepted connections whose handlers are not registered yet."""
+        transports = getattr(asyncio.get_running_loop(), "_transports", None)
+        if not transports or self._server is None:
+            return []
+        tracked = {writer.transport for writer in self._handlers.values()}
+        return [
+            transport for transport in list(transports.values())
+            if getattr(transport, "_server", None) is self._server
+            and transport not in tracked and not transport.is_closing()
+        ]
+
+    def _abort_visible_late_arrivals(self, seen: dict[asyncio.Task, asyncio.StreamWriter]) -> None:
+        late = {task: writer for task, writer in self._handlers.items() if task not in seen}
+        orphans = self._orphan_transports()
+        if late:
+            logger.warning("HTTP shutdown grace expired; aborting %d HTTP connection(s)", len(late))
+            for task, writer in late.items():
+                transport = writer.transport
+                if transport is not None and not transport.is_closing():
+                    transport.abort()
+                task.cancel()
+            seen.update(late)
+        if orphans:
+            logger.warning("HTTP shutdown grace expired; aborting %d HTTP connection(s)", len(orphans))
+            for transport in orphans:
+                transport.abort()
+
+    async def _abort_late_arrivals(self, seen: dict[asyncio.Task, asyncio.StreamWriter]) -> None:
+        """Abort connections that attached after ``seen`` was snapshotted.
+
+        ``wait_closed`` on Python 3.12 waits while the server's active count
+        is non-zero. Yielding lets an accept that already left the listening
+        socket attach, and lets ``abort`` drop the count, before that wait.
+        """
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + HTTP_SHUTDOWN_CLEANUP_SECONDS
+        quiet = 0
+        while quiet < 2 and loop.time() < deadline:
+            await asyncio.sleep(0)
+            self._abort_visible_late_arrivals(seen)
+            active = self._server._active_count if self._server is not None else 0
+            if active:
+                quiet = 0
+            else:
+                quiet += 1
+        active = self._server._active_count if self._server is not None else 0
+        if active:
+            self._abort_visible_late_arrivals(seen)
+            pending = [task for task in self._handlers if not task.done()]
+            if pending:
+                logger.warning("HTTP shutdown cleanup expired; cancelling %d handler(s)", len(pending))
+                for task in pending:
+                    task.cancel()
 
     async def _handle_connection(
         self,
@@ -1806,19 +1864,21 @@ class AgentHTTPServer:
         page = path in ("/", "/index.html")
         file_path = self._static_dir / ("index.html" if path == "/" else path.lstrip("/"))
 
-        if not file_path.is_file():
-            index_path = self._static_dir / "index.html"
-            if index_path.is_file():
-                file_path = index_path
-                page = True
-            else:
-                writer.write(_json_response(HTTP_404, {"error": "not found"}))
-                await writer.drain()
-                return
-
         try:
+            # is_file() reports an embedded NUL as missing and raises only for an
+            # overlong name, so resolve before the dashboard-page fallback.
             resolved = file_path.resolve()
             static_resolved = self._static_dir.resolve()
+            if not file_path.is_file():
+                index_path = self._static_dir / "index.html"
+                if index_path.is_file():
+                    file_path = index_path
+                    resolved = index_path.resolve()
+                    page = True
+                else:
+                    writer.write(_json_response(HTTP_404, {"error": "not found"}))
+                    await writer.drain()
+                    return
             if not resolved.is_relative_to(static_resolved):
                 writer.write(_json_response(HTTP_404, {"error": "not found"}))
                 await writer.drain()

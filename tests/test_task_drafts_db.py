@@ -333,6 +333,7 @@ def test_work_mode_off_freeze(monkeypatch, tmp_path):
     old = set(frozen["operation_ids"])
     assert ids - old == {
         "tasks.create_draft", "task_conversations.get", "task_conversations.update", "tasks.done",
+        "tasks.task_manager_profile_set",
         # worker.interrupted_hint.enabled (default off; these only read and store it)
         "worker_interrupted_hint.get", "worker_interrupted_hint.update"}
     assert old - ids == set()

@@ -224,7 +224,7 @@ async def _tell_completion(self, rows: list[dict[str, Any]], batch: uuid.UUID) -
     if session_visibility.for_session(self._session_now().key, manager_id=self.agent_id) is not None:
         # Existing completion prompts add project/cost facts with no chat-safe projection.
         # Their already routed code notices still go to the originating chat.
-        await self._fall_back_completion(batch, "session_allowlist", {"rows": rows})
+        await self._fall_back_completion(batch, db_manager_events.Reason.SESSION_ALLOWLIST, {"rows": rows})
         return
     if rows and rows[0].get("kind") == "triage":  # its own settling: no code notice, no task links
         from . import triage_background

@@ -177,6 +177,7 @@ class Say:
     code_only: bool = False  # Looper answers the step without calling the model (for example, /profile).
     profile_after: Literal["switch", "settings"] | None = None  # A code-only session profile selection.
     attachments: tuple[tuple[str, bytes], ...] = ()
+    client: bool = False  # this turn alone uses the API client; other turns keep the dialog's audience
     sender: Literal["operator", "member", "bot"] = "operator"
 
 
@@ -370,6 +371,109 @@ def _state_views(database_url: str) -> list[str]:
         return [row["view"] for row in rows]
 
     return asyncio.run(read())
+
+
+def _state_turns(database_url: str) -> list[tuple[str | None, str | None]]:
+    """``(view, reason)`` of each Manager turn that started with a state block, in order."""
+    import asyncpg
+
+    async def read() -> list[tuple[str | None, str | None]]:
+        conn = await asyncpg.connect(database_url)
+        try:
+            rows = await conn.fetch("SELECT metadata->'looper_state'->>'view' AS view, "
+                                    "metadata->'looper_state'->>'reason' AS reason FROM llm_records "
+                                    "WHERE agent_id LIKE 'manager%' AND metadata ? 'looper_state' ORDER BY id")
+        finally:
+            await conn.close()
+        return [(row["view"], row["reason"]) for row in rows]
+
+    return asyncio.run(read())
+
+
+def _json_field(value: Any) -> Any:
+    return json.loads(value) if isinstance(value, str) else value
+
+
+def _model_input_records(database_url: str) -> list[dict[str, Any]]:
+    """What each Manager run recorded for an input comparison: the prompt hash, its layers and ``looper_state``."""
+    import asyncpg
+
+    async def read() -> list[dict[str, Any]]:
+        conn = await asyncpg.connect(database_url)
+        try:
+            rows = await conn.fetch(
+                "SELECT metadata->>'system_prompt_sha256' AS system_prompt_sha256, "
+                "metadata->'prompt_layers' AS prompt_layers, metadata->'looper_state' AS looper_state "
+                "FROM llm_records WHERE agent_id LIKE 'manager%' ORDER BY id")
+        finally:
+            await conn.close()
+        return [{"system_prompt_sha256": row["system_prompt_sha256"],
+                 "prompt_layers": _json_field(row["prompt_layers"]),
+                 "looper_state": _json_field(row["looper_state"])} for row in rows]
+
+    return asyncio.run(read())
+
+
+def _captured_turn_inputs(path: Path) -> list[dict[str, Any]]:
+    """State-block bodies and Turn context blocks the server appended for this case, in turn order."""
+    if not path.is_file():
+        return []
+    return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+
+
+def _postgres_url(database_url: str) -> bool:
+    """True when ``database_url`` is a PostgreSQL URL. A stub dialog yields a label, or nothing."""
+    return database_url.startswith(("postgres://", "postgresql://"))
+
+
+def _attach_model_inputs(row: dict[str, Any], database_url: str, capture: Path, *,
+                         capture_enabled: bool) -> None:
+    """Copy each turn's comparison inputs onto ``row`` before the disposable database is dropped.
+
+    The user text is already ``turns[].text``. The run record holds the system-prompt sha256, ``prompt_layers``
+    and the ``looper_state`` view; the capture file holds the state-block body and the Turn context, which the
+    record does not. A run with no database URL, or one that did not enable the per-turn capture, records
+    ``inputs_captured`` false and does not open a connection. A null field on a captured turn was read and empty.
+    """
+    if not capture_enabled or not _postgres_url(database_url):
+        row["inputs_captured"] = False
+        return
+    records, captured = _model_input_records(database_url), _captured_turn_inputs(capture)
+    for index, turn in enumerate(row.get("turns") or []):
+        if index < len(records):
+            turn.update(records[index])
+        if index < len(captured):
+            turn["state_block"] = captured[index].get("state_block")
+            turn["turn_context"] = captured[index].get("turn_context")
+    row["inputs_captured"] = True
+
+
+def _stable_audience(*turns: tuple[str, str]) -> Callable[[Look], str | None]:
+    """The Manager turns so far started with these ``(view, reason)`` pairs, in order."""
+    def check(look: Look) -> str | None:
+        actual = _state_turns(look.database_url)
+        return None if actual == list(turns) else f"state turns: {actual}, expected {list(turns)}"
+    return check
+
+
+def _seed_stable_audience(api: Api, project_id: str) -> None:
+    """A private profile and a persona, with the vault's Manager reads off.
+
+    Operator-only vault tools change the resident's tool-list signature between an operator turn and a client
+    turn, so the next operator turn would start a new process and resend the whole block for that reason.
+    Leaving ``manager_read`` off keeps the tool list, and the resident, the same.
+    """
+    import atexit
+
+    from .runner import _confirmed
+
+    root = Path(tempfile.mkdtemp(prefix="looper-eval-profile-"))
+    atexit.register(shutil.rmtree, root, True)
+    (root / "关于我.md").write_text("## Name\nEval Operator\n", encoding="utf-8")
+    api.post("/api/v1/knowledge_vault/update", {"path": str(root), "writable": [], "rules_file": None,
+                                                "manager_read": False})
+    api.post("/api/v1/manager_persona/update", {"name": "Atlas", "tone": "concise"})
+    _confirmed(api, "/api/v1/profile_settings/update", {"enabled": True})
 
 
 # --- One-time reminders (looper_reminder_*): reminders on, the user named as the Lark bot's operator ---
@@ -3528,6 +3632,24 @@ FAILURE_DIALOGS = tuple(_hold_dialog(action) for action in ("retry", "planner", 
 
 
 FAKE_DIALOGS: tuple[Dialog, ...] = (
+    # The third turn must resend the whole block because the client turn was another audience, in the same
+    # resident. A new process would also resend it, and would pass a view-only check on a build without the
+    # pending-whole recovery.
+    Dialog("stable_whole_after_client", (
+        Say("请说出我的称呼和你的名字。", _stable_audience(("whole", "new session")),
+            (("__reply__", {"text": "你是 Eval Operator，我是 Atlas。"}),)),
+        Say("作为 API 客户端，只查询你叫什么。", _stable_audience(
+            ("whole", "new session"), ("whole", "operator profile omitted for client turn")),
+            (("__reply__", {"text": "我是 Atlas。"}),), client=True),
+        Say("再说一次我的称呼和你的名字。", _stable_audience(
+            ("whole", "new session"), ("whole", "operator profile omitted for client turn"),
+            ("whole", "another audience's block came after the last shown state")),
+            (("__reply__", {"text": "你是 Eval Operator，我是 Atlas。"}),)),
+        Say("继续保持当前称呼。", _stable_audience(
+            ("whole", "new session"), ("whole", "operator profile omitted for client turn"),
+            ("whole", "another audience's block came after the last shown state"), ("unchanged", "unchanged")),
+            (("__reply__", {"text": "好的。"}),)),
+    ), seed=_seed_stable_audience, tags=("manager", "stable_context", "audience")),
     Dialog("group_per_chat_smoke", (
         Say("Operator greeting.", group_dialogs.smoke_check,
             (("__reply__", {"text": f"Received in {group_dialogs.CHAT}."}),)),
@@ -4021,7 +4143,7 @@ def run_dialog(api: Api, dialog: Dialog, *, database_url: str, project_id: str, 
     budget_args = {"check_budget": check_budget} if cap_left is not None else {}
     client_id: str | None = None  # the API client a client dialog made; its token stays in this function
     try:
-        if dialog.client and any(say.stop or say.withdraw for say in dialog.says):
+        if any((dialog.client or say.client) and (say.stop or say.withdraw) for say in dialog.says):
             raise EvalError("stop and withdraw are not supported in client dialogs")
         fixture_hold = None
         if dialog.failure_hold:
@@ -4098,12 +4220,14 @@ def run_dialog(api: Api, dialog: Dialog, *, database_url: str, project_id: str, 
             api.post("/api/v1/session_budget/update", {"turn_budget_usd": 4})
             api.post("/api/v1/scheduler_settings/update", {"session_context_max_tokens": 40000})
             _seed_session_bound_task(database_url, project_id)
+        if dialog.id == "stable_whole_after_client":
+            _turn_on(database_url, "manager.stable_context")
         registry_before = api.post("/api/v1/registry/view", {})["result"] if dialog.id in {
             "model_login_runtime", "model_missing_endpoint"} else None
         session = f"eval-{dialog.id}-{uuid.uuid4().hex[:6]}"
         client_api: Api | None = None
         conversation: str | None = None
-        if dialog.client:
+        if dialog.client or any(say.client for say in dialog.says):
             created = api.post("/api/v1/clients/create", {"name": f"eval-{uuid.uuid4().hex[:6]}"})["result"]
             client_id = created["client"]["id"]
             client_api = Api(api.base_url, token=created["token"], timeout=api.timeout)
@@ -4159,7 +4283,7 @@ def run_dialog(api: Api, dialog: Dialog, *, database_url: str, project_id: str, 
 
                 reply = ask(api, scenarios.parent / "lark", dialog, text, database_url=database_url,
                             timeout=timeout, **budget_args)
-            elif client_api is not None:
+            elif client_api is not None and (dialog.client or say.client):
                 reply, conversation = _ask_client(client_api, api, conversation, text, timeout=timeout,
                                                   database_url=database_url, **budget_args)
             else:
@@ -4317,7 +4441,11 @@ def run(
     with that model and ``manager_effort``. A failure to set a dialog's server up stops the run, as it would stop
     every dialog after it. ``manager_agent`` registers a spec for the Manager's role layer only. With
     ``stable_context`` every dialog's database has ``manager.stable_context`` on, and each row lists what the
-    Manager's turns started with (``state_views``). With ``leads_fulltext`` it has ``leads.search_mode``
+    Manager's turns started with (``state_views``). Each turn also keeps the system-prompt sha256, ``prompt_layers``
+    and ``looper_state`` from its run record, plus the state-block body and the Turn context (null when that
+    setting is off). Those fields are attached only when the run has a database URL and the per-turn capture is
+    enabled; otherwise the row records ``inputs_captured`` false and the database is not opened for them.
+    With ``leads_fulltext`` it has ``leads.search_mode``
     ``fulltext``. ``delivery_guard`` enables the operator-only recovery setting in each disposable server and
     reports how many hidden follow-ups ran. With ``untrusted_fence`` every dialog's database has
     ``untrusted_fence.enabled`` on."""
@@ -4385,12 +4513,15 @@ def run(
 
                         seed_server(database_url)
                 reminder_now = REMINDER_NOW if mode == "fake" and dialog.id == "reminder_tools" else None
+                capture_file = case / "turn-inputs.jsonl"
+                server_env = {"LOOPER_EVAL_TURN_CAPTURE": str(capture_file),
+                              **({"TZ": REMINDER_ZONE} if reminder_now is not None else {})}
                 with running_server(database_url=database_url, runtime_root=case / "runtime", bin_dir=case / "bin",
                                     log_path=logs / f"{dialog.id}-{rep}.log", home=home,
                                     projects_root=projects_root,
                                     pi_runtime=pi_runtime, dsh_runtime=dsh_runtime,
                                     reminder_now=reminder_now,
-                                    env={"TZ": REMINDER_ZONE} if reminder_now is not None else None) as api:
+                                    env=server_env) as api:
                     named = register_agent(api, register)["name"] if register is not None else agent
                     picked = select_agent(api, agent=named, model=model)
                     require_claude(mode, real_claude, [picked.get("runtime_type")])
@@ -4433,6 +4564,8 @@ def run(
                     row["resolved_models"] = reported_models(database_url)
                 if stable_context:
                     row["state_views"] = _state_views(database_url)
+                _attach_model_inputs(row, database_url, capture_file,
+                                     capture_enabled=bool(server_env.get("LOOPER_EVAL_TURN_CAPTURE")))
                 if "runtime_evidence" in row:
                     # DSH's full bill is unknown. Use reported root spend for the
                     # suite's observable soft cap rather than a null bill as zero.
