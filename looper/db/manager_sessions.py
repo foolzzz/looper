@@ -62,7 +62,9 @@ async def save(row: Mapping[str, Any], *, pool: asyncpg.Pool | asyncpg.Connectio
             scope_id = EXCLUDED.scope_id, scope_version = EXCLUDED.scope_version,
             audience = EXCLUDED.audience, scope_fingerprint = EXCLUDED.scope_fingerprint,
             context_policy_version = EXCLUDED.context_policy_version,
-            activity_cursor = EXCLUDED.activity_cursor,
+            -- a late save of a retired session keeps the stored watermark; reopen() clears it
+            activity_cursor = CASE WHEN manager_sessions.retired_at IS NULL
+                                   THEN EXCLUDED.activity_cursor ELSE manager_sessions.activity_cursor END,
             context_tokens = COALESCE(EXCLUDED.context_tokens, manager_sessions.context_tokens),
             last_turn_cost_usd = COALESCE(EXCLUDED.last_turn_cost_usd, manager_sessions.last_turn_cost_usd),
             last_active_at = now()
