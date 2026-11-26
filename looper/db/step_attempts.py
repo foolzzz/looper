@@ -1,5 +1,7 @@
 """SQL writes for step attempts. Callers use the best-effort agents.attempts boundary."""
 
+import json
+
 import asyncpg
 
 from .connection import get_pool
@@ -45,6 +47,20 @@ async def worker_started(attempt_id: int, record_id: int, profile_id: str | None
         "WITH linked AS (UPDATE llm_records SET attempt_id=$1 WHERE id=$2 RETURNING id) "
         "UPDATE step_attempts SET worker_record_id=$2,profile_id=$3,worker_runs=worker_runs+1 "
         "WHERE id=$1 AND EXISTS (SELECT 1 FROM linked)", attempt_id, record_id, profile_id)
+
+
+async def previous_worker_run(attempt_id: int, task_id: str, step_id: str, *, pool: Database | None = None) -> dict | None:
+    """The attempt's latest Worker, before a new run replaces its pointer; never a Reviewer or an older attempt."""
+    row = await (pool or get_pool()).fetchrow(
+        "SELECT r.status,r.error,r.metadata FROM step_attempts a JOIN llm_records r ON r.id=a.worker_record_id "
+        "WHERE a.id=$1 AND a.task_id=$2 AND a.step_id=$3 AND r.attempt_id=a.id", attempt_id, task_id, step_id)
+    if row is None:
+        return None
+    result = dict(row)
+    # asyncpg's default JSON codec returns text.
+    if isinstance(result["metadata"], str):
+        result["metadata"] = json.loads(result["metadata"])
+    return result
 
 
 async def link_record(attempt_id: int, record_id: int, *, pool: Database | None = None) -> None:

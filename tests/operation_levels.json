@@ -450,6 +450,8 @@
  "waits.cancel": "inside",
  "waits.resume": "inside",
  "whoami": "inside",
+ "worker_interrupted_hint.get": "inside",
+ "worker_interrupted_hint.update": "inside",
  "workflows.delete": "inside",
  "workflows.get": "inside",
  "workflows.list": "inside",
