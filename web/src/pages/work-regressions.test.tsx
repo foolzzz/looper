@@ -50,54 +50,54 @@ afterEach(() => { act(() => root.unmount()); host.remove(); vi.unstubAllGlobals(
 
 it("reaches the eleventh scheduled run through the server cursor", async () => {
   await show(); await click("Nightly");
-  const schedules = host.querySelector('[aria-label="Schedules"]')!;
-  const more = [...schedules.querySelectorAll("button")].find(el => el.textContent === "Load more")!;
+  const schedules = host.querySelector('[aria-label="定时任务"]')!;
+  const more = [...schedules.querySelectorAll("button")].find(el => el.textContent === "加载更多")!;
   expect(more).toBeTruthy(); await act(async () => { more.click(); }); await settle();
   expect(schedules.querySelector('a[href="#work/task/run-11"]')).not.toBeNull();
   expect(calls.find(call => call.path.includes("tasks/page") && call.body.before === "older")?.body).toEqual({ schedule_id: "s", limit: 10, before: "older" });
   await remount();
-  expect(host.querySelector('[aria-label="Schedules"] a[href="#work/task/run-11"]')).not.toBeNull();
+  expect(host.querySelector('[aria-label="定时任务"] a[href="#work/task/run-11"]')).not.toBeNull();
 });
 
 it("reads deep-linked and reloaded tasks independently with the latest watermark", async () => {
   await show("task/outside");
-  expect(host.querySelector("h1")?.textContent).toBe("Outside first screen");
+  expect(host.querySelector('[aria-label="当前任务"] h1')?.textContent).toBe("Outside first screen");
   expect(host.querySelector('a[href="#chat?target=planner-outside"]')).toBeNull();
-  expect(host.querySelector('textarea[aria-label="Message"]')).not.toBeNull();
+  expect(host.querySelector('textarea[aria-label="消息"]')).not.toBeNull();
   expect(calls.filter(c => c.path.includes("mark_seen")).map(c => c.body)).toEqual([{ task_id: "outside", seq: 1501 }]);
   await remount("task/outside");
-  expect(host.querySelector("h1")?.textContent).toBe("Outside first screen");
+  expect(host.querySelector('[aria-label="当前任务"] h1')?.textContent).toBe("Outside first screen");
 });
 
 it("distinguishes selected task loading, missing and error states without marking seen", async () => {
   let release!: () => void; delay = () => new Promise<void>(resolve => { release = resolve; });
   await show("task/outside");
-  expect(host.querySelector('[aria-label="Selected task"]')?.textContent).toContain("Loading");
+  expect(host.querySelector('[aria-label="当前任务"]')?.textContent).toContain("正在加载");
   detailStatus = 404; delay = null; await act(async () => { release(); }); await settle();
-  expect(host.querySelector('[aria-label="Selected task"]')?.textContent).toContain("任务不存在");
+  expect(host.querySelector('[aria-label="当前任务"]')?.textContent).toContain("任务不存在");
   detailStatus = 500; await remount("task/outside");
-  expect(host.querySelector('[aria-label="Selected task"] [role="alert"]')).not.toBeNull();
+  expect(host.querySelector('[aria-label="当前任务"] [role="alert"]')).not.toBeNull();
   expect(calls.some(c => c.path.includes("mark_seen"))).toBe(false);
 });
 
 it("rebuilds loaded pages and expanded schedule runs before restoring delayed content", async () => {
-  await show(); await click("Nightly"); await click("Ended");
-  const ended = host.querySelector('[aria-label="Ended"]')!;
-  await act(async () => { [...ended.querySelectorAll("button")].find(el => el.textContent === "Load more")!.click(); }); await settle();
-  const list = host.querySelector('[aria-label="Work tasks"]') as HTMLElement;
+  await show(); await click("Nightly"); await click("已结束");
+  const ended = host.querySelector('[aria-label="已结束"]')!;
+  await act(async () => { [...ended.querySelectorAll("button")].find(el => el.textContent === "加载更多")!.click(); }); await settle();
+  const list = host.querySelector('[aria-label="工作台任务"]') as HTMLElement;
   list.scrollTop = 600; await act(async () => { list.dispatchEvent(new Event("scroll")); });
   held = true; await remount();
-  const reloaded = host.querySelector('[aria-label="Work tasks"]') as HTMLElement;
+  const reloaded = host.querySelector('[aria-label="工作台任务"]') as HTMLElement;
   expect(reloaded.scrollTop).toBe(0);
   expect(sessionStorage.getItem("looper.work.scroll")).toBe("600");
   held = false; await act(async () => { releases.splice(0).forEach(resolve => resolve()); }); await settle();
-  expect(host.querySelector('[aria-label="Ended"] a[href="#work/task/later"]')).not.toBeNull();
-  expect(host.querySelector('[aria-label="Schedules"] a[href="#work/task/run-9"]')).not.toBeNull();
+  expect(host.querySelector('[aria-label="已结束"] a[href="#work/task/later"]')).not.toBeNull();
+  expect(host.querySelector('[aria-label="定时任务"] a[href="#work/task/run-9"]')).not.toBeNull();
   expect(reloaded.scrollTop).toBe(600);
 });
 
 it("returns search focus on Escape without reopening, leaving Manager and task links reachable", async () => {
-  await show(); const search = host.querySelector('input[aria-label="Find a task"]') as HTMLInputElement;
+  await show(); const search = host.querySelector('input[aria-label="查找任务"]') as HTMLInputElement;
   await act(async () => { search.focus(); search.click(); }); await settle();
   expect(host.querySelector('[role="dialog"]')).not.toBeNull();
   await act(async () => { await new Promise(resolve => setTimeout(resolve, 1)); });
@@ -128,7 +128,7 @@ it("waits for a hidden narrow-screen list to have layout before restoring", asyn
   });
   sessionStorage.setItem("looper.work.scroll", "600");
   await show("task/outside");
-  const list = host.querySelector('[aria-label="Work tasks"]') as HTMLElement;
+  const list = host.querySelector('[aria-label="工作台任务"]') as HTMLElement;
   expect(list.scrollTop).toBe(0);
   height.mockReturnValue(600);
   await act(async () => { resized(); });

@@ -240,7 +240,16 @@ def test_error_details_are_optional_and_typed():
     details = error["properties"]["details"]
     assert details["additionalProperties"] is False and "required" not in details
     assert details["properties"] == {"manager_id": {"type": "string"}, "state": {"type": "string"},
-        "phase": {"type": ["string", "null"]}, "method": {"type": ["string", "null"]}}
+        "phase": {"type": ["string", "null"]}, "method": {"type": ["string", "null"]},
+        "current_version": {"type": "integer"}}
+
+
+def test_requirement_expected_version_is_optional_and_not_a_tool():
+    operation = api_v1.find("POST", "/api/v1/tasks/requirement_update")
+    assert operation.tool is None
+    assert operation.request["required"] == ["task_id", "requirement"]
+    assert operation.request["properties"]["expected_version"] == {"type": "integer"}
+    assert api_v1.STATUS[ErrorCode.REQUIREMENT_CHANGED] == "409 Conflict"
 
 
 def test_acceptance_permission_has_only_operator_operations():
