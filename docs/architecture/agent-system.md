@@ -1286,9 +1286,22 @@ directly. It is not an isolation boundary.
   activity; the task stays completed. `off` (the default) writes nothing.
 - After a server restart (`TASK_RESUME`), a new Planner reads its plan and
   session back and carries on without planning again: a step whose Worker was
-  running runs again as the same attempt with its feedback, a step in review
-  gets a new Reviewer, a decision the stop cut off is taken again from the
-  step's saved result, and Claude resumes its session from its saved totals.
+  running and cannot be adopted runs again as the same attempt with its feedback
+  and workspace kept. With `worker.interrupted_hint.enabled` on (default off),
+  only when that attempt's latest Worker record ended `interrupted`, its new
+  Worker's first user message adds one fixed English line immediately after
+  "Start your step": it names a typed, short reason (`deploy drain`,
+  `restart not adopted` or `run stopped`), warns about partial workspace changes,
+  asks it to inspect git status and the files it will touch, and to check whether
+  external side effects already happened before repeating them. Free-form errors
+  never reach this line. First runs, normal failures, new attempts and other
+  roles' prompts stay unchanged. The operator-only `worker_interrupted_hint.get`
+  and `worker_interrupted_hint.update` operations read/store the switch; null
+  restores off. These operations also provide the generated CLI control;
+  dashboard and channel task entry points need no companion changes because
+  they share Worker dispatch. A step in review gets a new Reviewer, a decision
+  the stop cut off is taken again from the step's saved result, and Claude
+  resumes its session from its saved totals.
   Continuing a task that failed at its spend cap reads the same rows.
 - Each turn is one `llm_records` row with agent_id `planner-<task_id>`, the
   `task_id`, its own cost and tokens, its context at the end, `metadata.pid` and the system prompt's record
@@ -1371,7 +1384,8 @@ answer to an edit on the task page goes.
   Claude's own, each with a result: the Worker reads the output to
   its end, and the run's last result is its outcome, its report and its cost
   ("Worker finished" goes to the task's activity once, from it)
-- The step is the system prompt; only other agents' output is the user turn:
+- The step is in the system prompt; other agents' output and, when enabled,
+  the fixed interruption guidance above are in the first user turn:
   - system prompt: the harness (resolved for the Worker or Reviewer in its
     project; a Reviewer without its own takes the Workers'), the
     role prompt of the `worker` or `reviewer` row (the default when the
@@ -5298,6 +5312,54 @@ values. Task outcome metrics add act-only hold counts, longest wait, automatic r
 role/class/streak distributions; self-check warns above five breakers per UTC day. Environment holds have one
 durable reminder after an hour. See [validation](../validation/failure-handling.md) for measured coverage and
 pending real-model evaluations.
+
+### Pausing model network outages
+
+`network_pause.get/update` is an independent operator-only policy. Its single
+`enabled` switch defaults to false; `max_pause_seconds` defaults to 7200 and
+accepts 1–86400. Updates require confirmation; null restores either default.
+The generated CLI exposes `network-pause get/update`. Chat settings, prompts,
+tool descriptions and runtime command lines are unchanged.
+
+When enabled, a failed Planner, Worker or Reviewer run pauses its task only
+when structured runtime evidence identifies a model API connection failure.
+The existing typed connection classifier is reused, alongside exact API error
+codes `ENOTFOUND`, `ECONNRESET`, `EAI_AGAIN` and `ECONNREFUSED`. Tool output,
+free text, authentication failures, quota errors and HTTP server errors do not
+qualify. This policy works with failure typing off and takes precedence over
+its transient retries when both policies are enabled. The runtime's own
+internal retries still finish before Looper receives the final failure.
+
+The task projects `waiting`, retains its plan, workspace and Planner session,
+and starts no new model executions while paused. Already running parallel
+executions are not interrupted. A DNS plus TCP/TLS connection probe uses the
+failed launch's configured endpoint (or the known runtime default), sends no
+HTTP or model request, and backs off from 5 to 60 seconds with jitter and a
+5-second connection timeout. An unknown endpoint cannot count as success.
+Successful connectivity resumes the same Planner turn or redispatches the
+failed step/review in the same attempt, without spending a step retry. A
+persisted pause is restored before task work resumes after a server restart.
+
+At the original deadline the task becomes `waiting_user`, stops probing and
+appears once in the existing failure-holds section of Needs you when attention
+is enabled. The operator can check connectivity, stop and restart the task, or
+disable this policy to release existing waits on their next settings check.
+The task detail API and dashboard show the pause reason and deadline. During
+an active task's pause, `network_pause.state` is authoritative: task detail
+projects `phase` as `waiting` for `paused`, or `waiting_user` after expiry,
+as soon as it reads the pause row. The persisted `tasks.status` converges
+asynchronously through the Planner's status message and TaskRouter; consumers
+must not rely on it to detect the start or expiry of a network pause. With
+the policy disabled, task detail does not query pause storage.
+Lark and Telegram use the existing task controls and Needs you
+summary; neither needs a new chat command.
+
+Migration `network_pauses` stores pause history with pause-ID-fenced releases.
+Logs record pause, resume and expiry. While enabled, `metrics.task_outcomes`
+adds global lifetime `network_pause` counts, active paused/human waits and total
+pause duration in seconds (bounded by each pause deadline); those counters
+are independent of the task metric window and project filters. With the
+switch off, ordinary failure and retry behavior is unchanged.
 
 ### Translated models (local gateway)
 

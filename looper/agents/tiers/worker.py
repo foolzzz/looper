@@ -63,6 +63,7 @@ from ...db import memory_lesson_injection as db_lesson_injection
 from .. import memory_lesson_injection as lesson_injection
 from ..memory_model import format_id
 from .. import keeper, kept_dirs
+from .. import worker_interruption
 from ..keeper.client import KeeperGone
 from ..keeper.protocol import ErrorCode, KeeperError
 from ..kept_run import (AdoptFailure, AdoptOutcome, AdoptResult, AttachError, DetachKind, DetachOutcome,
@@ -113,6 +114,7 @@ from ...db import activity as db_activity
 from ...db import llm_records as db_llm_records
 from ...db import role_configs as db_role_configs
 from ...db import projects as db_projects
+from ...db import step_attempts as db_step_attempts
 
 logger = logging.getLogger(__name__)
 
@@ -2167,14 +2169,20 @@ class WorkerPool:
     async def _record_run(self, worker_id: str, recorder: ClaudeRunRecorder) -> AsyncIterator[None]:
         self._recorders[worker_id] = recorder
         try:
+            from .. import network_pause
+            if recorder.task_id:
+                await network_pause.existing(recorder.task_id)
             async with recorder:
                 yield
         finally:
             self._recorders.pop(worker_id, None)
+            from .. import network_pause_settings
+            if (await network_pause_settings.load()).enabled and recorder.network_unavailable():
+                self._engine_runs[worker_id] = {'network_unavailable': {'endpoint': recorder.network_endpoint()}}
             if await failures.typing_mode() is failures.FailureTyping.ACT:
                 signal = recorder.execution_signal()
                 if signal is not None:
-                    self._engine_runs[worker_id] = signal
+                    self._engine_runs[worker_id] = {**self._engine_runs.get(worker_id, {}), **signal}
 
     @staticmethod
     async def _control_failure(result: dict[str, Any], found: failures.Failure, *,
@@ -2268,6 +2276,13 @@ class WorkerPool:
             prompt = self._build_verify_prompt(payload)
         else:
             prompt = self._build_work_prompt(payload)
+            if type(attempt_id := payload.get("attempt_id")) is int and await worker_interruption.enabled():
+                previous = await db_step_attempts.previous_worker_run(
+                    attempt_id, parent_task_id, payload.get("task_id") or "")
+                if previous is not None and previous["status"] == db_llm_records.RecordStatus.INTERRUPTED:
+                    line = worker_interruption.instruction(worker_interruption.reason_for(previous))
+                    opening, separator, rest = prompt.partition("\n")
+                    prompt = opening + "\n" + line + separator + rest
 
         agent = AgentType.REVIEWER if is_verify else AgentType.WORKER
         # The role its task's Planner defined that the run runs as, when its dispatch names one.
@@ -2650,6 +2665,8 @@ class WorkerPool:
                     ctx.verification_writes.close()
             if timeout is None and result.get("failure") in ("verification_changed_code", "verification_unavailable"):
                 break
+            if self._engine_runs.get(ctx.worker_id, {}).get('network_unavailable') is not None:
+                break  # Network recovery must run before any profile fallback can spend another model call.
             if ctx.fallback_reason is None:
                 if timeout is not None:
                     if not fallbacks:
@@ -3335,6 +3352,14 @@ class WorkerPool:
             )
             if waiting is not None:
                 error += f"; the Worker ended while waiting for: {waiting.waiting_for[:200]}"
+            if not is_verify and isinstance(exc, asyncio.CancelledError):
+                # Detached runs returned above; guidance metadata must not prevent record closure.
+                with contextlib.suppress(Exception):
+                    if await worker_interruption.enabled():
+                        reason = (worker_interruption.InterruptionReason.DEPLOY_DRAIN
+                                  if self._drain is not None and self._drain.draining
+                                  else worker_interruption.InterruptionReason.RUN_STOPPED)
+                        await recorder.annotate({"interruption_reason": reason.value})
             await recorder.finish(output_text=None, result_event=result_event, error=error,
                                   outcome=RunOutcome.RUN_FAILED.value, status=ended_by(exc),
                                   failure=failures.TIMED_OUT if timed_out else None)

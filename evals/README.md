@@ -307,6 +307,61 @@ uv run --extra test python -m evals.prompt_regression run --mode fake \
 `tests/test_prompt_eval.py` runs it as part of the test suite when
 `LOOPER_TEST_DATABASE_URL` is set.
 
+The separate `worker_interrupted` case runs paired baseline/treatment arms.
+Each arm seeds an interrupted record and a dispatched step on the same attempt;
+the normal startup recovery of an isolated `looper serve` re-dispatches it.
+The baseline uses today's Worker with `worker.interrupted_hint.enabled=false`;
+the treatment enables only that setting. No replay system/user prompt is built.
+Both use the real Worker role, harness, launch and built-in tools. The synthetic
+project disables the room and operator notes in both arms, avoiding ambient
+context and random MCP transport identities. Only Planner decisions are scripted
+in real mode; the Worker runs the selected Claude Code binary.
+
+Before interruption the fixture actually invokes a non-idempotent local publisher.
+Its receipt ledger is outside the checkout, absent from the task description,
+and discoverable by reading `publish.py`. The new Worker must inspect the dirty
+checkout and publisher, check publication status (or read the existing receipt),
+preserve the partial edit, avoid a second publication, and write the final result.
+Checks use actual ledger/audit files and recorded tool calls, not the Worker's
+claim. Fake mode deliberately repeats the action without the hint and checks it
+with the hint, exercising both sides of the oracle; this is not model evidence.
+
+Each arm gets a fresh disposable database/runtime and the identical workspace
+path, identifiers, files and fixed initial git commit. The report retains both
+actual CLI inputs: system/user text, arguments, referenced settings/MCP files,
+cwd, initial workspace/HEAD and init tool names. A unified diff is saved for each
+pair. Comparison removes exactly one expected hint from the treatment user turn
+and requires the entire remaining input capture to equal the baseline; any other
+drift fails comparability. This records Looper's delivered launch inputs, not
+Claude's private built-in system prompt or full provider request bodies.
+
+Run the free harness check against a disposable PostgreSQL server:
+
+```bash
+uv run --system-certs --python 3.11 --extra test python -m evals.prompt_regression.worker_interrupted \
+  --mode fake --reps 2 --pg-url "$LOOPER_EVAL_DATABASE_URL" --out-dir "$EVAL_OUT/worker-interrupted-fake"
+```
+
+Pending approval, the exact proposed real comparison is Sonnet, two repetitions
+per arm (four Worker runs):
+
+```bash
+uv run --system-certs --python 3.11 --extra test python -m evals.prompt_regression.worker_interrupted \
+  --mode real --model sonnet --reps 2 --total-cap-usd 2 --case-budget-usd 0.50 \
+  --claude-bin "$CLAUDE_BIN" --pg-url "$LOOPER_EVAL_DATABASE_URL" --out-dir "$EVAL_OUT/worker-interrupted"
+```
+
+Set `CLAUDE_BIN` to the actual Claude Code executable and the database URL to a
+disposable server's admin database. The runner writes its own ops file and pins
+every client to the isolated port. Estimated total cost is $0.20–0.80 (unmeasured),
+with $0.50 reserved per case and a $2 total admission cap. Each real Worker also
+receives `--max-budget-usd 0.5`; model calls in flight can overshoot a soft cap.
+The report includes per-arm pass counts, pass-rate difference, cost, checks,
+tool evidence and input diffs. Two repetitions are a small behavioral sample,
+not a statistical guarantee. Keep reports/logs local; do not commit raw artifacts.
+No real model run is included here. `tests/test_worker_interrupted_eval.py` covers
+the paired fake path, input drift rejection and local-only real-CLI forwarding.
+
 A script may also give the Planner's retry notes (`retry_feedback`: a step's
 Nth retry gets its Nth note), recheck an errored check (`decision_rechecks`:
 a step id to a count; the stand-in answers `recheck` while that decision is

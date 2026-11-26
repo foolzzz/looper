@@ -1,0 +1,11 @@
+{"type": "user", "message": {"role": "user", "content": "Start your step."}}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "tool_use", "id": "toolu_01", "name": "Bash", "input": {"command": "echo placeholder", "description": "placeholder"}}], "model": "model-placeholder", "stop_reason": "tool_use"}}
+{"type": "user", "message": {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "toolu_01", "content": "placeholder output", "is_error": false}]}}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "thinking", "thinking": ""}], "model": "model-placeholder", "stop_reason": "tool_use"}}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": "Placeholder reply."}], "model": "model-placeholder", "stop_reason": "tool_use"}}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "tool_use", "id": "toolu_05", "name": "Bash", "input": {"command": "echo placeholder", "description": "placeholder"}}], "model": "model-placeholder", "stop_reason": "tool_use"}}
+{"type": "user", "message": {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "toolu_05", "content": "placeholder output", "is_error": false}]}}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "thinking", "thinking": ""}], "model": "model-placeholder", "stop_reason": "tool_use"}}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "tool_use", "id": "toolu_08", "name": "Bash", "input": {"command": "echo placeholder", "description": "placeholder"}}], "model": "model-placeholder", "stop_reason": "tool_use"}}
+{"type": "user", "message": {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "toolu_08", "content": "placeholder output", "is_error": false}]}}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": "Placeholder reply."}], "model": "model-placeholder", "stop_reason": "end_turn"}}
