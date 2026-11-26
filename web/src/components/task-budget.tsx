@@ -10,7 +10,7 @@ import { cn } from "@/lib/utils";
 export const NEAR_CAP = 0.8;
 
 /** A task's spend as a share of its project's cap per task, with a warning from NEAR_CAP on. */
-export function TaskSpendMeter({ spent, cap }: { spent: number; cap: number }) {
+export function TaskSpendMeter({ spent, cap, language }: { spent: number; cap: number; language?: "zh-CN" }) {
   const share = spent / cap;
   const percent = Math.round(share * 100);
   const reached = share >= 1;
@@ -20,7 +20,7 @@ export function TaskSpendMeter({ spent, cap }: { spent: number; cap: number }) {
       <div
         className="h-1.5 overflow-hidden rounded-full bg-muted"
         role="meter"
-        aria-label="Share of the task spend cap used"
+        aria-label={language === "zh-CN" ? "任务费用上限使用比例" : "Share of the task spend cap used"}
         aria-valuemin={0}
         aria-valuemax={100}
         aria-valuenow={Math.min(percent, 100)}
@@ -33,7 +33,9 @@ export function TaskSpendMeter({ spent, cap }: { spent: number; cap: number }) {
       <p className={cn("flex items-center gap-1 text-xs", reached ? "text-destructive" : near ? "text-warning" : "text-muted-foreground")}>
         {(near || reached) && <AlertTriangle className="h-3 w-3 shrink-0" aria-hidden="true" />}
         <span>
-          {percent}% of {formatUsd(cap)} cap{reached ? " · reached" : near ? " · near the cap" : ""}
+          {language === "zh-CN"
+            ? `已使用 ${formatUsd(cap)} 上限的 ${percent}%${reached ? " · 已达上限" : near ? " · 接近上限" : ""}`
+            : `${percent}% of ${formatUsd(cap)} cap${reached ? " · reached" : near ? " · near the cap" : ""}`}
         </span>
       </p>
     </div>

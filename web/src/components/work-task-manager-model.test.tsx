@@ -170,6 +170,12 @@ afterEach(() => {
 });
 
 describe("task manager model choices", () => {
+  it("hides the unavailable model section without requesting or polling", async () => {
+    await show(<TaskBox taskId="A" snapshot={null} onReread={vi.fn()} />);
+    expect(host.querySelector('[aria-label="任务管家模型"]')).toBeNull();
+    expect(calls).toHaveLength(0);
+  });
+
   it("shows the profiles passed in, and does not read", async () => {
     await show(<TaskBox taskId="A" snapshot={snap()} onReread={async () => snap()} />);
     expect(host.textContent).toContain("任务管家模型");
@@ -417,7 +423,7 @@ describe("task manager model writes", () => {
     await show(<TaskBox taskId="A" snapshot={snap()} onReread={async () => snap()} />);
     await choose(OPUS.profile_id);
     await click("切换模型");
-    expect(host.textContent).toContain(`读回的 Profile 是 ${SONNET.profile_id}`);
+    expect(host.textContent).toContain(`读回的配置是 ${SONNET.profile_id}`);
     expect(host.textContent).not.toContain("已按读回更新");
     expect(field("profile-id")).toBe(SONNET.profile_id);
     expect((choice(OPUS.profile_id).querySelector("input") as HTMLInputElement).checked).toBe(true);
@@ -482,7 +488,7 @@ describe("task manager model writes", () => {
     await show(<TaskBox taskId="A" snapshot={snap()} onReread={async () => snap()} />);
     await choose(OPUS.profile_id);
     await click("切换模型");
-    expect(host.textContent).toContain("此服务器尚不支持任务模型切换");
+    expect(host.querySelector('[aria-label="任务管家模型"]')).toBeNull();
     expect(button("切换模型")).toBeUndefined();
     expect(sets()).toHaveLength(1);
     expect(calls.every((call) => !call.url.includes("task_manager_profile_get"))).toBe(true);
@@ -510,7 +516,7 @@ describe("Work panel mount", () => {
     await show(<WorkPage sub="task/A" onNavigate={vi.fn()} />);
     expect(calls.some((call) => call.url.includes("task_manager_profile"))).toBe(false);
     await click("任务详情");
-    expect(host.textContent).toContain("此服务器尚不支持任务模型切换");
+    expect(host.querySelector('[aria-label="任务管家模型"]')).toBeNull();
     expect(calls.some((call) => call.url.includes("task_manager_profile"))).toBe(false);
     vi.useFakeTimers();
     await act(async () => { await vi.advanceTimersByTimeAsync(8000); });
@@ -524,7 +530,7 @@ describe("Work panel mount", () => {
     })));
     calls.length = 0;
     await show(<WorkPage sub="task/A" onNavigate={vi.fn()} />);
-    expect(host.querySelector('[aria-label="任务管家模型"] h2')?.textContent).toBe("任务管家模型");
+    expect(host.querySelector('[aria-label="任务管家模型"]')).toBeNull();
     expect(calls.some((call) => call.url.includes("task_manager_profile"))).toBe(false);
     expect(sets()).toHaveLength(0);
   });

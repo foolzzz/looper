@@ -68,6 +68,7 @@ class ErrorCode(str, Enum):
     FORBIDDEN = "forbidden"
     UNAUTHORIZED = "unauthorized"  # /api/v1 without a valid client token (the Manager never sees it)
     CONFLICT = "conflict"  # the target's state does not allow it (an ended task, a task not started)
+    REQUIREMENT_CHANGED = "requirement_changed"  # a conditional requirement edit has an obsolete version
     EXPIRED = "expired"  # a confirmation past its time or its turn
     STOPPED = "stopped"  # the user stopped the turn the call came in
     NOT_THIS_TURN = "not_this_turn"  # a write call no tool_use of the running turn's stream matches
@@ -77,6 +78,7 @@ class ErrorCode(str, Enum):
 
 
 class ErrorDetails(TypedDict, total=False):
+    current_version: int
     manager_id: str
     state: str
     phase: str | None

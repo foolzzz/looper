@@ -94,6 +94,7 @@ def dashboard(dashboard_url):  # noqa: F811
                           "complete": True, "truncated": False}
             else:
                 result = {"project_admin/list": {"projects": [project]}, "system/status": {},
+                    "task_conversations/get": {"enabled": False},
                     "system/overview": state["overview"], "ops/gates/list": {"gates": [], "total": 0},
                     "chat_settings/get": {"stop_enabled": False},
                     "registry/view": {"profiles": [], "models": [], "runtimes": [], "providers": []},

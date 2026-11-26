@@ -204,6 +204,9 @@ Manager has no tool for it. The dashboard shows the task page's 指标 card and 
     the operator's own message remains a direct request. A platform-tools attachments section ends
     with "This session cannot open attachments; if the message needs one, say so." File-capable
     sessions retain their existing file-reading instructions. Attachment payloads and paths are unchanged.
+    Operator-only `manager_chat_bindings.put` sets the group default, and `chat_scope_overrides.list/put/delete`
+    manages person or bot overrides; committed changes reconcile running sessions at once, with `stop_now`
+    explicitly interrupting a retiring session's running turn.
   - Sessions run in parallel; inside one, messages run in order. The message
     loop hands each user message to its session's worker. Completion wake-ups
     resolve the bot's identity before claiming events, then use the event
@@ -558,11 +561,15 @@ Manager has no tool for it. The dashboard shows the task page's 指标 card and 
   a missing, invalid or unreadable source logs a warning and yields no profile, without disabling other vault
   tools or returning a previously cached profile.
   The compiler preserves typed fields — name, address, reply language, time zone, working hours, communication
-  preferences and standing rules — with relative-path, heading and line citations. Inline `[kind:: …]` bullets
-  keep their existing classification and inactive-entry filtering. Frontmatter and fenced code are excluded;
+  preferences, standing rules and background facts (`about`) — with relative-path, heading and line citations.
+  Inline `[kind:: fact]` bullets compile under `About:`; `person`, `decision`, `commitment`, `request` and
+  `deadline` remain under `Standing rules:`, while `preference` and `habit` remain under `Communication:`.
+  Superseded and deleted entries, frontmatter and fenced code are excluded; unknown kinds are skipped;
   backticks are normalized. Duplicate single-value fields fail compilation. The text stays within 1500 Unicode
-  characters, dropping lower-priority fields first and truncating a remaining oversized field with `…`.
-  `profile.get` caches the compiled block in `profile_blocks`, retaining its version when the body is unchanged.
+  characters, dropping lower-priority fields first (`About:` before `Standing rules:`) and truncating a remaining
+  oversized value with `…`. Profiles without facts keep exactly the same compiled text.
+  `profile.get` caches the compiled block in `profile_blocks`, advancing its version only when the text changes;
+  citation and field metadata refreshes alone retain the version.
   Manager and CLI reads do not write that cache.
   The independent operator-only `profile_settings.get/update` operations control `manager.profile.enabled`
   (default off; null restores off). Settings → Knowledge vault exposes its confirmed switch. Off, the Manager
@@ -599,7 +606,9 @@ Manager has no tool for it. The dashboard shows the task page's 指标 card and 
   an API client, an allowlisted sender and a member. An operator in a group may authorize operations, while
   access to private tools still follows the existing operator-turn check. `ManagerOps.call` refuses escalating
   operations and confirmations for allowed senders and members, audits `forbidden` with reason `operator_only`,
-  and drops a refused confirmation. A turn with no speaker keeps the existing behavior.
+  and drops a refused confirmation. Scoped sessions check the routing-time principal instead of the speaker;
+  a waiting confirmation belongs to its session and sender (`not_initiator` otherwise), and a non-operator's
+  `/stop` stops only shared sessions' turns. Unscoped turns retain the existing speaker rules.
   Settings → Chat uses the operator-only v1 `turn_context_settings.get` and `turn_context_settings.update`
   operations to store `manager.turn_context.enabled`
   (off by default), `user.timezone` (an IANA name, or null for the server zone) and `user.reply_language`
@@ -817,6 +826,37 @@ Manager has no tool for it. The dashboard shows the task page's 指标 card and 
   channel adds the reply to that chat's history (`chat_messages`, shown when
   the chat is opened) instead of a message's stream; Lark and Telegram send it
   to the chat. With no message before it, the reply is only recorded
+
+### Task Manager (`looper/agents/tiers/task_manager.py`)
+
+Each task can own a Claude Code resident, separate from the operator's Manager.
+The pool is constructed after workspace recovery, before HTTP admission; constructing
+it starts no model process. `tasks.conversations.enabled` remains off by default.
+The independent `task_manager` role defaults to Sonnet; task profile overrides take
+precedence over that role and never inherit the owning Manager's profile. Other
+runtimes are refused rather than substituted.
+
+Direct launches append the fixed task instructions and a bounded, fenced brief.
+They retain the operator's settings, memory and MCP servers. Orchestrated or
+unrecoverable workspaces use the existing isolated read-only command. The child
+receives `LOOPER_TASK_MANAGER`, never `LOOPER_AGENT_RUN`. An enabled outbound review
+requires an actual review hook. Before every direct launch or resume, a typed
+settings-source table rejects hook-disabling settings and environment variables;
+unreadable settings also fail closed. Managed policy checks are statically
+confirmed only. Claude Code must match the verified version constant; upgrading
+it requires rerunning the local fake-model launch probe. Refusals name the file
+and key or CLI version, and increment a reason/phase/version counter visible in
+`manager_metrics.get` while work mode is enabled.
+
+`tasks.managers.max_resident` defaults to 6 (1–20). Admission can reclaim the least
+recently used idle process; a 60-second ticker reclaims processes idle for 30
+minutes, measured from the end of the last turn. Admission, including preparation,
+shares the pool gate; all-busy messages queue visibly, and an active turn prevents
+starting the task in the background. Shutdown stops owned processes; deleting a
+task forgets its resident and session. This foundation provides the scheduling and
+native-turn primitive, with no conversation transport or task-bound MCP tools.
+Session persistence, per-task profile switching and turn accounting belong to the
+stacked turn implementation.
 
 ### TaskRouter (`looper/agents/tiers/task.py`)
 
@@ -8901,6 +8941,11 @@ is not done.
 
 ## Web Dashboard
 
+The Work page is called 工作台 in the Chinese UI, with the bilingual sidebar label
+“Work 工作台”, matching “Ledger 账本”. Its pinned main Manager conversation is
+labelled 管家; task conversations use their task names and call the counterpart
+任务管家.
+
 In Work, one task details column lists the plan and gate summaries from the
 selected task's shared detail. Both gate entry points locate the conversation's
 existing gate card; only that card owns the editor and discussion reads. Narrow
@@ -8967,6 +9012,30 @@ built by `scripts/stage-dashboard.sh` at release time), and it carries
   activity pages and growing tool results preserve that anchor; live updates follow the bottom only
   when the reader is there. One “你离开之后” separator precedes the first row after the departure
   watermark. This client watermark is independent of `tasks.mark_seen`, which still sends only a sequence.
+- **Work drafts**: the centre composer appends messages to the server requirement through
+  `tasks.requirement_update`, separated by a blank line, and displays the persisted text and version.
+  It rereads before appending and sends that requirement's version as `expected_version` (1 before the first
+  edit). The optional integer on `tasks.requirement_update` is checked atomically under the task row lock;
+  a mismatch returns HTTP 409 `requirement_changed` with `details.current_version` and writes nothing.
+  Omitting it preserves unconditional edits. The right-panel editor sends the version it opened with.
+  Input clears only after readback confirms the write. A conflict reloads the current requirement, keeps
+  unsent text and asks the user to check and resend against the latest version. Every failed save releases
+  the composer lock and preserves input; an uncertain save also offers a read-only retry. Draft messages do not
+  start a Planner. The adjacent Start control requires a nonempty requirement and valid directory and
+  retains its owner and confirmation result when the task leaves draft. Other tasks keep panel controls.
+  Untitled rows and headers share a local creation-time label; task rows reserve the first line for
+  the title and show a single short status with a colored dot below it. New labels follow the panel's
+  Chinese copy; Work has no language-selection mechanism. Existing CLI, Lark and Telegram callers retain
+  their behavior; the generated CLI also accepts `--expected-version` for conditional requirement edits.
+- **Work task controls**: the gated Work page starts ready tasks and valid drafts through the existing
+  operator start operation, resumes failed/stopped/cancelled tasks with the saved plan, and stops background
+  execution separately from the conversation's reply Stop. Direct-mode completion uses `tasks.done`.
+  Controls reread detail before writing, lock synchronous duplicate clicks, and use the page's shared
+  refresh to confirm the persisted result. A start acknowledges an active new attempt immediately; a fast
+  terminal attempt requires two identical changed, settled snapshots. Historical terminal rows and run
+  counts alone do not confirm a start. Errors and unfinished confirmation remain visible; retry only reads.
+  Task switches abort readback and discard late results. Missing operations are unavailable; pause,
+  background handoff and takeover remain disabled with a reason. The old task page is unchanged.
 - **Work task cost**: the existing task details panel renders one read-only cost section from the shared
   detail, without a separate read or poll. Missing costs or no recorded task runs remain unavailable;
   recorded zero costs retain their value. Running or unpriced runs retain the cost caveats and label any
@@ -9257,6 +9326,9 @@ notify a channel, or call the task-end listener. A task the background is workin
 | `/api/v1/schedule_admin/{list,project_list,get,preview,runs,notifications,create,update,delete,reset_planner_session,run,confirm_target,reset_cursor}` | POST | `schedule_admin.{list,project_list,get,preview,runs,notifications,create,update,delete,reset_planner_session,run,confirm_target,reset_cursor}` |
 | `/api/v1/channel_configs/{list,get,create,update,delete}` | POST | `channel_configs.{list,get,create,update,delete}` |
 | `/api/v1/manager_chat_bindings/{list,put,delete}` | POST | `manager_chat_bindings.{list,put,delete}` (operator-only) |
+| `/api/v1/capability_sets/{list,get}` | POST | `capability_sets.{list,get}` (operator-only) |
+| `/api/v1/chat_scope_overrides/{list,put,delete}` | POST | `chat_scope_overrides.{list,put,delete}` (operator-only) |
+| `/api/v1/manager_sessions/{list,reset}` | POST | `manager_sessions.{list,reset}` (operator-only) |
 | `/api/v1/channel_chats/{list,set_policy}` | POST | `channel_chats.{list,set_policy}` (operator-only) |
 | `/api/v1/manager_session/{get,select_profile}` | POST | `manager_session.{get,select_profile}` |
 | `/api/v1/operator_chat/{turn,stop,targets,sessions,messages,save_message,send,reply_events,thread_events}` | POST | `operator_chat.{turn,stop,targets,sessions,messages,save_message,send,reply_events,thread_events}` |
@@ -9653,7 +9725,23 @@ to native ids. Observation starts after upgrade, only for eligible admitted
 messages; it stores metadata, never message bodies. The exact bot/chat pair is the
 routing key. An explicit binding may also carry extra senders
 (`allowed_senders`, the bot type's sender ids, at most 100), changed only through
-`manager_chat_bindings.put` (Settings → Managers, loopercli). A message in exactly
+`manager_chat_bindings.put` (Settings → Managers, loopercli). Its optional `default_scope`
+sets the group default; null means `chat_only`, omission keeps it for the same Manager,
+and rebinding resets it unless explicitly supplied. `full` is reserved for the operator's
+own session; `legacy` is accepted only on bindings retained from before scopes.
+Binding responses include `default_scope`, `effective_default_scope`, `legacy_allowed`
+and `suggested_scope`. The optional `stop_now` (default false) interrupts running turns
+whose sessions the scope change retires; otherwise they finish their current turn.
+Capability sets and person or bot overrides are configured through operator-only API
+operations and the generated CLI. Override writes lock the binding and refuse sender ids
+owned by another principal. Override writes and changes to a binding's effective default
+scope require confirmation, including a Manager move that resets that scope. Binding
+saves with no effective scope change keep their existing confirmation behavior. Writes
+reconcile the running Manager after commit; a stopped Manager reconciles on its next message.
+`manager_sessions.list` accepts an optional `manager_id` (default: the default Manager)
+and returns its main and stored sessions, including `scope` (`id`, `version`, `audience`)
+or null and `retired`; `manager_sessions.reset` remains limited to the default Manager.
+A message in exactly
 that bot/chat pair is admitted when its sender is on the bot's allowlist or on that
 binding's extra senders; the adapter takes one decision from the committed snapshot
 for both admission and destination. Anywhere else, a direct message or another chat,
