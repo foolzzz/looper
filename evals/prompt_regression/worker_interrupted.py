@@ -108,6 +108,61 @@ def compare_inputs(baseline, treatment):
                                                fromfile="baseline", tofile="treatment"))}
 
 
+def _parse_events(events):
+    """Keep usable evidence and count each partly/uninterpretable event once."""
+    calls, results, tools, unparsed = [], {}, [], 0
+    for event in events:
+        if not isinstance(event, dict):
+            unparsed += 1
+            continue
+        kind = event.get("type")
+        if kind == "system" and event.get("subtype") == "init":
+            available = event.get("tools", [])
+            if isinstance(available, list) and all(isinstance(tool, str) for tool in available):
+                tools = tools or available
+            else:
+                unparsed += 1
+            continue
+        if kind not in ("assistant", "user"):
+            if kind not in ("system", "result", "stream_event", "tool_progress", "tool_use_summary", "rate_limit_event"):
+                unparsed += 1
+            continue
+        message = event.get("message", {})
+        content = message.get("content", []) if isinstance(message, dict) else None
+        if isinstance(content, str):
+            continue  # Native user prompt echoes are text, not tool-result blocks.
+        if not isinstance(content, list):
+            unparsed += 1
+            continue
+        malformed = False
+        for block in content:
+            if not isinstance(block, dict):
+                malformed = True
+                continue
+            block_type = block.get("type")
+            if kind == "assistant" and block_type == "tool_use":
+                inputs = block.get("input")
+                name = block.get("name")
+                if (not isinstance(block.get("id"), str) or not block["id"]
+                        or not isinstance(name, str) or not isinstance(inputs, dict)
+                        or (name == "Bash" and not isinstance(inputs.get("command"), str))
+                        or (name == "Read" and not isinstance(inputs.get("file_path"), str))):
+                    malformed = True
+                    continue
+                calls.append(block)
+            elif kind == "user" and block_type == "tool_result":
+                if (not isinstance(block.get("tool_use_id"), str) or not block["tool_use_id"]
+                        or not isinstance(block.get("content"), (str, list))):
+                    malformed = True
+                    continue
+                results[block["tool_use_id"]] = block
+            elif block_type not in ("text", "thinking", "redacted_thinking", "image", "document"):
+                malformed = True
+        unparsed += int(malformed)
+    calls = [{**call, **({"result": results[call["id"]]} if call["id"] in results else {})} for call in calls]
+    return calls, tools, unparsed
+
+
 def behavior_checks(*, tool_calls, effect_count, output, partial, audit):
     tool_calls = [call for call in tool_calls if call.get("result") and not call["result"].get("is_error")]
     commands = []
@@ -196,13 +251,7 @@ def _arm(root, url, *, mode, enabled, model, budget, claude, timeout, log):
         raise EvalError("expected exactly one re-dispatched Worker and its CLI input capture")
     current = workers[0]
     inputs = json.loads(capture.read_text())
-    calls = [block for event in current["events"] if event.get("type") == "assistant"
-             for block in event.get("message", {}).get("content", []) if block.get("type") == "tool_use"]
-    results = {block["tool_use_id"]: block for event in current["events"] if event.get("type") == "user"
-               for block in event.get("message", {}).get("content", []) if block.get("type") == "tool_result"}
-    calls = [{**call, **({"result": results[call["id"]]} if call["id"] in results else {})} for call in calls]
-    init = [event for event in current["events"] if event.get("type") == "system" and event.get("subtype") == "init"]
-    inputs["tools"] = next((event["tools"] for event in init if event.get("tools")), [])
+    calls, inputs["tools"], unparsed = _parse_events(current["events"])
     effect_count = len(_json_lines(root / "publisher" / "events.jsonl"))
     audit = _json_lines(root / "publisher" / "audit.jsonl")
     checks = behavior_checks(tool_calls=calls, effect_count=effect_count,
@@ -213,7 +262,9 @@ def _arm(root, url, *, mode, enabled, model, budget, claude, timeout, log):
                       and current["metadata"].get("system_prompt") == inputs["system_prompt"]),
                   real_worker_prompt="You are a Worker in Looper" in inputs["system_prompt"],
                   finished_task=detail["status"] == "completed", tools_recorded=bool(inputs["tools"]))
-    return {"arm": "treatment" if enabled else "baseline", "outcome": "pass" if all(checks.values()) else "fail",
+    failed = [name for name, passed in checks.items() if not passed]
+    return {"arm": "treatment" if enabled else "baseline", "outcome": "fail" if failed else "pass",
+            "reason": "failed checks: " + ", ".join(failed) if failed else None, "unparsed_events": unparsed,
             "checks": checks, "effect_count": effect_count, "audit": audit, "tool_calls": calls, "inputs": inputs,
             "cost_usd": sum(float(record["cost_usd"] or 0) for record in records)}
 

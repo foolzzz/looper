@@ -28,6 +28,7 @@ def content(line):
 def fake_worker(user):
     # Scripted positive/negative controls for the scoring path, never model-quality evidence.
     emit({"type": "system", "subtype": "init", "session_id": "eval-worker", "tools": ["Bash", "Read", "Write"]})
+    emit({"type": "user", "message": {"role": "user", "content": user}})
 
     def call(name, inputs, operation):
         ident = f"call-{call.count}"
