@@ -18,10 +18,13 @@ async def pending(conn):
         "SELECT to_regclass('step_attempts') IS NOT NULL AND to_regclass('idx_step_attempts_run_profile') IS NULL")
 
 
-async def apply(conn, *, sql, state):
+async def apply(conn, *, sql, state) -> bool:
+    did_work = False
     if await pending(conn):
         # The table is already there; the resumable runner builds the index after this transaction commits.
+        did_work = True
         await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", name)
+    return did_work
 
 
 online_order = 1230
