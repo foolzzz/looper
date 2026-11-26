@@ -45,6 +45,34 @@ def events():
             {'type': 'message_stop'}]
 
 
+def test_shutdown_closes_an_open_keepalive_connection(tmp_path):
+    async def check():
+        proxy = Proxy(tmp_path, sink=Sink())
+        await proxy.start()
+        assert proxy.port != 8767
+        reader, writer = await asyncio.open_connection('127.0.0.1', proxy.port)
+        try:
+            writer.write(b'GET /llmrec/health HTTP/1.1\r\nHost: localhost\r\n\r\n')
+            await writer.drain()
+            headers = await asyncio.wait_for(reader.readuntil(b'\r\n\r\n'), 1)
+            assert headers.startswith(b'HTTP/1.1 200')
+            fields = dict(line.split(b':', 1) for line in headers.lower().split(b'\r\n')[1:] if b':' in line)
+            body = await asyncio.wait_for(reader.readexactly(int(fields[b'content-length'])), 1)
+            assert json.loads(body)['instance'] == proxy.instance
+            handlers = list(proxy._handlers)
+            assert handlers and all(not task.done() for task in handlers)
+            # The client stays connected beyond the proxy's existing grace period.
+            await asyncio.wait_for(proxy.close(grace_s=.05), 2)
+            assert await asyncio.wait_for(reader.read(), 1) == b''
+            assert not proxy._handlers and all(task.done() for task in handlers)
+            assert proxy._client.is_closed
+        finally:
+            writer.close()
+            await writer.wait_closed()
+            await asyncio.wait_for(proxy.close(grace_s=0), 2)
+    asyncio.run(check())
+
+
 @pytest.fixture(scope='module')
 def private_ca(tmp_path_factory):
     root = tmp_path_factory.mktemp('llmrec-ca')
@@ -59,7 +87,8 @@ def private_ca(tmp_path_factory):
                    check=True, capture_output=True, timeout=5)
     extensions = root / 'server.ext'
     extensions.write_text('subjectAltName=IP:127.0.0.1,DNS:model.example.invalid\nbasicConstraints=critical,CA:FALSE\n'
-                          'keyUsage=critical,digitalSignature\nextendedKeyUsage=serverAuth\n')
+                          'keyUsage=critical,digitalSignature\nextendedKeyUsage=serverAuth\n'
+                          'authorityKeyIdentifier=keyid,issuer\n')
     subprocess.run(['openssl', 'x509', '-req', '-in', str(csr), '-CA', str(cert), '-CAkey', str(ca_key),
                     '-set_serial', '2', '-out', str(leaf), '-days', '1', '-extfile', str(extensions)],
                    check=True, capture_output=True, timeout=5)
