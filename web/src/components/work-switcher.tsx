@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState, type KeyboardEvent as ReactKey } from "react";
 import { Input } from "@/components/ui/input";
 import { errorText } from "@/lib/use-action";
-import { taskTitle, tasksSelect, type SelectCandidate, type SelectResult } from "@/lib/work";
+import { taskTitle, tasksSelect, workStatusLabel, type SelectCandidate, type SelectResult } from "@/lib/work";
 
 export const SELECT_DEBOUNCE_MS = 150;
 
@@ -132,24 +132,24 @@ export function WorkSwitcher({
         onKeyDown={onKey}
         className="mx-auto flex max-h-[70dvh] w-full max-w-lg flex-col overflow-hidden rounded-lg border border-border bg-card"
       >
-        <h2 id="work-find-title" className="px-3 pt-3 text-sm font-medium">Find a task</h2>
+        <h2 id="work-find-title" className="px-3 pt-3 text-sm font-medium">查找任务</h2>
         <div className="p-3">
-          <Input ref={inputRef} value={query} aria-label="Task selection" placeholder="Find a task"
+          <Input ref={inputRef} value={query} aria-label="选择任务" placeholder="查找任务"
             onChange={(event) => {
               setQuery(event.target.value);
               setAnswer(null);
             }} />
         </div>
-        {loading && <p role="status" className="px-3 pb-3 text-sm text-muted-foreground">Loading…</p>}
+        {loading && <p role="status" className="px-3 pb-3 text-sm text-muted-foreground">正在加载…</p>}
         {error && <p role="alert" className="px-3 pb-3 text-sm text-destructive">{error}</p>}
         {result?.kind === "none" && (
           <div className="space-y-2 px-3 pb-3 text-sm">
-            <p>No matching task.</p>
+            <p>没有匹配的任务。</p>
             {result.hint && <p>{result.hint}</p>}
             <pre className="overflow-auto font-mono text-xs text-muted-foreground">{JSON.stringify(result.searched ?? {}, null, 2)}</pre>
           </div>
         )}
-        <ul role="listbox" aria-label="Matching tasks" className="min-h-0 flex-1 overflow-y-auto px-2 pb-2">
+        <ul role="listbox" aria-label="匹配任务" className="min-h-0 flex-1 overflow-y-auto px-2 pb-2">
           {rows.map((row, rowIndex) => (
             <li key={row.task_id}>
               <button
@@ -162,13 +162,13 @@ export function WorkSwitcher({
               >
                 <span className="min-w-0 flex-1 truncate">{taskTitle(row.title)}</span>
                 {row.project_name && <span className="text-xs text-muted-foreground">{row.project_name}</span>}
-                <span className="text-xs text-muted-foreground">{row.status}</span>
+                <span className="text-xs text-muted-foreground">{workStatusLabel(row.status)}</span>
               </button>
             </li>
           ))}
         </ul>
         {!!result?.more && result.more > 0 && (
-          <p className="border-t border-border px-3 py-2 text-xs text-muted-foreground">{result.more} more not shown</p>
+          <p className="border-t border-border px-3 py-2 text-xs text-muted-foreground">还有 {result.more} 项未显示</p>
         )}
       </div>
     </div>

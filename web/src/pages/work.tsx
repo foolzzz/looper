@@ -10,13 +10,15 @@ import { WorkRequirement } from "@/components/work-requirement";
 import { WorkSteps } from "@/components/work-steps";
 import { WorkTaskManagerModel } from "@/components/work-task-manager-model";
 import { WorkCost } from "@/components/work-cost";
+import { WorkControls, type WorkControlResult } from "@/components/work-controls";
+import { WorkDraft } from "@/components/work-draft";
 import { openWorkGate } from "@/components/work-activity-feed";
 import { fetchTaskDetail, isActiveTask, TaskDetailError, type TaskDetail, type UserGate } from "@/lib/api";
 import { startPolling } from "@/lib/polling";
 import { callV1, V1Error } from "@/lib/v1";
 import { errorText } from "@/lib/use-action";
 import { TaskStatusMark } from "@/pages/tasks";
-import { isMissingOperation, markSeen, taskTitle, workSelection, workStorage } from "@/lib/work";
+import { isMissingOperation, isUnstartedTask, markSeen, taskTitle, workStatusLabel, workSelection, workStorage } from "@/lib/work";
 import { isGateShown } from "@/lib/gates";
 import { WorkConversationStateProvider, useWorkConversationStore, workConversationKey } from "@/lib/use-work-conversation-state";
 
@@ -70,6 +72,12 @@ function WorkPageContent({
   const [finder, setFinder] = useState(true);
   const [panel, setPanel] = useState(false);
   const [wide, setWide] = useState(false);
+  const [draftControlId, setDraftControlId] = useState("");
+  const [draftSaving, setDraftSaving] = useState(false);
+  const [controlBusy, setControlBusy] = useState(false);
+  const onControlResult = useCallback((result: WorkControlResult) => {
+    setControlBusy(["requesting", "accepted", "error"].includes(result.phase));
+  }, []);
   const [gateTarget, setGateTarget] = useState<{ taskId: string; step: string } | null>(null);
   const [gateError, setGateError] = useState("");
   const conversation = useRef<HTMLDivElement>(null);
@@ -99,6 +107,12 @@ function WorkPageContent({
   const cacheKey = workConversationKey({ kind: "planner", taskId });
   const candidate = detail.id === taskId && detail.task ? detail.task : conversations.cached(cacheKey)?.task;
   const selected = candidate?.task_id === taskId ? candidate : undefined;
+  // Keep the same control owner through Start readback so its confirmed result survives the transition.
+  const draftControls = isUnstartedTask(selected?.status) || draftControlId === taskId;
+  useEffect(() => {
+    if (isUnstartedTask(selected?.status)) setDraftControlId(taskId);
+  }, [taskId, selected?.status]);
+  useEffect(() => { setControlBusy(false); setDraftSaving(false); }, [taskId]);
   useEffect(() => {
     const media = window.matchMedia("(min-width: 1280px)");
     const update = () => { setWide(media.matches); setPanel(false); };
@@ -146,17 +160,18 @@ function WorkPageContent({
     setDetail(current => current.id === taskId ? { ...current, task } : current);
   }, [taskId, conversations, cacheKey]);
   // Requirement edits read this task back through the shared detail. A newer read, another task, or a page that has gone, is dropped.
-  const refreshDetail = useCallback(async () => {
+  const refreshDetail = useCallback(async (signal?: AbortSignal) => {
     const id = taskId;
     if (!pageLive.current || !id || selectionRef.current !== id) return;
     const token = takeDetailEpoch(detailEpoch.current, id);
-    const task = await fetchTaskDetail(id);
-    if (!pageLive.current || selectionRef.current !== id || detailEpochOf(detailEpoch.current, id) !== token) return;
+    const task = await (signal ? fetchTaskDetail(id, signal) : fetchTaskDetail(id));
+    if (signal?.aborted || !pageLive.current || selectionRef.current !== id || detailEpochOf(detailEpoch.current, id) !== token) return;
     if (task.task_id !== id) throw new Error("任务详情与当前任务不匹配，请刷新");
     conversations.cache(workConversationKey({ kind: "planner", taskId: id }), { task });
     setDetail(current => (
       current.id === id && detailEpochOf(detailEpoch.current, id) === token ? { id, task } : current
     ));
+    return task;
   }, [taskId, conversations]);
   const active = !!selected && isActiveTask(selected);
   useEffect(() => {
@@ -264,38 +279,42 @@ function WorkPageContent({
       <div className={`h-full min-h-0 min-w-0 flex-1 flex-col xl:flex-row ${pane === "detail" ? "flex" : "hidden md:flex"} ${shortColumn ? "overflow-y-auto" : ""}`} data-work-scroll={shortColumn ? "" : undefined}>
         <div inert={panel && !wide} className={shortColumn && selection.kind === "task" ? "flex h-auto min-h-full shrink-0 flex-col" : "flex h-full min-h-0 min-w-0 flex-1 flex-col"}>
           <div className="shrink-0 border-b border-border p-3 md:hidden">
-            <Button type="button" variant="outline" onClick={() => setPane("list")}>Back to the list</Button>
+            <Button type="button" variant="outline" onClick={() => setPane("list")}>返回列表</Button>
           </div>
           {selection.kind === "manager" ? (
             <>
-              <header aria-label="Selected task" className="shrink-0 border-b border-border p-4">
-                <h1 className="text-lg font-semibold">Manager</h1>
+              <header aria-label="当前任务" className="shrink-0 border-b border-border p-4">
+                <h1 className="text-lg font-semibold">管家</h1>
               </header>
               <ManagerWorkConversation />
             </>
           ) : !selected ? (
             <div className="min-h-0 flex-1 overflow-y-auto p-4">
-              <header aria-label="Selected task" className="space-y-3">
-                {detail.id !== taskId || !detail.error ? <p role="status">Loading task…</p>
+              <header aria-label="当前任务" className="space-y-3">
+                {detail.id !== taskId || !detail.error ? <p role="status">正在加载任务…</p>
                   : detail.missing ? <PlannerWorkConversation taskId={taskId} missing />
-                    : <div role="alert"><p>{detail.error}</p><Button variant="outline" onClick={() => setRetry(n => n + 1)}>Retry</Button></div>}
+                    : <div role="alert"><p>{detail.error}</p><Button variant="outline" onClick={() => setRetry(n => n + 1)}>重试</Button></div>}
               </header>
             </div>
           ) : (
             <>
-              <header aria-label="Selected task" className="shrink-0 space-y-3 border-b border-border p-4">
-                <h1 className="text-lg font-semibold">{taskTitle(selected.title)}</h1>
-                <TaskStatusMark status={selected.status} />
+              <header aria-label="当前任务" className="shrink-0 space-y-3 border-b border-border p-4">
+                <h1 className="text-lg font-semibold">{taskTitle(selected.title, selected.created_at, selected.task_id)}</h1>
+                <TaskStatusMark status={selected.status} label={workStatusLabel(selected.status)} />
                 {selected.project_name && <p className="text-sm text-muted-foreground">{selected.project_name}</p>}
-                <a className={LINK} href={`#tasks/${encodeURIComponent(taskId)}`}>Open the task page</a>
+                <a className={LINK} href={`#tasks/${encodeURIComponent(taskId)}`}>打开任务页面</a>
                 {!wide && <Button ref={panelOpener} variant="outline" aria-haspopup="dialog" aria-expanded={panel}
                   onClick={() => setPanel(true)}>任务详情</Button>}
                 {gateError && <p role="alert" className="text-sm text-destructive">{gateError}</p>}
-                {detail.error && <p role="alert" className="text-sm text-destructive">Task refresh failed: {detail.error}</p>}
+                {detail.error && <p role="alert" className="text-sm text-destructive">任务刷新失败： {detail.error}</p>}
               </header>
+              {draftControls && <WorkControls key={taskId} task={selected} onRefresh={refreshDetail}
+                disabled={draftSaving} compact onResult={onControlResult} />}
               <div ref={conversation} data-work-detail="" data-layout={shortColumn ? "scroll" : "split"}
                 className={shortColumn ? "work-short-conversation block" : "flex min-h-0 min-w-0 flex-1 flex-col"}>
-                <PlannerWorkConversation key={taskId} taskId={taskId} detail={selected} task={selected} onGateChanged={onGateChanged} />
+                {isUnstartedTask(selected.status) ? <WorkDraft key={taskId} task={selected} onRefresh={refreshDetail}
+                  disabled={controlBusy} onBusy={setDraftSaving} />
+                  : <PlannerWorkConversation key={taskId} taskId={taskId} detail={selected} task={selected} onGateChanged={onGateChanged} />}
               </div>
             </>
           )}
@@ -317,7 +336,8 @@ function WorkPageContent({
         className={wide ? "min-h-0 w-72 shrink-0 overflow-y-auto border-l border-border"
           : "fixed inset-0 z-50 overflow-y-auto bg-background"}>
         {!wide && <div className="border-b border-border p-3"><Button variant="outline" onClick={closePanel}>关闭任务详情</Button></div>}
-        <WorkRequirement task={selected} onRefresh={refreshDetail} />
+        {!draftControls && <WorkControls task={selected} onRefresh={refreshDetail} />}
+        <WorkRequirement task={selected} onRefresh={async () => { await refreshDetail(); }} />
         <WorkTaskManagerModel
           mode="task"
           taskId={taskId}
@@ -326,7 +346,7 @@ function WorkPageContent({
         />
         <WorkSteps task={selected} onOpenGate={step => openGate(step.step_key)} />
         <WorkGates task={selected} onOpenGate={openGate} />
-        <div className="p-4"><WorkChanges taskId={taskId} visible /></div>
+        <div className="p-4"><WorkChanges taskId={taskId} visible pendingWorkspace={isUnstartedTask(selected.status)} /></div>
         <WorkCost task={selected} />
       </aside>}
       <WorkSwitcher open={switcher && finder} onClose={closeSwitcher} onOpen={openTask} restore={restore} />

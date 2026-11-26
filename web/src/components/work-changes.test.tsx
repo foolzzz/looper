@@ -7,7 +7,10 @@ import { WorkPage } from "@/pages/work";
 
 vi.mock("@/lib/use-projects", () => ({ useProjects: () => ({ projects: [] }) }));
 vi.mock("@/components/work-list", () => ({ WorkList: () => <div>任务列表</div> }));
-vi.mock("@/components/work-conversation", () => ({ PlannerWorkConversation: () => <textarea aria-label="Message" /> }));
+vi.mock("@/components/work-conversation", async importOriginal => ({
+  ...await importOriginal<typeof import("@/components/work-conversation")>(),
+  PlannerWorkConversation: () => <textarea aria-label="Message" />,
+}));
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
 const ok = (taskId = "a", files: object[] = [], extra: object = {}) => ({
@@ -17,6 +20,7 @@ const file = (path = "new.ts", status = "modified", old_path: string | null = nu
 const answer = (result: object) => Response.json({ status: "ok", result });
 const failure = (status: number, message: string) => Response.json({ status: "error", error: { code: status === 404 ? "not_found" : "forbidden", message } }, { status });
 let host: HTMLDivElement, root: Root;
+let taskStatus: string;
 let respond: (body: { task_id: string; limit: number }, signal: AbortSignal) => Response | Promise<Response>;
 const calls: { path: string; body: Record<string, unknown>; signal?: AbortSignal | null }[] = [];
 async function settle() { for (let i = 0; i < 8; i++) await act(async () => { await Promise.resolve(); }); }
@@ -31,12 +35,13 @@ async function click(text: string) {
 
 beforeEach(() => {
   calls.length = 0;
+  taskStatus = "running";
   respond = body => answer(ok(body.task_id));
   vi.stubGlobal("fetch", vi.fn(async (path: string, init?: RequestInit) => {
     const body = JSON.parse(String(init?.body ?? "{}"));
     calls.push({ path: String(path), body, signal: init?.signal });
     if (path === "/api/v1/tasks/changes") return respond(body, init!.signal!);
-    if (path === "/api/v1/tasks/detail") return answer({ task_id: body.task_id, title: "Selected task", status: "running" });
+    if (path === "/api/v1/tasks/detail") return answer({ task_id: body.task_id, title: "Selected task", status: taskStatus });
     if (path === "/api/v1/tasks/activity") return answer({ activity: [] });
     return answer({});
   }));
@@ -86,13 +91,67 @@ it.each([
   await show(); expect(host.querySelector("li")?.textContent).toContain(copy);
 });
 
+it("explains an unstarted task without a workspace before making a changes request", async () => {
+  await show(<WorkChanges taskId="a" visible pendingWorkspace />);
+  expect(host.textContent).toContain("任务开始后显示改动");
+  expect(host.querySelector('[role="alert"], .text-destructive')).toBeNull();
+  expect(calls).toHaveLength(0);
+  await show();
+  expect(calls).toHaveLength(1);
+  expect(host.textContent).toContain("没有改动文件");
+});
+
+it.each(["draft", "init"])("keeps the %s right panel neutral before the task starts", async status => {
+  taskStatus = status;
+  respond = () => answer(ok("a", [], { kind: "unavailable", scope: null, reason: "workspace_missing" }));
+  await show(<WorkPage sub="task/a" onNavigate={vi.fn()} />);
+  await click("任务详情");
+  const changes = host.querySelector('[aria-label="改动文件"]')!;
+  expect(changes.textContent).toContain("任务开始后显示改动");
+  expect(changes.querySelector("button, [role=alert], .text-destructive")).toBeNull();
+  expect(calls.filter(call => call.path.endsWith("/changes"))).toHaveLength(0);
+  expect(host.querySelector("#work-steps")?.textContent).toContain("尚无步骤");
+  expect(host.querySelector('[aria-label="关卡"]')?.textContent).toContain("没有关卡");
+  expect(host.querySelector('[aria-labelledby="work-cost-title"]')?.textContent).toContain("费用尚不可用");
+});
+
+it.each(["pending", "assigned", "running", "planning", "executing", "verifying", "stopping", "waiting", "waiting_user", "awaiting_budget", "handing_back", "completed", "failed", "cancelled", "stopped"])(
+  "keeps real changes failures distinct from the other empty %s panel blocks", async status => {
+    taskStatus = status;
+    respond = () => answer(ok("a", [], { kind: "unavailable", scope: null, reason: "workspace_missing" }));
+    await show(<WorkPage sub="task/a" onNavigate={vi.fn()} />);
+    await click("任务详情");
+    const changes = host.querySelector('[aria-label="改动文件"]')!;
+    expect(changes.querySelector('[role="alert"]')?.textContent).toContain("无法读取改动：工作目录不存在");
+    expect(changes.querySelector("button")?.textContent).toBe("重试");
+    for (const selector of ["#work-steps", '[aria-label="关卡"]', '[aria-labelledby="work-cost-title"]']) {
+      const block = host.querySelector(selector)!;
+      expect(block.querySelector('[role="alert"], .text-destructive')).toBeNull();
+      expect(block.textContent).toMatch(/尚无步骤|没有关卡|费用尚不可用/);
+    }
+  },
+);
+
+it("keeps a real non-Git directory neutral without calling it a read failure", async () => {
+  respond = () => answer(ok("a", [], { kind: "unavailable", scope: null, reason: "not_git" }));
+  await show();
+  expect(host.textContent).toContain("工作目录不是 Git 仓库");
+  expect(host.textContent).not.toContain("无法读取改动");
+  expect(host.querySelector('[role="alert"], .text-destructive')).toBeNull();
+  expect(calls).toHaveLength(1);
+  respond = () => answer(ok());
+  await click("刷新");
+  expect(host.textContent).toContain("没有改动文件");
+});
+
 it.each([
-  ["not_git", "工作目录不是 Git 仓库"], ["workspace_missing", "工作目录不存在"],
+  ["workspace_missing", "工作目录不存在"],
   ["branch_missing", "任务分支不存在"], ["branch_changed", "工作区分支已变更"], ["git_error", "Git 读取失败"],
 ])("explains unavailable %s and retries exactly once", async (reason, copy) => {
   respond = () => answer(ok("a", [], { kind: "unavailable", scope: null, reason }));
   await show();
   expect(host.textContent).toContain(`无法读取改动：${copy}`);
+  expect(host.querySelector('[role="alert"]')?.className).toContain("text-destructive");
   expect(host.textContent).not.toContain("没有改动文件");
   respond = () => answer(ok());
   await click("重试");

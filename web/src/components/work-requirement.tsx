@@ -57,6 +57,7 @@ export function WorkRequirement({ task, onRefresh }: { task: TaskDetail; onRefre
   const [unavailable, setUnavailable] = useState(false);
   const ticket = useRef(0);
   const savingRef = useRef(false);
+  const editVersion = useRef(1);
   const mounted = useRef(false);
   const taskIdRef = useRef(task.task_id);
   taskIdRef.current = task.task_id;
@@ -77,6 +78,7 @@ export function WorkRequirement({ task, onRefresh }: { task: TaskDetail; onRefre
   const begin = () => {
     if (unavailable || !editable) return;
     setText(body);
+    editVersion.current = current?.version ?? 1;
     setError("");
     setEditing(true);
   };
@@ -101,7 +103,7 @@ export function WorkRequirement({ task, onRefresh }: { task: TaskDetail; onRefre
     const ownsEdit = () => mounted.current && taskIdRef.current === id && ticket.current === generation;
     void (async () => {
       try {
-        await editTaskRequirement(id, requirement);
+        await editTaskRequirement(id, requirement, editVersion.current);
         // Mount, this edit, and the task still on screen. A late save must not read another task or a newer edit.
         if (!ownsEdit()) return;
         try {

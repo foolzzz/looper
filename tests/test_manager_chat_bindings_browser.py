@@ -84,6 +84,8 @@ def managers_dashboard(dashboard_url):
                 result = {"profiles": [], "providers": [], "runtimes": []}
             elif path == "project_admin/list":
                 result = {"projects": []}
+            elif path == "task_conversations/get":
+                result = {"enabled": False}
             elif path == "system/overview":
                 result = {"tasks": {}, "agents": [], "channels": []}
             elif path == "operator_chat/targets":
