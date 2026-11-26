@@ -371,7 +371,9 @@ Manager has no tool for it. The dashboard shows the task page's 指标 card and 
   when its session may not hold the last one: a new session (`/new`, a
   session switch such as a full context), a new process (a server restart, an
   idle close), after a compaction the session reported (`compact_boundary`)
-  or a turn it ran on its own, after a turn that did not go through, and on
+  or a turn it ran on its own, after a turn that did not go through, on the
+  first non-isolated user turn after a shared group/other-sender or API-client
+  turn rendered its own audience's whole block, and on
   every turn of a runtime whose resident session does not report its
   compactions (`RuntimeAdapter.resident_compaction_events`, only Claude
   Code's). A compaction or a turn of its own moves a context generation on: a
@@ -385,7 +387,11 @@ Manager has no tool for it. The dashboard shows the task page's 指标 card and 
   30 % or 40 % is still a note. An open gate's line says when it opened (UTC,
   to the minute) instead of how long it has been open, so the block does not
   change every minute. What the session holds is in the Manager's memory
-  only. The contract then ends with `STABLE_CONTEXT_CONTRACT` (the latest
+  only, including the typed pending whole-block reason after an isolated turn;
+  a server restart already sends a whole block. Isolated turns keep the prior
+  non-isolated baseline, and a successful non-isolated recovery replaces it and
+  returns subsequent turns to the normal unchanged/change rules. The contract
+  then ends with `STABLE_CONTEXT_CONTRACT` (the latest
   whole block with the newest note after it is the current state), and each
   turn's record has `metadata.looper_state` (`view`, `rev`, `reason`). Off,
   the turns, the prompt, the tool list and the process signature are as they
