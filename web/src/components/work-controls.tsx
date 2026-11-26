@@ -51,7 +51,7 @@ function Controls({ task, onRefresh, onResult, disabled, compact }: Props) {
       if (current.task_id !== task.task_id) throw new Error("任务详情与当前任务不匹配，请刷新");
       if (pending.rejected) {
         request.current = null;
-        setResult({ phase: "idle" });
+        setResult(current => ({ ...current, phase: "idle" }));
         return true;
       }
       let confirmed = pending.action === "done" ? current.status === "completed"
@@ -133,7 +133,10 @@ function Controls({ task, onRefresh, onResult, disabled, compact }: Props) {
       pending.rejected ||= err instanceof V1Error && err.status >= 400 && err.status < 500;
       if (isMissingOperation(err)) setUnavailable(action);
       setResult({ phase: "error", message: err instanceof V1Error && err.status === 409
-        ? `${errorText(err)}。请先停止这一轮，再重新读取任务状态。` : errorText(err) });
+        ? action === "start" && pending.before.status === "draft"
+          ? `此服务器尚未提供草稿开始入口：${errorText(err)}`
+          : `${errorText(err)}。请先停止这一轮，再重新读取任务状态。`
+        : errorText(err) });
     }
   };
   const retryRead = () => {

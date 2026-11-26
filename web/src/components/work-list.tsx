@@ -23,17 +23,17 @@ const FOCUS = "focus-visible:outline-none focus-visible:ring-1 focus-visible:rin
 const FILTER = `h-9 w-full pointer-coarse:h-11 rounded-md border border-input bg-transparent px-2 text-sm text-foreground ${FOCUS}`;
 
 const STATUSES: [string, string][] = [
-  ["", "All statuses"],
-  ["init", "Ready"],
-  ["running", "Running"],
-  ["waiting", "Waiting"],
-  ["waiting_user", "Waiting for you"],
+  ["", "全部状态"],
+  ["init", "待开始"],
+  ["running", "运行中"],
+  ["waiting", "等待中"],
+  ["waiting_user", "等你回复"],
   ["awaiting_budget", "等你决定花费"],
-  ["pending", "Pending"],
-  ["completed", "Completed"],
-  ["failed", "Failed"],
-  ["cancelled", "Cancelled"],
-  ["stopped", "Stopped"],
+  ["pending", "排队中"],
+  ["completed", "已完成"],
+  ["failed", "失败"],
+  ["cancelled", "已取消"],
+  ["stopped", "已停止"],
 ];
 
 export function WorkList({
@@ -115,7 +115,7 @@ export function WorkList({
   const draftReason = drafts === false
     ? DRAFTS_UNAVAILABLE
     : !projectId && projects !== null
-      ? "Create a project before a draft task."
+      ? "请先创建项目，再新建草稿任务。"
       : draftError;
 
   const onNew = async () => {
@@ -170,14 +170,14 @@ export function WorkList({
       <div className="shrink-0 space-y-2 border-b border-border p-3">
         <Button ref={newButton} type="button" className="w-full" disabled={drafts === false || !projectId || creating} onClick={() => void onNew()}
           aria-describedby={draftReason ? "work-draft-reason" : undefined}>
-          New task
+          新建任务
         </Button>
         {draftReason && <p id="work-draft-reason" className="text-xs text-muted-foreground">{draftReason}</p>}
         <Input
           readOnly={finder !== false}
           disabled={finder === false}
-          aria-label="Find a task"
-          placeholder="Find a task"
+          aria-label="查找任务"
+          placeholder="查找任务"
           aria-describedby={finder === false ? "work-find-reason" : undefined}
           onKeyDown={(event) => {
             if (finder !== false && (event.key === "Enter" || event.key === " ")) { event.preventDefault(); onFind(); }
@@ -196,13 +196,13 @@ export function WorkList({
           }}
           className={`flex items-center rounded-md px-3 py-2 text-sm font-medium pointer-coarse:min-h-11 ${FOCUS} ${selection.kind === "manager" ? "bg-primary/10 text-primary" : "hover:bg-accent"}`}
         >
-          Manager
+          管家
         </a>
       </div>
-      <div ref={scroller} aria-label="Work tasks" onScroll={saveScroll} className="min-h-0 flex-1 overflow-y-auto overscroll-contain">
-        <section aria-label="Open tasks" aria-busy={open.loading} className="border-b border-border pb-2">
-          <h2 className="px-3 pt-3 text-xs font-medium text-muted-foreground">Open</h2>
-          <SectionState section="open" state={open} empty="No open tasks" />
+      <div ref={scroller} aria-label="工作任务" onScroll={saveScroll} className="min-h-0 flex-1 overflow-y-auto overscroll-contain">
+        <section aria-label="进行中任务" aria-busy={open.loading} className="border-b border-border pb-2">
+          <h2 className="px-3 pt-3 text-xs font-medium text-muted-foreground">进行中</h2>
+          <SectionState section="open" state={open} empty="暂无进行中任务" />
           {groupByProject(open.items).map((group) => {
             const shut = collapsed.includes(group.id);
             return (
@@ -220,35 +220,35 @@ export function WorkList({
           })}
           {open.next && <More loading={open.loading} onClick={open.loadMore} />}
         </section>
-        <section aria-label="Schedules" aria-busy={schedules.loading} className="border-b border-border pb-2">
-          <h2 className="px-3 pt-3 text-xs font-medium text-muted-foreground">Schedules</h2>
-          <SectionState section="schedules" state={schedules} empty="No schedules" />
+        <section aria-label="定时任务" aria-busy={schedules.loading} className="border-b border-border pb-2">
+          <h2 className="px-3 pt-3 text-xs font-medium text-muted-foreground">定时任务</h2>
+          <SectionState section="schedules" state={schedules} empty="暂无定时任务" />
           {schedules.items.map((schedule) => (
             <WorkScheduleRow key={schedule.schedule_id} schedule={schedule} onRestored={scheduleRestored} onOpenTask={(id) => { saveScroll(); onOpenTask(id); }} />
           ))}
           {schedules.next && <More loading={schedules.loading} onClick={schedules.loadMore} />}
         </section>
-        <section aria-label="Ended" aria-busy={ended.loading} className="pb-3">
+        <section aria-label="已结束" aria-busy={ended.loading} className="pb-3">
           <button type="button" aria-expanded={endedOpen} onClick={toggleEnded}
             className={`flex w-full items-center px-3 py-2 text-sm font-medium pointer-coarse:min-h-11 ${FOCUS}`}>
-            Ended
+            已结束
           </button>
           {endedOpen && (
             <>
               <div className="grid grid-cols-2 gap-2 px-3 pb-2">
-                <label className={LABEL}>Project
-                  <select aria-label="Ended project" className={FILTER} value={projectFilter} onChange={(event) => setProjectFilter(event.target.value)}>
-                    <option value="">All projects</option>
+                <label className={LABEL}>项目
+                  <select aria-label="已结束任务的项目" className={FILTER} value={projectFilter} onChange={(event) => setProjectFilter(event.target.value)}>
+                    <option value="">全部项目</option>
                     {(projects ?? []).map((project) => <option key={project.project_id} value={project.project_id}>{project.name}</option>)}
                   </select>
                 </label>
-                <label className={LABEL}>Status
-                  <select aria-label="Ended status" className={FILTER} value={statusFilter} onChange={(event) => setStatusFilter(event.target.value)}>
+                <label className={LABEL}>状态
+                  <select aria-label="已结束任务的状态" className={FILTER} value={statusFilter} onChange={(event) => setStatusFilter(event.target.value)}>
                     {STATUSES.map(([value, label]) => <option key={value || "all"} value={value}>{label}</option>)}
                   </select>
                 </label>
               </div>
-              <SectionState section="ended" state={ended} empty="No ended tasks" />
+              <SectionState section="ended" state={ended} empty="暂无已结束任务" />
               {ended.items.map((task) => (
                 <WorkTaskLink key={task.task_id} task={task} current={selection.kind === "task" && selection.taskId === task.task_id} onActivate={() => openTask(task)} />
               ))}
@@ -275,11 +275,11 @@ function SectionState<T>({
     return (
       <div role="alert" className="space-y-2 px-3 py-2">
         <p className="text-sm text-destructive">{state.error}</p>
-        <Button type="button" variant="outline" onClick={state.retry}>Retry</Button>
+        <Button type="button" variant="outline" onClick={state.retry}>重试</Button>
       </div>
     );
   }
-  if (state.loading && state.items.length === 0) return <p className="px-3 py-2 text-sm text-muted-foreground">Loading…</p>;
+  if (state.loading && state.items.length === 0) return <p className="px-3 py-2 text-sm text-muted-foreground">正在加载…</p>;
   if (state.items.length === 0) return <p className="px-3 py-2 text-sm text-muted-foreground">{empty}</p>;
   return null;
 }
@@ -287,7 +287,7 @@ function SectionState<T>({
 function More({ loading, onClick }: { loading: boolean; onClick: () => void }) {
   return (
     <div className="px-3 py-2">
-      <Button type="button" variant="outline" disabled={loading} onClick={onClick}>Load more</Button>
+      <Button type="button" variant="outline" disabled={loading} onClick={onClick}>加载更多</Button>
     </div>
   );
 }

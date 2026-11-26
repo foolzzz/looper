@@ -140,6 +140,21 @@ describe("work conversation", () => {
     vi.restoreAllMocks();
   });
 
+  it("uses Chinese interface text for Work conversation and queued composer", async () => {
+    const props: WorkConversationProps = {
+      identity: { kind: "manager" }, canSend: true, messages: [], history: "empty",
+      draft: "下一条", onDraft: vi.fn(), staged: ["待发"], onStaged: vi.fn(),
+      onSend: vi.fn(), replying: true,
+    };
+    await show(<WorkConversation {...props} />);
+    expect(container.querySelector('section')?.getAttribute('aria-label')).toBe("对话");
+    expect(input().placeholder).toBe("正在回复… 按 Enter 加入队列");
+    expect(input().getAttribute('aria-label')).toBe("消息");
+    expect(container.textContent).toContain("已排队 · 回复结束后发送");
+    expect(container.querySelector('button[aria-label="加入队列"]')).not.toBeNull();
+    expect(container.textContent).not.toMatch(/Queued|Queue|Edit/);
+  });
+
   it("accepts external Planner and Manager adapters", async () => {
     const onSend = vi.fn();
     function Box() {
@@ -185,7 +200,7 @@ describe("work conversation", () => {
       />,
     );
     expect(container.querySelector("textarea")).not.toBeNull();
-    expect(container.textContent).not.toContain("任务管家");
+    expect(container.querySelector('[aria-label="任务管家模型"]')).toBeNull();
     expect(container.textContent).toContain("nope");
   });
 
@@ -205,7 +220,7 @@ describe("work conversation", () => {
     expect(container.querySelector('a[href="#chat"]')).toBeNull();
     expect(container.querySelector("textarea")).not.toBeNull();
     expect(api.watchChat).toHaveBeenCalledWith(localStorage.getItem("looper-chat-session-id"), expect.any(Function), "manager");
-    expect(container.textContent).not.toContain("任务管家");
+    expect(container.querySelector('[aria-label="任务管家模型"]')).toBeNull();
     expect(container.textContent).not.toContain("已接通");
   });
 
@@ -254,7 +269,7 @@ describe("work conversation", () => {
     api.fetchChatMessages.mockResolvedValueOnce(undefined);
     await show(<TaskPane taskId="t1" />);
     expect(container.textContent).toContain("对话读取失败");
-    expect(container.textContent).toContain("The server returned invalid chat messages.");
+    expect(container.textContent).toContain("服务器返回了无效的对话消息。");
 
     api.fetchChatMessages.mockClear();
     api.fetchChatTargets.mockClear();
@@ -269,12 +284,12 @@ describe("work conversation", () => {
     let release!: (targets: unknown) => void;
     api.fetchChatTargets.mockReturnValue(new Promise((resolve) => { release = resolve; }));
     await show(<TaskPane taskId="t1" />);
-    expect(container.textContent).toContain("Checking chat availability");
+    expect(container.textContent).toContain("正在检查对话可用性");
     expect(input().disabled).toBe(true);
     await act(async () => { release([planner("t1")]); });
     await flush();
     expect(input().disabled).toBe(false);
-    expect(container.textContent).not.toContain("Checking chat availability");
+    expect(container.textContent).not.toContain("正在检查对话可用性");
 
     api.fetchChatTargets.mockRejectedValueOnce(new Error("catalog offline"));
     await remount(<TaskPane taskId="t1" />);
@@ -283,18 +298,18 @@ describe("work conversation", () => {
 
     api.fetchChatTargets.mockRejectedValueOnce(new Error("  "));
     await remount(<TaskPane taskId="t2" />);
-    expect(container.textContent).toContain("Chat availability could not be checked");
+    expect(container.textContent).toContain("无法检查对话可用性");
     expect(input().disabled).toBe(true);
 
     api.fetchChatTargets.mockResolvedValueOnce([planner("other")]);
     await remount(<PlannerWorkConversation taskId="t1" detail={{ group: "in_progress", status: "running" }} />);
-    expect(container.textContent).toContain("Only tasks with a running Planner can be chatted with");
+    expect(container.textContent).toContain("仅可与 Planner 运行中的任务对话");
     expect(input().disabled).toBe(true);
     expect(container.querySelector('a[href="#chat"]')).toBeNull();
 
     api.fetchChatTargets.mockResolvedValueOnce([planner("t1", false)]);
     await remount(<PlannerWorkConversation taskId="t1" detail={{ group: "in_progress", status: "running" }} />);
-    expect(container.textContent).toContain("This task has ended, so its Planner no longer takes messages.");
+    expect(container.textContent).toContain("任务已结束，Planner 不再接收消息。");
     expect(input().disabled).toBe(true);
 
     api.fetchChatTargets.mockResolvedValueOnce([planner("t1", true)]);
@@ -337,7 +352,7 @@ describe("work conversation", () => {
     expect(container.querySelector("[data-phase]")?.textContent).toBe("Thinking");
     await fire("answer.final", { text: "", outcome: "answered" });
     expect(container.textContent).toContain("partial");
-    expect(container.textContent).not.toContain("Done.");
+    expect(container.textContent).not.toContain("已完成。");
     expect(container.querySelector("[data-phase]")).toBeNull();
 
     await say("first");
@@ -357,7 +372,7 @@ describe("work conversation", () => {
     await show(<TaskPane taskId="t1" />);
     await say("ask");
     await fire("answer.final", { text: "" });
-    expect(container.textContent).toContain("Done.");
+    expect(container.textContent).toContain("已完成。");
     expect(api.sendChat).toHaveBeenCalledTimes(1);
   });
 
@@ -368,7 +383,7 @@ describe("work conversation", () => {
     await fire("answer.final", { text: "end", outcome });
     expect(api.sendChat).toHaveBeenCalledTimes(1);
     expect(input().value).toBe("queued");
-    if (outcome === "stopped") expect(container.textContent).toContain("Stopped");
+    if (outcome === "stopped") expect(container.textContent).toContain("已停止");
     expect(api.fetchChatTurn).not.toHaveBeenCalled();
   });
 
@@ -421,7 +436,7 @@ describe("work conversation", () => {
 
     api.sendChat.mockRejectedValueOnce(new TypeError("Failed to fetch"));
     await say("again");
-    expect(container.textContent).toContain("Failed to connect. Is the server running?");
+    expect(container.textContent).toContain("连接失败，请检查服务器是否运行。");
     expect(input().value).toBe("again");
     expect(api.sendChat).toHaveBeenCalledTimes(2);
   });
@@ -592,7 +607,7 @@ describe("work conversation", () => {
       await say("ask");
       await say("fresh queued");
       expect(container.textContent).toContain("fresh queued");
-      expect(container.textContent).toContain("Queued");
+      expect(container.textContent).toContain("已排队");
       await show(<KeyedPane taskId="t2" />);
       expect(container.textContent).not.toContain("fresh queued");
       await show(<KeyedPane taskId="t1" />);
@@ -645,15 +660,15 @@ describe("work conversation", () => {
     expect(earlier?.className ?? "").not.toContain("bg-primary");
     expect(earlier?.className).toContain("bg-card");
     type("ready");
-    const send = container.querySelector('button[aria-label="Send"]');
+    const send = container.querySelector('button[aria-label="发送"]');
     expect(send?.className ?? "").not.toContain("bg-primary");
     expect(send?.className).toContain("border-border");
     await say("go");
     const sent = container.querySelector('[data-message-id][data-role="user"] > div');
     expect(sent?.className ?? "").not.toContain("bg-primary");
     type("later");
-    const queue = container.querySelector('button[aria-label="Queue message"]');
-    expect(queue?.textContent).toBe("Queue");
+    const queue = container.querySelector('button[aria-label="加入队列"]');
+    expect(queue?.textContent).toBe("加入队列");
     expect(queue?.className ?? "").not.toContain("bg-primary");
     expect(queue?.className).toContain("border-border");
   });

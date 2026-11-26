@@ -45,7 +45,7 @@ describe("Work task row", () => {
 
   it("uses the local creation time for an untitled task without displaying its id", () => {
     const created = "2026-11-25T10:20:00Z";
-    const local = new Date(created).toLocaleString(undefined, {
+    const local = new Date(created).toLocaleString("zh-CN", {
       month: "short", day: "numeric", hour: "2-digit", minute: "2-digit",
     });
     act(() => root.render(<WorkTaskLink task={{ ...base, title: base.task_id, created_at: created }} current={false} onActivate={vi.fn()} />));

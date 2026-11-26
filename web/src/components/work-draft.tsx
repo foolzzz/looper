@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { WORK_COMPOSER_COPY } from "@/components/work-conversation";
 import { ChatComposer } from "@/components/chat-composer";
 import { Button } from "@/components/ui/button";
 import { editTaskRequirement, type TaskDetail } from "@/lib/api";
@@ -93,7 +94,7 @@ export function WorkDraft({ task, onRefresh, disabled, onBusy }: {
       {busy && !uncertain && <p role="status" className="text-xs text-muted-foreground">正在保存需求…</p>}
       <ChatComposer draft={composer.value.draft} onDraft={composer.setDraft}
         staged={composer.value.staged} onStaged={composer.setStaged} history={composer.value.history}
-        replying={false} canStop={false} onStop={() => {}} controls="neutral"
+        replying={false} canStop={false} onStop={() => {}} controls="neutral" copy={WORK_COMPOSER_COPY}
         disabled={disabled || busy} onSend={text => void send(text)} />
     </div>
   </section>;

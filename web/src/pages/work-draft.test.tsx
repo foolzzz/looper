@@ -168,8 +168,18 @@ it.each([false, true])("restores composer focus after saving unless the user mov
   // Browsers blur a focused input when it becomes disabled; emulate that in the DOM test.
   act(() => { input().disabled = false; input().blur(); input().disabled = true; });
   expect(document.activeElement).toBe(document.body);
-  const target = moved ? button("New task") : input();
+  const target = moved ? button("新建任务") : input();
   if (moved) act(() => target.focus());
   act(() => finish()); await settle();
   expect(document.activeElement).toBe(target);
+});
+
+
+it("shows a neutral changes placeholder for a draft without reading its workspace", async () => {
+  vi.stubGlobal("matchMedia", vi.fn((query: string) => ({ matches: query.includes("1280"), addEventListener: vi.fn(), removeEventListener: vi.fn() })));
+  await show();
+  const changes = host.querySelector('[aria-label="改动文件"]')!;
+  expect(changes.textContent).toContain("开始后可查看改动");
+  expect(changes.querySelector('[role="alert"]')).toBeNull();
+  expect(host.querySelector('[aria-label="任务管家模型"]')).toBeNull();
 });

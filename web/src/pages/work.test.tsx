@@ -202,7 +202,7 @@ describe("Work page shell", () => {
     window.history.replaceState(null, "", "#work/task/x");
     await render(<App />);
     expect(window.location.hash).toBe("#work/task/x");
-    expect(host.textContent).not.toContain("New task");
+    expect(host.textContent).not.toContain("新建任务");
     await act(async () => { release?.({ status: 200, body: { status: "ok", result: { enabled: false } } }); });
     await settle();
     expect(window.location.hash).toBe("#dashboard");
@@ -227,7 +227,7 @@ describe("Work page shell", () => {
       );
     }
     await render(<Harness initial="" />);
-    const scroller = host.querySelector('[aria-label="Work tasks"]') as HTMLElement;
+    const scroller = host.querySelector('[aria-label="工作任务"]') as HTMLElement;
     scroller.scrollTop = 120;
     const link = [...host.querySelectorAll("a")].find((a) => a.textContent?.includes("Beta new"))!;
     await act(async () => { link.dispatchEvent(new MouseEvent("click", { bubbles: true })); });
@@ -244,11 +244,11 @@ describe("Work page shell", () => {
     navigated.length = 0;
     await render(<Harness initial="task/t-b1" />);
     expect(host.querySelector("h1")!.textContent).toBe("Beta new");
-    expect(host.querySelector('a[href="#tasks/t-b1"]')!.textContent).toBe("Open the task page");
+    expect(host.querySelector('a[href="#tasks/t-b1"]')!.textContent).toBe("打开任务页面");
     expect(host.querySelector('a[href="#chat?target=planner-t-b1"]')).toBeNull();
-    expect(host.querySelector('textarea[aria-label="Message"]')).not.toBeNull();
+    expect(host.querySelector('textarea[aria-label="消息"]')).not.toBeNull();
     expect(host.textContent).not.toContain("Talk to its Planner");
-    expect((host.querySelector('[aria-label="Work tasks"]') as HTMLElement).scrollTop).toBe(120);
+    expect((host.querySelector('[aria-label="工作任务"]') as HTMLElement).scrollTop).toBe(120);
 
     act(() => root.unmount());
     root = createRoot(host);
@@ -260,9 +260,9 @@ describe("Work page shell", () => {
 
   it("accessibility", async () => {
     await render(<WorkPage sub="" onNavigate={() => {}} />);
-    const open = host.querySelector('[aria-label="Open tasks"]')!;
+    const open = host.querySelector('[aria-label="进行中任务"]')!;
     const row = [...open.querySelectorAll("a")].find((a) => a.textContent?.includes("Beta new")) as HTMLAnchorElement;
-    const button = [...host.querySelectorAll("button")].find((item) => item.textContent === "New task") as HTMLButtonElement;
+    const button = [...host.querySelectorAll("button")].find((item) => item.textContent === "新建任务") as HTMLButtonElement;
     for (const el of [row, button]) {
       el.focus();
       expect(document.activeElement).toBe(el);
@@ -270,7 +270,7 @@ describe("Work page shell", () => {
       expect(el.className).toContain("focus-visible:ring-ring");
     }
     expect(row.textContent).toContain("运行中");
-    expect(row.textContent).toContain("Unseen");
+    expect(row.textContent).toContain("未读");
     expect(row.querySelector('[aria-hidden="true"]')).not.toBeNull();
     button.focus();
     await act(async () => {
@@ -280,7 +280,7 @@ describe("Work page shell", () => {
     expect(dialog).not.toBeNull();
     const name = dialog.getAttribute("aria-labelledby");
     expect(name).toBeTruthy();
-    expect(host.querySelector(`#${name}`)!.textContent).toBe("Find a task");
+    expect(host.querySelector(`#${name}`)!.textContent).toBe("查找任务");
   });
 });
 

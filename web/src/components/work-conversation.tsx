@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { ChatComposer } from "@/components/chat-composer";
+import { ChatComposer, type ComposerCopy } from "@/components/chat-composer";
 import { WorkActivityFeed, WorkMessageRow, WorkSinceAway, type WorkFeedRecord } from "@/components/work-activity-feed";
 import { Button } from "@/components/ui/button";
 import {
@@ -67,16 +67,23 @@ export interface WorkConversationProps {
   stopRefusal?: string;
 }
 
+export const WORK_COMPOSER_COPY: ComposerCopy = {
+  idle: "输入消息…（Shift+Enter 换行）", replying: "正在回复… 按 Enter 加入队列",
+  stoppable: "正在回复… 按 Enter 加入队列，Esc 停止", full: "队列已满",
+  queued: "已排队 · 回复结束后发送", edit: "编辑", remove: "移除排队消息", message: "消息",
+  stop: "停止回复（Esc）", stopReason: "停止回复", queue: "加入队列", queueButton: "加入队列", send: "发送",
+};
+
 const RECENT = "仅显示最近的对话";
 const EMPTY = "还没有对话";
 const LOADING = "正在加载对话…";
 const READ_FAILED = "对话读取失败";
 const NOT_FOUND = "任务不存在";
-const CHECKING = "Checking chat availability";
-const CHECK_FAILED = "Chat availability could not be checked";
-const NO_PLANNER = "Only tasks with a running Planner can be chatted with";
-const PLANNER_ENDED = "This task has ended, so its Planner no longer takes messages.";
-const CONNECT_FAILED = "Failed to connect. Is the server running?";
+const CHECKING = "正在检查对话可用性";
+const CHECK_FAILED = "无法检查对话可用性";
+const NO_PLANNER = "仅可与 Planner 运行中的任务对话";
+const PLANNER_ENDED = "任务已结束，Planner 不再接收消息。";
+const CONNECT_FAILED = "连接失败，请检查服务器是否运行。";
 const STREAM_LOST = "回复流已断开，服务端可能仍在运行";
 
 export const clearWorkComposerMemory = clearWorkConversationMemory;
@@ -109,7 +116,7 @@ function foldStream(messages: WorkPaneMessage[], events: SSEEvent[]): { messages
     } else if (event.kind === "answer.final") {
       const row = streaming();
       const text = String(event.payload.text ?? "");
-      row.content = text || row.content || "Done.";
+      row.content = text || row.content || "已完成。";
       row.streaming = false;
       row.outcome = event.payload.outcome === "stopped" ? "stopped" : undefined;
       phase = "";
@@ -145,12 +152,12 @@ export function WorkConversation(props: WorkConversationProps) {
 
   return (
     <section
-      aria-label="Conversation"
+      aria-label="对话"
       data-identity={ownerKey}
       data-task-status={detail?.status ?? ""}
       className="flex h-full min-h-0 flex-1 flex-col"
     >
-      <div ref={position.viewport} aria-label="Conversation history" className="flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto p-4 [overflow-anchor:none]">
+      <div ref={position.viewport} aria-label="对话历史" className="flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto p-4 [overflow-anchor:none]">
         {history === "loading" && shown.length === 0 && <p role="status">{loadingText ?? LOADING}</p>}
         {history === "error" && (
           <p role="alert" className="flex flex-wrap items-center gap-2 text-sm text-destructive">
@@ -186,6 +193,7 @@ export function WorkConversation(props: WorkConversationProps) {
           notice={notice}
           disabled={!canSend}
           controls="neutral"
+          copy={WORK_COMPOSER_COPY}
         />
       </div>
     </section>
@@ -320,7 +328,7 @@ export function PlannerWorkConversation({
     setLive((current) => current.taskId !== taskId ? current : { ...current, history: store.cached(cacheKey)?.messagesLoaded ? current.history : "loading", historyError: "" });
     fetchChatMessages(`planner-${taskId}`, ctrl.signal).then((rows) => {
       if (ctrl.signal.aborted || turn !== gen.current || taskRef.current !== taskId) return;
-      if (!Array.isArray(rows)) throw new Error("The server returned invalid chat messages.");
+      if (!Array.isArray(rows)) throw new Error("服务器返回了无效的对话消息。");
       if (sent !== sendGen.current) return;
       setLive((current) => current.taskId !== taskId ? current : {
         ...current,
@@ -407,7 +415,7 @@ export function PlannerWorkConversation({
             replying: false,
             messages: current.messages.map((message) => message.id === assistantId ? {
               ...message,
-              content: finalText || message.content || "Done.",
+              content: finalText || message.content || "已完成。",
               streaming: false,
               outcome: outcome === "stopped" ? "stopped" : undefined,
             } : message),
