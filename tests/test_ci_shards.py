@@ -64,7 +64,7 @@ def test_shards_partition_pr_collection(collection) -> None:
     assert any(node.startswith("tests/test_prompt_eval.py::") for node in baseline)
     file_counts = Counter(node.split("::", 1)[0] for node in baseline)
     durations = json.loads((ROOT / "tests/shard_durations.json").read_text(encoding="utf-8"))
-    assigned = conftest._assign_shard_units(dict(file_counts), durations, 6)
+    assigned = conftest._assign_shard_units(dict(file_counts), durations, 8)
     spans = conftest._file_spans(dict(file_counts), durations)
     seen: Counter[str] = Counter()
     node_shard: dict[str, int] = {}
@@ -83,8 +83,8 @@ def test_shards_partition_pr_collection(collection) -> None:
             assert count == sum(1 for node in baseline if node.startswith(f"{path}::"))
     combined: set[str] = set()
     counts = []
-    for shard in range(1, 7):
-        nodes = collection(f"{shard}/6")
+    for shard in range(1, 9):
+        nodes = collection(f"{shard}/8")
         assert nodes, f"shard {shard} is empty"
         assert nodes == [node for node in baseline if node_shard[node] == shard]
         assert combined.isdisjoint(nodes), f"shard {shard} overlaps another shard"
@@ -243,12 +243,12 @@ def test_invalid_shard_fails_at_configuration(shard: str) -> None:
     assert "LOOPER_TEST_SHARD must be N/TOTAL" in result.stderr
 
 
-def test_workflow_runs_six_shards_behind_stable_required_check() -> None:
+def test_workflow_runs_eight_shards_behind_stable_required_check() -> None:
     workflow = (ROOT / ".github/workflows/python-tests.yml").read_text(encoding="utf-8")
     shards = workflow.split("  agent-system:\n", 1)[1].split("\n  bridge-schema-pg18:", 1)[0]
-    assert "shard: [1, 2, 3, 4, 5, 6]" in shards
-    assert "name: Agent system tests (shard ${{ matrix.shard }}/6)" in shards
-    assert "LOOPER_TEST_SHARD: ${{ matrix.shard }}/6" in shards
+    assert "shard: [1, 2, 3, 4, 5, 6, 7, 8]" in shards
+    assert "name: Agent system tests (shard ${{ matrix.shard }}/8)" in shards
+    assert "LOOPER_TEST_SHARD: ${{ matrix.shard }}/8" in shards
     assert "timeout-minutes: 30" in shards
     assert "fail-fast: false" in shards
     result = workflow.split("  agent-system-result:\n", 1)[1].split("\n  dashboard:", 1)[0]
@@ -269,7 +269,7 @@ def test_shards_upload_total_test_durations_even_on_failure() -> None:
     assert "junit_duration_report=total" in run  # setup + call + teardown
     upload = next(step for step in steps if step.get("uses", "").startswith("actions/upload-artifact@"))
     assert "always()" in upload["if"]
-    assert upload["with"]["name"] == "agent-shard-junit-${{ matrix.shard }}-of-6"
+    assert upload["with"]["name"] == "agent-shard-junit-${{ matrix.shard }}-of-8"
     assert upload["with"]["path"] == "agent-shard-junit.xml"
     assert int(upload["with"]["retention-days"]) <= 7
 

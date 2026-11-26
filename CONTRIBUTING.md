@@ -33,7 +33,7 @@ disposable database; they create and drop their own schemas. CI runs the same
 command against a PostgreSQL service on every pull request. Which tests a
 change needs is described in section 1 of the development plan.
 
-PR agent tests use six shards balanced by the recorded seconds in
+PR agent tests use eight shards balanced by the recorded seconds in
 `tests/shard_durations.json`. A file heavier than 300 seconds is split into
 consecutive chunks of its collected tests, and those chunks can land on
 different shards; every other file stays whole. xdist work stealing within
