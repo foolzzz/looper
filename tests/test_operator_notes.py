@@ -55,7 +55,7 @@ def memory(root: Path, key: str, files: dict[str, str]) -> Path:
     return directory
 
 
-LONG = ("/private/tmp/claude-501/-Users-bytedance-persona-myloopx/79a1ad79-ca6f-4d93-a6e3-9702fd857d03/scratchpad/"
+LONG = ("/private/tmp/example-agent/-Users-operator-projects-demo/00000000-0000-4000-8000-000000000000/scratchpad/"
         "lane-workdir-i2/ccmem/plain/" + "a" * 120 + "/" + "b" * 60)
 
 
@@ -63,7 +63,7 @@ LONG = ("/private/tmp/claude-501/-Users-bytedance-persona-myloopx/79a1ad79-ca6f-
     ("/Users/me/my.repo_x", "-Users-me-my-repo-x"),
     ("/private/tmp/claude-501/-Users-me-proj", "-private-tmp-claude-501--Users-me-proj"),
     # Past 200 characters: the first 200, then the key's djb2 hash in base 36, as Claude Code 2.1.285 named it.
-    (LONG, re.sub(r"[^a-zA-Z0-9]", "-", LONG)[:200] + "-hkty31"),
+    (LONG, re.sub(r"[^a-zA-Z0-9]", "-", LONG)[:200] + "-jnntbz"),
 ])
 def test_a_directory_is_named_as_claude_code_names_it(key: str, name: str) -> None:
     assert directory_name(key) == name
