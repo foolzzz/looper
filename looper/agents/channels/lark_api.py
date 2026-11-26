@@ -15,7 +15,7 @@ from urllib.parse import parse_qs, quote, urlsplit
 import httpx
 
 from ..chat_attachments import TooLarge
-from .markdown_images import remote_images_as_links
+from .markdown_images import neutralize_images
 from .lark_cli import LarkCliError, MESSAGE_GONE_CODES, normalize_key, sent_message_id
 
 __all__ = ["BASE_URLS", "FEISHU_BASE_URL", "LARK_BASE_URL", "MESSAGE_GONE_CODES", "BotInfo", "LarkApi",
@@ -178,7 +178,7 @@ class LarkApi:
         if (text is None) == (markdown is None):
             raise ValueError("send exactly one of text and markdown")
         key = normalize_key(key)  # the same long-key rule as the CLI transport: one message per logical key
-        content = {"text": text} if text is not None else {"zh_cn": {"content": [[{"tag": "md", "text": remote_images_as_links(markdown)}]]}}
+        content = {"text": text} if text is not None else {"zh_cn": {"content": [[{"tag": "md", "text": neutralize_images(markdown)}]]}}
         body = {"msg_type": "text" if text is not None else "post", "content": json.dumps(content)}
         if key is not None:
             body["uuid"] = key

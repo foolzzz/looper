@@ -33,7 +33,7 @@ from typing import Any
 from ..db import card_actions as db_cards
 from ..db import system_settings
 from ..db import user_gates as db_user_gates
-from .channels.markdown_images import remote_images_as_links
+from .channels.markdown_images import neutralize_images
 from .message import manager_address, parse_channel_id
 from .user_gates import GateState, MessageKind
 
@@ -432,7 +432,7 @@ async def press_gate(row: dict[str, Any], event: Press, choice: str, *, bus: Any
 
 def lark_card(card: Card) -> dict[str, Any]:
     """The card as Lark's card JSON 2.0: its text as Markdown, then its buttons in a row."""
-    text = remote_images_as_links(card.text)
+    text = neutralize_images(card.text)
     text = f"<at id={card.mention}></at> {text}" if card.mention else text
     elements: list[dict[str, Any]] = [{"tag": "markdown", "content": text}]
     if card.buttons:
