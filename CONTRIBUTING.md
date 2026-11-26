@@ -33,11 +33,14 @@ disposable database; they create and drop their own schemas. CI runs the same
 command against a PostgreSQL service on every pull request. Which tests a
 change needs is described in section 1 of the development plan.
 
-PR agent tests use six whole-file shards balanced by the recorded seconds in
-`tests/shard_durations.json`, with xdist work stealing within each shard so idle
-workers can take queued cases from busy workers. New files use their item count
-times the median seconds per item of the collected, recorded files. CI uploads
-each shard's JUnit report (including setup and teardown) for seven days, even when tests fail.
+PR agent tests use eight shards balanced by the recorded seconds in
+`tests/shard_durations.json`. A file heavier than 300 seconds is split into
+consecutive chunks of its collected tests, and those chunks can land on
+different shards; every other file stays whole. xdist work stealing within
+each shard lets idle workers take queued cases from busy workers. New files
+use their item count times the median seconds per item of the collected,
+recorded files. CI uploads each shard's JUnit report (including setup and
+teardown) for seven days, even when tests fail.
 After a completed run, refresh the committed weights with an authenticated `gh`:
 
 ```bash
