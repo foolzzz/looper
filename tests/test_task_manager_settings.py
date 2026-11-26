@@ -172,6 +172,47 @@ def test_reselecting_the_same_effective_profile_keeps_the_idle_resident(monkeypa
     run_db(check, monkeypatch)
 
 
+def test_changing_the_profile_saves_and_publishes_once(monkeypatch, caplog):
+    """Selecting a different profile records and publishes one switch; the same profile again does neither.
+
+    The resident guard and this path share ``changed``. The conversation event is the
+    write that guard owns: the task layer is stored either way.
+    """
+    import json
+
+    from looper.agents.tiers import task_manager
+    from looper.db import chat, projects, tasks
+
+    monkeypatch.setattr(agent_settings, "_login_problem", AsyncMock(return_value=None))
+    monkeypatch.setattr(task_manager, "current_pool", lambda: None)
+    published = []
+
+    async def publish(task_id, payload):
+        published.append((task_id, dict(payload)))
+
+    async def check(db):
+        project = await projects.create_project(name="Publish profile once", pool=db)
+        await tasks.create_task(task_id="task-publish", requirement="Synthetic work",
+                                project_id=project["id"], pool=db)
+        with caplog.at_level("WARNING", logger="looper.agents.task_manager_settings"):
+            await settings.set_task_manager_profile("task-publish", "agent-claude-code-opus", publish=publish)
+            saved = await chat.list_messages(chat.task_thread("task-publish"), pool=db)
+            events = [json.loads(row["content"]) for row in saved if row["role"] == "event"]
+            body = {"kind": "model_switched", "from_profile_id": settings.DEFAULT_PROFILE_ID,
+                    "to_profile_id": "agent-claude-code-opus"}
+            assert events == [body]
+            assert published == [("task-publish", body)]
+
+            await settings.set_task_manager_profile("task-publish", "agent-claude-code-opus", publish=publish)
+            again = await chat.list_messages(chat.task_thread("task-publish"), pool=db)
+            assert [row["content"] for row in again] == [row["content"] for row in saved]
+            assert published == [("task-publish", body)]
+            assert [record.message for record in caplog.records
+                    if record.name == "looper.agents.task_manager_settings"
+                    and "could not publish the model switch" in record.message] == []
+    run_db(check, monkeypatch)
+
+
 def test_profile_switch_refuses_non_claude_runtime(monkeypatch):
     from looper.agents.ops import ErrorCode, OpError
     from looper.agents.tiers import task_manager
