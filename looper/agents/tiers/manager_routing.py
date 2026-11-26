@@ -30,7 +30,7 @@ from datetime import datetime, timezone
 from enum import StrEnum
 from typing import TYPE_CHECKING, Any
 
-from .. import admission, chat_scopes, lanes_settings, mid_turn_input, session_routing
+from .. import admission, chat_scopes, lanes_settings, mid_turn_input, session_routing, session_visibility
 from ..lanes import Lane
 from ..message import MessageEnvelope, MessageType
 from ..runtimes import CLAUDE_CODE
@@ -243,6 +243,9 @@ class SessionRouter:
             label = session_routing.resident_label(self._agent.agent_id, key)
             sessions[key.text] = ManagerSession(key=key.text, route=key, claude=CLAUDE_CODE.resident_session(label),
                                                 claude_runtime=CLAUDE_CODE, last_activity=self._agent._clock(), scope=scope)
+            if scope is not None and scope.mode is chat_scopes.LaunchMode.PLATFORM_TOOLS:
+                session_visibility.register_scoped(self._agent.agent_id, key.text,
+                                                   session_visibility.SCOPED_CHAT_ALLOWLIST)
         session = sessions[key.text]
         if (session.scope.fingerprint if session.scope else None) != (scope.fingerprint if scope else None):
             raise ScopeInvariantViolation("session scope differs from its key")
@@ -369,7 +372,8 @@ class SessionRouter:
             # The last turn may have inserted its first row after reconcile's UPDATE.
             await manager_sessions.retire(self._agent.agent_id, [session.key], Retirement.SCOPE_CHANGED.value)
             if self._agent.ops is not None:
-                self._agent.ops.forget_session(session.key)
+                self._agent.ops.retire_session(session.key)
+            session_visibility.forget_scoped(self._agent.agent_id, session.key)
             worker = self._workers.get(session.key)
             if worker is not None and worker is not asyncio.current_task():
                 worker.cancel()

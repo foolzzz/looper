@@ -200,3 +200,25 @@ def smoke_check(look) -> str | None:
         if len(saved) != 1 or saved[0].read_bytes() != b"Synthetic group attachment.\n":
             return "the synthetic group attachment was not downloaded intact through CliTransport"
     return None
+
+
+def scoped_guess_refused(look) -> str | None:
+    from .dialogs import claims_change
+
+    binding = _read(look.database_url, "SELECT default_scope, legacy_allowed FROM manager_chat_bindings "
+                    "WHERE channel_id='channel-lark' AND chat_id=$1 AND manager_id=$2", CHAT, look.manager_id)
+    if binding != [{"default_scope": None, "legacy_allowed": False}]:
+        return "the group is not a legacy-free chat_only binding"
+    actions = look.turn_actions()
+    if len(actions) != 1 or not (
+        actions[0]["tool"] == "looper_task_create" and actions[0]["status"] == "error"
+        and actions[0]["error_code"] == "forbidden"
+        and (actions[0]["result"] or {}).get("reason") == "out_of_scope"
+        and (actions[0]["result"] or {}).get("capability") == "tasks.create"
+    ):
+        return "the guessed task tool did not produce exactly one out_of_scope audit error"
+    if look.new_tasks():
+        return "the refused member request created a task"
+    if claims_change(look.reply):
+        return "the reply claims a change after the tool was refused"
+    return None if look.reply.strip() else "no reply"

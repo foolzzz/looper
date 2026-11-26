@@ -1,8 +1,8 @@
-"""Fail-closed model boundary for the default Manager's routed group and DM sessions.
+"""Fail-closed model boundary for routed and scoped chat sessions.
 
 NON_MAIN_ALLOWLIST is the complete grant, for both inputs and tools. New global
 sections, contracts and tools do not inherit permission. Main (including every
-turn while routing is off) and scenario Managers keep their existing assembly and authorization.
+turn while routing is off) and unscoped scenario sessions keep their existing assembly and authorization.
 """
 
 from collections.abc import Mapping
@@ -46,6 +46,22 @@ NON_MAIN_ALLOWLIST = SessionAllowlist(
     tools=frozenset(),
 )
 
+SCOPED_CHAT_ALLOWLIST = SessionAllowlist(version=1, inputs=NON_MAIN_ALLOWLIST.inputs, tools=frozenset())
+_SCOPED: dict[tuple[str, str], SessionAllowlist] = {}
+
+
+def register_scoped(manager_id: str, key: str, allowlist: SessionAllowlist) -> None:
+    _SCOPED[manager_id, key] = allowlist
+
+
+def forget_scoped(manager_id: str, key: str) -> None:
+    _SCOPED.pop((manager_id, key), None)
+
+
+def scoped_for(manager_id: str, key: str) -> SessionAllowlist | None:
+    return _SCOPED.get((manager_id, key))
+
+
 PUBLIC_PROMPT = (
     "You are Looper's chat assistant for this conversation. Answer the current message using only this chat. "
     "You have no access to the operator's projects, tasks, settings, memories or other conversations, and no "
@@ -88,9 +104,11 @@ PUBLIC_PROMPT_TOOLS = (
 
 
 def for_session(key: str, *, manager_id: str) -> SessionAllowlist | None:
-    """Only the default Manager's routed turns are restricted, including while routing drains."""
+    """Scoped grants take precedence; otherwise preserve the default Manager's routed boundary."""
     from .managers_api import DEFAULT_MANAGER_ID
 
+    if (scoped := scoped_for(manager_id, key)) is not None:
+        return scoped
     if manager_id != DEFAULT_MANAGER_ID or key == "main":
         return None
     return NON_MAIN_WITH_TOOLS if session_tools_settings.enabled() else NON_MAIN_ALLOWLIST

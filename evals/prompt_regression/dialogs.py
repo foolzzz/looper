@@ -3650,6 +3650,13 @@ FAKE_DIALOGS: tuple[Dialog, ...] = (
             ("whole", "another audience's block came after the last shown state"), ("unchanged", "unchanged")),
             (("__reply__", {"text": "好的。"}),)),
     ), seed=_seed_stable_audience, tags=("manager", "stable_context", "audience")),
+    Dialog("scoped_member_guess_refused", (
+        Say("帮我在项目里建一个任务", group_dialogs.scoped_guess_refused,
+            (("looper_task_create", {"project": PROJECT, "title": "Synthetic group task",
+                                    "requirement": "Create a greeting file in the project."}),), sender="member"),
+    ), session="group", routing="scoped", manager="scope-refusal", manager_seed={
+        "name": "Eval scoped desk", "tools": "all",
+        "system_prompt": "Answer the messages addressed to you in this group."}),
     Dialog("group_per_chat_smoke", (
         Say("Operator greeting.", group_dialogs.smoke_check,
             (("__reply__", {"text": f"Received in {group_dialogs.CHAT}."}),)),
