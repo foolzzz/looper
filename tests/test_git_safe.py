@@ -344,6 +344,83 @@ def test_a_relocated_checkout_is_run_without_the_layout_check(repo, tmp_path):
     assert refused.value.reason == "attributes_driver"
 
 
+def test_a_gitdir_link_elsewhere_runs_nothing_and_is_refused(repo, probe, marker, tmp_path):
+    """A task directory whose ``.git`` file points at a repository armed with a probe."""
+    other = tmp_path / "other"
+    other.mkdir()
+    plain(other, "init", "-q", "-b", "main")
+    plain(other, "config", "core.fsmonitor", str(probe))
+    task = tmp_path / "task"
+    task.mkdir()
+    (task / ".git").write_text(f"gitdir: {other / '.git'}\n")
+    plain(task, "status", "--porcelain", check=False)
+    assert fired(marker), "positive control: the linked repository's fsmonitor fires with plain git"
+    marker.unlink()
+    with pytest.raises(git_safe.RepositoryRefused):
+        safe(task, "status", "--porcelain")
+    assert fired(marker) == []
+
+
+def test_core_worktree_in_the_config_runs_nothing_and_is_refused(repo, probe, marker, tmp_path):
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    plain(repo, "config", "core.fsmonitor", str(probe))
+    plain(repo, "config", "core.worktree", str(elsewhere))
+    plain(repo, "status", "--porcelain", check=False)
+    plain(repo, "--git-dir", str(repo / ".git"), "status", "--porcelain", check=False)
+    assert fired(marker), "positive control: git runs the configured fsmonitor against the redirected work tree"
+    marker.unlink()
+    assert safe(elsewhere, "status", "--porcelain").returncode == 128  # no repository is found there
+    with pytest.raises(git_safe.RepositoryRefused):
+        safe(repo, "status", "--porcelain")
+    assert fired(marker) == []
+
+
+SUBMODULE_COMMANDS = {"status": ("status", "--porcelain"), "add": ("add", "-A"), "commit": ("commit", "-q", "-a", "-m", "x"),
+                      "diff": ("diff",), "worktree_add": ("worktree", "add", "-q", "--detach", "../wt", "HEAD")}
+
+
+def _arm_submodule(repo: Path, module: Path, probe: Path) -> None:
+    """The submodule's own config, hook, attributes and a change inside it."""
+    plain(module, "config", "core.fsmonitor", str(probe))
+    plain(module, "config", "filter.evil.clean", str(probe))
+    plain(module, "config", "diff.evil.textconv", str(probe))
+    (module / ".gitattributes").write_text("*.txt filter=evil diff=evil\n")
+    hook = Path(plain(module, "rev-parse", "--path-format=absolute", "--git-path", "hooks").stdout.strip()) / "pre-commit"
+    hook.parent.mkdir(exist_ok=True)
+    hook.write_text(f'#!/bin/sh\nexec "{probe}" submodule-hook\n')
+    hook.chmod(0o755)
+    (module / "f").write_text("changed in the submodule\n")
+    (module / "g.txt").write_text("new\n")
+    (repo / "a.txt").write_text("changed in the superproject\n")
+
+
+@pytest.mark.parametrize("command", SUBMODULE_COMMANDS)
+def test_a_submodule_runs_nothing_either(command, repo, probe, marker, tmp_path):
+    module = _submodule(tmp_path, repo)
+    plain(repo, "commit", "-q", "-m", "module")
+    _arm_submodule(repo, module, probe)
+    args = SUBMODULE_COMMANDS[command]
+    plain(repo, *args, check=False)
+    plain(module, "add", "-A", check=False)
+    positive = fired(marker)
+    assert positive, f"positive control: the submodule's own code fires with plain git (git {command})"
+    marker.unlink()
+    _arm_submodule(repo, module, probe)
+    safe(repo, *args)
+    safe(repo, "status", "--porcelain", "--ignore-submodules=none")
+    assert fired(marker) == []
+
+
+def test_a_submodule_info_attributes_is_refused_when_the_helper_runs_in_it(repo, probe, tmp_path):
+    module = _submodule(tmp_path, repo)
+    git_dir = Path(plain(module, "rev-parse", "--path-format=absolute", "--git-dir").stdout.strip())
+    (git_dir / "info").mkdir(exist_ok=True)
+    (git_dir / "info" / "attributes").write_text("*.txt filter=evil\n")
+    with pytest.raises(git_safe.RepositoryRefused):
+        safe(module, "status")
+
+
 def test_outside_a_repository_the_command_runs_and_fails_as_before(tmp_path):
     plain_run = subprocess.run(["git", "-C", str(tmp_path), "rev-parse", "--show-toplevel"], env=_PLAIN_ENV,
                                capture_output=True, text=True)
