@@ -36,9 +36,24 @@ async def save_message(
     ``channels.base.DeliveryFailure``) and the channel's error.
 
     ``entry_kind`` is ``message``, ``command`` or ``command_reply`` when the writer classified the row. A later
-    save that omits it keeps the kind already stored.
+    save that omits it keeps the kind already stored. The column stays out of that statement, so a database that
+    has not added it yet can still store the message.
     """
     pool = pool or get_pool()
+    if entry_kind is None:
+        await pool.execute(
+            """
+            INSERT INTO chat_messages (session_id, message_id, role, content, channel, created_at, delivery_failure,
+                                       delivery_error)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+            ON CONFLICT (session_id, message_id) DO UPDATE
+            SET content = EXCLUDED.content, delivery_failure = EXCLUDED.delivery_failure,
+                delivery_error = EXCLUDED.delivery_error
+            """,
+            session_id, message_id, role, content, channel,
+            datetime.now(timezone.utc), delivery_failure, delivery_error,
+        )
+        return
     await pool.execute(
         """
         INSERT INTO chat_messages (session_id, message_id, role, content, channel, created_at, delivery_failure,
@@ -47,7 +62,7 @@ async def save_message(
         ON CONFLICT (session_id, message_id) DO UPDATE
         SET content = EXCLUDED.content, delivery_failure = EXCLUDED.delivery_failure,
             delivery_error = EXCLUDED.delivery_error,
-            entry_kind = COALESCE(EXCLUDED.entry_kind, chat_messages.entry_kind)
+            entry_kind = EXCLUDED.entry_kind
         """,
         session_id, message_id, role, content, channel,
         datetime.now(timezone.utc), delivery_failure, delivery_error, entry_kind,
