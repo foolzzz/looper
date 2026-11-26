@@ -1180,7 +1180,10 @@ def _install_wheel(host: Host, source: str, *, dependencies: bool, environment: 
 
 
 class _InstallFailed(ServiceError):
-    """The target's dependencies failed to install after the stop; the checkout was put back."""
+    """The target's dependencies failed to install after the stop; the checkout was put back
+    unless ``keep_stopped`` says it could not be, in which case the service must stay stopped."""
+
+    keep_stopped = False
 
 
 def _sync_command(host: Host, project: Path) -> list[str]:
@@ -1252,9 +1255,13 @@ def _restore_checkout(host: Host, previous: str, saved_lock: bytes | None, comma
         elif lock.exists():
             lock.unlink()
     except (ServiceError, OSError) as exc:
-        return _InstallFailed(f"installing the target's dependencies failed after the stop ({failure}) and the checkout "
-                              f"could not be reset to {previous} ({exc}); it is still on the target commit with the "
-                              "old environment, so do not start the service until the checkout is reset by hand")
+        stuck = _InstallFailed(
+            f"installing the target's dependencies failed after the stop ({failure}) and the checkout could not be "
+            f"reset to {previous} ({exc}); the service is stopped and was NOT restarted, because the checkout is on "
+            f"the target commit with the old environment. Next step: run `git -C {host.cwd} reset --hard {previous}`, "
+            "then `looper service restart`")
+        stuck.keep_stopped = True
+        return stuck
     # A failed sync may have changed packages before failing: put the old set back from the cache.
     try:
         _checked(host, command, installing=True, env={**environment, "UV_OFFLINE": "1"})
@@ -1628,7 +1635,7 @@ def _execute_plan(host: Host, mgr: _Manager, *, port: int, root: Path, log_path:
                             raise port_conflict()
                         stopped = True
                 # Retry an exited or failed start from a stopped unit before cancelling.
-                if stopped:
+                if stopped and not getattr(exc, "keep_stopped", False):
                     pid = None
                     if start_attempted:
                         pid = mgr.state().pid
@@ -1645,7 +1652,7 @@ def _execute_plan(host: Host, mgr: _Manager, *, port: int, root: Path, log_path:
                 report["recovery_error"] = str(cancel_error)
                 if isinstance(cancel_error, ServiceStarting):
                     starting = cancel_error
-            if starting is None:
+            if starting is None and not getattr(exc, "keep_stopped", False):
                 try:
                     host.system_operation(port, token, "drain_cancel", {}, address=address)
                 except (ServiceError, OSError) as cancel_error:

@@ -1657,6 +1657,28 @@ def test_offline_sync_failure_does_not_send_the_operator_to_a_plain_restart(depe
     assert "looper service restart" not in capsys.readouterr().err
 
 
+def test_failed_checkout_reset_leaves_the_service_stopped(dependency_upgrade, capsys):
+    deployment = dependency_upgrade.deployment
+    dependency_upgrade.fail.post = True
+    run = deployment.host.run
+
+    def execute(argv, **kwargs):
+        if "reset" in argv:
+            return subprocess.CompletedProcess(argv, 1, "", "cannot lock ref")
+        return run(argv, **kwargs)
+
+    deployment.host.run = execute
+    deployment.host.get_status = lambda *args, **kwargs: (
+        deployment.responses.status if deployment.state.running else None)
+    assert cli.main(["service", "upgrade"]) == 1
+    # The checkout is still on the target: the old version must not be started on it.
+    assert "start" not in deployment.events and not deployment.state.running
+    assert "drain_cancel" not in deployment.events
+    error = capsys.readouterr().err
+    assert "NOT restarted" in error and "reset --hard" in error and "serving: no" in error
+    assert report(deployment)["serving"] is False and "restart_hint" not in report(deployment)
+
+
 def test_failed_sync_restores_the_local_lock_file(checkout_install, tmp_path):
     lock = checkout_install.host.cwd / "uv.lock"
     lock.write_bytes(b"old lock")
