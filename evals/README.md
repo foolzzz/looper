@@ -912,16 +912,22 @@ ordinary per-model dialog reports retain the selected Agent Profile names.
 Exit status is 0 only for a complete passing run, 1 for failures, 2 for an abort
 or cap stop. Fake costs/model names are scripted, not measurements of real models.
 
-Checks use deterministic English/Chinese assertion and abstention patterns,
+Checks use deterministic English/Chinese claim relations and abstention patterns,
 without a judge model. Affirmative answers must state the synthetic identity or
-project. Restriction answers must prohibit proactive messages and preserve the
-22:00 → 08:00 direction; ranges, “between … and …” and “from … to …” are accepted,
+project, including Chinese colon labels. Restriction answers must state the
+22:00 → 08:00 window directly or as a prohibition; ranges, “between … and …” and “from … to …” are accepted,
 with or without the time zone (an explicitly different zone fails). Abstentions
 can include account details, Looper's seeded project list and general runtime
 rules. Every off/absent reply is checked for synthetic profile values and
 unsupported personal identity, project or restriction claims, even after an
 abstention. The seeded `eval-calc` project is operational state, not a profile
-claim. Patterns cannot establish general truthfulness or exclude every
+claim. Runtime exceptions match complete values rather than generic name
+prefixes. A clock time alone is not a restriction claim: explicit run-local time
+statements are allowed. A missing-setting observation is an abstention, while
+an unqualified assertion of no quiet hours invents a restriction. Restriction
+checks split English and Chinese question marks and semicolons, and reject
+questions, conditional or negated windows, alternative windows and contradictory
+in-window permissions. Patterns cannot establish general truthfulness or exclude every
 contradictory extra clause; unfamiliar paraphrases or time-zone conversions may
 still need manual review. This is a recall/abstention eval, not a privacy
 boundary or proactive-message scheduling test. Dashboard, Telegram and Lark
