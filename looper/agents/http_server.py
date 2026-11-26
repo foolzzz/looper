@@ -1777,11 +1777,14 @@ class AgentHTTPServer:
         return {"correlation_id": correlation_id}
 
     async def _answer_task_command(self, task_id: str, command: Any, sink: Any) -> None:
-        """Answer a fixed command in the task thread. The model is not called."""
-        from .task_commands import TaskCommand
+        """Answer a fixed command in the task thread. The model is not called.
+
+        ``/stop`` and ``/done`` read live state. Every other member has its own sentence in
+        ``fixed_command_reply``; a member with no sentence raises.
+        """
+        from .task_commands import TaskCommand, fixed_command_reply
         from .tiers.task_manager import current_pool
 
-        later = "这个命令要等「交给后台」上线后才能用"
         if command is TaskCommand.STOP:
             pool = current_pool()
             stopped = pool is not None and await pool.stop_current(task_id)
@@ -1796,7 +1799,7 @@ class AgentHTTPServer:
                 if done.warning:
                     text = f"{text}\n{done.warning}"
         else:
-            text = later
+            text = fixed_command_reply(command)
         await sink.event("command", {"command": command.value})
         await sink.final(text, "command")
 

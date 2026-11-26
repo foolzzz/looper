@@ -30,7 +30,15 @@ PREFIX = "/api/v1/operator_chat/"
 # Hash of /operator_chat/* paths plus the component schemas those paths $ref, excluding ErrorCode, after stripping.
 # Recompute by hashing that same selection from main's document with nothing stripped; the two hashes must match.
 PRE_CARD_DOCUMENT = "424bc93c721eb5b547483ae0db286f0ed88910b265bf60ba87488fec88e12a61"
-LATER = "这个命令要等「交给后台」上线后才能用"
+BACKGROUND_REPLY = "这个命令要等「交给后台」上线后才能用"
+START_REPLY = "请用上方的「开始」按钮启动任务"
+LATER_CONTROL_REPLY = "此控制将在后续步骤提供"
+UNAVAILABLE_REPLIES = {
+    "/background": BACKGROUND_REPLY,
+    "/start": START_REPLY,
+    "/pause": LATER_CONTROL_REPLY,
+    "/takeover": LATER_CONTROL_REPLY,
+}
 
 
 @pytest.fixture(autouse=True)
@@ -320,17 +328,12 @@ def test_commands_never_reach_pool(monkeypatch, tmp_path):
             assert final_text(warning)["text"] == "任务已完成\nkept the worktree"
             assert "branch line" not in final_text(warning)["text"]
             assert pool.calls == []
-            status, answer = await send(server, task_id, "/background", "later")
-            assert status == 200, answer
-            later = await reply(server, answer["result"]["correlation_id"])
-            assert final_text(later)["text"] == LATER
-            command_event(later, "/background")
-            assert pool.calls == []
-            for word in ("/pause", "/takeover", "/start"):
+            for word, reply_text in UNAVAILABLE_REPLIES.items():
                 status, answer = await send(server, task_id, word, "later-" + word[1:])
                 assert status == 200, answer
                 events = await reply(server, answer["result"]["correlation_id"])
-                assert final_text(events)["text"] == LATER
+                assert final_text(events)["text"] == reply_text
+                command_event(events, word)
             assert pool.calls == []
             status, answer = await send(server, task_id, "work", "running")
             assert status == 200, answer
@@ -696,12 +699,23 @@ def test_fixed_commands_never_submit_or_enter_history(monkeypatch, tmp_path):
         work_on()
         task_id = await make_task(conn, tmp_path)
         async with opened(tmp_path) as server:
+            expected = {
+                TaskCommand.STOP: "现在没有在进行的回合",
+                TaskCommand.DONE: "任务已完成",
+                TaskCommand.PAUSE: LATER_CONTROL_REPLY,
+                TaskCommand.BACKGROUND: BACKGROUND_REPLY,
+                TaskCommand.TAKEOVER: LATER_CONTROL_REPLY,
+                TaskCommand.START: START_REPLY,
+            }
+            assert set(expected) == set(TaskCommand)
             for command in TaskCommand:
                 status, answer = await send(server, task_id, f"\n  {command.value.upper()}  ",
                                             "cmd-" + command.value[1:])
                 assert status == 200, answer
                 events = await reply(server, answer["result"]["correlation_id"])
+                assert final_text(events)["text"] == expected[command]
                 assert final_text(events)["outcome"] == "command"
+                command_event(events, command.value)
                 assert pool.calls == []
             status, answer = await send(server, task_id, "please continue", "after-commands")
             assert status == 200, answer
@@ -710,7 +724,7 @@ def test_fixed_commands_never_submit_or_enter_history(monkeypatch, tmp_path):
             for command in TaskCommand:
                 assert command.value not in blob
                 assert f"\n  {command.value.upper()}  " not in blob
-            for phrase in ("现在没有在进行的回合", "任务已完成", "这个命令要等"):
+            for phrase in ("现在没有在进行的回合", "任务已完成", BACKGROUND_REPLY, START_REPLY, LATER_CONTROL_REPLY):
                 assert phrase not in blob
             assert conn is not None
     run_db(check, monkeypatch, timeout=60)

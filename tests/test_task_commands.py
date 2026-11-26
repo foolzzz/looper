@@ -1,7 +1,10 @@
 """Whole-message task commands parse, and a sentence that only contains one does not."""
 
+import pytest
+
 from looper.agents.task_commands import (
-    DIRECT, ORCHESTRATED, STARTING, TaskCommand, delivery_route, history_for_model, parse,
+    DIRECT, NOT_YET_REPLIES, ORCHESTRATED, STARTING, TaskCommand, delivery_route, fixed_command_reply,
+    history_for_model, parse,
 )
 from looper.agents.tiers.task_manager import resume_message
 
@@ -16,6 +19,24 @@ def test_parse_commands():
     assert parse("/DONE") is TaskCommand.DONE
     for text in ("/stop now", "please /done", "/stopped", "/done please", "stop", "", "/stop/done", " / stop"):
         assert parse(text) is None
+
+
+def test_every_task_command_has_a_reply():
+    """Each command is answered from live state or from its own mapped sentence. A gap raises."""
+    live = {TaskCommand.STOP, TaskCommand.DONE}
+    assert live.isdisjoint(NOT_YET_REPLIES)
+    assert set(NOT_YET_REPLIES) | live == set(TaskCommand)
+    assert NOT_YET_REPLIES == {
+        TaskCommand.BACKGROUND: "这个命令要等「交给后台」上线后才能用",
+        TaskCommand.START: "请用上方的「开始」按钮启动任务",
+        TaskCommand.PAUSE: "此控制将在后续步骤提供",
+        TaskCommand.TAKEOVER: "此控制将在后续步骤提供",
+    }
+    for command, text in NOT_YET_REPLIES.items():
+        assert fixed_command_reply(command) == text
+    for command in live:
+        with pytest.raises(RuntimeError, match="no reply"):
+            fixed_command_reply(command)
 
 
 def test_delivery_route_by_status():

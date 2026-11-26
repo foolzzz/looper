@@ -40,6 +40,40 @@ MESSAGE_TEXT_CONFLICT = "this message_id was already sent with different text"
 STARTING_REPLY = "已存储，启动中"
 ORCHESTRATED_REPLY = "这句话已留下，没有交给任务管家。编排中的纠正还不能从这里送出。"
 
+# Answered from the live turn or the task status, not from NOT_YET_REPLIES.
+_LIVE_REPLIES = frozenset({TaskCommand.STOP, TaskCommand.DONE})
+
+
+def _require_reply_for_every_command(replies: Mapping[TaskCommand, str]) -> Mapping[TaskCommand, str]:
+    """Each member is live or named once. A new command must not reuse another command's sentence."""
+    missing = [command.value for command in TaskCommand if command not in replies and command not in _LIVE_REPLIES]
+    overlap = [command.value for command in replies if command in _LIVE_REPLIES]
+    if missing or overlap:
+        raise RuntimeError(
+            f"task command replies must cover each command once; missing={missing} overlap={overlap}")
+    return replies
+
+
+NOT_YET_REPLIES: Mapping[TaskCommand, str] = _require_reply_for_every_command({
+    TaskCommand.BACKGROUND: "这个命令要等「交给后台」上线后才能用",
+    TaskCommand.START: "请用上方的「开始」按钮启动任务",
+    TaskCommand.PAUSE: "此控制将在后续步骤提供",
+    TaskCommand.TAKEOVER: "此控制将在后续步骤提供",
+})
+
+
+def fixed_command_reply(command: TaskCommand) -> str:
+    """The code reply for a command this conversation does not run.
+
+    ``/stop`` and ``/done`` are answered from the live turn and the task status. Any other member must be in
+    ``NOT_YET_REPLIES``; a missing one raises instead of borrowing another command's sentence.
+    """
+    try:
+        return NOT_YET_REPLIES[command]
+    except KeyError:
+        raise RuntimeError(f"no reply for task command {command!r}") from None
+
+
 # The background is starting. The message is kept; a task Manager turn would race that start.
 _STARTING_STATUSES = frozenset({"pending", "assigned"})
 DIRECT = "direct"
