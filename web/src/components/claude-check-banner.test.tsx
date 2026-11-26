@@ -4,7 +4,7 @@ import { createRoot } from "react-dom/client";
 import { afterEach, expect, it, vi } from "vitest";
 import { ClaudeCheckBanner } from "@/components/claude-check-banner";
 import { redactDisplay } from "@/lib/attention-display";
-import cases from "../../../tests/fixtures/attention-redaction.json";
+import cases from "@/test-fixtures/attention-redaction.json";
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 afterEach(() => vi.unstubAllGlobals());

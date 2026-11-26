@@ -571,11 +571,15 @@ Manager has no tool for it. The dashboard shows the task page's 指标 card and 
   a missing, invalid or unreadable source logs a warning and yields no profile, without disabling other vault
   tools or returning a previously cached profile.
   The compiler preserves typed fields — name, address, reply language, time zone, working hours, communication
-  preferences and standing rules — with relative-path, heading and line citations. Inline `[kind:: …]` bullets
-  keep their existing classification and inactive-entry filtering. Frontmatter and fenced code are excluded;
+  preferences, standing rules and background facts (`about`) — with relative-path, heading and line citations.
+  Inline `[kind:: fact]` bullets compile under `About:`; `person`, `decision`, `commitment`, `request` and
+  `deadline` remain under `Standing rules:`, while `preference` and `habit` remain under `Communication:`.
+  Superseded and deleted entries, frontmatter and fenced code are excluded; unknown kinds are skipped;
   backticks are normalized. Duplicate single-value fields fail compilation. The text stays within 1500 Unicode
-  characters, dropping lower-priority fields first and truncating a remaining oversized field with `…`.
-  `profile.get` caches the compiled block in `profile_blocks`, retaining its version when the body is unchanged.
+  characters, dropping lower-priority fields first (`About:` before `Standing rules:`) and truncating a remaining
+  oversized value with `…`. Profiles without facts keep exactly the same compiled text.
+  `profile.get` caches the compiled block in `profile_blocks`, advancing its version only when the text changes;
+  citation and field metadata refreshes alone retain the version.
   Manager and CLI reads do not write that cache.
   The independent operator-only `profile_settings.get/update` operations control `manager.profile.enabled`
   (default off; null restores off). Settings → Knowledge vault exposes its confirmed switch. Off, the Manager
@@ -830,6 +834,37 @@ Manager has no tool for it. The dashboard shows the task page's 指标 card and 
   channel adds the reply to that chat's history (`chat_messages`, shown when
   the chat is opened) instead of a message's stream; Lark and Telegram send it
   to the chat. With no message before it, the reply is only recorded
+
+### Task Manager (`looper/agents/tiers/task_manager.py`)
+
+Each task can own a Claude Code resident, separate from the operator's Manager.
+The pool is constructed after workspace recovery, before HTTP admission; constructing
+it starts no model process. `tasks.conversations.enabled` remains off by default.
+The independent `task_manager` role defaults to Sonnet; task profile overrides take
+precedence over that role and never inherit the owning Manager's profile. Other
+runtimes are refused rather than substituted.
+
+Direct launches append the fixed task instructions and a bounded, fenced brief.
+They retain the operator's settings, memory and MCP servers. Orchestrated or
+unrecoverable workspaces use the existing isolated read-only command. The child
+receives `LOOPER_TASK_MANAGER`, never `LOOPER_AGENT_RUN`. An enabled outbound review
+requires an actual review hook. Before every direct launch or resume, a typed
+settings-source table rejects hook-disabling settings and environment variables;
+unreadable settings also fail closed. Managed policy checks are statically
+confirmed only. Claude Code must match the verified version constant; upgrading
+it requires rerunning the local fake-model launch probe. Refusals name the file
+and key or CLI version, and increment a reason/phase/version counter visible in
+`manager_metrics.get` while work mode is enabled.
+
+`tasks.managers.max_resident` defaults to 6 (1–20). Admission can reclaim the least
+recently used idle process; a 60-second ticker reclaims processes idle for 30
+minutes, measured from the end of the last turn. Admission, including preparation,
+shares the pool gate; all-busy messages queue visibly, and an active turn prevents
+starting the task in the background. Shutdown stops owned processes; deleting a
+task forgets its resident and session. This foundation provides the scheduling and
+native-turn primitive, with no conversation transport or task-bound MCP tools.
+Session persistence, per-task profile switching and turn accounting belong to the
+stacked turn implementation.
 
 ### TaskRouter (`looper/agents/tiers/task.py`)
 
@@ -8914,6 +8949,11 @@ is not done.
 
 ## Web Dashboard
 
+The Work page is called 工作台 in the Chinese UI, with the bilingual sidebar label
+“Work 工作台”, matching “Ledger 账本”. Its pinned main Manager conversation is
+labelled 管家; task conversations use their task names and call the counterpart
+任务管家.
+
 In Work, one task details column lists the plan and gate summaries from the
 selected task's shared detail. Both gate entry points locate the conversation's
 existing gate card; only that card owns the editor and discussion reads. Narrow
@@ -8980,6 +9020,30 @@ built by `scripts/stage-dashboard.sh` at release time), and it carries
   activity pages and growing tool results preserve that anchor; live updates follow the bottom only
   when the reader is there. One “你离开之后” separator precedes the first row after the departure
   watermark. This client watermark is independent of `tasks.mark_seen`, which still sends only a sequence.
+- **Work drafts**: the centre composer appends messages to the server requirement through
+  `tasks.requirement_update`, separated by a blank line, and displays the persisted text and version.
+  It rereads before appending and sends that requirement's version as `expected_version` (1 before the first
+  edit). The optional integer on `tasks.requirement_update` is checked atomically under the task row lock;
+  a mismatch returns HTTP 409 `requirement_changed` with `details.current_version` and writes nothing.
+  Omitting it preserves unconditional edits. The right-panel editor sends the version it opened with.
+  Input clears only after readback confirms the write. A conflict reloads the current requirement, keeps
+  unsent text and asks the user to check and resend against the latest version. Every failed save releases
+  the composer lock and preserves input; an uncertain save also offers a read-only retry. Draft messages do not
+  start a Planner. The adjacent Start control requires a nonempty requirement and valid directory and
+  retains its owner and confirmation result when the task leaves draft. Other tasks keep panel controls.
+  Untitled rows and headers share a local creation-time label; task rows reserve the first line for
+  the title and show a single short status with a colored dot below it. New labels follow the panel's
+  Chinese copy; Work has no language-selection mechanism. Existing CLI, Lark and Telegram callers retain
+  their behavior; the generated CLI also accepts `--expected-version` for conditional requirement edits.
+- **Work task controls**: the gated Work page starts ready tasks and valid drafts through the existing
+  operator start operation, resumes failed/stopped/cancelled tasks with the saved plan, and stops background
+  execution separately from the conversation's reply Stop. Direct-mode completion uses `tasks.done`.
+  Controls reread detail before writing, lock synchronous duplicate clicks, and use the page's shared
+  refresh to confirm the persisted result. A start acknowledges an active new attempt immediately; a fast
+  terminal attempt requires two identical changed, settled snapshots. Historical terminal rows and run
+  counts alone do not confirm a start. Errors and unfinished confirmation remain visible; retry only reads.
+  Task switches abort readback and discard late results. Missing operations are unavailable; pause,
+  background handoff and takeover remain disabled with a reason. The old task page is unchanged.
 - **Work task cost**: the existing task details panel renders one read-only cost section from the shared
   detail, without a separate read or poll. Missing costs or no recorded task runs remain unavailable;
   recorded zero costs retain their value. Running or unpriced runs retain the cost caveats and label any

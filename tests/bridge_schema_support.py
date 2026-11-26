@@ -4,6 +4,7 @@ import hashlib
 import io
 import os
 from pathlib import Path
+import re
 import subprocess
 import sys
 import tarfile
@@ -212,7 +213,18 @@ async def structure(conn):
             WHERE c.relnamespace=current_schema()::regnamespace
         """,
     }
-    return {kind: sorted((tuple(value.replace(quoted, "").replace(schema + ".", "")
+    result = {kind: sorted((tuple(value.replace(quoted, "").replace(schema + ".", "")
                                 if isinstance(value, str) else value for value in row)
                           for row in await conn.fetch(query)), key=repr)
             for kind, query in queries.items()}
+    # Independent role migrations can append the same values in different orders.
+    # Normalize only complete text-enum predicates; all other CHECK text stays exact.
+    literal = r"'(?:[^']|'')*'::text"
+    for index, (table, name, kind, definition, validated) in enumerate(result["constraints"]):
+        match = re.fullmatch(r"CHECK \(\((\w+) = ANY \(ARRAY\[(" + literal + r"(?:, " + literal + r")*)\]\)\)\)",
+                             definition)
+        if match:
+            values = ", ".join(sorted(re.findall(literal, match[2])))
+            definition = f"CHECK (({match[1]} = ANY (ARRAY[{values}])))"
+            result["constraints"][index] = (table, name, kind, definition, validated)
+    return result

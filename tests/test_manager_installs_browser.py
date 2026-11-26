@@ -90,6 +90,8 @@ def installs_dashboard(dashboard_url):
                     "value": {"profile_id": "agent-claude-code-opus"}}}}}}
             elif path == "project_admin/list":
                 result = {"projects": []}
+            elif path == "task_conversations/get":
+                result = {"enabled": False}
             elif path == "system/overview":
                 result = {"tasks": {}, "agents": [], "channels": []}
             elif path == "operator_chat/targets":

@@ -91,6 +91,8 @@ def dashboard(static_dashboard):
                 result = {"enabled": False, "subscriptions": []}
             elif path == "/api/v1/attention/settings_get":
                 result = {"enabled": False}
+            elif path == "/api/v1/task_conversations/get":
+                result = {"enabled": False}
             elif path in ("/api/v1/operator_chat/targets", "/api/v1/operator_chat/sessions",
                           "/api/v1/operator_chat/messages", "/api/v1/roles/list",
                           "/api/v1/manager_session/get", "/api/v1/chat_settings/get"):

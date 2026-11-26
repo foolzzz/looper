@@ -1,5 +1,7 @@
 """The local hook command is bounded and silent, including a PostgreSQL handshake that never answers."""
 
+import asyncio
+import json
 import socket
 import subprocess
 import sys
@@ -74,3 +76,42 @@ def test_database_without_settings_table_is_silent(tmp_path):
         ops_config.write_private(ops.path, ops_config.render(ops))
         result = _show(root)
         assert (result.returncode, result.stdout, result.stderr) == (0, b"", b"")
+
+
+def test_profile_show_prints_about_without_writing_the_cache(tmp_path):
+    import asyncpg
+
+    from looper.db.connection import ensure_schema
+    from tests.db_support import DSN
+    from evals.prompt_regression.runner import fresh_database
+
+    if not DSN:
+        pytest.skip("LOOPER_TEST_DATABASE_URL is not set")
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    (vault / "关于我.md").write_text("- Builds compilers [kind:: fact]\n", encoding="utf-8")
+    with fresh_database(DSN) as (database_url, _):
+        async def prepare():
+            conn = await asyncpg.connect(database_url)
+            try:
+                await ensure_schema(conn)
+                await conn.execute("INSERT INTO system_settings (key, value) VALUES ('knowledge_vault', $1)",
+                                   json.dumps({"path": str(vault)}))
+            finally:
+                await conn.close()
+
+        asyncio.run(prepare())
+        root = tmp_path / "runtime"
+        ops = ops_config.OpsConfig(runtime_root=root, path=root / ops_config.FILE, database_url=database_url)
+        ops_config.write_private(ops.path, ops_config.render(ops))
+        result = _show(root)
+        assert (result.returncode, result.stdout, result.stderr) == (0, b"About:\n- Builds compilers", b"")
+
+        async def cached_rows():
+            conn = await asyncpg.connect(database_url)
+            try:
+                return await conn.fetchval("SELECT count(*) FROM profile_blocks")
+            finally:
+                await conn.close()
+
+        assert asyncio.run(cached_rows()) == 0

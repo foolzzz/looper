@@ -262,7 +262,7 @@ describe("Sidebar Needs you item", () => {
 });
 
 describe("Sidebar Work item", () => {
-  const workButton = () => [...host.querySelectorAll("nav button")].find((b) => b.textContent === "Work");
+  const workButton = () => [...host.querySelectorAll("nav button")].find((b) => b.textContent === "Work 工作台");
 
   it("stops probing a missing operation after the first request", async () => {
     vi.mocked(taskConversationsGet).mockRejectedValue(
@@ -288,10 +288,12 @@ describe("Sidebar Work item", () => {
     expect(workButton()).toBeDefined();
   });
 
-  it("shows Work when enabled", async () => {
+  it("shows the bilingual Work 工作台 label and opens the Work route when enabled", async () => {
     vi.mocked(taskConversationsGet).mockResolvedValue({ enabled: true });
     await render();
     expect(workButton()).toBeDefined();
+    act(() => (workButton() as HTMLButtonElement).click());
+    expect(onNavigate).toHaveBeenCalledWith("work");
   });
 
   it("hides Work after a server error and keeps polling to recover", async () => {

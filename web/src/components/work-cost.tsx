@@ -19,14 +19,14 @@ export function WorkCost({ task }: { task: Pick<TaskDetail, "cost" | "task_budge
       <h2 id="work-cost-title" className="text-sm font-semibold">费用与上限</h2>
       {subtotal ? <>
         {partial && <p className="text-xs text-muted-foreground">已知费用小计，部分运行费用尚未确定</p>}
-        <TaskCostBreakdown cost={recorded} />
+        <TaskCostBreakdown cost={recorded} language="zh-CN" />
         {taskManager && taskManager.runs > 0 && <p className="text-xs text-muted-foreground">
           任务管家 · {taskManager.runs} 次运行 · {formatUsd(taskManager.cost_usd)}（已含在上述小计中）
         </p>}
       </> : <>
         <p className="text-sm text-muted-foreground">费用尚不可用</p>
         {recorded && <p className="text-xs text-muted-foreground">
-          {[costBasis(recorded), ...costCaveats(recorded)].filter(Boolean).join(" · ")}
+          {[costBasis(recorded, "zh-CN"), ...costCaveats(recorded, "zh-CN")].filter(Boolean).join(" · ")}
         </p>}
       </>}
       <p className="text-xs text-muted-foreground">
@@ -34,7 +34,7 @@ export function WorkCost({ task }: { task: Pick<TaskDetail, "cost" | "task_budge
           {cap === 0 ? "上限为0" : `上限 ${formatUsd(cap)}`} · {ownCap != null ? "本任务单独设置" : "沿用项目每任务上限"}
         </>}
       </p>
-      {cap != null && cap > 0 && subtotal && !partial && <TaskSpendMeter spent={recorded.cost_usd} cap={cap} />}
+      {cap != null && cap > 0 && subtotal && !partial && <TaskSpendMeter spent={recorded.cost_usd} cap={cap} language="zh-CN" />}
       {partial && cap != null && cap > 0 && <p className="text-xs text-muted-foreground">费用未完整，无法确定剩余额度</p>}
     </section>
   );

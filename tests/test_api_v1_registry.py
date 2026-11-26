@@ -119,3 +119,21 @@ def test_limits_publish_protocol_families_and_labels():
             {"protocol": "openai-chat", "label": "OpenAI Chat Completions"}]},
     ]
     assert {p for f in ApiFamily for p in ApiProtocol if p.family is f} == set(ApiProtocol)
+
+
+def test_task_manager_does_not_change_shared_role_discovery(monkeypatch):
+    from looper.agents import runtimes, task_conversations_settings
+    from looper.agents.ops.config import _tool_roles, _type_listed
+    from looper.agents.v1_domains.registry import REGISTRY_LIMITS
+
+    monkeypatch.setattr(task_conversations_settings, "_enabled", False)
+    expected = ["manager", "planner", "worker", "explorer", "reviewer", "processor", "advisor",
+                "advice_check", "leads_check", "outbound_check", "memory_draft", "memory_retro"]
+    tool_roles = ["manager", "planner", "worker", "reviewer"]
+    view = profile_registry.type_view(runtimes.ADAPTERS["claude-code"])
+    assert view["roles"] == expected
+    assert _type_listed(view)["roles"] == tool_roles
+    assert _tool_roles(view["roles"]) == tool_roles
+    assert list(runtimes.TOOL_ROLES) == tool_roles
+    assert list(profile_registry._limits()["role_capabilities"]) == expected
+    assert list(REGISTRY_LIMITS["properties"]["role_capabilities"]["properties"]) == expected
