@@ -371,7 +371,9 @@ Manager has no tool for it. The dashboard shows the task page's 指标 card and 
   when its session may not hold the last one: a new session (`/new`, a
   session switch such as a full context), a new process (a server restart, an
   idle close), after a compaction the session reported (`compact_boundary`)
-  or a turn it ran on its own, after a turn that did not go through, and on
+  or a turn it ran on its own, after a turn that did not go through, on the
+  first non-isolated user turn after a shared group/other-sender or API-client
+  turn rendered its own audience's whole block, and on
   every turn of a runtime whose resident session does not report its
   compactions (`RuntimeAdapter.resident_compaction_events`, only Claude
   Code's). A compaction or a turn of its own moves a context generation on: a
@@ -385,7 +387,11 @@ Manager has no tool for it. The dashboard shows the task page's 指标 card and 
   30 % or 40 % is still a note. An open gate's line says when it opened (UTC,
   to the minute) instead of how long it has been open, so the block does not
   change every minute. What the session holds is in the Manager's memory
-  only. The contract then ends with `STABLE_CONTEXT_CONTRACT` (the latest
+  only, including the typed pending whole-block reason after an isolated turn;
+  a server restart already sends a whole block. Isolated turns keep the prior
+  non-isolated baseline, and a successful non-isolated recovery replaces it and
+  returns subsequent turns to the normal unchanged/change rules. The contract
+  then ends with `STABLE_CONTEXT_CONTRACT` (the latest
   whole block with the newest note after it is the current state), and each
   turn's record has `metadata.looper_state` (`view`, `rev`, `reason`). Off,
   the turns, the prompt, the tool list and the process signature are as they
@@ -518,11 +524,15 @@ Manager has no tool for it. The dashboard shows the task page's 指标 card and 
   a missing, invalid or unreadable source logs a warning and yields no profile, without disabling other vault
   tools or returning a previously cached profile.
   The compiler preserves typed fields — name, address, reply language, time zone, working hours, communication
-  preferences and standing rules — with relative-path, heading and line citations. Inline `[kind:: …]` bullets
-  keep their existing classification and inactive-entry filtering. Frontmatter and fenced code are excluded;
+  preferences, standing rules and background facts (`about`) — with relative-path, heading and line citations.
+  Inline `[kind:: fact]` bullets compile under `About:`; `person`, `decision`, `commitment`, `request` and
+  `deadline` remain under `Standing rules:`, while `preference` and `habit` remain under `Communication:`.
+  Superseded and deleted entries, frontmatter and fenced code are excluded; unknown kinds are skipped;
   backticks are normalized. Duplicate single-value fields fail compilation. The text stays within 1500 Unicode
-  characters, dropping lower-priority fields first and truncating a remaining oversized field with `…`.
-  `profile.get` caches the compiled block in `profile_blocks`, retaining its version when the body is unchanged.
+  characters, dropping lower-priority fields first (`About:` before `Standing rules:`) and truncating a remaining
+  oversized value with `…`. Profiles without facts keep exactly the same compiled text.
+  `profile.get` caches the compiled block in `profile_blocks`, advancing its version only when the text changes;
+  citation and field metadata refreshes alone retain the version.
   Manager and CLI reads do not write that cache.
   The independent operator-only `profile_settings.get/update` operations control `manager.profile.enabled`
   (default off; null restores off). Settings → Knowledge vault exposes its confirmed switch. Off, the Manager
@@ -776,7 +786,13 @@ Manager has no tool for it. The dashboard shows the task page's 指标 card and 
   message's payload names its chat session (`chat_session_id`), so the web
   channel adds the reply to that chat's history (`chat_messages`, shown when
   the chat is opened) instead of a message's stream; Lark and Telegram send it
-  to the chat. With no message before it, the reply is only recorded
+  to the chat. With no message before it, the reply is only recorded. The
+  default Manager's main session holds the operator's own conversation, so it
+  sends the reply only when that message was the operator's (the dashboard
+  without an API client, or the operator's direct chat); after a group, another
+  sender's direct chat or an API client's thread the reply is only recorded,
+  with a `manager_events` row of kind `autonomous` (`skipped`,
+  `withheld_not_operator`). A routed session's own chat still gets its reply
 
 ### Task Manager (`looper/agents/tiers/task_manager.py`)
 
@@ -5855,9 +5871,21 @@ notice. A turn runs in the direct chat itself (its `/stop`, its history): a
 Lark notice names the person, so the chat is the task's reply route, or, for a
 task that recorded none, the one the same person's latest task with that bot
 recorded; when none did, the end is `skipped` with `no_chat` and gets the
-notice. A schedule's run message to an allowlisted direct chat (only a run that
+notice. The default Manager's main session is the operator's conversation, so
+its turn does not write to anyone else: an end whose turn would run there but
+whose chat is an API client's dashboard thread, or another person's direct chat
+(session routing off, or on with no operator id on the bot), is `skipped` with
+`withheld_not_operator` and gets the notice. With session routing on, another
+sender's direct chat runs in its own session. That session does not build the
+completion model turn, because the completion prompt is outside the session
+allowlist. The claimed events fall back with `session_allowlist` and the
+recorded code notice is delivered; a schedule run whose message waits in that
+session does the same. This reason is not one of the failing-turn warnings.
+A schedule's run message to an allowlisted direct chat (only a run that
 ended its task, and only when `notify` sends it) is `pending` for the default
-Manager; to a chat bound to a Manager it is `skipped` with `group_chat`. A
+Manager (`skipped` with `withheld_not_operator` when that chat is not the
+operator's and session routing is off); to a chat bound to a Manager it is
+`skipped` with `group_chat`. A
 pending event is due 60 seconds after it was recorded (`due_at`): the chat's
 first end opens a gathering window, and the ends that come before it closes are
 told in the same turn. The completion service (`completion_service`, one per
@@ -5931,8 +5959,9 @@ and binding released and a fresh runtime used, and whenever it ends it writes
 only its record: never the session, the runtime, the binding or the token of
 the turn after it),
 `turn_stopped`, `empty_reply`, `send_failed` (the reply could not be handed to
-the channel), and, at the claim, `off` (the setting was turned off) or
-`manager_off` (the Manager was turned off). A wake-up whose events cannot be
+the channel), `session_allowlist` (a routed session refused the model turn
+before it was built; the recorded notice is delivered), and, at the claim, `off`
+(the setting was turned off) or `manager_off` (the Manager was turned off). A wake-up whose events cannot be
 read (the database fails) queues a new `COMPLETION_DUE` after 5 seconds, before
 it is acknowledged. When a Manager starts, before its message loop, the events
 its earlier turns left `running` fall back with `restart`, their notices
