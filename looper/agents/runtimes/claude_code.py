@@ -432,7 +432,8 @@ class ClaudeCodeRuntime(RuntimeAdapter):
 
     def operator_resident_command(self, executable: str, *, cwd: str | Path, prompt_file: Path,
                                   launch: Launch, settings_dir: Path) -> list[str]:
-        """A task Manager's direct session keeps the operator's settings, memory, skills and MCP servers."""
+        """A task Manager's direct session keeps the operator's settings, memory and skills; its MCP servers are only
+        the ``--mcp-config`` file's."""
         from ..claude_cli import budget_args, operator_settings_args, peer_args, permission_args, system_prompt_args
 
         provider = launch.profile.provider
@@ -440,6 +441,9 @@ class ClaudeCodeRuntime(RuntimeAdapter):
         return [
             executable, "--print", "--verbose", "--output-format", "stream-json",
             "--input-format", "stream-json", "--include-partial-messages", "--replay-user-messages",
+            # Only the servers of the generated --mcp-config load, not the operator's others (user, local, project
+            # scope); the operator allows some by name (``operator_mcp``). Plugins' own servers do not load either.
+            "--strict-mcp-config",
             *operator_settings_args(settings_dir, hook.settings() if hook is not None else None),
             *system_prompt_args(prompt_file), *permission_args(), *peer_args(False),
             "--model", launch.model, *(["--effort", launch.effort] if launch.effort else []),
