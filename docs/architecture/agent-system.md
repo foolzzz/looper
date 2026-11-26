@@ -909,7 +909,12 @@ operator's servers named in `tasks.conversations.manager_mcp` (default none; rea
 through `task_conversations.get` and `task_conversations.update`, operator-only; up to 20 unique
 names). Each name is resolved as Claude Code does for the task's working directory (local scope,
 then a project `.mcp.json`, then user scope; with `CLAUDE_CONFIG_DIR` set, that directory's
-`.claude.json`) and its definition is copied into the file. A name with no definition makes the
+`.claude.json`) and its definition is copied into the file. The local scope is keyed by the
+git repository root of the working directory (the main repository's, for a git worktree), else by
+the directory itself, never by a parent directory (verified with Claude Code 2.1.332). `${VAR}`
+references in a definition are expanded by Claude Code from the task Manager's environment, so a
+variable that exists only in the operator's shell expands empty. The generated file can hold server
+secrets and is deleted when the session ends or is replaced. A name with no definition makes the
 task Manager refuse to start with `mcp_unresolved` (visible in the task thread like the other start
 refusals); none is skipped. A plugin's own MCP servers never load under strict mode (verified
 with Claude Code 2.1.332), so they cannot be allowed by name; configure the server as a user or

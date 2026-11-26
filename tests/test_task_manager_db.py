@@ -162,9 +162,19 @@ def test_direct_session_loads_only_looper_and_allowed_mcp_servers(monkeypatch, t
             command = agent.resident.command
             assert command.count("--strict-mcp-config") == 1 and command.count("--mcp-config") == 1
             assert servers(command) == ["looper"]  # default: only Looper's own server
+            monkeypatch.setattr(settings, "_manager_mcp", ("alpha",))
+            await agent.prepare()
+            first = Path(agent.resident.command[agent.resident.command.index("--mcp-config") + 1])
+            assert first.is_file() and servers(agent.resident.command) == ["alpha", "looper"]
             monkeypatch.setattr(settings, "_manager_mcp", ("alpha", "beta"))
             await agent.prepare()  # a changed allowlist restarts the resident with the new servers
             assert servers(agent.resident.command) == ["alpha", "beta", "looper"]
+            second = Path(agent.resident.command[agent.resident.command.index("--mcp-config") + 1])
+            assert not first.exists() and second.is_file()  # the replaced config, which can hold secrets, is gone
+            await agent.resident.stop()
+            assert not second.exists()  # and so is the one of an ended session
+            await agent.prepare()
+            assert Path(agent.resident.command[agent.resident.command.index("--mcp-config") + 1]).is_file()
             assert agent.resident.command.count("--strict-mcp-config") == 1
             await tasks.update_task_status(task_id, "pending", pool=db)
             await agent.prepare()  # the read-only orchestrated session keeps its own isolation, unaffected

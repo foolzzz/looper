@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import subprocess
 from dataclasses import replace
 from pathlib import Path
 
@@ -102,3 +103,48 @@ def test_library_gets_looper_servers_plus_allowed_ones(home, work, tmp_path):
     with pytest.raises(operator_mcp.UnresolvedServers, match="looper"):  # Looper's own name is not the operator's
         build(["looper"])
     assert replace(library, mcp_config=None).mcp_config is None
+
+
+def git(*args: str, cwd: Path) -> None:
+    subprocess.run(["git", "-c", "user.email=a@example.test", "-c", "user.name=n", *args], cwd=cwd, check=True,
+                   capture_output=True)
+
+
+@pytest.fixture
+def repository(tmp_path):
+    main = tmp_path / "main"
+    (main / "sub").mkdir(parents=True)
+    git("init", "-q", ".", cwd=main)
+    git("commit", "-q", "--allow-empty", "-m", "init", cwd=main)
+    git("worktree", "add", "-q", "-b", "task", str(tmp_path / "task-worktree"), cwd=main)
+    home = tmp_path / "home"
+    write_json(home / ".claude.json", {
+        "mcpServers": {"alpha": stdio("alpha"), "shared": stdio("user-shared")},
+        "projects": {str(main): {"mcpServers": {"beta": stdio("beta"), "shared": stdio("local-shared")}},
+                     str(main / "sub"): {"mcpServers": {"nested": stdio("nested")}}},
+    })
+    return main, tmp_path / "task-worktree", home
+
+
+def test_worktree_reads_the_main_repository_local_scope(repository):
+    main, worktree, home = repository
+    found = operator_mcp.resolve(["beta", "shared"], cwd=worktree, environment=environment(home))
+    assert found["beta"] == stdio("beta") and found["shared"]["command"] == "/bin/local-shared"
+
+
+def test_repository_subdirectory_reads_the_repository_root_entry_only(repository):
+    main, worktree, home = repository
+    (worktree / "sub").mkdir(exist_ok=True)
+    for directory in (main / "sub", worktree / "sub"):
+        assert operator_mcp.resolve(["beta"], cwd=directory, environment=environment(home)) == {"beta": stdio("beta")}
+        with pytest.raises(operator_mcp.UnresolvedServers):  # an entry keyed by the subdirectory is not read
+            operator_mcp.resolve(["nested"], cwd=directory, environment=environment(home))
+
+
+def test_subdirectory_outside_a_repository_does_not_read_a_parent_entry(home, work):
+    # ``home`` keys the local scope by ``work``, which is not a repository
+    assert operator_mcp.resolve(["beta"], cwd=work, environment=environment(home)) == {"beta": stdio("beta")}
+    with pytest.raises(operator_mcp.UnresolvedServers):
+        operator_mcp.resolve(["beta"], cwd=work / "sub", environment=environment(home))
+    assert operator_mcp.resolve(["shared"], cwd=work / "sub", environment=environment(home))["shared"]["command"] == (
+        "/bin/project-shared")  # the parent's project file still applies; its local entry does not

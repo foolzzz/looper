@@ -3,8 +3,11 @@
 The direct session keeps the operator's Claude Code configuration, but loads MCP servers only from the
 ``--mcp-config`` file Looper generates (``--strict-mcp-config``): Looper's own server plus the allowed names.
 Their definitions are read from the operator's configuration as Claude Code resolves them for the working directory,
-the nearest scope first: the local scope (``projects.<directory>.mcpServers`` of the user's ``.claude.json``), a
-project ``.mcp.json`` (the directory or one above it), then the user scope (top-level ``mcpServers``). A plugin's
+the nearest scope first: the local scope (``projects.<project>.mcpServers`` of the user's ``.claude.json``), a
+project ``.mcp.json`` (the directory or one above it), then the user scope (top-level ``mcpServers``). The local
+scope's project is the git repository root of the directory (the main repository's, for a git worktree), else the
+exact directory, never a parent: verified with Claude Code 2.1.332 (a subdirectory of a repository and a worktree
+read the repository's entry; a subdirectory outside any repository reads none). A plugin's
 MCP servers are not loadable by name: strict mode excludes them (verified with Claude Code 2.1.332), so a plugin's
 server is allowed by configuring it as a user or project server.
 """
@@ -13,6 +16,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import subprocess
 from collections.abc import Mapping, Sequence
 from dataclasses import replace
 from pathlib import Path
@@ -50,6 +54,17 @@ def _servers(path: Path, *keys: str) -> dict[str, dict[str, Any]]:
     return value
 
 
+def _project_roots(directory: Path) -> list[Path]:
+    """The paths Claude Code may key ``directory``'s local scope by: its repository's main root, else itself."""
+    try:
+        common = subprocess.run(["git", "-C", str(directory), "rev-parse", "--path-format=absolute", "--git-common-dir"],
+                                capture_output=True, text=True, timeout=10, check=True).stdout.strip()
+        root = Path(common).parent if Path(common).name == ".git" else None
+    except (OSError, subprocess.SubprocessError):
+        root = None
+    return list(dict.fromkeys(path for base in (root or directory,) for path in (base, base.resolve())))
+
+
 def resolve(names: Sequence[str], *, cwd: str | os.PathLike[str],
             environment: Mapping[str, str]) -> dict[str, dict[str, Any]]:
     """The definitions of ``names``; ``UnresolvedServers`` for every one that has none (none is skipped)."""
@@ -63,7 +78,7 @@ def resolve(names: Sequence[str], *, cwd: str | os.PathLike[str],
     try:
         user_file = config_dir / ".claude.json"
         projects = _servers(user_file, "projects")
-        for candidate in chain:
+        for candidate in _project_roots(directory):
             if isinstance(entry := projects.get(str(candidate)), dict) and isinstance(entry.get("mcpServers"), dict):
                 layers.append(entry["mcpServers"])
         layers += [_servers(candidate / ".mcp.json", "mcpServers") for candidate in chain]

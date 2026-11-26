@@ -129,6 +129,10 @@ class _TaskResident(ResidentClaude):
             if self.owner.token is not None:
                 self.owner.pool.ops.revoke(self.owner.token)
                 self.owner.token = None
+            # They can hold server secrets: no file outlives its session or survives a replacement.
+            for path in self.owner.mcp_files:
+                Path(path).unlink(missing_ok=True)
+            self.owner.mcp_files.clear()
 
 
 @dataclass(frozen=True)
@@ -191,6 +195,7 @@ class TaskManagerAgent:
         self.loaded = False
         self.context_rotation_pending = False
         self.running: asyncio.Task[None] | None = None
+        self.mcp_files: set[str] = set()  # generated configs holding the operator's server definitions
 
     async def prepare(self, *, sink: TurnSink | None = None) -> tuple[Mapping[str, Any], Any, Launch, SystemPrompt]:
         """Read configuration afresh; no launch bypasses the direct-mode review checks."""
@@ -259,6 +264,7 @@ class TaskManagerAgent:
                         environment=run.runtime.environment(run)))
                 except operator_mcp.UnresolvedServers as exc:
                     raise Refused(RefuseReason.MCP_UNRESOLVED, str(exc)) from exc
+                self.mcp_files.add(run.library.mcp_config)
             return run
         # Query newest summaries directly, so a long-lived task never gets its oldest activity as its brief.
         from ...db.connection import get_pool
