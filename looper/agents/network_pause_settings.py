@@ -14,6 +14,8 @@ ENABLED_KEY = "engine.network_pause.enabled"
 MAX_PAUSE_KEY = "engine.network_pause.max_pause_seconds"
 DEFAULT_MAX_PAUSE_SECONDS = 7200
 MAX_PAUSE_SECONDS = 86400
+# Last invalid stored maximum already logged. The same value stays quiet; a different one warns again.
+_warned_maximum: Any = None
 
 
 @dataclass(frozen=True)
@@ -23,6 +25,7 @@ class NetworkPauseSettings:
 
 
 async def load(*, pool=None, strict=False) -> NetworkPauseSettings:
+    global _warned_maximum
     try:
         stored = await system_settings.get_settings([ENABLED_KEY, MAX_PAUSE_KEY], pool=pool)
     except Exception:
@@ -32,13 +35,20 @@ async def load(*, pool=None, strict=False) -> NetworkPauseSettings:
         return NetworkPauseSettings()
     maximum = DEFAULT_MAX_PAUSE_SECONDS
     if MAX_PAUSE_KEY in stored:
+        raw = stored[MAX_PAUSE_KEY]
         try:
-            maximum = int(stored[MAX_PAUSE_KEY])
+            maximum = int(raw)
             if not 1 <= maximum <= MAX_PAUSE_SECONDS:
                 raise ValueError
         except ValueError:
-            logger.warning("Invalid %s; using the built-in duration", MAX_PAUSE_KEY)
+            if _warned_maximum != raw:
+                logger.warning("Invalid %s; using the built-in duration", MAX_PAUSE_KEY)
+                _warned_maximum = raw
             maximum = DEFAULT_MAX_PAUSE_SECONDS
+        else:
+            _warned_maximum = None
+    else:
+        _warned_maximum = None
     return NetworkPauseSettings(stored.get(ENABLED_KEY) == "true", maximum)
 
 
