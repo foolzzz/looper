@@ -18,7 +18,9 @@ def _origin(channel: str, channel_id: str | None, chat: str | None, *, sender: s
 
 @pytest.mark.parametrize(("origin", "client_id", "operator_id", "key"), [
     (_origin("web", "channel-web", "chat-1"), None, None, "main"),
-    (_origin("web", "channel-web", "chat-1"), "client-1", None, "main"),
+    (_origin("web", "channel-web", "chat-1"), "client-1", None, "client:api:client-1"),
+    (_origin("web", "channel-web", "chat-1"), "client-1", OPERATOR, "client:api:client-1"),
+    (_origin("web", "channel-web", "chat-2"), "client-2", None, "client:api:client-2"),
     (_origin("lark", LARK, "oc_group", sender=OTHER, group=True), None, OPERATOR, f"group:{LARK}:oc_group"),
     (_origin("telegram", TELEGRAM, "-100", sender="7", group=True), None, None, f"group:{TELEGRAM}:-100"),
     (_origin("lark", LARK, "oc_dm", sender=OPERATOR), None, OPERATOR, "main"),
@@ -143,3 +145,33 @@ def test_a_completion_turn_runs_in_the_session_of_the_chat_it_tells(monkeypatch,
             await manager._router.stop()
 
     assert asyncio.run(keys()) == [f"dm:{LARK}:oc_dm_other", "main"]
+
+
+def test_an_api_clients_session_is_its_own_and_keyed_by_the_client() -> None:
+    key = session_routing.client_key("client-1")
+    assert key == SessionKey(SessionKind.CLIENT, session_routing.CLIENT_CHANNEL, "client-1")
+    assert key.text == "client:api:client-1"
+    labels = {session_routing.resident_label("manager", session_routing.client_key(name))
+              for name in ("client-1", "client-2")}
+    assert len(labels) == 2 and "manager" not in labels
+    assert session_routing.resident_label("manager", key).startswith("manager.client.")
+
+
+@pytest.mark.parametrize("channel_id", [None, "channel-web", LARK])
+def test_a_client_key_names_the_api_channel_only(channel_id: str | None) -> None:
+    with pytest.raises(ValueError):
+        SessionKey(SessionKind.CLIENT, channel_id, "client-1")
+    with pytest.raises(ValueError):
+        SessionKey(SessionKind.CLIENT, session_routing.CLIENT_CHANNEL, None)
+
+
+def test_no_fingerprint_for_a_client_key() -> None:
+    with pytest.raises(ValueError):
+        SessionKey(SessionKind.CLIENT, session_routing.CLIENT_CHANNEL, "client-1", scope_fingerprint="0123456789abcdef")
+
+
+def test_the_dashboard_and_the_operators_own_chats_are_still_main() -> None:
+    web = _origin("web", "channel-web", "chat-1")
+    assert session_key_for(web, client_id=None, operator_id=OPERATOR).text == "main"
+    assert session_key_for(_origin("lark", LARK, "oc_dm", sender=OPERATOR), client_id=None,
+                           operator_id=OPERATOR).text == "main"

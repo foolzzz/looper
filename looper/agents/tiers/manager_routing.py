@@ -187,6 +187,8 @@ class SessionRouter:
                             or self.holds(main) or admission.enabled()) else None
         if kind not in (MessageType.USER_MESSAGE, MessageType.COMPLETION_DUE):
             return None
+        if kind is MessageType.USER_MESSAGE and (client := self._client_session(envelope)) is not None:
+            return client  # an API client has a session of its own, with routing on or off
         if kind is MessageType.COMPLETION_DUE and (lanes_settings.enabled() or admission.enabled()):
             return None  # claim in the loop; only the claimed batch joins the background lane
         if not session_routing.routes(self._agent.agent_id):
@@ -219,6 +221,17 @@ class SessionRouter:
                     await asyncio.sleep(completion_events.RETRY_SECONDS)
         finally:
             self._finish_scope_attempt(episode)
+
+    def _client_session(self, envelope: MessageEnvelope) -> ManagerSession | None:
+        """The default Manager's session of the API client ``envelope`` came through; None for any other message
+        (the client is named by the web adapter from a verified token only: ``manager._message_client``)."""
+        from ..managers_api import DEFAULT_MANAGER_ID
+        from .manager import _message_client, _message_origin
+
+        if self._agent.agent_id != DEFAULT_MANAGER_ID or _message_origin(envelope)["channel"] != "web":
+            return None
+        client_id, _name = _message_client(envelope)
+        return None if client_id is None else self.session(session_routing.client_key(client_id))
 
     def dispatch(self, session: ManagerSession, envelope: MessageEnvelope) -> None:
         """Queue ``envelope`` for ``session``'s worker, started on first use."""
@@ -765,7 +778,7 @@ class SessionRouter:
     async def admit(self, session: ManagerSession, envelope: MessageEnvelope | None) -> None:
         """Before ``session`` starts its process: make room under the cap, or wait for it (module docstring)."""
         agent = self._agent
-        if not session_routing.routes(agent.agent_id):
+        if not session_routing.routes(agent.agent_id) and not session_routing.always_routed(session.route):
             return
         if session_routing.scoped(agent.agent_id):
             await self._admit_scoped(session, envelope)
