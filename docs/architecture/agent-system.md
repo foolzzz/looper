@@ -826,14 +826,14 @@ restarts the process with the saved session. The operator-only
 `tasks.task_manager_profile_set` selects or clears this task's profile, refuses a
 busy turn with 409, and stops an idle process before the next resume when the
 effective profile changes. A change records one conversation event with
-`type: model_switched`, `from_profile_id` and `to_profile_id`; selecting the same
+`kind: model_switched`, `from_profile_id` and `to_profile_id`; selecting the same
 effective profile records nothing. A refused selection records
-`type: model_switch_rejected`, the requested `profile_id` (nullable when clearing)
+`kind: model_switch_rejected`, the requested `profile_id` (nullable when clearing)
 and a closed `reason`: `busy` for an active turn, `invalid_profile` for a registry
 selection failure, or `runtime_unsupported` for a non-Claude Code profile. The
 event is saved with `role: event` and streamed through `operator_chat.thread_events`
-as `task.event` with the identical payload. Existing turn events retain their
-`kind` discriminator. A failed resume
+as `task.event` with the identical payload. Every task event on that stream uses
+`kind` as its only discriminator. A failed resume
 retries once fresh with the caller's last 20 fenced thread messages and emits
 `session_fresh` with a bounded diagnostic. Server restart never replays a cut turn.
 Worktree turns commit pending changes with the task trailer; in-place turns list
