@@ -52,6 +52,12 @@ class StateView(str, Enum):
     CHANGES = "changes"
 
 
+class WholeReason(str, Enum):
+    """A pending reason to restore the session's whole state block."""
+
+    OTHER_AUDIENCE = "another audience's block came after the last shown state"
+
+
 @dataclass(frozen=True)
 class StateShown:
     """The last whole block a session got: its rev, its lines and that session."""

@@ -111,7 +111,7 @@ async def _telegram(env: ScheduleEnv) -> TelegramHTTP:
     await seed_channel_configs(env.pool)
     await env.pool.execute(
         "UPDATE channel_configs SET config = config || $1::jsonb WHERE channel_id = 'channel-telegram'",
-        json.dumps({"allowed_user_ids": [TELEGRAM_CHAT, OTHER_CHAT]}))
+        json.dumps({"allowed_user_ids": [TELEGRAM_CHAT, OTHER_CHAT], "operator_sender_id": TELEGRAM_CHAT}))
     return http
 
 
@@ -311,7 +311,8 @@ def test_a_lark_send_with_no_answer_is_uncertain_and_never_sent_again(monkeypatc
         await seed_channel_configs(env.pool)
         await env.pool.execute("UPDATE channel_configs SET enabled = TRUE, config = config || $1::jsonb "
                                "WHERE channel_id = 'channel-lark'",
-                               json.dumps({"profile": "other", "allowed_open_ids": [OPEN_ID, person]}))
+                               json.dumps({"profile": "other", "allowed_open_ids": [OPEN_ID, person],
+                                           "operator_sender_id": person}))
         schedule = await env.schedule(notify="failures", notify_target={"channel": "lark", "chat": person})
         run = await db_schedules.get_run(await env.scheduler.run_now(schedule["schedule_id"]))
         await env.end_task(run["task_id"], "failed", summary="no data")

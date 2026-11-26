@@ -29,7 +29,7 @@ from tests.test_operator_auth import TOKEN, _request
 PREFIX = "/api/v1/operator_chat/"
 # Hash of /operator_chat/* paths plus the component schemas those paths $ref, excluding ErrorCode, after stripping.
 # Recompute by hashing that same selection from main's document with nothing stripped; the two hashes must match.
-PRE_CARD_DOCUMENT = "e16f2f654a840fefeb74946ab3c816dfed7070f7fdff84431df1bbebdb1339fa"
+PRE_CARD_DOCUMENT = "424bc93c721eb5b547483ae0db286f0ed88910b265bf60ba87488fec88e12a61"
 LATER = "这个命令要等「交给后台」上线后才能用"
 
 

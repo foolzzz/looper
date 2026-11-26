@@ -3,7 +3,14 @@ import { createWorkConversationStore, workConversationKey } from "@/lib/use-work
 import { act, useState, type ReactNode } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { clearWorkComposerMemory, PlannerWorkConversation, WorkConversation, type WorkConversationProps } from "@/components/work-conversation";
+import {
+  clearWorkComposerMemory,
+  PlannerWorkConversation,
+  taskConversationAddress,
+  taskConversationHint,
+  WorkConversation,
+  type WorkConversationProps,
+} from "@/components/work-conversation";
 import { WorkPage } from "@/pages/work";
 
 type Handler = (event: { kind: string; payload: Record<string, unknown> }) => void;
@@ -222,6 +229,49 @@ describe("work conversation", () => {
     expect(api.watchChat).toHaveBeenCalledWith(localStorage.getItem("looper-chat-session-id"), expect.any(Function), "manager");
     expect(container.querySelector('[aria-label="任务管家模型"]')).toBeNull();
     expect(container.textContent).not.toContain("已接通");
+    expect(container.textContent).toContain("还没有对话");
+    expect(container.textContent).not.toContain(taskConversationHint("zh"));
+    expect(container.textContent).not.toContain(taskConversationHint("en"));
+    for (const state of ["unavailable", "ended", "handing_back", "before_start"] as const) {
+      expect(container.textContent).not.toContain(taskConversationHint("zh", state));
+      expect(container.textContent).not.toContain(taskConversationHint("en", state));
+    }
+  });
+
+  it("names the Planner who answers a task, in Chinese and English, and sends there", async () => {
+    expect(taskConversationHint("zh")).toBe("发送消息与这个任务的规划者对话。");
+    expect(taskConversationHint("en")).toBe("Send a message to this task's Planner.");
+    expect(taskConversationAddress("t1")).toEqual({
+      target: { kind: "planner", task_id: "t1" },
+      threadId: "planner-t1",
+    });
+    await show(<TaskPane taskId="t1" />);
+    expect(container.textContent).toContain(taskConversationHint("zh"));
+    expect(container.textContent).not.toContain("任务管家");
+    await say("ask");
+    const address = taskConversationAddress("t1");
+    expect(api.sendChat).toHaveBeenCalledWith(
+      "ask",
+      address.threadId,
+      expect.any(String),
+      address.target,
+      expect.anything(),
+    );
+  });
+
+  it.each([
+    ["unavailable", "这个任务的规划者当前不可用，暂时无法接收消息。", "This task's Planner is unavailable and cannot take messages right now."],
+    ["ended", "任务已结束，这个任务的规划者不再接收消息。", "This task has ended, so its Planner no longer takes messages."],
+    ["handing_back", "任务正在交还，这个任务的规划者暂时不接收消息。", "This task is being handed back, so its Planner is not taking messages for now."],
+    ["before_start", "继续发送会追加到需求。点击「开始」后，这个任务的规划者才会启动。", "Further messages append to the requirement. This task's Planner starts only after you click Start."],
+  ] as const)("derives the %s hint from the same task answerer in both languages", (state, zh, en) => {
+    expect(taskConversationHint("zh", state)).toBe(zh);
+    expect(taskConversationHint("en", state)).toBe(en);
+    expect(zh).toContain("规划者");
+    expect(zh).not.toContain("Planner");
+    expect(zh).not.toContain("任务管家");
+    expect(en).toContain("Planner");
+    expect(en).not.toContain("任务管家");
   });
 
   it("sends the original text to the planner thread with the original message id", async () => {
@@ -303,14 +353,17 @@ describe("work conversation", () => {
 
     api.fetchChatTargets.mockResolvedValueOnce([planner("other")]);
     await remount(<PlannerWorkConversation taskId="t1" detail={{ group: "in_progress", status: "running" }} />);
-    expect(container.textContent).toContain("任务管家当前不可用，暂时无法接收消息。");
+    expect(container.textContent).toContain(taskConversationHint("zh", "unavailable"));
+    expect(container.textContent).toContain("这个任务的规划者当前不可用，暂时无法接收消息。");
+    expect(container.textContent).not.toContain("任务管家");
     expect(input().disabled).toBe(true);
     expect(container.querySelector('a[href="#chat"]')).toBeNull();
 
     api.fetchChatTargets.mockResolvedValueOnce([planner("t1", false)]);
     await remount(<PlannerWorkConversation taskId="t1" detail={{ group: "in_progress", status: "running" }} />);
-    expect(container.textContent).toContain("任务管家当前不可用，暂时无法接收消息。");
+    expect(container.textContent).toContain("这个任务的规划者当前不可用，暂时无法接收消息。");
     expect(container.textContent).not.toContain("任务已结束");
+    expect(container.textContent).not.toContain("任务管家");
     expect(input().disabled).toBe(true);
 
     api.fetchChatTargets.mockResolvedValueOnce([planner("t1", true)]);
@@ -318,6 +371,22 @@ describe("work conversation", () => {
     expect(input().disabled).toBe(false);
     expect(container.querySelector("[data-task-status]")?.getAttribute("data-task-status")).toBe("completed");
     expect(container.querySelector("[data-identity]")?.getAttribute("data-identity")).toBe("planner:t1");
+  });
+
+  it.each([
+    ["ended", "completed"],
+    ["ended", "failed"],
+    ["ended", "cancelled"],
+    ["ended", "stopped"],
+    ["handing_back", "handing_back"],
+  ] as const)("shows the Chinese %s hint when %s cannot send", async (state, status) => {
+    api.fetchChatTargets.mockResolvedValueOnce([{ ...planner("t1", false), status }]);
+    await show(<PlannerWorkConversation taskId="t1" detail={{ group: "attention", status }} />);
+    expect(input().disabled).toBe(true);
+    expect(container.textContent).toContain(taskConversationHint("zh", state));
+    expect(container.textContent).not.toContain("任务管家");
+    expect(container.textContent).not.toContain(taskConversationHint("en", state));
+    expect(container.textContent).not.toContain("Planner");
   });
 
   it("rechecks sending after background start and stop without dropping unsent input", async () => {

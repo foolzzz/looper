@@ -92,11 +92,70 @@ const READ_FAILED = "对话读取失败";
 const NOT_FOUND = "任务不存在";
 const CHECKING = "正在检查对话可用性";
 const CHECK_FAILED = "无法检查对话可用性";
-const NO_PLANNER = "任务管家当前不可用，暂时无法接收消息。";
-const PLANNER_ENDED = "任务已结束，任务管家不再接收消息。";
 const TERMINAL = new Set(["completed", "failed", "cancelled", "stopped"]);
 const CONNECT_FAILED = "连接失败，请检查服务器是否运行。";
 const STREAM_LOST = "回复流已断开，服务端可能仍在运行";
+
+/**
+ * Who a Work task conversation addresses. The send target and every task
+ * hint, in both languages, read this one value, so a later switch to the
+ * task Manager changes them together.
+ */
+const TASK_CONVERSATION_ANSWERER = {
+  kind: "planner",
+  zh: "规划者",
+  en: "Planner",
+} as const;
+
+export type TaskConversationHintState =
+  | "ready"
+  | "unavailable"
+  | "ended"
+  | "handing_back"
+  | "before_start";
+
+/** Work renders Chinese. English is the same answerer's other language. */
+const TASK_CONVERSATION_HINTS: Record<TaskConversationHintState, Record<"zh" | "en", (name: string) => string>> = {
+  ready: {
+    zh: (name) => `发送消息与这个任务的${name}对话。`,
+    en: (name) => `Send a message to this task's ${name}.`,
+  },
+  unavailable: {
+    zh: (name) => `这个任务的${name}当前不可用，暂时无法接收消息。`,
+    en: (name) => `This task's ${name} is unavailable and cannot take messages right now.`,
+  },
+  ended: {
+    zh: (name) => `任务已结束，这个任务的${name}不再接收消息。`,
+    en: (name) => `This task has ended, so its ${name} no longer takes messages.`,
+  },
+  handing_back: {
+    zh: (name) => `任务正在交还，这个任务的${name}暂时不接收消息。`,
+    en: (name) => `This task is being handed back, so its ${name} is not taking messages for now.`,
+  },
+  before_start: {
+    zh: (name) => `继续发送会追加到需求。点击「开始」后，这个任务的${name}才会启动。`,
+    en: (name) => `Further messages append to the requirement. This task's ${name} starts only after you click Start.`,
+  },
+};
+
+export function taskConversationAddress(taskId: string): { target: ChatTarget; threadId: string } {
+  const kind = TASK_CONVERSATION_ANSWERER.kind;
+  return { target: { kind, task_id: taskId }, threadId: `${kind}-${taskId}` };
+}
+
+export function taskConversationHint(
+  language: "zh" | "en",
+  state: TaskConversationHintState = "ready",
+): string {
+  return TASK_CONVERSATION_HINTS[state][language](TASK_CONVERSATION_ANSWERER[language]);
+}
+
+function taskConversationRefusal(status: string): string {
+  const state: TaskConversationHintState = TERMINAL.has(status)
+    ? "ended"
+    : status === "handing_back" ? "handing_back" : "unavailable";
+  return taskConversationHint("zh", state);
+}
 
 export const clearWorkComposerMemory = clearWorkConversationMemory;
 
@@ -233,8 +292,8 @@ export function TaskWorkConversation(props: TaskConversationInput) {
 }
 
 /**
- * Planner adapter for one selected task. The thread is `planner-<task id>` and the
- * send target is `{kind:'planner', task_id}`. There is no Stop and no turn poll.
+ * Adapter for one selected task. The thread, send target and composer hints
+ * come from the task answerer. There is no Stop and no turn poll.
  */
 export function PlannerWorkConversation({
   taskId,
@@ -258,7 +317,7 @@ export function PlannerWorkConversation({
     genTask.current = taskId;
     gen.current += 1;
   }
-  const reply = useReplyStream(() => ({ id: taskRef.current, threadId: `planner-${taskRef.current}` }));
+  const reply = useReplyStream(() => ({ id: taskRef.current, threadId: taskConversationAddress(taskRef.current).threadId }));
   const replyRef = useRef(reply);
   replyRef.current = reply;
 
@@ -331,13 +390,12 @@ export function PlannerWorkConversation({
     setAvailability({ canSend: false, reason: CHECKING });
     fetchChatTargets(ctrl.signal).then((targets) => {
       if (ctrl.signal.aborted || turn !== gen.current || taskRef.current !== taskId) return;
-      const planner = targets.find((target) => target.kind === "planner" && target.task_id === taskId);
-      const status = taskStatus ?? planner?.status ?? "";
-      const unavailable = TERMINAL.has(status) ? PLANNER_ENDED : status === "handing_back"
-        ? "任务正在交还，任务管家暂时不接收消息。" : NO_PLANNER;
+      const address = taskConversationAddress(taskId);
+      const party = targets.find((target) => target.kind === address.target.kind && target.task_id === taskId);
+      const status = taskStatus ?? party?.status ?? "";
       setAvailability({
-        canSend: planner?.can_send ?? false,
-        reason: planner?.can_send ? "发送消息与任务管家对话。" : unavailable,
+        canSend: party?.can_send ?? false,
+        reason: party?.can_send ? taskConversationHint("zh") : taskConversationRefusal(status),
       });
     }).catch((error: unknown) => {
       if (ctrl.signal.aborted || turn !== gen.current || (error instanceof Error && error.name === "AbortError")) return;
@@ -353,7 +411,7 @@ export function PlannerWorkConversation({
     const turn = gen.current;
     const sent = sendGen.current;
     setLive((current) => current.taskId !== taskId ? current : { ...current, history: store.cached(cacheKey)?.messagesLoaded ? current.history : "loading", historyError: "" });
-    fetchChatMessages(`planner-${taskId}`, ctrl.signal).then((rows) => {
+    fetchChatMessages(taskConversationAddress(taskId).threadId, ctrl.signal).then((rows) => {
       if (ctrl.signal.aborted || turn !== gen.current || taskRef.current !== taskId) return;
       if (!Array.isArray(rows)) throw new Error("服务器返回了无效的对话消息。");
       if (sent !== sendGen.current) return;
@@ -391,8 +449,7 @@ export function PlannerWorkConversation({
   const send = (text: string) => {
     if (!text.trim() || !canSendRef.current || missing || taskRef.current !== taskId) return;
     const turn = gen.current;
-    const sid = `planner-${taskId}`;
-    const target: ChatTarget = { kind: "planner", task_id: taskId };
+    const { threadId: sid, target } = taskConversationAddress(taskId);
     sendGen.current += 1;
     finalSeen.current = false;
     reply.cancel();

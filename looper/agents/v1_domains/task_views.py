@@ -125,6 +125,9 @@ TASK_DETAIL = _object({
 from .task_failures import HOLD
 TASK_DETAIL["properties"]["fail_kind"] = {"type": ["string", "null"], "enum": [*[kind.value for kind in tasks.FailKind], None]}
 TASK_DETAIL["properties"]["holds"] = _array(HOLD)
+TASK_DETAIL["properties"]["network_pause"] = _object({
+    "id": _INT, "state": {"type": "string", "enum": ["paused", "waiting_user"]},
+    "reason": _STR, "started_at": _STR, "deadline": _STR}, closed=True)
 TASK_DETAIL["properties"]["run_roles"] = {"type": "object", "additionalProperties": _object({
     "id": _STR, "kind": _STR, "version": _INT})}
 # Its Planner's consults of the advisor, in a task with some.

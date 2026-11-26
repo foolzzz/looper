@@ -1,8 +1,8 @@
 """Task Manager profiles belong to the task, independently of Manager sessions."""
 
 import asyncio
-from dataclasses import replace
 from types import SimpleNamespace
+from dataclasses import replace
 from unittest.mock import AsyncMock
 
 import pytest
@@ -78,6 +78,49 @@ def test_profile_changes_are_durable_and_keep_session_selection_separate(monkeyp
     run_db(check, monkeypatch)
 
 
+def test_profile_switch_refuses_busy_then_closes_idle_resident(monkeypatch):
+    from looper.agents.ops import ErrorCode, OpError
+    from looper.agents.tiers import task_manager
+    from looper.db import projects, tasks
+
+    stop = AsyncMock()
+    pool = SimpleNamespace(_lock=asyncio.Lock(), in_turn=lambda _: True,
+                           agents={"task-a": SimpleNamespace(resident=SimpleNamespace(stop=stop))})
+    monkeypatch.setattr(task_manager, "current_pool", lambda: pool)
+
+    async def check(db):
+        project = await projects.create_project(name="Profile selection", pool=db)
+        await tasks.create_task(task_id="task-a", requirement="Synthetic work", project_id=project["id"], pool=db)
+        with pytest.raises(OpError, match="stop its turn first") as failure:
+            await settings.set_task_manager_profile("task-a", "agent-claude-code-opus")
+        assert failure.value.code is ErrorCode.TASK_MANAGER_BUSY
+        assert await settings.db_layers.profile_overrides("task-a", pool=db) == {}
+        stop.assert_not_awaited()
+        pool.in_turn = lambda _: False
+        await settings.set_task_manager_profile("task-a", "agent-claude-code-opus")
+        assert (await settings.db_layers.profile_overrides("task-a", pool=db))["task_manager"]["id"] == "agent-claude-code-opus"
+        stop.assert_awaited_once_with(kill=True)
+    run_db(check, monkeypatch)
+
+
+def test_profile_switch_refuses_non_claude_runtime(monkeypatch):
+    from looper.agents.ops import ErrorCode, OpError
+    from looper.agents.tiers import task_manager
+
+    monkeypatch.setattr(task_manager, "current_pool", lambda: None)
+    monkeypatch.setattr(settings, "_save_event", AsyncMock())
+    monkeypatch.setattr(settings, "check_selection", AsyncMock(return_value=SimpleNamespace(
+        name="Other profile", runtime=SimpleNamespace(type="codex"))))
+    write = AsyncMock()
+    monkeypatch.setattr(settings.db_layers, "set_task_layer", write)
+    async def check():
+        with pytest.raises(OpError, match="Claude Code") as failure:
+            await settings.set_task_manager_profile("task-a", "other-profile")
+        assert failure.value.code is ErrorCode.TASK_MANAGER_RUNTIME_UNSUPPORTED
+        write.assert_not_awaited()
+    asyncio.run(check())
+
+
 def test_stored_profile_effort_reaches_native_task_manager_launch(monkeypatch, tmp_path):
     from looper.agents.tiers.task_manager import TaskManagerPool
     from tests.task_manager_support import NativeTaskManager, submit_and_wait
@@ -107,44 +150,3 @@ def test_stored_profile_effort_reaches_native_task_manager_launch(monkeypatch, t
         finally:
             await pool.shutdown()
     run_db(check, monkeypatch, timeout=30)
-
-
-def test_profile_switch_refuses_busy_then_closes_idle_resident(monkeypatch):
-    from looper.agents.tiers import task_manager
-    from looper.agents.projects import RequestError
-    from looper.db import projects, tasks
-
-    stop = AsyncMock()
-    pool = SimpleNamespace(_lock=asyncio.Lock(), in_turn=lambda _: True,
-                           agents={"task-a": SimpleNamespace(resident=SimpleNamespace(stop=stop))})
-    monkeypatch.setattr(task_manager, "current_pool", lambda: pool)
-    async def check(db):
-        project = await projects.create_project(name="Profile selection", pool=db)
-        await tasks.create_task(task_id="task-a", requirement="Synthetic work", project_id=project["id"], pool=db)
-        with pytest.raises(RequestError, match="stop its turn first") as failure:
-            await settings.set_task_manager_profile("task-a", "agent-claude-code-opus")
-        assert failure.value.status == "409 Conflict"
-        assert await settings.db_layers.profile_overrides("task-a", pool=db) == {}
-        stop.assert_not_awaited()
-        pool.in_turn = lambda _: False
-        await settings.set_task_manager_profile("task-a", "agent-claude-code-opus")
-        assert (await settings.db_layers.profile_overrides("task-a", pool=db))["task_manager"]["id"] == "agent-claude-code-opus"
-        stop.assert_awaited_once_with(kill=True)
-    run_db(check, monkeypatch)
-
-
-def test_profile_switch_refuses_non_claude_runtime(monkeypatch):
-    from looper.agents.runtimes import RuntimeUnsupported
-    from looper.agents.tiers import task_manager
-
-    monkeypatch.setattr(task_manager, "current_pool", lambda: None)
-    monkeypatch.setattr(settings, "_save_event", AsyncMock())
-    monkeypatch.setattr(settings, "check_selection", AsyncMock(return_value=SimpleNamespace(
-        name="Other profile", runtime=SimpleNamespace(type="codex"))))
-    write = AsyncMock()
-    monkeypatch.setattr(settings.db_layers, "set_task_layer", write)
-    async def check():
-        with pytest.raises(RuntimeUnsupported, match="Claude Code"):
-            await settings.set_task_manager_profile("task-a", "other-profile")
-        write.assert_not_awaited()
-    asyncio.run(check())
