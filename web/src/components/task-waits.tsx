@@ -15,9 +15,13 @@ function checkEvery(seconds: number): string {
   return rest === 0 ? `every ${minutes} min` : `every ${minutes} min ${rest} s`;
 }
 
-export function WaitBadge({ state }: { state: TaskWait["state"] }) {
+export function WaitBadge({ state, language }: { state: TaskWait["state"]; language?: "zh-CN" }) {
   const look = WAIT_STATES[state];
-  return <Badge variant={look.variant}>{look.label}</Badge>;
+  const labels: Record<TaskWait["state"], string> = {
+    pending: "尚未开启", waiting: "等待中", ready: "已就绪", timed_out: "已超时",
+    cancel_requested: "已请求取消", done: "已完成", failed: "失败", skipped: "已跳过",
+  };
+  return <Badge variant={look.variant}>{language === "zh-CN" ? labels[state] : look.label}</Badge>;
 }
 
 function WaitTime({ iso }: { iso: string | null }) {

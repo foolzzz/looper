@@ -1,4 +1,4 @@
-"""The operator's list of the default Manager's sessions, and resetting one of them.
+"""The operator's list of a Manager's sessions, and resetting one of the default Manager's.
 
 ``main`` lives in ``agent_sessions``. Each group and each other sender's direct chat lives in
 ``manager_sessions``. Reset does what ``/new`` does in that session (clear the session id and stop
@@ -23,21 +23,24 @@ from .chat_controls import _manager
 
 _IDENTIFIER = re.compile(r"^(?:ou|on|oc|cli)_[0-9A-Za-z]+$")
 _NULL_NUM = {"type": ["number", "null"]}
+_SCOPE = _object({"id": _STR, "version": {"type": "integer", "minimum": 1},
+                  "audience": {"type": "string", "enum": ["operator", "shared"]}})
 _SESSION = _object({
     "key": _STR, "kind": {"type": "string", "enum": ["main", "group", "dm"]}, "name": _STR,
     "resident": _BOOL, "last_active_at": {"type": ["string", "null"]}, "context_tokens": {"type": ["integer", "null"]},
-    "cost_usd": _NULL_NUM,
+    "cost_usd": _NULL_NUM, "scope": {"anyOf": [_SCOPE, {"type": "null"}]}, "retired": _BOOL,
 })
 VIEW = _object({"routing_enabled": _BOOL, "sessions": _array(_SESSION)})
 RESULTS = {}
 _RESET = "重置这个会话？管家会忘掉这里之前的对话，下一条消息开一个新会话。"
 OPERATIONS = (
     Operation("manager_sessions.list", "POST", "/api/v1/manager_sessions/list",
-              "List the default Manager's sessions.",
-              "List the default Manager's sessions. Each row is main, or one group or other sender's direct chat, "
-              "with its name, whether a process is running, its last activity and its cost.",
-              _object({}, closed=True), VIEW, risk="read", operator_only=True,
-              level=ActionLevel.INSIDE),  # reads the default Manager's own session rows; sends nothing
+              "List a Manager's sessions.",
+              "List a Manager's sessions. Defaults to the default Manager. Each row includes its name, resident state, "
+              "last activity, cost, scope and retirement state.",
+              _object({"manager_id": {"type": "string", "minLength": 1}}, [], closed=True), VIEW,
+              risk="read", operator_only=True,
+              level=ActionLevel.INSIDE),  # reads the selected Manager's own session rows; sends nothing
     Operation("manager_sessions.reset", "POST", "/api/v1/manager_sessions/reset",
               "Reset one Manager session.",
               "Reset one Manager session. Clears its session id and stops its process once idle, the same as /new "
@@ -93,10 +96,11 @@ def _resident(agent: Any, key: str) -> bool:
     return bool(session is not None and session.claude.started)
 
 
-def _view(agent: Any, *, key: str, kind: str, name: str, last_active_at: Any, totals: Any) -> dict[str, Any]:
+def _view(agent: Any, *, key: str, kind: str, name: str, last_active_at: Any, totals: Any,
+          scope: dict[str, Any] | None = None, retired: bool = False) -> dict[str, Any]:
     return {"key": key, "kind": kind, "name": name, "resident": _resident(agent, key),
             "last_active_at": last_active_at, "context_tokens": None,  # filled in by 1.4
-            "cost_usd": _cost(totals)}
+            "cost_usd": _cost(totals), "scope": scope, "retired": retired}
 
 
 async def _seen_names(rows: list[dict[str, Any]]) -> dict[tuple[str, str], str | None]:
@@ -124,7 +128,10 @@ async def _rows(agent: Any) -> list[dict[str, Any]]:
     for row in stored:
         rows.append(_view(agent, key=row["session_key"], kind=row["kind"],
                           name=display_name(row["kind"], row["chat"], names.get((row["channel_id"], row["chat"]))),
-                          last_active_at=row["last_active_at"], totals=row["session_totals"]))
+                          last_active_at=row["last_active_at"], totals=row["session_totals"],
+                          scope=({"id": row["scope_id"], "version": row["scope_version"], "audience": row["audience"]}
+                                 if row["scope_id"] is not None else None),
+                          retired=row["retired_at"] is not None))
     return rows
 
 
@@ -142,9 +149,11 @@ async def impact(server, operation, arguments, principal, headers):
 
 
 async def run(server, operation, arguments, principal, headers):
-    agent = _default(server)
     if operation.operation_id == "manager_sessions.list":
-        return {"routing_enabled": session_routing.routing_enabled(), "sessions": await _rows(agent)}
+        manager_id = arguments.get("manager_id", DEFAULT_MANAGER_ID)
+        agent = _default(server) if manager_id == DEFAULT_MANAGER_ID else _manager(server, manager_id)
+        return {"routing_enabled": session_routing.routes(agent.agent_id), "sessions": await _rows(agent)}
+    agent = _default(server)
     try:
         key = parse_key(arguments["key"])
     except ValueError as exc:

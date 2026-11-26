@@ -137,7 +137,7 @@ def test_list_names_sessions_and_reset_clears_only_that_row(tmp_path, monkeypatc
             assert rows["main"]["context_tokens"] is None and rows["main"]["last_active_at"]
             assert rows[NAMED_KEY] == {"key": NAMED_KEY, "kind": "group", "name": "Synthetic room",
                                        "resident": True, "last_active_at": rows[NAMED_KEY]["last_active_at"],
-                                       "context_tokens": None, "cost_usd": 0.25}
+                                       "context_tokens": None, "cost_usd": 0.25, "scope": None, "retired": False}
             assert rows[BARE_KEY]["name"] == BARE_CHAT[-6:]
             assert rows[OPEN_KEY]["name"] == OPEN_CHAT[-6:]
             assert rows[OTHER_KEY]["name"] == "Other sender" and rows[OTHER_KEY]["kind"] == "dm"

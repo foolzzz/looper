@@ -575,7 +575,7 @@ def _manager(scenarios_path: str, args: list[str], stdin: _Stdin, system_prompt:
         if not line.strip():
             continue
         content = _user_text(line)
-        channel = re.search(r"^Channel: .*\n\n", content, re.MULTILINE)
+        channel = re.search(r"^Channel: [^\n]*\n\n|^\[Turn context\]\n(?:[^\n]+\n)+\n", content, re.MULTILINE)
         message = content[channel.end():] if channel else content
         named = re.search(r"confirmation_id (c-[0-9a-f]+)", content)
         with open(scenarios_path, encoding="utf-8") as handle:

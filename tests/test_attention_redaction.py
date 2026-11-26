@@ -14,7 +14,8 @@ from looper.agents.http_server import AgentHTTPServer
 from looper.agents.message import channel_address
 from tests.db_support import run_db
 
-CASES = json.loads((Path(__file__).parent / "fixtures" / "attention-redaction.json").read_text())
+CASES = json.loads((Path(__file__).resolve().parents[1] / "web" / "src" / "test-fixtures"
+                    / "attention-redaction.json").read_text())
 
 
 @pytest.mark.parametrize("case", CASES, ids=lambda case: case["name"])

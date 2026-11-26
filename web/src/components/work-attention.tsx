@@ -6,7 +6,6 @@ import {
   type AttentionSummary,
 } from "@/lib/api-attention";
 import { displayText as text } from "@/lib/attention-display";
-import { channelLabel } from "@/lib/chat-channels";
 import { sinceText } from "@/lib/gates";
 import { startPolling } from "@/lib/polling";
 import { errorText } from "@/lib/use-action";
@@ -14,37 +13,37 @@ import { isMissingOperation } from "@/lib/work";
 
 /** How often the manager column reads the summary again while it is visible. */
 const REFRESH_MS = 15_000;
+const channelLabel = (channel: string) => ({ web: "网页对话", lark: "飞书", lark_bot: "飞书（机器人）", telegram: "Telegram" } as Record<string, string>)[channel] ?? channel;
 
 const LINK = "rounded-sm font-medium underline-offset-2 hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring pointer-coarse:inline-flex pointer-coarse:min-h-11 pointer-coarse:items-center";
 
 const TITLES: Record<AttentionKind, string> = {
   failure_holds: "运行失败等你处理",
-  gates: "Gates waiting for your answer",
-  confirmations: "Operations to confirm",
-  schedules: "Failing schedules",
-  logins: "Logins that fail",
-  intents: "Intents 意图",
-  ledger: "Ledger items waiting for you",
-  deliveries: "Messages that may not have arrived",
+  gates: "等待你回答的关卡",
+  confirmations: "待确认的操作",
+  schedules: "失败的定时任务",
+  logins: "登录异常",
+  intents: "意图",
+  ledger: "待处理的账本事项",
+  deliveries: "可能未送达的消息",
   reminders: "未确认送达的提醒",
   cost: "花费等你决定",
   vault_commits: "知识库提交受阻",
 };
 
 const ALERTS: Record<string, string> = {
-  failures: "failures alert", stale: "no success for too long", deadline: "missed its deadline", overlap: "runs overlap",
-  unanswered: "nobody replied, paused automatically",
+  failures: "失败次数告警", stale: "长时间未成功", deadline: "已超过截止时间", overlap: "运行重叠",
+  unanswered: "无人回复，已自动暂停",
 };
-const LEDGER_KINDS: Record<string, string> = { pending: "to-do", decision: "decision to confirm", work_item: "work item" };
+const LEDGER_KINDS: Record<string, string> = { pending: "待办", decision: "待确认的决定", work_item: "工作事项" };
 const DELIVERY_SOURCES: Record<string, string> = {
-  subscription: "Subscription push", intent: "Intent message", task_end: "Task end notice",
-  catchup: "Lark catch-up dropped",
+  subscription: "订阅推送", intent: "意图消息", task_end: "任务结束通知",
+  catchup: "飞书补拉丢失",
   message_stream: "消息流采集/对账需处理",
 };
 
 const SECRET_KEY = /token|secret|password|credential|authorization|cookie|api[_-]?key|private[_-]?key/i;
 const count = (value: unknown) => (typeof value === "number" ? value : 0);
-const plural = (n: number, one: string) => `${n} ${one}${n === 1 ? "" : "s"}`;
 
 /** Facts the operator can read. Secret keys never reach the line. */
 function visibleFacts(facts: Record<string, unknown>): Record<string, unknown> {
@@ -66,25 +65,25 @@ function details(kind: AttentionKind, item: AttentionItem): { line: string; badg
       return { line: parts(context, `连续失败 ${count(facts.streak)} 次`), badges: [text(facts.kind)] };
     case "gates":
       return { line: parts(context, text(facts.step),
-        count(facts.questions) > 0 && plural(count(facts.questions), "open question")), badges: [] };
+        count(facts.questions) > 0 && `${count(facts.questions)} 个未回答的问题`), badges: [] };
     case "confirmations": {
       const minutes = Math.max(1, Math.floor(count(facts.expires_in_seconds) / 60));
-      return { line: parts(context, `in ${channelLabel(text(facts.channel) || "a chat")}`, `lapses in ${minutes} min`),
+      return { line: parts(context, `来自 ${channelLabel(text(facts.channel)) || "对话"}`, `${minutes} 分钟后过期`),
         badges: [] };
     }
     case "schedules": {
       const failures = count(facts.failures);
       const alerts = Array.isArray(facts.alerts)
         ? facts.alerts.map((alert) => text(ALERTS[String(alert)] ?? String(alert))) : [];
-      return { line: context, badges: [...(failures > 0 ? [`${plural(failures, "failure")} in a row`] : []), ...alerts] };
+      return { line: context, badges: [...(failures > 0 ? [`连续失败 ${failures} 次`] : []), ...alerts] };
     }
     case "logins":
-      return { line: parts(text(facts.detail), text(facts.fix) && `To fix: ${text(facts.fix)}`), badges: [] };
+      return { line: parts(text(facts.detail), text(facts.fix) && `处理方法：${text(facts.fix)}`), badges: [] };
     case "intents":
-      return { line: parts(ref, context), badges: facts.priority === "urgent" ? ["urgent"] : [] };
+      return { line: parts(ref, context), badges: facts.priority === "urgent" ? ["紧急"] : [] };
     case "ledger":
       return { line: parts(ref, LEDGER_KINDS[text(facts.kind)] ?? text(facts.kind)),
-        badges: facts.overdue === true ? ["overdue"] : [] };
+        badges: facts.overdue === true ? ["已逾期"] : [] };
     case "reminders":
       return { line: parts(ref, context), badges: [] };
     case "cost":
@@ -100,7 +99,7 @@ function details(kind: AttentionKind, item: AttentionItem): { line: string; badg
           facts.kind === "parity_drift" && `仅参考 ${count(facts.bridge_only)} · 仅采集 ${count(facts.collect_only)}`,
           text(facts.fix)), badges: [] };
       return { line: parts(DELIVERY_SOURCES[text(facts.source)] ?? text(facts.source), ref,
-        text(facts.channel) && `${facts.source === "catchup" ? "from" : "to"} ${channelLabel(text(facts.channel))}`,
+        text(facts.channel) && `${facts.source === "catchup" ? "来自" : "发往"} ${channelLabel(text(facts.channel))}`,
         text(facts.fix)), badges: [] };
     case "vault_commits":
       return { line: parts(context, text(facts.reason), text(facts.branch), text(facts.worktree)), badges: ["受阻"] };
@@ -127,7 +126,7 @@ function Item({ kind, item }: { kind: AttentionKind; item: AttentionItem }) {
       {href ? <a href={href} className={LINK}>{title}</a> : <span className="font-medium [overflow-wrap:anywhere]">{title}</span>}
       {note && <p className="text-xs text-muted-foreground [overflow-wrap:anywhere]">{note}</p>}
       {item.since && (
-        <time dateTime={item.since} className="block text-xs tabular-nums text-muted-foreground">{sinceText(item.since)}</time>
+        <time dateTime={item.since} className="block text-xs tabular-nums text-muted-foreground">{sinceText(item.since, "zh-CN")}</time>
       )}
     </li>
   );
