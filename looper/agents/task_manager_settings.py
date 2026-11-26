@@ -4,6 +4,7 @@ Task profile overrides keep the selection independent of Manager sessions.
 """
 
 import json
+import logging
 from collections.abc import Awaitable, Callable, Mapping
 from contextlib import AsyncExitStack
 from enum import Enum
@@ -15,6 +16,8 @@ from ..db.connection import get_pool
 from .agent_settings import AgentSettings, AgentType, index_layers, load_agent_settings, resolve
 from .profile_registry import RegistryError, builtin_profile, check_selection
 from .runtimes import RuntimeUnsupported
+
+logger = logging.getLogger(__name__)
 
 DEFAULT_PROFILE_ID = builtin_profile("task_manager").id
 
@@ -74,10 +77,18 @@ async def set_task_manager_profile(task_id: str, profile_id: str | None, *,
             reason = (ModelSwitchRejection.BUSY if isinstance(exc, RequestError) else
                       ModelSwitchRejection.INVALID_PROFILE if isinstance(exc, RegistryError) else
                       ModelSwitchRejection.RUNTIME_UNSUPPORTED)
-            body = {"type": TaskManagerEvent.MODEL_SWITCH_REJECTED.value, "profile_id": profile_id, "reason": reason.value}
-            await _save_event(task_id, body)
-            if publish is not None:
-                await publish(task_id, body)
+            body = {"kind": TaskManagerEvent.MODEL_SWITCH_REJECTED.value, "profile_id": profile_id, "reason": reason.value}
+            # A failed event write must not replace the typed refusal the caller is waiting for.
+            try:
+                await _save_event(task_id, body)
+            except Exception:
+                logger.warning("task %s: could not save the model switch refusal", task_id, exc_info=True)
+            else:
+                if publish is not None:
+                    try:
+                        await publish(task_id, body)
+                    except Exception:
+                        logger.warning("task %s: could not publish the model switch refusal", task_id, exc_info=True)
             raise
         async with get_pool().acquire() as conn, conn.transaction():
             await conn.fetchval("SELECT id FROM tasks WHERE id = $1 FOR UPDATE", task_id)
@@ -87,10 +98,14 @@ async def set_task_manager_profile(task_id: str, profile_id: str | None, *,
             selected = await _effective_profile(task_id, connection=conn)
             changed = previous != selected
             if changed:
-                body = {"type": TaskManagerEvent.MODEL_SWITCHED.value, "from_profile_id": previous, "to_profile_id": selected}
+                body = {"kind": TaskManagerEvent.MODEL_SWITCHED.value, "from_profile_id": previous, "to_profile_id": selected}
                 await _save_event(task_id, body, connection=conn)
         if changed and pool is not None and (agent := pool.agents.get(task_id)) is not None:
             # Idle only: no driver needs joining, and admission stays excluded until stop finishes.
             await agent.resident.stop(kill=True)
         if changed and publish is not None:
-            await publish(task_id, body)
+            try:
+                await publish(task_id, body)
+            except Exception:
+                # The profile change and the event row are already committed. History can be re-read.
+                logger.warning("task %s: could not publish the model switch", task_id, exc_info=True)

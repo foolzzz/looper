@@ -35,8 +35,8 @@ SCHEMAS = {
             "/stop", "/done", "/pause", "/background", "/takeover", "/start"]}}, closed=True),
         _object({"kind": {"const": "queued"}, "reason": {"enum": ["cap", "turn"]},
                  "position": {"type": "integer"}, "active": {"type": "integer", "minimum": 0}}, closed=True),
-        _object({"type": {"const": "model_switched"}, "from_profile_id": _STR, "to_profile_id": _STR}, closed=True),
-        _object({"type": {"const": "model_switch_rejected"}, "profile_id": {"type": ["string", "null"]},
+        _object({"kind": {"const": "model_switched"}, "from_profile_id": _STR, "to_profile_id": _STR}, closed=True),
+        _object({"kind": {"const": "model_switch_rejected"}, "profile_id": {"type": ["string", "null"]},
                  "reason": {"enum": [reason.value for reason in ModelSwitchRejection]}}, closed=True),
         _object({"kind": {"const": "session_fresh"}, "reason": {"enum": [
             "context_bound", "read_only_open", "resume_failed"]}, "detail": _STR}, closed=True),
