@@ -705,6 +705,24 @@ async def commit_pending(path: Path, links: Sequence[str], message: str) -> str 
     return await _rev(path, "HEAD")
 
 
+async def commit_paths(path: Path, paths: Sequence[str], links: Sequence[str], message: str) -> str | None:
+    """Commit only ``paths`` (relative to the checkout's top level) as Looper, leaving every other change, staged or
+    not, where it is; paths at or under ``links`` are never committed. The commit, or None when nothing changed."""
+    linked = tuple(link.rstrip("/") for link in links)
+    chosen = [f":(literal){p}" for p in paths if not any(p == link or p.startswith(f"{link}/") for link in linked)]
+    if not chosen:
+        return None
+    await _git(path, "add", "-A", "--", *chosen)
+    staged = await _git(path, "diff", "--cached", "--quiet", "--", *chosen, check=False)
+    if staged.returncode not in (0, 1):
+        raise GitError(f"git diff --cached failed: {staged.stderr.decode('utf-8', 'replace').strip()[:500]}")
+    if staged.returncode == 0:
+        return None
+    await _git(path, "commit", "-q", "--no-verify", "--no-gpg-sign", "--only", "-m", message, "--", *chosen,
+               identity=True)
+    return await _rev(path, "HEAD")
+
+
 async def _close_step_branch(workspace: StepWorkspace, step_key: str,
                              links: Sequence[str]) -> tuple[StepWorkspace, str | None]:
     """Commit what the step's Worker left uncommitted, without ``links`` (the linked paths that are still links); the

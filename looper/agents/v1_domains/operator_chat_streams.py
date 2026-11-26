@@ -43,7 +43,8 @@ SCHEMAS = {
         _object({"kind": {"const": "stopped"}, "method": {"enum": ["control", "cancel", "kill"]}}, closed=True),
         _object({"kind": {"const": "turn_summary"}, "files": _array(_STR),
                  "commit": {"type": ["string", "null"]},
-                 "mode": {"enum": ["direct", "orchestrated"]}}, closed=True),
+                 "mode": {"enum": ["direct", "orchestrated"]},
+                 "uncommitted": _array(_STR)}, ["kind", "files", "commit", "mode"], closed=True),
         _object({"kind": {"const": "refused"}, "reason": {"const": "orchestrated"}, "status": _STR}, closed=True),
         _object({"kind": {"const": "refused"}, "reason": {"enum": [
             "work_mode_off", "runtime_unsupported", "budget", "outbound_review_unavailable", "workspace",

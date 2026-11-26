@@ -107,6 +107,9 @@ for line in sys.stdin:
         emit({{'type':'assistant','message':{{'content':[], 'usage':{{'input_tokens':measurement_config['context_tokens']}}}}}})
     if text == 'write':
         Path('changed.txt').write_text('changed')
+    if text.startswith('edit:'):
+        for name in text[5:].split(','):
+            Path(name).write_text('changed by the turn\\n')
     emit({{'type':'stream_event','event':{{'delta':{{'type':'text_delta','text':'one'}}}}}})
     emit({{'type':'stream_event','event':{{'delta':{{'type':'text_delta','text':'two'}}}}}})
     emit({{'type':'assistant','message':{{'content':[{{'type':'tool_use','id':'tool-call','name':'Read','input':{{'file_path':'sample'}}}}]}}}})

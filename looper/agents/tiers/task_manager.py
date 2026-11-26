@@ -415,11 +415,17 @@ class TaskManagerAgent:
                     runtime_type="claude-code", profile_id=launch.profile.id, provider_id=launch.profile.provider.id)
             after = await _files(reopened.work_dir)
             files = sorted(name for name in before.keys() | after.keys() if before.get(name) != after.get(name))
-            commit = None
+            commit, summary = None, {}
             if written and task.get("workspace_mode") == "worktree" and self.mode == "direct":
-                commit = await step_workspaces.commit_pending(Path(reopened.work_dir), self.links,
-                    f"looper: task Manager turn of task {self.task_id}\n\nLooper-Task: {self.task_id}")
-            await request.sink.event(TaskManagerEvent.TURN_SUMMARY, {"files": files, "commit": commit, "mode": self.mode})
+                # A path that already had uncommitted changes when the turn began belongs to the user: it is never
+                # committed here, even when this turn edited it too.
+                own = [name for name in files if name not in before]
+                if kept := [name for name in files if name in before]:
+                    summary["uncommitted"] = kept
+                if own:
+                    commit = await step_workspaces.commit_paths(Path(reopened.work_dir), own, self.links,
+                        f"looper: task Manager turn of task {self.task_id}\n\nLooper-Task: {self.task_id}")
+            await request.sink.event(TaskManagerEvent.TURN_SUMMARY, {"files": files, "commit": commit, "mode": self.mode, **summary})
         from . import task_manager_context
         await task_manager_context.maintain(self, request, reopened, launch, prompt, record_id)
         await request.sink.final(text, outcome)
