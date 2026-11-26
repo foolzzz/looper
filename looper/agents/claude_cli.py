@@ -1498,6 +1498,8 @@ class ResidentClaude:
         if (process is None or process.stdin is None or process.returncode is not None
                 or process.stdin.is_closing()):
             raise ControlUnavailable(subtype, "no running process")
+        if self._output is not None:
+            self._output.read()  # the answer is read from the process's output, which a turn would otherwise start
         waiter: asyncio.Future[dict[str, Any]] = asyncio.get_running_loop().create_future()
         request_id = ""
         try:

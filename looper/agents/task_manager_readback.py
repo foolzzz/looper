@@ -50,9 +50,20 @@ REQUESTS: tuple[dict[str, Any], ...] = (
 MCP_PENDING_WAIT_SEC = 10.0
 MCP_PENDING_POLL_SEC = 0.25
 
-# Every built-in tool Claude Code ships that is not on the allowlist is denied by a ``toolsNarrowing`` rule under
-# ``--tools``. Recorded by the upgrade probe (tests/test_task_manager_readback_probe.py) for each verified version.
-KNOWN_BUILTIN_TOOLS: dict[str, frozenset[str]] = {}
+# The built-in tools Claude Code ships, by CLI version: under ``--tools`` each one outside the allowlist is denied by a
+# ``toolsNarrowing`` rule, which ``compare`` requires before the first turn. The list holds the tools every install
+# has (file, shell, network, agent, scheduling, messaging and task tools); tools that exist only for some accounts or
+# connectors are left out, because a rule for a tool an install does not have never appears. Whether another tool
+# slipped in is asserted by the upgrade probe (tests/test_task_manager_readback_probe.py), which must be rerun, and
+# this constant updated, before ``VERIFIED_CLI_VERSION`` changes.
+KNOWN_BUILTIN_TOOLS: dict[str, frozenset[str]] = {
+    "2.1.332": frozenset({
+        "Agent", "AskUserQuestion", "Bash", "CronCreate", "CronDelete", "CronList", "Edit", "EndConversation",
+        "EnterPlanMode", "EnterWorktree", "ExitPlanMode", "ExitWorktree", "Glob", "Grep", "ListMcpResourcesTool",
+        "LSP", "Monitor", "NotebookEdit", "Read", "ReadMcpResourceTool", "RemoteTrigger", "ScheduleWakeup",
+        "SendMessage", "Skill", "TaskCreate", "TaskGet", "TaskList", "TaskStop", "TaskUpdate", "TodoWrite",
+        "WaitForMcpServers", "WebFetch", "WebSearch", "Write"}),
+}
 
 _WRITES_FIXED = ("/dev/stdout", "/dev/stderr", "/dev/null", "/dev/tty", "/dev/dtracehelper", "/dev/autofs_nowait",
                  "/tmp/claude", "/private/tmp/claude", ".")
@@ -325,14 +336,14 @@ def compare(readback: Readback, expected: Expected) -> list[Mismatch]:
     for path in _unknown_sandbox_keys(effective):
         found.append(Mismatch(wider, "unknown_key", None, path, Source.UNKNOWN, key=path))
     # 5. F3: no extra writable path (the effective set is Claude Code's own entries)
-    extra = set(sandbox["restrictions"]["fs_allow_write"]) ^ expected.fs_allow_write
-    if extra:
+    write_pin = next((pin for pin in expected.pins if pin.item == "F3"), None)
+    blamed = _blame(write_pin, readback) if write_pin is not None else Source.UNKNOWN
+    if set(sandbox["restrictions"]["fs_allow_write"]) != expected.fs_allow_write and not any(m.item == "F3" for m in found):
         found.append(Mismatch(wider, "F3", sorted(expected.fs_allow_write),
-                              sorted(sandbox["restrictions"]["fs_allow_write"]), Source.UNKNOWN))
+                              sorted(sandbox["restrictions"]["fs_allow_write"]), blamed))
     entries = next(row["entries"] for row in sandbox["lists"]["rows"] if row["id"] == "writes_allowed")
     if set(entries) != expected.writes_allowed:
-        found.append(Mismatch(wider, "F3.effective", sorted(expected.writes_allowed), sorted(map(str, entries)),
-                              Source.UNKNOWN))
+        found.append(Mismatch(wider, "F3.effective", sorted(expected.writes_allowed), sorted(map(str, entries)), blamed))
     # 6. no forbidden variable (names only, never values)
     env = effective.get("env")
     if isinstance(env, Mapping) and (names := sorted(name for name in task_manager_sandbox.FORBIDDEN_ENV if name in env)):
