@@ -1,29 +1,6 @@
-import type { ReactNode } from "react";
 import ReactMarkdown, { type Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
-
-const REMOTE = /^(?:https?:)?\/\//i;
-
-/** The host of an absolute or protocol-relative web address, or null for a task link, anchor or other scheme. */
-function remoteHost(href: string | undefined): string | null {
-  if (!href || !REMOTE.test(href)) return null;
-  try {
-    return new URL(href, "https://placeholder.invalid").host || null;
-  } catch {
-    return null;
-  }
-}
-
-function RemoteLink({ href, host, children }: { href: string; host: string; children: ReactNode }) {
-  // Display text can name another site, so the real host always shows unless the text is the address itself.
-  const same = typeof children === "string" && (children === href || children.replace(/^https?:\/\//i, "").replace(/\/$/, "") === host);
-  return (
-    <a href={href} target="_blank" rel="noopener noreferrer" referrerPolicy="no-referrer">
-      {children}
-      {!same && <span className="text-muted-foreground"> ({host})</span>}
-    </a>
-  );
-}
+import { RemoteLink, remoteHost } from "@/components/remote-link";
 
 // An agent's text must not make the browser fetch anything: images become links, and links name their host.
 // A wide table scrolls inside its message instead of widening the page.
