@@ -55,7 +55,7 @@ export function WorkChanges({ taskId, visible, pendingWorkspace = false }: { tas
   if (!visible) return null;
   if (pendingWorkspace) return <section aria-label="改动文件" className="min-w-0 space-y-3 text-sm">
     <h2 className="font-medium">改动文件</h2>
-    <p role="status" className="text-muted-foreground">开始后可查看改动</p>
+    <p role="status" className="text-muted-foreground">任务开始后显示改动</p>
   </section>;
   // Guard during render too: effects run after a selection has already painted.
   const current = read?.taskId === taskId ? read : undefined;

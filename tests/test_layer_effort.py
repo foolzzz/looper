@@ -15,7 +15,7 @@ from typing import Any
 
 import pytest
 
-from looper.agents.agent_settings import SPAWN_ROLES, AgentType, Layer, LayerValues, resolve
+from looper.agents.agent_settings import AgentType, Layer, LayerValues, resolve
 from looper.agents.layer_effort import Before, Derived, convert
 from looper.agents.profile_registry import (
     BUILTIN_PROFILE, BUILTIN_PROVIDER, BUILTIN_RUNTIME, AgentProfile, ResolvedAgentProfile, builtin_resolved_profile,
@@ -24,7 +24,7 @@ from tests.runtime_model_helpers import resolved_profile
 
 S = (Layer.SYSTEM, None, None)
 # Only roles whose shared layers predate Agent Profiles' efforts participate in this migration.
-ROLES = tuple(role for role in AgentType if role not in (*SPAWN_ROLES, AgentType.EXPLORER))
+ROLES = (AgentType.MANAGER, AgentType.PLANNER, AgentType.WORKER, AgentType.REVIEWER, AgentType.PROCESSOR)
 TASK_ROLES = (AgentType.PLANNER, AgentType.WORKER, AgentType.REVIEWER)
 P = "proj-a"
 
@@ -165,3 +165,10 @@ def test_a_tasks_choice_keeps_the_effort_its_layers_gave_it() -> None:
         ("task-a", AgentType.WORKER): "claude-code/sonnet · low",
         ("task-a", AgentType.REVIEWER): "claude-code/haiku · high",
         ("task-b", AgentType.WORKER): "claude-code/sonnet · high"}
+
+
+def test_task_manager_profile_is_not_rewritten_by_legacy_effort() -> None:
+    conversion = convert({S: Before(effort="xhigh")}, CATALOG,
+                         {"task-a": (P, {AgentType.TASK_MANAGER: SONNET, AgentType.WORKER: SONNET})})
+    assert ("task-a", AgentType.TASK_MANAGER) not in conversion.tasks
+    assert conversion.tasks[("task-a", AgentType.WORKER)].effort == "xhigh"
