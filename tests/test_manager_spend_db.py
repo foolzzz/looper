@@ -16,10 +16,11 @@ pytestmark = pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not
 
 
 async def _record(pool: Any, agent_id: str, cost: float | None, *, ago: timedelta = timedelta(0),
-                  task_id: str | None = None) -> None:
+                  task_id: str | None = None, now: datetime | None = None) -> None:
+    now = now if now is not None else datetime.now(timezone.utc)
     await pool.execute(
         "INSERT INTO llm_records (agent_id, task_id, status, cost_usd, created_at) "
-        "VALUES ($1, $2, 'completed', $3, $4)", agent_id, task_id, cost, datetime.now(timezone.utc) - ago)
+        "VALUES ($1, $2, 'completed', $3, $4)", agent_id, task_id, cost, now - ago)
 
 
 def test_manager_role_counts_every_managers_runs(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -52,17 +53,17 @@ def test_task_costs_reports_any_managers_run_as_the_managers(monkeypatch: pytest
     run_db(test, monkeypatch)
 
 
-def test_manager_spend_sums_per_manager(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_manager_spend_sums_per_manager(monkeypatch: pytest.MonkeyPatch, fixed_clock) -> None:
     from looper.agents.overview import local_midnight
     from looper.db import llm_records
 
     async def test(pool: Any) -> None:
         since = local_midnight()
-        await _record(pool, "manager", 1.0)
-        await _record(pool, "manager", None)
-        await _record(pool, "manager-review", 2.0)
-        await _record(pool, "manager-review", 4.0, ago=timedelta(days=1) + (datetime.now(timezone.utc) - since))
-        await _record(pool, "manager-review", 8.0, ago=timedelta(days=8))
+        await _record(pool, "manager", 1.0, now=fixed_clock())
+        await _record(pool, "manager", None, now=fixed_clock())
+        await _record(pool, "manager-review", 2.0, now=fixed_clock())
+        await _record(pool, "manager-review", 4.0, now=fixed_clock(), ago=timedelta(days=1) + (fixed_clock() - since))
+        await _record(pool, "manager-review", 8.0, now=fixed_clock(), ago=timedelta(days=8))
         spend = await llm_records.manager_spend(["manager", "manager-review", "manager-none"], since=since, pool=pool)
         assert spend["manager"] == {"today_usd": 1.0, "last_7d_usd": 1.0, "runs_today": 2, "cost_status": "unknown", "unpriced_runs": 1}
         assert spend["manager-review"] == {"today_usd": 2.0, "last_7d_usd": 6.0, "runs_today": 1, "cost_status": "known", "unpriced_runs": 0}

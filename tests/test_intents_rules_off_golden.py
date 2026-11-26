@@ -148,12 +148,12 @@ def test_rules_off_path_matches_fixed_main_per_item(rule_setting: str | None, gr
             await pool.execute("INSERT INTO intent_rule_versions(rule_id,version,enabled,position,intent_type,scope,"
                 "conditions,action,edited_by) VALUES('00000000-0000-0000-0000-000000000001',1,true,1,'any',"
                 "'{\"kind\":\"all\"}','[]','record_only','synthetic-operator')")
-        guarded_methods = {}
+        guarded_methods, observed_queries = {}, []
         for name in ("fetch", "fetchrow", "fetchval", "execute", "executemany"):
             original = getattr(asyncpg.Connection, name)
             guarded_methods[name] = original
             async def guarded(conn, query, *args, _original=original, **kwargs):
-                assert "intent_rule" not in query.lower(), "the off runtime accessed rule storage"
+                observed_queries.append(query)
                 return await _original(conn, query, *args, **kwargs)
             monkeypatch.setattr(asyncpg.Connection, name, guarded)
         reader = PlanReader(pool)
@@ -199,6 +199,7 @@ def test_rules_off_path_matches_fixed_main_per_item(rule_setting: str | None, gr
         await push.run_once()
         for name, original in guarded_methods.items():
             monkeypatch.setattr(asyncpg.Connection, name, original)
+        assert not any("intent_rule" in query.lower() for query in observed_queries)
         tables = await table_rows(pool, ("llm_records", "llm_record_events", "schedules", "schedule_runs", "subscriptions",
             "subscription_runs", "intents", "intent_sources", "intent_posts", "tasks"))
         payload = {"window": window, "window_queries": reader.queries, "confirmation": confirmation, "config_version": version, "launches": read_launches(tmp_path),
@@ -243,6 +244,8 @@ def test_rules_off_companion_outputs_match_main_per_item(monkeypatch, tmp_path, 
     from looper.agents.ops import TurnOrigin
     from looper.agents.tiers.turn_token import TurnToken, TurnPhase
 
+    # Exercise companion output before the brief cutoff, independently of timing policy.
+    monkeypatch.setattr(f"{__name__}._NOW", _NOW.replace(hour=11))
     monkeypatch.setattr(attention, "datetime", FixedDatetime)
     monkeypatch.setattr(attention, "_status_checks", None)
     monkeypatch.setattr(attention, "_catchup_checks", None)

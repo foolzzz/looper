@@ -143,11 +143,12 @@ def test_rebind_keeps_inflight_reply_task_reports_and_history_with_original_owne
             await projects.create_project(name="Synthetic", work_dir=str(tmp_path))
             entered, release = asyncio.Event(), asyncio.Event()
             task_ids = []
+            task_results = []
             async def answer(agent, token, prepared):
                 if prepared.message == "create synthetic task":
                     result = await agent.ops.call("looper_task_create", {
                         "requirement": "Check synthetic examples", "title": "Synthetic task", "project": "Synthetic"})
-                    assert result["status"] == "ok", result
+                    task_results.append(result)
                     task_ids.append(result["result"]["task_id"])
                     entered.set()
                     await release.wait()
@@ -163,6 +164,7 @@ def test_rebind_keeps_inflight_reply_task_reports_and_history_with_original_owne
             finally:
                 release.set()
                 await asyncio.wait_for(waiting, 10)
+            assert [result["status"] for result in task_results] == ["ok"], task_results
             replies = await d.flush()
             assert any(e.source.agent_id == REVIEW and e.message_type is MessageType.AGENT_REPLY for e in replies)
             await d.ingress("next owner")

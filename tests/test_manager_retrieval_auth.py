@@ -73,8 +73,10 @@ def test_memory_credential_cannot_call_any_other_v1_operation(tmp_path, clients)
 def test_memory_credential_reaches_only_the_retrieval_reads(tmp_path, monkeypatch, name):
     from looper.agents.v1_domains import manager_retrieval
 
+    principals = []
+
     async def answer(server, operation, arguments, principal, headers):
-        assert principal == api_v1.OPERATOR
+        principals.append(principal)
         return {"read": operation.operation_id}
 
     monkeypatch.setattr(manager_retrieval, "run", answer)
@@ -85,6 +87,7 @@ def test_memory_credential_reaches_only_the_retrieval_reads(tmp_path, monkeypatc
                 _bearer(operator_auth.retrieval_token(TOKEN)), '{"path":"a.md"}' if name == "vault_read"
                 else '{"query":"Atlas"}')
             assert status == 200 and body["result"] == {"read": f"manager_retrieval.{name}"}
+            assert principals == [api_v1.OPERATOR]
     asyncio.run(run())
 
 

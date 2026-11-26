@@ -170,6 +170,13 @@ def _client_tasks(original: Tool) -> Tool:
 
 
 async def _client_control(call: Call) -> dict[str, Any]:
+    # Draft starts belong to the operator console; the Manager and API clients keep their ready-only contract.
+    if call.arguments["action"] == "start" and call.turn.client_id is None:
+        task_id = call.arguments["task_id"]
+        task = await db_tasks.get_task(task_id)
+        if task is not None and task["status"] == db_tasks.DRAFT:
+            await answered(projects.start_ready_task(task_id, call.platform.bus, call.manager_address))
+            return {"task_id": task_id, "started": True}
     return await _control(call, by=CancelBy.USER)
 
 

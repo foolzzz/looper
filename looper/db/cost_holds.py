@@ -19,7 +19,7 @@ async def create_hold(scope, ref, currency, limit, spent, reason, *, task_id=Non
             [task_id] if task_id else [], estimate_usd, pushes)
         if task_id:
             await conn.execute("UPDATE tasks SET status='awaiting_budget' WHERE id=$1 "
-                               "AND status NOT IN ('completed','failed','cancelled','stopped')", task_id)
+                               "AND status NOT IN ('completed','failed','cancelled','stopped','draft','init')", task_id)
         result = dict(row)
         created = result.pop('created')
         return result, created
