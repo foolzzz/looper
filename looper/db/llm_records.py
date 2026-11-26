@@ -472,10 +472,15 @@ _STEP_RUNS = f"({_ROLE_FILTERS['worker']} OR {_ROLE_FILTERS['reviewer']})"
 # Planner's.
 TASK_ROLES = ("planner", "worker", "reviewer")
 _PLANNER_SPAWNS = f"{RUN_KIND} IN ('advisor', 'advice_check', 'outbound_check', 'memory_draft', 'memory_retro')"
-_ROLE_BRANCHES = " ".join(f"WHEN {_ROLE_FILTERS[role]} THEN '{role}'" for role in TASK_ROLES + ("task_manager",))
+# Planner, Worker and Reviewer stay the tail of both cases. Consult accounting freezes that suffix on run
+# listings, and requires the consult branch to precede it on the spend case.
+_ROLE_BRANCHES = " ".join(f"WHEN {_ROLE_FILTERS[role]} THEN '{role}'" for role in TASK_ROLES)
+# An id prefix, so it sits with the other id prefixes and after an explicit consult kind. It is not part of the
+# frozen tail: a task-manager id matches none of those three, and none of them match it.
+_TASK_MANAGER_BRANCH = f"WHEN {_ROLE_FILTERS['task_manager']} THEN 'task_manager'"
 _TASK_ROLE = (
     f"CASE WHEN {RUN_KIND} = 'explorer' THEN 'explorer' WHEN {_PLANNER_SPAWNS} THEN 'planner' "
-    f"{_ROLE_BRANCHES} END"
+    f"{_TASK_MANAGER_BRANCH} {_ROLE_BRANCHES} END"
 )
 # A run of one of a task's agents, as task_costs counts them; the operator's Manager is not one.
 TASK_RUN = f"{_TASK_ROLE} IS NOT NULL"
@@ -483,7 +488,7 @@ TASK_RUN = f"{_TASK_ROLE} IS NOT NULL"
 # wins over an agent id that also matches a role prefix. Run listings stay on ``TASK_RUN``.
 _SPEND_ROLE = (
     f"CASE WHEN {RUN_KIND} = 'explorer' THEN 'explorer' WHEN {_PLANNER_SPAWNS} THEN 'planner' "
-    f"WHEN {RUN_KIND} = 'consult' THEN 'consult' {_ROLE_BRANCHES} END"
+    f"WHEN {RUN_KIND} = 'consult' THEN 'consult' {_TASK_MANAGER_BRANCH} {_ROLE_BRANCHES} END"
 )
 TASK_SPEND = f"{_SPEND_ROLE} IS NOT NULL"
 

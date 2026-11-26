@@ -78,6 +78,37 @@ def test_profile_changes_are_durable_and_keep_session_selection_separate(monkeyp
     run_db(check, monkeypatch)
 
 
+def test_stored_profile_effort_reaches_native_task_manager_launch(monkeypatch, tmp_path):
+    from looper.agents.tiers.task_manager import TaskManagerPool
+    from tests.task_manager_support import NativeTaskManager, submit_and_wait
+
+    loader = settings.load_task_manager_settings
+    native = NativeTaskManager(monkeypatch, tmp_path)
+    monkeypatch.setattr(settings, "load_task_manager_settings", loader)
+    monkeypatch.setattr(agent_settings, "_login_problem", AsyncMock(return_value=None))
+    async def check(db):
+        await settings.seed_defaults(db)
+        task_id, _, _ = await native.create(db)
+        await db.execute("UPDATE agent_profiles SET effort='high' WHERE id='agent-claude-code-opus'")
+        await db.execute("INSERT INTO agent_setting_layers(scope, profile_id) VALUES ('system', $1)",
+                         "agent-claude-code-opus")
+        pool = TaskManagerPool(tmp_path / "runtime", native.executable, max_resident=lambda: 1)
+        try:
+            for profile_id, model, effort in [(None, "claude-sonnet-5-5", None),
+                                               ("agent-claude-code-opus", "opus", "high"),
+                                               (None, "claude-sonnet-5-5", None)]:
+                await settings.set_task_manager_profile(task_id, profile_id)
+                await submit_and_wait(pool, task_id)
+                command = native.records("launch")[-1]["command"]
+                assert command[command.index("--model") + 1] == model
+                actual_effort = command[command.index("--effort") + 1] if "--effort" in command else None
+                assert actual_effort == effort
+            assert len(native.records("launch")) == 3
+        finally:
+            await pool.shutdown()
+    run_db(check, monkeypatch, timeout=30)
+
+
 def test_profile_switch_refuses_busy_then_closes_idle_resident(monkeypatch):
     from looper.agents.tiers import task_manager
     from looper.agents.projects import RequestError
@@ -117,34 +148,3 @@ def test_profile_switch_refuses_non_claude_runtime(monkeypatch):
             await settings.set_task_manager_profile("task-a", "other-profile")
         write.assert_not_awaited()
     asyncio.run(check())
-
-
-def test_stored_profile_effort_reaches_native_task_manager_launch(monkeypatch, tmp_path):
-    from looper.agents.tiers.task_manager import TaskManagerPool
-    from tests.task_manager_support import NativeTaskManager, submit_and_wait
-
-    loader = settings.load_task_manager_settings
-    native = NativeTaskManager(monkeypatch, tmp_path)
-    monkeypatch.setattr(settings, "load_task_manager_settings", loader)
-    monkeypatch.setattr(agent_settings, "_login_problem", AsyncMock(return_value=None))
-    async def check(db):
-        await settings.seed_defaults(db)
-        task_id, _, _ = await native.create(db)
-        await db.execute("UPDATE agent_profiles SET effort='high' WHERE id='agent-claude-code-opus'")
-        await db.execute("INSERT INTO agent_setting_layers(scope, profile_id) VALUES ('system', $1)",
-                         "agent-claude-code-opus")
-        pool = TaskManagerPool(tmp_path / "runtime", native.executable, max_resident=lambda: 1)
-        try:
-            for profile_id, model, effort in [(None, "claude-sonnet-5-5", None),
-                                               ("agent-claude-code-opus", "opus", "high"),
-                                               (None, "claude-sonnet-5-5", None)]:
-                await settings.set_task_manager_profile(task_id, profile_id)
-                await submit_and_wait(pool, task_id)
-                command = native.records("launch")[-1]["command"]
-                assert command[command.index("--model") + 1] == model
-                actual_effort = command[command.index("--effort") + 1] if "--effort" in command else None
-                assert actual_effort == effort
-            assert len(native.records("launch")) == 3
-        finally:
-            await pool.shutdown()
-    run_db(check, monkeypatch, timeout=30)
