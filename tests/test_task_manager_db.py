@@ -132,6 +132,59 @@ def test_prepare_operator_and_read_only_commands(monkeypatch, tmp_path, setup_ma
     run_db(check, monkeypatch)
 
 
+def test_direct_session_loads_only_looper_and_allowed_mcp_servers(monkeypatch, tmp_path, setup_manager):
+    from types import SimpleNamespace
+
+    from looper.agents.ops.service import Platform
+    from looper.agents.ops.task_manager import TaskManagerOps
+
+    home, work = tmp_path / "home", tmp_path / "work"
+    work.mkdir()
+    home.mkdir()
+    (home / ".claude.json").write_text(json.dumps({"mcpServers": {"alpha": {"type": "stdio", "command": "alpha"},
+                                                                  "unlisted": {"type": "stdio", "command": "other"}}}))
+    (work / ".mcp.json").write_text(json.dumps({"mcpServers": {"beta": {"type": "stdio", "command": "beta"}}}))
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
+
+    def servers(command):
+        return sorted(json.loads(Path(command[command.index("--mcp-config") + 1]).read_text())["mcpServers"])
+
+    async def check(db):
+        executable, create = setup_manager
+        task_id = await create(db, work_dir=work)
+        ops = TaskManagerOps(Platform(bus=AsyncMock(), task_router=SimpleNamespace(has_planner=lambda _: False)),
+                             url="http://127.0.0.1:18915")
+        pool = tm.TaskManagerPool(tmp_path / "runtime", executable, ops=ops, max_resident=lambda: 2)
+        try:
+            agent = pool.agent(task_id)
+            await agent.prepare()
+            command = agent.resident.command
+            assert command.count("--strict-mcp-config") == 1 and command.count("--mcp-config") == 1
+            assert servers(command) == ["looper"]  # default: only Looper's own server
+            monkeypatch.setattr(settings, "_manager_mcp", ("alpha",))
+            await agent.prepare()
+            first = Path(agent.resident.command[agent.resident.command.index("--mcp-config") + 1])
+            assert first.is_file() and servers(agent.resident.command) == ["alpha", "looper"]
+            monkeypatch.setattr(settings, "_manager_mcp", ("alpha", "beta"))
+            await agent.prepare()  # a changed allowlist restarts the resident with the new servers
+            assert servers(agent.resident.command) == ["alpha", "beta", "looper"]
+            second = Path(agent.resident.command[agent.resident.command.index("--mcp-config") + 1])
+            assert not first.exists() and second.is_file()  # the replaced config, which can hold secrets, is gone
+            await agent.resident.stop()
+            assert not second.exists()  # and so is the one of an ended session
+            await agent.prepare()
+            assert Path(agent.resident.command[agent.resident.command.index("--mcp-config") + 1]).is_file()
+            assert agent.resident.command.count("--strict-mcp-config") == 1
+            await tasks.update_task_status(task_id, "pending", pool=db)
+            await agent.prepare()  # the read-only orchestrated session keeps its own isolation, unaffected
+            readonly = agent.resident.command
+            assert "--setting-sources" in readonly and servers(readonly) == ["looper"]
+        finally:
+            await pool.shutdown()
+    run_db(check, monkeypatch)
+
+
 @pytest.mark.parametrize("review_on", [False, True])
 def test_task_tools_follow_process_and_turn_lifetime(monkeypatch, tmp_path, setup_manager, review_on):
     from types import SimpleNamespace

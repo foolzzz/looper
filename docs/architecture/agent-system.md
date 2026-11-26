@@ -903,7 +903,22 @@ precedence over that role and never inherit the owning Manager's profile. Other
 runtimes are refused rather than substituted.
 
 Direct launches append the fixed task instructions and a bounded, fenced brief.
-They retain the operator's settings, memory and MCP servers. Orchestrated or
+They retain the operator's settings, memory and skills, but load MCP servers only from
+a generated `--mcp-config` file under `--strict-mcp-config`: Looper's own server plus the
+operator's servers named in `tasks.conversations.manager_mcp` (default none; read and written
+through `task_conversations.get` and `task_conversations.update`, operator-only; up to 20 unique
+names). Each name is resolved as Claude Code does for the task's working directory (local scope,
+then a project `.mcp.json`, then user scope; with `CLAUDE_CONFIG_DIR` set, that directory's
+`.claude.json`) and its definition is copied into the file. The local scope is keyed by the
+git repository root of the working directory (the main repository's, for a git worktree), else by
+the directory itself, never by a parent directory (verified with Claude Code 2.1.332). `${VAR}`
+references in a definition are expanded by Claude Code from the task Manager's environment, so a
+variable that exists only in the operator's shell expands empty. The generated file can hold server
+secrets and is deleted when the session ends or is replaced. A name with no definition makes the
+task Manager refuse to start with `mcp_unresolved` (visible in the task thread like the other start
+refusals); none is skipped. A plugin's own MCP servers never load under strict mode (verified
+with Claude Code 2.1.332), so they cannot be allowed by name; configure the server as a user or
+project server instead. A changed list restarts the resident on its next turn. Orchestrated or
 unrecoverable workspaces use the existing isolated read-only command. The child
 receives `LOOPER_TASK_MANAGER`, never `LOOPER_AGENT_RUN`. An enabled outbound review
 requires an actual review hook. Before every direct launch or resume, a typed
@@ -9552,7 +9567,7 @@ notify a channel, or call the task-end listener. A task the background is workin
 | `/api/v1/system/{check,status,overview}` | POST | `system.{check,status,overview}` |
 | `/api/v1/config/{export,import_preview,import_apply,import_upload,import_cancel}` | POST | `config.{export,import_preview,import_apply,import_upload,import_cancel}` |
 | `/api/v1/tasks/{requirement_update,configure,move,agents,continue,role_update,room_view,activity,activity_detail,conversation,activity_stream,create,create_draft,done,page,detail,delete,select,work_list,mark_seen}` | POST | `tasks.{requirement_update,configure,move,agents,continue,role_update,room_view,activity,activity_detail,conversation,activity_stream,create,create_draft,done,page,detail,delete,select,work_list,mark_seen}` |
-| `/api/v1/task_conversations/{get,update}` | POST | `task_conversations.{get,update}` (operator-only; read or set `tasks.conversations.enabled` and `tasks.conversations.manager_answers`, both default false; null restores false) |
+| `/api/v1/task_conversations/{get,update}` | POST | `task_conversations.{get,update}` (operator-only; read or set `tasks.conversations.enabled` and `tasks.conversations.manager_answers`, both default false, and `tasks.conversations.manager_mcp`, default none; null restores the default) |
 | `/api/v1/catalog_items/{list,get,update,delete}` | POST | `catalog_items.{list,get,update,delete}` |
 | `/api/v1/installs/{create,update,delete,project}` | POST | `installs.{create,update,delete,project}` |
 | `/api/v1/catalog_sources/{import_machine,import_mcp,upload,git_preview,git_import,create_skill,create_mcp}` | POST | `catalog_sources.{import_machine,import_mcp,upload,git_preview,git_import,create_skill,create_mcp}` |
