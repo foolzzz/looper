@@ -1105,6 +1105,10 @@ class ManagerAgent:
                     if mismatch:
                         logger.error("%s: saved scope disagrees with session %s; starting fresh", self._log, session.key)
                     await db_manager_sessions.reopen(self.agent_id, session.key)
+                    if scope is not None:
+                        from .. import chat_scope_metrics
+
+                        chat_scope_metrics.session_opened(self.agent_id, "scope_changed")
                     session.session_id = session.pending_handoff = session.pending_switch = None
                     session.clean_start = False
                     session.activity_cursor = None
@@ -1118,6 +1122,11 @@ class ManagerAgent:
             session.clean_start = bool(saved.get("clean_start"))
             session.pending_handoff = saved.get("pending_handoff")
             session.activity_cursor = saved.get("activity_cursor")
+        elif session.key != MAIN_SESSION and session.scope is not None:
+            from .. import chat_scope_metrics
+
+            chat_scope_metrics.session_opened(self.agent_id, "first")
+        if saved:
             if (policy := session_visibility.for_session(session.key, manager_id=self.agent_id)) is not None and (
                     saved.get("context_policy_version", 0) != policy.version):
                 session.session_id = None
@@ -1930,8 +1939,9 @@ class ManagerAgent:
             if session.scope is not None and turn.origin is TurnOrigin.USER:
                 try:
                     turn.principal = self._router.principal(envelope, session)
-                except ScopeInvariantViolation:
+                except ScopeInvariantViolation as exc:
                     logger.critical("%s: turn principal disagrees with session %s", self._log, session.key, exc_info=True)
+                    await self._router._observe_invariant(envelope, exc, default="prepare")
                     raise TurnFailed("这条消息没有处理：范围检查没有通过。", "scope_invariant") from None
             delivery_guard.initialize(turn)
             # Registered before the first await: a Stop during the persisting, the status and the tools probe is kept.
@@ -2015,7 +2025,14 @@ class ManagerAgent:
         launch = Launch(agent_settings, library, role=AgentType.MANAGER,
                         access=Access.PLATFORM_TOOLS if restricted else None)
         if scope is not None and scope.mode not in launch.runtime.launch_modes:
-            # Scope start refusal counters and alerts hook in here.
+            from .. import chat_scope_alerts, chat_scope_metrics
+
+            chat_scope_metrics.start_refused(self.agent_id, launch.runtime.type, scope.mode.value)
+            origin = _message_origin(envelope)
+            await chat_scope_alerts.start_refused(
+                self.agent_id, channel_id=origin.get("channel_id"), chat=origin.get("chat"),
+                scope=f"{scope.resolved.scope_id}@{scope.version}", runtime=launch.runtime.type,
+                mode=scope.mode.value)
             logger.error("scoped runtime refused", extra={
                 "manager_id": self.agent_id, "chat_digest": session_routing.key_digest(self._session_now().key),
                 "runtime": launch.runtime.type, "scope": f"{scope.resolved.scope_id}@{scope.version}",
@@ -2079,11 +2096,14 @@ class ManagerAgent:
             components["scope"] = (scope.fingerprint, scope.mode.value)
         try:
             chat_scopes.check_launch(scope, launch, command=list(signature[0]))
-        except ScopeInvariantViolation:
+        except ScopeInvariantViolation as exc:
             logger.critical("scoped launch invariant failed", extra={
                 "manager_id": self.agent_id, "chat_digest": session_routing.key_digest(self._session_now().key),
                 "runtime": launch.runtime.type, "scope": f"{scope.resolved.scope_id}@{scope.version}" if scope else None,
                 "mode": scope.mode.value if scope else None}, exc_info=True)
+            await self._router._observe_invariant(
+                envelope, exc, default="launch",
+                scope=f"{scope.resolved.scope_id}@{scope.version}" if scope else None)
             raise TurnFailed("这条消息没有处理：启动检查没有通过。", "scope_invariant") from None
         # Diagnostic hashes are separate from the unchanged resident comparison. Hash even absent components
         # and existing digests so no command, URL or provider binding value can reach the restart log.
@@ -2293,11 +2313,20 @@ class ManagerAgent:
         try:
             await token.keep("recorder_start", recorder.start(), 10)
             await token.step("recorder_annotate", manager_budget.annotate(session, recorder))
+            if session.scope is not None:
+                scope = session.scope
+                await token.step("recorder_annotate", recorder.annotate({
+                    "scope": {"id": scope.resolved.scope_id, "version": scope.version,
+                              "audience": scope.resolved.audience.value}}))
             if prepared.delivery_followup:
                 await token.step("recorder_annotate", recorder.annotate(delivery_guard.metadata(prepared)))
             if run.state is not None:
                 await token.step("recorder_annotate", recorder.annotate(run.state.annotation()))
             if prepared.switch is not None and prepared.switch.reason is SwitchReason.CONTEXT_FULL:
+                if session.scope is not None:
+                    from .. import chat_scope_metrics
+
+                    chat_scope_metrics.session_opened(self.agent_id, "context_full")
                 recorder.account({"type": "system", "subtype": "compact_boundary",
                                   "compact_metadata": {"trigger": "auto", "pre_tokens": pre_context}})
             # The session this turn's new process resumes, if it starts one (its command resumes the saved session).
@@ -2376,7 +2405,12 @@ class ManagerAgent:
                     close = getattr(self._claude, "try_stop_if_idle", None)
                     if close is None or not await token.keep("library_idle_close", close(), 10):
                         if prepared.session.scope is not None and previous.signature[-2:] != prepared.signature[-2:]:
-                            raise ScopeInvariantViolation("library refresh cannot reuse another scope's launch")
+                            scope = prepared.session.scope
+                            exc = ScopeInvariantViolation("library refresh cannot reuse another scope's launch")
+                            await self._router._observe_invariant(
+                                prepared.envelope, exc, default="launch",
+                                scope=f"{scope.resolved.scope_id}@{scope.version}")
+                            raise exc
                         # A user result may leave background/autonomous work running. Keep the actual
                         # launch in this turn's record and retry the capability refresh next turn.
                         prepared = replace(prepared, launch=previous.launch, system_prompt=previous.system_prompt,
