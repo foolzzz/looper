@@ -1806,19 +1806,21 @@ class AgentHTTPServer:
         page = path in ("/", "/index.html")
         file_path = self._static_dir / ("index.html" if path == "/" else path.lstrip("/"))
 
-        if not file_path.is_file():
-            index_path = self._static_dir / "index.html"
-            if index_path.is_file():
-                file_path = index_path
-                page = True
-            else:
-                writer.write(_json_response(HTTP_404, {"error": "not found"}))
-                await writer.drain()
-                return
-
         try:
+            # is_file() reports an embedded NUL as missing and raises only for an
+            # overlong name, so resolve before the dashboard-page fallback.
             resolved = file_path.resolve()
             static_resolved = self._static_dir.resolve()
+            if not file_path.is_file():
+                index_path = self._static_dir / "index.html"
+                if index_path.is_file():
+                    file_path = index_path
+                    resolved = index_path.resolve()
+                    page = True
+                else:
+                    writer.write(_json_response(HTTP_404, {"error": "not found"}))
+                    await writer.drain()
+                    return
             if not resolved.is_relative_to(static_resolved):
                 writer.write(_json_response(HTTP_404, {"error": "not found"}))
                 await writer.drain()
