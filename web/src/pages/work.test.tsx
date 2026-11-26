@@ -161,6 +161,8 @@ describe("Work page shell", () => {
     expect(calls.some(call => call.url.includes("tasks/changes"))).toBe(false);
     expect(host.querySelector('[aria-label="改动文件"]')).toBeNull();
     expect(host.querySelector('[aria-labelledby="work-controls-title"]')).toBeNull();
+    expect(host.querySelector('[aria-label="任务管家模型"]')).toBeNull();
+    expect(calls.some(call => call.url.includes("task_manager_profile"))).toBe(false);
     expect(calls.some(call => call.url.includes("ops/task_control") || call.url.endsWith("tasks/done"))).toBe(false);
   });
 
