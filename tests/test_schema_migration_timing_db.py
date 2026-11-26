@@ -149,3 +149,62 @@ def test_ensure_schema_logs_work_done_on_a_pending_false_branch(caplog, monkeypa
             assert not _timing_lines(caplog.records)
 
     asyncio.run(test())
+
+
+# apply's bool is what the startup timing line follows. These migrations gained that
+# result after the first conversion; pin both values, not only the annotation.
+_APPLY_RESULT_MIGRATIONS = (
+    "task_origin_session",
+    "task_drafts",
+    "task_work_list",
+    "task_select_reads",
+    "task_select_directories",
+    "task_manager_role",
+    "proactive_bodies",
+    "main_session_egress",
+    "completion_session_allowlist",
+    "network_pauses",
+    "chat_message_entry_kind",
+)
+
+
+def _prefix_registry(migration):
+    earlier = tuple(item for item in connection._MIGRATIONS if item.order < migration.order)
+    return earlier, migrations.online_steps(earlier), {
+        item.name: item.online_order for item in earlier if getattr(item, "online", ())}
+
+
+async def _validate_online(conn, migration):
+    """Settle NOT VALID checks the way the post-commit online phase does.
+
+    A second ``apply`` still reports work while ``_unvalidated`` is true
+    (``main_session_egress``, ``completion_session_allowlist``). Validation is
+    what makes the next startup's ``apply`` return false.
+    """
+    for step in getattr(migration, "online", ()) or ():
+        for table, constraint in step.validate:
+            await conn.execute(f"ALTER TABLE {table} VALIDATE CONSTRAINT {constraint}")
+
+
+@pytest.mark.parametrize("migration_name", _APPLY_RESULT_MIGRATIONS)
+def test_apply_returns_true_only_while_pending(migration_name, monkeypatch):
+    migration = next(item for item in connection._MIGRATIONS if item.name == migration_name)
+    earlier, online_steps, online_orders = _prefix_registry(migration)
+
+    async def test():
+        async with fresh_connection(command_timeout=60) as conn:
+            _patch_registry(monkeypatch, earlier, online_steps=online_steps, online_orders=online_orders)
+            await connection.ensure_schema(conn)
+            # apply reads the real online steps (the unvalidated repair looks them up).
+            monkeypatch.undo()
+            # The baseline CREATE TABLE already has this column, so a fresh database is
+            # not pending. Dropping it is the upgrade pending() describes.
+            if migration.name == "task_origin_session":
+                await conn.execute("ALTER TABLE tasks DROP COLUMN IF EXISTS origin_session")
+                await conn.execute("DELETE FROM schema_migrations WHERE name = $1", migration.name)
+            assert await migration.pending(conn) is True
+            assert await migration.apply(conn, sql="", state="current") is True
+            await _validate_online(conn, migration)
+            assert await migration.apply(conn, sql="", state="current") is False
+
+    asyncio.run(test())
