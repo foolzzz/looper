@@ -651,7 +651,7 @@ draft、init ──删除──→ （删除）
    - 这些 `control_request` 子类型**没有公开文档**，是 CLI 内部协议，所以整套读回属于 `VERIFIED_CLI_VERSION` 的升级探针。**协议不认识、字段缺失、响应不是预期形状，一律拒绝启动（`readback_unavailable`），绝不跳过检查。**
    - 断言写法：`sources` 只含预期来源（`--setting-sources user` 下没有项目和 local 来源）；`effective` 的布尔项等于注入值（F1、F2、F4、F5、F6）；钩子来源只允许 `flagSettings`（Looper 注入）、用户来源，以及组织托管策略来源（`policySettings`）——组织的托管策略可能带钩子，它不能被非托管层关掉，所以接受来源为 `policySettings` 的钩子，不在公开文字里点名任何具体钩子；`mcp_status` 的服务器集合等于 F8 的允许集；`agents` 里没有项目来源的子代理。
    - **数组类设置（`allowedDomains`、`allowWrite`、`permissions`）只断言「注入的值是读回值的子集」。** 实测 `get_settings.effective` 和 `get_sandbox_dialog` 的 `network_allowed_domains` 会显示合并后的原始并集，包含 admin-required 下实际被忽略的项目来源条目，所以**有效的网络白名单不能由读回保证**；它由敌意配置测试保证（项目文件里新增的域名在沙箱内仍然连不上），本节如实标注为「测试保证，不是读回保证」。写路径可以读 `get_sandbox_dialog` 的实际生效值。
-   - 读回时机：启动、续接前做完整读回。**每个回合前的读回取决于一次完整读回的耗时：** 若单次不超过 300 ms（实测数值【待补：N ms，由测量结果填入】），每个回合前都做完整读回；否则只在启动和续接时做完整读回，每个回合前只读最便宜的一项（`get_settings` 的 `sources` 是否仍只含预期来源，加 `effective` 的布尔固定项；具体哪一项以测量为准）。读回是本地控制请求，不调用模型。会话中途新写项目文件，实测不会让 `sources` 出现项目来源。
+   - 读回时机：启动、续接前和**每个回合前都做完整读回**（五个请求依次发出）。在常驻会话里实测 20 次，完整读回的中位数 2.0 ms、p95 2.2 ms、最大 2.2 ms（每个请求最大不超过 1.4 ms），不调用模型，响应不和回合输出交错；测量环境是 macOS，机器负载不低，长时间回合下的耗时没测。读回是本地控制请求。
    - 平台：v1 只支持 macOS，代码先显式检查平台，非 macOS 直接 `sandbox_unavailable`。`failIfUnavailable`（官方文档，**未在本机实测**）只保证：开了沙箱但起不来时 CLI 启动即退出；启动检查通过后才初始化失败的，会话继续但**拒绝每一条沙箱内命令**。它不是「Linux 不支持」的保证：文档称 Linux 和 WSL2 依赖 `bubblewrap` 与 `socat`，本轮没有任何 Linux 实测，所以不能因为 Linux 上沙箱碰巧能起来就当成支持；`get_sandbox_dialog` 的 `supported` 和依赖的错误、警告读回作为补充检查。Linux 支持列为后续。
 3. 任何一项不符，不启动、不续接，在任务对话里插入代码生成的说明（哪一项、期望值、实际值、来自哪个来源、怎么改），计入第 21 节的 `task_manager_launch_refusals_total`。
 
