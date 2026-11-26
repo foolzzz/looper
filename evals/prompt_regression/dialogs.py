@@ -3650,6 +3650,18 @@ FAKE_DIALOGS: tuple[Dialog, ...] = (
             ("whole", "another audience's block came after the last shown state"), ("unchanged", "unchanged")),
             (("__reply__", {"text": "好的。"}),)),
     ), seed=_seed_stable_audience, tags=("manager", "stable_context", "audience")),
+    Dialog("scoped_group_activity", (
+        Say("先记住这个群的对话。", lambda look: None,
+            (("__reply__", {"text": "好的。"}),)),
+        Say("明天的发布推迟到周五", lambda look: None,
+            (("__reply__", {"text": "收到。"}),), sender="member"),
+        Say("刚才群里说发布改到哪天？", group_dialogs.scoped_group_activity,
+            (("__input_contract__", {
+                "input": ["[GROUP ACTIVITY]", '<untrusted source="group_message"',
+                          '>\n明天的发布推迟到周五\n</untrusted>'],
+                "reply": "群里说发布推迟到周五。"}),)),
+    ), session="group", routing="scoped", manager="scope-activity", manager_seed={
+        "name": "Eval group activity desk", "tools": "all", "system_prompt": group_dialogs.SCOPED_ROLE}),
     Dialog("scoped_operator_group_contract", (
         Say("这个群里刚才说了什么？", group_dialogs.scoped_operator_input,
             (("__input_contract__", {

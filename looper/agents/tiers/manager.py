@@ -432,6 +432,8 @@ class Ask:
     retried: bool = False  # the resume retry: running goes back to starting
     quoted: lark_quote.QuoteRead | None = None  # what the message quotes, read once (``_read_quote``)
     stop_notice: str = ""  # session-owned code notice; generic notes are not a routed input grant
+    activity: tuple[str, ...] = ()  # keep the same activity when a failed resume retries preparation
+    activity_cursor: int | None = None  # commit the read watermark only after a successful reply
 
 
 @dataclass
@@ -1105,6 +1107,7 @@ class ManagerAgent:
                     await db_manager_sessions.reopen(self.agent_id, session.key)
                     session.session_id = session.pending_handoff = session.pending_switch = None
                     session.clean_start = False
+                    session.activity_cursor = None
                     session.session_totals = Usage.from_dict(saved.get("session_totals"))
                     return
             session.session_id = saved.get("session_id")
@@ -1114,6 +1117,7 @@ class ManagerAgent:
             session.session_provider = saved.get("provider_id")
             session.clean_start = bool(saved.get("clean_start"))
             session.pending_handoff = saved.get("pending_handoff")
+            session.activity_cursor = saved.get("activity_cursor")
             if (policy := session_visibility.for_session(session.key, manager_id=self.agent_id)) is not None and (
                     saved.get("context_policy_version", 0) != policy.version):
                 session.session_id = None
@@ -1145,6 +1149,7 @@ class ManagerAgent:
                 "session_totals": session.session_totals.to_dict(), "runtime_type": session.session_runtime,
                 "profile_id": session.session_profile, "provider_id": session.session_provider,
                 "clean_start": session.clean_start, "pending_handoff": handoff,
+                "activity_cursor": session.activity_cursor,
                 "context_policy_version": policy.version if policy is not None else 0,
                 **({"scope_id": scope.resolved.scope_id, "scope_version": scope.version,
                     "audience": scope.resolved.audience.value, "scope_fingerprint": scope.fingerprint}
@@ -1838,6 +1843,8 @@ class ManagerAgent:
         library, prompt and the message Claude is sent. With ``ask`` (the resume retry, or a caller without a chat
         message) only the second half runs."""
         restricted = session_visibility.for_session(self._session_now().key, manager_id=self.agent_id) is not None
+        activity = list(ask.activity) if ask is not None else []
+        activity_cursor = None
         if restricted and ask is not None and ask.turn is not None and (
                 lanes.manager_lane(ask.turn.origin) is lanes.Lane.BACKGROUND):
             raise _CompletionNotTaken()  # no background model input is on the allowlist
@@ -1929,6 +1936,27 @@ class ManagerAgent:
             delivery_guard.initialize(turn)
             # Registered before the first await: a Stop during the persisting, the status and the tools probe is kept.
             self._running_token = token
+            if (session.scope is not None and session.route.kind is session_routing.SessionKind.GROUP
+                    and SessionInput.GROUP_ACTIVITY in session_visibility.inputs_for(session.scope).inputs
+                    and turn.origin is TurnOrigin.USER and _stored_chat(origin)
+                    and (thread := _session_key(envelope))):
+                if not session.session_loaded:
+                    await token.step("load_session_state", self._load_session_state())
+                try:
+                    if session.activity_cursor is None:
+                        # Read before storing this turn: the opening excerpt covers the existing rows.
+                        # Zero marks an initialized cursor even when this chat has no stored messages yet.
+                        activity_cursor = await token.step("group_activity", db_chat.latest_id(thread)) or 0
+                    else:
+                        result = await token.step("group_activity", db_chat.activity_since(
+                            thread, after_id=session.activity_cursor, exclude_session=session.key,
+                            exclude_message_id=envelope.message_id, limit=group_session.EXCERPT_MESSAGES))
+                        activity = group_session.activity(result.rows, result.hidden)
+                        activity_cursor = result.last_id
+                except TurnStopped:
+                    raise
+                except Exception:
+                    logger.warning("%s: cannot read group activity", self._log, exc_info=True)
             await token.keep("persist_user_message", self._persist_user(envelope, text), 10)
             await token.step("status_thinking", self._send_status(envelope, "thinking", phase=True, activity="thinking"))
             # Read after the status, in the message's turn: in order, stoppable, and again on restart replay.
@@ -1955,7 +1983,8 @@ class ManagerAgent:
             waiting = (self.ops.begin_turn(turn, binding=token.binding, session_key=self._session_now().key)
                        if self.ops is not None and not self._mid_turn.native_started(token) else "")
             ask = Ask(text, "\n".join(part for part in (waiting, gate.note, stopped_note) if part), turn,
-                      quoted=quoted, stop_notice=stopped_note)
+                      quoted=quoted, stop_notice=stopped_note, activity=tuple(activity),
+                      activity_cursor=activity_cursor)
         else:
             await token.keep("resident_settlement", self._settle_native_inputs(token), 60)
         if restricted:
@@ -2110,7 +2139,7 @@ class ManagerAgent:
                 ask.message, ask.note, channel=channel_line(envelope), envelope=envelope,
                 attachments=[*attachments, *(ask.quoted.attachments if ask.quoted else ())],
                 quoted=ask.quoted.quotes if ask.quoted else (), image_input=launch.runtime.image_input,
-                sections=state is None, turn=ask.turn, persona_scope=persona_scope))
+                sections=state is None, turn=ask.turn, persona_scope=persona_scope, activity=activity))
         return Prepared(
             envelope=envelope, turn=ask.turn, message=ask.message, note=ask.note, retried=ask.retried, system_prompt=system_prompt,
             launch=launch, prompt_file=prompt_file, signature=signature, switch=switch, turn_text=turn_text,
@@ -2813,8 +2842,11 @@ class ManagerAgent:
         """Prepare, start and run one turn for ``message`` (a caller outside a chat message has no token of its
         own; the resume retry has the turn's)."""
         token = token or self._running_token or self._detached_token(context_envelope)
-        prepared = await self._prepare_turn(
-            token, context_envelope, ask=Ask(message, note, ops_turn, retried, quoted))
+        ask = Ask(message, note, ops_turn, retried, quoted)
+        if retried and token.prepared_ask is not None:
+            ask = replace(ask, activity=token.prepared_ask.activity,
+                          activity_cursor=token.prepared_ask.activity_cursor)
+        prepared = await self._prepare_turn(token, context_envelope, ask=ask)
         return await self._run_prepared(token, prepared)
 
     def _detached_token(self, envelope: MessageEnvelope) -> TurnToken:
@@ -3177,6 +3209,8 @@ class ManagerAgent:
                 # The reply and context maintenance finish before the capped process is closed.
                 session.budget.over_cap = True
         if not exited and not token.abandoned:
+            if replied and token.prepared_ask is not None and token.prepared_ask.activity_cursor is not None:
+                session.activity_cursor = token.prepared_ask.activity_cursor
             self._session_totals = self._claude.totals
             await self._save_session_state()
 
@@ -3597,7 +3631,9 @@ class ManagerAgent:
                                        switch=switch,
                                        handoff=handoff if session.scope is None and (
                                            policy is None or SessionInput.CHAT_HANDOFF in policy.inputs) else None,
-                                       new=session.session_id is None)
+                                       new=session.session_id is None,
+                                       telegram_note=session.scope is not None and session.route.kind is session_routing.SessionKind.GROUP
+                                       and _message_origin(envelope)["channel"] == "telegram")
         conversations = await self._recent_conversations(envelope, message)
         if switch is None and not handoff and not conversations:
             return ""
@@ -3797,7 +3833,8 @@ class ManagerAgent:
                                   quoted: Sequence[lark_quote.Quote] = (),
                                   image_input: ImageInput = ImageInput.NONE, sections: bool = True,
                                   turn: Turn | None = None,
-                                  persona_scope: manager_persona_context.Scope | None = None) -> str:
+                                  persona_scope: manager_persona_context.Scope | None = None,
+                                  activity: Sequence[str] = ()) -> str:
         scope = self._session_now().scope
         policy = session_visibility.for_session(self._session_now().key, manager_id=self.agent_id)
         if scope is not None and scope.resolved.audience is chat_scopes.ScopeAudience.OPERATOR:
@@ -3821,6 +3858,8 @@ class ManagerAgent:
             # provenance, inside the same fence; off, keep even a caller-supplied label byte for byte.
             parts += [channel_line(envelope, fence=True)
                       if fence and envelope is not None and channel == channel_line(envelope) else channel, ""]
+        if activity:
+            parts += [*activity, ""]
         if not allowed(SessionInput.MESSAGE):
             user_message = ""
         quoted = quoted if allowed(SessionInput.QUOTES) else ()

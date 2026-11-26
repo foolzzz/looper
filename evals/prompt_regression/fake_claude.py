@@ -581,9 +581,11 @@ def _manager(scenarios_path: str, args: list[str], stdin: _Stdin, system_prompt:
         with open(scenarios_path, encoding="utf-8") as handle:
             scenarios = json.load(handle)
         candidates = [message]
-        fenced = re.search(r'<untrusted source="group_message"[^>]*>\n(.*?)\n</untrusted>', message, re.S)
+        fenced = list(re.finditer(r'<untrusted source="group_message"[^>]*>\n(.*?)\n</untrusted>', message, re.S))
         if fenced:
-            candidates.append(fenced.group(1))
+            # Group activity precedes the current request. Prefer the request after it, or the last fence
+            # when the current speaker's own message is fenced too.
+            candidates.extend((message[fenced[-1].end():].strip(), fenced[-1].group(1)))
         calls = next((scenarios["manager"][candidate.strip()] for candidate in candidates
                       if candidate.strip() in (scenarios.get("manager") or {})), None)
         if calls is None:

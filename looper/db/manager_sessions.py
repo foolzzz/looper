@@ -51,8 +51,8 @@ async def save(row: Mapping[str, Any], *, pool: asyncpg.Pool | asyncpg.Connectio
         INSERT INTO manager_sessions (manager_id, session_key, kind, channel_id, chat, session_id, session_totals,
                                       runtime_type, profile_id, provider_id, clean_start, pending_handoff,
                                       context_tokens, last_turn_cost_usd, scope_id, scope_version, audience,
-                                      scope_fingerprint, last_active_at, context_policy_version)
-        VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, now(), $19)
+                                      scope_fingerprint, last_active_at, context_policy_version, activity_cursor)
+        VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, now(), $19, $20)
         ON CONFLICT (manager_id, session_key) DO UPDATE
         SET kind = EXCLUDED.kind, channel_id = EXCLUDED.channel_id, chat = EXCLUDED.chat,
             session_id = EXCLUDED.session_id, session_totals = EXCLUDED.session_totals,
@@ -62,6 +62,7 @@ async def save(row: Mapping[str, Any], *, pool: asyncpg.Pool | asyncpg.Connectio
             scope_id = EXCLUDED.scope_id, scope_version = EXCLUDED.scope_version,
             audience = EXCLUDED.audience, scope_fingerprint = EXCLUDED.scope_fingerprint,
             context_policy_version = EXCLUDED.context_policy_version,
+            activity_cursor = EXCLUDED.activity_cursor,
             context_tokens = COALESCE(EXCLUDED.context_tokens, manager_sessions.context_tokens),
             last_turn_cost_usd = COALESCE(EXCLUDED.last_turn_cost_usd, manager_sessions.last_turn_cost_usd),
             last_active_at = now()
@@ -70,7 +71,7 @@ async def save(row: Mapping[str, Any], *, pool: asyncpg.Pool | asyncpg.Connectio
         json.dumps(dict(row["session_totals"])), row["runtime_type"], row["profile_id"], row["provider_id"],
         row["clean_start"], row["pending_handoff"], row.get("context_tokens"), row.get("last_turn_cost_usd"),
         row.get("scope_id"), row.get("scope_version"), row.get("audience"), row.get("scope_fingerprint"),
-        row.get("context_policy_version", 0),
+        row.get("context_policy_version", 0), row.get("activity_cursor"),
     )
 
 
