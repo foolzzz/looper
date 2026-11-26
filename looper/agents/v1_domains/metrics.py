@@ -20,7 +20,7 @@ OPERATIONS = (
         _object({"days": _INT, "window": _OBJ, "comparison_window": _OBJ, "filters": _OBJ,
                  "coverage_since": _NULL_STR, "missing_attempts": {"type": ["integer", "null"]},
                  "tasks": _OBJ, "steps": _OBJ, "reviews": _OBJ, "contract": _OBJ,
-                 "failure_handling": _OBJ}, ["days", "window", "comparison_window", "filters", "coverage_since",
+                 "failure_handling": _OBJ, "network_pause": _OBJ}, ["days", "window", "comparison_window", "filters", "coverage_since",
                  "missing_attempts", "tasks", "steps", "reviews", "contract"]),
         risk="read", operator_only=True,
         level=ActionLevel.INSIDE),  # reads only Looper's stored attempt and outcome records

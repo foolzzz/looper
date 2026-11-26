@@ -181,7 +181,7 @@ def test_event_save_failure_keeps_the_original_refusal(monkeypatch, caplog):
             return await server._answer_v1("POST", path, api_v1.find("POST", path), {}, body, api_v1.OPERATOR)
 
         baseline = await call()
-        assert baseline[1]["error"]["code"] == "conflict"
+        assert baseline[1]["error"]["code"] == "task_manager_busy"
         assert baseline[1]["error"]["message"] == "the task Manager is working in this task: stop its turn first"
         before = len(await chat.list_messages(chat.task_thread("refusal-task")))
         monkeypatch.setattr(task_manager_settings, "_save_event", AsyncMock(side_effect=RuntimeError("storage unavailable")))
@@ -221,7 +221,10 @@ def test_publish_failure_after_commit_still_succeeds(monkeypatch, caplog):
             "task_id": "publish-task", "profile_id": "agent-claude-code-opus"}).encode(), api_v1.OPERATOR)
         assert int(code.split()[0]) == 200, answer
         assert answer["status"] == "ok"
-        assert answer["result"] == {"task_id": "publish-task", "profile_id": "agent-claude-code-opus"}
+        result = answer["result"]
+        assert result["task_id"] == "publish-task"
+        assert result["override_profile_id"] == "agent-claude-code-opus"
+        assert result["effective"]["profile_id"] == "agent-claude-code-opus"
         rows = await chat.list_messages(chat.task_thread("publish-task"))
         assert len(rows) == 1 and rows[0]["role"] == "event"
         stored = json.loads(rows[0]["content"])

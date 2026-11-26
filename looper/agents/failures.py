@@ -126,6 +126,20 @@ def _epoch(value: Any) -> datetime | None:
         return None
 
 
+_NETWORK_CODES = frozenset({"ENOTFOUND", "ECONNRESET", "EAI_AGAIN", "ECONNREFUSED"})
+
+
+def _network_code(event: Mapping[str, Any]) -> str | None:
+    """Read exact codes only in a model API error envelope, never tool output or prose."""
+    api_error = event.get("api_error")
+    codes = [event.get("api_error_code")]
+    if isinstance(api_error, Mapping):
+        codes.append(api_error.get("code"))
+    if event.get("error_source") == "model_api":
+        codes.extend(event.get(key) for key in ("code", "error_code", "error_kind", "exit_reason"))
+    return next((code for code in codes if isinstance(code, str) and code in _NETWORK_CODES), None)
+
+
 class Evidence:
     """What a run's stream said about how it may fail, taken from each event as the recorder accounts it.
 
@@ -141,9 +155,27 @@ class Evidence:
         self.api_retries = 0  # Claude Code: its own retries of a failed request (system api_retry)
         self.codex_error_info: Any = None  # Codex app-server: the final error's codexErrorInfo
         self.codex_messages: list[str] = []  # Codex: the latest error messages, oldest first
+        self.network_error_code: str | None = None  # structured model API errors only
 
     def observe(self, event: Mapping[str, Any]) -> None:
         kind = event.get("type")
+        if kind == "assistant" or (kind == "system" and event.get("subtype") == "api_error"):
+            # A response or a different API error supersedes the failed request, even after an internal retry.
+            self.network_error_code = (_network_code(event)
+                                       if isinstance(event.get("error"), str) or kind == "system" else None)
+        elif kind == "result":
+            code = _network_code(event)
+            # A generic failure result can wrap the last API error; a specific result replaces it.
+            if (code is not None or not _failed(event)
+                    or event.get("subtype") not in (None, "error_during_execution")
+                    or any(event.get(key) is not None for key in
+                           ("api_error", "api_error_code", "api_error_type", "api_error_status",
+                            "error_source", "error_kind", "codex_error_info"))):
+                self.network_error_code = code
+        elif kind == "tool_result" or (kind == "user" and isinstance(event.get("message"), Mapping)
+                and isinstance(content := event["message"].get("content"), list)
+                and any(isinstance(block, Mapping) and block.get("type") == "tool_result" for block in content)):
+            self.network_error_code = None
         if kind == "rate_limit_event":
             self._rate_limit(event.get("rate_limit_info"))
         elif kind == "assistant" and isinstance(event.get("error"), str):
@@ -344,6 +376,24 @@ def classify(runtime: RuntimeAdapter | None, result: Mapping[str, Any] | None, e
         except Exception:
             logger.exception("could not read a %s run's spend cap", runtime.type)
     return Failure(FailureCause.UNKNOWN)
+
+
+def network_unavailable(runtime: RuntimeAdapter | None, result: Mapping[str, Any] | None, evidence: Evidence, *,
+                        given: Failure | None = None) -> bool:
+    """Whether a failed run has a structured model connection failure, independent of failure-typing mode.
+
+    Runtime classifiers already distinguish transport errors from quota, auth and HTTP failures. Their text
+    fallbacks never qualify. Exact network codes qualify only in dedicated API fields or an explicitly marked
+    model API envelope; a tool's connection failure must not pause the task.
+    """
+    if given is not None:
+        return given.signal is Signal.TYPED and given.cause is FailureCause.CONNECTION_FAILED
+    if result is not None and not _failed(result):
+        return False
+    found = classify(runtime, result, evidence)
+    if found.signal is Signal.TYPED and found.cause is not FailureCause.UNKNOWN:
+        return found.cause is FailureCause.CONNECTION_FAILED
+    return _network_code(result or {}) is not None or evidence.network_error_code is not None
 
 
 async def typing_mode(*, pool: asyncpg.Pool | None = None) -> FailureTyping:

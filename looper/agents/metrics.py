@@ -546,6 +546,14 @@ async def compute(days: int, filters: Filters, *, now: datetime | None = None, p
         except Exception:
             logger.exception("Could not read failure recovery metrics")
             result["failure_handling"] = {"error": "Failure recovery metrics are unavailable"}
+    from . import network_pause_settings
+    if (await network_pause_settings.load(pool=pool)).enabled:
+        try:
+            from ..db import network_pauses
+            result['network_pause'] = await network_pauses.stats(pool=pool)
+        except Exception:
+            logger.exception('Could not read network pause metrics')
+            result['network_pause'] = {'error': 'Network pause metrics are unavailable'}
     return result
 
 
