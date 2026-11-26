@@ -8852,6 +8852,11 @@ is not done.
 
 ## Web Dashboard
 
+The Work page is called 工作台 in the Chinese UI, with the bilingual sidebar label
+“Work 工作台”, matching “Ledger 账本”. Its pinned main Manager conversation is
+labelled 管家; task conversations use their task names and call the counterpart
+任务管家.
+
 In Work, one task details column lists the plan and gate summaries from the
 selected task's shared detail. Both gate entry points locate the conversation's
 existing gate card; only that card owns the editor and discussion reads. Narrow
