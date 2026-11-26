@@ -10,6 +10,7 @@ from looper.agents.agent_settings import AgentSettings
 from looper.agents.profile_registry import builtin_resolved_profile
 from looper.db import projects, tasks
 from tests.db_support import until
+from tests.fake_cli_readback import SOURCE as READBACK_SOURCE
 from tests.fake_claude import fake_claude
 
 
@@ -58,6 +59,7 @@ def emit(value):
     print(json.dumps(value), flush=True)
 if '--version' in sys.argv:
     print('2.1.332 (Claude Code)'); sys.exit()
+exec({READBACK_SOURCE!r})
 resuming = '--resume' in sys.argv
 record({{'kind':'launch', 'command':sys.argv[1:], 'cwd':os.getcwd(),
          'environment':{{key:os.environ.get(key) for key in ('LOOPER_TASK_MANAGER','LOOPER_AGENT_RUN','SERVER_PRIVATE')}}}})
@@ -76,6 +78,14 @@ def finish(text):
            **({{'usage_complete':False}} if measurement_config.get('unknown_cost') else {{}})}})
 for line in sys.stdin:
     data = json.loads(line)
+    if data.get('type') == 'control_request' and data['request']['subtype'] in READBACK_SUBTYPES:
+        record({{'kind':'control', 'subtype':data['request']['subtype']}})
+        answer = readback_answer(data['request'], str(log.with_name('readback-override.json')))
+        if answer is not None:
+            kind, body = answer
+            emit({{'type':'control_response','response':{{'subtype':kind,'request_id':data['request_id'],
+                  **({{'response':body}} if kind == 'success' else {{'error':body}})}}}})
+        continue
     if data.get('type') == 'control_request':
         emit({{'type':'control_response','response':{{'subtype':'success','request_id':data['request_id']}}}})
         finish('stopped')
