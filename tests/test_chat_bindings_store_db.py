@@ -71,8 +71,11 @@ def test_schema_upgrade_preserves_existing_bot_and_transcript(bridge_source):
             await initialize_bridge(pool, bridge_source, seed=False)
             async with asyncio.timeout(30):
                 await _seed(pool)
-                await chat.save_message(session_id="telegram-7", message_id="message-one", role="user",
-                                        content="Synthetic public example", channel="telegram", pool=pool)
+                # Seeded with the released schema's own columns: save_message also writes the provenance columns
+                # that only the upgrade adds, and serve migrates before any channel starts.
+                await pool.execute(
+                    "INSERT INTO chat_messages (session_id, message_id, role, content, channel, created_at) "
+                    "VALUES ('telegram-7', 'message-one', 'user', 'Synthetic public example', 'telegram', now())")
                 before = dict(await pool.fetchrow("SELECT * FROM channel_configs WHERE channel_id = $1", BOT))
                 await connection.ensure_schema(pool)
                 after = dict(await pool.fetchrow("SELECT * FROM channel_configs WHERE channel_id = $1", BOT))

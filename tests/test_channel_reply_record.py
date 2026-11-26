@@ -89,7 +89,8 @@ def test_an_answer_is_stored_as_its_channel_delivered_it(monkeypatch: pytest.Mon
     asyncio.run(record_reply("telegram", _answer(TELEGRAM), receipt))
     assert saved.rows == [{"session_id": "telegram:12345", "message_id": "m1:reply", "role": "assistant",
                            "content": "ok", "channel": "telegram", "delivery_failure": stored[0],
-                           "delivery_error": stored[1], "manager_id": "manager"}]
+                           "delivery_error": stored[1], "manager_id": "manager",
+                           "manager_session": None}]  # an answer with no routed session records none
 
 
 @pytest.mark.parametrize("envelope", [
