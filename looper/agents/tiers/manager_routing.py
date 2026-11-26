@@ -13,6 +13,9 @@ Scoped Managers use a machine-wide cap counting all Managers' processes and rese
 non-main session makes room with its session id kept for resumption, starts wait when none is idle, main never
 waits or gets evicted, and scoped non-main residents are reclaimed after the configured idle timeout.
 
+An API client's messages go to the session of that client (``session_routing.client_key``) whether routing is on or
+off, count toward the same cap, and with routing off stop with their worker once their queue is empty.
+
 Switched off, new messages go to main again: main's worker keeps the messages it holds in order, the other workers
 finish theirs, and their processes stop once idle (``sweep``).
 """
