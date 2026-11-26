@@ -212,3 +212,29 @@ def test_activity_since(monkeypatch) -> None:
             "other-user", "other-answer", "web", "current"]
 
     run_db(body, monkeypatch)
+
+
+def test_entry_kind_and_provenance_are_stored_together(monkeypatch) -> None:
+    async def body(pool):
+        await chat.save_message(session_id="thread", message_id="m1", role="user", content="hello",
+                                manager_session="group:synthetic", sender_kind="person", sender_name="Synthetic",
+                                entry_kind="command", pool=pool)
+        row = await pool.fetchrow("SELECT entry_kind, manager_session, sender_kind, sender_name FROM chat_messages "
+                                  "WHERE session_id='thread' AND message_id='m1'")
+        assert tuple(row) == ("command", "group:synthetic", "person", "Synthetic")
+
+    run_db(body, monkeypatch)
+
+
+@pytest.mark.parametrize("entry_kind", [None, "message"])
+def test_resaving_a_message_keeps_its_first_provenance(monkeypatch, entry_kind) -> None:
+    async def body(pool):
+        for session, kind, name in [("group:first", "person", "First"), ("group:second", "bot", "Second")]:
+            await chat.save_message(session_id="thread", message_id="m1", role="user", content=f"from {name}",
+                                    manager_session=session, sender_kind=kind, sender_name=name,
+                                    entry_kind=entry_kind, pool=pool)
+        row = await pool.fetchrow("SELECT content, manager_session, sender_kind, sender_name FROM chat_messages "
+                                  "WHERE session_id='thread' AND message_id='m1'")
+        assert tuple(row) == ("from Second", "group:first", "person", "First")  # content follows, provenance does not
+
+    run_db(body, monkeypatch)
