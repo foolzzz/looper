@@ -223,7 +223,11 @@ def test_a_kept_worker_carries_on_across_a_planned_restart():
             current = keeper.read_json(directory / keeper.STATE)
             assert current["child_pid"] == before["child_pid"]
             after_ps = _ps(current)
-            assert _activity(url, task).count(f"Worker {worker} carried on across the restart") == 1
+            # Pool adoption precedes the Planner's asynchronous activity write.
+            summary = f"Worker {worker} carried on across the restart"
+            activity = _until(lambda: (rows := _activity(url, task)) and summary in rows and rows,
+                              "the adoption activity being recorded")
+            assert activity.count(summary) == 1
             (state / "room-after").touch()
             _until(lambda: len(_events(state, "room")) == 2, "the old token serving its room tool after adoption")
             api.post("/api/v1/operator_chat/send", {"text": "Pass STEER-AFTER-RESTART to step s1",
