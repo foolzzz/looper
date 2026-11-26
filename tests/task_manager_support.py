@@ -65,11 +65,13 @@ if resuming and Path('reject-resume').exists():
 if resuming and Path('wrong-resume').exists():
     session = 'wrong-session'
 total = .1 if resuming else 0
+measurement_config = {{}}
 def finish(text):
     global total
     total += .1
     emit({{'type':'result','subtype':'success','result':text,'session_id':session,
-           'total_cost_usd':total,'usage':{{'input_tokens':10,'output_tokens':5}}}})
+           'total_cost_usd':total,'usage':{{'input_tokens':10,'output_tokens':5}},
+           **({{'usage_complete':False}} if measurement_config.get('unknown_cost') else {{}})}})
 for line in sys.stdin:
     data = json.loads(line)
     if data.get('type') == 'control_request':
@@ -77,10 +79,31 @@ for line in sys.stdin:
         finish('stopped')
         continue
     text = data.get('message',{{}}).get('content','')
+    config_path = Path('context-probe.json')
+    measurement_config = json.loads(config_path.read_text()) if config_path.exists() else {{}}
     record({{'kind':'input','text':text,'session':session}})
     emit({{'type':'system','subtype':'init','session_id':session}})
     if text == 'wait':
         continue
+    if text == '/compact':
+        behavior = measurement_config.get('compaction', 'success')
+        if behavior == 'wait':
+            continue
+        if behavior == 'failure':
+            emit({{'type':'result','subtype':'error','is_error':True,'session_id':session}})
+            continue
+        if behavior != 'missing':
+            post = measurement_config.get('post_tokens', 20)
+            metadata = {{'trigger':'manual', 'pre_tokens':measurement_config.get('context_tokens', 120)}}
+            if post is not None:
+                metadata['post_tokens'] = post
+            emit({{'type':'system','subtype':'compact_boundary','compact_metadata':metadata}})
+            if post is not None:
+                emit({{'type':'assistant','message':{{'content':[], 'usage':{{'input_tokens':post}}}}}})
+        finish('compacted')
+        continue
+    if measurement_config.get('context_tokens') is not None:
+        emit({{'type':'assistant','message':{{'content':[], 'usage':{{'input_tokens':measurement_config['context_tokens']}}}}}})
     if text == 'write':
         Path('changed.txt').write_text('changed')
     emit({{'type':'stream_event','event':{{'delta':{{'type':'text_delta','text':'one'}}}}}})

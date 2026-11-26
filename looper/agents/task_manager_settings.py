@@ -4,11 +4,13 @@ Task profile overrides keep the selection independent of Manager sessions.
 """
 
 from collections.abc import Mapping
+from contextlib import AsyncExitStack
 from typing import Any
 
 from ..db import agent_setting_layers as db_layers, role_configs as db_role_configs
 from .agent_settings import AgentSettings, AgentType, load_agent_settings
 from .profile_registry import builtin_profile, check_selection
+from .runtimes import RuntimeUnsupported
 
 DEFAULT_PROFILE_ID = builtin_profile("task_manager").id
 
@@ -31,6 +33,21 @@ async def set_task_manager_profile(task_id: str, profile_id: str | None) -> None
     The pool observes the changed profile in its next launch signature, restarts
     the process and resumes the existing session. Runtime refusals belong there.
     """
-    if profile_id is not None:
-        await check_selection(profile_id, ["task_manager"])
-    await db_layers.set_task_layer(task_id, profiles={"task_manager": profile_id})
+    from .projects import HTTP_409, RequestError
+    from .tiers.task_manager import current_pool
+
+    pool = current_pool()
+    async with AsyncExitStack() as stack:
+        if pool is not None:
+            # Share the admission gate: validation and persistence may yield.
+            await stack.enter_async_context(pool._lock)
+            if pool.in_turn(task_id):
+                raise RequestError(HTTP_409, "the task Manager is working in this task: stop its turn first")
+        if profile_id is not None:
+            profile = await check_selection(profile_id, ["task_manager"])
+            if profile.runtime.type != "claude-code":
+                raise RuntimeUnsupported(f"Profile {profile.name}: the task Manager runs only on Claude Code for now.")
+        await db_layers.set_task_layer(task_id, profiles={"task_manager": profile_id})
+        if pool is not None and (agent := pool.agents.get(task_id)) is not None:
+            # Idle only: no driver needs joining, and admission stays excluded until stop finishes.
+            await agent.resident.stop(kill=True)
