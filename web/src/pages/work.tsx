@@ -10,6 +10,7 @@ import { WorkRequirement } from "@/components/work-requirement";
 import { WorkSteps } from "@/components/work-steps";
 import { WorkTaskManagerModel } from "@/components/work-task-manager-model";
 import { WorkCost } from "@/components/work-cost";
+import { WorkControls } from "@/components/work-controls";
 import { openWorkGate } from "@/components/work-activity-feed";
 import { fetchTaskDetail, isActiveTask, TaskDetailError, type TaskDetail, type UserGate } from "@/lib/api";
 import { startPolling } from "@/lib/polling";
@@ -146,17 +147,18 @@ function WorkPageContent({
     setDetail(current => current.id === taskId ? { ...current, task } : current);
   }, [taskId, conversations, cacheKey]);
   // Requirement edits read this task back through the shared detail. A newer read, another task, or a page that has gone, is dropped.
-  const refreshDetail = useCallback(async () => {
+  const refreshDetail = useCallback(async (signal?: AbortSignal) => {
     const id = taskId;
     if (!pageLive.current || !id || selectionRef.current !== id) return;
     const token = takeDetailEpoch(detailEpoch.current, id);
-    const task = await fetchTaskDetail(id);
-    if (!pageLive.current || selectionRef.current !== id || detailEpochOf(detailEpoch.current, id) !== token) return;
+    const task = await (signal ? fetchTaskDetail(id, signal) : fetchTaskDetail(id));
+    if (signal?.aborted || !pageLive.current || selectionRef.current !== id || detailEpochOf(detailEpoch.current, id) !== token) return;
     if (task.task_id !== id) throw new Error("任务详情与当前任务不匹配，请刷新");
     conversations.cache(workConversationKey({ kind: "planner", taskId: id }), { task });
     setDetail(current => (
       current.id === id && detailEpochOf(detailEpoch.current, id) === token ? { id, task } : current
     ));
+    return task;
   }, [taskId, conversations]);
   const active = !!selected && isActiveTask(selected);
   useEffect(() => {
@@ -317,7 +319,8 @@ function WorkPageContent({
         className={wide ? "min-h-0 w-72 shrink-0 overflow-y-auto border-l border-border"
           : "fixed inset-0 z-50 overflow-y-auto bg-background"}>
         {!wide && <div className="border-b border-border p-3"><Button variant="outline" onClick={closePanel}>关闭任务详情</Button></div>}
-        <WorkRequirement task={selected} onRefresh={refreshDetail} />
+        <WorkControls task={selected} onRefresh={refreshDetail} />
+        <WorkRequirement task={selected} onRefresh={async () => { await refreshDetail(); }} />
         <WorkTaskManagerModel
           mode="task"
           taskId={taskId}

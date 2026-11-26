@@ -145,7 +145,7 @@ afterEach(() => {
 });
 
 describe("Work page shell", () => {
-  it.each(["off", "missing", "offline"])("never mounts file reads when the Work switch is %s", async mode => {
+  it.each(["off", "missing", "offline"])("never mounts the task panel when the Work switch is %s", async mode => {
     const matchMedia = window.matchMedia.bind(window);
     vi.spyOn(window, "matchMedia").mockImplementation(query => Object.assign(matchMedia(query), { matches: true }));
     handler = (url, method, body) => {
@@ -160,6 +160,8 @@ describe("Work page shell", () => {
     expect(host.textContent).toContain("Dashboard view");
     expect(calls.some(call => call.url.includes("tasks/changes"))).toBe(false);
     expect(host.querySelector('[aria-label="改动文件"]')).toBeNull();
+    expect(host.querySelector('[aria-labelledby="work-controls-title"]')).toBeNull();
+    expect(calls.some(call => call.url.includes("ops/task_control") || call.url.endsWith("tasks/done"))).toBe(false);
   });
 
   it("nav hidden when off", async () => {

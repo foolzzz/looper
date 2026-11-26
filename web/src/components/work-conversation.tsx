@@ -284,6 +284,7 @@ export function PlannerWorkConversation({
   const sendGen = useRef(0);
   const finalSeen = useRef(false);
   const sendRef = useRef<(text: string) => void>(() => {});
+  const backgroundActive = detail?.group === "in_progress" || detail?.group === "needs_you";
 
   useEffect(() => () => { replyRef.current.cancel(); }, [taskId]);
 
@@ -309,7 +310,7 @@ export function PlannerWorkConversation({
       setAvailability({ canSend: false, reason: reason || CHECK_FAILED });
     });
     return () => ctrl.abort();
-  }, [taskId, missing]);
+  }, [taskId, missing, backgroundActive]);
 
   useEffect(() => {
     if (missing) return;
