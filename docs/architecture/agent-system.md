@@ -803,6 +803,15 @@ Manager has no tool for it. The dashboard shows the task page's 指标 card and 
 Each task can own a Claude Code resident, separate from the operator's Manager.
 The pool is constructed after workspace recovery, before HTTP admission; constructing
 it starts no model process. `tasks.conversations.enabled` remains off by default.
+Whether the task Manager answers is its own switch, `tasks.conversations.manager_answers`
+(default off; only the string `true` is on; read and written through
+`task_conversations.get` and `task_conversations.update`, operator-only, like
+`enabled`). While it is off, `operator_chat.send` with a `kind: "task"` target
+answers `409 task_manager_off` and stores nothing, and the pool refuses at
+`submit`, at the driver and at `prepare` with `manager_answers_off`, so no process
+starts, no `agent_sessions` row is written and no model is called. Nothing else
+starts a task Manager: task start, delete, profile change, the status read and a
+restart only read or stop one. Tasks keep being answered by the Planner.
 The independent `task_manager` role defaults to Sonnet; task profile overrides take
 precedence over that role and never inherit the owning Manager's profile. Other
 runtimes are refused rather than substituted.
@@ -9417,7 +9426,7 @@ notify a channel, or call the task-end listener. A task the background is workin
 | `/api/v1/system/{check,status,overview}` | POST | `system.{check,status,overview}` |
 | `/api/v1/config/{export,import_preview,import_apply,import_upload,import_cancel}` | POST | `config.{export,import_preview,import_apply,import_upload,import_cancel}` |
 | `/api/v1/tasks/{requirement_update,configure,move,agents,continue,role_update,room_view,activity,activity_detail,conversation,activity_stream,create,create_draft,done,page,detail,delete,select,work_list,mark_seen}` | POST | `tasks.{requirement_update,configure,move,agents,continue,role_update,room_view,activity,activity_detail,conversation,activity_stream,create,create_draft,done,page,detail,delete,select,work_list,mark_seen}` |
-| `/api/v1/task_conversations/{get,update}` | POST | `task_conversations.{get,update}` (operator-only; read or set `tasks.conversations.enabled`, default false; null restores false) |
+| `/api/v1/task_conversations/{get,update}` | POST | `task_conversations.{get,update}` (operator-only; read or set `tasks.conversations.enabled` and `tasks.conversations.manager_answers`, both default false; null restores false) |
 | `/api/v1/catalog_items/{list,get,update,delete}` | POST | `catalog_items.{list,get,update,delete}` |
 | `/api/v1/installs/{create,update,delete,project}` | POST | `installs.{create,update,delete,project}` |
 | `/api/v1/catalog_sources/{import_machine,import_mcp,upload,git_preview,git_import,create_skill,create_mcp}` | POST | `catalog_sources.{import_machine,import_mcp,upload,git_preview,git_import,create_skill,create_mcp}` |
