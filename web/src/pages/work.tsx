@@ -18,7 +18,7 @@ import { startPolling } from "@/lib/polling";
 import { callV1, V1Error } from "@/lib/v1";
 import { errorText } from "@/lib/use-action";
 import { TaskStatusMark } from "@/pages/tasks";
-import { isMissingOperation, markSeen, taskTitle, workSelection, workStorage } from "@/lib/work";
+import { isMissingOperation, isUnstartedTask, markSeen, taskTitle, workStatusLabel, workSelection, workStorage } from "@/lib/work";
 import { isGateShown } from "@/lib/gates";
 import { WorkConversationStateProvider, useWorkConversationStore, workConversationKey } from "@/lib/use-work-conversation-state";
 
@@ -108,9 +108,9 @@ function WorkPageContent({
   const candidate = detail.id === taskId && detail.task ? detail.task : conversations.cached(cacheKey)?.task;
   const selected = candidate?.task_id === taskId ? candidate : undefined;
   // Keep the same control owner through Start readback so its confirmed result survives the transition.
-  const draftControls = selected?.status === "draft" || draftControlId === taskId;
+  const draftControls = isUnstartedTask(selected?.status) || draftControlId === taskId;
   useEffect(() => {
-    if (selected?.status === "draft") setDraftControlId(taskId);
+    if (isUnstartedTask(selected?.status)) setDraftControlId(taskId);
   }, [taskId, selected?.status]);
   useEffect(() => { setControlBusy(false); setDraftSaving(false); }, [taskId]);
   useEffect(() => {
@@ -279,40 +279,40 @@ function WorkPageContent({
       <div className={`h-full min-h-0 min-w-0 flex-1 flex-col xl:flex-row ${pane === "detail" ? "flex" : "hidden md:flex"} ${shortColumn ? "overflow-y-auto" : ""}`} data-work-scroll={shortColumn ? "" : undefined}>
         <div inert={panel && !wide} className={shortColumn && selection.kind === "task" ? "flex h-auto min-h-full shrink-0 flex-col" : "flex h-full min-h-0 min-w-0 flex-1 flex-col"}>
           <div className="shrink-0 border-b border-border p-3 md:hidden">
-            <Button type="button" variant="outline" onClick={() => setPane("list")}>Back to the list</Button>
+            <Button type="button" variant="outline" onClick={() => setPane("list")}>返回列表</Button>
           </div>
           {selection.kind === "manager" ? (
             <>
-              <header aria-label="Selected task" className="shrink-0 border-b border-border p-4">
-                <h1 className="text-lg font-semibold">Manager</h1>
+              <header aria-label="当前任务" className="shrink-0 border-b border-border p-4">
+                <h1 className="text-lg font-semibold">管家</h1>
               </header>
               <ManagerWorkConversation />
             </>
           ) : !selected ? (
             <div className="min-h-0 flex-1 overflow-y-auto p-4">
-              <header aria-label="Selected task" className="space-y-3">
-                {detail.id !== taskId || !detail.error ? <p role="status">Loading task…</p>
+              <header aria-label="当前任务" className="space-y-3">
+                {detail.id !== taskId || !detail.error ? <p role="status">正在加载任务…</p>
                   : detail.missing ? <PlannerWorkConversation taskId={taskId} missing />
-                    : <div role="alert"><p>{detail.error}</p><Button variant="outline" onClick={() => setRetry(n => n + 1)}>Retry</Button></div>}
+                    : <div role="alert"><p>{detail.error}</p><Button variant="outline" onClick={() => setRetry(n => n + 1)}>重试</Button></div>}
               </header>
             </div>
           ) : (
             <>
-              <header aria-label="Selected task" className="shrink-0 space-y-3 border-b border-border p-4">
+              <header aria-label="当前任务" className="shrink-0 space-y-3 border-b border-border p-4">
                 <h1 className="text-lg font-semibold">{taskTitle(selected.title, selected.created_at, selected.task_id)}</h1>
-                <TaskStatusMark status={selected.status} />
+                <TaskStatusMark status={selected.status} label={workStatusLabel(selected.status)} />
                 {selected.project_name && <p className="text-sm text-muted-foreground">{selected.project_name}</p>}
-                <a className={LINK} href={`#tasks/${encodeURIComponent(taskId)}`}>Open the task page</a>
+                <a className={LINK} href={`#tasks/${encodeURIComponent(taskId)}`}>打开任务页面</a>
                 {!wide && <Button ref={panelOpener} variant="outline" aria-haspopup="dialog" aria-expanded={panel}
                   onClick={() => setPanel(true)}>任务详情</Button>}
                 {gateError && <p role="alert" className="text-sm text-destructive">{gateError}</p>}
-                {detail.error && <p role="alert" className="text-sm text-destructive">Task refresh failed: {detail.error}</p>}
+                {detail.error && <p role="alert" className="text-sm text-destructive">任务刷新失败： {detail.error}</p>}
               </header>
               {draftControls && <WorkControls key={taskId} task={selected} onRefresh={refreshDetail}
                 disabled={draftSaving} compact onResult={onControlResult} />}
               <div ref={conversation} data-work-detail="" data-layout={shortColumn ? "scroll" : "split"}
                 className={shortColumn ? "work-short-conversation block" : "flex min-h-0 min-w-0 flex-1 flex-col"}>
-                {selected.status === "draft" ? <WorkDraft key={taskId} task={selected} onRefresh={refreshDetail}
+                {isUnstartedTask(selected.status) ? <WorkDraft key={taskId} task={selected} onRefresh={refreshDetail}
                   disabled={controlBusy} onBusy={setDraftSaving} />
                   : <PlannerWorkConversation key={taskId} taskId={taskId} detail={selected} task={selected} onGateChanged={onGateChanged} />}
               </div>
@@ -346,7 +346,7 @@ function WorkPageContent({
         />
         <WorkSteps task={selected} onOpenGate={step => openGate(step.step_key)} />
         <WorkGates task={selected} onOpenGate={openGate} />
-        <div className="p-4"><WorkChanges taskId={taskId} visible /></div>
+        <div className="p-4"><WorkChanges taskId={taskId} visible pendingWorkspace={selected.status === "draft"} /></div>
         <WorkCost task={selected} />
       </aside>}
       <WorkSwitcher open={switcher && finder} onClose={closeSwitcher} onOpen={openTask} restore={restore} />

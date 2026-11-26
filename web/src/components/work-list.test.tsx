@@ -130,28 +130,47 @@ afterEach(() => {
 });
 
 describe("Work list", () => {
+  it("names the page 工作台 and pins 管家 before conversations named after their tasks", async () => {
+    await show();
+    expect(host.querySelector("h1")?.textContent).toBe("工作台");
+    const links = [...host.querySelectorAll("a")];
+    expect(links[0].textContent?.trim()).toBe("管家");
+    expect(links[0].getAttribute("href")).toBe("#work/manager");
+    const list = host.querySelector('[aria-label="工作台任务"]')!;
+    expect(list.contains(links[0])).toBe(false);
+    expect(links[1].querySelector("[data-task-title]")?.textContent).toBe("Beta new");
+  });
+
+  it("uses Chinese for list controls and schedule status", async () => {
+    await show();
+    for (const text of ["新建任务", "查找任务", "管家", "进行中", "定时任务", "已结束", "连续失败 3 次"]) {
+      expect(host.textContent + host.querySelector("input")?.getAttribute("placeholder")).toContain(text);
+    }
+    expect(host.textContent).not.toMatch(/New task|Manager|Schedules|Unseen|Failed|Running/);
+  });
+
   it("full list reachable", async () => {
     await show();
-    const ended = host.querySelector('[aria-label="Ended"]')!;
-    await click(button(ended, "Ended"));
-    await click(button(ended, "Load more"));
-    await click(button(ended, "Load more"));
+    const ended = host.querySelector('[aria-label="已结束"]')!;
+    await click(button(ended, "已结束"));
+    await click(button(ended, "加载更多"));
+    await click(button(ended, "加载更多"));
     const hrefs = [...ended.querySelectorAll("a")].map((link) => link.getAttribute("href"));
     expect(hrefs).toEqual(["#work/task/e1", "#work/task/e2", "#work/task/e3", "#work/task/e4", "#work/task/e5"]);
     expect(new Set(hrefs).size).toBe(hrefs.length);
-    expect(ended.textContent).not.toContain("Load more");
+    expect(ended.textContent).not.toContain("加载更多");
   });
 
   it("sections and rows", async () => {
     await show();
-    const open = host.querySelector('[aria-label="Open tasks"]')!;
+    const open = host.querySelector('[aria-label="进行中任务"]')!;
     const headers = [...open.querySelectorAll("button")].map((item) => item.textContent ?? "");
     expect(headers[0]).toContain("Beta");
     expect(headers[1]).toContain("Alpha");
     const links = [...open.querySelectorAll("a")].map((link) => link.textContent ?? "");
     expect(links[0]).toContain("Beta new");
     expect(links[0]).toContain("运行中");
-    expect(links[0]).toContain("Unseen");
+    expect(links[0]).toContain("未读");
     expect(links[1]).toContain("未命名任务");
     expect(links[1]).toContain("待开始");
     expect(links[2]).toContain("等你回复 (2)");
@@ -160,10 +179,10 @@ describe("Work list", () => {
     const scheduleCalls = calls.filter((call) => call.url.includes("work_list") && call.body.section === "schedules");
     expect(openCalls).toHaveLength(1);
     expect(scheduleCalls).toHaveLength(1);
-    const schedules = host.querySelector('[aria-label="Schedules"]')!;
-    expect(schedules.textContent).toContain("Failed");
-    expect(schedules.textContent).toContain("3 consecutive failures");
-    expect(schedules.textContent).toContain("Running");
+    const schedules = host.querySelector('[aria-label="定时任务"]')!;
+    expect(schedules.textContent).toContain("失败");
+    expect(schedules.textContent).toContain("连续失败 3 次");
+    expect(schedules.textContent).toContain("运行中");
     expect(schedules.querySelector("time")!.getAttribute("dateTime")).toBe("2026-11-24T01:00:00Z");
     await click(button(schedules, "Nightly"));
     expect(calls.some((call) => call.url.includes("/tasks/page") && call.body.schedule_id === "s1" && call.body.limit === 10)).toBe(true);
@@ -176,19 +195,19 @@ describe("Work list", () => {
     missingSelect = true;
     await act(async () => { root.render(<WorkPage sub="" onNavigate={() => {}} />); });
     await settle();
-    const open = host.querySelector('[aria-label="Open tasks"]')!;
-    const schedules = host.querySelector('[aria-label="Schedules"]')!;
+    const open = host.querySelector('[aria-label="进行中任务"]')!;
+    const schedules = host.querySelector('[aria-label="定时任务"]')!;
     expect(open.textContent).toContain("Beta new");
     expect(schedules.textContent).toContain("database unavailable");
     expect(schedules.querySelector('[role="alert"]')).not.toBeNull();
     failSchedules = false;
-    await click(button(schedules, "Retry"));
+    await click(button(schedules, "重试"));
     expect(schedules.textContent).toContain("Nightly");
     expect(schedules.textContent).not.toContain("database unavailable");
-    const draft = button(host, "New task");
+    const draft = button(host, "新建任务");
     expect(draft.disabled).toBe(true);
     expect(host.textContent).toContain(DRAFTS_UNAVAILABLE);
-    const search = host.querySelector('input[aria-label="Find a task"]') as HTMLInputElement;
+    const search = host.querySelector('input[aria-label="查找任务"]') as HTMLInputElement;
     expect(search.disabled).toBe(true);
     expect(host.textContent).toContain(FIND_UNAVAILABLE);
     expect(host.querySelector('[role="dialog"]')).toBeNull();
@@ -201,8 +220,8 @@ describe("Work list", () => {
     missingDraft = false;
     missingSelect = false;
     await show();
-    const again = host.querySelector('[aria-label="Open tasks"]')!;
-    expect(again.textContent).toContain("Open tasks are not available on this server yet.");
-    expect(again.textContent).not.toContain("No open tasks");
+    const again = host.querySelector('[aria-label="进行中任务"]')!;
+    expect(again.textContent).toContain("此服务器尚不支持进行中任务。");
+    expect(again.textContent).not.toContain("暂无进行中任务");
   });
 });

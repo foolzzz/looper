@@ -1,11 +1,12 @@
 import { useEffect, useRef, useState, type MouseEvent } from "react";
 import { Button } from "@/components/ui/button";
 import { Loader2 } from "lucide-react";
-import { RunStatusBadge } from "@/components/project-schedules";
+import { Badge } from "@/components/ui/badge";
+import { RUN_STATUS } from "@/lib/schedules";
 import { TaskStatusMark } from "@/pages/tasks";
 import { fetchTasks, type ScheduleRunStatus } from "@/lib/api";
 import { errorText } from "@/lib/use-action";
-import { formatWhen, taskTitle, workStorage, type WorkSchedule, type WorkTask } from "@/lib/work";
+import { formatWhen, taskTitle, workStorage, workStatusLabel, type WorkSchedule, type WorkTask } from "@/lib/work";
 
 const ROW = "flex w-full flex-wrap items-center gap-x-2 gap-y-1 rounded-md px-3 py-2 text-left text-sm transition-colors duration-150 motion-reduce:transition-none pointer-coarse:min-h-11 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring";
 
@@ -62,7 +63,7 @@ export function WorkTaskLink({
       {task.unseen && (
         <span className="inline-flex items-center gap-1 text-xs">
           <span aria-hidden="true" className="h-2 w-2 rounded-full bg-primary" />
-          Unseen
+          未读
         </span>
       )}
     </a>
@@ -147,24 +148,24 @@ export function WorkScheduleRow({
         <span className="min-w-[7rem] flex-1 truncate text-left font-medium">{schedule.name}</span>
         {schedule.project_name && <span className="text-xs text-muted-foreground">{schedule.project_name}</span>}
         {schedule.last_status
-          ? <RunStatusBadge status={schedule.last_status as ScheduleRunStatus} />
-          : <span className="text-xs text-muted-foreground">No runs yet</span>}
+          ? <Badge variant={RUN_STATUS[schedule.last_status as ScheduleRunStatus]?.variant ?? "outline"} className="shrink-0">{workStatusLabel(schedule.last_status)}</Badge>
+          : <span className="text-xs text-muted-foreground">尚未运行</span>}
         {schedule.last_ended_at && <time dateTime={schedule.last_ended_at} className="text-xs text-muted-foreground">{formatWhen(schedule.last_ended_at)}</time>}
         {schedule.consecutive_failures > 0 && (
-          <span className="text-xs">{schedule.consecutive_failures} consecutive failures</span>
+          <span className="text-xs">连续失败 {schedule.consecutive_failures} 次</span>
         )}
         {schedule.running && (
           <span className="inline-flex items-center gap-1 text-xs">
             <Loader2 aria-hidden="true" className="h-3.5 w-3.5 motion-safe:animate-spin" />
-            Running
+            运行中
           </span>
         )}
       </button>
       {open && (
         <div className="space-y-1 px-3 pb-2">
           {error && <div role="alert"><p className="text-xs text-destructive">{error}</p>
-            <Button variant="outline" onClick={() => ready ? void more() : setRetry(n => n + 1)}>Retry</Button></div>}
-          {loading && <p role="status" className="text-xs text-muted-foreground">Loading…</p>}
+            <Button variant="outline" onClick={() => ready ? void more() : setRetry(n => n + 1)}>重试</Button></div>}
+          {loading && <p role="status" className="text-xs text-muted-foreground">正在加载…</p>}
           {runs?.map((run) => (
             <a
               key={run.task_id}
@@ -177,11 +178,11 @@ export function WorkScheduleRow({
               className="flex items-center gap-2 rounded-md px-2 py-1 text-sm pointer-coarse:min-h-11 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
             >
               <span className="min-w-0 flex-1 truncate">{taskTitle(run.name)}</span>
-              <TaskStatusMark status={run.status} />
+              <TaskStatusMark status={run.status} label={workStatusLabel(run.status)} />
             </a>
           ))}
-          {next && <Button variant="outline" disabled={loading} onClick={() => void more()}>Load more</Button>}
-          {ready && runs.length === 0 && <p className="text-xs text-muted-foreground">No runs yet</p>}
+          {next && <Button variant="outline" disabled={loading} onClick={() => void more()}>加载更多</Button>}
+          {ready && runs.length === 0 && <p className="text-xs text-muted-foreground">尚未运行</p>}
         </div>
       )}
     </div>

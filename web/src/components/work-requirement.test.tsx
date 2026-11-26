@@ -662,7 +662,7 @@ describe("Work requirement on the page", () => {
     await typeInto("alpha changed");
     await click("保存");
     await showPage(<WorkPage sub="task/B" onNavigate={vi.fn()} />);
-    expect(host.textContent).toContain("Loading task…");
+    expect(host.textContent).toContain("正在加载任务…");
     const callsAtSwitch = api.fetchTaskDetail.mock.calls.length;
     save.resolve();
     await act(async () => { await save.promise; });
@@ -671,7 +671,7 @@ describe("Work requirement on the page", () => {
     loadB.resolve(task({ task_id: "B", requirement: "beta", title: "Task B" }));
     await settle();
     expect(host.querySelector("[data-requirement-body]")?.textContent).toBe("beta");
-    expect(host.textContent).not.toContain("Loading task…");
+    expect(host.textContent).not.toContain("正在加载任务…");
     expect(host.textContent).not.toContain("alpha-late");
     expect(host.textContent).not.toContain("alpha changed");
   });

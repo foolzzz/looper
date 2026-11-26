@@ -1,12 +1,14 @@
 import { useEffect, useRef, useState } from "react";
+import { WORK_COMPOSER_COPY } from "@/components/work-conversation";
 import { ChatComposer } from "@/components/chat-composer";
 import { Button } from "@/components/ui/button";
 import { editTaskRequirement, type TaskDetail } from "@/lib/api";
 import { useWorkConversationState } from "@/lib/use-work-conversation-state";
 import { errorText } from "@/lib/use-action";
 import { V1Error } from "@/lib/v1";
+import { isUnstartedTask } from "@/lib/work";
 
-/** Draft messages edit the persisted requirement; only the separate Start control launches a Planner. */
+/** Unstarted task messages edit the requirement; only the separate Start control launches a Planner. */
 export function WorkDraft({ task, onRefresh, disabled, onBusy }: {
   task: TaskDetail;
   onRefresh: () => Promise<TaskDetail | undefined>;
@@ -56,8 +58,8 @@ export function WorkDraft({ task, onRefresh, disabled, onBusy }: {
       // Append to a fresh server value, including edits made in the right panel.
       const current = await onRefresh();
       if (!live.current) return;
-      if (!current || current.task_id !== task.task_id || current.status !== "draft")
-        throw new Error("任务已不在草稿阶段，请重新读取任务");
+      if (!current || current.task_id !== task.task_id || !isUnstartedTask(current.status))
+        throw new Error("任务已不在待开始阶段，请重新读取任务");
       const requirement = current.requirement ? `${current.requirement}\n\n${text}` : text;
       pending.current = { requirement, text };
       writing = true;
@@ -94,7 +96,7 @@ export function WorkDraft({ task, onRefresh, disabled, onBusy }: {
     finally { if (live.current) lock(false); }
   };
   const versions = task.requirement_versions ?? [];
-  const version = versions.length ? Math.max(...versions.map(item => item.version)) : null;
+  const version = versions.length ? Math.max(...versions.map(item => item.version)) : task.requirement ? 1 : null;
   return <section aria-label="草稿编辑" className="flex min-h-0 flex-1 flex-col">
     <div className="min-h-0 flex-1 overflow-y-auto p-4">
       <section aria-label="需求草稿" className="space-y-3">
@@ -110,7 +112,7 @@ export function WorkDraft({ task, onRefresh, disabled, onBusy }: {
       {busy && !uncertain && <p role="status" className="text-xs text-muted-foreground">正在保存需求…</p>}
       <ChatComposer draft={composer.value.draft} onDraft={composer.setDraft}
         staged={composer.value.staged} onStaged={composer.setStaged} history={composer.value.history}
-        replying={false} canStop={false} onStop={() => {}} controls="neutral"
+        replying={false} canStop={false} onStop={() => {}} controls="neutral" copy={WORK_COMPOSER_COPY}
         disabled={disabled || busy} onSend={text => void send(text)} />
     </div>
   </section>;
