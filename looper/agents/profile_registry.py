@@ -197,6 +197,8 @@ BUILTIN_PROFILE = LegacyAgentProfile("agent-claude-code-opus", "claude-code/opus
 # changes it. The advisor's names its model in full, never the alias: an alias maps to another model with another
 # provider, or in another release.
 BUILTIN_ROLE_PROFILES: Mapping[str, LegacyAgentProfile] = MappingProxyType({
+    "task_manager": LegacyAgentProfile("agent-claude-code-sonnet-5-5", "claude-code/sonnet-5-5", BUILTIN_RUNTIME,
+                                       BUILTIN_PROVIDER, "claude-sonnet-5-5"),
     "advisor": LegacyAgentProfile("agent-claude-code-fable-5-2", "claude-code/fable-5-2", BUILTIN_RUNTIME,
                                   BUILTIN_PROVIDER, "claude-fable-5-2", effort="high"),
     "advice_check": LegacyAgentProfile("agent-claude-code-sonnet-5-5", "claude-code/sonnet-5-5", BUILTIN_RUNTIME,
@@ -835,7 +837,8 @@ def check_roles(profile: AgentProfile | LegacyAgentProfile, roles: Iterable[str]
     """Refuse ``profile`` for a role its runtime lacks capabilities for or explicitly excludes."""
     adapter = runtimes.ADAPTERS.get(profile.runtime.type)
     for role in roles:
-        needs = runtimes.ROLE_CAPABILITIES[role]
+        # The task Manager is selected separately, never part of shared defaults or role discovery.
+        needs = runtimes.ROLE_CAPABILITIES["manager" if role == "task_manager" else role]
         missing = needs - profile.runtime.capabilities
         label = adapter.label if adapter else profile.runtime.type
         if adapter is not None and adapter.roles is not None and role not in adapter.roles:
@@ -883,7 +886,7 @@ async def _selected_roles(profile_id: str, conn: Any = None) -> list[str]:
     if await agent_sessions.manager_sessions_selecting(profile_id, pool=conn):
         roles.add("manager")
     roles |= await db_managers.template_profile_roles(profile_id, pool=conn)
-    return [role for role in runtimes.ROLE_CAPABILITIES if role in roles]
+    return [role for role in (*runtimes.ROLE_CAPABILITIES, "task_manager") if role in roles]
 
 
 # --- Views ---

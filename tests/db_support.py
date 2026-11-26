@@ -13,12 +13,15 @@ from pathlib import Path
 import re
 import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
-from contextlib import asynccontextmanager, contextmanager
+from contextlib import asynccontextmanager, contextmanager, suppress
 from typing import Any
 
 import pytest
 
 DSN = os.environ.get("LOOPER_TEST_DATABASE_URL")
+# Schema DDL and DROP SCHEMA get this budget of their own. The caller's ``timeout`` stays on the test body, so a
+# migration that stalls under load is not reported as a slow test, and a slow test still fails at its own deadline.
+SCHEMA_PHASE_TIMEOUT = 30.0
 
 
 @contextmanager
@@ -91,32 +94,90 @@ async def fresh_connection(*, command_timeout: float = 15) -> AsyncIterator[Any]
         await conn.close()
 
 
+async def _phase_deadline(timeout: float) -> None:
+    """Wait out one phase budget. Budget tests replace this so a simulated stall does not sleep."""
+    await asyncio.sleep(timeout)
+
+
+async def _close(task: asyncio.Task) -> None:
+    if not task.done():
+        task.cancel()
+    with suppress(asyncio.CancelledError):
+        await task
+
+
+async def _bounded(awaitable: Awaitable[Any], timeout: float | None, *, phase: str) -> Any:
+    """Run ``awaitable`` until ``timeout`` seconds. A timeout names ``phase`` and leaves an exception from the
+    awaitable itself unchanged, including a ``TimeoutError`` the test raised."""
+    if timeout is None:
+        return await awaitable
+    work = asyncio.ensure_future(awaitable)
+    deadline = asyncio.ensure_future(_phase_deadline(timeout))
+    try:
+        done, _pending = await asyncio.wait({work, deadline}, return_when=asyncio.FIRST_COMPLETED)
+    except asyncio.CancelledError:
+        await _close(deadline)
+        await _close(work)
+        raise
+    if work in done:
+        await _close(deadline)
+        return work.result()
+    deadline_error = deadline.exception() if deadline.done() and not deadline.cancelled() else None
+    await _close(work)
+    if not deadline.done():
+        await _close(deadline)
+    if deadline_error is not None:
+        raise deadline_error
+    raise TimeoutError(f"{phase} exceeded {timeout:g}s")
+
+
 def run_db(
     test: Callable[[Any], Awaitable[None]], monkeypatch: pytest.MonkeyPatch | None = None, *,
     before: str | Callable[[Any], Awaitable[None]] | None = None, setup: Callable[[Any], Awaitable[None]] | None = None,
     timeout: float | None = None, max_size: int = 3,
 ) -> None:
     """Run ``test(pool)`` on a new, migrated schema. With ``monkeypatch`` the pool is also the server's pool.
+
     ``before`` (SQL, or a coroutine function of the pool) runs ahead of the migration, ``setup(pool)`` after it and
-    ahead of the test; with ``timeout`` the whole run is cut off after that many seconds."""
+    ahead of the test. ``timeout`` bounds ``setup`` and the test body only. Opening the schema, ``before``, and
+    ``ensure_schema`` share a 30s budget, and dropping the schema has its own 30s budget. A timeout names the phase,
+    so a slow migration is schema setup and a slow body is still the test.
+    """
     if not DSN:
         pytest.skip("LOOPER_TEST_DATABASE_URL is not set")
     from looper.db import connection
 
     async def _main() -> None:
-        async with fresh_schema(max_size=max_size) as pool:
+        schema = fresh_schema(max_size=max_size)
+        entered = False
+
+        async def open_schema():
+            nonlocal entered
+            pool = await schema.__aenter__()
+            entered = True
             if callable(before):
                 await before(pool)
             elif before:
                 await pool.execute(before)
             await connection.ensure_schema(pool)
-            if monkeypatch is not None:
-                monkeypatch.setattr(connection, "_pool", pool)
-            if setup is not None:
-                await setup(pool)
-            await test(pool)
+            return pool
 
-    asyncio.run(_main() if timeout is None else asyncio.wait_for(_main(), timeout))
+        try:
+            pool = await _bounded(open_schema(), SCHEMA_PHASE_TIMEOUT, phase="schema setup")
+
+            async def exercise() -> None:
+                if monkeypatch is not None:
+                    monkeypatch.setattr(connection, "_pool", pool)
+                if setup is not None:
+                    await setup(pool)
+                await test(pool)
+
+            await _bounded(exercise(), timeout, phase="test body")
+        finally:
+            if entered:
+                await _bounded(schema.__aexit__(None, None, None), SCHEMA_PHASE_TIMEOUT, phase="schema teardown")
+
+    asyncio.run(_main())
 
 
 def run_with_channel_configs(test: Callable[[Any], Awaitable[None]], monkeypatch: pytest.MonkeyPatch) -> None:
