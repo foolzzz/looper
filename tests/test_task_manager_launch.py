@@ -32,7 +32,7 @@ def test_operator_command_golden(tmp_path):
     assert command == [
         "claude", "--print", "--verbose", "--output-format", "stream-json",
         "--input-format", "stream-json", "--include-partial-messages", "--replay-user-messages",
-        "--settings", settings_file, "--append-system-prompt-file", str(prompt),
+        "--strict-mcp-config", "--settings", settings_file, "--append-system-prompt-file", str(prompt),
         "--system-prompt-snapshot", "off", "--dangerously-skip-permissions",
         "--disallowedTools", "ListAgents,SendMessage", "--model", run.model,
         *(["--effort", run.effort] if run.effort else []),
@@ -45,6 +45,7 @@ def test_operator_command_golden(tmp_path):
     with_library = CLAUDE_CODE.operator_resident_command(
         "claude", cwd=tmp_path, prompt_file=prompt, launch=replace(run, library=library), settings_dir=settings_dir)
     assert with_library == [*command, "--mcp-config", "servers.json"]
+    assert "--strict-mcp-config" in with_library
 
 
 def test_read_only_command(tmp_path):

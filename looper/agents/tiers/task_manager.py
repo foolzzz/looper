@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any, Literal, Protocol
 
 from ...db import activity, agent_sessions, projects, tasks
-from .. import outbound_hook, step_workspaces, task_budget, task_conversations_settings
+from .. import operator_mcp, outbound_hook, step_workspaces, task_budget, task_conversations_settings
 from .. import task_manager_safety, task_manager_settings, task_workspaces
 from ..agent_settings import Access, Launch
 from ..claude_cli import ClaudeRunRecorder, ResidentClaude
@@ -65,6 +65,7 @@ class RefuseReason(str, Enum):
     REVIEW_HOOK_DISABLED = "review_hook_disabled"
     CLI_UNVERIFIED = "cli_unverified"
     MANAGER_ANSWERS_OFF = "manager_answers_off"
+    MCP_UNRESOLVED = "mcp_unresolved"
 
 
 def _off_text(reason: RefuseReason) -> str:
@@ -249,8 +250,16 @@ class TaskManagerAgent:
                     raise Refused(RefuseReason.OUTBOUND_REVIEW_UNAVAILABLE, "The outbound review hook is unavailable.") from exc
                 if hook is None:
                     raise Refused(RefuseReason.OUTBOUND_REVIEW_UNAVAILABLE, "The outbound review hook is unavailable.")
-            return Launch(settings=settings, library=library, role=None,
-                          access=Access.FULL if direct else Access.READ_ONLY, tool_hook=hook)
+            run = Launch(settings=settings, library=library, role=None,
+                         access=Access.FULL if direct else Access.READ_ONLY, tool_hook=hook)
+            if direct and (allowed := task_conversations_settings.manager_mcp()):
+                try:
+                    run = replace(run, library=await operator_mcp.library_with_allowed(
+                        library, self.pool.runtime_root, allowed, cwd=reopened.work_dir,
+                        environment=run.runtime.environment(run)))
+                except operator_mcp.UnresolvedServers as exc:
+                    raise Refused(RefuseReason.MCP_UNRESOLVED, str(exc)) from exc
+            return run
         # Query newest summaries directly, so a long-lived task never gets its oldest activity as its brief.
         from ...db.connection import get_pool
         recent = await get_pool().fetch("SELECT summary FROM activity WHERE task_id=$1 ORDER BY seq DESC LIMIT 20",
@@ -271,7 +280,8 @@ class TaskManagerAgent:
         command = command_for(launch)
         env = task_manager_safety.environment(launch, self.task_id)
         settings_file = command[command.index("--settings") + 1] if "--settings" in command else ""
-        signature = (self.mode, reopened.work_dir, launch.profile.id, launch.model, launch.effort, launch.profile.provider, prompt.sha256, settings_file)
+        signature = (self.mode, reopened.work_dir, launch.profile.id, launch.model, launch.effort, launch.profile.provider, prompt.sha256, settings_file,
+                     task_conversations_settings.manager_mcp() if direct else ())
         async with self.pool._available:
             notified = False
             while not await self.pool._slot(self):
