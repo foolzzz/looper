@@ -123,6 +123,8 @@ def _parser() -> argparse.ArgumentParser:
     run.add_argument("--untrusted-fence", action="store_true",
                      help="turn untrusted_fence.enabled on in the run's database (outside content fenced)")
 
+    run.add_argument("--compaction-restore", action="store_true", help="enable compaction keep-list and state snapshots")
+
     talk = sub.add_parser("dialogs", help="Run the Manager's dialogs and check what Looper did after each reply.")
     talk.add_argument("--mode", choices=("fake", "real"), default="fake")
     talk.add_argument("--claude", help="the Claude Code executable (default: claude on PATH)")
@@ -148,6 +150,7 @@ def _parser() -> argparse.ArgumentParser:
                       help="enable delivery recovery in every disposable Manager dialog")
     talk.add_argument("--untrusted-fence", action="store_true",
                       help="turn untrusted_fence.enabled on in every dialog's database (outside content fenced)")
+    talk.add_argument("--compaction-restore", action="store_true", help="enable compaction keep-list and state snapshots")
     talk.add_argument("--reps", type=_reps, default=1, help=_REPS_HELP)
     talk.add_argument("--jobs", type=_jobs, default=1, help=_JOBS_HELP)
     talk.add_argument("--case-budget-usd", type=_case_budget, help=_CASE_BUDGET_HELP)
@@ -292,6 +295,7 @@ def main(argv: list[str] | None = None) -> int:
             pi_runtime=_selected_runtime(args, "pi"),
             dsh_runtime=_selected_runtime(args, "dsh"),
             untrusted_fence=args.untrusted_fence,
+            compaction_restore=args.compaction_restore,
         )
     except (ValueError, runner.EvalError) as exc:
         print(f"error: {exc}", file=sys.stderr)
@@ -328,6 +332,7 @@ def _dialogs(args: argparse.Namespace) -> int:
             leads_fulltext=args.leads_fulltext,
             delivery_guard=args.delivery_guard,
             untrusted_fence=args.untrusted_fence,
+            compaction_restore=args.compaction_restore,
             claude_bin=args.claude,
         )
     except (ValueError, runner.EvalError) as exc:

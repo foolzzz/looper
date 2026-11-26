@@ -53,6 +53,8 @@ class EvalTask:
     # The task's project lets its Planner define the roles its steps run as (planner_roles on), and keeps these
     # role templates (each its key and fields, as the dashboard writes one) for it to copy.
     roles_on: bool = False
+    schedule_fires: int = 0
+    planner_env: dict[str, str] = field(default_factory=dict)
     schedule_template: dict[str, Any] | None = None
     workflow: dict[str, Any] | None = None
     role_templates: tuple[dict[str, Any], ...] = ()
@@ -1882,7 +1884,7 @@ def select(ids: list[str] | None) -> tuple[EvalTask, ...]:
     unknown id."""
     if not ids:
         return TASKS
-    available = (*TASKS, *LESSON_TASKS, *FAILURE_TASKS)
+    available = (*TASKS, *LESSON_TASKS, *FAILURE_TASKS, *COMPACTION_TASKS)
     known = {task.id for task in available}
     unknown = sorted(set(ids) - known)
     if unknown:
@@ -2657,3 +2659,35 @@ MEMORY_TASKS: tuple[EvalTask, ...] = (
     ),
 )
 TASKS = TASKS + MEMORY_TASKS
+
+
+def _compaction_settings(work_dir: Path) -> str | None:
+    try:
+        document = tomllib.loads((work_dir / "settings.toml").read_text())
+    except (OSError, ValueError) as exc:
+        return f"settings.toml is missing or invalid: {exc}"
+    return None if document.get("service", {}).get("port") == 8080 else "settings.toml lost the service port"
+
+
+# Explicit opt-in cases leave the default task selection and its baselines unchanged.
+COMPACTION_TASKS = (
+    EvalTask(id="compaction_gate", requirement=("Write the service settings file. Its format, file name, section and keys "
+        "are the user's choice, written down nowhere: ask the user at a gate."), user_gates=True,
+        planner_env={"CLAUDE_CODE_AUTO_COMPACT_WINDOW": "100000"},
+        files={"docs/REFERENCE.md": "Synthetic service reference data.\n" * 6500},
+        gate_script=("Format: TOML. Put everything under a section named [service]. Read docs/REFERENCE.md in full before you ask me anything else.",
+                     "<await-compaction>",
+                     "File name: settings.toml. Add port = 8080 to the section I named in my first message. That is all.",
+                     END_DISCUSSION),
+        check=_compaction_settings,
+        expect={"min_gates_opened": 1, "min_gates_passed": 1, "max_gate_asks_beyond_script": 0},
+        fake={"plan": [_SETTINGS_GATE], "compact_on_turn": [2], "gate_keep_first": True,
+              "gate_close_steps": [_write_settings(["g1"])],
+              "attempts": {"s1": [{"files": {"settings.toml": '[service]\nname = "demo"\nport = 8080\n'}}]}}),
+    EvalTask(id="compaction_schedule_keep",
+        requirement="Read docs/NOTES.md in full. Append run 1 to log.txt on the first run and run 2 on the second.",
+        files={"docs/NOTES.md": "Synthetic scheduled run reference.\n" * 2000}, schedule_fires=2,
+        check=_equals("log.txt", "run 1\nrun 2"),
+        fake={"plan": [_step("s1", "Append the scheduled run number to log.txt.", ["log.txt contains this run"])],
+              "schedule_run": True, "schedule_append": True, "context_tokens": 50001}),
+)

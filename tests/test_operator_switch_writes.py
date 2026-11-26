@@ -11,6 +11,7 @@ from tests.db_support import run_db, v1_api
 
 # prefix, read action, write action, stored key, field, on, off, default
 SWITCHES = (
+    ("compaction_restore_settings", "get", "update", "compaction_restore.enabled", "enabled", True, False, False),
     ("attention", "settings_get", "settings_update", "attention.enabled", "enabled", True, False, False),
     ("reminders_settings", "get", "update", "reminders.enabled", "enabled", True, False, False),
     ("stable_context_settings", "get", "update", "manager.stable_context", "enabled", True, False, False),
@@ -35,6 +36,12 @@ async def _behavior(prefix, value, call, pool, tmp_path):
         names = {tool["name"] for tool in await ops.current_listing(
             Turn(channel="web", chat="synthetic", message_id="synthetic-message"))}
         assert set(TOOL_NAMES) & names == (set(TOOL_NAMES) if value else set())
+    elif prefix == "compaction_restore_settings":
+        from looper.agents.tiers.manager import ManagerAgent, ManagerConfig
+
+        manager = ManagerAgent(config=ManagerConfig(work_dir=tmp_path), runtime_root=tmp_path)
+        await manager._load_db_config()
+        assert manager._compaction_restore is value
     elif prefix == "stable_context_settings":
         from looper.agents.agent_settings import resolve
         from looper.agents.tiers.manager import ManagerAgent, ManagerConfig

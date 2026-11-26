@@ -282,6 +282,7 @@ MANIFEST = Path(__file__).with_name("operation_levels.json")
 
 
 @pytest.mark.parametrize("operation_id", [
+    "compaction_restore_settings.get", "compaction_restore_settings.update",
     "attention.settings_update", "reminders_settings.get", "reminders_settings.update",
     "stable_context_settings.get", "stable_context_settings.update", "decision_snapshots_settings.get",
     "decision_snapshots_settings.update", "leads_search_settings.get", "leads_search_settings.update",

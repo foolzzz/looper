@@ -711,6 +711,7 @@ def run_task(
     fake: bool = False,
     review_profile_id: str | None = None,
     lesson_database_url: str | None = None,
+    compaction_restore: bool = False,
 ) -> dict[str, Any]:
     """Create and start ``task`` in ``work_dir``, wait until it ends, and read back what it shows.
 
@@ -770,6 +771,9 @@ def run_task(
         return project_id
 
     try:
+        if task.planner_env:
+            api.post("/api/v1/agent_settings/update_role", {"role": "planner", "values": {
+                "env": [{"key": key, "value": value} for key, value in task.planner_env.items()]}})
         if task.lesson_seeds:
             if lesson_database_url is None:
                 raise EvalError("lesson scenarios need their disposable database URL")
@@ -803,7 +807,18 @@ def run_task(
         if task.acceptance_checks:
             _confirmed(api, "/api/v1/acceptance_checks/update",
                        {"project_id": require_project(), "acceptance_checks": task.acceptance_checks})
-        if task.schedule_template:
+        schedule = None
+        schedule_runs = []
+        schedule_cost = 0.0
+        if task.schedule_fires:
+            api.post("/api/v1/scheduler_settings/update", {"session_context_max_tokens": 40000})
+            schedule = api.post("/api/v1/schedule_admin/create", {"project_id": require_project(), "fields": {
+                "name": "Compaction scheduled run", "cron": "0 9 * * *", "overlap": "skip",
+                "work_dir": str(work_dir), "requirement": task.requirement}})["result"]["schedule"]
+            run = api.post("/api/v1/schedule_admin/run", {"schedule_id": schedule["schedule_id"]})["result"]["run"]
+            task_id = run["task_id"]
+            schedule_runs.append(task_id)
+        elif task.schedule_template:
             owner_key = "eval-" + uuid.uuid4().hex[:8]
             api.post("/api/v1/managers/create", {"key": owner_key, "name": "Public reports " + owner_key,
                 "system_prompt": "Handle the public source report scenario.", "task_policy": "templates_only"})
@@ -820,6 +835,7 @@ def run_task(
                 raise EvalError(f"schedule template failed: {run.get('error')}")
         else:
             api.post("/api/v1/ops/task_control/start", {"task_id": task_id})
+        compaction_windows: dict[str, dict[str, Any]] = {}
         answered: dict[str, int] = {}  # each gate's script entries posted so far
         resumed: dict[str, float] = {}  # each wait resumed by the runner, and when (database clock)
         replier = api
@@ -836,8 +852,19 @@ def run_task(
             detail = api.post("/api/v1/tasks/detail", {"task_id": task_id})["result"]
             status = detail.get("status")
             if status in metrics.TERMINAL_STATUSES:
+                if schedule is not None and len(schedule_runs) < task.schedule_fires:
+                    schedule_cost += float((detail.get("cost") or {}).get("cost_usd") or 0.0)
+                    if cap_left is not None and schedule_cost >= cap_left:
+                        stopped_by_cap = True
+                        break
+                    run = api.post("/api/v1/schedule_admin/run", {"schedule_id": schedule["schedule_id"]})["result"]["run"]
+                    task_id = run["task_id"]
+                    if not task_id:
+                        raise EvalError(f"scheduled run did not start: {run}")
+                    schedule_runs.append(task_id)
+                    continue
                 break
-            cost = float((detail.get("cost") or {}).get("cost_usd") or 0.0)
+            cost = schedule_cost + float((detail.get("cost") or {}).get("cost_usd") or 0.0)
             if cap_left is not None and cost >= cap_left and not stopped_by_cap:
                 stopped_by_cap = True
                 api.post("/api/v1/ops/task_control/cancel", {"task_id": task_id})
@@ -849,7 +876,7 @@ def run_task(
             elif resume_waits(api, task, task_id, detail, resumed, now=time.time() + clock_offset):
                 pass  # the user resumed a wait; read the Planner's progress at the next poll
             elif answer_gates(api, task, task_id, detail, answered, now=time.time() + clock_offset,
-                              replier=replier):
+                              replier=replier, compaction_windows=compaction_windows):
                 pass  # the user answered a gate; look again at the next poll
             elif chat_pending and detail.get("steps") and detail.get("phase") in ("executing", "verifying"):
                 if fake and task.fake.get("wait_for_input"):
@@ -928,7 +955,38 @@ def run_task(
             acceptance=acceptance,
             record_completion_checks=record_completion_checks,
         )
+        if task.schedule_fires:
+            records = [api.post("/api/v1/runs/get", {"record_id": r["id"]})["result"]["record"]
+                       for task_run in schedule_runs
+                       for r in api.post("/api/v1/runs/list", {"task_id": task_run, "limit": 500})["result"]["records"]]
         result.update(metrics.attempt_fields(attempts_view))
+        if task.id.startswith("compaction_"):
+            result.update(compaction_fields(records))
+            if task.schedule_fires:
+                result["cost_usd"] = round(sum(float(r.get("cost_usd") or 0) for r in records), 6)
+            result["compaction_restore"] = compaction_restore
+            result["compaction_exercised"] = (any(not window.get("timed_out", True) and
+                any(r.get("compactions") and window["after_record"] < r["id"] <= window["before_record"]
+                    for r in records if metrics.role(r) == "planner") for window in compaction_windows.values())
+                if task.id == "compaction_gate" else any(
+                    (r.get("metadata") or {}).get("session_bound", {}).get("action") == "compacted" for r in records))
+            if task.schedule_fires:
+                runs = api.post("/api/v1/schedule_admin/runs", {"schedule_id": schedule["schedule_id"], "limit": 20})["result"]["runs"]
+                result["compaction_exercised"] = any(run.get("planner_session_action") == "compacted" for run in runs)
+                statuses = [api.post("/api/v1/tasks/detail", {"task_id": run})["result"]["status"] for run in schedule_runs]
+                result["schedule_run_statuses"] = statuses
+                if statuses != ["completed"] * task.schedule_fires:
+                    result["problems"].append("not every scheduled run completed")
+                    result["success"] = False
+            target_boundary = next((r["id"] for r in records if r.get("compactions") and
+                any(not window.get("timed_out", True) and window["after_record"] < r["id"] <= window["before_record"]
+                    for window in compaction_windows.values())), None)
+            problem = (task_compaction_evidence(records, enabled=compaction_restore,
+                                                gate=task.id == "compaction_gate", boundary_record_id=target_boundary)
+                       if result["compaction_exercised"] else "scripted compaction was not exercised" if fake else None)
+            if problem:
+                result["problems"].append(problem)
+                result["success"] = False
         if task.lesson_seeds:
             lessons = api.post("/api/v1/memory/task_lessons", {"task_id": task_id, "limit": 200})["result"]
             result["lesson_readback"] = lessons
@@ -961,6 +1019,46 @@ def run_task(
     return {**row, "outcome": (Outcome.PASS if result["success"] else Outcome.FAIL).value}
 
 
+def task_compaction_evidence(records: list[dict[str, Any]], *, enabled: bool, gate: bool,
+                             boundary_record_id: int | None = None) -> str | None:
+    from looper.agents.compaction_restore import Role, command
+
+    planners = sorted((r for r in records if metrics.role(r) == "planner"), key=lambda r: r["id"])
+    boundaries = [r for r in planners if r.get("compactions") and
+                  (r["id"] == boundary_record_id if gate and boundary_record_id is not None else
+                   gate or str(r.get("input_text") or "").startswith("/compact"))]
+    if not boundaries:
+        return None  # Real calibration may not exercise the boundary; report separately.
+    boundary = boundaries[-1]
+    later = [r for r in planners if r["id"] > boundary["id"]]
+    if not later:
+        return "no Planner turn after the compact boundary"
+    if not gate and boundary.get("input_text") != (command(Role.PLANNER) if enabled else "/compact"):
+        return "Planner maintenance command did not match the selected arm"
+    snapshot = str(later[0].get("input_text") or "")
+    if enabled:
+        if (not snapshot.startswith("[COMPACTED]") or
+            (later[0].get("metadata") or {}).get("compaction_restore", {}).get("state") != "sent"):
+            return "the first Planner turn after compaction did not carry and acknowledge its snapshot"
+        if gate and not all(text in snapshot for text in ("Gates and waits:", "Format: TOML.", "[service]")):
+            return "the Planner snapshot lost the waiting gate or its discussion"
+    elif any("compaction_restore" in (r.get("metadata") or {}) or
+             "[COMPACTED]" in str(r.get("input_text") or "") for r in planners):
+        return "disabled compaction restore changed a Planner turn"
+    return None
+
+
+def compaction_fields(records: list[dict[str, Any]]) -> dict[str, int]:
+    """Count recorded boundaries and restore transitions, never inferred from a reply."""
+    from looper.agents.compaction_restore import Role, command
+
+    keep = {command(role) for role in Role}
+    states = [(record.get("metadata") or {}).get("compaction_restore", {}).get("state") for record in records]
+    return {"compactions": sum(bool(record.get("compactions")) for record in records),
+            **{f"restore_{state}": states.count(state) for state in ("due", "offered", "sent")},
+            "keep_compacts": sum(record.get("input_text") in keep for record in records)}
+
+
 def resume_waits(api: Api, task: EvalTask, task_id: str, detail: dict[str, Any], resumed: dict[str, float], *,
                  now: float) -> bool:
     """Resume each waiting wait once after the task's delay from opened_at; unset leaves every wait alone."""
@@ -988,7 +1086,8 @@ def _script(task: EvalTask) -> tuple[str, ...]:
 
 
 def answer_gates(api: Api, task: EvalTask, task_id: str, detail: dict[str, Any], answered: dict[str, int], *,
-                 now: float, replier: Api | None = None) -> bool:
+                 now: float, replier: Api | None = None,
+                 compaction_windows: dict[str, dict[str, Any]] | None = None) -> bool:
     """Play the user: post the next entry of ``task``'s gate script (``_script``) in each of the task's gates that
     waits for the user, once it has waited ``gate_reply_after_s`` since it opened; ``END_DISCUSSION`` ends the
     discussion, and so does a gate that asks again after the script ran out (so the task ends instead of waiting
@@ -1012,6 +1111,20 @@ def answer_gates(api: Api, task: EvalTask, task_id: str, detail: dict[str, Any],
                         (metrics.timestamp(record["finished_at"]) or 0) > opened) for record in records):
                 continue
         entry = script[done] if done < len(script) else END_DISCUSSION
+        if entry == "<await-compaction>":
+            records = api.post("/api/v1/runs/list", {"task_id": task_id, "limit": 500})["result"]["records"]
+            window = (compaction_windows or {}).get(label, {"after_record": 0, "sent_at": opened})
+            compacted = any(metrics.role(r) == "planner" and r.get("compactions")
+                            and r["id"] > window["after_record"] for r in records)
+            if not compacted and now - window["sent_at"] < 300:
+                continue
+            window.update(before_record=max((r["id"] for r in records), default=0), timed_out=not compacted)
+            done += 1
+            answered[label] = done
+            entry = script[done] if done < len(script) else END_DISCUSSION
+        if done == 0 and "<await-compaction>" in script and compaction_windows is not None:
+            records = api.post("/api/v1/runs/list", {"task_id": task_id, "limit": 500})["result"]["records"]
+            compaction_windows[label] = {"after_record": max((r["id"] for r in records), default=0), "sent_at": now}
         try:
             if entry == END_DISCUSSION:
                 (replier or api).post("/api/v1/ops/gates/end", {"task_id": task_id, "gate": label})
@@ -1280,6 +1393,7 @@ def run(
     pi_runtime: str = "cli",
     dsh_runtime: str = "cli",
     untrusted_fence: bool = False,
+    compaction_restore: bool = False,
 ) -> tuple[dict[str, Any], Path]:
     """Run ``tasks`` ``reps`` times each in ``mode`` (``fake`` or ``real``), ``jobs`` at a time on the one server
     (each in a project, a working directory and a task of its own); returns the run and the JSON file
@@ -1366,6 +1480,8 @@ def run(
         ) as api:
             if any(task.gh_pr_fix_files or task.gh_pr_views for task in tasks):
                 api.post("/api/v1/wait_settings/update", {"min_check_seconds": 10})
+            if compaction_restore:
+                _confirmed(api, "/api/v1/compaction_restore_settings/update", {"enabled": True})
             if untrusted_fence:
                 _set_true(database_url, "untrusted_fence.enabled")
             if vault_dir is not None:
@@ -1420,7 +1536,8 @@ def run(
                                                      record_completion_checks=planner_roles is not None or worker_agent is not None,
                                                      review_profile_id=review_profile_id,
                                                      lesson_database_url=database_url,
-                                                     notes_root=notes_root, vault_dir=vault_dir, fake=mode == "fake"),
+                                                     notes_root=notes_root, vault_dir=vault_dir, fake=mode == "fake",
+                                                     compaction_restore=compaction_restore),
                 total_cap_usd=total_cap_usd,
                 reps=reps,
                 results=results,
@@ -1436,6 +1553,8 @@ def run(
             shutil.rmtree(root, ignore_errors=True)
         by_id = {task.id: task for task in tasks}
         for row in results:
+            if compaction_restore:
+                row["compaction_restore"] = True
             row["user_gates"] = effective_user_gates(by_id[row["id"]], user_gates)
             if planner_roles is not None:
                 row["planner_roles"] = planner_roles
@@ -1458,6 +1577,7 @@ def run(
             "step_workspaces": step_workspaces,
             "user_gates": user_gates,
             "untrusted_fence": untrusted_fence,
+            **({"compaction_restore": True} if compaction_restore else {}),
             "reps": reps,
             "stopped_by_cap": stopped,
             "aborted": aborted,

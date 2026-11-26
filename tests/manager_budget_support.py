@@ -12,7 +12,7 @@ from looper.agents.tiers.manager import ManagerAgent, ManagerConfig
 
 @asynccontextmanager
 async def manager(pool, root, monkeypatch, *, context=100_001, cost=0.1, compact="success", budget_error=False,
-                  model="sonnet"):
+                  model="sonnet", compact_on=(), error_on=(), empty_on=()):
     monkeypatch.setattr(profile_registry, "_login_modules", lambda: {})
     executable = fake_claude(root / "claude", f'''
 import json, os, sys
@@ -24,20 +24,29 @@ for line in sys.stdin:
     text = event['message']['content']
     with open('inputs.jsonl', 'a') as f:
         f.write(json.dumps(text) + '\\n')
+    number = sum(1 for _ in open('inputs.jsonl'))
+    is_compact = text == '/compact' or text.startswith('/compact ')
     print(json.dumps({{'type':'system', 'subtype':'init', 'session_id':'budget-session', 'model':{model!r}}}), flush=True)
-    if text == '/compact' and {compact!r} == 'raise':
+    if is_compact and {compact!r} == 'raise':
         sys.exit(1)
-    if text == '/compact' and {compact!r} in ('success', 'large'):
+    if is_compact and {compact!r} in ('success', 'large'):
         print(json.dumps({{'type':'system', 'subtype':'compact_boundary', 'compact_metadata':{{'post_tokens':1200 if {compact!r} == 'success' else 120000}}}}), flush=True)
     answer = 'handoff facts' if text.startswith('[HANDOFF]') else 'answer'
-    context = 100 if text == '/compact' or text.startswith('[HANDOFF]') else {context!r}
+    if number in {tuple(empty_on)!r}:
+        answer = ''
+    if number in {tuple(compact_on)!r}:
+        print(json.dumps({{'type':'system', 'subtype':'compact_boundary', 'compact_metadata':{{'trigger':'auto', 'pre_tokens':10000, 'post_tokens':1200}}}}), flush=True)
+    context = 100 if is_compact or text.startswith('[HANDOFF]') else {context!r}
     usage = {{'input_tokens':context, 'output_tokens':1}}
     if context is None:
         usage = {{}}
     print(json.dumps({{'type':'assistant','message':{{'id':str(os.getpid()) + str(cost), 'model':{model!r}, 'content':[{{'type':'text','text':answer}}], 'usage':usage}}}}), flush=True)
     cost += {cost!r}
     over_cap = {budget_error!r} and text != '/compact'
-    print(json.dumps({{'type':'result','subtype':'error_max_budget_usd' if over_cap else 'success', 'is_error':over_cap, 'session_id':'budget-session','result':answer,'total_cost_usd':cost, 'usage':usage}}), flush=True)
+    if is_compact:
+        over_cap = False
+    failed = number in {tuple(error_on)!r}
+    print(json.dumps({{'type':'result','subtype':'error_max_budget_usd' if over_cap else 'error_during_execution' if failed else 'success', 'is_error':over_cap or failed, 'session_id':'budget-session','result':answer,'total_cost_usd':cost, 'usage':usage}}), flush=True)
 ''')
     bus = MessageBus(runtime_root=root)
     instance = ManagerAgent(config=ManagerConfig(claude_bin=executable, work_dir=root), runtime_root=root)

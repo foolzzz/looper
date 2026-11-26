@@ -238,6 +238,9 @@ def _gate(script: dict[str, Any], message: str) -> dict[str, Any]:
     items = re.findall(r"^- (q\d+) \[\w+\] (.+?)(?: \(options: .*\))?$", message, re.MULTILINE)
     said = re.findall(r"^- \([^)]*\) (.+)$", message.split("New messages from the user (oldest first):\n", 1)[-1],
                       re.MULTILINE)
+    if script.get("gate_keep_first") and "File name: settings.toml" not in message:
+        return {"reply": "What file name and keys?", "gate": "continue", "action": "none",
+                "agenda": [{"id": item_id, "question": question, "status": "open"} for item_id, question in items]}
     ended = "The user ended the discussion" in message
     answer = said[-1] if said else "as discussed"
     agenda = [{"id": item_id, "question": question, **({"status": "open"} if ended
@@ -298,9 +301,15 @@ def _bind_journal_refs(value: Any, message: str) -> Any:
     return value
 
 
+def _compact_boundary(session_id: str, *, trigger: str, pre_tokens: int, post_tokens: int) -> None:
+    _emit({"type": "system", "subtype": "compact_boundary", "session_id": session_id,
+           "compact_metadata": {"trigger": trigger, "pre_tokens": pre_tokens, "post_tokens": post_tokens}})
+
+
 def _planner(script: dict[str, Any], args: list[str], stdin: _Stdin) -> None:
     cost = 0.0
     broken = 0
+    turn = 0
     calls = script.get("planner_calls") or {}
     rpc = _mcp(args) if calls else None
     retried: dict[str, int] = {}
@@ -309,13 +318,17 @@ def _planner(script: dict[str, Any], args: list[str], stdin: _Stdin) -> None:
         if not line.strip():
             continue
         message = _user_text(line)
-        if script.get("schedule_run"):
-            # Scheduled PLAN turns keep this run's requirement before their typed turn marker.
-            from looper.agents.tiers.planner import SCHEDULE_RUN_REQUIREMENT_HEADING
-            if message.startswith(SCHEDULE_RUN_REQUIREMENT_HEADING):
-                _, marker, body = message.partition("\n\n[PLAN]")
-                if marker:
-                    message = "[PLAN]" + body
+        if message.startswith("/compact"):
+            _compact_boundary("fake-planner", trigger="manual", pre_tokens=50001, post_tokens=1200)
+            _answer("fake-planner", "Compacted.", cost)
+            continue
+        # Prefix snapshots and resume briefs are data; dispatch on the actual turn marker.
+        marker = re.search(r"^\[(?:PLAN|DECISION|GATE|CHAT|WAIT|ADVICE|ROOM|MEMORY|VAULT)\]", message, re.MULTILINE)
+        if marker:
+            message = message[marker.start():]
+        turn += 1
+        if turn in script.get("compact_on_turn", []):
+            _compact_boundary("fake-planner", trigger="auto", pre_tokens=50001, post_tokens=1200)
         writes = None
         kind = re.match(r"\[(\w+)\]", message)
         for name, arguments in calls.get(kind.group(1) if kind else "", []):
@@ -354,7 +367,8 @@ def _planner(script: dict[str, Any], args: list[str], stdin: _Stdin) -> None:
         else:
             reply = {"reviews": [], "progress": PROGRESS}
         cost += PLANNER_TURN_COST
-        _answer("fake-planner", "Done.\n\n" + _fenced(reply), cost, writes=writes)
+        _answer("fake-planner", "Done.\n\n" + _fenced(reply), cost, writes=writes,
+                request_usage={"usage": {"input_tokens": script["context_tokens"]}} if script.get("context_tokens") else None)
 
 
 def _write(work_dir: str, files: dict[str, str]) -> None:
@@ -418,6 +432,10 @@ def _worker(script: dict[str, Any], system_prompt: str, stdin: _Stdin, args: lis
         if expected_diff not in diff:
             raise RuntimeError("the simulated PR does not contain the commit this review needs")
     files = dict(attempt.get("files") or {})
+    if script.get("schedule_append"):
+        path = Path("log.txt")
+        previous = path.read_text() if path.exists() else ""
+        files["log.txt"] = previous + f"run {len(previous.splitlines()) + 1}\n"
     if attempt.get("run_verification"):
         for command in ("configure.py", "verify.py"):
             subprocess.run([sys.executable, command], check=True, timeout=10, capture_output=True)
@@ -575,8 +593,9 @@ def _manager(scenarios_path: str, args: list[str], stdin: _Stdin) -> None:
         if not line.strip():
             continue
         content = _user_text(line)
-        channel = re.search(r"^Channel: .*\n\n", content, re.MULTILINE)
-        message = content[channel.end():] if channel else content
+        fresh = content.rsplit("The user's new message follows.\n\n", 1)[-1]
+        channel = re.search(r"^Channel: .*\n\n", fresh, re.MULTILINE)
+        message = fresh[channel.end():] if channel else fresh
         named = re.search(r"confirmation_id (c-[0-9a-f]+)", content)
         with open(scenarios_path, encoding="utf-8") as handle:
             scenarios = json.load(handle)
@@ -589,6 +608,14 @@ def _manager(scenarios_path: str, args: list[str], stdin: _Stdin) -> None:
             calls = matches[0] if matches else []
         answers, held, reply, request_usage = [], False, None, None
         for name, arguments in calls:
+            if name == "__compact__":
+                _compact_boundary("fake-manager", trigger="manual", **arguments)
+                continue
+            if name == "__compact_fail__":
+                _emit({"type": "system", "subtype": "status", "status": "compacting"})
+                _emit({"type": "system", "subtype": "status", "status": None,
+                       "compact_result": "failed", "compact_error": "too_few_groups"})
+                continue
             if name == "__reply__":
                 reply = arguments["text"]
                 continue

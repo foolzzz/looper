@@ -361,6 +361,11 @@ Manager has no tool for it. The dashboard shows the task page's 指标 card and 
   Dashboard and generated CLI configuration use the existing operator-only
   `turn_context_settings.get/update`, separate from `chat_settings`; Lark and
   Telegram need no new command. See [the assistant RFC](rfcs/assistant-layer-v0.zh-CN.md#51-11-每轮上下文).
+- The operator-only `compaction_restore_settings.get/update` operations read and
+  write `compaction_restore.enabled` (`enabled`: true, false or null to restore
+  off). Only the stored value `true` enables it; the next Planner or Manager
+  turn reads it without restarting a resident process. The generated CLI exposes
+  these operations; dashboard, Telegram and Lark use their existing turn paths.
 - The operator-only `stable_context_settings.get/update` operations read and
   write `manager.stable_context` (`enabled`: true, false or null to restore off).
   The next Manager turn reads it through the existing configuration path.
@@ -4955,6 +4960,31 @@ Verified with Claude Code 2.1.285 (haiku, recorded in
   compacted at about 25k tokens with the override at 15, and at about 30k with
   it at 31. Without a window, the override at 10 did not compact a 25k
   session.
+
+With `compaction_restore.enabled` on (default off), Claude Code maintenance
+compactions carry fixed role-specific keep instructions. The Manager sends
+them when its turn budget enables session maintenance; the Planner sends them
+when a scheduled shared session exceeds its context limit. A reported
+`compact_boundary`, including an automatic one, marks that resident session as
+owing a `[COMPACTED]` snapshot on its next eligible Looper turn. The Planner
+snapshot reads the delivered requirement version, plan, gates, open agendas and
+gate discussions; the Manager snapshot reads the stored conversations allowed
+for that session. These are data and grant no permission. A failed snapshot
+turn is offered again until one succeeds; a new boundary supersedes that offer.
+The latest annotation for the same agent and session in
+`llm_records.metadata.compaction_restore` survives process restarts, regardless
+of traffic in other chats. A new session id cannot
+inherit an old annotation, and record retention may discard pending restores.
+Completion turns can arm a restore but, like hidden delivery follow-ups, do not
+carry one. Default Manager routed sessions are excluded; scenario per-chat
+sessions use only their own excerpt. Autonomous turns, Workers, Reviewers,
+automatic-compaction hooks and other runtimes remain outside this behavior.
+When off, maintenance keeps bare `/compact`, model inputs remain unchanged and
+no restore annotation is read or written.
+The switch is loaded with the cached settings at startup and refreshed by
+operator updates and configuration imports; turns do not query it in the database.
+Every Planner compaction decision reads that cache, including HANDOFF exchanges
+that bypass normal turn preparation.
 
 So:
 
