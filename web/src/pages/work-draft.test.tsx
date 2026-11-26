@@ -144,7 +144,7 @@ it.each(["draft", "init"])("enables the %s requirement composer and explains the
   task = { ...task, status, requirement: "Saved requirement", requirement_versions: [{ version: 4, text: "Saved requirement" }] };
   await show();
   expect(input().disabled).toBe(false);
-  expect(host.textContent).toContain("继续发送会追加到需求。点击「开始」后，Planner 才会启动。");
+  expect(host.textContent).toContain("继续发送会追加到需求。点击「开始」后，规划者才会启动。");
   const requirement = host.querySelector('[aria-label="需求草稿"]')!;
   expect(requirement.textContent).toContain("Saved requirement");
   expect(requirement.textContent).toContain("版本 4");
@@ -267,7 +267,7 @@ it("shows a neutral changes placeholder for a draft without reading its workspac
   vi.stubGlobal("matchMedia", vi.fn((query: string) => ({ matches: query.includes("1280"), addEventListener: vi.fn(), removeEventListener: vi.fn() })));
   await show();
   const changes = host.querySelector('[aria-label="改动文件"]')!;
-  expect(changes.textContent).toContain("开始后可查看改动");
+  expect(changes.textContent).toContain("任务开始后显示改动");
   expect(changes.querySelector('[role="alert"]')).toBeNull();
   expect(host.querySelector('[aria-label="任务管家模型"]')).toBeNull();
 });
