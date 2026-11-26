@@ -421,13 +421,23 @@ def _captured_turn_inputs(path: Path) -> list[dict[str, Any]]:
     return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
 
 
-def _attach_model_inputs(row: dict[str, Any], database_url: str, capture: Path) -> None:
+def _postgres_url(database_url: str) -> bool:
+    """True when ``database_url`` is a PostgreSQL URL. A stub dialog yields a label, or nothing."""
+    return database_url.startswith(("postgres://", "postgresql://"))
+
+
+def _attach_model_inputs(row: dict[str, Any], database_url: str, capture: Path, *,
+                         capture_enabled: bool) -> None:
     """Copy each turn's comparison inputs onto ``row`` before the disposable database is dropped.
 
     The user text is already ``turns[].text``. The run record holds the system-prompt sha256, ``prompt_layers``
     and the ``looper_state`` view; the capture file holds the state-block body and the Turn context, which the
-    record does not.
+    record does not. A run with no database URL, or one that did not enable the per-turn capture, records
+    ``inputs_captured`` false and does not open a connection. A null field on a captured turn was read and empty.
     """
+    if not capture_enabled or not _postgres_url(database_url):
+        row["inputs_captured"] = False
+        return
     records, captured = _model_input_records(database_url), _captured_turn_inputs(capture)
     for index, turn in enumerate(row.get("turns") or []):
         if index < len(records):
@@ -435,6 +445,7 @@ def _attach_model_inputs(row: dict[str, Any], database_url: str, capture: Path) 
         if index < len(captured):
             turn["state_block"] = captured[index].get("state_block")
             turn["turn_context"] = captured[index].get("turn_context")
+    row["inputs_captured"] = True
 
 
 def _stable_audience(*turns: tuple[str, str]) -> Callable[[Look], str | None]:
@@ -4432,7 +4443,9 @@ def run(
     ``stable_context`` every dialog's database has ``manager.stable_context`` on, and each row lists what the
     Manager's turns started with (``state_views``). Each turn also keeps the system-prompt sha256, ``prompt_layers``
     and ``looper_state`` from its run record, plus the state-block body and the Turn context (null when that
-    setting is off). With ``leads_fulltext`` it has ``leads.search_mode``
+    setting is off). Those fields are attached only when the run has a database URL and the per-turn capture is
+    enabled; otherwise the row records ``inputs_captured`` false and the database is not opened for them.
+    With ``leads_fulltext`` it has ``leads.search_mode``
     ``fulltext``. ``delivery_guard`` enables the operator-only recovery setting in each disposable server and
     reports how many hidden follow-ups ran. With ``untrusted_fence`` every dialog's database has
     ``untrusted_fence.enabled`` on."""
@@ -4500,13 +4513,15 @@ def run(
 
                         seed_server(database_url)
                 reminder_now = REMINDER_NOW if mode == "fake" and dialog.id == "reminder_tools" else None
+                capture_file = case / "turn-inputs.jsonl"
+                server_env = {"LOOPER_EVAL_TURN_CAPTURE": str(capture_file),
+                              **({"TZ": REMINDER_ZONE} if reminder_now is not None else {})}
                 with running_server(database_url=database_url, runtime_root=case / "runtime", bin_dir=case / "bin",
                                     log_path=logs / f"{dialog.id}-{rep}.log", home=home,
                                     projects_root=projects_root,
                                     pi_runtime=pi_runtime, dsh_runtime=dsh_runtime,
                                     reminder_now=reminder_now,
-                                    env={"LOOPER_EVAL_TURN_CAPTURE": str(case / "turn-inputs.jsonl"),
-                                         **({"TZ": REMINDER_ZONE} if reminder_now is not None else {})}) as api:
+                                    env=server_env) as api:
                     named = register_agent(api, register)["name"] if register is not None else agent
                     picked = select_agent(api, agent=named, model=model)
                     require_claude(mode, real_claude, [picked.get("runtime_type")])
@@ -4549,7 +4564,8 @@ def run(
                     row["resolved_models"] = reported_models(database_url)
                 if stable_context:
                     row["state_views"] = _state_views(database_url)
-                _attach_model_inputs(row, database_url, case / "turn-inputs.jsonl")
+                _attach_model_inputs(row, database_url, capture_file,
+                                     capture_enabled=bool(server_env.get("LOOPER_EVAL_TURN_CAPTURE")))
                 if "runtime_evidence" in row:
                     # DSH's full bill is unknown. Use reported root spend for the
                     # suite's observable soft cap rather than a null bill as zero.
