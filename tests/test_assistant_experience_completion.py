@@ -185,9 +185,9 @@ def test_online_definitions_read_manager_metrics_without_filling_missing_data():
 def test_documented_counts_match_the_collected_conversations():
     from evals.prompt_regression.dialogs import DIALOGS
     readme = (Path(__file__).resolve().parents[1] / 'evals/README.md').read_text()
-    assert len(e.CASES) == 27
-    assert sum(len(case.says) for case in e.CASES) == 37
-    assert 'Twenty-seven conversations' in readme
+    assert len(e.CASES) == 30
+    assert sum(len(case.says) for case in e.CASES) == 40
+    assert 'Thirty conversations' in readme
     assert f'all {len(DIALOGS)} dialogs' in readme
     assert {c.category.value for c in e.CASES} == {
         'time', 'identity', 'crosstalk', 'tone', 'memory', 'proactivity', 'latency'}

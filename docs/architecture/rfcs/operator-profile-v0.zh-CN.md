@@ -70,7 +70,8 @@
 | kind | 字段 |
 |---|---|
 | preference、habit | `communication_preferences` |
-| fact、decision、commitment、request、deadline、person | `standing_rules` |
+| fact | `about`（`About:`，描述性事实） |
+| decision、commitment、request、deadline、person | `standing_rules` |
 
 每条的出处是笔记相对路径、行号，以及它前面最近的标题；没有标题时标题用 `kind`。`source`、`confidence`、`until` 留在笔记里，不复制进档案。没写 `status` 视为 `active`；`superseded` 和 `deleted` 不进入档案，也不记入 `skipped`。不认识的 `kind` 记入 `skipped`，原因是 `unknown kind`。编译器不读时钟，所以 `until` 不参与取舍。
 
@@ -80,7 +81,7 @@
 
 代码围栏不参与编译。行首最多三个空格、接着至少三个反引号或波浪号，算开围栏；同样字符、至少一样长、后面没有信息字符串的一行算关围栏。围栏里面的标题和示例条目都忽略。没闭合的围栏一直忽略到笔记末尾。写进档案的文字把反引号换成撇号，把连续三个及以上的波浪号换成 `---`，输出里因此没有围栏边界。
 
-渲染按固定优先级（名字、称呼、回复语言、时区、工作时间、沟通偏好、长期规则）。同一字段里保持笔记里的顺序；偏好笔记先按相对路径排序。超过 1500 个字符（Unicode 码位，和 PostgreSQL 的 `char_length` 一致）时从优先级最低的字段往前丢，丢到只剩一条仍超长就截断那一条并加上 `…`，该字段标 `truncated`。上限比一条字段标签还短时失败。
+渲染按固定优先级（名字、称呼、回复语言、时区、工作时间、沟通偏好、长期规则、About）。同一字段里保持笔记里的顺序；偏好笔记先按相对路径排序。超过 1500 个字符（Unicode 码位，和 PostgreSQL 的 `char_length` 一致）时从优先级最低的字段往前丢，丢到只剩一条仍超长就截断那一条并加上 `…`，该字段标 `truncated`。上限比一条字段标签还短时失败。
 
 每个值的出处是相对路径、标题和行号，不是绝对路径。单篇笔记超过 256 KiB、不是 UTF-8、范围内笔记超过 200 篇，都失败。
 
@@ -96,7 +97,7 @@ CREATE TABLE IF NOT EXISTS profile_blocks (
 );
 ```
 
-`body` 是 `{text, fields, omitted, skipped, sources}`。`profile.get` 在编译结果和已存的 `text`、`body` 一致时不写，版本和 `compiled_at` 都不变；变了才把版本加一（第一行是 1）。换一个源目录不会立刻删旧行，下一次读到不同的编译结果才换版本。
+`body` 是 `{text, fields, omitted, skipped, sources}`。`profile.get` 在编译结果和已存的 `text`、`body` 一致时不写，版本和 `compiled_at` 都不变；只有 `text` 变化才把版本加一（第一行是 1）。仅 `body` 变化时刷新缓存和 `compiled_at`，保留版本。换一个源目录不会立刻删旧行，下一次读到不同的编译文本才换版本。
 
 `sources` 是编译出字段的笔记（含因超长被丢掉的），不含只被跳过的笔记。
 

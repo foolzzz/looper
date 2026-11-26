@@ -65,6 +65,12 @@ afterEach(() => {
 });
 
 describe("WorkSteps", () => {
+  it("labels each step kind in Chinese", () => {
+    show(task({ steps: (["work", "gate", "wait", "review"] as const).map((kind, index) =>
+      step({ id: String(index), step_key: String(index), step_index: index, kind, instruction: "" })) }));
+    for (const label of ["执行", "关卡", "等待", "评审"]) expect(host.textContent).toContain(label);
+  });
+
   it("says there is no plan until steps exist, then lists them in step_index order", () => {
     show(task());
     expect(host.querySelector("#work-steps-title")?.textContent).toBe("计划与步骤");
@@ -174,7 +180,7 @@ describe("WorkSteps", () => {
       "1/4 已完成 · 1 评审中 · 1 已跳过 · 1 个关卡已取消",
     );
     const gateRow = host.querySelector('[data-step-key="ask/now"]')!;
-    expect(gateRow.textContent).toContain("Cancelled");
+    expect(gateRow.textContent).toContain("已取消");
     expect(gateRow.querySelector("a")).toBeNull();
     const gateButton = gateRow.querySelector("button")!;
     expect(gateButton.type).toBe("button");
@@ -201,7 +207,7 @@ describe("WorkSteps", () => {
     expect(work.tabIndex).toBeGreaterThanOrEqual(0);
 
     expect(host.querySelector('[data-step-key="check"] [data-status-text]')?.textContent).toBe("评审中");
-    expect(host.querySelector('[data-step-key="hold"]')?.textContent).toContain("Timed out");
+    expect(host.querySelector('[data-step-key="hold"]')?.textContent).toContain("已超时");
     expect(host.querySelector('[data-step-key="hold"]')?.textContent).not.toContain("未开始");
     expect(host.querySelector('[data-step-key="panel"] [data-status-text]')?.textContent).toBe("失败");
     expect([...host.querySelectorAll("[data-kind]")].map((row) => row.getAttribute("data-kind"))).toEqual([
@@ -219,15 +225,15 @@ describe("WorkSteps", () => {
       steps: [step({ id: "g1", step_key: "ask", step_index: 0, kind: "gate", status: "waiting_user" })],
       gates: [gate("g1", "discussing", "planner")],
     }));
-    expect(host.querySelector('[data-step-key="ask"]')?.textContent).toContain("Planner answering");
+    expect(host.querySelector('[data-step-key="ask"]')?.textContent).toContain("规划助手回复中");
 
     show(task({
       group: "completed",
       steps: [step({ id: "g1", step_key: "ask", step_index: 0, kind: "gate", status: "waiting_user" })],
       gates: [gate("g1", "discussing", "planner")],
     }));
-    expect(host.querySelector('[data-step-key="ask"]')?.textContent).toContain("Your turn");
-    expect(host.querySelector('[data-step-key="ask"]')?.textContent).not.toContain("Planner answering");
+    expect(host.querySelector('[data-step-key="ask"]')?.textContent).toContain("等你回复");
+    expect(host.querySelector('[data-step-key="ask"]')?.textContent).not.toContain("规划助手回复中");
   });
 
   it("renders one task's steps at a time and leaves markup as text", () => {

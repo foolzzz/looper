@@ -116,3 +116,27 @@ def test_metrics_configuration_round_trip_requires_operator(monkeypatch):
             assert "proactive_deliveries" not in document
         chat_settings.set_metrics_enabled(False)
     run_db(check, monkeypatch)
+
+
+def test_task_manager_refusals_only_in_work_mode(monkeypatch, tmp_path):
+    from collections import Counter
+    from looper.agents import task_conversations_settings, task_manager_safety
+
+    monkeypatch.setattr(task_manager_safety, "refusal_counts", Counter({
+        ("review_hook_disabled", "resume", "unknown"): 2,
+        ("cli_unverified", "launch", "2.1.333"): 1}))
+
+    async def check(pool):
+        async with v1_api(tmp_path, pool) as call:
+            for enabled in (False, True, False):
+                monkeypatch.setattr(task_conversations_settings, "_enabled", enabled)
+                status, body = await call("manager_metrics.get")
+                assert status == 200
+                result = body["result"]
+                if enabled:
+                    assert result["work_mode"]["task_manager_launch_refusals_total"] == [
+                        {"reason": "cli_unverified", "phase": "launch", "cli_version": "2.1.333", "count": 1},
+                        {"reason": "review_hook_disabled", "phase": "resume", "cli_version": "unknown", "count": 2}]
+                else:
+                    assert "work_mode" not in result
+    run_db(check, monkeypatch)

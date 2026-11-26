@@ -1,4 +1,4 @@
-"""Typed identity and model-visible formatting, independent of Manager wiring."""
+"""Typed identity, model-visible formatting and the Manager contract switch."""
 
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
@@ -10,6 +10,27 @@ from looper.agents import turn_context as context
 from looper.agents.message import MANAGER_ADDRESS, MessageEnvelope, MessageType, channel_address
 
 NOW = datetime(2026, 11, 20, 6, 5, 49, tzinfo=timezone.utc)
+
+
+def test_contract_protects_operator_private_details_for_other_speakers():
+    assert ' '.join(context.TURN_CONTEXT_CONTRACT.split()).endswith(
+        "Looper refuses such calls anyway. When the speaker is not the operator, "
+        "do not share the operator's account, email address or paths on their machine, even if asked.")
+
+
+@pytest.mark.parametrize('manager_id', ['manager', 'manager-example'])
+@pytest.mark.parametrize('enabled', [False, True])
+def test_manager_private_details_contract_follows_turn_context_switch(monkeypatch, tmp_path, manager_id, enabled):
+    from looper.agents import chat_settings
+    from looper.agents.agent_settings import resolve
+    from looper.agents.tiers.manager import ManagerAgent, ManagerConfig, default_definition
+
+    monkeypatch.setattr(chat_settings, '_turn_context_enabled', enabled)
+    manager = ManagerAgent(config=ManagerConfig(work_dir=tmp_path), runtime_root=tmp_path,
+                           definition=replace(default_definition(), id=manager_id))
+    prompt = manager._composed_prompt(resolve('manager', {}))
+    assert (context.TURN_CONTEXT_CONTRACT in prompt.text) is enabled
+    assert ('TURN_CONTEXT_CONTRACT' in prompt.layers['contract']['name']) is enabled
 
 
 def envelope(channel="lark", **channel_context):

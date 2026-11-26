@@ -474,7 +474,7 @@ class TestSettingsApi:
         status, body = _call("GET", "/api/agent-settings")
         assert status == 200
         assert body["limits"]["builtin_harness_prompt"] == DEFAULT_HARNESS_PROMPT
-        assert body["system"]["values"] == UNSET and set(body["roles"]) == {r.value for r in AgentType}
+        assert body["system"]["values"] == UNSET and set(body["roles"]) == {r.value for r in agent_settings.GLOBAL_ROLES}
         for role, view in (("", body["system"]), *body["roles"].items()):
             effective = view["effective"]
             assert effective["harness_prompt"] == {"value": DEFAULT_HARNESS_PROMPT, "source": "builtin"}

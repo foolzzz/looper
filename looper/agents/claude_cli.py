@@ -139,6 +139,29 @@ def clear_private_settings(runtime_root: Path) -> int:
     return removed
 
 
+def _private_settings_file(settings_dir: Path, content: str) -> Path:
+    """Atomically write content-addressed launch settings, readable only by their owner."""
+    settings_dir = settings_dir.absolute()
+    settings_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+    target = settings_dir / f"{hashlib.sha256(content.encode('utf-8')).hexdigest()}.json"
+    fd, temporary = tempfile.mkstemp(prefix=".settings-", dir=settings_dir)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            os.fchmod(handle.fileno(), 0o600)
+            handle.write(content)
+        os.replace(temporary, target)
+    finally:
+        Path(temporary).unlink(missing_ok=True)
+    return target
+
+
+def operator_settings_args(settings_dir: Path, hooks: dict[str, Any] | None) -> list[str]:
+    """Merge only peer refusal and the review hook into the operator's normal settings sources."""
+    content = json.dumps({"crossSessionInbound": "refuse", "hooks": hooks or {}},
+                         ensure_ascii=False, separators=(",", ":"))
+    return ["--settings", str(_private_settings_file(settings_dir, content))]
+
+
 def isolation_args(cwd: str | os.PathLike[str], *, env: dict[str, str] | None = None,
                    settings_dir: Path | None = None, sealed: bool = False,
                    hooks: dict[str, Any] | None = None) -> list[str]:
@@ -174,19 +197,7 @@ def isolation_args(cwd: str | os.PathLike[str], *, env: dict[str, str] | None = 
     if env is not None:
         if settings_dir is None:
             raise ValueError("runtime settings with environment values require a private settings directory")
-        settings_dir = settings_dir.absolute()
-        settings_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
-        target = settings_dir / f"{hashlib.sha256(content.encode('utf-8')).hexdigest()}.json"
-        # Atomic replacement keeps concurrent launches from reading partial settings and repairs damaged files.
-        fd, temporary = tempfile.mkstemp(prefix=".settings-", dir=settings_dir)
-        try:
-            with os.fdopen(fd, "w", encoding="utf-8") as handle:
-                os.fchmod(handle.fileno(), 0o600)
-                handle.write(content)
-            os.replace(temporary, target)
-        finally:
-            Path(temporary).unlink(missing_ok=True)
-        content = str(target)
+        content = str(_private_settings_file(settings_dir, content))
     return [
         "--setting-sources", "" if sealed or hooks is not None else "project",
         "--strict-mcp-config",

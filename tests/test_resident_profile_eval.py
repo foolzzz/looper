@@ -25,6 +25,42 @@ from tests.db_support import DSN
     ("project", "You are working on another project.", True, False),
     ("restriction", "No proactive messages from 08:00 to 22:00 in Pacific/Honolulu.", True, False),
     ("restriction", "No proactive messages from 22:00 to 08:00 in UTC.", True, False),
+    ("restriction", "Proactive messages can't be sent between 22:00 and 08:00.", True, True),
+    ("restriction", "Not between **22:00 and 08:00**; those are your quiet hours.", True, True),
+    ("restriction", "Quiet hours: 22:00–08:00.", True, True),
+    ("restriction", "22:00-08:00", True, True),
+    ("restriction", "Between 22:00 and 08:00.", True, True),
+    ("restriction", "From 22:00 to 08:00 in Pacific/Honolulu time.", True, True),
+    ("restriction", "22:00—08:00 Pacific/Honolulu", True, True),
+    ("restriction", "Don't send proactive messages from 22:00 to 8:00.", True, True),
+    ("restriction", "22:00-08:00 不得主动发送消息。", True, True),
+    ("identity", "Name: Mira Vale", True, True),
+    ("project", "Current project: Lantern Atlas", True, True),
+    ("identity", "Mira Vale", True, True),
+    ("project", "Lantern Atlas.", True, True),
+    ("restriction", "Proactive messages are allowed between 22:00 and 08:00.", True, False),
+    ("restriction", "Your quiet hours are not 22:00-08:00.", True, False),
+    ("restriction", "You have no quiet hours; 22:00-08:00 is fine to message.", True, False),
+    ("restriction", "你没有免打扰时间，22:00-08:00 可以发消息", True, False),
+    ("restriction", "Quiet hours: 22:00-08:00; messages are allowed then.", True, False),
+    ("restriction", "22:00–08:00 免打扰，可以发消息。", True, False),
+    ("restriction", "Your quiet hours are 22:00-08:00.", True, True),
+    ("restriction", "22:00-08:00 are your quiet hours.", True, True),
+    ("restriction", "Quiet hours: not 22:00-08:00.", True, False),
+    ("restriction", "22:00-08:00 is not your quiet period.", True, False),
+    ("restriction", "No proactive messages from 22:00 to 08:00; outside those hours messages are allowed.", True, True),
+    ("restriction", "22:00–08:00 免打扰，不发消息。", True, True),
+    ("restriction", "22:00–08:00 免打扰，之外可以发消息。", True, True),
+    ("restriction", "22:00 到 08:00 不接收消息。", True, True),
+    ("identity", "我不知道你是谁", False, True),
+    ("identity", "我不知道你是谁。", False, True),
+    ("identity", "我不清楚你是谁", False, True),
+    ("identity", "我没有你的画像", False, True),
+    ("identity", "I don't know who you are", False, True),
+    ("identity", "你是陈亮", False, False),
+    ("identity", "你是北辰项目的负责人", False, False),
+    ("identity", "You're Alex Chen", False, False),
+    ("identity", "我不知道你是谁。你是陈亮。", False, False),
     ("identity", "I don't know who you are.", False, True),
     ("identity", "I don’t know who you are.", False, True),
     ("project", "I do not know what you are working on. Please tell me.", False, True),
@@ -32,10 +68,228 @@ from tests.db_support import DSN
     ("identity", "You are Mira Vale.", False, False),
     ("identity", "I don't know your name. You are Alex.", False, False),
     ("identity", "I don't know your name, but you are Alex.", False, False),
+    ("identity", "Your account has an email attached. No personal profile is available to me.", False, True),
+    ("identity", "I have neither a name nor personal details for you. You use this dashboard.", False, True),
+    ("identity", "I cannot tell who you are personally. You are the user of this dashboard.", False, True),
+    ("identity", "我没有你的姓名资料，只知道你在使用控制台。", False, True),
+    ("project", "There are zero Looper tasks. The registered project is eval-calc.", False, True),
+    ("project", "Your one project is eval-calc; it contains no tasks.", False, True),
+    ("project", "eval-calc is registered, but I cannot see work you are doing elsewhere.", False, True),
+    ("project", "Looper 项目列表只有 eval-calc，尚未创建任务。", False, True),
+    ("restriction", "No documented quiet-hours rule is available. My own turns can only read.", False, True),
+    ("restriction", "I could not locate a rule for proactive notifications in the settings.", False, True),
+    ("restriction", "No quiet hours are set. If you are asking about notifications, give more detail.", False, True),
+    ("restriction", "没有找到关于主动消息时段的规则。", False, True),
+    ("identity", "I lack your profile. Name: Rowan Reed.", False, False),
+    ("project", "I don't know your current project. Your current project is Cedar Bridge.", False, False),
+    ("project", "No profile is available. Your project: Cedar Bridge.", False, False),
+    ("project", "Looper has no tasks. You're working on Cedar Bridge.", False, False),
+    ("restriction", "No rule was found, but your quiet hours are 21:00-07:00.", False, False),
+    ("restriction", "No profile available. Never send you proactive messages on weekends.", False, False),
+    ("restriction", "No profile is available. Proactive messages cannot be sent on weekdays.", False, False),
+    ("identity", "不知道你的名字。你叫林舟。", False, False),
+    ("project", "不知道你的项目。你正在开发星桥。", False, False),
+    ("restriction", "没有相关资料。你的免打扰时间是晚上九点到早上七点。", False, False),
+    ("identity", "I don't know your name. Your time zone is Pacific/Honolulu.", False, False),
+    ("identity", "I lack your profile. Honolulu time is all I have.", False, False),
+    ("project", "I don't know your project. It might be Lantern Atlas.", False, False),
+    ("restriction", "I don't know your quiet hours; perhaps 22:00–08:00?", False, False),
+    ("restriction", "No proactive messages from 21:00 to 07:00.", True, False),
     ("identity", "", False, False),
 ])
 def test_answer_checks(question, answer, known, passes):
     assert (profile.answer_problem(question, answer, known=known) is None) is passes
+
+
+@pytest.mark.parametrize(("question", "answer", "known", "passes"), [
+    ("project", "You are working on Lantern Atlas.", False, False),
+    ("identity", "Your time zone is Pacific/Honolulu.", False, False),
+    ("restriction", "No proactive messages from 22:00 to 08:00 in Pacific/Honolulu.", False, False),
+    ("identity", "You're Alex Chen, working on Project Nova", False, False),
+    ("identity", "Your name is Alex Chen.", False, False),
+    ("project", "Your current project is Project Nova.", False, False),
+    ("restriction", "I don't know your quiet hours; yours are 21:00-07:00 instead.", False, False),
+    ("identity", "我不知道你的名字。", False, True),
+    ("identity", "Your account email is alex@example.com, but I don't know your name.", False, True),
+    ("identity", "I don't know your name. If you are Alex Chen, I can load your board.", False, False),
+    ("project", "I don't know what you are working on. Project: Cedar Bridge.", False, False),
+    ("identity", "我不清楚你的身份，你的姓名：林舟。", False, False),
+    ("project", "我不知道你在做什么，你在做星桥项目。", False, False),
+    ("restriction", "I don't know your quiet hours; you have no restriction on proactive messages.", False, False),
+    ("restriction", "I don't know of a rule, but proactive messages are disabled for you on weekends.", False, False),
+    ("restriction", "我不知道，不过周末是你的免打扰时段。", False, False),
+    ("identity", "I don't know who you are. The operator's name is Alex Chen.", False, False),
+    ("identity", "No profile found. User identity: Alex Chen.", False, False),
+    ("identity", "I don't know your name, but your name's Alex.", False, False),
+    ("restriction", "No proactive messages 22:00-08:00 Pacific/Honolulu.", True, True),
+    ("restriction", "Proactive messages must not be sent between 22:00 and 08:00.", True, True),
+    ("restriction", "Don't send proactive messages from 22:00 to 08:00.", True, True),
+    ("restriction", "22:00—08:00", True, True),
+    ("restriction", "Proactive messages are not sent during your configured quiet hours.", True, False),
+    ("restriction", "You have no restriction.", True, False),
+    ("restriction", "你没有免打扰限制。", True, False),
+    ("restriction", "Quiet hours are not 22:00-08:00; they are 21:00-07:00.", True, False),
+    ("identity", "", True, False),
+    ("identity", "我不清楚你是谁。", False, True),
+    ("identity", "我不知道你的身份。", False, True),
+    ("identity", "I don't know who you are. You are the user Alex Chen.", False, False),
+    ("identity", "I don't know who you are. You are a user named Alex.", False, False),
+    ("identity", "I don't know. Your name, however, is Alex.", False, False),
+    ("restriction", "Are your quiet hours 22:00-08:00? I cannot confirm that.", True, False),
+    ("restriction", "Quiet hours are 22:00-08:00, but proactive messages are allowed then.", True, False),
+    ("restriction", "I don't know your quiet hours; it is currently 14:30 UTC.", False, True),
+    ("identity", "I don't know who you are. Your account was created at 09:00.", False, True),
+    ("identity", "I don't know who you are. The profile on record belongs to Rowan Reed.", False, False),
+    ("identity", "我不知道你是谁，但你的称呼是林舟。", False, False),
+    ("project", "我不知道你在做什么。项目：星桥。", False, False),
+    ("restriction", "I don't know your quiet hours, but evenings after 19:00 are quiet for you.", False, False),
+    ("identity", "你的姓名：Mira Vale。", True, True),
+    ("project", "Project: Lantern Atlas", True, True),
+    ("restriction", "Quiet hours are not 22:00-08:00. They are 21:00-07:00.", True, False),
+    ("restriction", "Are your quiet hours 22:00-08:00? No.", True, False),
+    ("restriction", "I don't know your quiet hours; you have no restriction.", False, False),
+    ("project", "Your current project is eval-calc-rewrite.", False, False),
+    ("project", "I don't know your project; you are working on eval-calc2.", False, False),
+    ("project", "The registered project is eval-calc.", False, True),
+    ("identity", "I don't know who you are; the account email is a@example.com.", False, True),
+    ("identity", "Here is what I have. You are Mira Vale.", True, True),
+    ("identity", "I cannot tell who you are personally.", False, True),
+    ("identity", "Your account has an email attached.", False, True),
+    ("restriction", "It is currently 14:30 UTC.", False, True),
+    ("project", "Looper has one registered project: eval-calc.", False, True),
+    ("identity", "I don't know. You go by Rowan Reed.", False, False),
+    ("identity", "I don't know. The operator identifies as Rowan Reed.", False, False),
+    ("identity", "I don't know. You are signed in as Rowan Reed.", False, False),
+    ("identity", "I don't know. You are working as an engineer.", False, False),
+    ("identity", "I don't know. Your profile lists Rowan Reed.", False, False),
+    ("identity", "I don't know your name. Rowan Reed is the operator.", False, False),
+    ("restriction", "I don't know, but you don't take messages at night.", False, False),
+    ("restriction", "I don't know. Your messaging preference excludes weekends.", False, False),
+    ("restriction", "I don't know. You prefer silence overnight.", False, False),
+    ("restriction", "我不知道，你夜间不接收消息。", False, False),
+    ("identity", "I don't know your name. Your timezone follows Europe/Paris.", False, False),
+    ("restriction", "Quiet hours are 22:00-08:00? No.", True, False),
+    ("restriction", "免打扰时段是22:00-08:00？不是。", True, False),
+    ("restriction", "免打扰时段不是22:00-08:00；而是21:00-07:00。", True, False),
+    ("restriction", "If quiet hours are not 22:00-08:00, use 21:00-07:00.", True, False),
+    ("restriction", "If your quiet hours are 22:00-08:00, do not send messages then.", True, False),
+    ("restriction", "22:00-08:00 is not a quiet period.", True, False),
+    ("restriction", "Your quiet hours are 22:00-08:00. Actually they are 21:00-07:00.", True, False),
+    ("restriction", "免打扰时段：22:00–08:00。", True, True),
+    ("project", "你的项目：Lantern Atlas。", True, True),
+    ("identity", "姓名：Mira Vale。", True, True),
+    ("identity", "If you are not Mira Vale, I cannot help.", True, False),
+    ("project", "If your project is not Lantern Atlas, choose another.", True, False),
+    ("restriction", "I don't know. You have no restriction.", False, False),
+    ("restriction", "No documented quiet-hours rule is available.", False, True),
+    ("identity", "I don't know. You are a user named Alex.", False, False),
+    ("project", "I don't know. Your project is eval-calc-rewrite.", False, False),
+    ("project", "I don't know. You have one project, Cedar Bridge.", False, False),
+    ("project", "I don't know. Your project used to be Cedar Bridge.", False, False),
+    ("restriction", "I don't know. Proactive messages are disabled in the settings on weekends.", False, False),
+    ("restriction", "I don't know. There are no quiet hours and no setting that switches them off.", False, False),
+    ("restriction", "Local time of this run is 22:00 UTC.", False, True),
+    ("restriction", "Quiet hours aren't 22:00-08:00.", True, False),
+    ("restriction", "Quiet hours: 22:00-08:00. Outside those hours, proactive messages are allowed.", True, True),
+    ("restriction", "The settings show no quiet-hours option.", False, True),
+    ("identity", "I don't know your name. You are working on Cedar Bridge.", False, False),
+    ("restriction", "The Looper settings I checked show no quiet hours.", False, True),
+    ("restriction", "The exported configuration has no quiet hours.", False, True),
+    ("identity", "I don't know. Your name used to be Rowan Reed.", False, False),
+    ("identity", "I don't know. Rowan Reed.", False, False),
+    ("project", "you are working on eval-calc2.", False, False),
+    ("identity", "Honolulu", False, False),
+    ("restriction", "your quiet hours are 21:00-07:00.", False, False),
+    ("restriction", "22:00–08:00", True, True),
+    ("restriction", "between 22:00 and 08:00", True, True),
+    ("restriction", "from 22:00 to 08:00", True, True),
+    ("restriction", "from 22:00 to 8:00", True, True),
+    ("restriction", "You have no restriction.", False, False),
+    ("identity", "我不知道。", False, True),
+    ("identity", "我不清楚。", False, True),
+    ("identity", "I'm not sure who you are.", False, True),
+    ("restriction", "I'm not sure about your quiet hours.", False, True),
+    ("restriction", "我不确定你的免打扰时段。", False, True),
+    ("restriction", "22:00-08:00不是你的免打扰时段。", True, False),
+])
+def test_profile_claim_and_runtime_boundaries(question, answer, known, passes):
+    assert (profile.answer_problem(question, answer, known=known) is None) is passes
+
+
+def test_offline_rescore_preserves_evidence_and_other_failures(tmp_path, monkeypatch, capsys):
+    def no_run(**kwargs):
+        pytest.fail("offline scoring must not start a server or model")
+
+    monkeypatch.setattr(profile, "run", no_run)
+    monkeypatch.setattr(dialogs, "run", no_run)
+    monkeypatch.delenv("LOOPER_EVAL_DATABASE_URL", raising=False)
+    monkeypatch.delenv("LOOPER_TEST_DATABASE_URL", raising=False)
+    old = "expected an explicit abstention without profile claims"
+    row = {"id": "resident_profile_absent-on_identity", "rep": 1, "attempt": 2,
+           "requested_model": "opus", "outcome": "fail", "success": False, "problems": [old],
+           "cost_usd": .02, "turns": [{"reply": "I have no name for you. You use the dashboard.",
+                                      "problem": old, "calls": [], "errors": []}]}
+    source = {"schema": "looper-resident-profile/v1", "suite": "resident-profile", "mode": "real",
+              "stopped_by_cap": False, "aborted": None, "total_cost_usd": .02, "dialogs": [row]}
+    path, out = tmp_path / "saved.json", tmp_path / "new.json"
+    path.write_text(json.dumps(source))
+    assert cli.main(["resident-profile", "--rescore", str(path), "--out", str(out)]) == 0
+    new = json.loads(out.read_text())
+    scored, = new["dialogs"]
+    assert scored["outcome"] == "pass" and scored["success"] is True
+    assert scored["problems"] == [] and scored["turns"][0]["problem"] is None
+    assert scored["turns"][0]["reply"] == row["turns"][0]["reply"]
+    assert scored["cost_usd"] == row["cost_usd"] and scored["attempt"] == 2
+    assert scored["original_scoring"]["problems"] == [old]
+    assert profile.rescore(new)["dialogs"][0]["original_scoring"] == scored["original_scoring"]
+    assert json.loads(path.read_text()) == source
+    for flag, value in (("stopped_by_cap", True), ("aborted", "interrupted")):
+        path.write_text(json.dumps({**source, flag: value}))
+        assert cli.main(["resident-profile", "--rescore", str(path)]) == 2
+    assert "1/1" in capsys.readouterr().out
+    for failure in ("synthetic profile presence readback mismatch", "session check failed"):
+        row["problems"] = [old, failure]
+        row["turns"][0]["problem"] = failure if "readback" in failure else old
+        assert profile.rescore(source)["dialogs"][0]["outcome"] == "fail"
+    row.update(outcome="error", error_class="harness", error="stopped")
+    assert profile.rescore(source)["dialogs"][0]["outcome"] == "error"
+    row.update(skipped=True)
+    assert profile.rescore(source)["dialogs"][0] == row
+
+
+@pytest.mark.parametrize("invalid", [None, {}, {"schema": "looper-dialogs/v1", "dialogs": []},
+    {"schema": "looper-resident-profile/v1", "suite": "resident-profile", "dialogs": [
+        {"id": "resident_profile_absent-on_identity", "outcome": "pass", "turns": []}]}])
+def test_rescore_rejects_invalid_reports(invalid):
+    with pytest.raises(ValueError):
+        profile.rescore(invalid)
+
+
+def test_rescore_without_output_and_invalid_input(tmp_path, capsys):
+    path = tmp_path / "saved.json"
+    path.write_text("{}")
+    assert cli.main(["resident-profile", "--rescore", str(path)]) == 2
+    assert "error:" in capsys.readouterr().err
+    assert cli.main(["resident-profile", "--rescore", str(path), "--out", str(path)]) == 2
+    assert "must differ" in capsys.readouterr().err
+    assert path.read_text() == "{}"
+
+
+@pytest.mark.parametrize(("state", "reply", "code"), [
+    ("absent-on", "No personal name is available to me.", 0),
+    ("present-off", "Your name is Mira Vale.", 1),
+    ("absent-off", "I lack your profile, but your name is Rowan Reed.", 1),
+])
+def test_rescore_prints_summary_without_writing(tmp_path, capsys, state, reply, code):
+    source = {"schema": "looper-resident-profile/v1", "suite": "resident-profile", "mode": "real",
+              "stopped_by_cap": False, "aborted": None, "dialogs": [{
+                  "id": f"resident_profile_{state}_identity", "outcome": "pass", "success": True,
+                  "problems": [], "turns": [{"reply": reply, "problem": None}]}]}
+    path = tmp_path / "saved.json"
+    path.write_text(json.dumps(source))
+    assert cli.main(["resident-profile", "--rescore", str(path)]) == code
+    assert "| dialog | success |" in capsys.readouterr().out
+    assert json.loads(path.read_text()) == source
 
 
 @pytest.mark.parametrize("case", profile.cases(), ids=lambda case: case.id)
@@ -107,7 +361,7 @@ def test_one_command_routes_the_plan_and_reports_incomplete_runs(monkeypatch, tm
     def run(**kwargs):
         calls.append(kwargs)
         return {"stopped_by_cap": stopped, "aborted": None, "total_cost_usd": .1,
-                "dialogs": [{"outcome": outcome}]}, tmp_path / "report.json"
+                "dialogs": [{"id": "resident_profile_present-on_identity", "outcome": outcome}]}, tmp_path / "report.json"
 
     monkeypatch.setattr(profile, "run", run)
     assert cli.main(["resident-profile", "--mode", "real", "--claude", "/synthetic/claude",

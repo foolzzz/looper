@@ -99,7 +99,7 @@ describe("Work default Manager", () => {
     const pending = deferred<DbChatMessage[]>();
     api.fetchChatMessages.mockRejectedValueOnce(new ForeignConversationError("foreign", "manager-other")).mockReturnValue(pending.promise);
     await mount(); await send("blocked"); const sid = localStorage.getItem(POINTER)!; expect(sid).not.toBe(SID);
-    expect(host.textContent).toContain("The saved conversation belongs to another Manager, so this is a new conversation.");
+    expect(host.textContent).toContain("保存的对话属于另一位管家，已新建对话。");
     expect(api.watchChat).not.toHaveBeenCalled(); expect(api.sendChat).not.toHaveBeenCalled();
     await act(async () => pending.resolve([])); await send("own");
     expect(api.sendChat.mock.calls[0][1]).toBe(sid); expect(api.watchChat.mock.calls.map(call => call[0])).toEqual([sid]);
@@ -144,24 +144,24 @@ describe("Work default Manager", () => {
   });
   it("shows a server turn on reload and never auto-sends its queue", async () => {
     createWorkConversationStore().patch(workConversationKey({ kind: "manager", sessionId: SID }), { staged: ["waiting"] }); api.fetchChatTurn.mockResolvedValue(turn()); await mount();
-    expect(adapter.replying).toBe(true); expect(input().placeholder).toContain("Replying"); api.fetchChatTurn.mockResolvedValue(null);
+    expect(adapter.replying).toBe(true); expect(input().placeholder).toContain("正在回复"); api.fetchChatTurn.mockResolvedValue(null);
     await act(async () => vi.advanceTimersByTimeAsync(3000)); expect(input().value).toBe("waiting"); expect(api.sendChat).not.toHaveBeenCalled();
   });
   it.each([false, true])("keeps Stop gated by settings %s", async enabled => {
     api.fetchChatSettings.mockResolvedValue({ stop_enabled: enabled }); await mount(); await send("first");
     expect(adapter.canStop).toBe(enabled); await act(async () => adapter.onStop?.());
     if (enabled) expect(api.stopChatReply).toHaveBeenCalledWith(api.sendChat.mock.calls[0][2]);
-    else { expect(api.stopChatReply).not.toHaveBeenCalled(); expect(host.textContent).toContain("Stopping a reply is off (Settings → Chat)."); }
+    else { expect(api.stopChatReply).not.toHaveBeenCalled(); expect(host.textContent).toContain("停止回复未开启（设置 → 对话）。"); }
   });
   it("disables Stop for an unsupported runtime with the original text", async () => {
     api.fetchChatTurn.mockResolvedValue(turn("running", false)); await mount(); expect(adapter.canStop).toBe(false);
-    expect(host.querySelector('button[aria-label="Stop the reply: This runtime cannot interrupt a reply."]')?.hasAttribute("disabled")).toBe(true);
-    await act(async () => adapter.onStop?.()); expect(api.stopChatReply).not.toHaveBeenCalled(); expect(host.textContent).toContain("This runtime cannot interrupt a reply.");
+    expect(host.querySelector('button[aria-label="停止回复: 此运行时无法中断回复。"]')?.hasAttribute("disabled")).toBe(true);
+    await act(async () => adapter.onStop?.()); expect(api.stopChatReply).not.toHaveBeenCalled(); expect(host.textContent).toContain("此运行时无法中断回复。");
   });
   it.each(["disabled", "other_message", "cannot_interrupt"])("shows the original Stop refusal %s", async state => {
     api.stopChatReply.mockResolvedValue({ state }); await mount(); await send("first"); await act(async () => adapter.onStop?.());
-    expect(host.textContent).toContain(state === "disabled" ? "Stopping a reply is off (Settings → Chat)." : state === "other_message"
-      ? "The Manager is answering another message first; this one has not started." : "This runtime cannot interrupt a reply.");
+    expect(host.textContent).toContain(state === "disabled" ? "停止回复未开启（设置 → 对话）。" : state === "other_message"
+      ? "管家正在回答另一条消息，本条尚未开始。" : "此运行时无法中断回复。");
   });
   it("returns rejected submissions ahead of the queue and draft without retrying", async () => {
     const pending = deferred<{ correlation_id: string }>(); api.sendChat.mockReturnValue(pending.promise);

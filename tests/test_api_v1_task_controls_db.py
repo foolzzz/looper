@@ -1,5 +1,6 @@
 """Task controls and edits through authenticated v1 HTTP, read back from disposable PostgreSQL."""
 
+import asyncio
 import json
 from contextlib import asynccontextmanager
 from types import SimpleNamespace
@@ -138,6 +139,9 @@ def test_title_is_idempotent_and_requirement_versions_are_written_once(tmp_path,
     ("init", {"requirement": "build calc"}, 400),
     *[("init", {"requirement": text}, 400) for text in ("", "  ", None, 7, "x" * 32001)],
     ("init", {"requirement": "Build v2", "extra": True}, 400),
+    *[("init", {"requirement": "Build v2", "expected_version": value}, 400)
+      for value in (None, True, "1", 1.5)],
+    ("init", {"requirement": "build calc", "expected_version": 1}, 400),
     ("init", {}, 400),
     *[("init", {"task_id": value, "requirement": "Build v2"}, 400) for value in (None, 7, "")],
 ])
@@ -168,4 +172,82 @@ def test_client_requirement_edit_writes_one_version_and_audit(tmp_path, monkeypa
             rows = await pool.fetch("SELECT client_id, status, arguments FROM manager_actions")
             assert len(rows) == 1 and (rows[0]["client_id"], rows[0]["status"]) == (client["id"], "ok")
             assert _messages(bus) == []
+    run_db(run, monkeypatch, timeout=20)
+
+
+@pytest.mark.parametrize("expected", [1, None])
+@pytest.mark.parametrize("state", ["draft", "init"])
+def test_requirement_version_precondition_and_stale_write(tmp_path, monkeypatch, expected, state):
+    async def run(pool):
+        await _task(pool, state)
+        async with _controls(tmp_path, planner=True) as (_, bus, post):
+            before = await tasks.get_task("task-a", pool=pool)
+            status, answer = await post("/api/v1/tasks/requirement_update",
+                {"task_id": "task-a", "requirement": "Not saved", "expected_version": 0})
+            assert status == 409 and answer["error"]["code"] == "requirement_changed", answer
+            assert answer["error"]["details"] == {"current_version": 1}
+            assert await tasks.get_task("task-a", pool=pool) == before
+            assert await task_changes.requirement_versions("task-a", pool=pool) == []
+            assert _messages(bus, "planner-task-a") == []
+            body = {"task_id": "task-a", "requirement": "Build v2"}
+            if expected is not None:
+                body["expected_version"] = expected
+            status, answer = await post("/api/v1/tasks/requirement_update", body)
+            assert status == 200 and answer["result"]["version"] == 2
+            _messages(bus, "planner-task-a")
+            before = await tasks.get_task("task-a", pool=pool)
+            versions = await task_changes.requirement_versions("task-a", pool=pool)
+            assert before["requirement"] == "Build v2"
+            assert [(v["version"], v["text"]) for v in versions] == [(1, "build calc"), (2, "Build v2")]
+            # Even an identical text with an obsolete version is a stale write.
+            for text in ("Build v2", "Build v3"):
+                status, answer = await post("/api/v1/tasks/requirement_update",
+                    {"task_id": "task-a", "requirement": text, "expected_version": 1})
+                assert status == 409 and answer["error"]["code"] == "requirement_changed", answer
+                assert answer["error"]["details"] == {"current_version": 2}
+                assert await tasks.get_task("task-a", pool=pool) == before
+                assert await task_changes.requirement_versions("task-a", pool=pool) == versions
+                assert _messages(bus, "planner-task-a") == []
+            status, answer = await post("/api/v1/tasks/requirement_update",
+                {"task_id": "task-a", "requirement": "Build v3", "expected_version": 2})
+            assert status == 200 and answer["result"]["version"] == 3
+            assert (await tasks.get_task("task-a", pool=pool))["requirement"] == "Build v3"
+            assert [(v["version"], v["text"]) for v in await task_changes.requirement_versions("task-a", pool=pool)] == [
+                (1, "build calc"), (2, "Build v2"), (3, "Build v3")]
+    run_db(run, monkeypatch, timeout=20)
+
+
+def test_concurrent_requirement_writers_only_one_wins(tmp_path, monkeypatch):
+    async def run(pool):
+        await _task(pool, "draft")
+        async with _controls(tmp_path, planner=True) as (_, bus, post):
+            # Hold the existing task lock until both HTTP writers have reached the DB write.
+            reached = asyncio.Event()
+            count = 0
+            original = task_changes.edit_requirement
+
+            async def write(*args, **kwargs):
+                nonlocal count
+                count += 1
+                if count == 2:
+                    reached.set()
+                return await original(*args, **kwargs)
+
+            monkeypatch.setattr(task_changes, "edit_requirement", write)
+            async with pool.acquire() as conn:
+                async with conn.transaction():
+                    await conn.fetchrow("SELECT id FROM tasks WHERE id = 'task-a' FOR UPDATE")
+                    writers = [asyncio.create_task(post("/api/v1/tasks/requirement_update",
+                        {"task_id": "task-a", "requirement": text, "expected_version": 1}))
+                        for text in ("build calc\n\nA", "build calc\n\nB")]
+                    await asyncio.wait_for(reached.wait(), 5)
+            answers = await asyncio.gather(*writers)
+            assert sorted(status for status, _ in answers) == [200, 409], answers
+            winner = next(answer["result"] for status, answer in answers if status == 200)
+            loser = next(answer["error"] for status, answer in answers if status == 409)
+            assert loser["code"] == "requirement_changed" and loser["details"] == {"current_version": 2}
+            assert (await tasks.get_task("task-a", pool=pool))["requirement"] == winner["requirement"]
+            assert [(v["version"], v["text"]) for v in await task_changes.requirement_versions("task-a", pool=pool)] == [
+                (1, "build calc"), (2, winner["requirement"])]
+            assert len(_messages(bus, "planner-task-a")) == 1
     run_db(run, monkeypatch, timeout=20)

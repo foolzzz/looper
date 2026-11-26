@@ -146,11 +146,15 @@ def test_acceptance_is_not_read_until_model_output_after_a_later_tool_result(
         process, channel = handle.process, handle.channel
         assert process is not None and isinstance(channel, GrokChannel)
         events: list[dict[str, Any]] = []
+        tool_started = asyncio.Event()
         tool_finished = asyncio.Event()
 
         async def consume() -> None:
             async for event in channel.events():
                 events.append(event)
+                if any(b.get("type") == "tool_use" and b.get("id") == "steer-tool"
+                       for b in (event.get("message") or {}).get("content", []) if isinstance(b, dict)):
+                    tool_started.set()
                 if any(b.get("type") == "tool_result" for b in (event.get("message") or {}).get("content", [])
                        if isinstance(b, dict)):
                     tool_finished.set()
@@ -163,6 +167,9 @@ def test_acceptance_is_not_read_until_model_output_after_a_later_tool_result(
             await asyncio.wait_for(channel.start(scenario), 2)
             task = asyncio.create_task(consume())
             await _wait_file(tmp_path / "steer-ready")
+            if scenario not in ("STEER_FINAL", "STEER_LATE"):
+                # The child being ready does not mean the channel has read its tool call.
+                await asyncio.wait_for(tool_started.wait(), 2)
             result = await asyncio.wait_for(channel.send("new instructions", uuid=delivery_id), 3)
             assert result is (DeliveryResult.REJECTED if scenario == "STEER_REFUSE" else DeliveryResult.ACCEPTED)
             await _wait_file(tmp_path / "steer-accepted")
