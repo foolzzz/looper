@@ -776,7 +776,13 @@ Manager has no tool for it. The dashboard shows the task page's 指标 card and 
   message's payload names its chat session (`chat_session_id`), so the web
   channel adds the reply to that chat's history (`chat_messages`, shown when
   the chat is opened) instead of a message's stream; Lark and Telegram send it
-  to the chat. With no message before it, the reply is only recorded
+  to the chat. With no message before it, the reply is only recorded. The
+  default Manager's main session holds the operator's own conversation, so it
+  sends the reply only when that message was the operator's (the dashboard
+  without an API client, or the operator's direct chat); after a group, another
+  sender's direct chat or an API client's thread the reply is only recorded,
+  with a `manager_events` row of kind `autonomous` (`skipped`,
+  `withheld_not_operator`). A routed session's own chat still gets its reply
 
 ### TaskRouter (`looper/agents/tiers/task.py`)
 
@@ -5784,9 +5790,16 @@ notice. A turn runs in the direct chat itself (its `/stop`, its history): a
 Lark notice names the person, so the chat is the task's reply route, or, for a
 task that recorded none, the one the same person's latest task with that bot
 recorded; when none did, the end is `skipped` with `no_chat` and gets the
-notice. A schedule's run message to an allowlisted direct chat (only a run that
+notice. The default Manager's main session is the operator's conversation, so
+its turn does not write to anyone else: an end whose turn would run there but
+whose chat is an API client's dashboard thread, or another person's direct chat
+(session routing off, or on with no operator id on the bot), is `skipped` with
+`withheld_not_operator` and gets the notice. A schedule's run message to an
+allowlisted direct chat (only a run that
 ended its task, and only when `notify` sends it) is `pending` for the default
-Manager; to a chat bound to a Manager it is `skipped` with `group_chat`. A
+Manager (`skipped` with `withheld_not_operator` when that chat is not the
+operator's and session routing is off); to a chat bound to a Manager it is
+`skipped` with `group_chat`. A
 pending event is due 60 seconds after it was recorded (`due_at`): the chat's
 first end opens a gathering window, and the ends that come before it closes are
 told in the same turn. The completion service (`completion_service`, one per
