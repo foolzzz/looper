@@ -361,7 +361,7 @@ function WorkPageContent({
         />
         <WorkSteps task={selected} onOpenGate={step => openGate(step.step_key)} />
         <WorkGates task={selected} onOpenGate={openGate} />
-        <div className="p-4"><WorkChanges taskId={taskId} visible pendingWorkspace={selected.status === "draft"} /></div>
+        <div className="p-4"><WorkChanges taskId={taskId} visible pendingWorkspace={isUnstartedTask(selected.status)} /></div>
         <WorkCost task={selected} />
       </aside>}
       <WorkSwitcher open={switcher && finder} onClose={closeSwitcher} onOpen={openTask} restore={restore} />
