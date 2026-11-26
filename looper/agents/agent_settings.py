@@ -683,12 +683,13 @@ def resolve(role: AgentType | str | None, layers: Mapping[Place, LayerValues],
         if text is not None and not (layer is Layer.SYSTEM and _is_builtin_harness(text)):
             in_project = project_id if layer in (Layer.PROJECT, Layer.ROLE_PROJECT) else None
             harness = Harness(text, layer, in_project, from_role)
-        # Explorers have their own profile and cap; shared task defaults must
-        # not silently replace the deliberately cheaper built-in model.
-        own_explorer_layer = agent not in (AgentType.EXPLORER, AgentType.TASK_MANAGER) or layer_role is agent
-        if values.profile is not None and own_explorer_layer:
+        # Explorers have their own profile and cap. A task Manager selects only
+        # its independent role's profile or its task's override, never a project's.
+        own_role_layer = agent not in (AgentType.EXPLORER, AgentType.TASK_MANAGER) or layer_role is agent
+        own_profile_layer = layer in (Layer.ROLE, Layer.TASK) if agent is AgentType.TASK_MANAGER else own_role_layer
+        if values.profile is not None and own_profile_layer:
             chosen, chosen_source = values.profile, layer
-        if values.run_budget_usd is not None and own_explorer_layer:
+        if values.run_budget_usd is not None and own_role_layer:
             budget, budget_source = values.run_budget_usd, layer
         for key, value in values.env:
             if value is None:

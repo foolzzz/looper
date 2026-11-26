@@ -77,6 +77,8 @@ def dashboard(dashboard_url):
                 result = {"projects": []}
             elif path == "chat_settings/get":
                 result = {"stop_enabled": False}
+            elif path == "task_conversations/get":
+                result = {"enabled": False}
             elif path == "operator_chat/send":
                 if state["hold"]:
                     held.append(route)
