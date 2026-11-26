@@ -33,6 +33,7 @@ _CHAT_IDS = {
 _OBSERVATION_LOCK = 0x63686174  # Two-key namespace, separate from routing/schema locks.
 UNBOUND_KEPT = 20
 _Reader = asyncpg.Pool | asyncpg.Connection
+_KEEP = object()
 
 
 class SenderPolicy(StrEnum):
@@ -51,6 +52,10 @@ class ChatBinding(TypedDict):
     created_at: datetime
     allowed_senders: list[str]
     sender_policy: SenderPolicy
+    default_scope: str | None
+    effective_default_scope: str
+    legacy_allowed: bool
+    suggested_scope: str | None
 
 
 class RoutingSnapshot(TypedDict):
@@ -133,7 +138,9 @@ async def list_bindings(channel_id: str | None = None, manager_id: str | None = 
         if not await reader.fetchval("SELECT deleted_at IS NULL FROM managers WHERE id = $1", manager_id):
             raise LookupError("Manager not found")
     rows = await reader.fetch(
-        "SELECT channel_id, chat_id, manager_id, created_at, allowed_senders, sender_policy FROM manager_chat_bindings "
+        "SELECT channel_id, chat_id, manager_id, created_at, allowed_senders, sender_policy, "
+        "default_scope, coalesce(default_scope, 'chat_only') AS effective_default_scope, legacy_allowed, suggested_scope "
+        "FROM manager_chat_bindings "
         "WHERE ($1::text IS NULL OR channel_id = $1) AND ($2::text IS NULL OR manager_id = $2) "
         "ORDER BY channel_id, chat_id", channel_id, manager_id)
     return [ChatBinding(**dict(row)) for row in rows]
@@ -158,6 +165,7 @@ async def put_binding(channel_id: str, chat_id: str, manager_id: str, *,
                       conn: asyncpg.Connection, before_write: Callable[[], Awaitable[None]] | None = None,
                       allowed_senders: Sequence[str] | None = None,
                       sender_policy: SenderPolicy | str | None = None,
+                      default_scope: object | None | str = _KEEP,
                       expected_manager_revision: int | None = None) -> ChatBinding:
     """Bind even to the bot's own Manager; rebinding keeps the original creation time.
 
@@ -188,29 +196,46 @@ async def put_binding(channel_id: str, chat_id: str, manager_id: str, *,
     await _channel(channel_id, conn, lock=True)
     if before_write is not None:
         await before_write()
-    previous_owner = await conn.fetchval(
-        "SELECT manager_id FROM manager_chat_bindings WHERE channel_id = $1 AND chat_id = $2 FOR UPDATE",
+    previous = await conn.fetchrow(
+        "SELECT manager_id, legacy_allowed FROM manager_chat_bindings WHERE channel_id = $1 AND chat_id = $2 FOR UPDATE",
         channel_id, chat_id)
+    if default_scope is not _KEEP:
+        await validate_default_scope(conn, default_scope, bool(previous and previous["legacy_allowed"]
+                                    and previous["manager_id"] == manager_id))
     row = await conn.fetchrow(
-        "INSERT INTO manager_chat_bindings (channel_id, chat_id, manager_id, allowed_senders, sender_policy) "
-        "VALUES ($1, $2, $3, coalesce($4::text[], '{}'), coalesce($5::text, 'listed')) "
+        "INSERT INTO manager_chat_bindings (channel_id, chat_id, manager_id, allowed_senders, sender_policy, default_scope, legacy_allowed) "
+        "VALUES ($1, $2, $3, coalesce($4::text[], '{}'), coalesce($5::text, 'listed'), $6, $8) "
         "ON CONFLICT (channel_id, chat_id) DO UPDATE SET manager_id = EXCLUDED.manager_id, "
         "allowed_senders = CASE WHEN $4::text[] IS NOT NULL THEN $4::text[] "
         "WHEN manager_chat_bindings.manager_id = EXCLUDED.manager_id THEN manager_chat_bindings.allowed_senders "
         "ELSE '{}' END, sender_policy = CASE WHEN $5::text IS NOT NULL THEN $5::text "
         "WHEN manager_chat_bindings.manager_id = EXCLUDED.manager_id THEN manager_chat_bindings.sender_policy "
         "ELSE 'listed' END, "
-        "default_scope = CASE WHEN manager_chat_bindings.manager_id = EXCLUDED.manager_id "
+        "default_scope = CASE WHEN $7 THEN $6 WHEN manager_chat_bindings.manager_id = EXCLUDED.manager_id "
         "THEN manager_chat_bindings.default_scope ELSE NULL END, "
         "legacy_allowed = manager_chat_bindings.legacy_allowed AND manager_chat_bindings.manager_id = EXCLUDED.manager_id, "
         "suggested_scope = CASE WHEN manager_chat_bindings.manager_id = EXCLUDED.manager_id "
         "THEN manager_chat_bindings.suggested_scope ELSE NULL END "
-        "RETURNING channel_id, chat_id, manager_id, created_at, allowed_senders, sender_policy",
-        channel_id, chat_id, manager_id, allowed_senders, policy)
-    if previous_owner is not None and previous_owner != manager_id:
+        "RETURNING channel_id, chat_id, manager_id, created_at, allowed_senders, sender_policy, "
+        "default_scope, coalesce(default_scope, 'chat_only') AS effective_default_scope, legacy_allowed, suggested_scope",
+        channel_id, chat_id, manager_id, allowed_senders, policy,
+        None if default_scope is _KEEP else default_scope, default_scope is not _KEEP,
+        bool(previous and previous["legacy_allowed"] and previous["manager_id"] == manager_id))
+    if previous is not None and previous["manager_id"] != manager_id:
         await conn.execute("DELETE FROM binding_principal_scopes WHERE channel_id = $1 AND chat_id = $2",
                            channel_id, chat_id)
     return ChatBinding(**dict(row))
+
+
+async def validate_default_scope(conn: _Reader, scope: object, legacy_allowed: bool = False) -> None:
+    """Validate the operator's choice before writing; CHECKs remain the final guard."""
+    if scope == "full":
+        raise ValueError("full is only for the operator's own session")
+    if scope == "legacy" and not legacy_allowed:
+        raise ValueError("legacy is kept only on bindings that existed before scopes; choose another scope")
+    if scope is not None and not await conn.fetchval(
+            "SELECT true FROM capability_sets WHERE id = $1 AND deleted_at IS NULL", scope):
+        raise ValueError("unknown or deleted capability set")
 
 
 async def delete_binding(channel_id: str, chat_id: str, *, conn: asyncpg.Connection,
