@@ -28,6 +28,7 @@ from looper.agents import operator_auth, service
 from looper.upgrade import UpgradeKind, UpgradePlan
 
 _REAL_INSTALLER = service._install_target
+_REAL_DEPENDENCY_PREPARATION = service._prepare_checkout_dependencies
 _REAL_UNIT_PACKAGE_ROOT = service._unit_package_root
 
 
@@ -98,7 +99,8 @@ def deployment(tmp_path, monkeypatch, system_responses):
 
     statuses = [{"phase": "draining", "waiting": {"runs": []}}, {"phase": "drained"}]
     scenario = SimpleNamespace(target=target, current=current, install_error=False, stop_error=False, stop_then_error=False,
-                               verify_error=False, process_lingers=False)
+                               verify_error=False, process_lingers=False, prepare_error=False,
+                               prepared=[])
 
     def operation(port, token, name, args, **kwargs):
         events.append(name)
@@ -156,6 +158,15 @@ def deployment(tmp_path, monkeypatch, system_responses):
     monkeypatch.setattr(components, "manifest_from_git", lambda *args: scenario.target)
     monkeypatch.setattr(components, "loaded_manifest", lambda: current)
     monkeypatch.setattr(service, "_install_target", install)
+
+    def prepare_dependencies(host, source):
+        assert state.running, "the target's dependencies are prepared while the old version serves"
+        assert "drain" not in events
+        scenario.prepared.append(source)
+        if scenario.prepare_error:
+            raise service.ServiceError("preparing dependencies failed")
+
+    monkeypatch.setattr(service, "_prepare_checkout_dependencies", prepare_dependencies)
     monkeypatch.setattr(service, "_unit_package_root", lambda host, mgr: host.package_root.resolve())
     monkeypatch.setattr(service, "__file__", str(tmp_path / "looper/agents/service.py"))
     return SimpleNamespace(host=host, events=events, statuses=statuses, state=state, scenario=scenario,
@@ -1407,7 +1418,8 @@ def checkout_install(deployment, tmp_path):
     config.parent.mkdir()
     config.write_bytes(components.CONFIG.read_bytes())
     commands = []
-    sources = {"web/src/app.ts": b"target dashboard source",
+    sources = {"pyproject.toml": b"[project]\nname = 'target'\n",
+               "web/src/app.ts": b"target dashboard source",
                "looper/components.toml": components.CONFIG.read_bytes(),
                "looper/components.py": Path(components.__file__).read_bytes()}
 
@@ -1526,6 +1538,186 @@ def test_checkout_build_failure_leaves_running_checkout_untouched(
     assert report(deployment)["prepare_seconds"] > 0
     assert report(deployment)["gap_seconds"] == 0
     assert report(deployment)["serving"] is True
+
+
+@pytest.fixture
+def dependency_upgrade(deployment, checkout_install, monkeypatch):
+    """A FULL checkout upgrade through the real installer and the real dependency preparation."""
+    monkeypatch.setattr(service, "_install_target", _REAL_INSTALLER)
+    monkeypatch.setattr(service, "_prepare_checkout_dependencies", _REAL_DEPENDENCY_PREPARATION)
+    syncs, order = [], []
+    fail = SimpleNamespace(pre=False, post=False, repair=False)
+    run = deployment.host.run
+
+    def execute(argv, **kwargs):
+        env = kwargs.get("env") or {}
+        if argv[:2] == ["uv", "sync"]:
+            running = deployment.state.running
+            syncs.append(SimpleNamespace(argv=list(argv), env=dict(env), running=running,
+                                         project=Path(argv[argv.index("--project") + 1]),
+                                         exists=Path(argv[argv.index("--project") + 1], "pyproject.toml").exists()))
+            order.append("pre_sync" if running else "post_sync")
+            if (running and fail.pre) or (not running and fail.post and env.get("UV_OFFLINE") == "1"
+                                          and len(syncs) == 2):
+                return subprocess.CompletedProcess(argv, 1, "", "index unreachable")
+            if not running and fail.repair and len(syncs) == 3:
+                return subprocess.CompletedProcess(argv, 1, "", "repair failed")
+            if not running and len(syncs) == 2:
+                deployment.scenario.current = deployment.scenario.target
+            return subprocess.CompletedProcess(argv, 0, "", "")
+        if argv[:5] == ["git", "-C", str(deployment.host.cwd), "reset", "--hard"]:
+            order.append("reset")
+        if "merge" in argv:
+            order.append("merge")
+        return run(argv, **kwargs)
+
+    deployment.host.run = execute
+    deployment.host.environ = {"PATH": "/usr/bin", "HOME": str(deployment.host.home)}
+    return SimpleNamespace(deployment=deployment, syncs=syncs, order=order, fail=fail,
+                           commands=checkout_install.commands)
+
+
+def test_dependencies_install_before_the_drain_and_offline_after_the_stop(dependency_upgrade, tmp_path):
+    deployment = dependency_upgrade.deployment
+    assert cli.main(["service", "upgrade"]) == 0
+    pre, post = dependency_upgrade.syncs
+    assert len(dependency_upgrade.syncs) == 2  # one extra sync, no more
+    assert dependency_upgrade.order == ["pre_sync", "merge", "post_sync"]
+    assert deployment.events.index("drain") < deployment.events.index("stop") < deployment.events.index("install") \
+        if "install" in deployment.events else deployment.events.index("drain") < deployment.events.index("stop")
+    # Before the drain: the target's archive, a throwaway environment, the caller's environment.
+    assert pre.running and pre.exists and pre.project != deployment.host.cwd
+    assert pre.env["UV_PROJECT_ENVIRONMENT"] != str(tmp_path / ".venv")
+    assert Path(pre.env["UV_PROJECT_ENVIRONMENT"]).parent == pre.project.parent
+    assert "UV_OFFLINE" not in pre.env
+    assert not pre.project.exists()  # removed afterwards
+    assert pre.argv[pre.argv.index("--python") + 1] == deployment.host.executable
+    assert pre.argv[pre.argv.index("--extra") + 1] == "test"
+    archive = next(argv for argv in dependency_upgrade.commands if "archive" in argv)
+    assert ":(exclude)web" in archive and archive[archive.index("--") - 1] == "1" * 40
+    # After the stop: the real environment, offline.
+    assert not post.running and post.project == deployment.host.cwd
+    assert post.env["UV_OFFLINE"] == "1"
+    assert post.env["UV_PROJECT_ENVIRONMENT"] == str(tmp_path / ".venv")
+
+
+def test_dependency_preparation_failure_never_stops_the_service(dependency_upgrade):
+    deployment = dependency_upgrade.deployment
+    dependency_upgrade.fail.pre = True
+    assert cli.main(["service", "upgrade"]) == 1
+    assert deployment.events == []
+    assert deployment.state.running and deployment.state.pid == 123456789
+    assert dependency_upgrade.order == ["pre_sync"]
+    assert report(deployment)["serving"] is True
+
+
+@pytest.mark.parametrize("repair_fails", [False, True])
+def test_offline_sync_failure_resets_checkout_and_restarts_the_old_version(
+        dependency_upgrade, repair_fails, capsys):
+    deployment = dependency_upgrade.deployment
+    dependency_upgrade.fail.post = True
+    dependency_upgrade.fail.repair = repair_fails
+    assert cli.main(["service", "upgrade"]) == 1
+    # The checkout goes back before the old version starts; the target is never started.
+    assert dependency_upgrade.order == ["pre_sync", "merge", "post_sync", "reset", "post_sync"]
+    reset = next(argv for argv in dependency_upgrade.commands if "reset" in argv)
+    assert reset[-1] == "1" * 40
+    assert deployment.events.count("start") == 1 and deployment.events.index("stop") < deployment.events.index("start")
+    assert deployment.events[-1] == "drain_cancel"
+    assert deployment.scenario.current.version == "1.0.0"
+    assert deployment.state.running
+    # The old environment is re-synced offline from the cache.
+    assert dependency_upgrade.syncs[2].env["UV_OFFLINE"] == "1" and dependency_upgrade.syncs[2].project == deployment.host.cwd
+    error = capsys.readouterr().err
+    assert "dependencies failed after the stop" in error and "index unreachable" in error
+    assert f"reset to {'1' * 40}" in error
+    assert ("unverified" in error) is repair_fails
+    assert "looper service restart" not in error
+    assert report(deployment)["serving"] is True and "restart_hint" not in report(deployment)
+
+
+def test_offline_sync_failure_does_not_send_the_operator_to_a_plain_restart(dependency_upgrade, capsys):
+    deployment = dependency_upgrade.deployment
+    log = deployment.root / "logs/serve.log"
+    log.parent.mkdir(parents=True)
+    log.write_text("startup output\n")
+    dependency_upgrade.fail.post = True
+
+    def status(*args, **kwargs):
+        if "stop" not in deployment.events:
+            return deployment.responses.status
+        deployment.state.running = False
+        deployment.state.pid = None
+        return None
+
+    deployment.host.get_status = status
+    assert cli.main(["service", "upgrade", "--timeout", "1"]) == 1
+    data = report(deployment)
+    assert data["serving"] is False and "restart_hint" not in data
+    assert "looper service restart" not in capsys.readouterr().err
+
+
+def test_failed_checkout_reset_leaves_the_service_stopped(dependency_upgrade, capsys):
+    deployment = dependency_upgrade.deployment
+    dependency_upgrade.fail.post = True
+    run = deployment.host.run
+
+    def execute(argv, **kwargs):
+        if "reset" in argv:
+            return subprocess.CompletedProcess(argv, 1, "", "cannot lock ref")
+        return run(argv, **kwargs)
+
+    deployment.host.run = execute
+    deployment.host.get_status = lambda *args, **kwargs: (
+        deployment.responses.status if deployment.state.running else None)
+    assert cli.main(["service", "upgrade"]) == 1
+    # The checkout is still on the target: the old version must not be started on it.
+    assert "start" not in deployment.events and not deployment.state.running
+    assert "drain_cancel" not in deployment.events
+    error = capsys.readouterr().err
+    assert "NOT restarted" in error and "reset --hard" in error and "serving: no" in error
+    assert report(deployment)["serving"] is False and "restart_hint" not in report(deployment)
+
+
+def test_failed_sync_restores_the_local_lock_file(checkout_install, tmp_path):
+    lock = checkout_install.host.cwd / "uv.lock"
+    lock.write_bytes(b"old lock")
+    run, attempts = checkout_install.host.run, []
+
+    def execute(argv, **kwargs):
+        if argv[:2] == ["uv", "sync"] and kwargs["env"].get("UV_OFFLINE") == "1" and not attempts:
+            attempts.append(argv)
+            lock.write_bytes(b"half-written lock")
+            return subprocess.CompletedProcess(argv, 1, "", "no matching distribution")
+        return run(argv, **kwargs)
+
+    checkout_install.host.run = execute
+    with pytest.raises(service._InstallFailed, match="no matching distribution"):
+        _REAL_INSTALLER(checkout_install.host, "candidate", wheel=False, build_web=False, dependencies=True,
+                        sync_environment=tmp_path / ".venv")
+    assert lock.read_bytes() == b"old lock"
+
+
+def test_upgrade_without_dependency_change_runs_no_sync(deployment, checkout_install, monkeypatch):
+    target = manifest("web", "1.0.1")
+    deployment.scenario.target = target
+    deployment.host.get_index = lambda *args, **kwargs: b"new dashboard"
+    monkeypatch.setattr(service, "_install_target", _REAL_INSTALLER)
+    monkeypatch.setattr(service, "_prepare_checkout_dependencies", _REAL_DEPENDENCY_PREPARATION)
+    target.verification["web"] = "x"
+    run = deployment.host.run
+
+    def execute(argv, **kwargs):
+        result = run(argv, **kwargs)
+        if "--outDir" in argv:
+            target.verification["web"] = components.web_fingerprints(Path(argv[-1]))[1]
+        if "merge" in argv:
+            deployment.scenario.current = target
+        return result
+
+    deployment.host.run = execute
+    assert cli.main(["service", "upgrade"]) == 0
+    assert not any(argv[0] == "uv" for argv in checkout_install.commands)
 
 
 @pytest.mark.parametrize("build_web", [False, True], ids=["noop", "web_only"])
