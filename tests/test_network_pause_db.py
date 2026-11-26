@@ -1,5 +1,8 @@
 """Network pause persistence, bounded waiting and public readback."""
 from datetime import datetime, timedelta, timezone
+from unittest.mock import AsyncMock
+
+import pytest
 
 from looper.db import network_pauses, plans
 from looper.agents import attention, metrics, projects
@@ -29,8 +32,13 @@ def test_pause_survives_reload_and_preserves_original_deadline(monkeypatch):
                            "('task','project','Keep the workspace','waiting')")
         await plans.save('task', plan={'plan_id': 'plan', 'status': 'planning'}, pool=pool)
         assert await attention._failure_holds(None) is attention.NotRead.OFF
-        assert 'network_pause' not in await projects.task_detail('task')
+        with monkeypatch.context() as patch:
+            read_pause = AsyncMock(wraps=network_pauses.get)
+            patch.setattr(network_pauses, 'get', read_pause)
+            assert 'network_pause' not in await projects.task_detail('task')
+            read_pause.assert_not_awaited()
         assert 'network_pause' not in await metrics.compute(7, metrics.Filters(), pool=pool)
+        await pool.execute("INSERT INTO system_settings(key,value) VALUES ('engine.network_pause.enabled','true')")
         started = datetime.now(timezone.utc) - timedelta(seconds=30)
         deadline = started + timedelta(hours=2)
         first = await network_pauses.put('task', {'reason': 'Model API unavailable', 'started_at': started,
@@ -61,6 +69,29 @@ def test_pause_survives_reload_and_preserves_original_deadline(monkeypatch):
         assert await network_pauses.expire('task', pause_id=first['id'], pool=pool) is None
         assert await network_pauses.clear('task', pause_id=first['id'], pool=pool) is None
         assert (await network_pauses.get('task', pool=pool))['state'] == 'paused'
+    run_db(body, monkeypatch)
+
+
+@pytest.mark.parametrize('state,phase', [('paused', 'waiting'), ('waiting_user', 'waiting_user')])
+@pytest.mark.parametrize('status', ['executing', 'stopped'])
+def test_detail_projects_pause_phase_before_task_status_converges(monkeypatch, state, phase, status):
+    async def body(pool):
+        await pool.execute("INSERT INTO projects(id,name) VALUES ('project','Network recovery')")
+        await pool.execute("INSERT INTO tasks(id,project_id,requirement,status,phase) VALUES "
+                           "('task','project','Keep the workspace',$1,'executing')", status)
+        await pool.execute("INSERT INTO system_settings(key,value) VALUES ('engine.network_pause.enabled','true')")
+        await network_pauses.put('task', {'state': state, 'reason': 'Model API unavailable',
+            'deadline': datetime.now(timezone.utc) + timedelta(hours=1)})
+        detail = await projects.task_detail('task')
+        assert detail['network_pause']['state'] == state
+        assert detail['status'] == status
+        assert detail['phase'] == (phase if status == 'executing' else 'executing')
+        stored = await pool.fetchrow("SELECT status,phase FROM tasks WHERE id='task'")
+        assert dict(stored) == {'status': status, 'phase': 'executing'}
+        await network_pauses.clear('task')
+        released = await projects.task_detail('task')
+        assert 'network_pause' not in released
+        assert released['phase'] == 'executing'
     run_db(body, monkeypatch)
 
 

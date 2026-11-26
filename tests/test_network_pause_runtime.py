@@ -128,6 +128,42 @@ def test_default_off_does_not_pause_or_restart(monkeypatch, tmp_path):
     asyncio.run(body())
 
 
+@pytest.mark.parametrize('state', ['paused', 'waiting_user'])
+def test_disabling_policy_releases_a_live_pause(monkeypatch, state):
+    from looper.agents import network_pause, network_pause_settings
+    from looper.db import network_pauses
+
+    async def body(pool):
+        await pool.execute("INSERT INTO projects(id,name) VALUES ('project','Network recovery')")
+        await pool.execute("INSERT INTO tasks(id,project_id,requirement,status) VALUES "
+                           "('task','project','Release the wait','waiting')")
+        await network_pause_settings.update({'enabled': True})
+        pause = await network_pauses.put('task', {'state': state, 'reason': 'Model API unavailable',
+            'deadline': datetime.now(timezone.utc) + timedelta(hours=1)})
+        monkeypatch.setattr(network_pause, 'PROBE_INITIAL_SECONDS', .01)
+        monkeypatch.setattr(network_pause, 'PROBE_MAX_SECONDS', .02)
+        monkeypatch.setattr(network_pause, 'probe', AsyncMock(return_value=False))
+        started = asyncio.Event()
+        changes = []
+        async def changed(row):
+            changes.append(row)
+            started.set()
+        waiting = asyncio.create_task(network_pause.wait('task', changed=changed))
+        try:
+            await asyncio.wait_for(started.wait(), 3)
+            assert not waiting.done()
+            await network_pause_settings.update({'enabled': False})
+            assert await asyncio.wait_for(waiting, 3) is True
+            assert changes[0]['id'] == pause['id'] and changes[-1] is None
+            assert await network_pauses.get('task') is None
+            ended = await pool.fetchrow('SELECT ended_at,end_reason FROM task_network_pauses WHERE id=$1', pause['id'])
+            assert ended['ended_at'] is not None and ended['end_reason'] == 'disabled'
+        finally:
+            waiting.cancel()
+            await asyncio.gather(waiting, return_exceptions=True)
+    run_db(body, monkeypatch, timeout=35)
+
+
 def test_restart_resumes_a_paused_planning_turn_with_the_saved_plan(monkeypatch, tmp_path):
     from looper.agents import network_pause
     from looper.agents.message import MessageEnvelope, MessageType, planner_address

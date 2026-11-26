@@ -979,7 +979,12 @@ async def task_detail(task_id: str, *, compact: bool = False) -> dict[str, Any]:
         from .v1_domains.task_failures import hold_view
         failure_holds = [hold_view(row) for row in failure_holds]
     from ..db import network_pauses
-    network_pause = await network_pauses.get(task_id)
+    from . import network_pause_settings
+    network_pause = await network_pauses.get(task_id) if (await network_pause_settings.load()).enabled else None
+    phase = raw.get("phase", "pending")
+    if network_pause is not None and raw.get("status") in db_tasks.ACTIVE_STATUSES:
+        # The pause is durable before the TaskRouter consumes the Planner's status message.
+        phase = "waiting" if network_pause['state'] == network_pauses.State.PAUSED else "waiting_user"
     return {
         **({"holds": failure_holds} if failure_holds is not None else {}),
         **({"network_pause": network_pauses.view(network_pause)} if network_pause is not None else {}),
@@ -1008,7 +1013,7 @@ async def task_detail(task_id: str, *, compact: bool = False) -> dict[str, Any]:
         "project_name": raw.get("project_name", ""),
         "status": raw.get("status", "pending"),
         "group": db_tasks.task_group(raw.get("status")).value,
-        "phase": raw.get("phase", "pending"),
+        "phase": phase,
         "planner_id": raw.get("planner_id"),
         "correlation_id": raw.get("correlation_id", ""),
         "work_dir": raw.get("work_dir", ""),

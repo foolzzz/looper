@@ -223,13 +223,15 @@ def test_isolated_serve_network_pause_resume_and_expiry(tmp_path, variant):
                 return
             paused = _until(lambda: (row if (row := detail()).get("network_pause") else None), "network pause")
             assert paused["network_pause"]["state"] == "paused"
-            assert paused["network_pause"]["reason"] and paused["status"] == "waiting"
+            assert paused["network_pause"]["reason"] and paused["phase"] == "waiting"
+            _until(lambda: detail()["status"] == "waiting", "task status converges to waiting")
             assert all(step["retries"] == 0 for step in paused["steps"])
             plan = _query(url, "SELECT plan_id FROM task_plans WHERE task_id=$1", task_id)
             counts = {path.name: path.read_text() for path in state.glob("*.count")}
             if variant == "expiry":
                 expired = _until(lambda: (row if (row := detail())["status"] == "waiting_user" else None), "bounded expiry")
                 assert expired["network_pause"]["state"] == "waiting_user"
+                assert expired["phase"] == "waiting_user"
                 assert all(step["retries"] == 0 for step in expired["steps"])
                 for _ in range(2):
                     summary = call("attention.summary")["result"]
@@ -258,8 +260,8 @@ def test_isolated_serve_network_pause_resume_and_expiry(tmp_path, variant):
             assert (work / "retained.txt").read_text() == "Workspace content survives a network pause.\n"
             if variant == 'expiry':
                 confirmed('ops.task_control.stop', {'task_id': task_id})
-                stopped = _until(lambda: (row if (row := detail())['status'] == 'stopped' else None), 'operator stop')
-                assert stopped.get('network_pause') is None
+                _until(lambda: detail()['status'] == 'stopped', 'operator stop')
+                _until(lambda: detail().get('network_pause') is None, 'operator stop releases network pause')
                 assert counts == {path.name: path.read_text() for path in state.glob('*.count')}
                 endpoint.listen()
                 confirmed('ops.task_control.restart', {'task_id': task_id})
