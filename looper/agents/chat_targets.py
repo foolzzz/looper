@@ -14,6 +14,7 @@ from typing import Any
 
 from ..db import llm_records, managers as db_managers, steps as db_steps, tasks as db_tasks
 from . import task_conversations_settings
+from .ops import ErrorCode, OpError
 from .message import MANAGER_ADDRESS, AgentAddress, manager_address, planner_address, task_manager_address
 from .task_roles import run_role
 from .tiers.task import TaskRouter
@@ -59,6 +60,9 @@ async def resolve_chat_target(raw: Any, task_router: TaskRouter, fleet: Any = No
     if kind == "task":
         if not task_conversations_settings.enabled():
             raise ChatTargetError(HTTP_409, "work mode is off (tasks.conversations.enabled)")
+        if not task_conversations_settings.manager_answers():
+            raise OpError(ErrorCode.TASK_MANAGER_OFF,
+                          "the task Manager does not answer (tasks.conversations.manager_answers is off)")
         task_id = str(target.get("task_id") or "")
         if await db_tasks.get_task(task_id) is None:
             raise ChatTargetError(HTTP_400, f"no task {task_id}")

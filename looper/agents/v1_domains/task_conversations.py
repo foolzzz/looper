@@ -5,7 +5,7 @@ from ..action_levels import ActionLevel
 from ..api_v1 import Operation, _BOOL, _object
 
 _MAX = {"type": "integer", "minimum": 1, "maximum": 20}
-VIEW = _object({"enabled": _BOOL, "max_resident": _MAX}, closed=True)
+VIEW = _object({"enabled": _BOOL, "manager_answers": _BOOL, "max_resident": _MAX}, closed=True)
 RESULTS = {}
 OPERATIONS = (
     Operation("task_conversations.get", "POST", "/api/v1/task_conversations/get",
@@ -16,8 +16,11 @@ OPERATIONS = (
     Operation("task_conversations.update", "POST", "/api/v1/task_conversations/update",
               "Set the work-mode setting.",
               "Set the work-mode setting. On, the dashboard can create draft tasks; nothing else changes yet. "
-              "Max resident sets the task Manager process cap (1–20). Null restores defaults: disabled and 6.",
+              "manager_answers (default off) is a separate switch: on, a message to a task is answered by the task Manager "
+              "instead of being refused. Max resident sets the task Manager process cap (1–20). "
+              "Null restores defaults: disabled, off and 6.",
               _object({"enabled": {"type": ["boolean", "null"]},
+                       "manager_answers": {"type": ["boolean", "null"]},
                        "max_resident": {**_MAX, "type": ["integer", "null"]}}, [], closed=True), VIEW,
               risk="high", confirms=True, operator_only=True,
               level=ActionLevel.INSIDE),  # changes only Looper's own setting
@@ -32,6 +35,10 @@ async def impact(server, operation, arguments, principal, headers):
         value = False if arguments["enabled"] is None else arguments["enabled"]
         changes.append(f"Set {settings.KEY} to {str(value).lower()}? "
                        "On, the dashboard can create draft tasks; nothing else changes yet.")
+    if "manager_answers" in arguments:
+        value = False if arguments["manager_answers"] is None else arguments["manager_answers"]
+        changes.append(f"Set {settings.MANAGER_ANSWERS_KEY} to {str(value).lower()}? "
+                       "On, a message to a task starts a task Manager process that calls a model.")
     if "max_resident" in arguments:
         value = settings.DEFAULT_MAX_RESIDENT if arguments["max_resident"] is None else arguments["max_resident"]
         changes.append(f"Set {settings.MAX_RESIDENT_KEY} to {value}?")

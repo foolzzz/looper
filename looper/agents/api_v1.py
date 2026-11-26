@@ -39,6 +39,7 @@ STATUS: dict[ErrorCode, str] = {
     ErrorCode.NOT_FOUND: "404 Not Found",
     ErrorCode.CONFLICT: "409 Conflict",
     ErrorCode.REQUIREMENT_CHANGED: "409 Conflict",
+    ErrorCode.TASK_MANAGER_OFF: "409 Conflict",
     ErrorCode.TASK_MANAGER_BUSY: "409 Conflict",
     ErrorCode.TASK_MANAGER_RUNTIME_UNSUPPORTED: "400 Bad Request",
     ErrorCode.EXPIRED: "410 Gone",

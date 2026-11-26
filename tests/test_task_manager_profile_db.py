@@ -14,6 +14,7 @@ from tests.db_support import run_db, v1_api
 @pytest.fixture(autouse=True)
 def isolated(monkeypatch):
     monkeypatch.setattr(task_conversations_settings, "_enabled", True)
+    monkeypatch.setattr(task_conversations_settings, "_manager_answers", True)
     monkeypatch.setattr(agent_settings, "_login_problem", AsyncMock(return_value=None))
     monkeypatch.setattr(task_manager, "current_pool", lambda: None)
 
