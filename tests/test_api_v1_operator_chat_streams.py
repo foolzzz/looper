@@ -238,6 +238,35 @@ def test_disconnect_closes_idle_subscription_even_without_a_write(tmp_path, stat
     asyncio.run(run())
 
 
+@pytest.mark.parametrize("action,body", [("reply_events", {"correlation_id": "reply"}),
+                                         ("thread_events", {"session_id": "thread"})])
+def test_shutdown_closes_an_open_event_stream(tmp_path, state, action, body):
+    async def run():
+        async with _serving(tmp_path, listen=True) as server:
+            adapter = prepare(server, state)
+            adapter._sse_queues["reply"] = asyncio.Queue()
+            assert server._port != 8767
+            reader, writer = await asyncio.open_connection("127.0.0.1", server._port)
+            try:
+                writer.write(_request(server._port, "POST " + PREFIX + action, _bearer(TOKEN),
+                                      json.dumps(body)).encode())
+                await writer.drain()
+                headers = await asyncio.wait_for(reader.readuntil(b"\r\n\r\n"), 1)
+                assert b"200 OK" in headers and b"text/event-stream" in headers
+                # Keep the client open: shutdown must retire the subscription itself.
+                await asyncio.wait_for(server.stop(), 2)
+                assert await asyncio.wait_for(reader.read(), 1) == b""
+                assert not server._handlers
+                if action == "reply_events":
+                    assert "reply" not in adapter._sse_queues
+                else:
+                    assert not adapter._chats._subs
+            finally:
+                writer.close()
+                await writer.wait_closed()
+    asyncio.run(run())
+
+
 def test_autonomous_thread_message_and_session_end_close_stream_and_retire_session_route(tmp_path, state):
     async def run():
         async with _serving(tmp_path, listen=True) as server:
