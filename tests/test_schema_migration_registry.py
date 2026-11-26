@@ -141,3 +141,11 @@ def test_retrospective_migrations_use_their_reserved_orders(name, order):
     for field in ("order", "pending_order", "online_order"):
         assert getattr(migration, field) == order
         assert sum(getattr(item, field, None) == order for item in discovered) == 1
+
+
+def test_proactive_bodies_uses_its_unoccupied_order():
+    discovered = migrations.discover()
+    migration = next(item for item in discovered if item.name == "proactive_bodies")
+    for field in ("order", "pending_order"):
+        assert getattr(migration, field) == 2110
+        assert sum(getattr(item, field, None) == 2110 for item in discovered) == 1

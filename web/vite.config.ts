@@ -22,7 +22,22 @@ function sourceFingerprint(): Plugin {
 }
 
 export default defineConfig({
-  plugins: [react(), tailwindcss(), sourceFingerprint()],
+  plugins: [react(), tailwindcss(), sourceFingerprint(), ...(process.env.VITEST ? [{
+    name: "work-main-baseline",
+    resolveId(id: string) {
+      return id === "virtual:work-main-app" || id === "virtual:work-main-sidebar" ? `${id}.tsx` : undefined;
+    },
+    load(id: string) {
+      if (!id.startsWith("virtual:work-main-")) return;
+      const file = id === "virtual:work-main-app.tsx" ? "App.tsx" : "components/sidebar.tsx";
+      const source = execFileSync("git", ["show", `origin/main:web/src/${file}`], {
+        cwd: path.resolve(import.meta.dirname, ".."), encoding: "utf8",
+      });
+      return file === "App.tsx"
+        ? source.replace('from "@/components/sidebar"', 'from "virtual:work-main-sidebar"') + "\nexport const baselinePages = [...PAGES];\n"
+        : source;
+    },
+  } satisfies Plugin] : [])],
   resolve: {
     alias: {
       "@": path.resolve(import.meta.dirname, "./src"),

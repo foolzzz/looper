@@ -1,0 +1,458 @@
+[
+  {
+    "name": "refresh_token=",
+    "input": "refresh_token=synthetic_value",
+    "expected": "refresh_token=[redacted]",
+    "secrets": [
+      "synthetic_value"
+    ]
+  },
+  {
+    "name": "refresh_token: ",
+    "input": "refresh_token: synthetic_value",
+    "expected": "refresh_token: [redacted]",
+    "secrets": [
+      "synthetic_value"
+    ]
+  },
+  {
+    "name": "access_token=",
+    "input": "access_token=synthetic_value",
+    "expected": "access_token=[redacted]",
+    "secrets": [
+      "synthetic_value"
+    ]
+  },
+  {
+    "name": "access_token: ",
+    "input": "access_token: synthetic_value",
+    "expected": "access_token: [redacted]",
+    "secrets": [
+      "synthetic_value"
+    ]
+  },
+  {
+    "name": "api_key=",
+    "input": "api_key=synthetic_value",
+    "expected": "api_key=[redacted]",
+    "secrets": [
+      "synthetic_value"
+    ]
+  },
+  {
+    "name": "api_key: ",
+    "input": "api_key: synthetic_value",
+    "expected": "api_key: [redacted]",
+    "secrets": [
+      "synthetic_value"
+    ]
+  },
+  {
+    "name": "password=",
+    "input": "password=synthetic_value",
+    "expected": "password=[redacted]",
+    "secrets": [
+      "synthetic_value"
+    ]
+  },
+  {
+    "name": "password: ",
+    "input": "password: synthetic_value",
+    "expected": "password: [redacted]",
+    "secrets": [
+      "synthetic_value"
+    ]
+  },
+  {
+    "name": "passwd=",
+    "input": "passwd=synthetic_value",
+    "expected": "passwd=[redacted]",
+    "secrets": [
+      "synthetic_value"
+    ]
+  },
+  {
+    "name": "passwd: ",
+    "input": "passwd: synthetic_value",
+    "expected": "passwd: [redacted]",
+    "secrets": [
+      "synthetic_value"
+    ]
+  },
+  {
+    "name": "secret=",
+    "input": "secret=synthetic_value",
+    "expected": "secret=[redacted]",
+    "secrets": [
+      "synthetic_value"
+    ]
+  },
+  {
+    "name": "secret: ",
+    "input": "secret: synthetic_value",
+    "expected": "secret: [redacted]",
+    "secrets": [
+      "synthetic_value"
+    ]
+  },
+  {
+    "name": "authorization=",
+    "input": "authorization=synthetic_value",
+    "expected": "authorization=[redacted]",
+    "secrets": [
+      "synthetic_value"
+    ]
+  },
+  {
+    "name": "authorization: ",
+    "input": "authorization: synthetic_value",
+    "expected": "authorization: [redacted]",
+    "secrets": [
+      "synthetic_value"
+    ]
+  },
+  {
+    "name": "cookie=",
+    "input": "cookie=synthetic_value",
+    "expected": "cookie=[redacted]",
+    "secrets": [
+      "synthetic_value"
+    ]
+  },
+  {
+    "name": "cookie: ",
+    "input": "cookie: synthetic_value",
+    "expected": "cookie: [redacted]",
+    "secrets": [
+      "synthetic_value"
+    ]
+  },
+  {
+    "name": "session=",
+    "input": "session=synthetic_value",
+    "expected": "session=[redacted]",
+    "secrets": [
+      "synthetic_value"
+    ]
+  },
+  {
+    "name": "session: ",
+    "input": "session: synthetic_value",
+    "expected": "session: [redacted]",
+    "secrets": [
+      "synthetic_value"
+    ]
+  },
+  {
+    "name": "bearer=",
+    "input": "bearer=synthetic_value",
+    "expected": "bearer=[redacted]",
+    "secrets": [
+      "synthetic_value"
+    ]
+  },
+  {
+    "name": "bearer: ",
+    "input": "bearer: synthetic_value",
+    "expected": "bearer: [redacted]",
+    "secrets": [
+      "synthetic_value"
+    ]
+  },
+  {
+    "name": "key=",
+    "input": "key=synthetic_value",
+    "expected": "key=[redacted]",
+    "secrets": [
+      "synthetic_value"
+    ]
+  },
+  {
+    "name": "key: ",
+    "input": "key: synthetic_value",
+    "expected": "key: [redacted]",
+    "secrets": [
+      "synthetic_value"
+    ]
+  },
+  {
+    "name": "token=",
+    "input": "token=synthetic_value",
+    "expected": "token=[redacted]",
+    "secrets": [
+      "synthetic_value"
+    ]
+  },
+  {
+    "name": "token: ",
+    "input": "token: synthetic_value",
+    "expected": "token: [redacted]",
+    "secrets": [
+      "synthetic_value"
+    ]
+  },
+  {
+    "name": "client-secret=",
+    "input": "client-secret=synthetic_value",
+    "expected": "client-secret=[redacted]",
+    "secrets": [
+      "synthetic_value"
+    ]
+  },
+  {
+    "name": "client-secret: ",
+    "input": "client-secret: synthetic_value",
+    "expected": "client-secret: [redacted]",
+    "secrets": [
+      "synthetic_value"
+    ]
+  },
+  {
+    "name": "private_key=",
+    "input": "private_key=synthetic_value",
+    "expected": "private_key=[redacted]",
+    "secrets": [
+      "synthetic_value"
+    ]
+  },
+  {
+    "name": "private_key: ",
+    "input": "private_key: synthetic_value",
+    "expected": "private_key: [redacted]",
+    "secrets": [
+      "synthetic_value"
+    ]
+  },
+  {
+    "name": "credential=",
+    "input": "credential=synthetic_value",
+    "expected": "credential=[redacted]",
+    "secrets": [
+      "synthetic_value"
+    ]
+  },
+  {
+    "name": "credential: ",
+    "input": "credential: synthetic_value",
+    "expected": "credential: [redacted]",
+    "secrets": [
+      "synthetic_value"
+    ]
+  },
+  {
+    "name": "failure prefix",
+    "input": "failed: refresh_token=rt_live_supersecretvalue",
+    "expected": "failed: refresh_token=[redacted]",
+    "secrets": [
+      "rt_live_supersecretvalue"
+    ]
+  },
+  {
+    "name": "nested prefix",
+    "input": "failed: reason: {\"refresh_token\":\"rt_live_supersecretvalue\"}",
+    "expected": "failed: reason: {\"refresh_token\":[redacted]}",
+    "secrets": [
+      "rt_live_supersecretvalue"
+    ]
+  },
+  {
+    "name": "quoted key",
+    "input": "{\"token\":\"tk_json_synthetic\"}",
+    "expected": "{\"token\":[redacted]}",
+    "secrets": [
+      "tk_json_synthetic"
+    ]
+  },
+  {
+    "name": "single quoted key",
+    "input": "{'access_token': 'tk_synthetic value'}",
+    "expected": "{'access_token': [redacted]}",
+    "secrets": [
+      "tk_synthetic value"
+    ]
+  },
+  {
+    "name": "quoted value",
+    "input": "password=\"pw_quoted_secret_value with spaces\"",
+    "expected": "password=[redacted]",
+    "secrets": [
+      "pw_quoted_secret_value"
+    ]
+  },
+  {
+    "name": "escaped quote",
+    "input": "token: \"tk_synthetic\\\"value\"",
+    "expected": "token: [redacted]",
+    "secrets": [
+      "tk_synthetic"
+    ]
+  },
+  {
+    "name": "single quoted value",
+    "input": "token: 'tk_single_quoted_value'",
+    "expected": "token: [redacted]",
+    "secrets": [
+      "tk_single_quoted_value"
+    ]
+  },
+  {
+    "name": "URL query",
+    "input": "https://example.test/login?token=tk_query_value&state=ok",
+    "expected": "https://example.test/login?token=[redacted]&state=ok",
+    "secrets": [
+      "tk_query_value"
+    ]
+  },
+  {
+    "name": "multiple URL parameters",
+    "input": "?state=ok&access_token=tk_access_value&refresh_token=rt_refresh_value#done",
+    "expected": "?state=ok&access_token=[redacted]&refresh_token=[redacted]#done",
+    "secrets": [
+      "tk_access_value",
+      "rt_refresh_value"
+    ]
+  },
+  {
+    "name": "Bearer header",
+    "input": "Authorization: Bearer AbCdEfGh1234567890",
+    "expected": "Authorization: [redacted]",
+    "secrets": [
+      "AbCdEfGh1234567890"
+    ]
+  },
+  {
+    "name": "Basic header",
+    "input": "Proxy-Authorization: Basic dXNlcjpwYXNzZW9yZA",
+    "expected": "Proxy-Authorization: [redacted]",
+    "secrets": [
+      "dXNlcjpwYXNzZW9yZA"
+    ]
+  },
+  {
+    "name": "short Basic header",
+    "input": "Authorization: Basic dTpw",
+    "expected": "Authorization: [redacted]",
+    "secrets": [
+      "dTpw"
+    ]
+  },
+  {
+    "name": "quoted Basic header",
+    "input": "authorization=\"Basic dTpw\"",
+    "expected": "authorization=[redacted]",
+    "secrets": [
+      "dTpw"
+    ]
+  },
+  {
+    "name": "standalone short Basic",
+    "input": "failed: Basic dTpw",
+    "expected": "failed: [redacted]",
+    "secrets": [
+      "dTpw"
+    ]
+  },
+  {
+    "name": "short Bearer",
+    "input": "failed: bearer x7",
+    "expected": "failed: [redacted]",
+    "secrets": [
+      "x7"
+    ]
+  },
+  {
+    "name": "known token prefix",
+    "input": "sk-live-ABCDEFGHIJKLMNOPQRSTUVWXYZ12",
+    "expected": "[redacted]",
+    "secrets": [
+      "sk-live-ABCDEFGHIJKLMNOPQRSTUVWXYZ12"
+    ]
+  },
+  {
+    "name": "opaque",
+    "input": "qW7nR2mK9pL4nR2mK9pL4nR2mK9pL4nR2mK9pL4nR2mK9pL4",
+    "expected": "[redacted]",
+    "secrets": [
+      "qW7nR2mK9pL4nR2mK9pL4nR2mK9pL4nR2mK9pL4nR2mK9pL4"
+    ]
+  },
+  {
+    "name": "hex",
+    "input": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+    "expected": "[redacted]",
+    "secrets": [
+      "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+    ]
+  },
+  {
+    "name": "uppercase hex",
+    "input": "0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF",
+    "expected": "[redacted]",
+    "secrets": [
+      "0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF"
+    ]
+  },
+  {
+    "name": "base64",
+    "input": "c3ludGhldGljY3JlZGVudGlhbGZvcnRlc3Rpbmdvbmx5",
+    "expected": "[redacted]",
+    "secrets": [
+      "c3ludGhldGljY3JlZGVudGlhbGZvcnRlc3Rpbmdvbmx5"
+    ]
+  },
+  {
+    "name": "padded base64",
+    "input": "c3ludGhldGljY3JlZGVudGlhbGZvcnRlc3Rpbmdvbmx5==",
+    "expected": "[redacted]",
+    "secrets": [
+      "c3ludGhldGljY3JlZGVudGlhbGZvcnRlc3Rpbmdvbmx5"
+    ]
+  },
+  {
+    "name": "JWT",
+    "input": "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJzeW50aGV0aWMifQ.c2lnbmF0dXJl",
+    "expected": "[redacted]",
+    "secrets": [
+      "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJzeW50aGV0aWMifQ.c2lnbmF0dXJl"
+    ]
+  },
+  {
+    "name": "adjacent assignments",
+    "input": "state: failed; token=tk_first, password=pw_second",
+    "expected": "state: failed; token=[redacted], password=[redacted]",
+    "secrets": [
+      "tk_first",
+      "pw_second"
+    ]
+  },
+  {
+    "name": "partly signed in (no refresh token)",
+    "input": "partly signed in (no refresh token)",
+    "expected": "partly signed in (no refresh token)",
+    "secrets": []
+  },
+  {
+    "name": "token expired",
+    "input": "token expired",
+    "expected": "token expired",
+    "secrets": []
+  },
+  {
+    "name": "not signed in",
+    "input": "not signed in",
+    "expected": "not signed in",
+    "secrets": []
+  },
+  {
+    "name": "count=3; state: ok",
+    "input": "count=3; state: ok",
+    "expected": "count=3; state: ok",
+    "secrets": []
+  },
+  {
+    "name": "keyboard=connected; tokenizer: ready",
+    "input": "keyboard=connected; tokenizer: ready",
+    "expected": "keyboard=connected; tokenizer: ready",
+    "secrets": []
+  }
+]

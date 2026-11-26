@@ -146,7 +146,7 @@ HTTP_503 = "503 Service Unavailable"
 # which the same-origin check refuses. Nothing leaves for another site either way.
 SIGN_IN_HEADERS = {
     "Cache-Control": "no-store", "Referrer-Policy": "same-origin",
-    "Content-Security-Policy": "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'",
+    "Content-Security-Policy": "default-src 'none'; manifest-src 'self'; img-src 'self'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'",
 }
 
 V1_HEADERS = {"Cache-Control": "no-store"}
@@ -168,13 +168,21 @@ _INT64_MAX = 2**63 - 1
 REQUEST_BODY_MAX_BYTES = 4 * knowledge.DOCUMENT_MAX_BYTES
 
 
+def _header_block(headers: Mapping[str, str] | None = None) -> str:
+    # One request per connection, then the handler closes. HTTP/1.1 reuses the socket
+    # unless the response says Connection: close, and the client then races that close.
+    fields = [(key, value) for key, value in (headers or {}).items() if key.lower() != "connection"]
+    fields.append(("Connection", "close"))
+    return "".join(f"{key}: {value}\r\n" for key, value in fields)
+
+
 def _json_response(status: str, body: Any, *, headers: Mapping[str, str] | None = None) -> bytes:
     payload = json.dumps(body, ensure_ascii=False).encode("utf-8")
     head = (
         f"HTTP/1.1 {status}\r\n"
         f"Content-Type: application/json; charset=utf-8\r\n"
         f"Content-Length: {len(payload)}\r\n"
-        + "".join(f"{key}: {value}\r\n" for key, value in (headers or {}).items())
+        + _header_block(headers)
         + "\r\n"
     )
     return head.encode("utf-8") + payload
@@ -182,7 +190,7 @@ def _json_response(status: str, body: Any, *, headers: Mapping[str, str] | None 
 
 def _no_content() -> bytes:
     # Same-origin requests never preflight, so an allowed OPTIONS gets no CORS headers.
-    return b"HTTP/1.1 204 No Content\r\nContent-Length: 0\r\n\r\n"
+    return b"HTTP/1.1 204 No Content\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
 
 
 def _with_run_role(record: dict[str, Any]) -> dict[str, Any]:
@@ -1128,6 +1136,7 @@ class AgentHTTPServer:
             f"Content-Security-Policy: sandbox\r\n"
             f"Content-Disposition: {disposition}\r\n"
             f"Cache-Control: no-store\r\n"
+            f"Connection: close\r\n"
             f"\r\n"
         )
         writer.write(head.encode("utf-8") + data)
@@ -1664,7 +1673,7 @@ class AgentHTTPServer:
         fields = {**SIGN_IN_HEADERS, **(headers or {})}
         writer.write((f"HTTP/1.1 {status}\r\nContent-Type: text/html; charset=utf-8\r\n"
                       f"Content-Length: {len(data)}\r\n"
-                      + "".join(f"{key}: {value}\r\n" for key, value in fields.items())
+                      + _header_block(fields)
                       + "".join(f"Set-Cookie: {cookie}\r\n" for cookie in cookies)
                       + "\r\n").encode() + data)
         await writer.drain()
@@ -1686,6 +1695,7 @@ class AgentHTTPServer:
                 "or open the dashboard there.</p>" if not unusable else "")
         page = ("<!doctype html><html lang=\"en\"><meta charset=\"utf-8\">"
                 "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\"><title>Looper</title>"
+                "<link rel=\"manifest\" href=\"/manifest.webmanifest\"><meta name=\"theme-color\" content=\"#0a0a0f\">"
                 "<style>:root{color-scheme:light dark;font:16px system-ui;background:#f4f5f7;color:#202124}"
                 "body{max-width:24rem;margin:12vh auto;padding:2rem}form,label{display:grid;gap:.6rem}"
                 "form{gap:1.2rem}input,button{font:inherit;padding:.7rem;border:1px solid #888;border-radius:.4rem}"
@@ -1801,7 +1811,9 @@ class AgentHTTPServer:
             await self._login_page(writer)
             return
 
-        content_type, _ = mimetypes.guess_type(str(file_path))
+        # Keep the manifest MIME type consistent across host MIME databases.
+        content_type = ("application/manifest+json" if file_path.suffix == ".webmanifest"
+                        else mimetypes.guess_type(str(file_path))[0])
         if content_type is None:
             content_type = "application/octet-stream"
 
@@ -1815,6 +1827,7 @@ class AgentHTTPServer:
             f"Content-Type: {content_type}\r\n"
             f"Content-Length: {len(data)}\r\n"
             f"Cache-Control: {'no-store' if page else 'public, max-age=3600'}\r\n"
+            f"Connection: close\r\n"
             f"{policy}{cookie}"
             f"\r\n"
         )
