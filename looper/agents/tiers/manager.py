@@ -47,7 +47,7 @@ from collections.abc import Awaitable, Callable, Iterator, Sequence
 from typing import TYPE_CHECKING, Any, NoReturn
 
 from ..broadcast import Broadcaster
-from ..chat_scopes import LaunchMode, PrincipalKind, ScopeInvariantViolation
+from ..chat_scopes import LaunchMode, PrincipalKind, ScopeAudience, ScopeInvariantViolation
 from ..drain import DrainState
 from ..bus import MessageBus
 from ..channels import lark_quote
@@ -1271,11 +1271,24 @@ class ManagerAgent:
         try:
             origin = _message_origin(envelope)
             channel, chat = origin["channel"], origin["chat"]
+            exclude_operator_sessions = False
+            if session_routing.scoped(self.agent_id) and origin["group"]:
+                from ..operator_identity import operator_sender_id
+
+                exclude_operator_sessions = True
+                try:
+                    operator = await operator_sender_id(origin["channel_id"])
+                    exclude_operator_sessions = not (operator and operator == origin["sender"]
+                                                       and _sender_kind(envelope) is PrincipalKind.PERSON)
+                except Exception:
+                    logger.warning("%s: could not resolve /stop sender; protecting operator turns", self._log,
+                                   exc_info=True)
             if self.stop_chat is not None:
                 from ..managers import chat_stop_reply
 
                 summary = await self.stop_chat(origin["channel_id"] or channel or "", chat or "", via=channel or "",
-                    sender_id=origin["sender"] if not origin["group"] else None)
+                    sender_id=origin["sender"] if not origin["group"] else None,
+                    **({"exclude_operator_sessions": True} if exclude_operator_sessions else {}))
                 reply = chat_stop_reply(summary)
                 # Only an empty fleet lookup falls back to the receiving runtime's legacy idle answer.
                 if summary.state == "enabled" and not summary.matched and not self.can_interrupt:
@@ -1286,7 +1299,8 @@ class ManagerAgent:
                 await self._send_reply(envelope, chat_settings.STOP_DISABLED_REPLY, persist=False)
                 return
             tokens = self.live_for_chat(origin["channel_id"] or channel, chat,
-                sender_id=origin["sender"] if not origin["group"] else None) if channel and chat else []
+                sender_id=origin["sender"] if not origin["group"] else None,
+                exclude_operator_sessions=exclude_operator_sessions) if channel and chat else []
             if not self.can_interrupt and not any(token.admission_waiting for token in tokens):
                 await self._send_reply(envelope, STOP_UNSUPPORTED_REPLY, persist=False)
                 return
@@ -2359,9 +2373,14 @@ class ManagerAgent:
         """The live turn of a message, by the envelope's id or the web page's own."""
         return self._turns.find(message_id)
 
-    def live_for_chat(self, channel_id: str, chat_id: str, *, sender_id: str | None = None) -> list[TurnToken]:
+    def live_for_chat(self, channel_id: str, chat_id: str, *, sender_id: str | None = None,
+                      exclude_operator_sessions: bool = False) -> list[TurnToken]:
         """Snapshot this bot/chat's live turns using its full channel identity."""
-        return background_turn.live_tokens(self, channel_id, sender_id, self._turns.live_for(channel_id, chat_id))
+        tokens = background_turn.live_tokens(self, channel_id, sender_id, self._turns.live_for(channel_id, chat_id))
+        if exclude_operator_sessions:
+            tokens = [token for token in tokens if token.ops_turn is not None and (
+                token.ops_turn.principal is None or token.ops_turn.principal.audience is ScopeAudience.SHARED)]
+        return tokens
 
     def current_turn_for(self, channel: str, chat: str) -> TurnToken | None:
         """The oldest live user turn of ``chat`` on ``channel``: the one being answered, else the first queued."""
