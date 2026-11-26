@@ -18,7 +18,9 @@ import { startPolling } from "@/lib/polling";
 import { callV1, V1Error } from "@/lib/v1";
 import { errorText } from "@/lib/use-action";
 import { TaskStatusMark } from "@/pages/tasks";
-import { isMissingOperation, isUnstartedTask, markSeen, taskTitle, workStatusLabel, workSelection, workStorage } from "@/lib/work";
+import {
+  awaitingTaskWorkspace, isMissingOperation, isUnstartedTask, markSeen, taskTitle, workStatusLabel, workSelection, workStorage,
+} from "@/lib/work";
 import { isGateShown } from "@/lib/gates";
 import { WorkConversationStateProvider, useWorkConversationStore, workConversationKey } from "@/lib/use-work-conversation-state";
 
@@ -346,7 +348,8 @@ function WorkPageContent({
         />
         <WorkSteps task={selected} onOpenGate={step => openGate(step.step_key)} />
         <WorkGates task={selected} onOpenGate={openGate} />
-        <div className="p-4"><WorkChanges taskId={taskId} visible pendingWorkspace={isUnstartedTask(selected.status)} /></div>
+        <div className="p-4"><WorkChanges taskId={taskId} visible pendingWorkspace={isUnstartedTask(selected.status)}
+          awaitingWorkspace={awaitingTaskWorkspace(selected.status)} /></div>
         <WorkCost task={selected} />
       </aside>}
       <WorkSwitcher open={switcher && finder} onClose={closeSwitcher} onOpen={openTask} restore={restore} />
