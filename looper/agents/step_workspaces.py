@@ -45,7 +45,7 @@ from enum import Enum
 from pathlib import Path
 from typing import Any
 
-from .. import child_env
+from .. import git_safe
 from .reported_files import prompt_name
 
 logger = logging.getLogger(__name__)
@@ -59,16 +59,14 @@ LOOPER_NAME = "Looper"
 LOOPER_EMAIL = "looper@localhost"
 _IDENTITY = {"GIT_AUTHOR_NAME": LOOPER_NAME, "GIT_AUTHOR_EMAIL": LOOPER_EMAIL,
              "GIT_COMMITTER_NAME": LOOPER_NAME, "GIT_COMMITTER_EMAIL": LOOPER_EMAIL}
-# No hooks run for Looper's commands; the Worker's own git commands run the repository's.
-_GIT = ("git", "-c", "core.hooksPath=/dev/null")
+# Looper's commands run through ``git_safe``: none of the repository's hooks, drivers or programs run; the Worker's
+# own git commands run the repository's.
 # The files whose presence means the user is in the middle of an operation in the repository.
 _IN_PROGRESS = {"MERGE_HEAD": "a merge", "CHERRY_PICK_HEAD": "a cherry-pick", "REVERT_HEAD": "a revert",
                 "rebase-merge": "a rebase", "rebase-apply": "a rebase", "BISECT_LOG": "a bisect"}
 WORKTREES_DIR = "worktrees"
 # A checkout larger than this (its files at HEAD) gets no step worktrees: each would be a copy of it.
 CHECKOUT_LIMIT_BYTES = 1 << 30
-# Inherited variables that would point Looper's commands at another repository or index.
-_REDIRECTS = frozenset({"GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_COMMON_DIR"})
 
 
 class StepWorkspaceState(str, Enum):
@@ -221,23 +219,30 @@ class _Run:
 
 
 async def _git(cwd: str | Path, *args: str, identity: bool = False, check: bool = True,
-               env: Mapping[str, str] | None = None, input: bytes | None = None) -> _Run:
-    """Run one git command in ``cwd``: no hooks, no prompts, with the time limit; ``identity`` commits as Looper.
+               env: Mapping[str, str] | None = None, input: bytes | None = None, layout: bool = True) -> _Run:
+    """Run one git command in ``cwd`` through ``git_safe`` (none of the repository's own code runs, no prompts), with
+    the time limit; ``identity`` commits as Looper.
 
-    Raises ``GitError`` when git is missing, times out or (with ``check``) fails.
+    Raises ``GitError`` when git is missing, ``cwd`` is a repository ``git_safe`` refuses, or the command times out
+    or (with ``check``) fails.
     """
-    command_env = {name: value for name, value in child_env.inherited().items() if name not in _REDIRECTS}
-    command_env.update({"GIT_TERMINAL_PROMPT": "0", "GIT_MERGE_AUTOEDIT": "no", **(env or {})})
+    command_env = {"GIT_MERGE_AUTOEDIT": "no", **(env or {})}
     if identity:
         command_env.update(_IDENTITY)
+    if not Path(cwd).is_dir():
+        raise GitError(f"cannot run git in {prompt_name(cwd)}: it is not a directory")
     try:
-        process = await asyncio.create_subprocess_exec(
-            *_GIT, *args, cwd=str(cwd), env=command_env,
+        process = await git_safe.spawn(
+            cwd, *args, extra_env=command_env, layout=layout,
             stdin=asyncio.subprocess.PIPE if input is not None else asyncio.subprocess.DEVNULL,
             stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
         )
     except FileNotFoundError as exc:
         raise GitError(f"cannot run git in {prompt_name(cwd)}: {exc}") from None
+    except git_safe.RepositoryRefused as exc:
+        raise GitError(f"refused to run git in {prompt_name(cwd)}: {exc.reason}") from None
+    except asyncio.TimeoutError:
+        raise GitError(f"git {args[0]} timed out checking the repository") from None
     try:
         stdout, stderr = await asyncio.wait_for(process.communicate(input), GIT_TIMEOUT_SEC)
     except asyncio.TimeoutError:
@@ -329,9 +334,11 @@ async def git_version() -> tuple[int, int] | None:
     """The installed git's (major, minor), None without git; read once."""
     global _version
     if _version is None:
-        if shutil.which("git") is None:
-            return None
-        match = re.search(r"(\d+)\.(\d+)", (await _git("/", "--version")).text)
+        try:
+            output = (await _git("/", "--version")).text
+        except GitError:
+            return None  # git is not installed
+        match = re.search(r"(\d+)\.(\d+)", output)
         _version = (int(match.group(1)), int(match.group(2))) if match else (0, 0)
     return _version
 

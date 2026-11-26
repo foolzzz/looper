@@ -16,6 +16,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from ... import git_safe
 from ...db import tasks
 from .. import outbound_hook, projects, task_conversations_settings
 from ..message import task_manager_address
@@ -220,8 +221,11 @@ async def _workspace(task: dict[str, Any]) -> dict[str, Any]:
              "branch": None, "head": None, "changed": [], "uncommitted": 0}
 
     async def git(*args: str) -> str:
-        process = await asyncio.create_subprocess_exec("git", "-C", directory, *args,
-            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL)
+        try:
+            process = await git_safe.spawn(directory, *args, stdout=asyncio.subprocess.PIPE,
+                                           stderr=asyncio.subprocess.DEVNULL, stdin=asyncio.subprocess.DEVNULL)
+        except git_safe.RepositoryRefused as error:
+            raise ValueError("not a git checkout") from error
         try:
             async with asyncio.timeout(5):
                 stdout, _ = await process.communicate()

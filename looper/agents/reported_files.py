@@ -35,15 +35,13 @@ from enum import Enum
 from pathlib import Path
 from typing import Any
 
-from .. import child_env
+from .. import git_safe
 
 GIT_TIMEOUT_SEC = 10
 MAX_WORKTREES = 64
 MAX_COMMITS = 500
 # Commit times are whole seconds and may come from another clock: a commit this long before the run's start counts.
 CLOCK_SLACK = timedelta(seconds=60)
-# Inherited variables that would point the commands at another repository or index.
-_REDIRECTS = frozenset({"GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_COMMON_DIR"})
 
 
 class Evidence(str, Enum):
@@ -305,13 +303,12 @@ def _commits(work_dir: Path, since: datetime) -> tuple[list[tuple[str, dict[str,
 
 def _git(cwd: Path, *args: str, input: str | None = None) -> subprocess.CompletedProcess[bytes] | None:
     """One read-only git command in ``cwd``, with the time limit; None when git cannot run or times out."""
-    env = {name: value for name, value in child_env.inherited().items() if name not in _REDIRECTS}
-    env.update({"GIT_TERMINAL_PROMPT": "0", "GIT_OPTIONAL_LOCKS": "0"})
     try:
-        return subprocess.run(["git", *args], cwd=str(cwd), env=env, capture_output=True, timeout=GIT_TIMEOUT_SEC,
-                              input=input.encode("utf-8", "surrogateescape") if input is not None else None,
-                              stdin=None if input is not None else subprocess.DEVNULL)
-    except (OSError, subprocess.TimeoutExpired):
+        return git_safe.run(cwd, *args, extra_env={"GIT_OPTIONAL_LOCKS": "0"}, capture_output=True,
+                            timeout=GIT_TIMEOUT_SEC,
+                            input=input.encode("utf-8", "surrogateescape") if input is not None else None,
+                            stdin=None if input is not None else subprocess.DEVNULL)
+    except (OSError, subprocess.SubprocessError):  # including a repository git_safe refuses
         return None
 
 

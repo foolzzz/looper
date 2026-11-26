@@ -15,7 +15,7 @@ from typing import Any
 import uuid
 import weakref
 
-from looper import child_env
+from looper import child_env, git_safe
 from looper.db import activity, projects, step_check_runs as runs, tasks
 from .acceptance_checks import ArtifactCheck, Check
 from . import acceptance_artifacts as artifacts, proc_tree
@@ -134,8 +134,7 @@ async def _execute(check: Check, work_dir: Path, env: dict[str, str], prefix: tu
 
 
 def _git(directory: Path, *args: str) -> bytes:
-    return subprocess.run(["git", "-C", str(directory), *args], capture_output=True, check=True,
-                          timeout=10, env=child_env.inherited()).stdout
+    return git_safe.run(directory, *args, capture_output=True, check=True, timeout=10).stdout
 
 
 def _protected(work_dir: Path, paths: tuple[str, ...], base_commit: str | None) -> list[str]:

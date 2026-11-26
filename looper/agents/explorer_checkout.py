@@ -13,6 +13,8 @@ import shutil
 import subprocess
 import tempfile
 
+from looper import git_safe
+
 
 class CheckoutError(RuntimeError):
     """The explorer cannot be isolated from its spawner's checkout."""
@@ -27,8 +29,8 @@ class Checkout:
 
 def _git(directory: Path, *args: str, env: dict[str, str] | None = None) -> str:
     try:
-        result = subprocess.run(['git', '-C', str(directory), *args], capture_output=True,
-                                text=True, check=True, timeout=30, env=env)
+        result = git_safe.run(directory, *args, capture_output=True, text=True, check=True, timeout=30,
+                              extra_env=env)
     except (OSError, subprocess.SubprocessError) as exc:
         raise CheckoutError('cannot create explorer checkout') from exc
     return result.stdout.strip()
@@ -47,7 +49,7 @@ def prepare(work_dir: Path, target: Path) -> Checkout:
     checkout = Checkout(repo, target, target / relative)
     try:
         with tempfile.TemporaryDirectory(prefix='looper-explorer-index-') as directory:
-            env = {**os.environ, 'GIT_INDEX_FILE': str(Path(directory) / 'index')}
+            env = {'GIT_INDEX_FILE': str(Path(directory) / 'index')}
             # An empty tree also supports an initialized repository with no commit.
             try:
                 _git(repo, 'read-tree', 'HEAD', env=env)
