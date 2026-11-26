@@ -375,24 +375,31 @@ def test_unusable_set_answers_and_starts_nothing(items: Any, monkeypatch: Any, t
     run_db(body, monkeypatch, timeout=90)
 
 
-def test_unknown_sender_kind_is_held_not_routed(monkeypatch: Any, tmp_path: Path, caplog: Any) -> None:
-    """Routing reads the channel's sender kind strictly: a value that is neither person nor bot never reaches
-    scope resolution (stored provenance tolerates it, authority does not)."""
+@pytest.mark.parametrize("kind", ["robot", None])
+@pytest.mark.parametrize("sender", [OTHER, OPERATOR])
+def test_unknown_or_missing_sender_kind_is_routed_with_least_privilege(
+        kind: str | None, sender: str, monkeypatch: Any, tmp_path: Path, caplog: Any) -> None:
+    """An unknown or missing classification is never held and never above a shared non-person: no person principal,
+    no full or operator scope, on the message path. (A completion batch reads no kind; see
+    test_unknown_sender_kind_completion_settles_batch.) Unknown values stay visible as a warning."""
     from looper.agents.tiers.manager import _sender_kind
 
     async def body(pool: Any) -> None:
         rig, residents = await _setup(pool, tmp_path, monkeypatch)
-        invalid = _message(rig, "held", kind="robot")
-        with pytest.raises(scopes.ScopeInvariantViolation):
-            _sender_kind(invalid)
+        message = _message(rig, "unclassified", sender, kind)
+        with caplog.at_level(logging.WARNING):
+            assert _sender_kind(message) is None
+        assert any("unknown channel sender kind" in r.getMessage() for r in caplog.records) == (kind is not None)
+        session = await rig.manager._router.target(message)
+        principal = rig.manager._router._principals[message.message_id][0]
+        assert principal.kind is scopes.PrincipalKind.BOT
+        assert principal.audience is scopes.ScopeAudience.SHARED and principal.scope_id == "chat_only"
+        assert session.scope.resolved.audience is scopes.ScopeAudience.SHARED
         await rig.start()
         try:
-            held = await _published(rig, invalid)
-            await _send(rig, "next")
-            rig.collect()
-            assert held.message_id not in rig.replies and len(residents[0].turns) == 1
-            assert "held" not in residents[0].turns[0]
-            assert any(record.levelno == logging.CRITICAL for record in caplog.records)
+            await _send(rig, "unclassified", sender, kind)
+            assert len(residents) == 1 and len(residents[0].turns) == 1  # routed and run, not held
+            assert not rig.manager._router.pending()
         finally:
             await rig.close()
     run_db(body, monkeypatch, timeout=90)

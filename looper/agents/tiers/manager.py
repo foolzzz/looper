@@ -641,7 +641,8 @@ def _audience_kind(origin: dict[str, Any]) -> str:
 
 
 def _sender_kind(envelope: MessageEnvelope) -> PrincipalKind | None:
-    """The channel's trusted sender classification; absent classification grants no person authority."""
+    """The channel's trusted sender kind, or None for absent or unknown values. None grants no person authority:
+    the sender is routed as a non-person with the least privilege, and the message is never held."""
     context = envelope.payload.get("channel_context")
     value = context.get("sender_kind") if isinstance(context, dict) else None
     if value is None:
@@ -649,7 +650,8 @@ def _sender_kind(envelope: MessageEnvelope) -> PrincipalKind | None:
     try:
         return PrincipalKind(value)
     except (TypeError, ValueError):
-        raise ScopeInvariantViolation("invalid channel sender kind") from None
+        logger.warning("unknown channel sender kind; routed as a non-person")
+        return None
 
 
 def _completion_origin(row: dict[str, Any], manager: AgentAddress, batch: uuid.UUID) -> dict[str, Any]:
