@@ -332,7 +332,8 @@ def test_work_mode_off_freeze(monkeypatch, tmp_path):
     ids = {item["operationId"] for methods in api_v1.document()["paths"].values() for item in methods.values()}
     old = set(frozen["operation_ids"])
     assert ids - old == {
-        "tasks.create_draft", "task_conversations.get", "task_conversations.update", "tasks.done"}
+        "tasks.create_draft", "task_conversations.get", "task_conversations.update", "tasks.done",
+        "tasks.task_manager_profile_set"}
     assert old - ids == set()
     async def check(pool):
         owner = await projects.create_project(name="Frozen project", work_dir=str(tmp_path), pool=pool)
