@@ -41,11 +41,12 @@ async def pending(conn):
         "SELECT EXISTS (SELECT 1 FROM schema_migrations WHERE name = $1)", name)
 
 
-async def apply(conn, *, sql, state):
+async def apply(conn, *, sql, state) -> bool:
     if not await pending(conn):
-        return
+        return False
     await conn.execute(_COLUMN)
     if await _constraint(conn) is None:
         await conn.execute(_CHECK)
     await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1) ON CONFLICT DO NOTHING", name)
     await conn.execute("DELETE FROM schema_migrations WHERE name = $1", online[0].marker)
+    return True
