@@ -1,0 +1,257 @@
+"""Directory checks and the one-session lock for a direct task Manager.
+
+A direct session starts only for an in-place task whose directory is its own
+non-bare git repository root, is not the operator's home or a system directory,
+does not contain trusted configuration, and does not overlap another live
+direct session. The lock file lives under the runtime root, outside the task
+directory and outside the directory the session may write.
+"""
+from __future__ import annotations
+
+import fcntl
+import hashlib
+import os
+import stat
+from collections.abc import Iterable, Mapping
+from dataclasses import dataclass
+from enum import StrEnum
+from pathlib import Path
+from typing import Any
+
+# macOS temporary directories, where test and scratch repositories live, are
+# under /private/var and /tmp. Those are not system directories.
+SYSTEM_DIRS: tuple[str, ...] = (
+    "/System", "/Library", "/usr", "/bin", "/sbin", "/etc", "/private/etc", "/dev", "/Applications", "/cores",
+)
+
+
+class Reason(StrEnum):
+    """Refusal reason. The value is the string a direct session records."""
+
+    WORKTREE_UNSUPPORTED = "worktree_unsupported"
+    WORKSPACE_IS_HOME = "workspace_is_home"
+    WORKSPACE_IN_SYSTEM_DIR = "workspace_in_system_dir"
+    WORKSPACE_CONTAINS_TRUSTED_CONFIG = "workspace_contains_trusted_config"
+    WORKSPACE_NOT_REPO_ROOT = "workspace_not_repo_root"
+    WORKSPACE_OVERLAPS_SESSION = "workspace_overlaps_session"
+
+
+class Kind(StrEnum):
+    SUBDIRECTORY = "subdirectory"
+    BARE = "bare"
+    NOT_GIT = "not_git"
+    LINKED_WORKTREE = "linked_worktree"
+    WORKSPACE_MODE = "workspace_mode"
+
+
+@dataclass(frozen=True)
+class Problem:
+    reason: Reason
+    kind: Kind | None
+    text: str
+
+
+class LockHeld(Exception):
+    def __init__(self, holder: str) -> None:
+        super().__init__(holder)
+        self.holder = holder
+
+
+def _realpath(path: Path | str) -> Path:
+    return Path(os.path.realpath(os.path.expanduser(str(path))))
+
+
+def _home(environment: Mapping[str, str]) -> Path:
+    raw = (environment.get("HOME") or "").strip()
+    return Path(raw).expanduser() if raw else Path.home()
+
+
+def _claude_dir(environment: Mapping[str, str]) -> Path:
+    raw = (environment.get("CLAUDE_CONFIG_DIR") or "").strip()
+    return Path(raw).expanduser() if raw else _home(environment) / ".claude"
+
+
+def _claude_json(environment: Mapping[str, str]) -> Path:
+    raw = (environment.get("CLAUDE_CONFIG_DIR") or "").strip()
+    if raw:
+        return Path(raw).expanduser() / ".claude.json"
+    return _home(environment) / ".claude.json"
+
+
+def _config_home(environment: Mapping[str, str]) -> Path:
+    raw = (environment.get("XDG_CONFIG_HOME") or "").strip()
+    return Path(raw).expanduser() if raw else _home(environment) / ".config"
+
+
+def _ops_file(runtime_root: Path) -> Path:
+    from .. import ops_config
+
+    return Path(ops_config.config_path(None, Path(runtime_root)))
+
+
+def _dedupe(paths: Iterable[Path]) -> tuple[Path, ...]:
+    found: list[Path] = []
+    seen: set[Path] = set()
+    for path in paths:
+        real = _realpath(path)
+        if real not in seen:
+            seen.add(real)
+            found.append(real)
+    return tuple(found)
+
+
+def trusted_paths(environment: Mapping[str, str], runtime_root: Path) -> tuple[Path, ...]:
+    """Credentials, operator configuration, Looper's runtime and configuration, and the Claude directory.
+
+    A missing path is still returned: the check compares paths and does not require the entry to exist.
+    """
+    home = _home(environment)
+    claude = _claude_dir(environment)
+    return _dedupe((
+        home / ".ssh",  # operator SSH credentials
+        home / ".aws",  # operator AWS credentials
+        home / ".gnupg",  # operator GnuPG credentials
+        _config_home(environment),  # XDG_CONFIG_HOME, or the operator's .config
+        claude / ".credentials.json",  # Claude credential file
+        _claude_json(environment),  # .claude.json in CLAUDE_CONFIG_DIR, or in HOME
+        Path(runtime_root),  # runtime root: ops file, tokens, generated configuration
+        _ops_file(runtime_root),  # configuration file; included when it lives outside the runtime root too
+        claude,  # the whole Claude configuration directory
+    ))
+
+
+def _is_system(place: Path) -> bool:
+    if place == Path("/"):
+        return True
+    for root in SYSTEM_DIRS:
+        base = Path(root)
+        if place == base or base in place.parents:
+            return True
+    return False
+
+
+def _git_marker(place: Path) -> str | None:
+    try:
+        mode = (place / ".git").lstat().st_mode
+    except OSError:
+        return None
+    if stat.S_ISDIR(mode):
+        return "dir"
+    if stat.S_ISLNK(mode) or stat.S_ISREG(mode):
+        return "link"
+    return None
+
+
+def _holds_git(directory: Path) -> bool:
+    return _git_marker(directory) in ("dir", "link")
+
+
+def _is_bare(place: Path) -> bool:
+    return (place / "HEAD").is_file() and (place / "objects").is_dir() and (place / "refs").is_dir()
+
+
+def _ancestor_git(place: Path) -> Path | None:
+    current = place.parent
+    while True:
+        if _holds_git(current):
+            return current
+        parent = current.parent
+        if parent == current:
+            return None
+        current = parent
+
+
+def _overlaps(place: Path, other: Path) -> bool:
+    return place == other or place in other.parents or other in place.parents
+
+
+def check(task: Mapping[str, Any], work_dir: str, *, environment: Mapping[str, str], runtime_root: Path,
+          live: Iterable[tuple[str, str]]) -> Problem | None:
+    """The first directory check that fails, or None when a direct session may use ``work_dir``."""
+    if task["workspace_mode"] == "worktree":
+        return Problem(
+            Reason.WORKTREE_UNSUPPORTED, Kind.WORKSPACE_MODE,
+            f"{work_dir}: v1 runs the task Manager's direct mode only for in-place tasks; this task works in its "
+            "own worktree. Use the background (orchestrated) mode for it.")
+    place = _realpath(work_dir)
+    if place == _realpath(_home(environment)):
+        return Problem(
+            Reason.WORKSPACE_IS_HOME, None,
+            f"{place} is the operator's home directory. Open the task on a repository that is not the home directory.")
+    if _is_system(place):
+        return Problem(
+            Reason.WORKSPACE_IN_SYSTEM_DIR, None,
+            f"{place} is a system directory. Open the task on a repository outside system directories.")
+    for entry in trusted_paths(environment, runtime_root):
+        if place == entry or place in entry.parents:
+            return Problem(
+                Reason.WORKSPACE_CONTAINS_TRUSTED_CONFIG, None,
+                f"{place} contains trusted configuration {entry}. "
+                f"Open the task on a repository that does not contain {entry}.")
+    marker = _git_marker(place)
+    if marker == "link":
+        return Problem(
+            Reason.WORKTREE_UNSUPPORTED, Kind.LINKED_WORKTREE,
+            f"{place}: the repository's git directory is elsewhere (a linked worktree or a submodule); the sandbox "
+            "would open the shared .git. Open an in-place task whose .git is a directory inside the repository, "
+            "or use the background (orchestrated) mode.")
+    if marker != "dir":
+        if _is_bare(place):
+            return Problem(
+                Reason.WORKSPACE_NOT_REPO_ROOT, Kind.BARE,
+                f"{place} is a bare git repository, not a working tree. Open the task on a non-bare repository root.")
+        if (root := _ancestor_git(place)) is not None:
+            return Problem(
+                Reason.WORKSPACE_NOT_REPO_ROOT, Kind.SUBDIRECTORY,
+                f"{place} is a subdirectory of the git repository {root}. Open the task on the repository root.")
+        return Problem(
+            Reason.WORKSPACE_NOT_REPO_ROOT, Kind.NOT_GIT,
+            f"{place} is not a git repository. Open the task on the root of a non-bare git repository.")
+    for task_id, other in live:
+        other_place = _realpath(other)
+        if _overlaps(place, other_place):
+            return Problem(
+                Reason.WORKSPACE_OVERLAPS_SESSION, None,
+                f"{place} overlaps the work directory of task {task_id} ({other_place}). Wait until that task "
+                "Manager session stops, or open this task on a directory that does not contain it and is not inside it.")
+    return None
+
+
+class DirectoryLock:
+    """An exclusive lock for one directory. The file is never deleted: unlinking a flock file races."""
+
+    def __init__(self, fd: int) -> None:
+        self._fd: int | None = fd
+
+    @classmethod
+    def acquire(cls, runtime_root: Path, work_dir: str, task_id: str) -> DirectoryLock:
+        directory = Path(runtime_root) / "task-manager-locks"
+        directory.mkdir(parents=True, exist_ok=True)
+        os.chmod(directory, 0o700)
+        digest = hashlib.sha256(os.path.realpath(work_dir).encode()).hexdigest()
+        path = directory / f"{digest}.lock"
+        fd = os.open(path, os.O_CREAT | os.O_RDWR, 0o600)
+        try:
+            os.chmod(path, 0o600)
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                holder = os.read(fd, 4096).decode("utf-8", "replace").strip()
+                raise LockHeld(holder) from None
+            os.ftruncate(fd, 0)
+            os.lseek(fd, 0, os.SEEK_SET)
+            os.write(fd, task_id.encode("utf-8"))
+        except Exception:
+            os.close(fd)
+            raise
+        return cls(fd)
+
+    def release(self) -> None:
+        fd = self._fd
+        if fd is None:
+            return
+        self._fd = None
+        try:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+        finally:
+            os.close(fd)
