@@ -1121,8 +1121,9 @@ chat, each reply checked against what Looper did (the API, and the Manager's
 tool calls in the run's `manager_actions`). Same setup as `run`: a new
 database, a disposable `looper serve`, and fake or real mode.
 
-Group dialogs (`Dialog.session="group"`) use the real lark-cli `CliTransport`
-with a native CLI stand-in ported from #1710. It never contacts the network;
+Scenario group dialogs (`Dialog.session="group"` with explicit `Dialog.routing`)
+use the real lark-cli `CliTransport` and share #1710's native CLI stand-in with
+the conversation-scoped task dialogs below. It never contacts the network;
 each `Say.sender` selects a synthetic operator, member or bot (the bot's events
 use `sender_type="app"`). `group_per_chat_smoke` is explicitly selected in fake
 mode and checks operator, member and bot turns in one per-chat session, including

@@ -1,0 +1,2366 @@
+{
+  "create_result": {
+    "created_at": "<timestamp>",
+    "project_id": "<project>",
+    "status": "init",
+    "task_id": "<task>",
+    "workspace": {
+      "git": null,
+      "mode": "in_place",
+      "notes": {
+        "files": [],
+        "found": false,
+        "omitted": []
+      },
+      "requested_mode": "in_place",
+      "warnings": [],
+      "workspace": "<workspace>"
+    }
+  },
+  "create_row": {
+    "attempt_ended_at": null,
+    "budget_usd": null,
+    "chat_group": false,
+    "chat_id": null,
+    "chat_kind": null,
+    "chat_mention": null,
+    "client_id": null,
+    "completed_at": null,
+    "config": "{\"fixture\": \"fixed\"}",
+    "continues_schedule_session": false,
+    "correlation_id": "",
+    "created_at": "<timestamp>",
+    "error": null,
+    "fail_kind": null,
+    "goal_id": "frozen-goal",
+    "id": "<task>",
+    "manager_id": "manager",
+    "origin_channel_id": "",
+    "origin_reply_route": null,
+    "origin_session": null,
+    "origin_thread": null,
+    "original_user_text": null,
+    "phase": "pending",
+    "planner_id": null,
+    "planner_session_label": null,
+    "process_record": null,
+    "project_id": "<project>",
+    "requirement": "Build the frozen fixture.",
+    "result_summary": null,
+    "run_no": 1,
+    "schedule_id": null,
+    "status": "init",
+    "template": null,
+    "title": null,
+    "untrusted_inputs": [],
+    "updated_at": "<timestamp>",
+    "work_dir": "<workspace>",
+    "work_dir_real": "<workspace>",
+    "work_dir_recheck": false,
+    "workflow": null,
+    "workspace_base": "",
+    "workspace_dir": "<workspace>",
+    "workspace_dir_real": "<workspace>",
+    "workspace_dir_recheck": false,
+    "workspace_mode": "in_place"
+  },
+  "manager_tools": [
+    {
+      "description": "What is happening now: task counts by group, the running tasks (with their own concurrency limits) and step runs, each active project's running tasks and step runs, today's spend, unhealthy components.",
+      "name": "looper_overview",
+      "schema": {
+        "additionalProperties": false,
+        "properties": {},
+        "type": "object"
+      }
+    },
+    {
+      "description": "List or search tasks (newest first), or get one task with its steps (including each kind), wait conditions and states, acceptance (accept_when, accept_state, accept_when_text), supplements, latest progress note, result, process record, cost and concurrency limits; room: what the task's agents said to each other in its room (read only).",
+      "name": "looper_tasks",
+      "schema": {
+        "additionalProperties": false,
+        "properties": {
+          "action": {
+            "enum": [
+              "list",
+              "get",
+              "room"
+            ],
+            "type": "string"
+          },
+          "group": {
+            "description": "Only the tasks in this group (action list).",
+            "enum": [
+              "needs_you",
+              "in_progress",
+              "ready",
+              "attention",
+              "completed",
+              "cancelled",
+              "other"
+            ],
+            "type": "string"
+          },
+          "limit": {
+            "description": "At most this many (action list; default 20).",
+            "maximum": 50,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "project": {
+            "description": "Only this project's tasks, by name (action list).",
+            "type": "string"
+          },
+          "query": {
+            "description": "Words to find in a task's id, name, requirement or project (action list).",
+            "type": "string"
+          },
+          "task_id": {
+            "description": "The task to get (action get, room).",
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "action"
+        ],
+        "type": "object"
+      }
+    },
+    {
+      "description": "Create a task, ready and not started, once the user confirmed it. A project that does not exist is created only after the user confirms it too (the answer is needs_confirmation). Looper adds the task's configuration and the question whether to start it to your reply.",
+      "name": "looper_task_create",
+      "schema": {
+        "additionalProperties": false,
+        "properties": {
+          "base": {
+            "description": "Only when the user named one: the branch, tag or commit a worktree task starts from (default: what the directory has checked out).",
+            "type": "string"
+          },
+          "goal_id": {
+            "description": "A short kebab-case id for the task's goal.",
+            "type": "string"
+          },
+          "profiles": {
+            "description": "An Agent Profile (id or name) the user chose for some of the task's roles.",
+            "properties": {
+              "planner": {
+                "type": "string"
+              },
+              "reviewer": {
+                "type": "string"
+              },
+              "worker": {
+                "type": "string"
+              }
+            },
+            "type": "object"
+          },
+          "project": {
+            "description": "The project's name: an existing one, or a new one the user named.",
+            "minLength": 1,
+            "type": "string"
+          },
+          "requirement": {
+            "description": "The clear requirement, with what the user clarified.",
+            "maxLength": 32000,
+            "minLength": 1,
+            "type": "string"
+          },
+          "title": {
+            "description": "A few words naming the task, in the user's language.",
+            "minLength": 1,
+            "type": "string"
+          },
+          "work_dir": {
+            "description": "The absolute directory the user named; leave it out for the project's default. A new project needs one.",
+            "type": "string"
+          },
+          "workspace_mode": {
+            "description": "Only when the user said so: worktree (a git worktree of the directory, on a branch of the task's own, left to the user to merge) or in_place (in the directory itself). Leave it out for the default.",
+            "enum": [
+              "worktree",
+              "in_place"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "requirement",
+          "title",
+          "project"
+        ],
+        "type": "object"
+      }
+    },
+    {
+      "description": "start a ready task; stop a running one; restart a stopped, failed or cancelled one (it goes on from its saved plan: accepted steps are kept and not run again); start_over one instead only when the user asks to start from scratch (its steps and plan are deleted and it plans anew; the user confirms it first); cancel a running one (the user confirms it first).",
+      "name": "looper_task_control",
+      "schema": {
+        "additionalProperties": false,
+        "properties": {
+          "action": {
+            "enum": [
+              "start",
+              "stop",
+              "restart",
+              "start_over",
+              "cancel"
+            ],
+            "type": "string"
+          },
+          "task_id": {
+            "description": "The task's id (task-...), from looper_tasks.",
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "task_id",
+          "action"
+        ],
+        "type": "object"
+      }
+    },
+    {
+      "description": "Add what the user said to a running task as a supplement: stored with the task, its Planner gets it in a turn and decides whether to change the plan, and every later Worker and Reviewer sees it. To change a task that has not started, use looper_task_update.",
+      "name": "looper_task_instruct",
+      "schema": {
+        "additionalProperties": false,
+        "properties": {
+          "task_id": {
+            "description": "The task's id (task-...), from looper_tasks.",
+            "minLength": 1,
+            "type": "string"
+          },
+          "text": {
+            "description": "The user's words for the task, as they said them.",
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "task_id",
+          "text"
+        ],
+        "type": "object"
+      }
+    },
+    {
+      "description": "Pass the user's message to a user gate waiting for their answer (\"Open gates\"): Looper puts the message itself into the gate's discussion, and its Planner answers there. excerpt: only when part of the message is about the gate, that part, copied word for word. end: true when the user wants the Planner to go on with the conclusions so far.",
+      "name": "looper_task_gate_reply",
+      "schema": {
+        "additionalProperties": false,
+        "properties": {
+          "end": {
+            "description": "The user ends the discussion: the Planner closes the gate on what is settled and states its assumptions.",
+            "type": "boolean"
+          },
+          "excerpt": {
+            "description": "The part of the user's message that is about the gate, copied word for word; leave it out to pass on the whole message.",
+            "type": "string"
+          },
+          "gate": {
+            "description": "The gate's id in its task (g1, ...).",
+            "minLength": 1,
+            "type": "string"
+          },
+          "task_id": {
+            "description": "The task's id (task-...), from looper_tasks.",
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "task_id",
+          "gate"
+        ],
+        "type": "object"
+      }
+    },
+    {
+      "description": "Change a task: its title in any task (a label, only the name it is shown by), its requirement while it has not ended (kept as a new version; a running task's Planner gets the edit in a turn), its directory (a task not started only), or the Agent Profile of some of its roles in any task but a completed one (a Worker or Reviewer from its next step on; a stopped, failed or cancelled task's restart runs with it).",
+      "name": "looper_task_update",
+      "schema": {
+        "additionalProperties": false,
+        "properties": {
+          "profiles": {
+            "description": "An Agent Profile (its id or its name) for some of the task's roles; null clears the task's own choice of that role (looper_task_update only).",
+            "properties": {
+              "planner": {
+                "type": "string"
+              },
+              "reviewer": {
+                "type": "string"
+              },
+              "worker": {
+                "type": "string"
+              }
+            },
+            "type": "object"
+          },
+          "requirement": {
+            "description": "The whole new requirement.",
+            "maxLength": 32000,
+            "minLength": 1,
+            "type": "string"
+          },
+          "system_prompt_modes": {
+            "description": "The task's own append or replace choice per role; null returns it to the role setting.",
+            "properties": {
+              "planner": {
+                "enum": [
+                  "append",
+                  "replace",
+                  null
+                ]
+              },
+              "reviewer": {
+                "enum": [
+                  "append",
+                  "replace",
+                  null
+                ]
+              },
+              "worker": {
+                "enum": [
+                  "append",
+                  "replace",
+                  null
+                ]
+              }
+            },
+            "type": "object"
+          },
+          "task_id": {
+            "description": "The task's id (task-...), from looper_tasks.",
+            "minLength": 1,
+            "type": "string"
+          },
+          "title": {
+            "description": "The new title: a few words naming the task, in the user's language.",
+            "maxLength": 60,
+            "minLength": 1,
+            "type": "string"
+          },
+          "work_dir": {
+            "description": "The new absolute directory.",
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "task_id"
+        ],
+        "type": "object"
+      }
+    },
+    {
+      "description": "Change one task's own limit of how many of its Workers or Reviewers run at once, in any task but a completed one (a stopped, failed or cancelled task's restart runs with it); it applies at once, and a null limit clears it to the default. Concurrency is per task: projects have no limits and nothing limits how many tasks run, so a project's limit cannot be changed; say so. The default for every task is the worker or reviewer role's max_concurrency (looper_settings). Lowering a limit stops nothing that runs. looper_tasks get shows a task's limits.",
+      "name": "looper_concurrency",
+      "schema": {
+        "additionalProperties": false,
+        "properties": {
+          "limits": {
+            "description": "The task's new limit of each role to change, from 1 to 64; null clears it.",
+            "properties": {
+              "reviewer": {
+                "maximum": 64,
+                "minimum": 1,
+                "type": "integer"
+              },
+              "worker": {
+                "maximum": 64,
+                "minimum": 1,
+                "type": "integer"
+              }
+            },
+            "type": "object"
+          },
+          "task_id": {
+            "description": "The task (task-...).",
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "task_id",
+          "limits"
+        ],
+        "type": "object"
+      }
+    },
+    {
+      "description": "Projects: list; get one; create (name, and the work_dir and background the user gave; never pick a directory); update its name, work_dir, background or dependency_conditions (a work_dir change asks the user first when enabled or queued command schedules run in its directory); delete one with its tasks and schedules, stopping its running tasks first (the user confirms first); move its directory and files to an absolute to path (omit to to use the configured projects root). Move asks the user first, rewrites command and agent schedule directories, preserves the old path with a symbolic link unless link_old is false, and refuses running tasks, commands or gates without interrupting them. dependency_conditions enables composed step readiness conditions (AND, OR and k-of).",
+      "name": "looper_projects",
+      "schema": {
+        "additionalProperties": false,
+        "properties": {
+          "action": {
+            "enum": [
+              "list",
+              "get",
+              "create",
+              "update",
+              "delete",
+              "move"
+            ],
+            "type": "string"
+          },
+          "background": {
+            "description": "What its agents should know.",
+            "type": "string"
+          },
+          "dependency_conditions": {
+            "description": "update: enable, disable or inherit step readiness conditions.",
+            "enum": [
+              "on",
+              "off",
+              null
+            ],
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "link_old": {
+            "description": "move: retain the old path as a symbolic link (default true).",
+            "type": "boolean"
+          },
+          "name": {
+            "description": "create: its name; update: its new name.",
+            "minLength": 1,
+            "type": "string"
+          },
+          "project": {
+            "description": "The project (get, update, delete, move).",
+            "minLength": 1,
+            "type": "string"
+          },
+          "to": {
+            "description": "move: absolute destination; omit for projects root / safe project name.",
+            "type": "string"
+          },
+          "work_dir": {
+            "description": "Its default absolute directory; '' for none.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "action"
+        ],
+        "type": "object"
+      }
+    },
+    {
+      "description": "Agent Profiles: runtime, LLM model and runtime options. List; create; update; delete one nothing uses with confirmation. Select a role's profile with looper_settings.",
+      "name": "looper_agent_profiles",
+      "schema": {
+        "additionalProperties": false,
+        "properties": {
+          "action": {
+            "enum": [
+              "list",
+              "create",
+              "update",
+              "delete"
+            ],
+            "type": "string"
+          },
+          "agent_teams": {
+            "description": "Claude Code only.",
+            "type": "boolean"
+          },
+          "custom_prompt": {
+            "description": "Text placed first in this profile's system prompt, before the harness; empty adds nothing.",
+            "type": "string"
+          },
+          "effort": {
+            "description": "Choose from the runtime type's effort_levels returned by list; when null, shared levels are low, medium, high, xhigh, max. A null effort uses the runtime's default.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "fallback_profile_id": {
+            "description": "Fallback Agent Profile id; null clears it.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "model": {
+            "oneOf": [
+              {
+                "description": "Model id from list.",
+                "minLength": 1,
+                "pattern": "^model-[a-zA-Z0-9-]+$",
+                "type": "string"
+              },
+              {
+                "additionalProperties": false,
+                "properties": {
+                  "name": {
+                    "maxLength": 200,
+                    "minLength": 1,
+                    "pattern": "^([A-Za-z0-9][A-Za-z0-9._:/-]*)(\\[(?:[A-Za-z0-9._:/-]+|[A-Za-z0-9._-]+=[A-Za-z0-9._-]+(?:,[A-Za-z0-9._-]+=[A-Za-z0-9._-]+)*)\\])?(?![\\s\\S])",
+                    "type": "string"
+                  },
+                  "protocol": {
+                    "enum": [
+                      "anthropic-messages",
+                      "openai-responses",
+                      "openai-chat"
+                    ],
+                    "type": "string"
+                  },
+                  "provider": {
+                    "minLength": 1,
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "provider",
+                  "name",
+                  "protocol"
+                ],
+                "type": "object"
+              }
+            ]
+          },
+          "name": {
+            "description": "create: its name; update: its new name.",
+            "minLength": 1,
+            "type": "string"
+          },
+          "profile": {
+            "description": "Its id or name (update, delete).",
+            "minLength": 1,
+            "type": "string"
+          },
+          "runtime": {
+            "description": "A runtime's id, name or type.",
+            "type": "string"
+          },
+          "web_search": {
+            "description": "Default true. Only Grok supports false; false disables web search and web fetch tools.",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "action"
+        ],
+        "type": "object"
+      }
+    },
+    {
+      "description": "LLM accounts: list vendors and accounts; register an API-key account without its key; update an account's name, endpoints, env, max_concurrency or enabled. Never take or pass a key; the user enters it on the dashboard.",
+      "name": "looper_providers",
+      "schema": {
+        "additionalProperties": false,
+        "properties": {
+          "action": {
+            "enum": [
+              "list",
+              "register",
+              "update"
+            ],
+            "type": "string"
+          },
+          "enabled": {
+            "description": "update: false disables the account: its Agent Profiles keep their selections but do not run until it is enabled again. Built-in login accounts take only this.",
+            "type": "boolean"
+          },
+          "endpoints": {
+            "oneOf": [
+              {
+                "items": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "base_url": {
+                      "type": "string"
+                    },
+                    "protocol": {
+                      "enum": [
+                        "anthropic-messages",
+                        "openai-responses",
+                        "openai-chat"
+                      ],
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "protocol",
+                    "base_url"
+                  ],
+                  "type": "object"
+                },
+                "type": "array"
+              }
+            ]
+          },
+          "env": {
+            "oneOf": [
+              {
+                "items": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "key": {
+                      "type": "string"
+                    },
+                    "value": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "key",
+                    "value"
+                  ],
+                  "type": "object"
+                },
+                "type": "array"
+              }
+            ]
+          },
+          "max_concurrency": {
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "name": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "provider": {
+            "description": "Account id or name (update).",
+            "minLength": 1,
+            "type": "string"
+          },
+          "vendor_type": {
+            "enum": [
+              "glm-bigmodel",
+              "glm-zai",
+              "deepseek",
+              "kimi-moonshot-cn",
+              "kimi-moonshot",
+              "cpa",
+              "opencode",
+              "sub2api",
+              "claude-subscription",
+              "codex-login",
+              "grok-login",
+              "cursor-login",
+              "coco-login",
+              "custom"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "action"
+        ],
+        "type": "object"
+      }
+    },
+    {
+      "description": "LLM models: list (optionally compatible with a runtime); create; update settings; delete an unused model with confirmation. A model is one provider, exact name and protocol; use its id or full reference. chat_dialect selects the openai-chat translation dialect; null uses the provider vendor default.",
+      "name": "looper_models",
+      "schema": {
+        "additionalProperties": false,
+        "properties": {
+          "action": {
+            "enum": [
+              "list",
+              "create",
+              "update",
+              "delete"
+            ],
+            "type": "string"
+          },
+          "background_model": {
+            "maxLength": 200,
+            "minLength": 1,
+            "pattern": "^([A-Za-z0-9][A-Za-z0-9._:/-]*)(\\[(?:[A-Za-z0-9._:/-]+|[A-Za-z0-9._-]+=[A-Za-z0-9._-]+(?:,[A-Za-z0-9._-]+=[A-Za-z0-9._-]+)*)\\])?(?![\\s\\S])",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "cache_read_usd_per_mtok": {
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "cache_write_usd_per_mtok": {
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "chat_dialect": {
+            "description": "OpenAI Chat Completions dialect; null uses the provider vendor default. Applies only to openai-chat models.",
+            "enum": [
+              null,
+              "generic",
+              "openai",
+              "deepseek",
+              "moonshot",
+              "zhipu",
+              "qwen",
+              "vllm",
+              "minimax",
+              "ark",
+              "openrouter"
+            ],
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "context_window": {
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "efforts": {
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "input_usd_per_mtok": {
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "model": {
+            "oneOf": [
+              {
+                "description": "Model id from list.",
+                "minLength": 1,
+                "pattern": "^model-[a-zA-Z0-9-]+$",
+                "type": "string"
+              },
+              {
+                "additionalProperties": false,
+                "properties": {
+                  "name": {
+                    "maxLength": 200,
+                    "minLength": 1,
+                    "pattern": "^([A-Za-z0-9][A-Za-z0-9._:/-]*)(\\[(?:[A-Za-z0-9._:/-]+|[A-Za-z0-9._-]+=[A-Za-z0-9._-]+(?:,[A-Za-z0-9._-]+=[A-Za-z0-9._-]+)*)\\])?(?![\\s\\S])",
+                    "type": "string"
+                  },
+                  "protocol": {
+                    "enum": [
+                      "anthropic-messages",
+                      "openai-responses",
+                      "openai-chat"
+                    ],
+                    "type": "string"
+                  },
+                  "provider": {
+                    "minLength": 1,
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "provider",
+                  "name",
+                  "protocol"
+                ],
+                "type": "object"
+              }
+            ]
+          },
+          "name": {
+            "description": "Exact model name (create).",
+            "maxLength": 200,
+            "minLength": 1,
+            "pattern": "^([A-Za-z0-9][A-Za-z0-9._:/-]*)(\\[(?:[A-Za-z0-9._:/-]+|[A-Za-z0-9._-]+=[A-Za-z0-9._-]+(?:,[A-Za-z0-9._-]+=[A-Za-z0-9._-]+)*)\\])?(?![\\s\\S])",
+            "type": "string"
+          },
+          "output_usd_per_mtok": {
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "protocol": {
+            "enum": [
+              "anthropic-messages",
+              "openai-responses",
+              "openai-chat"
+            ],
+            "type": "string"
+          },
+          "provider": {
+            "description": "Account id or name (list, create).",
+            "minLength": 1,
+            "type": "string"
+          },
+          "runtime": {
+            "description": "Runtime id, name or type (list).",
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "action"
+        ],
+        "type": "object"
+      }
+    },
+    {
+      "description": "Skills, plugins and MCP servers: list with installs (with project: what reaches it); install an item globally or in a project, for some roles; update an install's roles or enabled; uninstall. Agents load it from their next run.",
+      "name": "looper_catalog",
+      "schema": {
+        "additionalProperties": false,
+        "properties": {
+          "action": {
+            "enum": [
+              "list",
+              "install",
+              "update",
+              "uninstall"
+            ],
+            "type": "string"
+          },
+          "enabled": {
+            "type": "boolean"
+          },
+          "install_id": {
+            "description": "From list (update, uninstall).",
+            "type": "string"
+          },
+          "item": {
+            "description": "Its id or name (install).",
+            "type": "string"
+          },
+          "project": {
+            "description": "A project (list, install); leave out for global.",
+            "minLength": 1,
+            "type": "string"
+          },
+          "roles": {
+            "description": "Of manager (global only), planner, worker, reviewer; default all.",
+            "type": "array"
+          }
+        },
+        "required": [
+          "action"
+        ],
+        "type": "object"
+      }
+    },
+    {
+      "description": "Export looper-config/v4 (profiles, providers, settings, channels, skills, MCP, and scenario Manager definitions and task templates when any exist) to a file on this machine, never with secrets; include_projects adds each project and its schedules.",
+      "name": "looper_config_export",
+      "schema": {
+        "additionalProperties": false,
+        "properties": {
+          "include_projects": {
+            "type": "boolean"
+          }
+        },
+        "type": "object"
+      }
+    },
+    {
+      "description": "Spending: one task's cost; or a time range's (default all time) by project, or with project by its tasks. Money and subscription equivalent apart.",
+      "name": "looper_costs",
+      "schema": {
+        "additionalProperties": false,
+        "properties": {
+          "period": {
+            "enum": [
+              "today",
+              "this_week",
+              "this_month"
+            ],
+            "type": "string"
+          },
+          "project": {
+            "description": "The project's name.",
+            "minLength": 1,
+            "type": "string"
+          },
+          "since": {
+            "description": "A day (YYYY-MM-DD) or ISO date-time.",
+            "type": "string"
+          },
+          "task_id": {
+            "description": "The task's id (task-...), from looper_tasks.",
+            "minLength": 1,
+            "type": "string"
+          },
+          "until": {
+            "description": "As since; a day counts whole.",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      }
+    },
+    {
+      "description": "Settings agents inherit, a later layer winning: shared defaults → role → project → role in project. view (with project: its layers and allowed profiles) includes the gateway (enabled, port, aliases; no key); set values on one layer (no role nor project: shared defaults); allowed_profiles: add or remove the profiles a project's Planners may choose (an empty list: they may choose any profile); scheduler: the schedules' system settings (the user confirms them first); llmrec: recording retention_days (1–90, default 7) and max_total_mb (256–65536 MiB, default 2048), read by view and changed after confirmation; gateway: change the local gateway (enabled, port, alias_set, alias_delete); each change needs the user's confirmation; to read it use view. Gateway key reveal and rotation are dashboard-only; waits: system limits for wait steps (the user confirms first). knowledge_vault: the notes folder agents read in projects that turn it on, and the folders they may write (the user confirms first). The user confirms shared defaults, limits and higher spend caps first. Model and effort are the profile's. The Manager's current session may run its own profile (/profile).",
+      "name": "looper_settings",
+      "schema": {
+        "additionalProperties": false,
+        "properties": {
+          "action": {
+            "enum": [
+              "view",
+              "set",
+              "allowed_profiles",
+              "scheduler",
+              "waits",
+              "knowledge_vault",
+              "llmrec",
+              "gateway"
+            ],
+            "type": "string"
+          },
+          "add": {
+            "description": "allowed_profiles: profile ids or names.",
+            "type": "array"
+          },
+          "gateway": {
+            "additionalProperties": false,
+            "description": "gateway: enabled and/or port, or one alias_set, or one alias_delete. All writes require confirmation; no key operations.",
+            "properties": {
+              "alias_delete": {
+                "type": "string"
+              },
+              "alias_set": {
+                "additionalProperties": false,
+                "properties": {
+                  "alias": {
+                    "type": "string"
+                  },
+                  "model_id": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "alias",
+                  "model_id"
+                ],
+                "type": "object"
+              },
+              "enabled": {
+                "type": "boolean"
+              },
+              "port": {
+                "type": "integer"
+              }
+            },
+            "type": "object"
+          },
+          "knowledge_vault": {
+            "description": "knowledge_vault: path (absolute), writable (folders in it), rules_file; {\"path\": null} turns it off.",
+            "type": "object"
+          },
+          "llmrec": {
+            "additionalProperties": false,
+            "description": "llmrec: recording retention limits only; null restores the built-in.",
+            "properties": {
+              "max_total_mb": {
+                "maximum": 65536,
+                "minimum": 256,
+                "type": [
+                  "number",
+                  "null"
+                ]
+              },
+              "retention_days": {
+                "maximum": 90,
+                "minimum": 1,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              }
+            },
+            "type": "object"
+          },
+          "project": {
+            "description": "The project's name.",
+            "minLength": 1,
+            "type": "string"
+          },
+          "remove": {
+            "description": "allowed_profiles: as add.",
+            "type": "array"
+          },
+          "role": {
+            "enum": [
+              "manager",
+              "planner",
+              "worker",
+              "reviewer"
+            ],
+            "type": "string"
+          },
+          "scheduler": {
+            "description": "scheduler: min_interval_seconds (schedules' least gap), run_timeout_seconds (default), run_retention_days (days a finished schedule run is kept; each schedule keeps its newest 100); null: built-in.",
+            "type": "object"
+          },
+          "values": {
+            "description": "set: what to change; null inherits.",
+            "properties": {
+              "boundaries": {
+                "description": "Shared defaults only: what every run of a role a task's Planner defines ends with.",
+                "type": "string"
+              },
+              "env": {
+                "description": "The layer's whole {NAME: value}; a null value unsets an inherited one.",
+                "type": "object"
+              },
+              "harness_prompt": {
+                "type": "string"
+              },
+              "max_concurrency": {
+                "description": "Role worker or reviewer, no project: how many of each task's Workers or Reviewers run at once when the task sets none.",
+                "maximum": 64,
+                "minimum": 1,
+                "type": "integer"
+              },
+              "profile": {
+                "description": "An Agent Profile's id or name.",
+                "type": "string"
+              },
+              "run_budget_usd": {
+                "description": "Each run's spend cap.",
+                "type": "number"
+              },
+              "timeout_seconds": {
+                "description": "With role, no project; 0: none.",
+                "maximum": 31536000,
+                "minimum": 0,
+                "type": "integer"
+              }
+            },
+            "type": "object"
+          },
+          "waits": {
+            "description": "waits: max_wait_seconds (longest wait step), min_check_seconds (least gap between checks); null restores the built-in default.",
+            "type": "object"
+          }
+        },
+        "required": [
+          "action"
+        ],
+        "type": "object"
+      }
+    },
+    {
+      "description": "Schedules (a project's task, or a shell command with kind command, on a time rule): list; get (with latest runs); create (disabled; Looper shows it and asks whether to enable it); update; enable (it then fires unattended: its task, or its command; the user confirms first) or disable; run now (the user confirms first); delete (the user confirms first; an agent schedule's tasks stay; a command schedule is not deleted while its command runs: tell the user it can be deleted once the command finishes and that disabling it stops new fires; if it has a queued run, that run still starts after the running one, even when disabled; disable it only if the user asks (disabling it in the same turn after its delete was refused asks the user first); otherwise the delete removes its runs and messages, and a queued run will not execute; a command schedule has no tasks); reset_planner_session (the user confirms first; the next run starts fresh; a run in progress keeps its session and will not write it back).",
+      "name": "looper_schedules",
+      "schema": {
+        "additionalProperties": false,
+        "properties": {
+          "action": {
+            "enum": [
+              "list",
+              "get",
+              "create",
+              "update",
+              "enable",
+              "disable",
+              "run",
+              "delete",
+              "reset_planner_session"
+            ],
+            "type": "string"
+          },
+          "enabled": {
+            "description": "list: only those enabled (true) or not.",
+            "type": "boolean"
+          },
+          "fields": {
+            "description": "create, update (only those to change; null clears one).",
+            "properties": {
+              "alert_failures_after": {
+                "description": "Alert after this many consecutive failures; null: default.",
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "alert_overlap_after": {
+                "description": "Alert after this many consecutive overlap skips; 0: off; null: default.",
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "alert_stale_after_seconds": {
+                "description": "Alert after this many seconds without success; null: default.",
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "catch_up": {
+                "enum": [
+                  "once",
+                  "skip"
+                ],
+                "type": "string"
+              },
+              "command": {
+                "description": "kind command: the shell command, as the user gave it.",
+                "type": "string"
+              },
+              "cron": {
+                "description": "5 fields.",
+                "type": "string"
+              },
+              "daily_budget_usd": {
+                "type": "number"
+              },
+              "env": {
+                "additionalProperties": {
+                  "type": "string"
+                },
+                "description": "kind command: variables to set; never secrets (use env_file).",
+                "type": "object"
+              },
+              "env_file": {
+                "description": "kind command: a KEY=VALUE file read at each run; only its path is stored.",
+                "type": "string"
+              },
+              "gate_command": {
+                "description": "Shell; prints each run's input, nothing skips it.",
+                "type": "string"
+              },
+              "gate_timeout_seconds": {
+                "type": "integer"
+              },
+              "kind": {
+                "description": "create only. command: runs `command` with /bin/sh at each firing, no task, no agent and no model spend; for scripts the user names. Default agent.",
+                "enum": [
+                  "agent",
+                  "command"
+                ],
+                "type": "string"
+              },
+              "max_parallel_runs": {
+                "type": "integer"
+              },
+              "name": {
+                "type": "string"
+              },
+              "notify": {
+                "enum": [
+                  "failures",
+                  "alerts",
+                  "always",
+                  "never"
+                ],
+                "type": "string"
+              },
+              "notify_format": {
+                "description": "report (default): operator report; deliverable: delivered text only, agent schedules only.",
+                "enum": [
+                  "report",
+                  "deliverable"
+                ],
+                "type": "string"
+              },
+              "notify_target": {
+                "description": "{channel, chat}; null: dashboard only.",
+                "type": "object"
+              },
+              "overlap": {
+                "enum": [
+                  "skip",
+                  "queue",
+                  "parallel"
+                ],
+                "type": "string"
+              },
+              "profiles": {
+                "description": "{planner, worker, reviewer}: Agent Profile (id or name) per role; a role left out keeps the project's. Set only what the user asks for: a repetitive schedule's Planner may be a cheaper profile.",
+                "type": "object"
+              },
+              "requirement": {
+                "type": "string"
+              },
+              "run_budget_usd": {
+                "type": "number"
+              },
+              "run_timeout_seconds": {
+                "description": "Seconds; null: no limit; 'default' (a new schedule's): the system default."
+              },
+              "success_deadline": {
+                "description": "HH:MM in the schedule's zone: alert once when no run succeeded since the previous deadline.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "task_limits": {
+                "description": "{worker, reviewer}: each run's task's own limits.",
+                "type": "object"
+              },
+              "template_inputs": {
+                "additionalProperties": {
+                  "type": "string"
+                },
+                "description": "Static string values by template input key; omitted: keep inputs unless changing template_key. Supplied values replace all inputs.",
+                "type": "object"
+              },
+              "template_key": {
+                "description": "This schedule owner's template key; omitted: keep selection; a new key resets inherited inputs; null clears selection and inputs.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "timezone": {
+                "description": "IANA.",
+                "type": "string"
+              },
+              "user_gates": {
+                "description": "Allow this schedule's tasks to ask for user input when the project also allows user gates. Default off. Waiting counts against the run timeout.",
+                "enum": [
+                  "off",
+                  "on"
+                ],
+                "type": "string"
+              },
+              "work_dir": {
+                "description": "'' for the project's.",
+                "type": "string"
+              }
+            },
+            "type": "object"
+          },
+          "project": {
+            "description": "create: its project; list: only its schedules; with a schedule's name: its project.",
+            "minLength": 1,
+            "type": "string"
+          },
+          "schedule": {
+            "description": "Its id (sched-...) or name.",
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "action"
+        ],
+        "type": "object"
+      }
+    },
+    {
+      "description": "Run the operation the user was asked to confirm, when the user's message you answer confirms it; the note before that message gives its confirmation_id. It runs as it was asked, unchanged.",
+      "name": "looper_confirm",
+      "schema": {
+        "additionalProperties": false,
+        "properties": {
+          "confirmation_id": {
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "confirmation_id"
+        ],
+        "type": "object"
+      }
+    }
+  ],
+  "operation_ids": [
+    "acceptance_checks.get",
+    "acceptance_checks.update",
+    "acp_reviewer.get",
+    "acp_reviewer.update",
+    "action_receipts.get",
+    "action_receipts.update",
+    "admission_settings.get",
+    "admission_settings.update",
+    "agent_profiles.create",
+    "agent_profiles.delete",
+    "agent_profiles.list",
+    "agent_profiles.update",
+    "agent_settings.get",
+    "agent_settings.update_role",
+    "agent_settings.update_system",
+    "allowed_profiles.get",
+    "allowed_profiles.replace",
+    "attention.settings_get",
+    "attention.settings_update",
+    "attention.summary",
+    "auth.clear_password",
+    "auth.set_password",
+    "card_actions.get",
+    "card_actions.update",
+    "catalog.install",
+    "catalog.list",
+    "catalog.uninstall",
+    "catalog.update",
+    "catalog_items.delete",
+    "catalog_items.get",
+    "catalog_items.list",
+    "catalog_items.update",
+    "catalog_sources.create_mcp",
+    "catalog_sources.create_skill",
+    "catalog_sources.git_import",
+    "catalog_sources.git_preview",
+    "catalog_sources.import_machine",
+    "catalog_sources.import_mcp",
+    "catalog_sources.upload",
+    "channel_chats.list",
+    "channel_chats.set_policy",
+    "channel_configs.create",
+    "channel_configs.delete",
+    "channel_configs.get",
+    "channel_configs.list",
+    "channel_configs.update",
+    "channel_down_alert.get",
+    "channel_down_alert.update",
+    "channels.people",
+    "channels.status",
+    "chat.conversations",
+    "chat.messages",
+    "chat.send",
+    "chat_settings.get",
+    "chat_settings.update",
+    "clients.create",
+    "clients.list",
+    "clients.revoke",
+    "concurrency",
+    "config.export",
+    "config.import_apply",
+    "config.import_cancel",
+    "config.import_preview",
+    "config.import_upload",
+    "config_export",
+    "confirm",
+    "cost_guard.get",
+    "cost_guard.update",
+    "cost_holds.decide",
+    "cost_holds.list",
+    "costs",
+    "decision_snapshots_settings.get",
+    "decision_snapshots_settings.update",
+    "delivery_guard.get",
+    "delivery_guard.update",
+    "engine_settings.get",
+    "engine_settings.update",
+    "gate_settings.get",
+    "gate_settings.update",
+    "gates.end",
+    "gates.list",
+    "gates.messages",
+    "gates.reply",
+    "gateway.alias_delete",
+    "gateway.alias_set",
+    "gateway.get",
+    "gateway.key_reveal",
+    "gateway.key_rotate",
+    "gateway.update",
+    "idle_check_settings.get",
+    "idle_check_settings.update",
+    "installs.create",
+    "installs.delete",
+    "installs.project",
+    "installs.update",
+    "intent_alert_senders.delete",
+    "intent_alert_senders.list",
+    "intent_alert_senders.put",
+    "intent_bindings.delete",
+    "intent_bindings.list",
+    "intent_bindings.put",
+    "intent_group_reads.delete",
+    "intent_group_reads.list",
+    "intent_group_reads.preview",
+    "intent_group_reads.put",
+    "intent_group_reads.settings_put",
+    "intent_recognitions.list",
+    "intent_recognitions.preview",
+    "intent_recognitions.settings_put",
+    "intent_recognitions.start",
+    "intent_rule_hits.get",
+    "intent_rule_hits.list",
+    "intent_rule_hits.stats",
+    "intent_rules.claim_revision",
+    "intent_rules.confirm",
+    "intent_rules.discovery_build",
+    "intent_rules.discovery_get",
+    "intent_rules.discovery_reject",
+    "intent_rules.discovery_submit",
+    "intent_rules.history",
+    "intent_rules.list",
+    "intent_rules.migration_confirm",
+    "intent_rules.migration_preview",
+    "intent_rules.preview",
+    "intent_rules.revoke",
+    "intent_rules.settings_get",
+    "intent_types.archive",
+    "intent_types.create",
+    "intent_types.history",
+    "intent_types.list",
+    "intent_types.rollback",
+    "intent_types.save",
+    "intent_types.set_project_template",
+    "intents.build",
+    "intents.get",
+    "intents.list",
+    "intents.reject",
+    "intents.settings_get",
+    "intents.settings_put",
+    "intents.stats",
+    "intents.update",
+    "knowledge_vault.get",
+    "knowledge_vault.update",
+    "leads.chats",
+    "leads.delete",
+    "leads.mark",
+    "leads.search",
+    "leads.set_chat",
+    "leads.settings_get",
+    "leads.settings_put",
+    "leads_search_settings.get",
+    "leads_search_settings.update",
+    "ledger.action",
+    "ledger.add",
+    "ledger.get",
+    "ledger.list",
+    "ledger.page",
+    "limit_signals_settings.get",
+    "limit_signals_settings.update",
+    "llm_requests.export",
+    "llm_requests.get",
+    "llm_requests.list",
+    "llm_requests.purge",
+    "llmrec_settings.get",
+    "llmrec_settings.update",
+    "manager_chat_bindings.delete",
+    "manager_chat_bindings.list",
+    "manager_chat_bindings.put",
+    "manager_cleanup.preview",
+    "manager_cleanup.purge",
+    "manager_events.summary",
+    "manager_installs.delete",
+    "manager_installs.list",
+    "manager_installs.put",
+    "manager_lanes.get",
+    "manager_lanes.update",
+    "manager_metrics.get",
+    "manager_metrics_settings.get",
+    "manager_metrics_settings.update",
+    "manager_persona.get",
+    "manager_persona.update",
+    "manager_retrieval.leads_search",
+    "manager_retrieval.vault_read",
+    "manager_retrieval.vault_search",
+    "manager_session.get",
+    "manager_session.select_profile",
+    "manager_sessions.assign_task",
+    "manager_sessions.list",
+    "manager_sessions.reset",
+    "manager_templates.delete",
+    "manager_templates.put",
+    "managers.create",
+    "managers.delete",
+    "managers.list",
+    "managers.update",
+    "mcp_tool_levels.get",
+    "mcp_tool_levels.put",
+    "memory.check",
+    "memory.confirm",
+    "memory.confirm_many",
+    "memory.delete",
+    "memory.edit",
+    "memory.get",
+    "memory.lessons_list",
+    "memory.list",
+    "memory.propose_from_lead",
+    "memory.redraft",
+    "memory.reject",
+    "memory.renew",
+    "memory.retry",
+    "memory.revive",
+    "memory.revoke",
+    "memory.settings_get",
+    "memory.settings_put",
+    "memory.task_lessons",
+    "memory_closeout.get",
+    "memory_closeout.update",
+    "memory_lessons.settings_get",
+    "memory_lessons.settings_put",
+    "message_collection.get",
+    "message_collection.mode_update",
+    "message_collection.run_now",
+    "message_collection.update",
+    "message_stream.chat_update",
+    "message_stream.chats",
+    "message_stream.configure",
+    "message_stream.delete",
+    "message_stream.delete_preview",
+    "message_stream.runs",
+    "message_stream.status",
+    "metrics.step_attempts",
+    "metrics.task_outcomes",
+    "metrics_alerts.get",
+    "metrics_alerts.update",
+    "mid_turn_input.get",
+    "mid_turn_input.update",
+    "models.add_many",
+    "models.create",
+    "models.delete",
+    "models.get",
+    "models.list",
+    "models.update",
+    "morning_brief.get",
+    "morning_brief.update",
+    "openapi",
+    "operator_chat.messages",
+    "operator_chat.reply_events",
+    "operator_chat.save_message",
+    "operator_chat.send",
+    "operator_chat.sessions",
+    "operator_chat.stop",
+    "operator_chat.targets",
+    "operator_chat.thread_events",
+    "operator_chat.turn",
+    "outbound_gateway.get",
+    "outbound_gateway.update",
+    "outbound_review.get",
+    "outbound_review.list",
+    "outbound_review.update",
+    "overview",
+    "proactive_delivery.get",
+    "proactive_delivery.update",
+    "proactive_sends.list",
+    "processor_settings.get",
+    "processor_settings.update",
+    "profile.get",
+    "profile_settings.get",
+    "profile_settings.update",
+    "profile_source.get",
+    "profile_source.update",
+    "profiles.create",
+    "profiles.delete",
+    "profiles.prompt_preview",
+    "profiles.update",
+    "project_admin.create",
+    "project_admin.delete",
+    "project_admin.list",
+    "project_admin.move_dir",
+    "project_admin.preview_delete",
+    "project_admin.preview_move_dir",
+    "project_admin.update",
+    "project_agent_settings.get",
+    "project_agent_settings.update",
+    "project_agent_settings.update_role",
+    "project_knowledge.add",
+    "project_knowledge.confirm_draft",
+    "project_knowledge.delete",
+    "project_knowledge.discard_draft",
+    "project_knowledge.drafts",
+    "project_knowledge.get",
+    "project_knowledge.list",
+    "project_knowledge.update",
+    "project_roles.stats",
+    "project_skills.add",
+    "project_skills.context_budget",
+    "project_skills.delete",
+    "project_skills.deprecate",
+    "project_skills.get",
+    "project_skills.proposals.confirm",
+    "project_skills.proposals.get",
+    "project_skills.proposals.list",
+    "project_skills.proposals.reject",
+    "project_skills.proposals.restore",
+    "project_skills.proposals.set_mode",
+    "project_skills.restore",
+    "project_skills.rollback",
+    "project_skills.update",
+    "project_skills.usage",
+    "project_skills.versions",
+    "projects.create",
+    "projects.delete",
+    "projects.get",
+    "projects.list",
+    "projects.move",
+    "projects.update",
+    "provider_accounts.clear_login_problem",
+    "provider_accounts.create",
+    "provider_accounts.delete",
+    "provider_accounts.fetch_models",
+    "provider_accounts.list",
+    "provider_accounts.set_enabled",
+    "provider_accounts.update",
+    "providers.limits",
+    "providers.limits_clear",
+    "providers.list",
+    "providers.register",
+    "providers.update",
+    "registry.view",
+    "reminders_settings.get",
+    "reminders_settings.update",
+    "role_templates.delete",
+    "role_templates.list",
+    "role_templates.put",
+    "roles.get",
+    "roles.list",
+    "roles.reset_prompt",
+    "roles.update",
+    "runs.events",
+    "runs.failures",
+    "runs.for_task",
+    "runs.get",
+    "runs.list",
+    "runs.tree",
+    "runs.usage",
+    "runtimes.probe",
+    "scenario_session_routing.get",
+    "scenario_session_routing.update",
+    "schedule_admin.confirm_target",
+    "schedule_admin.create",
+    "schedule_admin.delete",
+    "schedule_admin.get",
+    "schedule_admin.list",
+    "schedule_admin.notifications",
+    "schedule_admin.preview",
+    "schedule_admin.project_list",
+    "schedule_admin.reset_cursor",
+    "schedule_admin.reset_planner_session",
+    "schedule_admin.run",
+    "schedule_admin.run_log",
+    "schedule_admin.runs",
+    "schedule_admin.subscription_preset",
+    "schedule_admin.update",
+    "scheduler_settings.get",
+    "scheduler_settings.update",
+    "schedules.create",
+    "schedules.delete",
+    "schedules.disable",
+    "schedules.enable",
+    "schedules.get",
+    "schedules.list",
+    "schedules.reset_planner_session",
+    "schedules.run",
+    "schedules.update",
+    "session_budget.get",
+    "session_budget.update",
+    "session_routing.get",
+    "session_routing.update",
+    "session_search.get",
+    "session_search.update",
+    "session_tools.get",
+    "session_tools.update",
+    "settings.allowed_profiles",
+    "settings.gateway",
+    "settings.knowledge_vault",
+    "settings.llmrec",
+    "settings.scheduler",
+    "settings.set",
+    "settings.view",
+    "settings.waits",
+    "stable_context_settings.get",
+    "stable_context_settings.update",
+    "status_card.get",
+    "status_card_settings.get",
+    "status_card_settings.update",
+    "system.check",
+    "system.components",
+    "system.drain",
+    "system.drain_cancel",
+    "system.drain_status",
+    "system.health",
+    "system.overview",
+    "system.status",
+    "task_control.cancel",
+    "task_control.restart",
+    "task_control.start",
+    "task_control.start_over",
+    "task_control.stop",
+    "task_create",
+    "task_evidence.get",
+    "task_feedback.get",
+    "task_feedback.set",
+    "task_instruct",
+    "task_pipeline",
+    "task_update",
+    "tasks.activity",
+    "tasks.activity_detail",
+    "tasks.activity_stream",
+    "tasks.agents",
+    "tasks.changes",
+    "tasks.configure",
+    "tasks.continue",
+    "tasks.conversation",
+    "tasks.create",
+    "tasks.delete",
+    "tasks.detail",
+    "tasks.failure_history",
+    "tasks.get",
+    "tasks.hold_release",
+    "tasks.holds",
+    "tasks.list",
+    "tasks.mark_seen",
+    "tasks.move",
+    "tasks.page",
+    "tasks.requirement_update",
+    "tasks.role_update",
+    "tasks.room",
+    "tasks.room_view",
+    "tasks.select",
+    "tasks.work_list",
+    "triage.why",
+    "triage_settings.get",
+    "triage_settings.update",
+    "turn_context_settings.get",
+    "turn_context_settings.update",
+    "untrusted_fence.get",
+    "untrusted_fence.update",
+    "wait_settings.get",
+    "wait_settings.update",
+    "waits.cancel",
+    "waits.resume",
+    "whoami",
+    "workflows.delete",
+    "workflows.get",
+    "workflows.list",
+    "workflows.preview",
+    "workflows.put",
+    "workspaces.check",
+    "workspaces.discard"
+  ],
+  "request": {
+    "additionalProperties": false,
+    "oneOf": [
+      {
+        "required": [
+          "project_id"
+        ]
+      },
+      {
+        "required": [
+          "project"
+        ]
+      }
+    ],
+    "properties": {
+      "base": {
+        "maxLength": 200,
+        "type": "string"
+      },
+      "config": {
+        "type": "object"
+      },
+      "goal_id": {
+        "type": "string"
+      },
+      "profile_overrides": {
+        "additionalProperties": false,
+        "properties": {
+          "planner": {
+            "type": "string"
+          },
+          "reviewer": {
+            "type": "string"
+          },
+          "worker": {
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "project": {
+        "additionalProperties": false,
+        "properties": {
+          "advisor": {
+            "enum": [
+              "on",
+              "off",
+              "",
+              null
+            ],
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "advisor_budget_usd": {
+            "anyOf": [
+              {
+                "type": [
+                  "number",
+                  "null"
+                ]
+              },
+              {
+                "const": ""
+              }
+            ]
+          },
+          "advisor_consult_budget_usd": {
+            "anyOf": [
+              {
+                "type": [
+                  "number",
+                  "null"
+                ]
+              },
+              {
+                "const": ""
+              }
+            ]
+          },
+          "advisor_consults_per_step": {
+            "anyOf": [
+              {
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              {
+                "const": ""
+              }
+            ]
+          },
+          "advisor_consults_per_task": {
+            "anyOf": [
+              {
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              {
+                "const": ""
+              }
+            ]
+          },
+          "advisor_fallback_profile": {
+            "anyOf": [
+              {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              {
+                "const": ""
+              }
+            ]
+          },
+          "advisor_internal_domains": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": [
+                  "array",
+                  "null"
+                ]
+              },
+              {
+                "const": ""
+              }
+            ]
+          },
+          "agent_room": {
+            "enum": [
+              "on",
+              "off",
+              "",
+              null
+            ],
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "background": {
+            "type": "string"
+          },
+          "dependency_conditions": {
+            "enum": [
+              "on",
+              "off",
+              "",
+              null
+            ],
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "description": {
+            "type": "string"
+          },
+          "distill_lessons": {
+            "description": "Lessons mode; true maps to write, false, null and empty string map to off.",
+            "enum": [
+              "off",
+              "draft",
+              "write",
+              "",
+              true,
+              false,
+              null
+            ],
+            "type": [
+              "string",
+              "boolean",
+              "null"
+            ]
+          },
+          "gate_reminder_hours": {
+            "anyOf": [
+              {
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              {
+                "const": ""
+              }
+            ]
+          },
+          "max_step_retries": {
+            "anyOf": [
+              {
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              {
+                "const": ""
+              }
+            ]
+          },
+          "memory_lessons": {
+            "enum": [
+              "off",
+              "on",
+              null
+            ],
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "name": {
+            "minLength": 1,
+            "pattern": "\\S",
+            "type": "string"
+          },
+          "operator_notes": {
+            "enum": [
+              "on",
+              "off",
+              "",
+              null
+            ],
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "planner_roles": {
+            "enum": [
+              "on",
+              "off",
+              "",
+              null
+            ],
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "review_policy": {
+            "enum": [
+              "planner",
+              "all",
+              "",
+              null
+            ],
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "role_text_max_chars": {
+            "anyOf": [
+              {
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              {
+                "const": ""
+              }
+            ]
+          },
+          "room_broadcasts_per_run": {
+            "anyOf": [
+              {
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              {
+                "const": ""
+              }
+            ]
+          },
+          "room_consult_budget_usd": {
+            "anyOf": [
+              {
+                "type": [
+                  "number",
+                  "null"
+                ]
+              },
+              {
+                "const": ""
+              }
+            ]
+          },
+          "room_consult_timeout_seconds": {
+            "anyOf": [
+              {
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              {
+                "const": ""
+              }
+            ]
+          },
+          "room_consults_per_task": {
+            "anyOf": [
+              {
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              {
+                "const": ""
+              }
+            ]
+          },
+          "room_message_max_chars": {
+            "anyOf": [
+              {
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              {
+                "const": ""
+              }
+            ]
+          },
+          "room_messages_per_task": {
+            "anyOf": [
+              {
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              {
+                "const": ""
+              }
+            ]
+          },
+          "room_ping_pong_rounds": {
+            "anyOf": [
+              {
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              {
+                "const": ""
+              }
+            ]
+          },
+          "room_post_per_minute": {
+            "anyOf": [
+              {
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              {
+                "const": ""
+              }
+            ]
+          },
+          "room_wait_max_seconds": {
+            "anyOf": [
+              {
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              {
+                "const": ""
+              }
+            ]
+          },
+          "step_workspaces": {
+            "enum": [
+              "shared",
+              "worktree",
+              "",
+              null
+            ],
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "subagent_budget_usd": {
+            "anyOf": [
+              {
+                "type": [
+                  "number",
+                  "null"
+                ]
+              },
+              {
+                "const": ""
+              }
+            ]
+          },
+          "subagent_task_budget_usd": {
+            "anyOf": [
+              {
+                "type": [
+                  "number",
+                  "null"
+                ]
+              },
+              {
+                "const": ""
+              }
+            ]
+          },
+          "subagents": {
+            "enum": [
+              "on",
+              "off",
+              "",
+              null
+            ],
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "subagents_per_run": {
+            "anyOf": [
+              {
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              {
+                "const": ""
+              }
+            ]
+          },
+          "subagents_per_task": {
+            "anyOf": [
+              {
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              {
+                "const": ""
+              }
+            ]
+          },
+          "supervise_interval_seconds": {
+            "anyOf": [
+              {
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              {
+                "const": ""
+              }
+            ]
+          },
+          "task_budget_action": {
+            "enum": [
+              "fail",
+              "wrap_up",
+              "",
+              null
+            ],
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "task_budget_usd": {
+            "anyOf": [
+              {
+                "type": [
+                  "number",
+                  "null"
+                ]
+              },
+              {
+                "const": ""
+              }
+            ]
+          },
+          "task_workspaces": {
+            "enum": [
+              "in_place",
+              "worktree",
+              "",
+              null
+            ],
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "user_gates": {
+            "enum": [
+              "on",
+              "off",
+              "",
+              null
+            ],
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "vault": {
+            "enum": [
+              "on",
+              "off",
+              "",
+              null
+            ],
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "verification_paths": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": [
+                  "array",
+                  "null"
+                ]
+              },
+              {
+                "const": ""
+              }
+            ]
+          },
+          "wait_commands": {
+            "enum": [
+              "on",
+              "off",
+              "",
+              null
+            ],
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "work_dir": {
+            "type": "string"
+          },
+          "workspace_links": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": [
+                  "array",
+                  "null"
+                ]
+              },
+              {
+                "const": ""
+              }
+            ]
+          }
+        },
+        "required": [
+          "name"
+        ],
+        "type": "object"
+      },
+      "project_id": {
+        "minLength": 1,
+        "type": "string"
+      },
+      "requirement": {
+        "maxLength": 32000,
+        "minLength": 1,
+        "pattern": "\\S",
+        "type": "string"
+      },
+      "work_dir": {
+        "type": "string"
+      },
+      "workflow": {
+        "type": "string"
+      },
+      "workspace_mode": {
+        "enum": [
+          "in_place",
+          "worktree"
+        ],
+        "type": "string"
+      }
+    },
+    "required": [
+      "requirement"
+    ],
+    "type": "object"
+  },
+  "source_commit": "021ed06e9286767ef0365c8883a022b8d2224a9a"
+}

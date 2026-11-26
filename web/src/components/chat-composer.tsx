@@ -17,6 +17,8 @@ export interface ChatComposerProps {
   onStop: () => void;
   notice?: string;
   disabled?: boolean;
+  /** Send and Queue stay primary unless a page asks for neutral controls. */
+  controls?: "primary" | "neutral";
 }
 
 const IDLE_PLACEHOLDER = "Type a message... (Shift+Enter for a new line)";
@@ -25,8 +27,9 @@ const REPLYING_STOPPABLE_PLACEHOLDER = "Replying… Enter queues, Esc stops";
 const FULL_NOTICE = "Queue is full";
 
 export function ChatComposer(props: ChatComposerProps) {
-  const { draft, onDraft, staged, onStaged, history, replying, canStop, stopRefusal, onSend, onStop, notice, disabled } =
+  const { draft, onDraft, staged, onStaged, history, replying, canStop, stopRefusal, onSend, onStop, notice, disabled, controls } =
     props;
+  const submitVariant = controls === "neutral" ? "outline" as const : undefined;
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const browsingRef = useRef<{ index: number; saved: string } | null>(null);
   const shownRef = useRef<string | null>(null);
@@ -201,12 +204,12 @@ export function ChatComposer(props: ChatComposerProps) {
                 </span>
               )
             )}
-            <Button type="submit" className="h-11 min-w-11 shrink-0" aria-label="Queue message" disabled={disabled || !hasDraft || full}>
+            <Button type="submit" variant={submitVariant} className="h-11 min-w-11 shrink-0" aria-label="Queue message" disabled={disabled || !hasDraft || full}>
               Queue
             </Button>
           </>
         ) : (
-          <Button type="submit" className="h-11 w-11 p-0" aria-label="Send" disabled={disabled || !hasDraft}>
+          <Button type="submit" variant={submitVariant} className="h-11 w-11 p-0" aria-label="Send" disabled={disabled || !hasDraft}>
             <Send className="h-4 w-4" aria-hidden="true" />
           </Button>
         )}

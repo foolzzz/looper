@@ -69,7 +69,12 @@ def test_move_preserves_files_rewrites_schedules_and_keeps_task_records(monkeypa
                            "VALUES ('wait-step','waiting',0,'Wait for input','pending','wait')")
         await pool.execute("INSERT INTO task_waits (step_id,task_id,topic,spec,state) "
                            "VALUES ('wait-step','waiting','Waiting','{}','waiting')")
-        recorded_tasks = [dict(row) for row in await pool.fetch("SELECT * FROM tasks ORDER BY id")]
+        def historical_task(row):
+            # Directory keys are derived caches refreshed after the move; recorded task fields stay intact.
+            return {key: value for key, value in dict(row).items()
+                    if key not in {"work_dir_real", "workspace_dir_real", "work_dir_recheck", "workspace_dir_recheck"}}
+
+        recorded_tasks = [historical_task(row) for row in await pool.fetch("SELECT * FROM tasks ORDER BY id")]
         preview = await api.preview_project_move(project, {"to": str(new)}, db=pool)
         impact = api.project_move_impact(project, preview)
         assert "default" in impact and "inherited-command" in impact
@@ -84,10 +89,67 @@ def test_move_preserves_files_rewrites_schedules_and_keeps_task_records(monkeypa
         paths = {row["id"]: row["work_dir"] for row in await pool.fetch("SELECT id,work_dir FROM schedules")}
         assert paths == {"command": str(new), "agent": str(new / "subdir"), "outside": str(old) + "-other",
                          "default": "", "inherited-command": "", "other-project": str(old)}
-        assert [dict(row) for row in await pool.fetch("SELECT * FROM tasks ORDER BY id")] == recorded_tasks
+        assert [historical_task(row) for row in await pool.fetch("SELECT * FROM tasks ORDER BY id")] == recorded_tasks
         activity = await pool.fetch("SELECT kind,summary FROM project_activity WHERE project_id=$1", project["id"])
         assert [dict(row) for row in activity] == [
             {"kind": "directory_moved", "summary": f"directory moved from {old} to {new}; notes not moved: notes root does not exist"}]
+
+    run_db(check, monkeypatch, timeout=30)
+
+
+def test_move_refreshes_task_selection_directories(monkeypatch, tmp_path):
+    from looper.agents.v1_domains import task_select
+    from looper.db import task_worktrees
+
+    old, new = tmp_path / "old", tmp_path / "new"
+
+    async def check(pool):
+        project = await _project(pool, old)
+        _git(old, "init", "-q")
+        _git(old, "add", ".")
+        _git(old, "-c", "user.name=Directory move test", "-c", "user.email=move@example.invalid",
+             "commit", "-qm", "Initial files")
+        base = _git(old, "rev-parse", "HEAD")
+        checkout = old / "checkout"
+        branch = "looper/task-tree/task"
+        _git(old, "worktree", "add", "-qb", branch, str(checkout))
+        await tasks.create_task(task_id="task-work", requirement="Historical work directory",
+                                project_id=project["id"], work_dir=str(old / "subdir"),
+                                status="completed", pool=pool)
+        await tasks.create_task(task_id="task-workspace", requirement="Historical workspace",
+                                project_id=project["id"], workspace_dir=str(old), status="completed", pool=pool)
+        await tasks.create_task(task_id="task-tree", requirement="Active checkout",
+                                project_id=project["id"], status="stopped", pool=pool)
+        await task_worktrees.save({
+            "task_id": "task-tree", "repo_dir": str(old), "subdir": "", "path": str(checkout),
+            "branch": branch, "base_commit": base, "links": [], "state": "active",
+            "result_commit": None, "removed_at": None,
+        }, pool=pool)
+        assert await pool.fetchval("SELECT work_dir_real FROM tasks WHERE id='task-work'") == str(
+            (old / "subdir").resolve())
+        assert await pool.fetchval("SELECT workspace_dir_real FROM tasks WHERE id='task-workspace'") == str(
+            old.resolve())
+        assert await pool.fetchval("SELECT path_real FROM task_worktrees WHERE task_id='task-tree'") == str(
+            checkout.resolve())
+
+        moved = await api.move_project_dir(project["id"], {"to": str(new), "link_old": True})
+
+        assert moved["repairs"] and all(repair["ok"] for repair in moved["repairs"])
+        work = await tasks.get_task("task-work", pool=pool)
+        workspace = await tasks.get_task("task-workspace", pool=pool)
+        tree = await task_worktrees.get("task-tree", pool=pool)
+        assert work["work_dir"] == str(old / "subdir")
+        assert work["work_dir_real"] == str((new / "subdir").resolve())
+        assert workspace["workspace_dir"] == str(old)
+        assert workspace["workspace_dir_real"] == str(new.resolve())
+        assert tree["path"] == str(new / "checkout")
+        assert tree["path_real"] == str((new / "checkout").resolve())
+        for root in (old, new):
+            for directory, task_id in ((root / "subdir", "task-work"), (root, "task-workspace"),
+                                       (root / "checkout", "task-tree")):
+                selected = await task_select.run(None, task_select.OPERATIONS[0], {"cwd": str(directory)}, None, {})
+                assert selected["kind"] == "one"
+                assert selected["task"]["task_id"] == task_id
 
     run_db(check, monkeypatch, timeout=30)
 
