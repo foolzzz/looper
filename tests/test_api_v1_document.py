@@ -263,3 +263,42 @@ def test_channel_start_state_is_read_only_and_described():
     with pytest.raises(OpError):
         api_v1.validate_arguments(update.request, {"channel_id": "channel-lark", "fields": {
             "runtime": {"state": "running", "last_error": None, "next_attempt_at": None}}})
+
+
+@pytest.mark.parametrize("fact", [None, "", "- Builds compilers [kind:: fact]\n"])
+def test_profile_result_and_document_accept_the_compiled_about_group(tmp_path, fact):
+    from looper.agents.operator_profile import _unconfigured, compile_profile
+
+    if fact is None:
+        view = _unconfigured()
+    else:
+        (tmp_path / "关于我.md").write_text("## Name\nAda\n" + fact, encoding="utf-8")
+        view = compile_profile(tmp_path, source="关于我.md").view(1)
+    operation = api_v1.find("POST", "/api/v1/profile/get")
+    response = api_v1.document()["paths"]["/profile/get"]["post"]["responses"]["200"]
+    published = response["content"]["application/json"]["schema"]["allOf"][1]["properties"]["result"]
+    assert published == operation.result
+    fields = published["properties"]["fields"]
+    assert fields["additionalProperties"] is False
+    assert fields["properties"]["about"] == fields["properties"]["standing_rules"]
+    assert api_v1.validate_arguments(operation.result, view) == view
+    assert bool(view["fields"]["about"]) == bool(fact)
+    for invalid in ("a fact", [{}], [42]):
+        with pytest.raises(OpError):
+            api_v1.validate_arguments(published, {**view, "fields": {**view["fields"], "about": invalid}})
+
+
+def test_profile_about_is_additive_for_existing_field_readers(tmp_path):
+    from looper.agents.operator_profile import compile_profile
+
+    note = tmp_path / "关于我.md"
+    text = "## Name\nAda\n- Use short replies [kind:: preference]\n- Keep tests [kind:: decision]\n"
+    note.write_text(text, encoding="utf-8")
+    before = compile_profile(tmp_path, source="关于我.md").view(1)
+    note.write_text(text + "- Builds compilers [kind:: fact]\n", encoding="utf-8")
+    response = json.loads(json.dumps(compile_profile(tmp_path, source="关于我.md").view(2)))
+    legacy_fields = {"name", "address", "working_hours", "time_zone", "reply_language",
+                     "communication_preferences", "standing_rules"}
+    assert set(response["fields"]) == legacy_fields | {"about"}
+    assert {key: response["fields"][key] for key in legacy_fields} == {
+        key: before["fields"][key] for key in legacy_fields}
