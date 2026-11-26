@@ -63,6 +63,8 @@ def display_name(kind: str, chat: str | None, *candidates: str | None) -> str:
 
 def parse_key(text: str) -> SessionKey:
     """``main``, or ``kind:channel_id:chat`` (the chat may contain colons). Anything else is refused."""
+    if "~" in text:
+        raise ValueError("session key must be main or kind:channel:chat")
     if text == SessionKind.MAIN.value:
         return MAIN_KEY
     kind, _, rest = text.partition(":")

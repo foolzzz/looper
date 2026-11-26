@@ -48,7 +48,7 @@ from collections.abc import Awaitable, Callable, Iterator, Sequence
 from typing import TYPE_CHECKING, Any, NoReturn
 
 from ..broadcast import Broadcaster
-from ..chat_scopes import LaunchMode
+from ..chat_scopes import LaunchMode, PrincipalKind, ScopeInvariantViolation
 from ..drain import DrainState
 from ..bus import MessageBus
 from ..channels import lark_quote
@@ -109,7 +109,7 @@ from .manager_session import MAIN_SESSION, ManagerSession, _Process, session_fie
 from . import background_turn, idle_check_turn, manager_budget, triage_background
 from .background_turn import completion_context as _completion_context  # noqa: F401 (router compatibility)
 from .. import lanes, lanes_settings
-from .manager_routing import SessionRouter
+from .manager_routing import RouteOutcome, SessionRouter
 from . import group_session
 from .. import session_routing, cost_guard, cost_hold_routing, cost_manager
 from ..mid_turn_input import MidTurnInputs
@@ -616,6 +616,30 @@ def _audience_kind(origin: dict[str, Any]) -> str:
     return "web" if origin["channel"] == "web" else "group" if origin["group"] else "dm"
 
 
+def _sender_kind(envelope: MessageEnvelope) -> PrincipalKind | None:
+    """The channel's trusted sender classification; absent classification grants no person authority."""
+    context = envelope.payload.get("channel_context")
+    value = context.get("sender_kind") if isinstance(context, dict) else None
+    if value is None:
+        return None
+    try:
+        return PrincipalKind(value)
+    except (TypeError, ValueError):
+        raise ScopeInvariantViolation("invalid channel sender kind") from None
+
+
+def _completion_origin(row: dict[str, Any], manager: AgentAddress, batch: uuid.UUID) -> dict[str, Any]:
+    """The code-recorded requester of a group completion, without changing its reply envelope."""
+    origin = _message_origin(_completion_context(row, manager, batch))
+    if session_routing.scoped(manager.agent_id) and row["target_kind"] == "group":
+        fallback = json.loads(row["fallback"]) if isinstance(row["fallback"], str) else row["fallback"]
+        notice = (fallback[0].get("notice") or {}) if fallback else {}
+        sender = notice.get("mention")
+        origin.update(channel_id=row["channel_id"], chat=row["chat"], group=True,
+                      sender=sender if isinstance(sender, str) and sender else None)
+    return origin
+
+
 async def _outside_source(turn: Turn | None) -> untrusted_text.Source | None:
     """What a turn's message is to the fence: a Lark or Telegram message from someone other than the operator (any
     group chat's) is outside content; the operator's own, the dashboard's and an API client's are not."""
@@ -1044,6 +1068,19 @@ class ManagerAgent:
             logger.warning("%s: cannot read its saved session; starting a new one", self._log, exc_info=True)
             return
         if saved:
+            if session.key != MAIN_SESSION:
+                scope = session.scope
+                mismatch = scope is not None and any(saved.get(name) != value for name, value in {
+                    "scope_id": scope.resolved.scope_id, "scope_version": scope.version,
+                    "audience": scope.resolved.audience.value, "scope_fingerprint": scope.fingerprint}.items())
+                if saved.get("retired_at") is not None or mismatch:
+                    if mismatch:
+                        logger.error("%s: saved scope disagrees with session %s; starting fresh", self._log, session.key)
+                    await db_manager_sessions.reopen(self.agent_id, session.key)
+                    session.session_id = session.pending_handoff = session.pending_switch = None
+                    session.clean_start = False
+                    session.session_totals = Usage.from_dict(saved.get("session_totals"))
+                    return
             session.session_id = saved.get("session_id")
             session.session_totals = Usage.from_dict(saved.get("session_totals"))
             session.session_runtime = saved.get("runtime_type")
@@ -1074,6 +1111,7 @@ class ManagerAgent:
             handoff = None
         if session.key != MAIN_SESSION:
             route = session.route
+            scope = session.scope
             policy = session_visibility.for_session(session.key, manager_id=self.agent_id)
             await db_manager_sessions.save({
                 "manager_id": self.agent_id, "session_key": session.key, "kind": route.kind.value,
@@ -1081,7 +1119,10 @@ class ManagerAgent:
                 "session_totals": session.session_totals.to_dict(), "runtime_type": session.session_runtime,
                 "profile_id": session.session_profile, "provider_id": session.session_provider,
                 "clean_start": session.clean_start, "pending_handoff": handoff,
-                "context_policy_version": policy.version if policy is not None else 0}, pool=pool)
+                "context_policy_version": policy.version if policy is not None else 0,
+                **({"scope_id": scope.resolved.scope_id, "scope_version": scope.version,
+                    "audience": scope.resolved.audience.value, "scope_fingerprint": scope.fingerprint}
+                   if scope is not None else {})}, pool=pool)
         else:
             await db_agent_sessions.save_session(self.agent_id, session.session_id, session.session_totals.to_dict(),
                                                  runtime_type=session.session_runtime,
@@ -1401,7 +1442,13 @@ class ManagerAgent:
                 # A message is settled only after its handler returns; restart replays held messages.
                 if self._drain is not None:
                     await self._drain.wait_serving()
-                if (session := await self._router.target(envelope)) is not None:
+                session = await self._router.target(envelope)
+                if session is RouteOutcome.ANSWERED:
+                    self._bus.settle_handled(envelope)
+                    continue
+                if session is RouteOutcome.HELD:
+                    continue
+                if session is not None:
                     merged = (await lanes.route_arrival(self, session, envelope) if lanes_settings.enabled()
                               else await self._mid_turn.merge(session, envelope))
                     if not merged:
@@ -1817,6 +1864,13 @@ class ManagerAgent:
                         require_match=self._claude.shares_bridge)
             token.check()
             token.ops_turn = turn
+            session = self._session_now()
+            if session.scope is not None and turn.origin is TurnOrigin.USER:
+                try:
+                    turn.principal = self._router.principal(envelope, session)
+                except ScopeInvariantViolation:
+                    logger.critical("%s: turn principal disagrees with session %s", self._log, session.key, exc_info=True)
+                    raise TurnFailed("这条消息没有处理：范围检查没有通过。", "scope_invariant") from None
             delivery_guard.initialize(turn)
             # Registered before the first await: a Stop during the persisting, the status and the tools probe is kept.
             self._running_token = token
@@ -2464,7 +2518,24 @@ class ManagerAgent:
                 return
             operator = await self._router.completion_operator(target.channel_id) if routed else None
             batch = uuid.uuid4()
-            rows = await db_manager_events.claim(*target.key, batch)
+            key = None
+            if session_routing.scoped(self.agent_id):
+                # Resolve before the claim, then resolve the row actually claimed inside the transaction.
+                # A failed read rolls the claim back, leaving the event pending for the retry wake-up.
+                async with db_connection.transaction() as conn:
+                    pending = await db_manager_events.pending_one(*target.key, pool=conn)
+                    if pending is None:
+                        return
+                    origin = _completion_origin(pending, self.agent_address, batch)
+                    await self._router.completion_key(origin)
+                    rows = await db_manager_events.claim(*target.key, batch, limit=1, pool=conn)
+                    if rows:
+                        origin = _completion_origin(rows[0], self.agent_address, batch)
+                        key = await self._router.completion_key(origin)
+                        if await db_manager_events.pending_one(*target.key, pool=conn) is not None:
+                            await self._bus.publish(completion_events.wake(self.agent_address, target))
+            else:
+                rows = await db_manager_events.claim(*target.key, batch)
         except Exception:
             # The bus acknowledges this wake-up once it is handled: a new one is queued (and journaled) first, so
             # the events are tried again, after a pause, and after a restart.
@@ -2475,9 +2546,22 @@ class ManagerAgent:
             return
         if rows:
             if routed or lanes_settings.enabled() or admission.enabled():
-                self._router.dispatch_completion(envelope, rows, batch, operator)
+                self._router.dispatch_completion(envelope, rows, batch, operator, key=key)
             else:
                 await self._tell_completion(rows, batch)
+
+    async def scope_config_changed(self, channel_id: str, chat: str, *, stop_now: bool) -> None:
+        """Reconcile committed scope changes; failed reads leave current sessions untouched."""
+        if not session_routing.scoped(self.agent_id):
+            return
+        from ...db import chat_bindings
+
+        try:
+            config = await chat_bindings.scope_config(channel_id, chat, self.agent_id)
+            operator = await self._router._operator_id(channel_id)
+            await self._router.reconcile(channel_id, chat, config=config, operator_id=operator, stop_now=stop_now)
+        except Exception:
+            logger.exception("%s: cannot reconcile scope configuration; the next message will retry", self._log)
 
     @manager_budget.after_reply
     async def _tell_completion(self, rows: list[dict[str, Any]], batch: uuid.UUID) -> None:

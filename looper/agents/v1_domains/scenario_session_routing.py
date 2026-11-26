@@ -6,8 +6,9 @@ from ..api_v1 import Operation, _object
 from ..ops.config import answered
 
 _ID = {"type": "string", "minLength": 1}
-_ROUTING = {"type": "string", "enum": [mode.value for mode in managers_api.ScenarioSessionRouting]}
-VIEW = _object({"manager_id": _ID, "session_routing": _ROUTING}, closed=True)
+_ROUTING = {"type": "string", "enum": [mode.value for mode in managers_api.SELECTABLE_ROUTING]}
+VIEW = _object({"manager_id": _ID, "session_routing": {
+    "type": "string", "enum": [mode.value for mode in managers_api.ScenarioSessionRouting]}}, closed=True)
 RESULTS = {}
 OPERATIONS = (
     Operation("scenario_session_routing.get", "POST", "/api/v1/scenario_session_routing/get",
