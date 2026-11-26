@@ -76,6 +76,7 @@ def test_local_gateway_settings_layout(gateway_dashboard, gateway_browser, width
                 "code": "unavailable", "message": "Gateway configuration unavailable"}})
             return
         result = {"gateway/get": settings, "registry/view": registry,
+                  "task_conversations/get": {"enabled": False},
                   "project_admin/list": {"projects": []}, "system/overview": {}, "system/status": {},
                   "ops/gates/list": {"gates": [], "total": 0}, "chat_settings/get": {"stop_enabled": False}}.get(operation)
         if result is None:

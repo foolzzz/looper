@@ -96,6 +96,8 @@ def test_sessions_resume_after_async_restart(page, outcome):
             result = {"runs": []}
         elif path == "project_admin/list":
             result = {"projects": []}
+        elif path == "task_conversations/get":
+            result = {"enabled": False}
         elif path == "ops/gates/list":
             result = {"gates": [], "total": 0}
         elif path == "tasks/page":
@@ -207,6 +209,8 @@ def test_restart_completes_with_a_historical_running_record(page, outcome, reset
             result = {"runs": []}
         elif path == "project_admin/list":
             result = {"projects": []}
+        elif path == "task_conversations/get":
+            result = {"enabled": False}
         elif path == "ops/gates/list":
             result = {"gates": [], "total": 0}
         elif path == "tasks/page":
