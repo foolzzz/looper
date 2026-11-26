@@ -182,14 +182,42 @@ LOOSENINGS = {
     "excludedCommands": ({"sandbox": {"excludedCommands": ["git"]}}, "sandbox.excludedCommands"),
     "allowUnixSockets": ({"sandbox": {"network": {"allowUnixSockets": ["/private/var/x.sock"]}}},
                          "sandbox.network.allowUnixSockets"),
-    "allowLocalBinding": ({"sandbox": {"network": {"allowLocalBinding": True}}}, "sandbox.network.allowLocalBinding"),
-    "enableWeakerNetworkIsolation": ({"sandbox": {"enableWeakerNetworkIsolation": True}},
-                                     "sandbox.enableWeakerNetworkIsolation"),
     "allowedDomains": ({"sandbox": {"network": {"allowedDomains": ["evil.example"]}}}, "sandbox.network.allowedDomains"),
     "httpProxyPort": ({"sandbox": {"network": {"httpProxyPort": 8080}}}, "sandbox.network.httpProxyPort"),
     "additionalDirectories": ({"permissions": {"additionalDirectories": ["/private/var/extra"]}},
                               "permissions.additionalDirectories"),
 }
+
+
+# Scalar pins cannot be loosened from the user layer: the flag layer outranks it (measured on 2.1.332), so the CLI's
+# effective value stays the pinned one and the readback sees exactly that. Arrays merge, so they are the way in.
+SCALARS = {
+    "allowLocalBinding": ({"sandbox": {"network": {"allowLocalBinding": True}}}, ("sandbox", "network", "allowLocalBinding")),
+    "enableWeakerNetworkIsolation": ({"sandbox": {"enableWeakerNetworkIsolation": True}},
+                                     ("sandbox", "enableWeakerNetworkIsolation")),
+}
+
+
+@pytest.mark.parametrize("name", sorted(SCALARS))
+def test_r2_a_scalar_the_user_layer_sets_does_not_override_the_flag_layer(probe, name):
+    content, key = SCALARS[name]
+    probe.write_user_settings(content)
+
+    async def scenario():
+        live = Live(probe, [text("never")])
+        await live.start()
+        try:
+            readback, mismatches = await live.readback("launch")
+            node: Any = readback.settings["effective"]
+            for part in key:
+                node = node[part]
+            probe.observations[f"r2_{name}"] = {"effective": node, "user_layer_listed": any(
+                layer["source"] == "userSettings" for layer in readback.settings["sources"])}
+            assert node is False and mismatches == [], mismatches
+        finally:
+            await live.stop()
+
+    run(scenario())
 
 
 @pytest.mark.parametrize("name", sorted(LOOSENINGS))
@@ -341,8 +369,9 @@ def test_r5_user_settings_that_change_between_turns(probe):
             await live.stop()
 
     reloaded = run(scenario())
+    probe.observations["r5_turn_two_wrote_outside_the_sandbox_rules"] = target.exists()
     if reloaded:
-        pass  # turn 2 is refused by the readback before it is sent
+        pass  # the CLI reloads user settings: the readback before turn 2 refuses it in the product
     else:
         assert not target.exists(), "the sandbox changed although the readback did not see it"
 
@@ -376,6 +405,8 @@ def test_r6_twenty_full_readbacks(probe):
 
 
 def test_upgrade_probe_the_tool_list_is_exactly_the_expected_set(probe):
+    """``system/init.tools`` under the launch's ``--tools``: Bash and the allowed MCP servers' tools, nothing else.
+    ``EndConversation`` and ``WaitForMcpServers`` may or may not be listed in ``--print`` (recorded)."""
     library = library_with_looper_and_probe(probe)
 
     async def scenario():
@@ -389,15 +420,29 @@ def test_upgrade_probe_the_tool_list_is_exactly_the_expected_set(probe):
             await live.stop()
 
     init = run(scenario())
-    expected = {*sandbox.BUILTIN_TOOLS, *sandbox.UNREMOVABLE_TOOLS, "mcp__probe__echo", "mcp__looper__echo"}
-    probe.observations["upgrade_init_tools"] = sorted(init["tools"])
-    assert set(init["tools"]) == expected, sorted(set(init["tools"]) ^ expected)
-    assert "ToolSearch" not in init["tools"]
+    tools = set(init["tools"])
+    probe.observations["upgrade_init_tools"] = sorted(tools)
+    assert tools - set(sandbox.UNREMOVABLE_TOOLS) == {*sandbox.BUILTIN_TOOLS, "mcp__probe__echo", "mcp__looper__echo"}, sorted(tools)
+    assert tools <= {*sandbox.BUILTIN_TOOLS, *sandbox.UNREMOVABLE_TOOLS, "mcp__probe__echo", "mcp__looper__echo"}
+    assert "ToolSearch" not in tools
 
 
-def test_upgrade_probe_no_built_in_appeared_that_the_known_list_lacks(probe):
-    """Without ``--tools`` the CLI lists every built-in it offers in ``--print``; each must be known."""
-    async def scenario():
+def test_upgrade_probe_every_built_in_the_cli_offers_is_denied_under_the_launch(probe):
+    """Without ``--tools`` the CLI lists every built-in it offers in ``--print``; under the launch's ``--tools`` each
+    one outside the allowlist must be denied by a ``toolsNarrowing`` rule (``Task`` is ``Agent``'s display name;
+    ``ToolSearch`` is switched off by the pinned ``ENABLE_TOOL_SEARCH``, which the pin check covers). Tools seen that
+    ``KNOWN_BUILTIN_TOOLS`` does not list are recorded: they exist only on some installs."""
+    async def pinned():
+        live = Live(probe, [text("one")])
+        await live.start()
+        try:
+            readback, mismatches = await live.readback("launch")
+            assert mismatches == [], rb.notice(mismatches, probe.version)
+            return {rule["rule"] for rule in readback.rules["state"]["rules"] if rule["source"] == "toolsNarrowing"}
+        finally:
+            await live.stop()
+
+    async def loose():
         live = Live(probe, [text("one")], control="loose")
         await live.start()
         try:
@@ -405,8 +450,12 @@ def test_upgrade_probe_no_built_in_appeared_that_the_known_list_lacks(probe):
         finally:
             await live.stop()
 
-    init = run(scenario())
-    seen = {name for name in init["tools"] if not name.startswith("mcp__")}
+    denied = run(pinned())
+    seen = {name for name in run(loose())["tools"] if not name.startswith("mcp__")}
     known = rb.KNOWN_BUILTIN_TOOLS[VERIFIED_CLI_VERSION]
     probe.observations["upgrade_builtins_without_tools_flag"] = sorted(seen)
-    assert seen <= known, sorted(seen - known)
+    probe.observations["upgrade_seen_but_not_known"] = sorted(seen - known)
+    probe.observations["upgrade_denied_under_launch"] = sorted(denied)
+    offered = {("Agent" if name == "Task" else name) for name in seen} - {"ToolSearch", *sandbox.BUILTIN_TOOLS}
+    assert offered <= denied, sorted(offered - denied)
+    assert (known - set(sandbox.BUILTIN_TOOLS)) <= denied | set(sandbox.UNREMOVABLE_TOOLS), sorted(known - denied)
