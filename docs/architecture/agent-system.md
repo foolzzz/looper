@@ -4260,11 +4260,15 @@ the [step workspaces RFC](rfcs/step-workdir-isolation-v0.zh-CN.md)):
   write `.git/config`, `.git/hooks` and `.git/info/attributes`, so every git
   command the service runs in a task, step or worktree directory, a consult
   or verification checkout or an explorer snapshot goes through one helper.
-  It runs no hook, `core.fsmonitor`, filter, merge or diff driver, textconv,
-  signing program, `core.sshCommand`, pager, editor, askpass or credential
-  helper of the repository (fixed `-c` overrides, and `--attr-source` with the
-  empty tree, so `.gitattributes` is not applied either: LFS and `eol=`
-  attributes do not take effect in Looper's own git commands). The command's
+  It runs no hook, `core.fsmonitor`, signing program, `core.sshCommand`,
+  pager, editor, askpass or credential helper of the repository (fixed `-c`
+  overrides), and no filter, merge or diff driver (textconv) *defined by the
+  repository*: `.gitattributes` stays in effect (`eol=`, `text`, a user's LFS
+  filter), and the definitions found in the repository's own config (and in
+  its checked-out submodules') are overridden, by the user-level or system
+  definition of the same name when there is one, else by nothing. The
+  definitions are read just before the command, so one an agent writes in
+  between is not stopped. The command's
   environment is an allowlist (`PATH`, `HOME`, the locale, the operator's own
   `GIT_CONFIG_*`, and the few `GIT_*` variables a call names), so the
   database URL, tokens and provider keys never reach git or anything it

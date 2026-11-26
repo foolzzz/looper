@@ -9,6 +9,7 @@ from __future__ import annotations
 import ast
 import asyncio
 import os
+import re
 import subprocess
 from collections.abc import Callable
 from pathlib import Path
@@ -30,7 +31,7 @@ _IDENTITY = {"GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@example.com",
 
 def plain(repo: Path, *args: str, check: bool = True) -> subprocess.CompletedProcess:
     """Ordinary git: the control."""
-    return subprocess.run(["git", "-C", str(repo), *args], env=_PLAIN_ENV, capture_output=True, text=True,
+    return subprocess.run(["git", "-C", str(repo), *args], env={**_PLAIN_ENV, **_PLAIN_ENV_PATCH}, capture_output=True, text=True,
                           stdin=subprocess.DEVNULL, check=check, timeout=30)
 
 
@@ -295,10 +296,10 @@ def test_a_core_worktree_elsewhere_is_refused(repo, tmp_path):
 def test_ordinary_layouts_are_accepted(repo, tmp_path):
     (repo / "sub").mkdir()
     plain(repo, "worktree", "add", "-q", "--detach", str(tmp_path / "wt"), "HEAD")
-    assert git_safe.check_repository(repo) == "sha1"
-    assert git_safe.check_repository(repo / "sub") == "sha1"
-    assert git_safe.check_repository(tmp_path / "wt") == "sha1"
-    assert git_safe.check_repository(repo / ".git") == "sha1"  # inside the git dir: no work tree, still checked
+    assert git_safe.check_repository(repo) is not None
+    assert git_safe.check_repository(repo / "sub") is not None
+    assert git_safe.check_repository(tmp_path / "wt") is not None
+    assert git_safe.check_repository(repo / ".git") is not None  # inside the git dir: no work tree, still checked
     assert safe(tmp_path / "wt", "status", "--porcelain").returncode == 0
 
 
@@ -315,7 +316,7 @@ def _submodule(tmp_path: Path, repo: Path) -> Path:
 
 def test_a_checked_out_submodule_is_accepted(repo, tmp_path):
     module = _submodule(tmp_path, repo)
-    assert git_safe.check_repository(module) == "sha1"
+    assert git_safe.check_repository(module) is not None
     assert safe(module, "status", "--porcelain").returncode == 0
 
 
@@ -336,11 +337,21 @@ def test_a_relocated_checkout_is_run_without_the_layout_check(repo, tmp_path):
     wt.rename(moved)  # the main repository still lists ``wt``: the links are stale
     with pytest.raises(git_safe.RepositoryRefused):
         git_safe.check_repository(moved)
-    assert git_safe.check_repository(moved, layout=False) == "sha1"
+    assert git_safe.check_repository(moved, layout=False) is not None
     (repo / ".git" / "info").mkdir(exist_ok=True)
     (repo / ".git" / "info" / "attributes").write_text("*.txt filter=evil\n")
     with pytest.raises(git_safe.RepositoryRefused) as refused:  # the attributes are checked either way
         git_safe.check_repository(moved, layout=False)
+    assert refused.value.reason == "attributes_driver"
+
+
+def test_a_submodule_info_attributes_is_refused_for_the_superproject(repo, tmp_path):
+    module = _submodule(tmp_path, repo)
+    git_dir = Path(plain(module, "rev-parse", "--path-format=absolute", "--git-dir").stdout.strip())
+    (git_dir / "info").mkdir(exist_ok=True)
+    (git_dir / "info" / "attributes").write_text("*.txt filter=evil\n")
+    with pytest.raises(git_safe.RepositoryRefused) as refused:
+        safe(repo, "status")
     assert refused.value.reason == "attributes_driver"
 
 
@@ -430,14 +441,115 @@ def test_outside_a_repository_the_command_runs_and_fails_as_before(tmp_path):
     assert safe(tmp_path / "missing", "rev-parse", "HEAD").returncode == 128
 
 
-def test_sha256_repositories_get_their_own_empty_tree(tmp_path):
+def test_sha256_repositories_work(tmp_path):
     directory = tmp_path / "r256"
     directory.mkdir()
     if plain(directory, "init", "-q", "--object-format=sha256", check=False).returncode != 0:
         pytest.skip("this git cannot make a sha256 repository")
     (directory / "f").write_text("x\n")
-    assert git_safe.check_repository(directory) == "sha256"
+    assert git_safe.check_repository(directory) is not None
     assert safe(directory, "status", "--porcelain").stdout.strip() == "?? f"
+
+
+def _global_config(tmp_path: Path, monkeypatch, text: str) -> None:
+    config = tmp_path / "user.gitconfig"
+    config.write_text(text)
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(config))
+    _PLAIN_ENV_PATCH["GIT_CONFIG_GLOBAL"] = str(config)
+
+
+_PLAIN_ENV_PATCH: dict[str, str] = {}
+
+
+@pytest.fixture(autouse=True)
+def _reset_plain_env():
+    yield
+    _PLAIN_ENV_PATCH.clear()
+
+
+def _blob(repo: Path, path: str) -> str:
+    return plain(repo, "cat-file", "-p", f":{path}").stdout
+
+
+def test_gitattributes_still_apply(repo):
+    """eol and text attributes (what LFS and normalisation rely on) are not dropped."""
+    (repo / ".gitattributes").write_text("*.txt text eol=crlf\n")
+    (repo / "c.txt").write_bytes(b"one\r\ntwo\r\n")
+    assert safe(repo, "add", "-A").returncode == 0
+    assert _blob(repo, "c.txt") == "one\ntwo\n"  # normalised to LF in the object: the attribute applied
+
+
+def test_a_user_level_filter_still_runs_and_converts(repo, probe, marker, tmp_path, monkeypatch):
+    upper = tmp_path / "upper.sh"
+    upper.write_text(f'#!/bin/sh\necho user-filter >> "{marker}"\ntr a-z A-Z\n')
+    upper.chmod(0o755)
+    _global_config(tmp_path, monkeypatch, f'[filter "lfsish"]\n\tclean = {upper}\n')
+    (repo / ".gitattributes").write_text("*.txt filter=lfsish\n")
+    (repo / "c.txt").write_text("hello\n")
+    assert safe(repo, "add", "-A").returncode == 0
+    assert _blob(repo, "c.txt") == "HELLO\n"
+    assert set(fired(marker)) == {"user-filter"}
+
+
+def test_a_repository_definition_of_a_user_level_filter_gets_the_users_back(repo, probe, marker, tmp_path, monkeypatch):
+    upper = tmp_path / "upper.sh"
+    upper.write_text("#!/bin/sh\ntr a-z A-Z\n")
+    upper.chmod(0o755)
+    _global_config(tmp_path, monkeypatch, f'[filter "lfsish"]\n\tclean = {upper}\n')
+    plain(repo, "config", "filter.lfsish.clean", str(probe))  # the repository redefines it
+    plain(repo, "config", "filter.lfsish.smudge", str(probe))
+    plain(repo, "config", "filter.lfsish.required", "true")
+    (repo / ".gitattributes").write_text("*.txt filter=lfsish\n")
+    (repo / "c.txt").write_text("hello\n")
+    assert safe(repo, "add", "-A").returncode == 0
+    assert _blob(repo, "c.txt") == "HELLO\n"
+    assert fired(marker) == []
+
+
+def test_a_repository_attributes_file_setting_is_replaced(repo, probe, marker, tmp_path):
+    attributes = tmp_path / "attrs"
+    attributes.write_text("*.txt filter=evil\n")
+    plain(repo, "config", "core.attributesFile", str(attributes))
+    plain(repo, "config", "filter.evil.clean", str(probe))
+    (repo / "a.txt").write_text("changed\n")
+    plain(repo, "add", "-A")
+    assert fired(marker), "positive control"
+    plain(repo, "reset", "-q")
+    marker.unlink()
+    assert safe(repo, "add", "-A").returncode == 0
+    assert fired(marker) == []
+
+
+def test_a_required_repository_filter_without_a_command_does_not_fail_the_command(repo, probe):
+    (repo / ".gitattributes").write_text("*.txt filter=evil\n")
+    plain(repo, "config", "filter.evil.clean", str(probe))
+    plain(repo, "config", "filter.evil.required", "true")
+    (repo / "a.txt").write_text("changed\n")
+    assert safe(repo, "add", "-A").returncode == 0
+
+
+def test_overrides_are_found_by_scope():
+    out = "\0".join(["global", "file:/h/.gitconfig", "filter.lfs.clean\nlfs clean", "local", "file:.git/config",
+                     "filter.lfs.clean\nevil", "local", "file:.git/config", "filter.x.smudge\nevil",
+                     "local", "file:.git/config", "filter.x.required\ntrue", "worktree", "file:w", "diff.d.textconv\nevil",
+                     "local", "file:.git/config", "merge.m.driver\nevil", "local", "file:c", "core.attributesfile\n/x",
+                     "global", "file:/h/.gitconfig", "filter.only.process\nok", ""])
+    assert git_safe._overrides(out) == ("core.attributesfile=/dev/null", "diff.d.textconv=", "filter.lfs.clean=lfs clean",
+                                        "filter.x.required=false", "filter.x.smudge=", "merge.m.driver=")
+
+
+def test_cached_checks_a_directory_once(repo, monkeypatch):
+    calls = []
+    real = subprocess.run
+    monkeypatch.setattr(subprocess, "run", lambda command, *a, **k: calls.append(command) or real(command, *a, **k))
+    with git_safe.cached():
+        for _ in range(3):
+            git_safe.check_repository(repo)
+    assert len(calls) == 3  # layout, config and gitlink probes, once
+    calls.clear()
+    git_safe.check_repository(repo)
+    git_safe.check_repository(repo)
+    assert len(calls) == 6
 
 
 def test_spawn_runs_through_the_same_checks(repo, probe, marker):
@@ -461,8 +573,9 @@ def test_call_sites_treat_a_refused_repository_as_a_failed_git(repo, probe, tmp_
     _arm_info_attributes(repo, probe)
 
     async def go():
-        with pytest.raises(step_workspaces.GitError, match="attributes_driver"):
+        with pytest.raises(step_workspaces.GitError, match="info/attributes") as refused:
             await step_workspaces._git(repo, "status")
+        assert refused.value.reason == "repository_refused:attributes_driver"
 
     asyncio.run(go())
     done = consult._git(repo, "status")
@@ -488,18 +601,37 @@ DIRECT_GIT_ALLOWED = {
 _SPAWNERS = {"run", "Popen", "call", "check_call", "check_output", "create_subprocess_exec", "create_subprocess_shell"}
 
 
+_GIT_PATH = re.compile(r"^(?:/[\w.+-]+)*/git$")
+_GIT_SHELL = re.compile(r"^\s*(?:/\S*/)?git(?:\s|$)")
+_GIT_NAMES = {"git", "git_bin", "git_path", "GIT", "GIT_BIN"}
+
+
 def _is_git_word(node: ast.AST) -> bool:
-    return isinstance(node, ast.Constant) and node.value == "git"
+    """"git", an absolute path to it, or a variable named like the binary."""
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        return node.value == "git" or bool(_GIT_PATH.match(node.value))
+    return isinstance(node, ast.Name) and node.id in _GIT_NAMES
 
 
 def _starts_with_git(node: ast.AST) -> bool:
     return isinstance(node, (ast.List, ast.Tuple)) and bool(node.elts) and _is_git_word(node.elts[0])
 
 
+def _is_git_shell(node: ast.AST) -> bool:
+    """A shell string that runs git (``"git status"``, ``f"git -C {d} status"``)."""
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        return bool(_GIT_SHELL.match(node.value))
+    if isinstance(node, ast.JoinedStr) and node.values:
+        first = node.values[0]
+        return isinstance(first, ast.Constant) and bool(_GIT_SHELL.match(str(first.value)))
+    return False
+
+
 def _direct_git_calls(source: str) -> list[int]:
-    """Lines that start git directly: an argv (a list or tuple starting with "git") passed to a process starter,
-    or one whose next item is an option or a ``*args`` (``("git", "-c", ...)``, ``["git", *args]``);
-    ``create_subprocess_exec("git", ...)``; ``shutil.which("git")``."""
+    """Lines that start git directly: an argv (a list or tuple starting with git, its absolute path or a variable
+    named like it) passed to a process starter, or one whose next item is an option or a ``*args``;
+    ``create_subprocess_exec("git", ...)``; a shell string starting with git given to a starter or ``os.system``;
+    ``shutil.which("git")``."""
     lines = []
     for node in ast.walk(ast.parse(source)):
         if isinstance(node, (ast.List, ast.Tuple)) and len(node.elts) > 1 and _is_git_word(node.elts[0]):
@@ -509,9 +641,11 @@ def _direct_git_calls(source: str) -> list[int]:
                 lines.append(node.lineno)
         elif isinstance(node, ast.Call):
             name = node.func.attr if isinstance(node.func, ast.Attribute) else getattr(node.func, "id", "")
-            if name in _SPAWNERS and node.args and (_is_git_word(node.args[0]) or _starts_with_git(node.args[0])):
+            first = node.args[0] if node.args else None
+            if name in _SPAWNERS | {"system", "popen"} and first is not None and (
+                    _is_git_word(first) or _starts_with_git(first) or _is_git_shell(first)):
                 lines.append(node.lineno)
-            elif name == "which" and node.args and _is_git_word(node.args[0]):
+            elif name == "which" and first is not None and _is_git_word(first):
                 lines.append(node.lineno)
     return lines
 
@@ -522,6 +656,10 @@ def test_direct_git_calls_are_found_by_the_scan():
     assert _direct_git_calls('async def f():\n    await asyncio.create_subprocess_exec("git", "-C", d)')
     assert _direct_git_calls('x = ("git", "-c", "a=b")')
     assert _direct_git_calls('git = shutil.which("git")')
+    assert _direct_git_calls('subprocess.run(["/usr/bin/git", "status"])')
+    assert _direct_git_calls('subprocess.run(f"git -C {d} status", shell=True)')
+    assert _direct_git_calls('os.system("git status")')
+    assert _direct_git_calls('subprocess.run([git, "status"])') and _direct_git_calls('x = [git, *args]')
     assert not _direct_git_calls('subprocess.run(["ls"])\ngit_safe.run(d, "status")')
 
 

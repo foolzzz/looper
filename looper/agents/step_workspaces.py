@@ -101,7 +101,12 @@ class IllegalTransition(ValueError):
 
 
 class GitError(Exception):
-    """A git command failed or timed out; the message has its output."""
+    """A git command failed or timed out; the message has its output. ``reason`` is ``repository_refused:<code>``
+    (the codes of ``git_safe.RepositoryRefused``) when Looper would not run git in the directory, else None."""
+
+    def __init__(self, message: str, reason: str | None = None):
+        super().__init__(message)
+        self.reason = reason
 
 
 @dataclass(frozen=True)
@@ -240,7 +245,8 @@ async def _git(cwd: str | Path, *args: str, identity: bool = False, check: bool 
     except FileNotFoundError as exc:
         raise GitError(f"cannot run git in {prompt_name(cwd)}: {exc}") from None
     except git_safe.RepositoryRefused as exc:
-        raise GitError(f"refused to run git in {prompt_name(cwd)}: {exc.reason}") from None
+        raise GitError(f"refused to run git in {prompt_name(cwd)}: {exc}",
+                       reason=f"repository_refused:{exc.reason}") from None
     except asyncio.TimeoutError:
         raise GitError(f"git {args[0]} timed out checking the repository") from None
     try:

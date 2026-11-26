@@ -8,16 +8,23 @@ that code would run as the service, after the agent's run (and its time budget a
 
 Every git command Looper runs in a task, step or worktree directory goes through this module:
 
-* ``argv`` puts fixed overrides in front of the command: ``-c`` for each setting that names a program, and
-  ``--attr-source`` with the empty tree, so the work tree's ``.gitattributes`` assign no drivers. That does not
-  cover ``.git/info/attributes``, so ``check_repository`` refuses a repository whose file assigns a filter, diff
-  or merge driver. The overrides also make git ignore ``.gitattributes`` for text conversion: a repository that
-  relies on it (LFS, ``eol=``) is read and written as plain content.
+* ``argv`` puts fixed overrides in front of the command: ``-c`` for each setting that names a program. A filter,
+  merge or diff driver is named by the repository's own ``.gitattributes`` and defined in a configuration file,
+  so ``.gitattributes`` stays in effect (``eol=``, ``text`` and a user's LFS filter keep working) and the
+  *definitions* that come from the repository (its ``config`` and ``config.worktree``, and what they include) are
+  overridden: a driver defined only there runs nothing, and one the user's or the system's configuration also
+  defines gets that definition back. ``check_repository`` finds them, with ``git config --show-scope``. The
+  repository's ``info/attributes`` can assign a driver without a definition of its own that we can see, so
+  ``check_repository`` refuses a repository whose file assigns a filter, diff or merge driver.
 * ``environment`` builds the child's environment from an allowlist: the server's database credentials, tokens
   and provider keys never reach git or anything it runs.
 * ``check_repository`` refuses, with ``RepositoryRefused``, a directory whose ``.git`` points somewhere that does
   not point back (another repository, a ``core.worktree`` elsewhere, a ``gitdir:`` link that is not a linked
-  worktree's), so the checks above are made on the repository the directory claims to be.
+  worktree's or a submodule's), so the checks above are made on the repository the directory claims to be.
+
+The drivers are found before the command runs, so an agent that writes a definition in between is not stopped
+(the fixed overrides, which do not depend on the repository, are). ``cached`` reuses one check for a directory
+inside a block, for an operation that runs many commands and has no agent running meanwhile.
 
 ``tests/test_git_safe.py`` fails when a direct ``git`` call appears elsewhere in ``looper/`` without a reason
 listed there.
@@ -26,20 +33,21 @@ listed there.
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import contextvars
+import functools
 import os
 import re
 import subprocess
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping, Sequence
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-# The empty tree's id, per object format: with it as the attribute source, no attributes apply.
-EMPTY_TREE = {"sha1": "4b825dc642cb6eb9a060e54bf8d69288fbee4904",
-              "sha256": "6ef19b41225c5369f1c104d45d8d85efa9b057b53b14b4b9b939dd74decc5321"}
 # Each setting names a program or a place one is read from; the command line beats every configuration file,
 # so the repository's value never applies.
 OVERRIDES = (
-    "core.hooksPath=/dev/null", "core.fsmonitor=false", "core.attributesFile=/dev/null",
+    "core.hooksPath=/dev/null", "core.fsmonitor=false",
     "core.sshCommand=false", "core.pager=cat", "core.editor=true", "core.askPass=true",
     "credential.helper=", "commit.gpgsign=false", "tag.gpgsign=false", "push.gpgSign=false",
     "gpg.program=false", "gpg.ssh.program=false", "gpg.x509.program=false",
@@ -95,14 +103,11 @@ def environment(extra: Mapping[str, str] | None = None, *, environ: Mapping[str,
     return env
 
 
-def argv(*args: str, directory: str | Path | None = None, object_format: str = "sha1",
-         attributes: bool = True) -> list[str]:
-    """``git`` with the fixed overrides, ``-C directory`` when given, then ``args``. ``attributes=False`` leaves
-    out ``--attr-source`` (for a command that reads no attributes and may run outside a repository)."""
+def argv(*args: str, directory: str | Path | None = None, overrides: Sequence[str] = ()) -> list[str]:
+    """``git`` with the fixed overrides, then ``overrides`` (``Inspection.overrides``), ``-C directory`` when given,
+    then ``args``."""
     command = ["git"]
-    if attributes:
-        command.append(f"--attr-source={EMPTY_TREE[object_format]}")
-    for setting in OVERRIDES:
+    for setting in (*OVERRIDES, *overrides):
         command += ["-c", setting]
     if directory is not None:
         command += ["-C", str(directory)]
@@ -110,8 +115,92 @@ def argv(*args: str, directory: str | Path | None = None, object_format: str = "
 
 
 def _probe(directory: str | Path) -> list[str]:
-    return argv("rev-parse", "--path-format=absolute", "--show-object-format", "--git-dir", "--git-common-dir",
-                "--show-toplevel", directory=directory, attributes=False)
+    return argv("rev-parse", "--path-format=absolute", "--git-dir", "--git-common-dir", "--show-toplevel",
+                directory=directory)
+
+
+# What the config probe asks for: every driver definition, and where attributes are read from.
+_CONFIG_KEYS = r"^(filter|diff|merge)\.|^core\.attributesfile$"
+# The settings of a driver that name a program (git runs them), by section.
+_PROGRAMS = {"filter": ("clean", "smudge", "process"), "diff": ("textconv", "command"), "merge": ("driver",)}
+# Configuration the operator owns; everything else (the repository's config, its worktree config, what they include)
+# is the agent's.
+_TRUSTED_SCOPES = frozenset({"system", "global"})
+
+
+def _config_probe(directory: str | Path) -> list[str]:
+    return argv("config", "--show-scope", "--show-origin", "-z", "--get-regexp", _CONFIG_KEYS, directory=directory)
+
+
+MAX_SUBMODULE_DEPTH = 8
+
+
+def _run_probe(command: list[str]) -> str:
+    return subprocess.run(command, capture_output=True, text=True, timeout=PREFLIGHT_TIMEOUT_SEC,
+                          env=_probe_environment(), stdin=subprocess.DEVNULL).stdout
+
+
+def _submodules(top: str, depth: int = 0) -> Iterator[Path]:
+    """The checked-out submodules under ``top``, nested ones too: git runs a submodule's own filters and drivers
+    when a command in the superproject recurses into it, so its definitions are overridden as well."""
+    if depth >= MAX_SUBMODULE_DEPTH:
+        return
+    entries = _run_probe(argv("ls-files", "--stage", "-z", directory=top)).split("\0")
+    for entry in entries:
+        mode, _, rest = entry.partition(" ")
+        path = Path(top, rest.partition("\t")[2])
+        if mode == "160000" and path.joinpath(".git").exists():
+            yield path
+            yield from _submodules(str(path), depth + 1)
+
+
+def _git_dir_of(checkout: Path) -> Path:
+    dot_git = checkout / ".git"
+    if dot_git.is_dir():
+        return dot_git
+    link = _gitdir_link(dot_git)
+    return Path(link) if link else dot_git
+
+
+def _refuse_attributes(directory: str | Path, text: str) -> None:
+    for line in text.splitlines():
+        if not line.lstrip().startswith("#") and _DRIVER.search(line):
+            raise RepositoryRefused("attributes_driver", directory,
+                                    "info/attributes assigns a filter, diff or merge driver")
+
+
+@dataclass(frozen=True)
+class Inspection:
+    """What ``check_repository`` found: the ``-c`` settings that replace the repository's own driver definitions."""
+
+    overrides: tuple[str, ...] = ()
+
+
+def _overrides(output: str) -> tuple[str, ...]:
+    """``-c`` settings for the program-naming driver settings the repository defines: the value the user's or the
+    system's configuration gives the same setting, else empty (``required`` false). Where the repository sets
+    ``core.attributesFile``, the operator's value or ``/dev/null``."""
+    fields = output.split("\0")
+    values: dict[str, list[tuple[str, str]]] = {}
+    for scope, _origin, entry in zip(fields[0::3], fields[1::3], fields[2::3]):
+        key, _, value = entry.partition("\n")
+        values.setdefault(key, []).append((scope, value))
+    settings = []
+    for key, entries in values.items():
+        section, _, rest = key.partition(".")
+        name, _, variable = rest.rpartition(".")
+        if key == "core.attributesfile":
+            is_program, empty = True, "/dev/null"
+        elif section in _PROGRAMS and name and (variable in _PROGRAMS[section] or
+                                                 (section == "filter" and variable == "required")):
+            is_program, empty = True, "false" if variable == "required" else ""
+        else:
+            is_program, empty = False, ""
+        if not is_program or all(scope in _TRUSTED_SCOPES or scope == "command" for scope, _ in entries):
+            continue
+        trusted = [value for scope, value in entries if scope in _TRUSTED_SCOPES]
+        settings.append(f"{key}={trusted[-1] if trusted else empty}")
+    return tuple(sorted(settings))
 
 
 def _probe_environment() -> dict[str, str]:
@@ -133,18 +222,17 @@ def _gitdir_link(dot_git: Path) -> str | None:
     return _real(dot_git.parent / target) if target else None
 
 
-def _judge(directory: str | Path, stdout: str, layout: bool = True) -> str | None:
-    """Check what the probe printed; the repository's object format, or None when ``directory`` is no repository.
+def _judge(directory: str | Path, stdout: str, layout: bool = True) -> tuple[str | None, bool]:
+    """Check what the probe printed: the work tree's top (None without one) and whether ``directory`` is in a
+    repository at all.
 
     ``layout`` False skips the checks of where the ``.git`` points (for a directory being relocated, which the
     caller owns); ``info/attributes`` is still checked. Raises ``RepositoryRefused``."""
     lines = stdout.splitlines()
-    if len(lines) < 3:
-        return None  # no repository: the command itself will say so
-    object_format, git_dir, common = lines[0], _real(lines[1]), _real(lines[2])
-    top = _real(lines[3]) if len(lines) > 3 else None
-    if object_format not in EMPTY_TREE:
-        raise RepositoryRefused("git_dir_mismatch", directory, f"unknown object format {object_format}")
+    if len(lines) < 2:
+        return None, False  # no repository: the command itself will say so
+    git_dir, common = _real(lines[0]), _real(lines[1])
+    top = _real(lines[2]) if len(lines) > 2 else None
     if top is not None and layout:
         dot_git = Path(top, ".git")
         if dot_git.is_symlink() or not dot_git.exists():
@@ -177,29 +265,66 @@ def _judge(directory: str | Path, stdout: str, layout: bool = True) -> str | Non
             if not line.lstrip().startswith("#") and _DRIVER.search(line):
                 raise RepositoryRefused("attributes_driver", directory,
                                         "info/attributes assigns a filter, diff or merge driver")
-    return object_format
+    return top, True
 
 
-def check_repository(directory: str | Path, *, layout: bool = True) -> str | None:
-    """The object format of the repository ``directory`` is in, or None outside one. Raises ``RepositoryRefused``.
-
-    Blocking: from async code use ``check_repository_async``."""
-    done = subprocess.run(_probe(directory), capture_output=True, text=True, timeout=PREFLIGHT_TIMEOUT_SEC,
-                          env=_probe_environment(), stdin=subprocess.DEVNULL)
-    return _judge(directory, done.stdout, layout)
+_cache: contextvars.ContextVar[dict | None] = contextvars.ContextVar("git_safe_cache", default=None)
 
 
-async def check_repository_async(directory: str | Path, *, layout: bool = True) -> str | None:
-    process = await asyncio.create_subprocess_exec(
-        *_probe(directory), env=_probe_environment(), stdin=asyncio.subprocess.DEVNULL,
-        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL)
+@contextlib.contextmanager
+def cached() -> Iterator[None]:
+    """Within the block, a directory is checked once: for an operation that runs many commands in one directory
+    while no agent writes there. A block inside a block shares the outer one's results."""
+    if _cache.get() is not None:
+        yield
+        return
+    token = _cache.set({})
     try:
-        stdout, _ = await asyncio.wait_for(process.communicate(), PREFLIGHT_TIMEOUT_SEC)
-    except BaseException:
-        process.kill()
-        await process.wait()
-        raise
-    return _judge(directory, stdout.decode("utf-8", "replace"), layout)
+        yield
+    finally:
+        _cache.reset(token)
+
+
+def cached_operation(function):
+    """``function`` runs inside ``cached()``."""
+    @functools.wraps(function)
+    def wrapper(*args, **kwargs):
+        with cached():
+            return function(*args, **kwargs)
+    return wrapper
+
+
+def _cache_key(directory: str | Path, layout: bool) -> tuple[str, bool]:
+    return _real(directory), layout
+
+
+def check_repository(directory: str | Path, *, layout: bool = True) -> Inspection | None:
+    """What git_safe found in the repository ``directory`` is in, or None outside one.
+    Raises ``RepositoryRefused``. Blocking: from async code use ``check_repository_async``."""
+    store = _cache.get()
+    key = _cache_key(directory, layout)
+    if store is not None and key in store:
+        return store[key]
+    top, inside = _judge(directory, _run_probe(_probe(directory)), layout)
+    found = None
+    if inside:
+        config = _run_probe(_config_probe(directory))
+        for module in _submodules(top) if top is not None else ():  # not gated on .gitmodules: the agent writes it
+            config += _run_probe(_config_probe(module))
+            try:
+                attributes = (_git_dir_of(module) / "info" / "attributes").read_text(errors="replace")
+            except OSError:
+                continue
+            _refuse_attributes(directory, attributes)
+        found = Inspection(_overrides(config))
+    if store is not None:
+        store[key] = found
+    return found
+
+
+async def check_repository_async(directory: str | Path, *, layout: bool = True) -> Inspection | None:
+    return await asyncio.wait_for(asyncio.to_thread(check_repository, directory, layout=layout),
+                                  PREFLIGHT_TIMEOUT_SEC * 4)
 
 
 def run(directory: str | Path | None, *args: str, extra_env: Mapping[str, str] | None = None,
@@ -211,8 +336,8 @@ def run(directory: str | Path | None, *args: str, extra_env: Mapping[str, str] |
     Raises ``RepositoryRefused`` (a ``subprocess.SubprocessError``) before running anything."""
     if {"env", "cwd", "shell"} & kwargs.keys():
         raise ValueError("git_safe.run: env, cwd and shell are not accepted")
-    object_format = (check_repository(directory) if directory is not None else None) or "sha1"
-    return subprocess.run(argv(*args, directory=directory, object_format=object_format),
+    inspection = check_repository(directory) if directory is not None else None
+    return subprocess.run(argv(*args, directory=directory, overrides=inspection.overrides if inspection else ()),
                           env=environment(extra_env), **kwargs)
 
 
@@ -222,6 +347,6 @@ async def spawn(directory: str | Path, *args: str, extra_env: Mapping[str, str] 
     directory Looper is relocating (see ``check_repository``)."""
     if {"env", "cwd", "shell"} & kwargs.keys():
         raise ValueError("git_safe.spawn: env, cwd and shell are not accepted")
-    object_format = await check_repository_async(directory, layout=layout) or "sha1"
+    inspection = await check_repository_async(directory, layout=layout)
     return await asyncio.create_subprocess_exec(
-        *argv(*args, directory=directory, object_format=object_format), env=environment(extra_env), **kwargs)
+        *argv(*args, directory=directory, overrides=inspection.overrides if inspection else ()), env=environment(extra_env), **kwargs)

@@ -742,6 +742,7 @@ class RunContext:
     lesson_delivered: bool = False
 
 
+@git_safe.cached_operation
 def _verification_paths(work_dir: str) -> tuple[Path, list[str]]:
     root = git_safe.run(work_dir, "rev-parse", "--show-toplevel",
                         capture_output=True, check=True, timeout=5).stdout.decode().strip()
@@ -756,6 +757,7 @@ def _verification_gitlinks(root: Path) -> dict[str, bytes]:
             for metadata, name in [entry.split(b"\t", 1)] if metadata.startswith(b"160000 ")}
 
 
+@git_safe.cached_operation
 def _verification_write_paths(work_dir: str) -> tuple[Path, list[str]]:
     root, paths = _verification_paths(work_dir)
     gitlinks = _verification_gitlinks(root)
@@ -771,6 +773,7 @@ def _verification_write_paths(work_dir: str) -> tuple[Path, list[str]]:
     return root, watched
 
 
+@git_safe.cached_operation
 def _verification_snapshot(work_dir: str) -> dict[str, Any]:
     def git(*args: str) -> subprocess.CompletedProcess:
         return git_safe.run(work_dir, *args, capture_output=True, timeout=5)
@@ -816,6 +819,7 @@ def _verification_snapshot(work_dir: str) -> dict[str, Any]:
         return {"git": False, "head": None, "status_sha256": None, "error": "git_snapshot_unavailable"}
 
 
+@git_safe.cached_operation
 def _verification_baseline(work_dir: str, backup: Path) -> dict[str, Any]:
     """Keep the run's baseline on disk, including uncommitted work and the index."""
     manifest = backup / "baseline.json"
@@ -855,6 +859,7 @@ def _verification_baseline(work_dir: str, backup: Path) -> dict[str, Any]:
     return current
 
 
+@git_safe.cached_operation
 def _restore_verification(work_dir: str, backup: Path, *, detached: bool = False) -> bool:
     """Undo only the verifier's changes; preserve the developer's dirty files and staging."""
     try:
@@ -904,6 +909,7 @@ def _restore_verification(work_dir: str, backup: Path, *, detached: bool = False
         return False
 
 
+@git_safe.cached_operation
 def _verification_checkout(work_dir: str, backup: Path, runtime_paths: Collection[str] = ()) -> str:
     """Seed a private Git checkout with the source's staged, unstaged and untracked files.
 
