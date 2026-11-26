@@ -1368,6 +1368,7 @@ class ManagerAgent:
             for session in self._sessions.values():  # every session's resident
                 async with session.lifecycle_gate:
                     await session.claude.stop()
+                await self._router.changed()
 
         closing = asyncio.create_task(close())
         try:
@@ -1399,6 +1400,7 @@ class ManagerAgent:
         """Close only a provably idle resident, retaining the enabled agent and its complete session state."""
         main = self._sessions[MAIN_SESSION]  # main's: the resident the idle timeout closes
         await self._router.sweep()  # session routing switched off: the other sessions' idle processes stop
+        await self._router.reclaim_idle(now)
         timeout = self._definition.idle_timeout_seconds
         if self.agent_id == DEFAULT_MANAGER_ID or not timeout or not self._running or self._turned_off:
             return False
@@ -1427,6 +1429,7 @@ class ManagerAgent:
                 main.last_activity = now
                 return False
             logger.info("Manager %s resident suspended (idle timeout)", self.agent_id)
+            await self._router.changed()
             return True
 
     def is_healthy(self) -> bool:

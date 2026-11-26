@@ -225,7 +225,8 @@ Manager has no tool for it. The dashboard shows the task page's 指标 card and 
     server's OS user; it does not sandbox a compromised runtime executable.
     Calls remain bound until the routed turns end, even after routing is
     switched off, whatever `chat.stop_enabled` says.
-  - Per Manager, at most `manager.sessions.max_resident` sessions (1–16, default 2) keep a
+  - For the default Manager and `per_chat` Managers, at most
+    `manager.sessions.max_resident` sessions per Manager (1–16, default 2) keep a
     process. Starts reserve capacity atomically, including saved-session
     restores; successful, failed and cancelled starts release their reservation.
     The shared setting applies independently to each routed Manager: count
@@ -238,6 +239,25 @@ Manager has no tool for it. The dashboard shows the task page's 指标 card and 
     never waits and is never stopped for another. With a cap of 1, a session
     other than main still runs its turn when only main holds a process, and
     stops it once the turn is over.
+    `scoped` Managers (not selectable yet) instead admit starts under
+    `manager.sessions.max_resident_total` (1–32, default 6), counting every
+    Manager's main and non-main processes and start reservations, including
+    Managers with routing off or `per_chat`. At the cap, the least recently
+    active idle non-main session of any Manager stops; its session id is kept
+    for resumption. If a runtime refuses to stop, the next idle session is tried;
+    if none can stop, the start waits with the same status until a turn ends
+    or a process stops. Main never waits and is never evicted; main processes
+    can therefore exceed the cap. Scoped start wait durations are kept in a
+    bounded in-process queue (the latest 256 samples).
+    Scoped non-main sessions also release their process on the idle sweep after
+    `manager.sessions.idle_reclaim_seconds` (default 1800; 0 disables reclaim,
+    otherwise 60–86400), keeping their session id. Busy, main and retired
+    sessions are excluded; retirement handles its own process-tree cleanup.
+    The two settings have their own operator-only `resident_limits.get/update`
+    operations, also available through the generated CLI. Null restores the
+    corresponding default; updates require high-risk confirmation. They are
+    absent from `chat_settings` and add no Lark or Telegram command or dashboard
+    control; the default Manager's and `per_chat` caps are unchanged.
   - `/new` resets only the session it was sent in. In a group or dm session
     it leaves main's pending confirmations and remembered leads alone. The
     profile is chosen in main (`/profile`, `select_session_profile`): a default
@@ -9337,6 +9357,7 @@ notify a channel, or call the task-end listener. A task the background is workin
 | `/api/v1/operator_chat/{turn,stop,targets,sessions,messages,save_message,send,reply_events,thread_events}` | POST | `operator_chat.{turn,stop,targets,sessions,messages,save_message,send,reply_events,thread_events}` |
 | `/api/v1/chat_settings/{get,update}` | POST | `chat_settings.{get,update}` |
 | `/api/v1/session_routing/{get,update}` | POST | `session_routing.{get,update}` |
+| `/api/v1/resident_limits/{get,update}` | POST | `resident_limits.{get,update}` |
 | `/api/v1/clients/{list,create,revoke}` | POST | `clients.{list,create,revoke}` |
 | `/api/v1/roles/{list,get,update,reset_prompt}` | POST | `roles.{list,get,update,reset_prompt}` |
 | `/api/v1/agent_settings/{get,update_system,update_role}` | POST | `agent_settings.{get,update_system,update_role}` |
