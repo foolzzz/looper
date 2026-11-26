@@ -76,6 +76,8 @@ jobs:
           fi
       - name: Build the dashboard
         run: scripts/stage-dashboard.sh
+      - name: Verify the staged dashboard exists
+        run: test -f looper/web/dashboard/index.html
       - name: Run installed tests against local stand-ins
         run: timeout 1800 uv run --no-sync python -m pytest -q -n auto -m installed -rs --durations=25 --junitxml=installed-results.xml
       - name: Report unverified paths

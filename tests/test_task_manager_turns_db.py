@@ -27,7 +27,7 @@ def native(monkeypatch, tmp_path):
     return NativeTaskManager(monkeypatch, tmp_path)
 
 
-@pytest.mark.parametrize("reason", ["work_mode_off", "manager_answers_off", "runtime_unsupported", "budget", "outbound_review_unavailable", "workspace", "shutting_down", "review_hook_disabled", "cli_unverified"])
+@pytest.mark.parametrize("reason", ["work_mode_off", "manager_answers_off", "runtime_unsupported", "budget", "outbound_review_unavailable", "workspace", "shutting_down", "review_hook_disabled", "cli_unverified", "mcp_unresolved"])
 def test_refusals_start_no_process_and_keep_status(monkeypatch, tmp_path, native, reason):
     async def check(db):
         task_id, project_id, _ = await native.create(db)
@@ -49,6 +49,10 @@ def test_refusals_start_no_process_and_keep_status(monkeypatch, tmp_path, native
                 monkeypatch.setattr(outbound_hook, "known_enabled", lambda: True)
             elif reason == "workspace":
                 monkeypatch.setattr(task_workspaces, "reopen", AsyncMock(side_effect=task_workspaces.TaskWorkspaceError("unavailable")))
+            elif reason == "mcp_unresolved":
+                monkeypatch.setenv("HOME", str(tmp_path / "no-home"))
+                monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
+                monkeypatch.setattr(task_conversations_settings, "_manager_mcp", ("not-configured",))
             elif reason in ("review_hook_disabled", "cli_unverified"):
                 safety = tm.task_manager_safety
                 monkeypatch.setattr(safety, "gate", AsyncMock(return_value=safety.Refusal(
@@ -69,6 +73,8 @@ def test_refusals_start_no_process_and_keep_status(monkeypatch, tmp_path, native
                 assert "tasks.conversations.manager_answers" in sink.finals[0][0] and "task_conversations.update" in sink.finals[0][0]
             if reason == "runtime_unsupported":
                 assert native.settings.profile.name in sink.finals[0][0] and "Claude Code" in sink.finals[0][0]
+            if reason == "mcp_unresolved":
+                assert "not-configured" in sink.finals[0][0] and "task_conversations.update" in sink.finals[0][0]
             if reason == "budget":
                 assert sink.finals[0][0] == "这个任务已到花费上限，提高上限后再说"
         finally:

@@ -5,7 +5,10 @@ from ..action_levels import ActionLevel
 from ..api_v1 import Operation, _BOOL, _object
 
 _MAX = {"type": "integer", "minimum": 1, "maximum": 20}
-VIEW = _object({"enabled": _BOOL, "manager_answers": _BOOL, "max_resident": _MAX}, closed=True)
+_SERVERS = {"type": "array", "maxItems": settings.MAX_MANAGER_MCP, "uniqueItems": True,
+            "items": {"type": "string", "pattern": settings.MCP_NAME.pattern}}
+VIEW = _object({"enabled": _BOOL, "manager_answers": _BOOL, "max_resident": _MAX, "manager_mcp": _SERVERS},
+               closed=True)
 RESULTS = {}
 OPERATIONS = (
     Operation("task_conversations.get", "POST", "/api/v1/task_conversations/get",
@@ -18,10 +21,13 @@ OPERATIONS = (
               "Set the work-mode setting. On, the dashboard can create draft tasks; nothing else changes yet. "
               "manager_answers (default off) is a separate switch: on, a message to a task is answered by the task Manager "
               "instead of being refused. Max resident sets the task Manager process cap (1–20). "
-              "Null restores defaults: disabled, off and 6.",
+              "manager_mcp lists the names of your own MCP servers (user, local or project scope) the task Manager's "
+              "direct session may load beside Looper's; it loads no others, and a name that is not configured "
+              "stops it from starting. Null restores defaults: disabled, off, 6 and none.",
               _object({"enabled": {"type": ["boolean", "null"]},
                        "manager_answers": {"type": ["boolean", "null"]},
-                       "max_resident": {**_MAX, "type": ["integer", "null"]}}, [], closed=True), VIEW,
+                       "max_resident": {**_MAX, "type": ["integer", "null"]},
+                       "manager_mcp": {**_SERVERS, "type": ["array", "null"]}}, [], closed=True), VIEW,
               risk="high", confirms=True, operator_only=True,
               level=ActionLevel.INSIDE),  # changes only Looper's own setting
 )
@@ -42,6 +48,10 @@ async def impact(server, operation, arguments, principal, headers):
     if "max_resident" in arguments:
         value = settings.DEFAULT_MAX_RESIDENT if arguments["max_resident"] is None else arguments["max_resident"]
         changes.append(f"Set {settings.MAX_RESIDENT_KEY} to {value}?")
+    if "manager_mcp" in arguments:
+        names = arguments["manager_mcp"] or []
+        changes.append(f"Set {settings.MANAGER_MCP_KEY} to [{', '.join(names)}]? The task Manager's direct session "
+                       "will load these MCP servers of yours, with the permissions they hold, besides Looper's own.")
     return " ".join(changes)
 
 

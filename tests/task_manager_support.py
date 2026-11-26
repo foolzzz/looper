@@ -39,6 +39,7 @@ class NativeTaskManager:
         self.settings = AgentSettings(profile=builtin_resolved_profile())
         monkeypatch.setattr(task_conversations_settings, "_enabled", True)
         monkeypatch.setattr(task_conversations_settings, "_manager_answers", True)
+        monkeypatch.setattr(task_conversations_settings, "_manager_mcp", ())
         monkeypatch.setattr(outbound_hook, "known_enabled", lambda: False)
         monkeypatch.setattr(task_manager_safety, "gate", AsyncMock(return_value=None))
 
