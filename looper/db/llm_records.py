@@ -463,26 +463,32 @@ _ROLE_FILTERS = {
     "worker": "agent_id LIKE 'worker-%'",
     "reviewer": "agent_id LIKE 'reviewer-%'",
     "processor": "agent_id LIKE 'processor:%'",
+    "task_manager": "agent_id LIKE 'task-manager-%'",
 }
 # A task's step runs: its Workers' and its Reviewers'.
 _STEP_RUNS = f"({_ROLE_FILTERS['worker']} OR {_ROLE_FILTERS['reviewer']})"
-# The agents that work on one task, whose runs make up its cost; the Manager is not one of them. The runs the Planner's
+# The agents that work on one task, whose runs make up its cost; the operator's Manager is not one of them. The runs the Planner's
 # consults of the advisor start (the advisor's and its judge's) and the reviews of a task's outbound actions are the
 # Planner's.
 TASK_ROLES = ("planner", "worker", "reviewer")
 _PLANNER_SPAWNS = f"{RUN_KIND} IN ('advisor', 'advice_check', 'outbound_check', 'memory_draft', 'memory_retro')"
+# Planner, Worker and Reviewer stay the tail of both cases. Consult accounting freezes that suffix on run
+# listings, and requires the consult branch to precede it on the spend case.
 _ROLE_BRANCHES = " ".join(f"WHEN {_ROLE_FILTERS[role]} THEN '{role}'" for role in TASK_ROLES)
+# An id prefix, so it sits with the other id prefixes and after an explicit consult kind. It is not part of the
+# frozen tail: a task-manager id matches none of those three, and none of them match it.
+_TASK_MANAGER_BRANCH = f"WHEN {_ROLE_FILTERS['task_manager']} THEN 'task_manager'"
 _TASK_ROLE = (
     f"CASE WHEN {RUN_KIND} = 'explorer' THEN 'explorer' WHEN {_PLANNER_SPAWNS} THEN 'planner' "
-    f"{_ROLE_BRANCHES} END"
+    f"{_TASK_MANAGER_BRANCH} {_ROLE_BRANCHES} END"
 )
-# A run of one of a task's agents (Planner, Worker, Reviewer), as task_costs counts them; the Manager is not one.
+# A run of one of a task's agents, as task_costs counts them; the operator's Manager is not one.
 TASK_RUN = f"{_TASK_ROLE} IS NOT NULL"
 # The same runs, plus a room consult. The consult branch is before the id prefixes, so an explicit consult kind
 # wins over an agent id that also matches a role prefix. Run listings stay on ``TASK_RUN``.
 _SPEND_ROLE = (
     f"CASE WHEN {RUN_KIND} = 'explorer' THEN 'explorer' WHEN {_PLANNER_SPAWNS} THEN 'planner' "
-    f"WHEN {RUN_KIND} = 'consult' THEN 'consult' {_ROLE_BRANCHES} END"
+    f"WHEN {RUN_KIND} = 'consult' THEN 'consult' {_TASK_MANAGER_BRANCH} {_ROLE_BRANCHES} END"
 )
 TASK_SPEND = f"{_SPEND_ROLE} IS NOT NULL"
 
@@ -689,7 +695,7 @@ async def task_costs(
     *,
     pool: asyncpg.Pool | None = None,
 ) -> dict[str, dict[str, Any]]:
-    """Each task's cost: the sum of its Planner's, Workers' and Reviewers' runs and its room consults, in total and by role.
+    """Each task's cost: its task Manager, Planner, Workers, Reviewers and room consults, in total and by role.
 
     Every given task id gets an entry. ``runs`` counts every run; ``running``
     those still going, whose reported usage may already have a cost checkpoint; ``unpriced_runs`` the
@@ -755,11 +761,13 @@ async def task_costs(
         "WHERE t.id=ANY($1::text[]) AND p.subagents='on'", task_ids))
     # Consult is a key only for a task that has consult rows, not for every task.
     consult_tasks = {row["task_id"] for row in rows if row["role"] == "consult"}
+    task_manager_tasks = {row["task_id"] for row in rows if row["role"] == "task_manager"}
     costs = {
         task_id: {"cost_usd": Decimal(0), "unknown_models": set(), "runs": 0, "running": 0, "unpriced_runs": 0, "equivalent_runs": 0,
                   "provider_price_runs": 0, "by_role": {role: {"cost_usd": Decimal(0), "runs": 0}
                                                       for role in TASK_ROLES
                                                       + (("explorer",) if task_id in explorer_tasks else ())
+                                                      + (("task_manager",) if task_id in task_manager_tasks else ())
                                                       + (("consult",) if task_id in consult_tasks else ())},
                   "by_model": {}, "manager_by_model": {}}
         for task_id in task_ids
