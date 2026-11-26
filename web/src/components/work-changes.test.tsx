@@ -86,13 +86,36 @@ it.each([
   await show(); expect(host.querySelector("li")?.textContent).toContain(copy);
 });
 
+it("explains a draft without a workspace before making a changes request", async () => {
+  await show(<WorkChanges taskId="a" visible pendingWorkspace />);
+  expect(host.textContent).toContain("开始后可查看改动");
+  expect(host.querySelector('[role="alert"], .text-destructive')).toBeNull();
+  expect(calls).toHaveLength(0);
+  await show();
+  expect(calls).toHaveLength(1);
+  expect(host.textContent).toContain("没有改动文件");
+});
+
+it("keeps a real non-Git directory neutral without calling it a read failure", async () => {
+  respond = () => answer(ok("a", [], { kind: "unavailable", scope: null, reason: "not_git" }));
+  await show();
+  expect(host.textContent).toContain("工作目录不是 Git 仓库");
+  expect(host.textContent).not.toContain("无法读取改动");
+  expect(host.querySelector('[role="alert"], .text-destructive')).toBeNull();
+  expect(calls).toHaveLength(1);
+  respond = () => answer(ok());
+  await click("刷新");
+  expect(host.textContent).toContain("没有改动文件");
+});
+
 it.each([
-  ["not_git", "工作目录不是 Git 仓库"], ["workspace_missing", "工作目录不存在"],
+  ["workspace_missing", "工作目录不存在"],
   ["branch_missing", "任务分支不存在"], ["branch_changed", "工作区分支已变更"], ["git_error", "Git 读取失败"],
 ])("explains unavailable %s and retries exactly once", async (reason, copy) => {
   respond = () => answer(ok("a", [], { kind: "unavailable", scope: null, reason }));
   await show();
   expect(host.textContent).toContain(`无法读取改动：${copy}`);
+  expect(host.querySelector('[role="alert"]')?.className).toContain("text-destructive");
   expect(host.textContent).not.toContain("没有改动文件");
   respond = () => answer(ok());
   await click("重试");

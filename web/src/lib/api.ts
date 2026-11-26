@@ -2479,9 +2479,10 @@ export interface ManagerAction {
 }
 
 /** Edit the requirement of a task that has not ended; its Planner, if it runs, gets the edit in a turn. */
-export async function editTaskRequirement(taskId: string, requirement: string): Promise<void> {
+export async function editTaskRequirement(taskId: string, requirement: string, expectedVersion?: number): Promise<void> {
   const result = await callV1<{ task_id: string; version: number; requirement: string }>(
-    "/api/v1/tasks/requirement_update", { task_id: taskId, requirement });
+    "/api/v1/tasks/requirement_update", { task_id: taskId, requirement,
+      ...(expectedVersion === undefined ? {} : { expected_version: expectedVersion }) });
   if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
 }
 
