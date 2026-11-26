@@ -47,7 +47,7 @@ class NativeTaskManager:
 
         monkeypatch.setattr(task_manager_settings, "load_task_manager_settings", read_settings)
         self.executable = fake_claude(tmp_path / "scripted-claude", f'''
-import sys, json, os, uuid
+import sys, json, os, uuid, subprocess
 from pathlib import Path
 log = Path({str(self.transcript)!r})
 def record(value):
@@ -107,6 +107,14 @@ for line in sys.stdin:
         emit({{'type':'assistant','message':{{'content':[], 'usage':{{'input_tokens':measurement_config['context_tokens']}}}}}})
     if text == 'write':
         Path('changed.txt').write_text('changed')
+    if text.startswith(('mv:', 'gitmv:')):
+        old, new = text.split(':', 1)[1].split('>')
+        if text.startswith('gitmv:'):
+            subprocess.run(['git', 'mv', old, new], check=True)
+        else:
+            os.rename(old, new)
+    if text.startswith('revert:'):
+        subprocess.run(['git', 'checkout', '--', text[7:]], check=True)
     if text.startswith('edit:'):
         for name in text[5:].split(','):
             Path(name).write_text('changed by the turn\\n')

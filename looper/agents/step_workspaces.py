@@ -712,7 +712,13 @@ async def commit_paths(path: Path, paths: Sequence[str], links: Sequence[str], m
     chosen = [f":(literal){p}" for p in paths if not any(p == link or p.startswith(f"{link}/") for link in linked)]
     if not chosen:
         return None
-    await _git(path, "add", "-A", "--", *chosen)
+    # ``add`` refuses a path that is gone from both the working tree and the index (a staged rename's old path).
+    present = [c for c in chosen if os.path.lexists(path / c[len(":(literal)"):])]
+    if present:
+        await _git(path, "add", "-A", "--", *present)
+    if len(present) < len(chosen):
+        await _git(path, "rm", "-r", "-q", "--cached", "--ignore-unmatch", "--",
+                   *(c for c in chosen if c not in present))
     staged = await _git(path, "diff", "--cached", "--quiet", "--", *chosen, check=False)
     if staged.returncode not in (0, 1):
         raise GitError(f"git diff --cached failed: {staged.stderr.decode('utf-8', 'replace').strip()[:500]}")

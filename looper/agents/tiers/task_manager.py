@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import time
@@ -10,6 +11,7 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from enum import Enum
 from pathlib import Path
+from stat import S_ISREG
 from typing import Any, Literal, Protocol
 
 from ...db import activity, agent_sessions, projects, tasks
@@ -151,6 +153,9 @@ class _ResumeFailed(Exception):
     pass
 
 
+_DIGEST_LIMIT = 1 << 20
+
+
 async def _files(cwd: str) -> dict[str, tuple[Any, ...]]:
     """Status plus file metadata distinguishes another edit without reading large files."""
     status = await step_workspaces._git(cwd, "status", "--porcelain", "-z", "--untracked-files=all", check=False)
@@ -164,15 +169,18 @@ async def _files(cwd: str) -> dict[str, tuple[Any, ...]]:
             if not entry:
                 continue
             name = entry[3:]
-            if "R" in entry[:2] or "C" in entry[:2]:
-                next(entries, None)
-            path = Path(cwd) / name
-            try:
-                stat = path.lstat()
-                value = (stat.st_mtime_ns, stat.st_ctime_ns, stat.st_size)
-            except OSError:
-                value = ()
-            found[name] = (entry[:2], *value)
+            origin = next(entries, "") if "R" in entry[:2] or "C" in entry[:2] else ""
+            # A staged rename is one change of two paths; a copy leaves its origin alone.
+            for path, partner in ((name, origin if "R" in entry[:2] else ""), *(((origin, name),) if "R" in entry[:2] else ())):
+                digest = ""
+                try:
+                    stat = (Path(cwd) / path).lstat()
+                    value = (stat.st_mtime_ns, stat.st_ctime_ns, stat.st_size)
+                    if S_ISREG(stat.st_mode) and stat.st_size <= _DIGEST_LIMIT:
+                        digest = hashlib.sha1((Path(cwd) / path).read_bytes()).hexdigest()
+                except OSError:
+                    value = ()
+                found[path] = (entry[:2], partner, digest, *value)
         return found
 
     return await asyncio.to_thread(snapshot)
@@ -419,8 +427,15 @@ class TaskManagerAgent:
             if written and task.get("workspace_mode") == "worktree" and self.mode == "direct":
                 # A path that already had uncommitted changes when the turn began belongs to the user: it is never
                 # committed here, even when this turn edited it too.
-                own = [name for name in files if name not in before]
-                if kept := [name for name in files if name in before]:
+                # A rename is its old and new path together: it is the user's when either side was already dirty.
+                # An unstaged rename shows as a deletion plus a new file: a new file holding the content of a
+                # path that was dirty before the turn is that path's, moved.
+                moved = {value[2] for value in before.values() if value[2]}
+                theirs = [name for name in files if name in before or after.get(name, ("", ""))[1] in before
+                          or before.get(name, ("", ""))[1] in before
+                          or after.get(name, ("", "", ""))[2] in moved]
+                own = [name for name in files if name not in theirs]
+                if kept := [name for name in theirs if name in after]:
                     summary["uncommitted"] = kept
                 if own:
                     commit = await step_workspaces.commit_paths(Path(reopened.work_dir), own, self.links,
