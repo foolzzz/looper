@@ -80,8 +80,8 @@
 ### 3.3 它怎么启动
 
 - **工作目录：** 任务的工作区（原地任务是 `work_dir`；worktree 任务是任务 worktree 里的位置，第一次需要时由 `task_workspaces.prepare` 建好，`task_workspaces.py:324-385`）。**v1 的直接模式只支持原地任务**，且目录要通过第 25.6 节的启动前检查；worktree 任务进直接模式在启动时拒绝（`worktree_unsupported`），编排模式不变。
-- **权限：** 直接模式跳过权限确认（同执行者，`agent_settings.py:1031`），但**不是全部工具**：v1 里只有白名单内的内置工具可用（Bash、Read 等，第 25.2 节 F9），Bash 在沙箱里、只写任务目录（第 25 节）；编排模式下写权限在后台，任务管家改用 Looper 自己的隔离加只读启动（`isolation_args` 加 `read_only_args`，`claude_cli.py:142-195`、`:377-407`）续同一条会话：不载入操作者的设置，操作者的 allow 规则和 MCP 服务就放宽不了它。模式一变，启动签名就变，停掉进程、按同一个会话 id 续上。会诊是 `--resume --fork-session`，原会话不动（`consult.py:14-22`），**不能证明**同会话换权限可行；后者需要任务卡 1.0 的真实 CLI 离线探针验证，失败就报告，不暗中分叉或放宽权限。
-- **操作者本人的环境：** 直接模式自己组启动参数，不调用 `isolation_args`：该函数只要收到 `hooks` 就强制 `--setting-sources ""`（`claude_cli.py:191`），会把用户设置一起关掉。让操作者的**用户层**设置、全局指令、记忆和 skill 生效（加 `--setting-sources user`，项目层设置、钩子、MCP 和技能不加载，第 25 节）。仍由 Looper 加上（经只属于这次启动的 `--settings` 和启动参数）：拒绝别的会话发来的消息（`crossSessionInbound: refuse`）；沙箱和第 25.2.1 节的全部钉死值；只放行白名单内的内置工具（第 25.2 节 F9），也就排除了和 Looper 撞名的内置工具。**v1 的直接会话不注入对外动作审查的 PreToolUse 钩子**：沙箱是边界，出站审查留给第 2 步的受控出口。不设 `LOOPER_AGENT_RUN`，改设 `LOOPER_TASK_MANAGER=<task_id>`；本机命令按第 18 节的类型化表拒绝或只限本任务。这是减速带，不是隔离，不能声称它挡得住绕开 CLI 的调用。**直接会话的安全边界和固定启动配置以第 25 节为准**（Bash 沙箱加代码钉死的设置，不是逐次出站审查）。
+- **权限：** 直接模式跳过权限确认（同执行者，`agent_settings.py:1031`），但**不是全部工具**：v1 里内置工具只有 Bash，加 Looper 自己的任务工具和白名单 MCP 服务器的工具（第 25.2 节 F9），Bash 在沙箱里、只写任务目录（第 25 节）；编排模式下写权限在后台，任务管家改用 Looper 自己的隔离加只读启动（`isolation_args` 加 `read_only_args`，`claude_cli.py:142-195`、`:377-407`）续同一条会话：不载入操作者的设置，操作者的 allow 规则和 MCP 服务就放宽不了它。模式一变，启动签名就变，停掉进程、按同一个会话 id 续上。会诊是 `--resume --fork-session`，原会话不动（`consult.py:14-22`），**不能证明**同会话换权限可行；后者需要任务卡 1.0 的真实 CLI 离线探针验证，失败就报告，不暗中分叉或放宽权限。
+- **操作者本人的环境：** 直接模式自己组启动参数，不调用 `isolation_args`：该函数只要收到 `hooks` 就强制 `--setting-sources ""`（`claude_cli.py:191`），会把用户设置一起关掉。让操作者的**用户层**设置、全局指令、记忆和 skill 生效（加 `--setting-sources user`，项目层设置、钩子、MCP 和技能不加载，第 25 节）。仍由 Looper 加上（经只属于这次启动的 `--settings` 和启动参数）：拒绝别的会话发来的消息（`crossSessionInbound: refuse`）；沙箱和第 25.2.1 节的全部钉死值；内置工具只放行 Bash（第 25.2 节 F9），也就排除了和 Looper 撞名的内置工具。**v1 的直接会话不注入对外动作审查的 PreToolUse 钩子**：沙箱是边界，出站审查留给第 2 步的受控出口。不设 `LOOPER_AGENT_RUN`，改设 `LOOPER_TASK_MANAGER=<task_id>`；本机命令按第 18 节的类型化表拒绝或只限本任务。这是减速带，不是隔离，不能声称它挡得住绕开 CLI 的调用。**直接会话的安全边界和固定启动配置以第 25 节为准**（Bash 沙箱加代码钉死的设置，不是逐次出站审查）。
 - **审查钩子的启动门（已定，v1 作纵深防御）：** v1 的直接会话不注入审查钩子（第 25 节），本条的门不再是直接会话的前提，保留给第 2 步的受控出口；它读的项目、local 来源在 v1 因 `--setting-sources user` 不再被 CLI 加载。版本门（`cli_unverified`）仍然每次都跑。以下是原有规则：直接模式任务管家**每次启动前、每次续接前**，由代码读取这次 CLI 会加载的每一份设置：用户配置目录的 `settings.json` 和 `settings.local.json`、项目 `.claude/settings.json` 和 `.claude/settings.local.json`、启动的 `--settings`，以及 CLI 会加载的 managed settings 文件。逐来源检查，不只看合并后的值，不因文件是操作者写的就放行。命中下表就不启动、不续接；任务对话插入代码生成的说明（文件、键、如何改回），类型化原因 `review_hook_disabled`，计入第 21 节的 `task_manager_launch_refusals_total`。只报告，不自动修改设置；managed settings **绝不修改**，说明由管理方处理。探针 D3 在运行中写出的设置不影响当前进程，下一次续接仍须重读并拦住。
 
   检测器是类型化表 `(source, key, predicate)`：`source` 是 `USER / USER_LOCAL / PROJECT / PROJECT_LOCAL / LAUNCH / MANAGED` 枚举，`key` 是精确的键路径，`predicate` 是 `IS_TRUE / EQ_STRING_1 / TRUE_OR_CONTAINS_HOOKS` 枚举，不用文本包含规则。任务卡 1.0（#1751）证明能停掉 `--settings` 钩子的其他设置也必须进表；当前记录如下：
@@ -395,7 +395,7 @@ draft、init ──删除──→ （删除）
 ## 18. 安全
 
 - **只对操作者开放：** 任务对话的发送、建草稿、交给后台、接手、完成、模型切换、`tasks.work_list`、`tasks.mark_seen`、`tasks.select`、`tasks.changes` 都是 `operator_only`；API 客户端答 `operator_only`。管家的 `looper_task_draft` 只在操作者的回合里能用（`ops/tasks.py` 调用时用 `operator_call(call.turn)`，`ops/service.py:1493`，只调用、签名不变）。飞书里回复任务通知只认操作者本人。
-- **操作者本人的环境：** 直接模式的边界是第 25 节的沙箱加固定启动配置：Bash 在沙箱里，只能写任务目录，网络只通白名单里的外部域名；只有白名单内的内置工具可用（第 25.2 节 F9）。用户层的设置、技能和钩子会加载，项目层的设置、钩子、MCP 和技能不加载；其中调用下表拒绝的 Looper 入口也被拒绝，不能声称所有操作者检索命令照常可用。每次直接启动/续接前执行 CLI 版本门（未验证版本以 `cli_unverified` 拒绝）和第 25.6 节的目录检查与读回；3.3 的逐来源「停钩子」检测（`review_hook_disabled`）在 v1 的直接会话里不作为前提，保留给第 2 步，代码在任务对话说明并计数。没有用户自写例外或退出开关，不修改 managed settings；这仍不是隔离。
+- **操作者本人的环境：** 直接模式的边界是第 25 节的沙箱加固定启动配置：Bash 在沙箱里，只能写任务目录，网络只通白名单里的外部域名；内置工具只有 Bash（第 25.2 节 F9）。用户层的设置、技能和钩子会加载，项目层的设置、钩子、MCP 和技能不加载；其中调用下表拒绝的 Looper 入口也被拒绝，不能声称所有操作者检索命令照常可用。每次直接启动/续接前执行 CLI 版本门（未验证版本以 `cli_unverified` 拒绝）和第 25.6 节的目录检查与读回；3.3 的逐来源「停钩子」检测（`review_hook_disabled`）在 v1 的直接会话里不作为前提，保留给第 2 步，代码在任务对话说明并计数。没有用户自写例外或退出开关，不修改 managed settings；这仍不是隔离。
 - **本机命令的类型化结果：** `CommandPolicy = ALLOW | OWN_TASK_ONLY | DENY`。在 `looper/cli.py:421` parse 后、任何分发和副作用前检查；未知叶子默认 DENY，通常退出 4、原因 `task_manager_command_denied`。OWN_TASK_ONLY 必须在解析选择器后再校验实际 task id 等于 `LOOPER_TASK_MANAGER`，令牌也必须绑定该任务，否则 `task_manager_task_mismatch`。保留原 `LOOPER_AGENT_RUN` 的所有行为（两变量都有时先应用旧规则，绝不借新变量放行）。安全的全局 `--version` 和 parser help 保留。
 
 | CLI 叶子（含全部参数变体） | LOOPER_TASK_MANAGER 下的结果 | 当前 origin/main 的分发/定义 |
@@ -582,14 +582,14 @@ draft、init ──删除──→ （删除）
 | F6 | `disableAllHooks` | **不钉**（v1 不注入 Looper 钩子） | v1 的直接会话没有 Looper 注入的钩子，所以没有需要靠 `disableAllHooks: false` 保护的东西；钉 `true` 又会关掉操作者自己的用户级钩子（它们属于可信配置）。因此 F6 在 v1 不做设置，只在读回里记录钩子来源集合（第 25.6 节）。第 3.3 节的 `review_hook_disabled` 启动门在 v1 的直接会话里不作为前提，代码和表保留给第 2 步的受控出口 |
 | F7 | `--setting-sources` | `user` | 不加载项目和 local 层设置，项目钩子（在沙箱外运行）和项目的权限、`env`、`apiKeyHelper` 等不生效，也挡住会话中途写 `.claude/settings.json` 引入的改写钩子（实测：不加这个参数时，中途新增的改写命令钩子会热加载并生效） |
 | F8 | MCP | `--strict-mcp-config`，只含 Looper 自己的 MCP 服务加操作者白名单（`tasks.conversations.manager_mcp`，#1852）；白名单名字的定义只从**用户层**配置解析（第 25.6 节） | 工作目录里的 `.mcp.json` 在 `--print` 加 bypass 下无需审批就加载，并在沙箱外运行（实测）。`--setting-sources user` 下项目的 `.mcp.json` 也不登记；严格模式仍然需要，用来挡用户层和 local 层之外的来源，并让集合恰好等于白名单 |
-| F9 | 内置工具白名单 | `--tools "Bash,Read,TodoWrite,Skill"`，再加 Looper 自己的任务工具和已放行 MCP 服务器的工具；预期集合还包括 `EndConversation` 和 `WaitForMcpServers`（见下）；同时在注入的 `env` 里钉 `ENABLE_TOOL_SEARCH=false` | **白名单，不是黑名单。** 沙箱只管 Bash 子进程，别的内置工具在沙箱外，bypass 下不经提示：`Write`、`Edit`、`NotebookEdit` 实测能写任意路径，`WebFetch` 实测直连非白名单端口；按文档，`Monitor` 的 WebSocket 来源由 CLI 自己直连、`SendMessage` 能向操作者本机的其他会话发消息（双方 bypass 时不经批准）、`EnterWorktree` 能把会话的工作目录和写权限移到别的 worktree、`Artifact`、`RemoteTrigger`、`SendUserFile`、`PushNotification` 等有不经白名单的上传或远端通道、`LSP` 在沙箱外处理这个不可信的工作区、`CronCreate`、`ScheduleWakeup` 会在 Looper 的回合循环之外起回合。这些里有的在 `--print` 会话里出不出现取决于版本和账号，所以不逐个列黑名单：不在白名单里的内置工具一概不可用。**`Grep`、`Glob` 不在白名单里：** 按权限文档，`Grep(path)`、`Glob(path)` 规则什么也匹配不到，`Read(path)` 的 `deny` 规则只对它们的搜索根目录尽力适用，从被拒目录的上一级开始搜就能返回里面的文件；在 macOS 上这两个工具本来就不在默认工具集里，Claude 会改用内置的 `find`、`grep` 经 Bash 运行，那是在沙箱里，`denyRead` 由系统强制。**`EndConversation`：** CLI 参考写明 `--tools` 列表里不写它也去不掉，所以它在预期集合里；它只是结束对话，不读写文件、不联网（按文档，需要探针确认）。**工具搜索：** 工具搜索默认开启时，MCP 工具被推迟到 `ToolSearch` 之后，不带 `ToolSearch` 的白名单可能让 Looper 的任务工具调不到；v1 选择钉 `ENABLE_TOOL_SEARCH=false`（Looper 自己的任务工具只有几个，放行的 MCP 服务器至多 20 个名字，一开始全部加载的代价可以接受），这时会多出 `WaitForMcpServers`，一并放进预期集合；读回断言 `env` 里这个值，探针要证明 `task_status` 可调用。`TodoWrite` 默认可能被 `Task*` 系列工具取代，写进白名单未必带回它，具体集合由升级探针按 CLI 实际工具清单固化 |
-| F10 | 读范围 | `sandbox.filesystem.denyRead` 和 `Read(...)` 的 `deny` 规则，同一份清单：操作者的凭据和信任根（`~/.ssh`、`~/.aws`、`~/.gnupg`、已知存放凭据的 `~/.config` 子目录、用户级 Claude 配置目录里的凭据和 `.claude.json`、Looper 自己的运行时、配置和令牌目录） | `Read` 是白名单里唯一在沙箱外读文件的内置工具，Bash 的读默认可及大半个文件系统。**`Read` 的 `deny` 规则在 bypass 下覆盖 `Read` 工具本身，是启用前必过的探针（C1 敌意测试的一行）。不成立就把 `Read` 从白名单里拿掉**（与排除 Grep、Glob 同理：读文件改走沙箱内的 Bash），不把它当残余风险带着上线。规则只能列要保护的根，不能表达「只准读任务目录」（`deny` 优先，加 `allow` 也不行），所以这是一份黑名单，天然不完整，第 25.5 节如实写出。**不整个拒绝 `~/.config`**：git 的全局配置在 `~/.config/git/config`，别的命令行工具的配置也在那里；清单只列存放凭据的子目录，具体清单和它对 `git status/add/commit`、`pytest` 的影响，由探针在 F10 生效的条件下重测（此前的实测是没有 `denyRead` 时做的） |
+| F9 | 内置工具白名单 | `--tools "Bash"`，再加 Looper 自己的任务工具和已放行 MCP 服务器的工具；预期集合还包括 `EndConversation` 和 `WaitForMcpServers`（见下）；同时在注入的 `env` 里钉 `ENABLE_TOOL_SEARCH=false` | **白名单，不是黑名单。** 沙箱只管 Bash 子进程，别的内置工具在沙箱外，bypass 下不经提示：`Write`、`Edit`、`NotebookEdit` 实测能写任意路径，`WebFetch` 实测直连非白名单端口；按文档，`Monitor` 的 WebSocket 来源由 CLI 自己直连、`SendMessage` 能向操作者本机的其他会话发消息（双方 bypass 时不经批准）、`EnterWorktree` 能把会话的工作目录和写权限移到别的 worktree、`Artifact`、`RemoteTrigger`、`SendUserFile`、`PushNotification` 等有不经白名单的上传或远端通道、`LSP` 在沙箱外处理这个不可信的工作区、`CronCreate`、`ScheduleWakeup` 会在 Looper 的回合循环之外起回合。这些里有的在 `--print` 会话里出不出现取决于版本和账号，所以不逐个列黑名单：不在白名单里的内置工具一概不可用。**`Read`、`Grep`、`Glob`、`TodoWrite`、`Skill` 也都不在白名单里：模型读写文件只经沙箱内的 Bash，读范围因此只有沙箱的 `denyRead` 一个机制（F10）。** 其中 `Grep`、`Glob`： 按权限文档，`Grep(path)`、`Glob(path)` 规则什么也匹配不到，`Read(path)` 的 `deny` 规则只对它们的搜索根目录尽力适用，从被拒目录的上一级开始搜就能返回里面的文件；在 macOS 上这两个工具本来就不在默认工具集里，Claude 会改用内置的 `find`、`grep` 经 Bash 运行，那是在沙箱里，`denyRead` 由系统强制。**`EndConversation`：** CLI 参考写明 `--tools` 列表里不写它也去不掉，所以它在预期集合里；它只是结束对话，不读写文件、不联网（按文档，需要探针确认）。**工具搜索：** 工具搜索默认开启时，MCP 工具被推迟到 `ToolSearch` 之后，不带 `ToolSearch` 的白名单可能让 Looper 的任务工具调不到；v1 选择钉 `ENABLE_TOOL_SEARCH=false`（Looper 自己的任务工具只有几个，放行的 MCP 服务器至多 20 个名字，一开始全部加载的代价可以接受），这时会多出 `WaitForMcpServers`，一并放进预期集合；读回断言 `env` 里这个值，探针要证明 `task_status` 可调用。`TodoWrite` 默认可能被 `Task*` 系列工具取代，写进白名单未必带回它，具体集合由升级探针按 CLI 实际工具清单固化。**后果（照实写）：** 读不了图片、PDF 和笔记本（`Read` 的多模态能力没了，这类文件在 v1 的管家会话里看不到内容）；读文本文件改用 `cat`、`sed -n`、`head`、`rg`，大文件分段读没有问题；用户层技能在 v1 不可用（`Skill` 不在白名单里；放进来要先证明技能的 `allowed-tools` 放宽不了工具集，并确认技能不需要 `Read`），`disableSkillShellExecution` 仍钉着作纵深防御；`TodoWrite` 不需要，进展由任务状态承载；Looper 的固定指令和任务工具没有假定 `Read`（核对了任务管家的启动、上下文和任务工具的代码，没有发现），模型自带系统提示里对 `Read` 的提及由模型自行适应 |
+| F10 | 读范围 | `sandbox.filesystem.denyRead`：操作者的凭据和信任根（`~/.ssh`、`~/.aws`、`~/.gnupg`、已知存放凭据的 `~/.config` 子目录、用户级 Claude 配置目录里的凭据和 `.claude.json`、Looper 自己的运行时、配置和令牌目录） | 内置工具里没有 `Read` 以后，读文件只有沙箱内的 Bash，**读范围只有 `denyRead` 这一个机制，由系统（Seatbelt）强制**，不再依赖 `Read(...)` 的权限规则在 bypass 下是否生效。`denyRead` 对沙箱内命令的强制，文档如此，本机**未实测**，列为启用前必过的探针（敌意测试）。它只能列要保护的根，不能表达「只准读任务目录」，是黑名单，天然不完整，第 25.5 节如实写出。**不整个拒绝 `~/.config`**：git 的全局配置在 `~/.config/git/config`，别的命令行工具的配置也在那里；清单只列存放凭据的子目录，具体清单和它对 `git status/add/commit`、`pytest` 的影响，由探针在 F10 生效的条件下重测（此前的实测是没有 `denyRead` 时做的） |
 | F11 | `sandbox.filesystem.denyWrite` | `.git/hooks`、`.git/config`、`.git/info`、`.git/modules`（任务目录内） | 实测：cwd 内 `.git` 的 `hooks` 和 `config` 默认已被沙箱保护（写、追加、改名、`mv` 覆盖、改名整个 `.git` 都被拒）；但 `.git/info/attributes` 和 `.git/info/exclude` 默认**可写**，而 `info/attributes` 不被 `--attr-source` 中和。加了 `denyWrite` 的 `hooks`、`config`、`info` 后三处都被拒，`git add`、`git commit` 仍成功。`.git/modules`（子模块自己的 `config` 和 `hooks`）按文档推断默认可写、**未实测**，所以也列进去；嵌套仓库自己的 `.git/config` 管不到，见第 25.5 节的残余风险 |
 
 
 两条补充：
 
-- 沙箱只管 Bash 子进程。Read、Edit、Write、WebFetch、WebSearch、MCP、钩子和状态栏命令都在沙箱外（实测 MCP 和钩子能写工作目录外、能直连监听端口）。所以 F7、F8 不是可选的加固：它们堵的正是沙箱管不到的出口；沙箱管不到的内置工具由 F9（工具白名单）和 F10（读范围）处理，是启用前必须完成的项（第 25.9 节）。
+- 沙箱只管 Bash 子进程。Read、Edit、Write、WebFetch、WebSearch、MCP、钩子和状态栏命令都在沙箱外（实测 MCP 和钩子能写工作目录外、能直连监听端口）。所以 F7、F8 不是可选的加固：它们堵的正是沙箱管不到的出口；沙箱管不到的内置工具由 F9（只放行 Bash）处理，读范围由沙箱的 `denyRead`（F10）一个机制管；两者都是启用前必须完成的项（第 25.9 节）。
 - 固定项不是设置：不经 `tasks.conversations.*` 的任何字段、环境变量或项目文件修改。操作者自己的用户级 Claude Code 配置可信（第 25.5 节），**但它不能放宽沙箱**：用户层的 `sandbox.filesystem.allowWrite` 等会生效（实测，文档也如此），所以注入的 `--settings` 把每一个能放宽的键都钉成 v1 的值，读回再断言有效值不比注入值更宽，更宽就拒绝启动。完整的键表见第 25.2.1 节。
 
 ### 25.2.1 放宽类设置：钉死的值和读回断言
@@ -625,12 +625,12 @@ draft、init ──删除──→ （删除）
 | `sandbox.autoAllowBashIfSandboxed` | 不设 | 不断言：只影响提示，`bypassPermissions` 下没有可放宽的东西 |
 | `sandbox.bwrapPath`、`socatPath`、`ripgrep`、`network.allowManagedDomainsOnly`、`filesystem.allowManagedReadPathsOnly` | — | 只有管理方或操作者能设；Linux 路径与 v1 无关；不断言 |
 | `sandbox.network.deniedDomains` | — | 只会变窄，不断言 |
-| `sandbox.filesystem.denyRead`、`Read(...)` 的 `deny` 规则 | F10 的清单 | 注入的清单是有效数组的子集（别处可以更多：只会更窄） |
+| `sandbox.filesystem.denyRead` | F10 的清单 | 注入的清单是有效数组的子集（别处可以更多：只会更窄） |
 | `disableSkillShellExecution` | `true` | 等于 `true`。技能里的内联 shell 是否在沙箱内运行，文档没写，调用参数又来自模型；用户层技能本身可信，这里只关掉内联 shell。设置参考说内置技能和托管设置里的技能不受这个键影响：升级探针要证明它们的内联 shell 也在沙箱内运行，证明不了就记为残余风险 |
 | `permissions.defaultMode`、`--permission-mode` | `bypassPermissions`（沿用 `permission_args()`） | `system/init` 的 `permissionMode` 等于 `bypassPermissions`；用户层的 `defaultMode` 压不过启动参数，压得过就拒绝 |
 | `permissions.additionalDirectories` | `[]` | 有效数组为空，且 `get_sandbox_dialog` 的可写路径集合等于期望集合（它可能扩大沙箱的默认可写集合） |
 | `permissions.allow`、`permissions.ask` | — | 不断言：`bypassPermissions` 下它们不能再放宽；改成别的模式会被上一行拒绝 |
-| `permissions.deny` | F10 的 `Read(...)` 清单 | 注入的清单是有效数组的子集（只会更窄，其余 `deny` 不断言）；`disableBypassPermissionsMode` 让 bypass 失败，被 `permissionMode` 断言拦住 |
+| `permissions.deny`、`disableBypassPermissionsMode` | — | 不断言 `deny`（只会变窄）；`disableBypassPermissionsMode` 让 bypass 失败，被 `permissionMode` 断言拦住 |
 | 内置工具：`--tools`、`env.ENABLE_TOOL_SEARCH` | 白名单（F9）；`ENABLE_TOOL_SEARCH=false` | `system/init` 的 `tools` 是「白名单 ∪ `EndConversation` ∪ `WaitForMcpServers` ∪ Looper 任务工具 ∪ 已放行 MCP 服务器的工具」的子集；多出任何一个工具，就以 `launch_setting_mismatch`（`item = tools`）拒绝启动；有效 `env` 里 `ENABLE_TOOL_SEARCH` 等于 `false`。升级探针重新核对工具清单 |
 | `hooks`、`disableAllHooks`、`allowedHttpHookUrls`、`httpHookAllowedEnvVars` | 不钉（v1 不注入 Looper 钩子） | `get_hooks_listing` 的钩子来源只能是用户层、`flagSettings` 和组织托管策略 `policySettings`；用户层钩子可信（第 25.5 节），在沙箱外运行 |
 | MCP：`enableAllProjectMcpServers`、`enabledMcpjsonServers`、`allowedMcpServers` 等 | — | 不断言这些键本身；`mcp_status` 的服务器集合等于允许集，且每个服务器的命令和参数指纹等于解析出的定义（第 25.6 节） |
@@ -695,7 +695,7 @@ draft、init ──删除──→ （删除）
   - (iv) **以后的渠道**：第 6 步把任务管家的回答送到飞书、Telegram 话题时，链接预览由服务端抓取，也是出口，加渠道时要重评。
   - (v) **放进白名单的域名**本身可以被滥用来外传数据（例如能写入的代码托管站点）；白名单的责任在操作者，界面要写明。
   - (vi) **模型服务商**会收到会话读到的一切，这是设计接受的。
-  - **读范围：** 沙箱内默认可读很大一部分文件系统，F10 的 `denyRead` 清单是黑名单，所以读到的内容不是「只能经白名单域名出去」，而是可以经上面各条出去；`Read` 工具的读范围靠启用前的探针保证（不成立就拿掉 `Read`，F10）。沙箱的每用户临时目录若和操作者其他进程共用，是共享的写入面。
+  - **读范围：** 内置工具里只有 Bash，读到的内容受沙箱的 `denyRead` 限制；沙箱内默认可读很大一部分文件系统，`denyRead` 清单是黑名单，所以读到的内容不是「只能经白名单域名出去」，而是可以经上面各条出去。沙箱的每用户临时目录若和操作者其他进程共用，是共享的写入面。
   - **其他在任务目录里启动的东西：** 用户层钩子、插件的服务器在任务目录里启动、在沙箱外运行，它们的启动方式受任务目录的影响，记为残余风险，v1 不解决；放行的 MCP 服务器的处理见第 25.6 节第 2 步。
   - **嵌套仓库和子模块：** 目录树里别处的 `.git` 和子模块自己的 `.git/config`、钩子，模型可能写得进去（按文档推断，未实测）；操作者自己的 git 或编辑器在那里自动执行 `status` 时会运行它们，Looper 的加固 git 不受影响，操作者要把这些仓库当不可信的。
 
@@ -793,7 +793,8 @@ draft、init ──删除──→ （删除）
 | `.claude/` 下的技能、命令 | 不加载（CLI 2.1.332 实测：`--setting-sources user` 下项目技能和命令不加载） |
 | `.claude/agents/` 子代理 | 不加载（CLI 2.1.332 实测，`init` 的 `agents` 里只有用户和内置的）；项目插件配置未测 |
 | 让模型用 Write、Edit、NotebookEdit、WebFetch、WebSearch、Monitor、SendMessage、EnterWorktree、LSP、CronCreate 等白名单外的工具，各一行 | 工具不可用（`No such tool available`）；阳性对照：不加 `--tools` 时该工具能用（在 `--print` 里不出现的工具，在测试里写明「未出现」，不算通过）；SendMessage 的对照用另一个本地会话，EnterWorktree 的对照看工作目录和写范围是否改变 |
-| **启用前必过：** 让模型用 `Read` 读 F10 清单里的路径（造一份假的密钥文件），再用 Bash `cat` 读同一个文件，再用 `Read` 在清单目录的上一级里找它 | `Read` 和 Bash 都被拒。**`Read` 的 `deny` 规则在 bypass 下盖不住 `Read` 工具，就把 `Read` 从 F9 白名单里拿掉，再重测（读文件改走沙箱内的 Bash）；这条探针不通过，任务管家不能启用** |
+| **启用前必过：** 造一份假的密钥文件放在 F10 清单的目录里；让模型在沙箱内用 `cat`、`sed -n`、`head`、`rg`、`find` 读它，或从清单目录的上一级开始搜它 | 全部被拒（系统强制）。**`denyRead` 在这台机器上强制不了，任务管家不能启用** |
+| 让模型用 `Read`、`Grep`、`Glob`、`TodoWrite`、`Skill` | 工具不可用（`No such tool available`）；阳性对照：不加 `--tools` 时能用 |
 | 在 F10 的 `denyRead` 清单生效的条件下，跑 `git status`、`git add`、`git commit`（含 `~/.config/git/config`、全局 `.gitignore`）、`pytest`、`rg`、`find` | 全部通过；git 需要的配置路径被清单挡住时，收窄清单（只列凭据子目录），不放弃 `denyRead` |
 | 任务目录里放 `looper/cli.py`（写一个会写标记文件的版本）和 `node_modules/<已放行的包>`，再启动、续接 | Looper 自己的服务器和已放行的服务器都不执行它们：标记文件不存在；相对路径或会从工作目录解析的启动器被拒（`mcp_launcher_unsafe`） |
 | 子模块和嵌套仓库里写 `.git/config`、`.git/modules/*/hooks` | 子模块的 `.git/modules` 被拒（F11）；嵌套仓库的写入记为残余风险，测试把现状固定下来【未实测，按文档推断】 |
@@ -811,7 +812,7 @@ draft、init ──删除──→ （删除）
 **启用前必须完成（不是已知缺口，三项缺一不可）。** 三项都已定：
 
 - **H1　内置工具的边界（F9、F10）。** 实测基线：沙箱全开、bypass 下，Write、Edit、NotebookEdit 能写工作目录外，WebFetch 能连非白名单端口；WebSearch 只走模型 API 通道。规则的 bypass 下行为：`deny` 规则不被 bypass 跳过；一条 `Edit(//绝对路径/**)` 规则同时拦 Write、Edit、NotebookEdit；`sandbox.filesystem.denyWrite` **不管**这三个工具。但规则无法表达「只允许写工作目录」，也无法表达「只准读任务目录」。
-  - **已定：内置工具白名单。** `--tools "Bash,Read,TodoWrite,Skill"`（具体集合由升级探针按 CLI 实际工具清单固化），不用黑名单：黑名单天然追不上新增的工具，而 `Monitor`、`SendMessage`、`EnterWorktree`、`Artifact`、`RemoteTrigger`、`LSP`、`CronCreate` 等都在沙箱外开了出口（F9 的说明）。这条路径要的是和沙箱一样确定的边界：在工作目录外写文件可以改操作者的用户级配置和钩子，而它们是整个设计的信任根。不采用「保留 Write/Edit 加 PreToolUse 路径钩子」的做法：钩子是先检查后写入，后台进程可以在两步之间把路径换成符号链接（检查与使用之间的竞争），而且钩子本身运行在沙箱外，成了新的沙箱外代码路径。
+  - **已定：内置工具白名单。** `--tools "Bash"`（具体集合由升级探针按 CLI 实际工具清单固化；只有 Bash，文件的读写都经沙箱内的 Bash，一个机制），不用黑名单：黑名单天然追不上新增的工具，而 `Monitor`、`SendMessage`、`EnterWorktree`、`Artifact`、`RemoteTrigger`、`LSP`、`CronCreate` 等都在沙箱外开了出口（F9 的说明）。这条路径要的是和沙箱一样确定的边界：在工作目录外写文件可以改操作者的用户级配置和钩子，而它们是整个设计的信任根。不采用「保留 Write/Edit 加 PreToolUse 路径钩子」的做法：钩子是先检查后写入，后台进程可以在两步之间把路径换成符号链接（检查与使用之间的竞争），而且钩子本身运行在沙箱外，成了新的沙箱外代码路径。
   - **编辑体验：** 模型少了精确编辑工具，改文件改走 Bash。为此 Looper 在沙箱的 `PATH` 上提供一个补丁命令，接受「旧文本替换为新文本」或 unified diff，不匹配时给清楚的错误；模型通过 Bash 调它，所以边界由沙箱而不是我们的路径检查来守。固定指令增加一句说明怎么改文件（模型可见的改动，由提示词负责人撰写并评测）。补丁命令来不及时，v1 先只用 Bash，补丁命令随后跟上。评测增加用例：多文件修改、在大文件里局部修改、一次编辑失败后重试，各自对「有补丁命令」和「没有」两种情况比较。
   - 进敌意配置测试表（上表），带阳性对照。
 - **H2　原地任务的 git 和每轮 ref 快照（v1 只报告，不恢复）。** v1 只支持原地任务且目录是仓库根（第 25.6 节），所以 `.git` 在任务目录内，沙箱只拿到这一个仓库的写权限；`hooks`、`config` 默认受保护，F11 再封 `info`。模型在沙箱里 `git add`、`git commit` 能成功（实测，`denyWrite` 后仍成功）。但目录内的 ref 和对象库对它是可写的，所以每个回合：
@@ -829,7 +830,7 @@ draft、init ──删除──→ （删除）
 1. **临时目录和缓存。** `uv`、`npm` 等的默认缓存在 `HOME` 下，沙箱内写失败；由代码把缓存目录指向工作目录内（`UV_CACHE_DIR`、`npm_config_cache`）是否合适，待评估。v1 没有写路径放行入口。
 2. **拒绝记录里能存什么。** 命令文本可能含凭据；建议只存工具名、拒绝类别、主机或路径和命令摘要的哈希，不存原文。
 3. **`<sandbox_violations>` 的格式稳定性。** 它是 CLI 输出的一部分，随 `VERIFIED_CLI_VERSION` 的升级探针一起验证。
-4. **读限制。** 是否给常见凭据目录（如 SSH 密钥）加 `denyRead`；v1 不加，靠网络白名单兜底，是否够用待评估。
+4. **读限制的清单。** F10 的 `denyRead` 清单已定为凭据子目录，不整个拒绝 `~/.config`；清单是否够用、是否有别的信任根漏列，待评估。
 5. **项目插件配置。** 未测。
 
 ### 25.10 可观测性
@@ -873,5 +874,5 @@ worktree 任务的工作区改成 `git clone --shared`（借用主仓库的对�
 | Looper 自己的 MCP 服务器 | `python -I` 加绝对路径的单独 PR（#1864），覆盖 Worker、Planner、管家各会话 |
 | 白名单 MCP 的解析器 | 在 #1852 之上改成只读用户层，生成 Looper 持有的 cd 包装，并给出指纹（第 25.6 节第 2 步） |
 | 加固的 git 封装 | Looper 对任务和步骤目录跑的每条 git 都走它（第 25.9 节 H3） |
-| 升级探针 | 读回协议和「第一个回合前可读回」、工具清单（含 `EndConversation`、`WaitForMcpServers`、`task_status` 可调用）、临时目录、`Read` 的 `deny` 规则、内置技能的内联 shell（第 25.9 节） |
+| 升级探针 | 读回协议和「第一个回合前可读回」、工具清单（含 `EndConversation`、`WaitForMcpServers`、`task_status` 可调用）、临时目录、`denyRead` 对沙箱内命令的强制、内置技能的内联 shell（第 25.9 节） |
 | 敌意配置测试 | 第 25.9 节的整张表，含阳性对照 |
