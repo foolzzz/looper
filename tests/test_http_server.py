@@ -121,6 +121,57 @@ def test_shutdown_gives_inflight_requests_a_grace_period(tmp_path, monkeypatch, 
     asyncio.run(run())
 
 
+def test_shutdown_aborts_a_connection_whose_handler_has_not_started(tmp_path, monkeypatch):
+    async def run():
+        monkeypatch.setattr(http_server, "HTTP_SHUTDOWN_GRACE_SECONDS", .05, raising=False)
+        monkeypatch.setattr(http_server, "HTTP_SHUTDOWN_CLEANUP_SECONDS", .05, raising=False)
+        server = AgentHTTPServer(port=0, runtime_root=tmp_path,
+            web_adapter=SimpleNamespace(), task_router=SimpleNamespace(), supervisor=SimpleNamespace())
+        release, started = asyncio.Event(), asyncio.Event()
+        transports = []
+        original = asyncio.start_server
+
+        async def start_server(callback, *args, **kwargs):
+            async def held(reader, writer):
+                # Hold the accept callback before _handle_connection registers.
+                transports.append(writer.transport)
+                started.set()
+                await release.wait()
+                if writer.transport is not None and not writer.transport.is_closing():
+                    await callback(reader, writer)
+
+            return await original(held, *args, **kwargs)
+
+        monkeypatch.setattr(asyncio, "start_server", start_server)
+        await server.start()
+        assert server._port != 8767
+        reader, writer = await asyncio.open_connection("127.0.0.1", server._port)
+        stopping = None
+        try:
+            await asyncio.wait_for(started.wait(), 1)
+            assert transports and not server._handlers and not transports[0].is_closing()
+            stopping = asyncio.create_task(server.stop())
+            await asyncio.wait_for(asyncio.shield(stopping), .6)
+            assert transports[0].is_closing()
+            try:
+                payload = await asyncio.wait_for(reader.read(), .5)
+            except ConnectionResetError:
+                payload = b""
+            assert payload == b""
+        finally:
+            release.set()
+            writer.close()
+            try:
+                await writer.wait_closed()
+            except ConnectionError:
+                pass
+            if stopping is not None and not stopping.done():
+                stopping.cancel()
+            await server.stop()
+
+    asyncio.run(run())
+
+
 def test_keepalive_client_is_told_when_the_server_closes(tmp_path: Path) -> None:
     async def run() -> None:
         server = AgentHTTPServer(

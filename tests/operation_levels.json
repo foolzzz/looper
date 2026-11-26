@@ -460,5 +460,6 @@
  "tasks.create_draft": "inside",
  "task_conversations.get": "inside",
  "task_conversations.update": "inside",
- "tasks.done": "inside"
+ "tasks.done": "inside",
+ "tasks.task_manager_profile_set": "inside"
 }

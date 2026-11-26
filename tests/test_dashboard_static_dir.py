@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -86,6 +87,76 @@ def test_static_files_stay_inside_directory(tmp_path: Path, path: str, expected:
             assert secret not in body
             if expected == 200:
                 assert body == asset
+        finally:
+            await server.stop()
+
+    asyncio.run(run())
+
+
+def _status_and_body(raw: bytes) -> tuple[int, bytes]:
+    head, separator, body = raw.partition(b"\r\n\r\n")
+    assert separator
+    return int(head.split(b"\r\n", 1)[0].split()[1]), body
+
+
+async def _raw_get(port: int, target: bytes) -> bytes:
+    # Write the request target verbatim: HTTP clients may normalize dot segments.
+    reader, writer = await asyncio.open_connection("127.0.0.1", port)
+    try:
+        writer.write(b"GET " + target + f" HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n\r\n".encode())
+        await writer.drain()
+        return await asyncio.wait_for(reader.read(), timeout=5)
+    finally:
+        writer.close()
+        await writer.wait_closed()
+
+
+@pytest.mark.parametrize("target", [
+    pytest.param(b"/" + b"a" * 5000, id="5000-characters"),
+    pytest.param(b"/" + b"b" * 300, id="300-character-segment"),
+    pytest.param(b"/a\x00b", id="nul"),
+])
+def test_unresolvable_static_path_answers_not_found(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture, target: bytes,
+) -> None:
+    static = tmp_path / "static"
+    (static / "assets").mkdir(parents=True)
+    (static / "assets" / "app.js").write_bytes(b"console.log('dashboard');")
+    # Present so a path the filesystem rejects must not fall through to the dashboard page.
+    (static / "index.html").write_bytes(b"dashboard-index")
+    secret = b"outside-static-directory"
+    sibling = tmp_path / "static-secret"
+    sibling.mkdir()
+    (sibling / "leak.txt").write_bytes(secret)
+    (static / "prefix-link").symlink_to(sibling, target_is_directory=True)
+    runtime = tmp_path / "runtime"
+    runtime.mkdir()
+
+    async def run() -> None:
+        server = http_server.AgentHTTPServer(
+            port=0, static_dir=static, runtime_root=runtime,
+            web_adapter=SimpleNamespace(), task_router=SimpleNamespace(), supervisor=SimpleNamespace(),
+        )
+        await server.start()
+        try:
+            port = server._port
+            assert port != 8767
+            caplog.clear()
+            contained = await _raw_get(port, b"/prefix-link/leak.txt")
+            contained_status, contained_body = _status_and_body(contained)
+            assert contained_status == 404
+            assert secret not in contained_body
+            caplog.clear()
+            raw = await _raw_get(port, target)
+            status, body = _status_and_body(raw)
+            assert status == contained_status
+            assert body == contained_body
+            assert b"Traceback" not in raw
+            assert secret not in raw
+            assert b"dashboard-index" not in raw
+            warnings = [record for record in caplog.records if record.levelno >= logging.WARNING]
+            assert len(warnings) <= 1
+            assert all(record.exc_info is None for record in warnings)
         finally:
             await server.stop()
 

@@ -153,7 +153,8 @@ def test_shared_main_hides_persona_from_other_chats(monkeypatch, tmp_path, stabl
                     assert shown is not None
                 await manager._handle(own)
                 if stable:
-                    assert turns()[-1].startswith("Looper state: changes" if cleared else "Looper state: unchanged")
+                    assert turns()[-1].startswith("Looper state (rev ")
+                    assert ("  Notes: private-notes" in turns()[-1]) is (not cleared)
                 else:
                     assert "  Tone: private-tone\n  Notes: private-notes" in turns()[-1]
         finally:

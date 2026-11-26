@@ -3,24 +3,27 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import time
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from enum import Enum
 from pathlib import Path
 from typing import Any, Literal, Protocol
 
-from ...db import activity, projects, tasks
-from .. import outbound_hook, task_conversations_settings, task_manager_safety, task_manager_settings, task_workspaces
+from ...db import activity, agent_sessions, projects, tasks
+from .. import outbound_hook, step_workspaces, task_budget, task_conversations_settings
+from .. import task_manager_safety, task_manager_settings, task_workspaces
 from ..agent_settings import Access, Launch
-from ..claude_cli import ResidentClaude
+from ..claude_cli import ClaudeRunRecorder, ResidentClaude
 from ..library import EMPTY_LIBRARY
 from ..project_execution import ProjectExecution
 from ..run_usage import Usage
 from ..runtimes.cancel import TurnCancel
 from ..system_prompt import SystemPrompt
 from ..task_manager_brief import brief, instructions
+from ..untrusted import Source, fence
 
 logger = logging.getLogger(__name__)
 
@@ -109,6 +112,37 @@ class _Request:
     cancel: TurnCancel = field(default_factory=TurnCancel)
 
 
+class _ResumeFailed(Exception):
+    pass
+
+
+async def _files(cwd: str) -> dict[str, tuple[Any, ...]]:
+    """Status plus file metadata distinguishes another edit without reading large files."""
+    status = await step_workspaces._git(cwd, "status", "--porcelain", "-z", "--untracked-files=all", check=False)
+    if status.returncode:
+        return {}
+
+    def snapshot() -> dict[str, tuple[Any, ...]]:
+        found = {}
+        entries = iter(status.stdout.decode("utf-8", "surrogateescape").split("\0"))
+        for entry in entries:
+            if not entry:
+                continue
+            name = entry[3:]
+            if "R" in entry[:2] or "C" in entry[:2]:
+                next(entries, None)
+            path = Path(cwd) / name
+            try:
+                stat = path.lstat()
+                value = (stat.st_mtime_ns, stat.st_ctime_ns, stat.st_size)
+            except OSError:
+                value = ()
+            found[name] = (entry[:2], *value)
+        return found
+
+    return await asyncio.to_thread(snapshot)
+
+
 class TaskManagerAgent:
     def __init__(self, pool: TaskManagerPool, task_id: str) -> None:
         self.pool, self.task_id = pool, task_id
@@ -118,6 +152,8 @@ class TaskManagerAgent:
         self.busy = False
         self.session_id: str | None = None
         self.totals = Usage()
+        self.loaded = False
+        self.context_rotation_pending = False
         self.running: asyncio.Task[None] | None = None
 
     async def prepare(self, *, sink: TurnSink | None = None) -> tuple[Mapping[str, Any], Any, Launch, SystemPrompt]:
@@ -134,6 +170,13 @@ class TaskManagerAgent:
             raise Refused(RefuseReason.WORK_MODE_OFF, "Task conversations are disabled.")
         if self.pool.closing:
             raise Refused(RefuseReason.SHUTTING_DOWN, "The task Manager is shutting down.")
+        if not self.loaded:
+            saved = await agent_sessions.get_session(f"task-manager-{self.task_id}")
+            if saved:
+                self.session_id = saved["session_id"]
+                self.totals = Usage.from_dict(saved["session_totals"])
+                self.context_rotation_pending = saved.get("pending_handoff") == "context_bound"
+            self.loaded = True
         task = await tasks.get_task(self.task_id)
         if task is None:
             raise Refused(RefuseReason.WORKSPACE, "The task no longer exists.")
@@ -220,27 +263,132 @@ class TaskManagerAgent:
                 if self.session_id:
                     command += ["--resume", self.session_id]
                 await self.resident.start(command, cwd=reopened.work_dir, signature=signature, env=env,
-                                          totals=self.totals, price=launch.price)
+                                          totals=self.totals, price=launch.price, capture_stderr=True)
             self.last_used = self.pool.clock()
         return task, reopened, launch, prompt
 
     async def turn(self, request: _Request) -> None:
-        """The launch/pool primitive; accounting and session recovery build on this path."""
-        await self.prepare(sink=request.sink)
+        try:
+            gate = await task_budget.gate(self.task_id)
+        except Exception:
+            logger.warning("task Manager %s: budget_unverifiable; allowing this turn", self.task_id, exc_info=True)
+            await activity.insert_activity(task_id=self.task_id, kind="error",
+                summary="budget_unverifiable: cannot read task costs; allowing this task Manager turn")
+            gate = None
+        if gate is not None and not gate.allowed:
+            raise Refused(RefuseReason.BUDGET, "这个任务已到花费上限，提高上限后再说")
+        if gate is not None and gate.unknown_models:
+            await activity.insert_activity(task_id=self.task_id, kind="error",
+                summary="Warning: task Manager cost is unknown for " + ", ".join(gate.unknown_models))
+        task, reopened, launch, prompt = await self.prepare()
         if not request.admitted.done():
             request.admitted.set_result(Submitted("started"))
+        rotating = self.context_rotation_pending
+        if rotating:
+            await request.sink.event(TaskManagerEvent.SESSION_FRESH,
+                                     {"reason": "context_bound", "detail": "The task session reached its context bound."})
+        elif reopened.reason and not self.session_id:
+            await request.sink.event(TaskManagerEvent.SESSION_FRESH,
+                                     {"reason": "read_only_open", "detail": reopened.reason})
+        before = await _files(reopened.work_dir)
+        text, outcome = "", "failed"
+        written = False
+        record_id = None
+        try:
+            for attempt in range(2):
+                resuming = "--resume" in self.resident.command
+                expected = self.session_id if resuming else None
+                initialized = False
+                pieces: list[str] = []
+                tools: dict[str, ToolRecord] = {}
 
-        async def on_event(event: dict[str, Any]) -> None:
-            delta = (event.get("event") or {}).get("delta") or {}
-            if event.get("parent_tool_use_id") is None and delta.get("type") == "text_delta":
-                await request.sink.delta(str(delta.get("text") or ""))
+                async def on_event(event: dict[str, Any]) -> None:
+                    nonlocal initialized
+                    await recorder.record(event)
+                    if event.get("type") == "system" and event.get("subtype") == "init":
+                        if expected and event.get("session_id") != expected:
+                            raise _ResumeFailed("Claude Code resumed a different session")
+                        initialized = True
+                        session_id = event.get("session_id") or self.session_id
+                        await agent_sessions.save_session(f"task-manager-{self.task_id}", session_id,
+                            self.resident.totals.to_dict(), runtime_type="claude-code",
+                            profile_id=launch.profile.id, provider_id=launch.profile.provider.id)
+                        self.session_id = session_id
+                    if event.get("parent_tool_use_id") is not None:
+                        return
+                    delta = (event.get("event") or {}).get("delta") or {}
+                    if delta.get("type") == "text_delta":
+                        chunk = str(delta.get("text") or "")
+                        pieces.append(chunk)
+                        await request.sink.delta(chunk)
+                    content = (event.get("message") or {}).get("content") or []
+                    for block in content if isinstance(content, list) else []:
+                        if not isinstance(block, dict):
+                            continue
+                        if block.get("type") == "tool_use" and event.get("type") == "assistant":
+                            name = str(block.get("name") or "")
+                            record = ToolRecord(str(block.get("id") or ""), name,
+                                (name + " " + json.dumps(block.get("input"), ensure_ascii=False))[:200], "", False)
+                            tools[record.tool_use_id] = record
+                            await request.sink.tool(record)
+                        elif block.get("type") == "tool_result" and block.get("tool_use_id") in tools:
+                            record = replace(tools[block["tool_use_id"]],
+                                result=json.dumps(block.get("content"), ensure_ascii=False)[:200],
+                                is_error=bool(block.get("is_error")))
+                            await request.sink.tool(record)
 
-        result = await self.resident.run_turn(request.text, on_event, tag=request, cancel=request.cancel)
-        if result.stopped:
-            await request.sink.event(TaskManagerEvent.STOPPED, {"method": result.stopped.value})
-        outcome = ("stopped" if result.stopped else "success"
-                   if (result.result_event or {}).get("subtype") == "success" else "failed")
-        await request.sink.final(str((result.result_event or {}).get("result") or ""), outcome)
+                message = request.text
+                if (attempt or rotating) and request.history:
+                    history = "\n".join(item if isinstance(item, str) else json.dumps(dict(item), ensure_ascii=False)
+                                        for item in request.history[-20:])
+                    message = fence(history, source=Source.CHAT_HISTORY) + "\n\n" + message
+                retry_detail = ""
+                async with ClaudeRunRecorder(agent_id=f"task-manager-{self.task_id}", task_id=self.task_id,
+                    command=self.resident.command, cwd=reopened.work_dir, input_text=message,
+                    session_id=self.session_id, system_prompt=prompt, launch=launch,
+                    pid_of=lambda: self.resident.pid) as recorder:
+                    try:
+                        result = await self.resident.run_turn(message, on_event, tag=request,
+                                                              stop=recorder.cap_stop, cancel=request.cancel)
+                        written |= result.prompt_sent
+                        if resuming and not initialized and not request.cancel.requested:
+                            retry_detail = result.stderr or await self.resident.stderr_tail()
+                            raise _ResumeFailed(retry_detail or "Claude Code exited before init")
+                    except _ResumeFailed as exc:
+                        if attempt or request.cancel.requested:
+                            raise
+                        await self.resident.stop(kill=True)
+                        self.session_id, self.totals = None, Usage()
+                        await request.sink.event(TaskManagerEvent.SESSION_FRESH,
+                                                {"reason": "resume_failed", "detail": str(exc)})
+                        # Re-run all configuration and review gates before the one fresh attempt.
+                        task, reopened, launch, prompt = await self.prepare()
+                        continue
+                    text = str((result.result_event or {}).get("result") or "".join(pieces))
+                    outcome = ("stopped" if result.stopped else "success"
+                               if (result.result_event or {}).get("subtype") == "success" else "failed")
+                    self.totals = self.resident.totals
+                    record_id = recorder.record_id
+                    self.context_rotation_pending = False
+                    await recorder.finish(output_text=text, result_event=result.result_event,
+                                          usage=result.usage, outcome=outcome)
+                if result.stopped:
+                    await request.sink.event(TaskManagerEvent.STOPPED, {"method": result.stopped.value})
+                break
+        finally:
+            if self.session_id:
+                await agent_sessions.save_session(f"task-manager-{self.task_id}", self.session_id, self.totals.to_dict(),
+                    runtime_type="claude-code", profile_id=launch.profile.id, provider_id=launch.profile.provider.id)
+            after = await _files(reopened.work_dir)
+            files = sorted(name for name in before.keys() | after.keys() if before.get(name) != after.get(name))
+            commit = None
+            if written and task.get("workspace_mode") == "worktree" and self.mode == "direct":
+                commit = await step_workspaces.commit_pending(Path(reopened.work_dir), self.links,
+                    f"looper: task Manager turn of task {self.task_id}\n\nLooper-Task: {self.task_id}")
+            await request.sink.event(TaskManagerEvent.TURN_SUMMARY, {"files": files, "commit": commit, "mode": self.mode})
+        from . import task_manager_context
+        await task_manager_context.maintain(self, request, reopened, launch, prompt, record_id)
+        await request.sink.final(text, outcome)
 
 
 _pool: TaskManagerPool | None = None
