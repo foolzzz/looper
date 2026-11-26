@@ -19,7 +19,7 @@ import time
 
 from looper.db import connection, llm_records, plans, step_attempts, system_settings
 
-from .runner import DEFAULT_OUT_DIR, EvalError, fresh_database, init_repository, running_server
+from .runner import DEFAULT_OUT_DIR, REPO_ROOT, EvalError, fresh_database, init_repository, running_server
 
 EXPECTED_LINE = (
     "This step was interrupted before (restart not adopted); the workspace may hold partial changes from that run. "
@@ -203,7 +203,7 @@ def behavior_checks(*, tool_calls, effect_count, output, partial, audit):
     }
 
 
-def _arm(root, url, *, mode, enabled, model, budget, claude, timeout, log):
+def _arm(root, url, *, mode, enabled, model, budget, claude, timeout, log, events_path):
     work = root / "work"
     work.mkdir()
     (work / "publish.py").write_text(PUBLISHER)
@@ -250,6 +250,8 @@ def _arm(root, url, *, mode, enabled, model, budget, claude, timeout, log):
     if len(workers) != 1 or not capture.exists():
         raise EvalError("expected exactly one re-dispatched Worker and its CLI input capture")
     current = workers[0]
+    events_path.parent.mkdir(parents=True, exist_ok=True)
+    events_path.write_text("".join(json.dumps(event) + "\n" for event in current["events"]), encoding="utf-8")
     inputs = json.loads(capture.read_text())
     calls, inputs["tools"], unparsed = _parse_events(current["events"])
     effect_count = len(_json_lines(root / "publisher" / "events.jsonl"))
@@ -283,6 +285,8 @@ def run(*, mode, admin_url, out_dir, model="sonnet", reps=1, total_cap_usd=None,
         if not claude_bin:
             raise EvalError("real mode needs an installed Claude Code executable")
     out_dir = Path(out_dir).resolve()
+    if mode == "real" and out_dir.is_relative_to(REPO_ROOT):
+        raise EvalError("real mode artifacts must be outside the repository; set --out-dir")
     out_dir.mkdir(parents=True, exist_ok=True)
     rows, pairs = [], []
     path = out_dir / "worker-interrupted.json"
@@ -309,7 +313,8 @@ def run(*, mode, admin_url, out_dir, model="sonnet", reps=1, total_cap_usd=None,
                 try:
                     with fresh_database(admin_url) as (url, _):
                         row = _arm(root, url, mode=mode, enabled=enabled, model=model, budget=case_budget_usd,
-                                   claude=claude_bin, timeout=timeout, log=out_dir / f"{rep}-{arm}.server.log")
+                                   claude=claude_bin, timeout=timeout, log=out_dir / f"{rep}-{arm}.server.log",
+                                   events_path=out_dir / "runtime" / f"{rep}-{arm}.events.jsonl")
                 except BaseException as exc:
                     checkpoint(exc)
                     raise

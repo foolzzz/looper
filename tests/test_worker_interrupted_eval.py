@@ -3,6 +3,7 @@
 import copy
 from contextlib import contextmanager, nullcontext
 import json
+from pathlib import Path
 import subprocess
 import sys
 from types import SimpleNamespace
@@ -67,12 +68,43 @@ def test_fake_pair_uses_real_served_worker_inputs_and_detects_duplicate_effect(p
 
 
 def test_fake_stream_contains_string_content_and_still_scores_end_to_end(paired):
-    result, _, streams = paired
+    result, path, streams = paired
     assert len(streams) == 4
     assert all(any(event.get("type") == "user" and isinstance(event.get("message", {}).get("content"), str)
                    for event in events) for events in streams)
     assert result["outcome"] == "pass"
     assert all(row["unparsed_events"] == 0 for row in result["runs"])
+    saved = sorted((path.parent / "runtime").glob("*.events.jsonl"))
+    assert len(saved) == 4
+    assert [evaluation._json_lines(file) for file in saved] == streams
+
+
+@pytest.fixture
+def native_stream_shapes():
+    # Event shapes from a real Claude Code run; all text replaced by placeholders. The stream envelope was rebuilt from the CLI session log, which has no system init or result events.
+    return evaluation._json_lines(Path(__file__).parent / "fixtures" / "worker_interrupted_stream_shapes.jsonl")
+
+
+def test_native_stream_shapes_preserve_tool_evidence(score_stream, native_stream_shapes):
+    assert len(native_stream_shapes) == 11
+    row = score_stream(native_stream_shapes)
+    assert [call["id"] for call in row["tool_calls"]] == ["toolu_01", "toolu_05", "toolu_08"]
+    assert all(call["result"]["tool_use_id"] == call["id"] for call in row["tool_calls"])
+    assert row["unparsed_events"] == 0
+
+
+@pytest.mark.parametrize("failure_at", ["_parse_events", "behavior_checks"])
+def test_raw_events_survive_scoring_failure(tmp_path, monkeypatch, score_stream, native_stream_shapes, failure_at):
+    def fail(*args, **kwargs):
+        raise RuntimeError("synthetic scoring failure")
+
+    monkeypatch.setattr(evaluation, failure_at, fail)
+    # The server and recorder are local stand-ins; no Claude process or model request is made.
+    with pytest.raises(RuntimeError, match="synthetic scoring failure"):
+        score_stream(native_stream_shapes, mode="real")
+    saved = tmp_path / "report" / "runtime" / "1-treatment.events.jsonl"
+    assert saved.is_file()
+    assert [json.loads(line) for line in saved.read_text().splitlines()] == native_stream_shapes
 
 
 @pytest.fixture
@@ -83,7 +115,7 @@ def score_stream(tmp_path, monkeypatch):
 
     monkeypatch.setattr(evaluation, "_seed", seed)
 
-    def score(events):
+    def score(events, *, mode="fake"):
         prompt = "You are a Worker in Looper"
 
         async def records(url):
@@ -98,8 +130,9 @@ def score_stream(tmp_path, monkeypatch):
 
         monkeypatch.setattr(evaluation, "_records", records)
         monkeypatch.setattr(evaluation, "running_server", server)
-        return evaluation._arm(tmp_path, "unused", mode="fake", enabled=True, model="sonnet", budget=None,
-                               claude=None, timeout=1, log=tmp_path / "server.log")
+        return evaluation._arm(tmp_path, "unused", mode=mode, enabled=True, model="sonnet", budget=None,
+                               claude=None, timeout=1, log=tmp_path / "server.log",
+                               events_path=tmp_path / "report" / "runtime" / "1-treatment.events.jsonl")
 
     return score
 
@@ -252,6 +285,18 @@ def test_failed_arm_preserves_completed_arm_evidence(tmp_path, monkeypatch, pair
 def test_real_mode_requires_explicit_finite_caps_before_any_launch(tmp_path, kwargs):
     with pytest.raises(evaluation.EvalError, match="budget|cap"):
         evaluation.run(mode="real", admin_url="must-not-connect", out_dir=tmp_path, **kwargs)
+
+
+def test_real_mode_rejects_artifacts_inside_repository(monkeypatch):
+    out_dir = Path(evaluation.__file__).resolve().parents[2] / "evals" / "runs" / "must-not-create"
+    launches = []
+    monkeypatch.setattr(evaluation.shutil, "which", lambda _: "stand-in")
+    monkeypatch.setattr(evaluation, "fresh_database", lambda url: launches.append(url))
+    with pytest.raises(evaluation.EvalError, match="outside.*repository"):
+        evaluation.run(mode="real", admin_url="must-not-connect", out_dir=out_dir,
+                       total_cap_usd=2, case_budget_usd=1)
+    assert launches == []
+    assert not out_dir.exists()
 
 
 @pytest.mark.parametrize("reps,total", [(1, 1.5), (2, 3.5)])
