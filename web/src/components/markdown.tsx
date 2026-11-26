@@ -1,21 +1,20 @@
 import ReactMarkdown, { type Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
-import { RemoteLink, remoteHost } from "@/components/remote-link";
+import { InsideLink, RemoteLink, useInsideLink } from "@/components/remote-link";
+
+function ImageLabel({ src, alt }: { src?: string | Blob; alt?: string }) {
+  const inLink = useInsideLink();
+  const label = `image: ${alt?.trim() || "image"}`;
+  return inLink || typeof src !== "string" ? <span>{label}</span> : <RemoteLink href={src}>{label}</RemoteLink>;
+}
 
 // An agent's text must not make the browser fetch anything: images become links, and links name their host.
 // A wide table scrolls inside its message instead of widening the page.
 const COMPONENTS: Components = {
-  a: ({ node: _node, href, children, ...rest }) => {
-    if (!href) return <span>{children}</span>; // a scheme the sanitizer dropped (javascript:) is no link
-    const host = remoteHost(href);
-    return host ? <RemoteLink href={href} host={host}>{children}</RemoteLink> : <a href={href} {...rest}>{children}</a>;
-  },
-  img: ({ src, alt }) => {
-    const href = typeof src === "string" ? src : "";
-    const host = remoteHost(href);
-    const label = `image: ${alt?.trim() || "image"}`;
-    return host ? <RemoteLink href={href} host={host}>{label}</RemoteLink> : <span>{label}</span>;
-  },
+  a: ({ href, children }) => (
+    <InsideLink><RemoteLink href={href ?? ""}>{children}</RemoteLink></InsideLink>
+  ),
+  img: ImageLabel,
   table: (props) => (
     <div className="overflow-x-auto">
       <table {...props} />

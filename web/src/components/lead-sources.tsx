@@ -10,7 +10,7 @@ export function LeadSources({ sources, total }: { sources: LeadSource[]; total: 
       {sources.map((source, index) => (
         <li key={`${source.message_id}-${index}`}>
           {source.chat} · {source.sender} · {source.sent_at ? source.sent_at.slice(0, 16).replace("T", " ") : "—"}
-          {source.link && remoteHost(source.link) && <> · <RemoteLink href={source.link} host={remoteHost(source.link)!}>打开</RemoteLink></>}
+          {source.link && remoteHost(source.link) && <> · <RemoteLink href={source.link}>打开</RemoteLink></>}
         </li>
       ))}
       {extra > 0 && <li>另 {extra} 条</li>}
