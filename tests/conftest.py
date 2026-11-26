@@ -42,6 +42,7 @@ import worker_database  # noqa: E402
 
 _TEST_SHARD = pytest.StashKey[tuple[int, int]]()
 _SHARD_DURATIONS = pytest.StashKey[dict[str, float]]()
+_SHARD_TEST_DURATIONS = pytest.StashKey[dict[str, dict[str, float]]]()
 _STAGED_DASHBOARD_DIR = REPO_ROOT / "looper" / "web" / "dashboard"
 
 
@@ -163,6 +164,8 @@ def pytest_configure(config: pytest.Config) -> None:
             raise pytest.UsageError("LOOPER_TEST_SHARD must be N/TOTAL with 1 <= N <= TOTAL")
         config.stash[_TEST_SHARD] = (int(match[1]), int(match[2]))
         config.stash[_SHARD_DURATIONS] = _load_shard_durations(REPO_ROOT / "tests/shard_durations.json")
+        config.stash[_SHARD_TEST_DURATIONS] = _load_shard_test_durations(
+            REPO_ROOT / "tests/shard_test_durations.json")
     # Before any test module is imported (several read the URL at import): an xdist worker gets a database of its own.
     worker_database.start(getattr(config, "workerinput", {}).get("workerid"))
 
@@ -180,6 +183,31 @@ def _load_shard_durations(path: Path) -> dict[str, float]:
         return durations
     except (OSError, ValueError) as exc:
         raise pytest.UsageError(f"Cannot load shard durations from {path}: {exc}") from exc
+
+
+def _load_shard_test_durations(path: Path) -> dict[str, dict[str, float]]:
+    """Per-test seconds for files that are split. Missing file means every test weighs the same."""
+    if not path.is_file():
+        return {}
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(payload, dict):
+            raise ValueError("expected a mapping of test file paths to per-test seconds")
+        parsed: dict[str, dict[str, float]] = {}
+        for name, tests in payload.items():
+            if (not isinstance(name, str) or not name.startswith("tests/") or not name.endswith(".py")
+                    or not isinstance(tests, dict)):
+                raise ValueError("expected a mapping of test file paths to per-test seconds")
+            parsed[name] = {}
+            for nodeid, seconds in tests.items():
+                if (not isinstance(nodeid, str) or not nodeid.startswith(f"{name}::")
+                        or isinstance(seconds, bool) or not isinstance(seconds, (int, float))
+                        or not math.isfinite(float(seconds)) or seconds < 0):
+                    raise ValueError(f"invalid per-test duration for {name}")
+                parsed[name][nodeid] = float(seconds)
+        return parsed
+    except (OSError, ValueError) as exc:
+        raise pytest.UsageError(f"Cannot load per-test shard durations from {path}: {exc}") from exc
 
 
 # A file heavier than this is split into consecutive chunks so one file cannot
@@ -209,12 +237,103 @@ def _chunk_spans(count: int, chunks: int) -> list[tuple[int, int]]:
     return [(index * count // chunks, (index + 1) * count // chunks) for index in range(chunks)]
 
 
+def _uniform(weights: list[float]) -> bool:
+    return all(math.isclose(weight, weights[0], rel_tol=0.0, abs_tol=1e-9) for weight in weights)
+
+
+def _per_test_seconds(
+    path: str, nodeids: list[str], test_durations: dict[str, dict[str, float]] | None,
+) -> list[float] | None:
+    """Seconds for each collected node, or None when this file has no per-test map.
+
+    A node missing from the map (a test added since the last refresh) weighs the
+    median of the recorded tests in the same file.
+    """
+    recorded = (test_durations or {}).get(path)
+    if not recorded:
+        return None
+    fallback = float(median(recorded.values()))
+    return [float(recorded[nodeid]) if nodeid in recorded else fallback for nodeid in nodeids]
+
+
+def _ordered_seconds(
+    path: str, count: int, nodes: dict[str, list[str]] | None,
+    test_durations: dict[str, dict[str, float]] | None,
+) -> list[float] | None:
+    if not nodes or path not in nodes:
+        return None
+    nodeids = nodes[path]
+    if len(nodeids) != count:
+        raise ValueError(f"{path} collected {count} tests but {len(nodeids)} node ids were given")
+    return _per_test_seconds(path, nodeids, test_durations)
+
+
+def _time_spans(weights: list[float], chunks: int) -> list[tuple[int, int]]:
+    """Contiguous chunks whose seconds stay near an equal share of the file.
+
+    Equal weights use the historical item split, so the same inputs keep the
+    same node ids. Otherwise each cut is the boundary closest to the cumulative
+    target, and a tie takes the earlier item. Every chunk stays non-empty.
+    """
+    count = len(weights)
+    chunks = max(1, min(chunks, count))
+    if chunks == 1 or count == 0:
+        return [(0, count)]
+    if _uniform(weights):
+        return _chunk_spans(count, chunks)
+    prefix = [0.0]
+    for weight in weights:
+        prefix.append(prefix[-1] + float(weight))
+    total = prefix[-1]
+    if total <= 0:
+        return _chunk_spans(count, chunks)
+    spans: list[tuple[int, int]] = []
+    start = 0
+    for index in range(chunks - 1):
+        target = total * (index + 1) / chunks
+        # One item must remain for each chunk that is still empty.
+        limit = count - (chunks - index - 1)
+        end = start + 1
+        while end < limit and prefix[end] < target:
+            end += 1
+        if prefix[end] >= target and end > start + 1:
+            if abs(target - prefix[end - 1]) <= abs(prefix[end] - target):
+                end -= 1
+        end = min(max(end, start + 1), limit)
+        spans.append((start, end))
+        start = end
+    spans.append((start, count))
+    return spans
+
+
+def _chunk_plan(
+    path: str, count: int, file_weight: float, threshold: float,
+    nodes: dict[str, list[str]] | None, test_durations: dict[str, dict[str, float]] | None,
+) -> list[tuple[int, int, float]]:
+    """Half-open spans and the scheduling weight of each chunk. One chunk when the file is light."""
+    chunks = _chunk_count(file_weight, count, threshold)
+    if chunks == 1:
+        return [(0, count, file_weight)]
+    seconds = _ordered_seconds(path, count, nodes, test_durations)
+    spans = _chunk_spans(count, chunks) if seconds is None else _time_spans(seconds, chunks)
+    # Uniform (or unknown) tests keep the historical item share, so scheduling ties do not move.
+    if seconds is None or _uniform(seconds) or sum(seconds) <= 0:
+        parts = [file_weight * (end - start) / count for start, end in spans]
+    else:
+        total = sum(seconds)
+        parts = [file_weight * sum(seconds[start:end]) / total for start, end in spans]
+    return [(start, end, part) for (start, end), part in zip(spans, parts, strict=True)]
+
+
 def _file_spans(
     counts: dict[str, int], durations: dict[str, float], threshold: float = HEAVY_FILE_SPLIT_SECONDS,
+    *, nodes: dict[str, list[str]] | None = None,
+    test_durations: dict[str, dict[str, float]] | None = None,
 ) -> dict[str, list[tuple[int, int]]]:
     weights = _item_weights(counts, durations)
     return {
-        path: _chunk_spans(count, _chunk_count(weights[path], count, threshold))
+        path: [(start, end) for start, end, _part in _chunk_plan(
+            path, count, weights[path], threshold, nodes, test_durations)]
         for path, count in counts.items()
     }
 
@@ -224,25 +343,28 @@ def _assign_shard_units(
     durations: dict[str, float],
     total: int,
     threshold: float = HEAVY_FILE_SPLIT_SECONDS,
+    *,
+    nodes: dict[str, list[str]] | None = None,
+    test_durations: dict[str, dict[str, float]] | None = None,
 ) -> dict[tuple[str, int], int]:
     """Map ``(path, chunk index)`` to a 1-based shard.
 
     A file heavier than ``threshold`` becomes ``ceil(weight / threshold)`` consecutive
-    chunks of its collected items (never more chunks than items). Each chunk weighs
-    the file weight times that chunk's share of the items. Every other file is one
-    chunk. Largest chunks are placed first. Equal weights break ties by path, then
-    chunk index, then the lower shard index, so every worker selects the same node ids.
+    chunks of its collected items (never more chunks than items). Chunk edges follow
+    recorded per-test seconds when that file has them; each chunk then weighs the file
+    weight times its share of those seconds. A test missing from the map weighs the
+    file's median per-test time. Without a map, chunks keep an equal item share.
+    Every other file is one chunk. Largest chunks are placed first. Equal weights
+    break ties by path, then chunk index, then the lower shard index, so every
+    worker selects the same node ids.
     """
     weights = _item_weights(counts, durations)
     units: list[tuple[tuple[str, int], float]] = []
     for path, count in counts.items():
-        weight = weights[path]
-        chunks = _chunk_count(weight, count, threshold)
-        if chunks == 1:
-            units.append(((path, 0), weight))
-            continue
-        for index, (start, end) in enumerate(_chunk_spans(count, chunks)):
-            units.append(((path, index), weight * (end - start) / count))
+        for index, (_start, _end, part) in enumerate(_chunk_plan(
+            path, count, weights[path], threshold, nodes, test_durations,
+        )):
+            units.append(((path, index), part))
     loads = [0.0] * total
     assigned: dict[tuple[str, int], int] = {}
     # Largest chunks first. The key (path, chunk index) makes ties identical on every worker.
@@ -267,8 +389,12 @@ def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item
     paths = [item.path.relative_to(config.rootpath).as_posix() for item in items]
     counts = Counter(paths)
     durations = config.stash[_SHARD_DURATIONS]
-    assigned = _assign_shard_units(counts, durations, total)
-    spans = _file_spans(counts, durations)
+    test_durations = config.stash[_SHARD_TEST_DURATIONS]
+    nodes: dict[str, list[str]] = {}
+    for item, path in zip(items, paths):
+        nodes.setdefault(path, []).append(item.nodeid)
+    assigned = _assign_shard_units(counts, durations, total, nodes=nodes, test_durations=test_durations)
+    spans = _file_spans(counts, durations, nodes=nodes, test_durations=test_durations)
     seen: Counter[str] = Counter()
     selected, deselected = [], []
     for item, path in zip(items, paths):
