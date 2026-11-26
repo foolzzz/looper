@@ -23,6 +23,7 @@ const TASK_STATUS: Record<string, { label: string; color: string }> = {
   pending: { label: "排队中", color: "bg-warning" },
   waiting_user: { label: "等你回复", color: "bg-warning" },
   awaiting_budget: { label: "等你决定花费", color: "bg-warning" },
+  handing_back: { label: "交回中", color: "bg-warning" },
   completed: { label: "已完成", color: "bg-success" },
   failed: { label: "失败", color: "bg-destructive" },
   stopped: { label: "已停止", color: "bg-warning" },
