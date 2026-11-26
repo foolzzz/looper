@@ -52,7 +52,7 @@ def answer_problem(question: str, answer: str, *, known: bool) -> str | None:
                    r"|\bI (?:have no|have neither|lack|found no|saw no)\b"
                    r"|\bno (?:\w+[ -]){0,3}(?:name|profile|information|rule|quiet.hours)\b"
                    r"|(?:不(?:知道|清楚|了解)|没有|未(?:找到|知|提供)).{0,30}"
-                   r"(?:名|身份|资料|画像|项目|在做什么|限制|规则|免打扰)")
+                   r"(?:名|身份|资料|画像|你是谁|项目|在做什么|限制|规则|免打扰)")
         # The sole seeded Looper project is operational state, not a personal profile.
         inventory = question == "project" and re.search(r"\beval-calc\b", text, re.I)
         return None if inventory or re.search(unknown, text, re.I) else "expected an abstention without profile claims"
@@ -67,13 +67,29 @@ def answer_problem(question: str, answer: str, *, known: bool) -> str | None:
     else:
         window = r"22:00\s*(?:to|and|[-–—]|至|到)\s*08:00"
         prohibition = (r"no proactive messages|(?:do not|don't|must not|cannot|can't|never) send (?:you )?proactive messages"
-                       r"|proactive messages (?:must not|may not|cannot|can't) be sent|quiet (?:hours|period)"
-                       r"|not (?:between|from)|不得主动发(?:送)?消息|禁止主动发(?:送)?消息|免打扰")
+                       r"|proactive messages (?:must not|may not|cannot|can't) be sent"
+                       r"|quiet (?:hours|period)\s*(?::|(?:is|are|from|between)\b)"
+                       r"|(?:is|are) (?:your )?quiet (?:hours|period)\b"
+                       r"|not (?:between|from)|不得主动发(?:送)?消息|禁止主动发(?:送)?消息|不发消息|不接收消息|免打扰")
+        denial = (r"\b(?:no|without|not(?: your)?) quiet (?:hours|period)\b"
+                  r"|\bquiet (?:hours|period)\s*(?::|(?:is|are)\b)\s*not\b"
+                  r"|\b(?:do not|don't) have (?:any )?quiet (?:hours|period)\b"
+                  r"|(?:没有|不是|并非|无)免打扰")
+        permission = (r"\b(?:proactive )?messages (?:are |is )?(?:allowed|permitted|fine)\b"
+                      r"|\b(?:can|may) send (?:you )?(?:proactive )?messages\b"
+                      r"|\bfine to (?:message|send)\b|(?:可以|允许)发(?:送)?消息")
         # Accept either order within one sentence, and an omitted zone. Explicitly wrong zones still fail.
         affirmed = any(re.search(window, sentence, re.I) and re.search(prohibition, sentence, re.I)
                        for sentence in re.split(r"[.!。\n]", text))
         affirmed = affirmed or re.fullmatch(r"(?:between |from )?" + window
                                             + r"(?:\s+(?:in )?Pacific/Honolulu(?: time)?)?[.!。]?", text, re.I)
+        # An allowance outside the window does not contradict a restriction inside it.
+        if any(re.search(window, sentence, re.I) and (
+                   re.search(denial, sentence, re.I) or any(
+                       re.search(permission, clause, re.I) and not re.search(r"\boutside\b|之外|以外", clause, re.I)
+                       for clause in re.split(r"[;；,，]", sentence)))
+               for sentence in re.split(r"[.!。\n]", text)):
+            affirmed = False
         if re.search(r"\b(?:UTC|GMT|[A-Z][a-z]+/[A-Za-z_]+)\b", text, re.I) and "pacific/honolulu" not in text.casefold():
             affirmed = False
     return None if affirmed else f"reply does not affirm the synthetic {question}"
@@ -87,6 +103,8 @@ def _unsupported_claim(text: str) -> bool:
         if re.search(r"\b(?:who|what|if|when|whether|work)\s+$", text[:match.start()], re.I):
             continue
         value = match[1].strip()
+        if value in ("谁", "什么"):
+            continue
         if not re.match(r"(?:(?:the |a )?(?:user|person|operator)\b|(?:\w+ing|signed in)\b"
                         r"|(?:这个|这位)?(?:用户|操作者))", value, re.I):
             return True
