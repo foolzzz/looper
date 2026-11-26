@@ -40,9 +40,9 @@ export function WorkDraft({ task, onRefresh, disabled, onBusy }: {
     if (!live.current) return;
     if (!current || current.task_id !== task.task_id) throw new Error("尚未读到已保存的需求，请重新读取");
     if (current.requirement !== pending.current?.requirement)
-      throw new Error("尚未确认本次需求保存，请重新读取；可在右侧查看服务端需求");
+      throw new Error("需求已在其他窗口修改，已显示最新版本；请核对后重新发送");
     // Clear only after server readback, never an optimistic message bubble.
-    composer.setDraft("");
+    if (composer.value.draft === pending.current.text) composer.setDraft("");
     composer.rememberHistory([...composer.value.history, pending.current.text]);
     pending.current = null;
     setUncertain(false); setError(""); lock(false);
@@ -61,20 +61,37 @@ export function WorkDraft({ task, onRefresh, disabled, onBusy }: {
       const requirement = current.requirement ? `${current.requirement}\n\n${text}` : text;
       pending.current = { requirement, text };
       writing = true;
-      await editTaskRequirement(task.task_id, requirement);
+      const version = Math.max(1, ...(current.requirement_versions ?? []).map(item => item.version));
+      await editTaskRequirement(task.task_id, requirement, version);
       if (live.current) await readback();
     } catch (err) {
       if (!live.current) return;
+      if (err instanceof V1Error && err.code === "requirement_changed") {
+        pending.current = null; setUncertain(false);
+        try {
+          const latest = await onRefresh();
+          if (!latest || latest.task_id !== task.task_id) throw new Error("未能读取最新需求");
+          if (live.current) setError("需求已在其他窗口修改，已显示最新版本；请核对后重新发送");
+        } catch (refreshError) {
+          if (live.current) setError(`需求已在其他窗口修改，读取最新需求失败：${errorText(refreshError)}`);
+        }
+        return;
+      }
       setError(errorText(err));
-      // A failed read/network write may already have saved. Only retry its read, never its write.
+      // A failed read/network write may already have saved. Read retry never repeats the write.
       const unknown = writing && !(err instanceof V1Error && err.status >= 400 && err.status < 500);
       setUncertain(unknown);
-      if (!unknown) { pending.current = null; lock(false); }
+      if (!unknown) pending.current = null;
+    } finally {
+      if (live.current) lock(false);
     }
   };
   const retry = async () => {
+    if (locked.current) return;
+    lock(true);
     try { await readback(); }
     catch (err) { if (live.current) setError(errorText(err)); }
+    finally { if (live.current) lock(false); }
   };
   const versions = task.requirement_versions ?? [];
   const version = versions.length ? Math.max(...versions.map(item => item.version)) : null;

@@ -48,7 +48,10 @@ beforeEach(() => {
       if (pendingConfirmation) return new Response(JSON.stringify({ status: "needs_confirmation", impact: "Operator confirmation required", confirmation_id: "pending", expires_in_seconds: 60 }), { status: 202 });
       if (refuse) return new Response(JSON.stringify({ status: "error", error: { code: "conflict", message: refuse } }), { status: 409 });
       const versions = task.requirement_versions as { version: number; text: string }[];
-      const version = versions.length + 1;
+      const current = Math.max(1, ...versions.map(item => item.version));
+      if (body.expected_version !== undefined && body.expected_version !== current)
+        return new Response(JSON.stringify({ status: "error", error: { code: "requirement_changed", message: "Changed elsewhere", details: { current_version: current } } }), { status: 409 });
+      const version = current + 1;
       task = { ...task, requirement: body.requirement, requirement_versions: [...versions, { version, text: body.requirement, via: "operator" }] };
       result = { task_id: task.task_id, version, requirement: body.requirement };
     } else if (url.includes("task_control")) {
@@ -76,7 +79,7 @@ it("appends two draft messages through requirement_update and restores the serve
   expect(button("开始").disabled).toBe(true);
   expect(host.textContent).not.toContain("This task has ended");
   await send("First requirement");
-  expect(writes[0]).toEqual({ url: "/api/v1/tasks/requirement_update", body: { task_id: "task-draft", requirement: "First requirement" } });
+  expect(writes[0]).toEqual({ url: "/api/v1/tasks/requirement_update", body: { task_id: "task-draft", requirement: "First requirement", expected_version: 1 } });
   expect(host.querySelector('[aria-label="需求草稿"]')?.textContent).toContain("First requirement");
   expect(input().value).toBe("");
   expect(button("开始").disabled).toBe(false);
@@ -86,7 +89,7 @@ it("appends two draft messages through requirement_update and restores the serve
   act(() => root.unmount()); root = createRoot(host); await show();
   const draft = host.querySelector('[aria-label="需求草稿"]')!;
   expect(draft.textContent).toContain("First requirement\n\nSecond requirement");
-  expect(draft.textContent).toContain("版本 2");
+  expect(draft.textContent).toContain("版本 3");
   expect(writes.some(write => write.url.includes("task_control"))).toBe(false);
 });
 
@@ -95,20 +98,56 @@ it.each([false, true])("keeps a rejected draft message and shows the server reas
   await show(); await send("Keep this requirement");
   expect(host.textContent).toContain(confirmation ? "Operator confirmation required" : refuse);
   expect(input().value).toBe("Keep this requirement");
+  expect(input().disabled).toBe(false);
   expect(host.querySelector('[aria-label="需求草稿"]')?.textContent).not.toContain("Keep this requirement");
   expect(writes).toHaveLength(1);
 });
 
-it("keeps an uncertain save locked until a readback confirms it, without repeating the write", async () => {
+it("unlocks an uncertain save and can confirm it by readback without repeating the write", async () => {
   await show(); failReadback = true; await send("Persist once");
   expect(host.textContent).toContain("Readback offline");
   expect(input().value).toBe("Persist once");
-  expect(button("开始").disabled).toBe(true);
+  expect(input().disabled).toBe(false);
   failReadback = false;
   act(() => button("重新读取需求").click()); await settle();
   expect(host.querySelector('[aria-label="需求草稿"]')?.textContent).toContain("Persist once");
   expect(input().value).toBe("");
   expect(writes).toHaveLength(1);
+});
+
+it("reloads a two-tab conflict, keeps unsent text and appends to the latest version on resend", async () => {
+  task = { ...task, requirement: "Original" };
+  await show();
+  releaseWrite = async () => {
+    releaseWrite = undefined;
+    task = { ...task, requirement: "Original\n\nOther tab", requirement_versions: [{ version: 2, text: "Original\n\nOther tab" }] };
+  };
+  await send("My addition");
+  expect(writes[0].body.expected_version).toBe(1);
+  expect(input().disabled).toBe(false);
+  expect(input().value).toBe("My addition");
+  expect(host.querySelector('[role="alert"]')?.textContent).toContain("需求已在其他窗口修改，已显示最新版本");
+  expect(host.querySelector('[aria-label="需求草稿"]')?.textContent).toContain("Other tab");
+  await send(input().value);
+  expect(writes[1].body).toMatchObject({ expected_version: 2, requirement: "Original\n\nOther tab\n\nMy addition" });
+  expect(task.requirement).toBe("Original\n\nOther tab\n\nMy addition");
+  expect(input().value).toBe("");
+});
+
+it("unlocks and keeps input when a successful write is replaced before readback", async () => {
+  await show();
+  const fetch = globalThis.fetch;
+  vi.stubGlobal("fetch", vi.fn(async (path: string, init?: RequestInit) => {
+    const response = await fetch(path, init);
+    if (String(path).includes("requirement_update"))
+      task = { ...task, requirement: "Replaced elsewhere", requirement_versions: [{ version: 3, text: "Replaced elsewhere" }] };
+    return response;
+  }));
+  await send("Keep this text");
+  expect(input().disabled).toBe(false);
+  expect(input().value).toBe("Keep this text");
+  expect(host.textContent).toContain("需求已在其他窗口修改");
+  expect(host.querySelector('[aria-label="需求草稿"]')?.textContent).toContain("Replaced elsewhere");
 });
 
 it("shows the identical timestamped untitled name in the list and header, without the internal id", async () => {
