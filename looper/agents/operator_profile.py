@@ -43,6 +43,9 @@ _KIND_FIELD = {
     "request": "standing_rules", "deadline": "standing_rules", "person": "standing_rules",
 }
 _INACTIVE = frozenset({"superseded", "deleted"})
+# ``[share:: hook]`` marks one inline entry for the operator's local sessions (``looper profile show`` and the
+# SessionStart hook). Everything else stays Manager-only: no marker, any other value, heading fields, plain rules.
+_SHARE_FIELD, _SHARE_HOOK = "share", "hook"
 # Highest priority first. A profile over CAP drops from the end of this order.
 _ORDER = ("name", "address", "reply_language", "time_zone", "working_hours",
           "communication_preferences", "standing_rules")
@@ -80,6 +83,7 @@ class Piece:
     line: int
     kind: str = ""
     truncated: bool = False
+    shared: bool = False
 
     def cited(self) -> dict[str, Any]:
         cited: dict[str, Any] = {
@@ -278,7 +282,8 @@ def _truncate(piece: Piece, cap: int) -> Piece:
         raise ProfileError("profile cap is smaller than a field label")
     keep = cap - len(prefix) - 1
     value = piece.value[:keep].rstrip() + "…"
-    return Piece(piece.field, value, piece.path, piece.heading, piece.line, piece.kind, truncated=True)
+    return Piece(piece.field, value, piece.path, piece.heading, piece.line, piece.kind, truncated=True,
+                 shared=piece.shared)
 
 
 def _fit(pieces: list[Piece], cap: int) -> tuple[str, list[Piece], list[Piece]]:
@@ -393,7 +398,8 @@ def _kind_pieces(lines: list[tuple[int, str]], rel: str, skipped: list[dict[str,
         value = _clean(raw)
         if not value:
             continue
-        pieces.append(Piece(field, value, rel, _clean(nearest) or kind, line_no, kind))
+        shared = fields.get(_SHARE_FIELD, "").strip() == _SHARE_HOOK
+        pieces.append(Piece(field, value, rel, _clean(nearest) or kind, line_no, kind, shared=shared))
     return pieces
 
 
@@ -452,8 +458,12 @@ def _reject_duplicates(pieces: list[Piece]) -> None:
         seen[piece.field] = piece
 
 
-def compile_profile(root: Path, *, source: str | None = None, cap: int = CAP) -> Compiled:
-    """The profile of the notes under ``root``. The same notes always compile to the same text."""
+def compile_profile(root: Path, *, source: str | None = None, cap: int = CAP,
+                    shared_only: bool = False) -> Compiled:
+    """The profile of the notes under ``root``. The same notes always compile to the same text.
+
+    ``shared_only`` keeps only entries marked ``[share:: hook]``, after the whole note has been validated.
+    """
     if cap < 1:
         raise ProfileError("cap must be positive")
     if not root.exists():
@@ -478,6 +488,8 @@ def compile_profile(root: Path, *, source: str | None = None, cap: int = CAP) ->
     for note in notes:
         pieces.extend(_rule_pieces(root, note, skipped))
     _reject_duplicates(pieces)
+    if shared_only:
+        pieces = [piece for piece in pieces if piece.shared]
     rank = {field: index for index, field in enumerate(_ORDER)}
     pieces.sort(key=lambda piece: rank[piece.field])
     text, kept, omitted = _fit(pieces, cap)
@@ -493,7 +505,7 @@ def compile_profile(root: Path, *, source: str | None = None, cap: int = CAP) ->
     return Compiled(text, fields, dropped, tuple(skipped), sources)
 
 
-async def compiled_profile() -> Compiled | None:
+async def compiled_profile(*, shared_only: bool = False) -> Compiled | None:
     """Compile the configured note as it is now; never serve a stale cached profile on failure."""
     from . import vault
 
@@ -503,7 +515,7 @@ async def compiled_profile() -> Compiled | None:
             raise ProfileError(problem)
         if config is None:
             return None
-        return compile_profile(config.path, source=config.profile_source)
+        return compile_profile(config.path, source=config.profile_source, shared_only=shared_only)
     except Exception:
         logger.warning("operator profile is unavailable; omitting it", exc_info=True)
         return None
@@ -512,6 +524,12 @@ async def compiled_profile() -> Compiled | None:
 async def resident_text() -> str:
     """The exact bounded text shared by resident content and the hook command; no cache writes."""
     compiled = await compiled_profile()
+    return compiled.text if compiled is not None else ""
+
+
+async def session_text() -> str:
+    """The entries marked ``[share:: hook]``, for local sessions; the Manager keeps reading resident_text()."""
+    compiled = await compiled_profile(shared_only=True)
     return compiled.text if compiled is not None else ""
 
 

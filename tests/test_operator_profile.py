@@ -428,3 +428,90 @@ def test_a_single_value_field_rejects_a_second_bullet(tmp_path: Path) -> None:
         compile_profile(root)
     assert raised.value.reason == "multiple_values"
     assert str(root) not in str(raised.value)
+
+
+_SHARED_NOTE = """# Profile
+
+## Name
+Ada Example
+
+## Work
+- Builds the Atlas billing service at Example Corp [kind:: fact] [share:: hook] [status:: superseded]
+- Builds the Beacon service at Example Corp [kind:: fact]
+- Pairs on reviews every Friday [kind:: habit] [share:: hook]
+
+## Time
+- UTC+2; read times as local [kind:: fact] [source:: chat 2026-01-02] [share:: hook] [confidence:: high]
+- Quiet from 21:00 to 07:00 [kind:: decision] [share:: Hook]
+
+## Talk
+- Lead with the conclusion [kind:: preference] [share:: hook]
+- Mentions the Gamma team channel [kind:: preference] [share:: hooks]
+- Mystery entry [kind:: mystery] [share:: hook]
+"""
+
+
+def _without_markers(text: str) -> str:
+    for marker in (" [share:: hook]", " [share:: Hook]", " [share:: hooks]"):
+        text = text.replace(marker, "")
+    return text
+
+
+def test_only_inline_entries_marked_for_the_hook_are_shared(tmp_path: Path) -> None:
+    _note(tmp_path, "记忆/画像.md", _SHARED_NOTE)
+    shared = compile_profile(tmp_path, source="记忆/画像.md", shared_only=True)
+    assert shared.text == (
+        "Communication:\n"
+        "- Pairs on reviews every Friday\n"
+        "- Lead with the conclusion\n"
+        "Standing rules:\n"
+        "- UTC+2; read times as local")
+    for hidden in ("Ada Example", "Atlas", "Beacon", "21:00", "Gamma", "Mystery", "[share::"):
+        assert hidden not in shared.text + repr(shared.payload())
+    assert shared.fields["name"] is None
+    assert [entry["line"] for entry in shared.fields["communication_preferences"]] == [9, 16]
+    assert shared.sources == ("记忆/画像.md",)
+
+
+def test_markers_do_not_change_what_the_manager_reads(tmp_path: Path) -> None:
+    _note(tmp_path, "marked/画像.md", _SHARED_NOTE)
+    _note(tmp_path, "plain/画像.md", _without_markers(_SHARED_NOTE))
+    marked = compile_profile(tmp_path, source="marked/画像.md")
+    plain = compile_profile(tmp_path, source="plain/画像.md")
+    assert marked.text == plain.text
+    assert marked.text.startswith("Name: Ada Example\n")
+    assert "Beacon" in marked.text and "21:00" in marked.text and "Gamma" in marked.text
+    assert repr(marked.payload()).replace("marked/", "") == repr(plain.payload()).replace("plain/", "")
+
+
+def test_heading_fields_are_never_shared(tmp_path: Path) -> None:
+    _note(tmp_path, "记忆/画像.md", "## 时区\nEurope/Berlin\n\n## Communication\n- Short answers [share:: hook]\n")
+    assert compile_profile(tmp_path, source="记忆/画像.md").text.startswith("Time zone: Europe/Berlin\n")
+    assert compile_profile(tmp_path, source="记忆/画像.md", shared_only=True).text == ""
+
+
+def test_a_note_without_markers_shares_nothing(tmp_path: Path) -> None:
+    _about(tmp_path, "- Lead with the conclusion [kind:: preference]\n")
+    shared = compile_profile(tmp_path, shared_only=True)
+    assert (shared.text, shared.sources, shared.omitted) == ("", (), ())
+    assert compile_profile(tmp_path).text.startswith("Name: Ada\n")
+
+
+def test_an_invalid_note_shares_nothing_even_when_the_conflict_is_unmarked(tmp_path: Path) -> None:
+    _note(tmp_path, "记忆/画像.md", "## Name\nAda\n\n## 名字\nBee\n\n"
+          "- Lead with the conclusion [kind:: preference] [share:: hook]\n")
+    with pytest.raises(ProfileError, match="two headings for name"):
+        compile_profile(tmp_path, source="记忆/画像.md", shared_only=True)
+    _note(tmp_path, "记忆/画像.md", "## 名字\n- Ada\n- Bee\n\n"
+          "- Lead with the conclusion [kind:: preference] [share:: hook]\n")
+    with pytest.raises(ProfileError, match="name has more than one value"):
+        compile_profile(tmp_path, source="记忆/画像.md", shared_only=True)
+
+
+def test_shared_entries_over_the_cap_drop_from_the_end(tmp_path: Path) -> None:
+    lines = "".join(f"- Preference {index} {'x' * 80} [kind:: preference] [share:: hook]\n" for index in range(30))
+    _note(tmp_path, "记忆/画像.md", lines + "- Unshared rule [kind:: fact]\n")
+    shared = compile_profile(tmp_path, source="记忆/画像.md", shared_only=True)
+    assert len(shared.text) <= CAP and "Preference 0 " in shared.text and "Preference 29" not in shared.text
+    assert shared.omitted and all(item["field"] == "communication_preferences" for item in shared.omitted)
+    assert "Unshared" not in repr(shared.payload())

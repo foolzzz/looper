@@ -1,4 +1,4 @@
-"""Bounded, silent profile read for local session-start hooks. No schema or cache writes."""
+"""Bounded, silent read of the profile entries shared with local session-start hooks. No schema or cache writes."""
 
 from __future__ import annotations
 
@@ -15,7 +15,7 @@ MAX_OUTPUT_BYTES = 6000  # the compiler's 1500 Unicode characters, at most four 
 
 
 def read_text(args: Any) -> str:
-    """Read the same resident text for every local CLI consumer; no writes or model calls."""
+    """Read the entries marked ``[share:: hook]`` for every local CLI consumer; no writes or model calls."""
     from .. import child_env
 
     if os.environ.get(child_env.AGENT_RUN_ENV):
@@ -42,14 +42,14 @@ def show(args: Any) -> int:
 async def _read(args: Any) -> str:
     from .. import ops_config
     from ..db import connection
-    from .operator_profile import resident_text
+    from .operator_profile import session_text
 
     pool = None
     try:
         async with asyncio.timeout(0.7):
             ops = ops_config.load(ops_config.Flags(runtime_root=args.runtime_root, config=args.config))
             pool = await connection.init_pool(ops.database_url, min_size=1, max_size=1)
-            return await resident_text()
+            return await session_text()
     except Exception:
         return ""
     finally:

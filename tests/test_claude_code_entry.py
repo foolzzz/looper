@@ -196,7 +196,7 @@ def test_profile_hook_discards_all_output_on_unexpected_failure(
 
 
 @pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
-def test_real_server_profile_and_installed_hook_share_the_same_text(tmp_path: Path) -> None:
+def test_real_server_profile_show_and_installed_hook_share_only_marked_entries(tmp_path: Path) -> None:
     from evals.prompt_regression import runner
     from fake_claude import fake_claude
     from manager_mcp_stand_in import _BODY
@@ -207,7 +207,7 @@ def test_real_server_profile_and_installed_hook_share_the_same_text(tmp_path: Pa
     (vault / "记忆" / "画像.md").write_text(
         "## 名字\nAda Example\n\n"
         "- Working on Atlas and Beacon [kind:: fact]\n"
-        "- No proactive messages from 22:00 to 08:00 [kind:: decision]\n", encoding="utf-8")
+        "- No proactive messages from 22:00 to 08:00 [kind:: decision] [share:: hook]\n", encoding="utf-8")
     discovery = "import sys\nif '--mcp-config' not in sys.argv:\n    print('2.1.0')\n    sys.exit(0)\n"
     fake_claude(bin_dir / "claude", discovery + "TURNS = []\n" + _BODY)
     env = _environment(tmp_path)
@@ -229,8 +229,9 @@ def test_real_server_profile_and_installed_hook_share_the_same_text(tmp_path: Pa
             assert answer["status"] == "ok"
             original = command("profile", "show")
             assert original.returncode == 0 and original.stderr == b""
-            assert original.stdout.startswith(b"Name: Ada Example")
-            assert b"Atlas" in original.stdout and b"22:00" in original.stdout
+            assert original.stdout == "Standing rules:\n- No proactive messages from 22:00 to 08:00".encode()
+            resident = api.post("/api/v1/profile/get", {})["result"]["text"]
+            assert resident.startswith("Name: Ada Example\n") and "Atlas" in resident and "22:00" in resident
             hook = command("claude-code", "profile", "--hook")
             assert hook.returncode == 0 and hook.stderr == b""
             expected = {"hookSpecificOutput": {
