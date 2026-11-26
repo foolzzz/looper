@@ -167,9 +167,13 @@ class WebChannelAdapter(ChannelAdapter):
         text = str(envelope.payload.get("text") or "")
         await store_envelope_body("web", envelope, text, chat=session_id)
         message_id = message_id or envelope.message_id
+        entry_kind = envelope.payload.get("entry_kind")
+        saved = {"session_id": session_id, "message_id": message_id, "role": "assistant", "content": text}
+        if isinstance(entry_kind, str):
+            saved["entry_kind"] = entry_kind
         receipt = DeliveryReceipt(channel="web", success=True)
         try:
-            await save_message(session_id=session_id, message_id=message_id, role="assistant", content=text)
+            await save_message(**saved)
         except Exception as exc:
             logger.warning("web: could not add a reply to chat %s", session_id, exc_info=True)
             receipt = DeliveryReceipt(channel="web", success=False, error=f"could not save to chat: {exc}")
@@ -180,6 +184,12 @@ class WebChannelAdapter(ChannelAdapter):
         })
         record_delivery("web", envelope, DeliveryReceipt(channel="web", success=True), chat=session_id)
         return receipt
+
+    async def publish_task_event(self, task_id: str, payload: Mapping[str, Any]) -> None:
+        """Fan out an already-persisted task conversation event to open thread subscribers."""
+        from ...db.chat import task_thread
+
+        self._chats.publish(task_thread(task_id), {"kind": "task.event", "payload": dict(payload)})
 
     def iter_chat_events(self, session_id: str, *, heartbeat: float = 15.0) -> AsyncGenerator[dict[str, Any], None]:
         """The events of the chat ``session_id`` that belong to no message's stream, for as long as it is read.
@@ -213,6 +223,16 @@ class WebChannelAdapter(ChannelAdapter):
             "active_sse_streams": len(self._sse_queues),
         }
 
+    async def begin_reply(self, session_id: str | None, message_id: str | None, *, persist: bool = True) -> str:
+        """Open one reply's SSE queue and, when it is stored, the awaiting entry. Publishes nothing."""
+        correlation_id = str(uuid.uuid4())
+        self._sse_queues[correlation_id] = asyncio.Queue(maxsize=1000)
+        if session_id and message_id and persist:
+            self._awaiting[correlation_id] = (session_id, message_id)
+            while len(self._awaiting) > AWAITING_MAX:  # answers that never came
+                self._awaiting.popitem(last=False)
+        return correlation_id
+
     # --- Inbound: HTTP → Bus ---
 
     async def handle_user_message(
@@ -234,20 +254,13 @@ class WebChannelAdapter(ChannelAdapter):
         that chat under ``reply_message_id(message_id)``. ``supplement_id``: a message to a task's Planner, stored
         as that supplement of the task. ``client`` (``id``, ``name``): the API client it comes from."""
         assert self._bus is not None
-        correlation_id = str(uuid.uuid4())
+        correlation_id = await self.begin_reply(session_id, message_id, persist=persist)
         paths = [item["path"] for item in attachments or []
                  if isinstance(item, dict) and isinstance(item.get("path"), str)]
         if paths:
             self._attachment_paths[correlation_id] = paths
             while len(self._attachment_paths) > AWAITING_MAX:
                 self._attachment_paths.popitem(last=False)
-
-        sse_q: asyncio.Queue[dict[str, Any]] = asyncio.Queue(maxsize=1000)
-        self._sse_queues[correlation_id] = sse_q
-        if session_id and message_id and persist:
-            self._awaiting[correlation_id] = (session_id, message_id)
-            while len(self._awaiting) > AWAITING_MAX:  # answers that never came
-                self._awaiting.popitem(last=False)
 
         envelope = MessageEnvelope.create(
             source=self._address,
@@ -331,6 +344,15 @@ class WebChannelAdapter(ChannelAdapter):
                     },
                 }
             case MessageType.STATUS_UPDATE:
+                record = envelope.payload.get("tool_record")
+                if isinstance(record, dict):
+                    return {"kind": "agent.tool", "payload": {
+                        "tool_use_id": record.get("tool_use_id", ""), "name": record.get("name", ""),
+                        "args": record.get("args", ""), "result": record.get("result", ""),
+                        "is_error": bool(record.get("is_error", False))}}
+                task_event = envelope.payload.get("task_event")
+                if isinstance(task_event, dict):
+                    return {"kind": "task.event", "payload": task_event}
                 if envelope.payload.get("delta"):
                     return {
                         "kind": "answer.delta",

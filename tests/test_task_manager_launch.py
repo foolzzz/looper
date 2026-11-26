@@ -205,6 +205,7 @@ def test_real_cli_direct_turn_saves_session(tmp_path, monkeypatch):
     monkeypatch.setattr(CLAUDE_CODE, "environment", lambda launch: dict(env))
     monkeypatch.setattr(outbound_hook, "known_enabled", lambda: True)
     monkeypatch.setattr(task_conversations_settings, "_enabled", True)
+    monkeypatch.setattr(task_conversations_settings, "_manager_answers", True)
 
     async def settings(task):
         return AgentSettings(profile=builtin_resolved_profile())

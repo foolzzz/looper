@@ -93,7 +93,7 @@ def test_maintenance_holds_turn_lease_and_queues_the_next_input(monkeypatch, tmp
             await until(lambda: any(row["text"] == "/compact" for row in native.records("input")))
             assert pool.in_turn(task_id)
             assert (await pool.submit(task_id, "second", message_id="second", sink=second)).state == "queued"
-            assert ("queued", {"reason": "turn", "position": 1}) in second.events
+            assert ("queued", {"reason": "turn", "position": 1, "active": 1}) in second.events
             assert [row["text"] for row in native.records("input")] == ["reply", "/compact"]
             bus = SimpleNamespace(publish=AsyncMock())
             with pytest.raises(project_service.RequestError) as start_error:

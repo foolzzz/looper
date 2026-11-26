@@ -29,22 +29,43 @@ async def save_message(
     channel: str = "web",
     delivery_failure: str | None = None,
     delivery_error: str | None = None,
+    entry_kind: str | None = None,
     pool: asyncpg.Pool | asyncpg.Connection | None = None,
 ) -> None:
     """Store a message; a Telegram or Lark answer its channel could not send with why (``delivery_failure``, a
-    ``channels.base.DeliveryFailure``) and the channel's error."""
+    ``channels.base.DeliveryFailure``) and the channel's error.
+
+    ``entry_kind`` is ``message``, ``command`` or ``command_reply`` when the writer classified the row. A later
+    save that omits it keeps the kind already stored. The column stays out of that statement, so a database that
+    has not added it yet can still store the message.
+    """
     pool = pool or get_pool()
+    if entry_kind is None:
+        await pool.execute(
+            """
+            INSERT INTO chat_messages (session_id, message_id, role, content, channel, created_at, delivery_failure,
+                                       delivery_error)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+            ON CONFLICT (session_id, message_id) DO UPDATE
+            SET content = EXCLUDED.content, delivery_failure = EXCLUDED.delivery_failure,
+                delivery_error = EXCLUDED.delivery_error
+            """,
+            session_id, message_id, role, content, channel,
+            datetime.now(timezone.utc), delivery_failure, delivery_error,
+        )
+        return
     await pool.execute(
         """
         INSERT INTO chat_messages (session_id, message_id, role, content, channel, created_at, delivery_failure,
-                                   delivery_error)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+                                   delivery_error, entry_kind)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
         ON CONFLICT (session_id, message_id) DO UPDATE
         SET content = EXCLUDED.content, delivery_failure = EXCLUDED.delivery_failure,
-            delivery_error = EXCLUDED.delivery_error
+            delivery_error = EXCLUDED.delivery_error,
+            entry_kind = EXCLUDED.entry_kind
         """,
         session_id, message_id, role, content, channel,
-        datetime.now(timezone.utc), delivery_failure, delivery_error,
+        datetime.now(timezone.utc), delivery_failure, delivery_error, entry_kind,
     )
 
 
@@ -101,11 +122,36 @@ async def list_messages(
     return [dict(r) for r in rows]
 
 
+async def older_messages(session_id: str, *, before: int | None = None, limit: int = 200,
+                         pool: asyncpg.Pool | None = None) -> tuple[list[dict[str, Any]], bool, int | None]:
+    """Backward storage-order page, with the internal row id used only for the next cursor.
+
+    Storage order preserves the legacy newest-200 read, including timestamp ties. Fetching one extra row
+    determines whether the next page exists without a separate count or a racy existence check.
+    """
+    rows = await (pool or get_pool()).fetch(
+        "SELECT id, message_id, role, content, channel, created_at, delivery_failure, delivery_error "
+        "FROM chat_messages WHERE session_id = $1 AND ($2::bigint IS NULL OR id < $2) "
+        "ORDER BY id DESC LIMIT $3", session_id, before, limit + 1)
+    has_more = len(rows) > limit
+    page = [dict(row) for row in reversed(rows[:limit])]
+    next_id = page[0]["id"] if page and has_more else None
+    for row in page:
+        row.pop("id")
+    return page, has_more, next_id
+
+
 # The web chat keeps each task's Planner thread under that Planner's agent id, ``planner-<task_id>``
 # (web/src/pages/chat.tsx ``sessionFor``); every other chat session is a conversation with the Manager.
 PLANNER_THREAD_PREFIX = "planner-"
+# One task conversation, ``task-chat:<task_id>``. It is not a Manager conversation.
+TASK_THREAD_PREFIX = "task-chat:"
 # What a session's listing keeps of its last message.
 LAST_MESSAGE_MAX_CHARS = 200
+
+
+def task_thread(task_id: str) -> str:
+    return f"{TASK_THREAD_PREFIX}{task_id}"
 
 
 async def list_sessions(
@@ -117,8 +163,9 @@ async def list_sessions(
 ) -> list[dict[str, Any]]:
     """Manager ``manager_id``'s (default: the default Manager's) conversations on every channel, the most recently active first: each session's channel,
     message count, first and last message times, and its last message's role and start (``last_role``,
-    ``last_content``, up to ``LAST_MESSAGE_MAX_CHARS``). Planner threads are left out. With ``session_id``, only
-    that session, however long ago it was active (none when it has no messages). A session without a
+    ``last_content``, up to ``LAST_MESSAGE_MAX_CHARS``). Planner threads and task conversations (``task-chat:``)
+    are left out. With ``session_id``, only that session, however long ago it was active (none when it has no
+    messages). A session without a
     ``chat_threads`` row is the default Manager's; a deleted Manager's threads keep their row, so they are in no list."""
     pool = pool or get_pool()
     rows = await pool.fetch(
@@ -133,7 +180,8 @@ async def list_sessions(
             FROM chat_messages m
             LEFT JOIN chat_threads t USING (session_id)
             LEFT JOIN api_clients c ON c.id = t.client_id
-            WHERE NOT starts_with(session_id, $2) AND ($4::text IS NULL OR session_id = $4)
+            WHERE NOT starts_with(session_id, $2) AND NOT starts_with(session_id, $6)
+              AND ($4::text IS NULL OR session_id = $4)
               AND coalesce(t.manager_id, 'manager') = $5
             GROUP BY session_id, t.client_id, c.name
             ORDER BY max(m.created_at) DESC, max(m.id) DESC
@@ -142,7 +190,7 @@ async def list_sessions(
         JOIN chat_messages last ON last.id = s.last_id
         ORDER BY s.last_message_at DESC, s.last_id DESC
         """,
-        limit, PLANNER_THREAD_PREFIX, LAST_MESSAGE_MAX_CHARS, session_id, manager_id,
+        limit, PLANNER_THREAD_PREFIX, LAST_MESSAGE_MAX_CHARS, session_id, manager_id, TASK_THREAD_PREFIX,
     )
     return [dict(r) for r in rows]
 
@@ -172,7 +220,8 @@ async def recent_conversations(
     """Manager ``manager_id``'s (default: the default Manager's; a thread without a ``chat_threads`` row is the
     default's) most recently active chat sessions, newest first, each with its last ``messages``
     messages, oldest first: ``[{"session_id", "messages": [{"role", "content", "created_at", "delivery_failure"}]}]``
-    (``delivery_failure`` set for an answer its channel could not send)."""
+    (``delivery_failure`` set for an answer its channel could not send). Planner threads and task conversations
+    are left out."""
     pool = pool or get_pool()
     rows = await pool.fetch(
         """
@@ -180,7 +229,8 @@ async def recent_conversations(
         FROM (
             SELECT c.session_id, max(c.id) AS last_id FROM chat_messages c
             LEFT JOIN chat_threads t ON t.session_id = c.session_id
-            WHERE NOT starts_with(c.session_id, $3) AND coalesce(t.manager_id, 'manager') = $4
+            WHERE NOT starts_with(c.session_id, $3) AND NOT starts_with(c.session_id, $5)
+              AND coalesce(t.manager_id, 'manager') = $4
             GROUP BY c.session_id ORDER BY max(c.id) DESC LIMIT $1
         ) r
         CROSS JOIN LATERAL (
@@ -189,7 +239,7 @@ async def recent_conversations(
         ) m
         ORDER BY r.last_id DESC, m.id ASC
         """,
-        sessions, messages, PLANNER_THREAD_PREFIX, manager_id,
+        sessions, messages, PLANNER_THREAD_PREFIX, manager_id, TASK_THREAD_PREFIX,
     )
     conversations: dict[str, list[dict[str, Any]]] = {}
     for row in rows:

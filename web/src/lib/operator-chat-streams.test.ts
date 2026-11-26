@@ -7,7 +7,7 @@ const headers = { "Content-Type": "text/event-stream" };
 beforeEach(() => resetSessionGuard());
 afterEach(() => { resetSessionGuard(); vi.useRealTimers(); vi.unstubAllGlobals(); });
 
-it.each([{ kind: "manager" }, { kind: "planner", task_id: "task-example" }] as const)(
+it.each([{ kind: "manager" }, { kind: "planner", task_id: "task-example" }, { kind: "task", task_id: "task-example" }] as const)(
   "sends a dashboard $kind target once through v1 and returns its correlation id", async (target) => {
     const fetcher = vi.fn(async () => Response.json({ status: "ok", result: { correlation_id: "reply-example" } }));
     vi.stubGlobal("fetch", fetcher);

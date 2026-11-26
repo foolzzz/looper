@@ -12,18 +12,43 @@ from ..api_v1 import Operation, _array, _object, _STR
 from ..chat_targets import HTTP_409, ChatTargetError, resolve_chat_target
 from ..ops import ErrorCode, OpError
 from ..tiers.manager import is_new_session_command
+from ..task_manager_settings import ModelSwitchRejection
 
 
 _ID = {"type": "string", "minLength": 1}
 CHAT_TARGET = {"oneOf": [
     _object({"kind": {"const": "manager"}, "id": _STR}, ["kind"], closed=True),
     _object({"kind": {"const": "planner"}, "task_id": _ID}, closed=True),
+    _object({"kind": {"const": "task"}, "task_id": _ID}, closed=True),
 ]}
 SCHEMAS = {
     "OperatorChatAnswerDelta": _object({"text": _STR}, closed=True),
     "OperatorChatAnswerFinal": _object({"text": _STR,
         "response": _object({"message": _STR}, closed=True), "outcome": _STR}, closed=True),
     "OperatorChatAgentPhase": _object({"label": _STR, "activity": _STR, "tool": _STR}, ["label"], closed=True),
+    "OperatorChatAgentTool": _object({"tool_use_id": _STR, "name": _STR, "args": _STR, "result": _STR,
+        "is_error": {"type": "boolean"}}, closed=True),
+    "OperatorChatTaskEvent": {"oneOf": [
+        _object({"kind": {"const": "accepted"}, "reason": {"const": "duplicate"}}, closed=True),
+        _object({"kind": {"const": "starting"}, "status": _STR}, closed=True),
+        _object({"kind": {"const": "command"}, "command": {"enum": [
+            "/stop", "/done", "/pause", "/background", "/takeover", "/start"]}}, closed=True),
+        _object({"kind": {"const": "queued"}, "reason": {"enum": ["cap", "turn"]},
+                 "position": {"type": "integer"}, "active": {"type": "integer", "minimum": 0}}, closed=True),
+        _object({"kind": {"const": "model_switched"}, "from_profile_id": _STR, "to_profile_id": _STR}, closed=True),
+        _object({"kind": {"const": "model_switch_rejected"}, "profile_id": {"type": ["string", "null"]},
+                 "reason": {"enum": [reason.value for reason in ModelSwitchRejection]}}, closed=True),
+        _object({"kind": {"const": "session_fresh"}, "reason": {"enum": [
+            "context_bound", "read_only_open", "resume_failed"]}, "detail": _STR}, closed=True),
+        _object({"kind": {"const": "stopped"}, "method": {"enum": ["control", "cancel", "kill"]}}, closed=True),
+        _object({"kind": {"const": "turn_summary"}, "files": _array(_STR),
+                 "commit": {"type": ["string", "null"]},
+                 "mode": {"enum": ["direct", "orchestrated"]}}, closed=True),
+        _object({"kind": {"const": "refused"}, "reason": {"const": "orchestrated"}, "status": _STR}, closed=True),
+        _object({"kind": {"const": "refused"}, "reason": {"enum": [
+            "work_mode_off", "runtime_unsupported", "budget", "outbound_review_unavailable", "workspace",
+            "shutting_down", "review_hook_disabled", "cli_unverified", "manager_answers_off"]}}, closed=True),
+    ]},
     "OperatorChatMessage": _object({"message_id": _STR, "role": {"const": "assistant"},
         "content": _STR, "created_at": _STR}, closed=True),
     "OperatorChatHeartbeat": _object({}, closed=True),
@@ -32,6 +57,7 @@ SCHEMAS = {
 }
 _EVENTS = {kind: {"data": {"$ref": "#/components/schemas/OperatorChat" + name}} for kind, name in (
     ("answer.delta", "AnswerDelta"), ("answer.final", "AnswerFinal"), ("agent.phase", "AgentPhase"),
+    ("agent.tool", "AgentTool"), ("task.event", "TaskEvent"),
     ("chat.message", "Message"), ("heartbeat", "Heartbeat"), ("system.event", "SystemEvent"))}
 RESULTS = {}
 
@@ -60,15 +86,18 @@ OPERATIONS = (
         risk="write", operator_only=True),
     _stream("reply_events", {"correlation_id": _ID}, ["correlation_id"],
         "Follow one dashboard reply until its final answer or timeout; unknown correlations end immediately.",
-        ("answer.delta", "answer.final", "agent.phase", "heartbeat", "system.event")),
+        ("answer.delta", "answer.final", "agent.phase", "heartbeat", "system.event", "agent.tool", "task.event")),
     _stream("thread_events", {"session_id": _ID, "manager": _STR}, ["session_id"],
         "Follow saved answers and autonomous messages in an open dashboard thread, checking its Manager owner.",
-        ("chat.message", "heartbeat")),
+        ("chat.message", "task.event", "heartbeat")),
 )
 
 
 async def run(server, operation, arguments, principal, headers):
-    text = arguments["text"].strip()
+    raw_text = arguments["text"]
+    # Manager and Planner messages stay trimmed. A task message is stored and delivered unchanged; only the empty
+    # check and the fixed-command match use the trimmed copy.
+    text = raw_text.strip()
     if not text:
         raise OpError(ErrorCode.INVALID, "text is required")
     try:
@@ -84,6 +113,13 @@ async def run(server, operation, arguments, principal, headers):
         except profile_registry.RegistryError as exc:
             raise OpError(ErrorCode.INVALID, str(exc)) from None
     session_id = arguments.get("session_id")
+    if target.agent_type == "task_manager":
+        from ...db.chat import task_thread
+        thread = task_thread(target.agent_id.removeprefix("task-manager-"))
+        if session_id not in (None, thread):
+            raise OpError(ErrorCode.INVALID, "a task's conversation is its own thread")
+        if not arguments.get("message_id"):
+            raise OpError(ErrorCode.INVALID, "a task message needs a message_id")
     if target.agent_type == "manager" and session_id and server._managers is not None:
         owner = await server._thread_owner_for_send(session_id, target.agent_id)
         if owner != target.agent_id:
@@ -112,7 +148,8 @@ async def run(server, operation, arguments, principal, headers):
             shutil.rmtree(chat_attachments.root(server._runtime_root) / "web" / upload_id)
             raise OpError(ErrorCode.INVALID, f"{rejected.name}: {rejected.reason or rejected.state.value}")
         attachments = [item.to_payload() for item in saved]
-    return await server._deliver_chat(text=text, target=target, session_id=session_id,
+    delivered = raw_text if target.agent_type == "task_manager" else text
+    return await server._deliver_chat(text=delivered, target=target, session_id=session_id,
         message_id=arguments.get("message_id"), language=arguments.get("language", "zh"),
         goal_id=arguments.get("goal_id"), attachments=attachments, new_session_profile_id=profile)
 

@@ -113,7 +113,8 @@ def test_bridge_normalization_preserves_evidence_and_matches_fresh(bridge_source
                     assert after[table] == [{**r, "launcher": "native"} for r in before[table]]
                 elif table == "chat_messages":
                     assert after[table] == [
-                        {**r, "manager_session": None, "sender_kind": None, "sender_name": None}
+                        {**r, "manager_session": None, "sender_kind": None, "sender_name": None,
+                         "entry_kind": None}
                         for r in before[table]]
                 elif table == "library_items":
                     # Machine imports have no project-skill version; every historical field stays intact.

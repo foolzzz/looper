@@ -204,6 +204,21 @@ def _with_run_role(record: dict[str, Any]) -> dict[str, Any]:
     return {**record, "task_role": role} if role else record
 
 
+class _TaskMessageClaim:
+    """The one in-flight acceptance of a task message id, and the text it kept."""
+
+    def __init__(self, text: str) -> None:
+        self.text = text
+        self.stored_text: str | None = None
+        self.future: asyncio.Future[dict[str, Any]] = asyncio.get_running_loop().create_future()
+
+
+def _retrieve_future_exception(future: asyncio.Future[Any]) -> None:
+    """Mark a published failure as retrieved when no waiter is left to do it."""
+    if not future.cancelled():
+        future.exception()
+
+
 class AgentHTTPServer:
     """Async HTTP server bridging REST/SSE to the agent system."""
 
@@ -297,6 +312,9 @@ class AgentHTTPServer:
         self._handlers: dict[asyncio.Task, asyncio.StreamWriter] = {}
         self._address_publication: Publication | None = None
         self._components: components.Manifest | None = None
+        # One accepted task message per (task_id, message_id). A retry waits for that turn instead of starting another.
+        self._task_message_claims: dict[tuple[str, str], _TaskMessageClaim] = {}
+        self._task_message_claim_lock = asyncio.Lock()
 
     async def start(self) -> None:
         from .. import components
@@ -1623,11 +1641,164 @@ class AgentHTTPServer:
                 **({"client": client} if client is not None else {}),
             )
 
+        if target.agent_type == "task_manager":
+            return await self._deliver_task_chat(text=text, target=target, session_id=session_id,
+                                                 message_id=message_id)
         if target.agent_type == "planner":
             return await projects.add_task_supplement(
                 target.agent_id.removeprefix("planner-"), text, via=projects.VIA_CHAT,
                 wake=deliver, best_effort=True, from_operator=client is None)  # the dashboard's, not a client's
         return await deliver(None)
+
+    async def _deliver_task_chat(self, *, text: str, target: AgentAddress, session_id: str | None,
+                                 message_id: str | None) -> dict[str, Any]:
+        """Save a task message and stream the task Manager's answer, a code command, or a status reply.
+
+        ``text`` is the operator's original string. Command matching uses a trimmed copy. The same
+        ``(task, message_id)`` is claimed once before any turn: a retry of the same text reuses that turn, and a
+        different text is a conflict.
+        """
+        from ..db.chat import task_thread
+        from ..db.tasks import get_task
+        from . import task_commands
+        from .tiers.task_manager import current_pool
+
+        task_id = target.agent_id.removeprefix("task-manager-")
+        thread = task_thread(task_id)
+        if session_id not in (None, thread):
+            raise OpError(ErrorCode.INVALID, "a task's conversation is its own thread")
+        if not message_id:
+            raise OpError(ErrorCode.INVALID, "a task message needs a message_id")
+        adapter = self._web_adapter
+        if adapter is None or getattr(adapter, "_bus", None) is None:
+            raise OpError(ErrorCode.UNAVAILABLE, "the web channel is not running")
+        task = await get_task(task_id)
+        if task is None:
+            raise OpError(ErrorCode.INVALID, f"no task {task_id}")
+        command = task_commands.parse(text)
+        route = None if command is not None else task_commands.delivery_route(task.get("status"))
+        pool = current_pool()
+        if command is None and route == task_commands.DIRECT and pool is None:
+            raise OpError(ErrorCode.UNAVAILABLE, "the task Manager is not running")
+        manager_id = str(task.get("manager_id") or "manager")
+
+        async def accept() -> dict[str, Any]:
+            return await self._accept_task_message(
+                task_id=task_id, thread=thread, message_id=message_id, text=text, command=command,
+                route=route, status=str(task.get("status") or ""), pool=pool, adapter=adapter,
+                manager_id=manager_id)
+
+        return await self._one_task_message(task_id, message_id, text, accept)
+
+    async def _one_task_message(self, task_id: str, message_id: str, text: str,
+                                accept: Callable[[], Awaitable[dict[str, Any]]]) -> dict[str, Any]:
+        """Run ``accept`` once for this message id. The same text waits for that result; a different text conflicts."""
+        from .task_commands import MESSAGE_TEXT_CONFLICT
+
+        key = (task_id, message_id)
+        async with self._task_message_claim_lock:
+            claim = self._task_message_claims.get(key)
+            if claim is None:
+                claim = _TaskMessageClaim(text)
+                self._task_message_claims[key] = claim
+                leader = True
+            else:
+                leader = False
+        if not leader:
+            if claim.text != text:
+                raise OpError(ErrorCode.CONFLICT, MESSAGE_TEXT_CONFLICT)
+            return await asyncio.shield(claim.future)
+        try:
+            result = await accept()
+        except asyncio.CancelledError:
+            self._fail_task_claim(key, claim, OpError(ErrorCode.UNAVAILABLE, "the task message was cancelled"))
+            raise
+        except Exception as exc:
+            self._fail_task_claim(key, claim, exc)
+            raise
+        else:
+            if not claim.future.done():
+                claim.future.set_result(result)
+            return result
+
+    def _fail_task_claim(self, key: tuple[str, str], claim: _TaskMessageClaim, exc: BaseException) -> None:
+        """Publish ``exc`` to waiters. A claim that did not keep this text can be retried."""
+        if not claim.future.done():
+            claim.future.set_exception(exc)
+            claim.future.add_done_callback(_retrieve_future_exception)
+        # A row that already holds this text must not be submitted again. Anything else can be retried.
+        if self._task_message_claims.get(key) is claim and claim.stored_text != claim.text:
+            self._task_message_claims.pop(key, None)
+
+    async def _accept_task_message(self, *, task_id: str, thread: str, message_id: str, text: str,
+                                   command: Any, route: str | None, status: str, pool: Any,
+                                   adapter: Any, manager_id: str) -> dict[str, Any]:
+        """Claim the thread and the row, then answer. A repeat of the stored text does not start another turn."""
+        from ..db import task_chat as db_task_chat
+        from ..db.chat import claim_thread
+        from .channels.web import reply_message_id
+        from .channels.web_task_sink import WebTaskSink
+        from .task_commands import (
+            DIRECT, ENTRY_COMMAND, ENTRY_MESSAGE, MESSAGE_TEXT_CONFLICT, ORCHESTRATED, ORCHESTRATED_REPLY,
+            STARTING, STARTING_REPLY,
+        )
+
+        await claim_thread(thread, manager_id)
+        outcome = await db_task_chat.claim_user_message(
+            thread, message_id, text, channel="web",
+            entry_kind=ENTRY_COMMAND if command is not None else ENTRY_MESSAGE)
+        claim = self._task_message_claims.get((task_id, message_id))
+        if claim is not None and outcome != "conflict":
+            claim.stored_text = text
+        if outcome == "conflict":
+            raise OpError(ErrorCode.CONFLICT, MESSAGE_TEXT_CONFLICT)
+        if outcome == "same":
+            correlation_id = await adapter.begin_reply(thread, message_id)
+            sink = WebTaskSink(adapter._bus, adapter._address, correlation_id, task_id, thread, message_id)
+            existing = await db_task_chat.message_content(thread, reply_message_id(message_id))
+            await sink.event("accepted", {"reason": "duplicate"})
+            await sink.final(existing or "", "duplicate")
+            return {"correlation_id": correlation_id}
+        correlation_id = await adapter.begin_reply(thread, message_id)
+        sink = WebTaskSink(adapter._bus, adapter._address, correlation_id, task_id, thread, message_id)
+        if command is not None:
+            await self._answer_task_command(task_id, command, sink)
+        elif route == STARTING:
+            await sink.event("starting", {"status": status})
+            await sink.final(STARTING_REPLY, "starting")
+        elif route == ORCHESTRATED:
+            await sink.event("refused", {"reason": "orchestrated", "status": status})
+            await sink.final(ORCHESTRATED_REPLY, "refused")
+        elif route == DIRECT:
+            await pool.submit(task_id, text, message_id=message_id, sink=sink,
+                              history=await db_task_chat.recent(task_id, 20))
+        else:
+            raise OpError(ErrorCode.UNAVAILABLE, "the task message has no route")
+        return {"correlation_id": correlation_id}
+
+    async def _answer_task_command(self, task_id: str, command: Any, sink: Any) -> None:
+        """Answer a fixed command in the task thread. The model is not called."""
+        from .task_commands import TaskCommand
+        from .tiers.task_manager import current_pool
+
+        later = "这个命令要等「交给后台」上线后才能用"
+        if command is TaskCommand.STOP:
+            pool = current_pool()
+            stopped = pool is not None and await pool.stop_current(task_id)
+            text = "已停止这一轮" if stopped else "现在没有在进行的回合"
+        elif command is TaskCommand.DONE:
+            try:
+                done = await self._task_router.complete_direct(task_id)
+            except projects.RequestError as exc:
+                text = str(exc)
+            else:
+                text = "任务已完成" if done.changed else "任务已经是完成状态"
+                if done.warning:
+                    text = f"{text}\n{done.warning}"
+        else:
+            text = later
+        await sink.event("command", {"command": command.value})
+        await sink.final(text, "command")
 
     async def _foreign_thread_error(self, owner: str) -> OpError:
         from ..db import managers as db_managers

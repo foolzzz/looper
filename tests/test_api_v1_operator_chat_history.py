@@ -27,9 +27,9 @@ def history(monkeypatch):
         "task_role": {"id": "tester", "kind": "work", "version": 1} if kind == "worker" else None
     } for kind in ("worker", "reviewer")]))
     monkeypatch.setattr(chat, "thread_owner", AsyncMock(return_value="manager"))
-    monkeypatch.setattr(chat, "list_messages", AsyncMock(return_value=[{
+    monkeypatch.setattr(chat, "older_messages", AsyncMock(return_value=([{
         "message_id": "one", "role": "assistant", "content": "Saved reply", "created_at": "2026-10-24",
-        "channel": "lark", "delivery_failure": "send_failed", "delivery_error": "offline"}]))
+        "channel": "lark", "delivery_failure": "send_failed", "delivery_error": "offline"}], False, None)))
     monkeypatch.setattr(chat, "list_sessions", AsyncMock(return_value=[{
         "session_id": "old-chat", "channel": "web", "first_message_at": "2026-10-24",
         "last_message_at": "2026-10-24", "last_role": "assistant", "last_content": "Saved reply", "message_count": 1,

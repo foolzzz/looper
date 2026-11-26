@@ -63,11 +63,14 @@ class ErrorCode(str, Enum):
     INTERNAL = "internal"  # a stored exchange cannot be reconstructed completely
     NOT_FOUND = "not_found"
     INVALID = "invalid"
+    INVALID_CURSOR = "invalid_cursor"
+    CURSOR_SESSION_MISMATCH = "cursor_session_mismatch"
     NEEDS_USER_TURN = "needs_user_turn"  # a change outside a turn that answers the user
     FORBIDDEN = "forbidden"
     UNAUTHORIZED = "unauthorized"  # /api/v1 without a valid client token (the Manager never sees it)
     CONFLICT = "conflict"  # the target's state does not allow it (an ended task, a task not started)
     REQUIREMENT_CHANGED = "requirement_changed"  # a conditional requirement edit has an obsolete version
+    TASK_MANAGER_OFF = "task_manager_off"  # tasks.conversations.manager_answers is off: no message goes to a task Manager
     TASK_MANAGER_BUSY = "task_manager_busy"  # stop the task Manager's active turn before changing its profile
     TASK_MANAGER_RUNTIME_UNSUPPORTED = "task_manager_runtime_unsupported"  # v0 requires Claude Code
     EXPIRED = "expired"  # a confirmation past its time or its turn
