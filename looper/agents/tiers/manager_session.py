@@ -25,7 +25,7 @@ if TYPE_CHECKING:
     from ..runtimes import ResidentSession, RuntimeAdapter
     from ..session_switch import SessionSwitch
     from ..system_prompt import SystemPrompt
-    from .state_view import StateShown
+    from .state_view import StateShown, WholeReason
     from .turn_token import TurnToken
     from .manager_budget import BudgetTurn
 
@@ -103,6 +103,8 @@ class ManagerSession:
     # after a restart sends it whole. None: none a turn may refer to, for ``state_lost``'s reason.
     state_shown: StateShown | None = None
     state_lost: str = "no whole block yet"
+    # Like state_shown, memory only: restarting already forces a whole block.
+    state_pending_whole: WholeReason | None = None
     # Moves on when the session's context may have lost what earlier turns showed: a compaction it reported, a
     # turn it runs on its own (whose stream is not read for one). A turn rendered before it moved starts whole
     # and leaves no block behind.
