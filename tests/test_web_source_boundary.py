@@ -121,6 +121,50 @@ def file_reads(text, source):
         yield "".join(expression), path_value(expression, source, bindings)
 
 
+def specifier_form(text, match):
+    """Name the syntactic form of a specifier match. Detection stays in SPECIFIERS."""
+    head = text[match.start():match.start("quote")]
+    if head.startswith("require"):
+        return "require"
+    if head.startswith("import"):
+        if re.match(rf"import{SPACE}\(", head):
+            return "dynamic-import"
+        return "side-effect-import"
+    statement = re.sub(r"/\*[\s\S]*?\*/|//[^\n]*", " ", text[:match.start()])
+    statement = statement.rsplit(";", 1)[-1]
+    if re.search(r"\bexport\s+\*\s+as\b", statement):
+        return "export-star-as"
+    if re.search(r"\bexport\s+\*", statement):
+        return "export-star"
+    if re.search(r"\bexport\s+type\b", statement):
+        return "export-type"
+    if re.search(r"\bexport\b", statement):
+        return "export-from"
+    if re.search(r"\bimport\s+type\b", statement):
+        return "import-type"
+    if re.search(r"\bimport\b", statement):
+        return "import-from"
+    return "from"
+
+
+def specifier_shape(specifier):
+    """Path class after query and hash stripping, plus which suffix was present."""
+    path = re.split(r"[?#]", specifier, maxsplit=1)[0]
+    if path.startswith("@/"):
+        kind = "alias"
+    elif path.startswith("/"):
+        kind = "absolute"
+    elif path.startswith("."):
+        kind = "relative"
+    else:
+        kind = "bare"
+    if "?" in specifier:
+        return kind + "+query"
+    if "#" in specifier:
+        return kind + "+hash"
+    return kind
+
+
 def check_web_sources(web):
     web = web.resolve()
     root = web.parent
@@ -143,7 +187,13 @@ def check_web_sources(web):
             else:
                 continue  # Bare package and virtual module specifiers are not source paths.
             if not target.resolve().is_relative_to(web):
-                violations.append(f"{source.relative_to(root)}: {specifier}")
+                # Name the specifier line, syntactic form and path shape so each
+                # import form can be asserted on its own.
+                line = text.count("\n", 0, match.start("specifier")) + 1
+                form = specifier_form(text, match)
+                violations.append(
+                    f"{source.relative_to(root)}:{line}: {form}/{specifier_shape(specifier)}: {specifier}"
+                )
         for expression, value in file_reads(text, source):
             checked += 1
             if value is None:
@@ -211,4 +261,119 @@ def test_checker_allows_reads_inside_web(tmp_path):
     ''', encoding="utf-8")
     checked, violations = check_web_sources(web)
     assert checked
+    assert violations == []
+
+
+# One row per form the import matcher covers. `from` is shared by the static
+# import, import-type and re-export statements; import(...) and import "..."
+# share the import keyword; quotes differ so each quote class is represented.
+# ABSOLUTE_* is filled with a real path under or beside the temporary web root.
+IMPORT_PROBES = [
+    ("import-from", "import-from", "relative",
+     'import { widget } from "SPEC";',
+     "../../../outside-import-from.js", "./inside-import-from.js"),
+    ("side-effect-import", "side-effect-import", "relative",
+     "import 'SPEC';",
+     "../../../outside-side-effect.js", "./inside-side-effect.js"),
+    ("export-from", "export-from", "relative",
+     'export { widget } from "SPEC";',
+     "../../../outside-export-from.js", "./inside-export-from.js"),
+    ("export-star", "export-star", "relative",
+     "export * from 'SPEC';",
+     "../../../outside-export-star.js", "./inside-export-star.js"),
+    ("export-star-as", "export-star-as", "relative",
+     'export * as widget from "SPEC";',
+     "../../../outside-export-star-as.js", "./inside-export-star-as.js"),
+    ("export-type", "export-type", "relative",
+     'export type { Widget } from "SPEC";',
+     "../../../outside-export-type.js", "./inside-export-type.js"),
+    ("dynamic-import", "dynamic-import", "relative",
+     "import(`SPEC`);",
+     "../../../outside-dynamic.js", "./inside-dynamic.js"),
+    ("require", "require", "relative",
+     'require("SPEC");',
+     "../../../outside-require.js", "./inside-require.js"),
+    ("import-type", "import-type", "relative",
+     "import type { Widget } from 'SPEC';",
+     "../../../outside-import-type.js", "./inside-import-type.js"),
+    ("alias", "import-from", "alias",
+     'import { widget } from "SPEC";',
+     "@/../../outside-alias.js", "@/inside-alias.js"),
+    ("absolute", "import-from", "absolute",
+     'import { widget } from "SPEC";',
+     "ABSOLUTE_OUTSIDE", "ABSOLUTE_INSIDE"),
+    ("query", "import-from", "relative+query",
+     'import { widget } from "SPEC";',
+     "../../../outside-query.js?raw",
+     "./inside-query.js?/../../../../outside-query.js"),
+    ("hash", "import-from", "relative+hash",
+     'import { widget } from "SPEC";',
+     "../../../outside-hash.js#section",
+     "./inside-hash.js#/../../../../outside-hash.js"),
+    ("import-from-comment", "import-from", "relative",
+     'import { widget } from /* boundary */ "SPEC";',
+     "../../../outside-comment.js", "./inside-comment.js"),
+]
+
+
+def write_import_probe(tmp_path, template, token):
+    web = tmp_path / "web"
+    source = web / "src" / "lib" / "probe.ts"
+    source.parent.mkdir(parents=True)
+    if token == "ABSOLUTE_OUTSIDE":
+        spec = (tmp_path / "outside.js").resolve().as_posix()
+    elif token == "ABSOLUTE_INSIDE":
+        spec = (web / "src" / "inside.js").resolve().as_posix()
+    else:
+        spec = token
+    source.write_text("// boundary\n" + template.replace("SPEC", spec) + "\n", encoding="utf-8")
+    return web, spec
+
+
+@pytest.mark.parametrize("probe", IMPORT_PROBES, ids=[probe[0] for probe in IMPORT_PROBES])
+def test_checker_reports_import_outside_web(tmp_path, probe):
+    _name, form, shape, template, outside, _inside = probe
+    web, spec = write_import_probe(tmp_path, template, outside)
+    checked, violations = check_web_sources(web)
+    assert checked == 1
+    assert violations == [f"web/src/lib/probe.ts:2: {form}/{shape}: {spec}"]
+    assert spec in (web / "src" / "lib" / "probe.ts").read_text(encoding="utf-8").splitlines()[1]
+
+
+@pytest.mark.parametrize("probe", IMPORT_PROBES, ids=[probe[0] for probe in IMPORT_PROBES])
+def test_checker_allows_import_inside_web(tmp_path, probe):
+    _name, _form, _shape, template, _outside, inside = probe
+    web, spec = write_import_probe(tmp_path, template, inside)
+    checked, violations = check_web_sources(web)
+    assert checked == 1
+    assert violations == []
+    assert spec in (web / "src" / "lib" / "probe.ts").read_text(encoding="utf-8").splitlines()[1]
+
+
+def test_checker_ignores_non_source_import_specifiers(tmp_path):
+    web = tmp_path / "web"
+    source = web / "src" / "lib" / "probe.ts"
+    source.parent.mkdir(parents=True)
+    source.write_text(
+        "\n".join([
+            'import "react";',
+            'import "@scope/pkg";',
+            'import "virtual:outside";',
+            'import "https://example.com/outside.js";',
+            'import "file:///etc/passwd";',
+            'import { widget } from "pkg/../../../../outside.js";',
+            'import "pkg/../../../../outside.js";',
+            'export * from "pkg/../../../../outside.js";',
+            'import("pkg/../../../../outside.js");',
+            'require("pkg/../../../../outside.js");',
+            '// import { widget } from "../../../outside.js";',
+            '/* require("../../../outside.js"); export * from "../../../outside.js"; */',
+            '''const sample = "import('../../../outside.js')";''',
+            'const other = `import("../../../outside.js")`;',
+            "",
+        ]),
+        encoding="utf-8",
+    )
+    checked, violations = check_web_sources(web)
+    assert checked == 10
     assert violations == []
