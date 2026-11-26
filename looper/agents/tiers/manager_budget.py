@@ -14,7 +14,7 @@ from functools import wraps
 from typing import TYPE_CHECKING, Any
 
 from ...db import agent_sessions, connection
-from .. import scheduler_settings, session_budget as policy, session_switch
+from .. import compaction_restore, scheduler_settings, session_budget as policy, session_switch, session_visibility
 from ..claude_cli import ClaudeRunRecorder
 from ..run_usage import compaction
 from ..runtimes import Capability, CostSource
@@ -213,8 +213,11 @@ async def bound(manager: ManagerAgent, session: ManagerSession) -> None:
 async def _compact(manager: ManagerAgent, session: ManagerSession, decision: policy.Decision,
                    max_tokens: int) -> policy.Compaction:
     process = session.process
+    keep = (manager._compaction_restore and compaction_restore.applies(session.claude_runtime)
+            and session_visibility.for_session(session.key, manager_id=manager.agent_id) is None)
+    text = compaction_restore.command(compaction_restore.Role.MANAGER) if keep else "/compact"
     recorder = ClaudeRunRecorder(agent_id=manager.agent_id, task_id=None, command=process.command,
-                                cwd=str(manager._session_work_dir()), input_text="/compact", session_id=session.session_id,
+                                cwd=str(manager._session_work_dir()), input_text=text, session_id=session.session_id,
                                 system_prompt=process.system_prompt, launch=process.launch, pid_of=lambda: session.claude.pid)
     boundary = None
     finished = False
@@ -226,10 +229,12 @@ async def _compact(manager: ManagerAgent, session: ManagerSession, decision: pol
             await recorder.record(event)
             if (found := compaction(event)) is not None:
                 boundary = found
+                if keep:
+                    await recorder.annotate(compaction_restore.due_metadata(found))
                 manager._context_changed("a session budget compaction")
 
         try:
-            turn = await asyncio.wait_for(session.claude.run_turn("/compact", on_event, cancel=TurnCancel()),
+            turn = await asyncio.wait_for(session.claude.run_turn(text, on_event, cancel=TurnCancel()),
                                           MAINTENANCE_SECONDS)
             finished = (turn.result_event is not None and turn.result_event.get("subtype") == "success"
                         and not turn.result_event.get("is_error"))

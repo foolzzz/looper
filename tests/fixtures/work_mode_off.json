@@ -1338,6 +1338,8 @@
     "clients.create",
     "clients.list",
     "clients.revoke",
+    "compaction_restore_settings.get",
+    "compaction_restore_settings.update",
     "concurrency",
     "config.export",
     "config.import_apply",

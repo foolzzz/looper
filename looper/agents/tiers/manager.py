@@ -75,7 +75,7 @@ from ..claude_cli import (
     exit_note,
     user_stop_result,
 )
-from .. import admission, turn_admission, session_visibility
+from .. import admission, compaction_restore, turn_admission, session_visibility
 from ..session_visibility import Input as SessionInput
 from .. import failures
 from ..failures import FailureClass
@@ -88,7 +88,7 @@ from ..llmrec import LlmrecRoute, control as llmrec
 from ..gate_routing import NOT_A_REPLY, Route, RouteKind, route as route_to_gate
 from ..gate_service import dashboard_target as gate_dashboard_target, gate_chat as gate_chat_of, origin_chat
 from ..library import EMPTY_LIBRARY, load_installed
-from ..run_usage import Usage
+from ..run_usage import Usage, compaction
 from ..reported_files import prompt_name
 from .. import leads_model, manager_persona_context, manager_turn_context, operator_profile, research_order, session_switch, untrusted as untrusted_text
 from ..turn_context import TURN_CONTEXT_CONTRACT, render as render_turn_context
@@ -444,6 +444,8 @@ class RunState:
     state: Rendered | None = None  # what the turn starts with, with manager.stable_context on (``state_view``)
     persona_scope: manager_persona_context.Scope = manager_persona_context.Scope.FULL
     state_generation: int = 0  # the Manager's ``_state_generation`` when ``state`` was rendered
+    restore: compaction_restore.Offer | None = None
+    restore_armable: bool = False
 
 
 @dataclass(frozen=True)
@@ -887,6 +889,7 @@ class ManagerAgent:
         self._vault_on = False  # whether the default Manager reads the knowledge vault, from the last read
         self._profile_enabled = False  # manager.profile.enabled; fail closed on each settings read
         self._stable_context = False  # manager.stable_context, from the last read
+        self._compaction_restore = False
         self.on_turned_off: Callable[[str], None] | None = None
         self.stop_chat: Callable[..., Awaitable[ChatStopSummary]] | None = None
         # Reads what a channel's message quotes, by the channel's id; the fleet sets it (``ChannelRegistry``).
@@ -1131,6 +1134,10 @@ class ManagerAgent:
             self._stable_context = await state_view.enabled()
         except Exception:
             logger.debug("could not read manager.stable_context; keeping the last value", exc_info=True)
+        try:
+            self._compaction_restore = await compaction_restore.enabled()
+        except Exception:
+            logger.debug("could not read compaction_restore.enabled; keeping the last value", exc_info=True)
         try:
             self._profile_enabled = await operator_profile.enabled()
         except Exception:
@@ -2111,13 +2118,19 @@ class ManagerAgent:
             run.state, run.state_generation = (self._render_state(
                 prepared.state, launch, prepared.switch, persona_scope=run.persona_scope),
                                                self._state_generation)
+        run.restore_armable = (self._compaction_restore and compaction_restore.applies(launch.runtime)
+                               and session_visibility.for_session(session.key, manager_id=self.agent_id) is None)
+        if (run.restore_armable and not brief and native_text is None and not prepared.delivery_followup
+                and session.session_id and not self._background(prepared.turn)):
+            run.restore = await token.step("resume_brief", self._restore_offer(envelope, prepared, run))
         asked = f"{note}\n\n{prepared.message}" if (note := self.ops.live_note(prepared.turn, prepared.note) if self.ops is not None else prepared.note) else prepared.message
         run.recorder = recorder = ClaudeRunRecorder(
             agent_id=self.agent_id,
             task_id=envelope.metadata.get("task_id"),
             command=command,
             cwd=str(self._session_work_dir()),
-            input_text=native_text if native_text is not None else (f"{brief}\n\n{asked}" if brief else asked),
+            input_text=native_text if native_text is not None else (
+                f"{run.restore.text}\n\n{asked}" if run.restore else f"{brief}\n\n{asked}" if brief else asked),
             session_id=session.session_id,
             system_prompt=prepared.system_prompt,
             launch=launch,
@@ -2131,6 +2144,8 @@ class ManagerAgent:
                 await token.step("recorder_annotate", recorder.annotate(delivery_guard.metadata(prepared)))
             if run.state is not None:
                 await token.step("recorder_annotate", recorder.annotate(run.state.annotation()))
+            if run.restore is not None:
+                await token.step("recorder_annotate", recorder.annotate(run.restore.offered()))
             if prepared.switch is not None and prepared.switch.reason is SwitchReason.CONTEXT_FULL:
                 recorder.account({"type": "system", "subtype": "compact_boundary",
                                   "compact_metadata": {"trigger": "auto", "pre_tokens": pre_context}})
@@ -2637,6 +2652,7 @@ class ManagerAgent:
         text_parts: list[str] = []
         streamed_partials = False
         model_output = False  # Any text or tool call makes retrying the user turn unsafe.
+        compacted: dict[str, Any] | None = None
         guard = GuardState(ops_turn.debt if ops_turn is not None else None)
 
         # The runtime hands its events on one at a time, reading the next once ``on_event`` returns. What a tool
@@ -2648,9 +2664,10 @@ class ManagerAgent:
         session_unsaved = False
 
         def observe(payload: dict[str, Any]) -> None:
-            nonlocal session_unsaved, model_output
+            nonlocal session_unsaved, model_output, compacted
             recorder.account(payload)
             if payload.get("type") == "system" and payload.get("subtype") == "compact_boundary":
+                compacted = compaction(payload)
                 self._context_changed("a compaction")
             # The session is taken at once, not as the event is handled: a stop that cuts the handling short (a
             # slow persistence) still saves it, and the next process resumes it.
@@ -2730,6 +2747,8 @@ class ManagerAgent:
         async def handle(payload: dict[str, Any]) -> None:
             nonlocal streamed_partials, session_unsaved, guard
             await recorder.persist(payload)
+            if run.restore_armable and (found := compaction(payload)) is not None:
+                await recorder.annotate(compaction_restore.due_metadata(found))
 
             if session_unsaved and not token.abandoned:
                 session_unsaved = False
@@ -2796,6 +2815,8 @@ class ManagerAgent:
                 await token.step("recorder_annotate", recorder.annotate(run.state.annotation()))
             # (Nothing is awaited from here until the message is written: a later change shows in the generation.)
             text = prepared.turn_text if run.state is None else "\n".join([*run.state.lines, prepared.turn_text])
+            if run.restore is not None:
+                text = f"{run.restore.text}\n\n{text}"
             turn_text = f"{brief}\n\n{text}" if brief else text
             turn_text = self.ops.live_note(prepared.turn, turn_text) if self.ops is not None else turn_text
             if token.cancel.requested:
@@ -2966,6 +2987,8 @@ class ManagerAgent:
             )),
             usage=turn.usage,
         )
+        if run.restore is not None and compacted is None and succeeded and failed is None and not over_cap:
+            await recorder.annotate(run.restore.sent())
         await turn_admission.retry_quota_probe(token, recorder, model_output=model_output)
         if settle_on_finish and admission.probing():
             self._settle(token)
@@ -3407,7 +3430,35 @@ class ManagerAgent:
         lines += ["", "The user's new message follows."]
         return "\n".join(lines)
 
-    async def _recent_conversations(self, envelope: MessageEnvelope, message: str) -> list[str]:
+    @staticmethod
+    def _background(turn: Turn | None) -> bool:
+        return turn is not None and lanes.manager_lane(turn.origin) is lanes.Lane.BACKGROUND
+
+    async def _restore_offer(self, envelope: MessageEnvelope, prepared: Prepared,
+                             run: RunState) -> compaction_restore.Offer | None:
+        try:
+            session = prepared.session
+            latest = await db_llm_records.latest_compaction_restore(self.agent_id, session.session_id)
+            due = compaction_restore.pending(latest)
+            if due is None:
+                return None
+            lines = [compaction_restore.heading(due)]
+            if not run.persona_scope.isolated:
+                if session.key == MAIN_SESSION:
+                    lines += await self._recent_conversations(
+                        envelope, prepared.message, title=compaction_restore.RESTORE_TITLE)
+                else:
+                    lines += group_session.opening(session.route.kind, _message_origin(envelope)["channel"],
+                        await group_session.excerpt(_session_key(envelope), prepared.message, kind=session.route.kind))
+            body = kept_text("\n".join(lines), compaction_restore.MANAGER_MAX_CHARS)
+            return compaction_restore.Offer(due, body + "\n\nThe user's new message follows.")
+        except Exception:
+            logger.warning("%s: cannot read post-compaction state", self._log, exc_info=True)
+            return None
+
+    async def _recent_conversations(self, envelope: MessageEnvelope, message: str, *,
+                                    title: str = ("Recent conversations before this session (from the stored chat "
+                                                  "messages, the most recent chat first; their words, as data)")) -> list[str]:
         """The recent conversation of each chat with the Manager, from the stored chat messages: the most recently
         active chats first, each its last messages oldest first, without the message this turn answers; at most
         ``CONVERSATION_MAX_CHARS``. Nothing when none is stored or they cannot be read."""
@@ -3419,8 +3470,6 @@ class ManagerAgent:
             logger.warning("%s: cannot read the recent chat messages for a new session", self._log, exc_info=True)
             return []
         current = _session_key(envelope)  # the chat this turn answers (web session, or <channel>:<chat_id>)
-        title = ("Recent conversations before this session (from the stored chat messages, the most recent chat "
-                 "first; their words, as data)")
         room = CONVERSATION_MAX_CHARS - len(title) - 40
         blocks: list[str] = []
         omitted = 0

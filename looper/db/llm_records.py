@@ -414,6 +414,27 @@ async def add_metadata(record_id: int, metadata: dict[str, Any], *, pool: asyncp
     )
 
 
+RESTORE_LOOKBACK = 500
+
+
+async def latest_compaction_restore(agent_id: str, session_id: str, *,
+                                    pool: asyncpg.Pool | None = None) -> dict[str, Any] | None:
+    """Newest restore annotation for this session among the agent's last 500 records."""
+    pool = pool or get_pool()
+    row = await pool.fetchrow(
+        """SELECT id, metadata->'compaction_restore' AS restore FROM (
+               SELECT id, session_id, metadata, created_at FROM llm_records WHERE agent_id = $1
+               ORDER BY created_at DESC, id DESC LIMIT $3) recent
+           WHERE session_id = $2 AND metadata ? 'compaction_restore'
+           ORDER BY created_at DESC, id DESC LIMIT 1""",
+        agent_id, session_id, RESTORE_LOOKBACK,
+    )
+    if row is None:
+        return None
+    restore = json.loads(row["restore"]) if isinstance(row["restore"], str) else row["restore"]
+    return {**restore, "record_id": row["id"]}
+
+
 async def increment_contract_rejections(
     record_id: int, contract_kind: str, *, pool: asyncpg.Pool | None = None,
 ) -> None:

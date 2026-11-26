@@ -15,6 +15,7 @@ HAND = {"chat.send", "chat.messages", "chat.conversations", "confirm", "openapi"
 
 
 @pytest.mark.parametrize("path,field,values", [
+    ("compaction_restore_settings/update", "enabled", [True, False, None]),
     ("attention/settings_update", "enabled", [True, False, None]),
     ("reminders_settings/update", "enabled", [True, False, None]),
     ("stable_context_settings/update", "enabled", [True, False, None]),

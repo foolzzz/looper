@@ -57,6 +57,8 @@
  "clients.create": "inside",
  "clients.list": "inside",
  "clients.revoke": "inside",
+ "compaction_restore_settings.get": "inside",
+ "compaction_restore_settings.update": "inside",
  "concurrency": "inside",
  "config.export": "inside",
  "config.import_apply": "inside",

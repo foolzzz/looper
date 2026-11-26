@@ -121,7 +121,7 @@ from typing import Any, TypeVar
 
 from . import planner_budget
 from ..acceptance_checks import Check, parse_checks
-from .. import turn_admission
+from .. import compaction_restore, turn_admission
 from .. import acceptance_decisions, acceptance_result
 from ..project_execution import AcceptanceChecksMode
 from ..bus import MessageBus
@@ -186,6 +186,7 @@ from ..user_gates import (
     THREAD_MAX_CHARS,
     WAITING_USER,
     AgendaItem,
+    AgendaStatus,
     Gate,
     GateAction,
     GatePolicy,
@@ -1016,6 +1017,7 @@ class PlannerAgent:
         self._plan_shown: PlanShown | None = None
         self._plan_staged: PlanShown | None = None
         self._plan_compacted = False
+        self._restore_on = False
         # What the task's template said when the task was created (None for a task from none); it never changes.
         self._template: Mapping[str, Any] | None = None
         self._workflow: Mapping[str, Any] | None = None
@@ -5350,6 +5352,11 @@ class PlannerAgent:
         # Compose the shared role guidance after resolving the launch; its runtime keeps its reading tools
         # and read-only controls, and a saved custom role prompt is still loaded unchanged.
         settings = await load_settings()
+        try:
+            self._restore_on = await compaction_restore.enabled()
+        except Exception:
+            self._restore_on = False
+            logger.debug("planner %s cannot read compaction restore setting", self.agent_id, exc_info=True)
         system_prompt = self._system_prompt(plan, settings, knowledge, launch.settings.harness,
                                             custom_prompt=launch.profile.custom_prompt)
         await self._note_background(plan.project_background)
@@ -5486,7 +5493,10 @@ class PlannerAgent:
         if self._schedule_bound and plan.session_id:
             bound = self._schedule_bound
             try:
-                await self._exchange("/compact", process, settings.timeout_seconds, maintenance=True)
+                await self._exchange(
+                    compaction_restore.command(compaction_restore.Role.PLANNER)
+                    if self._restore_on and compaction_restore.applies(process.launch.runtime) else "/compact",
+                    process, settings.timeout_seconds, maintenance=True)
             except PlannerTurnError as exc:
                 if exc.fail_kind is FailKind.QUOTA_EXHAUSTED:
                     raise
@@ -5497,18 +5507,35 @@ class PlannerAgent:
             self._schedule_bound = None
             await self._record_schedule_bound(bound, "compacted", self._schedule_compacted_tokens)
 
+        offer = None
+        if (self._restore_on and not brief and plan.session_id
+                and compaction_restore.applies(process.launch.runtime)):
+            offer = await self._restore_offer(plan)
+
         # Grok reports compaction in its headless stream only; its ACP resident path has no verified
         # compaction signal. Keep unchanged steps in every turn, including after a silent compaction.
         full_reason = ("new session" if brief else "new process" if started_process else
                        "no compaction events" if process.launch.runtime.type == "grok" or
                        Capability.COMPACTION_EVENTS not in process.launch.runtime.capabilities else None)
+        if offer is not None and full_reason is None:
+            full_reason = "compaction"
         self._fence = await untrusted.enabled()
         text, annotation = self._render_plan_message(plan, message, full_reason=full_reason)
+        if offer is not None:
+            text = f"{offer.text}\n\n{text}"
+            annotation = {**(annotation or {}), **offer.offered()}
         try:
             self._turn_kind = kind
-            return await self._exchange(f"{brief}\n\n{text}" if brief else text, process,
-                                        settings.timeout_seconds, resuming=None if retried else resuming,
-                                        fallbacks=changes, annotation=annotation)
+            reply = await self._exchange(f"{brief}\n\n{text}" if brief else text, process,
+                                         settings.timeout_seconds, resuming=None if retried else resuming,
+                                         fallbacks=changes, annotation=annotation)
+            if offer is not None and self._last_compaction is None:
+                try:
+                    await db_llm_records.add_metadata(self._last_record_id, offer.sent())
+                except Exception:
+                    logger.warning("planner %s cannot record the sent compaction snapshot", self.agent_id,
+                                   exc_info=True)
+            return reply
         except _SessionNotResumed as exc:
             # Claude never started the saved session: it no longer exists, and resuming it again would fail
             # every turn. The Planner continues in a new session, which the resume brief starts.
@@ -5674,6 +5701,7 @@ class PlannerAgent:
         """Run ``text`` as one turn on the running Claude (started with ``process``) and return its final
         message, recorded as one run; raises ``PlannerTurnError``, or ``_SessionNotResumed`` when Claude never
         started ``resuming``, the session it was told to resume."""
+        self._last_compaction = None
         plan = self._plan
         assert plan is not None
         # With the room off, finished explorer results ride the next turn (none: no change to the text).
@@ -5731,6 +5759,9 @@ class PlannerAgent:
                     last_context = context
                 if (boundary := compaction(event)) is not None:
                     compacted = boundary
+                    self._last_compaction = boundary
+                    if self._restore_on and compaction_restore.applies(process.launch.runtime):
+                        await recorder.annotate(compaction_restore.due_metadata(boundary))
                 if event.get("type") == "system" and event.get("subtype") == "compact_boundary":
                     self._plan_compacted = True
                 if event.get("subtype") == "cursor_run_retry":
@@ -6018,21 +6049,67 @@ class PlannerAgent:
                               "session had it; oldest first):", *_thread_lines(had, THREAD_MAX_CHARS, fence=fence)]
         return lines
 
+    async def _restore_offer(self, plan: TaskPlan) -> compaction_restore.Offer | None:
+        try:
+            latest = await db_llm_records.latest_compaction_restore(self.agent_id, plan.session_id)
+            due = compaction_restore.pending(latest)
+            if due is None:
+                return None
+            try:
+                versions = await db_changes.requirement_versions(self._task_id)
+                version = max((row["version"] for row in versions if row.get("delivered_at") is not None),
+                              default=1)
+                requirement = f"requirement version {version} (the Task section of your instructions has its text)"
+            except Exception:
+                logger.warning("planner %s cannot read the delivered requirement version", self.agent_id,
+                               exc_info=True)
+                requirement = "requirement version unknown (Looper could not read it)"
+            running = ", ".join(f"{s.label} ({s.worker_id})" for s in plan.steps if s.status == "dispatched") or "none"
+            lines = [
+                compaction_restore.heading(due),
+                f"Task {self._task_id}: {requirement}; plan {plan.status}; {self._step_counts(plan)}.",
+                f"Running now: {running}",
+            ]
+            gates = [item.text for item in self._plan_items(plan)
+                     if item.state.startswith(("gate:", "wait "))]
+            if gates:
+                lines += ["Gates and waits:", *gates]
+            for step in plan.waiting_gates():
+                agenda = [item.line() for item in step.gate.agenda if item.status is AgendaStatus.OPEN]
+                if agenda:
+                    lines += [f"Open agenda of gate {step.label}:", *agenda]
+            lines.append("Ready to start next: " + (", ".join(s.label for s in plan.ready_steps()) or "none"))
+            head = "\n".join(lines)
+            threads = "\n".join(await self._gate_threads(plan))
+            tail = "\nThe request for this turn follows; answer it in its shape."
+            cap = compaction_restore.PLANNER_MAX_CHARS
+            if len(head) + len(threads) + len(tail) + 2 > cap:
+                threads = "\n" + compaction_restore.THREADS_LEFT_OUT
+            if len(head) + len(threads) + len(tail) + 2 > cap:
+                head = journal.kept_text(head, cap - len(tail) - len(threads) - 2)
+            return compaction_restore.Offer(due, "\n".join([head, *([threads] if threads else []), tail]))
+        except Exception:
+            logger.warning("planner %s cannot build the compaction snapshot", self.agent_id, exc_info=True)
+            return None
+
+    def _step_counts(self, plan: TaskPlan) -> str:
+        live = [s for s in plan.steps if s.status != "skipped"]
+        done = sum(1 for s in live if s.status == "verified")
+        under_way = sum(1 for s in live if s.status in ("dispatched", "deciding", "completed"))
+        failed = sum(1 for s in live if s.status == "failed")
+        return f"{done} of {len(live)} steps accepted, {under_way} under way, {failed} failed"
+
     def _resume_brief(self, plan: TaskPlan, gate_threads: Sequence[str] = (), *, lessons: str = "") -> str:
         """What starts the first turn of a new session for a plan under way: why the session is new, where the
         task is, the handoff the old session wrote and the discussions of the gates that wait
         (``_gate_threads``); the request after it carries the plan, the user's instructions and the task
         journal."""
         switch, handoff = self._pending_switch, self._pending_handoff
-        live = [s for s in plan.steps if s.status != "skipped"]
-        done = sum(1 for s in live if s.status == "verified")
-        under_way = sum(1 for s in live if s.status in ("dispatched", "deciding", "completed"))
-        failed = sum(1 for s in live if s.status == "failed")
         why = switch.describe() if switch is not None else "its earlier session is gone"
         lines = [
             f"[RESUME] You continue this task in a new session ({why}); your earlier conversation in it is not "
-            f"here. Where the task is: {done} of {len(live)} steps accepted, {under_way} under way, {failed} "
-            "failed. The request below carries the plan, the user's instructions and the task journal as they "
+            f"here. Where the task is: {self._step_counts(plan)}. The request below carries the plan, the user's "
+            "instructions and the task journal as they "
             "are now.",
             "",
         ]
