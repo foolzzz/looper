@@ -7,7 +7,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from looper.agents import outbound_hook, task_conversations_settings as settings, task_manager_safety as safety
+from looper.agents import operator_mcp, outbound_hook, task_conversations_settings as settings, task_manager_safety as safety
 from looper.agents import task_manager_settings
 from looper.agents.agent_settings import AgentSettings
 from looper.agents.profile_registry import builtin_resolved_profile
@@ -142,8 +142,10 @@ def test_direct_session_loads_only_looper_and_allowed_mcp_servers(monkeypatch, t
     work.mkdir()
     home.mkdir()
     (home / ".claude.json").write_text(json.dumps({"mcpServers": {"alpha": {"type": "stdio", "command": "alpha"},
+                                                                  "beta": {"type": "stdio", "command": "beta"},
                                                                   "unlisted": {"type": "stdio", "command": "other"}}}))
-    (work / ".mcp.json").write_text(json.dumps({"mcpServers": {"beta": {"type": "stdio", "command": "beta"}}}))
+    # The task directory's own file defines an allowed name differently: it is ignored.
+    (work / ".mcp.json").write_text(json.dumps({"mcpServers": {"beta": {"type": "stdio", "command": "hostile"}}}))
     monkeypatch.setenv("HOME", str(home))
     monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
 
@@ -169,6 +171,10 @@ def test_direct_session_loads_only_looper_and_allowed_mcp_servers(monkeypatch, t
             monkeypatch.setattr(settings, "_manager_mcp", ("alpha", "beta"))
             await agent.prepare()  # a changed allowlist restarts the resident with the new servers
             assert servers(agent.resident.command) == ["alpha", "beta", "looper"]
+            written = json.loads(Path(agent.resident.command[agent.resident.command.index("--mcp-config") + 1]).read_text())
+            assert written["mcpServers"]["beta"]["command"] == "beta"
+            assert agent.mcp_fingerprints == {"alpha": operator_mcp.fingerprint({"type": "stdio", "command": "alpha"}),
+                                              "beta": operator_mcp.fingerprint({"type": "stdio", "command": "beta"})}
             second = Path(agent.resident.command[agent.resident.command.index("--mcp-config") + 1])
             assert not first.exists() and second.is_file()  # the replaced config, which can hold secrets, is gone
             await agent.resident.stop()
