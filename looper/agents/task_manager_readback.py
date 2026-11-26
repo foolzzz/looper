@@ -143,9 +143,20 @@ def shape(definition: Mapping[str, Any]) -> str:
                                      sort_keys=True).encode("utf-8")).hexdigest()
 
 
+def unwrapped(config: Mapping[str, Any], private_dir: Path) -> dict[str, Any]:
+    """The definition a stdio server was wrapped from; ``ValueError`` unless ``config`` is exactly what
+    ``operator_mcp.wrap`` writes for ``private_dir`` (the launch shape: another directory or another wrapper fails)."""
+    if not operator_mcp.is_wrapped(config):
+        raise ValueError("not wrapped")
+    plain = operator_mcp.unwrap(config)
+    if operator_mcp.wrap(plain, private_dir) != dict(config):
+        raise ValueError("another private directory or wrapper")
+    return plain
+
+
 def expected_mcp(servers: Mapping[str, Mapping[str, Any]], private_dir: Path) -> dict[str, str]:
     """``shape`` of each server of the generated ``--mcp-config`` as the user scope defined it (stdio ones unwrapped)."""
-    return {name: shape(operator_mcp.unwrap(definition, private_dir) if "command" in definition else definition)
+    return {name: shape(unwrapped(definition, private_dir) if "command" in definition else definition)
             for name, definition in servers.items()}
 
 
@@ -385,7 +396,7 @@ def _compare_mcp(readback: Readback, expected: Expected) -> list[Mismatch]:
     for name in sorted(servers.keys() & expected.mcp.keys()):
         config = servers[name]
         try:
-            definition = operator_mcp.unwrap(config, expected.private_dir) if "command" in config else config
+            definition = unwrapped(config, expected.private_dir) if "command" in config else config
         except ValueError:
             found.append(Mismatch(Reason.MCP_SET_MISMATCH, f"wrapper:{name}", None, None, Source.UNKNOWN))
             continue

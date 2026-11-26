@@ -405,7 +405,8 @@ class TaskManagerAgent:
             return
         phase = self.started_for_turn or "turn"
         env = launch.runtime.environment(launch)
-        work_dir, private_dir = Path(reopened.work_dir), operator_mcp.private_cwd(self.pool.runtime_root)
+        work_dir = Path(reopened.work_dir)
+        private_dir = (self.pool.runtime_root / "task-managers" / self.task_id / "mcp-cwd").absolute()  # where launch wrapped
         expected = task_manager_readback.Expected(
             private_dir=private_dir,
             pins=task_manager_sandbox.pins(work_dir, allowed_domains=self.allowed_domains, read_deny=self.read_deny),

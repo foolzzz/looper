@@ -17,6 +17,7 @@ import os
 import statistics
 import sys
 import time
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -51,18 +52,23 @@ def probe(tmp_path, request):
         print(f"Evidence: {evidence}")
 
 
+def private_dir(probe: SandboxProbe) -> Path:
+    """Where the launch's wrapper starts every stdio server (``<runtime_root>/task-managers/<task>/mcp-cwd``)."""
+    return probe.runtime_root / "task-managers" / "probe-task" / "mcp-cwd"
+
+
 def library_with_looper_and_probe(probe: SandboxProbe):
     """The generated ``--mcp-config`` of a launch: Looper's own server plus the allowed ``probe``, both wrapped."""
     own = probe.root / "own_server.py"
     own.write_text(MCP_SERVER)
-    base = EMPTY_LIBRARY.__class__(**{**EMPTY_LIBRARY.__dict__, "mcp_config": str(
-        write_config(probe.runtime_root, [("looper", {"type": "stdio", "command": sys.executable,
-                                                       "args": [str(own), str(probe.markers / "own-cwd.txt")]})]))})
+    base = replace(EMPTY_LIBRARY, mcp_config=str(write_config(probe.runtime_root, [("looper", {
+        "type": "stdio", "command": sys.executable, "args": [str(own), str(probe.markers / "own-cwd.txt")]})])))
     script = probe.root / "mcp_server.py"
     script.write_text(MCP_SERVER)
     (probe.config / ".claude.json").write_text(json.dumps({"mcpServers": {"probe": {
         "type": "stdio", "command": sys.executable, "args": [str(script), str(probe.markers / "mcp-cwd.txt")]}}}))
-    return asyncio.run(operator_mcp.library_with_allowed(base, probe.runtime_root, ["probe"], environment=probe.env))
+    return asyncio.run(operator_mcp.library_with_allowed(base, probe.runtime_root, ["probe"], environment=probe.env,
+                                                             cwd=private_dir(probe)))
 
 
 class Live:
@@ -89,7 +95,7 @@ class Live:
 
     @property
     def expected(self) -> rb.Expected:
-        private = operator_mcp.private_cwd(self.probe.runtime_root)
+        private = private_dir(self.probe)
         return rb.Expected(
             private_dir=private,
             pins=sandbox.pins(self.cwd, allowed_domains=(), read_deny=self.probe.read_deny),
@@ -287,7 +293,7 @@ def test_r4_a_project_mcp_file_cannot_replace_an_allowed_server(probe):
     assert not marker.exists(), "the project's server started"
     assert (probe.markers / "mcp-cwd.txt").exists()
     cwd = (probe.markers / "mcp-cwd.txt").read_text().strip().split("=", 1)[1]
-    assert cwd == os.path.realpath(operator_mcp.private_cwd(probe.runtime_root)), "the wrapper did not start the server in the private directory"
+    assert cwd == os.path.realpath(private_dir(probe)), "the wrapper did not start the server in the private directory"
 
 
 def test_r4b_a_server_that_runs_unwrapped_or_changed_is_caught_by_the_readback(probe):
