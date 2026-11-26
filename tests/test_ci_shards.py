@@ -274,6 +274,19 @@ def test_shards_upload_total_test_durations_even_on_failure() -> None:
     assert int(upload["with"]["retention-days"]) <= 7
 
 
+def test_workflows_verify_staged_dashboard_before_pytest() -> None:
+    verify = "name: Verify the staged dashboard exists\n"
+    workflow = (ROOT / ".github/workflows/python-tests.yml").read_text(encoding="utf-8")
+    agent_job = workflow.split("  agent-system:\n", 1)[1].split("\n  bridge-schema-pg18:", 1)[0]
+    assert verify in agent_job
+    assert "run: test -f looper/web/dashboard/index.html" in agent_job
+    assert agent_job.index(verify) < agent_job.index("name: Run the tests\n")
+    installed = (ROOT / ".github/workflows/installed-tests.yml").read_text(encoding="utf-8")
+    assert verify in installed
+    assert "run: test -f looper/web/dashboard/index.html" in installed
+    assert installed.index(verify) < installed.index("Run installed tests against local stand-ins")
+
+
 def test_workflow_keeps_docs_only_required_jobs_successful() -> None:
     workflow = (ROOT / ".github/workflows/python-tests.yml").read_text(encoding="utf-8")
     assert "paths-ignore:" not in workflow

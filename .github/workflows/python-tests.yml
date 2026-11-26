@@ -139,6 +139,10 @@ jobs:
         if: needs.changes.outputs.docs_only != 'true'
         run: scripts/stage-dashboard.sh
 
+      - name: Verify the staged dashboard exists
+        if: needs.changes.outputs.docs_only != 'true'
+        run: test -f looper/web/dashboard/index.html
+
       - name: Allow unprivileged user namespaces
         if: needs.changes.outputs.docs_only != 'true'
         run: |
