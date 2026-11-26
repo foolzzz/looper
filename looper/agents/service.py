@@ -1179,6 +1179,40 @@ def _install_wheel(host: Host, source: str, *, dependencies: bool, environment: 
                    *([] if dependencies else ["--no-deps"]), source], installing=True, env=environment)
 
 
+class _InstallFailed(ServiceError):
+    """The target's dependencies failed to install after the stop; the checkout was put back
+    unless ``keep_stopped`` says it could not be, in which case the service must stay stopped."""
+
+    keep_stopped = False
+
+
+def _sync_command(host: Host, project: Path) -> list[str]:
+    # Keep deploy's test extra and any other packages already in the venv.
+    return ["uv", "sync", "--project", str(project), "--python", host.executable, "--extra", "test", "--inexact"]
+
+
+def _prepare_checkout_dependencies(host: Host, source: str) -> None:
+    """Install the target's dependency set into a throwaway environment before the drain.
+
+    The target must install (including building the package itself) while the old version still
+    serves, and every wheel it needs must be in the uv cache for the offline sync after the stop."""
+    with tempfile.TemporaryDirectory(prefix="looper-deps-upgrade-") as directory:
+        scratch = Path(directory)
+        archive = scratch / "sources.tar"
+        _checked(host, ["git", "-C", str(host.cwd), "archive", "--format=tar", "--output", str(archive), source,
+                        "--", ".", ":(exclude)web", ":(exclude)docs", ":(exclude)tests", ":(exclude)evals"],
+                 installing=True)
+        sources = scratch / "sources"
+        with tarfile.open(archive) as bundle:
+            bundle.extractall(sources, filter="data")
+        lock = host.cwd / "uv.lock"
+        if lock.is_file():
+            # Resolve from the same starting point as the real sync.
+            shutil.copyfile(lock, sources / "uv.lock")
+        _checked(host, _sync_command(host, sources), installing=True,
+                 env={**_tool_environment(host), "UV_PROJECT_ENVIRONMENT": str(scratch / "venv")})
+
+
 @dataclass(frozen=True)
 class _PreparedDashboard:
     directory: Path
@@ -1208,6 +1242,35 @@ def _prepare_checkout_dashboard(host: Host, source: str):
             raise ServiceError("the dashboard build did not produce index.html")
         record_web_source(sources, staged)
         yield _PreparedDashboard(staged, ((staged / "index.html").read_bytes(), web_fingerprints(staged)[1]))
+
+
+def _restore_checkout(host: Host, previous: str, saved_lock: bytes | None, command: list[str],
+                      environment: Mapping[str, str], failure: ServiceError) -> ServiceError:
+    """Put the checkout back on the commit it had before the merge so the old version can restart."""
+    try:
+        _checked(host, ["git", "-C", str(host.cwd), "reset", "--hard", previous], installing=True)
+        lock = host.cwd / "uv.lock"
+        if saved_lock is not None:
+            lock.write_bytes(saved_lock)
+        elif lock.exists():
+            lock.unlink()
+    except (ServiceError, OSError) as exc:
+        stuck = _InstallFailed(
+            f"installing the target's dependencies failed after the stop ({failure}) and the checkout could not be "
+            f"reset to {previous} ({exc}); the service is stopped and was NOT restarted, because the checkout is on "
+            f"the target commit with the old environment. Next step: run `git -C {host.cwd} reset --hard {previous}`, "
+            "then `looper service restart`")
+        stuck.keep_stopped = True
+        return stuck
+    # A failed sync may have changed packages before failing: put the old set back from the cache.
+    try:
+        _checked(host, command, installing=True, env={**environment, "UV_OFFLINE": "1"})
+        environment_state = "the previous environment was re-synced"
+    except ServiceError as exc:
+        environment_state = f"re-syncing the previous environment failed too ({exc}); its packages are unverified"
+    return _InstallFailed(f"installing the target's dependencies failed after the stop ({failure}); the target was "
+                          f"not installed, the checkout was reset to {previous} and {environment_state}; the previous "
+                          "version is being restarted; fix the cause and run looper service upgrade again")
 
 
 def _install_target(host: Host, source: str, *, wheel: bool, build_web: bool,
@@ -1253,13 +1316,20 @@ def _install_target(host: Host, source: str, *, wheel: bool, build_web: bool,
         raise ServiceError("the dashboard must be prepared before installing the checkout")
     if dependencies and sync_environment is None:
         sync_environment = _checkout_sync_environment(host)
+    if dependencies:
+        previous = _checked(host, ["git", "-C", str(host.cwd), "rev-parse", "--verify", "HEAD"])
+        lock = host.cwd / "uv.lock"
+        saved_lock = lock.read_bytes() if lock.is_file() else None
     _checked(host, ["git", "-C", str(host.cwd), "merge", "--ff-only", source], installing=True)
     if dependencies:
-        # Keep deploy's test extra and any other packages already in the venv.
+        # The pre-drain sync cached everything the target needs: the real one must not need the network.
         # Pin the preflight result even if the caller's environment changes while draining.
-        _checked(host, ["uv", "sync", "--project", str(host.cwd), "--python", host.executable,
-                        "--extra", "test", "--inexact"], installing=True,
-                 env={**_tool_environment(host), "UV_PROJECT_ENVIRONMENT": str(sync_environment)})
+        environment = {**_tool_environment(host), "UV_PROJECT_ENVIRONMENT": str(sync_environment)}
+        command = _sync_command(host, host.cwd)
+        try:
+            _checked(host, command, installing=True, env={**environment, "UV_OFFLINE": "1"})
+        except ServiceError as exc:
+            raise _restore_checkout(host, previous, saved_lock, command, environment, exc) from exc
     if not build_web:
         return None
     _swap_directory(prepared_web.directory, host.cwd / "web/dist")
@@ -1565,7 +1635,7 @@ def _execute_plan(host: Host, mgr: _Manager, *, port: int, root: Path, log_path:
                             raise port_conflict()
                         stopped = True
                 # Retry an exited or failed start from a stopped unit before cancelling.
-                if stopped:
+                if stopped and not getattr(exc, "keep_stopped", False):
                     pid = None
                     if start_attempted:
                         pid = mgr.state().pid
@@ -1582,7 +1652,7 @@ def _execute_plan(host: Host, mgr: _Manager, *, port: int, root: Path, log_path:
                 report["recovery_error"] = str(cancel_error)
                 if isinstance(cancel_error, ServiceStarting):
                     starting = cancel_error
-            if starting is None:
+            if starting is None and not getattr(exc, "keep_stopped", False):
                 try:
                     host.system_operation(port, token, "drain_cancel", {}, address=address)
                 except (ServiceError, OSError) as cancel_error:
@@ -1616,7 +1686,8 @@ def _execute_plan(host: Host, mgr: _Manager, *, port: int, root: Path, log_path:
             report["running_code_fingerprint_error"] = "the service is still starting"
         else:
             report["running_code_fingerprint_error"] = "the service is not serving"
-            report["restart_hint"] = "looper service restart"
+            if not isinstance(exc, _InstallFailed):
+                report["restart_hint"] = "looper service restart"
         line = _deploy_report(report, log_path)
         if isinstance(exc, (KeyboardInterrupt, SystemExit)):
             raise
@@ -1783,7 +1854,10 @@ def upgrade(host: Host, *, label: str = DEFAULT_LABEL, to: str | None = None, dr
 
             def prepare() -> None:
                 nonlocal prepared_web
-                prepared_web = preparation.enter_context(_prepare_checkout_dashboard(host, source))
+                if dependencies:
+                    _prepare_checkout_dependencies(host, source)
+                if build_web:
+                    prepared_web = preparation.enter_context(_prepare_checkout_dashboard(host, source))
 
             def online_backup() -> Path:
                 import asyncio
@@ -1801,7 +1875,7 @@ def upgrade(host: Host, *, label: str = DEFAULT_LABEL, to: str | None = None, dr
 
             build_web = "web" in plan.changed_components
             return _execute_plan(host, mgr, port=port, root=root, log_path=log_path, plan=plan,
-                address=address, running=running, target=target, prepare=prepare if build_web and not wheel else None,
+                address=address, running=running, target=target, prepare=prepare if (build_web or dependencies) and not wheel else None,
                 installer=lambda: _install_target(host, source, wheel=wheel, build_web=build_web,
                     dependencies=dependencies, sync_environment=sync_environment, wheel_environment=wheel_environment,
                     prepared_web=prepared_web),

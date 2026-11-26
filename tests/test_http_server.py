@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import socket
+import weakref
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -168,6 +169,80 @@ def test_shutdown_aborts_a_connection_whose_handler_has_not_started(tmp_path, mo
             if stopping is not None and not stopping.done():
                 stopping.cancel()
             await server.stop()
+
+    asyncio.run(run())
+
+
+def _shutdown_server(tmp_path):
+    return AgentHTTPServer(port=0, runtime_root=tmp_path,
+        web_adapter=SimpleNamespace(), task_router=SimpleNamespace(), supervisor=SimpleNamespace())
+
+
+class _LateConnection:
+    """A handler the shutdown snapshot has not seen yet."""
+
+    def __init__(self):
+        self.aborted = False
+        self.cancelled = False
+
+    def is_closing(self):
+        return self.aborted
+
+    def abort(self):
+        self.aborted = True
+
+    def done(self):
+        return self.cancelled
+
+    def cancel(self):
+        self.cancelled = True
+
+
+def _track_late_arrival(server):
+    connection = _LateConnection()
+    server._handlers[connection] = SimpleNamespace(transport=connection)
+    return connection
+
+
+def test_shutdown_cleanup_counts_clients_when_active_count_is_absent(tmp_path, monkeypatch):
+    """A listener that only has ``_clients`` still finishes shutdown and aborts late arrivals."""
+
+    async def run():
+        monkeypatch.setattr(http_server, "HTTP_SHUTDOWN_CLEANUP_SECONDS", .05, raising=False)
+        server = _shutdown_server(tmp_path)
+        connection = _track_late_arrival(server)
+
+        class Clients(weakref.WeakSet):
+            def __init__(self):
+                super().__init__()
+                self.reads = 0
+
+            def __len__(self):
+                self.reads += 1
+                return super().__len__()
+
+        clients = Clients()
+        clients.add(connection)
+        server._server = SimpleNamespace(_clients=clients)
+        await asyncio.wait_for(server._abort_late_arrivals({}), 2)
+        assert connection.aborted and connection.cancelled
+        # The poll and the check after it both have to read the listener.
+        assert clients.reads >= 2
+
+    asyncio.run(run())
+
+
+def test_shutdown_cleanup_counts_tracked_handlers_when_the_listener_tracks_nothing(tmp_path, monkeypatch):
+    """No ``_active_count`` and no ``_clients``: the handlers already tracked still abort."""
+
+    async def run():
+        # A zero window skips the poll, so only the final count can abort the late arrival.
+        monkeypatch.setattr(http_server, "HTTP_SHUTDOWN_CLEANUP_SECONDS", 0, raising=False)
+        server = _shutdown_server(tmp_path)
+        connection = _track_late_arrival(server)
+        server._server = SimpleNamespace()
+        await asyncio.wait_for(server._abort_late_arrivals({}), 2)
+        assert connection.aborted and connection.cancelled
 
     asyncio.run(run())
 

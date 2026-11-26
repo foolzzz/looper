@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import inspect
 import subprocess
+from pathlib import Path
 from dataclasses import replace
 from unittest.mock import AsyncMock
 
@@ -331,3 +332,153 @@ def test_turn_commits_only_owned_worktree(monkeypatch, tmp_path, native, workspa
         finally:
             await pool.shutdown()
     run_db(check, monkeypatch, timeout=30)
+
+
+UNCOMMITTED_NOTE_FILES = ("pre_dirty_edited.txt", "pre_dirty_idle.txt", "clean.txt")
+
+
+def _scoped_repository(tmp_path):
+    directory = tmp_path / "repository"
+    directory.mkdir()
+
+    def git(*args):
+        return subprocess.check_output(["git", "-C", str(directory), *args], text=True).strip()
+    git("init", "-q", "-b", "main")
+    for name in UNCOMMITTED_NOTE_FILES:
+        (directory / name).write_text("committed\n")
+    git("add", *UNCOMMITTED_NOTE_FILES)
+    git("-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "-q", "--no-gpg-sign", "-m", "Initial")
+    return directory, git
+
+
+def _run_scoped_turn(monkeypatch, tmp_path, native, message, *, dirty=(), status="draft"):
+    outcome = {}
+
+    async def check(db):
+        repository, _ = _scoped_repository(tmp_path)
+        task_id, _, _ = await native.create(db, status=status, workspace_mode="worktree", path=repository)
+        pool = tm.TaskManagerPool(tmp_path / "runtime", native.executable, max_resident=lambda: 2)
+        try:
+            await submit_and_wait(pool, task_id, "reply", message_id="warm-up")  # creates the task's worktree
+            listed = subprocess.check_output(["git", "-C", str(repository), "worktree", "list", "--porcelain"], text=True)
+            checkouts = [line[len("worktree "):] for line in listed.splitlines() if line.startswith("worktree ")]
+            work, = [path for path in checkouts if Path(path).resolve() != repository.resolve()]
+
+            def git(*args):
+                return subprocess.check_output(["git", "-C", work, *args], text=True).strip()
+            for name in dirty:
+                (Path(work) / name).write_text("the user's half-written change\n")
+            head = git("rev-parse", "HEAD")
+            sink = await submit_and_wait(pool, task_id, message, message_id="measured")
+            summary, = [payload for kind, payload in sink.events if kind == "turn_summary"]
+            outcome.update(summary=summary, head=head, new_head=git("rev-parse", "HEAD"),
+                           tree=git("ls-tree", "-r", "--name-only", "HEAD").split(),
+                           log=git("log", "--format=%H").split(), status=subprocess.check_output(["git", "-C", work, "status", "--porcelain"], text=True).splitlines(),
+                           commit_files=(git("show", "--name-only", "--format=", summary["commit"]).split()
+                                         if summary["commit"] else []))
+        finally:
+            await pool.shutdown()
+    run_db(check, monkeypatch, timeout=30)
+    return outcome
+
+
+def test_turn_that_changes_no_file_makes_no_commit(monkeypatch, tmp_path, native):
+    got = _run_scoped_turn(monkeypatch, tmp_path, native, "how is it going?",
+                           dirty=("pre_dirty_edited.txt", "pre_dirty_idle.txt"))
+    assert got["summary"]["files"] == [] and got["summary"]["commit"] is None
+    assert got["new_head"] == got["head"] and len(got["log"]) == 1
+    assert got["status"] == [" M pre_dirty_edited.txt", " M pre_dirty_idle.txt"]
+    assert "uncommitted" not in got["summary"]
+
+
+def test_turn_commits_exactly_the_files_it_changed(monkeypatch, tmp_path, native):
+    got = _run_scoped_turn(monkeypatch, tmp_path, native, "edit:clean.txt,fresh.txt",
+                           dirty=("pre_dirty_idle.txt",))
+    assert got["summary"]["commit"] and got["summary"]["commit"] == got["new_head"] != got["head"]
+    assert sorted(got["commit_files"]) == ["clean.txt", "fresh.txt"]
+    assert got["status"] == [" M pre_dirty_idle.txt"]
+    assert "uncommitted" not in got["summary"]
+
+
+def test_turn_never_commits_a_file_that_was_dirty_before_it(monkeypatch, tmp_path, native):
+    got = _run_scoped_turn(monkeypatch, tmp_path, native, "edit:pre_dirty_edited.txt",
+                           dirty=("pre_dirty_edited.txt",))
+    assert got["summary"]["commit"] is None and got["new_head"] == got["head"]
+    assert got["summary"]["files"] == ["pre_dirty_edited.txt"]
+    assert got["summary"]["uncommitted"] == ["pre_dirty_edited.txt"]
+    assert got["status"] == [" M pre_dirty_edited.txt"]
+
+
+def test_mixed_turn_commits_only_the_clean_change_and_names_the_dirty_one(monkeypatch, tmp_path, native):
+    got = _run_scoped_turn(monkeypatch, tmp_path, native, "edit:clean.txt,pre_dirty_edited.txt",
+                           dirty=("pre_dirty_edited.txt", "pre_dirty_idle.txt"))
+    assert got["commit_files"] == ["clean.txt"]
+    assert got["summary"]["commit"] == got["new_head"] != got["head"]
+    assert got["summary"]["uncommitted"] == ["pre_dirty_edited.txt"]
+    assert got["status"] == [" M pre_dirty_edited.txt", " M pre_dirty_idle.txt"]
+
+
+def _tree(work_git, rev="HEAD"):
+    return work_git("ls-tree", "-r", "--name-only", rev).split()
+
+
+@pytest.mark.parametrize("command", ["gitmv", "mv"])
+def test_renaming_a_clean_file_commits_both_its_paths(monkeypatch, tmp_path, native, command):
+    got = _run_scoped_turn(monkeypatch, tmp_path, native, f"{command}:clean.txt>renamed.txt",
+                           dirty=("pre_dirty_idle.txt",))
+    assert got["summary"]["commit"] == got["new_head"] != got["head"]
+    assert got["tree"] == ["pre_dirty_edited.txt", "pre_dirty_idle.txt", "renamed.txt"]
+    assert got["status"] == [" M pre_dirty_idle.txt"]
+    assert "uncommitted" not in got["summary"]
+
+
+@pytest.mark.parametrize("command", ["gitmv", "mv"])
+def test_renaming_a_file_that_was_dirty_commits_nothing(monkeypatch, tmp_path, native, command):
+    got = _run_scoped_turn(monkeypatch, tmp_path, native, f"{command}:pre_dirty_edited.txt>moved.txt",
+                           dirty=("pre_dirty_edited.txt",))
+    assert got["summary"]["commit"] is None and got["new_head"] == got["head"]
+    assert got["tree"] == ["clean.txt", "pre_dirty_edited.txt", "pre_dirty_idle.txt"]
+    assert "moved.txt" in got["summary"]["uncommitted"]
+
+
+def test_staged_rename_of_a_dirty_file_that_the_turn_also_edited_commits_nothing(monkeypatch, tmp_path, native):
+    got = _run_scoped_turn(monkeypatch, tmp_path, native, "gitmv:pre_dirty_edited.txt>moved.txt!",
+                           dirty=("pre_dirty_edited.txt",))
+    assert got["summary"]["commit"] is None and got["new_head"] == got["head"]
+    assert set(got["summary"]["uncommitted"]) == {"moved.txt", "pre_dirty_edited.txt"}
+
+
+def test_renaming_a_dirty_file_past_the_hashing_budget_is_reported_not_committed(monkeypatch, tmp_path, native):
+    monkeypatch.setattr(tm, "_DIGEST_BUDGET", 4)
+    got = _run_scoped_turn(monkeypatch, tmp_path, native, "mv:pre_dirty_edited.txt>moved.txt",
+                           dirty=("pre_dirty_edited.txt",))
+    assert got["summary"]["commit"] is None and got["new_head"] == got["head"]
+    assert got["summary"]["unverified"] == ["moved.txt"]
+
+
+def test_digests_stay_inside_the_byte_budget_on_a_large_untracked_tree(tmp_path):
+    import asyncio
+    import time
+    for index in range(400):
+        (tmp_path / f"f{index}.bin").write_bytes(b"x" * 100_000)
+    started = time.monotonic()
+    found, unknown = asyncio.run(tm._digests(str(tmp_path), [f"f{index}.bin" for index in range(400)]))
+    assert len(found) * 100_000 <= tm._DIGEST_BUDGET and len(found) + len(unknown) == 400 and unknown
+    assert time.monotonic() - started < 2
+
+
+def test_equal_content_files_are_not_mistaken_for_a_move(monkeypatch, tmp_path, native):
+    got = _run_scoped_turn(monkeypatch, tmp_path, native, "edit:fresh.txt", dirty=("pre_dirty_idle.txt",))
+    assert got["commit_files"] == ["fresh.txt"] and "unverified" not in got["summary"]
+
+
+def test_a_dirty_file_the_turn_reverted_is_not_listed_as_uncommitted(monkeypatch, tmp_path, native):
+    got = _run_scoped_turn(monkeypatch, tmp_path, native, "revert:pre_dirty_edited.txt",
+                           dirty=("pre_dirty_edited.txt",))
+    assert got["summary"]["commit"] is None and "uncommitted" not in got["summary"]
+
+
+def test_orchestrated_turn_still_commits_nothing(monkeypatch, tmp_path, native):
+    got = _run_scoped_turn(monkeypatch, tmp_path, native, "edit:clean.txt", status="running")
+    assert got["summary"]["commit"] is None and got["new_head"] == got["head"]
+    assert got["summary"]["mode"] == "orchestrated" and "uncommitted" not in got["summary"]

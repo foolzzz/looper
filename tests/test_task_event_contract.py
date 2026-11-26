@@ -35,6 +35,7 @@ def _payloads():
         *({"kind": "stopped", "method": method.value} for method in StopMethod),
         {"kind": "turn_summary", "files": ["src/app.py"], "commit": None, "mode": "direct"},
         {"kind": "turn_summary", "files": [], "commit": "abc", "mode": "orchestrated"},
+        {"kind": "turn_summary", "files": ["a.py"], "commit": None, "mode": "direct", "uncommitted": ["a.py"]},
         {"kind": "refused", "reason": "orchestrated", "status": "running"},
         *({"kind": "refused", "reason": reason.value} for reason in RefuseReason),
     ]
@@ -43,6 +44,7 @@ def _payloads():
         {"kind": "command", "command": "/done", "extra": True},
         {"kind": "nope"},
         {"kind": "turn_summary", "files": []},
+        {"kind": "turn_summary", "files": [], "commit": None, "mode": "direct", "uncommitted": [1]},
         {"kind": "refused", "reason": "orchestrated"},
         {"kind": "refused", "reason": "budget", "status": "running"},
         {"kind": "queued", "reason": "cap"},
