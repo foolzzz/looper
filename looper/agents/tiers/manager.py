@@ -610,6 +610,11 @@ def _message_origin(envelope: MessageEnvelope) -> dict[str, Any]:
             "sender": str(sender) if sender else None, "chat": chat, "group": group}
 
 
+def _audience_kind(origin: dict[str, Any]) -> str:
+    """Where a message's chat is, as ``manager_events.target_kind`` names it."""
+    return "web" if origin["channel"] == "web" else "group" if origin["group"] else "dm"
+
+
 async def _outside_source(turn: Turn | None) -> untrusted_text.Source | None:
     """What a turn's message is to the fence: a Lark or Telegram message from someone other than the operator (any
     group chat's) is outside content; the operator's own, the dashboard's and an API client's are not."""
@@ -3496,7 +3501,8 @@ class ManagerAgent:
                         self._session_totals = self._claude.totals  # it spent too: a restart resumes from here
                         await self._save_session_state()
                     if text:
-                        await self._send_own_reply(last, text)
+                        await self._send_own_reply(last, text, main=session.key == MAIN_SESSION,
+                                                   record_id=recorder.record_id)
                 finally:
                     self._last_activity = self._clock()
 
@@ -3504,14 +3510,41 @@ class ManagerAgent:
 
         return begin
 
-    async def _send_own_reply(self, last: MessageEnvelope | None, text: str) -> None:
+    async def _own_reply_withheld(self, last: MessageEnvelope, record_id: int | None) -> None:
+        """Record, as a ``manager_events`` row of kind ``autonomous``, that what Claude said on its own in the
+        operator's main session was not sent to the chat of ``last``, which is not the operator's."""
+        origin = _message_origin(last)
+        channel_id = origin["channel_id"] or "channel-web"
+        chat = origin["chat"] or ""
+        try:
+            recorded = await db_manager_events.record(
+                manager_id=self.agent_id, task_id=None, origin="chat", target_kind=_audience_kind(origin),
+                channel_id=channel_id, chat=chat, dedupe_key=f"autonomous:{record_id or uuid.uuid4().hex}",
+                payload={"version": "autonomous_v1"}, fallback=[], state="skipped",
+                reason=db_manager_events.Reason.WITHHELD_NOT_OPERATOR.value, kind="autonomous")
+            await db_connection.get_pool().execute(
+                "UPDATE manager_events SET record_id = $2, finished_at = now() WHERE id = $1",
+                recorded.row["id"], record_id)
+        except Exception:
+            logger.exception("%s: could not record the withheld autonomous reply", self._log)
+
+    async def _send_own_reply(self, last: MessageEnvelope | None, text: str, *, main: bool = False,
+                              record_id: int | None = None) -> None:
         """Send what Claude said on its own to the channel of ``last``, as a reply to no message.
 
         It names ``last``'s web chat session (``chat_session_id``), so the web
-        channel adds it to that chat instead of a message's stream.
+        channel adds it to that chat instead of a message's stream. The operator's main session
+        (``main``) sends it only when ``last`` is the operator's own message: its words are the operator's
+        private conversation, and ``last`` may be a group, another person's direct chat or an API client's
+        thread; they are recorded then, not sent (``_own_reply_withheld``).
         """
         if last is None or self._bus is None:
             logger.info("%s: Claude spoke on its own before any message; its words are only recorded", self._log)
+            return
+        if main and self.agent_id == DEFAULT_MANAGER_ID and not await self._operator_envelope(last):
+            logger.info("%s: Claude spoke on its own after a message of someone else; its words are only recorded",
+                        self._log)
+            await self._own_reply_withheld(last, record_id)
             return
         payload: dict[str, Any] = {"text": self._group_safe(last, text), "autonomous": True}
         context = last.payload.get("channel_context")
@@ -3528,6 +3561,18 @@ class ManagerAgent:
                       **_chat_record(last, f"auto-{uuid.uuid4().hex[:12]}"),
                       **self._proactive_metadata(ProactiveSource.AUTONOMOUS)},
         ))
+
+    async def _operator_envelope(self, envelope: MessageEnvelope) -> bool:
+        """Whether the message is the operator's own (``operator_identity.is_operator``): from the dashboard
+        without an API client, or from the operator's direct chat on a bot."""
+        from ..operator_identity import is_operator, operator_sender_id
+
+        origin = _message_origin(envelope)
+        channel = origin["channel"]
+        operator_id = (await operator_sender_id(origin["channel_id"])
+                       if (is_lark(channel) or channel == "telegram") and origin["channel_id"] else None)
+        return is_operator(channel=channel, group=origin["group"], sender=origin["sender"],
+                           client_id=_message_client(envelope)[0], operator_id=operator_id)
 
     def _claude_command(self, prompt_file: Path, launch: Launch, *, resume: bool = True) -> list[str]:
         """The resident process's command (``RuntimeAdapter.resident_command``), resuming the saved session."""

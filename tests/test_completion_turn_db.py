@@ -73,6 +73,14 @@ def _goal_status(status: str = "completed", *, thread: str | None = THREAD, noti
                   **({"origin_channel_id": "channel-web"} if thread else {}), **metadata})
 
 
+async def _operator_is_the_lark_person(pool: Any) -> None:
+    """The bot names the person as its operator: only an operator's direct chat gets a main-session reply."""
+    await pool.execute(
+        "INSERT INTO channel_configs (channel_id, channel_type, enabled, config) VALUES ('channel-lark', 'lark', "
+        "TRUE, $1::jsonb) ON CONFLICT (channel_id) DO UPDATE SET config = EXCLUDED.config",
+        json.dumps({"operator_sender_id": OPEN_ID}))
+
+
 def _dm_notice() -> Notice:
     return Notice(NotifyChannel.LARK, NotifyTarget(TargetKind.USER, OPEN_ID), "✅ 任务完成 · calc\nadd and sub pass",
                   channel_id="channel-lark")
@@ -154,6 +162,7 @@ def test_the_dashboard_chat_gets_the_managers_message_and_the_tasks_link_instead
 def test_a_lark_direct_chat_gets_the_managers_message_as_the_notice_would_go(monkeypatch, tmp_path, turns_on):
     async def run(pool):
         async with _manager(pool, tmp_path, monkeypatch, [_text(REPLY)]) as chat:
+            await _operator_is_the_lark_person(pool)
             await _task(pool, tmp_path)
             await _end_and_tell(chat, _goal_status(thread=None, notice=_dm_notice(),
                                                    reply_route={"chat_id": DM_CHAT},
@@ -617,6 +626,7 @@ def test_a_lark_direct_chat_the_task_did_not_record_is_resolved_or_told_by_its_n
 
     async def run(pool):
         async with _manager(pool, tmp_path, monkeypatch, [script]) as chat:
+            await _operator_is_the_lark_person(pool)
             await _task(pool, tmp_path)  # recorded no reply route
             if known:  # the same person's earlier task with this bot recorded their direct chat
                 project = await pool.fetchval("SELECT project_id FROM tasks WHERE id = 't1'")
