@@ -5461,7 +5461,11 @@ disable this policy to release existing waits on their next settings check.
 The task detail API and dashboard show the pause reason and deadline. During
 an active task's pause, `network_pause.state` is authoritative: task detail
 projects `phase` as `waiting` for `paused`, or `waiting_user` after expiry,
-as soon as it reads the pause row. The persisted `tasks.status` converges
+as soon as it reads the pause row. That read is one statement with the task's
+current status and stored phase. A detail request that loaded the task while
+it was still ready, before start moved it to pending, still projects `phase`
+from the status it reads with the pause. An ended task keeps the phase from
+that same read. The persisted `tasks.status` converges
 asynchronously through the Planner's status message and TaskRouter; consumers
 must not rely on it to detect the start or expiry of a network pause. With
 the policy disabled, task detail does not query pause storage.
