@@ -7,7 +7,7 @@ from typing import Any
 import pytest
 
 from looper.agents.operator_profile import profile_view, update_source
-from looper.db import connection
+from looper.db import connection, profile_blocks
 from tests.db_support import dropped_tables, run_db
 
 
@@ -60,6 +60,43 @@ def test_a_read_keeps_the_version_until_the_compiled_body_changes(monkeypatch, t
         changed = await profile_view()
         assert changed["version"] == 2 and changed["text"] == "Name: Bee"
         assert (await pool.fetchval("SELECT compiled_at FROM profile_blocks")).year != 2020
+
+    run_db(test, monkeypatch)
+
+
+@pytest.mark.parametrize("with_fact", [False, True])
+def test_main_cache_version_changes_only_with_compiled_text(monkeypatch, tmp_path, with_fact):
+    note = "## Name\nAda\n" + ("- Builds compilers [kind:: fact]\n" if with_fact else "")
+    (tmp_path / "关于我.md").write_text(note, encoding="utf-8")
+    # The cache payload on main, before the About group existed.
+    legacy = {"text": "Name: Ada" + ("\nStanding rules:\n- Builds compilers" if with_fact else ""),
+              "fields": {"name": {"value": "Ada", "path": "关于我.md", "heading": "Name", "line": 1},
+                         "address": None, "working_hours": None, "time_zone": None, "reply_language": None,
+                         "communication_preferences": [], "standing_rules": []},
+              "omitted": [], "skipped": [], "sources": ["关于我.md"]}
+    if with_fact:
+        legacy["fields"]["standing_rules"] = [{"value": "Builds compilers", "path": "关于我.md",
+                                               "heading": "Name", "line": 3, "kind": "fact"}]
+
+    async def test(pool):
+        await _arm(pool, tmp_path)
+        assert await profile_blocks.retain_or_replace(text=legacy["text"], body=legacy) == 1
+        view = await profile_view()
+        expected = "Name: Ada" + ("\nAbout:\n- Builds compilers" if with_fact else "")
+        version = 2 if with_fact else 1
+        assert (view["text"], view["version"]) == (expected, version)
+        assert view["fields"]["about"] == legacy["fields"]["standing_rules"]
+        assert (await profile_view())["version"] == version
+        # Citations refresh without a version bump when the rendered text stays the same.
+        (tmp_path / "关于我.md").write_text("\n" + note, encoding="utf-8")
+        moved = await profile_view()
+        assert (moved["text"], moved["version"]) == (expected, version)
+        assert moved["fields"]["name"]["line"] == 2
+        row = await pool.fetchrow("SELECT version, text, body FROM profile_blocks")
+        assert (row["text"], row["version"]) == (expected, version)
+        assert _body(row["body"]) == {key: moved[key] for key in legacy}
+        (tmp_path / "关于我.md").write_text(note.replace("Ada", "Bee"), encoding="utf-8")
+        assert (await profile_view())["version"] == version + 1
 
     run_db(test, monkeypatch)
 

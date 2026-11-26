@@ -32,7 +32,7 @@ def test_expired_unknown_pending_is_never_retried(monkeypatch, restart):
         try:
             await box.send('send', 'chat', {'text': 'hello'}, None, 'stable-key', 'answer')
             # The caller's wait can expire before the background state write commits.
-            original = await wait_for_unknown_state('pending')
+            original = await asyncio.wait_for(wait_for_unknown_state('pending'), 5)
             assert original['state'] == 'pending' and original['error_class'] == 'unknown'
             # Moving the clock across the dedupe boundary must also protect pending rows.
             now += timedelta(hours=2)
@@ -44,14 +44,14 @@ def test_expired_unknown_pending_is_never_retried(monkeypatch, restart):
             else:
                 box._wake.set()
             receipt = await box.send('send', 'chat', {'text': 'hello'}, None, 'stable-key', 'answer')
-            current = await wait_for_unknown_state('uncertain')
+            current = await asyncio.wait_for(wait_for_unknown_state('uncertain'), 5)
             assert current['state'] == 'uncertain'
             assert not receipt.success
             assert transport.send.await_count == 1
             assert current['first_possible_at'] == original['first_possible_at']
         finally:
             await box.stop()
-    run_db(check, monkeypatch, timeout=5)
+    run_db(check, monkeypatch)
 
 
 @pytest.mark.parametrize('committed', [False, True])
@@ -84,7 +84,7 @@ def test_sent_state_failure_retries_only_persistence_and_releases_chat(monkeypat
             assert await db.counts('app') == dict(pending=0, sending=0, sent=2, failed=0, uncertain=0)
         finally:
             await box.stop()
-    run_db(check, monkeypatch, timeout=6)
+    run_db(check, monkeypatch)
 
 
 def test_total_deadline_releases_unsent_chat_head(monkeypatch, fixed_clock):
@@ -138,6 +138,7 @@ def test_lost_claim_acknowledgement_does_not_strand_chat(monkeypatch):
         transport.send.return_value = 'om_sent'
         box = outbound.Outbox('app', transport, outbound.Gateway('app'))
         try:
+            # Bound claim recovery, not schema migration or cleanup on a loaded runner.
             result = await asyncio.wait_for(box.send('send', 'chat', {'text': 'one'}, None, 'one', 'answer'), 3)
             assert result.success
             assert transport.send.await_count == 1
@@ -145,7 +146,7 @@ def test_lost_claim_acknowledgement_does_not_strand_chat(monkeypatch):
             assert item['state'] == 'sent' and item['attempts'] == 1
         finally:
             await box.stop()
-    run_db(check, monkeypatch, timeout=5)
+    run_db(check, monkeypatch)
 
 
 def test_timestamp_write_wait_cannot_cross_dedupe_window(monkeypatch):
@@ -170,13 +171,13 @@ def test_timestamp_write_wait_cannot_cross_dedupe_window(monkeypatch):
         transport = AsyncMock()
         box = outbound.Outbox('app', transport, outbound.Gateway('app'), clock=lambda: now)
         try:
-            result = await box.send('send', 'chat', {'text': 'hello'}, None, 'waiting', 'answer')
+            result = await asyncio.wait_for(box.send('send', 'chat', {'text': 'hello'}, None, 'waiting', 'answer'), 5)
             assert not result.success
             assert (await db.get(item['id']))['state'] == 'uncertain'
             transport.send.assert_not_awaited()
         finally:
             await box.stop()
-    run_db(check, monkeypatch, timeout=5)
+    run_db(check, monkeypatch)
 
 
 @pytest.mark.parametrize('failure', ['hang', 'errors', 'lost_ack'])
@@ -239,4 +240,4 @@ def test_attempt_write_deadline_releases_app_slot_and_defers_without_sending(mon
             worker.cancel()
             await asyncio.gather(worker, return_exceptions=True)
             await box.stop()
-    run_db(check, monkeypatch, timeout=5)
+    run_db(check, monkeypatch)

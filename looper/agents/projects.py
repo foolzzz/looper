@@ -516,6 +516,9 @@ async def delete_task(task_id: str, runtime_root: Path | None, *,
         raise RequestError(HTTP_404, "task not found")
     if task.get("status", "") in db_tasks.ACTIVE_STATUSES:
         raise _TaskActive()
+    from .tiers.task_manager import current_pool
+    if manager_pool := current_pool():
+        await manager_pool.forget(task_id)
     async with db_connection.transaction() as conn:
         # Serialize cleanup with start_ready_task's UPDATE, using this connection throughout
         # so cleanup cannot wait for another connection while holding the row lock.
@@ -1226,6 +1229,9 @@ async def start_ready_task(task_id: str, bus: MessageBus, source: AgentAddress, 
     task = await db_tasks.get_task(task_id, **({"pool": pool} if pool is not None else {}))
     if task is None:
         raise RequestError(HTTP_404, "task not found")
+    from .tiers.task_manager import current_pool
+    if (managers := current_pool()) is not None and managers.in_turn(task_id):
+        raise RequestError(HTTP_409, "the task Manager is working in this task: stop its turn first")
     if task["status"] not in (db_tasks.READY, db_tasks.DRAFT):
         raise RequestError(HTTP_400, f"the task is {task['status']}, not ready: only a task that was created and "
                                      "never started can be started")
@@ -1348,23 +1354,31 @@ async def edit_requirement(
     """Make ``data["requirement"]`` the task's requirement, keeping the old text as a version: 404 for an unknown
     task, 409 for one that has ended, 400 for an empty or unchanged text. A running task's Planner gets the edit in
     a turn (``TASK_CHANGE``), and so does one whose Planner is starting, at its PLAN turn; a task not started
-    plans the new text."""
+    plans the new text. Optional ``expected_version`` is checked under the write lock; an obsolete version
+    raises ``task_changes.RequirementChanged`` without writing."""
     from ..db import task_changes
 
     requirement = data.get("requirement")
     if not isinstance(requirement, str) or not requirement.strip():
         raise RequestError(HTTP_400, "requirement must be a non-empty string")
     check_requirement(requirement)
+    expected_version = data.get("expected_version")
+    if "expected_version" in data and type(expected_version) is not int:
+        raise RequestError(HTTP_400, "expected_version must be an integer")
     task = await db_tasks.get_task(task_id)
     if task is None:
         raise RequestError(HTTP_404, "task not found")
     if task["status"] not in EDITABLE_STATUSES:
         raise RequestError(HTTP_409, f"the task is {task['status']}: only a task that has not ended can change; "
                                      "start it again to run the requirement it has")
-    if requirement == task["requirement"]:
+    if expected_version is None and requirement == task["requirement"]:
         raise RequestError(HTTP_400, "the requirement is unchanged")
     not_started = task["status"] in (db_tasks.READY, db_tasks.DRAFT)
-    version = await task_changes.edit_requirement(task_id, requirement, via=via, delivered=not_started)
+    try:
+        version = await task_changes.edit_requirement(task_id, requirement, via=via, delivered=not_started,
+                                                      expected_version=expected_version)
+    except ValueError as exc:
+        raise RequestError(HTTP_400, str(exc)) from None
     if version is None:
         raise RequestError(HTTP_404, "task not found")
     if task_router.has_planner(task_id):
