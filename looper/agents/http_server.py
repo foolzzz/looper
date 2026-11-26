@@ -460,12 +460,39 @@ class AgentHTTPServer:
             for transport in orphans:
                 transport.abort()
 
+    def _active_connection_count(self) -> int:
+        """Connections the listening server still has open.
+
+        CPython 3.12 and earlier keep an integer ``Server._active_count``.
+        CPython 3.13 and later keep the transports in ``Server._clients``.
+        Shutdown must not fail when this interpreter has neither: the handlers
+        already tracked here are the fallback, and a count that cannot be read
+        is treated as zero only after that fallback fails too.
+        """
+        try:
+            server = self._server
+            if server is None:
+                return 0
+            count = getattr(server, "_active_count", None)
+            if count is not None:
+                return int(count)
+            clients = getattr(server, "_clients", None)
+            if clients is not None:
+                return len(clients)
+        except Exception:
+            pass
+        try:
+            return sum(1 for task in self._handlers if not task.done())
+        except Exception:
+            return 0
+
     async def _abort_late_arrivals(self, seen: dict[asyncio.Task, asyncio.StreamWriter]) -> None:
         """Abort connections that attached after ``seen`` was snapshotted.
 
-        ``wait_closed`` on Python 3.12 waits while the server's active count
-        is non-zero. Yielding lets an accept that already left the listening
-        socket attach, and lets ``abort`` drop the count, before that wait.
+        ``wait_closed`` waits while the listener still has connections
+        (``_active_count`` through 3.12, ``_clients`` after that). Yielding
+        lets an accept that already left the listening socket attach, and
+        lets ``abort`` drop the count, before that wait.
         """
         loop = asyncio.get_running_loop()
         deadline = loop.time() + HTTP_SHUTDOWN_CLEANUP_SECONDS
@@ -473,12 +500,12 @@ class AgentHTTPServer:
         while quiet < 2 and loop.time() < deadline:
             await asyncio.sleep(0)
             self._abort_visible_late_arrivals(seen)
-            active = self._server._active_count if self._server is not None else 0
+            active = self._active_connection_count()
             if active:
                 quiet = 0
             else:
                 quiet += 1
-        active = self._server._active_count if self._server is not None else 0
+        active = self._active_connection_count()
         if active:
             self._abort_visible_late_arrivals(seen)
             pending = [task for task in self._handlers if not task.done()]
