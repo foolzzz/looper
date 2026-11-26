@@ -208,3 +208,330 @@ def test_apply_returns_true_only_while_pending(migration_name, monkeypatch):
             assert await migration.apply(conn, sql="", state="current") is False
 
     asyncio.run(test())
+
+
+# Every migration whose apply started reporting whether it did work. A fresh
+# database already contains most of these upgrades, so the catalog is rewound to
+# the older shape pending() recognizes. The first apply is that upgrade. Online
+# validation and index builds then settle it, and the next apply must be a no-op.
+_CONVERTED_MIGRATIONS = (
+    "acceptance_checks",
+    "acp_command",
+    "action_receipts",
+    "advisor_roles",
+    "agent_spawns",
+    "attempt_ids",
+    "card_actions",
+    "card_actions_intents_ledger",
+    "channel_outbox",
+    "channel_outbox_terminal_at",
+    "chat_binding_sender_policy",
+    "chat_binding_senders",
+    "chat_direct_threads",
+    "chat_message_entry_kind",
+    "chat_scopes",
+    "coco_login",
+    "command_schedules",
+    "completion_session_allowlist",
+    "cost_holds",
+    "cost_holds_unanswered",
+    "cursor_login",
+    "decision_snapshots",
+    "dependency_conditions",
+    "event_triage",
+    "failure_typing",
+    "gate_message_sender",
+    "gate_purpose",
+    "gateway_aliases",
+    "headless_compaction",
+    "idle_check_sending",
+    "idle_check_source",
+    "idle_checks",
+    "intent_final_notices",
+    "intent_group_reads",
+    "intent_merges",
+    "intent_mr_review_type",
+    "intent_recognitions",
+    "intent_rule_execution",
+    "intent_rules",
+    "journal_supplement_sender",
+    "lead_taint",
+    "leads_check",
+    "leads_check_run_kind",
+    "leads_search",
+    "leads_trigram",
+    "ledger",
+    "llm_models_chat_dialect",
+    "llm_requests",
+    "llm_requests_stored_bytes",
+    "llm_requests_translation",
+    "main_session_egress",
+    "manager_event_delivery",
+    "manager_event_reasons",
+    "manager_events",
+    "manager_scope_projects",
+    "manager_session_bounds",
+    "manager_session_context_policy",
+    "manager_sessions",
+    "mcp_tool_levels",
+    "memory_candidates",
+    "memory_closeout",
+    "memory_draft_queue",
+    "memory_draft_role",
+    "memory_lesson_injection",
+    "memory_lessons",
+    "memory_retro_queue",
+    "memory_retro_role",
+    "message_collection",
+    "message_leads",
+    "message_stream",
+    "message_stream_deletions",
+    "metrics_alert_source",
+    "mid_turn_input",
+    "model_name_parameters",
+    "morning_brief_kind",
+    "morning_brief_send_started",
+    "morning_brief_triage",
+    "morning_briefs",
+    "network_pauses",
+    "outbound_reviews",
+    "platform_subagents",
+    "proactive_bodies",
+    "proactive_deliveries",
+    "proactive_digest",
+    "processor_role",
+    "profile_blocks",
+    "profile_fallback",
+    "profile_web_search",
+    "project_activity",
+    "project_advisor",
+    "project_knowledge_dir",
+    "provider_admission",
+    "provider_enabled",
+    "provider_limit_windows",
+    "reminder_post_started",
+    "reminders",
+    "review_panel",
+    "run_skips",
+    "run_tree",
+    "runtime_launcher",
+    "scenario_session_routing",
+    "schedule_deferred_by_drain",
+    "schedule_equivalent_budget",
+    "schedule_missed_since",
+    "schedule_notification_events",
+    "schedule_notify_format",
+    "schedule_pause_reasons",
+    "schedule_session_bounds",
+    "schedule_throttle",
+    "schedule_user_gates",
+    "search_tokens",
+    "skill_lifecycle",
+    "skill_proposal_feedback",
+    "skill_proposals",
+    "skill_versions",
+    "step_attempt_profiles",
+    "step_attempts",
+    "step_check_runs",
+    "step_difficulty",
+    "step_failure_handling",
+    "subagent_room_delivery",
+    "subscription_check_record",
+    "subscription_lookback",
+    "subscription_rules",
+    "subscription_window_seqs",
+    "subscriptions",
+    "task_chat_group",
+    "task_drafts",
+    "task_feedback",
+    "task_manager_role",
+    "task_origin_session",
+    "task_outcomes",
+    "task_process_record",
+    "task_reply_route",
+    "task_select_directories",
+    "task_select_reads",
+    "task_work_list",
+    "triage_handoff_reasons",
+    "triage_source",
+    "uncertain_deliveries",
+    "verification_paths",
+    "workflow_rules",
+    "workflows",
+)
+
+# Rewind SQL, then a CHECK value to remove so the released constraint is pending again.
+# Historical apply text rejects rows the current seeds added later; those rows go too.
+_UPGRADE_FROM = {
+    "acp_command": ("", ("llm_providers", "llm_providers_vendor_type_check", "acp-command")),
+    "advisor_roles": ("", ("agent_setting_layers", "agent_setting_layers_role_check", "advice_check")),
+    "agent_spawns": ("DROP TABLE IF EXISTS agent_spawns CASCADE", None),
+    "card_actions": ("DROP TABLE IF EXISTS card_actions CASCADE", None),
+    "channel_outbox": ("ALTER TABLE channel_outbox DROP COLUMN IF EXISTS claim_token", None),
+    "chat_binding_sender_policy": (
+        "ALTER TABLE manager_chat_bindings DROP COLUMN IF EXISTS sender_policy", None),
+    "chat_binding_senders": (
+        "ALTER TABLE manager_chat_bindings DROP COLUMN IF EXISTS allowed_senders", None),
+    "coco_login": (
+        "DELETE FROM llm_providers WHERE vendor_type = 'coco-login'",
+        ("llm_providers", "llm_providers_vendor_type_check", "coco-login")),
+    "command_schedules": ("ALTER TABLE schedules DROP COLUMN IF EXISTS kind", None),
+    "cursor_login": (
+        "DELETE FROM llm_models WHERE provider_id IN ('prov-cursor-login', 'prov-coco-login'); "
+        "DELETE FROM llm_providers WHERE vendor_type IN ('cursor-login', 'coco-login', 'acp-command')",
+        ("llm_providers", "llm_providers_vendor_type_check", "cursor-login")),
+    "decision_snapshots": ("DROP TABLE IF EXISTS decision_snapshots CASCADE", None),
+    "dependency_conditions": (
+        "ALTER TABLE task_steps DROP COLUMN IF EXISTS ready_when; "
+        "ALTER TABLE projects DROP COLUMN IF EXISTS dependency_conditions", None),
+    "failure_typing": (
+        "ALTER TABLE llm_records DROP CONSTRAINT IF EXISTS llm_records_failure_check; "
+        "ALTER TABLE llm_records DROP COLUMN IF EXISTS failure_class, DROP COLUMN IF EXISTS failure_cause",
+        None),
+    "gate_purpose": ("ALTER TABLE task_user_gates DROP COLUMN IF EXISTS purpose", None),
+    "gateway_aliases": ("DROP TABLE IF EXISTS gateway_aliases CASCADE", None),
+    "headless_compaction": (
+        "UPDATE agent_runtimes SET capabilities = array_remove(array_remove(capabilities, "
+        "'headless_compaction'), 'mid_turn_input')",
+        ("agent_runtimes", "agent_runtimes_capabilities_check", "headless_compaction")),
+    "intent_merges": ('DROP TRIGGER IF EXISTS "A_intents_detach_merged" ON intents', None),
+    "leads_check_run_kind": ("", ("llm_records", "llm_records_run_kind_check", "leads_check")),
+    "ledger": ("DROP TABLE IF EXISTS ledger_items CASCADE", None),
+    "llm_models_chat_dialect": ("ALTER TABLE llm_models DROP COLUMN IF EXISTS chat_dialect", None),
+    "llm_requests": ("DROP TABLE IF EXISTS llm_requests CASCADE", None),
+    "llm_requests_stored_bytes": (
+        "ALTER TABLE llm_requests DROP COLUMN IF EXISTS stored_bytes; "
+        "ALTER TABLE llm_request_parts DROP COLUMN IF EXISTS stored_bytes", None),
+    "llm_requests_translation": ("ALTER TABLE llm_requests DROP COLUMN IF EXISTS translation", None),
+    "manager_event_delivery": ("ALTER TABLE manager_events DROP COLUMN IF EXISTS delivery", None),
+    "manager_event_reasons": ("", ("manager_events", "manager_events_reason_check", "no_chat")),
+    "manager_events": ("DROP TABLE IF EXISTS manager_events CASCADE", None),
+    "manager_scope_projects": (
+        "ALTER TABLE managers DROP CONSTRAINT IF EXISTS managers_scope_tools_check; "
+        "ALTER TABLE managers DROP CONSTRAINT IF EXISTS managers_scope_projects_check; "
+        "ALTER TABLE managers DROP COLUMN IF EXISTS scope_project_ids", None),
+    "manager_sessions": ("DROP TABLE IF EXISTS manager_sessions CASCADE", None),
+    "mcp_tool_levels": ("DROP TABLE IF EXISTS mcp_tool_levels CASCADE", None),
+    "memory_candidates": ("DROP TABLE IF EXISTS memory_candidates CASCADE", None),
+    "message_leads": ("DROP TABLE IF EXISTS message_leads CASCADE", None),
+    "message_stream": ("DROP TABLE IF EXISTS event_sources CASCADE", None),
+    "message_stream_deletions": (
+        "ALTER TABLE event_sources DROP COLUMN IF EXISTS retention_last_at; "
+        "ALTER TABLE source_runs DROP COLUMN IF EXISTS skipped_by_deletion", None),
+    "mid_turn_input": (
+        "UPDATE agent_runtimes SET capabilities = array_remove(capabilities, 'mid_turn_input')",
+        ("agent_runtimes", "agent_runtimes_capabilities_check", "mid_turn_input")),
+    "outbound_reviews": ("DROP TABLE IF EXISTS outbound_reviews CASCADE", None),
+    "proactive_deliveries": ("DROP TABLE IF EXISTS proactive_deliveries CASCADE", None),
+    "processor_role": (
+        "UPDATE agent_runtimes SET capabilities = array_remove(array_remove(capabilities, "
+        "'headless_compaction'), 'mid_turn_input')",
+        ("agent_setting_layers", "agent_setting_layers_role_check", "processor")),
+    "profile_fallback": ("ALTER TABLE agent_profiles DROP COLUMN IF EXISTS fallback_profile_id", None),
+    "profile_web_search": ("ALTER TABLE agent_profiles DROP COLUMN IF EXISTS web_search", None),
+    "project_activity": ("DROP TABLE IF EXISTS project_activity CASCADE", None),
+    "project_advisor": (
+        "ALTER TABLE projects DROP COLUMN IF EXISTS advisor, "
+        "DROP COLUMN IF EXISTS advisor_consult_budget_usd, DROP COLUMN IF EXISTS advisor_budget_usd, "
+        "DROP COLUMN IF EXISTS advisor_consults_per_task, DROP COLUMN IF EXISTS advisor_consults_per_step, "
+        "DROP COLUMN IF EXISTS advisor_fallback_profile, DROP COLUMN IF EXISTS advisor_internal_domains",
+        None),
+    "provider_enabled": ("ALTER TABLE llm_providers DROP COLUMN IF EXISTS enabled", None),
+    "provider_limit_windows": ("DROP TABLE IF EXISTS provider_limit_windows CASCADE", None),
+    "reminders": ("DROP TABLE IF EXISTS reminders CASCADE", None),
+    "review_panel": (
+        "ALTER TABLE task_steps DROP COLUMN IF EXISTS accept_when, DROP COLUMN IF EXISTS reviews", None),
+    "run_tree": (
+        "ALTER TABLE llm_records DROP CONSTRAINT IF EXISTS llm_records_run_kind_check; "
+        "ALTER TABLE llm_records DROP CONSTRAINT IF EXISTS llm_records_parent_record_id_fkey; "
+        "ALTER TABLE llm_records DROP COLUMN IF EXISTS parent_record_id, DROP COLUMN IF EXISTS run_kind",
+        None),
+    "runtime_launcher": ("ALTER TABLE agent_runtimes DROP COLUMN IF EXISTS launcher", None),
+    "schedule_deferred_by_drain": (
+        "ALTER TABLE schedule_runs DROP COLUMN IF EXISTS deferred_by_drain", None),
+    "schedule_missed_since": ("ALTER TABLE schedule_runs DROP COLUMN IF EXISTS missed_since", None),
+    "schedule_notification_events": (
+        "ALTER TABLE schedule_notifications DROP COLUMN IF EXISTS manager_event_id", None),
+    "schedule_notify_format": ("ALTER TABLE schedules DROP COLUMN IF EXISTS notify_format", None),
+    "schedule_session_bounds": (
+        "ALTER TABLE schedules DROP COLUMN IF EXISTS planner_session_context_tokens, "
+        "DROP COLUMN IF EXISTS planner_session_run_cost_usd; "
+        "ALTER TABLE schedule_runs DROP COLUMN IF EXISTS planner_context_tokens, "
+        "DROP COLUMN IF EXISTS planner_cost_usd, DROP COLUMN IF EXISTS planner_session_action, "
+        "DROP COLUMN IF EXISTS planner_session_reason, DROP COLUMN IF EXISTS planner_session_before_tokens, "
+        "DROP COLUMN IF EXISTS planner_session_after_tokens, DROP COLUMN IF EXISTS failure_kind", None),
+    "schedule_user_gates": ("ALTER TABLE schedules DROP COLUMN IF EXISTS user_gates", None),
+    "step_difficulty": ("ALTER TABLE task_steps DROP COLUMN IF EXISTS difficulty", None),
+    "subscription_lookback": ("DROP TABLE IF EXISTS subscription_daily_claims", None),
+    "subscription_rules": (
+        "ALTER TABLE subscriptions DROP COLUMN IF EXISTS rules, DROP COLUMN IF EXISTS config_epoch; "
+        "ALTER TABLE subscription_runs DROP COLUMN IF EXISTS config, DROP COLUMN IF EXISTS config_epoch, "
+        "DROP COLUMN IF EXISTS match_timeouts", None),
+    "subscriptions": ("DROP TABLE IF EXISTS subscriptions CASCADE", None),
+    "task_chat_group": ("ALTER TABLE tasks DROP COLUMN IF EXISTS chat_group", None),
+    "task_origin_session": ("ALTER TABLE tasks DROP COLUMN IF EXISTS origin_session", None),
+    "task_process_record": ("ALTER TABLE tasks DROP COLUMN IF EXISTS process_record", None),
+    "task_reply_route": ("ALTER TABLE tasks DROP COLUMN IF EXISTS origin_reply_route", None),
+    "uncertain_deliveries": (
+        "DROP INDEX IF EXISTS idx_subscription_deliveries_uncertain; "
+        "DROP INDEX IF EXISTS idx_intent_posts_uncertain; "
+        "DROP INDEX IF EXISTS idx_manager_events_uncertain", None),
+    "verification_paths": ("ALTER TABLE projects DROP COLUMN IF EXISTS verification_paths", None),
+    "workflow_rules": ("", ("task_journal", "task_journal_kind_check", "verification_round")),
+    "workflows": (
+        "ALTER TABLE projects DROP COLUMN IF EXISTS default_workflow; "
+        "ALTER TABLE tasks DROP COLUMN IF EXISTS workflow; "
+        "DROP TABLE IF EXISTS workflows CASCADE", None),
+}
+
+
+def _without_check_token(definition, token):
+    for needle in (f"'{token}'::text", f"'{token}'"):
+        for pattern in (f", {needle}", f"{needle}, ", needle):
+            if pattern in definition:
+                return definition.replace(pattern, "", 1)
+    raise AssertionError(f"{token} is not in {definition}")
+
+
+async def _restore_older_check(conn, table, constraint, token):
+    definition = await conn.fetchval(
+        "SELECT pg_get_constraintdef(oid) FROM pg_constraint "
+        "WHERE conrelid = to_regclass($1) AND conname = $2", table, constraint)
+    updated = _without_check_token(definition, token).replace(" NOT VALID", "")
+    await conn.execute(f"ALTER TABLE {table} DROP CONSTRAINT {constraint}")
+    await conn.execute(f"ALTER TABLE {table} ADD CONSTRAINT {constraint} {updated}")
+
+
+@pytest.mark.parametrize("migration_name", _CONVERTED_MIGRATIONS)
+def test_converted_migration_apply_returns_true_then_false(migration_name, monkeypatch):
+    migration = next(item for item in connection._MIGRATIONS if item.name == migration_name)
+    earlier, online_steps, online_orders = _prefix_registry(migration)
+    schema = migrations.schema_sql(connection.SCHEMA_PATH.read_text(encoding="utf-8"), connection._MIGRATIONS)
+
+    async def test():
+        async with fresh_connection(command_timeout=120) as conn:
+            _patch_registry(monkeypatch, earlier, online_steps=online_steps, online_orders=online_orders)
+            await connection.ensure_schema(conn)
+            # apply and the online phase read the real registry, including this migration's steps.
+            monkeypatch.undo()
+            rewind, older_check = _UPGRADE_FROM.get(migration.name, ("", None))
+            if rewind:
+                await conn.execute(rewind)
+            if older_check:
+                await _restore_older_check(conn, *older_check)
+            if migration.name in _UPGRADE_FROM:
+                await conn.execute("DELETE FROM schema_migrations WHERE name = ANY($1::text[])",
+                                   [migration.name, f"{migration.name}_online"])
+            # Some upgrades do their work while pending() is already false (a constraint
+            # repair). The result that startup logs is apply's, so that is what this pins.
+            assert await migration.apply(conn, sql=schema, state="current") is True
+            await _validate_online(conn, migration)
+            # These three keep reporting work until their own online indexes exist. The
+            # full online phase would also run steps for markers another apply inserts
+            # before that step's constraint exists (manager_events).
+            if migration.name in {"memory_lesson_injection", "memory_lessons", "memory_retro_queue"}:
+                assert not conn.is_in_transaction()
+                await connection._finish_online(conn)
+            assert await migration.apply(conn, sql=schema, state="current") is False
+
+    asyncio.run(test())
