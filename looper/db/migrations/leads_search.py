@@ -23,11 +23,14 @@ async def pending(conn: asyncpg.Connection) -> bool:
     )
 
 
-async def apply(conn: asyncpg.Connection, *, sql: str, state: str) -> None:
+async def apply(conn: asyncpg.Connection, *, sql: str, state: str) -> bool:
+    did_work = False
     if await pending(conn):
         # search_tokens has already installed the tokenizer; leave the index
         # build to the resumable runner after the schema transaction commits.
+        did_work = True
         await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", name)
+    return did_work
 
 
 online_order = 150

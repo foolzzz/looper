@@ -1020,8 +1020,9 @@ async def _run_agent_system_watched(
             await cost_guard.initialize(day_start=scheduler.day_start, pool=pool)
             bus.subscribe_topic(MessageType.USER_MESSAGE, scheduler.observe_user)
             # The advisor's alerts go to the operator's chat through the same channels.
-            from . import advisor_alerts, outbound_hook, usage_windows
+            from . import advisor_alerts, chat_scope_alerts, outbound_hook, usage_windows
             advisor_alerts.configure(registry.notify)
+            chat_scope_alerts.configure(registry.notify)
             from . import admission_notices
             admission_notices.configure(registry.notify)
             # So does the daily note that skill proposals wait for the operator (names and reasons, never content).
@@ -1505,6 +1506,12 @@ def serve_agent(
         logger.warning("%s", warning)
 
     resolved_work_dir = work_dir or Path.cwd()
+
+    # Eagerly import the API domain modules while no event loop runs: their first import is slow (some pull
+    # in heavy dependencies) and would otherwise block the loop for seconds inside the http startup step.
+    from .api_v1 import preload_domains
+
+    preload_domains()
 
     try:
         asyncio.run(

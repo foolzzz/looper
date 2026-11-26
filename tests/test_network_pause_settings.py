@@ -16,6 +16,11 @@ from tests.test_api_v1_auth import CLIENT_TOKEN, _bearer, _send, _serving, clien
 from tests.test_operator_auth import TOKEN
 
 
+@pytest.fixture(autouse=True)
+def _clear_maximum_warning(monkeypatch):
+    monkeypatch.setattr(settings, "_warned_maximum", None)
+
+
 @pytest.fixture
 def stored(monkeypatch):
     rows, writes = {}, []
@@ -62,6 +67,33 @@ def test_invalid_values_never_write(stored, values):
 def test_invalid_stored_values_fail_closed(stored):
     stored[0].update({settings.ENABLED_KEY: "yes", settings.MAX_PAUSE_KEY: "-3"})
     assert asyncio.run(settings.load()) == settings.NetworkPauseSettings(False, 7200)
+
+
+def _invalid_maximum_warnings(caplog):
+    message = f"Invalid {settings.MAX_PAUSE_KEY}; using the built-in duration"
+    return [record for record in caplog.records
+            if record.name == "looper.agents.network_pause_settings" and record.message == message]
+
+
+def test_invalid_stored_maximum_warns_once_per_value(stored, caplog):
+    rows = stored[0]
+
+    async def check():
+        rows[settings.MAX_PAUSE_KEY] = "nope"
+        with caplog.at_level("WARNING", logger="looper.agents.network_pause_settings"):
+            assert await settings.load() == settings.NetworkPauseSettings(False, 7200)
+            assert await settings.load() == settings.NetworkPauseSettings(False, 7200)
+            assert len(_invalid_maximum_warnings(caplog)) == 1
+            rows[settings.MAX_PAUSE_KEY] = "0"
+            assert await settings.load() == settings.NetworkPauseSettings(False, 7200)
+            assert len(_invalid_maximum_warnings(caplog)) == 2
+            rows[settings.MAX_PAUSE_KEY] = "30"
+            assert await settings.load() == settings.NetworkPauseSettings(False, 30)
+            assert len(_invalid_maximum_warnings(caplog)) == 2
+            rows[settings.MAX_PAUSE_KEY] = "nope"
+            assert await settings.load() == settings.NetworkPauseSettings(False, 7200)
+            assert len(_invalid_maximum_warnings(caplog)) == 3
+    asyncio.run(check())
 
 
 def test_unavailable_settings_fail_closed(monkeypatch):

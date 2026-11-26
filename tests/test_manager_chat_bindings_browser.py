@@ -82,6 +82,12 @@ def managers_dashboard(dashboard_url):
                 result = {**body, "deleted": True}
             elif path == "registry/view":
                 result = {"profiles": [], "providers": [], "runtimes": []}
+            elif path == "capability_sets/list":
+                result = {"sets": []}
+            elif path == "chat_scope_overrides/list":
+                result = {"overrides": []}
+            elif path == "manager_sessions/list":
+                result = {"routing_enabled": False, "sessions": []}
             elif path == "project_admin/list":
                 result = {"projects": []}
             elif path == "task_conversations/get":

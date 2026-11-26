@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import time
@@ -10,10 +11,11 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from enum import Enum
 from pathlib import Path
+from stat import S_ISREG
 from typing import Any, Literal, Protocol
 
 from ...db import activity, agent_sessions, projects, tasks
-from .. import outbound_hook, step_workspaces, task_budget, task_conversations_settings
+from .. import operator_mcp, outbound_hook, step_workspaces, task_budget, task_conversations_settings
 from .. import task_manager_safety, task_manager_settings, task_workspaces
 from ..agent_settings import Access, Launch
 from ..claude_cli import ClaudeRunRecorder, ResidentClaude
@@ -65,6 +67,7 @@ class RefuseReason(str, Enum):
     REVIEW_HOOK_DISABLED = "review_hook_disabled"
     CLI_UNVERIFIED = "cli_unverified"
     MANAGER_ANSWERS_OFF = "manager_answers_off"
+    MCP_UNRESOLVED = "mcp_unresolved"
 
 
 def _off_text(reason: RefuseReason) -> str:
@@ -128,6 +131,10 @@ class _TaskResident(ResidentClaude):
             if self.owner.token is not None:
                 self.owner.pool.ops.revoke(self.owner.token)
                 self.owner.token = None
+            # They can hold server secrets: no file outlives its session or survives a replacement.
+            for path in self.owner.mcp_files:
+                Path(path).unlink(missing_ok=True)
+            self.owner.mcp_files.clear()
 
 
 @dataclass(frozen=True)
@@ -151,8 +158,13 @@ class _ResumeFailed(Exception):
     pass
 
 
+_DIGEST_FILE = 1 << 20  # a file larger than this is never hashed
+_DIGEST_BUDGET = 8 << 20  # total bytes one decision may hash
+
+
 async def _files(cwd: str) -> dict[str, tuple[Any, ...]]:
-    """Status plus file metadata distinguishes another edit without reading large files."""
+    """Status plus file metadata distinguishes another edit without reading large files. A staged rename is one
+    change of two paths: both are recorded, each naming the other as its partner (second field)."""
     status = await step_workspaces._git(cwd, "status", "--porcelain", "-z", "--untracked-files=all", check=False)
     if status.returncode:
         return {}
@@ -164,18 +176,64 @@ async def _files(cwd: str) -> dict[str, tuple[Any, ...]]:
             if not entry:
                 continue
             name = entry[3:]
-            if "R" in entry[:2] or "C" in entry[:2]:
-                next(entries, None)
-            path = Path(cwd) / name
-            try:
-                stat = path.lstat()
-                value = (stat.st_mtime_ns, stat.st_ctime_ns, stat.st_size)
-            except OSError:
-                value = ()
-            found[name] = (entry[:2], *value)
+            origin = next(entries, "") if "R" in entry[:2] or "C" in entry[:2] else ""
+            pairs = ((name, origin), (origin, name)) if "R" in entry[:2] else ((name, ""),)
+            for path, partner in pairs:
+                try:
+                    stat = (Path(cwd) / path).lstat()
+                    value = (stat.st_mtime_ns, stat.st_ctime_ns, stat.st_size)
+                except OSError:
+                    value = ()
+                found[path] = (entry[:2], partner, *value)
         return found
 
     return await asyncio.to_thread(snapshot)
+
+
+async def _digests(cwd: str, names: Sequence[str]) -> tuple[dict[str, str], set[str]]:
+    """Content hashes of the non-empty regular files among ``names``, at most ``_DIGEST_BUDGET`` bytes in all and
+    ``_DIGEST_FILE`` each; the second value holds the files that were skipped for size or budget (unknown content)."""
+    def hashed() -> tuple[dict[str, str], set[str]]:
+        found, unknown, spent = {}, set(), 0
+        for name in sorted(names):
+            try:
+                path = Path(cwd) / name
+                stat = path.lstat()
+                if not S_ISREG(stat.st_mode) or not stat.st_size:
+                    continue
+                if stat.st_size > _DIGEST_FILE or spent + stat.st_size > _DIGEST_BUDGET:
+                    unknown.add(name)
+                    continue
+                found[name] = hashlib.sha1(path.read_bytes()).hexdigest()
+                spent += stat.st_size
+            except OSError:
+                continue
+        return found, unknown
+    return await asyncio.to_thread(hashed)
+
+
+async def _own_paths(cwd: str, files: Sequence[str], before: Mapping[str, tuple[Any, ...]],
+                     after: Mapping[str, tuple[Any, ...]], before_digests: Mapping[str, str],
+                     before_unknown: set[str]) -> tuple[list[str], list[str], list[str]]:
+    """Split the turn's changed ``files`` into the paths it owns (safe to commit), the ones that were the user's
+    before it began, and the ones whose owner could not be settled within the hashing budget (never committed)."""
+    def partner(snapshot: Mapping[str, tuple[Any, ...]], name: str) -> str:
+        return snapshot[name][1] if name in snapshot else ""
+    theirs = [name for name in files if name in before or partner(after, name) in before]
+    rest = [name for name in files if name not in theirs]
+    # An unstaged rename shows as a deletion plus a new file: a new file holding the content of a path that was
+    # dirty before the turn, and is gone now, is that path's, moved.
+    vanished = [name for name in before if name not in after or "D" in after[name][0]]
+    candidates = [name for name in rest if "?" in after[name][0] or "A" in after[name][0]] if vanished else []
+    unverified: list[str] = []
+    if candidates:
+        now, now_unknown = await _digests(cwd, candidates)
+        moved = {before_digests[name] for name in vanished if name in before_digests}
+        theirs += [name for name in candidates if now.get(name) in moved]
+        if now_unknown or any(name in before_unknown for name in vanished):
+            unverified = [name for name in candidates if name not in theirs and (
+                name in now_unknown or any(v in before_unknown for v in vanished))]
+    return ([name for name in rest if name not in theirs and name not in unverified], theirs, unverified)
 
 
 class TaskManagerAgent:
@@ -190,6 +248,7 @@ class TaskManagerAgent:
         self.loaded = False
         self.context_rotation_pending = False
         self.running: asyncio.Task[None] | None = None
+        self.mcp_files: set[str] = set()  # generated configs holding the operator's server definitions
 
     async def prepare(self, *, sink: TurnSink | None = None) -> tuple[Mapping[str, Any], Any, Launch, SystemPrompt]:
         """Read configuration afresh; no launch bypasses the direct-mode review checks."""
@@ -249,8 +308,17 @@ class TaskManagerAgent:
                     raise Refused(RefuseReason.OUTBOUND_REVIEW_UNAVAILABLE, "The outbound review hook is unavailable.") from exc
                 if hook is None:
                     raise Refused(RefuseReason.OUTBOUND_REVIEW_UNAVAILABLE, "The outbound review hook is unavailable.")
-            return Launch(settings=settings, library=library, role=None,
-                          access=Access.FULL if direct else Access.READ_ONLY, tool_hook=hook)
+            run = Launch(settings=settings, library=library, role=None,
+                         access=Access.FULL if direct else Access.READ_ONLY, tool_hook=hook)
+            if direct and (allowed := task_conversations_settings.manager_mcp()):
+                try:
+                    run = replace(run, library=await operator_mcp.library_with_allowed(
+                        library, self.pool.runtime_root, allowed, cwd=reopened.work_dir,
+                        environment=run.runtime.environment(run)))
+                except operator_mcp.UnresolvedServers as exc:
+                    raise Refused(RefuseReason.MCP_UNRESOLVED, str(exc)) from exc
+                self.mcp_files.add(run.library.mcp_config)
+            return run
         # Query newest summaries directly, so a long-lived task never gets its oldest activity as its brief.
         from ...db.connection import get_pool
         recent = await get_pool().fetch("SELECT summary FROM activity WHERE task_id=$1 ORDER BY seq DESC LIMIT 20",
@@ -271,7 +339,8 @@ class TaskManagerAgent:
         command = command_for(launch)
         env = task_manager_safety.environment(launch, self.task_id)
         settings_file = command[command.index("--settings") + 1] if "--settings" in command else ""
-        signature = (self.mode, reopened.work_dir, launch.profile.id, launch.model, launch.effort, launch.profile.provider, prompt.sha256, settings_file)
+        signature = (self.mode, reopened.work_dir, launch.profile.id, launch.model, launch.effort, launch.profile.provider, prompt.sha256, settings_file,
+                     task_conversations_settings.manager_mcp() if direct else ())
         async with self.pool._available:
             notified = False
             while not await self.pool._slot(self):
@@ -327,6 +396,7 @@ class TaskManagerAgent:
             await request.sink.event(TaskManagerEvent.SESSION_FRESH,
                                      {"reason": "read_only_open", "detail": reopened.reason})
         before = await _files(reopened.work_dir)
+        before_digests, before_unknown = await _digests(reopened.work_dir, list(before))
         text, outcome = "", "failed"
         written = False
         record_id = None
@@ -415,11 +485,20 @@ class TaskManagerAgent:
                     runtime_type="claude-code", profile_id=launch.profile.id, provider_id=launch.profile.provider.id)
             after = await _files(reopened.work_dir)
             files = sorted(name for name in before.keys() | after.keys() if before.get(name) != after.get(name))
-            commit = None
+            commit, summary = None, {}
             if written and task.get("workspace_mode") == "worktree" and self.mode == "direct":
-                commit = await step_workspaces.commit_pending(Path(reopened.work_dir), self.links,
-                    f"looper: task Manager turn of task {self.task_id}\n\nLooper-Task: {self.task_id}")
-            await request.sink.event(TaskManagerEvent.TURN_SUMMARY, {"files": files, "commit": commit, "mode": self.mode})
+                # A path that already had uncommitted changes when the turn began belongs to the user: it is never
+                # committed here, even when this turn edited it too.
+                own, theirs, unverified = await _own_paths(reopened.work_dir, files, before, after,
+                                                           before_digests, before_unknown)
+                if kept := [name for name in theirs if name in after]:
+                    summary["uncommitted"] = kept
+                if unverified:
+                    summary["unverified"] = unverified
+                if own:
+                    commit = await step_workspaces.commit_paths(Path(reopened.work_dir), own, self.links,
+                        f"looper: task Manager turn of task {self.task_id}\n\nLooper-Task: {self.task_id}")
+            await request.sink.event(TaskManagerEvent.TURN_SUMMARY, {"files": files, "commit": commit, "mode": self.mode, **summary})
         from . import task_manager_context
         await task_manager_context.maintain(self, request, reopened, launch, prompt, record_id)
         await request.sink.final(text, outcome)

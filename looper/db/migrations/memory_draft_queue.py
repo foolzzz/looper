@@ -26,7 +26,10 @@ async def pending(conn):
                                    "AND to_regclass('memory_draft_lease') IS NOT NULL")
 
 
-async def apply(conn, *, sql, state):
+async def apply(conn, *, sql, state) -> bool:
+    did_work = False
     if await pending(conn):
+        did_work = True
         await conn.execute(fresh_ddl)
         await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1) ON CONFLICT DO NOTHING", name)
+    return did_work

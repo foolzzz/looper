@@ -23,6 +23,13 @@ vi.mock("@/lib/api", async (importOriginal) => ({
 }));
 
 vi.mock("@/lib/chat-bindings-api", () => ({ fetchChatBindings: vi.fn(async () => []) }));
+vi.mock("@/lib/v1", async (original) => ({
+  ...(await original<typeof import("@/lib/v1")>()),
+  callV1: vi.fn(async (path: string) => {
+    if (path === "/api/v1/manager_sessions/list") return { routing_enabled: false, sessions: [] };
+    throw new Error("unavailable");
+  }),
+}));
 vi.mock("@/lib/manager-installs-api", () => ({
   fetchManagerInstalls: vi.fn(async (manager_id: string) => ({ manager_id, installs: [] })),
 }));

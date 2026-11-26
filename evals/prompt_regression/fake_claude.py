@@ -568,7 +568,7 @@ def _hold(stdin: _Stdin, cost: float) -> None:
             return
 
 
-def _manager(scenarios_path: str, args: list[str], stdin: _Stdin) -> None:
+def _manager(scenarios_path: str, args: list[str], stdin: _Stdin, system_prompt: str) -> None:
     rpc = _mcp(args)
     cost, last_task = 0.0, ""
     while (line := stdin.readline()) is not None:
@@ -580,10 +580,18 @@ def _manager(scenarios_path: str, args: list[str], stdin: _Stdin) -> None:
         named = re.search(r"confirmation_id (c-[0-9a-f]+)", content)
         with open(scenarios_path, encoding="utf-8") as handle:
             scenarios = json.load(handle)
-        calls = (scenarios.get("manager") or {}).get(message.strip())
+        candidates = [message]
+        fenced = list(re.finditer(r'<untrusted source="group_message"[^>]*>\n(.*?)\n</untrusted>', message, re.S))
+        if fenced:
+            # Group activity precedes the current request. Prefer the request after it, or the last fence
+            # when the current speaker's own message is fenced too.
+            candidates.extend((message[fenced[-1].end():].strip(), fenced[-1].group(1)))
+        calls = next((scenarios["manager"][candidate.strip()] for candidate in candidates
+                      if candidate.strip() in (scenarios.get("manager") or {})), None)
         if calls is None:
             matches = [script for prefix, script in (scenarios.get("manager_prefix") or {}).items()
-                       if message.startswith(prefix)]
+                       if any(candidate.startswith(prefix) or candidate.rstrip() == prefix.rstrip()
+                              for candidate in candidates)]
             if len(matches) > 1:
                 raise ValueError("ambiguous scripted Manager prefixes")
             calls = matches[0] if matches else []
@@ -591,6 +599,20 @@ def _manager(scenarios_path: str, args: list[str], stdin: _Stdin) -> None:
         for name, arguments in calls:
             if name == "__reply__":
                 reply = arguments["text"]
+                continue
+            if name == "__input_contract__":
+                problems = [f"missing system text: {text}" for text in arguments.get("system", [])
+                            if text not in system_prompt]
+                problems += [f"missing input text: {text}" for text in arguments.get("input", [])
+                             if text not in content]
+                problems += [f"excluded text: {text}" for text in arguments.get("excluded", [])
+                             if text in content or text in system_prompt]
+                if arguments.get("attachment_end") and not (
+                    "Attachments sent with this message" in content
+                    and content.rstrip().endswith(arguments["attachment_end"])
+                ):
+                    problems.append("attachments section does not end with the cannot-open line")
+                reply = "EVAL_INPUT_FAILURE: " + "; ".join(problems) if problems else arguments["reply"]
                 continue
             if name == "__capture_context__":
                 Path(scenarios_path).with_suffix(".context.txt").write_text(content, encoding="utf-8")
@@ -674,7 +696,7 @@ def main(argv: list[str]) -> int:
     # Manager's prompt ends with Looper's tools contract.
     if ("## Looper's tools (required)" in system_prompt
             or "You are Looper's chat assistant for this conversation." in system_prompt):
-        _manager(scenarios_path, args, stdin)
+        _manager(scenarios_path, args, stdin, system_prompt)
     elif "## Your answer (required; code reads it)" in system_prompt:  # a consult of a run's session
         _consult(script, stdin)
     elif _ADVISOR_MARKER in system_prompt:

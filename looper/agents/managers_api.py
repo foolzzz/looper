@@ -64,6 +64,10 @@ class TaskPolicy(str, Enum):
 class ScenarioSessionRouting(str, Enum):
     OFF = "off"
     PER_CHAT = "per_chat"
+    SCOPED = "scoped"
+
+
+SELECTABLE_ROUTING = (ScenarioSessionRouting.OFF, ScenarioSessionRouting.PER_CHAT)
 
 
 @dataclass(frozen=True)
@@ -395,6 +399,8 @@ async def update_scenario_session_routing(manager_id: str, value: str | None) ->
         routing = ScenarioSessionRouting.OFF if value is None else ScenarioSessionRouting(value)
     except (TypeError, ValueError):
         raise _refuse("session_routing must be off, per_chat or null") from None
+    if routing not in SELECTABLE_ROUTING:
+        raise _refuse("session_routing must be off, per_chat or null")
     async with db_connection.transaction() as conn:
         updated = await db_managers.update_manager(manager_id, {"session_routing": routing.value},
                                                    conn=conn, only_if_changed=True)

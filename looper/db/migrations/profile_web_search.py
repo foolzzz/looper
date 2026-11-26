@@ -11,10 +11,12 @@ async def pending(conn):
     return await legacy._profile_web_search_pending(conn)
 
 
-async def apply(conn, *, sql, state):
+async def apply(conn, *, sql, state) -> bool:
+    did_work = False
     from .. import connection as legacy
 
     if await legacy._profile_web_search_pending(conn):
+        did_work = True
         await conn.execute(
             "ALTER TABLE agent_profiles ADD COLUMN web_search BOOLEAN NOT NULL DEFAULT true"
         )
@@ -22,3 +24,4 @@ async def apply(conn, *, sql, state):
             "INSERT INTO schema_migrations (name) VALUES ($1)",
             legacy._PROFILE_WEB_SEARCH,
         )
+    return did_work

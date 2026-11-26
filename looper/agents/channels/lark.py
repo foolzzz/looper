@@ -1371,7 +1371,7 @@ class LarkChannelAdapter(ChannelAdapter):
         correlation_id = str(_uuid.uuid4())
         self._correlation_chat[correlation_id] = chat_id
         context = {"chat_id": chat_id, "chat_type": "group" if group else "p2p", "sender_id": sender_open_id or "",
-                   "message_id": message_id}
+                   "message_id": message_id, "sender_kind": "bot" if bot else "person"}
         # What the message replies to: the message it answers and the first of its thread (a gate's messages).
         for key in ("reply_to", "root_id", "thread_id"):
             if isinstance(ref := event.get(key), str) and ref:

@@ -11,10 +11,12 @@ async def pending(conn):
     return await legacy._llm_requests_stored_bytes_pending(conn)
 
 
-async def apply(conn, *, sql, state):
+async def apply(conn, *, sql, state) -> bool:
+    did_work = False
     from .. import connection as legacy
 
     if await legacy._llm_requests_stored_bytes_pending(conn):
+        did_work = True
         for table in ("llm_requests", "llm_request_parts"):
             await conn.execute(
                 f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS stored_bytes BIGINT"
@@ -31,3 +33,4 @@ async def apply(conn, *, sql, state):
             "INSERT INTO schema_migrations (name) VALUES ($1)",
             legacy._LLM_REQUESTS_STORED_BYTES,
         )
+    return did_work

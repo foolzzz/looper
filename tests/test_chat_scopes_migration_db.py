@@ -176,7 +176,8 @@ def test_rebinding_resets_scope():
                 row = await conn.fetchrow("SELECT default_scope,legacy_allowed,suggested_scope FROM manager_chat_bindings WHERE chat_id='oc_alpha'")
                 assert tuple(row) == expected
                 assert binding['created_at'] == created_at
-                assert set(binding) == {'channel_id','chat_id','manager_id','created_at','allowed_senders','sender_policy'}
+                assert set(binding) == {'channel_id','chat_id','manager_id','created_at','allowed_senders','sender_policy',
+                                        'default_scope','effective_default_scope','legacy_allowed','suggested_scope'}  # the operations member's scope/risk fields
                 assert await conn.fetchval("SELECT count(*) FROM binding_principal_scopes") == (owner == 'manager-alpha')
             async with conn.transaction():
                 await chat_bindings.delete_binding('channel-lark','oc_alpha',conn=conn)

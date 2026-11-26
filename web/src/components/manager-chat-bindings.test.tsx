@@ -5,16 +5,21 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ManagersSection } from "@/components/managers-settings";
 import * as api from "@/lib/api";
 import * as bindingsApi from "@/lib/chat-bindings-api";
-import { V1Error } from "@/lib/v1";
+import { callV1, V1Error } from "@/lib/v1";
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 vi.mock("@/lib/api", async (original) => ({
   ...(await original<typeof import("@/lib/api")>()),
   fetchManagers: vi.fn(), fetchRegistry: vi.fn(async () => ({ profiles: [] })),
 }));
+vi.mock("@/lib/v1", async (original) => ({
+  ...(await original<typeof import("@/lib/v1")>()),
+  callV1: vi.fn(),
+}));
 vi.mock("@/lib/chat-bindings-api", async (original) => ({
   ...(await original<typeof import("@/lib/chat-bindings-api")>()),
   confirmChatBinding: vi.fn(), fetchChatBindings: vi.fn(), fetchChannelChats: vi.fn(), putChatBinding: vi.fn(), deleteChatBinding: vi.fn(),
+  listCapabilitySets: vi.fn(), listOverrides: vi.fn(), putDefaultScope: vi.fn(), putOverride: vi.fn(), deleteOverride: vi.fn(),
 }));
 vi.mock("@/lib/manager-installs-api", () => ({
   fetchManagerInstalls: vi.fn(async (manager_id: string) => ({ manager_id, installs: [] })),
@@ -31,7 +36,8 @@ const managers = [manager("manager", "Manager"), manager("review", "Review", fal
 function binding(patch: Partial<bindingsApi.Binding> = {}): bindingsApi.Binding {
   return { channel_id: "bot-one", chat_id: "42", chat_name: "Design", bot_name: "Example Bot",
     channel_type: "telegram", manager_id: "manager", manager_name: "Manager", manager_enabled: true,
-    manager_deleted: false, created_at: "", allowed_senders: [], sender_policy: "listed", ...patch };
+    manager_deleted: false, created_at: "", allowed_senders: [], sender_policy: "listed",
+    default_scope: null, effective_default_scope: "chat_only", legacy_allowed: false, suggested_scope: null, ...patch };
 }
 function deferred<T>() {
   let resolve!: (value: T) => void;
@@ -59,6 +65,20 @@ describe("Manager explicit chats", () => {
   beforeEach(() => {
     vi.resetAllMocks();
     rows = [binding()];
+    vi.mocked(callV1).mockImplementation(async (path: string) => {
+      if (path === "/api/v1/manager_sessions/list") return {
+        routing_enabled: true,
+        sessions: [{ key: "main", kind: "main", name: "主会话", resident: true, last_active_at: null,
+          context_tokens: null, cost_usd: null }],
+      };
+      throw new Error("unavailable");
+    });
+    b.listCapabilitySets.mockResolvedValue([
+      { id: "chat_only", name: "Chat only", builtin: true, current_version: 1, items: [] },
+      { id: "full", name: "Full", builtin: true, current_version: 1, items: [] },
+      { id: "legacy", name: "Legacy", builtin: true, current_version: 1, items: [] },
+    ]);
+    b.listOverrides.mockResolvedValue([]);
     m.fetchManagers.mockResolvedValue(managers);
     m.fetchRegistry.mockResolvedValue({ profiles: [] } as unknown as api.Registry);
     b.fetchChatBindings.mockImplementation(async () => rows.slice());
@@ -79,6 +99,323 @@ describe("Manager explicit chats", () => {
     await render();
     expect(region().textContent).toContain("Design");
     expect(region().textContent).toContain("Bound to Manager");
+    expect(region().textContent).toContain("Scope: chat_only");
+    expect(region().textContent).toContain("0 overrides");
+    expect(region().textContent).not.toContain("Legacy: everyone admitted");
+  });
+  const scopeValues = () => [...(region().querySelector('[aria-label="Scope for Design"]') as HTMLSelectElement).options].map((option) => option.value);
+  const setControl = async (selector: string, value: string) => {
+    const el = region().querySelector(selector) as HTMLSelectElement | HTMLInputElement;
+    const proto = el instanceof HTMLSelectElement ? HTMLSelectElement.prototype : HTMLInputElement.prototype;
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(proto, "value")!.set!.call(el, value);
+      el.dispatchEvent(new Event(el instanceof HTMLSelectElement ? "change" : "input", { bubbles: true }));
+    });
+  };
+  it("never offers full, and offers legacy only when the binding allows it", async () => {
+    await render();
+    expect(scopeValues()).toEqual(["", "chat_only"]);
+    expect(scopeValues()).not.toContain("full");
+    const overrideScopes = [...(region().querySelector('[aria-label="Override scope for Design"]') as HTMLSelectElement).options].map((option) => option.value);
+    expect(overrideScopes).toEqual(["", "chat_only"]);
+    expect(overrideScopes).not.toContain("full");
+    rows = [binding({ legacy_allowed: true })];
+    await click(button("Refresh chats"));
+    expect(scopeValues()).toContain("legacy");
+    expect(scopeValues()).not.toContain("full");
+  });
+  it("saves the group default with stop_now through the confirmation", async () => {
+    await render();
+    await setControl('[aria-label="Scope for Design"]', "chat_only");
+    await click(button("Save scope", region()));
+    await act(async () => (region().querySelector('[aria-label="Apply now, interrupting a running reply"]') as HTMLInputElement).click());
+    await click(button("Confirm scope", region()));
+    expect(b.putDefaultScope).toHaveBeenCalledWith(expect.objectContaining({
+      channel_id: "bot-one", chat_id: "42", manager_id: "manager" }), "chat_only", true);
+  });
+  it("shows the legacy notice only for legacy and adopts the suggested scope", async () => {
+    rows = [binding({ default_scope: "legacy", effective_default_scope: "legacy", legacy_allowed: true, suggested_scope: "chat_only" })];
+    await render();
+    expect(region().textContent).toContain("Legacy: everyone admitted here shares a session that can run commands with this machine's account.");
+    await click(button("Adopt chat_only", region()));
+    await click(button("Confirm scope", region()));
+    expect(b.putDefaultScope).toHaveBeenCalledWith(expect.anything(), "chat_only", false);
+    rows = [binding()];
+    await click(button("Refresh chats"));
+    expect(region().textContent).not.toContain("Legacy: everyone admitted");
+  });
+  it("adds a bot override with both ids and shows a conflict inline", async () => {
+    b.putOverride.mockRejectedValueOnce(new V1Error(409, "conflict", "sender id already belongs to principal ou_other"));
+    await render();
+    await setControl('[aria-label="Override kind for Design"]', "bot");
+    await setControl('[aria-label="Override id for Design"]', "ou_one");
+    await setControl('[aria-label="Override second id for Design"]', "cli_two");
+    expect(button("Add override", region()).disabled).toBe(true);
+    await setControl('[aria-label="Override scope for Design"]', "chat_only");
+    await click(button("Add override", region()));
+    expect(b.putOverride).toHaveBeenCalledWith(expect.objectContaining({ channel_id: "bot-one", chat_id: "42" }), {
+      principal_kind: "bot", sender_ids: ["ou_one", "cli_two"], scope_id: "chat_only", stop_now: false,
+    });
+    expect([...region().querySelectorAll('[role="alert"]')].some((el) => el.textContent?.includes("conflict"))).toBe(true);
+  });
+  it("removes an override by principal id", async () => {
+    b.listOverrides.mockResolvedValue([{ principal_id: "ou_one", principal_kind: "person", sender_ids: ["ou_one"],
+      scope_id: "chat_only", created_at: "" }]);
+    await render();
+    expect(region().textContent).toContain("person");
+    expect(region().textContent).toContain("1 override");
+    await click(button("Remove", region()));
+    expect(b.deleteOverride).toHaveBeenCalledWith(expect.objectContaining({ channel_id: "bot-one", chat_id: "42" }), "ou_one", false);
+  });
+  const sets = () => [
+    { id: "chat_only", name: "Chat only", builtin: true, current_version: 1, items: [] as unknown[] },
+    { id: "full", name: "Full", builtin: true, current_version: 1, items: [] as unknown[] },
+    { id: "legacy", name: "Legacy", builtin: true, current_version: 1, items: [] as unknown[] },
+  ];
+  const scopeSelect = () => region().querySelector('[aria-label="Scope for Design"]') as HTMLSelectElement;
+  const overrideSelect = () => region().querySelector('[aria-label="Override scope for Design"]') as HTMLSelectElement;
+  it("disables scope writes while capability sets load and enables them after a picked recovery", async () => {
+    const pending = deferred<bindingsApi.CapabilitySet[]>();
+    b.listCapabilitySets.mockReturnValue(pending.promise);
+    await render();
+    expect(region().textContent).toContain("Loading capability sets…");
+    expect(scopeSelect().disabled).toBe(true);
+    expect(overrideSelect().disabled).toBe(true);
+    expect(button("Save scope", region()).disabled).toBe(true);
+    expect(button("Add override", region()).disabled).toBe(true);
+    expect(button("Unbind", region()).disabled).toBe(false);
+    await select("review");
+    expect(button("Move", region()).disabled).toBe(false);
+    await setControl('[aria-label="Extra senders for Design"]', "ou_ready");
+    expect(button("Save", region()).disabled).toBe(false);
+    await setControl('[aria-label="Override id for Design"]', "ou_one");
+    expect(button("Add override", region()).disabled).toBe(true);
+    expect(b.putOverride).not.toHaveBeenCalled();
+    await act(async () => pending.resolve(sets()));
+    expect(region().textContent).not.toContain("Loading capability sets…");
+    expect(region().textContent).toContain("Chat only");
+    expect(scopeSelect().disabled).toBe(false);
+    expect(button("Save scope", region()).disabled).toBe(true);
+    await setControl('[aria-label="Scope for Design"]', "chat_only");
+    expect(button("Save scope", region()).disabled).toBe(false);
+    expect(button("Add override", region()).disabled).toBe(true);
+    await setControl('[aria-label="Override scope for Design"]', "chat_only");
+    expect(button("Add override", region()).disabled).toBe(false);
+    expect(button("Unbind", region()).disabled).toBe(false);
+  });
+  it("shows an empty capability catalog and keeps scope writes disabled", async () => {
+    b.listCapabilitySets.mockResolvedValue([]);
+    await render();
+    expect(region().textContent).toContain("No capability sets.");
+    expect(region().textContent).not.toContain("Loading capability sets…");
+    expect(region().textContent).not.toContain("Chat only");
+    expect(scopeSelect().disabled).toBe(true);
+    expect(overrideSelect().disabled).toBe(true);
+    expect(button("Save scope", region()).disabled).toBe(true);
+    expect(button("Add override", region()).disabled).toBe(true);
+    expect(button("Unbind", region()).disabled).toBe(false);
+    expect(b.putDefaultScope).not.toHaveBeenCalled();
+  });
+  it("shows a failed capability read, keeps binding writes, and recovers on retry", async () => {
+    b.listCapabilitySets.mockRejectedValueOnce(new V1Error(503, "unavailable", "sets down")).mockResolvedValue(sets());
+    await render();
+    expect(region().textContent).toContain("Capability sets could not be loaded.");
+    expect(region().textContent).toContain("unavailable: sets down");
+    expect(button("Save scope", region()).disabled).toBe(true);
+    expect(button("Add override", region()).disabled).toBe(true);
+    expect(button("Unbind", region()).disabled).toBe(false);
+    await click(button("Retry capability sets"));
+    expect(region().textContent).not.toContain("Capability sets could not be loaded.");
+    expect(region().textContent).toContain("Chat only");
+    expect(scopeSelect().disabled).toBe(false);
+    await setControl('[aria-label="Scope for Design"]', "chat_only");
+    expect(button("Save scope", region()).disabled).toBe(false);
+  });
+  it("retries a failed capability read from Refresh chats", async () => {
+    b.listCapabilitySets.mockRejectedValueOnce(new V1Error(503, "unavailable", "sets down")).mockResolvedValue(sets());
+    await render();
+    expect(region().textContent).toContain("Capability sets could not be loaded.");
+    const calls = b.listCapabilitySets.mock.calls.length;
+    await click(button("Refresh chats"));
+    expect(b.listCapabilitySets.mock.calls.length).toBeGreaterThan(calls);
+    expect(region().textContent).toContain("Chat only");
+    expect(scopeSelect().disabled).toBe(false);
+    expect(button("Save scope", region()).disabled).toBe(true);
+  });
+  const legacyRow = () => {
+    rows = [binding({ default_scope: "legacy", effective_default_scope: "legacy", legacy_allowed: true, suggested_scope: "chat_only" })];
+  };
+  const adopt = () => button("Adopt chat_only", region());
+  const confirmScope = () => button("Confirm scope", region());
+  const holdText = {
+    loading: "Loading capability sets…",
+    empty: "No capability sets.",
+    failed: "Capability sets could not be loaded.",
+  } as const;
+  const bindingWritesStay = async () => {
+    expect(button("Unbind", region()).disabled).toBe(false);
+    await select("review");
+    expect(button("Move", region()).disabled).toBe(false);
+  };
+  const recoverSets = async (kind: keyof typeof holdText, pending: ReturnType<typeof deferred<bindingsApi.CapabilitySet[]>> | null) => {
+    if (kind === "loading") await act(async () => pending!.resolve(sets()));
+    else if (kind === "empty") {
+      b.listCapabilitySets.mockResolvedValue(sets());
+      await click(button("Refresh chats"));
+    } else await click(button("Retry capability sets"));
+  };
+  it.each(["loading", "empty", "failed"] as const)("does not adopt a suggested scope while capability sets are %s", async (kind) => {
+    legacyRow();
+    const pending = kind === "loading" ? deferred<bindingsApi.CapabilitySet[]>() : null;
+    if (kind === "loading") b.listCapabilitySets.mockReturnValue(pending!.promise);
+    else if (kind === "empty") b.listCapabilitySets.mockResolvedValue([]);
+    else b.listCapabilitySets.mockRejectedValueOnce(new V1Error(503, "unavailable", "sets down")).mockResolvedValue(sets());
+    await render();
+    expect(adopt().disabled).toBe(true);
+    expect(adopt().textContent).toBe("Adopt chat_only");
+    expect(adopt().previousElementSibling?.textContent).toBe(holdText[kind]);
+    adopt().disabled = false;
+    await click(adopt());
+    expect(confirmScope()).toBeUndefined();
+    expect(b.putDefaultScope).not.toHaveBeenCalled();
+    await bindingWritesStay();
+    await recoverSets(kind, pending);
+    expect(adopt().disabled).toBe(false);
+    expect(adopt().previousElementSibling?.textContent).not.toBe(holdText[kind]);
+    await click(adopt());
+    await click(confirmScope());
+    expect(b.putDefaultScope).toHaveBeenCalledTimes(1);
+    expect(b.putDefaultScope).toHaveBeenCalledWith(expect.anything(), "chat_only", false);
+  });
+  it.each(["loading", "empty", "failed"] as const)("does not submit an open scope confirmation while capability sets are %s", async (kind) => {
+    await render();
+    await setControl('[aria-label="Scope for Design"]', "chat_only");
+    await click(button("Save scope", region()));
+    expect(confirmScope().disabled).toBe(false);
+    const pending = kind === "loading" ? deferred<bindingsApi.CapabilitySet[]>() : null;
+    if (kind === "loading") b.listCapabilitySets.mockReturnValueOnce(pending!.promise);
+    else if (kind === "empty") b.listCapabilitySets.mockResolvedValueOnce([]);
+    else b.listCapabilitySets.mockRejectedValueOnce(new V1Error(503, "unavailable", "sets down"));
+    await click(button("Refresh chats"));
+    const confirm = confirmScope();
+    expect(confirm.disabled).toBe(true);
+    expect(confirm.textContent).toBe("Confirm scope");
+    expect(confirm.parentElement?.previousElementSibling?.textContent).toBe(holdText[kind]);
+    expect(button("Cancel", region()).disabled).toBe(false);
+    await bindingWritesStay();
+    confirm.disabled = false;
+    await click(confirm);
+    expect(b.putDefaultScope).not.toHaveBeenCalled();
+    await recoverSets(kind, pending);
+    expect(confirmScope().disabled).toBe(false);
+    expect(confirmScope().parentElement?.previousElementSibling?.textContent).not.toBe(holdText[kind]);
+    await click(confirmScope());
+    expect(b.putDefaultScope).toHaveBeenCalledTimes(1);
+    expect(b.putDefaultScope).toHaveBeenCalledWith(expect.objectContaining({
+      channel_id: "bot-one", chat_id: "42", manager_id: "manager" }), "chat_only", false);
+  });
+  it("does not adopt or confirm a scope that is outside the ready set", async () => {
+    legacyRow();
+    const fullOnly = [{ id: "full", name: "Full", builtin: true, current_version: 1, items: [] as unknown[] }];
+    b.listCapabilitySets.mockResolvedValue(fullOnly);
+    await render();
+    expect(adopt().disabled).toBe(true);
+    expect(adopt().previousElementSibling?.textContent).toBe("This scope is not in the loaded capability sets.");
+    adopt().disabled = false;
+    await click(adopt());
+    expect(confirmScope()).toBeUndefined();
+    expect(b.putDefaultScope).not.toHaveBeenCalled();
+    expect(button("Unbind", region()).disabled).toBe(false);
+    b.listCapabilitySets.mockResolvedValue(sets());
+    await click(button("Refresh chats"));
+    expect(adopt().disabled).toBe(false);
+    await click(adopt());
+    await click(confirmScope());
+    expect(b.putDefaultScope).toHaveBeenCalledTimes(1);
+    rows = [binding()];
+    b.listCapabilitySets.mockResolvedValue(sets());
+    b.putDefaultScope.mockClear();
+    await click(button("Refresh chats"));
+    await setControl('[aria-label="Scope for Design"]', "chat_only");
+    await click(button("Save scope", region()));
+    b.listCapabilitySets.mockResolvedValueOnce(fullOnly);
+    await click(button("Refresh chats"));
+    const confirm = confirmScope();
+    expect(confirm.disabled).toBe(true);
+    expect(confirm.parentElement?.previousElementSibling?.textContent).toBe("This scope is not in the loaded capability sets.");
+    expect(button("Unbind", region()).disabled).toBe(false);
+    confirm.disabled = false;
+    await click(confirm);
+    expect(b.putDefaultScope).not.toHaveBeenCalled();
+    b.listCapabilitySets.mockResolvedValue(sets());
+    await click(button("Refresh chats"));
+    expect(confirmScope().disabled).toBe(false);
+    await click(confirmScope());
+    expect(b.putDefaultScope).toHaveBeenCalledWith(expect.anything(), "chat_only", false);
+  });
+  it("shows override loading, empty and failed text, and recovers without blocking binding writes", async () => {
+    const pending = deferred<bindingsApi.ScopeOverride[]>();
+    b.listOverrides.mockReturnValueOnce(pending.promise);
+    await render();
+    expect(region().textContent).toContain("Loading scope overrides…");
+    expect(region().textContent).not.toContain("0 overrides");
+    expect(button("Unbind", region()).disabled).toBe(false);
+    await act(async () => pending.resolve([]));
+    expect(region().textContent).toContain("No scope overrides.");
+    expect(region().textContent).toContain("0 overrides");
+    expect(region().textContent).not.toContain("Loading scope overrides…");
+  });
+  it("retries a failed override read without enabling an unpicked scope", async () => {
+    b.listOverrides.mockRejectedValueOnce(new V1Error(503, "unavailable", "overrides down")).mockResolvedValue([]);
+    await render();
+    expect(region().textContent).toContain("Scope overrides could not be loaded.");
+    expect(region().textContent).toContain("unavailable: overrides down");
+    expect(button("Unbind", region()).disabled).toBe(false);
+    await setControl('[aria-label="Override id for Design"]', "ou_one");
+    expect(button("Add override", region()).disabled).toBe(true);
+    await click(button("Retry scope overrides", region()));
+    expect(region().textContent).toContain("No scope overrides.");
+    expect(region().textContent).not.toContain("Scope overrides could not be loaded.");
+    expect(b.putOverride).not.toHaveBeenCalled();
+  });
+  it("confirms a scope write and reads the saved scope back", async () => {
+    const pending = { status: "needs_confirmation" as const, confirmation_id: "pending-scope", expires_in_seconds: 60,
+      session: "session-scope", impact: "Set the group default of 42 to chat_only." };
+    b.putDefaultScope.mockRejectedValueOnce(new bindingsApi.ChatBindingConfirmation(pending));
+    b.confirmChatBinding.mockImplementation(async () => {
+      rows = [binding({ default_scope: "chat_only", effective_default_scope: "chat_only" })];
+      return { binding: rows[0] };
+    });
+    await render();
+    const reads = b.fetchChatBindings.mock.calls.length;
+    await setControl('[aria-label="Scope for Design"]', "chat_only");
+    await click(button("Save scope", region()));
+    await click(button("Confirm scope", region()));
+    expect(region().textContent).toContain(pending.impact);
+    expect([...region().querySelectorAll("p")].find((node) => node.textContent === pending.impact)?.classList.contains("text-warning")).toBe(true);
+    expect(b.confirmChatBinding).not.toHaveBeenCalled();
+    expect(b.fetchChatBindings).toHaveBeenCalledTimes(reads);
+    expect(b.putDefaultScope).toHaveBeenCalledWith(expect.objectContaining({
+      channel_id: "bot-one", chat_id: "42", manager_id: "manager" }), "chat_only", false);
+    await click(button("Confirm", region()));
+    expect(b.confirmChatBinding).toHaveBeenCalledWith(pending);
+    expect(b.fetchChatBindings).toHaveBeenCalledTimes(reads + 1);
+    expect(scopeSelect().value).toBe("chat_only");
+    expect(button("Save scope", region()).disabled).toBe(true);
+    expect(region().textContent).not.toContain(pending.impact);
+  });
+  it("lists sessions on a scenario Manager and not on the default Manager", async () => {
+    await render();
+    const bodies = vi.mocked(callV1).mock.calls.filter((call) => call[0] === "/api/v1/manager_sessions/list").map((call) => call[1]);
+    expect(bodies).toEqual([{ manager_id: "review" }, { manager_id: "archive" }]);
+    const sessions = container.querySelectorAll('[aria-label="Manager sessions"]');
+    expect(sessions).toHaveLength(2);
+    for (const node of sessions) {
+      expect(node.textContent).toContain("主会话");
+      expect(node.querySelector("button")).toBeNull();
+    }
+    expect(vi.mocked(callV1).mock.calls.some((call) => call[0] === "/api/v1/manager_sessions/reset")).toBe(false);
+    expect(region().querySelector('[aria-label="Manager sessions"]')).toBeNull();
   });
   it.each(["lark", "lark_bot", "telegram"] as const)("edits %s extra senders and confirms them after readback", async (channel_type) => {
     rows = [binding({ channel_type, allowed_senders: ["a", "b"] })];

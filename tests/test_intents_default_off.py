@@ -20,6 +20,7 @@ from looper.agents.profile_registry import builtin_resolved_profile
 from looper.agents import agent_settings
 from looper.agents.ops import clients, planner, room, service
 from looper.agents.tiers import manager, planner as planner_tier, worker
+from tests.chat_scope_freeze import without_scope_signature
 from tests.prompt_sections import assert_sections
 
 _CATALOG = Path(__file__).parent / "fixtures" / "catalog_default_off.json"
@@ -112,7 +113,9 @@ def test_the_manager_launch_command_and_signature_equal_the_main_baseline(tmp_pa
                 signature.append(ast.dump(node, include_attributes=False))
         return signature
 
-    assert assignments(preparation) == assignments(ast.parse(_MAIN_SIGNATURE))
+    # The scoped-routing signature part is set aside by name; it is guarded by `scope is not None` and checked in
+    # test_chat_scope_signature_off_path.py.
+    assert without_scope_signature(assignments(preparation)) == assignments(ast.parse(_MAIN_SIGNATURE))
 
 
 @pytest.mark.parametrize("setting", [None, "false"])

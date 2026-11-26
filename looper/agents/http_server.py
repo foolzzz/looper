@@ -460,12 +460,39 @@ class AgentHTTPServer:
             for transport in orphans:
                 transport.abort()
 
+    def _active_connection_count(self) -> int:
+        """Connections the listening server still has open.
+
+        CPython 3.12 and earlier keep an integer ``Server._active_count``.
+        CPython 3.13 and later keep the transports in ``Server._clients``.
+        Shutdown must not fail when this interpreter has neither: the handlers
+        already tracked here are the fallback, and a count that cannot be read
+        is treated as zero only after that fallback fails too.
+        """
+        try:
+            server = self._server
+            if server is None:
+                return 0
+            count = getattr(server, "_active_count", None)
+            if count is not None:
+                return int(count)
+            clients = getattr(server, "_clients", None)
+            if clients is not None:
+                return len(clients)
+        except Exception:
+            pass
+        try:
+            return sum(1 for task in self._handlers if not task.done())
+        except Exception:
+            return 0
+
     async def _abort_late_arrivals(self, seen: dict[asyncio.Task, asyncio.StreamWriter]) -> None:
         """Abort connections that attached after ``seen`` was snapshotted.
 
-        ``wait_closed`` on Python 3.12 waits while the server's active count
-        is non-zero. Yielding lets an accept that already left the listening
-        socket attach, and lets ``abort`` drop the count, before that wait.
+        ``wait_closed`` waits while the listener still has connections
+        (``_active_count`` through 3.12, ``_clients`` after that). Yielding
+        lets an accept that already left the listening socket attach, and
+        lets ``abort`` drop the count, before that wait.
         """
         loop = asyncio.get_running_loop()
         deadline = loop.time() + HTTP_SHUTDOWN_CLEANUP_SECONDS
@@ -473,12 +500,12 @@ class AgentHTTPServer:
         while quiet < 2 and loop.time() < deadline:
             await asyncio.sleep(0)
             self._abort_visible_late_arrivals(seen)
-            active = self._server._active_count if self._server is not None else 0
+            active = self._active_connection_count()
             if active:
                 quiet = 0
             else:
                 quiet += 1
-        active = self._server._active_count if self._server is not None else 0
+        active = self._active_connection_count()
         if active:
             self._abort_visible_late_arrivals(seen)
             pending = [task for task in self._handlers if not task.done()]
@@ -851,7 +878,8 @@ class AgentHTTPServer:
             (name == "cost_guard.update" and data.get("mode") == "enforce")
             or (name == "cost_holds.decide" and data.get("new_limit_usd") is not None))
         requires_consent = cost_consent or principal.kind == "client" or name in (
-            "manager_chat_bindings.put", "managers.update", "memory.settings_put", "memory_lessons.settings_put",
+            "manager_chat_bindings.put", "chat_scope_overrides.put", "chat_scope_overrides.delete",
+            "managers.update", "memory.settings_put", "memory_lessons.settings_put",
             "tasks.hold_release", "engine_settings.update")
         return await self._client_ops.call(principal, session, name, data,
                                           require_confirmation=requires_consent, **kwargs)
@@ -1777,11 +1805,15 @@ class AgentHTTPServer:
         return {"correlation_id": correlation_id}
 
     async def _answer_task_command(self, task_id: str, command: Any, sink: Any) -> None:
-        """Answer a fixed command in the task thread. The model is not called."""
-        from .task_commands import TaskCommand
+        """Answer a fixed command in the task thread. The model is not called.
+
+        ``/stop`` and ``/done`` read live state. ``/start`` reads the task status and does not start it.
+        Every other member has its own sentence in ``fixed_command_reply``; a member with no sentence raises.
+        """
+        from ..db.tasks import get_task
+        from .task_commands import START_FALLBACK, TaskCommand, fixed_command_reply, start_reply
         from .tiers.task_manager import current_pool
 
-        later = "这个命令要等「交给后台」上线后才能用"
         if command is TaskCommand.STOP:
             pool = current_pool()
             stopped = pool is not None and await pool.stop_current(task_id)
@@ -1795,8 +1827,21 @@ class AgentHTTPServer:
                 text = "任务已完成" if done.changed else "任务已经是完成状态"
                 if done.warning:
                     text = f"{text}\n{done.warning}"
+        elif command is TaskCommand.START:
+            try:
+                task = await get_task(task_id)
+            except Exception as exc:
+                logger.warning("task /start reply could not read status task_id=%s error=%s",
+                               task_id, type(exc).__name__)
+                text = START_FALLBACK
+            else:
+                status = task.get("status") if task is not None else None
+                text = start_reply(status if isinstance(status, str) else None)
+                if text == START_FALLBACK:
+                    logger.warning("task /start reply has no control for status task_id=%s status=%s",
+                                   task_id, status)
         else:
-            text = later
+            text = fixed_command_reply(command)
         await sink.event("command", {"command": command.value})
         await sink.final(text, "command")
 

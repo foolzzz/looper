@@ -164,7 +164,7 @@ def test_manager_composes_the_selected_profiles_custom_prompt() -> None:
                              profile=replace(builtin_resolved_profile(), custom_prompt="CUSTOM"))
     prompt = ManagerAgent._composed_prompt(
         SimpleNamespace(agent_id="manager", _system_prompt="ROLE", _prompt_recommended=False,
-                        _session_now=lambda: SimpleNamespace(key="main")), settings)
+                        _session_now=lambda: SimpleNamespace(key="main", scope=None)), settings)
     assert prompt.text.startswith("CUSTOM\n\nHARNESS\n\nROLE\n\n")
     assert prompt.layers["custom_prompt"] == {"sha256": sha256_text("CUSTOM")}
 

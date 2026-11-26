@@ -13,10 +13,12 @@ async def pending(conn):
     return await legacy._leads_check_pending(conn)
 
 
-async def apply(conn, *, sql, state):
+async def apply(conn, *, sql, state) -> bool:
+    did_work = False
     from .. import connection as legacy
 
     if await legacy._leads_check_pending(conn):
+        did_work = True
         await conn.execute(legacy._leads_check_ddl())
         await conn.execute(
             "INSERT INTO schema_migrations (name) VALUES ($1) ON CONFLICT DO NOTHING",
@@ -29,10 +31,12 @@ async def apply(conn, *, sql, state):
     elif state == "empty":
         # schema.sql ran the block, so its constraints are NOT VALID here too: on tables just created, validating
         # them now scans nothing, and a fresh database keeps recording only its baseline.
+        did_work = True
         for table, constraint in legacy._leads_check_step().validate:
             await conn.execute(f"ALTER TABLE {table} VALIDATE CONSTRAINT {constraint}")
     elif await legacy._leads_check_unvalidated(conn):
         # The block ran outside a migration (schema.sql applied by hand): validated after commit, as an upgrade.
+        did_work = True
         await conn.execute(
             "INSERT INTO schema_migrations (name) VALUES ($1) ON CONFLICT DO NOTHING",
             legacy._LEADS_CHECK,
@@ -40,6 +44,7 @@ async def apply(conn, *, sql, state):
         await conn.execute(
             "DELETE FROM schema_migrations WHERE name = $1", legacy._LEADS_CHECK_ONLINE
         )
+    return did_work
 
 
 online_order = 60

@@ -11,10 +11,12 @@ async def pending(conn):
     return await legacy._schedule_session_bounds_pending(conn)
 
 
-async def apply(conn, *, sql, state):
+async def apply(conn, *, sql, state) -> bool:
+    did_work = False
     from .. import connection as legacy
 
     if await legacy._schedule_session_bounds_pending(conn):
+        did_work = True
         await conn.execute("""
                 ALTER TABLE schedules
                   ADD COLUMN planner_session_context_tokens BIGINT CHECK (planner_session_context_tokens >= 0),
@@ -32,3 +34,4 @@ async def apply(conn, *, sql, state):
             "INSERT INTO schema_migrations (name) VALUES ($1)",
             legacy._SCHEDULE_SESSION_BOUNDS,
         )
+    return did_work

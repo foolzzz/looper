@@ -64,6 +64,15 @@ def test_an_unlisted_sender_gets_nothing(tmp_path: Path, handler: str) -> None:
     update.message.reply_text.assert_not_awaited()
 
 
+@pytest.mark.parametrize("is_bot,kind", [(False, "person"), (True, "bot"), (None, "person"), (1, "person")])
+def test_telegram_sender_kind(tmp_path: Path, is_bot, kind) -> None:
+    update = _update(7, "/gates")
+    if is_bot is not None:
+        update.effective_user.is_bot = is_bot
+    (message,) = _run(tmp_path, "_cmd_gates", update, "7")
+    assert message.payload["channel_context"]["sender_kind"] == kind
+
+
 def test_the_menu_lists_both_commands() -> None:
     names = [name for name, _ in _BOT_COMMANDS]
     assert "gates" in names and "gate" in names

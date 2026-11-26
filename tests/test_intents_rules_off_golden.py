@@ -27,6 +27,7 @@ from looper.agents.ops import service
 from looper.agents.serve import seed_role_configs
 from looper.agents.tiers import manager
 from looper.db import schedules as db_schedules, subscriptions as db_subs
+from tests.chat_scope_freeze import without_scope_signature
 from tests.db_support import DSN, run_db
 from tests.leads_support import intent
 from tests.model_call_support import assert_golden, frozen_columns, golden_cli, read_launches, table_rows
@@ -78,7 +79,8 @@ def _signature_parts() -> list[str]:
         targets = node.targets if isinstance(node, ast.Assign) else [node.target] if isinstance(node, ast.AugAssign) else []
         if any(isinstance(part, ast.Name) and part.id == "signature" for target in targets for part in ast.walk(target)):
             parts.append(ast.dump(node, include_attributes=False))
-    return parts
+    # The scoped-routing part is guarded by `scope is not None` (test_chat_scope_signature_off_path.py).
+    return without_scope_signature(parts)
 
 
 @pytest.mark.parametrize("rule_setting", [None, "false", "invalid"])

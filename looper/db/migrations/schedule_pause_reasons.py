@@ -66,12 +66,13 @@ async def _ensure(conn, constraint: str, ddl: str, expected: str) -> bool:
     return True
 
 
-async def apply(conn, *, sql, state):
+async def apply(conn, *, sql, state) -> bool:
     if not await pending(conn):
-        return
+        return False
     await conn.execute(_COLUMNS)
     rebuilt = await _ensure(conn, "schedules_pause_reason_check", _REASON, _REASON_DEF)
     rebuilt = await _ensure(conn, "schedules_pause_pair_check", _PAIR, _PAIR_DEF) or rebuilt
     await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1) ON CONFLICT DO NOTHING", name)
     if rebuilt:
         await conn.execute("DELETE FROM schema_migrations WHERE name = $1", online[0].marker)
+    return True

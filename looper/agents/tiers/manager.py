@@ -48,7 +48,7 @@ from collections.abc import Awaitable, Callable, Iterator, Sequence
 from typing import TYPE_CHECKING, Any, NoReturn
 
 from ..broadcast import Broadcaster
-from ..chat_scopes import LaunchMode
+from ..chat_scopes import LaunchMode, PrincipalKind, ScopeAudience, ScopeInvariantViolation
 from ..drain import DrainState
 from ..bus import MessageBus
 from ..channels import lark_quote
@@ -76,7 +76,7 @@ from ..claude_cli import (
     exit_note,
     user_stop_result,
 )
-from .. import admission, turn_admission, session_visibility
+from .. import admission, turn_admission, session_visibility, chat_scopes
 from ..session_visibility import Input as SessionInput
 from .. import failures
 from ..failures import FailureClass
@@ -109,7 +109,7 @@ from .manager_session import MAIN_SESSION, ManagerSession, _Process, session_fie
 from . import background_turn, idle_check_turn, manager_budget, triage_background
 from .background_turn import completion_context as _completion_context  # noqa: F401 (router compatibility)
 from .. import lanes, lanes_settings
-from .manager_routing import SessionRouter
+from .manager_routing import RouteOutcome, SessionRouter
 from . import group_session
 from .. import session_routing, cost_guard, cost_hold_routing, cost_manager
 from ..mid_turn_input import MidTurnInputs
@@ -415,7 +415,7 @@ QUOTE_READ_SEC = 80.0
 NEW_SESSION_COMMAND = "/new"
 PREPARATION_STEPS: tuple[str, ...] = (
     "persist_user_message", "attention_enabled", "route_to_gate", "route_ledger", "route_memory", "route_intent", "read_quote", "resident_settlement", "status_thinking", "tools_probe", "turn_lock", "load_db_config",
-    "load_session_state", "agent_settings", "templates", "library", "library_server", "outbound_review", "llmrec_attach",
+    "load_session_state", "group_activity", "agent_settings", "templates", "library", "library_server", "outbound_review", "llmrec_attach",
     "build_user_message", "session_budget",
     "claude_command", "tool_listing", "switch_session", "claude_stop", "resident_admission", "resume_brief", "recorder_start", "claude_start", "recorder_finish",
     "recorder_annotate",
@@ -432,6 +432,8 @@ class Ask:
     retried: bool = False  # the resume retry: running goes back to starting
     quoted: lark_quote.QuoteRead | None = None  # what the message quotes, read once (``_read_quote``)
     stop_notice: str = ""  # session-owned code notice; generic notes are not a routed input grant
+    activity: tuple[str, ...] = ()  # keep the same activity when a failed resume retries preparation
+    activity_cursor: int | None = None  # commit the read watermark only after a successful reply
 
 
 @dataclass
@@ -509,6 +511,18 @@ class ProfileUnavailable(RuntimeError):
             return "\n\n发送 /profile 换一个 Agent Profile，或 /profile 0 跟随设置。"
         if self.source is Layer.ROLE:
             return "\n\n发送 /profile 选另一个 Agent Profile。"
+        return ""
+
+
+class ScopeStartRefused(ProfileUnavailable):
+    """A runtime cannot provide the session's declared authority; never widen it."""
+
+    def __init__(self, *, runtime: str, scope: str, mode: str) -> None:
+        self.runtime, self.scope, self.mode = runtime, scope, mode
+        super().__init__("这个群的能力范围在当前 Agent Profile 上跑不了，请操作者换一个支持的 Agent Profile。",
+                         Layer.ROLE)
+
+    def hint(self) -> str:
         return ""
 
 
@@ -591,6 +605,16 @@ def _looper_call(name: Any, raw: Any) -> tuple[str, dict[str, Any]]:
     return name, arguments
 
 
+def _recorded_sender_kind(envelope: MessageEnvelope) -> PrincipalKind | None:
+    """The sender kind kept as provenance on a stored message: None for absent or unknown values, so a bad value
+    never loses the message. Routing authority never reads this; it fails closed on its own strict reader."""
+    context = envelope.payload.get("channel_context")
+    try:
+        return PrincipalKind(context.get("sender_kind") if isinstance(context, dict) else None)
+    except (ValueError, TypeError):
+        return None
+
+
 def _message_origin(envelope: MessageEnvelope) -> dict[str, Any]:
     """The channel a message came from, its sender (Lark's open_id, Telegram's user id; the web chat names none),
     its chat (the Lark or Telegram chat, the web chat session) and whether that is a group chat: a Lark chat says
@@ -614,6 +638,32 @@ def _message_origin(envelope: MessageEnvelope) -> dict[str, Any]:
 def _audience_kind(origin: dict[str, Any]) -> str:
     """Where a message's chat is, as ``manager_events.target_kind`` names it."""
     return "web" if origin["channel"] == "web" else "group" if origin["group"] else "dm"
+
+
+def _sender_kind(envelope: MessageEnvelope) -> PrincipalKind | None:
+    """The channel's trusted sender kind, or None for absent or unknown values. None grants no person authority:
+    the sender is routed as a non-person with the least privilege, and the message is never held."""
+    context = envelope.payload.get("channel_context")
+    value = context.get("sender_kind") if isinstance(context, dict) else None
+    if value is None:
+        return None
+    try:
+        return PrincipalKind(value)
+    except (TypeError, ValueError):
+        logger.warning("unknown channel sender kind; routed as a non-person")
+        return None
+
+
+def _completion_origin(row: dict[str, Any], manager: AgentAddress, batch: uuid.UUID) -> dict[str, Any]:
+    """The code-recorded requester of a group completion, without changing its reply envelope."""
+    origin = _message_origin(_completion_context(row, manager, batch))
+    if session_routing.scoped(manager.agent_id) and row["target_kind"] == "group":
+        fallback = json.loads(row["fallback"]) if isinstance(row["fallback"], str) else row["fallback"]
+        notice = (fallback[0].get("notice") or {}) if fallback else {}
+        sender = notice.get("mention")
+        origin.update(channel_id=row["channel_id"], chat=row["chat"], group=True,
+                      sender=sender if isinstance(sender, str) and sender else None)
+    return origin
 
 
 async def _outside_source(turn: Turn | None) -> untrusted_text.Source | None:
@@ -699,14 +749,14 @@ def _session_key(envelope: MessageEnvelope) -> str | None:
     return None
 
 
-def _chat_record(envelope: MessageEnvelope, message_id: str) -> dict[str, Any]:
+def _chat_record(envelope: MessageEnvelope, message_id: str, *, manager_session: str | None = None) -> dict[str, Any]:
     """The metadata that has a Telegram or Lark channel store an answer to ``envelope`` as ``message_id`` once it
     has tried to send it (``channels.chat_history``); nothing for the web chat, which stores its own, and for a chat
     whose turns are not stored."""
     key = _session_key(envelope)
     if _message_origin(envelope)["channel"] == "web" or not key:
         return {}
-    return {CHAT_RECORD: chat_record(key, message_id)}
+    return {CHAT_RECORD: chat_record(key, message_id, manager_session=manager_session)}
 
 
 def _reply_route(envelope: MessageEnvelope) -> dict[str, Any]:
@@ -784,9 +834,13 @@ class TurnFailed(RuntimeError):
     chat's status line. Raised, not returned: the turn is answered as failed, so a queue staged behind it is not
     sent."""
 
-    def __init__(self, reply: str, error: str) -> None:
+    def __init__(self, reply: str, error: str, *,
+                 invariant: tuple[BaseException, str, str | None] | None = None) -> None:
         super().__init__(reply)
         self.reply, self.error = reply, error
+        # A scope invariant failure still to be reported (violation, default place, scope): preparation awaits only
+        # through stoppable token steps, so the report is sent where the failed turn is answered.
+        self.invariant = invariant
 
 
 def stopped_reply(partial: str, blocks: list[str]) -> str:
@@ -818,12 +872,13 @@ class GoalSnapshot:
 def reply_envelope(original: MessageEnvelope, text: str, source: AgentAddress, *, error: str | None = None,
                    outcome: ReplyOutcome | None = None, record: dict[str, Any] | None = None,
                    snapshot: str | None = None, cards: list[dict[str, Any]] | None = None,
-                   ephemeral: bool = False) -> MessageEnvelope:
+                   ephemeral: bool = False, manager_session: str = MAIN_SESSION) -> MessageEnvelope:
     """The reply from ``source`` to ``original``, addressed to the channel it came from; by default it is kept in
-    the chat's history (``record``). ``cards`` are blocks of ``text`` a channel with buttons sends as cards."""
+    the chat's history (``record``). Code-owned replies without a running session belong to main; callers answering
+    a session's interrupted turn pass its key. ``cards`` are blocks of ``text`` a channel with buttons sends as cards."""
     outcome = outcome or (ReplyOutcome.FAILED if error else ReplyOutcome.ANSWERED)
     if record is None:
-        record = _chat_record(original, f"{original.message_id}:reply")
+        record = _chat_record(original, f"{original.message_id}:reply", manager_session=manager_session)
     return MessageEnvelope.create(
         source=source,
         target=original.source,
@@ -938,6 +993,7 @@ class ManagerAgent:
         # hands them over when it retires this Manager).
         self._handling: MessageEnvelope | None = None
         self.stopped_in_flight: tuple[tuple[MessageEnvelope, str], ...] = ()
+        self.stopped_in_flight_sessions: dict[str, str] = {}
 
     @property
     def name(self) -> str:
@@ -985,7 +1041,8 @@ class ManagerAgent:
         return root
 
     def _session_work_dir(self) -> Path:
-        if self._session_now().key == MAIN_SESSION:
+        session = self._session_now()
+        if session.key == MAIN_SESSION or (session.scope is not None and session.scope.mode is LaunchMode.FULL):
             return self._config.work_dir
         path = self._session_root() / "work"
         path.mkdir(mode=0o700, exist_ok=True)
@@ -993,7 +1050,8 @@ class ManagerAgent:
 
     def _session_environment(self, launch: Launch) -> dict[str, str]:
         env = launch.environment()
-        if self._session_now().key == MAIN_SESSION:
+        session = self._session_now()
+        if session.key == MAIN_SESSION or (session.scope is not None and session.scope.mode is LaunchMode.FULL):
             return env
         root = self._session_root()
         original_home = Path(env.get("HOME", str(Path.home())))
@@ -1044,6 +1102,24 @@ class ManagerAgent:
             logger.warning("%s: cannot read its saved session; starting a new one", self._log, exc_info=True)
             return
         if saved:
+            if session.key != MAIN_SESSION:
+                scope = session.scope
+                mismatch = scope is not None and any(saved.get(name) != value for name, value in {
+                    "scope_id": scope.resolved.scope_id, "scope_version": scope.version,
+                    "audience": scope.resolved.audience.value, "scope_fingerprint": scope.fingerprint}.items())
+                if saved.get("retired_at") is not None or mismatch:
+                    if mismatch:
+                        logger.error("%s: saved scope disagrees with session %s; starting fresh", self._log, session.key)
+                    await db_manager_sessions.reopen(self.agent_id, session.key)
+                    if scope is not None:
+                        from .. import chat_scope_metrics
+
+                        chat_scope_metrics.session_opened(self.agent_id, "scope_changed")
+                    session.session_id = session.pending_handoff = session.pending_switch = None
+                    session.clean_start = False
+                    session.activity_cursor = None
+                    session.session_totals = Usage.from_dict(saved.get("session_totals"))
+                    return
             session.session_id = saved.get("session_id")
             session.session_totals = Usage.from_dict(saved.get("session_totals"))
             session.session_runtime = saved.get("runtime_type")
@@ -1051,6 +1127,12 @@ class ManagerAgent:
             session.session_provider = saved.get("provider_id")
             session.clean_start = bool(saved.get("clean_start"))
             session.pending_handoff = saved.get("pending_handoff")
+            session.activity_cursor = saved.get("activity_cursor")
+        elif session.key != MAIN_SESSION and session.scope is not None:
+            from .. import chat_scope_metrics
+
+            chat_scope_metrics.session_opened(self.agent_id, "first")
+        if saved:
             if (policy := session_visibility.for_session(session.key, manager_id=self.agent_id)) is not None and (
                     saved.get("context_policy_version", 0) != policy.version):
                 session.session_id = None
@@ -1074,6 +1156,7 @@ class ManagerAgent:
             handoff = None
         if session.key != MAIN_SESSION:
             route = session.route
+            scope = session.scope
             policy = session_visibility.for_session(session.key, manager_id=self.agent_id)
             await db_manager_sessions.save({
                 "manager_id": self.agent_id, "session_key": session.key, "kind": route.kind.value,
@@ -1081,7 +1164,11 @@ class ManagerAgent:
                 "session_totals": session.session_totals.to_dict(), "runtime_type": session.session_runtime,
                 "profile_id": session.session_profile, "provider_id": session.session_provider,
                 "clean_start": session.clean_start, "pending_handoff": handoff,
-                "context_policy_version": policy.version if policy is not None else 0}, pool=pool)
+                "activity_cursor": session.activity_cursor,
+                "context_policy_version": policy.version if policy is not None else 0,
+                **({"scope_id": scope.resolved.scope_id, "scope_version": scope.version,
+                    "audience": scope.resolved.audience.value, "scope_fingerprint": scope.fingerprint}
+                   if scope is not None else {})}, pool=pool)
         else:
             await db_agent_sessions.save_session(self.agent_id, session.session_id, session.session_totals.to_dict(),
                                                  runtime_type=session.session_runtime,
@@ -1223,11 +1310,24 @@ class ManagerAgent:
         try:
             origin = _message_origin(envelope)
             channel, chat = origin["channel"], origin["chat"]
+            exclude_operator_sessions = False
+            if session_routing.scoped(self.agent_id) and origin["group"]:
+                from ..operator_identity import operator_sender_id
+
+                exclude_operator_sessions = True
+                try:
+                    operator = await operator_sender_id(origin["channel_id"])
+                    exclude_operator_sessions = not (operator and operator == origin["sender"]
+                                                       and _sender_kind(envelope) is PrincipalKind.PERSON)
+                except Exception:
+                    logger.warning("%s: could not resolve /stop sender; protecting operator turns", self._log,
+                                   exc_info=True)
             if self.stop_chat is not None:
                 from ..managers import chat_stop_reply
 
                 summary = await self.stop_chat(origin["channel_id"] or channel or "", chat or "", via=channel or "",
-                    sender_id=origin["sender"] if not origin["group"] else None)
+                    sender_id=origin["sender"] if not origin["group"] else None,
+                    **({"exclude_operator_sessions": True} if exclude_operator_sessions else {}))
                 reply = chat_stop_reply(summary)
                 # Only an empty fleet lookup falls back to the receiving runtime's legacy idle answer.
                 if summary.state == "enabled" and not summary.matched and not self.can_interrupt:
@@ -1238,7 +1338,8 @@ class ManagerAgent:
                 await self._send_reply(envelope, chat_settings.STOP_DISABLED_REPLY, persist=False)
                 return
             tokens = self.live_for_chat(origin["channel_id"] or channel, chat,
-                sender_id=origin["sender"] if not origin["group"] else None) if channel and chat else []
+                sender_id=origin["sender"] if not origin["group"] else None,
+                exclude_operator_sessions=exclude_operator_sessions) if channel and chat else []
             if not self.can_interrupt and not any(token.admission_waiting for token in tokens):
                 await self._send_reply(envelope, STOP_UNSUPPORTED_REPLY, persist=False)
                 return
@@ -1274,9 +1375,18 @@ class ManagerAgent:
         self._running = False
         # Before the cancel: it runs the handlers' finally blocks, which end the tokens and clear ``_handling``.
         tokens = self._turns.live()
+        # Preserve ownership before cancellation clears worker/token state; unrouted fleet replies use main.
+        self.stopped_in_flight_sessions = {
+            envelope.message_id: key for key, envelope in self._router._handling.items()}
+        for key, queue in self._router._queues.items():
+            for _, item in (*queue.interactive, *queue.background):
+                if isinstance(item, MessageEnvelope):
+                    self.stopped_in_flight_sessions[item.message_id] = key
         for session in self._sessions.values():  # every session's
             if session.running_token is not None:
                 tokens.append(session.running_token)  # settled while its record finishes, but still answering the chat
+                if session.running_token.envelope is not None:
+                    self.stopped_in_flight_sessions[session.running_token.envelope.message_id] = session.key
         handling = ([self._handling] if self._handling is not None else []) + self._router.handling()
         pending = [(e, "") for e in handling] + [(t.envelope, t.partial) for t in tokens if t.envelope is not None]
         self.stopped_in_flight = tuple({e.message_id: (e, partial) for e, partial in pending}.values())
@@ -1305,6 +1415,7 @@ class ManagerAgent:
             for session in self._sessions.values():  # every session's resident
                 async with session.lifecycle_gate:
                     await session.claude.stop()
+                await self._router.changed()
 
         closing = asyncio.create_task(close())
         try:
@@ -1336,6 +1447,7 @@ class ManagerAgent:
         """Close only a provably idle resident, retaining the enabled agent and its complete session state."""
         main = self._sessions[MAIN_SESSION]  # main's: the resident the idle timeout closes
         await self._router.sweep()  # session routing switched off: the other sessions' idle processes stop
+        await self._router.reclaim_idle(now)
         timeout = self._definition.idle_timeout_seconds
         if self.agent_id == DEFAULT_MANAGER_ID or not timeout or not self._running or self._turned_off:
             return False
@@ -1364,6 +1476,7 @@ class ManagerAgent:
                 main.last_activity = now
                 return False
             logger.info("Manager %s resident suspended (idle timeout)", self.agent_id)
+            await self._router.changed()
             return True
 
     def is_healthy(self) -> bool:
@@ -1401,7 +1514,13 @@ class ManagerAgent:
                 # A message is settled only after its handler returns; restart replays held messages.
                 if self._drain is not None:
                     await self._drain.wait_serving()
-                if (session := await self._router.target(envelope)) is not None:
+                session = await self._router.target(envelope)
+                if session is RouteOutcome.ANSWERED:
+                    self._bus.settle_handled(envelope)
+                    continue
+                if session is RouteOutcome.HELD:
+                    continue
+                if session is not None:
                     merged = (await lanes.route_arrival(self, session, envelope) if lanes_settings.enabled()
                               else await self._mid_turn.merge(session, envelope))
                     if not merged:
@@ -1670,6 +1789,8 @@ class ManagerAgent:
             if turn is None:
                 raise
             token.settle(ReplyOutcome.FAILED)
+            if (observed := getattr(exc, "invariant", None)) is not None:
+                await self._router._observe_invariant(envelope, observed[0], default=observed[1], scope=observed[2])
             if turn.refused:
                 response = ""  # answered below: the tools did not work
             elif (reply := manager_budget.cap_reply(self._session_now(), exc)) is not None:
@@ -1677,6 +1798,16 @@ class ManagerAgent:
                 return
             elif isinstance(exc, cost_guard.Held):
                 await self._send_reply(envelope, cost_manager.usage_reply(exc))
+                return
+            elif isinstance(exc, ScopeStartRefused):
+                # Sent here, not while preparing: preparation awaits only through the stoppable token steps.
+                from .. import chat_scope_alerts
+
+                origin = _message_origin(envelope)
+                await chat_scope_alerts.start_refused(
+                    self.agent_id, channel_id=origin.get("channel_id"), chat=origin.get("chat"),
+                    scope=exc.scope, runtime=exc.runtime, mode=exc.mode)
+                await self._send_reply(envelope, _with_blocks(str(exc), turn.blocks), error=str(exc))
                 return
             elif isinstance(exc, (TurnFailed, cost_guard.Denied)):
                 logger.error("%s failed to answer %s: %s", self._log, envelope.message_id, exc.error)
@@ -1736,6 +1867,8 @@ class ManagerAgent:
         library, prompt and the message Claude is sent. With ``ask`` (the resume retry, or a caller without a chat
         message) only the second half runs."""
         restricted = session_visibility.for_session(self._session_now().key, manager_id=self.agent_id) is not None
+        activity = list(ask.activity) if ask is not None else []
+        activity_cursor = None
         if restricted and ask is not None and ask.turn is not None and (
                 lanes.manager_lane(ask.turn.origin) is lanes.Lane.BACKGROUND):
             raise _CompletionNotTaken()  # no background model input is on the allowlist
@@ -1817,9 +1950,38 @@ class ManagerAgent:
                         require_match=self._claude.shares_bridge)
             token.check()
             token.ops_turn = turn
+            session = self._session_now()
+            if session.scope is not None and turn.origin is TurnOrigin.USER:
+                try:
+                    turn.principal = self._router.principal(envelope, session)
+                except ScopeInvariantViolation as exc:
+                    logger.critical("%s: turn principal disagrees with session %s", self._log, session.key, exc_info=True)
+                    raise TurnFailed("这条消息没有处理：范围检查没有通过。", "scope_invariant",
+                                     invariant=(exc, "prepare", None)) from None
             delivery_guard.initialize(turn)
             # Registered before the first await: a Stop during the persisting, the status and the tools probe is kept.
             self._running_token = token
+            if (session.scope is not None and session.route.kind is session_routing.SessionKind.GROUP
+                    and SessionInput.GROUP_ACTIVITY in session_visibility.inputs_for(session.scope).inputs
+                    and turn.origin is TurnOrigin.USER and _stored_chat(origin)
+                    and (thread := _session_key(envelope))):
+                if not session.session_loaded:
+                    await token.step("load_session_state", self._load_session_state())
+                try:
+                    if session.activity_cursor is None:
+                        # Read before storing this turn: the opening excerpt covers the existing rows.
+                        # Zero marks an initialized cursor even when this chat has no stored messages yet.
+                        activity_cursor = await token.step("group_activity", db_chat.latest_id(thread)) or 0
+                    else:
+                        result = await token.step("group_activity", db_chat.activity_since(
+                            thread, after_id=session.activity_cursor, exclude_session=session.key,
+                            exclude_message_id=envelope.message_id, limit=group_session.EXCERPT_MESSAGES))
+                        activity = group_session.activity(result.rows, result.hidden)
+                        activity_cursor = result.last_id
+                except TurnStopped:
+                    raise
+                except Exception:
+                    logger.warning("%s: cannot read group activity", self._log, exc_info=True)
             await token.keep("persist_user_message", self._persist_user(envelope, text), 10)
             await token.step("status_thinking", self._send_status(envelope, "thinking", phase=True, activity="thinking"))
             # Read after the status, in the message's turn: in order, stoppable, and again on restart replay.
@@ -1846,7 +2008,8 @@ class ManagerAgent:
             waiting = (self.ops.begin_turn(turn, binding=token.binding, session_key=self._session_now().key)
                        if self.ops is not None and not self._mid_turn.native_started(token) else "")
             ask = Ask(text, "\n".join(part for part in (waiting, gate.note, stopped_note) if part), turn,
-                      quoted=quoted, stop_notice=stopped_note)
+                      quoted=quoted, stop_notice=stopped_note, activity=tuple(activity),
+                      activity_cursor=activity_cursor)
         else:
             await token.keep("resident_settlement", self._settle_native_inputs(token), 60)
         if restricted:
@@ -1866,15 +2029,27 @@ class ManagerAgent:
             raise ProfileUnavailable(agent_settings.error, agent_settings.profile_source)
         if agent_settings.profile_error:  # answered as an error; never another profile
             raise ProfileUnavailable(agent_settings.profile_error, agent_settings.profile_source)
-        routed = self.agent_id == DEFAULT_MANAGER_ID and self._session_now().key != MAIN_SESSION
-        if not routed:
+        scope = self._session_now().scope
+        restricted = (scope.mode is LaunchMode.PLATFORM_TOOLS if scope is not None
+                      else self.agent_id == DEFAULT_MANAGER_ID and self._session_now().key != MAIN_SESSION)
+        if not restricted:
             await token.step("templates", self._read_templates())
-        library = EMPTY_LIBRARY if routed else await token.step("library", load_installed(
+        library = EMPTY_LIBRARY if restricted else await token.step("library", load_installed(
             self._runtime_root, AgentType.MANAGER.value, manager_id=self.agent_id))
         library = await token.step("library_server", self._library_with_server(library))
         launch = Launch(agent_settings, library, role=AgentType.MANAGER,
-                        access=Access.PLATFORM_TOOLS if routed else None)
-        if routed and LaunchMode.PLATFORM_TOOLS not in launch.runtime.launch_modes:
+                        access=Access.PLATFORM_TOOLS if restricted else None)
+        if scope is not None and scope.mode not in launch.runtime.launch_modes:
+            from .. import chat_scope_metrics
+
+            chat_scope_metrics.start_refused(self.agent_id, launch.runtime.type, scope.mode.value)
+            logger.error("scoped runtime refused", extra={
+                "manager_id": self.agent_id, "chat_digest": session_routing.key_digest(self._session_now().key),
+                "runtime": launch.runtime.type, "scope": f"{scope.resolved.scope_id}@{scope.version}",
+                "mode": scope.mode.value})
+            raise ScopeStartRefused(runtime=launch.runtime.type, scope=f"{scope.resolved.scope_id}@{scope.version}",
+                                    mode=scope.mode.value)
+        if scope is None and restricted and LaunchMode.PLATFORM_TOOLS not in launch.runtime.launch_modes:
             raise ProfileUnavailable(f"{launch.runtime.label} 尚不支持仅使用平台工具的路由会话，请选择支持的 Agent Profile。",
                                      agent_settings.profile_source)
         if self.ops is not None and await token.step("outbound_review", outbound_hook.enabled()):
@@ -1926,6 +2101,18 @@ class ManagerAgent:
             listing = json.dumps(tools, sort_keys=True) if self.ops is not None else ""
             signature += (hashlib.sha256(listing.encode("utf-8")).hexdigest(),)
             components["tools"] = signature[-1]
+        if scope is not None:
+            signature += (scope.fingerprint, scope.mode.value)
+            components["scope"] = (scope.fingerprint, scope.mode.value)
+        try:
+            chat_scopes.check_launch(scope, launch, command=list(signature[0]))
+        except ScopeInvariantViolation as exc:
+            logger.critical("scoped launch invariant failed", extra={
+                "manager_id": self.agent_id, "chat_digest": session_routing.key_digest(self._session_now().key),
+                "runtime": launch.runtime.type, "scope": f"{scope.resolved.scope_id}@{scope.version}" if scope else None,
+                "mode": scope.mode.value if scope else None}, exc_info=True)
+            raise TurnFailed("这条消息没有处理：启动检查没有通过。", "scope_invariant", invariant=(
+                exc, "launch", f"{scope.resolved.scope_id}@{scope.version}" if scope else None)) from None
         # Diagnostic hashes are separate from the unchanged resident comparison. Hash even absent components
         # and existing digests so no command, URL or provider binding value can reach the restart log.
         signature_components = {name: hashlib.sha256(json.dumps(value).encode("utf-8")).hexdigest()
@@ -1980,7 +2167,7 @@ class ManagerAgent:
                 ask.message, ask.note, channel=channel_line(envelope), envelope=envelope,
                 attachments=[*attachments, *(ask.quoted.attachments if ask.quoted else ())],
                 quoted=ask.quoted.quotes if ask.quoted else (), image_input=launch.runtime.image_input,
-                sections=state is None, turn=ask.turn, persona_scope=persona_scope))
+                sections=state is None, turn=ask.turn, persona_scope=persona_scope, activity=activity))
         return Prepared(
             envelope=envelope, turn=ask.turn, message=ask.message, note=ask.note, retried=ask.retried, system_prompt=system_prompt,
             launch=launch, prompt_file=prompt_file, signature=signature, switch=switch, turn_text=turn_text,
@@ -2134,11 +2321,20 @@ class ManagerAgent:
         try:
             await token.keep("recorder_start", recorder.start(), 10)
             await token.step("recorder_annotate", manager_budget.annotate(session, recorder))
+            if session.scope is not None:
+                scope = session.scope
+                await token.step("recorder_annotate", recorder.annotate({
+                    "scope": {"id": scope.resolved.scope_id, "version": scope.version,
+                              "audience": scope.resolved.audience.value}}))
             if prepared.delivery_followup:
                 await token.step("recorder_annotate", recorder.annotate(delivery_guard.metadata(prepared)))
             if run.state is not None:
                 await token.step("recorder_annotate", recorder.annotate(run.state.annotation()))
             if prepared.switch is not None and prepared.switch.reason is SwitchReason.CONTEXT_FULL:
+                if session.scope is not None:
+                    from .. import chat_scope_metrics
+
+                    chat_scope_metrics.session_opened(self.agent_id, "context_full")
                 recorder.account({"type": "system", "subtype": "compact_boundary",
                                   "compact_metadata": {"trigger": "auto", "pre_tokens": pre_context}})
             # The session this turn's new process resumes, if it starts one (its command resumes the saved session).
@@ -2216,6 +2412,11 @@ class ManagerAgent:
                         and (previous.launch.tool_hook is None) == (prepared.launch.tool_hook is None):
                     close = getattr(self._claude, "try_stop_if_idle", None)
                     if close is None or not await token.keep("library_idle_close", close(), 10):
+                        if prepared.session.scope is not None and previous.signature[-2:] != prepared.signature[-2:]:
+                            scope = prepared.session.scope
+                            exc = ScopeInvariantViolation("library refresh cannot reuse another scope's launch")
+                            exc.invariant = (exc, "launch", f"{scope.resolved.scope_id}@{scope.version}")
+                            raise exc
                         # A user result may leave background/autonomous work running. Keep the actual
                         # launch in this turn's record and retry the capability refresh next turn.
                         prepared = replace(prepared, launch=previous.launch, system_prompt=previous.system_prompt,
@@ -2272,9 +2473,14 @@ class ManagerAgent:
         """The live turn of a message, by the envelope's id or the web page's own."""
         return self._turns.find(message_id)
 
-    def live_for_chat(self, channel_id: str, chat_id: str, *, sender_id: str | None = None) -> list[TurnToken]:
+    def live_for_chat(self, channel_id: str, chat_id: str, *, sender_id: str | None = None,
+                      exclude_operator_sessions: bool = False) -> list[TurnToken]:
         """Snapshot this bot/chat's live turns using its full channel identity."""
-        return background_turn.live_tokens(self, channel_id, sender_id, self._turns.live_for(channel_id, chat_id))
+        tokens = background_turn.live_tokens(self, channel_id, sender_id, self._turns.live_for(channel_id, chat_id))
+        if exclude_operator_sessions:
+            tokens = [token for token in tokens if token.ops_turn is not None and (
+                token.ops_turn.principal is None or token.ops_turn.principal.audience is ScopeAudience.SHARED)]
+        return tokens
 
     def current_turn_for(self, channel: str, chat: str) -> TurnToken | None:
         """The oldest live user turn of ``chat`` on ``channel``: the one being answered, else the first queued."""
@@ -2464,7 +2670,24 @@ class ManagerAgent:
                 return
             operator = await self._router.completion_operator(target.channel_id) if routed else None
             batch = uuid.uuid4()
-            rows = await db_manager_events.claim(*target.key, batch)
+            key = None
+            if session_routing.scoped(self.agent_id):
+                # Resolve before the claim, then resolve the row actually claimed inside the transaction.
+                # A failed read rolls the claim back, leaving the event pending for the retry wake-up.
+                async with db_connection.transaction() as conn:
+                    pending = await db_manager_events.pending_one(*target.key, pool=conn)
+                    if pending is None:
+                        return
+                    origin = _completion_origin(pending, self.agent_address, batch)
+                    await self._router.completion_key(origin)
+                    rows = await db_manager_events.claim(*target.key, batch, limit=1, pool=conn)
+                    if rows:
+                        origin = _completion_origin(rows[0], self.agent_address, batch)
+                        key = await self._router.completion_key(origin)
+                        if await db_manager_events.pending_one(*target.key, pool=conn) is not None:
+                            await self._bus.publish(completion_events.wake(self.agent_address, target))
+            else:
+                rows = await db_manager_events.claim(*target.key, batch)
         except Exception:
             # The bus acknowledges this wake-up once it is handled: a new one is queued (and journaled) first, so
             # the events are tried again, after a pause, and after a restart.
@@ -2475,9 +2698,22 @@ class ManagerAgent:
             return
         if rows:
             if routed or lanes_settings.enabled() or admission.enabled():
-                self._router.dispatch_completion(envelope, rows, batch, operator)
+                self._router.dispatch_completion(envelope, rows, batch, operator, key=key)
             else:
                 await self._tell_completion(rows, batch)
+
+    async def scope_config_changed(self, channel_id: str, chat: str, *, stop_now: bool) -> None:
+        """Reconcile committed scope changes; failed reads leave current sessions untouched."""
+        if not session_routing.scoped(self.agent_id):
+            return
+        from ...db import chat_bindings
+
+        try:
+            config = await chat_bindings.scope_config(channel_id, chat, self.agent_id)
+            operator = await self._router._operator_id(channel_id)
+            await self._router.reconcile(channel_id, chat, config=config, operator_id=operator, stop_now=stop_now)
+        except Exception:
+            logger.exception("%s: cannot reconcile scope configuration; the next message will retry", self._log)
 
     @manager_budget.after_reply
     async def _tell_completion(self, rows: list[dict[str, Any]], batch: uuid.UUID) -> None:
@@ -2490,6 +2726,8 @@ class ManagerAgent:
     async def _fall_back_completion(self, batch: uuid.UUID, reason: str, state: dict[str, Any], *,
                                     rejected: bool = False) -> None:
         assert self._bus is not None
+        if reason == "session_allowlist" and self._session_now().scope is not None:
+            reason = "group_chat"  # Scoped code notices use the existing persisted completion reason.
         try:
             await completion_events.fall_back(self._bus, self.agent_address, reason=reason, batch=batch,
                                               record_id=state.get("record_id"), rejected=rejected)
@@ -2568,11 +2806,24 @@ class ManagerAgent:
         if (policy := session_visibility.for_session(self._session_now().key, manager_id=self.agent_id)) is not None:
             contract = (state_view.STABLE_CONTEXT_CONTRACT
                         if self._stable_context and SessionInput.STABLE_BLOCK in policy.inputs else "")
+            role = (session_visibility.PUBLIC_PROMPT_TOOLS if policy.tools else session_visibility.PUBLIC_PROMPT)
+            role = role if SessionInput.PUBLIC_PROMPT in policy.inputs else ""
+            contract_name = "CHAT_SESSION_ALLOWLIST"
+            if SessionInput.ROLE_PROMPT in policy.inputs:
+                role += f"\n\n{self._system_prompt}"
+            if SessionInput.SPEAKERS_NOTE in policy.inputs:
+                contract = session_visibility.SHARED_SPEAKERS_NOTE + ("\n" + contract if contract else "")
+                contract_name += "+SHARED_SPEAKERS"
             return build_system_prompt(
                 harness=Harness("", Layer.BUILTIN), role_id=self.agent_id,
-                role=(session_visibility.PUBLIC_PROMPT_TOOLS if policy.tools else session_visibility.PUBLIC_PROMPT)
-                if SessionInput.PUBLIC_PROMPT in policy.inputs else "",
-                recommended=True, contract_name="CHAT_SESSION_ALLOWLIST", contract=contract)
+                role=role, recommended=True, contract_name=contract_name, contract=contract)
+        scope = self._session_now().scope
+        inputs = session_visibility.inputs_for(scope) if scope is not None else None
+        operator_inputs = inputs if scope is not None and scope.resolved.audience is chat_scopes.ScopeAudience.OPERATOR else None
+
+        def allowed(item: SessionInput) -> bool:
+            return operator_inputs is None or item in operator_inputs.inputs
+
         contract_name, contract = "TOOLS_CONTRACT", root_adjusted(TOOLS_CONTRACT)
         if self.agent_id != DEFAULT_MANAGER_ID:
             contract_name = "TOOLS_CONTRACT+SCOPE_CONTRACT"
@@ -2590,17 +2841,27 @@ class ManagerAgent:
         if (research := getattr(self, "_research", None)) is not None:  # the turn's sources (``_prepare_turn``)
             contract_name += f"+{research_order.CONTRACT_NAME}"
             contract += "\n" + research_order.section(research)
-        if getattr(self, "_stable_context", False):  # last, so every part before it reads as it does without it
+        if not allowed(SessionInput.TOOLS_CONTRACT):
+            contract_name, contract = "", ""
+        if inputs is not None and SessionInput.OPERATOR_CONTRACT in inputs.inputs:
+            contract_name += "+OPERATOR_GROUP_CONTRACT"
+            contract += "\n" + session_visibility.OPERATOR_GROUP_CONTRACT
+        if inputs is not None and SessionInput.SPEAKERS_NOTE in inputs.inputs:
+            contract_name += "+SHARED_SPEAKERS"
+            contract += "\n" + session_visibility.SHARED_SPEAKERS_NOTE
+        if getattr(self, "_stable_context", False) and allowed(SessionInput.STABLE_BLOCK):
             contract_name += "+STABLE_CONTEXT_CONTRACT"
             contract += "\n" + state_view.STABLE_CONTEXT_CONTRACT
-        if chat_settings.turn_context_enabled():
+        # Operator group inputs omit the shared timezone/language context and its contract together.
+        if operator_inputs is None and chat_settings.turn_context_enabled():
             contract_name += "+TURN_CONTEXT_CONTRACT"
             contract += "\n" + TURN_CONTEXT_CONTRACT
         return build_system_prompt(
-            harness=agent_settings.harness,
-            custom_prompt=agent_settings.profile.custom_prompt,
+            harness=agent_settings.harness if allowed(SessionInput.HARNESS) else Harness("", Layer.BUILTIN),
+            custom_prompt=agent_settings.profile.custom_prompt if allowed(SessionInput.PROFILE_PROMPT) else "",
             role_id=self.agent_id,
-            role=root_adjusted(self._system_prompt) if self._prompt_recommended else self._system_prompt,
+            role=(root_adjusted(self._system_prompt) if self._prompt_recommended else self._system_prompt)
+            if allowed(SessionInput.ROLE_PROMPT) else "",
             recommended=self._prompt_recommended,
             contract_name=contract_name, contract=contract,
         )
@@ -2621,8 +2882,11 @@ class ManagerAgent:
         """Prepare, start and run one turn for ``message`` (a caller outside a chat message has no token of its
         own; the resume retry has the turn's)."""
         token = token or self._running_token or self._detached_token(context_envelope)
-        prepared = await self._prepare_turn(
-            token, context_envelope, ask=Ask(message, note, ops_turn, retried, quoted))
+        ask = Ask(message, note, ops_turn, retried, quoted)
+        if retried and token.prepared_ask is not None:
+            ask = replace(ask, activity=token.prepared_ask.activity,
+                          activity_cursor=token.prepared_ask.activity_cursor)
+        prepared = await self._prepare_turn(token, context_envelope, ask=ask)
         return await self._run_prepared(token, prepared)
 
     def _detached_token(self, envelope: MessageEnvelope) -> TurnToken:
@@ -2985,6 +3249,8 @@ class ManagerAgent:
                 # The reply and context maintenance finish before the capped process is closed.
                 session.budget.over_cap = True
         if not exited and not token.abandoned:
+            if replied and token.prepared_ask is not None and token.prepared_ask.activity_cursor is not None:
+                session.activity_cursor = token.prepared_ask.activity_cursor
             self._session_totals = self._claude.totals
             await self._save_session_state()
 
@@ -3386,7 +3652,7 @@ class ManagerAgent:
         """What starts the first turn of a new session: why it is new, the handoff the old session wrote, and
         the recent conversation of each chat; '' when there is none of these."""
         session = self._session_now()
-        if self._pending_handoff and session.session_runtime == "api" and session.session_id:
+        if session.scope is None and self._pending_handoff and session.session_runtime == "api" and session.session_id:
             # A prior turn may have committed before its final state write (or the Manager's restart).
             await self._save_session_state()
             if not self._pending_handoff:
@@ -3394,14 +3660,20 @@ class ManagerAgent:
         switch, handoff = self._pending_switch, self._pending_handoff
         if session.key != MAIN_SESSION:  # a group's or another sender's chat: only its own (``group_session``)
             policy = session_visibility.for_session(session.key, manager_id=self.agent_id)
+            if session.scope is not None and session.scope.resolved.audience is chat_scopes.ScopeAudience.OPERATOR:
+                policy = session_visibility.inputs_for(session.scope)
             if policy is not None and SessionInput.CHAT_OPENING not in policy.inputs:
                 return ""
-            lines = (await group_session.excerpt(_session_key(envelope), message, kind=session.route.kind)
+            lines = (await group_session.excerpt(_session_key(envelope), message, kind=session.route.kind,
+                                                fenced=True if session.scope is not None else None)
                      if policy is None or SessionInput.CHAT_HISTORY in policy.inputs else [])
             return group_session.brief(session.route.kind, _message_origin(envelope)["channel"], lines,
                                        switch=switch,
-                                       handoff=handoff if policy is None or SessionInput.CHAT_HANDOFF in policy.inputs else None,
-                                       new=session.session_id is None)
+                                       handoff=handoff if session.scope is None and (
+                                           policy is None or SessionInput.CHAT_HANDOFF in policy.inputs) else None,
+                                       new=session.session_id is None,
+                                       telegram_note=session.scope is not None and session.route.kind is session_routing.SessionKind.GROUP
+                                       and _message_origin(envelope)["channel"] == "telegram")
         conversations = await self._recent_conversations(envelope, message)
         if switch is None and not handoff and not conversations:
             return ""
@@ -3561,7 +3833,7 @@ class ManagerAgent:
             correlation_id=last.correlation_id,
             metadata={"origin_channel_id": last.metadata.get("origin_channel_id"),
                       **_reply_route(last),
-                      **_chat_record(last, f"auto-{uuid.uuid4().hex[:12]}"),
+                      **_chat_record(last, f"auto-{uuid.uuid4().hex[:12]}", manager_session=self._session_now().key),
                       **self._proactive_metadata(ProactiveSource.AUTONOMOUS)},
         ))
 
@@ -3601,8 +3873,12 @@ class ManagerAgent:
                                   quoted: Sequence[lark_quote.Quote] = (),
                                   image_input: ImageInput = ImageInput.NONE, sections: bool = True,
                                   turn: Turn | None = None,
-                                  persona_scope: manager_persona_context.Scope | None = None) -> str:
+                                  persona_scope: manager_persona_context.Scope | None = None,
+                                  activity: Sequence[str] = ()) -> str:
+        scope = self._session_now().scope
         policy = session_visibility.for_session(self._session_now().key, manager_id=self.agent_id)
+        if scope is not None and scope.resolved.audience is chat_scopes.ScopeAudience.OPERATOR:
+            policy = session_visibility.inputs_for(scope)
         def allowed(item: SessionInput) -> bool:
             return policy is None or item in policy.inputs
 
@@ -3611,7 +3887,7 @@ class ManagerAgent:
             parts += [note, ""]
         # The untrusted fence (``untrusted``): a chat message from someone other than the operator, its quotes and
         # its attachments' names go in <untrusted> blocks, after one line saying how to read them.
-        fence = await untrusted_text.enabled()
+        fence = True if scope is not None else await untrusted_text.enabled()
         # The shared turn context includes operator timezone/language settings.
         # A routed chat receives only the provenance of its current message.
         context = await manager_turn_context.prepare(envelope, turn) if policy is None else None
@@ -3622,6 +3898,8 @@ class ManagerAgent:
             # provenance, inside the same fence; off, keep even a caller-supplied label byte for byte.
             parts += [channel_line(envelope, fence=True)
                       if fence and envelope is not None and channel == channel_line(envelope) else channel, ""]
+        if activity:
+            parts += [*activity, ""]
         if not allowed(SessionInput.MESSAGE):
             user_message = ""
         quoted = quoted if allowed(SessionInput.QUOTES) else ()
@@ -3638,7 +3916,9 @@ class ManagerAgent:
             parts += ["", *lead, *lark_quote.section(quoted, fence=fence)]
             lead = []
         if attachments:
-            parts += ["", *lead, *chat_attachments.section(attachments, image_input, fence=fence)]
+            parts += ["", *lead, *chat_attachments.section(
+                attachments, image_input, fence=fence,
+                readable=scope is None or scope.mode is not LaunchMode.PLATFORM_TOOLS)]
         return "\n".join(parts)
 
     async def _sections(self, envelope: MessageEnvelope | None, *,
@@ -3648,6 +3928,22 @@ class ManagerAgent:
         if (policy := session_visibility.for_session(self._session_now().key, manager_id=self.agent_id)) is not None:
             return (manager_persona_context.section(self.agent_id, manager_persona_context.Scope.NAME)
                     if SessionInput.PERSONA_NAME in policy.inputs else [])
+        scope = self._session_now().scope
+        if scope is not None and scope.resolved.audience is chat_scopes.ScopeAudience.OPERATOR:
+            inputs = session_visibility.inputs_for(scope).inputs
+            parts: list[str] = []
+            for item, section in ((SessionInput.PROJECTS, self._projects_section),
+                                  (SessionInput.TEMPLATES, self._templates_section),
+                                  (SessionInput.WORKFLOWS, self._workflows_section),
+                                  (SessionInput.READY_TASKS, self._ready_tasks_section)):
+                if item in inputs:
+                    parts += await section()
+            if SessionInput.OPEN_GATES in inputs:
+                parts += await self._open_gates_section(envelope)
+            if SessionInput.GOALS in inputs and self._goal_snapshots:
+                parts += ["当前活跃目标:", *(f"  - [{snap.status}] {snap.title or gid}: {snap.progress}"
+                                            for gid, snap in self._goal_snapshots.items()), ""]
+            return parts
         if persona_scope is None:
             persona_scope = await manager_persona_context.scope(
                 self.agent_id, self._session_now().route, envelope,
@@ -3869,9 +4165,14 @@ class ManagerAgent:
             key = _session_key(env)
             if not key:
                 return
+            context = env.payload.get("channel_context")
+            context = context if isinstance(context, dict) else {}
+            kind = _recorded_sender_kind(env)
             await db_chat.save_channel_message(
                 session_id=key, message_id=message_id,
                 role=role, content=content, channel=channel, manager_id=self.agent_id,
+                **({"manager_session": self._session_now().key, "sender_kind": kind.value if kind else None,
+                    "sender_name": context.get("sender_name")} if role == "user" else {}),
             )
             await ops_sessions.note_direct_thread(key, _message_origin(env))
         except Exception:
@@ -3891,7 +4192,8 @@ class ManagerAgent:
         assert self._bus is not None
         resident_text = text
         text = self._group_safe(original, text)
-        record = None if persist else {}
+        record = (_chat_record(original, f"{original.message_id}:reply", manager_session=self._session_now().key)
+                  if persist else {})
         outcome = outcome or (ReplyOutcome.FAILED if error else ReplyOutcome.ANSWERED)
         reply = reply_envelope(original, text, self.agent_address, error=error, outcome=outcome,
                                record=record, snapshot=snapshot, cards=cards, ephemeral=ephemeral)

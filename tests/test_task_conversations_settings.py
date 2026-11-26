@@ -20,6 +20,7 @@ def reset_settings(monkeypatch):
     monkeypatch.setattr(settings, "_enabled", False)
     monkeypatch.setattr(settings, "_manager_answers", False)
     monkeypatch.setattr(settings, "_max_resident", 6)
+    monkeypatch.setattr(settings, "_manager_mcp", ())
 
 
 def test_switch_default_off(monkeypatch, tmp_path):
@@ -29,13 +30,13 @@ def test_switch_default_off(monkeypatch, tmp_path):
         async with _serving(tmp_path) as server:
             server._client_ops = ClientOps(SimpleNamespace())
             status, _, body = await _send(server, "POST /api/v1/task_conversations/get", _bearer(TOKEN), "{}")
-            assert status == 200 and body["result"] == {"enabled": False, "manager_answers": False, "max_resident": 6}
-            assert await settings.update(True) == {"enabled": True, "manager_answers": False, "max_resident": 6}
+            assert status == 200 and body["result"] == {"enabled": False, "manager_answers": False, "max_resident": 6, "manager_mcp": []}
+            assert await settings.update(True) == {"enabled": True, "manager_answers": False, "max_resident": 6, "manager_mcp": []}
             assert await pool.fetchval("SELECT value FROM system_settings WHERE key=$1", settings.KEY) == "true"
             settings.set_enabled(False)
             await settings.load()
             assert settings.enabled() is True
-            assert await settings.update(None) == {"enabled": False, "manager_answers": False, "max_resident": 6}
+            assert await settings.update(None) == {"enabled": False, "manager_answers": False, "max_resident": 6, "manager_mcp": []}
             assert await pool.fetchval("SELECT value FROM system_settings WHERE key=$1", settings.KEY) is None
             status, _, body = await _send(server, "POST /api/v1/task_conversations/update", _bearer(TOKEN),
                                           json.dumps({"enabled": "true"}))
@@ -69,13 +70,13 @@ def test_invalid_resident_cap_never_writes(monkeypatch, value):
 
 def test_resident_cap_persists_and_null_restores_default(monkeypatch):
     async def check(pool):
-        assert await settings.update(max_resident=2) == {"enabled": False, "manager_answers": False, "max_resident": 2}
+        assert await settings.update(max_resident=2) == {"enabled": False, "manager_answers": False, "max_resident": 2, "manager_mcp": []}
         assert await pool.fetchval("SELECT value FROM system_settings WHERE key=$1", settings.MAX_RESIDENT_KEY) == "2"
         settings._max_resident = 6
         await settings.load()
         assert settings.max_resident() == 2
-        assert await settings.update(True) == {"enabled": True, "manager_answers": False, "max_resident": 2}
-        assert await settings.update(max_resident=None) == {"enabled": True, "manager_answers": False, "max_resident": 6}
+        assert await settings.update(True) == {"enabled": True, "manager_answers": False, "max_resident": 2, "manager_mcp": []}
+        assert await settings.update(max_resident=None) == {"enabled": True, "manager_answers": False, "max_resident": 6, "manager_mcp": []}
         assert await pool.fetchval("SELECT value FROM system_settings WHERE key=$1", settings.MAX_RESIDENT_KEY) is None
     run_db(check, monkeypatch)
 
@@ -129,7 +130,7 @@ def test_resident_cap_operation_updates_without_toggling_work_mode(monkeypatch):
         assert await domain.impact(None, op, {"max_resident": None}, api_v1.OPERATOR, {}) == (
             "Set tasks.managers.max_resident to 6?")
         assert await domain.run(None, op, {"max_resident": 20}, api_v1.OPERATOR, {}) == {
-            "enabled": False, "manager_answers": False, "max_resident": 20}
+            "enabled": False, "manager_answers": False, "max_resident": 20, "manager_mcp": []}
         write.assert_awaited_once_with({settings.MAX_RESIDENT_KEY: "20"})
     asyncio.run(check())
 
@@ -155,7 +156,49 @@ def test_manager_answers_is_its_own_field_of_the_same_operation(monkeypatch):
         text = await domain.impact(None, op, {"manager_answers": True}, api_v1.OPERATOR, {})
         assert text.startswith(f"Set {settings.MANAGER_ANSWERS_KEY} to true?")
         assert await domain.run(None, op, {"manager_answers": True}, api_v1.OPERATOR, {}) == {
-            "enabled": False, "manager_answers": True, "max_resident": 6}
+            "enabled": False, "manager_answers": True, "max_resident": 6, "manager_mcp": []}
         write.assert_awaited_once_with({settings.MANAGER_ANSWERS_KEY: "true"})
         assert settings.enabled() is False
+    asyncio.run(check())
+
+
+@pytest.mark.parametrize("value", ["alpha", [1], [""], ["a b"], ["a/b"], ["x" * 65], ["a", "a"], [f"s{i}" for i in range(21)],
+                                   {"a": 1}, [["a"]]])
+def test_invalid_manager_mcp_never_writes(monkeypatch, value):
+    write = AsyncMock()
+    monkeypatch.setattr(settings.db_settings, "put_settings", write)
+    async def check():
+        with pytest.raises(ValueError, match="manager_mcp"):
+            await settings.update(manager_mcp=value)
+        write.assert_not_awaited()
+        assert settings.manager_mcp() == ()
+    asyncio.run(check())
+
+
+def test_manager_mcp_persists_and_null_restores_empty(monkeypatch):
+    async def check(pool):
+        assert settings.manager_mcp() == ()  # default: only Looper's own server
+        assert (await settings.update(manager_mcp=["alpha", "beta-2"]))["manager_mcp"] == ["alpha", "beta-2"]
+        assert json.loads(await pool.fetchval("SELECT value FROM system_settings WHERE key=$1",
+                                               settings.MANAGER_MCP_KEY)) == ["alpha", "beta-2"]
+        settings._manager_mcp = ()
+        await settings.load()
+        assert settings.manager_mcp() == ("alpha", "beta-2")
+        assert (await settings.update(manager_mcp=None))["manager_mcp"] == []
+        assert await pool.fetchval("SELECT value FROM system_settings WHERE key=$1", settings.MANAGER_MCP_KEY) is None
+        await settings.update(manager_mcp=["alpha"])
+        assert (await settings.update(manager_mcp=[]))["manager_mcp"] == []
+    run_db(check, monkeypatch)
+
+
+def test_manager_mcp_operation_is_confirmed_and_reaches_the_setting(monkeypatch):
+    op = api_v1.find("POST", "/api/v1/task_conversations/update")
+    domain = api_v1.domain_for(op)
+    write = AsyncMock()
+    monkeypatch.setattr(settings.db_settings, "put_settings", write)
+    async def check():
+        text = await domain.impact(None, op, {"manager_mcp": ["alpha"]}, api_v1.OPERATOR, {})
+        assert "tasks.conversations.manager_mcp" in text and "alpha" in text
+        assert (await domain.run(None, op, {"manager_mcp": ["alpha"]}, api_v1.OPERATOR, {}))["manager_mcp"] == ["alpha"]
+        write.assert_awaited_once_with({settings.MANAGER_MCP_KEY: '["alpha"]'})
     asyncio.run(check())

@@ -90,10 +90,13 @@ async def pending(conn):
     return bool(await _statements(conn) or await _missing_indexes(conn))
 
 
-async def apply(conn, *, sql, state):
+async def apply(conn, *, sql, state) -> bool:
+    did_work = False
     statements = await _statements(conn)
     if statements or await _missing_indexes(conn):
+        did_work = True
         for statement in statements:
             await conn.execute(statement)
         await conn.execute("INSERT INTO schema_migrations(name) VALUES($1) ON CONFLICT DO NOTHING", name)
         await conn.execute("DELETE FROM schema_migrations WHERE name=$1", online[0].marker)
+    return did_work

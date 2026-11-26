@@ -18,13 +18,17 @@ async def pending(conn):
     return await _widen_check.pending(conn, _TABLE, "source", _ADD)
 
 
-async def apply(conn, *, sql, state):
+async def apply(conn, *, sql, state) -> bool:
+    did_work = False
     from .. import connection
 
     if await pending(conn):
+        did_work = True
         await conn.execute(_DDL)
         await conn.execute("INSERT INTO schema_migrations(name) VALUES ($1) ON CONFLICT DO NOTHING", name)
         await conn.execute("DELETE FROM schema_migrations WHERE name=$1", online[0].marker)
     elif await connection._unvalidated(conn, name):
+        did_work = True
         await conn.execute("INSERT INTO schema_migrations(name) VALUES ($1) ON CONFLICT DO NOTHING", name)
         await conn.execute("DELETE FROM schema_migrations WHERE name=$1", online[0].marker)
+    return did_work

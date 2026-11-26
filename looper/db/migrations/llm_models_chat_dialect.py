@@ -11,10 +11,12 @@ async def pending(conn):
     return await legacy._llm_models_chat_dialect_pending(conn)
 
 
-async def apply(conn, *, sql, state):
+async def apply(conn, *, sql, state) -> bool:
+    did_work = False
     from .. import connection as legacy
 
     if await legacy._llm_models_chat_dialect_pending(conn):
+        did_work = True
         await conn.execute(
             "ALTER TABLE llm_models ADD COLUMN chat_dialect TEXT "
             "CHECK (chat_dialect IS NULL OR protocol = 'openai-chat')"
@@ -23,3 +25,4 @@ async def apply(conn, *, sql, state):
             "INSERT INTO schema_migrations (name) VALUES ($1)",
             legacy._LLM_MODELS_CHAT_DIALECT,
         )
+    return did_work

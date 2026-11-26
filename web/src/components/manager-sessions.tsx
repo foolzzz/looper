@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { ConfirmDialog } from "@/components/confirm-dialog";
+import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { relative } from "@/lib/leads-labels";
 import { formatTokens, formatUsd } from "@/lib/usage";
@@ -14,6 +15,21 @@ export interface ManagerSessionRow {
   last_active_at: string | null;
   context_tokens: number | null;
   cost_usd: number | null;
+  scope?: { id: string; version: number; audience: "operator" | "shared" } | null;
+  retired?: boolean;
+}
+
+const AUDIENCE: Record<string, string> = { operator: "操作者", shared: "共享" };
+
+function SessionMarks({ row }: { row: ManagerSessionRow }) {
+  if (!row.scope && !row.retired) return null;
+  return (
+    <span className="inline-flex flex-wrap gap-1">
+      {row.scope && <Badge variant="outline">{row.scope.id}</Badge>}
+      {row.scope && <Badge variant="outline">{AUDIENCE[row.scope.audience] ?? row.scope.audience}</Badge>}
+      {row.retired && <Badge variant="warning">已停用</Badge>}
+    </span>
+  );
 }
 
 interface SessionList {
@@ -28,16 +44,19 @@ function isList(value: SessionList | { status: string }): value is SessionList {
   return "sessions" in value;
 }
 
-/** The default Manager's sessions, under the dashboard's Manager group. Routing off shows main and says so. */
-export function ManagerSessions() {
+/** A Manager's sessions. Omit `managerId` for the default Manager (the dashboard). Routing off shows main and says so.
+ *  Reset takes no manager id and always clears the default Manager, so a scenario list is read-only. */
+export function ManagerSessions({ managerId }: { managerId?: string }) {
   const [view, setView] = useState<SessionList | null>(null);
   const [error, setError] = useState("");
   const [pending, setPending] = useState<ManagerSessionRow | null>(null);
   const [busy, setBusy] = useState(false);
+  const readOnly = managerId != null;
 
   const load = useCallback(async (signal?: AbortSignal) => {
     try {
-      const result = await callV1<SessionList>("/api/v1/manager_sessions/list", {}, { signal });
+      const result = await callV1<SessionList>("/api/v1/manager_sessions/list",
+        managerId ? { manager_id: managerId } : {}, { signal });
       if (signal?.aborted || !isList(result)) return;
       setView(result);
       setError("");
@@ -45,7 +64,7 @@ export function ManagerSessions() {
       if (signal?.aborted) return;
       setError(caught instanceof Error ? caught.message : String(caught));
     }
-  }, []);
+  }, [managerId]);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -54,7 +73,7 @@ export function ManagerSessions() {
   }, [load]);
 
   const confirm = async () => {
-    if (!pending) return;
+    if (readOnly || !pending) return;
     setBusy(true);
     try {
       const result = await callV1<ManagerSessionRow>("/api/v1/manager_sessions/reset", { key: pending.key });
@@ -90,8 +109,9 @@ export function ManagerSessions() {
                   <div className="min-w-0">
                     <p className="truncate font-medium">{row.name}</p>
                     <p className="text-xs text-muted-foreground">{KIND[row.kind]} · {row.resident ? "常驻" : "已回收"}</p>
+                    <SessionMarks row={row} />
                   </div>
-                  <Button type="button" variant="outline" size="sm" onClick={() => setPending(row)}>重置</Button>
+                  {!readOnly && <Button type="button" variant="outline" size="sm" onClick={() => setPending(row)}>重置</Button>}
                 </div>
                 <p className="text-xs text-muted-foreground">
                   {relative(row.last_active_at)} · 上下文 {formatTokens(row.context_tokens)} · {formatUsd(row.cost_usd)}
@@ -105,11 +125,12 @@ export function ManagerSessions() {
                 <tr>
                   <th scope="col" className="py-1.5 pr-3 font-normal">名称</th>
                   <th scope="col" className="py-1.5 pr-3 font-normal">类型</th>
+                  <th scope="col" className="py-1.5 pr-3 font-normal">范围</th>
                   <th scope="col" className="py-1.5 pr-3 font-normal">常驻</th>
                   <th scope="col" className="py-1.5 pr-3 font-normal">最近活动</th>
                   <th scope="col" className="py-1.5 pr-3 font-normal">上下文</th>
                   <th scope="col" className="py-1.5 pr-3 font-normal">费用</th>
-                  <th scope="col" className="py-1.5 font-normal"><span className="sr-only">操作</span></th>
+                  {!readOnly && <th scope="col" className="py-1.5 font-normal"><span className="sr-only">操作</span></th>}
                 </tr>
               </thead>
               <tbody className="divide-y divide-border">
@@ -117,13 +138,14 @@ export function ManagerSessions() {
                   <tr key={row.key}>
                     <td className="py-1.5 pr-3">{row.name}</td>
                     <td className="py-1.5 pr-3">{KIND[row.kind]}</td>
+                    <td className="py-1.5 pr-3"><SessionMarks row={row} /></td>
                     <td className="py-1.5 pr-3">{row.resident ? "常驻" : "已回收"}</td>
                     <td className="whitespace-nowrap py-1.5 pr-3 tabular-nums">{relative(row.last_active_at)}</td>
                     <td className="py-1.5 pr-3 tabular-nums">{formatTokens(row.context_tokens)}</td>
                     <td className="py-1.5 pr-3 tabular-nums">{formatUsd(row.cost_usd)}</td>
-                    <td className="py-1.5 text-right">
+                    {!readOnly && <td className="py-1.5 text-right">
                       <Button type="button" variant="outline" size="sm" onClick={() => setPending(row)}>重置</Button>
-                    </td>
+                    </td>}
                   </tr>
                 ))}
               </tbody>
@@ -131,7 +153,7 @@ export function ManagerSessions() {
           </div>
         </>
       )}
-      {pending && (
+      {!readOnly && pending && (
         <ConfirmDialog title="重置会话" onClose={() => { if (!busy) setPending(null); }}>
           <p className="text-sm">{RESET}</p>
           <div className="flex justify-end gap-2">
