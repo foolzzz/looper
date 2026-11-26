@@ -13,6 +13,7 @@ from collections.abc import Awaitable, Callable
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from typing import Any
+from uuid import uuid4
 
 from .. import turn_metrics
 from ..turn_metrics import ProactiveRef
@@ -22,6 +23,7 @@ from ..task_notice import NotifyTarget
 from ..ops.leads import for_group
 from ..log_redaction import redact
 from .base import ChannelAdapter, PostOutcome, PostReceipt
+from .proactive import store_body
 from .chat_routing import RouteDecision, RoutingSnapshot, load_snapshot
 from .lark_quote import QuoteRead, QuoteReader, QuoteRef, QuoteUnavailable
 from .startup import ChannelStartState, transient
@@ -197,13 +199,19 @@ class ChannelRegistry:
                      idempotency_key: str | None = None, proactive: ProactiveRef | None = None,
                      group: bool = False) -> tuple[bool, str | None]:
         """Send through the running channel, retaining the event key across caller retries when supplied."""
+        context_ref, context_group = turn_metrics.current_proactive()
+        proactive = proactive or context_ref
+        group = group or context_group
+        record_key = (proactive.dedupe_key or idempotency_key or str(uuid4())) if proactive else idempotency_key
         adapter = self._channels.get(channel_id)
         if adapter is None:
             if proactive is not None:
                 turn_metrics.record_proactive(proactive, channel_id=channel_id, chat=chat,
                                               group=group, external_id=None,
-                                              outcome=PostOutcome.REJECTED.value, dedupe_key=idempotency_key)
+                                              outcome=PostOutcome.REJECTED.value, dedupe_key=record_key)
             return False, self._not_running(channel_id)
+        await store_body(proactive, text, channel_id=channel_id, chat=chat,
+                         group=group, dedupe_key=record_key or "")
         try:
             receipt = await adapter.notify(chat, text, **({"idempotency_key": idempotency_key}
                                                         if idempotency_key is not None else {}))
@@ -211,28 +219,32 @@ class ChannelRegistry:
             self.record_delivery(channel_id, False)
             if proactive is not None:
                 turn_metrics.record_proactive(proactive, channel_id=channel_id, chat=chat, group=group,
-                                              external_id=None, outcome=PostOutcome.UNKNOWN.value, dedupe_key=idempotency_key)
+                                              external_id=None, outcome=PostOutcome.UNKNOWN.value, dedupe_key=record_key)
             raise
         self.record_delivery(channel_id, receipt.success)
         if proactive is not None:
             turn_metrics.record_proactive(proactive, channel_id=channel_id, chat=chat,
                                           group=group,
-                                          external_id=receipt.external_id, outcome=receipt.result.value, dedupe_key=idempotency_key)
+                                          external_id=receipt.external_id, outcome=receipt.result.value, dedupe_key=record_key)
         return receipt.success, receipt.error
 
     async def post(self, channel_id: str, target: NotifyTarget, text: str, *,
                    reply_to: str | None = None, idempotency_key: str | None = None,
                    proactive: ProactiveRef | None = None) -> PostReceipt:
         """Post ``text`` to ``target`` through the running channel ``channel_id`` (``ChannelAdapter.post``)."""
+        proactive = proactive or turn_metrics.current_proactive()[0]
+        record_key = (proactive.dedupe_key or idempotency_key or str(uuid4())) if proactive else idempotency_key
         adapter = self._channels.get(channel_id)
         if adapter is None:
             if proactive is not None:
                 turn_metrics.record_proactive(proactive, channel_id=channel_id, chat=target.id, group=target.group,
                                               external_id=None, outcome=PostOutcome.REJECTED.value,
-                                              dedupe_key=idempotency_key)
+                                              dedupe_key=record_key)
             return PostReceipt(False, error=self._not_running(channel_id), outcome=PostOutcome.REJECTED)
         if target.group:
             text = for_group(text)
+        await store_body(proactive, text, channel_id=channel_id, chat=target.id,
+                         group=target.group, dedupe_key=record_key or "")
         try:
             receipt = await adapter.post(target, text, reply_to=reply_to, idempotency_key=idempotency_key)
         except Exception:
@@ -240,40 +252,44 @@ class ChannelRegistry:
             if proactive is not None:
                 turn_metrics.record_proactive(proactive, channel_id=channel_id, chat=target.id, group=target.group,
                                               external_id=None, outcome=PostOutcome.UNKNOWN.value,
-                                              dedupe_key=idempotency_key)
+                                              dedupe_key=record_key)
             raise
         self.record_delivery(channel_id, receipt.success)
         if proactive is not None:
             turn_metrics.record_proactive(proactive, channel_id=channel_id, chat=target.id, group=target.group,
                                           external_id=receipt.external_ids[0] if receipt.external_ids else None,
-                                          outcome=receipt.result.value, dedupe_key=idempotency_key)
+                                          outcome=receipt.result.value, dedupe_key=record_key)
         return receipt
 
     async def post_card(self, channel_id: str, target: NotifyTarget, card: Any, *,
                         reply_to: str | None = None, idempotency_key: str | None = None,
                         proactive: ProactiveRef | None = None) -> PostReceipt:
         """Post ``card`` (``card_actions.Card``) to ``target`` like ``post`` (``ChannelAdapter.post_card``)."""
+        proactive = proactive or turn_metrics.current_proactive()[0]
+        record_key = (proactive.dedupe_key or idempotency_key or str(uuid4())) if proactive else idempotency_key
         adapter = self._channels.get(channel_id)
         if adapter is None:
             if proactive is not None:
                 turn_metrics.record_proactive(proactive, channel_id=channel_id, chat=target.id, group=target.group,
                                               external_id=None, outcome=PostOutcome.REJECTED.value,
-                                              dedupe_key=idempotency_key)
+                                              dedupe_key=record_key)
             return PostReceipt(False, error=self._not_running(channel_id), outcome=PostOutcome.REJECTED)
         if target.group and (checked := for_group(card.text)) != card.text:
             card = replace(card, text=checked, buttons=())
+        await store_body(proactive, card.text, channel_id=channel_id, chat=target.id,
+                         group=target.group, dedupe_key=record_key or "")
         try:
             receipt = await adapter.post_card(target, card, reply_to=reply_to, idempotency_key=idempotency_key)
         except Exception:
             if proactive is not None:
                 turn_metrics.record_proactive(proactive, channel_id=channel_id, chat=target.id, group=target.group,
                                               external_id=None, outcome=PostOutcome.UNKNOWN.value,
-                                              dedupe_key=idempotency_key)
+                                              dedupe_key=record_key)
             raise
         if proactive is not None:
             turn_metrics.record_proactive(proactive, channel_id=channel_id, chat=target.id, group=target.group,
                                           external_id=receipt.external_ids[0] if receipt.external_ids else None,
-                                          outcome=receipt.result.value, dedupe_key=idempotency_key)
+                                          outcome=receipt.result.value, dedupe_key=record_key)
         return receipt
 
     async def edit_card(self, channel_id: str, target: NotifyTarget, external_id: str, card: Any) -> PostReceipt:

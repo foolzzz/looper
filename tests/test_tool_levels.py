@@ -20,6 +20,9 @@ INSIDE, OPERATOR, ORIGIN, MACHINE, EXTERNAL, UNKNOWN = (ActionLevel.INSIDE, Acti
                                                         ActionLevel.MACHINE, ActionLevel.EXTERNAL, ActionLevel.UNKNOWN)
 # The RFC's table (section 4.2): a fixed level, or "args" where the call's arguments decide it.
 RFC_TABLE: dict[str, ActionLevel | str] = {
+    # Chat task operations stay inside Looper; task agents are reviewed where they run.
+    "looper_chat_tasks": INSIDE, "looper_chat_task_create": INSIDE,
+    "looper_chat_task_control": INSIDE, "looper_chat_task_instruct": INSIDE,
     "looper_overview": INSIDE, "looper_tasks": INSIDE, "looper_costs": INSIDE, "looper_config_export": INSIDE,
     "looper_task_create": INSIDE, "looper_task_control": INSIDE, "looper_task_instruct": INSIDE,
     "looper_task_update": INSIDE, "looper_concurrency": INSIDE, "looper_task_gate_reply": ORIGIN,
@@ -212,6 +215,7 @@ DECIDED_OPERATIONS: dict[str, ActionLevel] = {
     "message_collection.update": INSIDE,  # stores configuration without reading an account
     "message_collection.mode_update": INSIDE,  # changes Looper's ingestion state
     "message_collection.run_now": MACHINE,  # starts a local read-only collector CLI
+    "tasks.changes": MACHINE,  # reads a local task repository with read-only git commands
 }
 
 

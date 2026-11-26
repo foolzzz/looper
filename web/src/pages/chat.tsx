@@ -19,7 +19,6 @@ import { Markdown } from "@/components/markdown";
 import { ChannelBadge, ConversationList } from "@/components/chat-conversations";
 import { channelLabel, undeliveredText } from "@/lib/chat-channels";
 import {
-  sendChat,
   fetchChatMessages,
   fetchChatSettings,
   fetchChatTurn,
@@ -31,11 +30,9 @@ import {
   fetchManagerSession,
   fetchTaskActivity,
   fetchTaskDetail,
-  streamChatReply,
   fetchRoleConfigs,
   fetchLlmRecords,
   watchChat,
-  type SSEEvent,
   type RoleConfig,
   type ChatTarget,
   type ChatTargetInfo,
@@ -48,6 +45,7 @@ import {
   type ManagerSessionView,
   sessionProfileLabel,
 } from "@/lib/api";
+import { useReplyStream } from "@/lib/use-reply-stream";
 import { historyFrom, joinStaged, pullBack, turnAnswers } from "@/lib/composer";
 import { isGateWaiting } from "@/lib/gates";
 import { randomId } from "@/lib/ids";
@@ -340,12 +338,16 @@ export function ChatPage({ query, onQuery, active = true }: { active?: boolean; 
   const [taskOpen, setTaskOpen] = useState<Record<string, boolean>>({});
   const [plannerActivity, setPlannerActivity] = useState<ActivityEvent[]>([]);
   const scrollRef = useRef<HTMLDivElement>(null);
-  const cleanupRef = useRef<(() => void) | null>(null);
-  const turnRef = useRef(0); // the send in flight; an older stream must not touch a newer turn's state
+  // The Manager and session shown now; a late answer is applied only when it was asked for these.
+  const currentRef = useRef({ managerId: target.id, sessionId });
+  currentRef.current = { managerId: target.id, sessionId };
   // A send belongs to the adopted target/session, even while a read-only or unresolved link hides its composer.
   // switchWebSession and applyTarget cancel it only when a different writable owner is actually adopted.
   // Leaving the page (the session ended, for one) stops the reply stream.
-  useEffect(() => () => cleanupRef.current?.(), []);
+  const reply = useReplyStream(() => ({
+    id: currentRef.current.managerId,
+    threadId: currentRef.current.sessionId,
+  }));
 
   // Stopping a reply is a system setting (off by default); until it is read, there is no Stop.
   const [stopEnabled, setStopEnabled] = useState(false);
@@ -389,9 +391,6 @@ export function ChatPage({ query, onQuery, active = true }: { active?: boolean; 
   // Below the md breakpoint the list takes the messages' place while it is open.
   const [listOpen, setListOpen] = useState(false);
 
-  // The Manager and session shown now; a late answer is applied only when it was asked for these.
-  const currentRef = useRef({ managerId: target.id, sessionId });
-  currentRef.current = { managerId: target.id, sessionId };
   // Persist under the writable owner even when a transcript hides its composer. Write synchronously so switching
   // owners or reloading cannot discard a recovered draft before React applies its state update.
   const setInput = (next: string | ((draft: string) => string)) => {
@@ -629,8 +628,7 @@ export function ChatPage({ query, onQuery, active = true }: { active?: boolean; 
 
   // The web thread to continue; the address names it too, so it is kept by a link, a refresh, Back and Forward.
   const switchWebSession = (id: string, managerId: string = currentRef.current.managerId) => {
-    cleanupRef.current?.();
-    cleanupRef.current = null;
+    reply.cancel();
     localStorage.setItem(sessionKey(managerId), id);
     currentRef.current = { managerId, sessionId: id };
     setSessionId(id);
@@ -673,8 +671,7 @@ export function ChatPage({ query, onQuery, active = true }: { active?: boolean; 
   // unknown one is the Manager, once the agents are listed.
   const applyTarget = (next: ChatTargetInfo) => {
     if (next.id === target.id) return;
-    cleanupRef.current?.();
-    cleanupRef.current = null;
+    reply.cancel();
     stopPoll();
     setServerTurn(null);
     setSending(false);
@@ -1002,19 +999,8 @@ export function ChatPage({ query, onQuery, active = true }: { active?: boolean; 
 
     const sid = sessionId;
     const managerId = target.id;
-    cleanupRef.current?.();
-    const turn = ++turnRef.current;
-    const controller = new AbortController();
-    const current_ = () => turn === turnRef.current && !controller.signal.aborted &&
-      managerId === currentRef.current.managerId && sid === currentRef.current.sessionId;
-    let close: (() => void) | undefined;
-    const cancel = () => {
-      controller.abort();
-      close?.();
-      if (cleanupRef.current === cancel) cleanupRef.current = null;
-    };
-    // Installed before awaiting sendChat: navigation owns cancellation throughout the send's lifetime.
-    cleanupRef.current = cancel;
+    // The previous send is cancelled before this turn's bubbles, as it was before the hook.
+    reply.cancel();
     stopPoll();
     setServerTurn(null);
     setNotice("");
@@ -1044,105 +1030,106 @@ export function ChatPage({ query, onQuery, active = true }: { active?: boolean; 
     };
     setMessages((prev) => [...prev, assistantMsg]);
 
-    try {
-      const { correlation_id } = await sendChat(text, sid, userMsg.id, sendTargetOf(target), {
-        newSessionProfileId, signal: controller.signal,
-      });
-      localThreads.current.get(managerId)?.delete(sid); // A successful send makes this a persisted thread.
-      if (!current_()) return;
-
-      close = streamChatReply(
-        correlation_id,
-        (event: SSEEvent) => {
-          if (!current_()) return;
-          switch (event.kind) {
-            case "answer.delta":
-              setMessages((prev) =>
-                prev.map((m) =>
-                  m.id === assistantId
-                    ? { ...m, content: m.content + ((event.payload as any).text || "") }
-                    : m
-                )
-              );
-              break;
-            case "answer.final": {
-              finalSeen = true;
-              const finalText = (event.payload as any).text || "";
-              const outcome: string = (event.payload as any).outcome || "answered";
-              setMessages((prev) =>
-                prev.map((m) =>
-                  m.id === assistantId
-                    ? {
-                        ...m,
-                        content: finalText || m.content || "Done.",
-                        streaming: false,
-                        outcome: outcome === "stopped" ? "stopped" : undefined,
-                      }
-                    : m
-                )
-              );
-              setSending(false);
-              setPhase("");
-              if (changesProfile) setProfileRefresh((n) => n + 1);
-              const list = stagedRef.current;
-              if (list.length > 0) {
-                if (outcome === "answered" && canSendRef.current) {
-                  // Cleared first, so the batch can never go out twice.
-                  setStaged([]);
-                  void sendRef.current(joinStaged(list));
-                } else pullStagedToDraft();
-              }
-              break;
+    const stillCurrent = { current: () => false };
+    reply.start({
+      target: sendTargetOf(target),
+      threadId: sid,
+      messageId: userMsg.id,
+      text,
+      options: { newSessionProfileId },
+      ownerId: managerId,
+      isCurrent: stillCurrent,
+      onAccepted: () => {
+        localThreads.current.get(managerId)?.delete(sid); // A successful send makes this a persisted thread.
+      },
+      onEvent: (event) => {
+        if (!stillCurrent.current()) return;
+        switch (event.kind) {
+          case "answer.delta":
+            setMessages((prev) =>
+              prev.map((m) =>
+                m.id === assistantId
+                  ? { ...m, content: m.content + ((event.payload as any).text || "") }
+                  : m
+              )
+            );
+            break;
+          case "answer.final": {
+            finalSeen = true;
+            const finalText = (event.payload as any).text || "";
+            const outcome: string = (event.payload as any).outcome || "answered";
+            setMessages((prev) =>
+              prev.map((m) =>
+                m.id === assistantId
+                  ? {
+                      ...m,
+                      content: finalText || m.content || "Done.",
+                      streaming: false,
+                      outcome: outcome === "stopped" ? "stopped" : undefined,
+                    }
+                  : m
+              )
+            );
+            setSending(false);
+            setPhase("");
+            if (changesProfile) setProfileRefresh((n) => n + 1);
+            const list = stagedRef.current;
+            if (list.length > 0) {
+              if (outcome === "answered" && canSendRef.current) {
+                // Cleared first, so the batch can never go out twice.
+                setStaged([]);
+                void sendRef.current(joinStaged(list));
+              } else pullStagedToDraft();
             }
-            case "agent.phase":
-              setPhase((event.payload as any).label || "");
-              break;
-            case "turn.completed":
-            case "turn.failed":
-              // WebChannelAdapter saves the reply to the captured send session, including after navigation.
-              setMessages((prev) => current_()
-                ? prev.map((m) => (m.id === assistantId ? { ...m, streaming: false } : m)) : prev);
-              setSending(false);
-              setPhase("");
-              break;
+            break;
           }
-        },
-        () => {
-          if (!current_()) return;
-          setSending(false);
-          setPhase("");
-          setMessages((prev) =>
-            prev.map((m) => (m.id === assistantId ? { ...m, streaming: false } : m))
-          );
-          if (finalSeen) return;
-          // The stream ended with no final answer (its deadline, say): the turn may still run on the server.
-          if (target.kind === "manager") followTurn(sid, [userMsg.id]);
-          else pullStagedToDraft();
+          case "agent.phase":
+            setPhase((event.payload as any).label || "");
+            break;
+          case "turn.completed":
+          case "turn.failed":
+            // WebChannelAdapter saves the reply to the captured send session, including after navigation.
+            setMessages((prev) => stillCurrent.current()
+              ? prev.map((m) => (m.id === assistantId ? { ...m, streaming: false } : m)) : prev);
+            setSending(false);
+            setPhase("");
+            break;
         }
-      );
-      // A synchronous stream callback can already have started the next staged send.
-      if (!current_()) close();
-    } catch (err) {
-      if (!current_()) return;
-      // fetch() rejects with a TypeError when the server is unreachable; other
-      // errors carry the server's reason, e.g. the task's Planner has stopped.
-      const reason =
-        err instanceof TypeError || !(err instanceof Error)
-          ? "Failed to connect. Is the server running?"
-          : err.message;
-      setSending(false);
-      if (text.toLowerCase() === NEW_SESSION_COMMAND) {
+      },
+      onDone: () => {
+        if (!stillCurrent.current()) return;
+        setSending(false);
+        setPhase("");
         setMessages((prev) =>
-          prev.map((m) => (m.id === assistantId ? { ...m, content: reason, streaming: false } : m)),
+          prev.map((m) => (m.id === assistantId ? { ...m, streaming: false } : m))
         );
-      } else {
-        // Nothing is retried: the text returns to the draft with the reason.
-        setMessages((prev) => prev.filter((m) => m.id !== userMsg.id && m.id !== assistantId));
-        pullStagedToDraft([text]);
-        setNotice(reason);
-      }
-      if (target.kind === "planner") refreshTargets();
-    }
+        if (finalSeen) return;
+        // The stream ended with no final answer (its deadline, say): the turn may still run on the server.
+        if (target.kind === "manager") followTurn(sid, [userMsg.id]);
+        else pullStagedToDraft();
+      },
+      onError: (err) => {
+        if (!stillCurrent.current()) return;
+        // fetch() rejects with a TypeError when the server is unreachable; other
+        // errors carry the server's reason, e.g. the task's Planner has stopped.
+        const reason =
+          err instanceof TypeError || !(err instanceof Error)
+            ? "Failed to connect. Is the server running?"
+            : err.message;
+        setSending(false);
+        if (text.toLowerCase() === NEW_SESSION_COMMAND) {
+          setMessages((prev) =>
+            prev.map((m) => (m.id === assistantId ? { ...m, content: reason, streaming: false } : m)),
+          );
+        } else {
+          // Nothing is retried: the text returns to the draft with the reason.
+          setMessages((prev) => prev.filter((m) => m.id !== userMsg.id && m.id !== assistantId));
+          pullStagedToDraft([text]);
+          setNotice(reason);
+        }
+        if (target.kind === "planner") refreshTargets();
+      },
+    });
   };
 
   sendRef.current = handleSend;
