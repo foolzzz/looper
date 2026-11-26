@@ -9303,11 +9303,21 @@ For source checkouts, an upgrade that changes the dashboard exports the target
 commit's web sources and fingerprint hook into a temporary directory, installs
 the npm dependencies and builds the dashboard before draining or stopping the
 service. The live `web/dist` stays untouched; a failed build leaves the service
-running and the checkout unchanged. The stopped interval contains the fast-forward
-merge, the required Python dependency sync and publication of the prepared
-dashboard by atomic directory swap. Upgrade reports and logs separate this build
-time as `prepare_seconds` from the service's `gap_seconds`. Wheel installs keep
-their existing behavior.
+running and the checkout unchanged. An upgrade that needs the Python
+dependency sync (`FULL` and `CONTROL_PLANE`) first runs the same `uv sync` for
+the target tree, exported from the target commit, into a throwaway environment.
+It proves that the target installs, including building the package itself, and
+leaves every wheel and the build backend in the uv cache; a failure leaves the
+service running and the checkout unchanged. The stopped interval then contains
+the fast-forward merge, the dependency sync of the real environment with
+`UV_OFFLINE=1` (it cannot depend on the network) and publication of the prepared
+dashboard by atomic directory swap. If that sync still fails, the checkout is
+reset to the commit it had before the merge, its local `uv.lock` is restored,
+the previous environment is re-synced from the cache, the previous version is
+restarted and the command fails naming the step; the target is never started on
+a checkout whose environment lacks its dependencies. Upgrade reports and logs
+separate the preparation time as `prepare_seconds` from the service's
+`gap_seconds`. Wheel installs keep their existing behavior.
 
 A `CONTROL_PLANE` upgrade begins a turns drain with `--drain-timeout` as the
 server deadline and the cap on the whole drain. The CLI measures
