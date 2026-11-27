@@ -414,6 +414,7 @@ QUOTE_READ_SEC = 80.0
 # case) starts a new session. Anything else, "/new foo" or "/news" too, is a message for Claude.
 NEW_SESSION_COMMAND = "/new"
 PREPARATION_STEPS: tuple[str, ...] = (
+    "classify_speaker",  # reads the bot's operator and allowlist; before ``begin_turn``, which reads the speaker
     "persist_user_message", "attention_enabled", "route_to_gate", "route_ledger", "route_memory", "route_intent", "read_quote", "resident_settlement", "status_thinking", "tools_probe", "turn_lock", "load_db_config",
     "load_session_state", "group_activity", "agent_settings", "templates", "library", "library_server", "outbound_review", "llmrec_attach",
     "build_user_message", "session_budget",
@@ -1950,6 +1951,8 @@ class ManagerAgent:
                         require_match=self._claude.shares_bridge)
             token.check()
             token.ops_turn = turn
+            # Before ``begin_turn``: its notes and the authorization checks read the speaker.
+            await token.step("classify_speaker", manager_turn_context.identify(envelope, turn))
             session = self._session_now()
             if session.scope is not None and turn.origin is TurnOrigin.USER:
                 try:
@@ -3906,7 +3909,10 @@ class ManagerAgent:
         fence = True if scope is not None else await untrusted_text.enabled()
         # The shared turn context includes operator timezone/language settings.
         # A routed chat receives only the provenance of its current message.
-        context = await manager_turn_context.prepare(envelope, turn) if policy is None else None
+        # The speaker is set for every user turn (authorization); only the rendering depends on the switch/policy.
+        context = await manager_turn_context.identify(envelope, turn)
+        if policy is not None or not chat_settings.turn_context_enabled():
+            context = None
         if context is not None:
             parts += render_turn_context(context)
         elif channel and allowed(SessionInput.PROVENANCE):

@@ -23,6 +23,7 @@ from looper.agents.channels.allowlist import SenderAllowlist
 from looper.agents.channels.lark_bot import make_adapter
 from looper.agents.channels.telegram import TelegramChannelAdapter
 from looper.agents.message import MessageEnvelope, MessageType, channel_address, manager_address
+from looper.agents.turn_context import SpeakerKind
 from tests.db_support import DSN, run_db
 
 ASKER = "ou_asker"
@@ -181,7 +182,8 @@ def test_lark_bot_a_confirmation_card_pressed_on_the_long_connection_runs_it_onc
         await system_settings.put_settings({card_actions.ENABLED_KEY: "true"}, pool=pool)
         ops = ManagerOps(Platform(bus=None, task_router=None), url="http://127.0.0.1:9", token="test-token")
         monkeypatch.setitem(card_actions._handlers, "confirmation", ops.press)
-        turn = Turn(channel="lark_bot", chat="oc_dm", message_id="om_ask", sender=ASKER, channel_id="channel-lark_bot")
+        turn = Turn(channel="lark_bot", chat="oc_dm", message_id="om_ask", sender=ASKER, channel_id="channel-lark_bot",
+                    speaker=SpeakerKind.OPERATOR)
         ops.begin_turn(turn)
         assert (await ops.call("looper_projects", {"action": "delete", "project": "sample"}))["status"] == \
             "needs_confirmation"
