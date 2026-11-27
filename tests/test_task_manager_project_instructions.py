@@ -216,3 +216,43 @@ def test_section_is_empty_without_text_and_a_cut_marker_stays_inside_the_fence(w
     rendered = pi.section(pi.read(str(work))[0])
     assert rendered.count("<untrusted ") == rendered.count("\n</untrusted>") == 1
     assert rendered.index(marker(32768)) < rendered.index("\n</untrusted>")
+
+
+def test_hard_link_to_a_file_elsewhere_is_skipped_and_its_text_never_read(
+    tmp_path: Path, work: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    secret = tmp_path / "secret"
+    secret.write_text("TOP-SECRET-TOKEN")
+    os.link(secret, work / "CLAUDE.md")  # its real path is inside the task directory; the inode is not only its own
+    reads: list[int] = []
+    real_read = os.read
+    monkeypatch.setattr(pi.os, "read", lambda fd, size: (reads.append(fd), real_read(fd, size))[1])
+    result = pi.read(str(work))
+    assert result == ([], [Skipped("CLAUDE.md", Skip.HARD_LINKED)])
+    assert "TOP-SECRET-TOKEN" not in repr(result) and not reads
+
+
+def test_two_names_linked_to_one_inode_are_both_skipped_and_a_symlink_alias_still_counts_once(work: Path) -> None:
+    (work / "AGENTS.md").write_text("agents\n")
+    os.link(work / "AGENTS.md", work / "CLAUDE.md")
+    assert pi.read(str(work)) == ([], [Skipped("CLAUDE.md", Skip.HARD_LINKED), Skipped("AGENTS.md", Skip.HARD_LINKED)])
+    (work / "CLAUDE.md").unlink()
+    (work / "AGENTS.md").rename(work / "x")
+    (work / "AGENTS.md").write_text("agents\n")
+    (work / "CLAUDE.md").symlink_to("AGENTS.md")
+    [entry], skipped = pi.read(str(work))
+    assert (entry.name, entry.aliases) == ("CLAUDE.md", ("AGENTS.md",)) and skipped == []
+
+
+def test_hidden_characters_are_written_out_and_a_leading_byte_order_mark_is_dropped(work: Path) -> None:
+    (work / "CLAUDE.md").write_text("﻿use tabs\x00​ now ‮evil⁦ end﻿", encoding="utf-8")
+    [entry], _ = pi.read(str(work))
+    assert entry.text == "use tabs\\u0000\\u200b now \\u202eevil\\u2066 end\\ufeff"
+    assert not any(ch in entry.text for ch in "\x00​‮⁦﻿")
+
+
+def test_mention_text_in_a_project_file_reaches_the_fence_as_written(work: Path) -> None:
+    text = "Ping @all and @ou_abc123 and <at user_id=\"1\">Ann</at> when a release goes out; see @AGENTS.md.\n"
+    (work / "CLAUDE.md").write_text(text)
+    rendered = pi.section(pi.read(str(work))[0])
+    assert f"\n{text}\n</untrusted>" in rendered
