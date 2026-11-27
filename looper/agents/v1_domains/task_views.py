@@ -173,7 +173,11 @@ OPERATIONS = (
 
 async def run(server, operation, arguments, principal, headers):
     if operation.operation_id == "tasks.detail":
-        return _plain(await answered(projects.task_detail(arguments["task_id"])))
+        detail = _plain(await answered(projects.task_detail(arguments["task_id"])))
+        if principal.kind != "operator":  # channel sender ids (chat user ids) are the operator's to see
+            for row in detail.get("manager_actions") or ():
+                row.update(sender_id=None, initiator_sender_id=None)
+        return detail
     filters = {**arguments}
     if "group" in filters:
         filters["group"] = tasks.TaskGroup(filters["group"])
