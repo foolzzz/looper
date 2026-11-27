@@ -251,6 +251,99 @@ def _stage_change_again(repo: Path) -> None:
     plain(repo, "add", "a.txt")
 
 
+SERVER_SECRETS = {"LOOPER_DATABASE_URL": "postgresql://svc:pw-fake@db.invalid/looper", "PGPASSWORD": "pw-fake",
+                  "PGUSER": "svc", "LOOPER_AGENT_TOKEN": "tok-fake", "LOOPER_OPERATOR_TOKEN": "op-fake",
+                  "ANTHROPIC_API_KEY": "sk-fake", "OPENAI_API_KEY": "sk-fake2", "CLAUDE_CODE_OAUTH_TOKEN": "oauth-fake",
+                  "XAI_API_KEY": "xai-fake", "HTTPS_PROXY": "http://proxy.invalid:1", "SSH_AUTH_SOCK": "/tmp/agent.sock"}
+
+
+def _plant_after_check(monkeypatch, repo: Path, probe: Path, *, asynchronous: bool = False) -> None:
+    """Simulate the check-then-run race deterministically: the repository gains a filter that runs, after the
+    check found none and before the command starts."""
+    def plant():
+        plain(repo, "config", "filter.race.clean", str(probe))
+
+    if asynchronous:
+        real_async = git_safe.check_repository_async
+
+        async def late(directory, **kwargs):
+            found = await real_async(directory, **kwargs)
+            plant()
+            return found
+
+        monkeypatch.setattr(git_safe, "check_repository_async", late)
+    else:
+        real = git_safe.check_repository
+
+        def late_sync(directory, **kwargs):
+            found = real(directory, **kwargs)
+            plant()
+            return found
+
+        monkeypatch.setattr(git_safe, "check_repository", late_sync)
+
+
+@pytest.fixture
+def env_probe(tmp_path: Path) -> tuple[Path, Path]:
+    """A filter that records the environment it was started with."""
+    dump = tmp_path / "env-dump"
+    script = tmp_path / "env-probe.sh"
+    script.write_text(f'#!/bin/sh\nenv >> "{dump}"\ncat\n')
+    script.chmod(0o755)
+    return script, dump
+
+
+def _seen(dump: Path) -> dict[str, str]:
+    return dict(line.split("=", 1) for line in dump.read_text().splitlines() if "=" in line)
+
+
+def _prepare_race(repo: Path) -> None:
+    (repo / ".gitattributes").write_text("*.txt filter=race\n")
+    (repo / "a.txt").write_text("changed\n")
+
+
+def test_a_driver_that_runs_anyway_sees_none_of_the_servers_secrets(repo, env_probe, monkeypatch):
+    """The containment: if a definition slips in after the check, what git starts has only ``environment()``."""
+    script, dump = env_probe
+    for name, value in SERVER_SECRETS.items():
+        monkeypatch.setenv(name, value)
+    _prepare_race(repo)
+    plain(repo, "config", "filter.race.clean", str(script))
+    subprocess.run(["git", "-C", str(repo), "add", "-A"], env={**os.environ, **_PLAIN_ENV, **SERVER_SECRETS},
+                   check=True, capture_output=True, stdin=subprocess.DEVNULL)
+    assert set(SERVER_SECRETS) <= set(_seen(dump)), "positive control: plain git hands the filter the server's variables"
+    dump.unlink()
+    plain(repo, "config", "--unset", "filter.race.clean")
+    plain(repo, "reset", "-q")
+    _plant_after_check(monkeypatch, repo, script)
+    assert safe(repo, "add", "-A").returncode == 0
+    seen = _seen(dump)
+    assert seen, "the planted filter ran (the race is real; the environment is what contains it)"
+    assert not set(SERVER_SECRETS) & set(seen)
+    assert set(seen) <= set(git_safe.environment(_IDENTITY)) | {"__CF_USER_TEXT_ENCODING", "PWD", "SHLVL", "_", "OLDPWD", "GIT_PREFIX", "GIT_DIR", "GIT_INDEX_FILE",
+                                                       "GIT_WORK_TREE", "GIT_EXEC_PATH", "GIT_CONFIG_PARAMETERS",
+                                                       "GIT_CONFIG_COUNT", "GIT_INTERNAL_SUPER_PREFIX", "GIT_LITERAL_PATHSPECS"}
+    assert "PATH" in seen and seen["GIT_TERMINAL_PROMPT"] == "0"
+
+
+def test_a_driver_that_runs_anyway_through_spawn_sees_none_of_the_servers_secrets(repo, env_probe, monkeypatch):
+    script, dump = env_probe
+    for name, value in SERVER_SECRETS.items():
+        monkeypatch.setenv(name, value)
+    _prepare_race(repo)
+    _plant_after_check(monkeypatch, repo, script, asynchronous=True)
+
+    async def go():
+        process = await git_safe.spawn(repo, "add", "-A", stdout=asyncio.subprocess.PIPE,
+                                       stderr=asyncio.subprocess.PIPE, stdin=asyncio.subprocess.DEVNULL)
+        await process.communicate()
+        assert process.returncode == 0
+
+    asyncio.run(go())
+    seen = _seen(dump)
+    assert seen and not set(SERVER_SECRETS) & set(seen)
+
+
 def test_environment_allowlist():
     env = git_safe.environment({"GIT_INDEX_FILE": "/tmp/i"}, environ={
         "PATH": "/bin", "HOME": "/h", "LC_ALL": "C", "LANG": "C", "PGPASSWORD": "x", "LOOPER_DATABASE_URL": "x",

@@ -2248,20 +2248,22 @@ class WorkerPool:
                 return {"status": "failed", "failure": "verification_changed_code", "error": error,
                         "summary": error, "verification": {"restored": restored}}
             try:
-                source = await asyncio.to_thread(_verification_snapshot, work_dir)
-                if source.get("error"):
-                    raise OSError(source["error"])
-                if source["git"]:
-                    # New attempts get current source; only this run's profile fallback reuses its checkout.
-                    execution = ProjectExecution.from_row(project)
-                    backup = self._verification_backup(parent_task_id, worker_id, work_dir)
-                    work_dir = await asyncio.to_thread(_verification_checkout, work_dir,
-                        backup, (*execution.link_paths, *(execution.verification_paths or ())))
-                    copied = json.loads((backup / "runtime-paths.json").read_text())
-                    await self._activity(parent_task_id, worker_id, "phase",
-                        "Verification runtime inputs copied read-only: " + (", ".join(copied) or "none"))
-                verification = await asyncio.to_thread(_verification_baseline, work_dir,
-                    self._verification_backup(parent_task_id, payload.get("task_id"), work_dir))
+                # Before the agent starts nothing writes these directories: each is checked once.
+                with git_safe.cached():
+                    source = await asyncio.to_thread(_verification_snapshot, work_dir)
+                    if source.get("error"):
+                        raise OSError(source["error"])
+                    if source["git"]:
+                        # New attempts get current source; only this run's profile fallback reuses its checkout.
+                        execution = ProjectExecution.from_row(project)
+                        backup = self._verification_backup(parent_task_id, worker_id, work_dir)
+                        work_dir = await asyncio.to_thread(_verification_checkout, work_dir,
+                            backup, (*execution.link_paths, *(execution.verification_paths or ())))
+                        copied = json.loads((backup / "runtime-paths.json").read_text())
+                        await self._activity(parent_task_id, worker_id, "phase",
+                            "Verification runtime inputs copied read-only: " + (", ".join(copied) or "none"))
+                    verification = await asyncio.to_thread(_verification_baseline, work_dir,
+                        self._verification_backup(parent_task_id, payload.get("task_id"), work_dir))
             except (OSError, ValueError, subprocess.SubprocessError):
                 verification = {"git": True, "error": "git_snapshot_unavailable"}
             if verification.get("error"):

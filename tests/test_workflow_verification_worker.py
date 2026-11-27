@@ -602,7 +602,9 @@ def test_verification_detects_modify_then_restore(tmp_path, verification_runtime
         assert result["verification"]["restored"] is True
         assert (root / "tracked").read_text() == "committed"
 
-    asyncio.run(asyncio.wait_for(scenario(), 10))
+    # A guard against a hang, not a speed test: this runs a whole worker execution, and the verification git calls
+    # alone are a few hundred processes, which a loaded machine stretches past ten seconds.
+    asyncio.run(asyncio.wait_for(scenario(), 30))
 
 
 @pytest.mark.parametrize("interrupted", [False, True])

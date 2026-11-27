@@ -140,18 +140,30 @@ def _run_probe(command: list[str]) -> str:
                           env=_probe_environment(), stdin=subprocess.DEVNULL).stdout
 
 
-def _submodules(top: str, depth: int = 0) -> Iterator[Path]:
-    """The checked-out submodules under ``top``, nested ones too: git runs a submodule's own filters and drivers
-    when a command in the superproject recurses into it, so its definitions are overridden as well."""
-    if depth >= MAX_SUBMODULE_DEPTH:
-        return
-    entries = _run_probe(argv("ls-files", "--stage", "-z", directory=top)).split("\0")
-    for entry in entries:
-        mode, _, rest = entry.partition(" ")
-        path = Path(top, rest.partition("\t")[2])
-        if mode == "160000" and path.joinpath(".git").exists():
-            yield path
-            yield from _submodules(str(path), depth + 1)
+def _drivers(checkout: str | Path, depth: int = 0) -> str:
+    """The driver-definition answers (``git config --show-scope`` output) for the checkout and the submodules
+    under it, nested ones too, and a refusal when one of their ``info/attributes`` assigns a driver: git runs a
+    submodule's own filters and drivers when a command in the superproject recurses into it. Cached per checkout
+    inside ``cached()``, so a submodule seen from its superproject and on its own is asked about once."""
+    store = _cache.get()
+    key = ("drivers", _real(checkout))
+    if store is not None and key in store:
+        return store[key]
+    answer = _run_probe(_config_probe(checkout))
+    if depth < MAX_SUBMODULE_DEPTH:
+        for entry in _run_probe(argv("ls-files", "--stage", "-z", directory=checkout)).split("\0"):
+            mode, _, rest = entry.partition(" ")
+            module = Path(checkout, rest.partition("\t")[2])
+            if mode == "160000" and module.joinpath(".git").exists():
+                answer += _drivers(module, depth + 1)
+                try:
+                    attributes = (_git_dir_of(module) / "info" / "attributes").read_text(errors="replace")
+                except OSError:
+                    continue
+                _refuse_attributes(checkout, attributes)
+    if store is not None:
+        store[key] = answer
+    return answer
 
 
 def _git_dir_of(checkout: Path) -> Path:
@@ -308,14 +320,7 @@ def check_repository(directory: str | Path, *, layout: bool = True) -> Inspectio
     top, inside = _judge(directory, _run_probe(_probe(directory)), layout)
     found = None
     if inside:
-        config = _run_probe(_config_probe(directory))
-        for module in _submodules(top) if top is not None else ():  # not gated on .gitmodules: the agent writes it
-            config += _run_probe(_config_probe(module))
-            try:
-                attributes = (_git_dir_of(module) / "info" / "attributes").read_text(errors="replace")
-            except OSError:
-                continue
-            _refuse_attributes(directory, attributes)
+        config = _drivers(top if top is not None else directory)
         found = Inspection(_overrides(config))
     if store is not None:
         store[key] = found
