@@ -419,7 +419,7 @@ with open(target, 'w') as output: output.write('scratch-ok')
 """
                 target = policy.scratch / "preflight"
                 arguments = json.dumps([str(probe), identity, unix_path, port, str(target)])
-                result = subprocess.run(policy.wrap([sys.executable, "-c", code, arguments]),
+                result = subprocess.run(policy.wrap([sys.executable, "-I", "-c", code, arguments]),
                                         env=policy.environment(os.environ), capture_output=True, timeout=5)
                 success = result.returncode == 0 and target.read_text() == "scratch-ok"
                 target.unlink(missing_ok=True)
