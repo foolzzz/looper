@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import subprocess
 from dataclasses import replace
 from unittest.mock import AsyncMock
 
@@ -133,9 +134,12 @@ for line in sys.stdin:
             return []
         return [row for line in self.transcript.read_text().splitlines() if (row := json.loads(line))["kind"] == kind]
 
-    async def create(self, db, task_id="task-one", *, status="draft", workspace_mode="in_place", path=None):
+    async def create(self, db, task_id="task-one", *, status="draft", workspace_mode="in_place", path=None, git=True):
         directory = path or self.root / task_id
         directory.mkdir(parents=True, exist_ok=True)
+        # A direct session starts only at a non-bare repository root. Callers that need a subdirectory pass git=False.
+        if git and workspace_mode == "in_place" and not (directory / ".git").exists():
+            subprocess.run(["git", "init", "-q", "-b", "main", str(directory)], check=True, capture_output=True)
         project = await projects.create_project(name=f"Synthetic project {task_id}", work_dir=str(directory), pool=db)
         await tasks.create_task(task_id=task_id, requirement="Implement the synthetic feature", project_id=project["id"],
             status=status, work_dir=str(directory), workspace_mode=workspace_mode, workspace_dir=str(directory), pool=db)

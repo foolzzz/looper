@@ -16,7 +16,7 @@ from typing import Any, Literal, Protocol
 
 from ...db import activity, agent_sessions, projects, tasks
 from .. import operator_mcp, outbound_hook, step_workspaces, task_budget, task_conversations_settings
-from .. import task_manager_safety, task_manager_settings, task_workspaces
+from .. import task_manager_dirs, task_manager_safety, task_manager_settings, task_workspaces
 from ..agent_settings import Access, Launch
 from ..claude_cli import ClaudeRunRecorder, ResidentClaude
 from ..library import EMPTY_LIBRARY
@@ -150,6 +150,9 @@ class _TaskResident(ResidentClaude):
             for path in self.owner.mcp_files:
                 Path(path).unlink(missing_ok=True)
             self.owner.mcp_files.clear()
+            lock, self.owner.dir_lock = self.owner.dir_lock, None
+            if lock is not None:
+                lock.release()
 
 
 @dataclass(frozen=True)
@@ -265,6 +268,8 @@ class TaskManagerAgent:
         self.running: asyncio.Task[None] | None = None
         self.mcp_fingerprints: dict[str, str] = {}  # of the allowed servers launched, to compare with what ran
         self.mcp_files: set[str] = set()  # generated configs holding the operator's server definitions
+        self.work_dir = ""
+        self.dir_lock: task_manager_dirs.DirectoryLock | None = None
 
     async def prepare(self, *, sink: TurnSink | None = None) -> tuple[Mapping[str, Any], Any, Launch, SystemPrompt]:
         """Read configuration afresh; no launch bypasses the direct-mode review checks."""
@@ -347,6 +352,17 @@ class TaskManagerAgent:
         root = self.pool.runtime_root / "task-managers" / self.task_id
         prompt_file = prompt.write_file(root)
         launch = await configure()
+        phase = "resume" if self.session_id else "launch"
+        if direct:
+            problem = task_manager_dirs.check(
+                task, reopened.work_dir, environment=launch.runtime.environment(launch),
+                runtime_root=self.pool.runtime_root,
+                live=[(a.task_id, a.work_dir) for a in self.pool.agents.values()
+                      if a is not self and a.resident.started and a.mode == "direct"])
+            if problem is not None:
+                task_manager_safety.record_refusal(task_manager_safety.Reason(problem.reason.value), phase)
+                raise Refused(RefuseReason(problem.reason.value), problem.text)
+            self.work_dir = reopened.work_dir
         executable = launch.executable(self.pool.claude_bin)
 
         def command_for(launch: Launch) -> list[str]:
@@ -384,6 +400,15 @@ class TaskManagerAgent:
                     if problem is not None:
                         await self.resident.stop(kill=True)
                         raise Refused(RefuseReason(problem.reason.value), problem.notice)
+                    if self.dir_lock is None:
+                        try:
+                            self.dir_lock = task_manager_dirs.DirectoryLock.acquire(
+                                self.pool.runtime_root, reopened.work_dir, self.task_id)
+                        except task_manager_dirs.LockHeld as held:
+                            task_manager_safety.record_refusal(
+                                task_manager_safety.Reason.WORKSPACE_OVERLAPS_SESSION, phase)
+                            raise Refused(RefuseReason.WORKSPACE_OVERLAPS_SESSION,
+                                          f"another task Manager session (task {held.holder}) holds {reopened.work_dir}") from held
                 if self.session_id:
                     command += ["--resume", self.session_id]
                 await self.resident.start(command, cwd=reopened.work_dir, signature=signature, env=env,

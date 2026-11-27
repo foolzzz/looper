@@ -315,6 +315,9 @@ def test_turn_commits_only_owned_worktree(monkeypatch, tmp_path, native, workspa
         git("add", "README.md")
         git("-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "-q", "--no-gpg-sign", "-m", "Initial")
         head = git("rev-parse", "HEAD")
+        # v1 refuses a direct worktree session. This case still covers the commit rules past that check.
+        if workspace_mode == "worktree":
+            monkeypatch.setattr("looper.agents.task_manager_dirs.check", lambda *args, **kwargs: None)
         task_id, _, _ = await native.create(db, workspace_mode=workspace_mode, path=directory)
         pool = tm.TaskManagerPool(tmp_path / "runtime", native.executable, max_resident=lambda: 2)
         try:
@@ -356,6 +359,8 @@ def _run_scoped_turn(monkeypatch, tmp_path, native, message, *, dirty=(), status
 
     async def check(db):
         repository, _ = _scoped_repository(tmp_path)
+        # v1 refuses a direct worktree session. These tests still cover the commit rules past that check.
+        monkeypatch.setattr("looper.agents.task_manager_dirs.check", lambda *args, **kwargs: None)
         task_id, _, _ = await native.create(db, status=status, workspace_mode="worktree", path=repository)
         pool = tm.TaskManagerPool(tmp_path / "runtime", native.executable, max_resident=lambda: 2)
         try:
