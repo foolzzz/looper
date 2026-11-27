@@ -38,6 +38,10 @@ def test_direct_launch_path_starts_with_the_private_edit_directory_also_after_a_
             await submit_and_wait(pool, task_id)
             [launch] = native.records("launch")
             assert launch["path"].split(os.pathsep)[0] == str(private)
+            # The shape the fixed instructions describe: Bash is the only built-in tool, and no project layer loads.
+            command = launch["command"]
+            assert command[command.index("--tools") + 1] == "Bash"
+            assert command[command.index("--setting-sources") + 1] == "user"
             assert (private / "looper-edit").is_symlink()
             assert os.readlink(private / "looper-edit") == str(bin_dir / "looper-edit")
             assert oct(private.stat().st_mode & 0o777) == "0o700"

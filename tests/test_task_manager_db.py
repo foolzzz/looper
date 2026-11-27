@@ -9,7 +9,7 @@ from unittest.mock import AsyncMock
 import pytest
 
 from looper.agents import operator_mcp, outbound_hook, task_conversations_settings as settings, task_manager_safety as safety
-from looper.agents import task_manager_sandbox, task_manager_settings
+from looper.agents import task_manager_edit, task_manager_sandbox, task_manager_settings
 from looper.agents.agent_settings import AgentSettings
 from looper.agents.profile_registry import builtin_resolved_profile
 from looper.agents.tiers import task_manager as tm
@@ -26,6 +26,9 @@ def setup_manager(monkeypatch, tmp_path):
     monkeypatch.setattr(task_manager_settings, "load_task_manager_settings", AsyncMock(return_value=AgentSettings(profile=builtin_resolved_profile())))
     monkeypatch.setattr(safety, "gate", AsyncMock(return_value=None))
     monkeypatch.setattr(task_manager_sandbox, "SUPPORTED_PLATFORM", sys.platform)  # a scripted CLI on any platform
+    # A direct launch puts a private looper-edit directory on PATH (task_manager_edit); keep it out of the operator's
+    # cache and out of the temporary HOME some tests set (under the system TMPDIR, which edit_bin refuses).
+    monkeypatch.setattr(task_manager_edit, "edit_bin", lambda environment, *, forbidden: tmp_path / "stub-edit-bin")
     executable = fake_claude(tmp_path / "claude", '''
 import sys, json, os, time
 if '--version' in sys.argv:
