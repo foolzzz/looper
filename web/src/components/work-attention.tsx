@@ -5,7 +5,7 @@ import {
   attentionSettingsGet, fetchAttention, isAttentionOff, type AttentionItem, type AttentionKind, type AttentionSection,
   type AttentionSummary,
 } from "@/lib/api-attention";
-import { displayText as text } from "@/lib/attention-display";
+import { displayText as text, plainName } from "@/lib/attention-display";
 import { sinceText } from "@/lib/gates";
 import { startPolling } from "@/lib/polling";
 import { errorText } from "@/lib/use-action";
@@ -29,6 +29,7 @@ const TITLES: Record<AttentionKind, string> = {
   reminders: "未确认送达的提醒",
   cost: "花费等你决定",
   vault_commits: "知识库提交受阻",
+  task_manager_refs: "任务管家改了别的分支或标签",
 };
 
 const ALERTS: Record<string, string> = {
@@ -103,6 +104,9 @@ function details(kind: AttentionKind, item: AttentionItem): { line: string; badg
         text(facts.fix)), badges: [] };
     case "vault_commits":
       return { line: parts(context, text(facts.reason), text(facts.branch), text(facts.worktree)), badges: ["受阻"] };
+    case "task_manager_refs":
+      return { line: parts(context, `${count(facts.count)} 个分支或标签被改`,
+        Array.isArray(facts.refs) && facts.refs.map((name) => plainName(name)).filter(Boolean).slice(0, 5).join("、")), badges: [] };
   }
 }
 

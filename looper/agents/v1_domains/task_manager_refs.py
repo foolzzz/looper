@@ -1,13 +1,14 @@
-"""Operator-only operation on the task branch a direct session records (``task_manager_refs``)."""
+"""Operator-only operations of the task Manager's ref reports (``task_manager_refs``)."""
 
 from ...db import task_manager_refs as store
 from ...db import tasks
 from .. import task_manager_refs
 from ..action_levels import ActionLevel
-from ..api_v1 import Operation, _NULL_STR, _STR, _object
+from ..api_v1 import Operation, _INT, _NULL_STR, _STR, _object
 from ..ops import ErrorCode, OpError
 
 _BRANCH_SUMMARY = "Record the branch checked out in a task's directory as its task branch."
+_RESOLVE_SUMMARY = "Mark a task Manager ref report handled."
 RESULTS = {}
 OPERATIONS = (
     Operation(
@@ -19,10 +20,24 @@ OPERATIONS = (
         _object({"task_id": _STR, "branch": _STR, "previous": _NULL_STR}, closed=True),
         risk="write", operator_only=True,
         level=ActionLevel.INSIDE),  # reads the checkout's HEAD through git_safe and writes only Looper's own row
+    Operation(
+        "tasks.task_manager_ref_report_resolve", "POST", "/api/v1/tasks/task_manager_ref_report_resolve",
+        _RESOLVE_SUMMARY,
+        _RESOLVE_SUMMARY + " The report leaves \"needs you\"; nothing in git changes and nothing is restored. "
+        "Resolving a handled report again keeps its first time.",
+        _object({"report_id": {"type": "integer", "minimum": 1}}, closed=True),
+        _object({"report_id": _INT, "resolved_at": _STR}, closed=True),
+        risk="write", operator_only=True,
+        level=ActionLevel.INSIDE),  # writes only Looper's own report row
 )
 
 
 async def run(server, operation, arguments, principal, headers):
+    if operation.operation_id == "tasks.task_manager_ref_report_resolve":
+        resolved = await store.resolve_report(arguments["report_id"], "operator")
+        if resolved is None:
+            raise OpError(ErrorCode.NOT_FOUND, "ref report not found")
+        return {"report_id": arguments["report_id"], "resolved_at": resolved.isoformat()}
     task = await tasks.get_task(arguments["task_id"])
     if task is None:
         raise OpError(ErrorCode.NOT_FOUND, "task not found")
