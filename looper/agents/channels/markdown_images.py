@@ -11,9 +11,9 @@ ability to render an image from anything that is not provably safe:
   targets, protocol-relative or entity-encoded URLs, unterminated or over-long labels) loses its ``!``, written as ``&#33;``, so it stays
   text or a plain link and the brackets around it keep their structure. Other ``![`` such as ``vec![1, 2]`` are left alone.
 * Every HTML tag opener (``<`` plus a letter, ``/`` and a letter, ``!`` or ``?``) has its ``<`` written as
-  ``&#60;``, the escape Lark's card Markdown documents, except Lark's own tags (``at``, ``a``, ``br``, ``hr``,
-  ``person``, ``local_datetime``, ``text_tag``, ``number_tag``, ``raw``, ``font``, ``u``) and ``<http(s)://...>`` or
-  ``<mailto:...>`` autolinks. Lark documents that its ``md`` tag does not support arbitrary raw HTML and does not say
+  ``&#60;``, the escape Lark's card Markdown documents, except Lark's own tags (``LARK_TAGS``) carrying only the
+  attributes listed for them (URL attributes take a plain http(s) URL, the others a short word, so ``style``,
+  ``background``, ``src`` or ``url(...)`` never pass) and ``<http(s)://...>`` or ``<mailto:...>`` autolinks. Lark documents that its ``md`` tag does not support arbitrary raw HTML and does not say
   what the card Markdown component does with tags it does not list, so no unlisted tag is sent as a tag. Lark's
   ``<link>`` and ``<audio>`` are left out of the allowlist on purpose: they are also resource-loading HTML.
 * Code is preserved: top-level fenced blocks (a backtick fence info string has no backticks) and inline code
@@ -36,10 +36,66 @@ _FENCE = re.compile(r" {0,3}(`{3,}|~{3,})(.*)")
 _RUN = re.compile(r"`+")
 _BRACKET = re.compile(r"[\[\]\\]")
 _DEFINITION = re.compile(r"[ \t>]*(?:(?:[-*+]|\d{1,9}[.)])[ \t]+)*\[((?:[^\[\]\\]|\\.){1,999})\]:")
-LARK_TAGS = ("at", "a", "br", "hr", "person", "local_datetime", "text_tag", "number_tag", "raw", "font", "u")
-_TAG = re.compile(
-    r"<(?=[A-Za-z]|/[A-Za-z]|[!?])(?!/?(?:" + "|".join(LARK_TAGS) + r")(?![A-Za-z0-9_-]))"
-    r"(?!(?:https?://|mailto:)[^\s<>]*>)", re.I)
+_URL_ATTR = "url"
+# The tags Lark's Markdown defines, each with the attributes it may carry. A tag outside this table, or a listed tag
+# with another attribute (``style``, ``background``, ``src``, ``srcset`` ...), is written as text. URL attributes
+# take a plain http(s) URL, every other attribute a short word, so no value can hold ``url(...)`` or a scheme trick.
+LARK_TAGS: dict[str, frozenset[str]] = {
+    "at": frozenset({"id", "user_id", "email"}),
+    "a": frozenset({"href", "pc_url", "android_url", "ios_url"}),
+    "font": frozenset({"color"}),
+    "text_tag": frozenset({"color"}),
+    "person": frozenset({"id", "show_name", "show_avatar"}),
+    "local_datetime": frozenset({"millisecond", "format_type"}),
+    "number_tag": frozenset({"font_color", "background_color", "url", "pc_url", "android_url", "ios_url"}),
+    "raw": frozenset(), "u": frozenset(), "br": frozenset(), "hr": frozenset(),
+}
+_URL_ATTRS = frozenset({"href", "pc_url", "android_url", "ios_url", "url"})
+_OPENER = re.compile(r"<(?=[A-Za-z]|/[A-Za-z]|[!?])")
+_AUTOLINK = re.compile(r"<(?:https?://|mailto:)[^\s<>]*>", re.I)
+_LARK_TAG = re.compile(
+    r"<(/?)([A-Za-z][A-Za-z0-9_]*)((?:\s+[A-Za-z_][\w-]*(?:\s*=\s*(?:\"[^\"<>]*\"|'[^'<>]*'|[^\s\"'<>=`]+))?)*)\s*(/?)>")
+_ATTR = re.compile(r"\s+([A-Za-z_][\w-]*)(?:\s*=\s*(\"[^\"<>]*\"|'[^'<>]*'|[^\s\"'<>=`]+))?")
+_WORD = re.compile(r"[A-Za-z0-9_.@#:+-]{0,100}")
+_HTTP_URL = re.compile(r"https?://[^\s\"'<>&\\`]{1,1800}", re.I)
+
+
+def _lark_tag(text: str, position: int) -> bool:
+    """True when the tag at ``position`` is one of Lark's tags with only attributes it may carry."""
+    match = _LARK_TAG.match(text, position)
+    if not match:
+        return False
+    closing, name, attrs, _ = match.groups()
+    allowed = LARK_TAGS.get(name.lower())
+    if allowed is None or (closing and attrs.strip()):
+        return False
+    for attr in _ATTR.finditer(attrs):
+        key = attr[1].lower()
+        value = (attr[2] or "").strip("\"'")
+        if key not in allowed:
+            return False
+        if not (_HTTP_URL.fullmatch(value) if key in _URL_ATTRS else _WORD.fullmatch(value)):
+            return False
+    return True
+
+
+def _escape_tags(text: str) -> str:
+    """Write the ``<`` of every tag opener as ``&#60;`` unless it is a Lark tag or an http(s)/mailto autolink."""
+    if "<" not in text:
+        return text
+    out: list[str] = []
+    position = 0
+    for match in _OPENER.finditer(text):
+        start = match.start()
+        if _AUTOLINK.match(text, start) or _lark_tag(text, start):
+            continue
+        out.append(text[position:start])
+        out.append("&#60;")
+        position = start + 1
+    out.append(text[position:])
+    return "".join(out)
+
+
 _ALT_MAX = 300
 _DEST_MAX = 2000
 _NESTING_STEPS = 16
@@ -86,7 +142,12 @@ def _images(text: str, definitions: frozenset[str]) -> str:
         close = _close(text, i)
         piece_end = i + 2
         replacement = _NEUTRAL
-        if close != -1:
+        slashes = 0
+        while i - slashes - 1 >= 0 and text[i - slashes - 1] == "\\":
+            slashes += 1
+        if slashes % 2:
+            replacement = "!["  # ``\\!`` is a literal bang: the rest is a link or text, not an image
+        elif close != -1:
             alt = text[i + 2:close]
             following = text[close + 1:close + 2]
             if following == "(":
@@ -105,7 +166,7 @@ def _images(text: str, definitions: frozenset[str]) -> str:
         position = piece_end
         i = text.find("![", position)
     out.append(text[position:])
-    return _TAG.sub("&#60;", "".join(out))
+    return _escape_tags("".join(out))
 
 
 def _spans(line: str) -> list[tuple[int, int]]:

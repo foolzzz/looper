@@ -30,9 +30,13 @@ def has_live_image(text: str) -> bool:
         return True
     defined = {" ".join(m[1].split()).casefold()
                for m in re.finditer(r"^[ \t>]*(?:(?:[-*+]|\d{1,9}[.)])[ \t]+)*\[([^\[\]\\]+)\]:", text, re.M)}
+    if re.search(r"<(?:at|a|font|text_tag|person|number_tag|local_datetime|raw|u|br|hr)\b[^>]*\b(?:style|background|src|srcset)\s*=", text, re.I):
+        return True
     for m in re.finditer(r"!\[", text):
         if KEY_IMAGE.match(text, m.start()):
             continue
+        if (len(text[:m.start()]) - len(text[:m.start()].rstrip("\\"))) % 2:
+            continue  # an escaped bang is a literal bang
         end, depth, k = -1, 1, m.end()
         while k < min(len(text), m.end() + 300):
             if text[k] == "\\":
@@ -184,6 +188,56 @@ def test_unterminated_label_fails_closed() -> None:
     assert neutralize_images("see ![ and more") == "see &#33;[ and more"
 
 
+@pytest.mark.parametrize("source", [
+    '<font style="background-image:url(https://evil.example/a.png)">x</font>',
+    '<font color="red" style="x">x</font>',
+    '<font background="https://evil.example/a.png">x</font>',
+    '<font color="url(https://evil.example/a.png)">x</font>',
+    '<font color=red/x>x</font>',
+    '<at id=all style="list-style-image:url(https://evil.example/a.png)"></at>',
+    '<at id="https://evil.example/a.png"></at>',
+    '<a href="//evil.example/a">x</a>', '<a href="javascript:alert(1)">x</a>', '<a href="https&#58;//evil.example/">x</a>',
+    '<a href="https://evil.example/a" style="border-image:url(https://e.example/a.png)">x</a>',
+    '<a href="https://evil.example/a" background="x">x</a>',
+    '<person id=ou_1 style="background:url(https://e.example/a.png)"></person>',
+    '<text_tag src="https://e.example/a.png">x</text_tag>',
+    '<br style="background:url(https://e.example/a.png)">', '<hr background=x>', '<u style=x>x</u>',
+    '</font style=x>', '<font color="red"', '<math><mglyph src="https://e.example/a.png"></mglyph></math>',
+])
+def test_lark_tags_keep_only_their_own_attributes(source: str) -> None:
+    out = neutralize_images(source)
+    assert out.startswith("&#60;") or "&#60;" in out
+    assert not re.search(r"<(?:font|at|a|person|text_tag|br|hr|u|math|mglyph)\b[^>]*(?:style|background|src|url\(|//evil|javascript)", out, re.I)
+
+
+@pytest.mark.parametrize("source", [
+    '<font color="red">x</font>', "<font color='green'>x</font>", "<font color=grey>x</font>",
+    '<at id=all></at>', '<at user_id="ou_abc123"></at>', '<at email="a@example.invalid"></at>',
+    '<a href="https://example.invalid/page?q=1">x</a>', '<person id="ou_1" show_name=true show_avatar=false></person>',
+    '<text_tag color="blue">tag</text_tag>', '<local_datetime millisecond="1700000000000" format_type="date"></local_datetime>',
+    '<number_tag background_color=grey font_color=white url="https://example.invalid/n">1</number_tag>',
+    '<br/>', '<br>', '<hr/>', '<u>x</u>', '<raw>x</raw>', '</at>',
+])
+def test_lark_tags_with_their_own_attributes_pass(source: str) -> None:
+    assert neutralize_images(source) == source
+
+
+def test_escaped_bang_is_a_literal_bang_before_a_link() -> None:
+    assert neutralize_images("\\![a](https://h.invalid/x)") == "\\![a](https://h.invalid/x)"
+    assert neutralize_images("\\\\![a](https://h.invalid/x)") == "\\\\image: [a (h.invalid)](https://h.invalid/x)"
+
+
+def test_key_with_a_title_is_not_a_key() -> None:
+    assert neutralize_images('![k](img_v3_a1 "title")') == '&#33;[k](img_v3_a1 "title")'
+
+
+def test_less_than_in_a_link_target_is_escaped_too() -> None:
+    # a link target cannot be told from raw HTML without a full parser (``a](https://x/<img/src=U>)`` has no
+    # link), so the escape stays; the entity is decoded inside a CommonMark target
+    assert neutralize_images("[a](https://x.invalid/q=<img)") == "[a](https://x.invalid/q=&#60;img)"
+    assert neutralize_images("a](https://x.invalid/<img/src=https://e.invalid/a.png>)").count("&#60;") == 1
+
+
 def test_ordinary_text_with_brackets_is_not_mangled() -> None:
     text = "let v = vec![1, 2, 3]; println!(\"x\"); Done![ok]; echo ![a]; vec![vec![1], 2]"
     assert neutralize_images(text) == text
@@ -194,7 +248,7 @@ def test_label_nested_in_a_remote_image_keeps_its_own_key_image() -> None:
     assert out.startswith("&#33;[") and "![k](img_v3_0a)" in out
 
 
-ADVERSARIAL = ["![", "<img ", "`", "[", "]", "(", ")", "![a](", "![a](https://h.invalid/", "\\", "\n", "```\n", "<", "!", "![a]", "![a][", "![[]", "<a:", "<![", "[r]:"]
+ADVERSARIAL = ["![", "<img ", "`", "[", "]", "(", ")", "![a](", "![a](https://h.invalid/", "\\", "\n", "```\n", "<", "!", "![a]", "![a][", "![[]", "<at a ", "<font x=\"", "\\![a](", "<a:", "<![", "[r]:"]
 
 
 @pytest.mark.parametrize("unit", ADVERSARIAL)
@@ -207,7 +261,7 @@ def test_linear_time_on_adversarial_input(unit: str, size: int) -> None:
 
 
 def test_random_inputs_never_leave_a_live_image() -> None:
-    tokens = ["![", "!", "[", "]", "[r]: u", "![r]", "---", "# ", "> ", "- ", "<div>", "<!--", "(", ")", "<img ", "<IMG", "src=", "img_v3_0a", "https://h.invalid/x", "//h/x",
+    tokens = ["<font ", "<at style=", "<a href=", "style=", "![", "!", "[", "]", "[r]: u", "![r]", "---", "# ", "> ", "- ", "<div>", "<!--", "(", ")", "<img ", "<IMG", "src=", "img_v3_0a", "https://h.invalid/x", "//h/x",
               " ", "\n", "\n\n", "\\", "&#58;", "<", ">", "\"", "alt", "<picture>", "title"]
     rng = random.Random(7)
     for _ in range(6000):
