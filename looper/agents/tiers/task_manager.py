@@ -385,19 +385,7 @@ class TaskManagerAgent:
             else:
                 self.mcp_fingerprints = {}
             return run
-        # Query newest summaries directly, so a long-lived task never gets its oldest activity as its brief.
-        from ...db.connection import get_pool
-        recent = await get_pool().fetch("SELECT summary FROM activity WHERE task_id=$1 ORDER BY seq DESC LIMIT 20",
-                                        self.task_id)
-        # Direct mode reads the project's instruction files every turn; the orchestrated prompt stays as it was.
-        loaded, skipped = task_manager_project_instructions.read(reopened.work_dir) if direct else ([], [])
-        self.instructions_skipped = tuple(skipped)
-        conventions = task_manager_project_instructions.section(loaded) if direct else ""
-        prompt = SystemPrompt(instructions(self.mode) + "\n\n" + brief(task, recent_activity=list(reversed(recent)),
-                                                                    reopened=reopened)
-                              + (f"\n\n{conventions}" if conventions else ""))
-        root = self.pool.runtime_root / "task-managers" / self.task_id
-        prompt_file = prompt.write_file(root)
+        # Direct mode: the directory admission runs before any file of that directory is read.
         launch = await configure()
 
         def live_direct() -> list[tuple[str, str]]:
@@ -413,6 +401,20 @@ class TaskManagerAgent:
                 raise Refused(RefuseReason(problem.reason.value), problem.text)
             self.work_dir = reopened.work_dir
             await task_manager_dirs.before_directory_lock()
+        # Query newest summaries directly, so a long-lived task never gets its oldest activity as its brief.
+        from ...db.connection import get_pool
+        recent = await get_pool().fetch("SELECT summary FROM activity WHERE task_id=$1 ORDER BY seq DESC LIMIT 20",
+                                        self.task_id)
+        # Direct mode reads the project's instruction files every turn; the orchestrated prompt stays as it was.
+        loaded, skipped = task_manager_project_instructions.read(reopened.work_dir) if direct else ([], [])
+        self.instructions_skipped = tuple(skipped)
+        conventions = task_manager_project_instructions.section(loaded) if direct else ""
+        prompt = SystemPrompt(instructions(self.mode) + "\n\n" + brief(task, recent_activity=list(reversed(recent)),
+                                                                    reopened=reopened)
+                              + (f"\n\n{conventions}" if conventions else ""))
+        root = self.pool.runtime_root / "task-managers" / self.task_id
+        prompt_file = prompt.write_file(root)
+
         executable = launch.executable(self.pool.claude_bin)
 
         def command_for(launch: Launch) -> list[str]:

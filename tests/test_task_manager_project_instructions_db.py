@@ -5,7 +5,7 @@ from looper.agents import task_manager_project_instructions as project_instructi
 from looper.agents.tiers import task_manager as tm
 from looper.db import tasks
 from tests.db_support import run_db
-from tests.task_manager_support import NativeTaskManager, submit_and_wait
+from tests.task_manager_support import NativeTaskManager, Sink, submit_and_wait
 
 
 def _prompt(command: list[str]) -> str:
@@ -118,3 +118,30 @@ def test_orchestrated_mode_never_reports_a_skipped_file(monkeypatch, tmp_path):
         finally:
             await pool.shutdown()
     run_db(check, monkeypatch, timeout=60)
+
+
+def test_a_refused_directory_never_has_its_instruction_files_opened(monkeypatch, tmp_path):
+    import subprocess
+
+    native = NativeTaskManager(monkeypatch, tmp_path)
+    opened: list[str] = []
+    real_read = project_instructions.read
+    monkeypatch.setattr(project_instructions, "read", lambda work_dir: opened.append(str(work_dir)) or real_read(work_dir))
+
+    async def check(db):
+        repository = tmp_path / "repository"
+        repository.mkdir()
+        subprocess.run(["git", "init", "-q", "-b", "main", str(repository)], check=True, capture_output=True)
+        child = repository / "nested"
+        child.mkdir()
+        (child / "AGENTS.md").write_text("SHOULD-NEVER-BE-READ\n")
+        task_id, _, _ = await native.create(db, path=child, git=False)
+        pool = tm.TaskManagerPool(tmp_path / "runtime", native.executable, max_resident=lambda: 1)
+        try:
+            result = await pool.submit(task_id, "reply", message_id="nested", sink=Sink())
+            assert result.state == "refused" and result.reason is tm.RefuseReason.WORKSPACE_NOT_REPO_ROOT
+            assert opened == []  # the admission refused before any instruction file was read
+            assert native.records("launch") == []
+        finally:
+            await pool.shutdown()
+    run_db(check, monkeypatch, timeout=30)
