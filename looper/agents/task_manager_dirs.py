@@ -71,13 +71,6 @@ def _claude_dir(environment: Mapping[str, str]) -> Path:
     return Path(raw).expanduser() if raw else _home(environment) / ".claude"
 
 
-def _claude_json(environment: Mapping[str, str]) -> Path:
-    raw = (environment.get("CLAUDE_CONFIG_DIR") or "").strip()
-    if raw:
-        return Path(raw).expanduser() / ".claude.json"
-    return _home(environment) / ".claude.json"
-
-
 def _config_home(environment: Mapping[str, str]) -> Path:
     raw = (environment.get("XDG_CONFIG_HOME") or "").strip()
     return Path(raw).expanduser() if raw else _home(environment) / ".config"
@@ -101,22 +94,21 @@ def _dedupe(paths: Iterable[Path]) -> tuple[Path, ...]:
 
 
 def trusted_paths(environment: Mapping[str, str], runtime_root: Path) -> tuple[Path, ...]:
-    """Credentials, operator configuration, Looper's runtime and configuration, and the Claude directory.
+    """The sandbox read-deny list, plus directories that list does not name on its own.
 
-    A missing path is still returned: the check compares paths and does not require the entry to exist.
+    ``read_deny_paths`` is the credential list, so the two cannot drift. It names files inside the Claude
+    directory and some children of the configuration directory, and the runtime root rather than the ops file.
+    A directory is refused when it contains an entry, and a descendant does not contain its parent, so the
+    Claude directory, the configuration directory and the ops file are named here too. A missing path is still
+    returned: the check compares paths and does not require the entry to exist.
     """
-    home = _home(environment)
-    claude = _claude_dir(environment)
+    from . import task_manager_sandbox
+
     return _dedupe((
-        home / ".ssh",  # operator SSH credentials
-        home / ".aws",  # operator AWS credentials
-        home / ".gnupg",  # operator GnuPG credentials
+        *(Path(path) for path in task_manager_sandbox.read_deny_paths(environment, Path(runtime_root))),
+        _ops_file(runtime_root),  # configuration file; a child of the runtime root is not covered by naming the root
+        _claude_dir(environment),  # the whole Claude configuration directory
         _config_home(environment),  # XDG_CONFIG_HOME, or the operator's .config
-        claude / ".credentials.json",  # Claude credential file
-        _claude_json(environment),  # .claude.json in CLAUDE_CONFIG_DIR, or in HOME
-        Path(runtime_root),  # runtime root: ops file, tokens, generated configuration
-        _ops_file(runtime_root),  # configuration file; included when it lives outside the runtime root too
-        claude,  # the whole Claude configuration directory
     ))
 
 
