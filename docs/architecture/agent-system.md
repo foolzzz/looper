@@ -975,6 +975,32 @@ them.
 - **Verification.** `tests/test_task_manager_sandbox_probe.py` runs the real command against the real
   CLI and a local scripted Messages API (`LOOPER_CLAUDE_PROBE_BIN`), with positive controls; rerun it
   before changing `VERIFIED_CLI_VERSION`.
+- **Network allowlist and denials.** By default a direct session reaches no external host. The
+  operator, and only the operator, allows external domains per project with the operator-only
+  `projects.task_manager_sandbox_get` and `projects.task_manager_sandbox_update` (`task_manager_sandbox_policies`
+  holds the list and a revision, `task_manager_sandbox_policy_audit` one row per change with the old and
+  new value). `update` replaces the whole list in one transaction; `validate_domains` accepts only
+  external names (at most 50, unique, no IP literals including `127.1`-style shorthand, no ports, paths,
+  bare or inner wildcards, no single-label or non-public names), else `network_policy_invalid` and nothing
+  is written; a stale `expected_revision` returns `conflict`. Every launch and resume reads the stored list
+  again (`allowed_domains`); an entry this version refuses refuses the launch with `network_policy_invalid`.
+  The list is `sandbox.network.allowedDomains` in the settings file, so it is part of the launch
+  signature and a change restarts the process and resumes the same session. Only commands that go
+  through the sandbox's HTTP(S) proxy are affected (`SCOPE_TEXT`): Go command-line tools such as `gh` fail
+  certificate verification inside the sandbox even for a listed domain, and Node command-line tools do not
+  use the proxy. The guarantee that nothing outside the list is reachable comes from the hostile-
+  configuration probes, not from reading the settings back (RFC task-sessions-v0, section 25.6).
+  When a Bash result ends in the CLI's `<sandbox_violations>` block, `task_manager_denials.parse` reads
+  its `deny network-outbound <host>:<port> (<reason>)` lines (the observed format on 2.1.332; a denied
+  file write carried no block at all there), and a per-turn `Observer` classifies each denial: not on the
+  project's list (`not_allowed`), on the list but a known client kind that the sandbox cannot support
+  (`unsupported_client`), or `unknown`, which names no host and does not suggest that allowing one helps.
+  Each denial writes an activity row (`sandbox_denial`: typed fields and a hash of the command, never its
+  text) and one count in `task_manager_sandbox_denials_total` of `manager_metrics.get` (category and
+  project, no host); the first denial of each category and target in a turn also sends a `sandbox_denial`
+  task event whose conversation text the dashboard writes from its fields. The event is stored for the
+  dashboard and is not part of the model's history. The task page shows the project's effective list
+  read-only; editing is in the operations.
 
 `tasks.managers.max_resident` defaults to 6 (1–20). Admission can reclaim the least
 recently used idle process; a 60-second ticker reclaims processes idle for 30
