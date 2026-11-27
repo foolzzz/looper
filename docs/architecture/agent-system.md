@@ -667,7 +667,7 @@ Manager has no tool for it. The dashboard shows the task page's 指标 card and 
   shared resident session's history.
   `looper profile show [--runtime-root …] [--config …]` reads the same file with the same compiler and prints
   exactly the resident section's body, with no added newline, whether injection is on or off. It makes no model
-  call or schema/cache write. Its worker has a 1-second deadline covering imports, settings and file I/O;
+  call or schema/cache write. Its worker bounds its database and settings reads to 0.7 seconds after its imports, and the parent waits at most 4.5 seconds for the worker to exit;
   missing settings, an unavailable database, an invalid profile or timeout prints nothing and exits 0.
   Output is bounded by the compiler's 1500-character cap (at most 6000 UTF-8 bytes).
   `looper claude-code profile` prints the same text for the operator's own Claude Code
@@ -948,7 +948,8 @@ runtimes are refused rather than substituted.
 
 Direct launches append the fixed task instructions and a bounded, fenced brief.
 They run inside Claude Code's Bash sandbox with the fixed configuration described below, keep the
-operator's user-level settings, memory and skills, and load MCP servers only from
+operator's user-level settings and memory (the global instructions); `Skill` is not an allowlisted tool, so a user
+skill is not something the model can call (an operator's slash command can still run one), and load MCP servers only from
 a generated `--mcp-config` file under `--strict-mcp-config`: Looper's own server plus the
 operator's servers named in `tasks.conversations.manager_mcp` (default none; read and written
 through `task_conversations.get` and `task_conversations.update`, operator-only; up to 20 unique
@@ -1001,11 +1002,23 @@ them.
   allowlist or the read deny list restarts the session.
 - **Write scope.** The task directory and the sandbox's temporary directory; `.git/hooks`,
   `.git/config`, `.git/info` and `.git/modules` of the task directory are write-denied.
-- **Read deny list.** `read_deny_paths()`: the operator's credential directories (`~/.ssh`, `~/.aws`,
-  `~/.gnupg`, credential stores under `~/.config`, `.netrc`, `.git-credentials`), Claude's credential
-  file and `.claude.json`, and Looper's runtime root. It is a blacklist and cannot say "read only the
-  task directory"; `~/.config` as a whole is not denied because git reads `~/.config/git`. What a
-  model reads can leave through the exits listed in the task-sessions RFC (section 25.5).
+- **Read deny list.** `read_deny_paths()`: credential directories and files of the operator (`~/.ssh`,
+  `~/.aws`, `~/.gnupg`, `~/.docker`, `~/.kube`, `~/.azure`, `.netrc`, `.git-credentials`, `.npmrc`,
+  `.pypirc`, ..., credential stores under `~/.config`), the login keychain, the whole Claude
+  configuration directory (and the default one when another is set), the Codex, Grok, coco and Copilot
+  homes (and the directories their variables name), shell history, browser profiles and cookie
+  stores, the default `~/.looper`, and the active runtime root (plus an ops file outside it). It is a
+  blacklist and cannot say "read only the task directory"; `~/.config` as a whole is not denied because git
+  reads `~/.config/git`, and `~/.zshenv` is not denied because every command reads it. What a model reads
+  can leave through the exits listed in the task-sessions RFC (section 25.5).
+- **Environment.** The direct session's process environment drops proxy variables (both cases),
+  `SSH_AUTH_SOCK`, every runtime variable `child_env` lists that the Claude CLI does not need
+  (`RUNTIME_ENV_CLASS`: keep or drop, one entry per name, enforced by a test), and the names an Agent
+  Profile's `env` adds that are not the CLI's own or the provider binding's. `ANTHROPIC_API_KEY` and the other
+  Anthropic variables stay visible to the sandboxed Bash (a residual, RFC 25.5). v1 supports the Anthropic API
+  and the Claude login only: a cloud-provider backend (Bedrock, Vertex) gets no region, profile or credentials
+  from the Agent Profile's `env` (`AWS_*`, `CLOUD_ML_REGION`, `GOOGLE_APPLICATION_CREDENTIALS` are dropped), and
+  its credential files are on the read deny list, so a direct session on such a profile cannot authenticate.
 - **MCP servers.** Definitions come from the user scope only. Looper starts every stdio server,
   its own included, through a wrapper (`operator_mcp.wrap`: `/bin/sh -c 'cd "$1" && shift && exec
   "$@"'` into a private directory of the runtime root, outside every task directory), because Claude
@@ -1037,8 +1050,9 @@ them.
   fast-forward, else on the old one). Commands are meant to run in the listed order: names that became or
   changed as links come first (the task branch first among them), before any command that moves or deletes
   a target. A change to any other branch or tag is stored in
-  `task_manager_ref_reports` with `needs_you` set; a change under `refs/heads/looper/<other task>/`
-  while that task exists and is unfinished is `info` only. The
+  `task_manager_ref_reports` and listed in the needs-you section `task_manager_refs` until the
+  operator resolves it (`tasks.task_manager_ref_report_resolve`, which changes nothing in git); a change
+  under `refs/heads/looper/<other task>/` while that task exists and is unfinished is `info` only. The
   task branch is recorded once, at the first enablement (`task_manager_branches`, with a
   `sandbox_notice` event that the real checkout is edited directly); a detached `HEAD` then refuses the
   first turn (`head_detached`), and every later turn refuses while `HEAD` is not on that branch
@@ -1056,6 +1070,8 @@ them.
   repository is refused as `workspace` for now (the typed `not_git` reason comes with the directory check).
   `ref_report` and the `refs_unreadable` notice carry the turn's `message_id`.
   Every git call goes through `git_safe`; the real-CLI rows are `tests/test_task_manager_refs_probe.py`.
+
+Directory checks. A direct session starts only for an in-place task whose directory is the root of its own non-bare git repository. A worktree task (`workspace_mode` worktree), a linked worktree, or a submodule (`.git` is a file or a symlink) is refused with `worktree_unsupported`: v1 has no direct mode for a worktree task, and orchestrated mode is unchanged, so the commit-per-turn of worktree tasks (#1848) is not reached in direct mode. The operator's home is `workspace_is_home`. A system directory (`/`, or `/System`, `/Library`, `/usr`, `/bin`, `/sbin`, `/etc`, `/private/etc`, `/dev`, `/Applications`, `/cores`, and anything under those) is `workspace_in_system_dir`. A directory that is, or contains, trusted configuration (credentials, the operator's configuration, the Claude configuration directory, the runtime root, and the ops file) is `workspace_contains_trusted_config`. A subdirectory, a bare repository, or a directory that is not a git repository is `workspace_not_repo_root`. A directory that equals, contains, or is inside another live direct session is `workspace_overlaps_session`. Comparisons use the device and inode of the resolved directory, so two spellings of one directory are the same directory. One directory has one lock, `task-manager-locks/<device>-<inode>.lock` under the runtime root (the directory is mode 0700, the file mode 0600, and the file is never deleted). A second session that finds the lock held gets the same refusal and names the holder. The resident's stop releases the lock. The overlap check runs again after that lock is taken, still inside admission and before the resident starts, so a parent directory and a child directory that both passed the earlier check cannot both start. The lock descriptor is close-on-exec. If the Looper process dies while the Claude process is still alive, the kernel releases the lock when the Looper process exits, which can be before that Claude process exits. That early release is accepted for v1. These checks run only while `tasks.conversations.manager_answers` is on, which defaults off.
 
 `tasks.managers.max_resident` defaults to 6 (1–20). Admission can reclaim the least
 recently used idle process; a 60-second ticker reclaims processes idle for 30
@@ -1832,7 +1848,7 @@ runs without the shared leader; OMP 18.4.3).
 `looper claude-code profile` reuses `looper profile show` and the Manager's single compiler; it reads the
 configured vault note locally through the database, without an HTTP request, model call or cache write.
 `--hook` returns SessionStart JSON whose `additionalContext` is that same text, capped at 3000 characters.
-The shared reader has a 1-second deadline (within the 2-second hook budget); an unavailable or empty profile,
+The shared reader gives its worker 4.5 seconds in total, including imports (the hook itself is cut off at 5 seconds); an unavailable or empty profile,
 errors and timeouts produce no stdout or stderr and exit 0. A stopped HTTP server alone does not prevent a read.
 Nothing is installed by default. `looper claude-code install hook --runtime-root <runtime root>` shows its
 user-settings path, added command and diff, asks for confirmation, backs up existing bytes and writes atomically.
@@ -6217,7 +6233,7 @@ prompt, name, turns and switch, changing or removing a provider, or adding
 items to the catalog.
 
 API clients run the same catalog. `ClientOps` wraps it for an API client: a request is a turn (a write runs; one of risk
-`high` answers 202 until `/api/v1/confirm`), and reads are not recorded. Attribution is kept: `client_id` on the
+`high` answers 202 until the client confirms its own request at `/api/v1/confirm`), and reads are not recorded. Attribution is kept: `client_id` on the
 conversation's threads, on the tasks it creates and on the Manager calls, and `via` is `client:<name>` for a call made
 through the API and `manager:loopercli` for one the Manager made in a client conversation. The Manager sees such a
 message with the line `Channel: loopercli, client "<name>" …`, and a task created in a client conversation reports its
@@ -9838,8 +9854,8 @@ belongs only to global worker/reviewer role layers, not project layers or manage
 
 Operators execute these writes in one call, using the dashboard's existing dialogs. Clients receive
 202 `needs_confirmation` for shared-default updates, concurrency updates, raised/lifted effective spend
-caps, profile deletion and role-template deletion; confirm with `POST /api/v1/confirm` in the same
-client/session. Gate replies/end and wait controls execute directly. Client management is operator-only,
+caps, profile deletion and role-template deletion; the client confirms its own request with `POST /api/v1/confirm` in the same
+client/session (not an operator approval). Gate replies/end and wait controls execute directly. Client management is operator-only,
 with `Cache-Control: no-store` on responses; never log its one-time create token.
 
 The following request bodies illustrate the field nesting. Identifiers are placeholders for existing
@@ -9902,7 +9918,7 @@ separate tokens and is not exported to API clients. No unversioned operator rout
   `conflict` 409, `expired` 410, `rate_limited` 429, `unavailable` 503.
 - **Sessions and confirmation.** A client may send `X-Looper-Session` (1–64 characters of `A-Za-z0-9._:-`; `default`
   without it). For client tokens, a write of risk `high` answers 202 with a `confirmation_id`; `POST /api/v1/confirm` with that id runs it
-  only for the same client and the same session, within 10 minutes. Pending confirmations live in memory and are lost
+  only for the same client and the same session, within 10 minutes. This is the client confirming its own request, not an operator approval: the client that sends the request also sends the confirmation, and Looper does not check that a person saw it (the Manager's chat is different: there only the operator confirms). Pending confirmations live in memory and are lost
   when the server restarts. Operators execute high operations in one request; the dashboard keeps its existing
   confirmation dialogs and never silently confirms a client confirmation.
 - **Credentials are the operator's.** `auth.set_password` and `auth.clear_password` accept only an operator token,

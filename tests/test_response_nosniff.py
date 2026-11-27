@@ -24,18 +24,45 @@ def test_json_responses_carry_nosniff_with_and_without_extra_headers() -> None:
         assert head.count(b"X-Content-Type-Options") == 1
 
 
+def _constant_text(node: ast.AST) -> str | None:
+    """The text of a string or bytes expression built from literals, f-strings (``{}`` for a hole), ``+`` and
+    ``sep.join([...])`` of such parts; a part that is not a literal counts as ``{}``. None for anything else.
+
+    Known blind spot, on purpose: ``%`` and ``.format`` formatting are not folded."""
+    if isinstance(node, ast.Constant) and isinstance(node.value, (str, bytes)):
+        return node.value.decode("latin-1") if isinstance(node.value, bytes) else node.value
+    if isinstance(node, ast.JoinedStr):
+        return "".join(part.value if isinstance(part, ast.Constant) else "{}" for part in node.values)
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
+        left, right = _constant_text(node.left), _constant_text(node.right)
+        if left is None and right is None:
+            return None
+        return (left if left is not None else "{}") + (right if right is not None else "{}")
+    if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr == "join"
+            and len(node.args) == 1 and isinstance(node.args[0], (ast.List, ast.Tuple))):
+        separator = _constant_text(node.func.value)
+        if separator is None:
+            return None
+        parts = [_constant_text(item) for item in node.args[0].elts]
+        return separator.join("{}" if part is None else part for part in parts)
+    return None
+
+
 def _stream_heads(source: str) -> list[tuple[int, str]]:
-    """(line, text) of each hand-written response head for a JSON or event-stream body."""
+    """(line, text) of each hand-written response head for a JSON or event-stream body. A head built by ``+`` or
+    ``join`` is read whole, from its outermost expression."""
     heads = []
-    for node in ast.walk(ast.parse(source)):
-        if isinstance(node, ast.JoinedStr):
-            text = "".join(part.value if isinstance(part, ast.Constant) else "{}" for part in node.values)
-        elif isinstance(node, ast.Constant) and isinstance(node.value, (str, bytes)):
-            text = node.value.decode("latin-1") if isinstance(node.value, bytes) else node.value
-        else:
-            continue
-        if text.startswith("HTTP/1.1 ") and ("text/event-stream" in text or "application/json" in text):
-            heads.append((node.lineno, text))
+
+    def visit(node: ast.AST) -> None:
+        text = _constant_text(node)
+        if text is not None:
+            if text.startswith("HTTP/1.1 ") and ("text/event-stream" in text or "application/json" in text):
+                heads.append((node.lineno, text))
+            return
+        for child in ast.iter_child_nodes(node):
+            visit(child)
+
+    visit(ast.parse(source))
     return heads
 
 
@@ -44,6 +71,19 @@ def test_the_head_scan_finds_a_head_without_nosniff() -> None:
         (1, "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n\r\n")]
     assert not _stream_heads('x = "HTTP/1.1 200 OK\\r\\nContent-Type: text/html\\r\\n"')
     assert _stream_heads('x = f"HTTP/1.1 {s}\\r\\nContent-Type: application/json\\r\\n" "A: b\\r\\n"')
+
+
+def test_the_head_scan_reads_a_head_built_by_concatenation_or_join() -> None:
+    plus = 'x = "HTTP/1.1 200 OK\\r\\n" + "Content-Type: text/event-stream\\r\\n" + "\\r\\n"'
+    plus_var = 'x = "HTTP/1.1 200 OK\\r\\n" + ctype + "Content-Type: application/json\\r\\n"'
+    join = 'x = "".join(["HTTP/1.1 200 OK\\r\\n", "Content-Type: application/json\\r\\n", "\\r\\n"])'
+    join_bytes = 'x = b"\\r\\n".join([b"HTTP/1.1 200 OK", b"Content-Type: text/event-stream", b""])'
+    for source in (plus, plus_var, join, join_bytes):
+        heads = _stream_heads(source)
+        assert len(heads) == 1 and NOSNIFF not in heads[0][1], source
+    split = 'x = "HTTP/1.1 200 OK\\r\\nContent-Type: application/json\\r\\n" + "X-Content-Type-Options: nosniff\\r\\n"'
+    assert [NOSNIFF in text for _, text in _stream_heads(split)] == [True]
+    assert not _stream_heads('x = "HTTP/1.1 200 OK\\r\\n" + "Content-Type: text/html\\r\\n"')
 
 
 def test_every_hand_written_json_and_sse_head_carries_nosniff() -> None:

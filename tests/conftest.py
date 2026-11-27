@@ -804,16 +804,21 @@ def _no_live_runs(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(live_runs, "_ended", [])
 
 
-@pytest.fixture(autouse=True)
-def _own_resident_pool(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The resident pool lists the routers of the Managers alive in this process. A Manager an earlier test built with
-    a stand-in session stays in the process-wide pool until the garbage collector frees it, and the metrics API's
-    resident count then failed on the stand-in (503) in whichever test ran next in that worker. Each test gets its own."""
+def own_resident_pool(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Give the process-wide resident pool a new, empty one (the autouse fixture below, and the test that checks it)."""
     manager_routing = sys.modules.get("looper.agents.tiers.manager_routing")
     if manager_routing is None:
         return
 
     monkeypatch.setattr(manager_routing, "pool", manager_routing.ResidentPool())
+
+
+@pytest.fixture(autouse=True)
+def _own_resident_pool(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The resident pool lists the routers of the Managers alive in this process. A Manager an earlier test built with
+    a stand-in session stays in the process-wide pool until the garbage collector frees it, and the metrics API's
+    resident count then failed on the stand-in (503) in whichever test ran next in that worker. Each test gets its own."""
+    own_resident_pool(monkeypatch)
 
 
 @pytest.fixture(autouse=True)
@@ -908,8 +913,12 @@ AUTONOMOUS = json.loads({autonomous!r})
 DENIED = json.loads({denied!r})
 WRITES = json.loads({writes!r})
 def log(name, value):
-    with open(os.path.join(STATE, name), 'a') as f:
-        f.write(json.dumps(value) + '\\n')
+    # One write of the whole line, so a reader never sees a record without its newline except mid-write.
+    fd = os.open(os.path.join(STATE, name), os.O_WRONLY | os.O_APPEND | os.O_CREAT)
+    try:
+        os.write(fd, (json.dumps(value) + '\\n').encode())
+    finally:
+        os.close(fd)
 log('argv.jsonl', sys.argv[1:])
 log('pids.jsonl', os.getpid())
 # Like Claude resuming a session it no longer has: an error result without an init event.
@@ -1031,7 +1040,8 @@ class FakePlannerClaude:
 
     def _log(self, name: str) -> list[Any]:
         path = self.state / name
-        return [json.loads(line) for line in path.read_text().splitlines()] if path.exists() else []
+        # Only newline-terminated records are committed; a half-written tail is read on the next poll.
+        return [json.loads(line) for line in path.read_text().split("\n")[:-1]] if path.exists() else []
 
     def argvs(self) -> list[list[str]]:
         return self._log("argv.jsonl")

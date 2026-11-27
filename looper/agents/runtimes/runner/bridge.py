@@ -164,6 +164,41 @@ class _FrameReader:
             self.parts.clear()
 
 
+class HostLag:
+    """Time the event loop was not running, sampled by a task that sleeps one tick at a time.
+
+    A stall that ends while the sampler is parked in its sleep is only seen when that sleep returns,
+    which a caller about to cancel the sampler never waits for. ``settle`` counts the pending tick
+    synchronously; the sleep callback then cannot count it twice.
+    """
+
+    def __init__(self, tick: float):
+        self.tick, self.total = tick, 0.0
+        # The stall can happen before the task is first scheduled: count the delay from here.
+        self._armed: float | None = time.monotonic()
+        self._mark: float | None = None
+
+    def settle(self) -> float:
+        now = time.monotonic()
+        if self._armed is not None:
+            late, self._armed = now - self._armed, None
+            if late > 0:
+                self.total += late
+        elif self._mark is not None:
+            over = now - self._mark - self.tick
+            if over > 0:
+                self.total += over
+            self._mark = now
+        return self.total
+
+    async def run(self) -> None:
+        self.settle()
+        while True:
+            self._mark = time.monotonic()
+            await asyncio.sleep(self.tick)
+            self.settle()
+
+
 class RunnerBridge:
     def __init__(self, reader, writer, kind: str, *, control_timeout: float = 10,
                  max_updates: int = 128, on_failure: Callable | None = None):
@@ -231,7 +266,7 @@ class RunnerBridge:
             return False
         pending = self._pending.get(rpc_id)
         received = pending.received_at if pending is not None and pending.received_at is not None else time.monotonic()
-        return received - started - lag[0] <= limit
+        return received - started - lag.settle() <= limit
 
     def _abandon_control(self, method, rpc_id, params, future) -> None:
         if method in _LOCAL_CONTROLS:
@@ -279,7 +314,7 @@ class RunnerBridge:
         rpc_id = f"l-{self._counter}"
         future = asyncio.get_running_loop().create_future()
         self._pending[rpc_id] = Pending(method, params, future, _entry)
-        lag = [0.0]
+        lag = None
         sampler = None
         started = time.monotonic()
         if method == "runner/health":
@@ -287,21 +322,8 @@ class RunnerBridge:
             # like a runner that missed the deadline. The stall can happen
             # before this task is scheduled, so the first sample is the delay
             # from here, not the overshoot of a sleep that starts afterwards.
-            tick = min(0.05, limit / 4)
-            armed = time.monotonic()
-
-            async def ticks():
-                late = time.monotonic() - armed
-                if late > 0:
-                    lag[0] += late
-                while True:
-                    mark = time.monotonic()
-                    await asyncio.sleep(tick)
-                    over = time.monotonic() - mark - tick
-                    if over > 0:
-                        lag[0] += over
-
-            sampler = asyncio.create_task(ticks())
+            lag = HostLag(min(0.05, limit / 4))
+            sampler = asyncio.create_task(lag.run())
         try:
             async with asyncio.timeout(limit):
                 await self._write(p.Request(rpc_id, method, params), _entry, before_write=before_write)
@@ -330,6 +352,7 @@ class RunnerBridge:
             elif not future.cancelled():
                 future.exception()  # Also consume a failure raised while writing.
             if sampler is not None:
+                lag.settle()
                 # Do not await it. A yield here lets generation recovery cancel
                 # this task and replace the health error with CancelledError.
                 sampler.cancel()

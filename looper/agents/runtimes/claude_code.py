@@ -433,8 +433,8 @@ class ClaudeCodeRuntime(RuntimeAdapter):
     def operator_resident_command(self, executable: str, *, cwd: str | Path, prompt_file: Path,
                                   launch: Launch, settings_dir: Path, allowed_domains: Sequence[str] = (),
                                   read_deny: Sequence[str] = ()) -> list[str]:
-        """A task Manager's direct session: the operator's user-level settings, memory and skills (not the task
-        directory's), inside Claude Code's Bash sandbox with every loosening key pinned (``task_manager_sandbox``).
+        """A task Manager's direct session: the operator's user-level settings and memory (not the task directory's;
+        ``Skill`` is not an allowlisted tool), inside Claude Code's Bash sandbox with every loosening key pinned (``task_manager_sandbox``).
         Its MCP servers are only the ``--mcp-config`` file's. The fixed items never come from ``launch``."""
         from .. import task_manager_sandbox
         from ..claude_cli import budget_args, operator_settings_args, peer_args, permission_args, system_prompt_args

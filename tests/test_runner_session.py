@@ -145,8 +145,12 @@ def test_failed_prompt_records_model_and_current_session(tmp_path, monkeypatch, 
     from tests.db_support import run_db
 
     async def exercise(pool):
-        async with connection(control_timeout=0.1) as (bridge, reader, writer, _):
+        async with connection() as (bridge, reader, writer, _):
             session, descriptor = await opened(tmp_path, bridge, reader, writer)
+            # The handshake runs on the default control timeout; only the unanswered prompt gets the short one.
+            assert bridge.control_timeout == 10
+            if failure == "timeout":
+                bridge.control_timeout = 0.1
             recorder = ClaudeRunRecorder(agent_id="manager", task_id=None, command=descriptor.to_argv(),
                 cwd=str(tmp_path), input_text="hello", session_id="s")
             await recorder.start()

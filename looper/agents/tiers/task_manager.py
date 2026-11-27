@@ -16,7 +16,8 @@ from typing import Any, Literal, Protocol
 
 from ...db import activity, agent_sessions, projects, tasks
 from .. import operator_mcp, outbound_hook, step_workspaces, task_budget, task_conversations_settings
-from .. import task_manager_refs, task_manager_safety, task_manager_sandbox, task_manager_settings, task_workspaces
+from .. import task_manager_dirs, task_manager_refs, task_manager_safety, task_manager_sandbox, task_manager_settings
+from .. import task_workspaces
 from ..agent_settings import Access, Launch
 from ..claude_cli import ClaudeRunRecorder, ResidentClaude
 from ..library import EMPTY_LIBRARY
@@ -152,6 +153,9 @@ class _TaskResident(ResidentClaude):
             for path in self.owner.mcp_files:
                 Path(path).unlink(missing_ok=True)
             self.owner.mcp_files.clear()
+            lock, self.owner.dir_lock = self.owner.dir_lock, None
+            if lock is not None:
+                lock.release()
 
 
 @dataclass(frozen=True)
@@ -272,6 +276,8 @@ class TaskManagerAgent:
         # from these same two attributes, so the command and the readback cannot disagree.
         self.allowed_domains: tuple[str, ...] = ()
         self.read_deny: tuple[str, ...] = ()
+        self.work_dir = ""
+        self.dir_lock: task_manager_dirs.DirectoryLock | None = None
 
     def _mcp_cwd(self) -> Path:
         return self.pool.runtime_root / "task-managers" / self.task_id / "mcp-cwd"
@@ -369,6 +375,20 @@ class TaskManagerAgent:
         root = self.pool.runtime_root / "task-managers" / self.task_id
         prompt_file = prompt.write_file(root)
         launch = await configure()
+
+        def live_direct() -> list[tuple[str, str]]:
+            return [(agent.task_id, agent.work_dir) for agent in self.pool.agents.values()
+                    if agent is not self and agent.resident.started and agent.mode == "direct"]
+
+        if direct:
+            problem = task_manager_dirs.check(
+                task, reopened.work_dir, environment=launch.runtime.environment(launch),
+                runtime_root=self.pool.runtime_root, live=live_direct())
+            if problem is not None:
+                task_manager_safety.record_refusal(task_manager_safety.Reason(problem.reason.value), phase)
+                raise Refused(RefuseReason(problem.reason.value), problem.text)
+            self.work_dir = reopened.work_dir
+            await task_manager_dirs.before_directory_lock()
         executable = launch.executable(self.pool.claude_bin)
 
         def command_for(launch: Launch) -> list[str]:
@@ -383,8 +403,8 @@ class TaskManagerAgent:
                                                                    prompt_file=prompt_file, launch=launch))
 
         command = command_for(launch)
-        dropped = task_manager_sandbox.DIRECT_DROPPED_ENV if direct else ()
-        env = task_manager_safety.environment(launch, self.task_id, drop=dropped)
+        env = task_manager_safety.environment(launch, self.task_id,
+                                              drop=task_manager_sandbox.dropped_env(launch) if direct else ())
         # The file's name is the SHA-256 of its content, so the signature covers the pinned values, the network
         # allowlist and the read deny list: a change in any of them restarts the session.
         settings_file = command[command.index("--settings") + 1] if "--settings" in command else ""
@@ -409,7 +429,10 @@ class TaskManagerAgent:
                     await asyncio.to_thread(operator_mcp.reset_cwd, self._mcp_cwd())
                 launch = await configure()
                 command = command_for(launch)
-                env = task_manager_safety.environment(launch, self.task_id, drop=dropped)
+                env = task_manager_safety.environment(launch, self.task_id,
+                                                      drop=task_manager_sandbox.dropped_env(launch) if direct else ())
+                if direct and (warning := task_manager_sandbox.credential_warning(env)):
+                    logger.warning("task Manager %s: %s", self.task_id, warning)
                 settings_file = command[command.index("--settings") + 1] if "--settings" in command else ""
                 if direct:
                     problem = await task_manager_safety.gate(executable, cwd=reopened.work_dir, environment=launch.runtime.environment(launch),
@@ -417,6 +440,21 @@ class TaskManagerAgent:
                     if problem is not None:
                         await self.resident.stop(kill=True)
                         raise Refused(RefuseReason(problem.reason.value), problem.notice)
+                    if self.dir_lock is None:
+                        try:
+                            self.dir_lock = task_manager_dirs.DirectoryLock.acquire(
+                                self.pool.runtime_root, reopened.work_dir, self.task_id)
+                        except task_manager_dirs.LockHeld as held:
+                            task_manager_safety.record_refusal(
+                                task_manager_safety.Reason.WORKSPACE_OVERLAPS_SESSION, phase)
+                            raise Refused(RefuseReason.WORKSPACE_OVERLAPS_SESSION,
+                                          f"another task Manager session (task {held.holder}) holds {reopened.work_dir}") from held
+                    overlap = task_manager_dirs.overlap(reopened.work_dir, live_direct())
+                    if overlap is not None:
+                        task_manager_safety.record_refusal(
+                            task_manager_safety.Reason(overlap.reason.value), phase)
+                        await self.resident.stop(kill=True)
+                        raise Refused(RefuseReason(overlap.reason.value), overlap.text)
                 if self.session_id:
                     command += ["--resume", self.session_id]
                 await self.resident.start(command, cwd=reopened.work_dir, signature=signature, env=env,
