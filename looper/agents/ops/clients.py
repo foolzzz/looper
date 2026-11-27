@@ -1,11 +1,12 @@
 """The API client's side of the ops catalog (RFC §7–§8): one request is one turn, writes run, ``high`` waits for
-``confirm`` from the same client and session.
+``confirm`` from the same client and session. That confirmation is the client confirming its own request, a
+second submission; it is not an operator approval (in the Manager's chat only the operator confirms).
 
 A client (``/api/v1``) has the Manager's tools but for the two that exist only in a chat (``MANAGER_ONLY``), and two of
 its own: ``looper_task_pipeline`` and ``looper_gates``. It is not in a chat that answers a user's message, so Looper
 does not wait for one: a write runs at once, as the operator's own request, and a ``high`` call is registered under
 the client and its session (``X-Looper-Session``) until the same client confirms it there, within
-``CONFIRMATION_SECONDS``. Confirmations live in memory, as the Manager's do.
+``CONFIRMATION_SECONDS``; nothing checks that a person saw it. Confirmations live in memory, as the Manager's do.
 """
 
 from __future__ import annotations
