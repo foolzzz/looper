@@ -422,12 +422,12 @@ def test_disabled_calls_match_main_script(tmp_path, monkeypatch, telegram_http):
             await bot._edit_status('7', '4', 'edited')
             await bot._react('7', '4')
             assert telegram_http.calls == [
-                ('sendMessage', {'chat_id': 7, 'text': 'answer', 'parse_mode': 'MarkdownV2'}),
-                ('sendMessage', {'chat_id': 7, 'text': 'notice'}),
-                ('sendMessage', {'chat_id': 7, 'text': 'post', 'reply_parameters': {
+                ('sendMessage', {'chat_id': 7, 'text': 'answer', 'link_preview_options': {'is_disabled': True}, 'parse_mode': 'MarkdownV2'}),
+                ('sendMessage', {'chat_id': 7, 'text': 'notice', 'link_preview_options': {'is_disabled': True}}),
+                ('sendMessage', {'chat_id': 7, 'text': 'post', 'link_preview_options': {'is_disabled': True}, 'reply_parameters': {
                     'allow_sending_without_reply': True, 'message_id': 4}}),
-                ('sendMessage', {'chat_id': 7, 'text': 'phase'}),
-                ('editMessageText', {'text': 'edited', 'chat_id': 7, 'message_id': 4}),
+                ('sendMessage', {'chat_id': 7, 'text': 'phase', 'link_preview_options': {'is_disabled': True}}),
+                ('editMessageText', {'text': 'edited', 'link_preview_options': {'is_disabled': True}, 'chat_id': 7, 'message_id': 4}),
                 ('setMessageReaction', {'chat_id': 7, 'message_id': 4,
                                         'reaction': [{'emoji': '👀', 'type': 'emoji'}]})]
         finally:
