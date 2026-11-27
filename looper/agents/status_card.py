@@ -27,7 +27,7 @@ _FAILURE_CHARS = 300
 _LABELS = {"manager": "管家", "tasks": "任务", "schedules": "定时任务", "waiting": "等你", "reminders": "提醒", "recent": "最近"}
 _WAITING = {"gates": "关卡", "confirmations": "确认", "schedules": "失败的定时任务", "logins": "登录",
             "intents": "意图", "ledger": "待办", "deliveries": "可能没送到", "vault_commits": "知识库提交受阻",
-            "reminders": "未确认送达的提醒"}
+            "reminders": "未确认送达的提醒", "task_manager_refs": "任务管家改了别的分支或标签"}
 _BACKGROUND = {"completion": "收尾", "own": "自己发起"}
 
 _enabled = False

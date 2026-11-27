@@ -476,5 +476,6 @@
  "tasks.done": "inside",
  "tasks.task_manager_profile_get": "inside",
  "tasks.task_manager_profile_set": "inside",
- "tasks.task_manager_branch_set": "inside"
+ "tasks.task_manager_branch_set": "inside",
+ "tasks.task_manager_ref_report_resolve": "inside"
 }

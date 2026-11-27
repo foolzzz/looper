@@ -948,7 +948,8 @@ runtimes are refused rather than substituted.
 
 Direct launches append the fixed task instructions and a bounded, fenced brief.
 They run inside Claude Code's Bash sandbox with the fixed configuration described below, keep the
-operator's user-level settings, memory and skills, and load MCP servers only from
+operator's user-level settings and memory (the global instructions); `Skill` is not an allowlisted tool, so a user
+skill is not something the model can call (an operator's slash command can still run one), and load MCP servers only from
 a generated `--mcp-config` file under `--strict-mcp-config`: Looper's own server plus the
 operator's servers named in `tasks.conversations.manager_mcp` (default none; read and written
 through `task_conversations.get` and `task_conversations.update`, operator-only; up to 20 unique
@@ -1001,11 +1002,23 @@ them.
   allowlist or the read deny list restarts the session.
 - **Write scope.** The task directory and the sandbox's temporary directory; `.git/hooks`,
   `.git/config`, `.git/info` and `.git/modules` of the task directory are write-denied.
-- **Read deny list.** `read_deny_paths()`: the operator's credential directories (`~/.ssh`, `~/.aws`,
-  `~/.gnupg`, credential stores under `~/.config`, `.netrc`, `.git-credentials`), Claude's credential
-  file and `.claude.json`, and Looper's runtime root. It is a blacklist and cannot say "read only the
-  task directory"; `~/.config` as a whole is not denied because git reads `~/.config/git`. What a
-  model reads can leave through the exits listed in the task-sessions RFC (section 25.5).
+- **Read deny list.** `read_deny_paths()`: credential directories and files of the operator (`~/.ssh`,
+  `~/.aws`, `~/.gnupg`, `~/.docker`, `~/.kube`, `~/.azure`, `.netrc`, `.git-credentials`, `.npmrc`,
+  `.pypirc`, ..., credential stores under `~/.config`), the login keychain, the whole Claude
+  configuration directory (and the default one when another is set), the Codex, Grok, coco and Copilot
+  homes (and the directories their variables name), shell history, browser profiles and cookie
+  stores, the default `~/.looper`, and the active runtime root (plus an ops file outside it). It is a
+  blacklist and cannot say "read only the task directory"; `~/.config` as a whole is not denied because git
+  reads `~/.config/git`, and `~/.zshenv` is not denied because every command reads it. What a model reads
+  can leave through the exits listed in the task-sessions RFC (section 25.5).
+- **Environment.** The direct session's process environment drops proxy variables (both cases),
+  `SSH_AUTH_SOCK`, every runtime variable `child_env` lists that the Claude CLI does not need
+  (`RUNTIME_ENV_CLASS`: keep or drop, one entry per name, enforced by a test), and the names an Agent
+  Profile's `env` adds that are not the CLI's own or the provider binding's. `ANTHROPIC_API_KEY` and the other
+  Anthropic variables stay visible to the sandboxed Bash (a residual, RFC 25.5). v1 supports the Anthropic API
+  and the Claude login only: a cloud-provider backend (Bedrock, Vertex) gets no region, profile or credentials
+  from the Agent Profile's `env` (`AWS_*`, `CLOUD_ML_REGION`, `GOOGLE_APPLICATION_CREDENTIALS` are dropped), and
+  its credential files are on the read deny list, so a direct session on such a profile cannot authenticate.
 - **MCP servers.** Definitions come from the user scope only. Looper starts every stdio server,
   its own included, through a wrapper (`operator_mcp.wrap`: `/bin/sh -c 'cd "$1" && shift && exec
   "$@"'` into a private directory of the runtime root, outside every task directory), because Claude
@@ -1059,8 +1072,9 @@ them.
   `report_id`, `changes`, `info`, `head`, `own_commits` and `needs_you`. A fast-forward of the task
   branch is the Manager's own commits (`own_commits`) and is not listed; a reset, rewrite or delete of it
   is listed but not "needs you" by itself. A change to any other branch or tag is stored in
-  `task_manager_ref_reports` with `needs_you` set; a change under `refs/heads/looper/<other task>/`
-  while that task exists and is unfinished is `info` only. The
+  `task_manager_ref_reports` and listed in the needs-you section `task_manager_refs` until the
+  operator resolves it (`tasks.task_manager_ref_report_resolve`, which changes nothing in git); a change
+  under `refs/heads/looper/<other task>/` while that task exists and is unfinished is `info` only. The
   task branch is recorded once, at the first enablement (`task_manager_branches`, with a
   `sandbox_notice` event that the real checkout is edited directly); a detached `HEAD` then refuses the
   first turn (`head_detached`), and every later turn refuses while `HEAD` is not on that branch
