@@ -13,6 +13,7 @@ from pathlib import Path
 import pytest
 
 from looper import child_env
+from looper.agents import task_manager_sandbox
 from looper.agents.agent_settings import Access, AgentSettings, Launch
 from looper.agents.outbound_hook import ToolHook
 from looper.agents.profile_registry import builtin_resolved_profile
@@ -25,27 +26,80 @@ def launch(**fields):
 
 def test_operator_command_golden(tmp_path):
     settings_dir, prompt = tmp_path / "settings", tmp_path / "prompt.md"
-    run = launch(tool_hook=ToolHook("review-action"))
+    run = launch()
+    deny = (str(tmp_path / "secrets"),)
     command = CLAUDE_CODE.operator_resident_command(
-        "claude", cwd=tmp_path, prompt_file=prompt, launch=run, settings_dir=settings_dir)
+        "claude", cwd=tmp_path, prompt_file=prompt, launch=run, settings_dir=settings_dir, read_deny=deny)
     settings_file = command[command.index("--settings") + 1]
     assert command == [
         "claude", "--print", "--verbose", "--output-format", "stream-json",
         "--input-format", "stream-json", "--include-partial-messages", "--replay-user-messages",
-        "--strict-mcp-config", "--settings", settings_file, "--append-system-prompt-file", str(prompt),
+        "--strict-mcp-config", "--setting-sources", "user", "--tools", ",".join(task_manager_sandbox.BUILTIN_TOOLS),
+        "--settings", settings_file, "--append-system-prompt-file", str(prompt),
         "--system-prompt-snapshot", "off", "--dangerously-skip-permissions",
         "--disallowedTools", "ListAgents,SendMessage", "--model", run.model,
         *(["--effort", run.effort] if run.effort else []),
     ]
-    assert json.loads(Path(settings_file).read_text()) == {
-        "crossSessionInbound": "refuse", "hooks": run.tool_hook.settings()}
+    content = json.loads(Path(settings_file).read_text())
+    assert content == task_manager_sandbox.settings_content(tmp_path, read_deny=deny)
+    assert "hooks" not in content and "disableAllHooks" not in content
+    root = os.path.realpath(tmp_path)
+    assert content["sandbox"]["filesystem"]["denyWrite"] == [f"{root}/.git/{part}" for part in
+                                                             ("hooks", "config", "info", "modules")]
+    assert content["sandbox"]["filesystem"]["denyRead"] == list(deny)
+    assert content["disableSkillShellExecution"] is True
     assert Path(settings_file).stat().st_mode & 0o777 == 0o600
     assert settings_dir.stat().st_mode & 0o777 == 0o700
     library = replace(run.library, mcp_config="servers.json")
     with_library = CLAUDE_CODE.operator_resident_command(
-        "claude", cwd=tmp_path, prompt_file=prompt, launch=replace(run, library=library), settings_dir=settings_dir)
+        "claude", cwd=tmp_path, prompt_file=prompt, launch=replace(run, library=library), settings_dir=settings_dir,
+        read_deny=deny)
     assert with_library == [*command, "--mcp-config", "servers.json"]
     assert "--strict-mcp-config" in with_library
+
+
+def test_a_direct_session_takes_no_looper_hook(tmp_path):
+    with pytest.raises(ValueError, match="no Looper hook"):
+        CLAUDE_CODE.operator_resident_command(
+            "claude", cwd=tmp_path, prompt_file=tmp_path / "prompt.md", launch=launch(tool_hook=ToolHook("review")),
+            settings_dir=tmp_path / "settings")
+
+
+def test_the_settings_file_name_follows_the_allowlist_and_the_read_deny_list(tmp_path):
+    def file_for(**fields):
+        command = CLAUDE_CODE.operator_resident_command(
+            "claude", cwd=tmp_path, prompt_file=tmp_path / "prompt.md", launch=launch(),
+            settings_dir=tmp_path / "settings", **fields)
+        return command[command.index("--settings") + 1]
+
+    base = file_for()
+    assert file_for() == base
+    assert len({base, file_for(allowed_domains=("example.com",)), file_for(allowed_domains=("example.org",)),
+                file_for(read_deny=("/a",)), file_for(read_deny=("/b",))}) == 5
+
+
+def test_orchestrated_command_is_unchanged_with_a_review_hook(tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", "/home/tester")
+    run = launch(access=Access.READ_ONLY, tool_hook=ToolHook("review-action"))
+    command = CLAUDE_CODE.resident_command("claude", cwd=Path("/work/x"), prompt_file=Path("/work/prompt.md"),
+                                           launch=run)
+    settings = command[command.index("--settings") + 1]
+    assert command == [
+        "claude", "--print", "--verbose", "--output-format", "stream-json", "--input-format", "stream-json",
+        "--include-partial-messages", "--replay-user-messages", "--setting-sources", "", "--strict-mcp-config",
+        "--settings", settings, "--append-system-prompt-file", "/work/prompt.md", "--system-prompt-snapshot", "off",
+        "--permission-mode", "manual", "--permission-prompts", "none",
+        "--disallowedTools", "Bash,Edit,Write,NotebookEdit,EnterWorktree",
+        "--allowedTools", "Read(//work/x/**),Glob(//work/x/**),Grep(//work/x/**),Skill,WebFetch,WebSearch",
+        "--disallowedTools", "ListAgents,SendMessage", "--model", run.model,
+        *(["--effort", run.effort] if run.effort else []),
+    ]
+    assert json.loads(settings) == {
+        "autoMemoryEnabled": False, "crossSessionInbound": "refuse", "hooks": run.tool_hook.settings(),
+        "claudeMdExcludes": ["/work/CLAUDE.md", "/work/.claude/CLAUDE.md", "/work/.claude/rules/**",
+                             "/work/AGENTS.md", "/work/.claude/AGENTS.md", "/CLAUDE.md", "/.claude/CLAUDE.md",
+                             "/.claude/rules/**", "/AGENTS.md", "/.claude/AGENTS.md", "/home/tester/.claude/CLAUDE.md",
+                             "/home/tester/.claude/rules/**", "/home/tester/.claude/AGENTS.md"]}
 
 
 def test_read_only_command(tmp_path):
@@ -143,6 +197,43 @@ def test_version_gate(tmp_path, monkeypatch, version, allowed):
     assert (result is None) == allowed
     if result:
         assert result.reason.value == "cli_unverified" and version in result.notice
+
+
+@pytest.mark.parametrize("review_hook,refused", [(True, True), (False, False)])
+def test_gate_without_a_review_hook_ignores_the_hook_guards(tmp_path, monkeypatch, review_hook, refused):
+    from fake_claude import fake_claude
+    from looper.agents import task_manager_safety as safety
+
+    monkeypatch.setattr(safety, "MANAGED_SETTINGS", ())
+    config = tmp_path / "home/.claude"
+    config.mkdir(parents=True)
+    (config / "settings.json").write_text('{"disableAllHooks": true}')
+    monkeypatch.setenv("CLAUDE_CODE_SIMPLE", "1")
+    command = fake_claude(tmp_path / "claude", "print('2.1.332 (Claude Code)')\n")
+    env = {**child_env.inherited(), "HOME": str(tmp_path / "home"), "CLAUDE_CODE_SIMPLE": "1"}
+    result = asyncio.run(safety.gate(command, cwd=tmp_path, environment=env, phase="launch", review_hook=review_hook))
+    assert (result is not None and result.reason is safety.Reason.REVIEW_HOOK_DISABLED) is refused
+    assert (result is None) is (not refused)
+
+
+def test_gate_without_a_review_hook_still_checks_the_cli_version(tmp_path, monkeypatch):
+    from fake_claude import fake_claude
+    from looper.agents import task_manager_safety as safety
+
+    monkeypatch.setattr(safety, "MANAGED_SETTINGS", ())
+    command = fake_claude(tmp_path / "claude", "print('2.1.331 (Claude Code)')\n")
+    result = asyncio.run(safety.gate(command, cwd=tmp_path, environment={**child_env.inherited(), "HOME": str(tmp_path)},
+                                     phase="resume", review_hook=False))
+    assert result.reason is safety.Reason.CLI_UNVERIFIED and safety.refusal_counts[("cli_unverified", "resume", "2.1.331")]
+
+
+def test_refusal_reasons_are_all_declared_for_the_event_stream():
+    from looper.agents import task_manager_safety as safety
+    from looper.agents.tiers.task_manager import RefuseReason
+
+    assert {reason.value for reason in safety.Reason} <= {reason.value for reason in RefuseReason}
+    safety.record_refusal(safety.Reason.MCP_LAUNCHER_UNSAFE, "turn")
+    assert safety.refusal_counts[("mcp_launcher_unsafe", "turn", "unknown")] >= 1
 
 
 def test_mid_session_settings_caught_on_resume(tmp_path, monkeypatch):

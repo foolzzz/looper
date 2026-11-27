@@ -12,7 +12,7 @@ import re
 import tempfile
 import time
 from collections import deque
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from enum import Enum
@@ -155,11 +155,11 @@ def _private_settings_file(settings_dir: Path, content: str) -> Path:
     return target
 
 
-def operator_settings_args(settings_dir: Path, hooks: dict[str, Any] | None) -> list[str]:
-    """Merge only peer refusal and the review hook into the operator's normal settings sources."""
-    content = json.dumps({"crossSessionInbound": "refuse", "hooks": hooks or {}},
-                         ensure_ascii=False, separators=(",", ":"))
-    return ["--settings", str(_private_settings_file(settings_dir, content))]
+def operator_settings_args(settings_dir: Path, content: Mapping[str, Any]) -> list[str]:
+    """The ``--settings`` file of a task Manager's direct session: ``content`` (``task_manager_sandbox``) as private,
+    content-addressed JSON, so the file's name changes when any pinned value does."""
+    return ["--settings", str(_private_settings_file(
+        settings_dir, json.dumps(content, ensure_ascii=False, separators=(",", ":"))))]
 
 
 def isolation_args(cwd: str | os.PathLike[str], *, env: dict[str, str] | None = None,

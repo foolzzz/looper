@@ -2,13 +2,14 @@
 from __future__ import annotations
 
 import json
+import sys
 from pathlib import Path
 from unittest.mock import AsyncMock
 
 import pytest
 
 from looper.agents import operator_mcp, outbound_hook, task_conversations_settings as settings, task_manager_safety as safety
-from looper.agents import task_manager_settings
+from looper.agents import task_manager_sandbox, task_manager_settings
 from looper.agents.agent_settings import AgentSettings
 from looper.agents.profile_registry import builtin_resolved_profile
 from looper.agents.tiers import task_manager as tm
@@ -24,6 +25,7 @@ def setup_manager(monkeypatch, tmp_path):
     monkeypatch.setattr(outbound_hook, "known_enabled", lambda: False)
     monkeypatch.setattr(task_manager_settings, "load_task_manager_settings", AsyncMock(return_value=AgentSettings(profile=builtin_resolved_profile())))
     monkeypatch.setattr(safety, "gate", AsyncMock(return_value=None))
+    monkeypatch.setattr(task_manager_sandbox, "SUPPORTED_PLATFORM", sys.platform)  # a scripted CLI on any platform
     executable = fake_claude(tmp_path / "claude", '''
 import sys, json, os, time
 if '--version' in sys.argv:
@@ -93,6 +95,8 @@ def test_failed_tool_launch_revokes_credential(monkeypatch, tmp_path, setup_mana
         pool = tm.TaskManagerPool(tmp_path / "runtime", executable, ops=ops, max_resident=lambda: 1)
         try:
             if failure == "hook":
+                # Only the read-only orchestrated session carries the review hook; a direct one has none.
+                await tasks.update_task_status(task_id, "pending", pool=db)
                 monkeypatch.setattr(outbound_hook, "known_enabled", lambda: True)
                 monkeypatch.setattr(ops, "tool_hook", lambda *args: None)
             elif failure == "gate":
@@ -118,7 +122,9 @@ def test_prepare_operator_and_read_only_commands(monkeypatch, tmp_path, setup_ma
             agent = pool.agent(task_id)
             _, _, launch, _ = await agent.prepare()
             direct = agent.resident.command
-            assert '--setting-sources' not in direct
+            # The sandboxed direct session reads the user's settings only, and has the built-in tool allowlist.
+            assert direct[direct.index('--setting-sources') + 1] == 'user'
+            assert direct[direct.index('--tools') + 1] == ','.join(task_manager_sandbox.BUILTIN_TOOLS)
             assert '--append-system-prompt-file' in direct
             await tasks.update_task_status(task_id, 'pending', pool=db)
             agent.session_id = 'task-session'
@@ -141,11 +147,11 @@ def test_direct_session_loads_only_looper_and_allowed_mcp_servers(monkeypatch, t
     home, work = tmp_path / "home", tmp_path / "work"
     work.mkdir()
     home.mkdir()
-    (home / ".claude.json").write_text(json.dumps({"mcpServers": {"alpha": {"type": "stdio", "command": "alpha"},
-                                                                  "beta": {"type": "stdio", "command": "beta"},
-                                                                  "unlisted": {"type": "stdio", "command": "other"}}}))
+    (home / ".claude.json").write_text(json.dumps({"mcpServers": {"alpha": {"type": "stdio", "command": "/opt/mcp/alpha"},
+                                                                  "beta": {"type": "stdio", "command": "/opt/mcp/beta"},
+                                                                  "unlisted": {"type": "stdio", "command": "/opt/mcp/other"}}}))
     # The task directory's own file defines an allowed name differently: it is ignored.
-    (work / ".mcp.json").write_text(json.dumps({"mcpServers": {"beta": {"type": "stdio", "command": "hostile"}}}))
+    (work / ".mcp.json").write_text(json.dumps({"mcpServers": {"beta": {"type": "stdio", "command": "/opt/mcp/hostile"}}}))
     monkeypatch.setenv("HOME", str(home))
     monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
 
@@ -172,9 +178,13 @@ def test_direct_session_loads_only_looper_and_allowed_mcp_servers(monkeypatch, t
             await agent.prepare()  # a changed allowlist restarts the resident with the new servers
             assert servers(agent.resident.command) == ["alpha", "beta", "looper"]
             written = json.loads(Path(agent.resident.command[agent.resident.command.index("--mcp-config") + 1]).read_text())
-            assert written["mcpServers"]["beta"]["command"] == "beta"
-            assert agent.mcp_fingerprints == {"alpha": operator_mcp.fingerprint({"type": "stdio", "command": "alpha"}),
-                                              "beta": operator_mcp.fingerprint({"type": "stdio", "command": "beta"})}
+            # Every stdio server, Looper's own included, starts through the wrapper in a private directory; the
+            # fingerprints are those of the user-scope definitions, before wrapping.
+            assert all(operator_mcp.is_wrapped(entry) for entry in written["mcpServers"].values())
+            assert operator_mcp.unwrap(written["mcpServers"]["beta"])["command"] == "/opt/mcp/beta"
+            assert agent.mcp_fingerprints == {
+                "alpha": operator_mcp.fingerprint({"type": "stdio", "command": "/opt/mcp/alpha"}),
+                "beta": operator_mcp.fingerprint({"type": "stdio", "command": "/opt/mcp/beta"})}
             second = Path(agent.resident.command[agent.resident.command.index("--mcp-config") + 1])
             assert not first.exists() and second.is_file()  # the replaced config, which can hold secrets, is gone
             await agent.resident.stop()
@@ -210,9 +220,9 @@ def test_task_tools_follow_process_and_turn_lifetime(monkeypatch, tmp_path, setu
             _, _, launch, _ = await agent.prepare()
             config = json.loads(Path(launch.library.mcp_config).read_text())
             token = config["mcpServers"]["looper"]["env"]["LOOPER_AGENT_TOKEN"]
-            if review_on:
-                hook = pool.runtime_root / ".local" / "outbound-hook" / f"task-manager-{agent.task_id}.json"
-                assert json.loads(hook.read_text())["token"] == token
+            # A direct session carries no outbound-review hook, whatever the switch says.
+            hook = pool.runtime_root / ".local" / "outbound-hook" / f"task-manager-{agent.task_id}.json"
+            assert not hook.exists()
             return token
 
         async def ignore(event):

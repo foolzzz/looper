@@ -2,10 +2,12 @@
 from __future__ import annotations
 
 import json
+import sys
 from dataclasses import replace
 from unittest.mock import AsyncMock
 
-from looper.agents import outbound_hook, task_conversations_settings, task_manager_safety, task_manager_settings
+from looper.agents import outbound_hook, task_conversations_settings, task_manager_safety, task_manager_sandbox
+from looper.agents import task_manager_settings
 from looper.agents.agent_settings import AgentSettings
 from looper.agents.profile_registry import builtin_resolved_profile
 from looper.db import projects, tasks
@@ -43,6 +45,8 @@ class NativeTaskManager:
         monkeypatch.setattr(task_conversations_settings, "_manager_mcp", ())
         monkeypatch.setattr(outbound_hook, "known_enabled", lambda: False)
         monkeypatch.setattr(task_manager_safety, "gate", AsyncMock(return_value=None))
+        # The direct session runs on macOS only; these lifecycle tests use a scripted CLI on any platform.
+        monkeypatch.setattr(task_manager_sandbox, "SUPPORTED_PLATFORM", sys.platform)
 
         async def read_settings(task):
             return self.settings
