@@ -4308,9 +4308,38 @@ the [step workspaces RFC](rfcs/step-workdir-isolation-v0.zh-CN.md)):
   A worktree that cannot be created fails the attempt the same way.
 - **Looper's commits** (checkpoint, leftovers, merge) are by
   `Looper <looper@localhost>`, with `Looper-Task` and `Looper-Step` trailers,
-  and unsigned. No git command Looper runs runs a hook
-  (`-c core.hooksPath=/dev/null`), and each has a 120 s limit. The Worker's own
+  and unsigned. Each git command Looper runs has a 120 s limit. The Worker's own
   commits keep the repository's identity, signing and hooks.
+- **Git in agent-writable directories** (`looper/agents/git_safe.py`). An agent can
+  write `.git/config`, `.git/hooks` and `.git/info/attributes`, so every git
+  command the service runs in a task, step or worktree directory, a consult
+  or verification checkout or an explorer snapshot goes through one helper.
+  It runs no hook, `core.fsmonitor`, signing program, `core.sshCommand`,
+  pager, editor, askpass or credential helper of the repository (fixed `-c`
+  overrides), and no filter, merge or diff driver (textconv) *defined by the
+  repository*: `.gitattributes` stays in effect (`eol=`, `text`, a user's LFS
+  filter), and the definitions found in the repository's own config (and in
+  its checked-out submodules') are overridden, by the user-level or system
+  definition of the same name when there is one, else by nothing. **Known
+  limitation:** the definitions are read just before the command, so one
+  written after that read is not stopped. It runs as the same system user as
+  the agent, with the allowlisted environment below and none of the
+  service's credentials; after each command the helper reads the definitions
+  again and logs one warning (task and step id, driver names) when one
+  appeared; the worker's verification snapshot, baseline, restore and
+  checkout run in `cached()` blocks, where no agent writes, and skip that
+  re-check, so they log no warning. The command's
+  environment is an allowlist (`PATH`, `HOME`, the locale, the operator's own
+  `GIT_CONFIG_*`, and the few `GIT_*` variables a call names), so the
+  database URL, tokens and provider keys never reach git or anything it
+  runs. Before each command the helper checks the repository and refuses
+  (`RepositoryRefused`; the step workspace code reports it as `GitError`) when
+  `info/attributes` assigns a filter, diff or merge driver, or when the
+  directory's `.git` is not the repository git would use for it (a `gitdir:`
+  link that is not a linked worktree's or a submodule's, a `core.worktree`
+  elsewhere). `tests/test_git_safe.py` fails on a direct `git` call elsewhere
+  in `looper/`, except for Looper's own checkout, a fresh clone, and the
+  knowledge vault, each listed there with its reason.
 - **Kept and removed.** A step that a replan drops, from a decision or a change
   to the task, loses its worktree and branch at once. A completed task's
   worktrees and branches are removed.
