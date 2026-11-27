@@ -354,3 +354,16 @@ def test_seeded_random_inputs_leave_nothing_for_a_renderer_to_load() -> None:
         out = neutralize_images(text)
         leaks = _oracle_leaks(out)
         assert leaks == [], (text, out, leaks)
+
+
+DEFINITION_PREFIXES = ["", " ", "   ", "> ", ">> ", "> > ", "- ", "* ", "+ ", "1. ", "10) ", "- > ", "1. > ", "+ > ", "* > ",
+                       "> - ", "> 1. ", "- 1. > - ", "- - ", "> > - ", "-   ", ">\t", "1.\t> "]
+
+
+@pytest.mark.parametrize("prefix", DEFINITION_PREFIXES)
+@pytest.mark.parametrize("image", ["![r]", "![r][]", "![R][r]"])
+@pytest.mark.parametrize("definition_first", [True, False])
+def test_reference_definitions_in_nested_containers_are_found(prefix: str, image: str, definition_first: bool) -> None:
+    definition = f"{prefix}[r]: http://e.example/z"
+    text = f"{definition}\n\n{image}" if definition_first else f"{image}\n\n{definition}"
+    assert _oracle_leaks(neutralize_images(text)) == [], text

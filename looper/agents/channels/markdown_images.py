@@ -38,7 +38,7 @@ _URL = re.compile(r"https?://[^\s<>()\"'\\\[\]`]{1,1800}", re.I)
 _FENCE = re.compile(r" {0,3}(`{3,}|~{3,})(.*)")
 _RUN = re.compile(r"`+")
 _BRACKET = re.compile(r"[\[\]\\]")
-_DEFINITION = re.compile(r"[ \t>]*(?:(?:[-*+]|\d{1,9}[.)])[ \t]+)*\[((?:[^\[\]\\]|\\.){1,999})\]:")
+_DEFINITION = re.compile(r"(?:[ \t>*+-]|\d{1,9}[.)])*\[((?:[^\[\]\\]|\\.){1,999})\]:")
 _URL_ATTR = "url"
 # The tags Lark's Markdown defines, each with the attributes it may carry. A tag outside this table, or a listed tag
 # with another attribute (``style``, ``background``, ``src``, ``srcset`` ...), is written as text. URL attributes
