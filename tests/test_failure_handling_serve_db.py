@@ -121,14 +121,26 @@ def until(check, what, timeout=30):
 
 
 _POLLS = ('op=tasks.detail ', 'op=tasks.holds ')
-_SUSPECTS = ('task router error', 'step_failure', 'TASK_STOP', 'task_stop', 'Traceback')
+_ROOT_CAUSE = ('task router error', 'step_failure', 'Traceback')
+_STOPS = ('TASK_STOP', 'task_stop')
 
 
 def failure_log(text, limit=12000):
     """What a failed run prints of the serve log: the polling lines a wait produces are dropped (they fill the whole
-    tail), and the lines that name a router or failure-store problem are kept even when they come before it."""
-    lines = [line for line in text.splitlines() if not any(poll in line for poll in _POLLS)]
-    suspects = '\n'.join(line for line in lines if any(word in line for word in _SUSPECTS))[-limit // 3:]
+    tail; failing and slow polls stay), and the lines that name a router or failure-store problem are kept even when
+    they come before it, ahead of the stop lines."""
+    lines = [line for line in text.splitlines()
+             if not (any(poll in line for poll in _POLLS) and 'status=ok' in line and 'api slow' not in line)]
+    causes, stops = [], []
+    for i, line in enumerate(lines):
+        if any(word in line for word in _ROOT_CAUSE):
+            causes.append(line)
+            if 'Traceback' in line:  # the exception type is the first unindented line after the frames
+                tail = lines[i + 1:i + 41]
+                causes.extend([x for x in tail if x and not x[0].isspace()][:1])
+        elif any(word in line for word in _STOPS):
+            stops.append(line)
+    suspects = '\n'.join(causes + stops)[:limit // 3]
     rest = '\n'.join(lines)[-(limit - len(suspects)):]
     return (f'--- lines naming the router or the failure store ---\n{suspects}\n--- end of the log ---\n{rest}'
             if suspects else rest)
