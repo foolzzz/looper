@@ -125,8 +125,13 @@ def _hits(source: Source, values: Mapping[str, Any]) -> list[str]:
 
 
 async def gate(executable: str, *, cwd: str | Path, environment: Mapping[str, str],
-               phase: Literal["launch", "resume"], settings_file: Path | None = None) -> Refusal | None:
-    """Read every source before every direct launch or resume; no model process is started here."""
+               phase: Literal["launch", "resume"], settings_file: Path | None = None,
+               review_hook: bool = True) -> Refusal | None:
+    """Read every source before every direct launch or resume; no model process is started here.
+
+    ``review_hook=False`` is a direct session that carries no Looper hook (the sandbox is its boundary): the
+    ``RULES`` checks, which guard that hook against being switched off, are skipped. The CLI version check runs on
+    every launch and resume either way."""
     home = Path(environment.get("HOME", str(Path.home())))
     config = Path(environment.get("CLAUDE_CONFIG_DIR", str(home / ".claude"))).expanduser()
     sources = [(Source.USER, config / "settings.json"), (Source.USER_LOCAL, config / "settings.local.json"),
@@ -136,7 +141,7 @@ async def gate(executable: str, *, cwd: str | Path, environment: Mapping[str, st
     if settings_file is not None:
         sources.append((Source.LAUNCH, settings_file))
     notices = []
-    for source, path in sources:
+    for source, path in (sources if review_hook else []):
         try:
             values = json.loads(path.read_text(encoding="utf-8"))
             if not isinstance(values, dict):
@@ -150,7 +155,8 @@ async def gate(executable: str, *, cwd: str | Path, environment: Mapping[str, st
             notices.append(f"{path}: {key} disables the review hook; remove this setting before retrying.")
     # Parent variables are checked even though the child allowlist removes them. Profile/provider variables are
     # checked by the caller's unsanitized environment too; environment() clears them from the final child.
-    for key in dict.fromkeys((*_hits(Source.PROCESS, os.environ), *_hits(Source.PROCESS, environment))):
+    for key in dict.fromkeys((*_hits(Source.PROCESS, os.environ), *_hits(Source.PROCESS, environment))
+                             if review_hook else ()):
         notices.append(f"process environment: {key} disables the review hook; remove this variable before retrying.")
     if notices:
         refusal = Refusal(Reason.REVIEW_HOOK_DISABLED, "\n".join(notices))
