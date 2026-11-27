@@ -1040,7 +1040,11 @@ them.
   first turn (`head_detached`), and every later turn refuses while `HEAD` is not on that branch
   (`head_moved`) until it is checked out again or the operator runs `tasks.task_manager_branch_set`.
   A fast-forward is decided from the raw commit objects (grafts and replace refs are not honoured) and
-  anything undecidable is reported as a rewrite. A ref listing Looper cannot read safely (a name with a
+  a walk that cannot decide (a commit limit, an unreadable object) is reported as
+  `fast_forward_unverified` ("could not verify that this is a fast-forward"): still listed with the same restore
+  command, but it does not claim a reset happened. An intact symbolic ref is skipped only when its target is
+  itself a compared ref (`refs/heads`, `refs/tags`); a link into `refs/remotes/*` or another uncompared
+  namespace is reported as moved when the target moves, with a restore command for the target. A ref listing Looper cannot read safely (a name with a
   line-break character, a repeated name, a failed read) refuses the turn at its start; at its end it emits a
   `sandbox_notice` with notice `refs_unreadable` instead of a report. A task directory that is not a git
   repository is refused as `workspace` for now (the typed `not_git` reason comes with the directory check).

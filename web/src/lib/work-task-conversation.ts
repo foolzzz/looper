@@ -45,7 +45,7 @@ const SWITCH_REASONS = ["busy", "invalid_profile", "runtime_unsupported"] as con
 const FRESH_REASONS = ["context_bound", "read_only_open", "resume_failed"] as const;
 const STOP_METHODS = ["control", "cancel", "kill"] as const;
 const SUMMARY_MODES = ["direct", "orchestrated"] as const;
-const REF_CHANGES = ["created", "deleted", "moved", "non_fast_forward"] as const;
+const REF_CHANGES = ["created", "deleted", "moved", "non_fast_forward", "fast_forward_unverified"] as const;
 const SANDBOX_NOTICES = ["first_enable_in_place", "refs_unreadable"] as const;
 const REFUSED = ["work_mode_off", "runtime_unsupported", "budget", "outbound_review_unavailable", "workspace", "shutting_down", "review_hook_disabled", "cli_unverified", "manager_answers_off", "mcp_unresolved", "sandbox_unavailable", "readback_unavailable", "launch_setting_mismatch", "mcp_set_mismatch", "mcp_launcher_unsafe", "network_policy_invalid", "workspace_not_repo_root", "workspace_is_home", "workspace_contains_trusted_config", "workspace_in_system_dir", "workspace_overlaps_session", "worktree_unsupported", "head_moved", "head_detached"] as const;
 
@@ -205,15 +205,18 @@ function asEvent(value: unknown): TaskEvent | null {
 
 const CHANGE_TEXT: Record<RefChange["change"], string> = {
   created: "新建", deleted: "被删除", moved: "被移动", non_fast_forward: "被改写（不是快进）",
+  fast_forward_unverified: "无法确认是否为快进",
 };
 const shortId = (id: string | null) => (id ? id.slice(0, 8) : "无");
 const NON_FAST_FORWARD_WARNING = "执行 reset --hard、rebase 或 commit --amend 之后恢复这个引用，工作区会留下一份撤销那些提交的差异；不要不看就提交它。";
+const FAST_FORWARD_UNVERIFIED_WARNING = "没能确认这是不是快进（提交历史太长或对象读不了），所以不能说它被重置过；请自己检查，确认是改写后再用恢复命令。";
 const FIRST_ENABLE_TEXT = "管家在你的真实检出目录里直接改文件；v1 只报告分支和标签的变化，不会恢复，删掉的对象也找不回来，建议先把重要分支推送或备份。";
 
 const REFS_UNREADABLE_TEXT = "本轮结束后没能重新读取分支和标签，这一轮对它们的改动（如果有）没有被报告；请自己检查 git branch 和 git tag。";
 
 function refChangeText(change: RefChange): string {
-  const warning = change.change === "non_fast_forward" ? ` ${NON_FAST_FORWARD_WARNING}` : "";
+  const warning = change.change === "non_fast_forward" ? ` ${NON_FAST_FORWARD_WARNING}`
+    : change.change === "fast_forward_unverified" ? ` ${FAST_FORWARD_UNVERIFIED_WARNING}` : "";
   return `${change.ref} ${CHANGE_TEXT[change.change]}（${shortId(change.old)} → ${shortId(change.new)}）${warning}`;
 }
 

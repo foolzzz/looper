@@ -311,9 +311,27 @@ def test_a_replace_ref_cannot_make_a_reset_look_like_a_fast_forward(repo):
     assert change.change is Change.NON_FAST_FORWARD
 
 
-def test_a_commit_object_over_the_size_limit_leaves_the_decision_open_as_non_fast_forward(repo, monkeypatch):
+def test_a_commit_object_over_the_size_limit_leaves_the_decision_open_and_says_so(repo, monkeypatch):
     monkeypatch.setattr(refs, "OBJECT_LIMIT", 10)
+    old = git(repo, "rev-parse", "HEAD")
     report = run(repo, lambda: commit(repo, "b.txt"))
+    change, = report.changes
+    assert change.change is Change.FAST_FORWARD_UNVERIFIED and report.own_commits == 0
+    assert change.restore == f"git update-ref --no-deref refs/heads/main {old} {change.new}"  # still restorable
+    assert not report.needs_you  # same as a rewrite of the task branch
+
+
+def test_a_walk_that_hits_its_commit_limit_is_unverified_not_a_rewrite(repo, monkeypatch):
+    monkeypatch.setattr(refs, "WALK_LIMIT", 1)
+    commit(repo, "b.txt")
+    report = run(repo, lambda: (commit(repo, "c.txt"), commit(repo, "d.txt")))
+    change, = report.changes
+    assert change.change is Change.FAST_FORWARD_UNVERIFIED
+
+
+def test_a_decided_reset_is_still_a_rewrite_and_only_an_undecided_walk_is_unverified(repo):
+    commit(repo, "b.txt")
+    report = run(repo, lambda: git(repo, "reset", "-q", "--hard", "HEAD~1"))
     change, = report.changes
     assert change.change is Change.NON_FAST_FORWARD
 
@@ -354,3 +372,17 @@ def test_zero_width_characters_are_escaped_and_the_restore_command_still_works(r
     subprocess.run(["bash", "-c", change.restore.replace("git ", f"git -C {shlex.quote(str(repo))} ", 1)], check=True,
                    capture_output=True)
     assert odd not in asyncio.run(refs.snapshot(repo)).refs
+
+
+@pytest.mark.parametrize("target", ["refs/hidden/x", "refs/remotes/origin/main"])
+def test_a_link_into_a_namespace_that_is_not_compared_still_reports_when_its_target_moves(repo, target):
+    commit(repo, "b.txt")
+    tip, first = git(repo, "rev-parse", "HEAD"), git(repo, "rev-parse", "HEAD~1")
+    git(repo, "update-ref", target, tip)
+    git(repo, "symbolic-ref", "refs/heads/up", target)
+    report = run(repo, lambda: git(repo, "update-ref", target, first))
+    change, = report.changes
+    assert change.ref == "refs/heads/up" and change.change is Change.MOVED and report.needs_you
+    assert (change.old, change.new) == (tip, first)
+    git_safe.run(repo, *shlex.split(change.restore)[1:], check=True, capture_output=True)
+    assert git(repo, "rev-parse", target) == tip and git(repo, "symbolic-ref", "refs/heads/up") == target

@@ -61,6 +61,13 @@ class Change(str, Enum):
     DELETED = "deleted"
     MOVED = "moved"
     NON_FAST_FORWARD = "non_fast_forward"
+    FAST_FORWARD_UNVERIFIED = "fast_forward_unverified"  # the bounded walk gave up: neither a reset nor a fast-forward is claimed
+
+
+class Ancestry(Enum):
+    DESCENDS = "descends"
+    DIVERGES = "diverges"
+    UNDECIDED = "undecided"
 
 
 @dataclass(frozen=True)
@@ -120,8 +127,10 @@ def _quote(name: str) -> str:
 
 
 def _restore(ref: str, change: Change, old: str | None, new: str | None,
-             old_target: str | None = None, new_target: str | None = None) -> str:
+             old_target: str | None = None, new_target: str | None = None, linked: str | None = None) -> str:
     name = _quote(ref)
+    if linked is not None:  # the link is intact and only its target (in a namespace not compared) moved
+        return f"git update-ref {_quote(linked)} {old} {new}"
     if old_target is not None:  # a symbolic ref goes back to what it pointed at
         return f"git symbolic-ref {name} {_quote(old_target)}"
     if new_target is not None:
@@ -134,11 +143,12 @@ def _restore(ref: str, change: Change, old: str | None, new: str | None,
     return f"git update-ref --no-deref {name} {old} {new}"
 
 
-def _change(ref: str, old: str | None, new: str | None, *, plain_move: bool = False,
-            old_target: str | None = None, new_target: str | None = None) -> RefChange:
+def _change(ref: str, old: str | None, new: str | None, *, plain_move: bool = False, unverified: bool = False,
+            old_target: str | None = None, new_target: str | None = None, linked: str | None = None) -> RefChange:
     kind = (Change.CREATED if old is None else Change.DELETED if new is None
-            else Change.MOVED if plain_move else Change.NON_FAST_FORWARD)
-    return RefChange(display(ref), kind, old, new, _restore(ref, kind, old, new, old_target, new_target))
+            else Change.MOVED if plain_move else Change.FAST_FORWARD_UNVERIFIED if unverified
+            else Change.NON_FAST_FORWARD)
+    return RefChange(display(ref), kind, old, new, _restore(ref, kind, old, new, old_target, new_target, linked))
 
 
 def _refused(exc: git_safe.RepositoryRefused):
@@ -230,45 +240,45 @@ def _parents(body: bytes) -> list[str] | None:
     return parents
 
 
-async def _reaches(work_dir: str | Path, new: str, old: str) -> bool:
+async def _reaches(work_dir: str | Path, new: str, old: str) -> Ancestry:
     """Whether ``old`` is an ancestor of ``new``, from the raw commit objects (``cat-file --batch`` honours neither
-    ``info/grafts`` nor replace refs), breadth first so a merge finds ``old`` among its first parents. False also
-    when the walk could not decide (a limit, an object that is not a well-formed commit)."""
+    ``info/grafts`` nor replace refs), breadth first so a merge finds ``old`` among its first parents.
+    ``UNDECIDED`` when the walk gave up (a limit, an object that is not a well-formed commit, a timeout)."""
     process = await git_safe.spawn(work_dir, "-c", "core.useReplaceRefs=false", "cat-file", "--batch",
                                    extra_env=_LOCKLESS, stdin=asyncio.subprocess.PIPE,
                                    stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL)
-    found = False
+    found = Ancestry.UNDECIDED
 
-    async def read() -> bool:
+    async def read() -> Ancestry:
         seen: set[str] = set()
         queue = deque([new])
         while queue:
             sha = queue.popleft()
             if sha == old:
-                return True
+                return Ancestry.DESCENDS
             if sha in seen:
                 continue
             if len(seen) >= WALK_LIMIT:
-                return False
+                return Ancestry.UNDECIDED
             seen.add(sha)
             process.stdin.write(sha.encode() + b"\n")
             await process.stdin.drain()
             header = (await process.stdout.readline()).decode("ascii", "replace").split()
             if len(header) != 3 or header[1] != "commit" or not header[2].isdigit():
-                return False
+                return Ancestry.UNDECIDED
             size = int(header[2])
             if size > OBJECT_LIMIT:
-                return False
+                return Ancestry.UNDECIDED
             parents = _parents(await process.stdout.readexactly(size + 1))
             if parents is None:
-                return False
+                return Ancestry.UNDECIDED
             queue.extend(parents)
-        return False
+        return Ancestry.DIVERGES
 
     try:
         found = await asyncio.wait_for(read(), GIT_TIMEOUT_SEC)
     except (asyncio.TimeoutError, asyncio.IncompleteReadError, ValueError):
-        found = False
+        found = Ancestry.UNDECIDED
     finally:
         try:
             process.stdin.close()
@@ -279,18 +289,20 @@ async def _reaches(work_dir: str | Path, new: str, old: str) -> bool:
     return found
 
 
-async def fast_forward(work_dir: str | Path, old: str, new: str) -> int | None:
-    """The number of commits ``old..new`` when ``new`` descends from ``old``, else None (also when it cannot be
-    decided). The decision reads raw parents, so a graft or a replace ref cannot make a reset look like an
-    ancestor; only the count comes from ``rev-list`` and a graft could skew that number, never the decision."""
+async def fast_forward(work_dir: str | Path, old: str, new: str) -> tuple[Ancestry, int]:
+    """Whether ``new`` descends from ``old`` and, when it does, the number of commits ``old..new``. The decision
+    reads raw parents, so a graft or a replace ref cannot make a reset look like an ancestor; only the count comes
+    from ``rev-list`` and a graft could skew that number, never the decision. ``UNDECIDED`` when it cannot be
+    decided: that is reported as unverified, never as a reset and never as a fast-forward."""
     try:
-        if not await _reaches(work_dir, new, old):
-            return None
+        verdict = await _reaches(work_dir, new, old)
+        if verdict is not Ancestry.DESCENDS:
+            return verdict, 0
         code, count = await _git(work_dir, "-c", "core.useReplaceRefs=false", "rev-list", "--count", f"{old}..{new}")
-        return int(count.strip()) if code == 0 and count.strip().isdigit() else 0
+        return Ancestry.DESCENDS, (int(count.strip()) if code == 0 and count.strip().isdigit() else 0)
     except Exception:
         logger.warning("task Manager refs: could not decide fast-forward", exc_info=True)
-        return None
+        return Ancestry.UNDECIDED, 0
 
 
 def _short(ref: str | None) -> str:
@@ -342,16 +354,23 @@ async def compare(work_dir: str | Path, before: Snapshot, after: Snapshot, *, ta
         old_target, new_target = before.symrefs.get(ref), after.symrefs.get(ref)
         if old == new and old_target == new_target:
             continue
-        if old_target is not None and old_target == new_target:  # a link to the same ref follows its target's moves
-            continue
         pointers = {"old_target": old_target, "new_target": new_target}
+        if old_target is not None and old_target == new_target:
+            # An intact link follows its target, and the target's own change is reported under its own name, but
+            # only when the target is itself compared (``refs/heads``, ``refs/tags``). A target outside them
+            # (``refs/remotes/*`` is deliberately never read, RFC 25.4; anything else is not listed) would
+            # otherwise hide the link's value change, so it is reported: erring toward reporting.
+            if old_target in before.refs or old_target in after.refs:
+                continue
+            pointers = {"linked": old_target}
         if ref == task_ref:
-            count = (await fast_forward(work_dir, old, new)
-                     if old is not None and new is not None and old_target is None and new_target is None else None)
-            if count is not None:
+            verdict, count = ((await fast_forward(work_dir, old, new))
+                              if old is not None and new is not None and not old_target and not new_target
+                              else (Ancestry.DIVERGES, 0))
+            if verdict is Ancestry.DESCENDS:
                 own_commits = count
                 continue
-            changes.append(_change(ref, old, new, **pointers))
+            changes.append(_change(ref, old, new, unverified=verdict is Ancestry.UNDECIDED, **pointers))
             continue
         change = _change(ref, old, new, plain_move=True, **pointers)
         owner = ref.removeprefix(LOOPER).split("/", 1) if ref.startswith(LOOPER) else None

@@ -274,7 +274,8 @@ describe("task conversation", () => {
       { kind: "ref_report", message_id: "turn-1", report_id: 7, own_commits: 2, needs_you: true,
         head: { before: "refs/heads/main", after: null }, info: [change("refs/heads/looper/t2/task", "moved", old, moved, "git update-ref refs/heads/looper/t2/task A B")],
         changes: [change("refs/heads/oth\\u202eer", "moved", old, moved, `git update-ref refs/heads/other ${old} ${moved}`),
-          change("refs/heads/main", "non_fast_forward", moved, old, `git update-ref refs/heads/main ${moved} ${old}`)] },
+          change("refs/heads/main", "non_fast_forward", moved, old, `git update-ref refs/heads/main ${moved} ${old}`),
+          change("refs/heads/big", "fast_forward_unverified", old, moved, `git update-ref refs/heads/big ${old} ${moved}`)] },
     ];
     const bad = [
       { kind: "sandbox_notice", notice: "other", detail: "x" },
@@ -293,6 +294,9 @@ describe("task conversation", () => {
     const report = container.querySelector('[data-feed-key="task-event:r2"]')!;
     expect(report.textContent).toContain("refs/heads/oth\\u202eer 被移动（aaaaaaaa → bbbbbbbb）");
     expect(report.textContent).toContain("refs/heads/main 被改写（不是快进）");
+    expect(report.textContent).toContain("refs/heads/big 无法确认是否为快进（aaaaaaaa → bbbbbbbb）");
+    expect(report.textContent).toContain("不能说它被重置过");
+    expect(report.textContent).not.toMatch(/refs\/heads\/big 被改写/);
     expect(report.textContent).toContain("reset --hard、rebase 或 commit --amend");
     expect(report.textContent).toContain("属于另一个 Looper 任务");
     expect(report.textContent).toContain("已列入「需要你处理」");
@@ -300,7 +304,7 @@ describe("task conversation", () => {
     expect(report.textContent).toContain("本轮有 2 个提交由任务管家自己做");
     expect(Array.from(report.querySelectorAll("code"), (node) => node.textContent)).toEqual([
       `git update-ref refs/heads/other ${old} ${moved}`, `git update-ref refs/heads/main ${moved} ${old}`,
-      "git update-ref refs/heads/looper/t2/task A B"]);
+      `git update-ref refs/heads/big ${old} ${moved}`, "git update-ref refs/heads/looper/t2/task A B"]);
     for (const index of [3, 4, 5]) expect(container.querySelector(`[data-feed-key="task-event:r${index}"]`)?.textContent).toContain("无法读取这条事件");
   });
 
