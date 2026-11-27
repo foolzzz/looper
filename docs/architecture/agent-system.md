@@ -1057,7 +1057,7 @@ them.
   anything undecidable is reported as a rewrite. A ref listing Looper cannot read safely (a name with a
   line-break character, a repeated name, a failed read) refuses the turn at its start; at its end it emits a
   `sandbox_notice` with notice `refs_unreadable` instead of a report. A task directory that is not a git
-  repository is refused as `workspace` for now (the typed `not_git` reason comes with the directory check).
+  repository is refused before the session starts (see Directory checks below).
   `ref_report` and the `refs_unreadable` notice carry the turn's `message_id`.
   Every git call goes through `git_safe`; the real-CLI rows are `tests/test_task_manager_refs_probe.py`.
 
