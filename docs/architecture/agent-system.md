@@ -1000,7 +1000,8 @@ them.
   content and is part of the launch signature, so a change in any pinned value, the network
   allowlist or the read deny list restarts the session.
 - **Write scope.** The task directory and the sandbox's temporary directory; `.git/hooks`,
-  `.git/config`, `.git/info` and `.git/modules` of the task directory are write-denied.
+  `.git/config`, `.git/info`, `.git/modules` and `.git/objects/info` of the task directory are
+  write-denied.
 - **Read deny list.** `read_deny_paths()`: the operator's credential directories (`~/.ssh`, `~/.aws`,
   `~/.gnupg`, credential stores under `~/.config`, `.netrc`, `.git-credentials`), Claude's credential
   file and `.claude.json`, and Looper's runtime root. It is a blacklist and cannot say "read only the
@@ -4416,7 +4417,13 @@ the [step workspaces RFC](rfcs/step-workdir-isolation-v0.zh-CN.md)):
   `info/attributes` assigns a filter, diff or merge driver, or when the
   directory's `.git` is not the repository git would use for it (a `gitdir:`
   link that is not a linked worktree's or a submodule's, a `core.worktree`
-  elsewhere). `tests/test_git_safe.py` fails on a direct `git` call elsewhere
+  elsewhere), or when the repository, or a checked-out submodule, borrows
+  another object store (`objects/info/alternates` or `http-alternates` exists
+  and is not an empty file; this includes a project cloned with `--shared` or
+  `--reference`, which `git repack -a -d` followed by removing the file makes
+  self-contained). Replacement refs (`refs/replace`) are off for every command
+  (`core.useReplaceRefs=false` and `GIT_NO_REPLACE_OBJECTS=1`), so Looper sees
+  the history as stored. `tests/test_git_safe.py` fails on a direct `git` call elsewhere
   in `looper/`, except for Looper's own checkout, a fresh clone, and the
   knowledge vault, each listed there with its reason.
 - **Kept and removed.** A step that a replan drops, from a decision or a change
