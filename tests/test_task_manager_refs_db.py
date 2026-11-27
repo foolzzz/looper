@@ -280,7 +280,13 @@ def test_orchestrated_and_worktree_turns_never_take_a_ref_snapshot(monkeypatch, 
             task_id, _ = await make_task(native, db, tmp_path, status="running")
         pool = tm.TaskManagerPool(tmp_path / "runtime", native.executable, max_resident=lambda: 1)
         try:
-            await submit_and_wait(pool, task_id, "reply", message_id="m1")
+            if mode == "worktree":  # a worktree task has no direct session: the turn is refused before any snapshot
+                sink = Sink()
+                result = await pool.submit(task_id, "reply", message_id="m1", sink=sink)
+                assert result.state == "refused" and result.reason is tm.RefuseReason.WORKTREE_UNSUPPORTED
+                await sink.done()
+            else:
+                await submit_and_wait(pool, task_id, "reply", message_id="m1")
             assert spy.await_count == 0
         finally:
             await pool.shutdown()
