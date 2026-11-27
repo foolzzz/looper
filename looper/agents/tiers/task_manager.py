@@ -416,8 +416,8 @@ class TaskManagerAgent:
                                                                    prompt_file=prompt_file, launch=launch))
 
         command = command_for(launch)
-        dropped = task_manager_sandbox.DIRECT_DROPPED_ENV if direct else ()
-        env = task_manager_safety.environment(launch, self.task_id, drop=dropped)
+        env = task_manager_safety.environment(launch, self.task_id,
+                                              drop=task_manager_sandbox.dropped_env(launch) if direct else ())
         # The file's name is the SHA-256 of its content, so the signature covers the pinned values, the network
         # allowlist and the read deny list: a change in any of them restarts the session.
         settings_file = command[command.index("--settings") + 1] if "--settings" in command else ""
@@ -444,7 +444,10 @@ class TaskManagerAgent:
                     await asyncio.to_thread(operator_mcp.reset_cwd, self._mcp_cwd())
                 launch = await configure()
                 command = command_for(launch)
-                env = task_manager_safety.environment(launch, self.task_id, drop=dropped)
+                env = task_manager_safety.environment(launch, self.task_id,
+                                                      drop=task_manager_sandbox.dropped_env(launch) if direct else ())
+                if direct and (warning := task_manager_sandbox.credential_warning(env)):
+                    logger.warning("task Manager %s: %s", self.task_id, warning)
                 settings_file = command[command.index("--settings") + 1] if "--settings" in command else ""
                 if direct:
                     problem = await task_manager_safety.gate(executable, cwd=reopened.work_dir, environment=launch.runtime.environment(launch),

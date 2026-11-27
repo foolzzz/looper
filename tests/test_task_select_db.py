@@ -72,8 +72,9 @@ async def _project(pool):
 
 
 async def _stamp(pool, task_ids):
-    await pool.execute("UPDATE tasks SET updated_at = $2 WHERE id = ANY($1::text[])", list(task_ids),
-                       datetime(2026, 11, 1, tzinfo=timezone.utc))
+    # One shared, recent timestamp relative to the database clock: the default search window is 90 days back
+    # from now(), so a fixed date would fall out of it once the real date passed.
+    await _backdate(pool, task_ids, "10 days")
 
 
 async def _wait(pool, task_id, number, repo="acme/widgets"):
@@ -572,9 +573,7 @@ def test_two_open_tasks_in_the_deepest_directory_stay_candidates(monkeypatch, tm
         await _task(pool, project_id, "task-shallow", work_dir=str(root), title="shallow", status="running")
         await _task(pool, project_id, "task-open-a", work_dir=str(sub), title="open a", status="running")
         await _task(pool, project_id, "task-open-b", work_dir=str(sub), title="open b", status="running")
-        stamp = datetime(2026, 11, 1, tzinfo=timezone.utc)
-        await pool.execute("UPDATE tasks SET updated_at = $2 WHERE id = ANY($1::text[])",
-                           ["task-shallow", "task-open-a", "task-open-b"], stamp)
+        await _stamp(pool, ["task-shallow", "task-open-a", "task-open-b"])
         found = await _select({"cwd": str(leaf)})
         _candidates(found, ["task-open-a", "task-open-b"])
         assert found["kind"] != "one" and "task-shallow" not in _ids(found)
@@ -592,8 +591,7 @@ def test_normalized_text_stays_ambiguous(titles, kind, ids, monkeypatch):
         task_ids = ["task-00000000000a", "task-00000000000b"][:len(titles)]
         for task_id, title in zip(task_ids, titles):
             await _task(pool, project_id, task_id, title=title, requirement="other", status="running")
-        stamp = datetime(2026, 11, 2, tzinfo=timezone.utc)
-        await pool.execute("UPDATE tasks SET updated_at = $2 WHERE id = ANY($1::text[])", task_ids, stamp)
+        await _stamp(pool, task_ids)
         found = await _select({"selection": "abc"})
         if kind == "one":
             _one(found, ids[0])

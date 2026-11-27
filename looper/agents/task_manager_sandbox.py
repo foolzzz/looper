@@ -66,19 +66,55 @@ HOME_BROWSER_PATHS = ("Library/Application Support/Firefox", "Library/Applicatio
                       "Library/Application Support/Arc", "Library/Cookies")
 
 
-def _provider_credentials() -> tuple[str, ...]:
-    """The provider credential variables of ``child_env`` that are not Anthropic's (Codex, Grok, ...): nothing in a
-    direct session needs them."""
-    import re
+# Every name of ``child_env.RUNTIMES`` and what a direct session does with it. A name that is not classified here fails
+# ``tests/test_task_manager_sandbox.py``: adding one to ``child_env`` means deciding it. "keep": the Claude CLI itself
+# needs it (the credentials among them stay visible to the sandboxed Bash: a residual, RFC 25.5). "drop": another
+# runtime's home or credential; nothing in a direct session needs it.
+RUNTIME_ENV_CLASS: dict[str, str] = {
+    "CLAUDE_CONFIG_DIR": "keep", "ANTHROPIC_API_KEY": "keep", "ANTHROPIC_AUTH_TOKEN": "keep",
+    "CLAUDE_CODE_OAUTH_TOKEN": "keep", "ANTHROPIC_BASE_URL": "keep", "ANTHROPIC_MODEL": "keep",
+    "ANTHROPIC_DEFAULT_OPUS_MODEL": "keep", "ANTHROPIC_DEFAULT_SONNET_MODEL": "keep",
+    "ANTHROPIC_DEFAULT_HAIKU_MODEL": "keep", "ANTHROPIC_SMALL_FAST_MODEL": "keep", "CLAUDE_CODE_SUBAGENT_MODEL": "keep",
+    "TRAE_HOME": "drop", "CODEX_HOME": "drop", "GROK_HOME": "drop", "COPILOT_HOME": "drop",
+    "COPILOT_CUSTOM_INSTRUCTIONS_DIRS": "drop", "CODEX_API_KEY": "drop", "CODEX_ACCESS_TOKEN": "drop",
+    "XAI_API_KEY": "drop", "GROK_CODE_XAI_API_KEY": "drop", "GROK_AUTH": "drop",
+}
+# Variables an Agent Profile's own ``env`` may add that a direct session keeps: the Claude CLI's and Anthropic's. Any
+# other name a profile sets (``GH_TOKEN``, a cloud key, ...) is not passed: the sandboxed Bash would print it.
+PROFILE_ENV_KEEP_PREFIXES = ("ANTHROPIC_", "CLAUDE_", "ENABLE_TOOL_SEARCH", "DISABLE_", "MAX_THINKING_TOKENS", "API_TIMEOUT_MS")
 
+
+DIRECT_DROPPED_ENV = (*DIRECT_DROPPED_ENV, *(name for name, kind in RUNTIME_ENV_CLASS.items() if kind == "drop"))
+
+
+def profile_env_dropped(profile_names: Iterable[str], binding_names: Iterable[str] = ()) -> tuple[str, ...]:
+    """The names of a profile's ``env`` a direct session does not carry: not the CLI's own, not set by the provider
+    binding, not a name the server inherits by allowlist (``child_env.NAMES``)."""
     from .. import child_env
 
-    return tuple(name for name in child_env.RUNTIMES if re.search(r"(KEY|TOKEN|AUTH)$", name)
-                 and not name.startswith(("ANTHROPIC", "CLAUDE")))
+    kept = set(binding_names) | set(child_env.NAMES)
+    return tuple(sorted({name for name in profile_names if name not in kept
+                         and not name.upper().startswith(PROFILE_ENV_KEEP_PREFIXES)}))
 
 
-PROVIDER_CREDENTIAL_ENV = _provider_credentials()
-DIRECT_DROPPED_ENV = (*DIRECT_DROPPED_ENV, *PROVIDER_CREDENTIAL_ENV)
+def dropped_env(launch: Any) -> tuple[str, ...]:
+    """What a direct session's process environment must not carry for ``launch``: ``DIRECT_DROPPED_ENV`` and the
+    names its Agent Profile adds that the CLI does not need (``profile_env_dropped``)."""
+    binding = launch.runtime.bind_provider(launch.profile.provider, launch.model, launch.effort)
+    return (*DIRECT_DROPPED_ENV, *profile_env_dropped((name for name, _ in launch.env), (name for name, _ in binding.env)))
+
+
+def credential_warning(environment: Mapping[str, str]) -> str | None:
+    """A warning for a direct session whose environment (the service's or an Agent Profile's) holds a long-lived
+    model-provider credential: the CLI needs it, and the sandboxed Bash can print it. Names only, never values."""
+    import re
+
+    names = sorted(name for name, kind in RUNTIME_ENV_CLASS.items()
+                   if kind == "keep" and re.search(r"(KEY|TOKEN)$", name) and environment.get(name))
+    if not names:
+        return None
+    return (f"the direct session's environment holds {', '.join(names)}, which the sandboxed Bash can read; prefer a "
+            "subscription login or a short-lived token over a long-lived key in the service environment or the profile's env")
 
 
 def tool_allowed(name: str, servers: Iterable[str]) -> bool:
@@ -176,6 +212,10 @@ def read_deny_paths(environment: Mapping[str, str], runtime_root: Path,
         logins.append(home / default)
         if (environment.get(variable) or "").strip():
             logins.append(helper.login_file(environment).parents[len(Path(helper.LOGIN_FILE).parts) - 1])
+    # The Copilot CLI (omp's provider) keeps its login in its home; it has no login helper here, so the paths are listed.
+    logins.append(home / ".copilot")
+    if (environment.get("COPILOT_HOME") or "").strip():
+        logins.append(Path(environment["COPILOT_HOME"]).expanduser())
     entries = (
         home / ".ssh",  # SSH keys
         home / ".aws",  # cloud credentials
