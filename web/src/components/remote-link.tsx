@@ -84,7 +84,7 @@ export function RemoteLink({ href, className, children, ...extra }: { href: stri
     ); // footnote ids, aria and title stay
   }
   return (
-    <a href={href} title={extra.title} target="_blank" rel="noopener noreferrer" referrerPolicy="no-referrer" className={className}>
+    <a href={href} target="_blank" rel="noopener noreferrer" referrerPolicy="no-referrer" className={className}>
       {children}
       {!namesTheDestination(children, target.url) && <bdi className="text-muted-foreground"> ({target.host})</bdi>}
     </a>

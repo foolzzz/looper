@@ -129,11 +129,23 @@ describe("remote content in agent Markdown", () => {
   });
 
   it.each(["\u202e", "\u202a", "\u2066", "\u2069", "\u200e", "\u200f", "\u061c"])(
-    "always shows the label, isolated, when the text holds the bidi control U+%#x", (mark) => {
-      const html = render(`[https://evil.example/${mark}x](https://evil.example/x)`);
-      expect(textOf(html)).toContain("(evil.example)");
-      expect(html).toContain("<bdi");
+    "removes the bidi control U+%#x from agent text", (mark) => {
+      const html = render(`${mark}[https://evil.example/${mark}x](https://evil.example/x) ${mark}after`);
+      expect(html).not.toMatch(/[\u202a-\u202e\u2066-\u2069\u200e\u200f\u061c]/);
     });
+
+  it("keeps two adjacent links in order and each label next to its own link under an override", () => {
+    const html = render("\u202e[https://a.example/](https://b.example/) [https://c.example/](https://d.example/)");
+    const text = textOf(html);
+    expect(html).not.toMatch(/[\u202a-\u202e\u2066-\u2069]/);
+    expect(text.indexOf("(b.example)")).toBeGreaterThan(text.indexOf("https://a.example/"));
+    expect(text.indexOf("(b.example)")).toBeLessThan(text.indexOf("https://c.example/"));
+    expect(text.indexOf("(d.example)")).toBeGreaterThan(text.indexOf("https://c.example/"));
+  });
+
+  it("drops the title of an external link", () => {
+    expect(render('[t](https://b.example/x "bank.example")')).not.toContain("title=");
+  });
 
   it("marks a same-site link whose text is an address on another site", () => {
     vi.stubGlobal("location", new URL("http://dashboard.example/"));
