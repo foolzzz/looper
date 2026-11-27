@@ -122,6 +122,19 @@ describe("remote content in agent Markdown", () => {
     expect(textOf(render(`[${text}](${href})`))).toContain("(evil.example");
   });
 
+  it("shows the host label when the ASCII host only appears in the path of look-alike text", () => {
+    for (const text of ["https://\u0430pple.com/xn--pple-43d.com", "https://\u0430pple.com/?q=xn--pple-43d.com", "https://\u0430pple.com/#xn--pple-43d.com"]) {
+      expect(textOf(render(`[${text}](${text})`))).toContain("(xn--pple-43d.com)");
+    }
+  });
+
+  it.each(["\u202e", "\u202a", "\u2066", "\u2069", "\u200e", "\u200f", "\u061c"])(
+    "always shows the label, isolated, when the text holds the bidi control U+%#x", (mark) => {
+      const html = render(`[https://evil.example/${mark}x](https://evil.example/x)`);
+      expect(textOf(html)).toContain("(evil.example)");
+      expect(html).toContain("<bdi");
+    });
+
   it("marks a same-site link whose text is an address on another site", () => {
     vi.stubGlobal("location", new URL("http://dashboard.example/"));
     try {

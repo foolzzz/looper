@@ -46,14 +46,22 @@ function absoluteWebAddress(text: ReactNode): URL | null {
   }
 }
 
+// Embedding and isolate controls and direction marks can visually reorder the text around them.
+const BIDI_CONTROL = /[\u202a-\u202e\u2066-\u2069\u200e\u200f\u061c]/;
+
+/** The host exactly as the text spells it: after the scheme and before the first path, query, fragment or port. */
+function literalHost(text: string): string {
+  return /^\s*[a-z][a-z0-9+.-]*:\/\/([^/?#:]*)/i.exec(text)?.[1].toLowerCase() ?? "";
+}
+
 // The label is dropped only when the text is an address with the very same origin as the destination (scheme, host and
-// port), neither side carries credentials, and the ASCII host appears literally in the text (a Unicode, full-width or
-// encoded spelling parses to the same host but reads differently).
+// port), neither side carries credentials, the text has no bidi control, and its own host part (not a path or query)
+// is the ASCII host: a Unicode, full-width or encoded spelling parses to the same host but reads differently.
 function namesTheDestination(text: ReactNode, destination: URL): boolean {
   const shown = absoluteWebAddress(text);
   return shown !== null && typeof text === "string" && shown.origin === destination.origin
     && !shown.username && !shown.password && !destination.username && !destination.password
-    && text.toLowerCase().includes(destination.host);
+    && !BIDI_CONTROL.test(text) && literalHost(text) === destination.hostname;
 }
 
 /**
@@ -71,14 +79,14 @@ export function RemoteLink({ href, className, children, ...extra }: { href: stri
     return (
       <a href={href} className={className} {...extra}>
         {children}
-        {elsewhere && <span className="text-muted-foreground"> (this site)</span>}
+        {elsewhere && <bdi className="text-muted-foreground"> (this site)</bdi>}
       </a>
     ); // footnote ids, aria and title stay
   }
   return (
     <a href={href} title={extra.title} target="_blank" rel="noopener noreferrer" referrerPolicy="no-referrer" className={className}>
       {children}
-      {!namesTheDestination(children, target.url) && <span className="text-muted-foreground"> ({target.host})</span>}
+      {!namesTheDestination(children, target.url) && <bdi className="text-muted-foreground"> ({target.host})</bdi>}
     </a>
   );
 }
