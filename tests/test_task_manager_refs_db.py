@@ -1,4 +1,4 @@
-"""The task branch, the ref reports of a direct turn and the branch operation (PostgreSQL)."""
+"""The task branch, the ref reports of a direct turn, their operations and their needs-you section (PostgreSQL)."""
 from __future__ import annotations
 
 import asyncio
@@ -10,9 +10,9 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from looper.agents import task_manager_refs as refs, task_manager_safety
+from looper.agents import attention, task_manager_refs as refs, task_manager_safety
 from looper.agents.tiers import task_manager as tm
-from looper.db import task_chat, tasks
+from looper.db import task_chat, task_manager_refs as store, tasks
 from tests.db_support import run_db, v1_api
 from tests.task_manager_support import NativeTaskManager, Sink, submit_and_wait
 
@@ -141,6 +141,39 @@ def test_end_turn_stores_a_report_says_it_and_raises_no_alert(monkeypatch, tmp_p
     run_db(check, monkeypatch, timeout=60)
 
 
+def test_needs_you_lists_an_unresolved_report_and_resolving_removes_it(monkeypatch, tmp_path, native):
+    async def check(db):
+        task_id, directory = await make_task(native, db, tmp_path)
+        sink = Sink()
+        before, branch = await refs.begin_turn({"id": task_id}, directory, sink=sink)
+        git(directory, "tag", "v9")
+        await refs.end_turn({"id": task_id}, directory, before, branch, sink=sink, message_id="m1")
+        # An information-only report (another active Looper task's branch) never appears.
+        await store.insert_report(task_id, "m2", {"changes": [], "info": [{"ref": "refs/heads/looper/x/y"}]}, False)
+        items, total = await attention._task_manager_refs(None)
+        item, = items
+        assert total == 1 and item["key"].startswith("tm_refs:") and item["href"] == f"#tasks/{task_id}"
+        assert item["facts"] == {"refs": ["refs/tags/v9"], "count": 1} and item["context"]
+        assert await attention.earliest("task_manager_refs") == item
+        summary = await attention.collect()
+        section, = [s for s in summary["sections"] if s["kind"] == "task_manager_refs"]
+        assert section["state"] == "ok" and section["count"] == 1
+        assert attention.KINDS[-1] == "task_manager_refs"
+        async with v1_api(tmp_path, db) as call:
+            report_id = int(item["key"].split(":")[1])
+            status, _ = await call("tasks.task_manager_ref_report_resolve", {"report_id": report_id}, client=True)
+            assert status == 403
+            status, answer = await call("tasks.task_manager_ref_report_resolve", {"report_id": report_id})
+            assert status == 200 and answer["result"]["report_id"] == report_id and answer["result"]["resolved_at"]
+            first = answer["result"]["resolved_at"]
+            status, answer = await call("tasks.task_manager_ref_report_resolve", {"report_id": report_id})
+            assert status == 200 and answer["result"]["resolved_at"] == first
+            status, _ = await call("tasks.task_manager_ref_report_resolve", {"report_id": 999999})
+            assert status == 404
+        assert await attention._task_manager_refs(None) is attention.NotRead.OFF
+    run_db(check, monkeypatch, timeout=60)
+
+
 def test_branch_set_refuses_a_detached_head_a_worktree_task_and_a_missing_directory(monkeypatch, tmp_path, native):
     async def check(db):
         task_id, directory = await make_task(native, db, tmp_path)
@@ -162,7 +195,7 @@ def test_branch_set_refuses_a_detached_head_a_worktree_task_and_a_missing_direct
 
 def test_operations_are_declared_with_levels_and_short_summaries():
     from looper.agents.api_v1 import document
-    operations = {"tasks.task_manager_branch_set"}
+    operations = {"tasks.task_manager_branch_set", "tasks.task_manager_ref_report_resolve"}
     levels = json.loads((Path(__file__).parent / "operation_levels.json").read_text())
     assert all(levels[name] == "inside" for name in operations)
     found = {}
@@ -280,7 +313,13 @@ def test_orchestrated_and_worktree_turns_never_take_a_ref_snapshot(monkeypatch, 
             task_id, _ = await make_task(native, db, tmp_path, status="running")
         pool = tm.TaskManagerPool(tmp_path / "runtime", native.executable, max_resident=lambda: 1)
         try:
-            await submit_and_wait(pool, task_id, "reply", message_id="m1")
+            if mode == "worktree":  # a worktree task has no direct session: the turn is refused before any snapshot
+                sink = Sink()
+                result = await pool.submit(task_id, "reply", message_id="m1", sink=sink)
+                assert result.state == "refused" and result.reason is tm.RefuseReason.WORKTREE_UNSUPPORTED
+                await sink.done()
+            else:
+                await submit_and_wait(pool, task_id, "reply", message_id="m1")
             assert spy.await_count == 0
         finally:
             await pool.shutdown()
