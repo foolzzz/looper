@@ -144,14 +144,9 @@ def shape(definition: Mapping[str, Any]) -> str:
 
 
 def unwrapped(config: Mapping[str, Any], private_dir: Path) -> dict[str, Any]:
-    """The definition a stdio server was wrapped from; ``ValueError`` unless ``config`` is exactly what
-    ``operator_mcp.wrap`` writes for ``private_dir`` (the launch shape: another directory or another wrapper fails)."""
-    if not operator_mcp.is_wrapped(config):
-        raise ValueError("not wrapped")
-    plain = operator_mcp.unwrap(config)
-    if operator_mcp.wrap(plain, private_dir) != dict(config):
-        raise ValueError("another private directory or wrapper")
-    return plain
+    """The definition a stdio server was wrapped from; ``ValueError`` unless ``config`` is exactly the launch's
+    wrapper running in ``private_dir`` (``operator_mcp.unwrap`` verifies the shape and the directory)."""
+    return operator_mcp.unwrap(config, private_dir)
 
 
 def expected_mcp(servers: Mapping[str, Mapping[str, Any]], private_dir: Path) -> dict[str, str]:
