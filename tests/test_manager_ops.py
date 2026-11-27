@@ -617,13 +617,13 @@ def test_the_managers_launch_gets_loopers_server_over_a_catalog_one_of_that_name
     launched = asyncio.run(ops.library_with_server(library, tmp_path))
     servers = json.loads(open(launched.mcp_config, encoding="utf-8").read())["mcpServers"]
     assert servers["notes"] == {"command": "notes-mcp"}
-    assert servers["looper"] == {"command": sys.executable, "args": ["-m", "looper.cli", "mcp-server"],
+    assert servers["looper"] == {"command": sys.executable, "args": ["-I", "-m", "looper.cli", "mcp-server"],
                                  "env": {"LOOPER_AGENT_URL": "http://127.0.0.1:9", "LOOPER_AGENT_TOKEN": "tok"}}
     assert [(item.name, item.scope) for item in launched.items] == [("notes", "global"), ("looper", "builtin")]
     assert launched.record()["mcp_servers"] == ["notes", "looper"]
     # Codex and OMP read the same file: a stdio server with its environment.
     assert dict(codex_servers(launched)[0])["looper"]["env"]["LOOPER_AGENT_TOKEN"] == "tok"
-    assert omp_config(launched, {})["mcpServers"]["looper"]["args"] == ["-m", "looper.cli", "mcp-server"]
+    assert omp_config(launched, {})["mcpServers"]["looper"]["args"] == ["-I", "-m", "looper.cli", "mcp-server"]
     # A Manager with nothing installed gets it too.
     alone = asyncio.run(ops.library_with_server(AgentLibrary(role="manager"), tmp_path))
     assert list(json.loads(open(alone.mcp_config, encoding="utf-8").read())["mcpServers"]) == ["looper"]
