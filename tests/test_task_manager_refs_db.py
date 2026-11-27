@@ -173,7 +173,9 @@ def test_operations_are_declared_with_levels_and_short_summaries():
     assert set(found) == operations
     for item in found.values():
         assert len(item["summary"]) <= 120 and item["description"].startswith(item["summary"])
-        assert item["x-looper-operator-only"] is True if "x-looper-operator-only" in item else True
+    from looper.agents import api_v1
+    for name in operations:
+        assert api_v1.find("POST", "/api/v1/" + name.replace(".", "/")).operator_only is True
 
 
 def test_hostile_repository_configuration_runs_nothing_in_begin_end_and_files(monkeypatch, tmp_path, native):
@@ -312,4 +314,37 @@ def test_an_unreadable_end_of_turn_snapshot_says_so_in_the_conversation(monkeypa
         notices = [p for p in events_of(sink, "sandbox_notice") if p["notice"] == "refs_unreadable"]
         assert len(notices) == 1 and "not reported" in notices[0]["detail"]
         assert not events_of(sink, "ref_report")
+    run_db(check, monkeypatch, timeout=60)
+
+
+def test_a_head_on_a_look_alike_name_or_a_non_branch_ref_is_not_the_task_branch(monkeypatch, tmp_path, native):
+    async def check(db):
+        task_id, directory = await make_task(native, db, tmp_path)
+        sink = Sink()
+        before, branch = await refs.begin_turn({"id": task_id}, directory, sink=sink)
+        git(directory, "tag", "v1")
+        git(directory, "symbolic-ref", "HEAD", "refs/heads/main\u00a0")  # main followed by a no-break space
+        assert (await refs.snapshot(directory)).head == "refs/heads/main\u00a0"
+        report = await refs.end_turn({"id": task_id}, directory, before, branch, sink=sink, message_id="m1")
+        assert report.head_changed
+        with pytest.raises(tm.Refused) as refused:
+            await refs.begin_turn({"id": task_id}, directory, sink=sink)
+        assert refused.value.reason is tm.RefuseReason.HEAD_MOVED
+        git(directory, "symbolic-ref", "HEAD", "refs/tags/v1")  # not a branch: the same as a detached HEAD
+        assert (await refs.snapshot(directory)).head is None
+    run_db(check, monkeypatch, timeout=60)
+
+
+def test_turn_events_carry_the_turns_message_id(monkeypatch, tmp_path, native):
+    async def check(db):
+        task_id, directory = await make_task(native, db, tmp_path)
+        sink = Sink()
+        before, branch = await refs.begin_turn({"id": task_id}, directory, sink=sink)
+        git(directory, "tag", "v7")
+        await refs.end_turn({"id": task_id}, directory, before, branch, sink=sink, message_id="turn-9")
+        assert events_of(sink, "ref_report")[0]["message_id"] == "turn-9"
+        git(directory, "update-ref", "refs/heads/z\u2028refs/heads/main", git(directory, "rev-parse", "HEAD"))
+        with pytest.raises(tm.Refused):
+            await refs.end_turn({"id": task_id}, directory, before, branch, sink=sink, message_id="turn-10")
+        assert [p["message_id"] for p in events_of(sink, "sandbox_notice") if p["notice"] == "refs_unreadable"] == ["turn-10"]
     run_db(check, monkeypatch, timeout=60)

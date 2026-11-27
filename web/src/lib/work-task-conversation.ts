@@ -61,9 +61,9 @@ type TaskEvent =
   | { kind: "session_fresh"; reason: (typeof FRESH_REASONS)[number]; detail: string }
   | { kind: "stopped"; method: (typeof STOP_METHODS)[number] }
   | { kind: "turn_summary"; files: string[]; commit: string | null; mode: (typeof SUMMARY_MODES)[number]; uncommitted?: string[]; unverified?: string[] }
-  | { kind: "ref_report"; report_id: number | null; changes: RefChange[]; info: RefChange[];
+  | { kind: "ref_report"; message_id: string | null; report_id: number | null; changes: RefChange[]; info: RefChange[];
       head: { before: string | null; after: string | null } | null; own_commits: number; needs_you: boolean }
-  | { kind: "sandbox_notice"; notice: (typeof SANDBOX_NOTICES)[number]; detail: string }
+  | { kind: "sandbox_notice"; notice: (typeof SANDBOX_NOTICES)[number]; detail: string; message_id?: string | null }
   | { kind: "refused"; reason: "orchestrated"; status: string }
   | { kind: "refused"; reason: (typeof REFUSED)[number] };
 
@@ -174,7 +174,8 @@ function asEvent(value: unknown): TaskEvent | null {
         ...("uncommitted" in value ? { uncommitted: value.uncommitted as string[] } : {}),
         ...("unverified" in value ? { unverified: value.unverified as string[] } : {}) };
     case "ref_report": {
-      if (!exactKeys(value, ["kind", "report_id", "changes", "info", "head", "own_commits", "needs_you"])) return null;
+      if (!exactKeys(value, ["kind", "message_id", "report_id", "changes", "info", "head", "own_commits", "needs_you"])
+        || !isNullableString(value.message_id)) return null;
       const changes = asRefChanges(value.changes);
       const info = asRefChanges(value.info);
       const head = value.head;
@@ -182,13 +183,16 @@ function asEvent(value: unknown): TaskEvent | null {
         && isNullableString(head.before) && isNullableString(head.after));
       if (!changes || !info || !headOk || !(value.report_id === null || isInteger(value.report_id))
         || !isInteger(value.own_commits) || value.own_commits < 0 || typeof value.needs_you !== "boolean") return null;
-      return { kind: "ref_report", report_id: value.report_id as number | null, changes, info,
+      return { kind: "ref_report", message_id: value.message_id, report_id: value.report_id as number | null, changes, info,
         head: head as { before: string | null; after: string | null } | null, own_commits: value.own_commits,
         needs_you: value.needs_you };
     }
     case "sandbox_notice":
-      return exactKeys(value, ["kind", "notice", "detail"]) && oneOf(value.notice, SANDBOX_NOTICES) && isString(value.detail)
-        ? { kind: "sandbox_notice", notice: value.notice, detail: value.detail } : null;
+      return exactKeys(value, ["kind", "notice", "detail", ..."message_id" in value ? ["message_id"] : []])
+        && oneOf(value.notice, SANDBOX_NOTICES) && isString(value.detail)
+        && (!("message_id" in value) || isNullableString(value.message_id))
+        ? { kind: "sandbox_notice", notice: value.notice, detail: value.detail,
+            ...("message_id" in value ? { message_id: value.message_id as string | null } : {}) } : null;
     case "refused":
       if (exactKeys(value, ["kind", "reason", "status"]) && value.reason === "orchestrated" && isString(value.status)) {
         return { kind: "refused", reason: "orchestrated", status: value.status };
