@@ -74,6 +74,21 @@ describe("Needs you page", () => {
     expect(host.querySelector('a[href="#chat"]')).not.toBeNull();
   });
 
+  it("shows a long ref name in full and drops control characters from it", async () => {
+    const long = "refs/heads/codex/tm-sandbox-refs-needs-you";
+    vi.mocked(fetchAttention).mockResolvedValue({ read_at: "2026-11-20T08:00:00Z", total: 1, sections: [
+      { kind: "task_manager_refs", state: "ok", count: 1, error: null, items: [
+        { key: "tm_refs:3", title: "任务管家改了别的分支或标签", context: "Login rewrite", since: null,
+          href: "#tasks/t1", ref: null, facts: { refs: [long, "refs/tags/v\u202e9"], count: 2 } }] },
+    ] });
+    await render();
+    const section = host.querySelector('section[aria-label="任务管家改了别的分支或标签"]')!;
+    expect(section.textContent).toContain(long);
+    expect(section.textContent).not.toContain("[redacted]");
+    expect(section.textContent).toContain("refs/tags/v9");
+    expect(section.textContent).not.toContain("\u202e");
+  });
+
   it("lists a changed-refs report with its task and refs, and marks it handled", async () => {
     vi.mocked(fetchAttention).mockResolvedValue({ read_at: "2026-11-20T08:00:00Z", total: 1, sections: [
       { kind: "task_manager_refs", state: "ok", count: 1, error: null, items: [

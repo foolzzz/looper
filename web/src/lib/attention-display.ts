@@ -33,3 +33,11 @@ export function redactDisplay(value: string): string {
 export function displayText(value: unknown): string {
   return typeof value === "string" ? redactDisplay(value) : "";
 }
+
+/** A name Looper read from git (a branch or tag): control and format characters dropped, cut at ``max`` characters.
+ * It is not credential-scanned: a full ref name is long and slash-separated, not a secret. */
+export function plainName(value: unknown, max = 120): string {
+  if (typeof value !== "string") return "";
+  const clean = value.replace(/[\p{Cc}\p{Cf}]/gu, "");
+  return clean.length > max ? `${clean.slice(0, max - 1)}…` : clean;
+}
