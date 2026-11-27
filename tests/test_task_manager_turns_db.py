@@ -132,11 +132,14 @@ def test_unknown_cost_warns_but_allows_turn(monkeypatch, tmp_path, native):
 def test_fifo_stop_then_next_turn_and_start_exclusion(monkeypatch, tmp_path, native):
     async def check(db):
         task_id, _, _ = await native.create(db)
+        # The stand-in sends its init a moment after it records the input; the delay widens that gap.
+        native.transcript.with_name("readback-override.json").write_text('{"init_delay": 0.3}')
         pool = tm.TaskManagerPool(tmp_path / "runtime", native.executable, max_resident=lambda: 2)
         try:
             first, second = Sink(), Sink()
             assert (await pool.submit(task_id, "wait", message_id="one", sink=first)).state == "started"
             await until(lambda: len(native.records("input")) == 1)
+            await until(lambda: pool.agent(task_id).session_id is not None)
             assert pool.in_turn(task_id)
             bus = type("Bus", (), {"publish": AsyncMock()})()
             with pytest.raises(project_service.RequestError, match="task Manager is working") as error:

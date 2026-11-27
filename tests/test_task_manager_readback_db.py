@@ -294,29 +294,42 @@ def test_a_partial_tool_start_the_init_did_not_list_is_refused_before_anything_i
     run_db(check, monkeypatch, timeout=40)
 
 
-@pytest.mark.parametrize("init_mode", ["skip", "normal"])
-def test_a_stop_before_the_init_does_not_deliver_the_cli_result(monkeypatch, tmp_path, native, alerts, init_mode):
+def test_a_stop_when_the_init_never_comes_does_not_deliver_the_cli_result(monkeypatch, tmp_path, native, alerts):
     async def check(db):
         task_id, _, _ = await native.create(db)
-        # The stand-in sends its init a moment after it records the input, so the stop below would race the init; the
-        # delay makes that gap wide and the wait below closes it.
-        override(native, {"init_mode": init_mode, "init_delay": 0.3})
+        override(native, {"init_mode": "skip", "init_delay": 0.3})
         pool = tm.TaskManagerPool(tmp_path / "runtime", native.executable, max_resident=lambda: 2)
         try:
             sink = Sink()
             assert (await pool.submit(task_id, "wait", message_id="one", sink=sink)).state == "started"
             await until(lambda: len(native.records("input")) == 1)
-            if init_mode == "normal":  # a stop before the init is the refused case pinned by the next test
-                await until(lambda: pool.agent(task_id).session_id is not None)
             result = pool.stop_turn(task_id, "one")
             assert (await result if inspect.isawaitable(result) else result) is True
             await sink.done()
-            if init_mode == "skip":  # the turn never showed an init: the CLI's own result text is not delivered
-                assert sink.finals[-1][1] == "refused" and sink.finals[-1][0] != "stopped"
-                assert not pool.agent(task_id).resident.started and not alerts  # a user stop is not an alarm
-                assert safety.refusal_counts[("launch_setting_mismatch", "turn", VERSION)] == 1
-            else:  # after a passing init the stop keeps its protocol
-                assert sink.finals[-1][1] == "stopped"
+            # the turn never showed an init: the CLI's own result text is not delivered
+            assert sink.finals[-1][1] == "refused" and sink.finals[-1][0] != "stopped"
+            assert not pool.agent(task_id).resident.started and not alerts  # a user stop is not an alarm
+            assert safety.refusal_counts[("launch_setting_mismatch", "turn", VERSION)] == 1
+        finally:
+            await pool.shutdown()
+    run_db(check, monkeypatch, timeout=40)
+
+
+def test_a_stop_after_a_passing_init_keeps_the_stop_protocol(monkeypatch, tmp_path, native, alerts):
+    async def check(db):
+        task_id, _, _ = await native.create(db)
+        # The stand-in sends its init a moment after it records the input; wait for the init before stopping.
+        override(native, {"init_mode": "normal", "init_delay": 0.3})
+        pool = tm.TaskManagerPool(tmp_path / "runtime", native.executable, max_resident=lambda: 2)
+        try:
+            sink = Sink()
+            assert (await pool.submit(task_id, "wait", message_id="one", sink=sink)).state == "started"
+            await until(lambda: len(native.records("input")) == 1)
+            await until(lambda: pool.agent(task_id).session_id is not None)
+            result = pool.stop_turn(task_id, "one")
+            assert (await result if inspect.isawaitable(result) else result) is True
+            await sink.done()
+            assert sink.finals[-1][1] == "stopped"
         finally:
             await pool.shutdown()
     run_db(check, monkeypatch, timeout=40)
