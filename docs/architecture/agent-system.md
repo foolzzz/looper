@@ -1019,6 +1019,23 @@ them.
 - **Verification.** `tests/test_task_manager_sandbox_probe.py` runs the real command against the real
   CLI and a local scripted Messages API (`LOOPER_CLAUDE_PROBE_BIN`), with positive controls; rerun it
   before changing `VERIFIED_CLI_VERSION`.
+- **Ref reports.** In an in-place direct session the model's Bash writes the real `.git`, so a turn
+  can move a branch, delete a tag or switch `HEAD`. `task_manager_refs` records `refs/heads`,
+  `refs/tags` and `HEAD` before every turn in the running turn's memory (the sandbox cannot reach it;
+  `refs/remotes` and anything else are never read, and packed refs, `gc` and reflogs show no change
+  because values are compared, not files), compares them after, and says what changed in the task
+  conversation with one `git update-ref` restore command per ref. It never restores anything and
+  raises no alert: a ref change is not an invariant violation. The `ref_report` event carries
+  `report_id`, `changes`, `info`, `head`, `own_commits` and `needs_you`. A fast-forward of the task
+  branch is the Manager's own commits (`own_commits`) and is not listed; a reset, rewrite or delete of it
+  is listed but not "needs you" by itself. A change to any other branch or tag is stored in
+  `task_manager_ref_reports` with `needs_you` set; a change under `refs/heads/looper/<other task>/`
+  while that task exists and is unfinished is `info` only. The
+  task branch is recorded once, at the first enablement (`task_manager_branches`, with a
+  `sandbox_notice` event that the real checkout is edited directly); a detached `HEAD` then refuses the
+  first turn (`head_detached`), and every later turn refuses while `HEAD` is not on that branch
+  (`head_moved`) until it is checked out again or the operator runs `tasks.task_manager_branch_set`.
+  Every git call goes through `git_safe`; the real-CLI rows are `tests/test_task_manager_refs_probe.py`.
 
 **Project instructions and editing.** A direct session's fixed instructions
 (`task_manager_brief.instructions`) say what its sandbox allows: Bash is its only built-in

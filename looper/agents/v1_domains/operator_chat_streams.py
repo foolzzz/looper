@@ -13,9 +13,14 @@ from ..chat_targets import HTTP_409, ChatTargetError, resolve_chat_target
 from ..ops import ErrorCode, OpError
 from ..tiers.manager import is_new_session_command
 from ..task_manager_settings import ModelSwitchRejection
+from ..task_manager_refs import FIRST_ENABLE_NOTICE, Change
 
 
 _ID = {"type": "string", "minLength": 1}
+_NULL_STR = {"type": ["string", "null"]}
+_REF_CHANGE = _object({"ref": _STR, "change": {"enum": [change.value for change in Change]},
+                       "old": _NULL_STR, "new": _NULL_STR, "restore": _STR},
+                      ["ref", "change", "old", "new", "restore"], closed=True)
 CHAT_TARGET = {"oneOf": [
     _object({"kind": {"const": "manager"}, "id": _STR}, ["kind"], closed=True),
     _object({"kind": {"const": "planner"}, "task_id": _ID}, closed=True),
@@ -45,6 +50,14 @@ SCHEMAS = {
                  "commit": {"type": ["string", "null"]},
                  "mode": {"enum": ["direct", "orchestrated"]},
                  "uncommitted": _array(_STR), "unverified": _array(_STR)}, ["kind", "files", "commit", "mode"], closed=True),
+        _object({"kind": {"const": "ref_report"}, "report_id": {"type": ["integer", "null"]},
+                 "changes": _array(_REF_CHANGE), "info": _array(_REF_CHANGE),
+                 "head": {"oneOf": [{"type": "null"}, _object({"before": _NULL_STR, "after": _NULL_STR},
+                                                              ["before", "after"], closed=True)]},
+                 "own_commits": {"type": "integer", "minimum": 0}, "needs_you": {"type": "boolean"}},
+                ["kind", "report_id", "changes", "info", "head", "own_commits", "needs_you"], closed=True),
+        _object({"kind": {"const": "sandbox_notice"}, "notice": {"enum": [FIRST_ENABLE_NOTICE]}, "detail": _STR},
+                ["kind", "notice", "detail"], closed=True),
         _object({"kind": {"const": "refused"}, "reason": {"const": "orchestrated"}, "status": _STR}, closed=True),
         _object({"kind": {"const": "refused"}, "reason": {"enum": [
             "work_mode_off", "runtime_unsupported", "budget", "outbound_review_unavailable", "workspace",

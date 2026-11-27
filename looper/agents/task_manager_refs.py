@@ -1,0 +1,234 @@
+"""Branch and tag changes of a direct session's turn: recorded outside the task directory, reported, never restored.
+
+In an in-place direct session the model's Bash writes the real checkout, ``.git`` included, so a turn can move a
+branch, delete a tag or switch ``HEAD``. Looper cannot prevent that inside the sandbox (RFC 25.5), so it records
+``refs/heads`` and ``refs/tags`` and ``HEAD`` before every turn, in memory (the sandbox cannot reach it), compares them
+after, and says in the task conversation what changed, with one restore command per ref. It never restores anything:
+the operator's checkout is the operator's. A change to a branch or tag other than the task branch also goes to "needs
+you"; it is not an invariant violation and raises no alert (RFC 21, 25.10).
+
+The task branch is recorded once, at the first enablement. A turn refuses to start while ``HEAD`` is not on it.
+Every git call goes through ``git_safe`` (no repository code runs); ``refs/remotes`` is never read.
+"""
+from __future__ import annotations
+
+import asyncio
+import logging
+import shlex
+from collections.abc import Awaitable, Callable, Mapping
+from dataclasses import dataclass
+from enum import Enum
+from pathlib import Path
+from typing import TYPE_CHECKING, Any
+
+from . import git_safe, task_manager_safety
+from ..db import task_manager_refs as store
+
+if TYPE_CHECKING:
+    from .tiers.task_manager import TurnSink
+
+logger = logging.getLogger(__name__)
+
+GIT_TIMEOUT_SEC = 30
+_LOCKLESS = {"GIT_OPTIONAL_LOCKS": "0"}
+HEADS, TAGS, LOOPER = "refs/heads/", "refs/tags/", "refs/heads/looper/"
+FINISHED_STATUSES = frozenset({"completed", "failed", "cancelled", "stopped"})
+FIRST_ENABLE_NOTICE = "first_enable_in_place"
+FIRST_ENABLE_DETAIL = ("The task Manager edits files directly in your real checkout. v1 only reports changes to "
+                       "branches and tags; it never restores them, and deleted objects cannot be recovered. Push or "
+                       "back up important branches first.")
+
+
+class Change(str, Enum):
+    CREATED = "created"
+    DELETED = "deleted"
+    MOVED = "moved"
+    NON_FAST_FORWARD = "non_fast_forward"
+
+
+@dataclass(frozen=True)
+class Snapshot:
+    refs: Mapping[str, str]
+    head: str | None  # the full name of the branch HEAD is on; None when detached
+
+
+@dataclass(frozen=True)
+class RefChange:
+    ref: str
+    change: Change
+    old: str | None
+    new: str | None
+    restore: str
+
+    def to_json(self) -> dict[str, Any]:
+        return {"ref": self.ref, "change": self.change.value, "old": self.old, "new": self.new,
+                "restore": self.restore}
+
+
+@dataclass(frozen=True)
+class Report:
+    changes: tuple[RefChange, ...]
+    info: tuple[RefChange, ...]
+    head_before: str | None
+    head_after: str | None
+    own_commits: int
+    needs_you: bool
+
+    @property
+    def head_changed(self) -> bool:
+        return self.head_before != self.head_after
+
+    @property
+    def worth_saying(self) -> bool:
+        return bool(self.changes or self.info or self.head_changed or self.own_commits)
+
+
+def _restore(ref: str, change: Change, old: str | None, new: str | None) -> str:
+    name = shlex.quote(ref)
+    if change is Change.CREATED:
+        return f"git update-ref -d {name} {new}"
+    if change is Change.DELETED:
+        return f"git update-ref {name} {old}"
+    return f"git update-ref {name} {old} {new}"
+
+
+def _change(ref: str, old: str | None, new: str | None, *, plain_move: bool = False) -> RefChange:
+    kind = (Change.CREATED if old is None else Change.DELETED if new is None
+            else Change.MOVED if plain_move else Change.NON_FAST_FORWARD)
+    return RefChange(ref, kind, old, new, _restore(ref, kind, old, new))
+
+
+def _refused(exc: git_safe.RepositoryRefused):
+    from .tiers.task_manager import RefuseReason, Refused
+
+    return Refused(RefuseReason.WORKSPACE, str(exc))
+
+
+async def _git(work_dir: str | Path, *args: str) -> tuple[int, str]:
+    """``git args`` in ``work_dir`` through ``git_safe``: the exit code and stdout."""
+    try:
+        process = await git_safe.spawn(work_dir, *args, extra_env=_LOCKLESS, stdin=asyncio.subprocess.DEVNULL,
+                                       stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+    except git_safe.RepositoryRefused as exc:
+        raise _refused(exc) from None
+    try:
+        stdout, _ = await asyncio.wait_for(process.communicate(), GIT_TIMEOUT_SEC)
+    except asyncio.TimeoutError:
+        process.kill()
+        await process.wait()
+        raise RuntimeError(f"git {args[0]} timed out reading the task's refs") from None
+    try:
+        await git_safe.recheck_async(process)
+    except git_safe.RepositoryRefused as exc:
+        raise _refused(exc) from None
+    return process.returncode, stdout.decode("utf-8", "surrogateescape")
+
+
+async def snapshot(work_dir: str | Path) -> Snapshot:
+    """The logical value of every branch and tag, and where ``HEAD`` points. Packed refs, ``gc``, reflogs and
+    index changes do not show in these values."""
+    code, listing = await _git(work_dir, "for-each-ref", "--format=%(refname)%00%(objectname)", "refs/heads", "refs/tags")
+    if code:
+        from .tiers.task_manager import RefuseReason, Refused
+
+        raise Refused(RefuseReason.WORKSPACE, f"{work_dir} is not a git repository Looper can read (git exit {code}).")
+    refs = {}
+    for line in listing.splitlines():
+        ref, _, sha = line.partition("\0")
+        if ref and sha:
+            refs[ref] = sha
+    code, head = await _git(work_dir, "symbolic-ref", "-q", "HEAD")
+    return Snapshot(refs, head.strip() if code == 0 and head.strip() else None)
+
+
+def _short(ref: str | None) -> str:
+    return "detached" if ref is None else ref.removeprefix(HEADS)
+
+
+async def begin_turn(task: Mapping[str, Any], work_dir: str | Path, *, sink: TurnSink,
+                     phase: str = "turn") -> tuple[Snapshot, str]:
+    """Record the refs, and settle the task branch: record it at the first enablement, refuse when ``HEAD`` is not on
+    it. Returns the snapshot (kept in memory by the running turn) and the task branch."""
+    from .tiers.task_manager import RefuseReason, Refused, TaskManagerEvent
+
+    task_id = str(task["id"])
+    before = await snapshot(work_dir)
+    recorded = await store.get_branch(task_id)
+    if recorded is None:
+        if before.head is None:
+            task_manager_safety.record_refusal(task_manager_safety.Reason.HEAD_DETACHED, phase)
+            raise Refused(RefuseReason.HEAD_DETACHED,
+                          "任务目录的 HEAD 是分离的（detached）。先检出一个分支再发消息，管家会把这个分支记为任务分支。")
+        branch = before.head.removeprefix(HEADS)
+        if await store.record_first_branch(task_id, branch):
+            await sink.event(TaskManagerEvent.SANDBOX_NOTICE, {"notice": FIRST_ENABLE_NOTICE, "detail": FIRST_ENABLE_DETAIL})
+        recorded = await store.get_branch(task_id) or branch
+    if before.head != HEADS + recorded:
+        task_manager_safety.record_refusal(task_manager_safety.Reason.HEAD_MOVED, phase)
+        raise Refused(RefuseReason.HEAD_MOVED,
+                      f"任务分支记录的是 {recorded}，目录现在在 {_short(before.head)}。"
+                      f"把 {recorded} 重新检出（git checkout {shlex.quote(recorded)}），"
+                      "或者用 tasks.task_manager_branch_set 把当前分支记为任务分支，再发消息。")
+    return before, recorded
+
+
+async def _active_task(task_id: str) -> bool:
+    from ..db import tasks
+
+    row = await tasks.get_task(task_id)
+    return row is not None and row["status"] not in FINISHED_STATUSES
+
+
+async def compare(work_dir: str | Path, before: Snapshot, after: Snapshot, *, task_branch: str, task_id: str,
+                  active_task: Callable[[str], Awaitable[bool]] = _active_task) -> Report:
+    """What changed between two snapshots, with no side effect."""
+    task_ref, own_commits, changes, info, needs_you = HEADS + task_branch, 0, [], [], False
+    for ref in sorted(before.refs.keys() | after.refs.keys()):
+        old, new = before.refs.get(ref), after.refs.get(ref)
+        if old == new:
+            continue
+        if ref == task_ref:
+            fast = False
+            if old is not None and new is not None:
+                code, _ = await _git(work_dir, "merge-base", "--is-ancestor", old, new)
+                fast = code == 0
+            if fast:
+                _, count = await _git(work_dir, "rev-list", "--count", f"{old}..{new}")
+                own_commits = int(count.strip() or 0)
+                continue
+            changes.append(_change(ref, old, new))
+            continue
+        change = _change(ref, old, new, plain_move=True)
+        owner = ref.removeprefix(LOOPER).split("/", 1) if ref.startswith(LOOPER) else None
+        if owner and len(owner) == 2 and owner[0] != task_id and await active_task(owner[0]):
+            info.append(change)
+            continue
+        changes.append(change)
+        needs_you = True
+    return Report(tuple(changes), tuple(info), before.head, after.head, own_commits, needs_you)
+
+
+def payload(report: Report, report_id: int | None) -> dict[str, Any]:
+    return {"report_id": report_id, "changes": [c.to_json() for c in report.changes],
+            "info": [c.to_json() for c in report.info],
+            "head": {"before": report.head_before, "after": report.head_after} if report.head_changed else None,
+            "own_commits": report.own_commits, "needs_you": report.needs_you}
+
+
+async def end_turn(task: Mapping[str, Any], work_dir: str | Path, before: Snapshot, branch: str, *, sink: TurnSink,
+                   message_id: str | None = None) -> Report:
+    """Compare now with ``before`` and say what changed. Nothing is restored and no alert is raised."""
+    from .tiers.task_manager import TaskManagerEvent
+
+    task_id = str(task["id"])
+    report = await compare(work_dir, before, await snapshot(work_dir), task_branch=branch, task_id=task_id)
+    if not report.worth_saying:
+        return report
+    report_id = None
+    if report.changes or report.info:
+        body = payload(report, None)
+        report_id = await store.insert_report(
+            task_id, message_id, {key: body[key] for key in ("changes", "info", "head", "own_commits")},
+            report.needs_you)
+    await sink.event(TaskManagerEvent.REF_REPORT, payload(report, report_id))
+    return report
