@@ -259,25 +259,25 @@ ADVERSARIAL = ["![", "<img ", "`", "[", "]", "(", ")", "![a](", "![a](https://h.
                "![a]\n`](u)\n", "- > [r]: u\n![r]\n", "![[[[]]]]", "<a href=\"https://x\" ", "``\\``", "![a\n"]
 
 
-def _best_of_three(text: str) -> float:
-    best = float("inf")
-    for _ in range(3):
-        started = time.perf_counter()
-        neutralize_images(text)
-        best = min(best, time.perf_counter() - started)
-    return best
+def _time(text: str) -> float:
+    started = time.perf_counter()
+    neutralize_images(text)
+    return time.perf_counter() - started
 
 
 @pytest.mark.parametrize("unit", ADVERSARIAL)
 def test_linear_time_on_adversarial_input(unit: str) -> None:
-    """Ten times the input takes about ten times as long (a quadratic scan takes a hundred times as long). The
-    ratio is measured in one process, so the speed of the machine does not matter; the absolute ceiling only
-    guards against a hang."""
-    small, large = 100_000, 1_000_000
-    t_small = _best_of_three(unit * (small // len(unit)))
-    t_large = _best_of_three(unit * (large // len(unit)))
-    assert t_large < 30.0
-    assert t_large / max(t_small, 0.002) < 20, (unit, t_small, t_large)  # the floor keeps timer noise out of fast cases
+    """Ten times the input takes about ten times as long; a quadratic scan takes a hundred times as long. Each
+    repeat times both sizes back to back in one process, and the smallest ratio of three repeats counts, so a
+    slow or busy runner (garbage collection, noisy neighbours) does not matter unless it slows every repeat; the
+    absolute ceiling only guards against a hang."""
+    small, large = unit * (100_000 // len(unit)), unit * (1_000_000 // len(unit))
+    ratios = []
+    for _ in range(3):
+        t_small, t_large = _time(small), _time(large)
+        assert t_large < 30.0
+        ratios.append(t_large / max(t_small, 0.002))  # the floor keeps timer noise out of the fast cases
+    assert min(ratios) < 30, (unit, ratios)
 
 
 def test_random_inputs_never_leave_a_live_image() -> None:

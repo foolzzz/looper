@@ -246,13 +246,13 @@ def neutralize_images(markdown: str) -> str:
         # literal. The images of a trusted run are scanned across its lines, since an image may span lines.
         if not paragraph:
             return
-        found = [_spans(line) for line in paragraph]
         text = "".join(paragraph)
-        if all(clean for _, clean in found) and not any(_starts_html_block(line) for line in paragraph):
+        # The pairing check keeps nothing per line: a huge paragraph must not leave a tracked object per line alive.
+        if all(_spans(line)[1] for line in paragraph) and not any(_starts_html_block(line) for line in paragraph):
             spans: list[tuple[int, int]] = []
             offset = 0
-            for line, (line_spans, _) in zip(paragraph, found):
-                spans.extend((offset + start, offset + end) for start, end in line_spans)
+            for line in paragraph:
+                spans.extend((offset + start, offset + end) for start, end in _spans(line)[0])
                 offset += len(line)
             out.append(_prose(text, definitions, spans))
         else:
