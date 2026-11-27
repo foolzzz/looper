@@ -1029,8 +1029,9 @@ them.
   `report_id`, `changes`, `info`, `head`, `own_commits` and `needs_you`. A fast-forward of the task
   branch is the Manager's own commits (`own_commits`) and is not listed; a reset, rewrite or delete of it
   is listed but not "needs you" by itself. A change to any other branch or tag is stored in
-  `task_manager_ref_reports` with `needs_you` set; a change under `refs/heads/looper/<other task>/`
-  while that task exists and is unfinished is `info` only. The
+  `task_manager_ref_reports` and listed in the needs-you section `task_manager_refs` until the
+  operator resolves it (`tasks.task_manager_ref_report_resolve`, which changes nothing in git); a change
+  under `refs/heads/looper/<other task>/` while that task exists and is unfinished is `info` only. The
   task branch is recorded once, at the first enablement (`task_manager_branches`, with a
   `sandbox_notice` event that the real checkout is edited directly); a detached `HEAD` then refuses the
   first turn (`head_detached`), and every later turn refuses while `HEAD` is not on that branch
