@@ -195,6 +195,7 @@ def _json_response(status: str, body: Any, *, headers: Mapping[str, str] | None 
     head = (
         f"HTTP/1.1 {status}\r\n"
         f"Content-Type: application/json; charset=utf-8\r\n"
+        f"X-Content-Type-Options: nosniff\r\n"
         f"Content-Length: {len(payload)}\r\n"
         + _header_block(headers)
         + "\r\n"
@@ -789,7 +790,7 @@ class AgentHTTPServer:
                 try:
                     first = await anext(chunks)  # pre-header failures still get a typed JSON refusal
                     writer.write((f"HTTP/1.1 {HTTP_200}\r\nContent-Type: application/json; charset=utf-8\r\n"
-                                  "Cache-Control: no-store\r\nConnection: close\r\n\r\n"
+                                  "X-Content-Type-Options: nosniff\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n"
                                   '{"status":"ok","result":{"document":').encode() + first.encode("utf-8"))
                     json_started = True
                     await writer.drain()
@@ -1136,7 +1137,7 @@ class AgentHTTPServer:
         try:
             writer.write((
                 "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-store\r\n"
-                "X-Accel-Buffering: no\r\nConnection: close\r\n\r\n").encode("utf-8"))
+                "X-Content-Type-Options: nosniff\r\nX-Accel-Buffering: no\r\nConnection: close\r\n\r\n").encode("utf-8"))
             writer.write(frame("accepted", {
                 "conversation_id": conversation_id, "message_id": message_id, "manager_id": target.agent_id}))
             await writer.drain()

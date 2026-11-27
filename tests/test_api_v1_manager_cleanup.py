@@ -163,8 +163,9 @@ def test_operator_preview_is_read_only_and_purge_executes_once_with_tombstone_re
             assert preview["counts"] == COUNTS and preview["blockers"] == []
             assert await pool.fetchval("SELECT count(*) FROM chat_messages WHERE session_id=$1", THREAD) == 1
             assert await pool.fetchval("SELECT count(*) FROM manager_actions") == before + 1
-            audit = await pool.fetchrow("SELECT manager_id, risk, status, arguments, result FROM manager_actions "
-                                        "WHERE tool='manager_cleanup.preview'")
+            audit = await pool.fetchrow("SELECT manager_id, risk, status, arguments, result, sender_kind FROM "
+                                        "manager_actions WHERE tool='manager_cleanup.preview'")
+            assert audit["sender_kind"] == "operator"
             assert audit["manager_id"] == "manager" and audit["risk"] == "read" and audit["status"] == "ok"
             assert json.loads(audit["arguments"]) == {"manager_id": TARGET, "retention_days": 30}
             assert audit["result"] is None

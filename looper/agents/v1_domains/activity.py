@@ -100,7 +100,7 @@ async def stream(server, operation, arguments, principal, headers, writer):
         rows = await activity.list_activity(task_id, since_seq=cursor, limit=500)
         terminal = (await _task(task_id))["status"] in {"completed", "failed", "stopped", "cancelled"}
         writer.write(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-store\r\n"
-                     b"Connection: close\r\nX-Accel-Buffering: no\r\n\r\n")
+                     b"X-Content-Type-Options: nosniff\r\nConnection: close\r\nX-Accel-Buffering: no\r\n\r\n")
         started = True
         while True:
             while rows:
