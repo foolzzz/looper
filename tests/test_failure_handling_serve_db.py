@@ -120,6 +120,20 @@ def until(check, what, timeout=30):
         time.sleep(.1)
 
 
+_POLLS = ('op=tasks.detail ', 'op=tasks.holds ')
+_SUSPECTS = ('task router error', 'step_failure', 'TASK_STOP', 'task_stop', 'Traceback')
+
+
+def failure_log(text, limit=12000):
+    """What a failed run prints of the serve log: the polling lines a wait produces are dropped (they fill the whole
+    tail), and the lines that name a router or failure-store problem are kept even when they come before it."""
+    lines = [line for line in text.splitlines() if not any(poll in line for poll in _POLLS)]
+    suspects = '\n'.join(line for line in lines if any(word in line for word in _SUSPECTS))[-limit // 3:]
+    rest = '\n'.join(lines)[-(limit - len(suspects)):]
+    return (f'--- lines naming the router or the failure store ---\n{suspects}\n--- end of the log ---\n{rest}'
+            if suspects else rest)
+
+
 @contextmanager
 def serve(root, url):
     from evals.prompt_regression.runner import Api, free_port
@@ -183,7 +197,7 @@ def serve(root, url):
                 assert b'<html' in homepage.read().lower()
         yield api, runtime, state, env
     except BaseException:
-        print((root / 'serve.log').read_text(errors='replace')[-12000:])
+        print(failure_log((root / 'serve.log').read_text(errors='replace')))
         raise
     finally:
         if process.poll() is None:
