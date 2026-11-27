@@ -231,11 +231,11 @@ def _parents(body: bytes) -> list[str] | None:
 
 
 async def _reaches(work_dir: str | Path, new: str, old: str) -> bool:
-    """Whether ``old`` is an ancestor of ``new``, from the raw commit objects (``cat-file --batch`` does not honour
-    ``info/grafts``, and ``git_safe`` turns replace refs off for every command), breadth first so a merge finds
-    ``old`` among its first parents. False also when the walk could not decide (a limit, an object that is not a
-    well-formed commit)."""
-    process = await git_safe.spawn(work_dir, "cat-file", "--batch", extra_env=_LOCKLESS, stdin=asyncio.subprocess.PIPE,
+    """Whether ``old`` is an ancestor of ``new``, from the raw commit objects (``cat-file --batch`` honours neither
+    ``info/grafts`` nor replace refs), breadth first so a merge finds ``old`` among its first parents. False also
+    when the walk could not decide (a limit, an object that is not a well-formed commit)."""
+    process = await git_safe.spawn(work_dir, "-c", "core.useReplaceRefs=false", "cat-file", "--batch",
+                                   extra_env=_LOCKLESS, stdin=asyncio.subprocess.PIPE,
                                    stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL)
     found = False
 
@@ -286,7 +286,7 @@ async def fast_forward(work_dir: str | Path, old: str, new: str) -> int | None:
     try:
         if not await _reaches(work_dir, new, old):
             return None
-        code, count = await _git(work_dir, "rev-list", "--count", f"{old}..{new}")
+        code, count = await _git(work_dir, "-c", "core.useReplaceRefs=false", "rev-list", "--count", f"{old}..{new}")
         return int(count.strip()) if code == 0 and count.strip().isdigit() else 0
     except Exception:
         logger.warning("task Manager refs: could not decide fast-forward", exc_info=True)
