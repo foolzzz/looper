@@ -227,9 +227,27 @@ def _prose(text: str, definitions: frozenset[str], spans: list[tuple[int, int]])
     return "".join(out)
 
 
+MAX_SCANNED_CHARS = 64 * 1024
+_ANY_TAG_OPENER = re.compile(r"<(?=[A-Za-z]|/[A-Za-z]|[!?])")
+
+
+def _neutralize_everything(markdown: str) -> str:
+    """The cheap form for text above ``MAX_SCANNED_CHARS``: no parsing, so no code, key, link or Lark tag is kept."""
+    return _ANY_TAG_OPENER.sub("&#60;", markdown.replace("![", _NEUTRAL))
+
+
 def neutralize_images(markdown: str) -> str:
+    """Neutralize the images and resource-loading tags of agent Markdown (see the module docstring).
+
+    The scan runs synchronously on the event loop. It costs about 0.5 us per character in the worst case, so up to
+    ``MAX_SCANNED_CHARS`` (64 Ki characters, far above a chat reply: Telegram caps a message at 4096, Lark's card and
+    post bodies are far smaller than this) it stays under about 30 ms. A longer text takes the single-pass
+    ``_neutralize_everything`` instead, whose cost is a C-level replace and substitution.
+    """
     if "![" not in markdown and "<" not in markdown:
         return markdown
+    if len(markdown) > MAX_SCANNED_CHARS:
+        return _neutralize_everything(markdown)
     lines = markdown.splitlines(keepends=True)
     definitions = frozenset(_normalize(m[1]) for m in map(_DEFINITION.match, lines) if m)
     out: list[str] = []
@@ -246,13 +264,13 @@ def neutralize_images(markdown: str) -> str:
         # literal. The images of a trusted run are scanned across its lines, since an image may span lines.
         if not paragraph:
             return
-        found = [_spans(line) for line in paragraph]
         text = "".join(paragraph)
-        if all(clean for _, clean in found) and not any(_starts_html_block(line) for line in paragraph):
+        # The pairing check keeps nothing per line: a huge paragraph must not leave a tracked object per line alive.
+        if all(_spans(line)[1] for line in paragraph) and not any(_starts_html_block(line) for line in paragraph):
             spans: list[tuple[int, int]] = []
             offset = 0
-            for line, (line_spans, _) in zip(paragraph, found):
-                spans.extend((offset + start, offset + end) for start, end in line_spans)
+            for line in paragraph:
+                spans.extend((offset + start, offset + end) for start, end in _spans(line)[0])
                 offset += len(line)
             out.append(_prose(text, definitions, spans))
         else:
