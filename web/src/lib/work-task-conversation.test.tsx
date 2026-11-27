@@ -221,6 +221,12 @@ describe("task conversation", () => {
       { kind: "refused", reason: "orchestrated", status: "running" },
       ...["work_mode_off", "runtime_unsupported", "budget", "outbound_review_unavailable", "workspace", "shutting_down", "review_hook_disabled", "cli_unverified", "manager_answers_off", "mcp_unresolved", "sandbox_unavailable", "readback_unavailable", "launch_setting_mismatch", "mcp_set_mismatch", "mcp_launcher_unsafe", "network_policy_invalid", "workspace_not_repo_root", "workspace_is_home", "workspace_contains_trusted_config", "workspace_in_system_dir", "workspace_overlaps_session", "worktree_unsupported", "head_moved", "head_detached"].map((reason) => ({ kind: "refused", reason })),
       { kind: "queued", reason: "cap", position: 1, active: 6, type: "queued" },
+      { kind: "sandbox_denial", tool_use_id: "tu-a", category: "network", case: "not_allowed", target: "blocked.example:443", client: null, command_name: "curl" },
+      { kind: "sandbox_denial", tool_use_id: "tu-b", category: "network", case: "unsupported_client", target: "api.example:443", client: "go_tls", command_name: "gh" },
+      { kind: "sandbox_denial", tool_use_id: "tu-c", category: "network", case: "unsupported_client", target: null, client: "node_no_proxy", command_name: "node" },
+      { kind: "sandbox_denial", tool_use_id: "tu-d", category: "other", case: "unknown", target: null, client: null, command_name: "ls" },
+      { kind: "sandbox_denial", tool_use_id: "tu-e", category: "write", case: "not_allowed", target: "/var/data/x", client: null, command_name: "touch" },
+      { kind: "sandbox_denial", tool_use_id: "tu-f", category: "network", case: "unknown", target: "blocked.example:443", client: null, command_name: "x" },
     ];
     const messages = [
       row("asst", "assistant", "模型已切换：a → b", "2026-11-25T00:00:00Z"),
@@ -255,6 +261,16 @@ describe("task conversation", () => {
     for (const reason of ["sandbox_unavailable", "readback_unavailable", "launch_setting_mismatch", "mcp_set_mismatch", "mcp_launcher_unsafe", "network_policy_invalid", "workspace_not_repo_root", "workspace_is_home", "workspace_contains_trusted_config", "workspace_in_system_dir", "workspace_overlaps_session", "worktree_unsupported", "head_moved", "head_detached"]) {
       expect(text).toContain(`已拒绝（${reason}）`);
     }
+    expect(text).toContain("命令 curl 访问 `blocked.example:443` 被拒绝；该域名不在本项目的白名单里，操作者可在项目的任务管家沙箱设置里放行");
+    expect(text).toContain("`api.example:443` 在白名单里，但 gh 这类命令在 v1 的管家会话里不受支持，放行域名不会让它可用");
+    expect(text).toContain("node 这类命令在 v1 的管家会话里不受支持");
+    expect(text).toContain("命令 touch 写 `/var/data/x` 被拒绝：管家会话只能写任务目录");
+    expect(text).toContain("被沙箱拒绝（other）");
+    // An unknown denial names no host and does not suggest that allowing one helps.
+    const unknown = [...container.querySelectorAll('[data-feed-key^="task-event:"]')].find((row) => row.textContent?.includes("被沙箱拒绝（network）"));
+    expect(unknown).toBeDefined();
+    expect(unknown?.textContent).not.toContain("blocked.example");
+    expect(unknown?.textContent).not.toContain("放行");
     expect(text).toContain("无法读取这条事件");
     expect(text).not.toContain("模型已切换：hidden");
     expect(container.querySelector('[data-role="assistant"]')?.textContent).toContain("已停止");

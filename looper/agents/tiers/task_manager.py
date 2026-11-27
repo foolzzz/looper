@@ -16,7 +16,7 @@ from typing import Any, Literal, Protocol
 
 from ...db import activity, agent_sessions, projects, tasks
 from .. import operator_mcp, outbound_hook, step_workspaces, task_budget, task_conversations_settings
-from .. import task_manager_safety, task_manager_settings, task_workspaces
+from .. import task_manager_denials, task_manager_network, task_manager_safety, task_manager_settings, task_workspaces
 from ..agent_settings import Access, Launch
 from ..claude_cli import ClaudeRunRecorder, ResidentClaude
 from ..library import EMPTY_LIBRARY
@@ -39,6 +39,7 @@ class TaskManagerEvent(str, Enum):
     STOPPED = "stopped"
     MODEL_SWITCHED = "model_switched"
     MODEL_SWITCH_REJECTED = "model_switch_rejected"
+    SANDBOX_DENIAL = "sandbox_denial"
 
 
 @dataclass(frozen=True)
@@ -310,6 +311,16 @@ class TaskManagerAgent:
         direct = (tasks.interaction_mode(task["status"]) is tasks.InteractionMode.DIRECT
                   and reopened.mode is task_workspaces.ReopenMode.WRITE)
         self.mode = "direct" if direct else "orchestrated"
+        self.project_id, self.allowed_domains = project["id"], ()
+        if direct:
+            try:
+                self.allowed_domains = await task_manager_network.allowed_domains(project["id"])
+            except task_manager_network.PolicyInvalid as exc:
+                task_manager_safety.record_refusal(task_manager_safety.Reason.NETWORK_POLICY_INVALID,
+                                                   "resume" if self.session_id else "launch")
+                raise Refused(RefuseReason.NETWORK_POLICY_INVALID,
+                              f"The project's task Manager network allowlist has an entry this version refuses "
+                              f"({exc}). Fix it with projects.task_manager_sandbox_update.") from exc
         async def configure() -> Launch:
             library, hook = EMPTY_LIBRARY, None
             if self.pool.ops is not None:
@@ -426,6 +437,9 @@ class TaskManagerAgent:
                 initialized = False
                 pieces: list[str] = []
                 tools: dict[str, ToolRecord] = {}
+                inputs: dict[str, Any] = {}
+                observer = task_manager_denials.Observer(self.task_id, self.project_id, request.message_id,
+                                                         self.allowed_domains, request.sink)
 
                 async def on_event(event: dict[str, Any]) -> None:
                     nonlocal initialized
@@ -455,12 +469,16 @@ class TaskManagerAgent:
                             record = ToolRecord(str(block.get("id") or ""), name,
                                 (name + " " + json.dumps(block.get("input"), ensure_ascii=False))[:200], "", False)
                             tools[record.tool_use_id] = record
+                            inputs[record.tool_use_id] = block.get("input")
                             await request.sink.tool(record)
                         elif block.get("type") == "tool_result" and block.get("tool_use_id") in tools:
                             record = replace(tools[block["tool_use_id"]],
                                 result=json.dumps(block.get("content"), ensure_ascii=False)[:200],
                                 is_error=bool(block.get("is_error")))
                             await request.sink.tool(record)
+                            if self.mode == "direct" and record.name == "Bash":
+                                await observer.observe(record.tool_use_id, inputs.get(record.tool_use_id),
+                                                       block.get("content"), record.is_error)
 
                 message = request.text
                 if (attempt or rotating) and request.history:

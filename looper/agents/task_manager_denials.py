@@ -1,21 +1,44 @@
 """Code-generated explanations for task Manager sandbox denials.
 
-The sandbox's own denial output is parsed elsewhere into Violations; this module turns violations into typed
-denial classifications and redacted records. It never invents a host: when neither the allowlist nor a known
-client signature explains a denial, the result stays UNKNOWN with no target (RFC task-sessions-v0
+``parse`` reads the sandbox's ``<sandbox_violations>`` block from a Bash tool result into Violations, ``classify``
+turns them into typed denials, and ``Observer`` records them. It never invents a host: when neither the allowlist
+nor a known client signature explains a denial, the result stays UNKNOWN with no target (RFC task-sessions-v0
 sections 25.4 and 25.9 open question 2).
+
+The block format, captured from Claude Code 2.1.332 with the real ``operator_resident_command`` (the probes D1 and
+D3 of ``tests/test_task_manager_network_probe.py``): the CLI appends, after the command's own output, one block that
+ends the result::
+
+    <sandbox_violations>
+    deny network-outbound blocked.example:443 (host is not on the allow list)
+    </sandbox_violations>
+
+``deny network-outbound <host>:<port> (<reason>)`` is the one line shape seen, for a plain HTTP request (the host
+with port 80, the command's output is "Connection blocked by network allowlist"), for an HTTPS CONNECT (port 443,
+curl says "CONNECT tunnel failed, response 403") and for a port in the URL. A denied file write in the same runs
+carried no block at all ("Operation not permitted" only), so the observed CLI reports no write path and the WRITE
+category is only reachable through a future format. Any other line in the block is OTHER with no target; its class
+is the line's first two words when it starts with ``deny`` (the sandbox's own shape), else ``unrecognized``. A
+program can print a block of its own as the last thing it writes; its host would then be named in the explanation,
+which is why a host must look like a host and the text is written from typed fields.
 """
 from __future__ import annotations
 
 import hashlib
+import logging
 import os
 import re
 import shlex
-from collections.abc import Sequence
+from collections import Counter
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from enum import StrEnum
+from typing import Any
 
+from ..db import activity
 from .task_manager_network import matches
+
+logger = logging.getLogger(__name__)
 
 
 class Category(StrEnum):
@@ -149,3 +172,79 @@ class TurnThrottle:
             return False
         self._seen.add(key)
         return True
+
+
+# One count per denial; the host is never a dimension (RFC 25.10). Exposed as ``task_manager_sandbox_denials_total``.
+denials_total: Counter[tuple[str, str]] = Counter()
+
+_OPEN, _CLOSE = "<sandbox_violations>", "</sandbox_violations>"
+_MAX_LINES = 50
+_HOST = r"(?:[A-Za-z0-9](?:[A-Za-z0-9._-]{0,251}[A-Za-z0-9])?|\[[0-9A-Fa-f:.]{2,45}\])"
+_NETWORK_LINE = re.compile(rf"deny network-outbound (?P<target>{_HOST}:(?P<port>[0-9]{{1,5}})) \([^()\n]*\)")
+_CLASS = re.compile(r"deny(?:\([0-9]+\))? [a-z][a-z0-9*-]*")
+
+
+def _text(content: Any) -> str:
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        return "\n".join(block["text"] for block in content
+                         if isinstance(block, Mapping) and block.get("type") == "text" and isinstance(block.get("text"), str))
+    return ""
+
+
+def parse(result_content: Any) -> list[Violation]:
+    """The violations of a Bash tool result: only the block that ends the result, one per line."""
+    text = _text(result_content).rstrip()
+    if not text.endswith(_CLOSE) or (start := text.rfind(_OPEN)) < 0:
+        return []
+    found: list[Violation] = []
+    for line in text[start + len(_OPEN):-len(_CLOSE)].splitlines()[:_MAX_LINES]:
+        line = line.strip()
+        if not line:
+            continue
+        if (match := _NETWORK_LINE.fullmatch(line)) and int(match["port"]) <= 65535:
+            found.append(Violation(Category.NETWORK, match["target"], "network-outbound"))
+        else:
+            head = _CLASS.match(line)
+            found.append(Violation(Category.OTHER, None, head[0] if head else "unrecognized"))
+    return found
+
+
+class Observer:
+    """One per turn: records the sandbox denials of the turn's Bash results (``observe``)."""
+
+    def __init__(self, task_id: str, project: str, message_id: str, allowed: Sequence[str], sink: Any) -> None:
+        self.task_id, self.project, self.message_id = task_id, project, message_id
+        self.allowed, self.sink = tuple(allowed), sink
+        self.throttle = TurnThrottle()
+
+    async def observe(self, tool_use_id: str, tool_input: Any, result_content: Any, is_error: bool) -> list[Denial]:
+        """Parse and classify one result. Each denial gets an activity row and a count; the first of each
+        (category, target) also an event for the conversation. A recording failure never fails the turn."""
+        output = _text(result_content)
+        command = str(tool_input.get("command") or "") if isinstance(tool_input, Mapping) else ""
+        found = classify(parse(result_content), command=command, output=output, allowed=self.allowed)
+        if not found:
+            return []
+        from .tiers.task_manager import TaskManagerEvent
+
+        for denial in found:
+            denials_total[(denial.category.value, self.project)] += 1
+            try:
+                await activity.insert_activity(
+                    task_id=self.task_id, kind="sandbox_denial",
+                    summary=record_summary(denial, tool_use_id=tool_use_id, command=command),
+                    metadata={"message_id": self.message_id, "tool_use_id": tool_use_id})
+            except Exception:
+                logger.warning("task %s: could not store a sandbox denial record", self.task_id, exc_info=True)
+            if not self.throttle.first(denial):
+                continue
+            try:
+                await self.sink.event(TaskManagerEvent.SANDBOX_DENIAL, {
+                    "tool_use_id": tool_use_id, "category": denial.category.value, "case": denial.case.value,
+                    "target": denial.target, "client": denial.client.value if denial.client else None,
+                    "command_name": denial.command_name})
+            except Exception:
+                logger.warning("task %s: could not send a sandbox denial event", self.task_id, exc_info=True)
+        return found
