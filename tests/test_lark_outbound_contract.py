@@ -119,24 +119,53 @@ def _functions(tree: ast.AST):
             yield node
 
 
-def _is_message_path(node: ast.AST) -> bool:
+REQUEST_HELPERS = {"call", "_request", "request", "_call"}
+
+
+def _texts(node: ast.AST, env: dict[str, list[str]]) -> list[str]:
+    """The strings ``node`` can evaluate to: literals, f-strings (``{}`` for a hole), ``+``, and names assigned
+    in the same function. Empty when it is not statically known."""
     if isinstance(node, ast.Constant) and isinstance(node.value, str):
-        return node.value.startswith("/open-apis/im/v1/messages")
-    if isinstance(node, ast.JoinedStr) and node.values:
-        first = node.values[0]
-        return isinstance(first, ast.Constant) and str(first.value).startswith("/open-apis/im/v1/messages")
-    return False
+        return [node.value]
+    if isinstance(node, ast.JoinedStr):
+        parts = [part.value if isinstance(part, ast.Constant) else "{}" for part in node.values]
+        return ["".join(str(part) for part in parts)]
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
+        return [left + right for left in _texts(node.left, env) for right in _texts(node.right, env)]
+    if isinstance(node, ast.Name):
+        return env.get(node.id, [])
+    return []
+
+
+def _local_strings(function: ast.AST) -> dict[str, list[str]]:
+    env: dict[str, list[str]] = {}
+    for node in ast.walk(function):
+        if isinstance(node, ast.Assign):
+            targets, value = node.targets, node.value
+        elif isinstance(node, ast.AnnAssign) and node.value is not None:
+            targets, value = [node.target], node.value
+        else:
+            continue
+        for target in targets:
+            if isinstance(target, ast.Name):
+                env.setdefault(target.id, []).extend(_texts(value, env))
+    return env
 
 
 def message_write_calls(source: str) -> list[tuple[str, int]]:
-    """(function, line) of every ``x.call("POST"|"PUT"|"PATCH", "/open-apis/im/v1/messages...")``."""
+    """(function, line) of every ``x.call|_request(<POST|PUT|PATCH>, "/open-apis/im/v1/messages...")``, with
+    the method and the path given directly or through a local variable."""
     found = []
     for function in _functions(ast.parse(source)):
+        env = _local_strings(function)
         for node in ast.walk(function):
             if not (isinstance(node, ast.Call) and len(node.args) >= 2):
                 continue
-            method, path = node.args[0], node.args[1]
-            if (isinstance(method, ast.Constant) and method.value in LARK_WRITE_METHODS and _is_message_path(path)):
+            if getattr(node.func, "id", getattr(node.func, "attr", "")) not in REQUEST_HELPERS:
+                continue
+            methods, paths = _texts(node.args[0], env), _texts(node.args[1], env)
+            if (any(m in LARK_WRITE_METHODS for m in methods)
+                    and any(p.startswith("/open-apis/im/v1/messages") for p in paths)):
                 found.append((function.name, node.lineno))
     return found
 
@@ -177,6 +206,23 @@ def test_the_scans_find_what_they_look_for() -> None:
     assert message_write_calls(write) == [("go", 2)]
     assert not message_write_calls('async def go(self):\n    await self.call("GET", "/open-apis/im/v1/messages")')
     assert not message_write_calls('async def go(self):\n    await self.call("POST", "/open-apis/contact/v3/x")')
+    assert not message_write_calls('async def go(self):\n    path = "/open-apis/im/v1/messages"\n    await self.call("GET", path)')
+
+
+def test_the_write_scan_sees_a_path_in_a_variable() -> None:
+    literal = 'async def go(self):\n    path = "/open-apis/im/v1/messages"\n    await self.call("POST", path, body=b)'
+    fstring = 'async def go(self, i):\n    path = f"/open-apis/im/v1/messages/{i}"\n    await self.call("PUT", path)'
+    method = 'async def go(self):\n    verb = "PATCH"\n    await self.call(verb, "/open-apis/im/v1/messages/x")'
+    assert message_write_calls(literal) == [("go", 3)]
+    assert message_write_calls(fstring) == [("go", 3)]
+    assert message_write_calls(method) == [("go", 3)]
+
+
+def test_the_write_scan_sees_a_direct_request_call() -> None:
+    direct = 'async def go(self):\n    await self._request("POST", "/open-apis/im/v1/messages", body=b)'
+    via_name = 'async def go(self):\n    p = "/open-apis/im/v1/messages"\n    await self._request("POST", p)'
+    assert message_write_calls(direct) == [("go", 2)]
+    assert message_write_calls(via_name) == [("go", 3)]
     assert markdown_builders('def f(t):\n    return {"tag": "md", "text": t}') == [("f", False)]
     assert markdown_builders('def f(t):\n    return {"tag": "md", "text": neutralize_images(t)}') == [("f", True)]
     assert markdown_builders('def f(t):\n    return ("--markdown", t)') == [("f", False)]
@@ -236,7 +282,19 @@ def test_a_malformed_mention_is_dropped_with_a_warning(mention: str, caplog: pyt
     assert card.mention is None
     assert lark_card(card)["body"]["elements"][0]["content"] == "done"
     assert [r.levelname for r in caplog.records] == ["WARNING"]
-    assert mention not in caplog.text or not mention  # the value itself is not logged
+    # the value itself is not logged: no record argument is it or contains it
+    for record in caplog.records:
+        args = record.args if isinstance(record.args, tuple) else tuple((record.args or {}).values())
+        assert all(mention not in str(arg) or not mention for arg in args), record.args
+        assert all(arg != mention for arg in args)
+
+
+def test_a_long_malformed_mention_is_not_in_the_log_text(caplog: pytest.LogCaptureFixture) -> None:
+    mention = "ou_a b-unique-7f3c9e1d5a2b4c68"
+    with caplog.at_level("WARNING", logger="looper.agents.card_actions"):
+        Card(text="done", mention=mention)
+    assert caplog.records
+    assert "7f3c9e1d5a2b4c68" not in caplog.text
 
 
 def test_a_card_restored_from_storage_is_validated_too(caplog: pytest.LogCaptureFixture) -> None:
