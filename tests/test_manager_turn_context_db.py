@@ -124,7 +124,8 @@ def test_off_matches_main_prompt_tools_command_and_process_signature(monkeypatch
         try:
             await rig.manager._handle(message())
             prepared, = seen
-            assert prepared.turn.speaker is None
+            # The speaker is classified for authorization even though nothing is rendered.
+            assert prepared.turn.speaker is SpeakerKind.ALLOWED
             assert "[Turn context]" not in prepared.turn_text
             assert "Channel: a Lark group chat, from Alice" in prepared.turn_text
             tools = await rig.manager.ops.current_listing(prepared.turn)
@@ -182,7 +183,10 @@ def test_user_turn_has_current_clock_identity_and_contract(monkeypatch, tmp_path
     (True, "ou_syntheticMember", True, "forbidden", True),
     (True, OPEN_ID, True, "needs_confirmation", True),
     (True, OPEN_ID, False, "forbidden", False),
-    (False, OTHER, True, "needs_confirmation", True),
+    (False, OTHER, True, "forbidden", True),
+    (False, "ou_syntheticMember", True, "forbidden", True),
+    (False, OPEN_ID, True, "needs_confirmation", True),
+    (False, OPEN_ID, False, "forbidden", False),
 ])
 def test_manager_speaker_enforces_escalation(monkeypatch, tmp_path, enabled, sender, operator, expected, group):
     async def check(pool):
@@ -350,3 +354,160 @@ def test_unreadable_bot_identity_still_answers_but_cannot_authorize(monkeypatch,
             await rig.close()
 
     run_db(check, monkeypatch, timeout=40)
+
+
+def _routed_lark(sender, *, chat="oc_synthetic_context"):
+    from tests.test_manager_session_routing_db import LARK, _lark
+    return _lark("please do it", chat, sender, group=True), LARK
+
+
+@pytest.mark.parametrize("enabled", [False, True], ids=["switch_off", "switch_on"])
+def test_group_authorization_follows_the_sender_whatever_the_switch(monkeypatch, tmp_path, enabled):
+    """Asking for a high-risk call and confirming one are the operator's, with the turn-context switch off or on."""
+
+    async def check(pool):
+        await seed(pool, enabled=enabled)
+        ran, answers = [], []
+
+        async def run(call):
+            ran.append(call.turn.sender)
+            return {"done": True}
+
+        async def escalate(call):
+            return "Delete the synthetic item?"
+
+        tool = Tool("t_delete", "delete", {"type": "object", "properties": {}}, Risk.WRITE, run, escalate=escalate)
+        rig = rig_with_ops(tmp_path, tools=(tool,))
+        ops = rig.manager.ops
+        await rig.start()
+        resident = rig.main
+        script = []
+
+        async def calls(on_event):
+            name, arguments = script.pop(0)
+            if arguments == "confirm":
+                arguments = {"confirmation_id": answers[0]["confirmation_id"]}
+            answers.append(await ops.call(name, arguments))
+
+        resident.on_turn = calls
+        try:
+            async def say(sender, name, arguments):
+                script.append((name, arguments))
+                envelope, _ = _routed_lark(sender)
+                await rig.bus.publish(envelope)
+                await rig.reply(envelope)
+                assert resident.turns, "the message did not reach the expected session"
+
+            # A sender who is not the operator cannot ask for a high-risk call.
+            await say(OTHER, "t_delete", {})
+            assert answers[-1]["error"]["code"] == "forbidden" and not ops._pending
+            await say("ou_syntheticMember", "t_delete", {})
+            assert answers[-1]["error"]["code"] == "forbidden" and not ops._pending
+            # The operator asks; another allowed sender's next message cannot confirm it.
+            await say(OPEN_ID, "t_delete", {})
+            first = len(answers)
+            assert answers[-1].get("status") == "needs_confirmation", answers[-1]
+            answers.insert(0, answers.pop())  # the confirmation id the confirm step reads
+            await say(OTHER, "looper_confirm", "confirm")
+            refused = next(a for a in answers[1:] if "error" in a)
+            assert refused["error"]["code"] == "forbidden" and "only the operator" in refused["error"]["message"]
+            assert ran == []
+            # The refused confirmation lapsed the pending call; the operator asks again and confirms it.
+            answers.clear()
+            await say(OPEN_ID, "t_delete", {})
+            await say(OPEN_ID, "looper_confirm", "confirm")
+            assert answers[-1] == {"status": "ok", "result": {"done": True}}
+            assert ran == [OPEN_ID]
+            assert first
+        finally:
+            await rig.close()
+
+    run_db(check, monkeypatch, timeout=60)
+
+
+def test_switch_off_renders_nothing_new_and_switch_on_context_is_unchanged(monkeypatch, tmp_path):
+    from looper.agents import manager_turn_context
+
+    async def check(pool):
+        await seed(pool, enabled=True)
+        envelope = message(sender=OPEN_ID)
+        on = Turn(channel="lark", channel_id="channel-lark", chat="oc_synthetic_context", group=True, sender=OPEN_ID,
+                   message_id="m1")
+        rendered = await manager_turn_context.prepare(envelope, on)
+        assert rendered is not None and on.speaker is SpeakerKind.OPERATOR
+        from looper.agents.turn_context import render
+        lines = render(rendered)
+        assert lines[0] == "[Turn context]" and lines[2].startswith("Speaker: the operator")
+        assert lines[3:] == ["Chat: a Lark group chat", "Reply in: Chinese", ""]
+        await pool.execute("UPDATE system_settings SET value = 'false' WHERE key = $1", chat_settings.TURN_CONTEXT_KEY)
+        await chat_settings.load()
+        off = Turn(channel="lark", channel_id="channel-lark", chat="oc_synthetic_context", group=True, sender=OTHER,
+                   message_id="m2")
+        assert await manager_turn_context.prepare(message(sender=OTHER), off) is None
+        assert off.speaker is SpeakerKind.ALLOWED
+
+    run_db(check, monkeypatch, timeout=40)
+
+
+def test_unreadable_identity_with_the_switch_off_still_refuses_authorization(monkeypatch, tmp_path):
+    from looper.db import channel_configs
+
+    async def check(pool):
+        await seed(pool, enabled=False)
+        rig = rig_with_ops(tmp_path)
+        seen = capture(monkeypatch)
+
+        async def unavailable(channel_id, **kwargs):
+            raise RuntimeError("synthetic identity lookup failure")
+
+        monkeypatch.setattr(channel_configs, "get_config", unavailable)
+        try:
+            await rig.manager._handle(message(sender=OPEN_ID))
+            prepared, = seen
+            assert prepared.turn.speaker is SpeakerKind.MEMBER and prepared.turn.operator_id_missing
+            assert "[Turn context]" not in prepared.turn_text
+        finally:
+            await rig.close()
+
+    run_db(check, monkeypatch, timeout=40)
+
+
+@pytest.mark.parametrize("enabled", [False, True], ids=["switch_off", "switch_on"])
+def test_routed_session_turns_carry_the_speaker_and_refuse_every_sender_the_high_risk_tools(
+        monkeypatch, tmp_path, enabled):
+    """A routed non-main session of the default Manager lists no high-risk tool; its turns still know their speaker,
+    so a tool added to it later cannot be authorized by a bystander."""
+    from looper.agents import session_routing
+    from tests.test_manager_session_routing_db import _Resident
+
+    async def check(pool):
+        await seed(pool, enabled=enabled)
+        tool = Tool("t_delete", "delete", {"type": "object", "properties": {}}, Risk.WRITE,
+                    lambda call: {"done": True}, escalate=lambda call: "Delete the synthetic item?")
+        rig = rig_with_ops(tmp_path, tools=(tool,))
+        ops = rig.manager.ops
+        await rig.start()
+        monkeypatch.setattr(session_routing, "_routing_enabled", True)
+        monkeypatch.setattr(session_routing, "_max_resident", 2)
+        resident = rig.group("oc_synthetic_context", _Resident("sess-group"))
+        seen = []
+
+        async def calls(on_event):
+            turn = rig.manager._running_token.ops_turn
+            seen.append((turn.speaker, await ops.call("t_delete", {})))
+
+        resident.on_turn = calls
+        try:
+            for sender, speaker in ((OTHER, SpeakerKind.ALLOWED), ("ou_syntheticMember", SpeakerKind.MEMBER),
+                                    (OPEN_ID, SpeakerKind.OPERATOR)):
+                envelope, _ = _routed_lark(sender)
+                await rig.bus.publish(envelope)
+                await rig.reply(envelope)
+                assert seen[-1][0] is speaker
+                assert seen[-1][1]["error"]["code"] == "forbidden" and not ops._pending
+            assert len(resident.turns) == 3
+            assert all("[Turn context]" not in text for text in resident.turns)
+        finally:
+            await rig.close()
+
+    run_db(check, monkeypatch, timeout=60)

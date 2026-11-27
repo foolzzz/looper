@@ -73,7 +73,7 @@ def test_member_high_risk_and_confirm_are_operator_only(name: str, monkeypatch: 
         try:
             answer, turn, _ = await _call(rig, ops, OTHER, name,
                 {"confirmation_id": "synthetic-confirmation"} if name == "looper_confirm" else {})
-            assert turn.speaker is None and turn.principal is not None
+            assert turn.speaker is SpeakerKind.MEMBER and turn.principal is not None
             assert answer["error"]["code"] == "forbidden" and not ran and not ops._pending
             assert json.loads(await pool.fetchval("SELECT result FROM manager_actions")) == {"reason": "operator_only"}
         finally:
@@ -287,7 +287,8 @@ def test_unscoped_turns_unchanged(monkeypatch: Any, tmp_path: Path) -> None:
     async def body(pool: Any) -> None:
         rig, ops, ran = await _rig(pool, tmp_path, monkeypatch)
         session_routing.set_scenario_routing(rig.manager.agent_id, "per_chat")
-        first = Turn(channel="lark", chat=GROUP_A, channel_id=LARK.agent_id, sender=OPERATOR, message_id="ask")
+        first = Turn(channel="lark", chat=GROUP_A, channel_id=LARK.agent_id, sender=OPERATOR, message_id="ask",
+                     speaker=SpeakerKind.OPERATOR)
         ops.begin_turn(first, binding="ask", session_key="synthetic-a")
         asked = await ops.call("t_delete", {}, binding="ask", session_key="synthetic-a")
         ops.end_turn(first)
