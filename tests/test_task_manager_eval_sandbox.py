@@ -112,6 +112,14 @@ def test_fake_pass_of_the_sandbox_cases(tmp_path):
     for case in runnable:
         assert rows[case.id]["outcome"] == "pass", (case.id, [c for c in rows[case.id]["checks"] if not c["ok"]])
 
+    # The shipped arms really ran looper-edit (the shell's own PATH found it); the Bash-only arms never did.
+    for case in runnable:
+        if case.edits:
+            calls = rows[case.id]["observations"]["looper_edit_calls"]
+            assert (calls >= 1) == (case.arm is cases.Arm.SHIPPED), (case.id, calls)
+    retry = rows["edit_retry_after_mismatch"]["observations"]
+    assert retry["looper_edit_failures"] == 1  # the stale first edit failed and changed nothing; the second applied
+
     # The arms differ in the edit line and looper-edit alone: the Bash-only arm's model never saw either.
     for case in runnable:
         launches = json.loads((tmp_path / "ok" / f"{case.id}-1" / "evidence.json").read_text())["launches"]
