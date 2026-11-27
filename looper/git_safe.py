@@ -185,12 +185,13 @@ _memo_lock = threading.Lock()
 _INCLUDE = re.compile(rb"^\s*\[\s*include", re.IGNORECASE | re.MULTILINE)
 
 
-def _stat(path: Path) -> tuple[int, int, int] | None:
+def _stat(path: Path) -> tuple[int, int, int, int] | None:
+    """Modification time, change time, size and inode: ``os.utime`` can set the first, never the change time."""
     try:
         info = os.stat(path)
     except OSError:
         return None
-    return info.st_mtime_ns, info.st_size, info.st_ino
+    return info.st_mtime_ns, info.st_ctime_ns, info.st_size, info.st_ino
 
 
 def _repository_files(git_dir: Path, common: Path) -> list[Path]:
@@ -372,7 +373,9 @@ _cache: contextvars.ContextVar[dict | None] = contextvars.ContextVar("git_safe_c
 @contextlib.contextmanager
 def cached() -> Iterator[None]:
     """Within the block, a directory is checked once: for an operation that runs many commands in one directory
-    while no agent writes there. A block inside a block shares the outer one's results."""
+    while no agent writes there. The commands in a block are not re-checked afterwards (``recheck``), so a driver
+    that appears during one logs no warning; the worker's verification snapshot, baseline, restore and checkout
+    run in blocks. A block inside a block shares the outer one's results."""
     if _cache.get() is not None:
         yield
         return

@@ -704,6 +704,22 @@ def test_a_change_to_the_repository_gives_a_fresh_check(repo, probe, monkeypatch
         git_safe.check_repository(repo)
 
 
+def test_an_in_place_rewrite_with_the_old_mtime_is_seen(repo, probe):
+    """An agent rewrites the config with the same length and sets the modification time back."""
+    config = repo / ".git" / "config"
+    plain(repo, "config", "filter.aaaa.clean", "/bin/cat")
+    assert git_safe.check_repository(repo).overrides == ("filter.aaaa.clean=",)
+    stamp = os.stat(config)
+    text = config.read_text()
+    same_length = text.replace('[filter "aaaa"]', '[filter "bbbb"]')
+    assert len(same_length) == len(text) and same_length != text
+    with open(config, "r+") as handle:  # in place: same inode and size
+        handle.write(same_length)
+    os.utime(config, ns=(stamp.st_atime_ns, stamp.st_mtime_ns))
+    assert os.stat(config).st_mtime_ns == stamp.st_mtime_ns and os.stat(config).st_size == stamp.st_size
+    assert git_safe.check_repository(repo).overrides == ("filter.bbbb.clean=",)
+
+
 def test_a_nested_repository_made_after_the_check_is_seen(repo, probe, tmp_path):
     (repo / "sub").mkdir()
     assert git_safe.check_repository(repo / "sub").overrides == ()

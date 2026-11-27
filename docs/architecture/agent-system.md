@@ -4287,7 +4287,9 @@ the [step workspaces RFC](rfcs/step-workdir-isolation-v0.zh-CN.md)):
   the agent, with the allowlisted environment below and none of the
   service's credentials; after each command the helper reads the definitions
   again and logs one warning (task and step id, driver names) when one
-  appeared. The command's
+  appeared; the worker's verification snapshot, baseline, restore and
+  checkout run in `cached()` blocks, where no agent writes, and skip that
+  re-check, so they log no warning. The command's
   environment is an allowlist (`PATH`, `HOME`, the locale, the operator's own
   `GIT_CONFIG_*`, and the few `GIT_*` variables a call names), so the
   database URL, tokens and provider keys never reach git or anything it
