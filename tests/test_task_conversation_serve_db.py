@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import json
 import re
+import subprocess
 import sys
 import tempfile
 import threading
@@ -223,6 +224,10 @@ def test_served_task_conversation_streams_a_tool_then_stop_reloads_history(monke
         bin_dir.mkdir()
         work.mkdir()
         (work / "README.md").write_text("notes\n", encoding="utf-8")
+        # A direct session needs a git repository root as its task directory.
+        for args in (["init", "-q"], ["add", "README.md"], ["-c", "user.name=Probe", "-c", "user.email=probe@example.invalid",
+                                                              "commit", "-qm", "Initial"]):
+            subprocess.run(["git", *args], cwd=work, check=True, capture_output=True)
         fake_claude(bin_dir / "claude", _CLAUDE)
         stub = f"#!{sys.executable}\nimport sys\nsys.exit(76)\n"
         for name in _OTHER_CLIS:
