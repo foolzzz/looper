@@ -515,7 +515,13 @@ def test_a_caller_cancelled_while_the_lock_is_taken_leaves_no_lock(tmp_path: Pat
         with pytest.raises(asyncio.CancelledError):
             await task
         gate.set()
-        await asyncio.sleep(0.5)
-        real(DirectoryLock, tmp_path / "runtime", str(repo), "probe").release()  # LockHeld if the lock leaked
+        deadline = asyncio.get_running_loop().time() + 5
+        while True:  # the release runs in a done callback; poll for it with a bound instead of a fixed sleep
+            try:
+                real(DirectoryLock, tmp_path / "runtime", str(repo), "probe").release()
+                break
+            except LockHeld:
+                assert asyncio.get_running_loop().time() < deadline, "the lock leaked after the caller was cancelled"
+                await asyncio.sleep(0.02)
 
     asyncio.run(main())
