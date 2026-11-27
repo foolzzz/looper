@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import copy
 import json
+import os
 from typing import Any
 
 import pytest
@@ -306,7 +307,7 @@ def test_the_effective_write_set_is_not_found_without_its_row(case) -> None:
 def test_the_write_set_rule_follows_home_uid_and_the_claude_temp_root(tmp_path) -> None:
     entries = rb.writes_allowed("/h", 7, str(tmp_path))
     assert f"{tmp_path.resolve()}/claude-7/" in entries and "/h/.claude/debug" in entries and "." in entries
-    assert "/private/tmp/claude-7/" in rb.writes_allowed("/h", 7) or "/tmp/claude-7/" in rb.writes_allowed("/h", 7)
+    assert f"{os.path.realpath('/tmp')}/claude-7/" in rb.writes_allowed("/h", 7)  # /private/tmp on macOS, /tmp on Linux
 
 
 # --- the positive check of a turn's system/init ---
