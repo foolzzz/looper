@@ -21,7 +21,9 @@ The sections, in this order (``KINDS``):
 - ``cost``: pending spend holds, while the cost guard enforces limits;
 - ``failure_holds``: environment and breaker holds, while failure handling is in act mode;
 - ``reminders``: terminal not-delivered reminders, until cancelled or seven days after settlement;
-- ``vault_commits``: owned vault commits whose fast-forward merge needs the operator.
+- ``vault_commits``: owned vault commits whose fast-forward merge needs the operator;
+- ``task_manager_refs``: a task Manager turn changed a branch or tag other than the task branch, until its report is
+  resolved.
 
 A section is ``ok`` (read; possibly empty), ``error`` (its source could not be read: never shown as empty) or
 ``unknown`` (this caller cannot read it, e.g. ``logins`` without a status reader). A feature that is off leaves its
@@ -53,7 +55,7 @@ from .log_redaction import redact_diagnostic
 logger = logging.getLogger(__name__)
 
 ENABLED_KEY = "attention.enabled"
-KINDS = ("gates", "confirmations", "schedules", "logins", "intents", "ledger", "deliveries", "cost", "failure_holds", "reminders", "vault_commits")
+KINDS = ("gates", "confirmations", "schedules", "logins", "intents", "ledger", "deliveries", "cost", "failure_holds", "reminders", "vault_commits", "task_manager_refs")
 SHOWN = 20
 DELIVERY_WINDOW = timedelta(hours=72)
 # The checks the dashboard's banner shows as a login that fails (web/src/components/claude-check-banner.tsx).
@@ -351,6 +353,24 @@ async def _earliest_vault_commits(_: Any) -> dict[str, Any] | None:
     return _oldest(read[0]) if isinstance(read, tuple) else None
 
 
+async def _task_manager_refs(_: Any) -> Read:
+    from . import task_manager_ref_attention
+
+    rows = await task_manager_ref_attention.pending()
+    if not rows:
+        return NotRead.OFF
+    items = [_item(f"tm_refs:{row['id']}", _TITLES["task_manager_refs"],
+                   context=_task_name(row, row["task_id"]), since=row["since"], href=f"#tasks/{row['task_id']}",
+                   refs=row["refs"], count=len(row["refs"]))
+             for row in rows]
+    return items[:SHOWN], len(items)
+
+
+async def _earliest_task_manager_refs(_: Any) -> dict[str, Any] | None:
+    read = await _task_manager_refs(None)
+    return _oldest(read[0]) if isinstance(read, tuple) else None
+
+
 def _oldest(items: Sequence[Mapping[str, Any]]) -> dict[str, Any] | None:
     """The earliest item by ``since``; the first when none is dated (logins have no clock)."""
     dated = [item for item in items if isinstance(item.get("since"), datetime)]
@@ -438,12 +458,13 @@ async def _earliest_failure_holds(_: Any) -> dict[str, Any] | None:
 
 _READERS = {"gates": _gates, "confirmations": _confirmations, "schedules": _schedules, "logins": _logins,
             "intents": _intents, "ledger": _ledger, "deliveries": _deliveries, "cost": _cost,
-            "failure_holds": _failure_holds, "reminders": _reminders, "vault_commits": _vault_commits}
+            "failure_holds": _failure_holds, "reminders": _reminders, "vault_commits": _vault_commits,
+            "task_manager_refs": _task_manager_refs}
 _EARLIEST = {"gates": _earliest_gates, "confirmations": _earliest_confirmations, "schedules": _earliest_schedules,
              "logins": _earliest_logins, "intents": _earliest_intents, "ledger": _earliest_ledger,
              "deliveries": _earliest_deliveries, "cost": _earliest_cost,
              "failure_holds": _earliest_failure_holds, "reminders": _earliest_reminders,
-             "vault_commits": _earliest_vault_commits}
+             "vault_commits": _earliest_vault_commits, "task_manager_refs": _earliest_task_manager_refs}
 
 
 async def earliest(kind: str, *, managers: Any = None) -> dict[str, Any] | None:
@@ -491,7 +512,8 @@ NOTHING = "现在没有需要你处理的事。"
 _TITLES = {"gates": "等你回复的关卡", "confirmations": "等你确认的操作", "schedules": "失败的定时任务",
            "logins": "登录失效", "intents": "待处理的意图", "ledger": "账本里等你的事",
            "deliveries": "可能没送到的消息", "cost": "花费等你决定",
-           "failure_holds": "运行失败等你处理", "reminders": "未确认送达的提醒", "vault_commits": "知识库提交受阻"}
+           "failure_holds": "运行失败等你处理", "reminders": "未确认送达的提醒", "vault_commits": "知识库提交受阻",
+           "task_manager_refs": "任务管家改了别的分支或标签"}
 _CHANNELS = {"web": "控制台聊天", "lark": "飞书", "lark_bot": "飞书", "telegram": "Telegram"}
 _ALERTS = {"failures": "连续失败告警", "stale": "太久没成功", "deadline": "没在截止时间前成功", "overlap": "运行重叠",
            "unanswered": "没人回，已自动暂停"}
@@ -502,7 +524,8 @@ _HINTS = {"gates": "发 /gates 看编号，再用 /gate N <回答> 回答。",
           "confirmations": "在提问的那个聊天里回复「确认」，或回复别的放弃。",
           "cost": "回复「继续 {ref} <新上限美元>」提高上限并继续，或「停 {ref}」。",
           "intents": "回复「建 {ref}」建任务，「驳回 {ref}」驳回。",
-          "reminders": "回复「取消提醒 {ref}」移除此项；重新安排时取消旧提醒，再设置新提醒。"}
+          "reminders": "回复「取消提醒 {ref}」移除此项；重新安排时取消旧提醒，再设置新提醒。",
+          "task_manager_refs": "先在任务页的对话里看恢复命令；处理完后在控制台「需要你处理」页点「标为已处理」，或调 tasks.task_manager_ref_report_resolve。Looper 不会自动恢复。"}
 
 
 def is_command(text: str) -> bool:
@@ -561,6 +584,8 @@ def _line(kind: str, item: Mapping[str, Any], now: datetime) -> str:
         return f"- {item['ref']} {title}（{label}）"
     if kind == "reminders":
         return f"- 提醒 {item['ref']} {title}（{context}）"
+    if kind == "task_manager_refs":
+        return f"- 【{context}】{facts['count']} 个分支或标签被改：" + "、".join(_plain(name) for name in facts["refs"][:5])
     if kind == "vault_commits":
         return f"- {context}：{_plain(facts['reason'])}；保留分支 {_plain(facts['branch'])}，工作区 {_plain(facts['worktree'])}"
     if kind == "deliveries" and facts["source"] == "catchup":
