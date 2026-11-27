@@ -140,6 +140,13 @@ describe("remote content in agent Markdown", () => {
     expect(textOf(html)).toContain("(evil.example)");
   });
 
+  it("removes bidi controls from an image's alt text, which shows as link text", () => {
+    const html = render("Pay: ![&#x202E;](https://bank.example/i.png)[elpmaxe.knab//:sptth](https://evil.example/)");
+    expect(html).not.toMatch(/[\u202a-\u202e\u2066-\u2069\u200e\u200f\u061c]/);
+    expect(html).not.toContain("<img");
+    expect(render("![a\u200fb](https://bank.example/i.png)")).not.toMatch(/[\u200f]/);
+  });
+
   it("keeps two adjacent links in order and each label next to its own link under an override", () => {
     const html = render("\u202e[https://a.example/](https://b.example/) [https://c.example/](https://d.example/)");
     const text = textOf(html);

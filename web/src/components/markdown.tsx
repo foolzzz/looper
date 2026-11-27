@@ -26,10 +26,15 @@ const COMPONENTS: Components = {
 const BIDI_CONTROLS = /[\u202a-\u202e\u2066-\u2069\u200e\u200f\u061c]/g;
 
 // The same controls written as character references are decoded by the parser, so they go from the parsed text too.
-type HastNode = { type: string; value?: string; children?: HastNode[] };
+type HastNode = { type: string; value?: string; properties?: Record<string, unknown>; children?: HastNode[] };
 function stripBidi() {
   const walk = (node: HastNode) => {
     if (node.type === "text" && node.value) node.value = node.value.replace(BIDI_CONTROLS, "");
+    // An image's alt text is shown as link text, so it is cleaned like the text nodes.
+    for (const name of ["alt", "title"]) {
+      const value = node.properties?.[name];
+      if (typeof value === "string") node.properties![name] = value.replace(BIDI_CONTROLS, "");
+    }
     node.children?.forEach(walk);
   };
   return walk;
