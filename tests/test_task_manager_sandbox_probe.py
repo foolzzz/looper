@@ -495,7 +495,30 @@ def test_p18_planted_module_is_not_run_by_a_wrapped_python_dash_m_server(probe):
     assert (probe.markers / "planted").exists()
 
 
-@pytest.mark.skip(reason="P18 needs Looper's own MCP server to start with python -I and an absolute path (a separate "
-                         "pull request that is not merged yet); the wrapper case above covers the same plant")
-def test_p18_looper_own_server_ignores_a_planted_module(probe):
-    raise AssertionError("pending")
+def test_p18_looper_own_server_ignores_a_planted_module_and_npx_is_refused_before_launch(probe):
+    from dataclasses import replace
+    import asyncio
+
+    from looper.agents.ops.service import server_config
+
+    planted = probe.cwd / "looper"
+    planted.mkdir()
+    (planted / "__init__.py").write_text("")
+    marker = probe.markers / "planted"
+    (planted / "cli.py").write_text(f"import pathlib\npathlib.Path({str(marker)!r}).write_text('ran')\n")
+    config = server_config("http://127.0.0.1:1", "token-not-real")
+    # The real definition of Looper's own server: an absolute interpreter, started isolated.
+    assert os.path.isabs(config["command"]) and "-I" in config["args"]
+    own = write_config(probe.runtime_root, [("looper", config)])
+    library = replace(probe.launch().library, mcp_config=str(own))
+    wrapped = asyncio.run(operator_mcp.library_with_allowed(library, probe.runtime_root, [], environment=probe.env,
+                                                            cwd=probe.mcp_cwd))
+    probe.run([text("done")], library=wrapped)
+    assert not marker.exists()
+    # An allowed server started by npx, with a package planted in the task directory, is refused before any launch.
+    (probe.cwd / "node_modules/pkg").mkdir(parents=True)
+    (probe.config / ".claude.json").write_text(json.dumps({"mcpServers": {"risky": {
+        "type": "stdio", "command": "npx", "args": ["-y", "pkg"]}}}))
+    with pytest.raises(operator_mcp.UnsafeLauncher):
+        asyncio.run(operator_mcp.library_with_allowed(library, probe.runtime_root, ["risky"], environment=probe.env,
+                                                      cwd=probe.mcp_cwd))
