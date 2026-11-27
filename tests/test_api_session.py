@@ -668,3 +668,22 @@ async def test_cancel_before_the_first_request_leaves_the_prompt_unsent(handed_o
             assert result.prompt_sent is handed_off
         finally:
             await session.stop()
+
+
+@async_test
+async def test_an_idle_session_is_reclaimable_and_a_busy_one_is_not(tmp_path):
+    script = ResponseScript(events=text_events('partial', usage=TOKENS), gate=asyncio.Event())
+    async with FakeModelAPI([script]) as api:
+        session, _ = await start(tmp_path, api.base_url)
+        task = asyncio.create_task(turn(session))
+        try:
+            await script.gate_reached.wait()
+            assert await session.try_stop_if_idle() is False and session.started  # a turn is running
+            script.gate.set()
+            await task
+            assert await session.try_stop_if_idle() is True and not session.started
+            assert await session.try_stop_if_idle() is False  # nothing left to stop
+        finally:
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+            await session.stop()
