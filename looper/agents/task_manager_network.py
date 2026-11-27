@@ -77,6 +77,10 @@ def _validate_entry(entry: str) -> None:
         raise _refuse(entry, "single-label names are not external domains")
     if len(hostname) > _MAX_HOSTNAME_LEN or any(not _LABEL_RE.fullmatch(label) for label in labels):
         raise _refuse(entry, "invalid hostname")
+    # "127.1" and "0x7f.1" are not IP literals to ``ipaddress`` but resolvers read them as IPv4 addresses; no
+    # public top-level domain is all digits or hexadecimal-prefixed.
+    if labels[-1].isdigit() or labels[-1].startswith("0x"):
+        raise _refuse(entry, "IP literals are not external domains")
 
 
 def validate_domains(values: Any) -> tuple[str, ...]:
@@ -104,7 +108,7 @@ def matches(host: str, allowed: Sequence[str]) -> bool:
     """Tell whether a denied host (optionally host:port) is covered by a normalized allowlist."""
     if host.count(":") == 1:
         host = host.rsplit(":", 1)[0]
-    host = host.lower()
+    host = host.lower().rstrip(".")
     for entry in allowed:
         if host == entry:
             return True
@@ -123,3 +127,4 @@ SCOPE_TEXT = (
     "A listed domain can itself be used to move data out of the sandbox; choosing the entries is the "
     "operator's responsibility."
 )
+

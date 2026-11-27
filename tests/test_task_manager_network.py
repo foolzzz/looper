@@ -180,3 +180,16 @@ def test_scope_text_covers_proxy_clients_go_and_node_tools_and_operator_responsi
     assert isinstance(SCOPE_TEXT, str) and SCOPE_TEXT
     for phrase in ("HTTP(S)", "proxy", "curl", "npm", "pip", "Python", "gh", "Node", "operator"):
         assert phrase in SCOPE_TEXT
+
+
+@pytest.mark.parametrize("entry", ["127.1", "10.1", "0x7f.1", "*.127.1", "example.0x1"])
+def test_shorthand_ipv4_forms_are_refused_as_ip_literals(entry):
+    with pytest.raises(PolicyInvalid) as exc:
+        validate_domains([entry])
+    assert exc.value.entry == entry
+    assert exc.value.why == "IP literals are not external domains"
+
+
+def test_matches_ignores_a_trailing_dot_of_the_denied_host():
+    assert matches("example.com.", ["example.com"]) is True
+    assert matches("a.example.com.", ["*.example.com"]) is True
