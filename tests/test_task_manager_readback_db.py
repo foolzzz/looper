@@ -298,12 +298,16 @@ def test_a_partial_tool_start_the_init_did_not_list_is_refused_before_anything_i
 def test_a_stop_before_the_init_does_not_deliver_the_cli_result(monkeypatch, tmp_path, native, alerts, init_mode):
     async def check(db):
         task_id, _, _ = await native.create(db)
-        override(native, {"init_mode": init_mode})
+        # The stand-in sends its init a moment after it records the input, so the stop below would race the init; the
+        # delay makes that gap wide and the wait below closes it.
+        override(native, {"init_mode": init_mode, "init_delay": 0.3})
         pool = tm.TaskManagerPool(tmp_path / "runtime", native.executable, max_resident=lambda: 2)
         try:
             sink = Sink()
             assert (await pool.submit(task_id, "wait", message_id="one", sink=sink)).state == "started"
             await until(lambda: len(native.records("input")) == 1)
+            if init_mode == "normal":  # a stop before the init is the refused case pinned by the next test
+                await until(lambda: pool.agent(task_id).session_id is not None)
             result = pool.stop_turn(task_id, "one")
             assert (await result if inspect.isawaitable(result) else result) is True
             await sink.done()
