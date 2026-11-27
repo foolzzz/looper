@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import subprocess
 from dataclasses import replace
 import sys
 from pathlib import Path
@@ -54,10 +55,15 @@ for line in sys.stdin:
 ''')
 
     async def create(pool, task_id="task-one", status="draft", work_dir=None, workspace_mode="in_place"):
-        project = await projects.create_project(name=f"Project {task_id}", work_dir=str(work_dir or tmp_path), pool=pool)
+        directory = Path(work_dir) if work_dir is not None else tmp_path / task_id
+        directory.mkdir(parents=True, exist_ok=True)
+        # The directory must not contain the runtime root, and a direct session requires its own repository root.
+        if workspace_mode == "in_place" and not (directory / ".git").exists():
+            subprocess.run(["git", "init", "-q", "-b", "main", str(directory)], check=True, capture_output=True)
+        project = await projects.create_project(name=f"Project {task_id}", work_dir=str(directory), pool=pool)
         await tasks.create_task(task_id=task_id, requirement="Implement a feature", project_id=project["id"],
-                                status=status, work_dir=str(work_dir or tmp_path), workspace_mode=workspace_mode,
-                                workspace_dir=str(work_dir or tmp_path), pool=pool)
+                                status=status, work_dir=str(directory), workspace_mode=workspace_mode,
+                                workspace_dir=str(directory), pool=pool)
         return task_id
 
     return executable, create

@@ -1046,8 +1046,9 @@ them.
   `report_id`, `changes`, `info`, `head`, `own_commits` and `needs_you`. A fast-forward of the task
   branch is the Manager's own commits (`own_commits`) and is not listed; a reset, rewrite or delete of it
   is listed but not "needs you" by itself. A change to any other branch or tag is stored in
-  `task_manager_ref_reports` with `needs_you` set; a change under `refs/heads/looper/<other task>/`
-  while that task exists and is unfinished is `info` only. The
+  `task_manager_ref_reports` and listed in the needs-you section `task_manager_refs` until the
+  operator resolves it (`tasks.task_manager_ref_report_resolve`, which changes nothing in git); a change
+  under `refs/heads/looper/<other task>/` while that task exists and is unfinished is `info` only. The
   task branch is recorded once, at the first enablement (`task_manager_branches`, with a
   `sandbox_notice` event that the real checkout is edited directly); a detached `HEAD` then refuses the
   first turn (`head_detached`), and every later turn refuses while `HEAD` is not on that branch
@@ -1059,6 +1060,8 @@ them.
   repository is refused as `workspace` for now (the typed `not_git` reason comes with the directory check).
   `ref_report` and the `refs_unreadable` notice carry the turn's `message_id`.
   Every git call goes through `git_safe`; the real-CLI rows are `tests/test_task_manager_refs_probe.py`.
+
+Directory checks. A direct session starts only for an in-place task whose directory is the root of its own non-bare git repository. A worktree task (`workspace_mode` worktree), a linked worktree, or a submodule (`.git` is a file or a symlink) is refused with `worktree_unsupported`: v1 has no direct mode for a worktree task, and orchestrated mode is unchanged, so the commit-per-turn of worktree tasks (#1848) is not reached in direct mode. The operator's home is `workspace_is_home`. A system directory (`/`, or `/System`, `/Library`, `/usr`, `/bin`, `/sbin`, `/etc`, `/private/etc`, `/dev`, `/Applications`, `/cores`, and anything under those) is `workspace_in_system_dir`. A directory that is, or contains, trusted configuration (credentials, the operator's configuration, the Claude configuration directory, the runtime root, and the ops file) is `workspace_contains_trusted_config`. A subdirectory, a bare repository, or a directory that is not a git repository is `workspace_not_repo_root`. A directory that equals, contains, or is inside another live direct session is `workspace_overlaps_session`. Comparisons use the device and inode of the resolved directory, so two spellings of one directory are the same directory. One directory has one lock, `task-manager-locks/<device>-<inode>.lock` under the runtime root (the directory is mode 0700, the file mode 0600, and the file is never deleted). A second session that finds the lock held gets the same refusal and names the holder. The resident's stop releases the lock. The overlap check runs again after that lock is taken, still inside admission and before the resident starts, so a parent directory and a child directory that both passed the earlier check cannot both start. The lock descriptor is close-on-exec. If the Looper process dies while the Claude process is still alive, the kernel releases the lock when the Looper process exits, which can be before that Claude process exits. That early release is accepted for v1. These checks run only while `tasks.conversations.manager_answers` is on, which defaults off.
 
 `tasks.managers.max_resident` defaults to 6 (1–20). Admission can reclaim the least
 recently used idle process; a 60-second ticker reclaims processes idle for 30
