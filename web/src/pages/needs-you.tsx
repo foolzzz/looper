@@ -6,7 +6,7 @@ import {
   attentionSettingsGet, fetchAttention, isAttentionOff, type AttentionItem, type AttentionKind, type AttentionSection,
   type AttentionSummary,
 } from "@/lib/api-attention";
-import { displayText as text } from "@/lib/attention-display";
+import { displayText as text, plainName } from "@/lib/attention-display";
 import { channelLabel } from "@/lib/chat-channels";
 import { sinceText } from "@/lib/gates";
 import { startPolling } from "@/lib/polling";
@@ -32,6 +32,7 @@ const TITLES: Record<AttentionKind, string> = {
   reminders: "未确认送达的提醒",
   cost: "花费等你决定",
   vault_commits: "知识库提交受阻",
+  task_manager_refs: "任务管家改了别的分支或标签",
 };
 
 /** What to do about a section, said once under its heading. */
@@ -45,6 +46,7 @@ const HOW: Partial<Record<AttentionKind, string>> = {
   deliveries: "Looper never sends these again: check the chat, and resend by hand if it is missing.",
   reminders: "在聊天里回复「取消提醒 #编号」移除此项；重新安排时取消旧提醒，再设置新提醒。最多展示 7 天。",
   vault_commits: "提交与工作区已保留。先处理知识库里的未提交改动，再检查并合入保留分支；不会自动覆盖你的改动。",
+  task_manager_refs: "先在任务页的对话里看每个分支或标签的恢复命令，处理完后点「标为已处理」；Looper 不会自动恢复。",
 };
 
 const ALERTS: Record<string, string> = {
@@ -109,6 +111,9 @@ function details(kind: AttentionKind, item: AttentionItem): { line: string; badg
         text(facts.fix)), badges: [] };
     case "vault_commits":
       return { line: parts(context, text(facts.reason), text(facts.branch), text(facts.worktree)), badges: ["受阻"] };
+    case "task_manager_refs":
+      return { line: parts(context, `${count(facts.count)} 个分支或标签被改`,
+        Array.isArray(facts.refs) && facts.refs.map((name) => plainName(name)).filter(Boolean).slice(0, 5).join("、")), badges: [] };
   }
 }
 
@@ -120,8 +125,17 @@ function Item({ kind, item, onResumed }: { kind: AttentionKind; item: AttentionI
   const { line, badges } = details(kind, item);
   const paused = kind === "schedules" && Array.isArray(item.facts.alerts) && item.facts.alerts.includes("unanswered");
   const scheduleId = item.key.startsWith("schedule:") ? item.key.slice("schedule:".length) : "";
+  const reportId = kind === "task_manager_refs" && item.key.startsWith("tm_refs:") ? Number(item.key.slice("tm_refs:".length)) : 0;
   const [busy, setBusy] = useState(false);
   const [resumeError, setResumeError] = useState("");
+  async function resolve() {
+    setBusy(true); setResumeError("");
+    try {
+      await callV1("/api/v1/tasks/task_manager_ref_report_resolve", { report_id: reportId });
+      await onResumed();
+    } catch (err) { setResumeError(errorText(err)); }
+    finally { setBusy(false); }
+  }
   async function resume() {
     setBusy(true); setResumeError("");
     try {
@@ -165,6 +179,10 @@ function Item({ kind, item, onResumed }: { kind: AttentionKind; item: AttentionI
       {paused && (
         <Button type="button" variant="outline" size="sm" className="shrink-0" disabled={busy}
           onClick={() => void resume()}>恢复</Button>
+      )}
+      {reportId > 0 && (
+        <Button type="button" variant="outline" size="sm" className="shrink-0" disabled={busy}
+          onClick={() => void resolve()}>标为已处理</Button>
       )}
       {resumeError && <p role="alert" className="w-full min-w-0 text-xs text-destructive [overflow-wrap:anywhere]">{text(resumeError)}</p>}
     </li>

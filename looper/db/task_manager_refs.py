@@ -37,3 +37,25 @@ async def insert_report(task_id: str, message_id: str | None, changes: dict[str,
     return await (pool or get_pool()).fetchval(
         "INSERT INTO task_manager_ref_reports (task_id, message_id, changes, needs_you) "
         "VALUES ($1, $2, $3::jsonb, $4) RETURNING id", task_id, message_id, json.dumps(changes), needs_you)
+
+
+async def pending_reports(*, pool: asyncpg.Pool | None = None) -> list[dict[str, Any]]:
+    """Unresolved reports that need the operator, oldest first, with the task's own columns for the item."""
+    rows = await (pool or get_pool()).fetch(
+        "SELECT r.id, r.task_id, r.created_at, r.changes, t.title, t.goal_id, t.requirement "
+        "FROM task_manager_ref_reports r JOIN tasks t ON t.id = r.task_id "
+        "WHERE r.needs_you AND r.resolved_at IS NULL ORDER BY r.created_at, r.id")
+    found = []
+    for row in rows:
+        value = dict(row)
+        if isinstance(value["changes"], str):
+            value["changes"] = json.loads(value["changes"])
+        found.append(value)
+    return found
+
+
+async def resolve_report(report_id: int, resolved_by: str, *, pool: asyncpg.Pool | None = None) -> Any:
+    """Mark a report handled; its ``resolved_at`` (an already handled report keeps its first time), None when unknown."""
+    return await (pool or get_pool()).fetchval(
+        "UPDATE task_manager_ref_reports SET resolved_at = COALESCE(resolved_at, now()), "
+        "resolved_by = COALESCE(resolved_by, $2) WHERE id = $1 RETURNING resolved_at", report_id, resolved_by)
