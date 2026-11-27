@@ -1077,6 +1077,8 @@ UTF-8, or the 64 KiB total already spent: `budget_exhausted`) is reported to the
 and a code-written `detail` (`<file>: <reason>`, sorted), once for each change of the skipped
 set; the notice is a stored conversation event and never part of a model's input.
 
+Directory checks. A direct session starts only for an in-place task whose directory is the root of its own non-bare git repository. A worktree task (`workspace_mode` worktree), a linked worktree, or a submodule (`.git` is a file or a symlink) is refused with `worktree_unsupported`: v1 has no direct mode for a worktree task, and orchestrated mode is unchanged, so the commit-per-turn of worktree tasks (#1848) is not reached in direct mode. The operator's home is `workspace_is_home`. A system directory (`/`, or `/System`, `/Library`, `/usr`, `/bin`, `/sbin`, `/etc`, `/private/etc`, `/dev`, `/Applications`, `/cores`, and anything under those) is `workspace_in_system_dir`. A directory that is, or contains, trusted configuration (credentials, the operator's configuration, the Claude configuration directory, the runtime root, and the ops file) is `workspace_contains_trusted_config`. A subdirectory, a bare repository, or a directory that is not a git repository is `workspace_not_repo_root`. A directory that equals, contains, or is inside another live direct session is `workspace_overlaps_session`. Comparisons use the device and inode of the resolved directory, so two spellings of one directory are the same directory. One directory has one lock, `task-manager-locks/<device>-<inode>.lock` under the runtime root (the directory is mode 0700, the file mode 0600, and the file is never deleted). A second session that finds the lock held gets the same refusal and names the holder. The resident's stop releases the lock. The overlap check runs again after that lock is taken, still inside admission and before the resident starts, so a parent directory and a child directory that both passed the earlier check cannot both start. The lock descriptor is close-on-exec. If the Looper process dies while the Claude process is still alive, the kernel releases the lock when the Looper process exits, which can be before that Claude process exits. That early release is accepted for v1. These checks run only while `tasks.conversations.manager_answers` is on, which defaults off.
+
 `tasks.managers.max_resident` defaults to 6 (1–20). Admission can reclaim the least
 recently used idle process; a 60-second ticker reclaims processes idle for 30
 minutes, measured from the last turn ending. All preparation shares the admission
@@ -6237,7 +6239,7 @@ prompt, name, turns and switch, changing or removing a provider, or adding
 items to the catalog.
 
 API clients run the same catalog. `ClientOps` wraps it for an API client: a request is a turn (a write runs; one of risk
-`high` answers 202 until `/api/v1/confirm`), and reads are not recorded. Attribution is kept: `client_id` on the
+`high` answers 202 until the client confirms its own request at `/api/v1/confirm`), and reads are not recorded. Attribution is kept: `client_id` on the
 conversation's threads, on the tasks it creates and on the Manager calls, and `via` is `client:<name>` for a call made
 through the API and `manager:loopercli` for one the Manager made in a client conversation. The Manager sees such a
 message with the line `Channel: loopercli, client "<name>" …`, and a task created in a client conversation reports its
@@ -9858,8 +9860,8 @@ belongs only to global worker/reviewer role layers, not project layers or manage
 
 Operators execute these writes in one call, using the dashboard's existing dialogs. Clients receive
 202 `needs_confirmation` for shared-default updates, concurrency updates, raised/lifted effective spend
-caps, profile deletion and role-template deletion; confirm with `POST /api/v1/confirm` in the same
-client/session. Gate replies/end and wait controls execute directly. Client management is operator-only,
+caps, profile deletion and role-template deletion; the client confirms its own request with `POST /api/v1/confirm` in the same
+client/session (not an operator approval). Gate replies/end and wait controls execute directly. Client management is operator-only,
 with `Cache-Control: no-store` on responses; never log its one-time create token.
 
 The following request bodies illustrate the field nesting. Identifiers are placeholders for existing
@@ -9922,7 +9924,7 @@ separate tokens and is not exported to API clients. No unversioned operator rout
   `conflict` 409, `expired` 410, `rate_limited` 429, `unavailable` 503.
 - **Sessions and confirmation.** A client may send `X-Looper-Session` (1–64 characters of `A-Za-z0-9._:-`; `default`
   without it). For client tokens, a write of risk `high` answers 202 with a `confirmation_id`; `POST /api/v1/confirm` with that id runs it
-  only for the same client and the same session, within 10 minutes. Pending confirmations live in memory and are lost
+  only for the same client and the same session, within 10 minutes. This is the client confirming its own request, not an operator approval: the client that sends the request also sends the confirmation, and Looper does not check that a person saw it (the Manager's chat is different: there only the operator confirms). Pending confirmations live in memory and are lost
   when the server restarts. Operators execute high operations in one request; the dashboard keeps its existing
   confirmation dialogs and never silently confirms a client confirmation.
 - **Credentials are the operator's.** `auth.set_password` and `auth.clear_password` accept only an operator token,
