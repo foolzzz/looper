@@ -999,9 +999,8 @@ them.
   Hooks are not pinned: v1 injects no Looper hook. The settings file is named by the SHA-256 of its
   content and is part of the launch signature, so a change in any pinned value, the network
   allowlist or the read deny list restarts the session.
-- **Write scope.** The task directory and the sandbox's temporary directory; `.git/hooks`,
-  `.git/config`, `.git/info`, `.git/modules` and `.git/objects/info` of the task directory are
-  write-denied.
+- **Write scope.** The task directory and the sandbox's temporary directory; `.git/objects/info`, `.git/hooks`,
+  `.git/config`, `.git/info` and `.git/modules` of the task directory are write-denied.
 - **Read deny list.** `read_deny_paths()`: the operator's credential directories (`~/.ssh`, `~/.aws`,
   `~/.gnupg`, credential stores under `~/.config`, `.netrc`, `.git-credentials`), Claude's credential
   file and `.claude.json`, and Looper's runtime root. It is a blacklist and cannot say "read only the
