@@ -87,12 +87,15 @@ def isolated_environment(root: Path, credential: tuple[str, str] | None) -> Iter
     home, config = root / "home", root / "claude-config"
     home.mkdir(parents=True)
     config.mkdir(parents=True)
+    (root / "tmp").mkdir(parents=True, exist_ok=True)
     (config / "settings.json").write_text(json.dumps(SYNTHETIC_SETTINGS, indent=2) + "\n")
     try:
         for name in list(os.environ):
             if name not in KEPT_VARIABLES and not name.startswith(KEPT_PREFIXES):
                 del os.environ[name]
-        os.environ.update(HOME=str(home), CLAUDE_CONFIG_DIR=str(config), PATH=MINIMAL_PATH,
+        # TMPDIR is a subdirectory of the run's root: a direct session keeps its private looper-edit directory (under
+        # HOME) out of the task directory and $TMPDIR, so the system temp directory cannot be the one it checks.
+        os.environ.update(HOME=str(home), CLAUDE_CONFIG_DIR=str(config), PATH=MINIMAL_PATH, TMPDIR=str(root / "tmp"),
                           GIT_TERMINAL_PROMPT="0", DISABLE_AUTOUPDATER="1", DISABLE_TELEMETRY="1")
         if credential is not None:
             os.environ[credential[0]] = credential[1]
@@ -235,7 +238,7 @@ class Run:
 
     def build_files(self) -> None:
         self.outside.mkdir(parents=True)
-        (self.outside / PROJECT_FILE).write_text("[shared]\ntimeout = 30\n")
+        (self.outside / PROJECT_FILE).write_text(f"[shared]\ntimeout = 30\ntoken = {cases.OUTSIDE_CANARY}\n")
         self.work.mkdir(parents=True)
         for name, text in cases.FILES.get(self.case.fixture if self.case.fixture in cases.FILES else "memory", {}).items():
             (self.work / name).parent.mkdir(parents=True, exist_ok=True)

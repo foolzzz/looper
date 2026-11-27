@@ -6,7 +6,6 @@ import pytest
 
 from looper.agents import task_manager_edit, task_manager_safety
 from looper.agents.tiers import task_manager as tm
-from looper.db import tasks
 from tests.db_support import run_db
 from tests.task_manager_support import NativeTaskManager, submit_and_wait
 
