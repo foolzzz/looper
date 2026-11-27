@@ -27,6 +27,7 @@ def test_enum_and_known_client_values():
     assert Case.NOT_ALLOWED.value == "not_allowed"
     assert Case.UNSUPPORTED_CLIENT.value == "unsupported_client"
     assert Case.UNKNOWN.value == "unknown"
+    assert Case.NOT_ALLOWABLE.value == "not_allowable"
     assert Client.GO_TLS.value == "go_tls"
     assert Client.NODE_NO_PROXY.value == "node_no_proxy"
     assert KNOWN_CLIENTS == (
@@ -85,29 +86,33 @@ def test_classify_uses_port_stripping_when_matching_the_allowlist():
     assert denials[0].client is Client.GO_TLS
 
 
-def test_classify_signature_in_output_identifies_go_client_without_known_executable():
-    violations = [Violation(Category.NETWORK, "api.example.com", "network")]
-    denials = classify(
-        violations,
-        command="custom-tool https://api.example.com",
-        output="x509: OSStatus -26276",
-        allowed=["api.example.com"],
-    )
-    assert denials == [
-        Denial(Category.NETWORK, Case.UNSUPPORTED_CLIENT, "api.example.com", Client.GO_TLS, "custom-tool")
-    ]
+def test_classify_a_signature_alone_never_names_a_client_that_did_not_run():
+    violations = [Violation(Category.NETWORK, "api.example.com:443", "network")]
+    for command, output in (("custom-tool https://api.example.com", "x509: OSStatus -26276"),
+                            ("curl https://api.example.com", "getaddrinfo ENOTFOUND api.example.com"),
+                            ("node-tool install", "getaddrinfo ENOTFOUND api.example.com")):
+        assert classify(violations, command=command, output=output, allowed=["api.example.com"]) == [
+            Denial(Category.NETWORK, Case.UNKNOWN, "api.example.com:443", None, command.split()[0])]
 
 
-def test_classify_node_signature_identifies_node_no_proxy_client():
-    violations = [Violation(Category.NETWORK, "registry.example.com", "network")]
-    denials = classify(
-        violations,
-        command="node-tool install",
-        output="getaddrinfo ENOTFOUND registry.example.com",
-        allowed=["registry.example.com"],
-    )
-    assert denials[0].case is Case.UNSUPPORTED_CLIENT
-    assert denials[0].client is Client.NODE_NO_PROXY
+def test_classify_a_known_client_on_an_unlisted_host_is_unsupported_not_allow_it():
+    violations = [Violation(Category.NETWORK, "api.github.com:443", "network")]
+    denials = classify(violations, command="gh api user", output="x509: OSStatus -26276", allowed=[])
+    assert denials == [Denial(Category.NETWORK, Case.UNSUPPORTED_CLIENT, "api.github.com:443", Client.GO_TLS, "gh")]
+    assert classify(violations, command="gh api user", output="", allowed=[])[0].case is Case.UNSUPPORTED_CLIENT
+
+
+@pytest.mark.parametrize("target", [
+    "10.0.0.1:443", "127.0.0.1:9", "[::1]:80", "localhost:80", "foo.local:80", "intranet:80", "host.internal:80",
+    "bad_host.example:443", "bad-.example:443", "127.1:80"])
+def test_classify_a_destination_that_cannot_be_allowed_says_so(target):
+    denials = classify([Violation(Category.NETWORK, target, "network")], command="curl http://x", output="", allowed=[])
+    assert denials == [Denial(Category.NETWORK, Case.NOT_ALLOWABLE, target, None, "curl")]
+
+
+def test_classify_a_network_violation_without_a_target_is_unknown():
+    denials = classify([Violation(Category.NETWORK, None, "network")], command="curl x", output="", allowed=[])
+    assert denials == [Denial(Category.NETWORK, Case.UNKNOWN, None, None, "curl")]
 
 
 def test_classify_allowed_target_without_known_client_is_unknown_case():
@@ -134,15 +139,12 @@ def test_classify_other_violation_is_unknown_without_target():
     assert denials == [Denial(Category.OTHER, Case.UNKNOWN, None, None, "curl")]
 
 
-def test_classify_signature_without_violations_emits_one_unsupported_client_without_target():
+def test_classify_signature_without_violations_needs_the_executable_too():
     denials = classify([], command="gh api /zen", output="x509: OSStatus -26276", allowed=["api.github.com"])
-    assert denials == [
-        Denial(Category.NETWORK, Case.UNSUPPORTED_CLIENT, None, Client.GO_TLS, "gh")
-    ]
-
-
-def test_classify_without_violations_or_signature_returns_empty():
-    assert classify([], command="curl https://example.com", output="all good", allowed=[]) == []
+    assert denials == [Denial(Category.NETWORK, Case.UNSUPPORTED_CLIENT, None, Client.GO_TLS, "gh")]
+    for command, output in (("custom-tool x", "x509: OSStatus -26276"), ("curl x", "getaddrinfo ENOTFOUND x"),
+                            ("gh api /zen", "some other failure"), ("curl x", "all good")):
+        assert classify([], command=command, output=output, allowed=[]) == []
 
 
 def test_classify_keeps_one_denial_per_violation_in_order():
@@ -191,13 +193,15 @@ def test_turn_throttle_emits_once_for_twelve_identical_denials():
     assert results == [True] + [False] * 11
 
 
-def test_turn_throttle_distinguishes_category_and_target_pairs():
+def test_turn_throttle_keys_on_the_host_not_the_port():
     throttle = TurnThrottle()
-    first = Denial(Category.NETWORK, Case.NOT_ALLOWED, "a.example", None, "curl")
-    same_pair = Denial(Category.NETWORK, Case.UNKNOWN, "a.example", None, "curl")
-    other_target = Denial(Category.NETWORK, Case.NOT_ALLOWED, "b.example", None, "curl")
+    first = Denial(Category.NETWORK, Case.NOT_ALLOWED, "a.example:80", None, "curl")
+    other_port = Denial(Category.NETWORK, Case.NOT_ALLOWED, "A.example:443", None, "curl")
+    other_target = Denial(Category.NETWORK, Case.NOT_ALLOWED, "b.example:80", None, "curl")
     other_category = Denial(Category.WRITE, Case.NOT_ALLOWED, "a.example", None, "touch")
+    no_target = Denial(Category.OTHER, Case.UNKNOWN, None, None, "ls")
     assert throttle.first(first) is True
-    assert throttle.first(same_pair) is False
+    assert throttle.first(other_port) is False
     assert throttle.first(other_target) is True
     assert throttle.first(other_category) is True
+    assert throttle.first(no_target) is True and throttle.first(no_target) is False

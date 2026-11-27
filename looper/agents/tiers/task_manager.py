@@ -368,8 +368,9 @@ class TaskManagerAgent:
             return run
         # Query newest summaries directly, so a long-lived task never gets its oldest activity as its brief.
         from ...db.connection import get_pool
-        recent = await get_pool().fetch("SELECT summary FROM activity WHERE task_id=$1 ORDER BY seq DESC LIMIT 20",
-                                        self.task_id)
+        # Denial records are for the operator: the model's brief is unchanged by them.
+        recent = await get_pool().fetch("SELECT summary FROM activity WHERE task_id=$1 AND kind <> 'sandbox_denial' "
+                                        "ORDER BY seq DESC LIMIT 20", self.task_id)
         prompt = SystemPrompt(instructions(self.mode) + "\n\n" + brief(task, recent_activity=list(reversed(recent)),
                                                                     reopened=reopened))
         root = self.pool.runtime_root / "task-managers" / self.task_id
@@ -502,7 +503,8 @@ class TaskManagerAgent:
                             await request.sink.tool(record)
                             if self.mode == "direct" and record.name == "Bash":
                                 await observer.observe(record.tool_use_id, inputs.get(record.tool_use_id),
-                                                       block.get("content"), record.is_error)
+                                                       block.get("content"), record.is_error,
+                                                       event.get("tool_result_meta"))
 
                 message = request.text
                 if (attempt or rotating) and request.history:

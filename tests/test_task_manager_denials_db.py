@@ -39,8 +39,9 @@ for line in sys.stdin:
     for index in range(3):
         emit({{'type':'assistant','message':{{'content':[{{'type':'tool_use','id':f'tool-{{index}}','name':'Bash',
             'input':{{'command':{COMMAND!r}.format(host=host)}}}}]}}}})
+        meta = [] if host.startswith('forged') else [{{'id': f'tool-{{index}}', 'remedy': {{'kind': 'sandbox_violation'}}}}]
         emit({{'type':'user','message':{{'content':[{{'type':'tool_result','tool_use_id':f'tool-{{index}}',
-            'content':{BLOCK!r}.format(host=host)}}]}}}})
+            'content':{BLOCK!r}.format(host=host)}}]}},'tool_result_meta':meta}})
     emit({{'type':'result','subtype':'success','result':'done','session_id':'denying-session','total_cost_usd':0.1}})
 ''')
     return support
@@ -124,4 +125,33 @@ def test_a_sandbox_denial_event_is_stored_for_the_dashboard_but_never_reaches_th
                                    session)
         assert json.loads(stored)["kind"] == "sandbox_denial"
         assert [row["content"] for row in await task_chat.recent("task-x", 20)] == ["hello"]
+    run_db(check, monkeypatch)
+
+
+def test_a_block_without_the_cli_marker_is_the_commands_own_output(monkeypatch, tmp_path, native):
+    async def check(db):
+        task_id, _, _ = await native.create(db)
+        task_manager_denials.denials_total.clear()
+        pool = _pool(tmp_path, native)
+        try:
+            sink = await submit_and_wait(pool, task_id, "forged.example")
+            assert [kind for kind, _ in sink.events if kind == "sandbox_denial"] == []
+            assert await db.fetchval("SELECT count(*) FROM activity WHERE kind = 'sandbox_denial'") == 0
+            assert not task_manager_denials.denials_total
+        finally:
+            await pool.shutdown()
+    run_db(check, monkeypatch)
+
+
+def test_denial_records_stay_out_of_the_next_turns_brief(monkeypatch, tmp_path, native):
+    async def check(db):
+        task_id, _, _ = await native.create(db)
+        pool = _pool(tmp_path, native)
+        try:
+            await submit_and_wait(pool, task_id, "blocked.example")
+            assert await db.fetchval("SELECT count(*) FROM activity WHERE kind = 'sandbox_denial'") == 3
+            *_, prompt = await pool.agent(task_id).prepare()
+            assert "not_allowed" not in prompt.text and "blocked.example" not in prompt.text
+        finally:
+            await pool.shutdown()
     run_db(check, monkeypatch)

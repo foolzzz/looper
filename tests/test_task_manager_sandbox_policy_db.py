@@ -175,3 +175,22 @@ def test_the_operator_gets_a_typed_error_over_http(tmp_path, monkeypatch):
                                                 "project": project, "network_allowed_domains": ["example.com"]}))
             assert status == 200 and answer["result"]["revision"] == 1, answer
     run_db(check, monkeypatch)
+
+
+def test_the_update_answer_is_the_committed_value_not_a_later_read(monkeypatch):
+    from looper.db import task_manager_sandbox_policy as store
+
+    async def check(pool):
+        project = await _project(pool)
+        await _call(UPDATE, project=project, network_allowed_domains=["old.example.com"])
+        real_get = store.get
+
+        async def another_writer_wins_first(project_id, **kwargs):
+            await store.update(project_id, ["other.example.com"], actor="someone else")
+            return await real_get(project_id, **kwargs)
+
+        monkeypatch.setattr(store, "get", another_writer_wins_first)
+        answer = await _call(UPDATE, project=project, network_allowed_domains=["mine.example.com"])
+        assert answer == {"project": project, "network_allowed_domains": ["mine.example.com"], "revision": 2,
+                          "added": ["mine.example.com"], "removed": ["old.example.com"]}
+    run_db(check, monkeypatch)

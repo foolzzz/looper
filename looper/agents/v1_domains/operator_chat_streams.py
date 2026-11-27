@@ -43,7 +43,7 @@ SCHEMAS = {
         _object({"kind": {"const": "stopped"}, "method": {"enum": ["control", "cancel", "kill"]}}, closed=True),
         _object({"kind": {"const": "sandbox_denial"}, "tool_use_id": _STR,
                  "category": {"enum": ["network", "write", "other"]},
-                 "case": {"enum": ["not_allowed", "unsupported_client", "unknown"]},
+                 "case": {"enum": ["not_allowed", "unsupported_client", "unknown", "not_allowable"]},
                  "target": {"type": ["string", "null"]}, "client": {"enum": ["go_tls", "node_no_proxy", None]},
                  "command_name": _STR}, closed=True),
         _object({"kind": {"const": "turn_summary"}, "files": _array(_STR),

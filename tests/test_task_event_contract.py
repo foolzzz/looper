@@ -37,6 +37,8 @@ def _payloads():
          "target": "blocked.example:443", "client": None, "command_name": "curl"},
         {"kind": "sandbox_denial", "tool_use_id": "toolu_2", "category": "network", "case": "unsupported_client",
          "target": None, "client": "go_tls", "command_name": "gh"},
+        {"kind": "sandbox_denial", "tool_use_id": "toolu_4", "category": "network", "case": "not_allowable",
+         "target": "10.0.0.1:443", "client": None, "command_name": "curl"},
         {"kind": "sandbox_denial", "tool_use_id": "toolu_3", "category": "other", "case": "unknown",
          "target": None, "client": None, "command_name": ""},
         {"kind": "turn_summary", "files": ["src/app.py"], "commit": None, "mode": "direct"},

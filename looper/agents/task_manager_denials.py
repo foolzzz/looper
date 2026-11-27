@@ -19,8 +19,10 @@ curl says "CONNECT tunnel failed, response 403") and for a port in the URL. A de
 carried no block at all ("Operation not permitted" only), so the observed CLI reports no write path and the WRITE
 category is only reachable through a future format. Any other line in the block is OTHER with no target; its class
 is the line's first two words when it starts with ``deny`` (the sandbox's own shape), else ``unrecognized``. A
-program can print a block of its own as the last thing it writes; its host would then be named in the explanation,
-which is why a host must look like a host and the text is written from typed fields.
+program can print a block of its own as the last thing it writes, so a result is only read when the CLI marked it:
+the same event carries ``tool_result_meta[{id, remedy: {kind: "sandbox_violation"}}]``, which a command's output cannot
+produce (observed on 2.1.332: a real block has it, a block a command echoed does not). A CLI version without the
+marker therefore explains nothing, which is the safe direction.
 """
 from __future__ import annotations
 
@@ -36,7 +38,7 @@ from enum import StrEnum
 from typing import Any
 
 from ..db import activity
-from .task_manager_network import matches
+from .task_manager_network import PolicyInvalid, matches, validate_domains
 
 logger = logging.getLogger(__name__)
 
@@ -51,6 +53,7 @@ class Case(StrEnum):
     NOT_ALLOWED = "not_allowed"
     UNSUPPORTED_CLIENT = "unsupported_client"
     UNKNOWN = "unknown"
+    NOT_ALLOWABLE = "not_allowable"  # the destination can never be on an allowlist (IP literal, local name, bad name)
 
 
 class Client(StrEnum):
@@ -107,46 +110,58 @@ class Denial:
     command_name: str
 
 
-def _known_client(command: str, output: str) -> Client | None:
+def _known_client(command: str) -> Client | None:
+    """The client kind of the executable that ran: by name only. A failure signature in the output is not enough,
+    because any program can print it and a supported client (curl) can fail in the same words."""
     name = command_name(command)
-    for known in KNOWN_CLIENTS:
-        if name in known.executables or known.signature in output:
-            return known.client
-    return None
+    return next((known.client for known in KNOWN_CLIENTS if name in known.executables), None)
+
+
+def _allowable(target: str) -> bool:
+    host = target.rsplit(":", 1)[0] if target.count(":") == 1 else target
+    try:
+        validate_domains([host])
+    except PolicyInvalid:
+        return False
+    return True
 
 
 def classify(
     violations: Sequence[Violation], *, command: str, output: str, allowed: Sequence[str]
 ) -> list[Denial]:
-    """Classify parsed violations into typed denials; returns [] when nothing explainable was denied."""
+    """Classify parsed violations into typed denials; returns [] when nothing explainable was denied.
+
+    ``not_allowed`` (and its "the operator can allow it" text) is only for a destination the operator could actually
+    list: one that passes ``validate_domains`` and is not explained by a client that cannot work in the sandbox."""
     name = command_name(command)
+    client = _known_client(command)
     denials: list[Denial] = []
     for violation in violations:
+        target = violation.target
         if violation.category is Category.NETWORK:
-            if violation.target is not None and matches(violation.target, allowed):
-                client = _known_client(command, output)
-                if client is not None:
-                    denials.append(
-                        Denial(Category.NETWORK, Case.UNSUPPORTED_CLIENT, violation.target, client, name)
-                    )
-                else:
-                    # On the allowlist, but no known client explains why the sandbox still denied it.
-                    denials.append(Denial(Category.NETWORK, Case.UNKNOWN, violation.target, None, name))
+            if client is not None:
+                # gh and the like fail in the sandbox whether or not the host is listed.
+                denials.append(Denial(Category.NETWORK, Case.UNSUPPORTED_CLIENT, target, client, name))
+            elif target is None:
+                denials.append(Denial(Category.NETWORK, Case.UNKNOWN, None, None, name))
+            elif not _allowable(target):
+                denials.append(Denial(Category.NETWORK, Case.NOT_ALLOWABLE, target, None, name))
+            elif matches(target, allowed):
+                # On the allowlist and denied anyway, with no known client to explain it.
+                denials.append(Denial(Category.NETWORK, Case.UNKNOWN, target, None, name))
             else:
-                denials.append(Denial(Category.NETWORK, Case.NOT_ALLOWED, violation.target, None, name))
+                denials.append(Denial(Category.NETWORK, Case.NOT_ALLOWED, target, None, name))
         elif violation.category is Category.WRITE:
             # The write scope has no allowlist: a write denial can never be "allowed but unsupported".
-            denials.append(Denial(Category.WRITE, Case.NOT_ALLOWED, violation.target, None, name))
+            denials.append(Denial(Category.WRITE, Case.NOT_ALLOWED, target, None, name))
         else:
             denials.append(Denial(Category.OTHER, Case.UNKNOWN, None, None, name))
-    if not denials:
-        # No parsed violation, but the output carries a known client failure signature.
-        for known in KNOWN_CLIENTS:
-            if known.signature in output:
-                denials.append(
-                    Denial(Category.NETWORK, Case.UNSUPPORTED_CLIENT, None, known.client, name)
-                )
-                break
+    if not denials and client is not None:
+        # No block, but a known client's executable ran and its failure signature is in the output (a listed
+        # host that the client cannot verify: the proxy let it through, so there is nothing to parse).
+        known = next(known for known in KNOWN_CLIENTS if known.client is client)
+        if known.signature in output:
+            denials.append(Denial(Category.NETWORK, Case.UNSUPPORTED_CLIENT, None, client, name))
     return denials
 
 
@@ -161,13 +176,16 @@ def record_summary(denial: Denial, *, tool_use_id: str, command: str) -> str:
 
 
 class TurnThrottle:
-    """One object per turn: passes the first denial of each (category, target) pair, suppresses the rest."""
+    """One object per turn: passes the first denial of each (category, host) pair, suppresses the rest."""
 
     def __init__(self) -> None:
         self._seen: set[tuple[Category, str | None]] = set()
 
     def first(self, denial: Denial) -> bool:
-        key = (denial.category, denial.target)
+        target = denial.target
+        if target is not None and target.count(":") == 1:
+            target = target.rsplit(":", 1)[0]
+        key = (denial.category, target.lower() if target is not None else None)
         if key in self._seen:
             return False
         self._seen.add(key)
@@ -211,6 +229,14 @@ def parse(result_content: Any) -> list[Violation]:
     return found
 
 
+def reported(meta: Any, tool_use_id: str) -> bool:
+    """Whether the CLI marked this tool result as a sandbox violation (``tool_result_meta[].remedy.kind``)."""
+    return isinstance(meta, list) and any(
+        isinstance(item, Mapping) and item.get("id") == tool_use_id
+        and isinstance(item.get("remedy"), Mapping) and item["remedy"].get("kind") == "sandbox_violation"
+        for item in meta)
+
+
 class Observer:
     """One per turn: records the sandbox denials of the turn's Bash results (``observe``)."""
 
@@ -219,9 +245,15 @@ class Observer:
         self.allowed, self.sink = tuple(allowed), sink
         self.throttle = TurnThrottle()
 
-    async def observe(self, tool_use_id: str, tool_input: Any, result_content: Any, is_error: bool) -> list[Denial]:
+    async def observe(self, tool_use_id: str, tool_input: Any, result_content: Any, is_error: bool,
+                      meta: Any = None) -> list[Denial]:
         """Parse and classify one result. Each denial gets an activity row and a count; the first of each
-        (category, target) also an event for the conversation. A recording failure never fails the turn."""
+        (category, host) also an event for the conversation. A recording failure never fails the turn.
+
+        ``meta`` is the event's ``tool_result_meta``: only a result the CLI itself marked as a sandbox violation is
+        read, because a command can print a block of its own."""
+        if not reported(meta, tool_use_id):
+            return []
         output = _text(result_content)
         command = str(tool_input.get("command") or "") if isinstance(tool_input, Mapping) else ""
         found = classify(parse(result_content), command=command, output=output, allowed=self.allowed)

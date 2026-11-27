@@ -226,6 +226,7 @@ describe("task conversation", () => {
       { kind: "sandbox_denial", tool_use_id: "tu-c", category: "network", case: "unsupported_client", target: null, client: "node_no_proxy", command_name: "node" },
       { kind: "sandbox_denial", tool_use_id: "tu-d", category: "other", case: "unknown", target: null, client: null, command_name: "ls" },
       { kind: "sandbox_denial", tool_use_id: "tu-e", category: "write", case: "not_allowed", target: "/var/data/x", client: null, command_name: "touch" },
+      { kind: "sandbox_denial", tool_use_id: "tu-g", category: "network", case: "not_allowable", target: "10.0.0.1:443", client: null, command_name: "curl" },
       { kind: "sandbox_denial", tool_use_id: "tu-f", category: "network", case: "unknown", target: "blocked.example:443", client: null, command_name: "x" },
     ];
     const messages = [
@@ -265,6 +266,9 @@ describe("task conversation", () => {
     expect(text).toContain("`api.example:443` 在白名单里，但 gh 这类命令在 v1 的管家会话里不受支持，放行域名不会让它可用");
     expect(text).toContain("node 这类命令在 v1 的管家会话里不受支持");
     expect(text).toContain("命令 touch 写 `/var/data/x` 被拒绝：管家会话只能写任务目录");
+    expect(text).toContain("命令 curl 访问 `10.0.0.1:443` 被拒绝：v1 不能放行这类目的地");
+    const notAllowable = [...container.querySelectorAll('[data-feed-key^="task-event:"]')].find((row) => row.textContent?.includes("10.0.0.1:443"));
+    expect(notAllowable?.textContent).not.toContain("操作者可在项目的任务管家沙箱设置里放行");
     expect(text).toContain("被沙箱拒绝（other）");
     // An unknown denial names no host and does not suggest that allowing one helps.
     const unknown = [...container.querySelectorAll('[data-feed-key^="task-event:"]')].find((row) => row.textContent?.includes("被沙箱拒绝（network）"));

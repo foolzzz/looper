@@ -46,7 +46,7 @@ const FRESH_REASONS = ["context_bound", "read_only_open", "resume_failed"] as co
 const STOP_METHODS = ["control", "cancel", "kill"] as const;
 const SUMMARY_MODES = ["direct", "orchestrated"] as const;
 const SANDBOX_CATEGORIES = ["network", "write", "other"] as const;
-const SANDBOX_CASES = ["not_allowed", "unsupported_client", "unknown"] as const;
+const SANDBOX_CASES = ["not_allowed", "unsupported_client", "unknown", "not_allowable"] as const;
 const SANDBOX_CLIENTS = ["go_tls", "node_no_proxy"] as const;
 const REFUSED = ["work_mode_off", "runtime_unsupported", "budget", "outbound_review_unavailable", "workspace", "shutting_down", "review_hook_disabled", "cli_unverified", "manager_answers_off", "mcp_unresolved", "sandbox_unavailable", "readback_unavailable", "launch_setting_mismatch", "mcp_set_mismatch", "mcp_launcher_unsafe", "network_policy_invalid", "workspace_not_repo_root", "workspace_is_home", "workspace_contains_trusted_config", "workspace_in_system_dir", "workspace_overlaps_session", "worktree_unsupported", "head_moved", "head_detached"] as const;
 
@@ -207,6 +207,7 @@ function taskEventText(event: TaskEvent): string {
         return target ? `${target} 在白名单里，但 ${kind}在 v1 的管家会话里不受支持，放行域名不会让它可用` : `${kind}在 v1 的管家会话里不受支持`;
       }
       if (event.case === "unknown") return `被沙箱拒绝（${event.category}）`;
+      if (event.case === "not_allowable") return `${command} 访问 ${target || "该目的地"} 被拒绝：v1 不能放行这类目的地（本机、内网地址或不合规的主机名）`;
       if (event.category === "write") return `${command} 写 ${target || "工作目录之外"} 被拒绝：管家会话只能写任务目录`;
       return `${command} 访问 ${target || "网络"} 被拒绝；该域名不在本项目的白名单里，操作者可在项目的任务管家沙箱设置里放行`;
     }

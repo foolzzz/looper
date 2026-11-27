@@ -52,11 +52,11 @@ async def run(server, operation, arguments, principal, headers):
     except task_manager_network.PolicyInvalid as exc:
         raise OpError(ErrorCode.NETWORK_POLICY_INVALID, str(exc), field=exc.field) from None
     try:
-        old, _, revision = await store.update(project_id, domains, actor="operator",
-                                              expected_revision=arguments.get("expected_revision"))
+        old, stored, revision = await store.update(project_id, domains, actor="operator",
+                                                   expected_revision=arguments.get("expected_revision"))
     except store.RevisionConflict as exc:
         raise OpError(ErrorCode.CONFLICT, f"expected_revision does not match the stored revision {exc.revision}",
                       details={"current_version": exc.revision}) from None
-    stored, revision = await store.get(project_id)
+    # The committed value of this transaction: a later read could show another writer's list.
     return {"project": project_id, "network_allowed_domains": stored, "revision": revision,
             "added": [d for d in stored if d not in old], "removed": [d for d in old if d not in stored]}
