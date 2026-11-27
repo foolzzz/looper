@@ -23,7 +23,6 @@ def case(tmp_path) -> Case:
 
 
 def _pin_cases():
-    probe = Case.__new__(Case)
     from pathlib import Path
     pins = sandbox.pins(Path("/work"), allowed_domains=("api.example.com",), read_deny=READ_DENY)
     return [pin for pin in pins if pin.check is not Check.NOT_ASSERTED]
