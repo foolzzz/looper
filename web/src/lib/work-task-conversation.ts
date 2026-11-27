@@ -46,7 +46,7 @@ const FRESH_REASONS = ["context_bound", "read_only_open", "resume_failed"] as co
 const STOP_METHODS = ["control", "cancel", "kill"] as const;
 const SUMMARY_MODES = ["direct", "orchestrated"] as const;
 const REF_CHANGES = ["created", "deleted", "moved", "non_fast_forward"] as const;
-const SANDBOX_NOTICES = ["first_enable_in_place", "project_instructions_skipped"] as const;
+const SANDBOX_NOTICES = ["first_enable_in_place", "refs_unreadable", "project_instructions_skipped"] as const;
 const REFUSED = ["work_mode_off", "runtime_unsupported", "budget", "outbound_review_unavailable", "workspace", "shutting_down", "review_hook_disabled", "cli_unverified", "manager_answers_off", "mcp_unresolved", "sandbox_unavailable", "readback_unavailable", "launch_setting_mismatch", "mcp_set_mismatch", "mcp_launcher_unsafe", "network_policy_invalid", "workspace_not_repo_root", "workspace_is_home", "workspace_contains_trusted_config", "workspace_in_system_dir", "workspace_overlaps_session", "worktree_unsupported", "head_moved", "head_detached"] as const;
 
 type RefChange = { ref: string; change: (typeof REF_CHANGES)[number]; old: string | null; new: string | null; restore: string };
@@ -220,6 +220,8 @@ function skippedInstructionsText(detail: string): string {
 }
 const FIRST_ENABLE_TEXT = "管家在你的真实检出目录里直接改文件；v1 只报告分支和标签的变化，不会恢复，删掉的对象也找不回来，建议先把重要分支推送或备份。";
 
+const REFS_UNREADABLE_TEXT = "本轮结束后没能重新读取分支和标签，这一轮对它们的改动（如果有）没有被报告；请自己检查 git branch 和 git tag。";
+
 function refChangeText(change: RefChange): string {
   const warning = change.change === "non_fast_forward" ? ` ${NON_FAST_FORWARD_WARNING}` : "";
   return `${change.ref} ${CHANGE_TEXT[change.change]}（${shortId(change.old)} → ${shortId(change.new)}）${warning}`;
@@ -272,7 +274,7 @@ function taskEventText(event: TaskEvent): string {
       return refReportText(event);
     case "sandbox_notice":
       if (event.notice === "project_instructions_skipped") return skippedInstructionsText(event.detail);
-      return event.notice === "first_enable_in_place" ? FIRST_ENABLE_TEXT : event.detail;
+      return event.notice === "first_enable_in_place" ? FIRST_ENABLE_TEXT : REFS_UNREADABLE_TEXT;
     case "refused":
       return "status" in event ? `已拒绝（${event.reason}：${event.status}）` : `已拒绝（${event.reason}）`;
     default:

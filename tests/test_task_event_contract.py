@@ -43,6 +43,7 @@ def _payloads():
          "head": {"before": "refs/heads/main", "after": None}},
         {"kind": "sandbox_notice", "notice": "first_enable_in_place", "detail": "text"},
         {"kind": "sandbox_notice", "notice": "project_instructions_skipped", "detail": "CLAUDE.md: outside_workdir"},
+        {"kind": "sandbox_notice", "notice": "refs_unreadable", "detail": "text"},
         {"kind": "refused", "reason": "orchestrated", "status": "running"},
         *({"kind": "refused", "reason": reason.value} for reason in RefuseReason),
     ]
