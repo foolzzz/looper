@@ -486,12 +486,152 @@ def test_a_new_tip_that_is_missing_is_undecided_not_a_fast_forward(repo):
     assert verdict is refs.Ancestry.UNDECIDED
 
 
-def test_a_task_branch_turned_into_a_link_to_a_compared_branch_adds_no_link_report(repo):
+def _run_restores(repo, report) -> None:
+    """Every restore command in the order the report lists them; the task branch resolves after each one."""
+    for change in (*report.changes, *report.info):
+        git_safe.run(repo, *shlex.split(change.restore)[1:], check=True, capture_output=True)
+        git(repo, "rev-parse", "--verify", "refs/heads/main")  # never a dangling symbolic ref
+
+
+@pytest.mark.parametrize("target", ["refs/heads/a-fresh", "refs/heads/z-fresh", "refs/heads/other",
+                                    "refs/heads/looper/task-two/step"])  # created before or after main, moved, info
+def test_a_task_branch_turned_into_a_link_to_a_compared_branch_is_reported_and_restored_first(repo, target):
+    existed = git(repo, "for-each-ref", "--format=%(objectname)", target)
 
     def go():
         commit(repo, "b.txt")
-        git(repo, "update-ref", "refs/heads/other", git(repo, "rev-parse", "HEAD"))
-        git(repo, "symbolic-ref", "refs/heads/main", "refs/heads/other")
+        git(repo, "update-ref", target, git(repo, "rev-parse", "HEAD"))
+        git(repo, "symbolic-ref", "refs/heads/main", target)
+
+    async def active(_: str) -> bool:
+        return True
+
+    report = run(repo, go, active=active)
+    tip = git(repo, "rev-parse", target)
+    link = report.changes[0]  # ahead of every command that deletes or moves the target
+    assert link.ref == "refs/heads/main" and link.change is Change.MOVED and link.new == tip
+    assert link.restore == f"git update-ref --no-deref refs/heads/main {tip} {tip}"
+    assert [c.ref for c in (*report.changes, *report.info)] == ["refs/heads/main", target]
+    assert report.own_commits == 1
+    _run_restores(repo, report)
+    after = asyncio.run(refs.snapshot(repo))
+    assert after.symrefs == {} and after.refs["refs/heads/main"] == tip
+    assert after.refs.get(target, "") == existed and after.head == "refs/heads/main"
+
+
+def test_a_task_branch_retargeted_at_the_same_commit_is_reported_and_restorable(repo):
+    head = git(repo, "rev-parse", "HEAD")  # other is on the same commit
+    before = asyncio.run(refs.snapshot(repo))
+    report = run(repo, lambda: git(repo, "symbolic-ref", "refs/heads/main", "refs/heads/other"))
+    change, = report.changes
+    assert change.ref == "refs/heads/main" and change.change is Change.MOVED and change.old == change.new == head
+    assert change.restore == f"git update-ref --no-deref refs/heads/main {head} {head}"
+    assert report.own_commits == 0 and not report.needs_you
+    _run_restores(repo, report)
+    assert asyncio.run(refs.snapshot(repo)) == before
+
+
+def test_a_task_branch_reset_and_then_linked_to_a_new_branch_goes_back_before_the_branch_is_removed(repo):
+    commit(repo, "b.txt")
+    tip, first = git(repo, "rev-parse", "HEAD"), git(repo, "rev-parse", "HEAD~1")
+    before = asyncio.run(refs.snapshot(repo))
+
+    def go():
+        git(repo, "update-ref", "refs/heads/a-fresh", first)
+        git(repo, "symbolic-ref", "refs/heads/main", "refs/heads/a-fresh")
+
     report = run(repo, go)
+    link = report.changes[0]
+    assert link.ref == "refs/heads/main" and link.change is Change.NON_FAST_FORWARD
+    assert link.restore == f"git update-ref --no-deref refs/heads/main {tip} {first}"
+    _run_restores(repo, report)
+    assert asyncio.run(refs.snapshot(repo)) == before
+
+
+@pytest.mark.parametrize("branch, reset", [("main", False), ("main", True), ("other", False)])
+def test_the_restore_of_a_branch_turned_into_a_link_refuses_after_a_later_commit(repo, branch, reset):
+    commit(repo, "b.txt")
+    ref = f"refs/heads/{branch}"
+
+    def go():
+        if branch == "main":
+            if reset:
+                git(repo, "reset", "-q", "--hard", "HEAD~1")
+            else:
+                commit(repo, "c.txt")
+        start = git(repo, "rev-parse", ref)
+        if branch == "other":
+            start = git(repo, "commit-tree", "-p", start, "-m", "turn", "HEAD^{tree}")
+        git(repo, "update-ref", "refs/hidden/x", start)
+        git(repo, "symbolic-ref", ref, "refs/hidden/x")
+
+    report = run(repo, go)
+    change = by_ref(report)[ref]
+    later = git(repo, "commit-tree", "-p", change.new, "-m", "later", "HEAD^{tree}")
+    git(repo, "update-ref", ref, later)  # through the link, after the report was written
+    assert git(repo, "rev-parse", "refs/hidden/x") == later
+    refused = git_safe.run(repo, *shlex.split(change.restore)[1:], capture_output=True)
+    assert refused.returncode != 0
+    assert git(repo, "rev-parse", ref) == later and git(repo, "symbolic-ref", ref) == "refs/hidden/x"
+    assert shlex.split(change.restore)[-1] == change.new
+    git(repo, "update-ref", ref, change.new)  # still on the reported commit: the command applies
+    git_safe.run(repo, *shlex.split(change.restore)[1:], check=True, capture_output=True)
+    assert ref not in asyncio.run(refs.snapshot(repo)).symrefs
+
+
+@pytest.mark.parametrize("target", ["refs/heads/a-fresh", "refs/heads/main"])  # removed, or moved back
+def test_a_new_link_is_restored_before_the_command_that_moves_or_removes_its_target(repo, target):
+    commit(repo, "b.txt")
+    before = asyncio.run(refs.snapshot(repo))
+
+    def go():
+        if target == "refs/heads/main":
+            git(repo, "reset", "-q", "--hard", "HEAD~1")
+        else:
+            git(repo, "update-ref", target, git(repo, "rev-parse", "HEAD"))
+        git(repo, "symbolic-ref", "refs/heads/other", target)
+
+    report = run(repo, go)
+    _run_restores(repo, report)
+    assert asyncio.run(refs.snapshot(repo)) == before
+
+
+def _link_main_before_the_turn(repo, target: str) -> tuple[str, str]:
+    commit(repo, "b.txt")
+    tip, first = git(repo, "rev-parse", "HEAD"), git(repo, "rev-parse", "HEAD~1")
+    git(repo, "update-ref", target, tip)
+    git(repo, "symbolic-ref", "refs/heads/main", target)
+    return tip, first
+
+
+@pytest.mark.parametrize("target", ["refs/heads/other", "refs/tags/v1", "refs/heads/looper/task-two/step"])
+def test_a_reset_on_a_task_branch_already_linked_to_a_compared_ref_is_a_rewrite(repo, target):
+    tip, first = _link_main_before_the_turn(repo, target)
+    before = asyncio.run(refs.snapshot(repo))
+
+    async def active(_: str) -> bool:
+        return True
+
+    report = run(repo, lambda: git(repo, "reset", "-q", "--hard", "HEAD~1"), active=active)
+    change = report.changes[0]
+    assert change.ref == "refs/heads/main" and change.change is Change.NON_FAST_FORWARD
+    assert (change.old, change.new) == (tip, first) and report.own_commits == 0
+    assert change.restore == f"git update-ref --no-deref {target} {tip} {first}"
+    assert [c.ref for c in (*report.changes, *report.info)] == ["refs/heads/main", target]  # the target once
+    git_safe.run(repo, *shlex.split(change.restore)[1:], check=True, capture_output=True)
+    assert asyncio.run(refs.snapshot(repo)) == before
+
+
+def test_a_commit_on_a_task_branch_already_linked_to_a_compared_ref_is_the_tasks_own(repo):
+    _link_main_before_the_turn(repo, "refs/heads/other")
+    report = run(repo, lambda: commit(repo, "c.txt"))
     assert report.own_commits == 1
     assert [c.ref for c in report.changes] == ["refs/heads/other"]  # its own change, reported once under its name
+
+
+def test_an_undecided_move_on_a_task_branch_already_linked_to_a_compared_ref_is_unverified(repo, monkeypatch):
+    _link_main_before_the_turn(repo, "refs/heads/other")
+    monkeypatch.setattr(refs, "OBJECT_LIMIT", 10)
+    report = run(repo, lambda: commit(repo, "c.txt"))
+    assert report.changes[0].ref == "refs/heads/main"
+    assert report.changes[0].change is Change.FAST_FORWARD_UNVERIFIED

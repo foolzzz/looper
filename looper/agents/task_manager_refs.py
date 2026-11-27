@@ -127,9 +127,12 @@ def _quote(name: str) -> str:
 
 
 def _restore(ref: str, change: Change, old: str | None, new: str | None,
-             old_target: str | None = None, new_target: str | None = None, linked: str | None = None) -> str:
+             old_target: str | None = None, new_target: str | None = None, linked: str | None = None,
+             direct: str | None = None) -> str:
     name = _quote(ref)
-    if linked is not None:  # the link is intact and only its target (in a namespace not compared) moved
+    if direct is not None:  # the task branch became a link: a direct ref on ``direct`` again, if it still reads ``new``
+        return f"git update-ref --no-deref {name} {direct} {new}"
+    if linked is not None:  # the link is intact: what moved, and what to move back, is its target
         # --no-deref like every other restore: the name was a direct ref when this was written (%(symref) peels to
         # the end of the chain); if it has become a symbolic ref since, only that name changes.
         return f"git update-ref --no-deref {_quote(linked)} {old} {new}"
@@ -137,7 +140,7 @@ def _restore(ref: str, change: Change, old: str | None, new: str | None,
         return f"git symbolic-ref {name} {_quote(old_target)}"
     if new_target is not None:
         return (f"git symbolic-ref --delete {name}" if old is None
-                else f"git update-ref --no-deref {name} {old}")
+                else f"git update-ref --no-deref {name} {old} {new}")
     if change is Change.CREATED:
         return f"git update-ref --no-deref -d {name} {new}"
     if change is Change.DELETED:
@@ -146,11 +149,13 @@ def _restore(ref: str, change: Change, old: str | None, new: str | None,
 
 
 def _change(ref: str, old: str | None, new: str | None, *, plain_move: bool = False, unverified: bool = False,
-            old_target: str | None = None, new_target: str | None = None, linked: str | None = None) -> RefChange:
+            old_target: str | None = None, new_target: str | None = None, linked: str | None = None,
+            direct: str | None = None) -> RefChange:
     kind = (Change.CREATED if old is None else Change.DELETED if new is None
             else Change.MOVED if plain_move else Change.FAST_FORWARD_UNVERIFIED if unverified
             else Change.NON_FAST_FORWARD)
-    return RefChange(display(ref), kind, old, new, _restore(ref, kind, old, new, old_target, new_target, linked))
+    return RefChange(display(ref), kind, old, new,
+                     _restore(ref, kind, old, new, old_target, new_target, linked, direct))
 
 
 def _refused(exc: git_safe.RepositoryRefused):
@@ -357,27 +362,32 @@ async def compare(work_dir: str | Path, before: Snapshot, after: Snapshot, *, ta
         if old == new and old_target == new_target:
             continue
         pointers = {"old_target": old_target, "new_target": new_target}
+        compared = old_target in before.refs or old_target in after.refs
         if old_target is not None and old_target == new_target:
             # An intact link follows its target, and the target's own change is reported under its own name, but
             # only when the target is itself compared (``refs/heads``, ``refs/tags``). A target outside them
             # (``refs/remotes/*`` is deliberately never read, RFC 25.4; anything else is not listed) would
-            # otherwise hide the link's value change, so it is reported: erring toward reporting.
-            if old_target in before.refs or old_target in after.refs:
+            # otherwise hide the link's value change, so it is reported: erring toward reporting. The task branch
+            # is judged below either way; undoing what it reads through an intact link means moving the target.
+            if compared and ref != task_ref:
                 continue
             pointers = {"linked": old_target}
         if ref == task_ref:
-            # Ancestry is decided from the two commits whatever the task branch is linked to; a link only adds
-            # its own report when it descends.
+            # Ancestry is decided from the two commits whatever the task branch is linked to.
             verdict, count = ((await fast_forward(work_dir, old, new))
                               if old is not None and new is not None else (Ancestry.DIVERGES, 0))
+            retargeted = old_target != new_target
+            if retargeted and new_target is not None and old is not None:
+                # Its commits stay when they descend; otherwise it goes back to where it was.
+                pointers["direct"] = new if verdict is Ancestry.DESCENDS else old
             if verdict is Ancestry.DESCENDS:
                 own_commits = count
-                targets = (old_target, new_target)
-                # A target inside the compared namespaces reports its own change; only one outside them needs this.
-                if any(t is not None and t not in before.refs and t not in after.refs for t in targets):
-                    changes.append(_change(ref, old, new, plain_move=True, **pointers))
-                continue
-            changes.append(_change(ref, old, new, unverified=verdict is Ancestry.UNDECIDED, **pointers))
+                # A changed link is always its own report; an intact one only into a namespace not compared.
+                if not (retargeted or (old_target is not None and not compared)):
+                    continue
+            # Ahead of the other entries: its command may have to run before one that deletes or moves its target.
+            changes.insert(0, _change(ref, old, new, plain_move=verdict is Ancestry.DESCENDS,
+                                      unverified=verdict is Ancestry.UNDECIDED, **pointers))
             continue
         change = _change(ref, old, new, plain_move=True, **pointers)
         owner = ref.removeprefix(LOOPER).split("/", 1) if ref.startswith(LOOPER) else None
@@ -386,6 +396,10 @@ async def compare(work_dir: str | Path, before: Snapshot, after: Snapshot, *, ta
             continue
         changes.append(change)
         needs_you = True
+    # The restore of a name that is now a changed link checks the value read through its target, so it comes before
+    # any command that moves or deletes a target. Stable: the task branch stays first within its group.
+    links = {display(ref) for ref, target in after.symrefs.items() if before.symrefs.get(ref) != target}
+    changes.sort(key=lambda change: change.ref not in links)
     return Report(tuple(changes), tuple(info), before.head, after.head, own_commits, needs_you)
 
 
