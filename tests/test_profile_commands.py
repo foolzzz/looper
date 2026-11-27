@@ -38,7 +38,7 @@ def test_database_handshake_has_a_deadline(tmp_path):
         result = _show(root)
         elapsed = time.monotonic() - before
         assert (result.returncode, result.stdout, result.stderr) == (0, b"", b"")
-        assert elapsed < 2
+        assert elapsed < profile_commands.TIMEOUT_SECONDS
         # Positive control: the client really connected, rather than failing before the blocking handshake.
         listener.settimeout(0.2)
         connection, _ = listener.accept()
@@ -50,10 +50,21 @@ def test_synchronous_worker_hang_is_killed(tmp_path, monkeypatch, capsys):
     worker.write_text("#!/bin/sh\nexec sleep 10\n")
     worker.chmod(0o755)
     monkeypatch.setattr(profile_commands.sys, "executable", str(worker))
+    monkeypatch.setattr(profile_commands, "TIMEOUT_SECONDS", 0.3)
     before = time.monotonic()
     assert profile_commands.show(object()) == 0
     assert time.monotonic() - before < 2
     assert capsys.readouterr() == ("", "")
+
+
+def test_slow_child_import_is_not_cut_off_by_the_hang_guard(tmp_path, monkeypatch, capsys):
+    # A child that needs longer than the old 1 s wall clock before it reaches its own bounded work.
+    worker = tmp_path / "slow-import-python"
+    worker.write_text("#!/bin/sh\nsleep 1.5\nprintf 'About:\\n- slow import'\n")
+    worker.chmod(0o755)
+    monkeypatch.setattr(profile_commands.sys, "executable", str(worker))
+    assert profile_commands.show(object()) == 0
+    assert capsys.readouterr() == ("About:\n- slow import", "")
 
 
 @pytest.mark.parametrize("output", [b"x" * (profile_commands.MAX_OUTPUT_BYTES + 1), b"\xff"])
