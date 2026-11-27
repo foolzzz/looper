@@ -17,6 +17,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
+from looper.agents import git_safe
 from looper.agents.bus import MessageBus
 from looper.agents.message import MessageEnvelope, MessageType, planner_address, worker_address
 from looper.agents.runtimes import ADAPTERS
@@ -731,14 +732,19 @@ def test_verification_cannot_push_to_developer_branch(tmp_path, verification_run
     asyncio.run(asyncio.wait_for(scenario(), 15))
 
 
-@pytest.mark.parametrize("shared_source", [False, True])
-def test_verification_checkout_keeps_uncommitted_staged_objects(tmp_path, shared_source):
+def test_verification_checkout_refuses_a_source_that_borrows_objects(tmp_path):
+    upstream = _repo(tmp_path / "upstream")
     root = tmp_path / "repo"
-    if shared_source:
-        upstream = _repo(tmp_path / "upstream")
-        _git(tmp_path, "clone", "--shared", str(upstream), str(root))
-    else:
-        _repo(root)
+    _git(tmp_path, "clone", "--shared", str(upstream), str(root))
+    with pytest.raises(git_safe.RepositoryRefused) as refused:
+        worker._verification_checkout(str(root), tmp_path / "backup")
+    assert refused.value.reason == "object_alternates"
+    assert not (tmp_path / "backup" / "checkout").exists()
+
+
+def test_verification_checkout_keeps_uncommitted_staged_objects(tmp_path):
+    root = tmp_path / "repo"
+    _repo(root)
     (root / "new").write_text("staged content")
     _git(root, "add", "new")
     (root / "new").write_text("unstaged content")
