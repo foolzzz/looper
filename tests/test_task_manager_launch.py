@@ -214,8 +214,18 @@ def test_real_cli_direct_turn_saves_session(tmp_path, monkeypatch):
     monkeypatch.setattr(task_manager_settings, "load_task_manager_settings", settings)
 
     class Ops:
+        def issue(self, task_id):
+            return "probe-token"
+
+        async def library_with_server(self, library, runtime_root, token):
+            return library
+
         def tool_hook(self, *args, **kwargs):
             return hook("launch-hook")
+
+        def begin_turn(self, token): pass
+        def end_turn(self, token): pass
+        def revoke(self, token): pass
 
     class Sink:
         def __init__(self):
