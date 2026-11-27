@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import subprocess
 import sys
 from dataclasses import replace
 from unittest.mock import AsyncMock
@@ -120,6 +121,8 @@ for line in sys.stdin:
             os.rename(old, new)
         if text.endswith('!'):
             Path(new).write_text('moved and edited by the turn\\n')
+    if text.startswith('sh:'):
+        subprocess.run(text[3:], shell=True, check=True)
     if text.startswith('revert:'):
         subprocess.run(['git', 'checkout', '--', text[7:]], check=True)
     if text.startswith('edit:'):
@@ -140,6 +143,8 @@ for line in sys.stdin:
     async def create(self, db, task_id="task-one", *, status="draft", workspace_mode="in_place", path=None):
         directory = path or self.root / task_id
         directory.mkdir(parents=True, exist_ok=True)
+        if not (directory / ".git").exists():  # a direct session records the task directory's branch
+            subprocess.run(["git", "init", "-q", "-b", "main", str(directory)], check=True, capture_output=True)
         project = await projects.create_project(name=f"Synthetic project {task_id}", work_dir=str(directory), pool=db)
         await tasks.create_task(task_id=task_id, requirement="Implement the synthetic feature", project_id=project["id"],
             status=status, work_dir=str(directory), workspace_mode=workspace_mode, workspace_dir=str(directory), pool=db)
