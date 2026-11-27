@@ -409,6 +409,8 @@ class TaskManagerAgent:
                 command = command_for(launch)
                 env = task_manager_safety.environment(launch, self.task_id,
                                                       drop=task_manager_sandbox.dropped_env(launch) if direct else ())
+                if direct and (warning := task_manager_sandbox.credential_warning(env)):
+                    logger.warning("task Manager %s: %s", self.task_id, warning)
                 settings_file = command[command.index("--settings") + 1] if "--settings" in command else ""
                 if direct:
                     problem = await task_manager_safety.gate(executable, cwd=reopened.work_dir, environment=launch.runtime.environment(launch),

@@ -210,3 +210,11 @@ def test_copilot_login_home_is_denied_by_default_and_where_its_variable_points(t
     assert real(home / ".copilot") in sandbox.read_deny_paths({"HOME": str(home)}, tmp_path / "runtime")
     found = sandbox.read_deny_paths({"HOME": str(home), "COPILOT_HOME": str(elsewhere)}, tmp_path / "runtime")
     assert real(elsewhere) in found
+
+
+def test_credential_warning_names_the_variables_and_never_the_values():
+    secret = "sk-ant-very-secret-value"
+    warning = sandbox.credential_warning({"ANTHROPIC_API_KEY": secret, "ANTHROPIC_AUTH_TOKEN": "tok-secret", "PATH": "/bin"})
+    assert "ANTHROPIC_API_KEY" in warning and "ANTHROPIC_AUTH_TOKEN" in warning and "sandboxed Bash" in warning
+    assert secret not in warning and "tok-secret" not in warning
+    assert sandbox.credential_warning({"PATH": "/bin", "ANTHROPIC_MODEL": "m", "ANTHROPIC_API_KEY": ""}) is None

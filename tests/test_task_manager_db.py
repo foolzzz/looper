@@ -305,3 +305,33 @@ def test_a_direct_session_drops_proxy_variables_and_the_ssh_agent_an_orchestrate
     assert "GH_TOKEN" not in direct and direct.get("ANTHROPIC_MODEL") == "x"  # the CLI's own profile variables stay
     # The positive control: the same variables reach an orchestrated session, so the drop is the direct one's own.
     assert {"HTTPS_PROXY", "https_proxy", "SSH_AUTH_SOCK", "GH_TOKEN"} <= set(orchestrated)
+
+
+@pytest.mark.parametrize("with_key", [True, False])
+def test_a_direct_launch_warns_about_a_provider_credential_without_logging_it(monkeypatch, tmp_path, setup_manager,
+                                                                               caplog, with_key):
+    secret = "sk-ant-never-in-a-log"
+    if with_key:
+        monkeypatch.setenv("ANTHROPIC_API_KEY", secret)
+    else:
+        monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+
+    async def start(self, command, **kwargs):
+        pass
+
+    monkeypatch.setattr(tm.ResidentClaude, "start", start)
+
+    async def check(db):
+        executable, create = setup_manager
+        task_id = await create(db)
+        pool = tm.TaskManagerPool(tmp_path / "runtime", executable, max_resident=lambda: 1)
+        try:
+            with caplog.at_level("WARNING"):
+                await pool.agent(task_id).prepare()
+        finally:
+            await pool.shutdown()
+    run_db(check, monkeypatch)
+    warned = [r.getMessage() for r in caplog.records if "sandboxed Bash can read" in r.getMessage()]
+    assert bool(warned) is with_key and secret not in caplog.text
+    if with_key:
+        assert "ANTHROPIC_API_KEY" in warned[0]

@@ -104,6 +104,19 @@ def dropped_env(launch: Any) -> tuple[str, ...]:
     return (*DIRECT_DROPPED_ENV, *profile_env_dropped((name for name, _ in launch.env), (name for name, _ in binding.env)))
 
 
+def credential_warning(environment: Mapping[str, str]) -> str | None:
+    """A warning for a direct session whose environment (the service's or an Agent Profile's) holds a long-lived
+    model-provider credential: the CLI needs it, and the sandboxed Bash can print it. Names only, never values."""
+    import re
+
+    names = sorted(name for name, kind in RUNTIME_ENV_CLASS.items()
+                   if kind == "keep" and re.search(r"(KEY|TOKEN)$", name) and environment.get(name))
+    if not names:
+        return None
+    return (f"the direct session's environment holds {', '.join(names)}, which the sandboxed Bash can read; prefer a "
+            "subscription login or a short-lived token over a long-lived key in the service environment or the profile's env")
+
+
 def tool_allowed(name: str, servers: Iterable[str]) -> bool:
     """Whether ``name`` may be in the launched session's tool list: the built-ins, the expected extras, or a tool of
     one of ``servers`` (Looper's own and the allowed MCP servers)."""
