@@ -502,6 +502,36 @@ def test_a_cancelled_call_leaves_no_lark_cli_behind(tmp_path: Path) -> None:
         os.kill(int(pid_file.read_text()), 0)
 
 
+def test_a_cancel_arriving_as_a_call_finishes_is_not_lost(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Lost, the channel's outbound loop went back to waiting for its next message, and stop() waited for it for good.
+    async def main() -> None:
+        class Finishing:
+            returncode = 0
+
+            async def communicate(self) -> tuple[bytes, bytes]:
+                loop = asyncio.get_running_loop()
+                finished = loop.create_future()
+                # The call finishes and the cancellation arrives in one step of the loop.
+                loop.call_soon(lambda: (finished.set_result((b"{}", b"")), call.cancel()))
+                return await finished
+
+            def kill(self) -> None:
+                raise ProcessLookupError
+
+            async def wait(self) -> int:
+                return 0
+
+        async def start(*argv: str, **kwargs: Any) -> Finishing:
+            return Finishing()
+
+        monkeypatch.setattr(asyncio, "create_subprocess_exec", start)
+        call = asyncio.ensure_future(lark_cli.run(["lark-cli"]))
+        with pytest.raises(asyncio.CancelledError):
+            await call
+
+    asyncio.run(main())
+
+
 @pytest.mark.parametrize("key", ["app_id_env", "app_secret_env"])
 def test_retired_app_settings_are_rejected(key: str) -> None:
     with pytest.raises(ValueError, match="unsupported Lark setting"):
