@@ -386,3 +386,91 @@ def test_a_link_into_a_namespace_that_is_not_compared_still_reports_when_its_tar
     assert (change.old, change.new) == (tip, first)
     git_safe.run(repo, *shlex.split(change.restore)[1:], check=True, capture_output=True)
     assert git(repo, "rev-parse", target) == tip and git(repo, "symbolic-ref", "refs/heads/up") == target
+
+
+def _link_main_to_hidden(repo):
+    git(repo, "update-ref", "refs/hidden/x", git(repo, "rev-parse", "HEAD"))
+    git(repo, "symbolic-ref", "refs/heads/main", "refs/hidden/x")
+
+
+def test_a_commit_on_a_task_branch_that_is_a_link_is_not_called_a_rewrite(repo):
+    _link_main_to_hidden(repo)
+    report = run(repo, lambda: commit(repo, "b.txt"))
+    assert report.own_commits == 1
+    assert all(c.change is not Change.NON_FAST_FORWARD for c in report.changes)
+    change, = report.changes  # the link's value moved with its uncompared target
+    assert change.ref == "refs/heads/main" and change.change is Change.MOVED
+
+
+def test_a_task_branch_turned_into_a_link_after_a_commit_is_not_called_a_rewrite(repo):
+    def go():
+        commit(repo, "b.txt")
+        git(repo, "update-ref", "refs/hidden/x", git(repo, "rev-parse", "HEAD"))
+        git(repo, "symbolic-ref", "refs/heads/main", "refs/hidden/x")
+    report = run(repo, go)
+    assert report.own_commits == 1
+    assert all(c.change is not Change.NON_FAST_FORWARD for c in report.changes)
+    assert [c.change for c in report.changes] == [Change.MOVED]
+
+
+def test_a_real_reset_behind_a_link_on_the_task_branch_is_still_a_rewrite(repo):
+    commit(repo, "b.txt")
+    _link_main_to_hidden(repo)
+    report = run(repo, lambda: git(repo, "reset", "-q", "--hard", "HEAD~1"))
+    change, = report.changes
+    assert change.change is Change.NON_FAST_FORWARD and report.own_commits == 0
+
+
+def test_the_restore_of_a_link_into_an_uncompared_namespace_does_not_follow_a_symbolic_ref(repo):
+    commit(repo, "b.txt")
+    tip, first = git(repo, "rev-parse", "HEAD"), git(repo, "rev-parse", "HEAD~1")
+    git(repo, "update-ref", "refs/hidden/x", tip)
+    git(repo, "symbolic-ref", "refs/heads/up", "refs/hidden/x")
+    report = run(repo, lambda: git(repo, "update-ref", "refs/hidden/x", first))
+    change, = report.changes
+    assert "--no-deref" in shlex.split(change.restore)
+    git(repo, "symbolic-ref", "refs/hidden/y", "refs/heads/other")  # the name has since become a symbolic ref
+    other = git(repo, "rev-parse", "other")
+    git_safe.run(repo, *shlex.split(change.restore.replace("refs/hidden/x", "refs/hidden/y"))[1:],
+                 capture_output=True)
+    assert git(repo, "rev-parse", "other") == other  # nothing it points at moved
+    git_safe.run(repo, *shlex.split(change.restore)[1:], check=True, capture_output=True)
+    assert git(repo, "rev-parse", "refs/hidden/x") == tip and git(repo, "rev-parse", "other") == other
+
+
+def _sha_of(repo, *args, stdin=None):
+    return subprocess.run(["git", "-C", str(repo), *args], input=stdin, check=True, capture_output=True,
+                          text=True).stdout.strip()
+
+
+def test_a_new_tip_that_is_not_a_commit_is_undecided_not_a_fast_forward(repo):
+    old = git(repo, "rev-parse", "HEAD")
+    blob = _sha_of(repo, "hash-object", "-w", "--stdin", stdin="x")
+    verdict, _ = asyncio.run(refs.fast_forward(repo, old, blob))
+    assert verdict is refs.Ancestry.UNDECIDED
+
+
+def test_a_commit_with_a_malformed_parent_line_is_undecided_not_a_fast_forward(repo):
+    old = git(repo, "rev-parse", "HEAD")
+    tree = git(repo, "rev-parse", "HEAD^{tree}")
+    ident = "T <t@example.invalid> 1700000000 +0000"
+    body = f"tree {tree}\nparent nothex\nauthor {ident}\ncommitter {ident}\n\nx\n"
+    bad = _sha_of(repo, "hash-object", "-t", "commit", "-w", "--literally", "--stdin", stdin=body)
+    verdict, _ = asyncio.run(refs.fast_forward(repo, old, bad))
+    assert verdict is refs.Ancestry.UNDECIDED
+
+
+def test_a_walk_that_times_out_is_undecided_not_a_fast_forward(repo, monkeypatch):
+    old = git(repo, "rev-parse", "HEAD")
+    commit(repo, "b.txt")
+    monkeypatch.setattr(refs, "GIT_TIMEOUT_SEC", 0)
+    verdict, _ = asyncio.run(refs.fast_forward(repo, old, git(repo, "rev-parse", "HEAD")))
+    assert verdict is refs.Ancestry.UNDECIDED
+
+
+def test_an_error_while_deciding_is_undecided_not_a_fast_forward(repo, monkeypatch):
+    async def boom(*_args):
+        raise RuntimeError("boom")
+    monkeypatch.setattr(refs, "_reaches", boom)
+    verdict, _ = asyncio.run(refs.fast_forward(repo, "a" * 40, "b" * 40))
+    assert verdict is refs.Ancestry.UNDECIDED

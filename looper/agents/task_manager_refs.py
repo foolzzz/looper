@@ -130,7 +130,9 @@ def _restore(ref: str, change: Change, old: str | None, new: str | None,
              old_target: str | None = None, new_target: str | None = None, linked: str | None = None) -> str:
     name = _quote(ref)
     if linked is not None:  # the link is intact and only its target (in a namespace not compared) moved
-        return f"git update-ref {_quote(linked)} {old} {new}"
+        # --no-deref like every other restore: the name was a direct ref when this was written (%(symref) peels to
+        # the end of the chain); if it has become a symbolic ref since, only that name changes.
+        return f"git update-ref --no-deref {_quote(linked)} {old} {new}"
     if old_target is not None:  # a symbolic ref goes back to what it pointed at
         return f"git symbolic-ref {name} {_quote(old_target)}"
     if new_target is not None:
@@ -364,11 +366,14 @@ async def compare(work_dir: str | Path, before: Snapshot, after: Snapshot, *, ta
                 continue
             pointers = {"linked": old_target}
         if ref == task_ref:
+            # Ancestry is decided from the two commits whatever the task branch is linked to; a link only adds
+            # its own report when it descends.
             verdict, count = ((await fast_forward(work_dir, old, new))
-                              if old is not None and new is not None and not old_target and not new_target
-                              else (Ancestry.DIVERGES, 0))
+                              if old is not None and new is not None else (Ancestry.DIVERGES, 0))
             if verdict is Ancestry.DESCENDS:
                 own_commits = count
+                if any(pointers.values()):
+                    changes.append(_change(ref, old, new, plain_move=True, **pointers))
                 continue
             changes.append(_change(ref, old, new, unverified=verdict is Ancestry.UNDECIDED, **pointers))
             continue
