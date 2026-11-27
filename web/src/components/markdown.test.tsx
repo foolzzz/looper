@@ -113,6 +113,27 @@ describe("remote content in agent Markdown", () => {
       expect(textOf(render(`[${text.trim()}](https://evil.example/x)`))).not.toContain("(evil.example)");
     });
 
+  it.each([
+    ["https text, http href", "https://evil.example/x", "http://evil.example/x"],
+    ["http text, https href", "http://evil.example/x", "https://evil.example/x"],
+    ["other port", "https://evil.example/x", "https://evil.example:8443/x"],
+    ["href userinfo", "https://evil.example/x", "https://bank.example@evil.example/x"],
+  ])("keeps the host label when the text differs from the destination in more than the path: %s", (_n, text, href) => {
+    expect(textOf(render(`[${text}](${href})`))).toContain("(evil.example");
+  });
+
+  it("marks a same-site link whose text is an address on another site", () => {
+    vi.stubGlobal("location", new URL("http://dashboard.example/"));
+    try {
+      const html = render("[https://evil.example/x](http:evil.example/x)");
+      expect(html).not.toContain("_blank");
+      expect(textOf(html)).toContain("(this site)");
+      expect(textOf(render("[http://dashboard.example/x](/x) [t](#tasks/t1)"))).not.toContain("(this site)");
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
   it("keeps footnote ids, aria attributes and link titles on internal links", () => {
     const html = render("text[^1] [a](#x \"Where to\")\n\n[^1]: note");
     expect(html).toContain('id="user-content-fnref-1"');

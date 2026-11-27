@@ -36,17 +36,24 @@ export function remoteHost(href: string | undefined): string | null {
   return target.kind === "external" ? target.host : null;
 }
 
-// The label is dropped only when the text is itself an address on that host without credentials.
-function namesTheHost(text: ReactNode, host: string): boolean {
-  if (typeof text !== "string") return false;
+function absoluteWebAddress(text: ReactNode): URL | null {
+  if (typeof text !== "string") return null;
   try {
     const url = new URL(text.trim());
-    return /^https?:$/.test(url.protocol) && !url.username && !url.password && url.host === host
-      // A Unicode or encoded spelling parses to the same host but reads differently, so the ASCII host must be in the text.
-      && text.toLowerCase().includes(host);
+    return /^https?:$/.test(url.protocol) ? url : null;
   } catch {
-    return false;
+    return null;
   }
+}
+
+// The label is dropped only when the text is an address with the very same origin as the destination (scheme, host and
+// port), neither side carries credentials, and the ASCII host appears literally in the text (a Unicode, full-width or
+// encoded spelling parses to the same host but reads differently).
+function namesTheDestination(text: ReactNode, destination: URL): boolean {
+  const shown = absoluteWebAddress(text);
+  return shown !== null && typeof text === "string" && shown.origin === destination.origin
+    && !shown.username && !shown.password && !destination.username && !destination.password
+    && text.toLowerCase().includes(destination.host);
 }
 
 /**
@@ -57,11 +64,21 @@ export function RemoteLink({ href, className, children, ...extra }: { href: stri
   & Omit<AnchorHTMLAttributes<HTMLAnchorElement>, "href" | "target" | "rel" | "referrerPolicy" | "className" | "children">) {
   const target = linkTarget(href);
   if (target.kind === "blocked") return <span>{children}</span>;
-  if (target.kind === "internal") return <a href={href} className={className} {...extra}>{children}</a>; // footnote ids, aria and title stay
+  if (target.kind === "internal") {
+    // Text that reads as another site's address must not pass for a link that stays here.
+    const shown = absoluteWebAddress(children);
+    const elsewhere = shown !== null && shown.origin !== new URL(globalThis.location?.href || "http://localhost/").origin;
+    return (
+      <a href={href} className={className} {...extra}>
+        {children}
+        {elsewhere && <span className="text-muted-foreground"> (this site)</span>}
+      </a>
+    ); // footnote ids, aria and title stay
+  }
   return (
     <a href={href} title={extra.title} target="_blank" rel="noopener noreferrer" referrerPolicy="no-referrer" className={className}>
       {children}
-      {!namesTheHost(children, target.host) && <span className="text-muted-foreground"> ({target.host})</span>}
+      {!namesTheDestination(children, target.url) && <span className="text-muted-foreground"> ({target.host})</span>}
     </a>
   );
 }
