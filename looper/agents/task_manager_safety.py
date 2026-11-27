@@ -6,7 +6,7 @@ import json
 import os
 import re
 from collections import Counter
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
@@ -37,6 +37,20 @@ class Source(str, Enum):
 class Reason(str, Enum):
     REVIEW_HOOK_DISABLED = "review_hook_disabled"
     CLI_UNVERIFIED = "cli_unverified"
+    SANDBOX_UNAVAILABLE = "sandbox_unavailable"
+    READBACK_UNAVAILABLE = "readback_unavailable"
+    LAUNCH_SETTING_MISMATCH = "launch_setting_mismatch"
+    MCP_SET_MISMATCH = "mcp_set_mismatch"
+    MCP_LAUNCHER_UNSAFE = "mcp_launcher_unsafe"
+    NETWORK_POLICY_INVALID = "network_policy_invalid"
+    WORKSPACE_NOT_REPO_ROOT = "workspace_not_repo_root"
+    WORKSPACE_IS_HOME = "workspace_is_home"
+    WORKSPACE_CONTAINS_TRUSTED_CONFIG = "workspace_contains_trusted_config"
+    WORKSPACE_IN_SYSTEM_DIR = "workspace_in_system_dir"
+    WORKSPACE_OVERLAPS_SESSION = "workspace_overlaps_session"
+    WORKTREE_UNSUPPORTED = "worktree_unsupported"
+    HEAD_MOVED = "head_moved"
+    HEAD_DETACHED = "head_detached"
 
 
 class Predicate(str, Enum):
@@ -84,9 +98,15 @@ class Refusal:
 refusal_counts: Counter[tuple[str, str, str]] = Counter()
 
 
-def environment(launch: Launch, task_id: str) -> dict[str, str]:
+def record_refusal(reason: Reason, phase: Literal["launch", "resume", "turn"], version: str = "unknown") -> None:
+    """Count one refused launch, resume or turn (``task_manager_launch_refusals_total``)."""
+    refusal_counts[(reason.value, phase, version)] += 1
+
+
+def environment(launch: Launch, task_id: str, *, drop: Sequence[str] = ()) -> dict[str, str]:
+    """The task Manager's process environment; ``drop`` names variables a direct session must not carry."""
     env = launch.runtime.environment(launch)
-    for key in (*HOOK_ENV, child_env.AGENT_RUN_ENV):
+    for key in (*HOOK_ENV, child_env.AGENT_RUN_ENV, *drop):
         env.pop(key, None)
     env[child_env.TASK_MANAGER_ENV] = task_id
     return env
@@ -106,8 +126,13 @@ def _hits(source: Source, values: Mapping[str, Any]) -> list[str]:
 
 
 async def gate(executable: str, *, cwd: str | Path, environment: Mapping[str, str],
-               phase: Literal["launch", "resume"], settings_file: Path | None = None) -> Refusal | None:
-    """Read every source before every direct launch or resume; no model process is started here."""
+               phase: Literal["launch", "resume"], settings_file: Path | None = None,
+               review_hook: bool = True) -> Refusal | None:
+    """Read every source before every direct launch or resume; no model process is started here.
+
+    ``review_hook=False`` is a direct session that carries no Looper hook (the sandbox is its boundary): the
+    ``RULES`` checks, which guard that hook against being switched off, are skipped. The CLI version check runs on
+    every launch and resume either way."""
     home = Path(environment.get("HOME", str(Path.home())))
     config = Path(environment.get("CLAUDE_CONFIG_DIR", str(home / ".claude"))).expanduser()
     sources = [(Source.USER, config / "settings.json"), (Source.USER_LOCAL, config / "settings.local.json"),
@@ -117,7 +142,7 @@ async def gate(executable: str, *, cwd: str | Path, environment: Mapping[str, st
     if settings_file is not None:
         sources.append((Source.LAUNCH, settings_file))
     notices = []
-    for source, path in sources:
+    for source, path in (sources if review_hook else []):
         try:
             values = json.loads(path.read_text(encoding="utf-8"))
             if not isinstance(values, dict):
@@ -131,7 +156,8 @@ async def gate(executable: str, *, cwd: str | Path, environment: Mapping[str, st
             notices.append(f"{path}: {key} disables the review hook; remove this setting before retrying.")
     # Parent variables are checked even though the child allowlist removes them. Profile/provider variables are
     # checked by the caller's unsanitized environment too; environment() clears them from the final child.
-    for key in dict.fromkeys((*_hits(Source.PROCESS, os.environ), *_hits(Source.PROCESS, environment))):
+    for key in dict.fromkeys((*_hits(Source.PROCESS, os.environ), *_hits(Source.PROCESS, environment))
+                             if review_hook else ()):
         notices.append(f"process environment: {key} disables the review hook; remove this variable before retrying.")
     if notices:
         refusal = Refusal(Reason.REVIEW_HOOK_DISABLED, "\n".join(notices))
@@ -157,5 +183,5 @@ async def gate(executable: str, *, cwd: str | Path, environment: Mapping[str, st
         refusal = Refusal(Reason.CLI_UNVERIFIED,
                           f"Claude Code {version} is unverified for the task Manager review hook; "
                           f"use {VERIFIED_CLI_VERSION} or run the required CLI upgrade probe.", version)
-    refusal_counts[(refusal.reason.value, phase, refusal.version)] += 1
+    record_refusal(refusal.reason, phase, refusal.version)
     return refusal

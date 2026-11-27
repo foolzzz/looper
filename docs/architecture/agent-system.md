@@ -947,7 +947,8 @@ precedence over that role and never inherit the owning Manager's profile. Other
 runtimes are refused rather than substituted.
 
 Direct launches append the fixed task instructions and a bounded, fenced brief.
-They retain the operator's settings, memory and skills, but load MCP servers only from
+They run inside Claude Code's Bash sandbox with the fixed configuration described below, keep the
+operator's user-level settings, memory and skills, and load MCP servers only from
 a generated `--mcp-config` file under `--strict-mcp-config`: Looper's own server plus the
 operator's servers named in `tasks.conversations.manager_mcp` (default none; read and written
 through `task_conversations.get` and `task_conversations.update`, operator-only; up to 20 unique
@@ -964,14 +965,63 @@ task Manager refuse to start with `mcp_unresolved` (visible in the task thread l
 refusals); none is skipped. A plugin's own MCP servers never load under strict mode (verified
 with Claude Code 2.1.332), so they cannot be allowed by name; configure the server as a user server instead. A changed list restarts the resident on its next turn. Orchestrated or
 unrecoverable workspaces use the existing isolated read-only command. The child
-receives `LOOPER_TASK_MANAGER`, never `LOOPER_AGENT_RUN`. An enabled outbound review
-requires an actual review hook. Before every direct launch or resume, a typed
-settings-source table rejects hook-disabling settings and environment variables;
-unreadable settings also fail closed. Managed policy checks are statically
-confirmed only. Claude Code must match the verified version constant; upgrading
-it requires rerunning the local fake-model launch probe. Refusals name the file
-and key or CLI version, and increment a reason/phase/version counter visible in
-`manager_metrics.get` while work mode is enabled.
+receives `LOOPER_TASK_MANAGER`, never `LOOPER_AGENT_RUN`. A direct session carries no
+outbound-review hook: the sandbox is its boundary. Before every direct launch or resume, Claude Code
+must match the verified version constant (`cli_unverified`); upgrading it requires rerunning
+the local fake-model launch probes. The orchestrated read-only session keeps its review hook and the
+typed settings-source table that rejects hook-disabling settings and environment variables
+(`review_hook_disabled`; unreadable settings fail closed; managed policy checks are statically
+confirmed only). Refusals name the file and key or CLI version, and increment a reason/phase/version
+counter visible in `manager_metrics.get` while work mode is enabled.
+
+#### Task Manager direct session: sandbox
+
+A direct session runs the model's Bash inside Claude Code's sandbox (macOS only for now: elsewhere
+it refuses with `sandbox_unavailable` and starts no process). The task directory is untrusted, so
+the boundary is code, not configuration: `task_manager_sandbox` renders the `--settings` file and
+the launch flags, and no `tasks.conversations.*` field, environment variable or project file can loosen
+them.
+
+- **Launch flags.** `--setting-sources user` (no project or local layer: project settings, hooks,
+  `env`, `.mcp.json`, skills, commands, agents and `CLAUDE.md` do not load), `--strict-mcp-config`
+  and `--tools` with the built-in allowlist `BUILTIN_TOOLS` (today only `Bash`). Everything else
+  Claude Code ships is unavailable (`Read`, `Grep`, `Glob`, `Write`, `Edit`, `NotebookEdit`, `WebFetch`,
+  `WebSearch`, `Monitor`, `SendMessage`, `EnterWorktree`, `LSP`, the cron tools, `TodoWrite`, `Skill`,
+  `ToolSearch`), because the sandbox covers only the Bash children. Files are read and written through
+  the sandboxed Bash. `EndConversation` and `WaitForMcpServers` may appear in the tool list and are
+  tolerated (`UNREMOVABLE_TOOLS`).
+- **Pinned keys.** `pins()` lists every key of the settings reference that could widen the boundary
+  with its pinned value and how the effective value must compare (`Check`: equal, array equal,
+  contains, absent): `sandbox.enabled`, `failIfUnavailable`, `allowUnsandboxedCommands: false`,
+  `excludedCommands: []`, `network.strictAllowlist`, the empty Unix-socket, Mach-lookup and
+  `allowWrite` lists, `disableSkillShellExecution`, `crossSessionInbound`, and
+  `env.ENABLE_TOOL_SEARCH=false` (so the allowed MCP servers' tools load without `ToolSearch`).
+  Hooks are not pinned: v1 injects no Looper hook. The settings file is named by the SHA-256 of its
+  content and is part of the launch signature, so a change in any pinned value, the network
+  allowlist or the read deny list restarts the session.
+- **Write scope.** The task directory and the sandbox's temporary directory; `.git/hooks`,
+  `.git/config`, `.git/info` and `.git/modules` of the task directory are write-denied.
+- **Read deny list.** `read_deny_paths()`: the operator's credential directories (`~/.ssh`, `~/.aws`,
+  `~/.gnupg`, credential stores under `~/.config`, `.netrc`, `.git-credentials`), Claude's credential
+  file and `.claude.json`, and Looper's runtime root. It is a blacklist and cannot say "read only the
+  task directory"; `~/.config` as a whole is not denied because git reads `~/.config/git`. What a
+  model reads can leave through the exits listed in the task-sessions RFC (section 25.5).
+- **MCP servers.** Definitions come from the user scope only. Looper starts every stdio server,
+  its own included, through a wrapper (`operator_mcp.wrap`: `/bin/sh -c 'cd "$1" && shift && exec
+  "$@"'` into a private directory of the runtime root, outside every task directory), because Claude
+  Code would otherwise start them in the task directory, outside the sandbox, where the model can plant
+  files. As defense in depth `launcher_problem` refuses an allowed server whose launcher resolves
+  code from the working directory or starts another program (`npx`, `uvx`, `bunx`, `uv run`,
+  `pnpm dlx`, `yarn dlx`, `deno run`, `bundle exec`, `go run`, `cargo run`, `python -m` without `-I`
+  including `-mpkg`, `env` and the shells, a relative command, script or `cwd`; names are matched after
+  resolving symbolic links, case-insensitively, with the subcommand found anywhere in the arguments)
+  or whose `env` sets a code-loading variable (`PYTHONPATH`, `NODE_PATH`, `NODE_OPTIONS`, `RUBYOPT`,
+  ...), with `mcp_launcher_unsafe`. Fingerprints are of the
+  user-scope definition before wrapping (`operator_mcp.fingerprints`); a comparison with what the CLI
+  reports applies `operator_mcp.unwrap` first and checks `is_wrapped`.
+- **Verification.** `tests/test_task_manager_sandbox_probe.py` runs the real command against the real
+  CLI and a local scripted Messages API (`LOOPER_CLAUDE_PROBE_BIN`), with positive controls; rerun it
+  before changing `VERIFIED_CLI_VERSION`.
 
 `tasks.managers.max_resident` defaults to 6 (1–20). Admission can reclaim the least
 recently used idle process; a 60-second ticker reclaims processes idle for 30

@@ -16,7 +16,7 @@ from typing import Any, Literal, Protocol
 
 from ...db import activity, agent_sessions, projects, tasks
 from .. import operator_mcp, outbound_hook, step_workspaces, task_budget, task_conversations_settings
-from .. import task_manager_safety, task_manager_settings, task_workspaces
+from .. import task_manager_safety, task_manager_sandbox, task_manager_settings, task_workspaces
 from ..agent_settings import Access, Launch
 from ..claude_cli import ClaudeRunRecorder, ResidentClaude
 from ..library import EMPTY_LIBRARY
@@ -68,6 +68,21 @@ class RefuseReason(str, Enum):
     CLI_UNVERIFIED = "cli_unverified"
     MANAGER_ANSWERS_OFF = "manager_answers_off"
     MCP_UNRESOLVED = "mcp_unresolved"
+    # The direct session's sandbox boundary (``task_manager_sandbox``); other cards raise most of these.
+    SANDBOX_UNAVAILABLE = "sandbox_unavailable"
+    READBACK_UNAVAILABLE = "readback_unavailable"
+    LAUNCH_SETTING_MISMATCH = "launch_setting_mismatch"
+    MCP_SET_MISMATCH = "mcp_set_mismatch"
+    MCP_LAUNCHER_UNSAFE = "mcp_launcher_unsafe"
+    NETWORK_POLICY_INVALID = "network_policy_invalid"
+    WORKSPACE_NOT_REPO_ROOT = "workspace_not_repo_root"
+    WORKSPACE_IS_HOME = "workspace_is_home"
+    WORKSPACE_CONTAINS_TRUSTED_CONFIG = "workspace_contains_trusted_config"
+    WORKSPACE_IN_SYSTEM_DIR = "workspace_in_system_dir"
+    WORKSPACE_OVERLAPS_SESSION = "workspace_overlaps_session"
+    WORKTREE_UNSUPPORTED = "worktree_unsupported"
+    HEAD_MOVED = "head_moved"
+    HEAD_DETACHED = "head_detached"
 
 
 def _off_text(reason: RefuseReason) -> str:
@@ -250,6 +265,14 @@ class TaskManagerAgent:
         self.running: asyncio.Task[None] | None = None
         self.mcp_fingerprints: dict[str, str] = {}  # of the allowed servers launched, to compare with what ran
         self.mcp_files: set[str] = set()  # generated configs holding the operator's server definitions
+        # What the direct session's launch command carries (``task_manager_sandbox``): the network allowlist (set by
+        # the network policy, empty until then) and the read deny list. The readback builds its expected values
+        # from these same two attributes, so the command and the readback cannot disagree.
+        self.allowed_domains: tuple[str, ...] = ()
+        self.read_deny: tuple[str, ...] = ()
+
+    def _mcp_cwd(self) -> Path:
+        return self.pool.runtime_root / "task-managers" / self.task_id / "mcp-cwd"
 
     async def prepare(self, *, sink: TurnSink | None = None) -> tuple[Mapping[str, Any], Any, Launch, SystemPrompt]:
         """Read configuration afresh; no launch bypasses the direct-mode review checks."""
@@ -295,13 +318,18 @@ class TaskManagerAgent:
         direct = (tasks.interaction_mode(task["status"]) is tasks.InteractionMode.DIRECT
                   and reopened.mode is task_workspaces.ReopenMode.WRITE)
         self.mode = "direct" if direct else "orchestrated"
+        phase: Literal["launch", "resume"] = "resume" if self.session_id else "launch"
+        if direct and (unsupported := task_manager_sandbox.platform_problem()) is not None:
+            task_manager_safety.record_refusal(task_manager_safety.Reason.SANDBOX_UNAVAILABLE, phase)
+            raise Refused(RefuseReason.SANDBOX_UNAVAILABLE, unsupported)
         async def configure() -> Launch:
             library, hook = EMPTY_LIBRARY, None
             if self.pool.ops is not None:
                 if self.token is None:
                     self.token = self.pool.ops.issue(self.task_id)
                 library = await self.pool.ops.library_with_server(library, self.pool.runtime_root, self.token)
-            if outbound_hook.known_enabled():
+            # A direct session carries no Looper hook: the sandbox is its boundary (``task_manager_sandbox``).
+            if not direct and outbound_hook.known_enabled():
                 try:
                     hook = (self.pool.ops.tool_hook(self.token, self.task_id, self.pool.runtime_root,
                                                    self.pool.claude_bin, library) if self.pool.ops else None)
@@ -311,15 +339,22 @@ class TaskManagerAgent:
                     raise Refused(RefuseReason.OUTBOUND_REVIEW_UNAVAILABLE, "The outbound review hook is unavailable.")
             run = Launch(settings=settings, library=library, role=None,
                          access=Access.FULL if direct else Access.READ_ONLY, tool_hook=hook)
-            if direct and (allowed := task_conversations_settings.manager_mcp()):
+            if direct:
+                allowed = task_conversations_settings.manager_mcp()
                 try:
+                    # Every stdio server, Looper's own included, starts through ``operator_mcp.wrap``.
                     run = replace(run, library=await operator_mcp.library_with_allowed(
                         library, self.pool.runtime_root, allowed,
-                        environment=run.runtime.environment(run)))
+                        environment=run.runtime.environment(run),
+                        cwd=self._mcp_cwd()))
                 except operator_mcp.UnresolvedServers as exc:
                     raise Refused(RefuseReason.MCP_UNRESOLVED, str(exc)) from exc
-                self.mcp_files.add(run.library.mcp_config)
-                self.mcp_fingerprints = operator_mcp.fingerprints(run.library, allowed)
+                except operator_mcp.UnsafeLauncher as exc:
+                    task_manager_safety.record_refusal(task_manager_safety.Reason.MCP_LAUNCHER_UNSAFE, phase)
+                    raise Refused(RefuseReason.MCP_LAUNCHER_UNSAFE, str(exc)) from exc
+                if run.library.mcp_config and run.library.mcp_config != library.mcp_config:
+                    self.mcp_files.add(run.library.mcp_config)
+                self.mcp_fingerprints = operator_mcp.fingerprints(run.library, allowed, self._mcp_cwd().resolve())
             else:
                 self.mcp_fingerprints = {}
             return run
@@ -335,13 +370,21 @@ class TaskManagerAgent:
         executable = launch.executable(self.pool.claude_bin)
 
         def command_for(launch: Launch) -> list[str]:
+            if direct:
+                self.read_deny = task_manager_sandbox.read_deny_paths(launch.runtime.environment(launch),
+                                                                      self.pool.runtime_root, self.pool.config_file)
             return (launch.runtime.operator_resident_command(executable, cwd=reopened.work_dir, prompt_file=prompt_file,
-                                                             launch=launch, settings_dir=root / "settings")
+                                                             launch=launch, settings_dir=root / "settings",
+                                                             allowed_domains=self.allowed_domains,
+                                                             read_deny=self.read_deny)
                     if direct else launch.runtime.resident_command(executable, cwd=reopened.work_dir,
                                                                    prompt_file=prompt_file, launch=launch))
 
         command = command_for(launch)
-        env = task_manager_safety.environment(launch, self.task_id)
+        dropped = task_manager_sandbox.DIRECT_DROPPED_ENV if direct else ()
+        env = task_manager_safety.environment(launch, self.task_id, drop=dropped)
+        # The file's name is the SHA-256 of its content, so the signature covers the pinned values, the network
+        # allowlist and the read deny list: a change in any of them restarts the session.
         settings_file = command[command.index("--settings") + 1] if "--settings" in command else ""
         signature = (self.mode, reopened.work_dir, launch.profile.id, launch.model, launch.effort, launch.profile.provider, prompt.sha256, settings_file,
                      task_conversations_settings.manager_mcp() if direct else ())
@@ -360,12 +403,15 @@ class TaskManagerAgent:
             restarting = not self.resident.started or self.resident.stale(signature)
             if restarting:
                 await self.resident.stop()
+                if direct:  # a fresh, empty start directory for the servers of the new process
+                    await asyncio.to_thread(operator_mcp.reset_cwd, self._mcp_cwd())
                 launch = await configure()
                 command = command_for(launch)
-                env = task_manager_safety.environment(launch, self.task_id)
+                env = task_manager_safety.environment(launch, self.task_id, drop=dropped)
+                settings_file = command[command.index("--settings") + 1] if "--settings" in command else ""
                 if direct:
                     problem = await task_manager_safety.gate(executable, cwd=reopened.work_dir, environment=launch.runtime.environment(launch),
-                        phase="resume" if self.session_id else "launch", settings_file=Path(settings_file))
+                        phase=phase, settings_file=Path(settings_file), review_hook=False)
                     if problem is not None:
                         await self.resident.stop(kill=True)
                         raise Refused(RefuseReason(problem.reason.value), problem.notice)
@@ -517,9 +563,11 @@ def current_pool() -> TaskManagerPool | None:
 
 class TaskManagerPool:
     def __init__(self, runtime_root: Path, claude_bin: str, *, ops: Any = None,
-                 max_resident: Callable[[], int], clock: Callable[[], float] = time.monotonic) -> None:
+                 max_resident: Callable[[], int], clock: Callable[[], float] = time.monotonic,
+                 config_file: Path | None = None) -> None:
         global _pool
         self.runtime_root, self.claude_bin, self.ops = runtime_root, claude_bin, ops
+        self.config_file = config_file  # Looper's ops file when it lives outside the runtime root (read deny list)
         self.max_resident, self.clock = max_resident, clock
         self.agents: dict[str, TaskManagerAgent] = {}
         self.closing = False

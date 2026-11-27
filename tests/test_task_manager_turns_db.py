@@ -46,6 +46,7 @@ def test_refusals_start_no_process_and_keep_status(monkeypatch, tmp_path, native
                 record = await llm_records.start_record(agent_id=f"task-manager-{task_id}", task_id=task_id, pool=db)
                 await llm_records.finish_record(record, status="completed", cost_usd=2, pool=db)
             elif reason == "outbound_review_unavailable":
+                await tasks.update_task_status(task_id, "pending", pool=db)  # a direct session has no review hook
                 monkeypatch.setattr(outbound_hook, "known_enabled", lambda: True)
             elif reason == "workspace":
                 monkeypatch.setattr(task_workspaces, "reopen", AsyncMock(side_effect=task_workspaces.TaskWorkspaceError("unavailable")))
@@ -68,7 +69,8 @@ def test_refusals_start_no_process_and_keep_status(monkeypatch, tmp_path, native
             if reason in ("work_mode_off", "manager_answers_off"):
                 assert await db.fetchval("SELECT count(*) FROM agent_sessions WHERE agent_id LIKE 'task-manager-%'") == 0
                 assert not pool.agent(task_id).resident.started
-            assert (await tasks.get_task(task_id, pool=db))["status"] == "draft"
+            kept = "pending" if reason == "outbound_review_unavailable" else "draft"
+            assert (await tasks.get_task(task_id, pool=db))["status"] == kept
             if reason == "manager_answers_off":
                 assert "tasks.conversations.manager_answers" in sink.finals[0][0] and "task_conversations.update" in sink.finals[0][0]
             if reason == "runtime_unsupported":
