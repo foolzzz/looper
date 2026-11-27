@@ -90,7 +90,7 @@ def launcher_problem(definition: Mapping[str, Any]) -> str | None:
     python = base.startswith("python")
     if python and "-m" in args and "-I" not in args[:args.index("-m")]:
         return "python -m"
-    if not posixpath.isabs(command):
+    if "/" in command and not posixpath.isabs(command):  # a bare name resolves through PATH
         return "relative_command"
     if (python or base in _INTERPRETERS) and not (python and ("-m" in args or "-c" in args)):
         script = next((arg for arg in args if not arg.startswith("-")), None)
@@ -132,8 +132,8 @@ def wrap(definition: Mapping[str, Any], cwd: Path) -> dict[str, Any]:
     if "command" not in definition or is_wrapped(definition):
         return dict(definition)
     command = definition["command"]
-    if not isinstance(command, str) or not posixpath.isabs(command):
-        raise ValueError("an MCP server's command must be an absolute path")
+    if not isinstance(command, str) or not command or ("/" in command and not posixpath.isabs(command)):
+        raise ValueError("an MCP server's command must be an absolute path or a bare name resolved through PATH")
     return {**definition, "command": _SHELL,
             "args": [*_WRAPPER_HEAD, str(cwd), command, *(str(arg) for arg in definition.get("args") or [])]}
 
@@ -178,20 +178,45 @@ def resolve(names: Sequence[str], *, environment: Mapping[str, str]) -> dict[str
         raise UnresolvedServers(names, f" ({exc})") from exc
     if missing := [name for name in names if name not in user]:
         raise UnresolvedServers(missing, " as a user-scope server")
+    # A command with a path separator that is not absolute is resolved by Claude Code against the task directory
+    # (verified with 2.1.332), which the model can write. A bare name resolves through PATH.
+    if relative := [name for name in names if _relative_command(user[name])]:
+        raise UnresolvedServers(relative, " (a command with a path separator must be an absolute path; a relative "
+                                          "one would be resolved in the task directory)")
     return {name: user[name] for name in names}
 
 
+def _relative_command(definition: Mapping[str, Any]) -> bool:
+    command = definition.get("command")
+    return isinstance(command, str) and "/" in command and not posixpath.isabs(command)
+
+
+_KNOWN_FIELDS = frozenset({"type", "command", "args", "env", "headers", "url", "cwd"})
+
+
 def fingerprint_input(definition: Mapping[str, Any]) -> dict[str, Any]:
-    """What identifies a definition without its secrets: transport, command, args, the names of its variables and
-    headers, and a URL without userinfo and query."""
-    from urllib.parse import urlsplit
+    """What identifies a definition without its secrets: transport, command, args, ``cwd``, the names of its
+    variables and headers, a URL without userinfo and query values (its port and the sorted names of its query
+    parameters stay), and each unknown field as a hash of its value."""
+    from urllib.parse import parse_qsl, urlsplit
 
     url = definition.get("url")
     parts = urlsplit(url) if isinstance(url, str) else None
+    try:
+        port = parts.port if parts else None
+    except ValueError:
+        port = -1
+    shown = None
+    if parts and parts.hostname:
+        shown = f"{parts.scheme}://{parts.hostname}{f':{port}' if port else ''}{parts.path}"
     return {"transport": definition.get("type") or ("stdio" if "command" in definition else "http"),
             "command": definition.get("command"), "args": list(definition.get("args") or []),
+            "cwd": definition.get("cwd"),
             "env_keys": sorted(definition.get("env") or {}), "header_keys": sorted(definition.get("headers") or {}),
-            "url": f"{parts.scheme}://{parts.hostname}{parts.path}" if parts and parts.hostname else None}
+            "url": shown, "query_names": sorted(name for name, _ in parse_qsl(parts.query, keep_blank_values=True))
+            if parts else [],
+            "extra": {name: hashlib.sha256(json.dumps(value, sort_keys=True, default=str).encode("utf-8")).hexdigest()
+                      for name, value in sorted(definition.items()) if name not in _KNOWN_FIELDS}}
 
 
 def fingerprint(definition: Mapping[str, Any]) -> str:
@@ -205,7 +230,9 @@ def fingerprints(library: Any, names: Sequence[str]) -> dict[str, str]:
     from .runtimes import library_mcp_servers
 
     servers = library_mcp_servers(library)
-    return {name: fingerprint(unwrap(servers[name])) for name in names if name in servers}
+    if missing := [name for name in names if name not in servers]:
+        raise UnresolvedServers(missing, " (not in the generated --mcp-config)")
+    return {name: fingerprint(unwrap(servers[name])) for name in names}
 
 
 async def library_with_allowed(library: Any, runtime_root: Path, names: Sequence[str], *,
@@ -228,5 +255,25 @@ async def library_with_allowed(library: Any, runtime_root: Path, names: Sequence
             raise UnsafeLauncher(name, problem)
     cwd = await asyncio.to_thread(private_cwd, cwd)
     servers = {name: wrap(definition, cwd) for name, definition in {**own, **allowed}.items()}
-    path = await asyncio.to_thread(write_config, runtime_root, sorted(servers.items()))
+    # Beside the task Manager's own directory, not in the shared ``.local/mcp``: ``sweep_orphans`` removes these
+    # after a crash, and no other agent's configuration is in the way.
+    path = await asyncio.to_thread(lambda: write_config(runtime_root, sorted(servers.items()),
+                                                        directory=_config_directory(cwd)))
     return replace(library, mcp_config=str(path))
+
+
+def _config_directory(cwd: Path) -> Path:
+    return cwd.absolute().parent / "mcp"
+
+
+def sweep_orphans(runtime_root: Path) -> int:
+    """Remove the generated configs (they can hold secrets) that a crashed server left under
+    ``<runtime_root>/task-managers/*/mcp``; run at service start, when no task Manager is resident. Returns how many."""
+    removed = 0
+    for path in (runtime_root.absolute() / "task-managers").glob("*/mcp/*.json"):
+        try:
+            path.unlink()
+            removed += 1
+        except OSError:
+            pass
+    return removed
