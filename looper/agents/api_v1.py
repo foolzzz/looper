@@ -42,6 +42,7 @@ STATUS: dict[ErrorCode, str] = {
     ErrorCode.TASK_MANAGER_OFF: "409 Conflict",
     ErrorCode.TASK_MANAGER_BUSY: "409 Conflict",
     ErrorCode.TASK_MANAGER_RUNTIME_UNSUPPORTED: "400 Bad Request",
+    ErrorCode.NETWORK_POLICY_INVALID: "400 Bad Request",
     ErrorCode.EXPIRED: "410 Gone",
     ErrorCode.RATE_LIMITED: "429 Too Many Requests",
     ErrorCode.UNAVAILABLE: "503 Service Unavailable",

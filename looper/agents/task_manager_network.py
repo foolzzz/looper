@@ -128,3 +128,10 @@ SCOPE_TEXT = (
     "operator's responsibility."
 )
 
+
+async def allowed_domains(project_id: str) -> tuple[str, ...]:
+    """The project's stored allowlist, validated again: an entry this version refuses raises ``PolicyInvalid``."""
+    from ..db import task_manager_sandbox_policy
+
+    stored, _ = await task_manager_sandbox_policy.get(project_id)
+    return validate_domains(stored)
