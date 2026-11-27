@@ -6183,7 +6183,7 @@ prompt, name, turns and switch, changing or removing a provider, or adding
 items to the catalog.
 
 API clients run the same catalog. `ClientOps` wraps it for an API client: a request is a turn (a write runs; one of risk
-`high` answers 202 until `/api/v1/confirm`), and reads are not recorded. Attribution is kept: `client_id` on the
+`high` answers 202 until the client confirms its own request at `/api/v1/confirm`), and reads are not recorded. Attribution is kept: `client_id` on the
 conversation's threads, on the tasks it creates and on the Manager calls, and `via` is `client:<name>` for a call made
 through the API and `manager:loopercli` for one the Manager made in a client conversation. The Manager sees such a
 message with the line `Channel: loopercli, client "<name>" …`, and a task created in a client conversation reports its
@@ -9804,8 +9804,8 @@ belongs only to global worker/reviewer role layers, not project layers or manage
 
 Operators execute these writes in one call, using the dashboard's existing dialogs. Clients receive
 202 `needs_confirmation` for shared-default updates, concurrency updates, raised/lifted effective spend
-caps, profile deletion and role-template deletion; confirm with `POST /api/v1/confirm` in the same
-client/session. Gate replies/end and wait controls execute directly. Client management is operator-only,
+caps, profile deletion and role-template deletion; the client confirms its own request with `POST /api/v1/confirm` in the same
+client/session (not an operator approval). Gate replies/end and wait controls execute directly. Client management is operator-only,
 with `Cache-Control: no-store` on responses; never log its one-time create token.
 
 The following request bodies illustrate the field nesting. Identifiers are placeholders for existing
@@ -9868,7 +9868,7 @@ separate tokens and is not exported to API clients. No unversioned operator rout
   `conflict` 409, `expired` 410, `rate_limited` 429, `unavailable` 503.
 - **Sessions and confirmation.** A client may send `X-Looper-Session` (1–64 characters of `A-Za-z0-9._:-`; `default`
   without it). For client tokens, a write of risk `high` answers 202 with a `confirmation_id`; `POST /api/v1/confirm` with that id runs it
-  only for the same client and the same session, within 10 minutes. Pending confirmations live in memory and are lost
+  only for the same client and the same session, within 10 minutes. This is the client confirming its own request, not an operator approval: the client that sends the request also sends the confirmation, and Looper does not check that a person saw it (the Manager's chat is different: there only the operator confirms). Pending confirmations live in memory and are lost
   when the server restarts. Operators execute high operations in one request; the dashboard keeps its existing
   confirmation dialogs and never silently confirms a client confirmation.
 - **Credentials are the operator's.** `auth.set_password` and `auth.clear_password` accept only an operator token,
