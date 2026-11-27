@@ -941,10 +941,17 @@ async def _run_agent_system_watched(
                 logger.exception("could not sweep the task worktrees")
 
         from . import task_conversations_settings, task_manager_settings
+        from . import operator_mcp
         from .tiers.task_manager import TaskManagerPool
         await task_manager_settings.seed_defaults(pool=pool)
+        try:
+            if swept := await asyncio.to_thread(operator_mcp.sweep_orphans, runtime_root):
+                logger.info("removed %d task Manager MCP configuration(s) a crashed server left", swept)
+        except Exception:
+            logger.exception("could not sweep the task Manager MCP configurations")
         task_managers = TaskManagerPool(runtime_root, claude_bin,
-                                        max_resident=task_conversations_settings.max_resident)
+                                        max_resident=task_conversations_settings.max_resident,
+                                        config_file=ops.path)
         if ownership is not None:
             ownership.push_async_callback(task_managers.shutdown)
 

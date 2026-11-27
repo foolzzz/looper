@@ -126,6 +126,8 @@ async def _rows(agent: Any) -> list[dict[str, Any]]:
     names = await _seen_names(stored)
     rows = [await _main_row(agent)]
     for row in stored:
+        if row["kind"] == SessionKind.CLIENT.value:
+            continue  # an API client's session is its own thread's, not one the operator lists or resets here
         rows.append(_view(agent, key=row["session_key"], kind=row["kind"],
                           name=display_name(row["kind"], row["chat"], names.get((row["channel_id"], row["chat"]))),
                           last_active_at=row["last_active_at"], totals=row["session_totals"],

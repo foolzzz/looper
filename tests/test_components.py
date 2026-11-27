@@ -447,7 +447,7 @@ def test_broken_runner_alias_is_not_silently_ignored(component_tree: Path):
         manifest_from_git(component_tree, "HEAD")
 
 
-@pytest.mark.parametrize("relative", ["looper/cli.py", "looper/__init__.py", "looper/skill/looper-skill/SKILL.md"])
+@pytest.mark.parametrize("relative", ["looper/cli.py", "looper/file_edit.py", "looper/__init__.py", "looper/skill/looper-skill/SKILL.md"])
 def test_cli_and_version_only_changes_do_not_restart(component_tree: Path, relative: str):
     before = manifest_from_directory(component_tree)
     target = component_tree / relative

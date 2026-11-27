@@ -21,7 +21,7 @@ OPERATIONS = (
               "Set the work-mode setting. On, the dashboard can create draft tasks; nothing else changes yet. "
               "manager_answers (default off) is a separate switch: on, a message to a task is answered by the task Manager "
               "instead of being refused. Max resident sets the task Manager process cap (1–20). "
-              "manager_mcp lists the names of your own MCP servers (user, local or project scope) the task Manager's "
+              "manager_mcp lists the names of your own MCP servers (user scope only) the task Manager's "
               "direct session may load beside Looper's; it loads no others, and a name that is not configured "
               "stops it from starting. Null restores defaults: disabled, off, 6 and none.",
               _object({"enabled": {"type": ["boolean", "null"]},

@@ -571,6 +571,10 @@ def _hold(stdin: _Stdin, cost: float) -> None:
 def _manager(scenarios_path: str, args: list[str], stdin: _Stdin, system_prompt: str) -> None:
     rpc = _mcp(args)
     cost, last_task = 0.0, ""
+    # A session that stops when idle starts again for its next turn: the last task id outlives the process.
+    memory = Path(scenarios_path).with_suffix(".last_task")
+    if memory.is_file():
+        last_task = memory.read_text(encoding="utf-8").strip()
     while (line := stdin.readline()) is not None:
         if not line.strip():
             continue
@@ -642,6 +646,8 @@ def _manager(scenarios_path: str, args: list[str], stdin: _Stdin, system_prompt:
             answer = json.loads(result["result"]["content"][0]["text"])
             created = answer.get("result") if isinstance(answer.get("result"), dict) else {}
             last_task = created.get("task_id") or last_task
+            if last_task:
+                memory.write_text(last_task, encoding="utf-8")
             answers.append((name, answer))
         cost += MANAGER_TURN_COST
         if held:
@@ -695,7 +701,8 @@ def main(argv: list[str]) -> int:
     # The role is in the task section: a Reviewer's names the step under review, a Worker's its step; the
     # Manager's prompt ends with Looper's tools contract.
     if ("## Looper's tools (required)" in system_prompt
-            or "You are Looper's chat assistant for this conversation." in system_prompt):
+            or "You are Looper's chat assistant for this conversation." in system_prompt
+            or "You are Looper's task assistant for one API client." in system_prompt):
         _manager(scenarios_path, args, stdin, system_prompt)
     elif "## Your answer (required; code reads it)" in system_prompt:  # a consult of a run's session
         _consult(script, stdin)

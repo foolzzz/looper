@@ -112,26 +112,29 @@ def test_a_stub_dialog_without_a_database_url_completes_and_marks_inputs_not_cap
 
 
 @pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
-def test_stable_dialog_records_the_recovered_whole_block(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_stable_dialog_records_the_client_session_apart(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "claude"))
-    case = next(dialog for dialog in dialogs.FAKE_DIALOGS if dialog.id == "stable_whole_after_client")
+    case = next(dialog for dialog in dialogs.FAKE_DIALOGS if dialog.id == "stable_client_session_apart")
     result, path = dialogs.run(mode="fake", dialogs=(case,), admin_url=str(DSN), out_dir=tmp_path,
                                stable_context=True)
     assert result["aborted"] is None
     row, = result["dialogs"]
     assert row["outcome"] == "pass", row
-    assert row["state_views"] == ["whole", "whole", "whole", "unchanged"]
+    assert row["state_views"] == ["whole", "whole", "unchanged", "unchanged"]
     turns = row["turns"]
     assert len(turns) == 4
     hashes = [turn["system_prompt_sha256"] for turn in turns]
-    assert len(hashes) == 4 and len(set(hashes)) == 1 and len(hashes[0]) == 64
+    # The operator's turns share one system prompt; the client's own session has its own (the client contract).
+    assert len(hashes) == 4 and hashes[0] == hashes[2] == hashes[3] != hashes[1] and len(hashes[0]) == 64
     assert all(isinstance(turn["prompt_layers"], dict) and turn["prompt_layers"].get("contract") for turn in turns)
     assert [turn["looper_state"]["view"] for turn in turns] == row["state_views"]
     assert [turn["looper_state"]["reason"] for turn in turns] == [
-        "new session", "operator profile omitted for client turn",
-        "another audience's block came after the last shown state", "unchanged"]
-    assert turns[2]["state_block"].startswith("Looper state (rev ")
-    assert "Eval Operator" in turns[2]["state_block"]
+        "new session", "new session", "unchanged", "unchanged"]
+    # The operator's block has the profile, the client's own whole block has the persona's name and no profile,
+    # and the client's turn leaves the operator's session with nothing to resend.
+    assert "Eval Operator" in turns[0]["state_block"]
+    assert "Atlas" in turns[1]["state_block"] and "Eval Operator" not in turns[1]["state_block"]
+    assert turns[2]["state_block"].startswith("Looper state: unchanged since rev ")
     assert turns[3]["state_block"].startswith("Looper state: unchanged since rev ")
     assert all(turn["turn_context"] is None for turn in turns)
     assert row["inputs_captured"] is True

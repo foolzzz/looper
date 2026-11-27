@@ -153,6 +153,16 @@ SIGN_IN_HEADERS = {
     "Content-Security-Policy": "default-src 'none'; manifest-src 'self'; img-src 'self'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'",
 }
 
+# Dashboard pages and assets load only from their own origin, so text an agent wrote cannot make the browser fetch
+# a remote URL. Same-origin referrer for the reason above; connect-src 'self' also covers same-origin SSE.
+DASHBOARD_HEADERS = {
+    "Referrer-Policy": "same-origin",
+    "Content-Security-Policy": (
+        "default-src 'none'; script-src 'self'; style-src 'self'; font-src 'self'; img-src 'self' data: blob:; "
+        "connect-src 'self'; manifest-src 'self'; worker-src 'self'; object-src 'none'; base-uri 'none'; "
+        "frame-ancestors 'none'; form-action 'self'"),
+}
+
 V1_HEADERS = {"Cache-Control": "no-store"}
 
 # The Manager's tools (``ops.service``).
@@ -2149,7 +2159,7 @@ class AgentHTTPServer:
         cookie = ""
         if page and self._operator_token and operator_auth.signs_in(headers or {}, peer_host=peer_host):
             cookie = f"Set-Cookie: {operator_auth.set_cookie(self._operator_token, port=self._port)}\r\n"
-        policy = "Referrer-Policy: same-origin\r\n" if page else ""  # the Sign out form POST needs a real Origin
+        policy = "".join(f"{key}: {value}\r\n" for key, value in DASHBOARD_HEADERS.items())
         response_headers = (
             f"HTTP/1.1 {HTTP_200}\r\n"
             f"Content-Type: {content_type}\r\n"

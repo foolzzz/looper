@@ -2286,7 +2286,8 @@ class ManagerAgent:
         elif not self._claude.started:
             # An idle library refresh may already have closed the resident before reaching this point.
             self._log_signature_change(prepared)
-        if not self._claude.started and session_routing.routes(self.agent_id):
+        if not self._claude.started and (session_routing.routes(self.agent_id)
+                                         or session_routing.always_routed(session.route)):
             # Room under the resident cap, or a wait for it (``SessionRouter.admit``).
             await token.step("resident_admission", self._router.admit(session, envelope))
         command = self._claude.command if self._claude.started else await token.step("claude_command", asyncio.to_thread(
@@ -2803,7 +2804,17 @@ class ManagerAgent:
 
     def _composed_prompt(self, agent_settings: AgentSettings) -> SystemPrompt:
         """The Manager's harness, its role prompt, then how to use Looper's tools (no project, no task)."""
-        if (policy := session_visibility.for_session(self._session_now().key, manager_id=self.agent_id)) is not None:
+        policy = session_visibility.for_session(self._session_now().key, manager_id=self.agent_id)
+        if policy is session_visibility.CLIENT_ALLOWLIST:
+            # An API client's session: its own contract and nothing of the operator's layers (harness, profile
+            # prompt, role prompt) or of the optional contracts (leads, vault, memory, recognition, research order,
+            # turn context).
+            return build_system_prompt(
+                harness=Harness("", Layer.BUILTIN), role_id=self.agent_id,
+                role=session_visibility.CLIENT_CONTRACT, recommended=True,
+                contract_name="CLIENT_SESSION_CONTRACT" + ("+STABLE_CONTEXT_CONTRACT" if self._stable_context else ""),
+                contract=state_view.STABLE_CONTEXT_CONTRACT if self._stable_context else "")
+        if policy is not None:
             contract = (state_view.STABLE_CONTEXT_CONTRACT
                         if self._stable_context and SessionInput.STABLE_BLOCK in policy.inputs else "")
             role = (session_visibility.PUBLIC_PROMPT_TOOLS if policy.tools else session_visibility.PUBLIC_PROMPT)
@@ -3658,7 +3669,9 @@ class ManagerAgent:
             if not self._pending_handoff:
                 return ""
         switch, handoff = self._pending_switch, self._pending_handoff
-        if session.key != MAIN_SESSION:  # a group's or another sender's chat: only its own (``group_session``)
+        # A group's or another sender's chat: only its own (``group_session``). An API client's session keeps main's
+        # brief, over the client's own chats only (``_recent_conversations``).
+        if session.key != MAIN_SESSION and session.route.kind is not session_routing.SessionKind.CLIENT:
             policy = session_visibility.for_session(session.key, manager_id=self.agent_id)
             if session.scope is not None and session.scope.resolved.audience is chat_scopes.ScopeAudience.OPERATOR:
                 policy = session_visibility.inputs_for(session.scope)
@@ -3691,10 +3704,13 @@ class ManagerAgent:
         """The recent conversation of each chat with the Manager, from the stored chat messages: the most recently
         active chats first, each its last messages oldest first, without the message this turn answers; at most
         ``CONVERSATION_MAX_CHARS``. Nothing when none is stored or they cannot be read."""
+        # An API client's session reads its own client's chats and no other; main's brief leaves the clients' chats out.
+        client = {"client_id": _message_client(envelope)[0]} \
+            if self._session_now().route.kind is session_routing.SessionKind.CLIENT else {}
         try:
             chats = await db_chat.recent_conversations(sessions=CONVERSATION_CHATS,
                                                        messages=CONVERSATION_MESSAGES + 1,
-                                                       manager_id=self.agent_id)
+                                                       manager_id=self.agent_id, **client)
         except Exception:
             logger.warning("%s: cannot read the recent chat messages for a new session", self._log, exc_info=True)
             return []
@@ -3926,8 +3942,17 @@ class ManagerAgent:
         """What every user turn starts with: persona, operator profile, projects, task templates, workflows, ready tasks, open gates
         and active goals, each section ending with a blank line."""
         if (policy := session_visibility.for_session(self._session_now().key, manager_id=self.agent_id)) is not None:
-            return (manager_persona_context.section(self.agent_id, manager_persona_context.Scope.NAME)
-                    if SessionInput.PERSONA_NAME in policy.inputs else [])
+            parts = (manager_persona_context.section(self.agent_id, manager_persona_context.Scope.NAME)
+                     if SessionInput.PERSONA_NAME in policy.inputs else [])
+            if policy is session_visibility.CLIENT_ALLOWLIST:
+                # An API client names a task's project, template or workflow: those lists, not the operator's
+                # profile, ready tasks, open gates or goals.
+                for item, section in ((SessionInput.PROJECTS, self._projects_section),
+                                      (SessionInput.TEMPLATES, self._templates_section),
+                                      (SessionInput.WORKFLOWS, self._workflows_section)):
+                    if item in policy.inputs:
+                        parts += await section()
+            return parts
         scope = self._session_now().scope
         if scope is not None and scope.resolved.audience is chat_scopes.ScopeAudience.OPERATOR:
             inputs = session_visibility.inputs_for(scope).inputs

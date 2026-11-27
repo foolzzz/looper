@@ -26,6 +26,7 @@ from typing import Any
 from urllib.parse import unquote, urlsplit
 import ipaddress
 
+from looper.agents import git_safe
 from .channel import RunStartError
 
 
@@ -175,8 +176,8 @@ def config_check(command: Sequence[str], config_dir: str | Path, *, protected: S
                 return ConfigCheck(PolicyReason.CONFIG_DIR_OVERLAPS, f"config dir overlaps protected path: {path}")
         if cwd is not None:
             current = Path(cwd).resolve(strict=True)
-            git_root = subprocess.run(["git", "rev-parse", "--show-toplevel"], cwd=current, capture_output=True,
-                                      text=True, timeout=5, check=True).stdout.strip()
+            git_root = git_safe.run(current, "rev-parse", "--show-toplevel", capture_output=True,
+                                    text=True, timeout=5, check=True).stdout.strip()
             root = Path(git_root).resolve(strict=True)
             # Grok 1.0.89 inspect confirms both sources are discovered even
             # with the Claude/Cursor compatibility MCP switches disabled.
@@ -231,8 +232,8 @@ def _protected_paths(cwd: str | Path, inspect_roots: Sequence[str | Path]) -> tu
         directory = Path(cwd).resolve(strict=True)
         paths = []
         for option in ("--show-toplevel", "--git-dir", "--git-common-dir"):
-            result = subprocess.run(["git", "rev-parse", option], cwd=directory, capture_output=True,
-                                    text=True, timeout=5, check=True)
+            result = git_safe.run(directory, "rev-parse", option, capture_output=True,
+                                  text=True, timeout=5, check=True)
             path = Path(result.stdout.strip())
             paths.append((path if path.is_absolute() else directory / path).resolve(strict=True))
     except (OSError, RuntimeError, ValueError, subprocess.SubprocessError) as exc:
