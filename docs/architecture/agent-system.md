@@ -667,7 +667,7 @@ Manager has no tool for it. The dashboard shows the task page's 指标 card and 
   shared resident session's history.
   `looper profile show [--runtime-root …] [--config …]` reads the same file with the same compiler and prints
   exactly the resident section's body, with no added newline, whether injection is on or off. It makes no model
-  call or schema/cache write. Its worker has a 1-second deadline covering imports, settings and file I/O;
+  call or schema/cache write. Its worker bounds its database and settings reads to 0.7 seconds after its imports, and the parent waits at most 4.5 seconds for the worker to exit;
   missing settings, an unavailable database, an invalid profile or timeout prints nothing and exits 0.
   Output is bounded by the compiler's 1500-character cap (at most 6000 UTF-8 bytes).
   `looper claude-code profile` prints the same text for the operator's own Claude Code
@@ -1748,7 +1748,7 @@ runs without the shared leader; OMP 18.4.3).
 `looper claude-code profile` reuses `looper profile show` and the Manager's single compiler; it reads the
 configured vault note locally through the database, without an HTTP request, model call or cache write.
 `--hook` returns SessionStart JSON whose `additionalContext` is that same text, capped at 3000 characters.
-The shared reader has a 1-second deadline (within the 2-second hook budget); an unavailable or empty profile,
+The shared reader gives its worker 4.5 seconds in total, including imports (the hook itself is cut off at 5 seconds); an unavailable or empty profile,
 errors and timeouts produce no stdout or stderr and exit 0. A stopped HTTP server alone does not prevent a read.
 Nothing is installed by default. `looper claude-code install hook --runtime-root <runtime root>` shows its
 user-settings path, added command and diff, asks for confirmation, backs up existing bytes and writes atomically.
