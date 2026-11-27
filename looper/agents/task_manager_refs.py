@@ -13,6 +13,7 @@ Every git call goes through ``git_safe`` (no repository code runs); ``refs/remot
 from __future__ import annotations
 
 import asyncio
+import heapq
 import logging
 import re
 import shlex
@@ -45,6 +46,7 @@ REFS_UNREADABLE_DETAIL = ("The branches and tags could not be read again after t
 _LINE_BREAKS = frozenset("\r\x0b\x0c\x1c\x1d\x1e\x85\u2028\u2029")
 WALK_LIMIT = 20000  # commits read when deciding fast-forward
 OBJECT_LIMIT = 1 << 20  # a commit object larger than this ends the walk undecided
+SYMREF_LIMIT = 200  # symbolic refs asked for their direct target (one git process each) in one snapshot
 _OID = re.compile(r"[0-9a-f]{40}(?:[0-9a-f]{24})?")
 
 
@@ -74,7 +76,8 @@ class Ancestry(Enum):
 class Snapshot:
     refs: Mapping[str, str]
     head: str | None  # the full name of the branch HEAD is on; None when detached
-    symrefs: Mapping[str, str] = field(default_factory=dict)  # ref -> the ref it points to, for symbolic refs
+    symrefs: Mapping[str, str] = field(default_factory=dict)  # ref -> the ref its chain ends at, for symbolic refs
+    hops: Mapping[str, str] = field(default_factory=dict)  # ref -> the ref it points to directly, for symbolic refs
 
 
 @dataclass(frozen=True)
@@ -158,6 +161,52 @@ def _change(ref: str, old: str | None, new: str | None, *, plain_move: bool = Fa
                      _restore(ref, kind, old, new, old_target, new_target, linked, direct))
 
 
+def _ordered(changes: list[tuple[str, RefChange]], info: list[tuple[str, RefChange]],
+             after: Snapshot) -> tuple[tuple[RefChange, ...], tuple[RefChange, ...]]:
+    """``changes`` and ``info`` (each entry with the ref its command writes) as they are listed, which is the order the
+    commands run in: ``changes`` first.
+
+    A command's current-value check reads through whatever its ref points to at the end of the turn, so it has to run
+    before any command that writes a ref further down that chain: outer link before inner link, every link before the
+    delete or move of its target. Otherwise the given order stays. An ``info`` entry that a change has to wait for is
+    listed among the changes. Links that form a cycle give no order: both lists then stay as given."""
+    below: dict[str, set[str]] = {}
+    for targets in (after.hops, after.symrefs):  # the chain's end too: a hop outside the compared refs is not read
+        for ref, target in targets.items():
+            below.setdefault(ref, set()).add(target)
+    entries = changes + info
+    written: dict[str, list[int]] = {}
+    for index, (ref, _) in enumerate(entries):
+        written.setdefault(ref, []).append(index)
+    later: list[set[int]] = []  # per entry, the entries whose commands have to run after its own
+    for ref, _ in entries:
+        seen, queue = {ref}, [ref]
+        while queue:
+            for target in below.get(queue.pop(), set()) - seen:
+                seen.add(target)
+                queue.append(target)
+        later.append({index for target in seen - {ref} for index in written.get(target, ())})
+    waiting = [0] * len(entries)
+    for followers in later:
+        for index in followers:
+            waiting[index] += 1
+    ready = [index for index, count in enumerate(waiting) if not count]  # ascending, so already a heap
+    order: list[int] = []
+    while ready:
+        order.append(heapq.heappop(ready))
+        for follower in later[order[-1]]:
+            waiting[follower] -= 1
+            if not waiting[follower]:
+                heapq.heappush(ready, follower)
+    if len(order) != len(entries):
+        logger.warning("task Manager refs: the symbolic refs form a cycle; the restore commands keep the order by name")
+        return tuple(c for _, c in changes), tuple(c for _, c in info)
+    changed = set(range(len(changes)))
+    listed = changed | {index for index in range(len(entries)) if later[index] & changed}
+    return (tuple(entries[i][1] for i in order if i in listed),
+            tuple(entries[i][1] for i in order if i not in listed))
+
+
 def _refused(exc: git_safe.RepositoryRefused):
     from .tiers.task_manager import RefuseReason, Refused
 
@@ -190,8 +239,27 @@ def _unreadable(detail: str):
     return Refused(RefuseReason.WORKSPACE, detail)
 
 
+async def _direct_targets(work_dir: str | Path, symrefs: Mapping[str, str]) -> dict[str, str]:
+    """The one-hop target of each symbolic ref (``%(symref)`` and a plain ``symbolic-ref`` both follow the whole
+    chain). It only orders the restore commands, so when it cannot be had (more than ``SYMREF_LIMIT`` symbolic refs,
+    a git without ``--no-recurse``) the snapshot goes without it and says so in the log."""
+    if len(symrefs) > SYMREF_LIMIT:
+        logger.warning("task Manager refs: %d symbolic refs, over the limit of %d; their direct targets are not read",
+                       len(symrefs), SYMREF_LIMIT)
+        return {}
+    hops: dict[str, str] = {}
+    for ref in symrefs:
+        code, target = await _git(work_dir, "symbolic-ref", "-q", "--no-recurse", ref)
+        if code:
+            logger.warning("task Manager refs: git could not read a direct symbolic-ref target (exit %d); restore "
+                           "commands are ordered without direct targets", code)
+            return {}
+        hops[ref] = target.removesuffix("\n")
+    return hops
+
+
 async def snapshot(work_dir: str | Path) -> Snapshot:
-    """The logical value of every branch and tag (and the target of a symbolic ref), and where ``HEAD`` points.
+    """The logical value of every branch and tag (and the targets of a symbolic ref), and where ``HEAD`` points.
     Packed refs, ``gc``, reflogs and index changes do not show in these values.
 
     A listing that cannot be told apart from another (a ref name holding a character ``str.splitlines`` breaks
@@ -218,7 +286,8 @@ async def snapshot(work_dir: str | Path) -> Snapshot:
     code, head = await _git(work_dir, "symbolic-ref", "-q", "HEAD")
     # Only the trailing newline goes: ref names may end in (or hold) Unicode whitespace.
     head = head.removesuffix("\n") if code == 0 else ""
-    return Snapshot(refs, head if head.startswith(HEADS) else None, symrefs)
+    return Snapshot(refs, head if head.startswith(HEADS) else None, symrefs,
+                    await _direct_targets(work_dir, symrefs))
 
 
 async def branch_problem(work_dir: str | Path, branch: str) -> str | None:
@@ -355,7 +424,10 @@ async def _active_task(task_id: str) -> bool:
 async def compare(work_dir: str | Path, before: Snapshot, after: Snapshot, *, task_branch: str, task_id: str,
                   active_task: Callable[[str], Awaitable[bool]] = _active_task) -> Report:
     """What changed between two snapshots, with no side effect."""
-    task_ref, own_commits, changes, info, needs_you = HEADS + task_branch, 0, [], [], False
+    # Each entry with the ref its command writes (an intact link's command writes the link's target).
+    changes: list[tuple[str, RefChange]] = []
+    info: list[tuple[str, RefChange]] = []
+    task_ref, own_commits, needs_you = HEADS + task_branch, 0, False
     for ref in sorted(before.refs.keys() | after.refs.keys()):
         old, new = before.refs.get(ref), after.refs.get(ref)
         old_target, new_target = before.symrefs.get(ref), after.symrefs.get(ref)
@@ -386,21 +458,22 @@ async def compare(work_dir: str | Path, before: Snapshot, after: Snapshot, *, ta
                 if not (retargeted or (old_target is not None and not compared)):
                     continue
             # Ahead of the other entries: its command may have to run before one that deletes or moves its target.
-            changes.insert(0, _change(ref, old, new, plain_move=verdict is Ancestry.DESCENDS,
-                                      unverified=verdict is Ancestry.UNDECIDED, **pointers))
+            changes.insert(0, (pointers.get("linked", ref), _change(
+                ref, old, new, plain_move=verdict is Ancestry.DESCENDS, unverified=verdict is Ancestry.UNDECIDED,
+                **pointers)))
             continue
-        change = _change(ref, old, new, plain_move=True, **pointers)
+        entry = (pointers.get("linked", ref), _change(ref, old, new, plain_move=True, **pointers))
         owner = ref.removeprefix(LOOPER).split("/", 1) if ref.startswith(LOOPER) else None
         if owner and len(owner) == 2 and owner[0] != task_id and await active_task(owner[0]):
-            info.append(change)
+            info.append(entry)
             continue
-        changes.append(change)
+        changes.append(entry)
         needs_you = True
-    # The restore of a name that is now a changed link checks the value read through its target, so it comes before
-    # any command that moves or deletes a target. Stable: the task branch stays first within its group.
+    # The order to start from: names that became or changed as links first, the task branch first among them.
+    # ``_ordered`` then moves only what a link's current-value check needs. Stable.
     links = {display(ref) for ref, target in after.symrefs.items() if before.symrefs.get(ref) != target}
-    changes.sort(key=lambda change: change.ref not in links)
-    return Report(tuple(changes), tuple(info), before.head, after.head, own_commits, needs_you)
+    changes.sort(key=lambda entry: entry[1].ref not in links)
+    return Report(*_ordered(changes, info, after), before.head, after.head, own_commits, needs_you)
 
 
 def payload(report: Report, report_id: int | None, message_id: str | None = None) -> dict[str, Any]:
