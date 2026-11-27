@@ -13,7 +13,7 @@ from ..chat_targets import HTTP_409, ChatTargetError, resolve_chat_target
 from ..ops import ErrorCode, OpError
 from ..tiers.manager import is_new_session_command
 from ..task_manager_settings import ModelSwitchRejection
-from ..task_manager_refs import FIRST_ENABLE_NOTICE, Change
+from ..task_manager_refs import NOTICES, Change
 
 
 _ID = {"type": "string", "minLength": 1}
@@ -56,7 +56,7 @@ SCHEMAS = {
                                                               ["before", "after"], closed=True)]},
                  "own_commits": {"type": "integer", "minimum": 0}, "needs_you": {"type": "boolean"}},
                 ["kind", "report_id", "changes", "info", "head", "own_commits", "needs_you"], closed=True),
-        _object({"kind": {"const": "sandbox_notice"}, "notice": {"enum": [FIRST_ENABLE_NOTICE]}, "detail": _STR},
+        _object({"kind": {"const": "sandbox_notice"}, "notice": {"enum": list(NOTICES)}, "detail": _STR},
                 ["kind", "notice", "detail"], closed=True),
         _object({"kind": {"const": "refused"}, "reason": {"const": "orchestrated"}, "status": _STR}, closed=True),
         _object({"kind": {"const": "refused"}, "reason": {"enum": [

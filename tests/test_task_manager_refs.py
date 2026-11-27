@@ -86,7 +86,7 @@ def test_other_branches_and_tags_are_reported_with_a_restore_command_that_undoes
     assert report.needs_you and report.own_commits == 0
     for change in found.values():  # every restore command, run through git_safe, returns the ref to its old state
         args = shlex.split(change.restore)
-        assert args[:2] == ["git", "update-ref"]
+        assert args[:3] == ["git", "update-ref", "--no-deref"]
         git_safe.run(repo, *args[1:], check=True, capture_output=True)
     assert asyncio.run(refs.snapshot(repo)).refs == before.refs
 
@@ -95,8 +95,8 @@ def test_restore_commands_quote_the_ref(repo):
     odd = "refs/heads/a$b;c"
     sha = git(repo, "rev-parse", "HEAD")
     report = run(repo, lambda: git(repo, "update-ref", odd, sha))
-    assert report.changes[0].restore == f"git update-ref -d {shlex.quote(odd)} {sha}"
-    assert shlex.split(report.changes[0].restore)[3] == odd
+    assert report.changes[0].restore == f"git update-ref --no-deref -d {shlex.quote(odd)} {sha}"
+    assert shlex.split(report.changes[0].restore)[4] == odd
 
 
 def test_resetting_the_task_branch_is_non_fast_forward_and_not_needs_you_by_itself(repo):
@@ -104,7 +104,7 @@ def test_resetting_the_task_branch_is_non_fast_forward_and_not_needs_you_by_itse
     report = run(repo, lambda: git(repo, "reset", "--hard", "HEAD~1"))
     change, = report.changes
     assert change.ref == "refs/heads/main" and change.change is Change.NON_FAST_FORWARD
-    assert change.restore.startswith("git update-ref refs/heads/main ") and not report.needs_you
+    assert change.restore.startswith("git update-ref --no-deref refs/heads/main ") and not report.needs_you
     assert report.own_commits == 0
 
 
@@ -179,3 +179,89 @@ def test_a_directory_that_is_not_a_repository_fails_loudly(tmp_path):
     plain.mkdir()
     with pytest.raises((Refused, RuntimeError)):
         asyncio.run(refs.snapshot(plain))
+
+
+# --- review findings of the first version -----------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("separator", ["\u2028", "\u2029", "\x85"])
+def test_a_ref_name_with_a_line_separator_cannot_overwrite_another_ref(repo, separator):
+    from looper.agents.tiers.task_manager import Refused
+    old = git(repo, "rev-parse", "HEAD")
+    commit(repo, "b.txt")
+    git(repo, "update-ref", f"refs/heads/z{separator}refs/heads/main", old)  # a line split would restore main to old
+    with pytest.raises(Refused, match="line-break"):
+        asyncio.run(refs.snapshot(repo))
+
+
+def test_a_task_branch_reset_is_not_hidden_by_a_graft(repo):
+    commit(repo, "b.txt")
+    first = git(repo, "rev-parse", "HEAD~1")
+    tip = git(repo, "rev-parse", "HEAD")
+
+    def reset_with_graft():
+        git(repo, "reset", "-q", "--hard", first)
+        (repo / ".git" / "info").mkdir(exist_ok=True)
+        (repo / ".git" / "info" / "grafts").write_text(f"{first} {tip}\n")  # makes tip look like first's parent
+    report = run(repo, reset_with_graft)
+    change, = report.changes
+    assert change.change is Change.NON_FAST_FORWARD and change.old == tip and change.new == first
+    assert report.own_commits == 0
+
+
+def test_a_merge_of_an_older_branch_into_the_task_branch_is_a_fast_forward_with_the_right_count(repo):
+    git(repo, "checkout", "-q", "-b", "topic")
+    commit(repo, "t.txt")
+    git(repo, "checkout", "-q", "main")
+    commit(repo, "m.txt")
+
+    def merge():
+        git(repo, "merge", "-q", "--no-ff", "-m", "merge topic", "topic")
+        commit(repo, "after.txt")
+    report = run(repo, merge)
+    assert report.changes == () and report.own_commits == 3  # the merge, topic's commit and the one after
+
+
+def test_a_symbolic_ref_is_restored_without_touching_its_target(repo):
+    before = asyncio.run(refs.snapshot(repo))
+    report = run(repo, lambda: git(repo, "symbolic-ref", "refs/heads/link", "refs/heads/main"))
+    change, = report.changes
+    assert change.ref == "refs/heads/link" and change.change is Change.CREATED
+    assert change.restore == "git symbolic-ref --delete refs/heads/link"
+    git_safe.run(repo, *shlex.split(change.restore)[1:], check=True, capture_output=True)
+    assert git(repo, "rev-parse", "--verify", "refs/heads/main")  # the target is still there
+    assert asyncio.run(refs.snapshot(repo)).refs == before.refs
+
+
+def test_retargeting_a_symbolic_ref_to_the_same_commit_is_a_change_and_restores(repo):
+    git(repo, "symbolic-ref", "refs/heads/link", "refs/heads/other")  # other and main are the same commit
+    report = run(repo, lambda: git(repo, "symbolic-ref", "refs/heads/link", "refs/heads/main"))
+    change, = report.changes
+    assert change.change is Change.MOVED and change.old == change.new
+    assert change.restore == "git symbolic-ref refs/heads/link refs/heads/other"
+    git_safe.run(repo, *shlex.split(change.restore)[1:], check=True, capture_output=True)
+    assert git(repo, "symbolic-ref", "refs/heads/link") == "refs/heads/other"
+
+
+def test_deleting_a_symbolic_ref_restores_the_link_not_a_copy(repo):
+    git(repo, "symbolic-ref", "refs/heads/link", "refs/heads/other")
+    report = run(repo, lambda: git(repo, "symbolic-ref", "--delete", "refs/heads/link"))
+    change, = report.changes
+    assert change.change is Change.DELETED and change.restore == "git symbolic-ref refs/heads/link refs/heads/other"
+
+
+def test_bidirectional_controls_are_escaped_in_the_name_and_the_restore_command_still_works(repo):
+    odd = "refs/heads/a\u202eb"
+    sha = git(repo, "rev-parse", "HEAD")
+    report = run(repo, lambda: git(repo, "update-ref", odd, sha))
+    change, = report.changes
+    assert change.ref == "refs/heads/a\\u202eb" and "\u202e" not in change.restore and "\u202e" not in change.ref
+    subprocess.run(["bash", "-c", change.restore.replace("git ", f"git -C {shlex.quote(str(repo))} ", 1)], check=True,
+                   capture_output=True)
+    assert odd not in asyncio.run(refs.snapshot(repo)).refs
+
+
+@pytest.mark.parametrize("name, ok", [("main", True), ("feature/x", True), ("--detach", False), ("-x", False),
+                                       ("a..b", False), ("a b", False)])
+def test_only_names_git_accepts_and_that_are_not_options_can_be_the_task_branch(repo, name, ok):
+    assert (asyncio.run(refs.branch_problem(repo, name)) is None) is ok

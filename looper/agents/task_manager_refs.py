@@ -16,7 +16,7 @@ import asyncio
 import logging
 import shlex
 from collections.abc import Awaitable, Callable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -34,6 +34,14 @@ _LOCKLESS = {"GIT_OPTIONAL_LOCKS": "0"}
 HEADS, TAGS, LOOPER = "refs/heads/", "refs/tags/", "refs/heads/looper/"
 FINISHED_STATUSES = frozenset({"completed", "failed", "cancelled", "stopped"})
 FIRST_ENABLE_NOTICE = "first_enable_in_place"
+REFS_UNREADABLE_NOTICE = "refs_unreadable"
+NOTICES = (FIRST_ENABLE_NOTICE, REFS_UNREADABLE_NOTICE)
+REFS_UNREADABLE_DETAIL = ("The branches and tags could not be read again after this turn, so any change this turn made "
+                          "to them is not reported. Check them yourself.")
+# What ``str.splitlines`` splits on (besides \n), and the bidirectional controls that reorder displayed text.
+_LINE_BREAKS = frozenset("\r\x0b\x0c\x1c\x1d\x1e\x85\u2028\u2029")
+_BIDI = frozenset("\u202a\u202b\u202c\u202d\u202e\u2066\u2067\u2068\u2069")
+WALK_LIMIT = 10000  # commits read when deciding fast-forward
 FIRST_ENABLE_DETAIL = ("The task Manager edits files directly in your real checkout. v1 only reports changes to "
                        "branches and tags; it never restores them, and deleted objects cannot be recovered. Push or "
                        "back up important branches first.")
@@ -50,6 +58,7 @@ class Change(str, Enum):
 class Snapshot:
     refs: Mapping[str, str]
     head: str | None  # the full name of the branch HEAD is on; None when detached
+    symrefs: Mapping[str, str] = field(default_factory=dict)  # ref -> the ref it points to, for symbolic refs
 
 
 @dataclass(frozen=True)
@@ -83,19 +92,43 @@ class Report:
         return bool(self.changes or self.info or self.head_changed or self.own_commits)
 
 
-def _restore(ref: str, change: Change, old: str | None, new: str | None) -> str:
-    name = shlex.quote(ref)
+def display(name: str | None) -> str | None:
+    """A ref name for the conversation: bidirectional controls written as ``\\uXXXX``."""
+    if name is None:
+        return None
+    return "".join(f"\\u{ord(ch):04x}" if ch in _BIDI else ch for ch in name)
+
+
+def _quote(name: str) -> str:
+    """``name`` as one shell word; bidirectional controls are spelled out in a ``$'...'`` word."""
+    if not any(ch in _BIDI for ch in name):
+        return shlex.quote(name)
+    # UTF-8 bytes as \\xHH: the one spelling every POSIX shell (bash 3.2 included) reads inside $'...'.
+    body = "".join("".join(f"\\x{byte:02x}" for byte in ch.encode()) if ch in _BIDI
+                   else ("\\" + ch if ch in "'\\" else ch) for ch in name)
+    return f"$'{body}'"
+
+
+def _restore(ref: str, change: Change, old: str | None, new: str | None,
+             old_target: str | None = None, new_target: str | None = None) -> str:
+    name = _quote(ref)
+    if old_target is not None:  # a symbolic ref goes back to what it pointed at
+        return f"git symbolic-ref {name} {_quote(old_target)}"
+    if new_target is not None:
+        return (f"git symbolic-ref --delete {name}" if old is None
+                else f"git update-ref --no-deref {name} {old}")
     if change is Change.CREATED:
-        return f"git update-ref -d {name} {new}"
+        return f"git update-ref --no-deref -d {name} {new}"
     if change is Change.DELETED:
-        return f"git update-ref {name} {old}"
-    return f"git update-ref {name} {old} {new}"
+        return f"git update-ref --no-deref {name} {old}"
+    return f"git update-ref --no-deref {name} {old} {new}"
 
 
-def _change(ref: str, old: str | None, new: str | None, *, plain_move: bool = False) -> RefChange:
+def _change(ref: str, old: str | None, new: str | None, *, plain_move: bool = False,
+            old_target: str | None = None, new_target: str | None = None) -> RefChange:
     kind = (Change.CREATED if old is None else Change.DELETED if new is None
             else Change.MOVED if plain_move else Change.NON_FAST_FORWARD)
-    return RefChange(ref, kind, old, new, _restore(ref, kind, old, new))
+    return RefChange(display(ref), kind, old, new, _restore(ref, kind, old, new, old_target, new_target))
 
 
 def _refused(exc: git_safe.RepositoryRefused):
@@ -124,25 +157,119 @@ async def _git(work_dir: str | Path, *args: str) -> tuple[int, str]:
     return process.returncode, stdout.decode("utf-8", "surrogateescape")
 
 
-async def snapshot(work_dir: str | Path) -> Snapshot:
-    """The logical value of every branch and tag, and where ``HEAD`` points. Packed refs, ``gc``, reflogs and
-    index changes do not show in these values."""
-    code, listing = await _git(work_dir, "for-each-ref", "--format=%(refname)%00%(objectname)", "refs/heads", "refs/tags")
-    if code:
-        from .tiers.task_manager import RefuseReason, Refused
+def _unreadable(detail: str):
+    from .tiers.task_manager import RefuseReason, Refused
 
-        raise Refused(RefuseReason.WORKSPACE, f"{work_dir} is not a git repository Looper can read (git exit {code}).")
-    refs = {}
-    for line in listing.splitlines():
-        ref, _, sha = line.partition("\0")
-        if ref and sha:
-            refs[ref] = sha
+    return Refused(RefuseReason.WORKSPACE, detail)
+
+
+async def snapshot(work_dir: str | Path) -> Snapshot:
+    """The logical value of every branch and tag (and the target of a symbolic ref), and where ``HEAD`` points.
+    Packed refs, ``gc``, reflogs and index changes do not show in these values.
+
+    A listing that cannot be told apart from another (a ref name holding a character ``str.splitlines`` breaks
+    lines on, or two records of one name) is a read failure, never a last-write-wins value."""
+    code, listing = await _git(work_dir, "for-each-ref", "--format=%(refname)%00%(objectname)%00%(symref)",
+                               "refs/heads", "refs/tags")
+    if code:
+        raise _unreadable(f"{work_dir} is not a git repository Looper can read (git exit {code}).")
+    refs: dict[str, str] = {}
+    symrefs: dict[str, str] = {}
+    for line in listing.split("\n"):
+        if not line:
+            continue
+        parts = line.split("\0")
+        if len(parts) != 3 or not parts[0] or not parts[1]:
+            raise _unreadable("The branch and tag listing has a record Looper cannot read.")
+        ref, sha, target = parts
+        if _LINE_BREAKS & set(ref) or ref in refs:
+            raise _unreadable("A branch or tag name holds a line-break character or appears twice; "
+                              "Looper cannot read the refs safely.")
+        refs[ref] = sha
+        if target:
+            symrefs[ref] = target
     code, head = await _git(work_dir, "symbolic-ref", "-q", "HEAD")
-    return Snapshot(refs, head.strip() if code == 0 and head.strip() else None)
+    return Snapshot(refs, head.strip() if code == 0 and head.strip() else None, symrefs)
+
+
+async def branch_problem(work_dir: str | Path, branch: str) -> str | None:
+    """Why ``branch`` cannot be the task branch (git's own branch-name check; a leading ``-`` would read as an
+    option), or None."""
+    if branch.startswith("-"):
+        return "a branch name that starts with '-' cannot be used as the task branch"
+    code, _ = await _git(work_dir, "check-ref-format", "--branch", branch)
+    return None if code == 0 else "git does not accept this as a branch name"
+
+
+async def _walk(work_dir: str | Path, start: str, stop: str | None) -> tuple[set[str], bool, bool, bool]:
+    """Commits reachable from ``start`` without passing ``stop``, read as raw objects (``cat-file --batch`` honours
+    neither ``info/grafts`` nor replace refs): ``(visited, reached_stop, complete, reached_root)``. ``complete`` is
+    false when the walk hit ``WALK_LIMIT`` or an object it could not read as a commit."""
+    process = await git_safe.spawn(work_dir, "-c", "core.useReplaceRefs=false", "cat-file", "--batch",
+                                   extra_env=_LOCKLESS, stdin=asyncio.subprocess.PIPE,
+                                   stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL)
+    visited: set[str] = set()
+    reached_stop = reached_root = False
+    complete = True
+
+    async def read() -> None:
+        nonlocal reached_stop, reached_root, complete
+        stack = [start]
+        while stack and complete:
+            sha = stack.pop()
+            if sha in visited:
+                continue
+            if sha == stop:
+                reached_stop = True
+                continue
+            if len(visited) >= WALK_LIMIT:
+                complete = False
+                break
+            process.stdin.write(sha.encode() + b"\n")
+            await process.stdin.drain()
+            header = (await process.stdout.readline()).decode("ascii", "replace").split()
+            if len(header) != 3 or header[1] != "commit":
+                complete = False
+                break
+            body = await process.stdout.readexactly(int(header[2]) + 1)
+            visited.add(sha)
+            parents = [line.split()[1] for line in body.decode("utf-8", "replace").split("\n\n", 1)[0].split("\n")
+                       if line.startswith("parent ")]
+            reached_root = reached_root or not parents
+            stack.extend(parents)
+
+    try:
+        await asyncio.wait_for(read(), GIT_TIMEOUT_SEC)
+    except (asyncio.TimeoutError, asyncio.IncompleteReadError, ValueError):
+        complete = False
+    finally:
+        try:
+            process.stdin.close()
+        except Exception:
+            pass
+        process.kill()
+        await process.wait()
+    return visited, reached_stop, complete, reached_root
+
+
+async def fast_forward(work_dir: str | Path, old: str, new: str) -> int | None:
+    """The number of commits ``old..new`` when ``new`` descends from ``old``, else None (also when it cannot be
+    decided). Parents are read from the raw commit objects, so a graft cannot make a reset look like an ancestor."""
+    try:
+        visited, reached, _, root = await _walk(work_dir, new, old)
+        if not reached:
+            return None
+        if root:  # another parent path ran down to the history ``old`` also contains: take that out of the count
+            ancestors, _, _, _ = await _walk(work_dir, old, None)
+            visited = visited - ancestors - {old}
+        return len(visited)
+    except Exception:
+        logger.warning("task Manager refs: could not decide fast-forward", exc_info=True)
+        return None
 
 
 def _short(ref: str | None) -> str:
-    return "detached" if ref is None else ref.removeprefix(HEADS)
+    return "detached" if ref is None else display(ref.removeprefix(HEADS))
 
 
 async def begin_turn(task: Mapping[str, Any], work_dir: str | Path, *, sink: TurnSink,
@@ -160,14 +287,16 @@ async def begin_turn(task: Mapping[str, Any], work_dir: str | Path, *, sink: Tur
             raise Refused(RefuseReason.HEAD_DETACHED,
                           "任务目录的 HEAD 是分离的（detached）。先检出一个分支再发消息，管家会把这个分支记为任务分支。")
         branch = before.head.removeprefix(HEADS)
+        if (problem := await branch_problem(work_dir, branch)) is not None:
+            raise Refused(RefuseReason.WORKSPACE, f"任务分支 {display(branch)} 不能记录：{problem}。换一个分支名再发消息。")
         if await store.record_first_branch(task_id, branch):
             await sink.event(TaskManagerEvent.SANDBOX_NOTICE, {"notice": FIRST_ENABLE_NOTICE, "detail": FIRST_ENABLE_DETAIL})
         recorded = await store.get_branch(task_id) or branch
     if before.head != HEADS + recorded:
         task_manager_safety.record_refusal(task_manager_safety.Reason.HEAD_MOVED, phase)
         raise Refused(RefuseReason.HEAD_MOVED,
-                      f"任务分支记录的是 {recorded}，目录现在在 {_short(before.head)}。"
-                      f"把 {recorded} 重新检出（git checkout {shlex.quote(recorded)}），"
+                      f"任务分支记录的是 {display(recorded)}，目录现在在 {_short(before.head)}。"
+                      f"把 {display(recorded)} 重新检出（git switch -- {_quote(recorded)}），"
                       "或者用 tasks.task_manager_branch_set 把当前分支记为任务分支，再发消息。")
     return before, recorded
 
@@ -185,20 +314,19 @@ async def compare(work_dir: str | Path, before: Snapshot, after: Snapshot, *, ta
     task_ref, own_commits, changes, info, needs_you = HEADS + task_branch, 0, [], [], False
     for ref in sorted(before.refs.keys() | after.refs.keys()):
         old, new = before.refs.get(ref), after.refs.get(ref)
-        if old == new:
+        old_target, new_target = before.symrefs.get(ref), after.symrefs.get(ref)
+        if old == new and old_target == new_target:
             continue
+        pointers = {"old_target": old_target, "new_target": new_target}
         if ref == task_ref:
-            fast = False
-            if old is not None and new is not None:
-                code, _ = await _git(work_dir, "merge-base", "--is-ancestor", old, new)
-                fast = code == 0
-            if fast:
-                _, count = await _git(work_dir, "rev-list", "--count", f"{old}..{new}")
-                own_commits = int(count.strip() or 0)
+            count = (await fast_forward(work_dir, old, new)
+                     if old is not None and new is not None and old_target is None and new_target is None else None)
+            if count is not None:
+                own_commits = count
                 continue
-            changes.append(_change(ref, old, new))
+            changes.append(_change(ref, old, new, **pointers))
             continue
-        change = _change(ref, old, new, plain_move=True)
+        change = _change(ref, old, new, plain_move=True, **pointers)
         owner = ref.removeprefix(LOOPER).split("/", 1) if ref.startswith(LOOPER) else None
         if owner and len(owner) == 2 and owner[0] != task_id and await active_task(owner[0]):
             info.append(change)
@@ -211,7 +339,8 @@ async def compare(work_dir: str | Path, before: Snapshot, after: Snapshot, *, ta
 def payload(report: Report, report_id: int | None) -> dict[str, Any]:
     return {"report_id": report_id, "changes": [c.to_json() for c in report.changes],
             "info": [c.to_json() for c in report.info],
-            "head": {"before": report.head_before, "after": report.head_after} if report.head_changed else None,
+            "head": ({"before": display(report.head_before), "after": display(report.head_after)}
+                     if report.head_changed else None),
             "own_commits": report.own_commits, "needs_you": report.needs_you}
 
 
@@ -221,7 +350,12 @@ async def end_turn(task: Mapping[str, Any], work_dir: str | Path, before: Snapsh
     from .tiers.task_manager import TaskManagerEvent
 
     task_id = str(task["id"])
-    report = await compare(work_dir, before, await snapshot(work_dir), task_branch=branch, task_id=task_id)
+    try:
+        report = await compare(work_dir, before, await snapshot(work_dir), task_branch=branch, task_id=task_id)
+    except Exception:
+        await sink.event(TaskManagerEvent.SANDBOX_NOTICE, {"notice": REFS_UNREADABLE_NOTICE,
+                                                          "detail": REFS_UNREADABLE_DETAIL})
+        raise
     if not report.worth_saying:
         return report
     report_id = None

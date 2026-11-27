@@ -53,4 +53,10 @@ async def run(server, operation, arguments, principal, headers):
     if head is None:
         raise OpError(ErrorCode.CONFLICT, "HEAD is detached: check a branch out first")
     branch = head.removeprefix(task_manager_refs.HEADS)
+    try:
+        problem = await task_manager_refs.branch_problem(work_dir, branch)
+    except Exception as exc:
+        raise OpError(ErrorCode.CONFLICT, f"cannot check the branch name: {exc}") from None
+    if problem is not None:
+        raise OpError(ErrorCode.CONFLICT, f"{task_manager_refs.display(branch)}: {problem}")
     return {"task_id": task["id"], "branch": branch, "previous": await store.set_branch(task["id"], branch)}

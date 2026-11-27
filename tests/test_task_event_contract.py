@@ -42,6 +42,7 @@ def _payloads():
         {"kind": "ref_report", "report_id": None, "own_commits": 0, "needs_you": False, "changes": [], "info": [],
          "head": {"before": "refs/heads/main", "after": None}},
         {"kind": "sandbox_notice", "notice": "first_enable_in_place", "detail": "text"},
+        {"kind": "sandbox_notice", "notice": "refs_unreadable", "detail": "text"},
         {"kind": "refused", "reason": "orchestrated", "status": "running"},
         *({"kind": "refused", "reason": reason.value} for reason in RefuseReason),
     ]

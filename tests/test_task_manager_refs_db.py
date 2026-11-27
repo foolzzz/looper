@@ -94,7 +94,7 @@ def test_a_moved_head_refuses_the_next_turn_until_the_branch_is_checked_out_or_s
             await refs.begin_turn({"id": task_id}, directory, sink=sink)
         assert refused.value.reason is tm.RefuseReason.HEAD_MOVED
         text = str(refused.value)
-        assert "main" in text and "other" in text and "git checkout main" in text and "task_manager_branch_set" in text
+        assert "main" in text and "other" in text and "git switch -- main" in text and "task_manager_branch_set" in text
         assert task_manager_safety.refusal_counts[("head_moved", "turn", "unknown")] == 1
         async with v1_api(tmp_path, db) as call:
             status, answer = await call("tasks.task_manager_branch_set", {"task_id": task_id})
@@ -316,3 +316,33 @@ def test_orchestrated_and_worktree_turns_never_take_a_ref_snapshot(monkeypatch, 
         finally:
             await pool.shutdown()
     run_db(check, monkeypatch, timeout=90)
+
+
+def test_a_task_branch_that_reads_as_an_option_is_never_recorded(monkeypatch, tmp_path, native):
+    async def check(db):
+        task_id, directory = await make_task(native, db, tmp_path)
+        git(directory, "symbolic-ref", "HEAD", "refs/heads/--detach")
+        sink = Sink()
+        with pytest.raises(tm.Refused) as refused:
+            await refs.begin_turn({"id": task_id}, directory, sink=sink)
+        assert refused.value.reason is tm.RefuseReason.WORKSPACE and "starts with '-'" in str(refused.value)
+        assert await db.fetchval("SELECT count(*) FROM task_manager_branches") == 0 and sink.events == []
+        async with v1_api(tmp_path, db) as call:
+            status, answer = await call("tasks.task_manager_branch_set", {"task_id": task_id})
+            assert status == 409 and "starts with '-'" in json.dumps(answer), answer
+        assert await db.fetchval("SELECT count(*) FROM task_manager_branches") == 0
+    run_db(check, monkeypatch, timeout=60)
+
+
+def test_an_unreadable_end_of_turn_snapshot_says_so_in_the_conversation(monkeypatch, tmp_path, native):
+    async def check(db):
+        task_id, directory = await make_task(native, db, tmp_path)
+        sink = Sink()
+        before, branch = await refs.begin_turn({"id": task_id}, directory, sink=sink)
+        git(directory, "update-ref", "refs/heads/z\u2028refs/heads/main", git(directory, "rev-parse", "HEAD"))
+        with pytest.raises(tm.Refused):
+            await refs.end_turn({"id": task_id}, directory, before, branch, sink=sink, message_id="m1")
+        notices = [p for p in events_of(sink, "sandbox_notice") if p["notice"] == "refs_unreadable"]
+        assert len(notices) == 1 and "not reported" in notices[0]["detail"]
+        assert not events_of(sink, "ref_report")
+    run_db(check, monkeypatch, timeout=60)
