@@ -472,10 +472,14 @@ Manager has no tool for it. The dashboard shows the task page's 指标 card and 
   configured operator and allowlist and sets `Turn.speaker`, enabling the existing
   ops checks: other allowlisted senders and group members cannot request an
   escalation or confirm one, and a refused confirmation is discarded. A bot
-  identity lookup failure grants no operator authority. Operator messages in
+  identity lookup failure grants no operator authority. The speaker is classified for
+  every user turn whatever the switch or the session's routing (the switch only decides
+  whether the context is rendered), and a bot-channel turn whose speaker is unknown is
+  refused like a non-operator's. Operator messages in
   groups and API clients can authorize, while private tools keep their separate
   operator-turn audience checks. Completion and autonomous turns keep their
-  existing messages and no speaker. Off, prompts, tools and launches are unchanged.
+  existing messages and no speaker. Off, prompts, tools and launches are unchanged
+  (the speaker is still set, so authorization does not depend on the switch).
   Dashboard and generated CLI configuration use the existing operator-only
   `turn_context_settings.get/update`, separate from `chat_settings`; Lark and
   Telegram need no new command. See [the assistant RFC](rfcs/assistant-layer-v0.zh-CN.md#51-11-每轮上下文).
@@ -689,7 +693,8 @@ Manager has no tool for it. The dashboard shows the task page's 指标 card and 
   operations and confirmations for allowed senders and members, audits `forbidden` with reason `operator_only`,
   and drops a refused confirmation. Scoped sessions check the routing-time principal instead of the speaker;
   a waiting confirmation belongs to its session and sender (`not_initiator` otherwise), and a non-operator's
-  `/stop` stops only shared sessions' turns. Unscoped turns retain the existing speaker rules.
+  `/stop` stops only shared sessions' turns. Unscoped turns follow the speaker rules; an unknown speaker on a bot
+  channel is refused.
   Settings → Chat uses the operator-only v1 `turn_context_settings.get` and `turn_context_settings.update`
   operations to store `manager.turn_context.enabled`
   (off by default), `user.timezone` (an IANA name, or null for the server zone) and `user.reply_language`
@@ -5980,7 +5985,17 @@ contract 5.3 KB (5,309 bytes of `TOOLS_CONTRACT`).
   and the `confirmation_id`. `GET /api/tasks/:id` lists a task's
   (`manager_actions`), and the task page shows them under "By the Manager".
   `manager_actions.manager_id` says which Manager made the call (no foreign
-  key: the trail outlives a deleted Manager). An `out_of_scope` row keeps only argument keys with null
+  key: the trail outlives a deleted Manager). `sender_id` and `sender_kind`
+  say who started the turn the call ran in: the channel sender id as the
+  adapter reports it (NULL for a turn no user started or an API client's) and
+  the turn's audience class (`operator`, `allowed`, `member`, `client` or
+  `autonomous`), both taken from Looper's own classification of the turn, never
+  from model text; `client_id` names the API client. A confirmed call also keeps
+  `initiator_sender_id` and `initiator_kind` (the turn that asked) beside the
+  confirmer in `sender_id`/`sender_kind` (the confirming turn, or the person who
+  pressed the button). `sender_kind` is NULL where Looper did not classify the
+  turn and on rows from before the columns existed. The task detail API shows the
+  two sender ids to the operator only; an API client sees the kinds. An `out_of_scope` row keeps only argument keys with null
   values, `status=error`, `error_code=forbidden`, the known tool's tier (otherwise `read`), and a result
   containing `reason`, `capability`, `scope` (`<id>@<version>`) and `principal_kind`.
   Refusal logs contain Manager, a 12-character session-key digest, capability, reason and principal kind,
@@ -9101,7 +9116,7 @@ PostgreSQL is a hard startup dependency. All data paths:
 | `decision_snapshots` | What a task's dispatch passes and its Planner's step decisions read and decided, while `decision_snapshots.enabled` is on ([Decision snapshots](#decision-snapshots)): `task_id`, `kind` (`dispatch`, `step_decision`), `step_id` (exactly for a step decision), `record_id` (the turn's run record, no foreign key), `inputs` with its `inputs_sha256`, `decision`, `created_at`; no message text; going with its task, kept 30 days while the switch is on |
 | `mcp_tool_levels` | The operator's declarations of an MCP server's tools for the outbound review ([Reviews of outbound actions](#reviews-of-outbound-actions)): `item_id` (going with its server), `tool`, `level` (`inside`: its calls run unreviewed) |
 | `outbound_reviews` | A review of an outbound action ([Reviews of outbound actions](#reviews-of-outbound-actions)): `agent_id` and `parent_record_id` (who asked), `record_id` (the classifier's run; null when code blocked it), `task_id` (going with its task), `manager_action_id`, `channel` and `chat`, `source` (`tool`, `hook`, `post`), `tool`, `action`, `level`, `target_kind` and `target`, a masked `summary` (at most 500 characters), `verdict` (`allow`, `block`), `failure` (`not_operator`, `timeout`, `parse`, `runtime`, `rate_limited`, `unavailable`, `budget`, `too_long`, `refused`, `protected`; only on a block), `reason` (at most 300 characters), `signals`, `profile_id`, `model`, `cost_usd`, `latency_ms` |
-| `manager_actions` | The Manager's tool calls (`looper/agents/ops`), one row each: `manager_id`, `channel`, `chat` and `message_id` of the turn (empty for a turn Claude ran on its own), `tool`, `arguments` (secret values masked), `risk` (`read`, `write`, `high`), `status` (`ok`, `needs_confirmation`, `error` with `error_code`), `result` (of a change; a read's is not kept), `confirmation_id` (the call that asked, on a confirmed one) and `task_id` (the task it acted on, no foreign key) |
+| `manager_actions` | The Manager's tool calls (`looper/agents/ops`), one row each: `manager_id`, `channel`, `chat` and `message_id` of the turn (empty for a turn Claude ran on its own), `tool`, `arguments` (secret values masked), `risk` (`read`, `write`, `high`), `status` (`ok`, `needs_confirmation`, `error` with `error_code`), `result` (of a change; a read's is not kept), `confirmation_id` (the call that asked, on a confirmed one), `task_id` (the task it acted on, no foreign key), and `sender_id`, `sender_kind`, `initiator_sender_id`, `initiator_kind` (who started the turn and who asked, nullable) |
 | `activity` | Execution trace events (SSE streaming to frontend) |
 | `chat_messages` | Chat conversation history of every channel: `session_id` (the web session or stable bot/chat/Manager thread described above; not Telegram groups), `message_id`, `role`, `content`, `channel` (`web`, `telegram`, `lark` or `lark_bot`; rows from before it read `web`), `delivery_failure` and `delivery_error` (a Lark or Telegram answer its channel did not deliver: `no_chat` or `send_failed`, and the channel's error; NULL otherwise), and nullable provenance columns `manager_session` (the writing Manager's session key, including `main`), `sender_kind` (`person` or `bot`) and `sender_name` (the channel's raw display name). New Manager user rows and recorded ordinary, autonomous and completion replies carry the answering session: `_persist_chat` writes user provenance and `record_reply` writes assistant provenance. Idle replies are stored directly by `idle_checks._remember` with `main`. Fleet retirement replies preserve the session of interrupted turns and messages already routed into a session queue; messages still in the fleet's unrouted queue are answered on `main`. Assistant sender fields remain NULL. Historical rows, replayed delivery records without provenance, and the web/API history-writing paths may leave provenance NULL; those unknown sessions remain eligible for `activity_since`. No runtime consumes this provenance yet; a new Manager session's resume brief reads the recent chats that are not a task's Planner thread (`planner-<task_id>`) |
 | `chat_direct_threads` | Who a stored Lark or Telegram direct chat (`session_id`) is with: its bot (`channel_id`) and `sender_id`, recorded when one of their messages is stored while session search or idle checks are on, the first record kept; the session search counts the chat as the user's own while the sender is the bot's `operator_sender_id` |
