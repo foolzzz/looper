@@ -75,12 +75,16 @@ _WRITES_FIXED = ("/dev/stdout", "/dev/stderr", "/dev/null", "/dev/tty", "/dev/dt
                  "/tmp/claude", "/private/tmp/claude", ".")
 
 
-def writes_allowed(home: str, uid: int, claude_tmpdir: str | None = None) -> frozenset[str]:
+def writes_allowed(home: str, uid: int, claude_tmpdir: str | None = None,
+                   read_deny: Sequence[str] = ()) -> frozenset[str]:
     """The sandbox's effective write set for a cwd with no ``allowWrite`` (2.1.332, macOS): Claude Code's own
-    entries only. The per-user temporary root is ``<realpath(CLAUDE_CODE_TMPDIR or /tmp)>/claude-<uid>/`` and does
-    not follow the process's ``TMPDIR``; ``.`` is the working directory."""
+    entries only, less any that lie inside a read-denied path (measured: ``<HOME>/.claude/debug`` drops out when the
+    configuration directory is denied). The per-user temporary root is ``<realpath(CLAUDE_CODE_TMPDIR or /tmp)>/
+    claude-<uid>/`` and does not follow the process's ``TMPDIR``; ``.`` is the working directory."""
     root = os.path.realpath(claude_tmpdir or "/tmp")
-    return frozenset((*_WRITES_FIXED, f"{home}/.npm/_logs", f"{home}/.claude/debug", f"{root}/claude-{uid}/"))
+    entries = (*_WRITES_FIXED, f"{home}/.npm/_logs", f"{home}/.claude/debug", f"{root}/claude-{uid}/")
+    return frozenset(entry for entry in entries
+                     if not any(entry == path or entry.startswith(path.rstrip("/") + "/") for path in read_deny))
 
 
 class ReadbackUnavailable(Exception):
@@ -412,6 +416,7 @@ def _compare_dialog(readback: Readback, expected: Expected, runtime: Mapping[str
     box = readback.sandbox
     domains = set(_pin_value(expected, "sandbox.network.allowedDomains"))
     denied = set(_pin_value(expected, "F10"))
+    git_denied = set(_pin_value(expected, "F11"))
 
     def wrong(item: str, want: Any, got: Any, pin: str = "") -> None:
         source = Source.UNKNOWN
@@ -422,6 +427,8 @@ def _compare_dialog(readback: Readback, expected: Expected, runtime: Mapping[str
 
     if not denied <= runtime.get("reads_denied", set()):
         wrong("reads_denied", sorted(denied), sorted(runtime.get("reads_denied", set())), "F10")
+    if not git_denied <= runtime.get("writes_denied", set()):
+        wrong("writes_denied", sorted(git_denied), sorted(runtime.get("writes_denied", set())), "F11")
     for identifier in _MUST_BE_EMPTY:
         if runtime.get(identifier):
             wrong(identifier, [], sorted(runtime[identifier]),

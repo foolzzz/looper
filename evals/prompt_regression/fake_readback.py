@@ -20,6 +20,12 @@ READBACK_SUBTYPES = ("initialize", "get_settings", "get_sandbox_dialog", "get_ho
                      "list_permission_rules", "get_context_usage")
 
 
+def partial_tool(override_path):
+    """The name of a tool the turn starts as a partial message of the stream (``{"partial_tool": "<name>"}``), or None."""
+    override = json.loads(Path(override_path).read_text()) if Path(override_path).exists() else {}
+    return override.get("partial_tool")
+
+
 def tool_name(override_path):
     override = json.loads(Path(override_path).read_text()) if Path(override_path).exists() else {}
     return override.get("tool", "Bash")
@@ -60,8 +66,10 @@ def readback_answer(request, override_path, mcp_tools=None):
     settings = json.loads(Path(_flag("--settings")).read_text())
     mcp_file = _flag("--mcp-config")
     servers = json.loads(Path(mcp_file).read_text()).get("mcpServers", {}) if mcp_file else {}
-    writes = sorted(rb.writes_allowed(os.environ["HOME"], os.getuid(), os.environ.get("CLAUDE_CODE_TMPDIR")))
+    writes = sorted(rb.writes_allowed(os.environ["HOME"], os.getuid(), os.environ.get("CLAUDE_CODE_TMPDIR"),
+                                      settings.get("sandbox", {}).get("filesystem", {}).get("denyRead", [])))
     deny = list(settings.get("sandbox", {}).get("filesystem", {}).get("denyRead", []))
+    wdeny = list(settings.get("sandbox", {}).get("filesystem", {}).get("denyWrite", []))
     domains = list(settings.get("sandbox", {}).get("network", {}).get("allowedDomains", []))
     allowed = set(sbx.BUILTIN_TOOLS) | set(sbx.UNREMOVABLE_TOOLS)
     bodies = {
@@ -73,6 +81,7 @@ def readback_answer(request, override_path, mcp_tools=None):
                                "lists": {"rows": [
                                    {"id": "writes_allowed", "entries": writes, "total": len(writes)},
                                    {"id": "reads_denied", "entries": deny, "total": len(deny)},
+                                   {"id": "writes_denied", "entries": wdeny, "total": len(wdeny)},
                                    *([{"id": "hosts_allowed", "entries": domains, "total": len(domains)}] if domains else [])],
                                    "files_confined": True, "all_unix_sockets": False, "other_hosts": "refused"}},
         "get_hooks_listing": {"hooks": []},

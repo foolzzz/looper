@@ -395,6 +395,9 @@ def _set_row(case, identifier, entries):
 @pytest.mark.parametrize("identifier,entries,item", [
     ("reads_denied", ["/home-placeholder/.aws"], "dialog.reads_denied"),  # shorter than the injected denyRead
     ("reads_denied", None, "dialog.reads_denied"),
+    ("writes_denied", None, "dialog.writes_denied"),  # the runtime write denial must hold the .git paths
+    ("writes_denied", ["/x"], "dialog.writes_denied"),
+    ("writes_denied", "SHORT", "dialog.writes_denied"),  # without .git/info and .git/modules
     ("reads_allowed_anyway", ["/srv/open"], "dialog.reads_allowed_anyway"),
     ("writes_allowed_anyway", ["/srv/open"], "dialog.writes_allowed_anyway"),
     ("hosts_allowed", ["evil.example"], "dialog.hosts_allowed"),
@@ -403,6 +406,8 @@ def _set_row(case, identifier, entries):
     ("unix_sockets_allowed", ["/srv/x.sock"], "dialog.unix_sockets_allowed"),
 ])
 def test_a_runtime_dialog_row_wider_than_the_launch_is_refused(case, identifier, entries, item) -> None:
+    if entries == "SHORT":
+        entries = sandbox.git_deny_write(case.work)[:2]
     _set_row(case, identifier, entries)
     assert [(m.reason, m.item) for m in case.compare()] == [(WIDER, item)]
 
@@ -464,3 +469,10 @@ def test_an_unknown_row_id_a_duplicate_row_or_a_truncated_row_is_unavailable(cas
     truncated = copy.deepcopy(rows)
     truncated[0]["total"] += 1
     assert read_with(truncated) == "get_sandbox_dialog.lists.rows.total"
+
+
+def test_a_write_entry_inside_a_read_denied_path_is_not_in_the_expected_set() -> None:
+    plain = rb.writes_allowed("/h", 7)
+    denied = rb.writes_allowed("/h", 7, None, ["/h/.claude", "/h/.npm_other"])
+    assert plain - denied == {"/h/.claude/debug"} and denied < plain
+    assert rb.writes_allowed("/h", 7, None, ["/h/.claud"]) == plain  # a prefix of the name is not a parent directory

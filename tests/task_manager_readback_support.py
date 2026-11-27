@@ -53,7 +53,7 @@ class Case:
             "restrictions": {"fs_allow_write": [], "fs_deny_write": [], "network_allowed_domains": list(allowed_domains)},
             "lists": {"rows": [row("writes_allowed", sorted(self.expected.writes_allowed)),
                                row("reads_denied", [*deny, f"{HOME}/extra-denied"]),
-                               row("writes_denied", ["/x"]),
+                               row("writes_denied", [*sandbox.git_deny_write(self.work), "/x"]),
                                *([row("hosts_allowed", list(allowed_domains))] if allowed_domains else [])],
                       "files_confined": True, "all_unix_sockets": False, "other_hosts": "refused"}}
         self.hooks: dict[str, Any] = {"hooks": [
