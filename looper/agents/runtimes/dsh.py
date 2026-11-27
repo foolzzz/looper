@@ -947,7 +947,7 @@ def runtime_notes() -> str:
 
 
 def _prompt_text(looper_prompt: str, launch: Launch, *, cwd: str | Path | None = None) -> str:
-    project = (instructions.injected_section(launch.runtime.instruction_files(cwd), launch.runtime.label)
+    project = (instructions.injected_section(launch.runtime.instruction_files(cwd), launch.runtime.label, cwd)
                if cwd is not None else "")
     return runtime_prompt_text(launch, looper_prompt, runtime_notes(), project, keep_empty=False)
 

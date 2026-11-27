@@ -17,6 +17,11 @@ omp 18.4.3 under Looper's isolation (the multi-runtime RFC, section 9):
   goes into the system prompt Looper gives it instead (``Delivery.INJECTED``,
   ``injected_section``), up to ``INJECTED_MAX_BYTES``.
 
+A file Looper reads itself is read only from inside the project (the repository
+root, or the work directory outside a repository) by ``safe_read``: a link that
+leads out of it, a file with other hard links and anything but a regular file
+are left out, and the run's record says which and why.
+
 So each runtime sees the file it reads itself, and the other one when the
 project has only that; no file is given twice. Each run's record names the
 files and how each was given (``record``). Only these two names are looked
@@ -27,6 +32,7 @@ at: a ``.claude/CLAUDE.md``, Codex's ``AGENTS.override.md`` or a project's own
 from __future__ import annotations
 
 import hashlib
+import logging
 import os
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -36,12 +42,24 @@ from typing import Any
 
 from ..claude_cli import repository_root
 from ..reported_files import prompt_name
+from ..safe_read import Skip, Skipped, read_inside
 
 CLAUDE_MD = "CLAUDE.md"
 AGENTS_MD = "AGENTS.md"
 # How much of an injected file a system prompt carries: as much as Codex reads of a project's own files
 # (its project_doc_max_bytes default).
 INJECTED_MAX_BYTES = 32 * 1024
+# What a run's record says of a file left out; an ``IO_ERROR`` says what failed instead.
+SKIPPED = {
+    Skip.OUTSIDE: "it leads outside the project",
+    Skip.SYMLINK: "its path became a link while it was opened",
+    Skip.HARD_LINKED: "it has other hard links",
+    Skip.NOT_REGULAR: "it is not a regular file",
+    Skip.TOO_LARGE: "it is too large",
+    Skip.IO_ERROR: "it could not be read",
+}
+
+logger = logging.getLogger(__name__)
 
 
 class Delivery(str, Enum):
@@ -92,30 +110,34 @@ def first_per_directory(cwd: str | Path, names: Sequence[str]) -> list[Path]:
 @dataclass(frozen=True)
 class Injected:
     """What a system prompt carries of an injected file: its text up to ``INJECTED_MAX_BYTES`` and how many bytes
-    were left out; or why the file could not be read."""
+    were left out; or why the file was left out."""
 
     text: str = ""
     size: int = 0
     clipped: int = 0
-    error: str | None = None
+    skipped: Skip | None = None
+    error: str | None = None  # ``skipped`` in words
 
 
-def read_injected(path: Path) -> Injected:
-    """The part of ``path`` a system prompt carries."""
-    try:
-        data = path.read_bytes()
-    except OSError as exc:
-        return Injected(error=f"{type(exc).__name__}: {exc.strerror or exc}")
-    return Injected(data[:INJECTED_MAX_BYTES].decode("utf-8", errors="replace"), len(data),
-                    max(len(data) - INJECTED_MAX_BYTES, 0))
+def read_injected(path: Path, cwd: str | Path) -> Injected:
+    """The part of ``path`` a system prompt carries, read only from inside the project of a run in ``cwd``."""
+    read = read_inside(project_dirs(cwd)[0], path, INJECTED_MAX_BYTES, clip=True)
+    if isinstance(read, Skipped):
+        return Injected(skipped=read.reason, error=read.detail or SKIPPED[read.reason])
+    return Injected(read.data.decode("utf-8", errors="replace"), read.size,
+                    max(read.size - INJECTED_MAX_BYTES, 0))
 
 
-def injected_section(files: Sequence[InstructionFile], runtime_label: str) -> str:
-    """The system prompt's part for the injected ones of ``files``, saying where each came from; ``''`` without
-    any (or when none could be read)."""
+def injected_section(files: Sequence[InstructionFile], runtime_label: str, cwd: str | Path) -> str:
+    """The system prompt's part for the injected ones of ``files``, the project files of a run in ``cwd``, saying
+    where each came from; ``''`` without any (or when none could be read)."""
     sections = []
     for file in files:
-        if file.delivery is not Delivery.INJECTED or (given := read_injected(file.path)).error is not None:
+        if file.delivery is not Delivery.INJECTED:
+            continue
+        given = read_injected(file.path, cwd)
+        if given.skipped is not None:
+            logger.warning("project instruction file %r left out: %s", str(file.path), given.skipped.value)
             continue
         lines = [f"# Project instructions: {prompt_name(file.path.name)}", "",
                  f"The work directory's own {prompt_name(file.path.name)} ({prompt_name(file.path)}), which {runtime_label} does not load "
@@ -128,15 +150,15 @@ def injected_section(files: Sequence[InstructionFile], runtime_label: str) -> st
 
 def record(files: Sequence[InstructionFile], cwd: str | Path) -> list[dict[str, Any]]:
     """``files`` in a run's record: each one's path from the work directory ``cwd`` and how it was given; for an
-    injected one, the sha256 of the text given, the file's size and how many bytes were clipped, or why it could
-    not be read."""
+    injected one, the sha256 of the text given, the file's size and how many bytes were clipped, or why it was
+    left out (``skipped``, a ``safe_read.Skip``, and ``error`` in words)."""
     entries = []
     for file in files:
         entry: dict[str, Any] = {"path": os.path.relpath(file.path, Path(cwd).absolute()),
                                  "delivery": file.delivery.value}
         if file.delivery is Delivery.INJECTED:
-            given = read_injected(file.path)
-            entry.update({"error": given.error} if given.error is not None else {
+            given = read_injected(file.path, cwd)
+            entry.update({"skipped": given.skipped.value, "error": given.error} if given.skipped is not None else {
                 "sha256": hashlib.sha256(given.text.strip().encode("utf-8")).hexdigest(), "bytes": given.size,
                 "clipped_bytes": given.clipped})
         entries.append(entry)
