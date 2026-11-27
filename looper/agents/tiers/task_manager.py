@@ -274,11 +274,23 @@ class TaskManagerAgent:
         # from these same two attributes, so the command and the readback cannot disagree.
         self.allowed_domains: tuple[str, ...] = ()
         self.read_deny: tuple[str, ...] = ()
+        # The project instruction files the last direct launch could not read, and the set last reported to the user.
+        self.instructions_skipped: tuple[task_manager_project_instructions.Skipped, ...] = ()
+        self.instructions_notified: frozenset[tuple[str, str]] = frozenset()
 
     def _edit_dir(self, launch: Launch, work_dir: str) -> Path:
         """The private looper-edit directory for a direct launch; never where the sandbox writes or cannot read."""
         cli = launch.runtime.environment(launch)
         return task_manager_edit.edit_bin(cli, forbidden=(work_dir, cli.get("TMPDIR") or tempfile.gettempdir(), *self.read_deny))
+
+    async def _notice_skipped(self, sink: TurnSink) -> None:
+        """Tell the user which project instruction files were not read, when that set changes; never in a model's input."""
+        current = frozenset((item.name, item.reason.value) for item in self.instructions_skipped)
+        if current and current != self.instructions_notified:
+            await sink.event(TaskManagerEvent.SANDBOX_NOTICE, {
+                "notice": task_manager_project_instructions.SKIPPED_NOTICE,
+                "detail": "; ".join(f"{name}: {reason}" for name, reason in sorted(current))})
+        self.instructions_notified = current
 
     def _mcp_cwd(self) -> Path:
         return self.pool.runtime_root / "task-managers" / self.task_id / "mcp-cwd"
@@ -372,8 +384,9 @@ class TaskManagerAgent:
         recent = await get_pool().fetch("SELECT summary FROM activity WHERE task_id=$1 ORDER BY seq DESC LIMIT 20",
                                         self.task_id)
         # Direct mode reads the project's instruction files every turn; the orchestrated prompt stays as it was.
-        conventions = task_manager_project_instructions.section(
-            task_manager_project_instructions.read(reopened.work_dir)[0]) if direct else ""
+        loaded, skipped = task_manager_project_instructions.read(reopened.work_dir) if direct else ([], [])
+        self.instructions_skipped = tuple(skipped)
+        conventions = task_manager_project_instructions.section(loaded) if direct else ""
         prompt = SystemPrompt(instructions(self.mode) + "\n\n" + brief(task, recent_activity=list(reversed(recent)),
                                                                     reopened=reopened)
                               + (f"\n\n{conventions}" if conventions else ""))
@@ -451,6 +464,7 @@ class TaskManagerAgent:
             await activity.insert_activity(task_id=self.task_id, kind="error",
                 summary="Warning: task Manager cost is unknown for " + ", ".join(gate.unknown_models))
         task, reopened, launch, prompt = await self.prepare()
+        await self._notice_skipped(request.sink)
         # An in-place direct session writes the real checkout: record its branches and tags and settle the task branch
         # (a detached or moved HEAD refuses here, before the message is admitted).
         refs_before, task_branch = ((await task_manager_refs.begin_turn(task, reopened.work_dir, sink=request.sink, phase="turn"))
@@ -536,6 +550,7 @@ class TaskManagerAgent:
                                                 {"reason": "resume_failed", "detail": str(exc)})
                         # Re-run all configuration and review gates before the one fresh attempt.
                         task, reopened, launch, prompt = await self.prepare()
+                        await self._notice_skipped(request.sink)
                         continue
                     text = str((result.result_event or {}).get("result") or "".join(pieces))
                     outcome = ("stopped" if result.stopped else "success"

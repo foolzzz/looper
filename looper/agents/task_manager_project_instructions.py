@@ -32,6 +32,8 @@ from .untrusted import Source, fence
 FILES = ("CLAUDE.md", "CLAUDE.local.md", "AGENTS.md")
 MAX_FILE = 32 * 1024
 MAX_TOTAL = 64 * 1024
+# The ``sandbox_notice`` value that reports skipped files; its ``detail`` is "<file>: <Skip value>" per file, sorted.
+SKIPPED_NOTICE = "project_instructions_skipped"
 TRUNCATED = "[Looper truncated this file at {size} bytes.]"
 LEAD = ("Project instructions follow: the CLAUDE.md, CLAUDE.local.md and AGENTS.md files at the root of the task "
         "directory, as Looper read them at the start of this turn. Anyone who can change the repository can change "

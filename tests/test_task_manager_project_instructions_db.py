@@ -64,3 +64,57 @@ def test_orchestrated_prompt_does_not_read_the_files(monkeypatch, tmp_path):
         finally:
             await pool.shutdown()
     run_db(check, monkeypatch, timeout=60)
+
+
+def _notices(sink):
+    return [payload for kind, payload in sink.events if kind == "sandbox_notice"
+            and payload["notice"] == "project_instructions_skipped"]
+
+
+def test_a_skipped_file_is_reported_once_per_change_and_never_reaches_the_model(monkeypatch, tmp_path):
+    native = NativeTaskManager(monkeypatch, tmp_path)
+
+    async def check(db):
+        task_id, _, directory = await native.create(db)
+        secret = tmp_path / "outside" / "secret"
+        secret.parent.mkdir()
+        secret.write_text("OUTSIDE-SECRET-TEXT\n")
+        (directory / "CLAUDE.md").symlink_to(secret)
+        pool = tm.TaskManagerPool(tmp_path / "runtime", native.executable, max_resident=lambda: 1)
+        try:
+            first = await submit_and_wait(pool, task_id, message_id="m1")
+            [notice] = _notices(first)
+            assert notice["detail"] == "CLAUDE.md: outside_workdir"
+            assert "OUTSIDE-SECRET-TEXT" not in _prompt(native.records("launch")[0]["command"]) + repr(first.events)
+            assert "OUTSIDE-SECRET-TEXT" not in repr(native.records("input"))
+            second = await submit_and_wait(pool, task_id, message_id="m2")
+            assert _notices(second) == []
+            (directory / "AGENTS.md").write_bytes(b"bad \xff\xfe")
+            third = await submit_and_wait(pool, task_id, message_id="m3")
+            [both] = _notices(third)
+            assert both["detail"] == "AGENTS.md: not_utf8; CLAUDE.md: outside_workdir"
+            (directory / "CLAUDE.md").unlink()
+            (directory / "AGENTS.md").write_text("fine\n")
+            fixed = await submit_and_wait(pool, task_id, message_id="m4")
+            assert _notices(fixed) == []
+            (directory / "CLAUDE.md").symlink_to(secret)
+            again = await submit_and_wait(pool, task_id, message_id="m5")
+            assert [n["detail"] for n in _notices(again)] == ["CLAUDE.md: outside_workdir"]
+        finally:
+            await pool.shutdown()
+    run_db(check, monkeypatch, timeout=90)
+
+
+def test_orchestrated_mode_never_reports_a_skipped_file(monkeypatch, tmp_path):
+    native = NativeTaskManager(monkeypatch, tmp_path)
+
+    async def check(db):
+        task_id, _, directory = await native.create(db, status="pending")
+        (directory / "CLAUDE.md").symlink_to(tmp_path / "nowhere")
+        pool = tm.TaskManagerPool(tmp_path / "runtime", native.executable, max_resident=lambda: 1)
+        try:
+            sink = await submit_and_wait(pool, task_id, message_id="m1")
+            assert _notices(sink) == []
+        finally:
+            await pool.shutdown()
+    run_db(check, monkeypatch, timeout=60)
