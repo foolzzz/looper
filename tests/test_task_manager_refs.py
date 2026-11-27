@@ -464,6 +464,10 @@ def test_a_walk_that_times_out_is_undecided_not_a_fast_forward(repo, monkeypatch
     old = git(repo, "rev-parse", "HEAD")
     commit(repo, "b.txt")
     monkeypatch.setattr(refs, "GIT_TIMEOUT_SEC", 0)
+
+    async def counted(*_args):  # the count step must not be the one that gives up
+        return 0, "1\n"
+    monkeypatch.setattr(refs, "_git", counted)
     verdict, _ = asyncio.run(refs.fast_forward(repo, old, git(repo, "rev-parse", "HEAD")))
     assert verdict is refs.Ancestry.UNDECIDED
 
@@ -483,7 +487,6 @@ def test_a_new_tip_that_is_missing_is_undecided_not_a_fast_forward(repo):
 
 
 def test_a_task_branch_turned_into_a_link_to_a_compared_branch_adds_no_link_report(repo):
-    git(repo, "branch", "other")
 
     def go():
         commit(repo, "b.txt")
