@@ -60,6 +60,7 @@
         "mcpServers": {
           "looper": {
             "args": [
+              "-I",
               "-m",
               "looper.cli",
               "mcp-server"
@@ -175,6 +176,7 @@
         "mcpServers": {
           "looper": {
             "args": [
+              "-I",
               "-m",
               "looper.cli",
               "mcp-server"

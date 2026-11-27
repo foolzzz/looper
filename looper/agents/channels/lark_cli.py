@@ -30,6 +30,7 @@ from typing import Any
 from urllib.parse import quote
 
 from ... import child_env
+from .markdown_images import neutralize_images
 
 # The event the adapter consumes: a message sent to the bot.
 RECEIVE_EVENT = "im.message.receive_v1"
@@ -172,7 +173,7 @@ def reply_command(message_id: str, *, text: str | None = None, markdown: str | N
 def _body(text: str | None, markdown: str | None) -> list[str]:
     """The flag and value of a message body. lark-cli reads a value that starts with ``@`` from a file and takes
     ``@@`` for a literal ``@``, so a body that starts with an @-mention gets one more ``@``."""
-    flag, value = ("--text", text) if text is not None else ("--markdown", markdown)
+    flag, value = ("--text", text) if text is not None else ("--markdown", neutralize_images(markdown))
     return [flag, "@" + value if value.startswith("@") else value]
 
 

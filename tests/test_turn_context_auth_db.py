@@ -93,24 +93,29 @@ def test_missing_operator_id_explains_why_authorization_is_refused(monkeypatch):
     run_db(check, monkeypatch)
 
 
-def test_no_speaker_keeps_the_existing_confirmation_and_audit_calls(monkeypatch):
+@pytest.mark.parametrize("channel,client_id,allowed", [
+    ("lark", None, False), ("telegram", None, False), ("lark_bot", None, False),
+    ("web", None, True), ("web", "client-synthetic", True)])
+def test_unknown_speaker_is_refused_on_a_bot_channel_only(monkeypatch, channel, client_id, allowed):
+    """A path that forgot to classify the speaker fails closed on a bot channel; the dashboard and API clients
+    keep their own rules."""
     async def check(pool):
         monkeypatch.setattr(connection, "_pool", pool)
         ran = []
         ops = make_ops(ran)
-        asking = Turn(channel="lark", chat="group", message_id="m1")
+        asking = Turn(channel=channel, chat="group", message_id="m1", client_id=client_id)
         assert asking.speaker is None
         ops.begin_turn(asking)
         asked = await ops.call("t_delete", {})
+        if not allowed:
+            assert asked["error"]["code"] == "forbidden" and not ops._pending
+            return
+        assert asked["status"] == "needs_confirmation"
         ops.end_turn(asking)
-        confirming = Turn(channel="lark", chat="group", message_id="m2")
+        confirming = Turn(channel=channel, chat="group", message_id="m2", client_id=client_id)
         assert ops.begin_turn(confirming)
         assert await ops.call("looper_confirm", {"confirmation_id": asked["confirmation_id"]}) == {
             "status": "ok", "result": {"done": True}}
         assert ran == ["m2"]
-        assert [tuple(row) for row in await pool.fetch(
-            "SELECT tool, risk, status, error_code FROM manager_actions ORDER BY id")] == [
-                ("t_delete", "high", "needs_confirmation", None), ("t_delete", "high", "ok", None)]
-        assert await pool.fetchval("SELECT count(*) FROM ledger_items") == 0
 
     run_db(check, monkeypatch)

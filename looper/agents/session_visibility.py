@@ -1,4 +1,4 @@
-"""Fail-closed model boundary for routed and scoped chat sessions.
+"""Fail-closed model boundary for routed and scoped chat sessions, and for an API client's own session.
 
 NON_MAIN_ALLOWLIST is the complete grant, for both inputs and tools. New global
 sections, contracts and tools do not inherit permission. Main (including every
@@ -112,6 +112,62 @@ def scoped_for(manager_id: str, key: str) -> SessionAllowlist | None:
     return _SCOPED.get((manager_id, key))
 
 
+# An API client's session: its tools are this list, one by one. A new Manager tool is not on it until someone adds it
+# here with a reason. Each entry is a task-control tool open to any turn (not the operator's own turns only):
+#   looper_tasks            read: list, search and get the tasks (the client's way to see a task's state and result)
+#   looper_task_create      create a task in an existing project
+#   looper_task_control     start, stop, restart and cancel a task
+#   looper_task_instruct    send a running task a supplement
+#   looper_task_update      edit a task's title, or its requirement while it has not ended
+# Not listed: configuration and settings (projects, providers, models, profiles, catalog, schedules, concurrency,
+# config export), spend (costs, overview), the confirmation tool (a pending confirmation is keyed by chat only,
+# so a client turn could confirm another session's item; only the operator confirms), the gate reply (the
+# open gates of every chat are the operator's), and every tool of the operator's own turns (leads, vault, session
+# search, reminders, memory, intents, task hold).
+CLIENT_TOOLS = frozenset({"looper_tasks", "looper_task_create", "looper_task_control", "looper_task_instruct",
+                          "looper_task_update"})
+# The client gets the lists it needs to name a task's project, template or workflow, and nothing of the operator's:
+# no profile, notes, goals, ready tasks, open gates, harness, profile prompt, role prompt or other chats. Its
+# instructions are CLIENT_CONTRACT alone.
+CLIENT_ALLOWLIST = SessionAllowlist(
+    version=1,
+    inputs=frozenset({Input.PROJECTS, Input.TEMPLATES, Input.WORKFLOWS, Input.PERSONA_NAME, Input.CHAT_OPENING,
+                      Input.CHAT_HISTORY, Input.CHAT_HANDOFF, Input.MESSAGE, Input.PROVENANCE, Input.QUOTES,
+                      Input.ATTACHMENTS, Input.STOP_NOTICE, Input.STABLE_BLOCK}),
+    tools=CLIENT_TOOLS,
+)
+CLIENT_CONTRACT = """\
+You are Looper's task assistant for one API client. This session is yours and the client's alone: you know nothing of
+the operator's conversations, notes, memory or settings, and you cannot read or change them. Say so when asked; never
+guess it. You have no shell or file tools.
+
+## Looper's tools
+You act on Looper only through its tools; never through its HTTP API or files. Each tool answers JSON: "status" is
+"ok", "needs_confirmation" or "error", and "error.message" says what to change. Your tools are looper_tasks (list,
+search and get tasks), looper_task_create, looper_task_control (start, stop, restart, cancel), looper_task_instruct
+and looper_task_update. Settings, projects, schedules, providers, costs and confirmations are not available here:
+when the client asks for one, say it is not available in this session and that the operator can do it.
+
+Each message starts with "Projects" (the existing projects and their default directories) and, when there are any,
+task templates and workflows.
+
+- Changing a task (creating, starting, stopping, restarting or cancelling it, adding to it, editing it) only when the
+  client's message asks for it, in the turn answering it. A turn you run on your own can only read.
+- Before looper_task_create: the client confirmed the task, and you know its project and directory. Project: the
+  existing project the client names or clearly means; otherwise ask. Directory: the one the client names (absolute,
+  or starting with ~/); when they name none, leave work_dir out and the project's default is used. Never pick a
+  directory yourself, and you cannot create a project. The task is created ready, not started; start it with
+  looper_task_control only when the client says so.
+- A task under way: what the client adds for it goes to looper_task_instruct (its Planner decides whether to change
+  the plan); a different requirement goes to looper_task_update. A task not started changes with looper_task_update.
+- Never ask for, take or repeat an API key, token or password.
+- After starting or changing a task, do not wait or poll inside the turn (no sleep, no repeated status calls): end
+  the reply.
+- When a tool answers "needs_confirmation" (cancelling a task, starting one over), it did not run: only the operator
+  can confirm it, from their own conversation. Say so and that it is waiting; you cannot confirm it.
+- Never say an operation ran unless its answer was "ok"."""
+CLIENT_KEY_PREFIX = "client:"
+
 PUBLIC_PROMPT = (
     "You are Looper's chat assistant for this conversation. Answer the current message using only this chat. "
     "You have no access to the operator's projects, tasks, settings, memories or other conversations, and no "
@@ -161,4 +217,6 @@ def for_session(key: str, *, manager_id: str) -> SessionAllowlist | None:
         return scoped
     if manager_id != DEFAULT_MANAGER_ID or key == "main":
         return None
+    if key.startswith(CLIENT_KEY_PREFIX):
+        return CLIENT_ALLOWLIST
     return NON_MAIN_WITH_TOOLS if session_tools_settings.enabled() else NON_MAIN_ALLOWLIST
