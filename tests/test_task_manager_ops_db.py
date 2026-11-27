@@ -314,7 +314,7 @@ def test_native_resident_restart_rotates_mcp_and_hook_credentials(monkeypatch, t
                 assert token and ops.authorized(f"Bearer {token}")
                 config = json.loads(Path(launch.library.mcp_config).read_text())
                 assert config["mcpServers"]["looper"]["env"]["LOOPER_AGENT_TOKEN"] == token
-                assert json.loads(hook.read_text())["token"] == token
+                assert not hook.exists()  # a direct session carries no outbound-review hook
                 if previous:
                     assert token != previous and not ops.authorized(f"Bearer {previous}")
                 await agent.resident.run_turn("reply", AsyncMock())
