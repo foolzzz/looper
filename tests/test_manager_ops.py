@@ -15,6 +15,7 @@ from unittest.mock import AsyncMock
 import pytest
 
 from looper.agents.ops import Call, ErrorCode, OpError, Risk, Tool, Turn, check_arguments
+from looper.agents.turn_context import SpeakerKind
 from looper.agents.ops.service import CONFIRM, CONFIRMATION_SECONDS, ManagerOps, Platform
 from looper.db import manager_actions
 
@@ -460,13 +461,15 @@ def test_a_confirmation_lapses(recorded: list[dict[str, Any]], how: str) -> None
 def test_a_confirmation_waits_until_a_turn_takes_it_up_or_it_lapses(recorded: list[dict[str, Any]],
                                                                      then: str) -> None:
     ops = _Ops()
-    first = Turn(channel="lark", channel_id="channel-lark", chat="oc_dm", message_id="m1")
+    first = Turn(channel="lark", channel_id="channel-lark", chat="oc_dm", message_id="m1",
+                speaker=SpeakerKind.OPERATOR)
     ops.ops.begin_turn(first)
     confirmation = ops.call("t_write", {"n": 3, "big": True})["confirmation_id"]
     ops.ops.end_turn(first)
     ops.clock.now += 60
     if then == "answer-turn-started":
-        ops.ops.begin_turn(Turn(channel="lark", channel_id="channel-lark", chat="oc_dm", message_id="m2"))
+        ops.ops.begin_turn(Turn(channel="lark", channel_id="channel-lark", chat="oc_dm", message_id="m2",
+                                                 speaker=SpeakerKind.OPERATOR))
     elif then == "too-late":
         ops.clock.now += CONFIRMATION_SECONDS
     waiting = ops.ops.waiting_confirmations()
