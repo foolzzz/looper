@@ -17,7 +17,8 @@ from typing import Any, Literal, Protocol
 
 from ...db import activity, agent_sessions, projects, tasks
 from .. import operator_mcp, outbound_hook, step_workspaces, task_budget, task_conversations_settings
-from .. import task_manager_alerts, task_manager_readback, task_manager_safety, task_manager_sandbox, task_manager_settings
+from .. import (task_manager_alerts, task_manager_dirs, task_manager_readback, task_manager_refs, task_manager_safety,
+                task_manager_sandbox, task_manager_settings)
 from .. import task_workspaces
 from ..agent_settings import Access, Launch
 from ..claude_cli import ClaudeRunRecorder, ResidentClaude
@@ -42,6 +43,8 @@ class TaskManagerEvent(str, Enum):
     STOPPED = "stopped"
     MODEL_SWITCHED = "model_switched"
     MODEL_SWITCH_REJECTED = "model_switch_rejected"
+    REF_REPORT = "ref_report"
+    SANDBOX_NOTICE = "sandbox_notice"
 
 
 @dataclass(frozen=True)
@@ -153,6 +156,9 @@ class _TaskResident(ResidentClaude):
             for path in self.owner.mcp_files:
                 Path(path).unlink(missing_ok=True)
             self.owner.mcp_files.clear()
+            lock, self.owner.dir_lock = self.owner.dir_lock, None
+            if lock is not None:
+                lock.release()
 
 
 @dataclass(frozen=True)
@@ -283,6 +289,8 @@ class TaskManagerAgent:
         self.read_deny: tuple[str, ...] = ()
         self.init_tools: frozenset[str] | None = None  # the MCP tools the readback saw: what a turn's init must list
         self.started_for_turn: Literal["launch", "resume"] | None = None  # what the turn's ``prepare`` started
+        self.work_dir = ""
+        self.dir_lock: task_manager_dirs.DirectoryLock | None = None
 
     def _mcp_cwd(self) -> Path:
         return self.pool.runtime_root / "task-managers" / self.task_id / "mcp-cwd"
@@ -380,6 +388,20 @@ class TaskManagerAgent:
         root = self.pool.runtime_root / "task-managers" / self.task_id
         prompt_file = prompt.write_file(root)
         launch = await configure()
+
+        def live_direct() -> list[tuple[str, str]]:
+            return [(agent.task_id, agent.work_dir) for agent in self.pool.agents.values()
+                    if agent is not self and agent.resident.started and agent.mode == "direct"]
+
+        if direct:
+            problem = task_manager_dirs.check(
+                task, reopened.work_dir, environment=launch.runtime.environment(launch),
+                runtime_root=self.pool.runtime_root, live=live_direct())
+            if problem is not None:
+                task_manager_safety.record_refusal(task_manager_safety.Reason(problem.reason.value), phase)
+                raise Refused(RefuseReason(problem.reason.value), problem.text)
+            self.work_dir = reopened.work_dir
+            await task_manager_dirs.before_directory_lock()
         executable = launch.executable(self.pool.claude_bin)
 
         def command_for(launch: Launch) -> list[str]:
@@ -430,6 +452,21 @@ class TaskManagerAgent:
                     if problem is not None:
                         await self.resident.stop(kill=True)
                         raise Refused(RefuseReason(problem.reason.value), problem.notice)
+                    if self.dir_lock is None:
+                        try:
+                            self.dir_lock = task_manager_dirs.DirectoryLock.acquire(
+                                self.pool.runtime_root, reopened.work_dir, self.task_id)
+                        except task_manager_dirs.LockHeld as held:
+                            task_manager_safety.record_refusal(
+                                task_manager_safety.Reason.WORKSPACE_OVERLAPS_SESSION, phase)
+                            raise Refused(RefuseReason.WORKSPACE_OVERLAPS_SESSION,
+                                          f"another task Manager session (task {held.holder}) holds {reopened.work_dir}") from held
+                    overlap = task_manager_dirs.overlap(reopened.work_dir, live_direct())
+                    if overlap is not None:
+                        task_manager_safety.record_refusal(
+                            task_manager_safety.Reason(overlap.reason.value), phase)
+                        await self.resident.stop(kill=True)
+                        raise Refused(RefuseReason(overlap.reason.value), overlap.text)
                 if self.session_id:
                     command += ["--resume", self.session_id]
                 await self.resident.start(command, cwd=reopened.work_dir, signature=signature, env=env,
@@ -495,6 +532,10 @@ class TaskManagerAgent:
                 summary="Warning: task Manager cost is unknown for " + ", ".join(gate.unknown_models))
         task, reopened, launch, prompt = await self.prepare()
         await self._verify(launch, reopened)
+        # An in-place direct session writes the real checkout: record its branches and tags and settle the task branch
+        # (a detached or moved HEAD refuses here, before the message is admitted).
+        refs_before, task_branch = ((await task_manager_refs.begin_turn(task, reopened.work_dir, sink=request.sink, phase="turn"))
+                                    if self.mode == "direct" and task.get("workspace_mode") != "worktree" else (None, ""))
         if not request.admitted.done():
             request.admitted.set_result(Submitted("started"))
         rotating = self.context_rotation_pending
@@ -633,6 +674,14 @@ class TaskManagerAgent:
                     commit = await step_workspaces.commit_paths(Path(reopened.work_dir), own, self.links,
                         f"looper: task Manager turn of task {self.task_id}\n\nLooper-Task: {self.task_id}")
             await request.sink.event(TaskManagerEvent.TURN_SUMMARY, {"files": files, "commit": commit, "mode": self.mode, **summary})
+            if refs_before is not None:
+                try:
+                    await task_manager_refs.end_turn(task, reopened.work_dir, refs_before, task_branch, sink=request.sink,
+                                                     message_id=request.message_id)
+                except Exception as exc:  # the turn's own outcome stands; the missing report is recorded
+                    logger.warning("task Manager %s: ref report failed", self.task_id, exc_info=True)
+                    await activity.insert_activity(task_id=self.task_id, kind="error",
+                        summary=f"Ref report failed: {type(exc).__name__}: {exc}"[:300])
         from . import task_manager_context
         await task_manager_context.maintain(self, request, reopened, launch, prompt, record_id)
         await request.sink.final(text, outcome)

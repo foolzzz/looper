@@ -36,6 +36,14 @@ def _payloads():
         {"kind": "turn_summary", "files": ["src/app.py"], "commit": None, "mode": "direct"},
         {"kind": "turn_summary", "files": [], "commit": "abc", "mode": "orchestrated"},
         {"kind": "turn_summary", "files": ["a.py"], "commit": None, "mode": "direct", "uncommitted": ["a.py"]},
+        {"kind": "ref_report", "message_id": "m1", "report_id": 3, "own_commits": 1, "needs_you": True, "head": None, "info": [],
+         "changes": [{"ref": "refs/heads/other", "change": "moved", "old": "a" * 40, "new": "b" * 40,
+                      "restore": "git update-ref refs/heads/other " + "a" * 40 + " " + "b" * 40}]},
+        {"kind": "ref_report", "message_id": None, "report_id": None, "own_commits": 0, "needs_you": False, "changes": [],
+         "info": [], "head": {"before": "refs/heads/main", "after": None}},
+        {"kind": "sandbox_notice", "notice": "first_enable_in_place", "detail": "text"},
+        {"kind": "sandbox_notice", "notice": "refs_unreadable", "detail": "text"},
+        {"kind": "sandbox_notice", "notice": "refs_unreadable", "detail": "text", "message_id": "m2"},
         {"kind": "refused", "reason": "orchestrated", "status": "running"},
         *({"kind": "refused", "reason": reason.value} for reason in RefuseReason),
     ]
@@ -49,6 +57,21 @@ def _payloads():
         {"kind": "refused", "reason": "budget", "status": "running"},
         {"kind": "queued", "reason": "cap"},
         {"kind": "accepted", "reason": "other"},
+        {"kind": "sandbox_notice", "notice": "other_notice", "detail": "text"},
+        {"kind": "sandbox_notice", "notice": "first_enable_in_place"},
+        {"kind": "sandbox_notice", "notice": "refs_unreadable", "detail": "text", "message_id": 5},
+        {"kind": "ref_report", "message_id": 5, "report_id": None, "own_commits": 0, "needs_you": False, "changes": [],
+         "info": [], "head": None},
+        {"kind": "ref_report", "report_id": None, "own_commits": 0, "needs_you": False, "changes": [], "info": []},
+        {"kind": "ref_report", "report_id": "3", "own_commits": 0, "needs_you": False, "changes": [], "info": [],
+         "head": None},
+        {"kind": "ref_report", "report_id": None, "own_commits": -1, "needs_you": False, "changes": [], "info": [],
+         "head": None},
+        {"kind": "ref_report", "report_id": None, "own_commits": 0, "needs_you": False, "info": [], "head": None,
+         "changes": [{"ref": "refs/heads/x", "change": "renamed", "old": None, "new": None, "restore": "x"}]},
+        {"kind": "ref_report", "report_id": None, "own_commits": 0, "needs_you": False, "info": [], "head": None,
+         "changes": [{"ref": "refs/heads/x", "change": "created", "old": None, "new": "a", "restore": "x",
+                      "extra": 1}]},
     ]
     return emitted, rejected
 
@@ -59,7 +82,7 @@ def test_task_event_contract_matches_every_emitted_payload():
     variants = {variant["properties"]["kind"]["const"]: variant for variant in schema["oneOf"]}
     assert set(variants) == {
         "accepted", "starting", "command", "queued", "session_fresh", "stopped", "turn_summary", "refused",
-        "model_switched", "model_switch_rejected",
+        "model_switched", "model_switch_rejected", "ref_report", "sandbox_notice",
     }
     assert set(variants["command"]["properties"]["command"]["enum"]) == {command.value for command in TaskCommand}
     assert set(variants["stopped"]["properties"]["method"]["enum"]) == {method.value for method in StopMethod}
