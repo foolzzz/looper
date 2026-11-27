@@ -99,6 +99,34 @@ describe("remote content in agent Markdown", () => {
     expect(textOf(render("[https://bank.example@evil.example/](https://bank.example@evil.example/)"))).toContain("(evil.example)");
   });
 
+  it.each([
+    ["Cyrillic letter", "https://\u0430pple.com/login", "xn--pple-43d.com"],
+    ["full-width letter", "https://\uff45vil.example/x", "evil.example"],
+    ["percent-encoded letter", "https://%65vil.example/x", "evil.example"],
+  ])("shows the ASCII host when the text spells the host differently: %s", (_name, address, host) => {
+    expect(textOf(render(`[${address}](${address})`))).toContain(`(${host})`);
+    if (!address.includes("%")) expect(textOf(render(`go ${address}`))).toContain(`(${host})`); // GFM does not autolink a % host
+  });
+
+  it.each(["HTTPS://EVIL.EXAMPLE/x", " https://evil.example/x ", "https://evil.example/", "https://evil.example/x"])(
+    "does not repeat the host when the text is the address: %j", (text) => {
+      expect(textOf(render(`[${text.trim()}](https://evil.example/x)`))).not.toContain("(evil.example)");
+    });
+
+  it("keeps footnote ids, aria attributes and link titles on internal links", () => {
+    const html = render("text[^1] [a](#x \"Where to\")\n\n[^1]: note");
+    expect(html).toContain('id="user-content-fnref-1"');
+    expect(html).toContain("aria-describedby");
+    expect(html).toContain('title="Where to"');
+  });
+
+  it("renders mailto links and email autolinks as text, and a relative image as a same-origin link", () => {
+    expect(render("[m](mailto:a@b.example) a@b.example")).not.toContain("<a");
+    const html = render("![x](/api/v1/f.png)");
+    expect(html).not.toContain("<img");
+    expect(html).toContain('href="/api/v1/f.png"');
+  });
+
   it("never links what is neither a task link nor a web address", () => {
     for (const target of ["data:text/html,x", "vbscript:x", "mailto:a@b.example", "irc://x.example/y"]) {
       expect(render(`[t](${target})`)).not.toContain("<a");

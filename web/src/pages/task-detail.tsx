@@ -1,3 +1,4 @@
+import { RemoteLink } from "@/components/remote-link";
 import { LiveActivityFeed } from "@/components/live-activity-feed";
 import { activityKindIcon, formatTime } from "@/lib/activity";
 import { TaskFailureHolds } from "@/components/task-failure-holds";
@@ -492,9 +493,9 @@ function TaskCreatedBy({ task, className }: { task: TaskDetail; className?: stri
               <li key={input.key}>
                 {input.label}:{" "}
                 {URL_PATTERN.test(input.value) ? (
-                  <a href={input.value} target="_blank" rel="noreferrer" className="text-primary underline">
+                  <RemoteLink href={input.value} className="text-primary underline">
                     {input.value}
-                  </a>
+                  </RemoteLink>
                 ) : (
                   <span className="text-foreground">{input.value}</span>
                 )}

@@ -11,8 +11,8 @@ function ImageLabel({ src, alt }: { src?: string | Blob; alt?: string }) {
 // An agent's text must not make the browser fetch anything: images become links, and links name their host.
 // A wide table scrolls inside its message instead of widening the page.
 const COMPONENTS: Components = {
-  a: ({ href, children }) => (
-    <InsideLink><RemoteLink href={href ?? ""}>{children}</RemoteLink></InsideLink>
+  a: ({ node: _node, href, children, ...rest }) => (
+    <InsideLink><RemoteLink href={href ?? ""} {...rest}>{children}</RemoteLink></InsideLink>
   ),
   img: ImageLabel,
   table: (props) => (

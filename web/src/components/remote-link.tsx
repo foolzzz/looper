@@ -1,4 +1,4 @@
-import { createContext, useContext, type ReactNode } from "react";
+import { createContext, useContext, type AnchorHTMLAttributes, type ReactNode } from "react";
 
 const LinkContext = createContext(false);
 
@@ -41,7 +41,9 @@ function namesTheHost(text: ReactNode, host: string): boolean {
   if (typeof text !== "string") return false;
   try {
     const url = new URL(text.trim());
-    return /^https?:$/.test(url.protocol) && !url.username && !url.password && url.host === host;
+    return /^https?:$/.test(url.protocol) && !url.username && !url.password && url.host === host
+      // A Unicode or encoded spelling parses to the same host but reads differently, so the ASCII host must be in the text.
+      && text.toLowerCase().includes(host);
   } catch {
     return false;
   }
@@ -51,12 +53,13 @@ function namesTheHost(text: ReactNode, host: string): boolean {
  * A link to another site: it shows the real host, opens in a new tab and sends no referrer. An address that is
  * neither this site nor http(s) renders as plain text.
  */
-export function RemoteLink({ href, className, children }: { href: string; className?: string; children: ReactNode }) {
+export function RemoteLink({ href, className, children, ...extra }: { href: string; className?: string; children: ReactNode }
+  & Omit<AnchorHTMLAttributes<HTMLAnchorElement>, "href" | "target" | "rel" | "referrerPolicy" | "className" | "children">) {
   const target = linkTarget(href);
   if (target.kind === "blocked") return <span>{children}</span>;
-  if (target.kind === "internal") return <a href={href} className={className}>{children}</a>;
+  if (target.kind === "internal") return <a href={href} className={className} {...extra}>{children}</a>; // footnote ids, aria and title stay
   return (
-    <a href={href} target="_blank" rel="noopener noreferrer" referrerPolicy="no-referrer" className={className}>
+    <a href={href} title={extra.title} target="_blank" rel="noopener noreferrer" referrerPolicy="no-referrer" className={className}>
       {children}
       {!namesTheHost(children, target.host) && <span className="text-muted-foreground"> ({target.host})</span>}
     </a>
