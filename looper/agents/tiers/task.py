@@ -798,10 +798,12 @@ class TaskRouter:
     async def _handle_stop(self, envelope: MessageEnvelope) -> None:
         assert self._bus is not None
         task_id = envelope.payload.get("task_id", "")
-        await self._clear_failure_holds(task_id)
+        # A stop is the user's explicit end state: a failing cleanup step is logged and must not keep ``stopped`` unwritten
+        # (the bus has already marked the message delivered, so nothing retries it).
+        await self._stop_step("clear_failure_holds", task_id, self._clear_failure_holds(task_id))
         task = self._tasks.get(task_id)
         from .. import cost_guard
-        await cost_guard.release_queued(task_id)
+        await self._stop_step("release_queued", task_id, cost_guard.release_queued(task_id))
         await attempts.close_attempts(task_id, failure_kind=attempts.FailureKind.STOPPED)
         await attempts.record_outcome(task_id, attempts.TaskOutcome.STOPPED, attempts.StopCause.USER_STOP)
         if not task:
@@ -816,13 +818,13 @@ class TaskRouter:
         task.status = "stopped"
         planner = self._planners.get(task_id)
         if planner:
-            await self._bus.publish(MessageEnvelope.create(
+            await self._stop_step("cancel_publish", task_id, self._bus.publish(MessageEnvelope.create(
                 source=TASK_ROUTER_ADDRESS,
                 target=planner.agent_address,
                 message_type=MessageType.TASK_CANCEL,
                 payload={"task_id": task_id},
                 correlation_id=task.correlation_id,
-            ))
+            )))
 
         try:
             await db_tasks.update_task_status(task_id, "stopped", result_summary=await self._stop_note(task_id, envelope.payload.get("stop_note")))
@@ -996,10 +998,17 @@ class TaskRouter:
         if self._broadcaster:
             self._broadcaster.close_task(task_id)
 
+    async def _stop_step(self, step: str, task_id: str, step_call: Awaitable[Any]) -> None:
+        """Run one cleanup step of a stop; a failure is logged and does not stop the rest."""
+        try:
+            await step_call
+        except Exception:
+            logger.warning("stop cleanup step %s failed for task %s", step, task_id, exc_info=True)
+
     async def _task_ended(self, task_id: str, status: str) -> None:
         from .. import cost_guard
 
-        await cost_guard.release_queued(task_id)
+        await self._stop_step("release_queued", task_id, cost_guard.release_queued(task_id))
         if self._on_task_end is None:
             return
         try:
