@@ -178,7 +178,7 @@
 - 客户端的 `high`（或被 `escalate` 升为 `high`）的调用不执行：登记 `_Pending(id, tool, arguments, impact, at)` 到 `(principal_key, session)`；同一键上新的待确认替换旧的；最多 50 个键，超出丢最旧的；写一行 `manager_actions`（`status = needs_confirmation`）；回答 202。
 - `POST /api/v1/confirm {confirmation_id}`：同一客户端、同一 `X-Looper-Session`、id 相同、600 秒内 → 按当初的参数执行一次，删除登记，写一行 `status = ok` 或 `error` 带 `confirmation_id`。否则：没有或 id 不同 → 404 `not_found`；超时 → 410 `expired`（同时删除）。另一个客户端或另一个会话拿到 id 也确认不了（键不同）。
 - 只在内存里：重启就没了，客户端再调一次原操作。
-- 和管家对话里的确认不是一回事：那是管家的流程，用户（或替他说话的 agent）在同一对话里回一句「确认」，管家调 `looper_confirm`。`/api/v1/confirm` 只确认直接操作。
+- 和管家对话里的确认不是一回事：那是管家的流程，用户（或替他说话的 agent）在同一对话里回一句「确认」，管家调 `looper_confirm`。`/api/v1/confirm` 只确认直接操作，而且是客户端对自己请求的二次提交（确认的就是发请求的客户端），不是操作者批准，服务器也不检查有没有人看过；管家聊天里的确认才由操作者做。
 - `principal_key` 是 `client:<id>`，操作者是 `operator`。会话名 1–64 个字符 `[A-Za-z0-9._:-]`，不合法 400。
 
 ## 9. 归属与留痕

@@ -667,7 +667,7 @@ Manager has no tool for it. The dashboard shows the task page's 指标 card and 
   shared resident session's history.
   `looper profile show [--runtime-root …] [--config …]` reads the same file with the same compiler and prints
   exactly the resident section's body, with no added newline, whether injection is on or off. It makes no model
-  call or schema/cache write. Its worker has a 1-second deadline covering imports, settings and file I/O;
+  call or schema/cache write. Its worker bounds its database and settings reads to 0.7 seconds after its imports, and the parent waits at most 4.5 seconds for the worker to exit;
   missing settings, an unavailable database, an invalid profile or timeout prints nothing and exits 0.
   Output is bounded by the compiler's 1500-character cap (at most 6000 UTF-8 bytes).
   `looper claude-code profile` prints the same text for the operator's own Claude Code
@@ -1035,6 +1035,30 @@ them.
 - **Verification.** `tests/test_task_manager_sandbox_probe.py` runs the real command against the real
   CLI and a local scripted Messages API (`LOOPER_CLAUDE_PROBE_BIN`), with positive controls; rerun it
   before changing `VERIFIED_CLI_VERSION`.
+- **Ref reports.** In an in-place direct session the model's Bash writes the real `.git`, so a turn
+  can move a branch, delete a tag or switch `HEAD`. `task_manager_refs` records `refs/heads`,
+  `refs/tags` and `HEAD` before every turn in the running turn's memory (the sandbox cannot reach it;
+  `refs/remotes` and anything else are never read, and packed refs, `gc` and reflogs show no change
+  because values are compared, not files), compares them after, and says what changed in the task
+  conversation with one restore command per ref (`git update-ref --no-deref`, or `git symbolic-ref` for a
+  symbolic ref). Names are shown with control and format characters written as `\uXXXX`. It never restores anything and
+  raises no alert: a ref change is not an invariant violation. The `ref_report` event carries
+  `report_id`, `changes`, `info`, `head`, `own_commits` and `needs_you`. A fast-forward of the task
+  branch is the Manager's own commits (`own_commits`) and is not listed; a reset, rewrite or delete of it
+  is listed but not "needs you" by itself. A change to any other branch or tag is stored in
+  `task_manager_ref_reports` with `needs_you` set; a change under `refs/heads/looper/<other task>/`
+  while that task exists and is unfinished is `info` only. The
+  task branch is recorded once, at the first enablement (`task_manager_branches`, with a
+  `sandbox_notice` event that the real checkout is edited directly); a detached `HEAD` then refuses the
+  first turn (`head_detached`), and every later turn refuses while `HEAD` is not on that branch
+  (`head_moved`) until it is checked out again or the operator runs `tasks.task_manager_branch_set`.
+  A fast-forward is decided from the raw commit objects (grafts and replace refs are not honoured) and
+  anything undecidable is reported as a rewrite. A ref listing Looper cannot read safely (a name with a
+  line-break character, a repeated name, a failed read) refuses the turn at its start; at its end it emits a
+  `sandbox_notice` with notice `refs_unreadable` instead of a report. A task directory that is not a git
+  repository is refused as `workspace` for now (the typed `not_git` reason comes with the directory check).
+  `ref_report` and the `refs_unreadable` notice carry the turn's `message_id`.
+  Every git call goes through `git_safe`; the real-CLI rows are `tests/test_task_manager_refs_probe.py`.
 
 `tasks.managers.max_resident` defaults to 6 (1–20). Admission can reclaim the least
 recently used idle process; a 60-second ticker reclaims processes idle for 30
@@ -1811,7 +1835,7 @@ runs without the shared leader; OMP 18.4.3).
 `looper claude-code profile` reuses `looper profile show` and the Manager's single compiler; it reads the
 configured vault note locally through the database, without an HTTP request, model call or cache write.
 `--hook` returns SessionStart JSON whose `additionalContext` is that same text, capped at 3000 characters.
-The shared reader has a 1-second deadline (within the 2-second hook budget); an unavailable or empty profile,
+The shared reader gives its worker 4.5 seconds in total, including imports (the hook itself is cut off at 5 seconds); an unavailable or empty profile,
 errors and timeouts produce no stdout or stderr and exit 0. A stopped HTTP server alone does not prevent a read.
 Nothing is installed by default. `looper claude-code install hook --runtime-root <runtime root>` shows its
 user-settings path, added command and diff, asks for confirmation, backs up existing bytes and writes atomically.
@@ -6196,7 +6220,7 @@ prompt, name, turns and switch, changing or removing a provider, or adding
 items to the catalog.
 
 API clients run the same catalog. `ClientOps` wraps it for an API client: a request is a turn (a write runs; one of risk
-`high` answers 202 until `/api/v1/confirm`), and reads are not recorded. Attribution is kept: `client_id` on the
+`high` answers 202 until the client confirms its own request at `/api/v1/confirm`), and reads are not recorded. Attribution is kept: `client_id` on the
 conversation's threads, on the tasks it creates and on the Manager calls, and `via` is `client:<name>` for a call made
 through the API and `manager:loopercli` for one the Manager made in a client conversation. The Manager sees such a
 message with the line `Channel: loopercli, client "<name>" …`, and a task created in a client conversation reports its
@@ -9817,8 +9841,8 @@ belongs only to global worker/reviewer role layers, not project layers or manage
 
 Operators execute these writes in one call, using the dashboard's existing dialogs. Clients receive
 202 `needs_confirmation` for shared-default updates, concurrency updates, raised/lifted effective spend
-caps, profile deletion and role-template deletion; confirm with `POST /api/v1/confirm` in the same
-client/session. Gate replies/end and wait controls execute directly. Client management is operator-only,
+caps, profile deletion and role-template deletion; the client confirms its own request with `POST /api/v1/confirm` in the same
+client/session (not an operator approval). Gate replies/end and wait controls execute directly. Client management is operator-only,
 with `Cache-Control: no-store` on responses; never log its one-time create token.
 
 The following request bodies illustrate the field nesting. Identifiers are placeholders for existing
@@ -9881,7 +9905,7 @@ separate tokens and is not exported to API clients. No unversioned operator rout
   `conflict` 409, `expired` 410, `rate_limited` 429, `unavailable` 503.
 - **Sessions and confirmation.** A client may send `X-Looper-Session` (1–64 characters of `A-Za-z0-9._:-`; `default`
   without it). For client tokens, a write of risk `high` answers 202 with a `confirmation_id`; `POST /api/v1/confirm` with that id runs it
-  only for the same client and the same session, within 10 minutes. Pending confirmations live in memory and are lost
+  only for the same client and the same session, within 10 minutes. This is the client confirming its own request, not an operator approval: the client that sends the request also sends the confirmation, and Looper does not check that a person saw it (the Manager's chat is different: there only the operator confirms). Pending confirmations live in memory and are lost
   when the server restarts. Operators execute high operations in one request; the dashboard keeps its existing
   confirmation dialogs and never silently confirms a client confirmation.
 - **Credentials are the operator's.** `auth.set_password` and `auth.clear_password` accept only an operator token,
