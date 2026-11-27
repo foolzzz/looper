@@ -9,8 +9,10 @@ import subprocess
 import sys
 from typing import Any
 
-# Include imports, ops-file reads and synchronous vault I/O in the deadline, not only PostgreSQL awaits.
-TIMEOUT_SECONDS = 1.0
+# Hang guard for the child process only. The child bounds its own database and vault work (0.7 s, after its
+# imports), so this must not race a cold import (about 2-3.5 s on a cold bytecode cache). It stays under the 5 s
+# SessionStart hook timeout so a stuck child is still reaped by this process.
+TIMEOUT_SECONDS = 4.5
 MAX_OUTPUT_BYTES = 6000  # the compiler's 1500 Unicode characters, at most four bytes each
 
 
