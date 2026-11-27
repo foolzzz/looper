@@ -13,6 +13,12 @@ notes) checks ``group_isolation`` and stays off in group turns until it reports 
 The global settings are kept in memory: ``load`` reads them at startup (from ``chat_settings.load``) and an update
 applies them at once. Scenario definitions are applied at startup and by the fleet's change listener.
 Until loaded, routing is off.
+
+An API client's messages are the exception: they never share ``main``, switch or no switch. The default Manager gives
+each client a session of its own (``client_key``) that holds only that client's chats, with an explicit short list of
+task-control tools (``session_visibility.CLIENT_ALLOWLIST``). Its resident process counts toward ``max_resident`` like
+a routed session's and stops when idle: with the switch off right after its turns, on when another session needs the
+slot.
 """
 
 from __future__ import annotations
@@ -30,6 +36,7 @@ from .operator_identity import is_operator
 
 ROUTING_KEY = "manager.session_routing.enabled"
 DEFAULT_ROUTING_ENABLED = False
+CLIENT_CHANNEL = "api"  # the channel part of a client session's key: client:api:<client id>
 MAX_RESIDENT_KEY = "manager.sessions.max_resident"
 DEFAULT_MAX_RESIDENT = 2  # RFC 4.2: a resident session costs about 240-310 MB; resuming on demand is 1-2 s slower
 MAX_RESIDENT_RANGE = (1, 16)
@@ -56,7 +63,8 @@ class GroupIsolation(str, Enum):
 
 
 class SessionKind(str, Enum):
-    MAIN = "main"  # the dashboard chat, API clients and the operator's own direct chats
+    MAIN = "main"  # the dashboard chat and the operator's own direct chats
+    CLIENT = "client"  # one API client's chats with the default Manager (``client_key``)
     GROUP = "group"  # one Lark or Telegram group chat (its topics included)
     DM = "dm"  # the direct chat of another allowed sender
 
@@ -75,6 +83,8 @@ class SessionKey:
                 or (self.kind is not SessionKind.MAIN and not (self.channel_id and self.chat)):
             raise ValueError(f"a {self.kind.value} session key needs {'no' if self.kind is SessionKind.MAIN else 'a'}"
                              " channel and chat")
+        if self.kind is SessionKind.CLIENT and self.channel_id != CLIENT_CHANNEL:
+            raise ValueError(f"a client session key names the {CLIENT_CHANNEL!r} channel")
         if self.scope_fingerprint is not None and (self.kind is not SessionKind.GROUP
                 or not isinstance(self.scope_fingerprint, str)
                 or re.fullmatch(r"[0-9a-f]{16}", self.scope_fingerprint) is None):
@@ -89,12 +99,24 @@ class SessionKey:
 MAIN_KEY = SessionKey(SessionKind.MAIN)
 
 
+def client_key(client_id: str) -> SessionKey:
+    """The default Manager's session of the API client ``client_id``."""
+    return SessionKey(SessionKind.CLIENT, CLIENT_CHANNEL, client_id)
+
+
+def always_routed(key: SessionKey) -> bool:
+    """Whether ``key``'s session runs apart from main whatever the routing switch says: an API client's does."""
+    return key.kind is SessionKind.CLIENT
+
+
 def session_key_for(origin: Mapping[str, Any], *, client_id: str | None, operator_id: str | None) -> SessionKey:
     """The session a message from ``origin`` (``tiers.manager._message_origin``: its channel, bot, chat, sender and
-    whether the chat is a group) runs in. The dashboard chat (with or without an API client) and the operator's own
-    direct chats are ``main``; so is any direct chat of a bot with no ``operator_id``, which cannot tell the operator
-    apart (RFC 5.3.1). A group is ``group``; another sender's direct chat is ``dm``."""
+    whether the chat is a group) runs in. An API client's message is its client's own session. The dashboard chat and
+    the operator's own direct chats are ``main``; so is any direct chat of a bot with no ``operator_id``, which cannot
+    tell the operator apart (RFC 5.3.1). A group is ``group``; another sender's direct chat is ``dm``."""
     channel, channel_id, chat = origin.get("channel"), origin.get("channel_id"), origin.get("chat")
+    if client_id and channel == "web":
+        return client_key(client_id)
     if not (is_lark(channel) or channel == "telegram") or not channel_id or not chat:
         return MAIN_KEY
     if origin.get("group"):

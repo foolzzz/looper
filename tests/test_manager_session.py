@@ -215,7 +215,7 @@ def test_the_main_sessions_binding_file_and_bridge_env_are_as_before(tmp_path: P
     assert turn_file.read_bytes() == b'{"epoch": 1, "turn": null}'
     library = asyncio.run(manager._library_with_server(AgentLibrary()))
     entry = json.loads(Path(library.mcp_config).read_text(encoding="utf-8"))["mcpServers"]["looper"]
-    assert entry == {"command": sys.executable, "args": ["-m", "looper.cli", "mcp-server"],
+    assert entry == {"command": sys.executable, "args": ["-I", "-m", "looper.cli", "mcp-server"],
                      "env": {"LOOPER_AGENT_URL": "http://127.0.0.1:9", "LOOPER_AGENT_TOKEN": "tok",
                              "LOOPER_AGENT_TURN_FILE": str(turn_file)}}
 

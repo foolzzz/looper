@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
 import { AlertTriangle, BookOpen, FileText, GitBranch, Link as LinkIcon, ListTodo, Plus, Terminal, X } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
+import { RemoteLink } from "@/components/remote-link";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import {
@@ -463,9 +464,9 @@ function LedgerDrawer({ itemId, onClose, onChanged }: { itemId: string; onClose:
         {item.refs.length > 0 && <ul className="space-y-2 text-sm">
           {item.refs.map((ref, n) => <li key={n}>
             <LinkIcon className="mr-1 inline h-3 w-3" aria-hidden="true" />
-            {safeRef(ref) ? <a href={safeRef(ref)!} target="_blank" rel="noopener noreferrer" className={LINK}>
+            {safeRef(ref) ? <RemoteLink href={safeRef(ref)!} className={LINK}>
               {ref.label || ref.ref}
-            </a> : <span>
+            </RemoteLink> : <span>
               {ref.label ? `${ref.label} · ` : ""}
               {ref.ref}
             </span>}

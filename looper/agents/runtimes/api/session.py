@@ -330,6 +330,14 @@ class ApiSession:
             self._loop = None
             self._descriptor = None
 
+    async def try_stop_if_idle(self) -> bool:
+        """Close the loop of an idle session so its slot can be reused; its saved history resumes it. No await
+        between the check and the claim, as ``ResidentClaude`` does."""
+        if not self.started or not self.idle:
+            return False
+        await self.stop()
+        return True
+
     async def interrupt(self) -> StopMethod | None:
         cancel, done = self._cancel, self._turn_done
         if cancel is None:

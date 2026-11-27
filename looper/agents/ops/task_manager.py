@@ -16,6 +16,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from .. import git_safe
 from ...db import tasks
 from .. import outbound_hook, projects, task_conversations_settings
 from ..message import task_manager_address
@@ -214,14 +215,18 @@ class TaskManagerOps:
         return answer
 
 
+@git_safe.attributed
 async def _workspace(task: dict[str, Any]) -> dict[str, Any]:
     directory = str(task.get("work_dir") or task.get("workspace_dir") or "")
     empty = {"dir": directory, "mode": task.get("workspace_mode") or "in_place",
              "branch": None, "head": None, "changed": [], "uncommitted": 0}
 
     async def git(*args: str) -> str:
-        process = await asyncio.create_subprocess_exec("git", "-C", directory, *args,
-            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL)
+        try:
+            process = await git_safe.spawn(directory, *args, stdout=asyncio.subprocess.PIPE,
+                                           stderr=asyncio.subprocess.DEVNULL, stdin=asyncio.subprocess.DEVNULL)
+        except git_safe.RepositoryRefused as error:
+            raise ValueError("not a git checkout") from error
         try:
             async with asyncio.timeout(5):
                 stdout, _ = await process.communicate()
@@ -229,6 +234,7 @@ async def _workspace(task: dict[str, Any]) -> dict[str, Any]:
             process.kill()
             await process.wait()
             raise
+        await git_safe.recheck_async(process)
         if process.returncode:
             raise ValueError("not a git checkout")
         return stdout.decode("utf-8", errors="replace")

@@ -470,12 +470,15 @@ class ManagerOps:
         turn = (turn or self._turn) if session_key is None else (
             self._session_turns.get(session_key) or Turn(channel=None, chat=None))
         key = session_key if session_key is not None else self._session_of(turn)
-        if (policy := session_visibility.for_session(key, manager_id=self._scope.manager_id)) is not None:
+        policy = session_visibility.for_session(key, manager_id=self._scope.manager_id)
+        if policy is not None and policy is not session_visibility.CLIENT_ALLOWLIST:
             # Filter before reading any global schemas (templates, workflows, settings).
             from .session_tools import TOOLS as SESSION_TOOLS
 
             return [tool.listing() for tool in SESSION_TOOLS if tool.name in policy.tools]
         tools = list((await self.current_scope()).tools.values())
+        if policy is not None:  # an API client's session: the Manager's tools its allowlist names, nothing else
+            tools = [tool for tool in tools if tool.name in policy.tools]
         if any(_audience(tool) is Audience.OPERATOR for tool in tools) and not (
                 turn is not None and await _operator_turn(turn)):
             tools = [tool for tool in tools if _audience(tool) is Audience.ANY]
@@ -567,7 +570,12 @@ class ManagerOps:
             return _error(ErrorCode.FORBIDDEN, "this turn belongs to another session; the call did not run")
         key = session_key if session_key is not None else self._binding_sessions.get(
             binding or "", self._session_of(bound or self._turn))
-        if (policy := session_visibility.for_session(key, manager_id=self._scope.manager_id)) is not None:
+        policy = session_visibility.for_session(key, manager_id=self._scope.manager_id)
+        if policy is session_visibility.CLIENT_ALLOWLIST and name not in policy.tools:
+            # An API client's session runs the Manager's own tool path, but only for the tools its allowlist
+            # names; any other name, listed in the Manager's scope or not, is refused without running or validating.
+            return await self._client_refusal(name, raw, self._bindings.get(binding) if binding else None)
+        if policy is not None and policy is not session_visibility.CLIENT_ALLOWLIST:
             # Also deny guessed, unknown and stale tool names, without revealing global
             # schemas, validation errors or return values. Authenticated sessions cannot
             # acquire main's access by omitting their binding.
@@ -968,6 +976,23 @@ class ManagerOps:
             self._lapse(self._pending.pop(next(iter(self._pending))))
         turn.blocks.append(block)
         return pending
+
+    async def _client_refusal(self, name: str, raw: Any, turn: Turn | None) -> dict[str, Any]:
+        """A call of a tool outside an API client session's allowlist: refused before its arguments are read, and
+        recorded by name only."""
+        arguments = raw if isinstance(raw, dict) else {}
+        turn = turn or Turn(channel=None, chat=None)
+        tool = self._scope.tools.get(name) or _MANAGER_TOOL_NAMES.get(name) or _LEDGER_TOOLS.get(name)
+        try:
+            await db_actions.record(
+                channel=turn.channel, chat=turn.chat, message_id=turn.message_id, tool=name,
+                arguments={key: None for key in arguments}, risk=tool.risk.value if tool else Risk.READ.value,
+                status="error", error_code=ErrorCode.FORBIDDEN.value, result={"reason": "client_session_tool"},
+                manager_id=self._scope.manager_id, client_id=turn.client_id)
+        except Exception:
+            logger.warning("could not record an API client session's refused tool call", exc_info=True)
+        return _error(ErrorCode.FORBIDDEN, f"{name} is not available in this API client session; its tools are: "
+                                           f"{', '.join(sorted(session_visibility.CLIENT_TOOLS))}")
 
     async def _out_of_scope(self, name: str, raw: Any, turn: Turn | None, key: str) -> dict[str, Any]:
         arguments = raw if isinstance(raw, dict) else {}
@@ -1540,7 +1565,9 @@ def server_config(url: str, token: str, *, reconnect_seconds: int | None = None)
     env = {URL_ENV: url, TOKEN_ENV: token}
     if reconnect_seconds is not None:
         env["LOOPER_AGENT_RECONNECT_SECONDS"] = str(reconnect_seconds)
-    return {"command": sys.executable, "args": ["-m", "looper.cli", "mcp-server"], "env": env}
+    # ``-I`` keeps the session's working directory (which the agent can write to) and PYTHON* variables off
+    # ``sys.path``, so a planted ``looper`` package there cannot replace this server's code.
+    return {"command": os.path.abspath(sys.executable), "args": ["-I", "-m", "looper.cli", "mcp-server"], "env": env}
 
 
 async def library_with_server(library: Any, runtime_root: Path, config: Mapping[str, Any], *, who: str) -> Any:
