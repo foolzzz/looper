@@ -144,6 +144,12 @@ def test_safe_and_code_content_is_untouched(source: str) -> None:
     f"```a`b\n![x]({U})\n```",  # a backtick fence has no backtick in its info string
     f"    ![x]({U})",  # indented code is not recognised either
     f"``` \n```\n![x]({U})",  # closed fence, then prose
+    # a backslash escapes only the first backtick of an opener; a closer matches on its raw length
+    "x```\\```![a](https://e.example/y)```",
+    "x``\\``![a](https://e.example/y)``",
+    "``\\`` ![a](https://e.example/y) ``",
+    "`\\`![a](https://e.example/y)`",
+    "`a\n``\\`` ![a](https://e.example/y)\n`",  # a stray backtick on another line: no spans in the paragraph
     # a code span never crosses a newline: these block boundaries end a paragraph, so no span forms
     "`a\n---\n![](https://e.example/y)\n`",
     "`a\n# ![](https://e.example/y)\n`",
@@ -268,3 +274,69 @@ def test_random_inputs_never_leave_a_live_image() -> None:
         text = "".join(rng.choice(tokens) for _ in range(rng.randint(1, 40)))
         out = neutralize_images(text)
         assert not has_live_image(out), (text, out)
+
+
+def test_ampersand_in_a_plain_url_attribute_is_kept_but_entities_are_not() -> None:
+    assert neutralize_images('<a href="https://example.invalid/p?a=1&b=2">x</a>') == '<a href="https://example.invalid/p?a=1&b=2">x</a>'
+    assert neutralize_images('<a href="https&#58;//example.invalid/">x</a>').startswith("&#60;")
+    assert neutralize_images('<a href="https://example.invalid/&#47;x">x</a>').startswith("&#60;")
+    assert neutralize_images('<a href="https://example.invalid/?&amp;x">x</a>').startswith("&#60;")
+
+
+def test_paragraph_with_a_stray_backtick_has_no_code_spans() -> None:
+    source = f"`code` and `![x]({U})`\nstray ` here"
+    out = neutralize_images(source)
+    assert f"image: [x (example.invalid)]({U})" in out and "`code`" in out
+    assert neutralize_images(f"`![x]({U})`\n\nstray ` here").startswith(f"`![x]({U})`")  # a blank line ends the paragraph
+
+
+def _oracle_leaks(markdown: str) -> list[str]:
+    """What a CommonMark renderer with HTML enabled would load from ``markdown``."""
+    from markdown_it import MarkdownIt
+
+    leaks: list[str] = []
+    stack = MarkdownIt("commonmark", {"html": True}).parse(markdown)
+    while stack:
+        token = stack.pop()
+        stack.extend(token.children or [])
+        if token.type == "image" and not KEY.fullmatch(str(token.attrs.get("src", ""))):
+            leaks.append(f"image {token.attrs.get('src')}")
+        if token.type in ("html_inline", "html_block") and RESOURCE_TAG.search(token.content):
+            leaks.append(f"html {token.content[:40]!r}")
+    return leaks
+
+
+KEY = re.compile(r"img_[A-Za-z0-9_-]{1,120}")
+RESOURCE_TAG = re.compile(r"<\s*(?:img|picture|source|video|audio|svg|embed|object|iframe|link|script|style|input|div|table|"
+                          r"meta|body|math|mglyph|image|pre|textarea|!--)", re.I)
+REVIEW_CORPUS = [
+    "x```\\```![a](https://e.example/y)```", "x``\\``![a](https://e.example/y)``",
+    "``\\`` ![a](https://e.example/y) ``", "`\\`![a](https://e.example/y)`",
+    "`a\n---\n![](https://e.example/y)\n`", "`a\n# ![](https://e.example/y)\n`",
+    "`a\n> ![](https://e.example/y)\n> `", "`a\n- ![](https://e.example/y)\n`",
+    "[r]: https://e.example/x``\n![r]``", "    ```\n![a](https://e.example/y)\n    ```",
+    "\t```\n![a](https://e.example/y)\n\t```", "`~~~\n<div><img src=https://e.example/y>",
+    "<pre>\n```\n</pre>\n![a](https://e.example/y)", "<!--\n```\n-->\n![a](https://e.example/y)",
+    "``'/\\``![a](https://e.example/y)]/\n`<svg><!--a<at id=1>\\`![a](https://e.example/y)",
+    "<at id=1>\n`<img src=https://e.example/y>`",
+    "<at id=1>\n```\n<img src=https://e.example/y>\n```",  # a Lark tag line opens an HTML block: no fence in it
+    "<br>\n~~~\n<!--\n<img src=https://e.example/y>",
+]
+
+
+@pytest.mark.parametrize("source", REVIEW_CORPUS)
+def test_review_corpus_leaves_nothing_for_a_renderer_to_load(source: str) -> None:
+    assert _oracle_leaks(source), "the corpus input must leak before the change"
+    assert _oracle_leaks(neutralize_images(source)) == []
+
+
+def test_seeded_random_inputs_leave_nothing_for_a_renderer_to_load() -> None:
+    pieces = ["`", "``", "```", "\\", "\\`", "\n", "\n\n", " ", "![a](https://e.example/y)", "![a][r]", "![r]", "[r]: https://e.example/y",
+              "<img src=https://e.example/y>", "<div>", "<!--", "-->", "<pre>", "</pre>", "<at id=1>", "<font style=x>", "#", "> ", "- ",
+              "---", "~~~", "    ", "\t", "]", "[", "(", ")", "<", ">", "'", "/", "!", "a", "img_v3_0a", "![k](img_v3_0a)"]
+    rng = random.Random(20260126)
+    for _ in range(20_000):
+        text = "".join(rng.choice(pieces) for _ in range(rng.randint(1, 30)))
+        out = neutralize_images(text)
+        leaks = _oracle_leaks(out)
+        assert leaks == [], (text, out, leaks)

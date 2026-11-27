@@ -17,8 +17,10 @@ ability to render an image from anything that is not provably safe:
   what the card Markdown component does with tags it does not list, so no unlisted tag is sent as a tag. Lark's
   ``<link>`` and ``<audio>`` are left out of the allowlist on purpose: they are also resource-loading HTML.
 * Code is preserved: top-level fenced blocks (a backtick fence info string has no backticks) and inline code
-  spans. A span never crosses a newline, which also covers the block boundaries (headings, quotes, list items,
-  reference definitions) that end a CommonMark paragraph. Indented code and fences indented 4+ spaces are not
+  spans. A span never crosses a newline, and the spans of a run of consecutive non-blank lines are trusted only
+  when every backtick run in it pairs within its own line; otherwise that run of lines has no code spans and
+  everything in it is neutralized. That covers the block boundaries (headings, quotes, list items, reference
+  definitions) that end a CommonMark paragraph and make a cross-line pairing a guess. Indented code and fences indented 4+ spaces are not
   recognised, so images in them are neutralized (a code sample there may show ``&#33;[`` instead of ``![``).
   Neutralizing is the safe direction when this parser and the renderer disagree about what is code.
 
@@ -27,6 +29,7 @@ safe to call on the event loop.
 """
 from __future__ import annotations
 
+import bisect
 import re
 from urllib.parse import urlsplit
 
@@ -57,7 +60,7 @@ _LARK_TAG = re.compile(
     r"<(/?)([A-Za-z][A-Za-z0-9_]*)((?:\s+[A-Za-z_][\w-]*(?:\s*=\s*(?:\"[^\"<>]*\"|'[^'<>]*'|[^\s\"'<>=`]+))?)*)\s*(/?)>")
 _ATTR = re.compile(r"\s+([A-Za-z_][\w-]*)(?:\s*=\s*(\"[^\"<>]*\"|'[^'<>]*'|[^\s\"'<>=`]+))?")
 _WORD = re.compile(r"[A-Za-z0-9_.@#:+-]{0,100}")
-_HTTP_URL = re.compile(r"https?://[^\s\"'<>&\\`]{1,1800}", re.I)
+_HTTP_URL = re.compile(r"https?://(?:[^\s\"'<>&\\`]|&(?!#|[A-Za-z]+;)){1,1800}", re.I)
 
 
 def _lark_tag(text: str, position: int) -> bool:
@@ -79,6 +82,13 @@ def _lark_tag(text: str, position: int) -> bool:
     return True
 
 
+def _starts_html_block(line: str) -> bool:
+    """True when ``line`` starts with a tag that is sent as a tag: a renderer with raw HTML on may read it as the
+    start of an HTML block. Tags that are escaped to text cannot."""
+    match = _HTML_BLOCK.match(line)
+    return bool(match) and _lark_tag(line, line.index("<"))
+
+
 def _escape_tags(text: str) -> str:
     """Write the ``<`` of every tag opener as ``&#60;`` unless it is a Lark tag or an http(s)/mailto autolink."""
     if "<" not in text:
@@ -96,6 +106,7 @@ def _escape_tags(text: str) -> str:
     return "".join(out)
 
 
+_HTML_BLOCK = re.compile(r" {0,3}<(?!(?:https?://|mailto:))/?[A-Za-z]", re.I)
 _ALT_MAX = 300
 _DEST_MAX = 2000
 _NESTING_STEPS = 16
@@ -169,41 +180,46 @@ def _images(text: str, definitions: frozenset[str]) -> str:
     return _escape_tags("".join(out))
 
 
-def _spans(line: str) -> list[tuple[int, int]]:
-    """Inline code spans (opening run start, closing run end) in one line: equal-length backtick runs pair up
-    in order; a backslash before a run escapes its first backtick."""
-    runs: list[tuple[int, int]] = []
+def _spans(line: str) -> tuple[list[tuple[int, int]], bool]:
+    """Inline code spans (opening run start, closing run end) in one line, and whether every backtick run of the
+    line is part of one. A backslash before a run escapes only its first backtick (the opener is then one shorter);
+    a closing run matches on its raw length, as in CommonMark, where a backslash inside a span is literal."""
+    runs: list[tuple[int, int, int]] = []  # (opener start, end, raw length)
     for match in _RUN.finditer(line):
         start, end = match.span()
         slashes = 0
         while start - slashes - 1 >= 0 and line[start - slashes - 1] == "\\":
             slashes += 1
-        if slashes % 2:
-            start += 1
-        if end > start:
-            runs.append((start, end))
-    following: dict[int, int] = {}
-    next_same: list[int | None] = [None] * len(runs)
-    for index in range(len(runs) - 1, -1, -1):
-        length = runs[index][1] - runs[index][0]
-        next_same[index] = following.get(length)
-        following[length] = index
+        opener = start + 1 if slashes % 2 else start
+        runs.append((opener, end, end - start))
+    by_length: dict[int, list[int]] = {}
+    for index, (_, _, raw) in enumerate(runs):
+        by_length.setdefault(raw, []).append(index)
     spans: list[tuple[int, int]] = []
+    clean = True
     index = 0
     while index < len(runs):
-        close = next_same[index]
-        if close is None:
+        opener, _, raw = runs[index]
+        length = runs[index][1] - opener
+        if length == 0:  # a lone escaped backtick is a literal character
+            index += 1
+            continue
+        candidates = by_length.get(length, [])
+        position = bisect.bisect_right(candidates, index)
+        if position == len(candidates):
+            clean = False
             index += 1
         else:
-            spans.append((runs[index][0], runs[close][1]))
+            close = candidates[position]
+            spans.append((opener, runs[close][1]))
             index = close + 1
-    return spans
+    return spans, clean
 
 
-def _line(line: str, definitions: frozenset[str]) -> str:
+def _line(line: str, definitions: frozenset[str], spans: list[tuple[int, int]]) -> str:
     out: list[str] = []
     position = 0
-    for start, end in _spans(line):
+    for start, end in spans:
         out.append(_images(line[position:start], definitions))
         out.append(line[start:end])
         position = end
@@ -217,16 +233,37 @@ def neutralize_images(markdown: str) -> str:
     lines = markdown.splitlines(keepends=True)
     definitions = frozenset(_normalize(m[1]) for m in map(_DEFINITION.match, lines) if m)
     out: list[str] = []
+    paragraph: list[str] = []
     fence: str | None = None
+    html_block = False  # a line starting with a Lark tag may open an HTML block, which ends only at a blank line
+
+    def flush() -> None:
+        # Trust the code spans of a run of lines only when every backtick run pairs within its own line. A
+        # stray backtick may pair with one on another line (or not at all) depending on the block structure,
+        # so such a run of lines is treated as having no code spans: everything in it is neutralized. The same
+        # holds when a line starts with a Lark tag: a renderer with raw HTML on reads it as an HTML block, which
+        # ends only at a blank line and makes the backticks after it literal.
+        found = [_spans(line) for line in paragraph]
+        trusted = all(clean for _, clean in found) and not any(_starts_html_block(line) for line in paragraph)
+        out.extend(_line(line, definitions, spans if trusted else []) for line, (spans, _) in zip(paragraph, found))
+        paragraph.clear()
+
     for line in lines:
         match = _FENCE.fullmatch(line.rstrip("\r\n"))
         if fence is not None:
             out.append(line)
             if match and match[1][0] == fence[0] and len(match[1]) >= len(fence) and not match[2].strip():
                 fence = None
-        elif match and not (match[1][0] == "`" and "`" in match[2]):
+        elif match and not html_block and not (match[1][0] == "`" and "`" in match[2]):
+            flush()
             fence = match[1]
             out.append(line)
+        elif not line.strip():
+            flush()
+            html_block = False
+            out.append(line)
         else:
-            out.append(_line(line, definitions))
+            html_block = html_block or _starts_html_block(line)
+            paragraph.append(line)
+    flush()
     return "".join(out)
