@@ -717,6 +717,13 @@ draft、init ──删除──→ （删除）
 
 此外，一个原地目录同一时间只允许一个任务管家会话：用目录锁，锁文件放在任务目录**之外**（沙箱够不到，模型改不了）。
 
+目录锁的范围和边界，照实写，不当作比实际更强的保证：
+
+- **范围是「每个运行时根、每个确切目录」。** 锁文件在运行时根下，名字是目录的设备号和 inode。两个 Looper 进程的运行时根不同（例如验证用的临时运行时根）时，互相看不到对方的锁；父目录和子目录的 inode 不同，所以跨进程时也不互斥（进程内由重叠检查负责）。v1 不做机器级的锁，也不为此引入全局目录。
+- **运行时根必须在本机文件系统上**：网络挂载上 `flock` 的语义没有保证。
+- **检查到加锁之间目录可能被改名或替换。** 所以加锁之后、启动 CLI 进程之前，代码用同样的路径解析重新取这个目录的设备号和 inode，和检查时的比较，并把整套目录检查（含进程内的重叠检查）再跑一遍；任何差异都拒绝，原因 `workspace_unavailable`，`kind` 为 `changed_after_check`。检查或加锁时的操作系统错误（目录没了、不是目录、权限、I/O）同样是类型化拒绝（`kind` 为 `not_a_directory` 或 `io_error`），说明由代码生成，不落入通用的「管家回合失败」，也不报告「已启动」。
+- 这些检查和加锁都在工作线程里执行，不阻塞事件循环。`kind` 以类型化字段随拒绝结果（`Submitted.kind`）传递，不在事件载荷里；下游不得靠匹配英文说明判断子类型。
+
 **2. 生成设置。** 本次 `--settings` 的内容（第 25.2 节 F1–F5、F11、第 25.2.1 节的全部钉死值和第 25.3 节的白名单）和参数（F7、F8、F9 的 `--tools`），写入只属于这次启动的私有文件。白名单里 MCP 服务器的定义**只从用户层配置解析**（包括操作者 `.claude.json` 里属于这个目录的 local scope），**不读任务目录和它上级目录的 `.mcp.json`**，也不读项目 scope：这些位置是不可信输入，编排模式的 Worker 不在沙箱里，又和管家共用这个目录，它们可以用一个已放行的名字定义一个服务器，而服务器在沙箱外运行。这会改变 #1852 的行为（不能再放行 project scope 的服务器），后续在 #1852 之上改解析器，按行为变化写出来。
 
    **定义可信，不等于实际执行的代码可信。** Claude Code 以会话的工作目录（任务目录）启动 stdio 服务器（实测）；服务器在沙箱外运行，模型能往任务目录里写文件。已测到三处：Looper 自己的 MCP 服务器以 `python -m looper.cli mcp-server` 启动、没有 `-I`，`python -m` 把当前目录放在 `sys.path` 最前，任务目录里一个 `looper/cli.py` 就会带着任务令牌在沙箱外运行；`npx -y <包>` 在任务目录有 `node_modules/<包>` 时运行本地那一份。对策：
@@ -750,6 +757,7 @@ draft、init ──删除──→ （删除）
 | `mcp_set_mismatch` | `mcp_status` 或 `init` 里出现白名单外的服务器，或某服务器的指纹（命令、参数、`env`、`cwd`、`type`、`url`）与解析出的定义不符 | 服务器名、哪一层 |
 | `network_policy_invalid` | 保存的或读到的操作者条目不合法（非外部域名） | 字段、条目 |
 | `workspace_not_repo_root`、`workspace_is_home`、`workspace_contains_trusted_config`、`workspace_in_system_dir`、`workspace_overlaps_session` | 目录检查（上文第 1 步） | 见表 |
+| `workspace_unavailable` | 检查到加锁之间目录被改名或替换，或检查、加锁时遇到操作系统错误 | `kind`：`changed_after_check`、`not_a_directory`、`io_error` |
 | `worktree_unsupported` | linked worktree 或 worktree 模式任务 | `kind` |
 | `head_moved` | 下一回合开始前 `HEAD` 不在任务记录的分支上（第 25.9 节 H2） | 记录的分支、当前分支 |
 | `head_detached` | 第一次启用时 `HEAD` 是分离的，没有分支可记 | — |
