@@ -1609,7 +1609,8 @@ def test_a_host_stall_ending_while_the_sampler_sleeps_is_counted(monkeypatch):
 
     reason, lag = asyncio.run(exercise())
     assert reason == "timeout"
-    assert lag > s._host_lag_limit(0.2)
+    # Counted once: the 0.3 s stall less the 0.05 s tick, never twice.
+    assert s._host_lag_limit(0.2) < lag < 0.4
 
 
 def test_host_lag_settles_the_pending_tick_once():
@@ -1622,7 +1623,7 @@ def test_host_lag_settles_the_pending_tick_once():
         time.sleep(0.25)
         settled = lag.settle()
         assert settled >= 0.15
-        await asyncio.sleep(0.06)  # The sleep callback must not add the same stall again.
+        await asyncio.sleep(0.01)  # One loop turn: the already-due tick callback runs, a new tick cannot.
         assert lag.total < settled + 0.05
         task.cancel()
     run(exercise())
