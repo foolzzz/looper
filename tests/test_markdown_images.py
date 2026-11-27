@@ -267,17 +267,25 @@ def _time(text: str) -> float:
 
 @pytest.mark.parametrize("unit", ADVERSARIAL)
 def test_linear_time_on_adversarial_input(unit: str) -> None:
-    """Ten times the input takes about ten times as long; a quadratic scan takes a hundred times as long. Each
-    repeat times both sizes back to back in one process, and the smallest ratio of three repeats counts, so a
-    slow or busy runner (garbage collection, noisy neighbours) does not matter unless it slows every repeat; the
-    absolute ceiling only guards against a hang."""
-    small, large = unit * (100_000 // len(unit)), unit * (1_000_000 // len(unit))
+    """The full scan (text up to MAX_SCANNED_CHARS) takes eight times as long on eight times the input; a quadratic
+    scan takes sixty-four times as long. Each repeat times both sizes back to back in one process and the smallest
+    ratio of three repeats counts, so a slow or busy runner does not matter unless it slows every repeat."""
+    small, large = unit * (8 * 1024 // len(unit)), unit * (MAX_SCANNED_CHARS // len(unit))
+    assert len(large) <= MAX_SCANNED_CHARS
     ratios = []
     for _ in range(3):
         t_small, t_large = _time(small), _time(large)
-        assert t_large < 30.0
-        ratios.append(t_large / max(t_small, 0.002))  # the floor keeps timer noise out of the fast cases
-    assert min(ratios) < 30, (unit, ratios)
+        assert t_large < 5.0  # a hang guard: about 0.03 s locally
+        ratios.append(t_large / max(t_small, 0.0005))  # the floor keeps timer noise out of the fast cases
+    assert min(ratios) < 24, (unit, ratios)
+
+
+@pytest.mark.parametrize("unit", ADVERSARIAL)
+def test_above_the_cap_one_megabyte_is_quick(unit: str) -> None:
+    text = unit * (1_000_000 // len(unit))
+    assert len(text) > MAX_SCANNED_CHARS
+    assert _time(text) < 5.0  # a hang guard: about 0.01 s locally
+    assert _oracle_leaks(neutralize_images(text[:200_000])) == []
 
 
 def test_random_inputs_never_leave_a_live_image() -> None:
