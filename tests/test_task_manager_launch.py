@@ -129,6 +129,18 @@ def test_environment(monkeypatch):
                    child_env.TASK_MANAGER_ENV: "task-1"}
 
 
+def test_a_direct_session_environment_drops_proxies_and_the_ssh_agent(monkeypatch):
+    from looper.agents import task_manager_safety as safety
+
+    run = launch()
+    monkeypatch.setattr(CLAUDE_CODE, "environment", lambda launch: {name: "x" for name in (
+        "HTTP_PROXY", "https_proxy", "ALL_PROXY", "no_proxy", "SSH_AUTH_SOCK", "KEEP")})
+    kept = safety.environment(run, "task-1")
+    assert {"HTTP_PROXY", "https_proxy", "SSH_AUTH_SOCK"} <= set(kept)  # an orchestrated session is unchanged
+    direct = safety.environment(run, "task-1", drop=task_manager_sandbox.DIRECT_DROPPED_ENV)
+    assert set(direct) == {"KEEP", child_env.TASK_MANAGER_ENV}
+
+
 @pytest.mark.parametrize("source", ["user", "user_local", "project", "project_local", "managed", "launch"])
 @pytest.mark.parametrize("phase", ["launch", "resume"])
 def test_hook_disabled_sources(tmp_path, monkeypatch, source, phase):
@@ -304,10 +316,6 @@ def test_real_cli_direct_turn_saves_session(tmp_path, monkeypatch):
 
     monkeypatch.setattr(task_manager_settings, "load_task_manager_settings", settings)
 
-    class Ops:
-        def tool_hook(self, *args, **kwargs):
-            return hook("launch-hook")
-
     class Sink:
         def __init__(self):
             self.done = asyncio.Event()
@@ -325,7 +333,7 @@ def test_real_cli_direct_turn_saves_session(tmp_path, monkeypatch):
         await tasks.create_task(task_id="probe", requirement="Run the offline probe", project_id=project["id"],
                                 status="draft", work_dir=str(workspace), workspace_dir=str(workspace),
                                 workspace_mode="in_place")
-        pool = TaskManagerPool(tmp_path / "runtime", binary, ops=Ops(), max_resident=lambda: 1)
+        pool = TaskManagerPool(tmp_path / "runtime", binary, max_resident=lambda: 1)
         sink = Sink()
         try:
             submitted = await pool.submit("probe", "Run the offline probe", message_id="probe-message", sink=sink)
@@ -335,7 +343,7 @@ def test_real_cli_direct_turn_saves_session(tmp_path, monkeypatch):
             assert session is not None and session["session_id"]
             assert workspace.joinpath("result.txt").read_text() == "probe"
             assert tmp_path.joinpath("user-hook").read_text() == "fired"
-            assert tmp_path.joinpath("launch-hook").read_text() == "fired"
+            assert not tmp_path.joinpath("launch-hook").exists()  # a direct session carries no Looper hook
             assert requests and all(request["api_key"] == "sk-probe-not-real" for request in requests)
         finally:
             await pool.shutdown()

@@ -68,8 +68,6 @@ def _layout(tmp_path: Path) -> tuple[dict[str, str], Path, dict[str, Path]]:
         "aws": home / ".aws",
         "gnupg": home / ".gnupg",
         "config": xdg,
-        "credentials": claude / ".credentials.json",
-        "claude_json": claude / ".claude.json",
         "runtime": runtime,
         "ops_file": runtime / FILE,
         "claude_dir": claude,
@@ -111,9 +109,7 @@ def test_a_system_directory_is_refused_and_a_scratch_directory_is_not(tmp_path: 
     assert _check(tmp_path, repo) is None
 
 
-@pytest.mark.parametrize("name", (
-    "ssh", "aws", "gnupg", "config", "credentials", "claude_json", "runtime", "ops_file", "claude_dir",
-))
+@pytest.mark.parametrize("name", ("ssh", "aws", "gnupg", "config", "runtime", "ops_file", "claude_dir"))
 def test_each_trusted_path_is_protected_even_when_missing(name: str, tmp_path: Path) -> None:
     environment, runtime, expected = _layout(tmp_path)
     entry = _real(expected[name])
@@ -148,10 +144,20 @@ def test_default_config_locations_are_protected_when_the_environment_does_not_ov
     found = {_real(path) for path in trusted_paths(environment, runtime)}
     for entry in (
         home / ".ssh", home / ".aws", home / ".gnupg", home / ".config",
-        home / ".claude" / ".credentials.json", home / ".claude.json", home / ".claude",
+        home / ".claude.json", home / ".claude",
         runtime, runtime / FILE,
     ):
         assert _real(entry) in found
+
+
+def test_the_claude_login_and_mcp_files_are_inside_a_trusted_directory(tmp_path: Path) -> None:
+    environment, runtime, expected = _layout(tmp_path)
+    found = [Path(_real(path)) for path in trusted_paths(environment, runtime)]
+    claude = Path(_real(expected["claude_dir"]))
+    assert claude in found
+    for name in (".credentials.json", ".claude.json"):
+        entry = claude / name
+        assert any(entry == path or path in entry.parents for path in found), entry
 
 
 def test_a_subdirectory_a_bare_repository_and_a_plain_directory_are_not_a_repository_root(tmp_path: Path) -> None:

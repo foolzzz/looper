@@ -127,7 +127,7 @@ def test_library_gets_looper_servers_plus_allowed_ones_and_their_fingerprints(ho
     # Every stdio server, Looper's own included, starts through the wrapper in a directory of Looper's own.
     assert all(operator_mcp.is_wrapped(entry) for entry in servers.values())
     assert operator_mcp.unwrap(servers["looper"]) == {**own_definition, "args": ["-m", "looper.cli"]}
-    assert servers["alpha"]["args"][3] == str(root / "cwd")
+    assert servers["alpha"]["args"][3] == str((root / "cwd").resolve())
     assert operator_mcp.unwrap(servers["alpha"]) == stdio("alpha")
     # Fingerprints are those of the user-scope definitions, before wrapping.
     assert operator_mcp.fingerprints(allowed, ["alpha", "shared"]) == {
@@ -145,7 +145,11 @@ def test_library_gets_looper_servers_plus_allowed_ones_and_their_fingerprints(ho
 def test_wrapping_is_idempotent_and_unwrap_leaves_other_definitions_alone(tmp_path):
     definition = stdio("alpha", env={"K": "v"}, cwd="/somewhere")
     wrapped = operator_mcp.wrap(definition, tmp_path)
-    assert operator_mcp.wrap(wrapped, tmp_path) == wrapped and operator_mcp.unwrap(wrapped) == definition
+    assert operator_mcp.unwrap(wrapped) == definition and operator_mcp.unwrap(wrapped, tmp_path) == definition
+    # A definition that already looks wrapped (into a directory of someone else's choosing) is wrapped again, never
+    # trusted as it is.
+    forged = {**wrapped, "args": [*wrapped["args"][:3], "/elsewhere", *wrapped["args"][4:]]}
+    assert operator_mcp.wrap(forged, tmp_path)["args"][3] == str(tmp_path) and operator_mcp.wrap(forged, tmp_path) != forged
     assert operator_mcp.unwrap(definition) == definition
     remote = {"type": "http", "url": "https://h.example/m"}
     assert operator_mcp.wrap(remote, tmp_path) == remote
@@ -181,6 +185,11 @@ def test_the_wrapper_starts_the_command_in_the_private_directory_not_the_task_di
     ({"command": "/opt/bin/uv", "args": ["run", "x"]}, "uv run"),
     ({"command": "/opt/bin/pnpm", "args": ["dlx", "x"]}, "pnpm dlx"),
     ({"command": "/opt/bin/yarn", "args": ["dlx", "x"]}, "yarn dlx"),
+    ({"command": "/opt/bin/yarn", "args": ["exec", "x"]}, "yarn exec"),
+    ({"command": "/opt/bin/pnpm", "args": ["exec", "x"]}, "pnpm exec"),
+    ({"command": "/opt/bin/npm", "args": ["exec", "--", "x"]}, "npm exec"),
+    ({"command": "/opt/bin/npm", "args": ["x", "pkg"]}, "npm x"),
+    ({"command": "/usr/bin/node", "args": ["/opt/lib/node_modules/npm/bin/npx-cli.js", "pkg"]}, "npx"),
     ({"command": "/opt/bin/deno", "args": ["run", "x.ts"]}, "deno run"),
     ({"command": "/opt/bin/bundle", "args": ["exec", "srv"]}, "bundle exec"),
     ({"command": "/opt/bin/go", "args": ["run", "."]}, "go run"),
@@ -196,8 +205,27 @@ def test_the_wrapper_starts_the_command_in_the_private_directory_not_the_task_di
     ({"cwd": "sub"}, "relative_cwd"),
     ({"command": "/opt/tools/server", "cwd": "sub"}, "relative_cwd"),
     ({"command": "/opt/tools/server", "cwd": "/opt/tools"}, "cwd"),
-    ({"command": "/opt/tools/server", "env": {"PYTHONPATH": "lib"}}, "relative PYTHONPATH"),
-    ({"command": "/opt/tools/server", "env": {"NODE_PATH": "/ok:rel"}}, "relative NODE_PATH"),
+    ({"command": "/opt/tools/server", "env": {"PYTHONPATH": "lib"}}, "env PYTHONPATH"),
+    ({"command": "/opt/tools/server", "env": {"NODE_PATH": "/ok:rel"}}, "env NODE_PATH"),
+    ({"command": "/opt/tools/server", "env": {"NODE_OPTIONS": "--require /abs/e.js"}}, "env NODE_OPTIONS"),
+    ({"command": "/opt/tools/server", "env": {"rubyopt": "-r/abs/e"}}, "env rubyopt"),
+    ({"command": "/opt/tools/server", "env": {"PYTHONSTARTUP": "/abs/s.py"}}, "env PYTHONSTARTUP"),
+    ({"command": "/opt/tools/server", "env": {"BUNDLE_GEMFILE": "/abs/Gemfile"}}, "env BUNDLE_GEMFILE"),
+    # Bypasses measured against the first version of the table.
+    ({"command": "/usr/bin/env", "args": ["npx", "-y", "p"]}, "env (starts another program)"),
+    ({"command": "/usr/bin/env", "args": ["python3", "-m", "pkg"]}, "env (starts another program)"),
+    ({"command": "/bin/sh", "args": ["-c", "/opt/bin/npx -y p"]}, "sh (starts another program)"),
+    ({"command": "/bin/bash", "args": ["/opt/srv.sh"]}, "bash (starts another program)"),
+    ({"command": "/usr/local/bin/NPX", "args": ["-y", "p"]}, "npx"),
+    ({"command": "/opt/bin/UV", "args": ["run", "x"]}, "uv run"),
+    ({"command": "/opt/bin/uv", "args": ["--quiet", "run", "x"]}, "uv run"),
+    ({"command": "/opt/bin/pnpm", "args": ["--reporter=silent", "dlx", "x"]}, "pnpm dlx"),
+    ({"command": "/opt/bin/go", "args": ["-C", "/tmp", "run", "."]}, "go run"),
+    ({"command": "/opt/bin/cargo", "args": ["--locked", "run"]}, "cargo run"),
+    ({"command": "/opt/bin/bundle", "args": ["--no-color", "exec", "s"]}, "bundle exec"),
+    ({"command": "/usr/bin/python3", "args": ["-mpkg"]}, "python -m"),
+    ({"command": "/usr/bin/python3", "args": ["-u", "-m", "pkg"]}, "python -m"),
+    ({"command": "/usr/bin/python3", "args": ["-Wignore", "-m", "pkg"]}, "python -m"),
 ])
 def test_unsafe_launchers_are_named(definition, launcher):
     assert operator_mcp.launcher_problem(definition) == launcher
@@ -206,7 +234,9 @@ def test_unsafe_launchers_are_named(definition, launcher):
 @pytest.mark.parametrize("definition", [
     {"command": "/usr/bin/python3", "args": ["-I", "-m", "pkg"]},
     {"command": "/usr/bin/python3", "args": ["-c", "print(1)"]},
-    {"command": "/opt/tools/server", "args": ["--stdio"], "env": {"PYTHONPATH": "/opt/lib"}},
+    {"command": "/opt/tools/server", "args": ["--stdio"], "env": {"API_KEY": "x", "HOME": "/opt/h"}},
+    {"command": "/usr/bin/python3", "args": ["-Im", "pkg"]},
+    {"command": "/usr/bin/python3", "args": ["/opt/srv.py", "-m", "fast"]},  # -m after the script is its argument
     {"command": "/usr/bin/node", "args": ["/opt/srv/index.js"]},
     {"command": "server-on-path", "args": ["--stdio"]},  # a bare name resolves through PATH
     {"command": "node", "args": ["/opt/srv/index.js"]},
@@ -287,3 +317,46 @@ def test_the_generated_config_lives_with_the_task_and_is_swept_at_service_start(
     assert operator_mcp.sweep_orphans(root) == 1
     assert not config.exists() and shared.exists() and cwd.is_dir()
     assert operator_mcp.sweep_orphans(root) == 0 and operator_mcp.sweep_orphans(tmp_path / "none") == 0
+
+
+def test_a_symlink_to_a_blacklisted_launcher_is_still_that_launcher(tmp_path):
+    real = tmp_path / "npx"
+    real.write_text("#!/bin/sh\n")
+    link = tmp_path / "innocent-name"
+    link.symlink_to(real)
+    assert operator_mcp.launcher_problem({"command": str(link), "args": ["-y", "p"]}) == "npx"
+
+
+def test_unwrap_with_the_expected_directory_refuses_every_other_shape(tmp_path):
+    private = tmp_path / "private"
+    wrapped = operator_mcp.wrap(stdio("alpha"), private)
+    assert operator_mcp.unwrap(wrapped, private) == stdio("alpha")
+    other_dir = {**wrapped, "args": [*wrapped["args"][:3], str(tmp_path / "elsewhere"), *wrapped["args"][4:]]}
+    other_script = {**wrapped, "args": ["-c", 'cd "$1" && exec "$@"', *wrapped["args"][2:]]}
+    other_shell = {**wrapped, "command": "/bin/bash"}
+    missing_part = {**wrapped, "args": wrapped["args"][:4]}
+    for forged in (other_dir, other_script, other_shell, missing_part, stdio("alpha")):
+        with pytest.raises(ValueError, match="expected directory"):
+            operator_mcp.unwrap(forged, private)
+    # The fingerprint is bound to the directory too, and is the user-scope one when it matches.
+    from looper.agents.library import AgentLibrary
+    from looper.agents.mcp import write_config
+    library = AgentLibrary(mcp_config=str(write_config(tmp_path, [("alpha", wrapped)])))
+    assert operator_mcp.fingerprints(library, ["alpha"], private) == {"alpha": operator_mcp.fingerprint(stdio("alpha"))}
+    with pytest.raises(ValueError):
+        operator_mcp.fingerprints(library, ["alpha"], tmp_path / "elsewhere")
+
+
+def test_reset_cwd_empties_the_start_directory(tmp_path):
+    directory = operator_mcp.private_cwd(tmp_path / "t" / "mcp-cwd")
+    (directory / "left-over").write_text("x")
+    operator_mcp.reset_cwd(directory)
+    assert not directory.exists()
+    assert operator_mcp.private_cwd(tmp_path / "t" / "mcp-cwd").is_dir()
+
+
+def test_a_shell_is_refused_and_named_as_configured_whatever_it_resolves_to(tmp_path):
+    named = tmp_path / "sh"
+    named.symlink_to("/bin/bash")
+    assert operator_mcp.launcher_problem({"command": str(named)}) == "sh (starts another program)"
+    assert operator_mcp.launcher_problem({"command": "/bin/sh", "args": ["-c", "x"]}) == "sh (starts another program)"

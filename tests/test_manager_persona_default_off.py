@@ -25,14 +25,15 @@ from tests.test_manager_session_routing_db import _Resident
 # Captured from origin/main (51a8d2f7c) with the same synthetic database and inputs.
 # Normalize temporary paths and check content-addressed hashes against their sources first. The system prompt and
 # the tools are checked per section and per tool against tests/fixtures/manager_surfaces_off.json.
+# The signature hashes changed on purpose (the MCP entry gained -I); sections, turn and command are unchanged.
 BASELINE = {False: {'sections': '1db4fa7cabcd2bd37cbfc5da7110f1baee4f19644ade5c15e852ad21ba7d948d',
          'turn': '92d3f8208e8edc7e68edfd6aae514b9aab2c0d575d36a1fc00e047f329336211',
          'command': 'e8f4c7aa9c0df509ed6ec960fcb698d7e476c3edbb278821e7601c2034a08740',
-         'signature': '5f76b151eb503d212e137ffa5c78c04cb6b5a885a78a5b415327f184c943ff13'},
+         'signature': '3291348a51946f4452605f5194bb1ad8a02f3675a3f9af44d2987bc469626ada'},
  True: {'sections': '1db4fa7cabcd2bd37cbfc5da7110f1baee4f19644ade5c15e852ad21ba7d948d',
         'turn': '45d307a205c1b2e5f448e6147f0db2bc033ac11c9bf1ade140bb7cbdb2e64462',
         'command': 'e8f4c7aa9c0df509ed6ec960fcb698d7e476c3edbb278821e7601c2034a08740',
-        'signature': '5f76b151eb503d212e137ffa5c78c04cb6b5a885a78a5b415327f184c943ff13'}}
+        'signature': '3291348a51946f4452605f5194bb1ad8a02f3675a3f9af44d2987bc469626ada'}}
 
 # Turn hashes captured on 8a69cf7ca before changing the audience guard (stable off, on).
 AUDIENCE_TURNS = {

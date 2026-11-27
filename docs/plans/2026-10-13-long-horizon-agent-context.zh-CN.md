@@ -1204,6 +1204,7 @@ M7 先让计划状态有唯一来源（M7a），再在其上加任务记忆（M7
 
 ### 5.2 工程待办
 
+- **git 封装的检查与命令之间有竞态；后续给出净化后的不可变属性树**（[#1861](https://github.com/foolzzz/looper/pull/1861)，评审中，本版接受并记为已知限制）：封装在命令前读取仓库自己定义的 filter、diff、merge driver 并用 `-c` 覆盖，命令前后之间写入的定义拦不住（影响限于同一系统用户，环境只有白名单变量，不含服务的凭据；命令结束后会重新检查，发现新的 driver 就记一行 WARNING，带任务和步骤 id）。后续做法：用一棵净化后的不可变属性树作为 `--attr-source`（保留 `eol`、`text`、LFS 等安全属性，去掉 `filter=`、`diff=`、`merge=`），这样 driver 的指派不再依赖检查时刻。与「worktree 任务改成独立克隆」放在同一步：之后并行步骤不再共享主仓库的 `.git/config`，竞态的前提就变了。
 - **Work 页验证的 B 阶段缺口（卡片 2.6 的 7 项未测）**：Planner 阶段已通过（见 §4 2026-11-26）；以下 7 项需要任务 Manager 阶段或真实模型，仍未验证：ArrowUp 发送历史、历史向前追加、回复期间排队输入、会话 Stop、任务 Stop、后台任务进度、Profile 错误提示。
 - **`looper service upgrade` 先停服务再装依赖**：升级在停止服务之后才安装目标版本的依赖；安装失败会留下无法启动的新代码。[#1849](https://github.com/foolzzz/looper/pull/1849)（评审中）改为排空前先在一次性环境里预同步一次，停服后的真实同步用 `UV_OFFLINE=1`，失败则回滚检出并重装旧环境。
 - **任务 Manager 的回合提交 worktree 任务里所有待提交的改动**：[#1848](https://github.com/foolzzz/looper/pull/1848)（评审中）改为只提交本回合自己的改动，回合开始前就有改动的路径不动。

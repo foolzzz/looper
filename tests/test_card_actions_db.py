@@ -13,6 +13,7 @@ import pytest
 from looper.agents import card_actions
 from looper.agents.message import MANAGER_ADDRESS, MessageEnvelope, MessageType, channel_address
 from looper.agents.ops import Turn
+from looper.agents.turn_context import SpeakerKind
 from looper.agents.ops.service import ManagerOps, Platform, _Pending
 from tests.db_support import DSN, dropped_tables, run_db
 from tests.test_gate_channels_db import _Bus, _Poster, _say, _task_with_gate
@@ -47,7 +48,7 @@ def _ops() -> ManagerOps:
 
 
 def _turn(message_id: str, sender: str = ASKER, chat: str = "oc_dm") -> Turn:
-    return Turn(channel="lark_bot", chat=chat, message_id=message_id, sender=sender, channel_id=BOT)
+    return Turn(channel="lark_bot", chat=chat, message_id=message_id, sender=sender, channel_id=BOT, speaker=SpeakerKind.OPERATOR)
 
 
 async def _ask(ops: ManagerOps) -> tuple[dict[str, Any], Turn]:
@@ -373,7 +374,7 @@ def test_a_card_acts_only_where_it_was_sent(monkeypatch: pytest.MonkeyPatch, cha
         await _switch(pool)
         ops = _ops()
         monkeypatch.setitem(card_actions._handlers, "confirmation", ops.press)
-        turn = Turn(channel=channel, chat=chat, message_id="m-ask", sender=ASKER, channel_id=channel_id)
+        turn = Turn(channel=channel, chat=chat, message_id="m-ask", sender=ASKER, channel_id=channel_id, speaker=SpeakerKind.OPERATOR)
         ops.begin_turn(turn)
         await ops.call("looper_projects", DELETE)
         ops.end_turn(turn)

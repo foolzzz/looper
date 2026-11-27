@@ -68,5 +68,6 @@ async def run(server, operation, arguments, principal, headers):
         result = {"task_id": task["id"], "origin_session": session}
         await db_actions.record(channel="api", chat=None, message_id=None, tool=operation.operation_id,
                                 arguments=arguments, risk="high", status="ok", result=result,
-                                task_id=task["id"], manager_id="manager", pool=conn)
+                                task_id=task["id"], manager_id="manager", pool=conn,
+                                sender_kind="operator")
         return result

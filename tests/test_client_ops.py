@@ -130,6 +130,35 @@ def test_the_operator_is_recorded_without_a_client(recorded: list[dict[str, Any]
     assert recorded[0]["client_id"] is None
 
 
+def test_the_operators_row_names_the_operator_and_a_clients_row_stays_a_client(recorded: list[dict[str, Any]]) -> None:
+    ops = _Ops()
+    assert ops.call("t_write", {"n": 2}, who=OPERATOR)["status"] == "ok"
+    assert ops.call("t_write", {"n": 3})["status"] == "ok"
+    operator_row, client_row = recorded
+    assert (operator_row["sender_kind"], operator_row["sender_id"], operator_row["client_id"]) == ("operator", None, None)
+    assert (client_row["sender_kind"], client_row["sender_id"], client_row["client_id"]) == ("client", None, "client-aaa")
+
+
+def test_the_operator_confirmation_rows_name_the_operator_for_asker_and_confirmer(recorded: list[dict[str, Any]]) -> None:
+    ops = _Ops()
+    assert ops.confirm(ops.ask(who=OPERATOR), who=OPERATOR)["status"] == "ok"
+    asked, confirmed = recorded
+    assert (asked["sender_kind"], confirmed["sender_kind"], confirmed["initiator_kind"]) == ("operator",) * 3
+
+
+@pytest.mark.parametrize("who", [OPERATOR, ALICE], ids=["operator", "client"])
+def test_the_audit_attribution_adds_nothing_the_authorization_reads(who: Principal) -> None:
+    """Authorization reads ``speaker``, ``principal``, ``client_id`` and the channel (``_not_operator``, confirm
+    checks); the operator's audit kind lives in ``recorded_kind`` alone, which only ``sender_kind`` reads."""
+    from looper.agents.ops.service import _not_operator
+
+    turn = ClientOps(Platform(bus=AsyncMock(), task_router=None), tools=())._turn(who, "s1")
+    assert (turn.speaker, turn.principal, turn.operator_id_missing, turn.channel) == (None, None, False, API_CHANNEL)
+    assert turn.client_id == who.client_id and turn.client_name == who.client_name
+    assert turn.recorded_kind == ("operator" if who.kind == "operator" else None)
+    assert _not_operator(turn) is False
+
+
 def test_what_the_tool_adds_to_the_turn_is_the_answers_notes(recorded: list[dict[str, Any]]) -> None:
     answer = _Ops().call("t_write", {"n": 2, "note": True})
     assert answer["notes"] == ["configuration shown"]

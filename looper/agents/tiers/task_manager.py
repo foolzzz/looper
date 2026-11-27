@@ -16,7 +16,8 @@ from typing import Any, Literal, Protocol
 
 from ...db import activity, agent_sessions, projects, tasks
 from .. import operator_mcp, outbound_hook, step_workspaces, task_budget, task_conversations_settings
-from .. import task_manager_dirs, task_manager_safety, task_manager_sandbox, task_manager_settings, task_workspaces
+from .. import task_manager_dirs, task_manager_refs, task_manager_safety, task_manager_sandbox, task_manager_settings
+from .. import task_workspaces
 from ..agent_settings import Access, Launch
 from ..claude_cli import ClaudeRunRecorder, ResidentClaude
 from ..library import EMPTY_LIBRARY
@@ -39,6 +40,8 @@ class TaskManagerEvent(str, Enum):
     STOPPED = "stopped"
     MODEL_SWITCHED = "model_switched"
     MODEL_SWITCH_REJECTED = "model_switch_rejected"
+    REF_REPORT = "ref_report"
+    SANDBOX_NOTICE = "sandbox_notice"
 
 
 @dataclass(frozen=True)
@@ -279,6 +282,9 @@ class TaskManagerAgent:
         self.work_dir = ""
         self.dir_lock: task_manager_dirs.DirectoryLock | None = None
 
+    def _mcp_cwd(self) -> Path:
+        return self.pool.runtime_root / "task-managers" / self.task_id / "mcp-cwd"
+
     async def prepare(self, *, sink: TurnSink | None = None) -> tuple[Mapping[str, Any], Any, Launch, SystemPrompt]:
         """Read configuration afresh; no launch bypasses the direct-mode review checks."""
         try:
@@ -351,7 +357,7 @@ class TaskManagerAgent:
                     run = replace(run, library=await operator_mcp.library_with_allowed(
                         library, self.pool.runtime_root, allowed,
                         environment=run.runtime.environment(run),
-                        cwd=self.pool.runtime_root / "task-managers" / self.task_id / "mcp-cwd"))
+                        cwd=self._mcp_cwd()))
                 except operator_mcp.UnresolvedServers as exc:
                     raise Refused(RefuseReason.MCP_UNRESOLVED, str(exc)) from exc
                 except operator_mcp.UnsafeLauncher as exc:
@@ -359,7 +365,7 @@ class TaskManagerAgent:
                     raise Refused(RefuseReason.MCP_LAUNCHER_UNSAFE, str(exc)) from exc
                 if run.library.mcp_config and run.library.mcp_config != library.mcp_config:
                     self.mcp_files.add(run.library.mcp_config)
-                self.mcp_fingerprints = operator_mcp.fingerprints(run.library, allowed)
+                self.mcp_fingerprints = operator_mcp.fingerprints(run.library, allowed, self._mcp_cwd().resolve())
             else:
                 self.mcp_fingerprints = {}
             return run
@@ -391,7 +397,7 @@ class TaskManagerAgent:
         def command_for(launch: Launch) -> list[str]:
             if direct:
                 self.read_deny = task_manager_sandbox.read_deny_paths(launch.runtime.environment(launch),
-                                                                      self.pool.runtime_root)
+                                                                      self.pool.runtime_root, self.pool.config_file)
             return (launch.runtime.operator_resident_command(executable, cwd=reopened.work_dir, prompt_file=prompt_file,
                                                              launch=launch, settings_dir=root / "settings",
                                                              allowed_domains=self.allowed_domains,
@@ -400,7 +406,8 @@ class TaskManagerAgent:
                                                                    prompt_file=prompt_file, launch=launch))
 
         command = command_for(launch)
-        env = task_manager_safety.environment(launch, self.task_id)
+        dropped = task_manager_sandbox.DIRECT_DROPPED_ENV if direct else ()
+        env = task_manager_safety.environment(launch, self.task_id, drop=dropped)
         # The file's name is the SHA-256 of its content, so the signature covers the pinned values, the network
         # allowlist and the read deny list: a change in any of them restarts the session.
         settings_file = command[command.index("--settings") + 1] if "--settings" in command else ""
@@ -421,9 +428,12 @@ class TaskManagerAgent:
             restarting = not self.resident.started or self.resident.stale(signature)
             if restarting:
                 await self.resident.stop()
+                if direct:  # a fresh, empty start directory for the servers of the new process
+                    await asyncio.to_thread(operator_mcp.reset_cwd, self._mcp_cwd())
                 launch = await configure()
                 command = command_for(launch)
-                env = task_manager_safety.environment(launch, self.task_id)
+                env = task_manager_safety.environment(launch, self.task_id, drop=dropped)
+                settings_file = command[command.index("--settings") + 1] if "--settings" in command else ""
                 if direct:
                     problem = await task_manager_safety.gate(executable, cwd=reopened.work_dir, environment=launch.runtime.environment(launch),
                         phase=phase, settings_file=Path(settings_file), review_hook=False)
@@ -465,6 +475,10 @@ class TaskManagerAgent:
             await activity.insert_activity(task_id=self.task_id, kind="error",
                 summary="Warning: task Manager cost is unknown for " + ", ".join(gate.unknown_models))
         task, reopened, launch, prompt = await self.prepare()
+        # An in-place direct session writes the real checkout: record its branches and tags and settle the task branch
+        # (a detached or moved HEAD refuses here, before the message is admitted).
+        refs_before, task_branch = ((await task_manager_refs.begin_turn(task, reopened.work_dir, sink=request.sink, phase="turn"))
+                                    if self.mode == "direct" and task.get("workspace_mode") != "worktree" else (None, ""))
         if not request.admitted.done():
             request.admitted.set_result(Submitted("started"))
         rotating = self.context_rotation_pending
@@ -578,6 +592,14 @@ class TaskManagerAgent:
                     commit = await step_workspaces.commit_paths(Path(reopened.work_dir), own, self.links,
                         f"looper: task Manager turn of task {self.task_id}\n\nLooper-Task: {self.task_id}")
             await request.sink.event(TaskManagerEvent.TURN_SUMMARY, {"files": files, "commit": commit, "mode": self.mode, **summary})
+            if refs_before is not None:
+                try:
+                    await task_manager_refs.end_turn(task, reopened.work_dir, refs_before, task_branch, sink=request.sink,
+                                                     message_id=request.message_id)
+                except Exception as exc:  # the turn's own outcome stands; the missing report is recorded
+                    logger.warning("task Manager %s: ref report failed", self.task_id, exc_info=True)
+                    await activity.insert_activity(task_id=self.task_id, kind="error",
+                        summary=f"Ref report failed: {type(exc).__name__}: {exc}"[:300])
         from . import task_manager_context
         await task_manager_context.maintain(self, request, reopened, launch, prompt, record_id)
         await request.sink.final(text, outcome)
@@ -592,9 +614,11 @@ def current_pool() -> TaskManagerPool | None:
 
 class TaskManagerPool:
     def __init__(self, runtime_root: Path, claude_bin: str, *, ops: Any = None,
-                 max_resident: Callable[[], int], clock: Callable[[], float] = time.monotonic) -> None:
+                 max_resident: Callable[[], int], clock: Callable[[], float] = time.monotonic,
+                 config_file: Path | None = None) -> None:
         global _pool
         self.runtime_root, self.claude_bin, self.ops = runtime_root, claude_bin, ops
+        self.config_file = config_file  # Looper's ops file when it lives outside the runtime root (read deny list)
         self.max_resident, self.clock = max_resident, clock
         self.agents: dict[str, TaskManagerAgent] = {}
         self.closing = False

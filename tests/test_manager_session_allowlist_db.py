@@ -419,7 +419,7 @@ def test_chat_tools_keep_ids_results_and_initiator_inside_the_authenticated_sess
                     assert (audit["status"], audit["error_code"], json.loads(audit["result"])) == (
                         "error", "forbidden", {"reason": "operator_only"}), (name, audit)
                     assert answer == {"status": "error", "error": {
-                        "code": "forbidden", "message": str(service._OperatorOnly(turn))}}, (name, answer)
+                        "code": "forbidden", "message": str(service._OperatorOnly(replace(turn, operator_id_missing=False)))}}, (name, answer)
             listed = await ops.call("looper_chat_tasks", {"action": "list"}, binding=binding, session_key=key)
             captured.append(listed)
             assert listed["status"] == "ok", listed

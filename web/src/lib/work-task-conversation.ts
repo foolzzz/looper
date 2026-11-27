@@ -45,8 +45,11 @@ const SWITCH_REASONS = ["busy", "invalid_profile", "runtime_unsupported"] as con
 const FRESH_REASONS = ["context_bound", "read_only_open", "resume_failed"] as const;
 const STOP_METHODS = ["control", "cancel", "kill"] as const;
 const SUMMARY_MODES = ["direct", "orchestrated"] as const;
+const REF_CHANGES = ["created", "deleted", "moved", "non_fast_forward"] as const;
+const SANDBOX_NOTICES = ["first_enable_in_place", "refs_unreadable"] as const;
 const REFUSED = ["work_mode_off", "runtime_unsupported", "budget", "outbound_review_unavailable", "workspace", "shutting_down", "review_hook_disabled", "cli_unverified", "manager_answers_off", "mcp_unresolved", "sandbox_unavailable", "readback_unavailable", "launch_setting_mismatch", "mcp_set_mismatch", "mcp_launcher_unsafe", "network_policy_invalid", "workspace_not_repo_root", "workspace_is_home", "workspace_contains_trusted_config", "workspace_in_system_dir", "workspace_overlaps_session", "workspace_unavailable", "worktree_unsupported", "head_moved", "head_detached"] as const;
 
+type RefChange = { ref: string; change: (typeof REF_CHANGES)[number]; old: string | null; new: string | null; restore: string };
 type ToolPayload = { tool_use_id: string; name: string; args: string; result: string; is_error: boolean };
 type TaskEvent =
   | { kind: "accepted"; reason: "duplicate" }
@@ -58,6 +61,9 @@ type TaskEvent =
   | { kind: "session_fresh"; reason: (typeof FRESH_REASONS)[number]; detail: string }
   | { kind: "stopped"; method: (typeof STOP_METHODS)[number] }
   | { kind: "turn_summary"; files: string[]; commit: string | null; mode: (typeof SUMMARY_MODES)[number]; uncommitted?: string[]; unverified?: string[] }
+  | { kind: "ref_report"; message_id: string | null; report_id: number | null; changes: RefChange[]; info: RefChange[];
+      head: { before: string | null; after: string | null } | null; own_commits: number; needs_you: boolean }
+  | { kind: "sandbox_notice"; notice: (typeof SANDBOX_NOTICES)[number]; detail: string; message_id?: string | null }
   | { kind: "refused"; reason: "orchestrated"; status: string }
   | { kind: "refused"; reason: (typeof REFUSED)[number] };
 
@@ -120,6 +126,20 @@ function asTool(value: unknown): ToolPayload | null {
   return { tool_use_id: value.tool_use_id, name: value.name, args: value.args, result: value.result, is_error: value.is_error };
 }
 
+const isNullableString = (value: unknown): value is string | null => value === null || isString(value);
+
+function asRefChanges(value: unknown): RefChange[] | null {
+  if (!Array.isArray(value)) return null;
+  const found: RefChange[] = [];
+  for (const item of value) {
+    if (!isRecord(item) || !exactKeys(item, ["ref", "change", "old", "new", "restore"]) || !isString(item.ref)
+      || !oneOf(item.change, REF_CHANGES) || !isNullableString(item.old) || !isNullableString(item.new)
+      || !isString(item.restore)) return null;
+    found.push({ ref: item.ref, change: item.change, old: item.old, new: item.new, restore: item.restore });
+  }
+  return found;
+}
+
 function asEvent(value: unknown): TaskEvent | null {
   if (!isRecord(value) || !isString(value.kind)) return null;
   switch (value.kind) {
@@ -153,6 +173,26 @@ function asEvent(value: unknown): TaskEvent | null {
       return { kind: "turn_summary", files: value.files, commit: value.commit, mode: value.mode,
         ...("uncommitted" in value ? { uncommitted: value.uncommitted as string[] } : {}),
         ...("unverified" in value ? { unverified: value.unverified as string[] } : {}) };
+    case "ref_report": {
+      if (!exactKeys(value, ["kind", "message_id", "report_id", "changes", "info", "head", "own_commits", "needs_you"])
+        || !isNullableString(value.message_id)) return null;
+      const changes = asRefChanges(value.changes);
+      const info = asRefChanges(value.info);
+      const head = value.head;
+      const headOk = head === null || (isRecord(head) && exactKeys(head, ["before", "after"])
+        && isNullableString(head.before) && isNullableString(head.after));
+      if (!changes || !info || !headOk || !(value.report_id === null || isInteger(value.report_id))
+        || !isInteger(value.own_commits) || value.own_commits < 0 || typeof value.needs_you !== "boolean") return null;
+      return { kind: "ref_report", message_id: value.message_id, report_id: value.report_id as number | null, changes, info,
+        head: head as { before: string | null; after: string | null } | null, own_commits: value.own_commits,
+        needs_you: value.needs_you };
+    }
+    case "sandbox_notice":
+      return exactKeys(value, ["kind", "notice", "detail", ..."message_id" in value ? ["message_id"] : []])
+        && oneOf(value.notice, SANDBOX_NOTICES) && isString(value.detail)
+        && (!("message_id" in value) || isNullableString(value.message_id))
+        ? { kind: "sandbox_notice", notice: value.notice, detail: value.detail,
+            ...("message_id" in value ? { message_id: value.message_id as string | null } : {}) } : null;
     case "refused":
       if (exactKeys(value, ["kind", "reason", "status"]) && value.reason === "orchestrated" && isString(value.status)) {
         return { kind: "refused", reason: "orchestrated", status: value.status };
@@ -161,6 +201,38 @@ function asEvent(value: unknown): TaskEvent | null {
     default:
       return null;
   }
+}
+
+const CHANGE_TEXT: Record<RefChange["change"], string> = {
+  created: "新建", deleted: "被删除", moved: "被移动", non_fast_forward: "被改写（不是快进）",
+};
+const shortId = (id: string | null) => (id ? id.slice(0, 8) : "无");
+const NON_FAST_FORWARD_WARNING = "执行 reset --hard、rebase 或 commit --amend 之后恢复这个引用，工作区会留下一份撤销那些提交的差异；不要不看就提交它。";
+const FIRST_ENABLE_TEXT = "管家在你的真实检出目录里直接改文件；v1 只报告分支和标签的变化，不会恢复，删掉的对象也找不回来，建议先把重要分支推送或备份。";
+
+const REFS_UNREADABLE_TEXT = "本轮结束后没能重新读取分支和标签，这一轮对它们的改动（如果有）没有被报告；请自己检查 git branch 和 git tag。";
+
+function refChangeText(change: RefChange): string {
+  const warning = change.change === "non_fast_forward" ? ` ${NON_FAST_FORWARD_WARNING}` : "";
+  return `${change.ref} ${CHANGE_TEXT[change.change]}（${shortId(change.old)} → ${shortId(change.new)}）${warning}`;
+}
+
+function refReportText(event: Extract<TaskEvent, { kind: "ref_report" }>): string {
+  const parts = ["本轮之后引用有变化，Looper 不会自动恢复，下面的恢复命令由你自己决定是否执行："];
+  parts.push(...event.changes.map(refChangeText).map((line) => `- ${line}`));
+  parts.push(...event.info.map((change) => `- ${refChangeText(change)}（属于另一个 Looper 任务）`));
+  if (event.needs_you) parts.push("这些变化已列入「需要你处理」。");
+  if (event.head) {
+    parts.push(`HEAD 从 ${event.head.before ?? "detached"} 变成 ${event.head.after ?? "detached"}，不会自动切回；`
+      + "下一轮需要把任务分支重新检出，或改记录的任务分支。");
+  }
+  if (event.own_commits > 0) parts.push(`本轮有 ${event.own_commits} 个提交由任务管家自己做。`);
+  return parts.join("\n");
+}
+
+/** The commands of an event, shown in code font under its text. */
+function taskEventCode(event: TaskEvent): string[] {
+  return event.kind === "ref_report" ? [...event.changes, ...event.info].map((change) => change.restore) : [];
 }
 
 function taskEventText(event: TaskEvent): string {
@@ -188,12 +260,21 @@ function taskEventText(event: TaskEvent): string {
       const unsure = event.unverified?.length ? ` · 以下文件无法确认是否为本轮前已有的改动（文件过大或数量过多），未自动提交：${event.unverified.join("、")}` : "";
       return `${event.mode}${files}${commit}${kept}${unsure}`;
     }
+    case "ref_report":
+      return refReportText(event);
+    case "sandbox_notice":
+      return event.notice === "first_enable_in_place" ? FIRST_ENABLE_TEXT : REFS_UNREADABLE_TEXT;
     case "refused":
       return "status" in event ? `已拒绝（${event.reason}：${event.status}）` : `已拒绝（${event.reason}）`;
     default:
       return UNREADABLE;
   }
 }
+
+const codeOf = (event: TaskEvent) => {
+  const code = taskEventCode(event);
+  return code.length ? { code } : {};
+};
 
 function unreadable(id: string, createdAt?: string): WorkFeedRecord {
   return { source: "task-event", id, ...(createdAt ? { created_at: createdAt } : {}), kind: "unreadable", text: UNREADABLE };
@@ -270,7 +351,7 @@ function readTaskHistory(rows: DbChatMessage[]): ParsedPage {
       const canonical = stable(event);
       if (!keys.has(canonical)) {
         keys.set(canonical, row.message_id);
-        records.push({ source: "task-event", id: row.message_id, created_at: row.created_at, kind: event.kind, text: taskEventText(event) });
+        records.push({ source: "task-event", id: row.message_id, created_at: row.created_at, kind: event.kind, text: taskEventText(event), ...codeOf(event) });
       }
       if (event.kind === "stopped") {
         const marked = withStopped(messages);
@@ -311,7 +392,7 @@ function foldLive(records: WorkFeedRecord[], keys: Map<string, string>, kind: st
   nextKeys.set(canonical, id);
   if (records.some((record) => record.id === id)) return { records, keys: nextKeys, stopped: event.kind === "stopped" };
   return {
-    records: [...records, { source: "task-event", id, kind: event.kind, text: taskEventText(event) }],
+    records: [...records, { source: "task-event", id, kind: event.kind, text: taskEventText(event), ...codeOf(event) }],
     keys: nextKeys,
     stopped: event.kind === "stopped",
   };
