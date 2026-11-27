@@ -203,8 +203,9 @@ function taskEventText(event: TaskEvent): string {
       const command = event.command_name ? `命令 ${event.command_name}` : "命令";
       const target = event.target ? `\`${event.target}\`` : "";
       if (event.case === "unsupported_client") {
+        // A known client (e.g. gh) is unsupported whether or not the host is on the allowlist, so never claim it is listed.
         const kind = event.command_name ? `${event.command_name} 这类命令` : "这类命令";
-        return target ? `${target} 在白名单里，但 ${kind}在 v1 的管家会话里不受支持，放行域名不会让它可用` : `${kind}在 v1 的管家会话里不受支持`;
+        return `${kind}在 v1 的管家会话里不受支持，放行域名不会让它可用`;
       }
       if (event.case === "unknown") return `被沙箱拒绝（${event.category}）`;
       if (event.case === "not_allowable") return `${command} 访问 ${target || "该目的地"} 被拒绝：v1 不能放行这类目的地（本机、内网地址或不合规的主机名）`;

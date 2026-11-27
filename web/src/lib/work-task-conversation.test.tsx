@@ -263,8 +263,15 @@ describe("task conversation", () => {
       expect(text).toContain(`已拒绝（${reason}）`);
     }
     expect(text).toContain("命令 curl 访问 `blocked.example:443` 被拒绝；该域名不在本项目的白名单里，操作者可在项目的任务管家沙箱设置里放行");
-    expect(text).toContain("`api.example:443` 在白名单里，但 gh 这类命令在 v1 的管家会话里不受支持，放行域名不会让它可用");
-    expect(text).toContain("node 这类命令在 v1 的管家会话里不受支持");
+    expect(text).toContain("gh 这类命令在 v1 的管家会话里不受支持，放行域名不会让它可用");
+    expect(text).toContain("node 这类命令在 v1 的管家会话里不受支持，放行域名不会让它可用");
+    // A known client is unsupported whether or not the host is on the allowlist, so the row never claims it is listed.
+    const unsupportedClient = [...container.querySelectorAll('[data-feed-key^="task-event:"]')]
+      .filter((item) => item.textContent?.includes("这类命令在 v1 的管家会话里不受支持"));
+    expect(unsupportedClient).toHaveLength(2);
+    for (const item of unsupportedClient) {
+      expect(item.textContent).not.toContain("在白名单里");
+    }
     expect(text).toContain("命令 touch 写 `/var/data/x` 被拒绝：管家会话只能写任务目录");
     expect(text).toContain("命令 curl 访问 `10.0.0.1:443` 被拒绝：v1 不能放行这类目的地");
     const notAllowable = [...container.querySelectorAll('[data-feed-key^="task-event:"]')].find((row) => row.textContent?.includes("10.0.0.1:443"));
@@ -282,6 +289,22 @@ describe("task conversation", () => {
     expect(command?.textContent).toContain("/pause");
     expect(command?.querySelector("button")).toBeNull();
     expect(container.querySelector('[data-role="assistant"]')?.textContent).toContain("模型已切换：a → b");
+  });
+
+  it("explains an unsupported client without claiming an unlisted host is allowlisted", async () => {
+    const denial = {
+      kind: "sandbox_denial", tool_use_id: "tu-unlisted", category: "network",
+      case: "unsupported_client", target: "unlisted.example:443", client: "go_tls", command_name: "gh",
+    };
+    api.fetchChatHistory.mockResolvedValue(idle([
+      row("e1", "event", JSON.stringify(denial), "2026-11-25T00:00:00Z"),
+    ]));
+    await show(<TaskWorkConversation taskId="t1" task={taskOf("t1")} />);
+    await flush();
+    const item = container.querySelector('[data-feed-key="task-event:e1"]');
+    expect(item?.textContent).toContain("gh 这类命令在 v1 的管家会话里不受支持，放行域名不会让它可用");
+    expect(item?.textContent).not.toContain("在白名单里");
+    expect(item?.textContent).not.toContain("unlisted.example");
   });
 
   it("shows a live model switch without sending, and reloads it as the same row", async () => {
