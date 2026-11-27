@@ -225,7 +225,7 @@ def test_operator_edits_reach_the_next_turn_and_clear_without_restarting(monkeyp
 
 
 @pytest.mark.parametrize("entry,kind", [
-    ("web", SessionKind.MAIN), ("api", SessionKind.MAIN),
+    ("web", SessionKind.MAIN), ("api", SessionKind.CLIENT),
     ("lark", SessionKind.MAIN), ("telegram", SessionKind.MAIN),
     ("group", SessionKind.GROUP), ("dm", SessionKind.DM),
 ])

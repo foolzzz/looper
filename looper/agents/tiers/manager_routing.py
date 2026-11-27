@@ -13,6 +13,9 @@ Scoped Managers use a machine-wide cap counting all Managers' processes and rese
 non-main session makes room with its session id kept for resumption, starts wait when none is idle, main never
 waits or gets evicted, and scoped non-main residents are reclaimed after the configured idle timeout.
 
+An API client's messages go to the session of that client (``session_routing.client_key``) whether routing is on or
+off, count toward the same cap, and with routing off stop with their worker once their queue is empty.
+
 Switched off, new messages go to main again: main's worker keeps the messages it holds in order, the other workers
 finish theirs, and their processes stop once idle (``sweep``).
 """
@@ -45,6 +48,8 @@ logger = logging.getLogger(__name__)
 
 OPERATOR_ID_SECONDS = 30.0  # how long a bot's operator id is reused before it is read again
 WAITING_STATUS = "排队中：其他会话正忙"
+RESIDENT_WAIT_SECONDS = 60.0  # how long a start waits for a free resident slot before it is refused as busy
+BUSY_REPLY = "现在同时运行的会话已满，这条消息没有处理，请稍后再发。"
 
 
 SCOPE_UNAVAILABLE_REPLY = "这个群的能力范围设置现在用不了，没有执行任何操作；请操作者检查这个群的范围。"
@@ -187,6 +192,8 @@ class SessionRouter:
                             or self.holds(main) or admission.enabled()) else None
         if kind not in (MessageType.USER_MESSAGE, MessageType.COMPLETION_DUE):
             return None
+        if kind is MessageType.USER_MESSAGE and (client := self._client_session(envelope)) is not None:
+            return client  # an API client has a session of its own, with routing on or off
         if kind is MessageType.COMPLETION_DUE and (lanes_settings.enabled() or admission.enabled()):
             return None  # claim in the loop; only the claimed batch joins the background lane
         if not session_routing.routes(self._agent.agent_id):
@@ -219,6 +226,17 @@ class SessionRouter:
                     await asyncio.sleep(completion_events.RETRY_SECONDS)
         finally:
             self._finish_scope_attempt(episode)
+
+    def _client_session(self, envelope: MessageEnvelope) -> ManagerSession | None:
+        """The default Manager's session of the API client ``envelope`` came through; None for any other message
+        (the client is named by the web adapter from a verified token only: ``manager._message_client``)."""
+        from ..managers_api import DEFAULT_MANAGER_ID
+        from .manager import _message_client, _message_origin
+
+        if self._agent.agent_id != DEFAULT_MANAGER_ID or _message_origin(envelope)["channel"] != "web":
+            return None
+        client_id, _name = _message_client(envelope)
+        return None if client_id is None else self.session(session_routing.client_key(client_id))
 
     def dispatch(self, session: ManagerSession, envelope: MessageEnvelope) -> None:
         """Queue ``envelope`` for ``session``'s worker, started on first use."""
@@ -765,12 +783,13 @@ class SessionRouter:
     async def admit(self, session: ManagerSession, envelope: MessageEnvelope | None) -> None:
         """Before ``session`` starts its process: make room under the cap, or wait for it (module docstring)."""
         agent = self._agent
-        if not session_routing.routes(agent.agent_id):
+        if not session_routing.routes(agent.agent_id) and not session_routing.always_routed(session.route):
             return
         if session_routing.scoped(agent.agent_id):
             await self._admit_scoped(session, envelope)
             return
         told = False
+        deadline = time.monotonic() + RESIDENT_WAIT_SECONDS
         async with self._resident:
             while True:
                 others = [s for s in agent._sessions.values() if s is not session
@@ -780,8 +799,13 @@ class SessionRouter:
                     return
                 idle = sorted((s for s in others if s.key != MAIN_SESSION and self.idle(s)),
                               key=lambda s: s.last_activity)
-                if idle and await self._stop_idle(idle[0], notify=False):
-                    logger.info("%s: stopped the idle session %s for %s", agent._log, idle[0].key, session.key)
+                stopped = None
+                for victim in idle:  # the least recently active first; one whose runtime keeps its process is skipped
+                    if await self._stop_idle(victim, notify=False):
+                        stopped = victim
+                        break
+                if stopped is not None:
+                    logger.info("%s: stopped the idle session %s for %s", agent._log, stopped.key, session.key)
                     continue
                 if session.key == MAIN_SESSION or not any(s.key != MAIN_SESSION for s in others):
                     self._reservations.add(session.key)
@@ -789,10 +813,25 @@ class SessionRouter:
                 if not told and envelope is not None:
                     told = True
                     await agent._send_status(envelope, WAITING_STATUS, phase=True)
-                await self._resident.wait()
+                await self._wait_for_room(self._resident, deadline)
+
+    async def _wait_for_room(self, condition: asyncio.Condition, deadline: float) -> None:
+        """Wait for a turn to end or a process to stop, until ``deadline``; then the start is refused as busy, never
+        waited on for ever and never made over the cap."""
+        remaining = deadline - time.monotonic()
+        try:
+            if remaining <= 0:
+                raise TimeoutError
+            await asyncio.wait_for(condition.wait(), remaining)
+        except TimeoutError:
+            from .manager import TurnFailed
+
+            logger.warning("%s: no resident slot became free within %.0f s", self._agent._log, RESIDENT_WAIT_SECONDS)
+            raise TurnFailed(BUSY_REPLY, "resident_busy") from None
 
     async def _admit_scoped(self, session: ManagerSession, envelope: MessageEnvelope | None) -> None:
         waiting_since = None
+        deadline = time.monotonic() + RESIDENT_WAIT_SECONDS
         async with pool.condition:
             while True:
                 if pool.count(exclude=session) < session_routing.max_resident_total():
@@ -813,7 +852,7 @@ class SessionRouter:
                         waiting_since = time.monotonic()
                         if envelope is not None:
                             await self._agent._send_status(envelope, WAITING_STATUS, phase=True)
-                    await pool.condition.wait()
+                    await self._wait_for_room(pool.condition, deadline)
             self._reservations.add(session.key)
             if waiting_since is not None:
                 pool.waits.append((self._agent.agent_id, time.monotonic() - waiting_since))

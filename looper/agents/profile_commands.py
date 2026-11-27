@@ -21,7 +21,7 @@ def read_text(args: Any) -> str:
 
     if os.environ.get(child_env.AGENT_RUN_ENV) or task_manager_denial("profile", "show") is not None:
         return ""
-    command = [sys.executable, "-m", __name__]
+    command = [sys.executable, "-I", "-m", __name__]  # not the cwd: a hook runs this in a session directory
     for flag in ("runtime_root", "config"):
         if value := getattr(args, flag, None):
             command += ["--" + flag.replace("_", "-"), str(value)]

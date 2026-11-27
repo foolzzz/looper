@@ -13,6 +13,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
+from looper.agents.turn_context import SpeakerKind
 from looper.agents import waits
 from looper.agents.project_execution import ProjectExecution
 from looper.agents.tiers.planner_protocol import (
@@ -684,7 +685,7 @@ def test_manager_wait_settings_read_confirmation_update_and_reset(
         for index, values in enumerate(({"max_wait_seconds": 600, "min_check_seconds": 60},
                                          {"max_wait_seconds": None, "min_check_seconds": None})):
             before = await waits.settings_view()
-            turn = Turn(channel="lark", chat="chat", message_id=f"ask-{index}")
+            turn = Turn(channel="lark", chat="chat", message_id=f"ask-{index}", speaker=SpeakerKind.OPERATOR)
             ops.begin_turn(turn)
             asked = await ops.call("looper_settings", {"action": "waits", "waits": values})
             assert asked["status"] == "needs_confirmation", asked
@@ -694,7 +695,7 @@ def test_manager_wait_settings_read_confirmation_update_and_reset(
                 assert str(before[name]["value"]) in turn.blocks[0]
                 assert str(before[name]["default"] if value is None else value) in turn.blocks[0]
             ops.end_turn(turn)
-            confirm = Turn(channel="lark", chat="chat", message_id=f"confirm-{index}")
+            confirm = Turn(channel="lark", chat="chat", message_id=f"confirm-{index}", speaker=SpeakerKind.OPERATOR)
             ops.begin_turn(confirm)
             answer = await ops.call("looper_confirm", {"confirmation_id": asked["confirmation_id"]})
             assert answer["status"] == "ok", answer
@@ -721,7 +722,7 @@ def test_manager_wait_settings_validate_before_confirmation(
 
     async def run() -> None:
         ops = ManagerOps(SimpleNamespace(), url="http://127.0.0.1:9", token="test")
-        turn = Turn(channel="telegram", chat="chat", message_id="ask")
+        turn = Turn(channel="telegram", chat="chat", message_id="ask", speaker=SpeakerKind.OPERATOR)
         ops.begin_turn(turn)
         answer = await ops.call("looper_settings", {"action": "waits", "waits": values})
         assert answer["status"] == "error" and answer["error"]["code"] == "invalid", answer

@@ -24,6 +24,7 @@ import asyncio
 import hashlib
 import json
 import logging
+import re
 import secrets
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
@@ -33,10 +34,14 @@ from typing import Any
 from ..db import card_actions as db_cards
 from ..db import system_settings
 from ..db import user_gates as db_user_gates
+from .channels.markdown_images import neutralize_images
 from .message import manager_address, parse_channel_id
 from .user_gates import GateState, MessageKind
 
 logger = logging.getLogger(__name__)
+
+# A Lark open_id as the platform issues it; a card @-mentions only a value of this shape.
+OPEN_ID = re.compile(r"ou_[A-Za-z0-9]+")
 
 ENABLED_KEY = "cards.actions.enabled"
 # The channel types whose adapter sends buttons and receives their presses; any other shows the card's text.
@@ -75,6 +80,13 @@ class Card:
     text: str
     buttons: tuple[Button, ...] = ()
     mention: str | None = None
+
+    def __post_init__(self) -> None:
+        # The mention is interpolated into the card's Markdown after the text is neutralized: a value that is not
+        # an open_id is dropped here, so the card is sent without it.
+        if self.mention is not None and not (isinstance(self.mention, str) and OPEN_ID.fullmatch(self.mention)):
+            logger.warning("a card's mention is not an open_id; the card is built without it")
+            object.__setattr__(self, "mention", None)
 
     def to_dict(self) -> dict[str, Any]:
         return {"text": self.text, "buttons": [{"label": b.label, "value": b.value, "style": b.style}
@@ -431,7 +443,8 @@ async def press_gate(row: dict[str, Any], event: Press, choice: str, *, bus: Any
 
 def lark_card(card: Card) -> dict[str, Any]:
     """The card as Lark's card JSON 2.0: its text as Markdown, then its buttons in a row."""
-    text = f"<at id={card.mention}></at> {card.text}" if card.mention else card.text
+    text = neutralize_images(card.text)
+    text = f"<at id={card.mention}></at> {text}" if card.mention else text
     elements: list[dict[str, Any]] = [{"tag": "markdown", "content": text}]
     if card.buttons:
         styles = {"primary": "primary_filled", "danger": "danger", "default": "default"}

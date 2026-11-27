@@ -24,7 +24,7 @@ pytestmark = pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not
 BASELINE = {
     "command": "5e061eeb979d5c7fe9a14e358758921fd245a8d209a6da69c3185cb50f319234",
     "prompt": "02bb63fba8b06401b47768209b31db99af74b73feb44eaecdcb8d7659874d407",
-    "signature": "8a41bb94febb3ebc935b28aa152341b88f1752ae7e05b055e4ce624eb78c4be1",
+    "signature": "990c9350f5706e2d149cabea75d5c98f24e3abf53cf7a030ae564d7758495203",  # the MCP entry gained -I on purpose
 }
 
 

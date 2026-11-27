@@ -6,7 +6,7 @@ import json
 import os
 import re
 from collections import Counter
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
@@ -103,9 +103,10 @@ def record_refusal(reason: Reason, phase: Literal["launch", "resume", "turn"], v
     refusal_counts[(reason.value, phase, version)] += 1
 
 
-def environment(launch: Launch, task_id: str) -> dict[str, str]:
+def environment(launch: Launch, task_id: str, *, drop: Sequence[str] = ()) -> dict[str, str]:
+    """The task Manager's process environment; ``drop`` names variables a direct session must not carry."""
     env = launch.runtime.environment(launch)
-    for key in (*HOOK_ENV, child_env.AGENT_RUN_ENV):
+    for key in (*HOOK_ENV, child_env.AGENT_RUN_ENV, *drop):
         env.pop(key, None)
     env[child_env.TASK_MANAGER_ENV] = task_id
     return env

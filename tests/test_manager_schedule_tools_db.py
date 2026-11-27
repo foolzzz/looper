@@ -655,19 +655,20 @@ def test_starting_a_schedule_refuses_a_confirmation_outside_its_turn_or_time(
     """A confirmation in the asking turn, or past the clock limit in the next turn, is expired."""
     from looper.agents.ops import Turn
     from looper.agents.ops.service import CONFIRMATION_SECONDS
+    from looper.agents.turn_context import SpeakerKind
 
     async def test(pool: Any) -> None:
         async with _starting_chat(pool, tmp_path) as (chat, sid):
             clock = _Clock()
             monkeypatch.setattr(chat.ops, "_clock", clock)
-            turn = Turn(channel="lark", chat="oc_1", message_id="asking")
+            turn = Turn(channel="lark", chat="oc_1", message_id="asking", speaker=SpeakerKind.OPERATOR)
             chat.ops.begin_turn(turn)
             try:
                 asked = await chat.ops.call(TOOL, {"action": action, "schedule": sid})
                 assert asked["status"] == "needs_confirmation", asked
                 if when == "clock-expired":
                     chat.ops.end_turn(turn)
-                    turn = Turn(channel="lark", chat="oc_1", message_id="answering")
+                    turn = Turn(channel="lark", chat="oc_1", message_id="answering", speaker=SpeakerKind.OPERATOR)
                     assert asked["confirmation_id"] in chat.ops.begin_turn(turn)
                     # Advance after the next turn starts, so _confirm itself sees an expired id.
                     clock.now += CONFIRMATION_SECONDS + 1

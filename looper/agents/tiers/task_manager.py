@@ -276,6 +276,9 @@ class TaskManagerAgent:
         self.work_dir = ""
         self.dir_lock: task_manager_dirs.DirectoryLock | None = None
 
+    def _mcp_cwd(self) -> Path:
+        return self.pool.runtime_root / "task-managers" / self.task_id / "mcp-cwd"
+
     async def prepare(self, *, sink: TurnSink | None = None) -> tuple[Mapping[str, Any], Any, Launch, SystemPrompt]:
         """Read configuration afresh; no launch bypasses the direct-mode review checks."""
         try:
@@ -348,7 +351,7 @@ class TaskManagerAgent:
                     run = replace(run, library=await operator_mcp.library_with_allowed(
                         library, self.pool.runtime_root, allowed,
                         environment=run.runtime.environment(run),
-                        cwd=self.pool.runtime_root / "task-managers" / self.task_id / "mcp-cwd"))
+                        cwd=self._mcp_cwd()))
                 except operator_mcp.UnresolvedServers as exc:
                     raise Refused(RefuseReason.MCP_UNRESOLVED, str(exc)) from exc
                 except operator_mcp.UnsafeLauncher as exc:
@@ -356,7 +359,7 @@ class TaskManagerAgent:
                     raise Refused(RefuseReason.MCP_LAUNCHER_UNSAFE, str(exc)) from exc
                 if run.library.mcp_config and run.library.mcp_config != library.mcp_config:
                     self.mcp_files.add(run.library.mcp_config)
-                self.mcp_fingerprints = operator_mcp.fingerprints(run.library, allowed)
+                self.mcp_fingerprints = operator_mcp.fingerprints(run.library, allowed, self._mcp_cwd().resolve())
             else:
                 self.mcp_fingerprints = {}
             return run
@@ -388,7 +391,7 @@ class TaskManagerAgent:
         def command_for(launch: Launch) -> list[str]:
             if direct:
                 self.read_deny = task_manager_sandbox.read_deny_paths(launch.runtime.environment(launch),
-                                                                      self.pool.runtime_root)
+                                                                      self.pool.runtime_root, self.pool.config_file)
             return (launch.runtime.operator_resident_command(executable, cwd=reopened.work_dir, prompt_file=prompt_file,
                                                              launch=launch, settings_dir=root / "settings",
                                                              allowed_domains=self.allowed_domains,
@@ -397,7 +400,8 @@ class TaskManagerAgent:
                                                                    prompt_file=prompt_file, launch=launch))
 
         command = command_for(launch)
-        env = task_manager_safety.environment(launch, self.task_id)
+        dropped = task_manager_sandbox.DIRECT_DROPPED_ENV if direct else ()
+        env = task_manager_safety.environment(launch, self.task_id, drop=dropped)
         # The file's name is the SHA-256 of its content, so the signature covers the pinned values, the network
         # allowlist and the read deny list: a change in any of them restarts the session.
         settings_file = command[command.index("--settings") + 1] if "--settings" in command else ""
@@ -418,9 +422,12 @@ class TaskManagerAgent:
             restarting = not self.resident.started or self.resident.stale(signature)
             if restarting:
                 await self.resident.stop()
+                if direct:  # a fresh, empty start directory for the servers of the new process
+                    await asyncio.to_thread(operator_mcp.reset_cwd, self._mcp_cwd())
                 launch = await configure()
                 command = command_for(launch)
-                env = task_manager_safety.environment(launch, self.task_id)
+                env = task_manager_safety.environment(launch, self.task_id, drop=dropped)
+                settings_file = command[command.index("--settings") + 1] if "--settings" in command else ""
                 if direct:
                     problem = await task_manager_safety.gate(executable, cwd=reopened.work_dir, environment=launch.runtime.environment(launch),
                         phase=phase, settings_file=Path(settings_file), review_hook=False)
@@ -590,9 +597,11 @@ def current_pool() -> TaskManagerPool | None:
 
 class TaskManagerPool:
     def __init__(self, runtime_root: Path, claude_bin: str, *, ops: Any = None,
-                 max_resident: Callable[[], int], clock: Callable[[], float] = time.monotonic) -> None:
+                 max_resident: Callable[[], int], clock: Callable[[], float] = time.monotonic,
+                 config_file: Path | None = None) -> None:
         global _pool
         self.runtime_root, self.claude_bin, self.ops = runtime_root, claude_bin, ops
+        self.config_file = config_file  # Looper's ops file when it lives outside the runtime root (read deny list)
         self.max_resident, self.clock = max_resident, clock
         self.agents: dict[str, TaskManagerAgent] = {}
         self.closing = False

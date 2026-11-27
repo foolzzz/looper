@@ -163,7 +163,7 @@ async def stream(server, operation, arguments, principal, headers, writer):
         if owner := await server._thread_owner_elsewhere(session_id, arguments.get("manager") or "manager"):
             raise await server._foreign_thread_error(owner)
     writer.write(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-store\r\n"
-                 b"Connection: close\r\nX-Accel-Buffering: no\r\n\r\n")
+                 b"X-Content-Type-Options: nosniff\r\nConnection: close\r\nX-Accel-Buffering: no\r\n\r\n")
     events = (server._web_adapter.iter_chat_events(session_id) if correlation_id is None
               else server._web_adapter.iter_sse_events(correlation_id))
     try:

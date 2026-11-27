@@ -287,7 +287,8 @@ async def _repair(move: ProjectMove, worktrees: list[Any], source: str,
                     logger.warning("cannot inspect moved worktree %s: %s", checkout, exc)
         try:
             args = ("--git-dir=.",) if bare else ()
-            run = await step_workspaces._git(repo, *args, "worktree", "repair", *sorted(set(paths)))
+            # The moved checkouts' links are stale: that is what repair fixes, so their layout is not checked.
+            run = await step_workspaces._git(repo, *args, "worktree", "repair", *sorted(set(paths)), layout=False)
             output = (run.stdout + run.stderr).decode("utf-8", "replace").strip()
             result = {"repository": str(repo), "ok": True, "output": output}
             logger.info("repaired moved repository %s: %s", repo, output)

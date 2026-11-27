@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "looper"
-version = "2.15.43"
+version = "2.15.44"
 description = "A self-hosted three-tier multi-agent system that runs Claude Code on your tasks, with a real-time web dashboard."
 readme = "README.md"
 requires-python = ">=3.11"
@@ -35,6 +35,7 @@ Changelog = "https://github.com/foolzzz/looper/blob/main/CHANGELOG.md"
 [project.optional-dependencies]
 test = [
   "jsonschema>=4.23,<5",
+  "markdown-it-py>=3,<5",
   "playwright>=1.51,<2",
   "pytest>=9.0.3,<10",
   "pytest-cov>=5,<7",
@@ -45,6 +46,7 @@ test = [
 [project.scripts]
 looper = "looper.cli:main"
 loopercli = "looper.loopercli:main"
+looper-edit = "looper.file_edit:main"
 
 [tool.setuptools.packages.find]
 include = ["looper*"]

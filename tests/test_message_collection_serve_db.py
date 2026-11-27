@@ -72,7 +72,8 @@ def test_isolated_serve_bridge_collect_parity_alert_and_rollback(tmp_path):
         with serving(root, url, world) as (api, ops):
             def post(action, body=None):
                 busy_message = {"message_collection.run_now": "collection could not start: connection",
-                                "message_collection.mode_update": "busy"}.get(action)
+                                "message_collection.mode_update": "busy",
+                                "message_collection.update": "busy"}.get(action)
 
                 def attempt():
                     assert_target(ops.path, ops.runtime_root, api)
