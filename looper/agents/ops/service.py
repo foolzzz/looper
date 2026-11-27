@@ -1244,7 +1244,7 @@ class ManagerOps:
             return []
         live = [entry for entry in self._button_notes.get(turn.chat_key, [])
                 if entry[3] == receipts_settings.generation() and entry[2] == self._session_gen.get(entry[1], 0)]
-        if turn.autonomous or turn.speaker in (SpeakerKind.ALLOWED, SpeakerKind.MEMBER):
+        if turn.autonomous or _not_operator(turn):
             return []
         mine = [entry for entry in live if entry[0] == turn.sender and entry[1] == session_key]
         rest = [entry for entry in live if entry not in mine]
@@ -1607,6 +1607,9 @@ class _Recorded(OpError):
 def _not_operator(turn: Turn) -> bool:
     if turn.principal is not None:
         return turn.principal.audience is not ScopeAudience.OPERATOR
+    if turn.speaker is None:
+        # Unknown speaker: only a bot-channel user turn is judged here, and it is refused (fail closed).
+        return not turn.autonomous and turn.client_id is None and turn.channel in BOT_CHANNEL_TYPES
     return turn.speaker in (SpeakerKind.ALLOWED, SpeakerKind.MEMBER)
 
 
