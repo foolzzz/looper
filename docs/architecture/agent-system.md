@@ -472,10 +472,14 @@ Manager has no tool for it. The dashboard shows the task page's 指标 card and 
   configured operator and allowlist and sets `Turn.speaker`, enabling the existing
   ops checks: other allowlisted senders and group members cannot request an
   escalation or confirm one, and a refused confirmation is discarded. A bot
-  identity lookup failure grants no operator authority. Operator messages in
+  identity lookup failure grants no operator authority. The speaker is classified for
+  every user turn whatever the switch or the session's routing (the switch only decides
+  whether the context is rendered), and a bot-channel turn whose speaker is unknown is
+  refused like a non-operator's. Operator messages in
   groups and API clients can authorize, while private tools keep their separate
   operator-turn audience checks. Completion and autonomous turns keep their
-  existing messages and no speaker. Off, prompts, tools and launches are unchanged.
+  existing messages and no speaker. Off, prompts, tools and launches are unchanged
+  (the speaker is still set, so authorization does not depend on the switch).
   Dashboard and generated CLI configuration use the existing operator-only
   `turn_context_settings.get/update`, separate from `chat_settings`; Lark and
   Telegram need no new command. See [the assistant RFC](rfcs/assistant-layer-v0.zh-CN.md#51-11-每轮上下文).
@@ -689,7 +693,8 @@ Manager has no tool for it. The dashboard shows the task page's 指标 card and 
   operations and confirmations for allowed senders and members, audits `forbidden` with reason `operator_only`,
   and drops a refused confirmation. Scoped sessions check the routing-time principal instead of the speaker;
   a waiting confirmation belongs to its session and sender (`not_initiator` otherwise), and a non-operator's
-  `/stop` stops only shared sessions' turns. Unscoped turns retain the existing speaker rules.
+  `/stop` stops only shared sessions' turns. Unscoped turns follow the speaker rules; an unknown speaker on a bot
+  channel is refused.
   Settings → Chat uses the operator-only v1 `turn_context_settings.get` and `turn_context_settings.update`
   operations to store `manager.turn_context.enabled`
   (off by default), `user.timezone` (an IANA name, or null for the server zone) and `user.reply_language`

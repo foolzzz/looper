@@ -19,6 +19,7 @@ import pytest
 from looper.agents.bus import MessageBus
 from looper.agents.message import MessageEnvelope, MessageType, channel_address
 from looper.agents.ops import Turn
+from looper.agents.turn_context import SpeakerKind
 from looper.agents.ops.service import ManagerOps, Platform
 from looper.agents.ops.tasks import GROUP_START_QUESTION, START_QUESTION
 from tests.db_support import DSN, run_db
@@ -54,7 +55,7 @@ class _Chat:
             correlation_id=f"corr-{len(self.turns)}", metadata={"origin_channel_id": self.channel_id},
         )
         turn = Turn(channel="lark", chat="oc_1", message_id=envelope.message_id, envelope=envelope, sender=self.sender,
-                    group=self.group, channel_id=self.channel_id)
+                    group=self.group, channel_id=self.channel_id, speaker=SpeakerKind.OPERATOR)
         self.turns.append(turn)
         self.notes.append(self.ops.begin_turn(turn))
         try:
@@ -174,7 +175,7 @@ async def _turn_in(conversation: str, ops: ManagerOps) -> AsyncIterator[Turn]:
                                       payload={"text": "确认", "channel_context": context},
                                       metadata={"origin_channel_id": channel_id})
     turn = Turn(channel=channel, chat=chat, message_id=envelope.message_id, envelope=envelope, sender=sender,
-                group=group, channel_id=channel_id)
+                group=group, channel_id=channel_id, speaker=SpeakerKind.OPERATOR)
     ops.begin_turn(turn)
     try:
         yield turn
