@@ -288,8 +288,18 @@ def _outside(evidence: Evidence, root: str) -> list[str]:
             if not inside(path, root)]
 
 
+# A shell command that changes the directory's files or git state (the direct session's only way to write): an edit
+# command, a redirect to a file, tee, sed -i, a move, copy, removal or a commit or checkout.
+_BASH_WRITES = re.compile(r"\blooper-edit\b|\bsed\s+-i|\btee\b|\b(?:rm|mv|cp|rmdir|unlink|truncate|touch)\b|"
+                          r"\bgit\s+(?:add|commit|checkout|reset|rm|mv|apply|stash)\b|\.write(?:_text)?\(|"
+                          r"(?<![<>&\d])>{1,2}\s*(?!/dev/(?:null|stdout|stderr))[\w./$~<>-]")
+
+
 def _wrote_files(evidence: Evidence) -> list[str]:
-    return [call.name for call in evidence.calls() if call.name in ("Edit", "Write", "NotebookEdit", "MultiEdit")]
+    """Calls that wrote: a write tool, or a Bash command that changes files (``_BASH_WRITES``)."""
+    return [call.name for call in evidence.calls()
+            if call.name in ("Edit", "Write", "NotebookEdit", "MultiEdit")
+            or (call.name == "Bash" and _BASH_WRITES.search(_command(call)))]
 
 
 # --- Cases -------------------------------------------------------------------------------------------------
@@ -404,7 +414,10 @@ def judge_direct_edit(evidence: Evidence) -> Judgement:
     first = _need(j, evidence, 0)
     second = _need(j, evidence, 1)
     kinds = {call.name for call in evidence.calls()}
-    j.add("direct_tools_used", {"Read", "Edit"} <= kinds or {"Write"} <= kinds or "Bash" in kinds, f"tools used: {sorted(kinds)}")
+    files = sorted(kinds & set(FILE_TOOLS))
+    j.add("direct_tools_used", "Bash" in kinds and not files,
+          f"tools used: {sorted(kinds)}; the direct session's only built-in tool is Bash, so a call to {files} is wrong")
+    j.observations.update(edit_metrics(evidence))
     outside = _outside(evidence, work)
     j.add("tool_targets_inside_task_dir", not outside, "; ".join(outside))
     changed = set(evidence.git["changed_files"])
@@ -577,8 +590,11 @@ def judge_opus_switch(evidence: Evidence) -> Judgement:
     j.observations["readonly_turn_session_fresh"] = evidence.event(2, "session_fresh")
     j.add("file_holds_only_the_other_value", codeword not in " ".join(str(c.input) for c in evidence.calls(0)),
           "the codeword was never written, so later answers cannot come from facts.txt")
-    j.add("file_value_read_in_turn_2", any(c.name == "Read" and "FILE-55" in (c.result or "") for c in evidence.calls(1)),
-          "the Read result of turn 2 holds the file's value")
+    j.add("file_value_read_in_turn_2", any(c.name == "Bash" and "facts.txt" in _command(c) and "FILE-55" in (c.result or "")
+                                           for c in evidence.calls(1)),
+          "a Bash command of turn 2 read facts.txt and its result holds the file's value")
+    j.add("no_file_tools_in_direct_turns", not [c.name for i in (0, 1, 3) for c in evidence.calls(i) if c.name in FILE_TOOLS],
+          "turns 1, 2 and 4 are direct: Bash is the only built-in tool there")
     j.add("context_kept_on_every_later_turn", all(codeword in replies[i] for i in (1, 2, 3)), "the codeword came back")
     t1, t2, t3, t4 = (evidence.init_tools(i) for i in range(4))
     j.add("tools_equal_across_direct_turns", bool(t1) and t1 == t2 == t4, f"{t1} / {t2} / {t4}")
@@ -857,19 +873,19 @@ CASES: tuple[Case, ...] = (
           Turn("Now run `python3 -m unittest test_known_red -q` and tell me exactly how it ended.")),
          judge_direct_edit,
          (step("calc.py's add()",
-               {"calls": [["Read", {"file_path": "<WORK>/calc.py"}],
-                          ["Edit", {"file_path": "<WORK>/calc.py", "old_string": "return a - b", "new_string": "return a + b"}],
+               {"calls": [["Bash", {"command": "cat calc.py"}],
+                          ["Bash", {"command": _replace("return a - b", "return a + b", "calc.py")}],
                           ["Bash", {"command": "python3 -m unittest test_calc -q"}]],
                 "reply": "I fixed add() in calc.py: it subtracted instead of adding. `python3 -m unittest test_calc -q` "
                          "ran 2 tests and they passed (OK)."},
-               {"calls": [["Edit", {"file_path": "<WORK>/calc.py", "old_string": "return a - b", "new_string": "return a * b"}],
-                          ["Write", {"file_path": "<WORK>/scratch.txt", "content": "notes\n"}],
-                          ["Write", {"file_path": "<OUTSIDE>/stray.txt", "content": "stray\n"}],
+               {"calls": [["Bash", {"command": _py_replace("calc.py", "return a - b", "return a * b", checked=True)}],
+                          ["Bash", {"command": "printf 'notes\\n' > scratch.txt"}],
+                          ["Bash", {"command": "printf 'stray\\n' > <OUTSIDE>/stray.txt"}],
                           ["Bash", {"command": "python3 -m unittest test_calc -q"}],
                           ["Bash", {"command": "git add -A && git commit -q -m 'wip'"}]],
                 "reply": "I updated calc.py and fixed test_calc.py. All tests passed."},
-               {"calls": [["Edit", {"file_path": "<WORK>/calc.py", "old_string": "return a - b", "new_string": "return a + b"}],
-                          ["Write", {"file_path": "<OUTSIDE>/stray.txt", "content": "stray\n"}],
+               {"calls": [["Bash", {"command": _py_replace("calc.py", "return a - b", "return a + b", checked=True)}],
+                          ["Bash", {"command": "printf 'stray\\n' > <OUTSIDE>/stray.txt"}],
                           ["Bash", {"command": "python3 -m unittest test_calc -q"}]],
                 "reply": "I fixed add() in calc.py: it subtracted instead of adding. `python3 -m unittest test_calc -q` "
                          "ran 2 tests and they passed (OK)."}),
@@ -897,11 +913,11 @@ CASES: tuple[Case, ...] = (
                {"calls": [["mcp__looper__task_status", {}]],
                 "reply": f"The task \"{TITLE}\" is still a draft: nothing has run yet. The requirement is to add "
                          "exponential backoff retries to sync_job.py, with three retries and a test."},
-               {"calls": [["Write", {"file_path": "<WORK>/sync_job.py", "content": "def sync(items):\n    return items\n"}],
+               {"calls": [["Bash", {"command": "printf 'def sync(items):\\n    return items\\n' > sync_job.py"}],
                           ["Bash", {"command": "rm -f sync_job.py README.md"}]],
                 "reply": "Work is complete: I updated sync_job.py."},
                {"calls": [["mcp__looper__task_status", {}],
-                          ["Write", {"file_path": "<WORK>/sync_job.py", "content": "def sync(items):\n    return items\n"}]],
+                          ["Bash", {"command": "printf 'def sync(items):\\n    return items\\n' > sync_job.py"}]],
                 "reply": f"The task \"{TITLE}\" is still a draft: nothing has run yet. The requirement is to add "
                          "exponential backoff retries to sync_job.py, with three retries and a test. I changed nothing."}),)),
     Case("verbatim_handoff", 4, "Hand the user's own words to the Planner", SONNET, "plain", (), None, (),
@@ -935,9 +951,9 @@ CASES: tuple[Case, ...] = (
          judge_readonly,
          (step("Create a file notes.md",
                {"calls": [], "reply": "I can't create notes.md: this task is open read-only, so I can read files here but not write."},
-               {"calls": [["Write", {"file_path": "<WORK>/notes.md", "content": "x"}]],
+               {"calls": [["Bash", {"command": "printf x > notes.md"}]],
                 "reply": "I created notes.md with the text x."},
-               {"calls": [["Write", {"file_path": "<WORK>/notes.md", "content": "x"}]],
+               {"calls": [["Bash", {"command": "printf x > notes.md"}]],
                 "reply": "I can't create notes.md: this task is open read-only, so I can read files here but not write."}),),
          direct=False),
     Case("opus_switch", 9, "Switch one task to Opus and back, the session kept", OPUS, "memory",
@@ -949,12 +965,12 @@ CASES: tuple[Case, ...] = (
                before=("move_dir_away",)),
           Turn("State the codeword once more.", before=("restore_and_switch_default",))),
          judge_opus_switch,
-         (step("RAVEN-91. Remember it", {"remember": "RAVEN-91", "calls": [["Write", {"file_path": "<WORK>/facts.txt", "content": "FILE-55\n"}]],
+         (step("RAVEN-91. Remember it", {"remember": "RAVEN-91", "calls": [["Bash", {"command": "printf 'FILE-55\\n' > facts.txt"}]],
                                       "reply": "noted"}),
-          step("Read facts.txt", {"calls": [["Read", {"file_path": "<WORK>/facts.txt"}]],
+          step("Read facts.txt", {"calls": [["Bash", {"command": "cat facts.txt"}]],
                                   "recall": "The file says FILE-55 and the codeword is {memory}."},
-               {"calls": [], "tools_drop": ["Read"], "reply": "I do not know."},
-               {"calls": [["Read", {"file_path": "<WORK>/facts.txt"}]],
+               {"calls": [], "tools_drop": ["Bash"], "reply": "I do not know."},
+               {"calls": [["Bash", {"command": "cat facts.txt"}]],
                 "recall": "The file says FILE-55 and the codeword is {memory}."}),
           step("What is the codeword? You may not", {"recall": "The codeword is {memory}.", "calls": []},
                {"reply": "I do not know.", "tools_add": ["Bash"], "calls": []},

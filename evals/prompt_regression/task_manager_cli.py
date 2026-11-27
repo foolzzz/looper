@@ -116,6 +116,9 @@ class Scripted:
         self.sessions = Path(config["capture_dir"]) / "sessions"
         self.sessions.mkdir(parents=True, exist_ok=True)
         self.disallowed = set((_flag(args, "--disallowedTools") or "").split(","))
+        # A direct launch carries ``--tools``: an allowlist of built-ins, as the real CLI applies it (the read-only
+        # launch has none and lists what it disallows instead).
+        self.allowed = set((_flag(args, "--tools") or "").split(",")) if "--tools" in args else None
         self.model = _flag(args, "--model") or "fake"
         resume = _flag(args, "--resume")
         if resume and not (self.sessions / resume).exists():
@@ -139,7 +142,8 @@ class Scripted:
     # -- protocol ---------------------------------------------------------------------------------------------
 
     def tool_names(self, plan: dict[str, Any] | None = None) -> list[str]:
-        builtin = [name for name in BUILTIN_TOOLS if name not in self.disallowed]
+        builtin = [name for name in BUILTIN_TOOLS if name not in self.disallowed
+                   and (self.allowed is None or name in self.allowed)]
         names = [*builtin, *(f"mcp__looper__{tool['name']}" for tool in self.mcp_tools)]
         plan = plan or {}
         return [n for n in names if n not in plan.get("tools_drop", [])] + list(plan.get("tools_add", []))
@@ -165,7 +169,8 @@ class Scripted:
         return False
 
     def run(self, name: str, arguments: dict[str, Any]) -> tuple[str, bool]:
-        if name in self.disallowed:
+        if name in self.disallowed or (self.allowed is not None and not name.startswith("mcp__")
+                                       and name not in self.allowed):
             return f"No such tool available: {name}", True
         if name == "Bash":
             done = subprocess.run(arguments["command"], shell=True, capture_output=True, text=True, timeout=120)

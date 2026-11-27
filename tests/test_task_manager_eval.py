@@ -234,7 +234,8 @@ GUARDS = {
     "fresh_session_excerpt": {"turn1_answered", "turn2_answered", "excerpt_leaves_out_commands", "last_attempt_succeeded"},
     "readonly_resume": {"turn1_answered"},
     "opus_switch": {"turn1_answered", "turn2_answered", "turn3_answered", "turn4_answered", "cost_within_case_budget",
-                    "task_binding_unchanged", "file_holds_only_the_other_value", "file_value_read_in_turn_2"},
+                    "task_binding_unchanged", "file_holds_only_the_other_value", "file_value_read_in_turn_2",
+                    "no_file_tools_in_direct_turns"},
 }
 
 
