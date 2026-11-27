@@ -3,13 +3,17 @@
 A direct session starts only for an in-place task whose directory is its own
 non-bare git repository root, is not the operator's home or a system directory,
 does not contain trusted configuration, and does not overlap another live
-direct session. The lock file lives under the runtime root, outside the task
-directory and outside the directory the session may write.
+direct session. Comparisons use the directory's device and inode, so two
+spellings of one directory are the same directory. The lock file lives under
+the runtime root, outside the task directory and outside the directory the
+session may write. Its name is ``<device>-<inode>.lock``. The descriptor is
+close-on-exec: if this process dies while the Claude process is still alive,
+the kernel releases the lock at this process's exit. That early release is
+accepted for v1.
 """
 from __future__ import annotations
 
 import fcntl
-import hashlib
 import os
 import stat
 from collections.abc import Iterable, Mapping
@@ -112,14 +116,123 @@ def trusted_paths(environment: Mapping[str, str], runtime_root: Path) -> tuple[P
     ))
 
 
-def _is_system(place: Path) -> bool:
-    if place == Path("/"):
-        return True
-    for root in SYSTEM_DIRS:
-        base = Path(root)
-        if place == base or base in place.parents:
+def _identity(path: Path) -> tuple[int, int] | None:
+    try:
+        st = os.stat(path)
+    except OSError:
+        return None
+    return (st.st_dev, st.st_ino)
+
+
+def _same(left: Path, right: Path) -> bool:
+    left_id = _identity(left)
+    return left_id is not None and left_id == _identity(right)
+
+
+def _directory_identity(path: Path) -> tuple[int, int] | None:
+    try:
+        st = os.stat(path)
+    except OSError:
+        return None
+    if not stat.S_ISDIR(st.st_mode):
+        return None
+    return (st.st_dev, st.st_ino)
+
+
+def _flip_first_letter(name: str) -> str:
+    for index, char in enumerate(name):
+        if char.isalpha():
+            flipped = char.lower() if char.isupper() else char.upper()
+            return name[:index] + flipped + name[index + 1:]
+    return name
+
+
+def _folds_case(directory: Path) -> bool:
+    current = directory
+    while True:
+        name = current.name
+        if any(char.isalpha() for char in name):
+            variant = current.with_name(_flip_first_letter(name))
+            ident = _directory_identity(current)
+            return ident is not None and ident == _directory_identity(variant)
+        parent = current.parent
+        if parent == current:
+            return False
+        current = parent
+
+
+def _locate(path: Path) -> tuple[Path | None, tuple[str, ...]]:
+    """The nearest existing directory and the path parts below it."""
+    missing: list[str] = []
+    current = path
+    while True:
+        if _directory_identity(current) is not None:
+            return current, tuple(reversed(missing))
+        parent = current.parent
+        if parent == current:
+            return None, tuple(reversed(missing))
+        missing.append(current.name)
+        current = parent
+
+
+def _parts_equal(left: tuple[str, ...], right: tuple[str, ...], *, fold: bool) -> bool:
+    if fold:
+        left = tuple(part.casefold() for part in left)
+        right = tuple(part.casefold() for part in right)
+    return left == right
+
+
+def _is_ancestor(ancestor: Path, descendant: Path) -> bool:
+    """True when ``ancestor`` is a strict ancestor of ``descendant``.
+
+    ``descendant`` may be missing. Existing directories on the walk are compared
+    by device and inode, not by the spelling of the path.
+    """
+    ancestor_id = _directory_identity(ancestor)
+    if ancestor_id is None:
+        return False
+    current = descendant
+    while True:
+        parent = current.parent
+        if parent == current:
+            return False
+        if _directory_identity(parent) == ancestor_id:
             return True
-    return False
+        current = parent
+
+
+def _contains(place: Path, entry: Path) -> bool:
+    """True when ``place`` is ``entry`` or an ancestor of it.
+
+    A missing path is its nearest existing directory plus the remaining parts.
+    Those parts fold case only when that directory's filesystem does.
+    """
+    if _same(place, entry):
+        return True
+    if _is_ancestor(place, entry):
+        return True
+    place_dir, place_rest = _locate(place)
+    entry_dir, entry_rest = _locate(entry)
+    if place_dir is None or entry_dir is None or not _same(place_dir, entry_dir):
+        return False
+    if len(place_rest) > len(entry_rest):
+        return False
+    return _parts_equal(place_rest, entry_rest[:len(place_rest)], fold=_folds_case(place_dir))
+
+
+def _is_system(place: Path) -> bool:
+    if _same(place, Path("/")):
+        return True
+    system_ids = {ident for root in SYSTEM_DIRS if (ident := _directory_identity(Path(root))) is not None}
+    current = place
+    while True:
+        ident = _directory_identity(current)
+        if ident is not None and ident in system_ids:
+            return True
+        parent = current.parent
+        if parent == current:
+            return False
+        current = parent
 
 
 def _git_marker(place: Path) -> str | None:
@@ -154,7 +267,7 @@ def _ancestor_git(place: Path) -> Path | None:
 
 
 def _overlaps(place: Path, other: Path) -> bool:
-    return place == other or place in other.parents or other in place.parents
+    return _contains(place, other) or _contains(other, place)
 
 
 def check(task: Mapping[str, Any], work_dir: str, *, environment: Mapping[str, str], runtime_root: Path,
@@ -166,7 +279,7 @@ def check(task: Mapping[str, Any], work_dir: str, *, environment: Mapping[str, s
             f"{work_dir}: v1 runs the task Manager's direct mode only for in-place tasks; this task works in its "
             "own worktree. Use the background (orchestrated) mode for it.")
     place = _realpath(work_dir)
-    if place == _realpath(_home(environment)):
+    if _same(place, _realpath(_home(environment))):
         return Problem(
             Reason.WORKSPACE_IS_HOME, None,
             f"{place} is the operator's home directory. Open the task on a repository that is not the home directory.")
@@ -175,7 +288,7 @@ def check(task: Mapping[str, Any], work_dir: str, *, environment: Mapping[str, s
             Reason.WORKSPACE_IN_SYSTEM_DIR, None,
             f"{place} is a system directory. Open the task on a repository outside system directories.")
     for entry in trusted_paths(environment, runtime_root):
-        if place == entry or place in entry.parents:
+        if _contains(place, entry):
             return Problem(
                 Reason.WORKSPACE_CONTAINS_TRUSTED_CONFIG, None,
                 f"{place} contains trusted configuration {entry}. "
@@ -199,6 +312,16 @@ def check(task: Mapping[str, Any], work_dir: str, *, environment: Mapping[str, s
         return Problem(
             Reason.WORKSPACE_NOT_REPO_ROOT, Kind.NOT_GIT,
             f"{place} is not a git repository. Open the task on the root of a non-bare git repository.")
+    return overlap(str(place), live)
+
+
+def overlap(work_dir: str, live: Iterable[tuple[str, str]]) -> Problem | None:
+    """The live-session overlap for ``work_dir``, or None.
+
+    Called again after the directory lock is taken, inside admission, so a parent
+    and a child that both passed the earlier check cannot both start.
+    """
+    place = _realpath(work_dir)
     for task_id, other in live:
         other_place = _realpath(other)
         if _overlaps(place, other_place):
@@ -206,6 +329,15 @@ def check(task: Mapping[str, Any], work_dir: str, *, environment: Mapping[str, s
                 Reason.WORKSPACE_OVERLAPS_SESSION, None,
                 f"{place} overlaps the work directory of task {task_id} ({other_place}). Wait until that task "
                 "Manager session stops, or open this task on a directory that does not contain it and is not inside it.")
+    return None
+
+
+async def before_directory_lock() -> None:
+    """Return once the early check has passed and before admission takes its lock.
+
+    The body does not wait. A test replaces this to hold two prepares in the window
+    where both have passed the early check and neither resident has started.
+    """
     return None
 
 
@@ -220,9 +352,16 @@ class DirectoryLock:
         directory = Path(runtime_root) / "task-manager-locks"
         directory.mkdir(parents=True, exist_ok=True)
         os.chmod(directory, 0o700)
-        digest = hashlib.sha256(os.path.realpath(work_dir).encode()).hexdigest()
-        path = directory / f"{digest}.lock"
-        fd = os.open(path, os.O_CREAT | os.O_RDWR, 0o600)
+        resolved = _realpath(work_dir)
+        ident = _directory_identity(resolved)
+        if ident is None:
+            raise NotADirectoryError(str(resolved))
+        device, inode = ident
+        path = directory / f"{device}-{inode}.lock"
+        # close-on-exec: the Claude child does not inherit the lock. If this process
+        # dies first, the kernel releases the lock while that child may still be writing.
+        # Accepted for v1.
+        fd = os.open(path, os.O_CREAT | os.O_RDWR | os.O_CLOEXEC, 0o600)
         try:
             os.chmod(path, 0o600)
             try:

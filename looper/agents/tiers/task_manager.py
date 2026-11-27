@@ -369,16 +369,20 @@ class TaskManagerAgent:
         root = self.pool.runtime_root / "task-managers" / self.task_id
         prompt_file = prompt.write_file(root)
         launch = await configure()
+
+        def live_direct() -> list[tuple[str, str]]:
+            return [(agent.task_id, agent.work_dir) for agent in self.pool.agents.values()
+                    if agent is not self and agent.resident.started and agent.mode == "direct"]
+
         if direct:
             problem = task_manager_dirs.check(
                 task, reopened.work_dir, environment=launch.runtime.environment(launch),
-                runtime_root=self.pool.runtime_root,
-                live=[(a.task_id, a.work_dir) for a in self.pool.agents.values()
-                      if a is not self and a.resident.started and a.mode == "direct"])
+                runtime_root=self.pool.runtime_root, live=live_direct())
             if problem is not None:
                 task_manager_safety.record_refusal(task_manager_safety.Reason(problem.reason.value), phase)
                 raise Refused(RefuseReason(problem.reason.value), problem.text)
             self.work_dir = reopened.work_dir
+            await task_manager_dirs.before_directory_lock()
         executable = launch.executable(self.pool.claude_bin)
 
         def command_for(launch: Launch) -> list[str]:
@@ -432,6 +436,12 @@ class TaskManagerAgent:
                                 task_manager_safety.Reason.WORKSPACE_OVERLAPS_SESSION, phase)
                             raise Refused(RefuseReason.WORKSPACE_OVERLAPS_SESSION,
                                           f"another task Manager session (task {held.holder}) holds {reopened.work_dir}") from held
+                    overlap = task_manager_dirs.overlap(reopened.work_dir, live_direct())
+                    if overlap is not None:
+                        task_manager_safety.record_refusal(
+                            task_manager_safety.Reason(overlap.reason.value), phase)
+                        await self.resident.stop(kill=True)
+                        raise Refused(RefuseReason(overlap.reason.value), overlap.text)
                 if self.session_id:
                     command += ["--resume", self.session_id]
                 await self.resident.start(command, cwd=reopened.work_dir, signature=signature, env=env,

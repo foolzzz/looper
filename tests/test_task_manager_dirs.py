@@ -1,7 +1,6 @@
 """Directory checks and the outside lock for a direct task Manager session."""
 from __future__ import annotations
 
-import hashlib
 import os
 import stat
 import subprocess
@@ -226,9 +225,116 @@ def test_an_overlapping_live_session_is_refused_and_a_sibling_passes(tmp_path: P
     assert _check(tmp_path, sibling, live=[("t2", str(parent))]) is None
 
 
+def _flip_name(name: str) -> str:
+    for index, char in enumerate(name):
+        if char.isalpha():
+            flipped = char.lower() if char.isupper() else char.upper()
+            return name[:index] + flipped + name[index + 1:]
+    raise AssertionError(f"no letter to flip in {name}")
+
+
+def _case_variant(path: Path) -> Path:
+    return path.with_name(_flip_name(path.name))
+
+
+def _same_directory(path: Path, variant: Path) -> bool:
+    try:
+        left, right = path.stat(), variant.stat()
+    except OSError:
+        return False
+    return (left.st_dev, left.st_ino) == (right.st_dev, right.st_ino)
+
+
+def _skip_when_case_sensitive(tmp_path: Path) -> None:
+    probe = tmp_path / "CaseFoldProbe"
+    probe.mkdir()
+    if not _same_directory(probe, _case_variant(probe)):
+        pytest.skip("the filesystem under tmp_path is case-sensitive")
+
+
+def _assert_same_directory(path: Path, variant: Path) -> None:
+    assert str(path) != str(variant)
+    assert _same_directory(path, variant)
+
+
+def test_a_case_variant_of_the_home_directory_is_refused(tmp_path: Path) -> None:
+    _skip_when_case_sensitive(tmp_path)
+    home = _repo(tmp_path / "home")
+    variant = _case_variant(home)
+    _assert_same_directory(home, variant)
+    problem = _check(tmp_path, variant, environment={"HOME": str(home)})
+    assert problem == Problem(
+        Reason.WORKSPACE_IS_HOME, None,
+        f"{_real(variant)} is the operator's home directory. "
+        "Open the task on a repository that is not the home directory.")
+
+
+def test_a_case_variant_of_a_system_directory_is_refused(tmp_path: Path) -> None:
+    _skip_when_case_sensitive(tmp_path)
+    system = Path("/usr/bin")
+    variant = Path("/USR/bin")
+    _assert_same_directory(system, variant)
+    problem = _check(tmp_path, variant)
+    assert problem is not None
+    assert problem.reason is Reason.WORKSPACE_IN_SYSTEM_DIR
+    assert problem.kind is None
+    assert _real(variant) in problem.text
+    assert "system directory" in problem.text
+
+
+def test_a_case_variant_of_a_trusted_config_ancestor_is_refused(tmp_path: Path) -> None:
+    _skip_when_case_sensitive(tmp_path)
+    environment, runtime, expected = _layout(tmp_path)
+    ancestor = expected["claude_dir"].parent
+    ancestor.mkdir(parents=True)
+    variant = _case_variant(ancestor)
+    _assert_same_directory(ancestor, variant)
+    problem = check(_IN_PLACE, str(variant), environment=environment, runtime_root=runtime, live=[])
+    assert problem is not None
+    assert problem.reason is Reason.WORKSPACE_CONTAINS_TRUSTED_CONFIG
+    assert _real(variant) in problem.text
+
+
+def test_a_case_variant_of_a_live_session_overlaps(tmp_path: Path) -> None:
+    _skip_when_case_sensitive(tmp_path)
+    parent = _repo(tmp_path / "parent")
+    variant = _case_variant(parent)
+    _assert_same_directory(parent, variant)
+    child = parent / "child"
+    child.mkdir()
+    _git(child, "init", "-q")
+    contained = _check(tmp_path, child, live=[("t2", str(variant))])
+    containing = _check(tmp_path, variant, live=[("t2", str(child))])
+    for problem, work_dir in ((contained, child), (containing, variant)):
+        assert problem is not None
+        assert problem.reason is Reason.WORKSPACE_OVERLAPS_SESSION
+        assert problem.kind is None
+        assert "t2" in problem.text
+        assert _real(work_dir) in problem.text
+
+
+def test_a_second_lock_on_a_case_variant_is_refused(tmp_path: Path) -> None:
+    _skip_when_case_sensitive(tmp_path)
+    repo = _repo(tmp_path / "repo")
+    variant = _case_variant(repo)
+    _assert_same_directory(repo, variant)
+    runtime = tmp_path / "runtime"
+    first = DirectoryLock.acquire(runtime, str(repo), "t1")
+    try:
+        with pytest.raises(LockHeld) as raised:
+            DirectoryLock.acquire(runtime, str(variant), "t2")
+        assert raised.value.holder == "t1"
+        locks = list((runtime / "task-manager-locks").iterdir())
+        assert len(locks) == 1
+        st = repo.stat()
+        assert locks[0].name == f"{st.st_dev}-{st.st_ino}.lock"
+    finally:
+        first.release()
+
+
 def _lock_path(runtime: Path, work_dir: Path) -> Path:
-    digest = hashlib.sha256(_real(work_dir).encode()).hexdigest()
-    return runtime / "task-manager-locks" / f"{digest}.lock"
+    st = os.stat(work_dir)
+    return runtime / "task-manager-locks" / f"{st.st_dev}-{st.st_ino}.lock"
 
 
 def test_the_directory_lock_names_the_holder_and_lives_outside_the_directory(tmp_path: Path) -> None:
