@@ -1047,12 +1047,18 @@ them.
   branch is the Manager's own commits (`own_commits`) and is not listed; a reset, rewrite or delete of it,
   or a change of what it links to, is listed but not "needs you" by itself. When this turn turned the
   task branch into a symbolic ref, its command makes it a direct ref again (on the new commit after a
-  fast-forward, else on the old one). Commands are meant to run in the listed order: names that became or
-  changed as links come first (the task branch first among them), before any command that moves or deletes
-  a target. A change to any other branch or tag is stored in
+  fast-forward, else on the old one). Commands are meant to run in the listed order, `changes` and then
+  `info`: a command's current-value check reads through whatever its ref points to when the turn ends, so
+  it is listed before any command that writes a ref further down that chain (outer link before inner link,
+  every link before the delete or move of its target; the task branch is no exception to a link that points
+  to it). Otherwise names that became or changed as links come first (the task branch first among them),
+  then by name. The order comes from each symbolic ref's direct target (`git symbolic-ref --no-recurse`,
+  which decides nothing else) and the end of its chain; with more than 200 symbolic refs, or a git without
+  that option, only the chain ends are used and the log says so. A change to any other branch or tag is stored in
   `task_manager_ref_reports` and listed in the needs-you section `task_manager_refs` until the
   operator resolves it (`tasks.task_manager_ref_report_resolve`, which changes nothing in git); a change
-  under `refs/heads/looper/<other task>/` while that task exists and is unfinished is `info` only. The
+  under `refs/heads/looper/<other task>/` while that task exists and is unfinished is `info` only (listed
+  among `changes`, still without "needs you", when a command there has to wait for it). The
   task branch is recorded once, at the first enablement (`task_manager_branches`, with a
   `sandbox_notice` event that the real checkout is edited directly); a detached `HEAD` then refuses the
   first turn (`head_detached`), and every later turn refuses while `HEAD` is not on that branch
