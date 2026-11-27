@@ -271,3 +271,66 @@ def test_mention_text_in_a_project_file_reaches_the_fence_as_written(work: Path)
     (work / "CLAUDE.md").write_text(text)
     rendered = pi.section(pi.read(str(work))[0])
     assert f"\n{text}\n</untrusted>" in rendered
+
+
+def _swap_on_first_open(monkeypatch: pytest.MonkeyPatch, directory: Path, target: Path) -> list[str]:
+    """Replace ``directory`` by a symlink to ``target`` the first time the reader opens anything: after its path check,
+    before the file is reached (what a process left running in the task directory can do)."""
+    swapped: list[str] = []
+    real_open = os.open
+
+    def racing_open(path, *args, **kwargs):  # noqa: ANN001, ANN002, ANN003
+        if not swapped:
+            swapped.append(os.fspath(path))
+            directory.rename(directory.with_name(directory.name + "-moved"))
+            directory.symlink_to(target)
+        return real_open(path, *args, **kwargs)
+
+    monkeypatch.setattr(pi.os, "open", racing_open)
+    return swapped
+
+
+def test_a_directory_swapped_for_a_symlink_after_the_check_is_never_followed(
+    tmp_path: Path, work: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "key").write_text("SECRET-OUTSIDE-KEY")
+    (work / "sub").mkdir()
+    (work / "sub" / "key").write_text("inside\n")
+    (work / "CLAUDE.md").symlink_to("sub/key")  # a legitimate in-tree link whose directory is then swapped
+    swapped = _swap_on_first_open(monkeypatch, work / "sub", outside)
+    result = pi.read(str(work))
+    assert swapped and "SECRET-OUTSIDE-KEY" not in repr(result)
+    assert result[0] == [] and [item.name for item in result[1]] == ["CLAUDE.md"]
+
+
+def test_a_symlinked_directory_in_the_middle_of_the_path_is_skipped_even_when_it_stays_inside(
+    tmp_path: Path, work: Path
+) -> None:
+    (work / "real").mkdir()
+    (work / "real" / "rules").write_text("inside\n")
+    (work / "link").symlink_to("real")
+    (work / "CLAUDE.md").symlink_to("link/rules")  # resolves to real/rules: read by its resolved path
+    assert pi.read(str(work))[0] == [Loaded("CLAUDE.md", "inside\n")]
+
+
+def test_the_in_tree_symlink_alias_still_reads_after_the_directory_walk(work: Path) -> None:
+    (work / "AGENTS.md").write_text("agents\n")
+    (work / "CLAUDE.md").symlink_to("AGENTS.md")
+    [entry], skipped = pi.read(str(work))
+    assert (entry.name, entry.text, entry.aliases, skipped) == ("CLAUDE.md", "agents\n", ("AGENTS.md",), [])
+
+
+def test_every_descriptor_the_reader_opens_is_closed(work: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    (work / "sub").mkdir()
+    (work / "sub" / "r").write_text("x\n")
+    (work / "CLAUDE.md").symlink_to("sub/r")
+    (work / "AGENTS.md").write_text("a\n")
+    opened: list[int] = []
+    closed: list[int] = []
+    real_open, real_close = os.open, os.close
+    monkeypatch.setattr(pi.os, "open", lambda *a, **k: opened.append(fd := real_open(*a, **k)) or fd)
+    monkeypatch.setattr(pi.os, "close", lambda fd: (closed.append(fd), real_close(fd))[1])
+    pi.read(str(work))
+    assert opened and sorted(opened) == sorted(closed)

@@ -7,7 +7,8 @@ task brief. Each file is capped at ``MAX_FILE`` bytes and all of them together a
 ``FILES`` order, counted on the text as the model sees it; a cut file ends with the ``TRUNCATED`` line, and a file that
 finds the total already spent is skipped (``Skip.BUDGET_EXHAUSTED``). A name that resolves to a file already read (a symlink)
 is an alias of the first name and counts once. A file is skipped, with a typed ``Skip`` reason, when it resolves
-outside the task directory (checked before it is opened), is not a regular file, has other hard links (a link made
+outside the task directory (checked before it is opened, and the open walks the resolved path from a descriptor of
+the directory with ``O_NOFOLLOW`` at every component, so a swap after the check skips the file), is not a regular file, has other hard links (a link made
 inside the directory to a file elsewhere on the same volume has a real path inside it), cannot be read, or is not
 valid UTF-8. NUL, zero-width and bidirectional-control characters in the text are written out as ``\\uXXXX``. A
 missing file is neither loaded nor skipped. ``@`` imports are never expanded, and ``@`` text is kept as written.
@@ -21,6 +22,7 @@ from __future__ import annotations
 
 import codecs
 import dataclasses
+import errno
 import os
 import re
 import stat
@@ -77,6 +79,40 @@ class Skipped:
     reason: Skip
 
 
+class _LeftTheDirectory(Exception):
+    """A component of the path turned out to be a symlink (or not a directory) while it was walked."""
+
+
+def _open_inside(base: str, relative: str) -> int:
+    """Open ``relative`` (the already resolved path below ``base``) one component at a time from a descriptor of
+    ``base``, refusing any symlink on the way: a check by path followed by an open by path can be raced by a process
+    that swaps an intermediate directory for a symlink, and this read runs outside the sandbox."""
+    parts = [part for part in relative.split(os.sep) if part not in ("", ".")]
+    if not parts:
+        raise OSError(errno.EISDIR, "the instruction file is the task directory itself")
+    flags = os.O_RDONLY | os.O_CLOEXEC
+    held = os.open(base, flags | os.O_DIRECTORY)
+    try:
+        for part in parts[:-1]:
+            try:
+                following = os.open(part, flags | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=held)
+            except OSError as exc:
+                if exc.errno in (errno.ELOOP, errno.ENOTDIR):
+                    raise _LeftTheDirectory(part) from exc
+                raise
+            os.close(held)
+            held = following
+        try:
+            # O_NONBLOCK: a FIFO must not block the open
+            return os.open(parts[-1], flags | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=held)
+        except OSError as exc:
+            if exc.errno == errno.ELOOP:
+                raise _LeftTheDirectory(parts[-1]) from exc
+            raise
+    finally:
+        os.close(held)
+
+
 def _read_bytes(fd: int, size: int) -> bytes:
     chunks: list[bytes] = []
     got = 0
@@ -110,7 +146,10 @@ def read(work_dir: str) -> tuple[list[Loaded], list[Skipped]]:
             skipped.append(Skipped(name, Skip.OUTSIDE_WORKDIR))
             continue
         try:
-            fd = os.open(real, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)  # a FIFO must not block the open
+            fd = _open_inside(base, os.path.relpath(real, base))
+        except _LeftTheDirectory:
+            skipped.append(Skipped(name, Skip.OUTSIDE_WORKDIR))
+            continue
         except OSError:
             skipped.append(Skipped(name, Skip.UNREADABLE))
             continue
