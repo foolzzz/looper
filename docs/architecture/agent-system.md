@@ -1027,12 +1027,16 @@ them.
   `refs/tags` and `HEAD` before every turn in the running turn's memory (the sandbox cannot reach it;
   `refs/remotes` and anything else are never read, and packed refs, `gc` and reflogs show no change
   because values are compared, not files), compares them after, and says what changed in the task
-  conversation with one restore command per ref (`git update-ref --no-deref`, or `git symbolic-ref` for a
-  symbolic ref). Names are shown with control and format characters written as `\uXXXX`. It never restores anything and
+  conversation with one restore command per ref (`git update-ref --no-deref`, or `git symbolic-ref` to put
+  back or remove a symbolic ref). Names are shown with control and format characters written as `\uXXXX`. It never restores anything and
   raises no alert: a ref change is not an invariant violation. The `ref_report` event carries
   `report_id`, `changes`, `info`, `head`, `own_commits` and `needs_you`. A fast-forward of the task
-  branch is the Manager's own commits (`own_commits`) and is not listed; a reset, rewrite or delete of it
-  is listed but not "needs you" by itself. A change to any other branch or tag is stored in
+  branch is the Manager's own commits (`own_commits`) and is not listed; a reset, rewrite or delete of it,
+  or a change of what it links to, is listed but not "needs you" by itself. When this turn turned the
+  task branch into a symbolic ref, its command makes it a direct ref again (on the new commit after a
+  fast-forward, else on the old one). Commands are meant to run in the listed order: names that became or
+  changed as links come first (the task branch first among them), before any command that moves or deletes
+  a target. A change to any other branch or tag is stored in
   `task_manager_ref_reports` with `needs_you` set; a change under `refs/heads/looper/<other task>/`
   while that task exists and is unfinished is `info` only. The
   task branch is recorded once, at the first enablement (`task_manager_branches`, with a
@@ -1042,9 +1046,11 @@ them.
   A fast-forward is decided from the raw commit objects (grafts and replace refs are not honoured) and
   a walk that cannot decide (a commit limit, an unreadable object) is reported as
   `fast_forward_unverified` ("could not verify that this is a fast-forward"): still listed with the same restore
-  command, but it does not claim a reset happened. An intact symbolic ref is skipped only when its target is
-  itself a compared ref (`refs/heads`, `refs/tags`); a link into `refs/remotes/*` or another uncompared
-  namespace is reported as moved when the target moves, with a restore command for the target. A ref listing Looper cannot read safely (a name with a
+  command, but it does not claim a reset happened. An intact symbolic ref other than the task branch is
+  skipped only when its target is itself a compared ref (`refs/heads`, `refs/tags`); a link into
+  `refs/remotes/*` or another uncompared namespace is reported as moved when the target moves, with a restore
+  command for the target. The task branch is judged on its commits even when it is an intact link: a rewrite
+  or an unverified move is listed under its name too, with the command for the target. A ref listing Looper cannot read safely (a name with a
   line-break character, a repeated name, a failed read) refuses the turn at its start; at its end it emits a
   `sandbox_notice` with notice `refs_unreadable` instead of a report. A task directory that is not a git
   repository is refused as `workspace` for now (the typed `not_git` reason comes with the directory check).
