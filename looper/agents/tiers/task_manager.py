@@ -17,8 +17,9 @@ from typing import Any, Literal, Protocol
 
 from ...db import activity, agent_sessions, projects, tasks
 from .. import operator_mcp, outbound_hook, step_workspaces, task_budget, task_conversations_settings
-from .. import (task_manager_alerts, task_manager_dirs, task_manager_readback, task_manager_refs, task_manager_safety,
-                task_manager_sandbox, task_manager_settings)
+from .. import (task_manager_alerts, task_manager_denials, task_manager_dirs, task_manager_network,
+                task_manager_readback, task_manager_refs, task_manager_safety, task_manager_sandbox,
+                task_manager_settings)
 from .. import task_workspaces
 from ..agent_settings import Access, Launch
 from ..claude_cli import ClaudeRunRecorder, ResidentClaude
@@ -43,6 +44,7 @@ class TaskManagerEvent(str, Enum):
     STOPPED = "stopped"
     MODEL_SWITCHED = "model_switched"
     MODEL_SWITCH_REJECTED = "model_switch_rejected"
+    SANDBOX_DENIAL = "sandbox_denial"
     REF_REPORT = "ref_report"
     SANDBOX_NOTICE = "sandbox_notice"
 
@@ -343,6 +345,15 @@ class TaskManagerAgent:
         if direct and (unsupported := task_manager_sandbox.platform_problem()) is not None:
             task_manager_safety.record_refusal(task_manager_safety.Reason.SANDBOX_UNAVAILABLE, phase)
             raise Refused(RefuseReason.SANDBOX_UNAVAILABLE, unsupported)
+        self.project_id, self.allowed_domains = project["id"], ()
+        if direct:
+            try:
+                self.allowed_domains = await task_manager_network.allowed_domains(project["id"])
+            except task_manager_network.PolicyInvalid as exc:
+                task_manager_safety.record_refusal(task_manager_safety.Reason.NETWORK_POLICY_INVALID, phase)
+                raise Refused(RefuseReason.NETWORK_POLICY_INVALID,
+                              f"The project's task Manager network allowlist has an entry this version refuses "
+                              f"({exc}). Fix it with projects.task_manager_sandbox_update.") from exc
         async def configure() -> Launch:
             library, hook = EMPTY_LIBRARY, None
             if self.pool.ops is not None:
@@ -381,8 +392,9 @@ class TaskManagerAgent:
             return run
         # Query newest summaries directly, so a long-lived task never gets its oldest activity as its brief.
         from ...db.connection import get_pool
-        recent = await get_pool().fetch("SELECT summary FROM activity WHERE task_id=$1 ORDER BY seq DESC LIMIT 20",
-                                        self.task_id)
+        # Denial records are for the operator: the model's brief is unchanged by them.
+        recent = await get_pool().fetch("SELECT summary FROM activity WHERE task_id=$1 AND kind <> 'sandbox_denial' "
+                                        "ORDER BY seq DESC LIMIT 20", self.task_id)
         prompt = SystemPrompt(instructions(self.mode) + "\n\n" + brief(task, recent_activity=list(reversed(recent)),
                                                                     reopened=reopened))
         root = self.pool.runtime_root / "task-managers" / self.task_id
@@ -561,6 +573,9 @@ class TaskManagerAgent:
                 listed: frozenset[str] | None = None  # the tools of this turn's passing ``system/init`` (direct)
                 pieces: list[str] = []
                 tools: dict[str, ToolRecord] = {}
+                inputs: dict[str, Any] = {}
+                observer = task_manager_denials.Observer(self.task_id, self.project_id, request.message_id,
+                                                         self.allowed_domains, request.sink)
 
                 async def on_event(event: dict[str, Any]) -> None:
                     nonlocal initialized, listed
@@ -608,12 +623,17 @@ class TaskManagerAgent:
                             record = ToolRecord(str(block.get("id") or ""), name,
                                 (name + " " + json.dumps(block.get("input"), ensure_ascii=False))[:200], "", False)
                             tools[record.tool_use_id] = record
+                            inputs[record.tool_use_id] = block.get("input")
                             await request.sink.tool(record)
                         elif block.get("type") == "tool_result" and block.get("tool_use_id") in tools:
                             record = replace(tools[block["tool_use_id"]],
                                 result=json.dumps(block.get("content"), ensure_ascii=False)[:200],
                                 is_error=bool(block.get("is_error")))
                             await request.sink.tool(record)
+                            if self.mode == "direct" and record.name == "Bash":
+                                await observer.observe(record.tool_use_id, inputs.get(record.tool_use_id),
+                                                       block.get("content"), record.is_error,
+                                                       event.get("tool_result_meta"))
 
                 message = request.text
                 if (attempt or rotating) and request.history:
