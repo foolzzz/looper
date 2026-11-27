@@ -991,7 +991,7 @@ class ManagerOps:
                 channel=turn.channel, chat=turn.chat, message_id=turn.message_id, tool=name,
                 arguments={key: None for key in arguments}, risk=tool.risk.value if tool else Risk.READ.value,
                 status="error", error_code=ErrorCode.FORBIDDEN.value, result={"reason": "client_session_tool"},
-                manager_id=self._scope.manager_id, client_id=turn.client_id)
+                manager_id=self._scope.manager_id, client_id=turn.client_id, **_senders(turn, None))
         except Exception:
             logger.warning("could not record an API client session's refused tool call", exc_info=True)
         return _error(ErrorCode.FORBIDDEN, f"{name} is not available in this API client session; its tools are: "
@@ -1011,7 +1011,7 @@ class ManagerOps:
                 channel=turn.channel, chat=turn.chat, message_id=turn.message_id, tool=name,
                 arguments={key: None for key in arguments}, risk=tool.risk.value if tool else Risk.READ.value,
                 status="error", error_code=ErrorCode.FORBIDDEN.value, result=result,
-                manager_id=self._scope.manager_id, client_id=turn.client_id)
+                manager_id=self._scope.manager_id, client_id=turn.client_id, **_senders(turn, None))
         except Exception:
             logger.warning("could not record scoped tool refusal", exc_info=True)
         try:

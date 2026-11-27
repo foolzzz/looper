@@ -5943,8 +5943,9 @@ contract 5.3 KB (5,309 bytes of `TOOLS_CONTRACT`).
   from model text; `client_id` names the API client. A confirmed call also keeps
   `initiator_sender_id` and `initiator_kind` (the turn that asked) beside the
   confirmer in `sender_id`/`sender_kind` (the confirming turn, or the person who
-  pressed the button). `sender_kind` is NULL where the turn was not classified
-  (per-turn context off) and on rows from before the columns existed. An `out_of_scope` row keeps only argument keys with null
+  pressed the button). `sender_kind` is NULL where Looper did not classify the
+  turn and on rows from before the columns existed. The task detail API shows the
+  two sender ids to the operator only; an API client sees the kinds. An `out_of_scope` row keeps only argument keys with null
   values, `status=error`, `error_code=forbidden`, the known tool's tier (otherwise `read`), and a result
   containing `reason`, `capability`, `scope` (`<id>@<version>`) and `principal_kind`.
   Refusal logs contain Manager, a 12-character session-key digest, capability, reason and principal kind,
