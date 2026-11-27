@@ -459,3 +459,23 @@ def test_upgrade_probe_every_built_in_the_cli_offers_is_denied_under_the_launch(
     offered = {("Agent" if name == "Task" else name) for name in seen} - {"ToolSearch", *sandbox.BUILTIN_TOOLS}
     assert offered <= denied, sorted(offered - denied)
     assert (known - set(sandbox.BUILTIN_TOOLS)) <= denied | set(sandbox.UNREMOVABLE_TOOLS), sorted(known - denied)
+
+
+def test_upgrade_probe_the_tool_search_pin_beats_the_process_environment(probe):
+    """A launch whose provider route sets ``ENABLE_TOOL_SEARCH=true`` in the process environment still has no
+    ``ToolSearch``: the pinned ``env`` of the flag settings wins."""
+    probe.env["ENABLE_TOOL_SEARCH"] = "true"
+
+    async def scenario():
+        live = Live(probe, [text("one")])
+        await live.start()
+        try:
+            _, mismatches = await live.readback("launch")
+            assert mismatches == [], rb.notice(mismatches, probe.version)
+            return init_of(await live.turn("go"))
+        finally:
+            await live.stop()
+
+    tools = run(scenario())["tools"]
+    probe.observations["upgrade_tools_with_tool_search_in_the_process_env"] = sorted(tools)
+    assert "ToolSearch" not in tools
