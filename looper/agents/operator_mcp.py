@@ -59,21 +59,54 @@ UNSAFE_LAUNCHERS: tuple[tuple[str, str | None, str], ...] = (
     ("uvx", None, "uvx"),
     ("bunx", None, "bunx"),
     ("uv", "run", "uv run"),  # runs the project of the working directory
+    ("npx-cli.js", None, "npx"),  # npx's own script, run by node
+    ("npm", "exec", "npm exec"),
+    ("npm", "x", "npm x"),
     ("pnpm", "dlx", "pnpm dlx"),
+    ("pnpm", "exec", "pnpm exec"),
+    ("yarn", "exec", "yarn exec"),
     ("yarn", "dlx", "yarn dlx"),
     ("deno", "run", "deno run"),  # reads deno.json of the working directory
     ("bundle", "exec", "bundle exec"),  # reads the Gemfile of the working directory
     ("go", "run", "go run"),
     ("cargo", "run", "cargo run"),
 )
-_INTERPRETERS = ("node", "bun", "deno", "ruby", "perl", "sh", "bash", "zsh")
-# Environment variables that point module resolution at a directory; a relative one is the working directory.
-_PATH_ENV = ("PYTHONPATH", "NODE_PATH")
+_INTERPRETERS = ("node", "bun", "deno", "ruby", "perl")
+# Programs that run another program, or a script string, so what they start cannot be told from the definition: never
+# a launcher of an allowed server.
+_INDIRECT = ("env", "sh", "bash", "zsh", "dash", "ksh", "csh", "tcsh", "fish", "xargs", "nohup", "exec", "command",
+             "time", "nice", "sudo", "doas", "arch", "caffeinate")
+# Variables that make an interpreter load code from a path or a string of the definition's choosing, or change which
+# project it reads. Not allowed in an allowed server's ``env`` at all, whatever the value (fail closed).
+_CODE_ENV = ("PYTHONPATH", "PYTHONSTARTUP", "PYTHONHOME", "PYTHONUSERBASE", "NODE_PATH", "NODE_OPTIONS", "RUBYOPT",
+             "RUBYLIB", "PERL5OPT", "PERL5LIB", "BUNDLE_GEMFILE", "GOFLAGS", "LD_PRELOAD", "LD_LIBRARY_PATH",
+             "DYLD_INSERT_LIBRARIES", "DYLD_LIBRARY_PATH", "DYLD_FRAMEWORK_PATH")
+
+
+def _names(command: str) -> set[str]:
+    """The case-normalized basenames the command goes by: as written and after resolving symbolic links."""
+    found = {posixpath.basename(command).casefold()}
+    if posixpath.isabs(command):
+        found.add(posixpath.basename(os.path.realpath(command)).casefold())
+    return found
+
+
+def _module_flag(args: Sequence[str]) -> int | None:
+    """The index of the ``-m`` option of a Python command line, glued (``-mpkg``) or in a cluster included."""
+    for index, arg in enumerate(args):
+        if not arg.startswith("-"):
+            return None  # the script: what follows is its own arguments
+        if arg.startswith("--"):
+            continue
+        if "m" in arg[1:] and not any(c in arg[1:arg[1:].index("m") + 1] for c in "cW"):
+            return index
+    return None
 
 
 def launcher_problem(definition: Mapping[str, Any]) -> str | None:
-    """How a stdio ``definition`` could run code from the working directory, as the launcher's name; ``None`` when it
-    cannot. A server with a ``url`` has no launcher."""
+    """How a stdio ``definition`` could run code from the working directory or something the definition cannot show, as
+    the launcher's name; ``None`` when it cannot. A server with a ``url`` has no launcher. The wrapper is the
+    mechanism (a private start directory); this is defense in depth."""
     command = definition.get("command")
     if not command and definition.get("url"):
         return None
@@ -83,25 +116,33 @@ def launcher_problem(definition: Mapping[str, Any]) -> str | None:
     if not isinstance(command, str) or not command:
         return "relative_command"
     args = [str(arg) for arg in definition.get("args") or []]
-    base = posixpath.basename(command)
+    names = _names(command)
+    if names & set(_INTERPRETERS) and (script := next((arg for arg in args if not arg.startswith("-")), None)):
+        names |= _names(script)  # `node .../npx-cli.js` is npx
     for name, argument, reason in UNSAFE_LAUNCHERS:  # named first: "npx" is more telling than "relative_command"
-        if base == name and (argument is None or argument in args[:1]):
+        if name in names and (argument is None or argument in args):
             return reason
-    python = base.startswith("python")
-    if python and "-m" in args and "-I" not in args[:args.index("-m")]:
-        return "python -m"
-    if not posixpath.isabs(command):
+    if indirect := names & set(_INDIRECT):
+        # Named as the operator configured it (``sh``), not as a platform resolves it (``dash`` on Linux).
+        written = posixpath.basename(command).casefold()
+        return f"{written if written in indirect else sorted(indirect)[0]} (starts another program)"
+    python = any(name.startswith("python") for name in names)
+    if python and (at := _module_flag(args)) is not None:
+        before = [*args[:at], args[at].split("m", 1)[0]]  # the options up to the module flag, its own cluster included
+        isolated = any(arg.startswith("-") and not arg.startswith("--") and "I" in arg[1:] for arg in before)
+        if not isolated:
+            return "python -m"
+    if "/" in command and not posixpath.isabs(command):  # a bare name resolves through PATH
         return "relative_command"
-    if (python or base in _INTERPRETERS) and not (python and ("-m" in args or "-c" in args)):
+    if (python or names & set(_INTERPRETERS)) and not (python and (_module_flag(args) is not None or "-c" in args)):
         script = next((arg for arg in args if not arg.startswith("-")), None)
         if script is not None and not posixpath.isabs(script):
             return "relative_script"
     env = definition.get("env")
     if isinstance(env, Mapping):
-        for name in _PATH_ENV:
-            value = env.get(name)
-            if isinstance(value, str) and any(part and not posixpath.isabs(part) for part in value.split(os.pathsep)):
-                return f"relative {name}"
+        for name in sorted(env):
+            if str(name).upper() in _CODE_ENV:
+                return f"env {name}"
     return None
 
 
@@ -112,12 +153,18 @@ _SHELL = "/bin/sh"
 
 
 def private_cwd(path: Path) -> Path:
-    """Create (0700) and return ``path``, the directory wrapped servers start in: Looper's own, outside every
-    task directory (``<runtime_root>/task-managers/<task_id>/mcp-cwd``)."""
-    path = path.absolute()
+    """Create (0700) and return the real path of ``path``, the directory wrapped servers start in: Looper's own,
+    outside every task directory (``<runtime_root>/task-managers/<task_id>/mcp-cwd``)."""
     path.mkdir(parents=True, exist_ok=True)
     os.chmod(path, 0o700)
-    return path
+    return path.resolve()
+
+
+def reset_cwd(path: Path) -> None:
+    """Empty the start directory before a new process, so nothing a previous server left is in it."""
+    import shutil
+
+    shutil.rmtree(path, ignore_errors=True)
 
 
 def is_wrapped(definition: Mapping[str, Any]) -> bool:
@@ -128,19 +175,25 @@ def is_wrapped(definition: Mapping[str, Any]) -> bool:
 
 def wrap(definition: Mapping[str, Any], cwd: Path) -> dict[str, Any]:
     """``definition`` started by the wrapper in ``cwd``: the command, arguments, ``env`` and the rest are the
-    original's. A server with a ``url`` is returned unchanged; a stdio ``command`` must be absolute."""
-    if "command" not in definition or is_wrapped(definition):
+    original's. A server with a ``url`` is returned unchanged; a stdio ``command`` is absolute or a bare name. A
+    definition that already has the wrapper's shape is wrapped like any other: its directory is never trusted."""
+    if "command" not in definition:
         return dict(definition)
     command = definition["command"]
-    if not isinstance(command, str) or not posixpath.isabs(command):
-        raise ValueError("an MCP server's command must be an absolute path")
+    if not isinstance(command, str) or not command or ("/" in command and not posixpath.isabs(command)):
+        raise ValueError("an MCP server's command must be an absolute path or a bare name resolved through PATH")
     return {**definition, "command": _SHELL,
             "args": [*_WRAPPER_HEAD, str(cwd), command, *(str(arg) for arg in definition.get("args") or [])]}
 
 
-def unwrap(definition: Mapping[str, Any]) -> dict[str, Any]:
-    """The definition ``wrap`` was given (a definition that is not wrapped is returned as it is)."""
-    if not is_wrapped(definition):
+def unwrap(definition: Mapping[str, Any], private_dir: Path | None = None) -> dict[str, Any]:
+    """The definition ``wrap`` was given. With ``private_dir`` (the directory the launch expects), a definition that is
+    not wrapped into exactly that directory is a ``ValueError``: a changed directory, shell, script or missing part
+    is refused. Without it a definition that is not wrapped is returned as it is."""
+    if private_dir is not None:
+        if not is_wrapped(definition) or definition["args"][3] != str(private_dir):
+            raise ValueError("the server is not started by Looper's wrapper in the expected directory")
+    elif not is_wrapped(definition):
         return dict(definition)
     args = definition["args"]
     return {**definition, "command": args[4], "args": args[5:]}
@@ -178,20 +231,45 @@ def resolve(names: Sequence[str], *, environment: Mapping[str, str]) -> dict[str
         raise UnresolvedServers(names, f" ({exc})") from exc
     if missing := [name for name in names if name not in user]:
         raise UnresolvedServers(missing, " as a user-scope server")
+    # A command with a path separator that is not absolute is resolved by Claude Code against the task directory
+    # (verified with 2.1.332), which the model can write. A bare name resolves through PATH.
+    if relative := [name for name in names if _relative_command(user[name])]:
+        raise UnresolvedServers(relative, " (a command with a path separator must be an absolute path; a relative "
+                                          "one would be resolved in the task directory)")
     return {name: user[name] for name in names}
 
 
+def _relative_command(definition: Mapping[str, Any]) -> bool:
+    command = definition.get("command")
+    return isinstance(command, str) and "/" in command and not posixpath.isabs(command)
+
+
+_KNOWN_FIELDS = frozenset({"type", "command", "args", "env", "headers", "url", "cwd"})
+
+
 def fingerprint_input(definition: Mapping[str, Any]) -> dict[str, Any]:
-    """What identifies a definition without its secrets: transport, command, args, the names of its variables and
-    headers, and a URL without userinfo and query."""
-    from urllib.parse import urlsplit
+    """What identifies a definition without its secrets: transport, command, args, ``cwd``, the names of its
+    variables and headers, a URL without userinfo and query values (its port and the sorted names of its query
+    parameters stay), and each unknown field as a hash of its value."""
+    from urllib.parse import parse_qsl, urlsplit
 
     url = definition.get("url")
     parts = urlsplit(url) if isinstance(url, str) else None
+    try:
+        port = parts.port if parts else None
+    except ValueError:
+        port = -1
+    shown = None
+    if parts and parts.hostname:
+        shown = f"{parts.scheme}://{parts.hostname}{f':{port}' if port else ''}{parts.path}"
     return {"transport": definition.get("type") or ("stdio" if "command" in definition else "http"),
             "command": definition.get("command"), "args": list(definition.get("args") or []),
+            "cwd": definition.get("cwd"),
             "env_keys": sorted(definition.get("env") or {}), "header_keys": sorted(definition.get("headers") or {}),
-            "url": f"{parts.scheme}://{parts.hostname}{parts.path}" if parts and parts.hostname else None}
+            "url": shown, "query_names": sorted(name for name, _ in parse_qsl(parts.query, keep_blank_values=True))
+            if parts else [],
+            "extra": {name: hashlib.sha256(json.dumps(value, sort_keys=True, default=str).encode("utf-8")).hexdigest()
+                      for name, value in sorted(definition.items()) if name not in _KNOWN_FIELDS}}
 
 
 def fingerprint(definition: Mapping[str, Any]) -> str:
@@ -199,13 +277,15 @@ def fingerprint(definition: Mapping[str, Any]) -> str:
     return hashlib.sha256(json.dumps(fingerprint_input(definition), sort_keys=True).encode("utf-8")).hexdigest()
 
 
-def fingerprints(library: Any, names: Sequence[str]) -> dict[str, str]:
+def fingerprints(library: Any, names: Sequence[str], private_dir: Path | None = None) -> dict[str, str]:
     """The fingerprints of ``names`` as the library's generated ``--mcp-config`` holds them, before wrapping (the
     fingerprint of the user-scope definition)."""
     from .runtimes import library_mcp_servers
 
     servers = library_mcp_servers(library)
-    return {name: fingerprint(unwrap(servers[name])) for name in names if name in servers}
+    if missing := [name for name in names if name not in servers]:
+        raise UnresolvedServers(missing, " (not in the generated --mcp-config)")
+    return {name: fingerprint(unwrap(servers[name], private_dir)) for name in names}
 
 
 async def library_with_allowed(library: Any, runtime_root: Path, names: Sequence[str], *,
@@ -228,5 +308,25 @@ async def library_with_allowed(library: Any, runtime_root: Path, names: Sequence
             raise UnsafeLauncher(name, problem)
     cwd = await asyncio.to_thread(private_cwd, cwd)
     servers = {name: wrap(definition, cwd) for name, definition in {**own, **allowed}.items()}
-    path = await asyncio.to_thread(write_config, runtime_root, sorted(servers.items()))
+    # Beside the task Manager's own directory, not in the shared ``.local/mcp``: ``sweep_orphans`` removes these
+    # after a crash, and no other agent's configuration is in the way.
+    path = await asyncio.to_thread(lambda: write_config(runtime_root, sorted(servers.items()),
+                                                        directory=_config_directory(cwd)))
     return replace(library, mcp_config=str(path))
+
+
+def _config_directory(cwd: Path) -> Path:
+    return cwd.absolute().parent / "mcp"
+
+
+def sweep_orphans(runtime_root: Path) -> int:
+    """Remove the generated configs (they can hold secrets) that a crashed server left under
+    ``<runtime_root>/task-managers/*/mcp``; run at service start, when no task Manager is resident. Returns how many."""
+    removed = 0
+    for path in (runtime_root.absolute() / "task-managers").glob("*/mcp/*.json"):
+        try:
+            path.unlink()
+            removed += 1
+        except OSError:
+            pass
+    return removed

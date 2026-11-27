@@ -30,6 +30,7 @@ def test_assignment_is_once_only_and_audited(monkeypatch):
         audit = await pool.fetchrow("SELECT * FROM manager_actions WHERE tool='manager_sessions.assign_task'")
         assert audit['status'] == 'ok' and audit['task_id'] == 'task-old'
         assert json.loads(audit['arguments']) == args
+        assert (audit['sender_kind'], audit['sender_id'], audit['client_id']) == ('operator', None, None)
         for changed in ({}, {"session": "dm:channel-lark:other"}):
             with pytest.raises(OpError):
                 await session_tools.run(None, op, args | changed, api_v1.OPERATOR, {})

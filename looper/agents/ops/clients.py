@@ -1,11 +1,12 @@
 """The API client's side of the ops catalog (RFC §7–§8): one request is one turn, writes run, ``high`` waits for
-``confirm`` from the same client and session.
+``confirm`` from the same client and session. That confirmation is the client confirming its own request, a
+second submission; it is not an operator approval (in the Manager's chat only the operator confirms).
 
 A client (``/api/v1``) has the Manager's tools but for the two that exist only in a chat (``MANAGER_ONLY``), and two of
 its own: ``looper_task_pipeline`` and ``looper_gates``. It is not in a chat that answers a user's message, so Looper
 does not wait for one: a write runs at once, as the operator's own request, and a ``high`` call is registered under
 the client and its session (``X-Looper-Session``) until the same client confirms it there, within
-``CONFIRMATION_SECONDS``. Confirmations live in memory, as the Manager's do.
+``CONFIRMATION_SECONDS``; nothing checks that a person saw it. Confirmations live in memory, as the Manager's do.
 """
 
 from __future__ import annotations
@@ -30,7 +31,7 @@ from ..user_gates import MESSAGE_MAX_CHARS
 from . import API_CHANNEL, Call, ErrorCode, OpError, Risk, Tool, Turn, check_arguments
 from .config import answered
 from .service import (CONFIRM_TOOL, CONFIRMATION_CHATS, CONFIRMATION_SECONDS, MANAGER_TOOLS, Platform, _created_task,
-                      _error, _plain)
+                      _error, _plain, _senders)
 from .tasks import (TASKS_LISTED, TASKS_SEARCHED, _TASK_ID, _control, _gate_listed, _group, _task_argument, _via,
                     task_workflow_tool)
 
@@ -210,7 +211,9 @@ class ClientOps:
 
     def _turn(self, principal: Principal, session: str) -> Turn:
         return Turn(channel=API_CHANNEL, chat=session, message_id=f"api-{uuid.uuid4().hex[:12]}",
-                    client_id=principal.client_id, client_name=principal.client_name)
+                    client_id=principal.client_id, client_name=principal.client_name,
+                    # Audit attribution only: ``speaker`` and the rest authorization reads stay unset.
+                    recorded_kind="operator" if principal.kind == "operator" else None)
 
     async def call(self, principal: Principal, session: str, name: str, raw: Any, *,
                    tool: Tool | None = None, validator: Callable[[Mapping[str, Any], Any], dict[str, Any]] = check_arguments,
@@ -285,7 +288,8 @@ class ClientOps:
             _refused(watch, turn, pending.tool, pending.arguments, expired)
             if watch.receipt is not None:  # the receipt is the one thing this exit adds to the trail
                 await self._record(turn, pending.tool, pending.arguments, Risk.HIGH, "error", error_code="expired",
-                                   result={"message": str(expired)}, confirmation_id=pending.id, watch=watch)
+                                   result={"message": str(expired)}, confirmation_id=pending.id, watch=watch,
+                                   initiator=turn)
             return _with_notes(_error(expired.code, str(expired)), turn)
         tool, arguments = pending.tool, pending.arguments
         try:
@@ -294,7 +298,8 @@ class ClientOps:
         except OpError as exc:
             _refused(watch, turn, tool, arguments, exc)
             await self._record(turn, tool, arguments, Risk.HIGH, "error", error_code=exc.code.value,
-                               result={"message": str(exc)}, confirmation_id=pending.id, watch=watch)
+                               result={"message": str(exc)}, confirmation_id=pending.id, watch=watch,
+                               initiator=turn)
             answer = _error(exc.code, str(exc))
             if exc.details is not None:
                 answer["error"]["details"] = exc.details
@@ -306,11 +311,11 @@ class ClientOps:
             _refused(watch, turn, tool, arguments, OpError(ErrorCode.UNAVAILABLE, "unavailable"))
             await self._record(turn, tool, arguments, Risk.HIGH, "error", error_code=ErrorCode.UNAVAILABLE.value,
                                result={"message": f"{type(exc).__name__}: {exc}"}, confirmation_id=pending.id,
-                               watch=watch)
+                               watch=watch, initiator=turn)
             return _with_notes(_error(ErrorCode.UNAVAILABLE, f"Looper could not do it now ({type(exc).__name__}: "
                                                              f"{exc}); call the operation again later"), turn)
         await self._record(turn, tool, arguments, Risk.HIGH, "ok", result=result, confirmation_id=pending.id,
-                           watch=watch)
+                           watch=watch, initiator=turn)
         return _ok(result, turn)
 
     async def _outbound_check(self, principal: Principal, turn: Turn, tool: Tool, arguments: Mapping[str, Any],
@@ -370,7 +375,9 @@ class ClientOps:
 
     async def _record(self, turn: Turn, tool: Tool, arguments: Mapping[str, Any], risk: Risk, status: str, *,
                       error_code: str | None = None, result: Any = None,
-                      confirmation_id: str | None = None, watch: receipts.Watch | None = None) -> int | None:
+                      confirmation_id: str | None = None, watch: receipts.Watch | None = None,
+                      initiator: Turn | None = None) -> int | None:
+        """Record the call; ``initiator`` is the turn that asked, on a confirmed call (the same client's)."""
         if risk is Risk.READ:  # a read is not in the trail
             return
         try:
@@ -379,6 +386,7 @@ class ClientOps:
                 arguments=arguments, risk=risk.value, status=status, error_code=error_code, result=result,
                 confirmation_id=confirmation_id, task_id=tool.task_id(arguments) or _created_task(result),
                 manager_id=DEFAULT_MANAGER_ID, client_id=turn.client_id, **receipts.row_fields(watch),
+                **_senders(turn, initiator),
             )
         except Exception:
             logger.warning("could not record an API client's call of %s", tool.name, exc_info=True)

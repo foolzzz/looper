@@ -758,7 +758,6 @@ DIRECT_GIT_ALLOWED = {
     "looper/agents/service.py": "Looper's own checkout (self-upgrade)",
     "looper/agents/catalog_sources.py": "a shallow clone of a remote into a new temporary directory, already neutralised",
     "looper/agents/self_check.py": "`git --version`, no repository",
-    "looper/agents/leads_commands.py": "the operator's own CLI command, run in the directory the operator names",
     "looper/agents/vault.py": "the operator's knowledge vault: its commit hooks run by design",
     "looper/agents/vault_commit.py": "the operator's knowledge vault: its commit hooks run by design",
     "looper/agents/memory_settings.py": "the operator's knowledge vault",
@@ -839,3 +838,23 @@ def test_no_direct_git_calls_outside_the_allowlist():
                        f"may not): {found}")
     for relative in DIRECT_GIT_ALLOWED:
         assert (REPO_ROOT / relative).is_file(), f"{relative} is listed but does not exist"
+
+
+# --- The eval-export committable check runs git through git_safe ---
+
+def test_committable_runs_nothing_a_hostile_repository_configures(repo, probe, marker):
+    from looper.agents import leads_commands
+    target = repo / "set.jsonl"
+    plain(repo, "config", "core.fsmonitor", str(probe))
+    plain(repo, "check-ignore", "-q", "--", str(target), check=False)
+    assert fired(marker), "positive control: plain git runs the configured fsmonitor for the same check"
+    marker.unlink()
+    assert "git does not ignore it" in leads_commands.committable(target)
+    assert fired(marker) == []
+
+
+def test_committable_reports_a_refused_repository_as_a_git_that_cannot_answer(repo):
+    from looper.agents import leads_commands
+    (repo / ".git" / "info" / "attributes").write_text("*.txt filter=evil\n")
+    reason = leads_commands.committable(repo / "set.jsonl")
+    assert reason is not None and reason.startswith("cannot ask git") and "RepositoryRefused" in reason

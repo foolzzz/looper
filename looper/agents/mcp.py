@@ -400,7 +400,8 @@ def config_directory(runtime_root: Path) -> Path:
     return runtime_root.absolute() / ".local" / "mcp"
 
 
-def write_config(runtime_root: Path, servers: Sequence[tuple[str, Mapping[str, Any]]]) -> Path:
+def write_config(runtime_root: Path, servers: Sequence[tuple[str, Mapping[str, Any]]], *,
+                 directory: Path | None = None) -> Path:
     """Write the ``--mcp-config`` file of ``servers`` (name, ``Server.config()``) once; returns its path.
 
     It is ``<runtime_root>/.local/mcp/<sha256 of its content>.json``, readable
@@ -409,7 +410,7 @@ def write_config(runtime_root: Path, servers: Sequence[tuple[str, Mapping[str, A
     """
     content = json.dumps({"mcpServers": {name: dict(config) for name, config in servers}}, ensure_ascii=False,
                          indent=2, sort_keys=True) + "\n"
-    directory = config_directory(runtime_root)
+    directory = directory if directory is not None else config_directory(runtime_root)
     target = directory / f"{_sha256(content)}.json"
     if target.is_file():
         return target

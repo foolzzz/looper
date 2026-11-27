@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import subprocess
 import sys
 from pathlib import Path
 from unittest.mock import AsyncMock
@@ -53,10 +54,15 @@ for line in sys.stdin:
 ''')
 
     async def create(pool, task_id="task-one", status="draft", work_dir=None, workspace_mode="in_place"):
-        project = await projects.create_project(name=f"Project {task_id}", work_dir=str(work_dir or tmp_path), pool=pool)
+        directory = Path(work_dir) if work_dir is not None else tmp_path / task_id
+        directory.mkdir(parents=True, exist_ok=True)
+        # The directory must not contain the runtime root, and a direct session requires its own repository root.
+        if workspace_mode == "in_place" and not (directory / ".git").exists():
+            subprocess.run(["git", "init", "-q", "-b", "main", str(directory)], check=True, capture_output=True)
+        project = await projects.create_project(name=f"Project {task_id}", work_dir=str(directory), pool=pool)
         await tasks.create_task(task_id=task_id, requirement="Implement a feature", project_id=project["id"],
-                                status=status, work_dir=str(work_dir or tmp_path), workspace_mode=workspace_mode,
-                                workspace_dir=str(work_dir or tmp_path), pool=pool)
+                                status=status, work_dir=str(directory), workspace_mode=workspace_mode,
+                                workspace_dir=str(directory), pool=pool)
         return task_id
 
     return executable, create
@@ -174,8 +180,11 @@ def test_direct_session_loads_only_looper_and_allowed_mcp_servers(monkeypatch, t
             await agent.prepare()
             first = Path(agent.resident.command[agent.resident.command.index("--mcp-config") + 1])
             assert first.is_file() and servers(agent.resident.command) == ["alpha", "looper"]
+            leftover = pool.runtime_root / "task-managers" / task_id / "mcp-cwd" / "left-by-a-server"
+            leftover.write_text("x")
             monkeypatch.setattr(settings, "_manager_mcp", ("alpha", "beta"))
-            await agent.prepare()  # a changed allowlist restarts the resident with the new servers
+            await agent.prepare()
+            assert not leftover.exists()  # a restart starts the servers in an empty directory  # a changed allowlist restarts the resident with the new servers
             assert servers(agent.resident.command) == ["alpha", "beta", "looper"]
             written = json.loads(Path(agent.resident.command[agent.resident.command.index("--mcp-config") + 1]).read_text())
             # Every stdio server, Looper's own included, starts through the wrapper in a private directory; the
@@ -265,3 +274,34 @@ def test_task_tools_follow_process_and_turn_lifetime(monkeypatch, tmp_path, setu
             await pool.shutdown()
         assert not ops.authorized("Bearer " + token)
     run_db(check, monkeypatch)
+
+
+def test_a_direct_session_drops_proxy_variables_and_the_ssh_agent_an_orchestrated_one_keeps_them(
+        monkeypatch, tmp_path, setup_manager):
+    from looper.agents import task_manager_sandbox
+
+    for name in task_manager_sandbox.DIRECT_DROPPED_ENV:
+        if name not in ("CLAUDE_CODE_SAFE_MODE", "CLAUDE_CODE_SIMPLE"):
+            monkeypatch.setenv(name, "http://127.0.0.1:9" if "proxy" in name.lower() else "x")
+    seen = []
+
+    async def start(self, command, **kwargs):
+        seen.append(dict(kwargs["env"]))
+
+    monkeypatch.setattr(tm.ResidentClaude, "start", start)
+
+    async def check(db):
+        executable, create = setup_manager
+        task_id = await create(db)
+        pool = tm.TaskManagerPool(tmp_path / "runtime", executable, max_resident=lambda: 2)
+        try:
+            await pool.agent(task_id).prepare()
+            await tasks.update_task_status(task_id, "pending", pool=db)
+            await pool.agent(task_id).prepare()
+        finally:
+            await pool.shutdown()
+    run_db(check, monkeypatch)
+    direct, orchestrated = seen
+    assert not set(task_manager_sandbox.DIRECT_DROPPED_ENV) & set(direct)
+    # The positive control: the same variables reach an orchestrated session, so the drop is the direct one's own.
+    assert {"HTTPS_PROXY", "https_proxy", "SSH_AUTH_SOCK"} <= set(orchestrated)

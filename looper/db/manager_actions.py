@@ -38,10 +38,14 @@ async def record(
     *, channel: str | None, chat: str | None, message_id: str | None, tool: str, arguments: Mapping[str, Any],
     risk: str, status: str, error_code: str | None = None, result: Any = None, confirmation_id: str | None = None,
     task_id: str | None = None, manager_id: str = "manager", client_id: str | None = None,
-    category: str | None = None, receipt: str | None = None, pool: asyncpg.Pool | None = None,
+    category: str | None = None, receipt: str | None = None, sender_id: str | None = None,
+    sender_kind: str | None = None, initiator_sender_id: str | None = None, initiator_kind: str | None = None,
+    pool: asyncpg.Pool | None = None,
 ) -> int:
     """Add one call to the trail (``client_id``: the API client it came through; ``category`` and ``receipt``: what
-    the call was and the line shown for it, written only while action receipts are on); its id."""
+    the call was and the line shown for it, written only while action receipts are on; ``sender_id`` and
+    ``sender_kind``: the trusted sender of the turn it ran in and its audience class, ``initiator_*`` the same for
+    the turn that asked, on a confirmed call); its id."""
     pool = pool or get_pool()
     values = [channel or "", chat or "", message_id or "", tool, _json(arguments) or "{}", risk, status, error_code,
               _json(result), confirmation_id, task_id, manager_id, client_id]
@@ -52,6 +56,12 @@ async def record(
         columns += ", category, receipt"
         marks += ", $14, $15"
         values += [category, receipt]
+    for column, value in (("sender_id", sender_id), ("sender_kind", sender_kind),
+                          ("initiator_sender_id", initiator_sender_id), ("initiator_kind", initiator_kind)):
+        if value is not None:  # NULL is the column's default: a call nobody classified adds nothing
+            values.append(value)
+            columns += f", {column}"
+            marks += f", ${len(values)}"
     return await pool.fetchval(f"INSERT INTO manager_actions ({columns}) VALUES ({marks}) RETURNING id", *values)
 
 
@@ -64,11 +74,13 @@ async def amend(action_id, *, status, error_code=None, result=None, pool=None) -
 
 async def for_task(task_id: str, *, limit: int = 20, pool: asyncpg.Pool | None = None) -> list[dict[str, Any]]:
     """The Manager's calls that acted on ``task_id`` (asked or done; not its errors), newest first, each with the
-    API client it came through (``client_id`` and ``client_name``, None for none)."""
+    API client it came through (``client_id`` and ``client_name``, None for none) and who started it (``sender_id``,
+    ``sender_kind``; for a confirmed call also ``initiator_sender_id`` and ``initiator_kind``, None for unknown)."""
     pool = pool or get_pool()
     rows = await pool.fetch(
         "SELECT a.created_at, a.manager_id, a.channel, a.tool, a.arguments, a.risk, a.status, a.confirmation_id, "
-        "a.client_id, c.name AS client_name FROM manager_actions a LEFT JOIN api_clients c ON c.id = a.client_id "
+        "a.client_id, c.name AS client_name, a.sender_id, a.sender_kind, a.initiator_sender_id, a.initiator_kind "
+        "FROM manager_actions a LEFT JOIN api_clients c ON c.id = a.client_id "
         "WHERE a.task_id = $1 AND a.status <> 'error' ORDER BY a.id DESC LIMIT $2", task_id, limit,
     )
     return [{**dict(row), "arguments": json.loads(row["arguments"])} for row in rows]

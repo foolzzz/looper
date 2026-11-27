@@ -115,7 +115,8 @@ class Run:
         """The text of every tool result, in order."""
         found = []
         for event in self.events:
-            content = (event.get("message") or {}).get("content")
+            message = event.get("message")
+            content = message.get("content") if isinstance(message, dict) else None
             for block in content if isinstance(content, list) else []:
                 if isinstance(block, dict) and block.get("type") == "tool_result":
                     body = block.get("content")
@@ -124,7 +125,8 @@ class Run:
 
     def result_of(self, tool_use_id: str) -> str:
         for event in self.events:
-            content = (event.get("message") or {}).get("content")
+            message = event.get("message")
+            content = message.get("content") if isinstance(message, dict) else None
             for block in content if isinstance(content, list) else []:
                 if isinstance(block, dict) and block.get("type") == "tool_result" and \
                         block.get("tool_use_id") == tool_use_id:

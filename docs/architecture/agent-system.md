@@ -667,7 +667,7 @@ Manager has no tool for it. The dashboard shows the task page's 指标 card and 
   shared resident session's history.
   `looper profile show [--runtime-root …] [--config …]` reads the same file with the same compiler and prints
   exactly the resident section's body, with no added newline, whether injection is on or off. It makes no model
-  call or schema/cache write. Its worker has a 1-second deadline covering imports, settings and file I/O;
+  call or schema/cache write. Its worker bounds its database and settings reads to 0.7 seconds after its imports, and the parent waits at most 4.5 seconds for the worker to exit;
   missing settings, an unavailable database, an invalid profile or timeout prints nothing and exits 0.
   Output is bounded by the compiler's 1500-character cap (at most 6000 UTF-8 bytes).
   `looper claude-code profile` prints the same text for the operator's own Claude Code
@@ -1010,10 +1010,13 @@ them.
   its own included, through a wrapper (`operator_mcp.wrap`: `/bin/sh -c 'cd "$1" && shift && exec
   "$@"'` into a private directory of the runtime root, outside every task directory), because Claude
   Code would otherwise start them in the task directory, outside the sandbox, where the model can plant
-  files. As defense in depth `launcher_problem` refuses an allowed server started by a launcher that
-  resolves code from the working directory (`npx`, `uvx`, `bunx`, `uv run`, `pnpm dlx`, `yarn dlx`,
-  `deno run`, `bundle exec`, `go run`, `cargo run`, `python -m` without `-I`, a relative command, script
-  or `cwd`, a relative `PYTHONPATH` or `NODE_PATH`) with `mcp_launcher_unsafe`. Fingerprints are of the
+  files. As defense in depth `launcher_problem` refuses an allowed server whose launcher resolves
+  code from the working directory or starts another program (`npx`, `uvx`, `bunx`, `uv run`,
+  `pnpm dlx`, `yarn dlx`, `deno run`, `bundle exec`, `go run`, `cargo run`, `python -m` without `-I`
+  including `-mpkg`, `env` and the shells, a relative command, script or `cwd`; names are matched after
+  resolving symbolic links, case-insensitively, with the subcommand found anywhere in the arguments)
+  or whose `env` sets a code-loading variable (`PYTHONPATH`, `NODE_PATH`, `NODE_OPTIONS`, `RUBYOPT`,
+  ...), with `mcp_launcher_unsafe`. Fingerprints are of the
   user-scope definition before wrapping (`operator_mcp.fingerprints`); a comparison with what the CLI
   reports applies `operator_mcp.unwrap` first and checks `is_wrapped`.
 - **Verification.** `tests/test_task_manager_sandbox_probe.py` runs the real command against the real
@@ -1045,6 +1048,32 @@ them.
   task event whose conversation text the dashboard writes from its fields. The event is stored for the
   dashboard and is not part of the model's history. The task page shows the project's effective list
   read-only; editing is in the operations.
+- **Ref reports.** In an in-place direct session the model's Bash writes the real `.git`, so a turn
+  can move a branch, delete a tag or switch `HEAD`. `task_manager_refs` records `refs/heads`,
+  `refs/tags` and `HEAD` before every turn in the running turn's memory (the sandbox cannot reach it;
+  `refs/remotes` and anything else are never read, and packed refs, `gc` and reflogs show no change
+  because values are compared, not files), compares them after, and says what changed in the task
+  conversation with one restore command per ref (`git update-ref --no-deref`, or `git symbolic-ref` for a
+  symbolic ref). Names are shown with control and format characters written as `\uXXXX`. It never restores anything and
+  raises no alert: a ref change is not an invariant violation. The `ref_report` event carries
+  `report_id`, `changes`, `info`, `head`, `own_commits` and `needs_you`. A fast-forward of the task
+  branch is the Manager's own commits (`own_commits`) and is not listed; a reset, rewrite or delete of it
+  is listed but not "needs you" by itself. A change to any other branch or tag is stored in
+  `task_manager_ref_reports` with `needs_you` set; a change under `refs/heads/looper/<other task>/`
+  while that task exists and is unfinished is `info` only. The
+  task branch is recorded once, at the first enablement (`task_manager_branches`, with a
+  `sandbox_notice` event that the real checkout is edited directly); a detached `HEAD` then refuses the
+  first turn (`head_detached`), and every later turn refuses while `HEAD` is not on that branch
+  (`head_moved`) until it is checked out again or the operator runs `tasks.task_manager_branch_set`.
+  A fast-forward is decided from the raw commit objects (grafts and replace refs are not honoured) and
+  anything undecidable is reported as a rewrite. A ref listing Looper cannot read safely (a name with a
+  line-break character, a repeated name, a failed read) refuses the turn at its start; at its end it emits a
+  `sandbox_notice` with notice `refs_unreadable` instead of a report. A task directory that is not a git
+  repository is refused as `workspace` for now (the typed `not_git` reason comes with the directory check).
+  `ref_report` and the `refs_unreadable` notice carry the turn's `message_id`.
+  Every git call goes through `git_safe`; the real-CLI rows are `tests/test_task_manager_refs_probe.py`.
+
+Directory checks. A direct session starts only for an in-place task whose directory is the root of its own non-bare git repository. A worktree task (`workspace_mode` worktree), a linked worktree, or a submodule (`.git` is a file or a symlink) is refused with `worktree_unsupported`: v1 has no direct mode for a worktree task, and orchestrated mode is unchanged, so the commit-per-turn of worktree tasks (#1848) is not reached in direct mode. The operator's home is `workspace_is_home`. A system directory (`/`, or `/System`, `/Library`, `/usr`, `/bin`, `/sbin`, `/etc`, `/private/etc`, `/dev`, `/Applications`, `/cores`, and anything under those) is `workspace_in_system_dir`. A directory that is, or contains, trusted configuration (credentials, the operator's configuration, the Claude configuration directory, the runtime root, and the ops file) is `workspace_contains_trusted_config`. A subdirectory, a bare repository, or a directory that is not a git repository is `workspace_not_repo_root`. A directory that equals, contains, or is inside another live direct session is `workspace_overlaps_session`. Comparisons use the device and inode of the resolved directory, so two spellings of one directory are the same directory. One directory has one lock, `task-manager-locks/<device>-<inode>.lock` under the runtime root (the directory is mode 0700, the file mode 0600, and the file is never deleted). A second session that finds the lock held gets the same refusal and names the holder. The resident's stop releases the lock. The overlap check runs again after that lock is taken, still inside admission and before the resident starts, so a parent directory and a child directory that both passed the earlier check cannot both start. The lock descriptor is close-on-exec. If the Looper process dies while the Claude process is still alive, the kernel releases the lock when the Looper process exits, which can be before that Claude process exits. That early release is accepted for v1. These checks run only while `tasks.conversations.manager_answers` is on, which defaults off.
 
 `tasks.managers.max_resident` defaults to 6 (1–20). Admission can reclaim the least
 recently used idle process; a 60-second ticker reclaims processes idle for 30
@@ -1821,7 +1850,7 @@ runs without the shared leader; OMP 18.4.3).
 `looper claude-code profile` reuses `looper profile show` and the Manager's single compiler; it reads the
 configured vault note locally through the database, without an HTTP request, model call or cache write.
 `--hook` returns SessionStart JSON whose `additionalContext` is that same text, capped at 3000 characters.
-The shared reader has a 1-second deadline (within the 2-second hook budget); an unavailable or empty profile,
+The shared reader gives its worker 4.5 seconds in total, including imports (the hook itself is cut off at 5 seconds); an unavailable or empty profile,
 errors and timeouts produce no stdout or stderr and exit 0. A stopped HTTP server alone does not prevent a read.
 Nothing is installed by default. `looper claude-code install hook --runtime-root <runtime root>` shows its
 user-settings path, added command and diff, asks for confirmation, backs up existing bytes and writes atomically.
@@ -6008,7 +6037,17 @@ contract 5.3 KB (5,309 bytes of `TOOLS_CONTRACT`).
   and the `confirmation_id`. `GET /api/tasks/:id` lists a task's
   (`manager_actions`), and the task page shows them under "By the Manager".
   `manager_actions.manager_id` says which Manager made the call (no foreign
-  key: the trail outlives a deleted Manager). An `out_of_scope` row keeps only argument keys with null
+  key: the trail outlives a deleted Manager). `sender_id` and `sender_kind`
+  say who started the turn the call ran in: the channel sender id as the
+  adapter reports it (NULL for a turn no user started or an API client's) and
+  the turn's audience class (`operator`, `allowed`, `member`, `client` or
+  `autonomous`), both taken from Looper's own classification of the turn, never
+  from model text; `client_id` names the API client. A confirmed call also keeps
+  `initiator_sender_id` and `initiator_kind` (the turn that asked) beside the
+  confirmer in `sender_id`/`sender_kind` (the confirming turn, or the person who
+  pressed the button). `sender_kind` is NULL where Looper did not classify the
+  turn and on rows from before the columns existed. The task detail API shows the
+  two sender ids to the operator only; an API client sees the kinds. An `out_of_scope` row keeps only argument keys with null
   values, `status=error`, `error_code=forbidden`, the known tool's tier (otherwise `read`), and a result
   containing `reason`, `capability`, `scope` (`<id>@<version>`) and `principal_kind`.
   Refusal logs contain Manager, a 12-character session-key digest, capability, reason and principal kind,
@@ -6196,7 +6235,7 @@ prompt, name, turns and switch, changing or removing a provider, or adding
 items to the catalog.
 
 API clients run the same catalog. `ClientOps` wraps it for an API client: a request is a turn (a write runs; one of risk
-`high` answers 202 until `/api/v1/confirm`), and reads are not recorded. Attribution is kept: `client_id` on the
+`high` answers 202 until the client confirms its own request at `/api/v1/confirm`), and reads are not recorded. Attribution is kept: `client_id` on the
 conversation's threads, on the tasks it creates and on the Manager calls, and `via` is `client:<name>` for a call made
 through the API and `manager:loopercli` for one the Manager made in a client conversation. The Manager sees such a
 message with the line `Channel: loopercli, client "<name>" …`, and a task created in a client conversation reports its
@@ -9129,7 +9168,7 @@ PostgreSQL is a hard startup dependency. All data paths:
 | `decision_snapshots` | What a task's dispatch passes and its Planner's step decisions read and decided, while `decision_snapshots.enabled` is on ([Decision snapshots](#decision-snapshots)): `task_id`, `kind` (`dispatch`, `step_decision`), `step_id` (exactly for a step decision), `record_id` (the turn's run record, no foreign key), `inputs` with its `inputs_sha256`, `decision`, `created_at`; no message text; going with its task, kept 30 days while the switch is on |
 | `mcp_tool_levels` | The operator's declarations of an MCP server's tools for the outbound review ([Reviews of outbound actions](#reviews-of-outbound-actions)): `item_id` (going with its server), `tool`, `level` (`inside`: its calls run unreviewed) |
 | `outbound_reviews` | A review of an outbound action ([Reviews of outbound actions](#reviews-of-outbound-actions)): `agent_id` and `parent_record_id` (who asked), `record_id` (the classifier's run; null when code blocked it), `task_id` (going with its task), `manager_action_id`, `channel` and `chat`, `source` (`tool`, `hook`, `post`), `tool`, `action`, `level`, `target_kind` and `target`, a masked `summary` (at most 500 characters), `verdict` (`allow`, `block`), `failure` (`not_operator`, `timeout`, `parse`, `runtime`, `rate_limited`, `unavailable`, `budget`, `too_long`, `refused`, `protected`; only on a block), `reason` (at most 300 characters), `signals`, `profile_id`, `model`, `cost_usd`, `latency_ms` |
-| `manager_actions` | The Manager's tool calls (`looper/agents/ops`), one row each: `manager_id`, `channel`, `chat` and `message_id` of the turn (empty for a turn Claude ran on its own), `tool`, `arguments` (secret values masked), `risk` (`read`, `write`, `high`), `status` (`ok`, `needs_confirmation`, `error` with `error_code`), `result` (of a change; a read's is not kept), `confirmation_id` (the call that asked, on a confirmed one) and `task_id` (the task it acted on, no foreign key) |
+| `manager_actions` | The Manager's tool calls (`looper/agents/ops`), one row each: `manager_id`, `channel`, `chat` and `message_id` of the turn (empty for a turn Claude ran on its own), `tool`, `arguments` (secret values masked), `risk` (`read`, `write`, `high`), `status` (`ok`, `needs_confirmation`, `error` with `error_code`), `result` (of a change; a read's is not kept), `confirmation_id` (the call that asked, on a confirmed one), `task_id` (the task it acted on, no foreign key), and `sender_id`, `sender_kind`, `initiator_sender_id`, `initiator_kind` (who started the turn and who asked, nullable) |
 | `activity` | Execution trace events (SSE streaming to frontend) |
 | `chat_messages` | Chat conversation history of every channel: `session_id` (the web session or stable bot/chat/Manager thread described above; not Telegram groups), `message_id`, `role`, `content`, `channel` (`web`, `telegram`, `lark` or `lark_bot`; rows from before it read `web`), `delivery_failure` and `delivery_error` (a Lark or Telegram answer its channel did not deliver: `no_chat` or `send_failed`, and the channel's error; NULL otherwise), and nullable provenance columns `manager_session` (the writing Manager's session key, including `main`), `sender_kind` (`person` or `bot`) and `sender_name` (the channel's raw display name). New Manager user rows and recorded ordinary, autonomous and completion replies carry the answering session: `_persist_chat` writes user provenance and `record_reply` writes assistant provenance. Idle replies are stored directly by `idle_checks._remember` with `main`. Fleet retirement replies preserve the session of interrupted turns and messages already routed into a session queue; messages still in the fleet's unrouted queue are answered on `main`. Assistant sender fields remain NULL. Historical rows, replayed delivery records without provenance, and the web/API history-writing paths may leave provenance NULL; those unknown sessions remain eligible for `activity_since`. No runtime consumes this provenance yet; a new Manager session's resume brief reads the recent chats that are not a task's Planner thread (`planner-<task_id>`) |
 | `chat_direct_threads` | Who a stored Lark or Telegram direct chat (`session_id`) is with: its bot (`channel_id`) and `sender_id`, recorded when one of their messages is stored while session search or idle checks are on, the first record kept; the session search counts the chat as the user's own while the sender is the bot's `operator_sender_id` |
@@ -9817,8 +9856,8 @@ belongs only to global worker/reviewer role layers, not project layers or manage
 
 Operators execute these writes in one call, using the dashboard's existing dialogs. Clients receive
 202 `needs_confirmation` for shared-default updates, concurrency updates, raised/lifted effective spend
-caps, profile deletion and role-template deletion; confirm with `POST /api/v1/confirm` in the same
-client/session. Gate replies/end and wait controls execute directly. Client management is operator-only,
+caps, profile deletion and role-template deletion; the client confirms its own request with `POST /api/v1/confirm` in the same
+client/session (not an operator approval). Gate replies/end and wait controls execute directly. Client management is operator-only,
 with `Cache-Control: no-store` on responses; never log its one-time create token.
 
 The following request bodies illustrate the field nesting. Identifiers are placeholders for existing
@@ -9881,7 +9920,7 @@ separate tokens and is not exported to API clients. No unversioned operator rout
   `conflict` 409, `expired` 410, `rate_limited` 429, `unavailable` 503.
 - **Sessions and confirmation.** A client may send `X-Looper-Session` (1–64 characters of `A-Za-z0-9._:-`; `default`
   without it). For client tokens, a write of risk `high` answers 202 with a `confirmation_id`; `POST /api/v1/confirm` with that id runs it
-  only for the same client and the same session, within 10 minutes. Pending confirmations live in memory and are lost
+  only for the same client and the same session, within 10 minutes. This is the client confirming its own request, not an operator approval: the client that sends the request also sends the confirmation, and Looper does not check that a person saw it (the Manager's chat is different: there only the operator confirms). Pending confirmations live in memory and are lost
   when the server restarts. Operators execute high operations in one request; the dashboard keeps its existing
   confirmation dialogs and never silently confirms a client confirmation.
 - **Credentials are the operator's.** `auth.set_password` and `auth.clear_password` accept only an operator token,
