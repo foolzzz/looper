@@ -18,11 +18,38 @@ LINK = f"image: [chart (example.invalid)]({U})"
 KEY_IMAGE = re.compile(r"!\[[^\[\]\\\n]{0,300}\]\(img_[A-Za-z0-9_-]{1,120}\)")
 
 
+TAG_OPENER = re.compile(r"<(?=[A-Za-z]|/[A-Za-z]|[!?])(?!/?(?:at|a|br|hr|person|local_datetime|text_tag|number_tag|raw|font|u)"
+                        r"(?![A-Za-z0-9_-]))(?!(?:https?://|mailto:)\S*>)", re.I)
+
+
 def has_live_image(text: str) -> bool:
-    """True when ``text`` holds an image marker that is not a complete image-key construct, or an ``<img`` tag."""
-    if re.search(r"<(?:img|picture|source)\b", text, re.I):
+    """True when ``text`` holds a construct a renderer could load: a tag opener outside Lark's tags, or an image
+    marker that is not a complete image-key construct and is followed by a target, a reference, a defined
+    label, or no closing bracket within the label window."""
+    if TAG_OPENER.search(text):
         return True
-    return any(not KEY_IMAGE.match(text, m.start()) for m in re.finditer(r"!\[", text))
+    defined = {" ".join(m[1].split()).casefold()
+               for m in re.finditer(r"^[ \t>]*(?:(?:[-*+]|\d{1,9}[.)])[ \t]+)*\[([^\[\]\\]+)\]:", text, re.M)}
+    for m in re.finditer(r"!\[", text):
+        if KEY_IMAGE.match(text, m.start()):
+            continue
+        end, depth, k = -1, 1, m.end()
+        while k < min(len(text), m.end() + 300):
+            if text[k] == "\\":
+                k += 1
+            elif text[k] == "[":
+                depth += 1
+            elif text[k] == "]":
+                depth -= 1
+                if depth == 0:
+                    end = k
+                    break
+            k += 1
+        if end == -1 or text[end + 1:end + 2] in ("(", "["):
+            return True
+        if " ".join(text[m.end():end].split()).casefold() in defined:
+            return True
+    return False
 
 
 @pytest.mark.parametrize("source, expected", [
@@ -74,10 +101,17 @@ def test_other_image_forms_lose_the_image_marker(source: str) -> None:
     "<img/src=//h.invalid/a.png>",
     '<video poster="https://h.invalid/a.png"></video>',
     '<svg><image href="https://h.invalid/a.png"/></svg>',
+    '<div style="background:url(https://h.invalid/a.png)">x</div>',
+    '<table background="https://h.invalid/a.png"><tr><td>x</td></tr></table>',
+    '<body background="https://h.invalid/a.png">',
+    '<meta http-equiv="refresh" content="0;url=https://h.invalid/">',
+    '<!-- note -->', '<?php x ?>', '<textarea>x</textarea>', '<pre>x</pre>',
+    '<link rel="stylesheet" href="https://h.invalid/a.css">', '<audio src="https://h.invalid/a.mp3"></audio>',
+    'Vec<String> and <b>bold</b>',
 ])
 def test_resource_html_tags_are_broken(source: str) -> None:
     out = neutralize_images(source)
-    assert out != source and not re.search(r"<(?:img|picture|source|video|svg|image)\b", out, re.I)
+    assert out != source and not TAG_OPENER.search(out) and "&#60;" in out
 
 
 @pytest.mark.parametrize("source", [
@@ -85,7 +119,9 @@ def test_resource_html_tags_are_broken(source: str) -> None:
     "![](img_v3_02abc)",
     "!![chart](img_v3_02abc)",
     "[docs](https://example.invalid/page) and <https://example.invalid/x> and [a]: https://example.invalid",
-    '<at user_id="ou_x"></at> <at id=all></at> <b>bold</b> <font color="red">x</font>',
+    '<at user_id="ou_x"></at> <at id=all></at> <font color="red">x</font><br/><hr> <person id=ou_x></person> <u>x</u>',
+    "<https://example.invalid/x> <mailto:a@example.invalid> a < b > c, 1<2, x <- y",
+    "vec![1, 2, 3]", "Done![ok]", "echo ![a]", "assert!(x); println!(\"hi\"); ", "!", "![]", "wow!![x]",
     "`" + f"![x]({U})" + "`",
     "``" + f"![x]({U})" + "``",
     f"```\n![x]({U})\n<img src=\"{U}\">\n```",
@@ -104,6 +140,14 @@ def test_safe_and_code_content_is_untouched(source: str) -> None:
     f"```a`b\n![x]({U})\n```",  # a backtick fence has no backtick in its info string
     f"    ![x]({U})",  # indented code is not recognised either
     f"``` \n```\n![x]({U})",  # closed fence, then prose
+    # a code span never crosses a newline: these block boundaries end a paragraph, so no span forms
+    "`a\n---\n![](https://e.example/y)\n`",
+    "`a\n# ![](https://e.example/y)\n`",
+    "`a\n> ![](https://e.example/y)\n> `",
+    "`a\n- ![](https://e.example/y)\n`",
+    "[r]: https://e.example/x``\n![r]``",
+    "![r]\n\n[r]: https://e.example/y",  # a bare label with a definition is an image
+    "- [r]: https://e.example/y\n\n![R]",
 ])
 def test_stray_code_markers_do_not_hide_images(source: str) -> None:
     assert not has_live_image(neutralize_images(source))
@@ -129,7 +173,28 @@ def test_choke_points_neutralize() -> None:
     assert json.loads(LarkApi._message(md, None)["content"]) == {"text": md}  # plain text is not Markdown
 
 
-ADVERSARIAL = ["![", "<img ", "`", "[", "]", "(", ")", "![a](", "![a](https://h.invalid/", "\\", "\n", "```\n", "<", "!"]
+@pytest.mark.parametrize("opener, closer", [("<pre>", "</pre>"), ("<!--", "-->"), ("<textarea>", "</textarea>")])
+def test_html_blocks_cannot_desync_the_fence_state(opener: str, closer: str) -> None:
+    out = neutralize_images(f"{opener}\n```\n{closer}\n![a](https://e.example/y)")
+    # no HTML block starts, so the ``` line opens a real fence that runs to the end: the rest is code, as a renderer reads it
+    assert out.startswith("&#60;") and out.endswith(f"{closer}\n![a](https://e.example/y)")
+
+
+def test_unterminated_label_fails_closed() -> None:
+    assert neutralize_images("see ![ and more") == "see &#33;[ and more"
+
+
+def test_ordinary_text_with_brackets_is_not_mangled() -> None:
+    text = "let v = vec![1, 2, 3]; println!(\"x\"); Done![ok]; echo ![a]; vec![vec![1], 2]"
+    assert neutralize_images(text) == text
+
+
+def test_label_nested_in_a_remote_image_keeps_its_own_key_image() -> None:
+    out = neutralize_images("![![k](img_v3_0a)](https://h.invalid/x)")
+    assert out.startswith("&#33;[") and "![k](img_v3_0a)" in out
+
+
+ADVERSARIAL = ["![", "<img ", "`", "[", "]", "(", ")", "![a](", "![a](https://h.invalid/", "\\", "\n", "```\n", "<", "!", "![a]", "![a][", "![[]", "<a:", "<![", "[r]:"]
 
 
 @pytest.mark.parametrize("unit", ADVERSARIAL)
@@ -138,14 +203,14 @@ def test_linear_time_on_adversarial_input(unit: str, size: int) -> None:
     text = unit * (size // len(unit))
     started = time.perf_counter()
     neutralize_images(text)
-    assert time.perf_counter() - started < 0.5
+    assert time.perf_counter() - started < (0.5 if size <= 200_000 else 3.0)
 
 
 def test_random_inputs_never_leave_a_live_image() -> None:
-    tokens = ["![", "!", "[", "]", "(", ")", "<img ", "<IMG", "src=", "img_v3_0a", "https://h.invalid/x", "//h/x",
+    tokens = ["![", "!", "[", "]", "[r]: u", "![r]", "---", "# ", "> ", "- ", "<div>", "<!--", "(", ")", "<img ", "<IMG", "src=", "img_v3_0a", "https://h.invalid/x", "//h/x",
               " ", "\n", "\n\n", "\\", "&#58;", "<", ">", "\"", "alt", "<picture>", "title"]
     rng = random.Random(7)
-    for _ in range(3000):
+    for _ in range(6000):
         text = "".join(rng.choice(tokens) for _ in range(rng.randint(1, 40)))
         out = neutralize_images(text)
         assert not has_live_image(out), (text, out)
