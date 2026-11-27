@@ -12,7 +12,7 @@ from looper.agents.agent_settings import AgentSettings
 from looper.agents.profile_registry import builtin_resolved_profile
 from looper.db import projects, tasks
 from tests.db_support import until
-from tests.fake_cli_readback import SOURCE as READBACK_SOURCE
+from evals.prompt_regression.fake_readback import SOURCE as READBACK_SOURCE
 from tests.fake_claude import fake_claude
 
 
@@ -98,7 +98,11 @@ for line in sys.stdin:
     config_path = Path('context-probe.json')
     measurement_config = json.loads(config_path.read_text()) if config_path.exists() else {{}}
     record({{'kind':'input','text':text,'session':session}})
-    emit({{'type':'system','subtype':'init','session_id':session, **init_fields(str(log.with_name('readback-override.json')))}})
+    override_file = str(log.with_name('readback-override.json'))
+    mode = init_mode(override_file)
+    init_event = {{'type':'system','subtype':'init','session_id':session, **init_fields(override_file)}}
+    if mode == 'normal':
+        emit(init_event)
     if text == 'wait':
         continue
     if text == '/compact':
@@ -135,10 +139,13 @@ for line in sys.stdin:
     if text.startswith('edit:'):
         for name in text[5:].split(','):
             Path(name).write_text('changed by the turn\\n')
-    emit({{'type':'stream_event','event':{{'delta':{{'type':'text_delta','text':'one'}}}}}})
-    emit({{'type':'stream_event','event':{{'delta':{{'type':'text_delta','text':'two'}}}}}})
-    emit({{'type':'assistant','message':{{'content':[{{'type':'tool_use','id':'tool-call','name':'Read','input':{{'file_path':'sample'}}}}]}}}})
-    emit({{'type':'user','message':{{'content':[{{'type':'tool_result','tool_use_id':'tool-call','content':'contents'}}]}}}})
+    if mode != 'bare':
+        emit({{'type':'stream_event','event':{{'delta':{{'type':'text_delta','text':'one'}}}}}})
+        emit({{'type':'stream_event','event':{{'delta':{{'type':'text_delta','text':'two'}}}}}})
+        emit({{'type':'assistant','message':{{'content':[{{'type':'tool_use','id':'tool-call','name':tool_name(override_file),'input':{{'command':'cat sample'}}}}]}}}})
+        emit({{'type':'user','message':{{'content':[{{'type':'tool_result','tool_use_id':'tool-call','content':'contents'}}]}}}})
+    if mode == 'late':
+        emit(init_event)
     finish('onetwo')
 ''')
 

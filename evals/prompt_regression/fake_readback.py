@@ -5,7 +5,7 @@ the clean one for the stand-in's own launch command: the effective settings are 
 servers the ``--mcp-config`` file's, the tool rules the verified version's. A test makes the CLI answer otherwise by
 writing JSON to ``override_path`` (read at every request, so it can change between turns):
 ``{"<subtype>": {...}}`` is deep-merged into that answer, ``{"<subtype>": "error"}`` answers an error and
-``{"<subtype>": "hang"}`` does not answer; ``{"init": {...}}`` replaces fields of the turn's ``system/init``.
+``{"<subtype>": "hang"}`` does not answer; ``{"init": {...}}`` replaces fields of the turn's ``system/init``; ``{"init_mode": "late"|"skip"}`` sends it after the turn's events or not at all, and ``{"tool": "<name>"}`` names the tool the turn calls.
 """
 from __future__ import annotations
 
@@ -18,6 +18,11 @@ from pathlib import Path
 
 READBACK_SUBTYPES = ("initialize", "get_settings", "get_sandbox_dialog", "get_hooks_listing", "mcp_status",
                      "list_permission_rules", "get_context_usage")
+
+
+def tool_name(override_path):
+    override = json.loads(Path(override_path).read_text()) if Path(override_path).exists() else {}
+    return override.get("tool", "Bash")
 
 
 def _flag(name):
@@ -40,7 +45,14 @@ def init_fields(override_path):
     return {**fields, **override.get("init", {})}
 
 
-def readback_answer(request, override_path):
+def init_mode(override_path):
+    """``normal`` (init first), ``late`` (init after the turn's other events) or ``skip`` (no init), from the override
+    file's ``{"init_mode": ...}``."""
+    override = json.loads(Path(override_path).read_text()) if Path(override_path).exists() else {}
+    return override.get("init_mode", "normal")
+
+
+def readback_answer(request, override_path, mcp_tools=None):
     """The ``control_response`` body for one readback request: ``("success", body)``, ``("error", text)`` or None."""
     from looper.agents import task_manager_readback as rb, task_manager_sandbox as sbx
 
@@ -49,16 +61,23 @@ def readback_answer(request, override_path):
     mcp_file = _flag("--mcp-config")
     servers = json.loads(Path(mcp_file).read_text()).get("mcpServers", {}) if mcp_file else {}
     writes = sorted(rb.writes_allowed(os.environ["HOME"], os.getuid(), os.environ.get("CLAUDE_CODE_TMPDIR")))
+    deny = list(settings.get("sandbox", {}).get("filesystem", {}).get("denyRead", []))
+    domains = list(settings.get("sandbox", {}).get("network", {}).get("allowedDomains", []))
     allowed = set(sbx.BUILTIN_TOOLS) | set(sbx.UNREMOVABLE_TOOLS)
     bodies = {
         "initialize": {"current_permission_mode": "bypassPermissions", "sandbox_enabled": True},
         "get_settings": {"effective": settings, "sources": [{"source": "flagSettings", "settings": settings}]},
-        "get_sandbox_dialog": {"supported": True, "enabled": True, "dependencies": {"errors": [], "warnings": []},
+        "get_sandbox_dialog": {"supported": True, "enabled": True, "unsandboxed_fallback": False, "excluded_commands": [],
+                               "dependencies": {"errors": [], "warnings": []},
                                "restrictions": {"fs_allow_write": []},
-                               "lists": {"rows": [{"id": "writes_allowed", "entries": writes, "total": len(writes)}]}},
+                               "lists": {"rows": [
+                                   {"id": "writes_allowed", "entries": writes, "total": len(writes)},
+                                   {"id": "reads_denied", "entries": deny, "total": len(deny)},
+                                   *([{"id": "hosts_allowed", "entries": domains, "total": len(domains)}] if domains else [])],
+                                   "files_confined": True, "all_unix_sockets": False, "other_hosts": "refused"}},
         "get_hooks_listing": {"hooks": []},
         "mcp_status": {"mcpServers": [
-            {"name": name, "status": "connected", "tools": [{"name": "task_status"}],
+            {"name": name, "status": "connected", "tools": [{"name": name} for name in (mcp_tools or ["task_status"])],
              "config": {key: value for key, value in definition.items() if key in ("type", "command", "args", "url")}}
             for name, definition in servers.items()]},
         "list_permission_rules": {"state": {"rules": [

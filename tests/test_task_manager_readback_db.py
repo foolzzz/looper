@@ -230,3 +230,46 @@ def test_the_fresh_process_after_a_failed_resume_is_read_back_too(monkeypatch, t
         finally:
             await pool.shutdown()
     run_db(check, monkeypatch, timeout=40)
+
+
+@pytest.mark.parametrize("mode", ["skip", "late", "bare"])
+@pytest.mark.parametrize("after_a_turn", [False, True])
+def test_a_turn_without_a_passing_init_before_its_events_is_refused(monkeypatch, tmp_path, native, alerts, mode, after_a_turn):
+    """Findings 3 and 4: no ``system/init`` at all, or one after the turn's first events, delivers nothing."""
+    async def check(db):
+        task_id, _, _ = await native.create(db)
+        pool = tm.TaskManagerPool(tmp_path / "runtime", native.executable, max_resident=lambda: 2)
+        try:
+            if after_a_turn:
+                await submit_and_wait(pool, task_id, "one", message_id="one")
+            override(native, {"init_mode": mode})
+            sink = Sink()
+            await pool.submit(task_id, "two", message_id="two", sink=sink)
+            await sink.done()
+            assert sink.finals[-1][1] == "refused" and "init" in sink.finals[-1][0]
+            assert sink.deltas == [] and sink.tools == []  # nothing of the turn reached the sink
+            assert safety.refusal_counts[("launch_setting_mismatch", "turn", VERSION)] == 1
+            assert not pool.agent(task_id).resident.started and len(alerts) == 1
+            clear_override(native)
+            await submit_and_wait(pool, task_id, "three", message_id="three")
+        finally:
+            await pool.shutdown()
+    run_db(check, monkeypatch, timeout=40)
+
+
+def test_a_tool_the_turns_init_did_not_list_is_refused_before_it_is_delivered(monkeypatch, tmp_path, native, alerts):
+    """Finding 5: a tool call outside the set the passing init listed (a tool a server registered mid-turn)."""
+    async def check(db):
+        task_id, _, _ = await native.create(db)
+        override(native, {"tool": "mcp__looper__registered_later"})
+        pool = tm.TaskManagerPool(tmp_path / "runtime", native.executable, max_resident=lambda: 2)
+        try:
+            sink = Sink()
+            await pool.submit(task_id, "two", message_id="two", sink=sink)
+            await sink.done()
+            assert sink.finals[-1][1] == "refused" and "mcp__looper__registered_later" in sink.finals[-1][0]
+            assert sink.tools == [] and safety.refusal_counts[("launch_setting_mismatch", "turn", VERSION)] == 1
+            assert not pool.agent(task_id).resident.started and len(alerts) == 1
+        finally:
+            await pool.shutdown()
+    run_db(check, monkeypatch, timeout=40)

@@ -97,8 +97,8 @@ def test_turn_stream_records_and_session(monkeypatch, tmp_path, native):
             assert len(sink.tools) == 2
             first, second = sink.tools
             assert first.tool_use_id == second.tool_use_id == "tool-call"
-            assert first.name == second.name == "Read" and first.result == "" and "contents" in second.result
-            assert "file_path" in first.args and max(len(first.args), len(second.result)) <= 200
+            assert first.name == second.name == "Bash" and first.result == "" and "contents" in second.result
+            assert "command" in first.args and max(len(first.args), len(second.result)) <= 200
             assert any(kind == "turn_summary" and payload["commit"] is None for kind, payload in sink.events)
             assert sink.finals[0][0] == "onetwo"
             records = await llm_records.list_records(task_id=task_id, pool=db)

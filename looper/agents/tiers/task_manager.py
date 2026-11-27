@@ -446,7 +446,7 @@ class TaskManagerAgent:
         phase = self.started_for_turn or "turn"
         env = launch.runtime.environment(launch)
         work_dir = Path(reopened.work_dir)
-        private_dir = (self.pool.runtime_root / "task-managers" / self.task_id / "mcp-cwd").absolute()  # where launch wrapped
+        private_dir = (self.pool.runtime_root / "task-managers" / self.task_id / "mcp-cwd").resolve()  # as launch wrapped it
         expected = task_manager_readback.Expected(
             private_dir=private_dir,
             pins=task_manager_sandbox.pins(work_dir, allowed_domains=self.allowed_domains, read_deny=self.read_deny),
@@ -513,16 +513,26 @@ class TaskManagerAgent:
                 resuming = "--resume" in self.resident.command
                 expected = self.session_id if resuming else None
                 initialized = False
+                listed: frozenset[str] | None = None  # the tools of this turn's passing ``system/init`` (direct)
                 pieces: list[str] = []
                 tools: dict[str, ToolRecord] = {}
 
                 async def on_event(event: dict[str, Any]) -> None:
-                    nonlocal initialized
+                    nonlocal initialized, listed
                     await recorder.record(event)
+                    gated = self.mode == "direct" and self.init_tools is not None
                     if event.get("type") == "system" and event.get("subtype") == "init":
-                        if self.mode == "direct" and self.init_tools is not None and (
-                                bad := task_manager_readback.check_init(event, self.init_tools)):
+                        if gated and (bad := task_manager_readback.check_init(event, self.init_tools)):
                             raise _InitMismatch(bad)  # before anything of this turn is delivered
+                        listed = frozenset(name for name in event.get("tools") or () if isinstance(name, str))
+                    elif gated and listed is None and event.get("type") in ("assistant", "stream_event", "result"):
+                        raise _InitMismatch(task_manager_readback.init_missing())  # nothing before a passing init
+                    if gated and listed is not None and event.get("type") == "assistant":
+                        for block in (event.get("message") or {}).get("content") or ():
+                            if isinstance(block, dict) and block.get("type") == "tool_use" and (
+                                    bad := task_manager_readback.unlisted_tool(str(block.get("name") or ""), listed)):
+                                raise _InitMismatch(bad)  # a tool the init did not list
+                    if event.get("type") == "system" and event.get("subtype") == "init":
                         if expected and event.get("session_id") != expected:
                             raise _ResumeFailed("Claude Code resumed a different session")
                         initialized = True
