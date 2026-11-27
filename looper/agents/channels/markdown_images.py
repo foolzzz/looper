@@ -227,9 +227,27 @@ def _prose(text: str, definitions: frozenset[str], spans: list[tuple[int, int]])
     return "".join(out)
 
 
+MAX_SCANNED_CHARS = 64 * 1024
+_ANY_TAG_OPENER = re.compile(r"<(?=[A-Za-z]|/[A-Za-z]|[!?])")
+
+
+def _neutralize_everything(markdown: str) -> str:
+    """The cheap form for text above ``MAX_SCANNED_CHARS``: no parsing, so no code, key, link or Lark tag is kept."""
+    return _ANY_TAG_OPENER.sub("&#60;", markdown.replace("![", _NEUTRAL))
+
+
 def neutralize_images(markdown: str) -> str:
+    """Neutralize the images and resource-loading tags of agent Markdown (see the module docstring).
+
+    The scan runs synchronously on the event loop. It costs about 0.5 us per character in the worst case, so up to
+    ``MAX_SCANNED_CHARS`` (64 Ki characters, far above a chat reply: Telegram caps a message at 4096, Lark's card and
+    post bodies are far smaller than this) it stays under about 30 ms. A longer text takes the single-pass
+    ``_neutralize_everything`` instead, whose cost is a C-level replace and substitution.
+    """
     if "![" not in markdown and "<" not in markdown:
         return markdown
+    if len(markdown) > MAX_SCANNED_CHARS:
+        return _neutralize_everything(markdown)
     lines = markdown.splitlines(keepends=True)
     definitions = frozenset(_normalize(m[1]) for m in map(_DEFINITION.match, lines) if m)
     out: list[str] = []

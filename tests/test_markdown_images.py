@@ -11,7 +11,7 @@ import pytest
 from looper.agents.card_actions import Card, lark_card
 from looper.agents.channels import lark_cli
 from looper.agents.channels.lark_api import LarkApi
-from looper.agents.channels.markdown_images import neutralize_images
+from looper.agents.channels.markdown_images import MAX_SCANNED_CHARS, neutralize_images
 
 U = "https://example.invalid/a.png?d=secret"
 LINK = f"image: [chart (example.invalid)]({U})"
@@ -381,3 +381,34 @@ def test_reference_definitions_in_nested_containers_are_found(prefix: str, image
     definition = f"{prefix}[r]: http://e.example/z"
     text = f"{definition}\n\n{image}" if definition_first else f"{image}\n\n{definition}"
     assert _oracle_leaks(neutralize_images(text)) == [], text
+
+
+def _padded(core: str, size: int) -> str:
+    return core + "x" * (size - len(core))
+
+
+def test_cap_below_keeps_the_full_scan_and_above_neutralizes_everything() -> None:
+    core = f"![chart]({U}) `![k](img_v3_0a)` <at id=all></at> vec![1]\n"
+    below = neutralize_images(_padded(core, MAX_SCANNED_CHARS))
+    assert below.startswith(f"{LINK} `![k](img_v3_0a)` <at id=all></at> vec![1]\n")  # parsed: link, code, tag, text kept
+    above = neutralize_images(_padded(core, MAX_SCANNED_CHARS + 1))
+    assert above.startswith(f"&#33;[chart]({U}) `&#33;[k](img_v3_0a)` &#60;at id=all>&#60;/at> vec&#33;[1]\n")
+
+
+@pytest.mark.parametrize("source", REVIEW_CORPUS)
+def test_above_the_cap_the_output_is_safe_for_a_renderer(source: str) -> None:
+    text = _padded(source + "\n\n", MAX_SCANNED_CHARS + 1)
+    assert _oracle_leaks(neutralize_images(text)) == []
+
+
+def test_above_the_cap_random_inputs_are_safe_and_the_pass_is_fast() -> None:
+    rng = random.Random(64)
+    pieces = ["`", "\\", "\n", "![a](https://e.example/y)", "![r]", "[r]: https://e.example/y", "<img src=https://e.example/y>",
+              "<div>", "<!--", "```", "<at id=1>", "> ", "- ", "![k](img_v3_0a)", "]", "[", "<", "!"]
+    for _ in range(40):
+        text = _padded("".join(rng.choice(pieces) for _ in range(rng.randint(1, 60))) + "\n\n", MAX_SCANNED_CHARS + 1)
+        assert _oracle_leaks(neutralize_images(text)) == []
+    big = "![a `\n<img " * 90_000  # about 1 MB
+    started = time.perf_counter()
+    neutralize_images(big)
+    assert time.perf_counter() - started < 2.0  # hang guard; about 0.01 s locally
