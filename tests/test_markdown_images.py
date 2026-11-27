@@ -11,7 +11,7 @@ import pytest
 from looper.agents.card_actions import Card, lark_card
 from looper.agents.channels import lark_cli
 from looper.agents.channels.lark_api import LarkApi
-from looper.agents.channels.markdown_images import neutralize_images
+from looper.agents.channels.markdown_images import MAX_SCANNED_CHARS, neutralize_images
 
 U = "https://example.invalid/a.png?d=secret"
 LINK = f"image: [chart (example.invalid)]({U})"
@@ -254,16 +254,38 @@ def test_label_nested_in_a_remote_image_keeps_its_own_key_image() -> None:
     assert out.startswith("&#33;[") and "![k](img_v3_0a)" in out
 
 
-ADVERSARIAL = ["![", "<img ", "`", "[", "]", "(", ")", "![a](", "![a](https://h.invalid/", "\\", "\n", "```\n", "<", "!", "![a]", "![a][", "![[]", "<at a ", "<font x=\"", "\\![a](", "<a:", "<![", "[r]:"]
+ADVERSARIAL = ["![", "<img ", "`", "[", "]", "(", ")", "![a](", "![a](https://h.invalid/", "\\", "\n", "```\n", "<", "!",
+               "![a]", "![a][", "![[]", "<at a ", "<font x=\"", "\\![a](", "<a:", "<![", "[r]:", "`\n", "![a `\n",
+               "![a]\n`](u)\n", "- > [r]: u\n![r]\n", "![[[[]]]]", "<a href=\"https://x\" ", "``\\``", "![a\n"]
+
+
+def _time(text: str) -> float:
+    started = time.perf_counter()
+    neutralize_images(text)
+    return time.perf_counter() - started
 
 
 @pytest.mark.parametrize("unit", ADVERSARIAL)
-@pytest.mark.parametrize("size", [200_000, 1_000_000])
-def test_linear_time_on_adversarial_input(unit: str, size: int) -> None:
-    text = unit * (size // len(unit))
-    started = time.perf_counter()
-    neutralize_images(text)
-    assert time.perf_counter() - started < (0.5 if size <= 200_000 else 3.0)
+def test_linear_time_on_adversarial_input(unit: str) -> None:
+    """The full scan (text up to MAX_SCANNED_CHARS) takes eight times as long on eight times the input; a quadratic
+    scan takes sixty-four times as long. Each repeat times both sizes back to back in one process and the smallest
+    ratio of three repeats counts, so a slow or busy runner does not matter unless it slows every repeat."""
+    small, large = unit * (8 * 1024 // len(unit)), unit * (MAX_SCANNED_CHARS // len(unit))
+    assert len(large) <= MAX_SCANNED_CHARS
+    ratios = []
+    for _ in range(3):
+        t_small, t_large = _time(small), _time(large)
+        assert t_large < 5.0  # a hang guard: about 0.03 s locally
+        ratios.append(t_large / max(t_small, 0.0005))  # the floor keeps timer noise out of the fast cases
+    assert min(ratios) < 24, (unit, ratios)
+
+
+@pytest.mark.parametrize("unit", ADVERSARIAL)
+def test_above_the_cap_one_megabyte_is_quick(unit: str) -> None:
+    text = unit * (1_000_000 // len(unit))
+    assert len(text) > MAX_SCANNED_CHARS
+    assert _time(text) < 5.0  # a hang guard: about 0.01 s locally
+    assert _oracle_leaks(neutralize_images(text[:200_000])) == []
 
 
 def test_random_inputs_never_leave_a_live_image() -> None:
@@ -367,3 +389,34 @@ def test_reference_definitions_in_nested_containers_are_found(prefix: str, image
     definition = f"{prefix}[r]: http://e.example/z"
     text = f"{definition}\n\n{image}" if definition_first else f"{image}\n\n{definition}"
     assert _oracle_leaks(neutralize_images(text)) == [], text
+
+
+def _padded(core: str, size: int) -> str:
+    return core + "x" * (size - len(core))
+
+
+def test_cap_below_keeps_the_full_scan_and_above_neutralizes_everything() -> None:
+    core = f"![chart]({U}) `![k](img_v3_0a)` <at id=all></at> vec![1]\n"
+    below = neutralize_images(_padded(core, MAX_SCANNED_CHARS))
+    assert below.startswith(f"{LINK} `![k](img_v3_0a)` <at id=all></at> vec![1]\n")  # parsed: link, code, tag, text kept
+    above = neutralize_images(_padded(core, MAX_SCANNED_CHARS + 1))
+    assert above.startswith(f"&#33;[chart]({U}) `&#33;[k](img_v3_0a)` &#60;at id=all>&#60;/at> vec&#33;[1]\n")
+
+
+@pytest.mark.parametrize("source", REVIEW_CORPUS)
+def test_above_the_cap_the_output_is_safe_for_a_renderer(source: str) -> None:
+    text = _padded(source + "\n\n", MAX_SCANNED_CHARS + 1)
+    assert _oracle_leaks(neutralize_images(text)) == []
+
+
+def test_above_the_cap_random_inputs_are_safe_and_the_pass_is_fast() -> None:
+    rng = random.Random(64)
+    pieces = ["`", "\\", "\n", "![a](https://e.example/y)", "![r]", "[r]: https://e.example/y", "<img src=https://e.example/y>",
+              "<div>", "<!--", "```", "<at id=1>", "> ", "- ", "![k](img_v3_0a)", "]", "[", "<", "!"]
+    for _ in range(40):
+        text = _padded("".join(rng.choice(pieces) for _ in range(rng.randint(1, 60))) + "\n\n", MAX_SCANNED_CHARS + 1)
+        assert _oracle_leaks(neutralize_images(text)) == []
+    big = "![a `\n<img " * 90_000  # about 1 MB
+    started = time.perf_counter()
+    neutralize_images(big)
+    assert time.perf_counter() - started < 2.0  # hang guard; about 0.01 s locally

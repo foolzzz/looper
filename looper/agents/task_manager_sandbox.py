@@ -50,11 +50,35 @@ DIRECT_DROPPED_ENV = (*FORBIDDEN_ENV, *(name.lower() for name in FORBIDDEN_ENV),
 
 # F10: subdirectories of ~/.config (or $XDG_CONFIG_HOME) that hold credentials. Not the whole directory: git reads
 # ~/.config/git/config and other tools keep their settings there.
-CONFIG_CREDENTIAL_DIRS = ("gh", "hub", "gcloud", "glab-cli", "op")
+CONFIG_CREDENTIAL_DIRS = ("gh", "hub", "gcloud", "glab-cli", "op", "Bitwarden CLI")
 # Credential files under ~/.config (git keeps its credential store beside its configuration).
 CONFIG_CREDENTIAL_FILES = ("git/credentials",)
 # Plain files in HOME that hold credentials.
-HOME_CREDENTIAL_FILES = (".netrc", ".git-credentials")
+HOME_CREDENTIAL_FILES = (".netrc", ".git-credentials", ".npmrc", ".pypirc", ".vault-token", ".sentryclirc",
+                         ".cargo/credentials.toml", ".gem/credentials", ".pulumi/credentials.json")
+# Credential directories in HOME (cloud, cluster, registry and infrastructure logins).
+HOME_CREDENTIAL_DIRS = (".docker", ".kube", ".azure", ".terraform.d", ".fly")
+# Shell history often holds tokens typed on a command line.
+HOME_HISTORY_FILES = (".zsh_history", ".bash_history")
+# Browser profiles (cookies, saved logins) and cookie stores, relative to HOME.
+HOME_BROWSER_PATHS = ("Library/Application Support/Firefox", "Library/Application Support/Google/Chrome",
+                      "Library/Application Support/Microsoft Edge", "Library/Application Support/BraveSoftware",
+                      "Library/Application Support/Arc", "Library/Cookies")
+
+
+def _provider_credentials() -> tuple[str, ...]:
+    """The provider credential variables of ``child_env`` that are not Anthropic's (Codex, Grok, ...): nothing in a
+    direct session needs them."""
+    import re
+
+    from .. import child_env
+
+    return tuple(name for name in child_env.RUNTIMES if re.search(r"(KEY|TOKEN|AUTH)$", name)
+                 and not name.startswith(("ANTHROPIC", "CLAUDE")))
+
+
+PROVIDER_CREDENTIAL_ENV = _provider_credentials()
+DIRECT_DROPPED_ENV = (*DIRECT_DROPPED_ENV, *PROVIDER_CREDENTIAL_ENV)
 
 
 def tool_allowed(name: str, servers: Iterable[str]) -> bool:
@@ -137,20 +161,34 @@ def read_deny_paths(environment: Mapping[str, str], runtime_root: Path,
     """F10: the operator's credentials and trust roots, as real paths without duplicates; ``environment`` is the CLI's
     (``launch.runtime.environment(launch)``); ``config_file`` is Looper's ops file when it lives outside
     ``runtime_root``. A blacklist: it cannot say "read only the task directory"."""
+    from .runtimes import coco_login, codex_login, grok_login
+
     home = Path(environment.get("HOME") or Path.home())
     config_home = Path(environment["XDG_CONFIG_HOME"]) if environment.get("XDG_CONFIG_HOME") else home / ".config"
-    claude_dir = Path(environment["CLAUDE_CONFIG_DIR"]).expanduser() if environment.get("CLAUDE_CONFIG_DIR") \
-        else home / ".claude"
-    claude_json_dir = Path(environment["CLAUDE_CONFIG_DIR"]).expanduser() if environment.get("CLAUDE_CONFIG_DIR") \
-        else home
+    custom_claude = environment.get("CLAUDE_CONFIG_DIR")
+    claude_dirs = [Path(custom_claude).expanduser()] if custom_claude else []
+    claude_dirs += [home / ".claude"]  # also the default one when another is in use: an old login may remain there
+    # Agent runtimes' own logins: the default home directory, and the one a variable names (the runtimes' helpers say
+    # which file is the login, and so which directory is the home).
+    logins = []
+    for variable, default, helper in (("CODEX_HOME", ".codex", codex_login), ("GROK_HOME", ".grok", grok_login),
+                                      ("TRAE_HOME", ".trae", coco_login)):
+        logins.append(home / default)
+        if (environment.get(variable) or "").strip():
+            logins.append(helper.login_file(environment).parents[len(Path(helper.LOGIN_FILE).parts) - 1])
     entries = (
         home / ".ssh",  # SSH keys
         home / ".aws",  # cloud credentials
         home / ".gnupg",  # GPG keys
-        *(home / name for name in HOME_CREDENTIAL_FILES),  # plain-text credential files
+        home / "Library" / "Keychains",  # the login keychain: the CLI sandbox lets `security` reach it (Claude Code's
+        # own login, git hosting tokens), and a sandboxed Bash can read an item whose ACL trusts /usr/bin/security
+        *(home / name for name in (*HOME_CREDENTIAL_FILES, *HOME_CREDENTIAL_DIRS, *HOME_HISTORY_FILES,
+                                   *HOME_BROWSER_PATHS)),
         *(config_home / name for name in (*CONFIG_CREDENTIAL_DIRS, *CONFIG_CREDENTIAL_FILES)),  # CLI credential stores
-        claude_dir / ".credentials.json",  # Claude Code's login
-        claude_json_dir / ".claude.json",  # MCP server definitions with their secrets
+        *claude_dirs,  # Claude Code's whole configuration directory: login, settings with `env`, session transcripts
+        home / ".claude.json",  # MCP server definitions with their secrets (inside the directory above when it is set)
+        *logins,
+        home / ".looper",  # the default runtime root, when the active one is elsewhere
         runtime_root,  # Looper's ops file, tokens, generated MCP configs and launch settings
         *([config_file] if config_file is not None else []),  # the ops file, when it lives elsewhere
     )
