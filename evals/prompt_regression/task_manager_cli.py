@@ -22,6 +22,10 @@ from pathlib import Path
 from typing import Any
 
 from .fake_claude import _Stdin, _emit, _mcp, _user_text
+from .fake_readback import SOURCE as _READBACK_SOURCE
+
+_READBACK: dict[str, Any] = {}
+exec(_READBACK_SOURCE, _READBACK)  # readback_answer, READBACK_SUBTYPES: what a sandboxed direct launch is asked
 
 VERSION = "2.1.332"  # looper.agents.task_manager_safety.VERIFIED_CLI_VERSION; the eval refuses a real CLI that differs
 TOKEN = re.compile(r"taskmgr\.[A-Za-z0-9_\-]+")
@@ -90,6 +94,7 @@ class Scripted:
         self.sessions = Path(config["capture_dir"]) / "sessions"
         self.sessions.mkdir(parents=True, exist_ok=True)
         self.disallowed = set((_flag(args, "--disallowedTools") or "").split(","))
+        self.sandboxed = _flag(args, "--tools") == "Bash" and _flag(args, "--settings") is not None  # a direct session
         self.model = _flag(args, "--model") or "fake"
         resume = _flag(args, "--resume")
         if resume and not (self.sessions / resume).exists():
@@ -113,7 +118,8 @@ class Scripted:
     # -- protocol ---------------------------------------------------------------------------------------------
 
     def tool_names(self, plan: dict[str, Any] | None = None) -> list[str]:
-        builtin = [name for name in BUILTIN_TOOLS if name not in self.disallowed]
+        builtin = (_flag(self.args, "--tools").split(",") if self.sandboxed
+                   else [name for name in BUILTIN_TOOLS if name not in self.disallowed])
         names = [*builtin, *(f"mcp__looper__{tool['name']}" for tool in self.mcp_tools)]
         plan = plan or {}
         return [n for n in names if n not in plan.get("tools_drop", [])] + list(plan.get("tools_add", []))
@@ -125,10 +131,16 @@ class Scripted:
 
     def tool(self, name: str, arguments: dict[str, Any]) -> bool:
         """Emit the call, run it, emit its result; True when the user's interrupt ended the turn on the way."""
+        if self.sandboxed and name in ("Read", "Write", "Edit") and self.config["behavior"] != "bad":
+            name, arguments = "Bash", {"command": self.shell_for(name, arguments)}  # the only file tool a sandbox has
         self.calls += 1
         ident = f"toolu_{self.calls:04d}"
         _emit({"type": "assistant", "session_id": self.session, "message": {"role": "assistant", "content": [
             {"type": "tool_use", "id": ident, "name": name, "input": arguments}]}})
+        if self.sandboxed and name != "Bash" and not name.startswith("mcp__looper__"):
+            # A tool the launch's init does not list: Looper refuses the turn and ends this process. Wait for that,
+            # so nothing the script does after it runs ahead of the refusal.
+            time.sleep(60)
         waiting = (re.search(r"select\(undef,\s*undef,\s*undef,\s*(\d+)\)", str(arguments.get("command", "")))
                    if name == "Bash" else None)
         if waiting and self.sleep(float(waiting.group(1))):
@@ -137,6 +149,31 @@ class Scripted:
         _emit({"type": "user", "session_id": self.session, "message": {"role": "user", "content": [
             {"type": "tool_result", "tool_use_id": ident, "content": content, **({"is_error": True} if is_error else {})}]}})
         return False
+
+    @staticmethod
+    def shell_for(name: str, arguments: dict[str, Any]) -> str:
+        """The shell command that does what a scripted file tool call does."""
+        import shlex
+
+        path = shlex.quote(arguments["file_path"])
+        if name == "Read":
+            return f"cat {path}"
+        if name == "Write":
+            return f"mkdir -p \"$(dirname {path})\" && printf %s {shlex.quote(arguments['content'])} > {path}"
+        code = ("import sys;p=sys.argv[1];t=open(p).read();o,n=sys.argv[2:4];"
+                "sys.exit('String to replace not found in file.') if o not in t else open(p,'w').write(t.replace(o,n,1))")
+        return f"python3 -c {shlex.quote(code)} {path} {shlex.quote(arguments['old_string'])} {shlex.quote(arguments['new_string'])}"
+
+    def answer_readback(self, data: dict[str, Any]) -> bool:
+        """Answer one of the readback's control requests as a sandboxed direct launch's CLI would."""
+        if not (self.sandboxed and data["request"]["subtype"] in _READBACK["READBACK_SUBTYPES"]):
+            return False
+        answer = _READBACK["readback_answer"](data["request"], "/nonexistent",
+                                              [tool["name"] for tool in self.mcp_tools] or None)
+        kind, body = answer
+        _emit({"type": "control_response", "response": {"subtype": kind, "request_id": data["request_id"],
+                                                          **({"response": body} if kind == "success" else {"error": body})}})
+        return True
 
     def run(self, name: str, arguments: dict[str, Any]) -> tuple[str, bool]:
         if name in self.disallowed:
@@ -189,7 +226,8 @@ class Scripted:
         step = max(matching, key=lambda s: content.rfind(_fill(s["match"], self.mapping)), default=None)
         plan = step[self.config["behavior"]] if step else None
         _emit({"type": "system", "subtype": "init", "session_id": self.session, "model": self.model,
-               "tools": self.tool_names(plan), "cwd": os.getcwd()})
+               "tools": self.tool_names(plan), "cwd": os.getcwd(),
+               **({"permissionMode": "bypassPermissions"} if self.sandboxed else {})})
         if step is None:
             self.cost += .001
             return self.finish("No scripted answer for this message.")
@@ -219,6 +257,8 @@ class Scripted:
             if not line.strip():
                 continue
             data = json.loads(line)
+            if data.get("type") == "control_request" and self.answer_readback(data):
+                continue
             if data.get("type") == "control_request":
                 _emit({"type": "control_response", "response": {"subtype": "success", "request_id": data["request_id"]}})
                 self.result("", subtype="error_during_execution")

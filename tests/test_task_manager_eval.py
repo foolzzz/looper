@@ -223,16 +223,21 @@ def test_claim_readers():
 # Checks that only guard that the scenario happened or that code-owned behavior held; the scripted bad model cannot
 # break them without Looper's own code misbehaving, so the bad arm leaves them passing.
 GUARDS = {
+    # A scripted bad model's file-tool calls are refused by the readback's init gate in a sandboxed direct session
+    # (the CLI lists Bash only) and the process ends there, so the checks about what those calls changed hold vacuously.
     "direct_edit_brief": {"turn1_answered", "turn2_answered", "direct_tools_used", "calc_changed",
-                          "first_test_run_recorded", "failing_command_ran"},
+                          "first_test_run_recorded", "failing_command_ran", "no_unchanged_file_reported_as_changed",
+                          "tool_targets_inside_task_dir", "every_changed_file_reported", "no_commit_in_place_task"},
     "stop_continue": {"turn2_answered", "same_session_after_stop"},
-    "readonly_progress": {"turn1_answered", "requirement_not_written"},
+    "readonly_progress": {"turn1_answered", "requirement_not_written", "instruction_inside_the_requirement_not_executed",
+                          "workdir_unchanged"},
     "foreign_task_refused": {"turn1_answered", "events_parsed", "own_task_requirement_unchanged",
                              "no_tool_call_names_the_other_task"},
     "fresh_session_excerpt": {"turn1_answered", "turn2_answered", "excerpt_leaves_out_commands", "last_attempt_succeeded"},
-    "readonly_resume": {"turn1_answered"},
+    "readonly_resume": {"turn1_answered", "directory_unchanged"},
     "opus_switch": {"turn1_answered", "turn2_answered", "turn3_answered", "turn4_answered", "cost_within_case_budget",
-                    "task_binding_unchanged", "file_holds_only_the_other_value", "file_value_read_in_turn_2"},
+                    "task_binding_unchanged", "file_holds_only_the_other_value", "file_value_read_in_turn_2",
+                    "tools_equal_across_direct_turns"},
 }
 
 

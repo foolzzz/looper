@@ -491,8 +491,8 @@ def judge_opus_switch(evidence: Evidence) -> Judgement:
     j.observations["readonly_turn_session_fresh"] = evidence.event(2, "session_fresh")
     j.add("file_holds_only_the_other_value", codeword not in " ".join(str(c.input) for c in evidence.calls(0)),
           "the codeword was never written, so later answers cannot come from facts.txt")
-    j.add("file_value_read_in_turn_2", any(c.name == "Read" and "FILE-55" in (c.result or "") for c in evidence.calls(1)),
-          "the Read result of turn 2 holds the file's value")
+    j.add("file_value_read_in_turn_2", any(c.name in ("Read", "Bash") and "FILE-55" in (c.result or "") for c in evidence.calls(1)),
+          "the file read of turn 2 (Read, or a shell read in a sandboxed session) holds the file's value")
     j.add("context_kept_on_every_later_turn", all(codeword in replies[i] for i in (1, 2, 3)), "the codeword came back")
     t1, t2, t3, t4 = (evidence.init_tools(i) for i in range(4))
     j.add("tools_equal_across_direct_turns", bool(t1) and t1 == t2 == t4, f"{t1} / {t2} / {t4}")

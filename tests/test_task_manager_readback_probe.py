@@ -54,7 +54,7 @@ def probe(tmp_path, request):
 
 def private_dir(probe: SandboxProbe) -> Path:
     """Where the launch's wrapper starts every stdio server (``<runtime_root>/task-managers/<task>/mcp-cwd``)."""
-    return probe.runtime_root / "task-managers" / "probe-task" / "mcp-cwd"
+    return (probe.runtime_root / "task-managers" / "probe-task" / "mcp-cwd").resolve()
 
 
 def library_with_looper_and_probe(probe: SandboxProbe):
@@ -537,3 +537,51 @@ def test_init_arrives_before_the_first_assistant_content_and_before_a_tool_runs(
     probe.observations["ordering_tool_minus_init_read_seconds"] = [round(value, 4) for value in lead]
     print("ORDERING load", os.getloadavg(), "min/median/max tool-after-init-read (s):",
           round(min(lead), 3), round(statistics.median(lead), 3), round(max(lead), 3), len(lead), "turns")
+
+
+# --- the runtime rows of the dialog, and the keys of the merged settings ---
+
+RUNTIME_ROWS = {
+    "allowedDomains": ({"sandbox": {"network": {"allowedDomains": ["evil.example"]}}}, "dialog.hosts_allowed"),
+    "allowUnixSockets": ({"sandbox": {"network": {"allowUnixSockets": ["/private/var/x.sock"]}}}, "dialog.unix_sockets_allowed"),
+    "excludedCommands": ({"sandbox": {"excludedCommands": ["git"]}}, "dialog.excluded_commands"),
+    "allowRead": ({"sandbox": {"filesystem": {"allowRead": ["/private/var/open"]}}}, "dialog.reads_allowed_anyway"),
+}
+
+
+@pytest.mark.parametrize("name", sorted(RUNTIME_ROWS))
+def test_r2_a_user_setting_that_widens_a_runtime_row_is_seen_in_the_row(probe, name):
+    content, item = RUNTIME_ROWS[name]
+    probe.write_user_settings(content)
+
+    async def scenario():
+        live = Live(probe, [text("never")])
+        await live.start()
+        try:
+            return await live.readback("launch")
+        finally:
+            await live.stop()
+
+    _, mismatches = run(scenario())
+    probe.observations[f"runtime_row_{name}"] = [(m.item, m.source.value) for m in mismatches]
+    assert item in {m.item for m in mismatches}, mismatches
+    assert all(m.reason is WIDER for m in mismatches)
+
+
+def test_r2_unrelated_user_settings_keys_appear_in_effective_and_do_not_refuse(probe):
+    """The merged settings hold the user's own unrelated keys: refusing every unknown top-level key would refuse a
+    normal installation. What can widen the boundary is covered by the pins, the hook listing and the dialog."""
+    probe.write_user_settings({"model": "synthetic-model", "theme": "dark"})
+
+    async def scenario():
+        live = Live(probe, [text("never")])
+        await live.start()
+        try:
+            return await live.readback("launch")
+        finally:
+            await live.stop()
+
+    readback, mismatches = run(scenario())
+    probe.observations["effective_top_level_keys"] = sorted(readback.settings["effective"])
+    assert readback.settings["effective"].get("model") == "synthetic-model"
+    assert mismatches == [], rb.notice(mismatches, probe.version)
