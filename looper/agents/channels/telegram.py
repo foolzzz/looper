@@ -170,11 +170,12 @@ class TelegramChannelAdapter(ChannelAdapter):
             Application,
             CallbackQueryHandler,
             CommandHandler,
+            Defaults,
             MessageHandler,
             TypeHandler,
             filters,
         )
-        from telegram import Update
+        from telegram import LinkPreviewOptions, Update
         from telegram.request import HTTPXRequest
         from .telegram_request import GatedRequest, TelegramOutboxTransport
 
@@ -184,6 +185,8 @@ class TelegramChannelAdapter(ChannelAdapter):
         add_secret(self._bot_token)  # python-telegram-bot puts it in every request URL and in the Bot's repr
         try:
             builder = Application.builder().token(self._bot_token)
+            # Agent text can carry data an agent read; a link preview makes Telegram's servers fetch its URLs.
+            builder.defaults(Defaults(link_preview_options=LinkPreviewOptions(is_disabled=True)))
             # update_id is unique within a bot, not across bots assigned to the same
             # channel row. Rotating one bot's token keeps its numeric identity.
             identity = self._bot_token.partition(":")[0]
