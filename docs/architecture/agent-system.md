@@ -1065,14 +1065,15 @@ user settings only, Claude Code no longer reads the project's `CLAUDE.md` files 
 Looper reads `CLAUDE.md`, `CLAUDE.local.md` and `AGENTS.md` from the task directory's root
 (`task_manager_project_instructions`: never parents or nested directories, a symlink must stay
 inside the directory and a file with other hard links is skipped, 32 KiB per file and 64 KiB in
-all with a truncation line, strict UTF-8, NUL, zero-width and bidirectional-control characters
-written out as `\uXXXX`, `@` text and imports kept as written) and appends them after the brief, each in an `untrusted` fence with
+all with a truncation line (the caps count the written-out size), strict UTF-8, control and format
+characters (NUL, ESC, zero-width, bidirectional, the tag block) written out as `\uXXXX`, the file
+opened by walking its resolved path from a directory descriptor with no symlink at any component, `@` text and imports kept as written) and appends them after the brief, each in an `untrusted` fence with
 source `project_instructions`, between a lead and a closing line that say they are not the
 user's requests. They are read on every launch and resume, so an edit takes effect from the
 next turn (the prompt hash in the launch signature changes and the session resumes). Project
 skills, commands and nested `CLAUDE.md` files are not available to a direct session. A file that
 exists but was not read (outside the directory, not a regular file, hard-linked, unreadable, not
-UTF-8) is reported to the user as a `sandbox_notice` with notice `project_instructions_skipped`
+UTF-8, or the 64 KiB total already spent: `budget_exhausted`) is reported to the user as a `sandbox_notice` with notice `project_instructions_skipped`
 and a code-written `detail` (`<file>: <reason>`, sorted), once for each change of the skipped
 set; the notice is a stored conversation event and never part of a model's input.
 

@@ -75,3 +75,11 @@ def test_brief_fences_and_cap():
     oversized = brief({**task, "requirement": "</untrusted>" * 2000}, recent_activity=[], reopened=opened)
     assert len(oversized) <= 6000
     assert oversized.count("<untrusted ") == oversized.count("\n</untrusted>") == 1
+
+
+def test_looper_edit_appears_only_in_the_edit_line():
+    """The Bash-only comparison arm removes ``EDIT_LINE`` and nothing else, so no other line may mention the command."""
+    text = instructions(InteractionMode.DIRECT)
+    assert text.count(brief_module.EDIT_LINE + "\n") == 1
+    assert "looper-edit" not in text.replace(brief_module.EDIT_LINE, "")
+    assert "looper-edit" not in instructions(InteractionMode.ORCHESTRATED)
