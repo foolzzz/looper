@@ -1594,6 +1594,40 @@ def test_health_timeout_and_process_exit_count_one_failure(runners, monkeypatch)
     run(exercise())
 
 
+def test_a_host_stall_ending_while_the_sampler_sleeps_is_counted(monkeypatch):
+    """The probe cancels its lag sampler right after the stall; the pending tick must already be counted."""
+    monkeypatch.setattr(s, "HEALTH_TIMEOUT_SECONDS", 0.2)
+
+    class Bridge:
+        async def health(self, *, timeout):
+            await asyncio.sleep(0.01)  # The sampler is now parked in its tick sleep.
+            time.sleep(0.3)  # The host stalls, then the deadline passes without a yield.
+            raise TimeoutError
+
+    async def exercise():
+        return await s.RunnerSupervisor._one_health(None, Bridge())
+
+    reason, lag = asyncio.run(exercise())
+    assert reason == "timeout"
+    assert lag > s._host_lag_limit(0.2)
+
+
+def test_host_lag_settles_the_pending_tick_once():
+    from looper.agents.runtimes.runner.bridge import HostLag
+
+    async def exercise():
+        lag = HostLag(0.05)
+        task = asyncio.create_task(lag.run())
+        await asyncio.sleep(0.01)
+        time.sleep(0.25)
+        settled = lag.settle()
+        assert settled >= 0.15
+        await asyncio.sleep(0.06)  # The sleep callback must not add the same stall again.
+        assert lag.total < settled + 0.05
+        task.cancel()
+    run(exercise())
+
+
 def test_host_stall_does_not_reclaim_a_runner_that_answered(runners, monkeypatch, caplog):
     """A child that answers inside the deadline stays up when the host then pauses."""
     monkeypatch.setattr(s, "HEALTH_INTERVAL_SECONDS", 0.05)
@@ -1622,9 +1656,8 @@ def test_host_stall_does_not_reclaim_a_runner_that_answered(runners, monkeypatch
             directory = lease._generation.directory
             try:
                 await until(lambda: stalled["done"] and _answered(directory) >= 1, timeout=3)
-                await asyncio.sleep(0.6)
                 # The probe task must stay alive after the pause, not exit on the deadline's cancel.
-                assert _health_count(directory) >= 2
+                await until(lambda: _health_count(directory) >= 2 and not lease._generation.failed, timeout=3)
                 assert lease.valid and not lease._generation.failed and lease.session_id == sid
                 assert processes[0].returncode is None and turn.writes == 1
                 assert not any("runner_health_failed" in record.getMessage() for record in caplog.records)
