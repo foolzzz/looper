@@ -547,3 +547,36 @@ def test_p16_the_keychain_cannot_be_read_from_the_sandbox_and_the_control_can(pr
     control = results_of(probe.run(script, control="loose"), script)
     assert "KEYCHAIN-SECRET" in control[0], control[0]  # without the deny list the item is printed
     probe.observations["p16_keychain"] = {"guarded": guarded[0][:120], "control_reads_secret": True}
+
+
+def plant_logins(probe):
+    planted = {probe.home / ".codex/auth.json": "CODEX-LOGIN-SECRET", probe.home / ".docker/config.json": "DOCKER-AUTH-SECRET",
+               probe.config / "settings.json": '{"env": {"API": "CLAUDE-SETTINGS-SECRET"}}',
+               probe.home / ".npmrc": "//registry.invalid/:_authToken=NPMRC-SECRET"}
+    for path, body in planted.items():
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(body)
+    return planted
+
+
+def test_p16_logins_the_claude_config_dir_and_registry_files_cannot_be_read_and_the_control_can(probe):
+    planted = plant_logins(probe)
+    script = [*(bash(f"cat {path}; echo rc=$?") for path in planted), bash("git status --short; echo rc=$?"), text("done")]
+    guarded = results_of(probe.run(script), script)
+    for outcome, body in zip(guarded, planted.values()):
+        assert "SECRET" not in outcome and "Operation not permitted" in outcome, outcome
+    assert "rc=0" in guarded[len(planted)]  # ordinary commands still work with the whole Claude directory denied
+    control = results_of(probe.run(script, control="loose"), script)
+    for outcome, body in zip(control, planted.values()):
+        assert "SECRET" in outcome, outcome  # without the deny list every one is readable
+
+
+def test_p16_the_provider_scrub_variable_is_not_usable_and_the_residual_is_recorded(probe):
+    """CLAUDE_CODE_SUBPROCESS_ENV_SCRUB=1 would hide the CLI's own key from Bash, but on 2.1.332 it forces the default
+    permission mode, so a Bash call needs approval and a direct session cannot work: RFC 25.5 states the residual."""
+    probe.env["CLAUDE_CODE_SUBPROCESS_ENV_SCRUB"] = "1"
+    script = [bash("printenv ANTHROPIC_API_KEY | wc -c"), text("done")]
+    run = probe.run(script)
+    outcome = results_of(run, script)[0]
+    probe.observations["scrub"] = {"result": outcome[:160], "stderr": run.stderr[-200:]}
+    assert "requires approval" in outcome or "approval" in outcome
