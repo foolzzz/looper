@@ -474,3 +474,21 @@ def test_an_error_while_deciding_is_undecided_not_a_fast_forward(repo, monkeypat
     monkeypatch.setattr(refs, "_reaches", boom)
     verdict, _ = asyncio.run(refs.fast_forward(repo, "a" * 40, "b" * 40))
     assert verdict is refs.Ancestry.UNDECIDED
+
+
+def test_a_new_tip_that_is_missing_is_undecided_not_a_fast_forward(repo):
+    old = git(repo, "rev-parse", "HEAD")
+    verdict, _ = asyncio.run(refs.fast_forward(repo, old, "e" * 40))  # cat-file answers "<sha> missing": two fields
+    assert verdict is refs.Ancestry.UNDECIDED
+
+
+def test_a_task_branch_turned_into_a_link_to_a_compared_branch_adds_no_link_report(repo):
+    git(repo, "branch", "other")
+
+    def go():
+        commit(repo, "b.txt")
+        git(repo, "update-ref", "refs/heads/other", git(repo, "rev-parse", "HEAD"))
+        git(repo, "symbolic-ref", "refs/heads/main", "refs/heads/other")
+    report = run(repo, go)
+    assert report.own_commits == 1
+    assert [c.ref for c in report.changes] == ["refs/heads/other"]  # its own change, reported once under its name

@@ -372,7 +372,9 @@ async def compare(work_dir: str | Path, before: Snapshot, after: Snapshot, *, ta
                               if old is not None and new is not None else (Ancestry.DIVERGES, 0))
             if verdict is Ancestry.DESCENDS:
                 own_commits = count
-                if any(pointers.values()):
+                targets = (old_target, new_target)
+                # A target inside the compared namespaces reports its own change; only one outside them needs this.
+                if any(t is not None and t not in before.refs and t not in after.refs for t in targets):
                     changes.append(_change(ref, old, new, plain_move=True, **pointers))
                 continue
             changes.append(_change(ref, old, new, unverified=verdict is Ancestry.UNDECIDED, **pointers))
