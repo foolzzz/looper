@@ -65,6 +65,12 @@ KNOWN_BUILTIN_TOOLS: dict[str, frozenset[str]] = {
         "WaitForMcpServers", "WebFetch", "WebSearch", "Write"}),
 }
 
+# The runtime lists of ``get_sandbox_dialog`` with ``lists`` (2.1.332): every row id is one of these, once. An empty
+# list has no row. ``total`` is the length before the CLI cuts ``entries`` to 1000.
+DIALOG_ROWS = frozenset({"reads_denied", "reads_allowed_anyway", "writes_allowed", "writes_denied",
+                         "writes_allowed_anyway", "hosts_allowed", "hosts_denied", "unix_sockets_allowed"})
+_MUST_BE_EMPTY = ("reads_allowed_anyway", "writes_allowed_anyway", "unix_sockets_allowed")
+
 _WRITES_FIXED = ("/dev/stdout", "/dev/stderr", "/dev/null", "/dev/tty", "/dev/dtracehelper", "/dev/autofs_nowait",
                  "/tmp/claude", "/private/tmp/claude", ".")
 
@@ -188,8 +194,19 @@ def _validate(readback: Readback) -> None:
     _need(sandbox, "get_sandbox_dialog", "dependencies", "errors", kind=list)
     _need(sandbox, "get_sandbox_dialog", "dependencies", "warnings", kind=list)
     _need(sandbox, "get_sandbox_dialog", "restrictions", "fs_allow_write", kind=list)
-    rows = _rows(sandbox, "get_sandbox_dialog", "lists", "rows", fields={"id": str})
-    if not any(row["id"] == "writes_allowed" and isinstance(row.get("entries"), list) for row in rows):
+    _need(sandbox, "get_sandbox_dialog", "enabled", kind=bool)
+    _need(sandbox, "get_sandbox_dialog", "unsandboxed_fallback", kind=bool)
+    _need(sandbox, "get_sandbox_dialog", "excluded_commands", kind=list)
+    _need(sandbox, "get_sandbox_dialog", "lists", "files_confined", kind=bool)
+    _need(sandbox, "get_sandbox_dialog", "lists", "all_unix_sockets", kind=bool)
+    _need(sandbox, "get_sandbox_dialog", "lists", "other_hosts", kind=str)
+    rows = _rows(sandbox, "get_sandbox_dialog", "lists", "rows", fields={"id": str, "entries": list, "total": int})
+    ids = [row["id"] for row in rows]
+    if len(set(ids)) != len(ids) or not set(ids) <= DIALOG_ROWS:
+        raise ReadbackUnavailable("get_sandbox_dialog.lists.rows.id", "unknown or repeated row")
+    if any(row["total"] != len(row["entries"]) for row in rows):
+        raise ReadbackUnavailable("get_sandbox_dialog.lists.rows.total", "a row is cut")
+    if "writes_allowed" not in ids:
         raise ReadbackUnavailable("get_sandbox_dialog.lists.rows.writes_allowed", "missing")
     _rows(readback.hooks, "get_hooks_listing", "hooks", fields={"source": str})
     _rows(readback.mcp, "mcp_status", "mcpServers", fields={"name": str, "status": str, "config": dict})
@@ -347,12 +364,13 @@ def compare(readback: Readback, expected: Expected) -> list[Mismatch]:
     if set(sandbox["restrictions"]["fs_allow_write"]) != expected.fs_allow_write and not any(m.item == "F3" for m in found):
         found.append(Mismatch(wider, "F3", sorted(expected.fs_allow_write),
                               sorted(sandbox["restrictions"]["fs_allow_write"]), blamed))
-    entries = next(row["entries"] for row in sandbox["lists"]["rows"] if row["id"] == "writes_allowed")
-    if set(entries) != expected.writes_allowed:
-        found.append(Mismatch(wider, "F3.effective", sorted(expected.writes_allowed), sorted(map(str, entries)), blamed))
-    # 6. no forbidden variable (names only, never values)
+    runtime = {row["id"]: set(map(str, row["entries"])) for row in sandbox["lists"]["rows"]}
+    if runtime["writes_allowed"] != expected.writes_allowed:
+        found.append(Mismatch(wider, "F3.effective", sorted(expected.writes_allowed), sorted(runtime["writes_allowed"]), blamed))
+    found.extend(_compare_dialog(readback, expected, runtime))
+    # 6. no forbidden variable (names only, never values; the names the launch drops from the process environment)
     env = effective.get("env")
-    if isinstance(env, Mapping) and (names := sorted(name for name in task_manager_sandbox.FORBIDDEN_ENV if name in env)):
+    if isinstance(env, Mapping) and (names := sorted(name for name in task_manager_sandbox.DIRECT_DROPPED_ENV if name in env)):
         found.append(Mismatch(wider, "env", [], names, _blame_env(readback, names), key="env"))
     # 7. hooks come from the user or the policy only
     hook_sources = sorted({source_of(hook["source"]).value for hook in readback.hooks["hooks"]
@@ -380,6 +398,46 @@ def compare(readback: Readback, expected: Expected) -> list[Mismatch]:
         found.append(Mismatch(wider, "agents", [], agents, Source.PROJECT))
     # 11. the MCP set, its wrapped launch shape and its definitions
     found.extend(_compare_mcp(readback, expected))
+    return found
+
+
+def _pin_value(expected: Expected, item: str) -> Sequence[Any]:
+    return next((pin.value for pin in expected.pins if pin.item == item), [])
+
+
+def _compare_dialog(readback: Readback, expected: Expected, runtime: Mapping[str, set[str]]) -> list[Mismatch]:
+    """What the sandbox itself enforces (the runtime rows), not what the merged settings say: the read deny list holds
+    the launch's, the allowlist is the launch's, and nothing is allowed back, bound or excluded beyond it."""
+    found: list[Mismatch] = []
+    box = readback.sandbox
+    domains = set(_pin_value(expected, "sandbox.network.allowedDomains"))
+    denied = set(_pin_value(expected, "F10"))
+
+    def wrong(item: str, want: Any, got: Any, pin: str = "") -> None:
+        source = Source.UNKNOWN
+        if pin and (found_pin := next((p for p in expected.pins if p.item == pin), None)) is not None:
+            source = _blame(found_pin, readback)
+        found.append(Mismatch(Reason.LAUNCH_SETTING_MISMATCH, f"dialog.{item}", want, got, source,
+                              key=".".join(found_pin.key) if pin and found_pin is not None else ""))
+
+    if not denied <= runtime.get("reads_denied", set()):
+        wrong("reads_denied", sorted(denied), sorted(runtime.get("reads_denied", set())), "F10")
+    for identifier in _MUST_BE_EMPTY:
+        if runtime.get(identifier):
+            wrong(identifier, [], sorted(runtime[identifier]),
+                  "sandbox.network.allowUnixSockets" if identifier == "unix_sockets_allowed" else "")
+    if runtime.get("hosts_allowed", set()) != domains:
+        wrong("hosts_allowed", sorted(domains), sorted(runtime.get("hosts_allowed", set())), "sandbox.network.allowedDomains")
+    if box["excluded_commands"]:
+        wrong("excluded_commands", [], box["excluded_commands"], "sandbox.excludedCommands")
+    if box["enabled"] is not True:
+        wrong("enabled", True, box["enabled"], "F1")
+    if box["unsandboxed_fallback"] is not False:
+        wrong("unsandboxed_fallback", False, box["unsandboxed_fallback"], "F5")
+    lists = box["lists"]
+    for field, want in (("other_hosts", "refused"), ("files_confined", True), ("all_unix_sockets", False)):
+        if lists[field] != want or type(lists[field]) is not type(want):
+            wrong(field, want, lists[field])
     return found
 
 
@@ -420,6 +478,18 @@ def check_init(event: Mapping[str, Any], mcp_tools: frozenset[str]) -> list[Mism
         found.append(Mismatch(Reason.LAUNCH_SETTING_MISMATCH, "permissions.defaultMode", "bypassPermissions",
                               event.get("permissionMode"), Source.UNKNOWN))
     return found
+
+
+def init_missing() -> list[Mismatch]:
+    """A turn showed events, or ended, without a passing ``system/init`` before them."""
+    return [Mismatch(Reason.LAUNCH_SETTING_MISMATCH, "init", "a passing system/init before the turn's events", None,
+                     Source.UNKNOWN)]
+
+
+def unlisted_tool(name: str, listed: frozenset[str]) -> list[Mismatch]:
+    """A tool call of a tool the turn's passing ``system/init`` did not list."""
+    return [] if name in listed else [Mismatch(Reason.LAUNCH_SETTING_MISMATCH, "tools", sorted(listed), [name],
+                                               Source.UNKNOWN)]
 
 
 def _short(value: Any) -> str:

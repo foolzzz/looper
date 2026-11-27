@@ -377,3 +377,90 @@ def test_a_slow_first_answer_is_waited_for_and_a_slow_later_one_is_not(case, mon
     asyncio.run(run(False))  # the first answer took 0.6 s, three times the later timeout: no refusal
     with pytest.raises(rb.ReadbackUnavailable):
         asyncio.run(run(True))
+
+
+# --- the runtime rows of the sandbox dialog (adversarial review, finding 1) ---
+
+
+def _rows(case, identifier):
+    return [r for r in case.sandbox["lists"]["rows"] if r["id"] == identifier]
+
+
+def _set_row(case, identifier, entries):
+    case.sandbox["lists"]["rows"] = [r for r in case.sandbox["lists"]["rows"] if r["id"] != identifier]
+    if entries is not None:
+        case.sandbox["lists"]["rows"].append({"id": identifier, "entries": entries, "total": len(entries)})
+
+
+@pytest.mark.parametrize("identifier,entries,item", [
+    ("reads_denied", ["/home-placeholder/.aws"], "dialog.reads_denied"),  # shorter than the injected denyRead
+    ("reads_denied", None, "dialog.reads_denied"),
+    ("reads_allowed_anyway", ["/srv/open"], "dialog.reads_allowed_anyway"),
+    ("writes_allowed_anyway", ["/srv/open"], "dialog.writes_allowed_anyway"),
+    ("hosts_allowed", ["evil.example"], "dialog.hosts_allowed"),
+    ("hosts_allowed", ["api.example.com", "evil.example"], "dialog.hosts_allowed"),
+    ("hosts_allowed", None, "dialog.hosts_allowed"),
+    ("unix_sockets_allowed", ["/srv/x.sock"], "dialog.unix_sockets_allowed"),
+])
+def test_a_runtime_dialog_row_wider_than_the_launch_is_refused(case, identifier, entries, item) -> None:
+    _set_row(case, identifier, entries)
+    assert [(m.reason, m.item) for m in case.compare()] == [(WIDER, item)]
+
+
+@pytest.mark.parametrize("field,value,item", [
+    ("excluded_commands", ["git"], "dialog.excluded_commands"),
+    ("enabled", False, "dialog.enabled"),
+    ("unsandboxed_fallback", True, "dialog.unsandboxed_fallback"),
+])
+def test_a_wider_dialog_field_is_refused(case, field, value, item) -> None:
+    case.sandbox[field] = value
+    assert [m.item for m in case.compare()] == [item]
+
+
+@pytest.mark.parametrize("field,value", [("other_hosts", "allowed"), ("files_confined", False), ("all_unix_sockets", True)])
+def test_a_wider_dialog_list_scalar_is_refused(case, field, value) -> None:
+    case.sandbox["lists"][field] = value
+    assert [m.item for m in case.compare()] == [f"dialog.{field}"]
+
+
+def test_extra_denied_entries_and_extra_known_rows_with_matching_content_pass(case) -> None:
+    _set_row(case, "hosts_denied", ["bad.example"])
+    _set_row(case, "reads_denied", ["/home-placeholder/.ssh", "/home-placeholder/.aws", "/more"])
+    assert case.compare() == []
+
+
+def test_a_missing_hosts_row_is_the_empty_allowlist(tmp_path) -> None:
+    clean = Case(tmp_path, allowed_domains=())
+    assert not _rows(clean, "hosts_allowed") and clean.compare() == []
+    _set_row(clean, "hosts_allowed", ["evil.example"])
+    assert [m.item for m in clean.compare()] == ["dialog.hosts_allowed"]
+
+
+# --- finding 2: lowercase proxy names ---
+
+
+@pytest.mark.parametrize("name", ["http_proxy", "https_proxy", "all_proxy", "no_proxy", "SSH_AUTH_SOCK", "HTTP_PROXY"])
+def test_every_dropped_environment_name_is_refused_in_effective_env(case, name) -> None:
+    case.user_layer(("env", name), "http://secret@x")
+    [mismatch] = case.compare()
+    assert (mismatch.item, mismatch.actual) == ("env", [name])
+    assert "secret" not in rb.notice([mismatch], "2.1.332")
+
+
+# --- finding 6: rows and totals ---
+
+
+def test_an_unknown_row_id_a_duplicate_row_or_a_truncated_row_is_unavailable(case) -> None:
+    def read_with(rows):
+        body = copy.deepcopy(case.sandbox)
+        body["lists"]["rows"] = rows
+        with pytest.raises(rb.ReadbackUnavailable) as caught:
+            asyncio.run(rb.read(FakeResident({**case.responses(), "get_sandbox_dialog": body}), "turn"))
+        return caught.value.item
+
+    rows = copy.deepcopy(case.sandbox["lists"]["rows"])
+    assert read_with([*rows, {"id": "writes_allowed_but_new", "entries": [], "total": 0}]) == "get_sandbox_dialog.lists.rows.id"
+    assert read_with([*rows, rows[0]]) == "get_sandbox_dialog.lists.rows.id"
+    truncated = copy.deepcopy(rows)
+    truncated[0]["total"] += 1
+    assert read_with(truncated) == "get_sandbox_dialog.lists.rows.total"

@@ -22,6 +22,10 @@ def tool_rule(name: str) -> dict[str, Any]:
             "description": {"prefix": "Any use of the ", "emphasis": name, "suffix": " tool"}}
 
 
+def row(identifier: str, entries: list[str]) -> dict[str, Any]:
+    return {"id": identifier, "entries": entries, "total": len(entries)}
+
+
 class Case:
     """One clean readback and the expectation it matches; tests change ``bodies`` and call ``compare``."""
 
@@ -42,12 +46,16 @@ class Case:
             "effective": copy.deepcopy(injected),
             "sources": [{"source": "flagSettings", "settings": copy.deepcopy(injected)},
                         {"source": "policySettings", "settings": {"hooks": {"PreToolUse": [{"matcher": "^Bash$"}]}}}]}
+        deny = list(READ_DENY) + [f"{HOME}/.config/gh"]
         self.sandbox: dict[str, Any] = {
-            "supported": True, "enabled": True, "dependencies": {"errors": [], "warnings": []},
+            "supported": True, "enabled": True, "unsandboxed_fallback": False, "excluded_commands": [],
+            "dependencies": {"errors": [], "warnings": []},
             "restrictions": {"fs_allow_write": [], "fs_deny_write": [], "network_allowed_domains": list(allowed_domains)},
-            "lists": {"rows": [{"id": "writes_allowed", "entries": sorted(self.expected.writes_allowed),
-                                "total": len(self.expected.writes_allowed)},
-                               {"id": "reads_denied", "entries": ["x"], "total": 1}]}}
+            "lists": {"rows": [row("writes_allowed", sorted(self.expected.writes_allowed)),
+                               row("reads_denied", [*deny, f"{HOME}/extra-denied"]),
+                               row("writes_denied", ["/x"]),
+                               *([row("hosts_allowed", list(allowed_domains))] if allowed_domains else [])],
+                      "files_confined": True, "all_unix_sockets": False, "other_hosts": "refused"}}
         self.hooks: dict[str, Any] = {"hooks": [
             {"event": "PreToolUse", "matcher": "^Bash$", "source": "policySettings", "type": "command"}]}
         self.mcp: dict[str, Any] = {"mcpServers": [
