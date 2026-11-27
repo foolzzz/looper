@@ -479,3 +479,61 @@ def test_upgrade_probe_the_tool_search_pin_beats_the_process_environment(probe):
     tools = run(scenario())["tools"]
     probe.observations["upgrade_tools_with_tool_search_in_the_process_env"] = sorted(tools)
     assert "ToolSearch" not in tools
+
+
+# --- ordering: a turn's system/init against the first tool it runs ---
+
+STAMP = "perl -MTime::HiRes=time -e 'open(F, \">>\", $ARGV[0]); printf F \"%.6f\\n\", time; close F' {marker}"
+
+
+def _ordering(probe: SandboxProbe, turns: int, *, resume: str | None = None, name: str = "tool-stamps.txt"):
+    marker = probe.cwd / name
+    session: list[str] = []
+    script = []
+    for _ in range(turns):
+        script += [tool_use("Bash", {"command": STAMP.format(marker=marker)}), text("done")]
+
+    async def scenario():
+        live = Live(probe, script)
+        if resume:
+            live.command = probe.command(probe.cwd, library=live.library, resume=resume)
+        await live.start()
+        rows = []
+        try:
+            for index in range(turns):
+                seen: list[tuple[str, float]] = []
+
+                async def on_event(event):
+                    kind = event.get("type")
+                    if kind == "system" and event.get("subtype") == "init":
+                        seen.append(("init", time.time()))
+                        session.append(event["session_id"])
+                    elif kind in ("assistant", "stream_event") or (kind == "user" and not event.get("isReplay")):
+                        seen.append((kind, time.time()))
+
+                await live.resident.run_turn(f"turn {index}", on_event)
+                rows.append(seen)
+            return rows, session[0]
+        finally:
+            await live.stop()
+
+    rows, session_id = run(scenario())
+    stamps = [float(line) for line in marker.read_text().split()] if marker.exists() else []
+    return rows, stamps, session_id
+
+
+def test_init_arrives_before_the_first_assistant_content_and_before_a_tool_runs(probe):
+    lead = []
+    session_id = None
+    for name, resume in (("fresh.txt", None), ("resumed.txt", "use-first")):
+        rows, stamps, found = _ordering(probe, 12, resume=session_id if resume else None, name=name)
+        session_id = session_id or found
+        assert len(stamps) == 12, stamps
+        for seen, stamp in zip(rows, stamps):
+            kinds = [kind for kind, _ in seen]
+            assert kinds[0] == "init", kinds  # nothing of the turn precedes init in the stream
+            lead.append(stamp - seen[0][1])  # the tool ran this long after Looper read init (negative: before)
+    probe.observations["ordering_load_average"] = os.getloadavg()
+    probe.observations["ordering_tool_minus_init_read_seconds"] = [round(value, 4) for value in lead]
+    print("ORDERING load", os.getloadavg(), "min/median/max tool-after-init-read (s):",
+          round(min(lead), 3), round(statistics.median(lead), 3), round(max(lead), 3), len(lead), "turns")

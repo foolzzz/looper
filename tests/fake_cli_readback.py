@@ -5,7 +5,7 @@ the clean one for the stand-in's own launch command: the effective settings are 
 servers the ``--mcp-config`` file's, the tool rules the verified version's. A test makes the CLI answer otherwise by
 writing JSON to ``override_path`` (read at every request, so it can change between turns):
 ``{"<subtype>": {...}}`` is deep-merged into that answer, ``{"<subtype>": "error"}`` answers an error and
-``{"<subtype>": "hang"}`` does not answer.
+``{"<subtype>": "hang"}`` does not answer; ``{"init": {...}}`` replaces fields of the turn's ``system/init``.
 """
 from __future__ import annotations
 
@@ -28,6 +28,16 @@ def _merge(base, patch):
     if isinstance(base, dict) and isinstance(patch, dict):
         return {**base, **{key: _merge(base.get(key), value) for key, value in patch.items()}}
     return patch
+
+
+def init_fields(override_path):
+    """``tools`` and ``permissionMode`` of the stand-in's ``system/init``: the launch's own; ``{"init": {...}}`` in the
+    override file replaces fields."""
+    mcp_file = _flag("--mcp-config")
+    servers = json.loads(Path(mcp_file).read_text()).get("mcpServers", {}) if mcp_file else {}
+    fields = {"tools": ["Bash", *(f"mcp__{name}__task_status" for name in servers)], "permissionMode": "bypassPermissions"}
+    override = json.loads(Path(override_path).read_text()) if Path(override_path).exists() else {}
+    return {**fields, **override.get("init", {})}
 
 
 def readback_answer(request, override_path):

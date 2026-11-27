@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import copy
+import json
 from typing import Any
 
 import pytest
@@ -260,7 +261,7 @@ def test_a_server_that_stays_pending_is_unavailable(case, monkeypatch) -> None:
     monkeypatch.setattr(rb, "MCP_PENDING_WAIT_SEC", 0.01)
     with pytest.raises(rb.ReadbackUnavailable) as caught:
         _read(case, "turn", mcp_status={"mcpServers": [{"name": "docs", "status": "pending", "config": {}}]})
-    assert caught.value.item == "mcp_status.status"
+    assert caught.value.item == "mcp_status.pending"
 
 
 @pytest.mark.parametrize("subtype", ["initialize", "get_settings", "get_sandbox_dialog", "get_hooks_listing",
@@ -306,3 +307,72 @@ def test_the_write_set_rule_follows_home_uid_and_the_claude_temp_root(tmp_path) 
     entries = rb.writes_allowed("/h", 7, str(tmp_path))
     assert f"{tmp_path.resolve()}/claude-7/" in entries and "/h/.claude/debug" in entries and "." in entries
     assert "/private/tmp/claude-7/" in rb.writes_allowed("/h", 7) or "/tmp/claude-7/" in rb.writes_allowed("/h", 7)
+
+
+# --- the positive check of a turn's system/init ---
+
+MCP = frozenset({"mcp__docs__do", "mcp__looper__do"})
+
+
+@pytest.mark.parametrize("tools,ok", [
+    (["Bash", *sorted(MCP)], True),
+    (["Bash", "EndConversation", "WaitForMcpServers", *sorted(MCP)], True),
+    (["Bash", "EndConversation", *sorted(MCP)], True),
+    (["Bash", *sorted(MCP), "Read"], False),
+    (["Bash", *sorted(MCP), "ToolSearch"], False),
+    (["Bash", "mcp__docs__do"], False),  # a server's tool is missing: not what was launched
+    (["Bash", *sorted(MCP), "mcp__stray__x"], False),
+    ([*sorted(MCP)], False),
+    (None, False),
+    ("Bash", False),
+])
+def test_init_tools_are_the_allowlist_plus_the_servers_tools(tools, ok) -> None:
+    event = {"type": "system", "subtype": "init", "tools": tools, "permissionMode": "bypassPermissions"}
+    found = rb.check_init(event, MCP)
+    assert (found == []) is ok
+    assert all(m.item == "tools" and m.reason is WIDER for m in found)
+
+
+@pytest.mark.parametrize("mode", ["default", "acceptEdits", None])
+def test_init_permission_mode_must_be_bypass(mode) -> None:
+    event = {"tools": ["Bash"], "permissionMode": mode}
+    assert [m.item for m in rb.check_init(event, frozenset())] == ["permissions.defaultMode"]
+
+
+def test_the_mcp_tool_names_come_from_mcp_status(case) -> None:
+    assert rb.mcp_tool_names(case.readback()) == {"mcp__docs__do", "mcp__looper__do"}
+
+
+# --- the first answer after a start is slow, later ones are not allowed to be ---
+
+
+def test_a_slow_first_answer_is_waited_for_and_a_slow_later_one_is_not(case, monkeypatch) -> None:
+    from tests.test_resident_control import _idle
+
+    monkeypatch.setattr(rb, "CONTROL_STARTUP_SEC", 2.0)
+    monkeypatch.setattr(rb, "CONTROL_TIMEOUT_SEC", 0.2)
+    bodies = case.responses()
+
+    async def run(slow_later: bool) -> None:
+        resident, writer, output = _idle()
+        delays = []
+
+        async def after() -> None:
+            request = json.loads(writer.lines[-1])
+            delay = 0.6 if (not delays or (slow_later and len(delays) == 2)) else 0.0
+            delays.append(delay)
+
+            async def answer() -> None:
+                await asyncio.sleep(delay)
+                await output._dispatch({"type": "control_response", "response": {
+                    "request_id": request["request_id"], "subtype": "success",
+                    "response": bodies[request["request"]["subtype"]]}})
+
+            asyncio.get_running_loop().create_task(answer())
+
+        writer.after_write = after
+        await rb.read(resident, "launch")
+
+    asyncio.run(run(False))  # the first answer took 0.6 s, three times the later timeout: no refusal
+    with pytest.raises(rb.ReadbackUnavailable):
+        asyncio.run(run(True))

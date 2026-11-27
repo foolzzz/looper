@@ -229,7 +229,7 @@ async def read(resident: ResidentClaude, phase: str) -> Readback:
         if not any(isinstance(server, Mapping) and server.get("status") == "pending" for server in servers):
             break
         if asyncio.get_running_loop().time() >= deadline:
-            raise ReadbackUnavailable("mcp_status.status", "a server is still pending")
+            raise ReadbackUnavailable("mcp_status.pending", "a server is still pending")
         await asyncio.sleep(MCP_PENDING_POLL_SEC)
     readback = Readback(mode, bodies["get_settings"], bodies["get_sandbox_dialog"], bodies["get_hooks_listing"], mcp,
                         bodies["list_permission_rules"], bodies["get_context_usage"])
@@ -402,6 +402,28 @@ def _compare_mcp(readback: Readback, expected: Expected) -> list[Mismatch]:
             continue
         if shape(definition) != expected.mcp[name]:
             found.append(Mismatch(Reason.MCP_SET_MISMATCH, f"fingerprint:{name}", None, None, Source.UNKNOWN))
+    return found
+
+
+def mcp_tool_names(readback: Readback) -> frozenset[str]:
+    """The MCP tools Claude Code reports for the launch's servers, by the name a turn lists them under."""
+    return frozenset(f"mcp__{server['name']}__{tool['name']}" for server in readback.mcp["mcpServers"]
+                     for tool in server.get("tools") or () if isinstance(tool, Mapping) and isinstance(tool.get("name"), str))
+
+
+def check_init(event: Mapping[str, Any], mcp_tools: frozenset[str]) -> list[Mismatch]:
+    """The positive check of a turn's ``system/init``: ``tools`` is the allowlist plus the servers' tools (the two
+    tools the CLI may add whatever ``--tools`` says may or may not be listed) and ``permissionMode`` is bypass."""
+    found: list[Mismatch] = []
+    required = {*task_manager_sandbox.BUILTIN_TOOLS, *mcp_tools}
+    tools = event.get("tools")
+    listed = set(tools) if isinstance(tools, list) and all(isinstance(name, str) for name in tools) else None
+    if listed is None or not required <= listed <= required | set(task_manager_sandbox.UNREMOVABLE_TOOLS):
+        found.append(Mismatch(Reason.LAUNCH_SETTING_MISMATCH, "tools", sorted(required),
+                              None if listed is None else sorted(listed), Source.UNKNOWN))
+    if event.get("permissionMode") != "bypassPermissions":
+        found.append(Mismatch(Reason.LAUNCH_SETTING_MISMATCH, "permissions.defaultMode", "bypassPermissions",
+                              event.get("permissionMode"), Source.UNKNOWN))
     return found
 
 

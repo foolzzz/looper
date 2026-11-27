@@ -180,3 +180,31 @@ def test_a_resume_reads_back_with_initialize_before_the_message(monkeypatch, tmp
         finally:
             await second.shutdown()
     run_db(check, monkeypatch, timeout=40)
+
+
+@pytest.mark.parametrize("init,item", [
+    ({"tools": ["Bash", "Read"]}, "tools"),
+    ({"tools": ["Bash", "ToolSearch"]}, "tools"),
+    ({"tools": []}, "tools"),
+    ({"permissionMode": "default"}, "permissions.defaultMode"),
+])
+def test_an_init_that_lists_other_tools_or_mode_discards_the_turn(monkeypatch, tmp_path, native, alerts, init, item):
+    async def check(db):
+        task_id, _, _ = await native.create(db)
+        pool = tm.TaskManagerPool(tmp_path / "runtime", native.executable, max_resident=lambda: 2)
+        try:
+            await submit_and_wait(pool, task_id, "one", message_id="one")
+            override(native, {"init": init})
+            sink = Sink()
+            result = await pool.submit(task_id, "write", message_id="two", sink=sink)
+            await sink.done()
+            assert result.state in ("refused", "started")
+            assert sink.finals[-1][1] == "refused" and item in sink.finals[-1][0]
+            assert sink.deltas == [] and sink.tools == []  # nothing of the turn was delivered
+            assert safety.refusal_counts[("launch_setting_mismatch", "turn", VERSION)] == 1
+            assert not pool.agent(task_id).resident.started and len(alerts) == 1
+            clear_override(native)
+            await submit_and_wait(pool, task_id, "three", message_id="three")
+        finally:
+            await pool.shutdown()
+    run_db(check, monkeypatch, timeout=40)

@@ -172,6 +172,14 @@ class _Request:
     cancel: TurnCancel = field(default_factory=TurnCancel)
 
 
+class _InitMismatch(Exception):
+    """A turn's ``system/init`` lists other tools or another permission mode than the verified launch has."""
+
+    def __init__(self, mismatches: list[task_manager_readback.Mismatch]) -> None:
+        super().__init__("init mismatch")
+        self.mismatches = mismatches
+
+
 class _ResumeFailed(Exception):
     pass
 
@@ -268,6 +276,7 @@ class TaskManagerAgent:
         self.running: asyncio.Task[None] | None = None
         self.mcp_fingerprints: dict[str, str] = {}  # of the allowed servers launched, to compare with what ran
         self.mcp_files: set[str] = set()  # generated configs holding the operator's server definitions
+        self.init_tools: frozenset[str] | None = None  # the MCP tools the readback saw: what a turn's init must list
         self.started_for_turn: Literal["launch", "resume"] | None = None  # what the turn's ``prepare`` started
 
     async def prepare(self, *, sink: TurnSink | None = None) -> tuple[Mapping[str, Any], Any, Launch, SystemPrompt]:
@@ -415,15 +424,22 @@ class TaskManagerAgent:
                 env.get("HOME") or str(Path.home()), os.getuid(), env.get("CLAUDE_CODE_TMPDIR")),
             mcp=task_manager_readback.expected_mcp(library_mcp_servers(launch.library), private_dir),
             known_tools=task_manager_readback.KNOWN_BUILTIN_TOOLS[task_manager_safety.VERIFIED_CLI_VERSION])
+        self.init_tools = None
         try:
-            mismatches = task_manager_readback.compare(await task_manager_readback.read(self.resident, phase), expected)
+            readback = await task_manager_readback.read(self.resident, phase)
+            mismatches = task_manager_readback.compare(readback, expected)
         except task_manager_readback.ReadbackUnavailable as exc:
             if phase == "resume" and not self.resident.running:
                 return  # a resume that exited at once is the turn's own ``_ResumeFailed`` (a fresh session follows)
             mismatches = [task_manager_readback.Mismatch(task_manager_safety.Reason.READBACK_UNAVAILABLE, exc.item,
                                                          None, None, task_manager_readback.Source.UNKNOWN)]
         if not mismatches:
+            self.init_tools = task_manager_readback.mcp_tool_names(readback)
             return
+        await self._refuse(mismatches, phase)
+
+    async def _refuse(self, mismatches: Sequence[task_manager_readback.Mismatch], phase: str) -> None:
+        """End the process, count and alert, and refuse with the first mismatch's reason."""
         reason = mismatches[0].reason
         task_manager_safety.record_refusal(reason, phase, task_manager_safety.VERIFIED_CLI_VERSION)
         await self.resident.stop(kill=True)
@@ -473,6 +489,9 @@ class TaskManagerAgent:
                     nonlocal initialized
                     await recorder.record(event)
                     if event.get("type") == "system" and event.get("subtype") == "init":
+                        if self.mode == "direct" and self.init_tools is not None and (
+                                bad := task_manager_readback.check_init(event, self.init_tools)):
+                            raise _InitMismatch(bad)  # before anything of this turn is delivered
                         if expected and event.get("session_id") != expected:
                             raise _ResumeFailed("Claude Code resumed a different session")
                         initialized = True
@@ -519,6 +538,8 @@ class TaskManagerAgent:
                         if resuming and not initialized and not request.cancel.requested:
                             retry_detail = result.stderr or await self.resident.stderr_tail()
                             raise _ResumeFailed(retry_detail or "Claude Code exited before init")
+                    except _InitMismatch as exc:
+                        await self._refuse(exc.mismatches, "turn")
                     except _ResumeFailed as exc:
                         if attempt or request.cancel.requested:
                             raise

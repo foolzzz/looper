@@ -94,7 +94,7 @@ for line in sys.stdin:
     config_path = Path('context-probe.json')
     measurement_config = json.loads(config_path.read_text()) if config_path.exists() else {{}}
     record({{'kind':'input','text':text,'session':session}})
-    emit({{'type':'system','subtype':'init','session_id':session}})
+    emit({{'type':'system','subtype':'init','session_id':session, **init_fields(str(log.with_name('readback-override.json')))}})
     if text == 'wait':
         continue
     if text == '/compact':
