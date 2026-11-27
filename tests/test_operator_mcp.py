@@ -150,7 +150,8 @@ def test_wrapping_is_idempotent_and_unwrap_leaves_other_definitions_alone(tmp_pa
     remote = {"type": "http", "url": "https://h.example/m"}
     assert operator_mcp.wrap(remote, tmp_path) == remote
     with pytest.raises(ValueError, match="absolute"):
-        operator_mcp.wrap({"command": "alpha"}, tmp_path)
+        operator_mcp.wrap({"command": "./alpha"}, tmp_path)
+    assert operator_mcp.unwrap(operator_mcp.wrap({"command": "alpha"}, tmp_path))["command"] == "alpha"
     # A server that merely uses sh with other arguments is not mistaken for the wrapper.
     assert not operator_mcp.is_wrapped({"command": "/bin/sh", "args": ["-c", "echo hi", "sh", "a", "b"]})
 
@@ -188,9 +189,10 @@ def test_the_wrapper_starts_the_command_in_the_private_directory_not_the_task_di
     ({"command": "/usr/bin/python3", "args": ["-m", "pkg"]}, "python -m"),
     ({"command": "/usr/bin/python3", "args": ["-m", "pkg", "-I"]}, "python -m"),
     ({"command": "/usr/bin/node", "args": ["./server.js"]}, "relative_script"),
-    ({"command": "node", "args": ["/opt/srv/index.js"]}, "relative_command"),
-    ({"command": "server.sh"}, "relative_command"),
     ({"command": "./server"}, "relative_command"),
+    ({"command": "bin/server"}, "relative_command"),
+    ({"command": "../server"}, "relative_command"),
+    ({"command": "node", "args": ["./index.js"]}, "relative_script"),
     ({"cwd": "sub"}, "relative_cwd"),
     ({"command": "/opt/tools/server", "cwd": "sub"}, "relative_cwd"),
     ({"command": "/opt/tools/server", "cwd": "/opt/tools"}, "cwd"),
@@ -206,6 +208,8 @@ def test_unsafe_launchers_are_named(definition, launcher):
     {"command": "/usr/bin/python3", "args": ["-c", "print(1)"]},
     {"command": "/opt/tools/server", "args": ["--stdio"], "env": {"PYTHONPATH": "/opt/lib"}},
     {"command": "/usr/bin/node", "args": ["/opt/srv/index.js"]},
+    {"command": "server-on-path", "args": ["--stdio"]},  # a bare name resolves through PATH
+    {"command": "node", "args": ["/opt/srv/index.js"]},
     {"command": "/opt/bin/uv", "args": ["tool", "list"]},
     {"type": "http", "url": "https://h.example/m"},
     {"type": "sse", "url": "https://h.example/s", "headers": {"A": "b"}},
@@ -226,3 +230,60 @@ def test_an_unsafe_allowed_server_raises_before_anything_is_written(home, tmp_pa
                                                      environment=environment(home), cwd=root / "cwd"))
     assert (raised.value.name, raised.value.launcher) == ("risky", "npx")
     assert "absolute path" in str(raised.value) and not root.exists()
+
+
+@pytest.mark.parametrize("command", ["./rel.sh", "bin/server", "../up", "sub/dir/x"])
+def test_a_relative_command_with_a_path_separator_is_unresolved(home, command):
+    """Claude Code resolves it against the task directory, which the model can write."""
+    write_json(home / ".claude.json", {"mcpServers": {"rel": {"type": "stdio", "command": command}}})
+    with pytest.raises(operator_mcp.UnresolvedServers, match="absolute path") as raised:
+        operator_mcp.resolve(["rel"], environment=environment(home))
+    assert raised.value.names == ("rel",)
+
+
+def test_absolute_bare_and_remote_commands_resolve(home):
+    write_json(home / ".claude.json", {"mcpServers": {
+        "abs": {"type": "stdio", "command": "/opt/x"}, "bare": {"type": "stdio", "command": "x-on-path"},
+        "remote": {"type": "http", "url": "https://h.example/m"}}})
+    assert sorted(operator_mcp.resolve(["abs", "bare", "remote"], environment=environment(home))) == [
+        "abs", "bare", "remote"]
+
+
+def test_fingerprint_covers_port_query_names_and_unknown_fields():
+    remote = {"type": "http", "url": "https://h.example:8443/mcp?token=a&x=1"}
+    base = operator_mcp.fingerprint(remote)
+    assert operator_mcp.fingerprint({**remote, "url": "https://h.example:9443/mcp?token=a&x=1"}) != base
+    assert operator_mcp.fingerprint({**remote, "url": "https://h.example:8443/mcp?other=a&x=1"}) != base
+    assert operator_mcp.fingerprint({**remote, "url": "https://h.example:8443/mcp?x=2&token=b"}) == base  # values stay out
+    assert "token=a" not in json.dumps(operator_mcp.fingerprint_input(remote))
+    assert operator_mcp.fingerprint({**remote, "oauth": {"clientId": "c"}}) != base
+    assert operator_mcp.fingerprint({**stdio("a"), "cwd": "/x"}) != operator_mcp.fingerprint(stdio("a"))
+
+
+def test_fingerprints_raise_for_a_name_the_library_lacks(tmp_path):
+    from looper.agents.library import AgentLibrary
+    from looper.agents.mcp import write_config
+
+    path = write_config(tmp_path, [("alpha", stdio("alpha"))])
+    library = AgentLibrary(mcp_config=str(path))
+    assert list(operator_mcp.fingerprints(library, ["alpha"])) == ["alpha"]
+    with pytest.raises(operator_mcp.UnresolvedServers) as raised:
+        operator_mcp.fingerprints(library, ["alpha", "gone"])
+    assert raised.value.names == ("gone",)
+
+
+def test_the_generated_config_lives_with_the_task_and_is_swept_at_service_start(home, tmp_path):
+    from looper.agents.library import AgentLibrary
+
+    root = tmp_path / "runtime"
+    cwd = root / "task-managers" / "t1" / "mcp-cwd"
+    built = asyncio.run(operator_mcp.library_with_allowed(
+        AgentLibrary(), root, ["alpha"], environment=environment(home), cwd=cwd))
+    config = Path(built.mcp_config)
+    assert config.parent == root / "task-managers" / "t1" / "mcp" and config.stat().st_mode & 0o777 == 0o400
+    shared = root / ".local" / "mcp" / "other-agent.json"  # another agent's config is not ours to remove
+    shared.parent.mkdir(parents=True)
+    shared.write_text("{}")
+    assert operator_mcp.sweep_orphans(root) == 1
+    assert not config.exists() and shared.exists() and cwd.is_dir()
+    assert operator_mcp.sweep_orphans(root) == 0 and operator_mcp.sweep_orphans(tmp_path / "none") == 0
