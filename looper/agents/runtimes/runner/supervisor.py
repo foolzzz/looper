@@ -17,7 +17,7 @@ import uuid
 from ... import proc_tree
 from ...log_redaction import add_secret, redact
 from ..per_turn import session_dir_name
-from .bridge import CloseState, ConnectionLost, RpcFailure, RunnerBridge
+from .bridge import CloseState, ConnectionLost, HostLag, RpcFailure, RunnerBridge
 from .protocol import ErrorCode, MAX_FRAME_BYTES, ProtocolError
 
 logger = logging.getLogger(__name__)
@@ -496,25 +496,9 @@ class RunnerSupervisor:
 
     async def _one_health(self, bridge: RunnerBridge) -> tuple[str | None, float]:
         timeout = HEALTH_TIMEOUT_SECONDS
-        tick = min(_HEALTH_LAG_TICK_SECONDS, timeout / 4)
-        lag = 0.0
-        # Captured before the task is scheduled: a pause inside the probe
-        # happens before the first sleep and must still count as host lag.
-        armed = time.monotonic()
-
-        async def ticks() -> None:
-            nonlocal lag
-            late = time.monotonic() - armed
-            if late > 0:
-                lag += late
-            while True:
-                mark = time.monotonic()
-                await asyncio.sleep(tick)
-                over = time.monotonic() - mark - tick
-                if over > 0:
-                    lag += over
-
-        sampler = asyncio.create_task(ticks())
+        # Counts a pause before the task is first scheduled, and (settle) one that ends mid-sleep.
+        host_lag = HostLag(min(_HEALTH_LAG_TICK_SECONDS, timeout / 4))
+        sampler = asyncio.create_task(host_lag.run())
         reason = None
         try:
             await bridge.health(timeout=timeout)
@@ -532,9 +516,10 @@ class RunnerSupervisor:
         finally:
             # Do not await it. Recovery cancels this probe as soon as the
             # connection fails, and that yield would drop the probe's reason.
+            host_lag.settle()
             sampler.cancel()
             sampler.add_done_callback(_drop_task_exception)
-        return reason, lag
+        return reason, host_lag.total
 
     def _skip_health(self, generation: _Generation, why: str) -> None:
         logger.warning("runner_health_skipped kind=%s runner_id=%s reason=%s",
