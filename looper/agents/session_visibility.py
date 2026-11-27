@@ -119,14 +119,13 @@ def scoped_for(manager_id: str, key: str) -> SessionAllowlist | None:
 #   looper_task_control     start, stop, restart and cancel a task
 #   looper_task_instruct    send a running task a supplement
 #   looper_task_update      edit a task's title, or its requirement while it has not ended
-#   looper_confirm          relay the user's word for an operation a listed tool asked to confirm (cancelling or
-#                           starting a task over): the client's own pending confirmation only, as in main
 # Not listed: configuration and settings (projects, providers, models, profiles, catalog, schedules, concurrency,
-# config export), spend (costs, overview), the gate reply (the
+# config export), spend (costs, overview), the confirmation tool (a pending confirmation is keyed by chat only,
+# so a client turn could confirm another session's item; only the operator confirms), the gate reply (the
 # open gates of every chat are the operator's), and every tool of the operator's own turns (leads, vault, session
 # search, reminders, memory, intents, task hold).
 CLIENT_TOOLS = frozenset({"looper_tasks", "looper_task_create", "looper_task_control", "looper_task_instruct",
-                          "looper_task_update", "looper_confirm"})
+                          "looper_task_update"})
 # The client gets the lists it needs to name a task's project, template or workflow, and nothing of the operator's:
 # no profile, notes, goals, ready tasks, open gates, harness, profile prompt, role prompt or other chats. Its
 # instructions are CLIENT_CONTRACT alone.
@@ -145,8 +144,8 @@ guess it. You have no shell or file tools.
 ## Looper's tools
 You act on Looper only through its tools; never through its HTTP API or files. Each tool answers JSON: "status" is
 "ok", "needs_confirmation" or "error", and "error.message" says what to change. Your tools are looper_tasks (list,
-search and get tasks), looper_task_create, looper_task_control (start, stop, restart, cancel), looper_task_instruct,
-looper_task_update and looper_confirm. Settings, projects, schedules, providers and costs are not available here:
+search and get tasks), looper_task_create, looper_task_control (start, stop, restart, cancel), looper_task_instruct
+and looper_task_update. Settings, projects, schedules, providers, costs and confirmations are not available here:
 when the client asks for one, say it is not available in this session and that the operator can do it.
 
 Each message starts with "Projects" (the existing projects and their default directories) and, when there are any,
@@ -164,9 +163,8 @@ task templates and workflows.
 - Never ask for, take or repeat an API key, token or password.
 - After starting or changing a task, do not wait or poll inside the turn (no sleep, no repeated status calls): end
   the reply.
-- When a tool answers "needs_confirmation" (cancelling a task, starting one over), it did not run: say so and wait.
-  When the next message starts with a [Looper] note naming the confirmation and the user confirms, call
-  looper_confirm with its confirmation_id; otherwise do not.
+- When a tool answers "needs_confirmation" (cancelling a task, starting one over), it did not run: only the operator
+  can confirm it, from their own conversation. Say so and that it is waiting; you cannot confirm it.
 - Never say an operation ran unless its answer was "ok"."""
 CLIENT_KEY_PREFIX = "client:"
 

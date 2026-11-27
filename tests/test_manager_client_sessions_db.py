@@ -217,6 +217,7 @@ def test_a_client_session_lists_only_the_allowlisted_tools_and_refuses_the_rest(
             seen["listing"] = sorted(item["name"] for item in await ops.current_listing(session_key=_key("client-a")))
             for name, arguments in (("looper_settings", {"action": "get"}), ("looper_projects", {"action": "list"}),
                                     ("looper_overview", {}), ("looper_task_gate_reply", {"gate": "g1", "task_id": "t"}),
+                                    ("looper_confirm", {"confirmation_id": "synthetic-pending"}),
                                     ("looper_session_search", {"query": "x"}), (future.name, {})):
                 seen["calls"].append((name, await ops.call(name, arguments, binding=binding,
                                                             session_key=_key("client-a"))))
@@ -226,7 +227,7 @@ def test_a_client_session_lists_only_the_allowlisted_tools_and_refuses_the_rest(
         a.on_turn = calls
         await rig.reply(await _sent(rig, pool, _client("list my tasks", "client-a", "thread-a")))
         assert seen["listing"] == sorted(session_visibility.CLIENT_TOOLS)
-        assert len(seen["calls"]) == 6
+        assert len(seen["calls"]) == 7
         for name, answer in seen["calls"]:
             assert answer["status"] == "error" and answer["error"]["code"] == "forbidden", (name, answer)
         assert reads == []
@@ -309,6 +310,40 @@ def test_an_idle_reclaimable_session_is_stopped_at_the_limit_for_the_longest_idl
         else:
             assert not any(r.started for r in residents.values())
         assert sum(r.started for r in (rig.main, *residents.values())) <= session_routing.max_resident()
+
+    _run(test, mode, tmp_path)
+
+
+def test_a_client_turn_cannot_confirm_a_pending_item_even_in_the_same_chat(
+        mode: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    from looper.agents.ops import Turn, service
+
+    async def test(rig: _Rig, pool: Any) -> None:
+        ran: list[str] = []
+        ops = ManagerOps(Platform(bus=None, task_router=None, manager=rig.manager),
+                         url="http://127.0.0.1:9/", token="synthetic-token")
+        ops._working_at = ops._clock()
+        rig.manager.ops = ops
+        await _thread(pool, "thread-a", "client-a")
+        a = _client_resident(rig, "client-a", _Resident("sess-a"))
+        seen: dict[str, Any] = {}
+
+        async def calls(on_event: Any) -> None:
+            turn = rig.manager._running_token.ops_turn
+            # A confirmation another session (the operator's) left pending under this chat's key.
+            asker = Turn(channel=turn.channel, channel_id=turn.channel_id, chat=turn.chat, message_id="earlier",
+                         sender=None)
+            ops._pending[turn.chat_key] = service._Pending(
+                id="synthetic-pending", tool=service.CONFIRM, arguments={}, block="operator's pending action",
+                asked_in="earlier", at=ops._clock(), confirmation={}, asker=asker)
+            seen["answer"] = await ops.call("looper_confirm", {"confirmation_id": "synthetic-pending"},
+                                            binding=rig.manager._running_token.binding, session_key=_key("client-a"))
+            seen["still_pending"] = turn.chat_key in ops._pending and ops._pending[turn.chat_key].id == "synthetic-pending"
+
+        a.on_turn = calls
+        await rig.reply(await _sent(rig, pool, _client("confirm it", "client-a", "thread-a")))
+        assert seen["answer"]["status"] == "error" and seen["answer"]["error"]["code"] == "forbidden", seen
+        assert seen["still_pending"] and ran == []
 
     _run(test, mode, tmp_path)
 

@@ -154,7 +154,7 @@ Manager has no tool for it. The dashboard shows the task page's 指标 card and 
   the operator's, turns never run in it. A scenario Manager has no client sessions: its clients keep its main.
   - Tools: an explicit list, `session_visibility.CLIENT_TOOLS`, run through the Manager's own tool path (the same
     checks as in main: risk, a user turn for a write, the outbound review): `looper_tasks` (read tasks),
-    `looper_task_create`, `looper_task_control`, `looper_task_instruct`, `looper_task_update` and `looper_confirm` (the client relays the user's word for a cancel or restart its own turn asked to confirm; the note naming the pending confirmation reaches the client session as in main). Any other name
+    `looper_task_create`, `looper_task_control`, `looper_task_instruct` and `looper_task_update`. `looper_confirm` is not listed: a pending confirmation is keyed by chat only, so a client turn could confirm another session's item; a client's high-risk request (cancelling or restarting a task) is shown to the operator as waiting for confirmation, and only the operator confirms, in their own conversation. Any other name
     is refused as `forbidden` before its arguments are read, whether or not the Manager has the tool, and the
     refusal is recorded by tool name only. A new Manager tool is not on the list until someone adds it there.
   - Inputs (`CLIENT_ALLOWLIST`): the client's own contract (`CLIENT_CONTRACT`, instead of the role prompt, the

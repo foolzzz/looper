@@ -1437,6 +1437,12 @@ def _cancelled_on_confirmation(look: Look) -> str | None:
     return None if confirmed else "the task ended without a confirmed cancel"
 
 
+def _client_confirm_refused(look: Look) -> str | None:
+    """The API client's session has no confirmation tool: its call was refused, and nothing was confirmed."""
+    refused = [a for a in _writes(look, status="error", tool="looper_confirm")]
+    return None if refused else "the client's confirmation call was not refused"
+
+
 def _task_owners(database_url: str, task_ids: list[str]) -> dict[str, dict[str, Any]]:
     """The API client and the conversation each task in ``task_ids`` was created through (None for none)."""
     import asyncpg
@@ -3612,7 +3618,8 @@ DIALOGS: tuple[Dialog, ...] = (
     Dialog("client_relay_cancel", (
         Say("用户要取消任务 <task>。", _asked_to_confirm,
             (("looper_task_control", {"task_id": "<task>", "action": "cancel"}),)),
-        Say("用户确认取消。", _both(_cancelled_on_confirmation, _by_the_client),
+        # A client session cannot confirm: the call is refused and the task keeps running until the operator confirms.
+        Say("用户确认取消。", _both(_client_confirm_refused, _still_running),
             (("looper_confirm", {"confirmation_id": "<confirmation>"}),)),
     ), running_task=True, client=True),
 )

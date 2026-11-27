@@ -8,7 +8,6 @@ from looper.agents.ops.service import _MANAGER_TOOL_NAMES, _OPERATOR_TOOLS, _aud
 
 EXPECTED = frozenset({
     "looper_tasks", "looper_task_create", "looper_task_control", "looper_task_instruct", "looper_task_update",
-    "looper_confirm",
 })
 
 
@@ -26,7 +25,7 @@ def test_every_listed_tool_is_a_manager_tool_open_to_any_turn() -> None:
 
 def test_no_configuration_cost_or_confirmation_tool_is_listed() -> None:
     for name in ("looper_settings", "looper_projects", "looper_schedules", "looper_costs", "looper_overview",
-                 "looper_task_gate_reply", "looper_providers", "looper_models", "looper_catalog", "looper_config_export",
+                 "looper_confirm", "looper_task_gate_reply", "looper_providers", "looper_models", "looper_catalog", "looper_config_export",
                  "looper_agent_profiles", "looper_concurrency", "looper_session_search", "looper_vault_read"):
         assert name not in session_visibility.CLIENT_TOOLS, name
 
