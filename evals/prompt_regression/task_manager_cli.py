@@ -14,6 +14,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import time
@@ -59,6 +60,7 @@ def capture(config: dict[str, Any], args: list[str]) -> Path:
         "model": _flag(args, "--model"),
         "env_names": sorted(os.environ),
         "env_values": {name: os.environ.get(name) for name in SENTINEL_ENV},
+        "looper_edit_on_path": shutil.which("looper-edit") is not None,
         "mode": config["mode"],
         "tools_list": None,
     }
@@ -67,6 +69,30 @@ def capture(config: dict[str, Any], args: list[str]) -> Path:
     path = directory / f"launch-{time.time_ns()}-{os.getpid()}.json"
     path.write_text(json.dumps(record, indent=2, ensure_ascii=False), encoding="utf-8")
     return path
+
+
+def apply_arm(config: dict[str, Any], args: list[str]) -> list[str]:
+    """The launch the case's arm asks for. ``shipped`` is Looper's own, unchanged. ``bash_only`` drops the fixed
+    instructions' edit line from the appended prompt (a copy in ``capture_dir``) and every PATH entry holding
+    ``looper-edit``; a prompt without that line exactly once, or a ``looper-edit`` still found, stops the launch."""
+    if config.get("arm", "shipped") == "shipped":
+        return args
+    from looper.agents.task_manager_brief import EDIT_LINE
+
+    flag = "--append-system-prompt-file"
+    text = Path(_flag(args, flag) or "/nonexistent").read_text(encoding="utf-8") if flag in args else ""
+    if text.count(EDIT_LINE + "\n") != 1:
+        raise SystemExit("bash_only arm: the launch's prompt does not hold the edit line exactly once")
+    copy = Path(config["capture_dir"]) / f"prompt-bash-only-{time.time_ns()}.md"
+    copy.parent.mkdir(parents=True, exist_ok=True)
+    copy.write_text(text.replace(EDIT_LINE + "\n", "", 1), encoding="utf-8")
+    os.environ["PATH"] = os.pathsep.join(entry for entry in os.environ.get("PATH", "").split(os.pathsep)
+                                         if not os.path.exists(os.path.join(entry, "looper-edit")))
+    if shutil.which("looper-edit"):
+        raise SystemExit("bash_only arm: looper-edit is still on PATH")
+    changed = list(args)
+    changed[changed.index(flag) + 1] = str(copy)
+    return changed
 
 
 def _fill(value: Any, mapping: dict[str, str]) -> Any:
@@ -235,9 +261,10 @@ def main() -> None:
             os.execv(config["claude"], [config["claude"], *args])
         print(f"{VERSION} (Claude Code)" if "--version" in args else json.dumps({"loggedIn": True}))
         return
+    args = apply_arm(config, args)
     launch_file = capture(config, args)
     if real:
-        os.execv(config["claude"], [config["claude"], *args])  # unchanged: Looper's arguments, stdin and stdout
+        os.execv(config["claude"], [config["claude"], *args])  # Looper's arguments (the arm's prompt copy), stdin, stdout
     Scripted(config, args, launch_file).loop()
 
 

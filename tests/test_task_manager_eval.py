@@ -187,7 +187,7 @@ def test_cases_that_need_step_3_report_a_typed_reason_and_never_pass():
     # Once the tool exists, a case without a judge is still not runnable: it never turns into a silent pass.
     later = cases.blocker(cases.BY_ID["verbatim_handoff"], tools | {"task_supplement"})
     assert later and later[0] is cases.Blocker.JUDGE_MISSING
-    assert all(cases.blocker(case, tools) is None for case in cases.CASES if case.requires is None)
+    assert all(cases.blocker(case, tools) is None for case in cases.CASES if case.requires is None and not case.edits)
     summary = evaluation.summarize([{"case": "a", "outcome": "pass", "cost_usd": 0},
                                     {"case": "b", "outcome": "not_runnable", "cost_usd": 0}],
                                    mode="fake", behavior="ok", reps=1, aborted=None, done=True, ledger=None, total_cap=None)
@@ -236,6 +236,11 @@ GUARDS = {
 }
 
 
+# The sandbox cases (project instructions, editing arms) have their own fake pass: tests/test_task_manager_eval_sandbox.py.
+SANDBOX_CASES = {"project_instructions_hostile", *(case.id for case in cases.CASES if case.edits)}
+MAIN_CASES = [case for case in cases.CASES if case.id not in SANDBOX_CASES]
+
+
 def checks(row):
     return {check["name"]: check["ok"] for check in row["checks"]}
 
@@ -246,13 +251,13 @@ def test_fake_pass_judges_each_criterion_and_dumps_inputs(tmp_path, monkeypatch)
     for name, value in PLANTED.items():
         monkeypatch.setenv(name, value)
     good, good_path = evaluation.run_suite(mode="fake", admin_url=DSN, out_dir=tmp_path / "ok",
-                                           dump_dir=tmp_path / "dump-a")
+                                           selected=MAIN_CASES, dump_dir=tmp_path / "dump-a")
     assert os.environ["ANTHROPIC_API_KEY"] == SECRET  # restored
     assert good["outcome"] == "incomplete"  # two cases cannot run on this checkout: never a pass
     rows = {row["case"]: row for row in good["rows"]}
     assert {c for c, r in rows.items() if r["outcome"] == "not_runnable"} == {"verbatim_handoff", "answer_gate"}
     assert rows["verbatim_handoff"]["blocker"] == "step_3_not_merged"
-    runnable = [case for case in cases.CASES if case.requires is None]
+    runnable = [case for case in MAIN_CASES if case.requires is None]
     for case in runnable:
         row = rows[case.id]
         assert row["outcome"] == "pass", (case.id, [c for c in row["checks"] if not c["ok"]])

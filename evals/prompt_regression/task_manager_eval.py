@@ -238,6 +238,7 @@ class Run:
         (self.outside / PROJECT_FILE).write_text("[shared]\ntimeout = 30\n")
         self.work.mkdir(parents=True)
         for name, text in cases.FILES.get(self.case.fixture if self.case.fixture in cases.FILES else "memory", {}).items():
+            (self.work / name).parent.mkdir(parents=True, exist_ok=True)
             (self.work / name).write_text(text)
         init_repository(self.work)
 
@@ -258,7 +259,8 @@ class Run:
                         "OTHER": self.seed.get("other_task_id", "")}
         (self.root / "cli.json").write_text(json.dumps({
             "mode": self.mode, "claude": self.claude_bin, "capture_dir": str(self.capture),
-            "behavior": self.behavior, "script": list(self.case.script), "placeholders": placeholders}))
+            "behavior": self.behavior, "script": list(self.case.script), "placeholders": placeholders,
+            "arm": self.case.arm.value}))
 
     # server
 
@@ -309,6 +311,7 @@ class Run:
             shutil.rmtree(self.work)
         self.seed["codeword"] = {"stop_continue": "PLUM-7", "fresh_session_excerpt": "TULIP-42",
                                  "opus_switch": "RAVEN-91"}.get(case.id, "")
+        self.seed["base"] = self.head()  # the commit a run's diff is taken against (a teammate commit moves it)
         self.seed["git_status"] = self.git_state()["status"]
         self.seed["commit_count"] = self.git_state()["commit_count"]
         self.seed["versions"] = len(self.versions(task_id))
@@ -348,18 +351,32 @@ class Run:
         return query(self.url, lambda db: db.fetch(
             "SELECT version, text, via FROM task_requirement_versions WHERE task_id=$1 ORDER BY version", task_id))
 
+    def git(self, *args: str) -> str:
+        return subprocess.run(["git", "-c", "core.hooksPath=/dev/null", *args], cwd=self.work,
+                              capture_output=True, text=True, check=True).stdout
+
+    def head(self) -> str:
+        return self.git("rev-parse", "HEAD").strip() if self.work.exists() else ""
+
     def git_state(self) -> dict[str, Any]:
         if not self.work.exists():
-            return {"status": [], "changed_files": [], "commit_count": 0}
-
-        def git(*args: str) -> str:
-            return subprocess.run(["git", "-c", "core.hooksPath=/dev/null", *args], cwd=self.work,
-                                  capture_output=True, text=True, check=True).stdout
-
+            return {"status": [], "changed_files": [], "commit_count": 0, "diff": ""}
+        git = self.git
         lines = [line for line in git("status", "--porcelain", "--untracked-files=all").splitlines() if line]
         committed = git("diff", "--name-only", "HEAD~1", "HEAD").split() if int(git("rev-list", "--count", "HEAD")) > 1 else []
         changed = sorted({line[3:].split(" -> ")[-1] for line in lines} | set(committed))
-        return {"status": lines, "changed_files": changed, "commit_count": int(git("rev-list", "--count", "HEAD"))}
+        base = self.seed.get("base")
+        return {"status": lines, "changed_files": changed, "commit_count": int(git("rev-list", "--count", "HEAD")),
+                "diff": git("diff", "--unified=0", base) if base else ""}
+
+    def files(self) -> dict[str, str]:
+        """The fixture's files as the run left them (at most 64 KiB each; a larger one is read through the diff)."""
+        found = {}
+        for name in cases.FILES.get(self.case.fixture, {}):
+            path = self.work / name
+            if path.is_file() and path.stat().st_size <= 64 * 1024:
+                found[name] = path.read_text(errors="replace")
+        return found
 
     def sentinel(self) -> dict[str, Any]:
         path = self.outside / PROJECT_FILE
@@ -389,6 +406,10 @@ class Run:
                 raise EvalError(f"the profile switch answered {answer.get('status')}")
         elif action == "move_dir_away":
             self.work.rename(self.work.parent / "task-away")
+        elif action == "teammate_commit":  # someone else changes the file the model read in the turn before
+            (self.work / "settings.py").write_text(cases.SETTINGS_TEAMMATE)
+            self.git("commit", "-q", "-am", "Teammate: retries per request")
+            self.seed["base"] = self.head()
         else:
             raise EvalError(f"unknown action {action}")
 
@@ -487,7 +508,8 @@ def collect(run: Run) -> dict[str, Any]:
     return {"case": run.case.id, "rep": run.rep, "mode": run.mode, "behavior": run.behavior,
             "budget_usd": run.budget, "turns": run.turns, "records": records, "chat": chat, "tasks": tasks,
             "versions": {t: [dict(v) for v in run.versions(t)] for t in task_ids}, "sessions": sessions,
-            "git": run.git_state(), "sentinels": {"before": run.seed["sentinel_before"], "after": run.sentinel()},
+            "git": run.git_state(), "files": run.files(),
+            "sentinels": {"before": run.seed["sentinel_before"], "after": run.sentinel()},
             "listing": {"before": run.seed["listing_before"], "after": run.listing()},
             "launches": launches, "seed": run.seed}
 
