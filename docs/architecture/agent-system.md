@@ -9527,8 +9527,11 @@ A dashboard page load signs the browser in when `Sec-Fetch-Mode: navigate` and
 `Sec-Fetch-Dest: document`, both the TCP peer and `Host` are loopback, and neither
 `Forwarded` nor `X-Forwarded-For` is present. This token cookie has `Path=/`,
 `HttpOnly` and `SameSite=Strict`, without `Max-Age`, `Expires` or `Secure`;
-pages use `Cache-Control: no-store` and `Referrer-Policy: same-origin` (the Sign out form's POST must carry an `Origin`), other
-files keep their public cache. Other browsers sign in with the user name and
+pages use `Cache-Control: no-store`, other files keep their public cache. Every dashboard page and asset also sends
+`Referrer-Policy: same-origin` (the Sign out form's POST must carry an `Origin`) and a Content-Security-Policy
+(`DASHBOARD_HEADERS`) that allows only same-origin scripts, styles, fonts, images (plus `data:` and `blob:`) and
+connections, so agent text cannot make the browser fetch a remote URL. In agent replies, Markdown images render as links
+and links show their host and open in a new tab without a referrer. Other browsers sign in with the user name and
 password set on the server's machine by
 `looper auth set-password [--user NAME] [--runtime-root DIR]`. The user defaults
 to `admin` and accepts `[A-Za-z0-9._-]{1,64}`; the password needs at least
