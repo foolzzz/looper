@@ -483,3 +483,39 @@ def test_the_directory_reasons_stay_in_step_with_the_safety_and_refusal_enums() 
                  if value.startswith(("workspace_", "worktree_"))}
     assert workspace == reasons
     assert {r.value for r in tm.RefuseReason if r.value.startswith(("workspace_", "worktree_"))} == reasons
+    from looper.agents.v1_domains import manager_metrics
+    work_mode = manager_metrics.SUMMARY["properties"]["work_mode"]["properties"]["task_manager_launch_refusals_total"]
+    published = set(work_mode["items"]["properties"]["reason"]["enum"])
+    assert reasons <= published
+
+
+def test_a_caller_cancelled_while_the_lock_is_taken_leaves_no_lock(tmp_path: Path, monkeypatch) -> None:
+    import asyncio
+    import threading
+
+    repo = _repo(tmp_path / "repo")
+    gate, entered = threading.Event(), threading.Event()
+    real = DirectoryLock.acquire.__func__
+
+    def slow(cls, *args, **kwargs):
+        entered.set()
+        gate.wait(10)
+        return real(cls, *args, **kwargs)
+
+    monkeypatch.setattr(DirectoryLock, "acquire", classmethod(slow))
+    identity = task_manager_dirs._directory_identity(task_manager_dirs._realpath(str(repo)))
+
+    async def main() -> None:
+        task = asyncio.ensure_future(task_manager_dirs.admit_off_loop(
+            _IN_PLACE, str(repo), "t1", environment={"HOME": str(tmp_path / "home")},
+            runtime_root=tmp_path / "runtime", live=(), expected=identity))
+        while not entered.is_set():
+            await asyncio.sleep(0.01)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        gate.set()
+        await asyncio.sleep(0.5)
+        real(DirectoryLock, tmp_path / "runtime", str(repo), "probe").release()  # LockHeld if the lock leaked
+
+    asyncio.run(main())
