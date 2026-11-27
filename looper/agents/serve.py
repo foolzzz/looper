@@ -950,7 +950,8 @@ async def _run_agent_system_watched(
         except Exception:
             logger.exception("could not sweep the task Manager MCP configurations")
         task_managers = TaskManagerPool(runtime_root, claude_bin,
-                                        max_resident=task_conversations_settings.max_resident)
+                                        max_resident=task_conversations_settings.max_resident,
+                                        config_file=ops.path)
         if ownership is not None:
             ownership.push_async_callback(task_managers.shutdown)
 

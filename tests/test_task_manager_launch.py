@@ -129,6 +129,18 @@ def test_environment(monkeypatch):
                    child_env.TASK_MANAGER_ENV: "task-1"}
 
 
+def test_a_direct_session_environment_drops_proxies_and_the_ssh_agent(monkeypatch):
+    from looper.agents import task_manager_safety as safety
+
+    run = launch()
+    monkeypatch.setattr(CLAUDE_CODE, "environment", lambda launch: {name: "x" for name in (
+        "HTTP_PROXY", "https_proxy", "ALL_PROXY", "no_proxy", "SSH_AUTH_SOCK", "KEEP")})
+    kept = safety.environment(run, "task-1")
+    assert {"HTTP_PROXY", "https_proxy", "SSH_AUTH_SOCK"} <= set(kept)  # an orchestrated session is unchanged
+    direct = safety.environment(run, "task-1", drop=task_manager_sandbox.DIRECT_DROPPED_ENV)
+    assert set(direct) == {"KEEP", child_env.TASK_MANAGER_ENV}
+
+
 @pytest.mark.parametrize("source", ["user", "user_local", "project", "project_local", "managed", "launch"])
 @pytest.mark.parametrize("phase", ["launch", "resume"])
 def test_hook_disabled_sources(tmp_path, monkeypatch, source, phase):
