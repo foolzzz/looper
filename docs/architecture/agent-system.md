@@ -1005,10 +1005,13 @@ them.
   its own included, through a wrapper (`operator_mcp.wrap`: `/bin/sh -c 'cd "$1" && shift && exec
   "$@"'` into a private directory of the runtime root, outside every task directory), because Claude
   Code would otherwise start them in the task directory, outside the sandbox, where the model can plant
-  files. As defense in depth `launcher_problem` refuses an allowed server started by a launcher that
-  resolves code from the working directory (`npx`, `uvx`, `bunx`, `uv run`, `pnpm dlx`, `yarn dlx`,
-  `deno run`, `bundle exec`, `go run`, `cargo run`, `python -m` without `-I`, a relative command, script
-  or `cwd`, a relative `PYTHONPATH` or `NODE_PATH`) with `mcp_launcher_unsafe`. Fingerprints are of the
+  files. As defense in depth `launcher_problem` refuses an allowed server whose launcher resolves
+  code from the working directory or starts another program (`npx`, `uvx`, `bunx`, `uv run`,
+  `pnpm dlx`, `yarn dlx`, `deno run`, `bundle exec`, `go run`, `cargo run`, `python -m` without `-I`
+  including `-mpkg`, `env` and the shells, a relative command, script or `cwd`; names are matched after
+  resolving symbolic links, case-insensitively, with the subcommand found anywhere in the arguments)
+  or whose `env` sets a code-loading variable (`PYTHONPATH`, `NODE_PATH`, `NODE_OPTIONS`, `RUBYOPT`,
+  ...), with `mcp_launcher_unsafe`. Fingerprints are of the
   user-scope definition before wrapping (`operator_mcp.fingerprints`); a comparison with what the CLI
   reports applies `operator_mcp.unwrap` first and checks `is_wrapped`.
 - **Verification.** `tests/test_task_manager_sandbox_probe.py` runs the real command against the real

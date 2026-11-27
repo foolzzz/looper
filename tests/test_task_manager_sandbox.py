@@ -105,7 +105,7 @@ def test_read_deny_paths_cover_credentials_and_trust_roots_as_real_paths(tmp_pat
     real = os.path.realpath
     for expected in (home / ".ssh", home / ".aws", home / ".gnupg", home / ".netrc", home / ".git-credentials",
                      home / ".config/gh", home / ".config/hub", home / ".config/gcloud",
-                     home / ".config/git/credentials", config / ".credentials.json",
+                     home / ".config/git/credentials", home / "Library/Keychains", config / ".credentials.json",
                      config / ".claude.json", runtime):
         assert real(expected) in found, expected
     assert len(found) == len(set(found)) and all(os.path.isabs(path) for path in found)

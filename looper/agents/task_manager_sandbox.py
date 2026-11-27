@@ -147,6 +147,8 @@ def read_deny_paths(environment: Mapping[str, str], runtime_root: Path,
         home / ".ssh",  # SSH keys
         home / ".aws",  # cloud credentials
         home / ".gnupg",  # GPG keys
+        home / "Library" / "Keychains",  # the login keychain: the CLI sandbox lets `security` reach it (Claude Code's
+        # own login, git hosting tokens), and a sandboxed Bash can read an item whose ACL trusts /usr/bin/security
         *(home / name for name in HOME_CREDENTIAL_FILES),  # plain-text credential files
         *(config_home / name for name in (*CONFIG_CREDENTIAL_DIRS, *CONFIG_CREDENTIAL_FILES)),  # CLI credential stores
         claude_dir / ".credentials.json",  # Claude Code's login

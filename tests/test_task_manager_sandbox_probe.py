@@ -522,3 +522,28 @@ def test_p18_looper_own_server_ignores_a_planted_module_and_npx_is_refused_befor
     with pytest.raises(operator_mcp.UnsafeLauncher):
         asyncio.run(operator_mcp.library_with_allowed(library, probe.runtime_root, ["risky"], environment=probe.env,
                                                       cwd=probe.mcp_cwd))
+
+
+def throwaway_keychain(probe) -> Path:
+    """A keychain created in the scratch HOME with one generic password; the operator's own is never touched."""
+    keychain = probe.home / "Library" / "Keychains" / "probe.keychain-db"
+    keychain.parent.mkdir(parents=True, exist_ok=True)
+    for args in (["create-keychain", "-p", "pw", str(keychain)], ["unlock-keychain", "-p", "pw", str(keychain)],
+                 ["add-generic-password", "-s", "looper-probe", "-a", "probe", "-w", "KEYCHAIN-SECRET",
+                  "-T", "/usr/bin/security", str(keychain)]):
+        subprocess.run(["security", *args], env=probe.env, check=True, capture_output=True, timeout=60)
+    return keychain
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="the macOS login keychain")
+def test_p16_the_keychain_cannot_be_read_from_the_sandbox_and_the_control_can(probe):
+    keychain = throwaway_keychain(probe)
+    read = f"security find-generic-password -s looper-probe -w {keychain} 2>&1; echo rc=$?"
+    cat = f"cat {keychain} | wc -c; echo rc=$?"
+    script = [bash(read), bash(cat), text("done")]
+    guarded = results_of(probe.run(script), script)
+    assert "KEYCHAIN-SECRET" not in guarded[0] and "rc=0" not in guarded[0], guarded[0]
+    assert "Operation not permitted" in guarded[1] or "rc=1" in guarded[1], guarded[1]
+    control = results_of(probe.run(script, control="loose"), script)
+    assert "KEYCHAIN-SECRET" in control[0], control[0]  # without the deny list the item is printed
+    probe.observations["p16_keychain"] = {"guarded": guarded[0][:120], "control_reads_secret": True}
