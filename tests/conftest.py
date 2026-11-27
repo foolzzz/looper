@@ -908,8 +908,12 @@ AUTONOMOUS = json.loads({autonomous!r})
 DENIED = json.loads({denied!r})
 WRITES = json.loads({writes!r})
 def log(name, value):
-    with open(os.path.join(STATE, name), 'a') as f:
-        f.write(json.dumps(value) + '\\n')
+    # One write of the whole line, so a reader never sees a record without its newline except mid-write.
+    fd = os.open(os.path.join(STATE, name), os.O_WRONLY | os.O_APPEND | os.O_CREAT)
+    try:
+        os.write(fd, (json.dumps(value) + '\\n').encode())
+    finally:
+        os.close(fd)
 log('argv.jsonl', sys.argv[1:])
 log('pids.jsonl', os.getpid())
 # Like Claude resuming a session it no longer has: an error result without an init event.
@@ -1031,7 +1035,8 @@ class FakePlannerClaude:
 
     def _log(self, name: str) -> list[Any]:
         path = self.state / name
-        return [json.loads(line) for line in path.read_text().splitlines()] if path.exists() else []
+        # Only newline-terminated records are committed; a half-written tail is read on the next poll.
+        return [json.loads(line) for line in path.read_text().split("\n")[:-1]] if path.exists() else []
 
     def argvs(self) -> list[list[str]]:
         return self._log("argv.jsonl")
