@@ -804,16 +804,21 @@ def _no_live_runs(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(live_runs, "_ended", [])
 
 
-@pytest.fixture(autouse=True)
-def _own_resident_pool(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The resident pool lists the routers of the Managers alive in this process. A Manager an earlier test built with
-    a stand-in session stays in the process-wide pool until the garbage collector frees it, and the metrics API's
-    resident count then failed on the stand-in (503) in whichever test ran next in that worker. Each test gets its own."""
+def own_resident_pool(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Give the process-wide resident pool a new, empty one (the autouse fixture below, and the test that checks it)."""
     manager_routing = sys.modules.get("looper.agents.tiers.manager_routing")
     if manager_routing is None:
         return
 
     monkeypatch.setattr(manager_routing, "pool", manager_routing.ResidentPool())
+
+
+@pytest.fixture(autouse=True)
+def _own_resident_pool(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The resident pool lists the routers of the Managers alive in this process. A Manager an earlier test built with
+    a stand-in session stays in the process-wide pool until the garbage collector frees it, and the metrics API's
+    resident count then failed on the stand-in (503) in whichever test ran next in that worker. Each test gets its own."""
+    own_resident_pool(monkeypatch)
 
 
 @pytest.fixture(autouse=True)
