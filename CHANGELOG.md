@@ -18,6 +18,35 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.15.44] - 2026-11-26
+
+Frozen at `448632f1f` (the merge of [#1874](https://github.com/foolzzz/looper/pull/1874)): everything merged to main after v2.15.43's freeze `45fc80461`, up to that commit. The release body is [docs/releases/v2.15.44.md](docs/releases/v2.15.44.md). Startup adds one migration, `manager_session_client_kind` (2150). The `test` extra gains `markdown-it-py`; no runtime dependency changes.
+
+### Security
+
+- **API clients get their own Manager session** ([#1858](https://github.com/foolzzz/looper/pull/1858)) with a short task-tool list instead of the operator's `main` session.
+- **Sender identity authorizes high-risk calls and confirmations in every session** ([#1874](https://github.com/foolzzz/looper/pull/1874)). With `manager.turn_context.enabled` off (the code default) or in a routed non-main session, a sender who could reach the Manager was treated as the operator. Every user turn is now classified and an unknown speaker is refused. A bot without an operator sender id has no chat sender that can ask for or confirm a high-risk call while the switch is off; only the dashboard can.
+- **The task Manager loads only allowed MCP servers** ([#1852](https://github.com/foolzzz/looper/pull/1852), [#1862](https://github.com/foolzzz/looper/pull/1862), [#1869](https://github.com/foolzzz/looper/pull/1869)): Looper's own server plus the user-scope servers named in `tasks.conversations.manager_mcp`.
+- **Git in agent-writable directories no longer runs repository-controlled code** ([#1861](https://github.com/foolzzz/looper/pull/1861)).
+- **Looper's MCP server launch ignores the session's working directory** ([#1864](https://github.com/foolzzz/looper/pull/1864)).
+- **The dashboard loads no remote content and links show their host** ([#1866](https://github.com/foolzzz/looper/pull/1866)).
+- **Lark messages carry no remote images or unlisted HTML tags** ([#1867](https://github.com/foolzzz/looper/pull/1867)); **Telegram messages carry no link previews** ([#1865](https://github.com/foolzzz/looper/pull/1865)).
+
+### Fixed
+
+- **`looper service upgrade` installs the target's dependencies before the drain** ([#1849](https://github.com/foolzzz/looper/pull/1849)).
+- **Startup and shutdown:** imports before the event loop ([#1853](https://github.com/foolzzz/looper/pull/1853)), a failed memory drafter side connection no longer stops the service ([#1855](https://github.com/foolzzz/looper/pull/1855)), HTTP shutdown on Python 3.13 and later ([#1851](https://github.com/foolzzz/looper/pull/1851)).
+- **Network pause:** task detail phase read in one statement ([#1847](https://github.com/foolzzz/looper/pull/1847)), an invalid stored maximum warns once per value ([#1843](https://github.com/foolzzz/looper/pull/1843)).
+- **Task Manager, off by default:** a worktree turn commits only its own changes ([#1848](https://github.com/foolzzz/looper/pull/1848)); the task thread shows every refusal reason ([#1859](https://github.com/foolzzz/looper/pull/1859)).
+
+### Added
+
+- **`looper-edit` command, not wired into any agent.** ([#1863](https://github.com/foolzzz/looper/pull/1863))
+
+### Internal
+
+- Task Manager safety boundary RFC ([#1860](https://github.com/foolzzz/looper/pull/1860)); tests, CI and plan sync with no product change ([#1844](https://github.com/foolzzz/looper/pull/1844), [#1846](https://github.com/foolzzz/looper/pull/1846), [#1850](https://github.com/foolzzz/looper/pull/1850), [#1854](https://github.com/foolzzz/looper/pull/1854), [#1856](https://github.com/foolzzz/looper/pull/1856), [#1857](https://github.com/foolzzz/looper/pull/1857)).
+
 ## [2.15.43] - 2026-11-26
 
 Frozen at `45fc80461` (the merge of [#1840](https://github.com/foolzzz/looper/pull/1840)): everything merged to main after v2.15.42's freeze `0ad334847`, up to that commit. Tag this release PR's own head after merge if main has moved beyond the freeze. Startup adds two migrations over v2.15.42: `chat_message_entry_kind` (2100) and `network_pauses` (2120); both run even with optional features off. Adds the runtime dependency `cryptography>=46,<47` (history cursors); a source-checkout upgrade (`looper service upgrade`) installs it while the service is stopped and needs package index access then; an offline or pinned environment must provide it. From v2.15.38 or earlier, also read [v2.15.42](docs/releases/v2.15.42.md), [v2.15.41](docs/releases/v2.15.41.md), [v2.15.40](docs/releases/v2.15.40.md) and [v2.15.39](docs/releases/v2.15.39.md). See [the release notes](docs/releases/v2.15.43.md) for validation and exclusions.
