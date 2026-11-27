@@ -37,6 +37,20 @@ class Source(str, Enum):
 class Reason(str, Enum):
     REVIEW_HOOK_DISABLED = "review_hook_disabled"
     CLI_UNVERIFIED = "cli_unverified"
+    SANDBOX_UNAVAILABLE = "sandbox_unavailable"
+    READBACK_UNAVAILABLE = "readback_unavailable"
+    LAUNCH_SETTING_MISMATCH = "launch_setting_mismatch"
+    MCP_SET_MISMATCH = "mcp_set_mismatch"
+    MCP_LAUNCHER_UNSAFE = "mcp_launcher_unsafe"
+    NETWORK_POLICY_INVALID = "network_policy_invalid"
+    WORKSPACE_NOT_REPO_ROOT = "workspace_not_repo_root"
+    WORKSPACE_IS_HOME = "workspace_is_home"
+    WORKSPACE_CONTAINS_TRUSTED_CONFIG = "workspace_contains_trusted_config"
+    WORKSPACE_IN_SYSTEM_DIR = "workspace_in_system_dir"
+    WORKSPACE_OVERLAPS_SESSION = "workspace_overlaps_session"
+    WORKTREE_UNSUPPORTED = "worktree_unsupported"
+    HEAD_MOVED = "head_moved"
+    HEAD_DETACHED = "head_detached"
 
 
 class Predicate(str, Enum):
@@ -82,6 +96,11 @@ class Refusal:
 
 # One increment per refused launch/resume, not per file or key hit. These dimensions contain no settings values.
 refusal_counts: Counter[tuple[str, str, str]] = Counter()
+
+
+def record_refusal(reason: Reason, phase: Literal["launch", "resume", "turn"], version: str = "unknown") -> None:
+    """Count one refused launch, resume or turn (``task_manager_launch_refusals_total``)."""
+    refusal_counts[(reason.value, phase, version)] += 1
 
 
 def environment(launch: Launch, task_id: str) -> dict[str, str]:
@@ -157,5 +176,5 @@ async def gate(executable: str, *, cwd: str | Path, environment: Mapping[str, st
         refusal = Refusal(Reason.CLI_UNVERIFIED,
                           f"Claude Code {version} is unverified for the task Manager review hook; "
                           f"use {VERIFIED_CLI_VERSION} or run the required CLI upgrade probe.", version)
-    refusal_counts[(refusal.reason.value, phase, refusal.version)] += 1
+    record_refusal(refusal.reason, phase, refusal.version)
     return refusal
