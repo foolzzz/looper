@@ -433,8 +433,9 @@ class TaskManagerAgent:
                     if self.dir_lock is not None:
                         self.dir_lock.release()
                         self.dir_lock = None
-                    # The lock is taken first; then the locked directory must still be the checked one and pass
-                    # the whole check again (including the live-session overlap), before the process starts.
+                    # The lock is taken first; then the directory the lock was taken on must be the checked one, and
+                    # the whole check runs again (including the live-session overlap). The process is then started
+                    # from the path: a same-user writer swapping the path after this point is not detected (RFC 25.5).
                     lock, problem = await task_manager_dirs.admit_off_loop(
                         task, reopened.work_dir, self.task_id, environment=launch.runtime.environment(launch),
                         runtime_root=self.pool.runtime_root, live=live_direct(), expected=checked)

@@ -525,3 +525,63 @@ def test_a_caller_cancelled_while_the_lock_is_taken_leaves_no_lock(tmp_path: Pat
                 await asyncio.sleep(0.02)
 
     asyncio.run(main())
+
+
+def test_a_path_swapped_during_the_lock_and_swapped_back_is_refused(tmp_path: Path, monkeypatch) -> None:
+    repo = _repo(tmp_path / "repo")
+    other = _repo(tmp_path / "other")
+    _, identity = _inspect(tmp_path, repo)
+    real = DirectoryLock.acquire.__func__
+
+    def swap_and_back(cls, *args, **kwargs):
+        old = tmp_path / "repo.old"
+        repo.rename(old)
+        repo.symlink_to(other, target_is_directory=True)  # the lock is taken on the other repository
+        try:
+            return real(cls, *args, **kwargs)
+        finally:
+            repo.unlink()
+            old.rename(repo)  # and the path points at the checked directory again
+
+    monkeypatch.setattr(DirectoryLock, "acquire", classmethod(swap_and_back))
+    lock, problem = _admit(tmp_path, repo, identity)
+    assert lock is None and problem is not None
+    assert problem.reason is Reason.WORKSPACE_UNAVAILABLE and problem.kind is Kind.CHANGED_AFTER_CHECK
+    monkeypatch.undo()
+    DirectoryLock.acquire(tmp_path / "runtime", str(repo), "again").release()  # the wrong lock was released
+
+
+def test_the_lock_reports_the_directory_it_was_taken_on(tmp_path: Path) -> None:
+    repo = _repo(tmp_path / "repo")
+    lock = DirectoryLock.acquire(tmp_path / "runtime", str(repo), "t1")
+    assert lock.identity == (os.stat(repo).st_dev, os.stat(repo).st_ino)
+    lock.release()
+
+
+def test_a_symlink_loop_is_an_io_error_not_a_missing_repository(tmp_path: Path) -> None:
+    loop = tmp_path / "loop"
+    loop.symlink_to(loop)
+    problem, identity = _inspect(tmp_path, loop)
+    assert identity is None and problem is not None
+    assert problem.reason is Reason.WORKSPACE_UNAVAILABLE and problem.kind is Kind.IO_ERROR
+    (tmp_path / "a").symlink_to(tmp_path / "b")
+    (tmp_path / "b").symlink_to(tmp_path / "a")
+    problem, identity = _inspect(tmp_path, tmp_path / "a" / "repo")
+    assert identity is None and problem is not None
+    assert problem.reason is Reason.WORKSPACE_UNAVAILABLE and problem.kind is Kind.IO_ERROR
+
+
+def test_a_missing_directory_is_still_not_a_repository(tmp_path: Path) -> None:
+    problem, _ = _inspect(tmp_path, tmp_path / "missing")
+    assert problem is not None and problem.reason is Reason.WORKSPACE_NOT_REPO_ROOT
+    assert problem.kind is Kind.NOT_GIT
+
+
+def test_a_runtime_root_that_is_a_file_is_an_io_error_naming_the_runtime_root(tmp_path: Path) -> None:
+    repo = _repo(tmp_path / "repo")
+    _, identity = _inspect(tmp_path, repo)
+    (tmp_path / "runtime").write_text("not a directory")
+    lock, problem = _admit(tmp_path, repo, identity)
+    assert lock is None and problem is not None
+    assert problem.reason is Reason.WORKSPACE_UNAVAILABLE and problem.kind is Kind.IO_ERROR
+    assert str(tmp_path / "runtime") in problem.text and "runtime root" in problem.text
