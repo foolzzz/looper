@@ -15,7 +15,7 @@ import asyncpg
 import pytest
 
 from evals.prompt_regression.runner import fresh_database, running_server
-from tests.db_support import DSN
+from tests.db_support import DSN, complete_records
 from tests.runner_support import require_disposable_database
 
 pytestmark = pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
@@ -35,8 +35,12 @@ variant_match = re.search(r"drain_variant=(\w+)", prompt)
 variant = variant_match.group(1) if variant_match else "manager"
 
 def log(kind, **values):
-    with (state / "events.jsonl").open("a") as output:
-        output.write(json.dumps({"kind": kind, "variant": variant, **values}) + "\n")
+    # One O_APPEND write per record, so a concurrent reader never sees a record in two pieces.
+    fd = os.open(state / "events.jsonl", os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o644)
+    try:
+        os.write(fd, (json.dumps({"kind": kind, "variant": variant, **values}) + "\n").encode())
+    finally:
+        os.close(fd)
 
 def answer(text):
     for event in (
@@ -117,7 +121,7 @@ def _query(url: str, sql: str, *args, execute: bool = False):
 
 def _events(state: Path, kind: str, variant: str | None = None):
     path = state / "events.jsonl"
-    rows = [json.loads(line) for line in path.read_text().splitlines()] if path.exists() else []
+    rows = complete_records(path.read_text()) if path.exists() else []
     return [row for row in rows if row["kind"] == kind and (variant is None or row["variant"] == variant)]
 
 
