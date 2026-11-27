@@ -7,7 +7,7 @@ from dataclasses import replace
 from unittest.mock import AsyncMock
 
 from looper.agents import outbound_hook, task_conversations_settings, task_manager_safety, task_manager_sandbox
-from looper.agents import task_manager_settings
+from looper.agents import task_manager_edit, task_manager_settings
 from looper.agents.agent_settings import AgentSettings
 from looper.agents.profile_registry import builtin_resolved_profile
 from looper.db import projects, tasks
@@ -46,6 +46,10 @@ class NativeTaskManager:
         monkeypatch.setattr(task_manager_safety, "gate", AsyncMock(return_value=None))
         # The direct session runs on macOS only; these lifecycle tests use a scripted CLI on any platform.
         monkeypatch.setattr(task_manager_sandbox, "SUPPORTED_PLATFORM", sys.platform)
+        # A direct launch puts a private looper-edit directory on PATH; these lifecycle tests keep it out of the
+        # operator's cache. ``test_task_manager_edit_wiring_db`` restores ``real_edit_bin``.
+        self.real_edit_bin, self.edit_dir = task_manager_edit.edit_bin, tmp_path / "stub-edit-bin"
+        monkeypatch.setattr(task_manager_edit, "edit_bin", lambda environment, *, forbidden: self.edit_dir)
 
         async def read_settings(task):
             return self.settings
@@ -63,7 +67,7 @@ def emit(value):
 if '--version' in sys.argv:
     print('2.1.332 (Claude Code)'); sys.exit()
 resuming = '--resume' in sys.argv
-record({{'kind':'launch', 'command':sys.argv[1:], 'cwd':os.getcwd(),
+record({{'kind':'launch', 'command':sys.argv[1:], 'cwd':os.getcwd(), 'path':os.environ.get('PATH'),
          'environment':{{key:os.environ.get(key) for key in ('LOOPER_TASK_MANAGER','LOOPER_AGENT_RUN','SERVER_PRIVATE')}}}})
 session = sys.argv[sys.argv.index('--resume')+1] if resuming else uuid.uuid4().hex
 if resuming and Path('reject-resume').exists():

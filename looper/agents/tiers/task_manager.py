@@ -6,6 +6,7 @@ import asyncio
 import hashlib
 import json
 import logging
+import tempfile
 import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
@@ -16,8 +17,8 @@ from typing import Any, Literal, Protocol
 
 from ...db import activity, agent_sessions, projects, tasks
 from .. import operator_mcp, outbound_hook, step_workspaces, task_budget, task_conversations_settings
-from .. import task_manager_project_instructions, task_manager_safety, task_manager_sandbox, task_manager_settings
-from .. import task_workspaces
+from .. import task_manager_edit, task_manager_project_instructions, task_manager_safety, task_manager_sandbox
+from .. import task_manager_settings, task_workspaces
 from ..agent_settings import Access, Launch
 from ..claude_cli import ClaudeRunRecorder, ResidentClaude
 from ..library import EMPTY_LIBRARY
@@ -272,6 +273,11 @@ class TaskManagerAgent:
         self.allowed_domains: tuple[str, ...] = ()
         self.read_deny: tuple[str, ...] = ()
 
+    def _edit_dir(self, launch: Launch, work_dir: str) -> Path:
+        """The private looper-edit directory for a direct launch; never where the sandbox writes or cannot read."""
+        cli = launch.runtime.environment(launch)
+        return task_manager_edit.edit_bin(cli, forbidden=(work_dir, cli.get("TMPDIR") or tempfile.gettempdir(), *self.read_deny))
+
     def _mcp_cwd(self) -> Path:
         return self.pool.runtime_root / "task-managers" / self.task_id / "mcp-cwd"
 
@@ -387,7 +393,8 @@ class TaskManagerAgent:
 
         command = command_for(launch)
         dropped = task_manager_sandbox.DIRECT_DROPPED_ENV if direct else ()
-        env = task_manager_safety.environment(launch, self.task_id, drop=dropped)
+        env = task_manager_safety.environment(launch, self.task_id, drop=dropped,
+                                                     edit_dir=self._edit_dir(launch, reopened.work_dir) if direct else None)
         # The file's name is the SHA-256 of its content, so the signature covers the pinned values, the network
         # allowlist and the read deny list: a change in any of them restarts the session.
         settings_file = command[command.index("--settings") + 1] if "--settings" in command else ""
@@ -412,7 +419,8 @@ class TaskManagerAgent:
                     await asyncio.to_thread(operator_mcp.reset_cwd, self._mcp_cwd())
                 launch = await configure()
                 command = command_for(launch)
-                env = task_manager_safety.environment(launch, self.task_id, drop=dropped)
+                env = task_manager_safety.environment(launch, self.task_id, drop=dropped,
+                                                     edit_dir=self._edit_dir(launch, reopened.work_dir) if direct else None)
                 settings_file = command[command.index("--settings") + 1] if "--settings" in command else ""
                 if direct:
                     problem = await task_manager_safety.gate(executable, cwd=reopened.work_dir, environment=launch.runtime.environment(launch),

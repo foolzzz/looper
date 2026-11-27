@@ -2,6 +2,7 @@
 import re
 
 from looper.agents import task_manager_brief as brief_module
+from looper.agents import task_manager_sandbox
 from looper.agents.task_manager_brief import BUILTIN_TOOLS, brief, instructions
 from looper.agents.task_workspaces import Reopened, ReopenMode
 from looper.db.tasks import InteractionMode
@@ -27,6 +28,7 @@ def test_orchestrated_instructions_are_unchanged_byte_for_byte():
 
 
 def test_direct_instructions_exact():
+    assert BUILTIN_TOOLS is task_manager_sandbox.BUILTIN_TOOLS
     assert BUILTIN_TOOLS == ("Bash",)  # the wording below is for this allowlist: a change must rewrite it
     assert instructions(InteractionMode.DIRECT) == (
         COMMON_HEAD

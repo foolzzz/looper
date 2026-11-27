@@ -5,11 +5,10 @@ from collections.abc import Mapping, Sequence
 from typing import Any
 
 from ..db.tasks import InteractionMode
+from .task_manager_sandbox import BUILTIN_TOOLS  # the direct text below is worded from this allowlist
 from .task_workspaces import Reopened, task_branch
 from .untrusted import Source, fence
 
-# The direct session's built-in tool allowlist (RFC 25.2 F9); everything below is worded from it.
-BUILTIN_TOOLS: tuple[str, ...] = ("Bash",)
 # Built-in tools a model may reach for out of habit; the direct text names the ones the allowlist leaves out.
 _HABITUAL = ("Read", "Edit", "Write", "NotebookEdit", "WebFetch", "WebSearch")
 EDIT_LINE = (
