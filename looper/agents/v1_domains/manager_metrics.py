@@ -47,7 +47,11 @@ SUMMARY = _object({"enabled": _BOOL, "window_days": _INT,
 SUMMARY["properties"]["work_mode"] = _object({"task_manager_launch_refusals_total": _array(_object({
     "reason": {"enum": ["review_hook_disabled", "cli_unverified",
         "sandbox_unavailable", "readback_unavailable", "launch_setting_mismatch", "mcp_set_mismatch", "mcp_launcher_unsafe", "network_policy_invalid", "workspace_not_repo_root", "workspace_is_home", "workspace_contains_trusted_config", "workspace_in_system_dir", "workspace_overlaps_session", "workspace_unavailable", "worktree_unsupported", "head_moved", "head_detached"]},
-    "phase": {"enum": ["launch", "resume", "turn"]}, "cli_version": _STR, "count": _INT}, closed=True))}, closed=True)
+    "phase": {"enum": ["launch", "resume", "turn"]}, "cli_version": _STR, "count": _INT}, closed=True)),
+    # One count per sandbox denial the task Manager saw; the host is never a dimension.
+    "task_manager_sandbox_denials_total": _array(_object({
+        "category": {"enum": ["network", "write", "other"]}, "project": _STR, "count": _INT}, closed=True))},
+    closed=True)
 _TASK_MEASUREMENT = _object({"task_id": _STR, "record_id": _INT,
     "model": {"type": ["string", "null"]}, "mode": {"enum": ["direct", "orchestrated"]},
     "maintenance": _BOOL, "value": _NUMBER}, closed=True)
@@ -109,11 +113,14 @@ async def run(server, operation, arguments, principal, headers):
     result["outbound_started_at"] = server._started_at.isoformat()
     result["outbound_since_start"] = datetime.now(timezone.utc) - server._started_at < timedelta(days=1)
     result["scopes"] = await _scopes(days)
-    from .. import task_conversations_settings, task_manager_safety
+    from .. import task_conversations_settings, task_manager_denials, task_manager_safety
     if task_conversations_settings.enabled():
         result["work_mode"] = {"task_manager_launch_refusals_total": [
             {"reason": reason, "phase": phase, "cli_version": version, "count": count}
-            for (reason, phase, version), count in sorted(task_manager_safety.refusal_counts.items())]}
+            for (reason, phase, version), count in sorted(task_manager_safety.refusal_counts.items())],
+            "task_manager_sandbox_denials_total": [
+                {"category": category, "project": project, "count": count}
+                for (category, project), count in sorted(task_manager_denials.denials_total.items())]}
         result["work_mode"].update(await _task_manager_metrics(db, days))
     return result
 

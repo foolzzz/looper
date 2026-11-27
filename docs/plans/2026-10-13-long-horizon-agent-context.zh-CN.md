@@ -1201,6 +1201,7 @@ M7 先让计划状态有唯一来源（M7a），再在其上加任务记忆（M7
 - ~~**服务停机随运行中的步骤数变慢，停任务和停服相撞时停机卡死**~~（✅ 已修复 looper #186）：停机时 Worker 池先停，每个 Planner 仍逐个向已停的池发 `KILL_WORK`，每步等满 5 秒，实测 3 步 15.5 秒，十几步就超过 launchd 的 20 秒被强杀；另外停任务的 kill 回复和停服的取消同时到达时，Python 3.11 的 `asyncio.wait_for` 吞掉取消，TaskRouter 的消息循环永远等下一条消息，服务不退出、之后的信号也不理。现在已停的池立即回答，Planner 和 TaskRouter 并行地停，丢了取消的循环会再被取消，请求-回复不再用 `wait_for`，整个停机最多 15 秒，第二个信号立即退出；结束进程树期间记录里同时列出这棵树（含启动时间），停机被强制截断时下次启动把剩下的进程也结束。已知限制：强制退出时运行中还在内存里的用量（token、花费）没有写入，下次启动只把记录补成 `interrupted`。
 - ~~**飞书渠道调用的 lark-cli 命令已不存在**~~（✅ 已修复 looper #102）：lark-cli 1.0.97 没有 `message send`，`event consume` 也不再接受 `--app-id`、`--format`，飞书渠道既收不到也回不了消息，消费进程还在紧循环里反复重启；现在收用 `lark-cli event consume im.message.receive_v1 --as bot`（扁平事件），发用 `lark-cli im +messages-send --as bot`（回复 `--chat-id`，定时任务通知 `--user-id`，共用一个构造函数），消费进程停止后 10 秒再起。`app_id_env` 仍需设置才能启动，但不再决定用哪个应用（由 lark-cli 自己的配置决定），二者如何对齐留待以后。
 - ~~**dashboard 在非安全上下文里白屏**~~（✅ 已修复 looper #213）（looper #207 的真实浏览器检查发现，早于 #207）：`web/src/pages/chat.tsx` 用 `crypto.randomUUID()`，浏览器只在 https 或 localhost 下提供它；用 http 从别的机器（`--host 0.0.0.0` 加局域网地址）打开时，登录成功后页面在首次渲染就抛 `TypeError` 而白屏。现在非安全上下文里生成 id 已回退到 `crypto.getRandomValues`，从别的机器通过普通 http 打开 dashboard 也能正常渲染。
+- **聊天发送失败的定时任务告警或运行通知会被静默丢掉，之后的恢复通知却照发**（核心，v2.15.45 之后做）：一次短暂的网络中断里就出现过，聊天里看到一条恢复通知，却从没收到过对应的告警。方向：发送失败的通知进入有上限的重试队列（按定时任务 + 类型 + 运行去重）；告警从未送达时，恢复通知附带这条告警的简短摘要。
 
 ### 5.2 工程待办
 
@@ -1209,6 +1210,8 @@ M7 先让计划状态有唯一来源（M7a），再在其上加任务记忆（M7
 - **`looper service upgrade` 先停服务再装依赖**：升级在停止服务之后才安装目标版本的依赖；安装失败会留下无法启动的新代码。[#1849](https://github.com/foolzzz/looper/pull/1849)（评审中）改为排空前先在一次性环境里预同步一次，停服后的真实同步用 `UV_OFFLINE=1`，失败则回滚检出并重装旧环境。
 - **任务 Manager 的回合提交 worktree 任务里所有待提交的改动**：[#1848](https://github.com/foolzzz/looper/pull/1848)（评审中）改为只提交本回合自己的改动，回合开始前就有改动的路径不动。
 - **任务 Manager 继承操作者的 Claude Code 配置，包括所有 MCP 服务器**：已提出显式的 MCP 允许清单，决定待定。
+- **任务 Manager 的直连会话沙箱栈**（按 C1–C6 分步，均为 Claude Code 自带的 Bash 沙箱，默认关闭）：已合入的是 C1（[#1871](https://github.com/foolzzz/looper/pull/1871)，直连任务 Manager 在 Claude Code 的 Bash 沙箱里运行）、C4 的 4a（[#1878](https://github.com/foolzzz/looper/pull/1878)，报告直连回合改动的分支和标签，HEAD 被移动时拒绝）、C3 的第一步（[#1872](https://github.com/foolzzz/looper/pull/1872)，只在检查过的、不共享的原地目录启动直连会话）、C4 后续的 needs-you 部分（[#1879](https://github.com/foolzzz/looper/pull/1879)，列出其他分支和标签上变化的引用）、环境分类（[#1886](https://github.com/foolzzz/looper/pull/1886)），以及两个测试加固（[#1887](https://github.com/foolzzz/looper/pull/1887) 控制超时不再占用握手、只读已提交的回合日志行；[#1893](https://github.com/foolzzz/looper/pull/1893) 收紧飞书写入与响应头契约的扫描器）。仍然开放、尚未合入，按串行顺序为：[#1873](https://github.com/foolzzz/looper/pull/1873)（C5，每个项目的网络允许清单和拒绝说明）→ [#1870](https://github.com/foolzzz/looper/pull/1870)（C2，每个直连回合前读回 CLI 实际生效的设置）→ [#1890](https://github.com/foolzzz/looper/pull/1890)（C3，重新校验被锁定的目录并按类型报告准入失败）→ [#1868](https://github.com/foolzzz/looper/pull/1868)（C6，向直连任务 Manager 说明它的沙箱、隔离项目指令文件并补编辑类评测）；另有 [#1894](https://github.com/foolzzz/looper/pull/1894)（open，报告指向未比较命名空间的符号链接引用，并如实表述尚未确定的快进）、[#1900](https://github.com/foolzzz/looper/pull/1900)（open，停止在清理步骤失败时不再丢失，迟到的 Planner 状态不再覆盖 stopped/cancelled）、[#1901](https://github.com/foolzzz/looper/pull/1901)（open，安全修复：项目指令文件只从仓库内部读取，是 v2.15.45 的前置）。决定（核心，在 #1868 内落实）：项目指令文件只在目录准入通过之后才读取，被拒绝的目录里的文件从不被打开。这些合入前不得写成已交付。
+- **按墙钟前移跑一遍测试套件的 CI 作业（手动触发，只改 CI）**：把 Python 时钟和 PostgreSQL 时钟一起前移 30 天和 90 天各跑一次，抓住随墙钟过期的测试。现在的时钟固定夹具只对一份写死的模块清单生效，`skill_proposals` 和 `task_select` 不在其中，才会在日期推进后失败；除了加作业，也要让夹具不再依赖手写清单。
 - **HTTP 启动步骤在事件循环线程里导入 API 域模块**：启动时会阻塞数秒。
 - **HTTP 关停读取 asyncio 的私有属性 `Server._active_count`**：CPython 3.13 及以上没有这个属性（改用 `_clients`）。[#1851](https://github.com/foolzzz/looper/pull/1851)（评审中）改为在每个 asyncio 版本上统计活动连接。
 
@@ -1308,6 +1311,15 @@ M7 先让计划状态有唯一来源（M7a），再在其上加任务记忆（M7
   - 每轮一个进程的管家运行时（Codex、OMP、Pi）现在靠结束进程树来停一轮；改成优雅中止：Codex app-server 的 `turn/interrupt`、OMP/Pi rpc 的 `abort`（要先 `clear_queue`），这样 Codex 的已用量也能保留；
   - 撤回一条还在排队、尚未开始的消息（RFC D7）；
   - 触屏上翻看消息历史（现在只有键盘的 ↑、↓）。
+
+- **Work 页探测操作时用 GET**：页面用 GET 探测只接受其他方法的操作，浏览器控制台里记两条 405；改为不触发错误的探测方式。
+- **直连会话的后续（C2 之后）**：用户在初始化之前停止，现在被报告成启动设置不一致，应有自己的原因；升级探测里断言在 `--tools` 限制下 `server_tool_use`、`mcp_tool_use` 永远不出现。
+- **runner 健康的后续**：给桥接侧的 `settle()` 补确定性测试；只有真的记过一次停滞才推进标记。
+- **直连会话的凭据 WARNING 每个进程只记一次**：现在每次都记。
+- **查清停止有时到不了终态的原因**：serve 测试里偶发停止之后任务没有进入终态，要分清是 `TASK_STOP` 丢了，还是在写 `stopped` 之前有异常被吞掉。
+- **#1900 的后续**：进程重启后 `restore_task` 可能为已停止的任务安排解除挂起；带着过期内存状态的迟到 `completed` 会在被拒绝的状态写入之前先跑工作区收尾步骤（应只在写入成功后收尾）；迟到的 `failed` 仍可能覆盖 `completed`，反过来也一样。
+- **#1870 的后续**：补一条数据库测试，固定「读回被拒绝时不记录引用快照」和「`begin_turn` 被拒绝后下一回合重新核验」两个行为。
+- **直连会话不支持云厂商后端**：云厂商后端靠凭据访问，现在直连会话不支持；需要先设计非机密的选择项和凭据交接方式。
 
 ### 5.4 验证缺口
 

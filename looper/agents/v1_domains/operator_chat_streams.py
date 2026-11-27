@@ -46,6 +46,11 @@ SCHEMAS = {
         _object({"kind": {"const": "session_fresh"}, "reason": {"enum": [
             "context_bound", "read_only_open", "resume_failed"]}, "detail": _STR}, closed=True),
         _object({"kind": {"const": "stopped"}, "method": {"enum": ["control", "cancel", "kill"]}}, closed=True),
+        _object({"kind": {"const": "sandbox_denial"}, "tool_use_id": _STR,
+                 "category": {"enum": ["network", "write", "other"]},
+                 "case": {"enum": ["not_allowed", "unsupported_client", "unknown", "not_allowable"]},
+                 "target": {"type": ["string", "null"]}, "client": {"enum": ["go_tls", None]},
+                 "command_name": _STR}, closed=True),
         _object({"kind": {"const": "turn_summary"}, "files": _array(_STR),
                  "commit": {"type": ["string", "null"]},
                  "mode": {"enum": ["direct", "orchestrated"]},

@@ -571,12 +571,23 @@ def test_p16_logins_the_claude_config_dir_and_registry_files_cannot_be_read_and_
         assert "SECRET" in outcome, outcome  # without the deny list every one is readable
 
 
-def test_p16_the_provider_scrub_variable_is_not_usable_and_the_residual_is_recorded(probe):
-    """CLAUDE_CODE_SUBPROCESS_ENV_SCRUB=1 would hide the CLI's own key from Bash, but on 2.1.332 it forces the default
-    permission mode, so a Bash call needs approval and a direct session cannot work: RFC 25.5 states the residual."""
-    probe.env["CLAUDE_CODE_SUBPROCESS_ENV_SCRUB"] = "1"
+def test_p16_the_subprocess_scrub_variant_is_measured_not_launched(probe):
+    """``CLAUDE_CODE_SUBPROCESS_ENV_SCRUB=1`` on 2.1.332: alone, it forces the default permission mode and a Bash call
+    needs approval; with ``--allowedTools`` for Bash and the MCP server the key is hidden from Bash and Bash and MCP
+    work, but ``system/init`` reports ``permissionMode`` ``default``, not ``bypassPermissions``. Adopting it needs a
+    readback and RFC decision; until then the key is a residual (RFC 25.5). This row documents the behaviour and fails
+    when the CLI changes it."""
+    library = probe.mcp_library()
+    original = probe.child_env
+    probe.child_env = lambda url: {**original(url), "CLAUDE_CODE_SUBPROCESS_ENV_SCRUB": "1"}
     script = [bash("printenv ANTHROPIC_API_KEY | wc -c"), text("done")]
-    run = probe.run(script)
-    outcome = results_of(run, script)[0]
-    probe.observations["scrub"] = {"result": outcome[:160], "stderr": run.stderr[-200:]}
-    assert "requires approval" in outcome or "approval" in outcome
+    alone = probe.run(script, library=library)
+    assert "approval" in results_of(alone, script)[0] and alone.init["permissionMode"] == "default"
+    script = [bash("printenv ANTHROPIC_API_KEY >/dev/null && echo KEY-VISIBLE || echo KEY-ABSENT; touch inside-ok; echo rc=$?"),
+              bash(f"touch {probe.outside}/scrub; echo rc=$?"), tool_use("mcp__probe__echo", {}), text("done")]
+    scrubbed = probe.run(script, command=probe.command(library=library) + ["--allowedTools", "Bash,mcp__probe"])
+    outcomes = results_of(scrubbed, script)
+    probe.observations["scrub"] = {"permissionMode": scrubbed.init["permissionMode"], "results": outcomes}
+    assert "KEY-ABSENT" in outcomes[0] and (probe.cwd / "inside-ok").exists() and not (probe.outside / "scrub").exists()
+    assert "echoed" in outcomes[2]
+    assert scrubbed.init["permissionMode"] == "default"  # what a readback expecting bypassPermissions would refuse

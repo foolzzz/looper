@@ -320,6 +320,8 @@
  "projects.get": "inside",
  "projects.list": "inside",
  "projects.move": "inside",
+ "projects.task_manager_sandbox_get": "inside",
+ "projects.task_manager_sandbox_update": "inside",
  "projects.update": "inside",
  "provider_accounts.clear_login_problem": "inside",
  "provider_accounts.create": "inside",
@@ -474,5 +476,6 @@
  "tasks.done": "inside",
  "tasks.task_manager_profile_get": "inside",
  "tasks.task_manager_profile_set": "inside",
- "tasks.task_manager_branch_set": "inside"
+ "tasks.task_manager_branch_set": "inside",
+ "tasks.task_manager_ref_report_resolve": "inside"
 }

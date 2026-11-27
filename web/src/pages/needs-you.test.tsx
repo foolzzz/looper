@@ -74,6 +74,43 @@ describe("Needs you page", () => {
     expect(host.querySelector('a[href="#chat"]')).not.toBeNull();
   });
 
+  it("shows a long ref name in full and drops control characters from it", async () => {
+    const long = "refs/heads/codex/tm-sandbox-refs-needs-you";
+    vi.mocked(fetchAttention).mockResolvedValue({ read_at: "2026-11-20T08:00:00Z", total: 1, sections: [
+      { kind: "task_manager_refs", state: "ok", count: 1, error: null, items: [
+        { key: "tm_refs:3", title: "任务管家改了别的分支或标签", context: "Login rewrite", since: null,
+          href: "#tasks/t1", ref: null, facts: { refs: [long, "refs/tags/v\u202e9", "refs/heads/ma\u200bin"], count: 3 } }] },
+    ] });
+    await render();
+    const section = host.querySelector('section[aria-label="任务管家改了别的分支或标签"]')!;
+    expect(section.textContent).toContain(long);
+    expect(section.textContent).not.toContain("[redacted]");
+    expect(section.textContent).toContain("refs/tags/v\\u202e9");  // shown, not applied
+    expect(section.textContent).toContain("refs/heads/ma\\u200bin");  // distinct from refs/heads/main
+    expect(section.textContent).not.toContain("\u202e");
+    expect(section.textContent).not.toContain("\u200b");
+  });
+
+  it("lists a changed-refs report with its task and refs, and marks it handled", async () => {
+    vi.mocked(fetchAttention).mockResolvedValue({ read_at: "2026-11-20T08:00:00Z", total: 1, sections: [
+      { kind: "task_manager_refs", state: "ok", count: 1, error: null, items: [
+        { key: "tm_refs:12", title: "任务管家改了别的分支或标签", context: "Login rewrite", since: "2026-11-20T05:00:00Z",
+          href: "#tasks/t1", ref: null, facts: { refs: ["refs/heads/other", "refs/tags/v9"], count: 2 } }] },
+    ] });
+    vi.mocked(callV1).mockResolvedValue({ report_id: 12, resolved_at: "2026-11-20T08:01:00Z" });
+    await render();
+    const section = host.querySelector('section[aria-label="任务管家改了别的分支或标签"]')!;
+    expect(section.textContent).toContain("Login rewrite");
+    expect(section.textContent).toContain("2 个分支或标签被改");
+    expect(section.textContent).toContain("refs/heads/other、refs/tags/v9");
+    expect(section.textContent).toContain("Looper 不会自动恢复");
+    expect(section.querySelector('a[href="#tasks/t1"]')).not.toBeNull();
+    const button = Array.from(section.querySelectorAll("button")).find((node) => node.textContent === "标为已处理")!;
+    await act(async () => { button.click(); });
+    expect(callV1).toHaveBeenCalledWith("/api/v1/tasks/task_manager_ref_report_resolve", { report_id: 12 });
+    expect(fetchAttention).toHaveBeenCalledTimes(2);
+  });
+
   it("shows a terminal reminder with its due time, uncertain state and cancellation action", async () => {
     vi.mocked(fetchAttention).mockResolvedValue({ read_at: "2026-11-24T12:00:00Z", total: 1, sections: [
       { kind: "reminders", state: "ok", count: 1, error: null, items: [
