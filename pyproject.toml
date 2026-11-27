@@ -45,6 +45,7 @@ test = [
 [project.scripts]
 looper = "looper.cli:main"
 loopercli = "looper.loopercli:main"
+looper-edit = "looper.file_edit:main"
 
 [tool.setuptools.packages.find]
 include = ["looper*"]
