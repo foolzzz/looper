@@ -175,6 +175,9 @@ class Turn:
     speaker: SpeakerKind | None = None
     principal: Principal | None = None
     operator_id_missing: bool = False
+    # The audience class recorded on the audit rows of its calls, when ``speaker`` is not the source: a card press
+    # takes the asker's when the presser is the asker (``service.sender_kind``).
+    recorded_kind: str | None = None
     # Initialized explicitly by delivery-guard wiring; absent when disabled.
     debt: DeliveryDebt | None = None
     # The outside content its calls brought in (source, text), as the outbound review reads it: the leads it found.

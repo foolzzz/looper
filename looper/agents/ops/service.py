@@ -811,12 +811,13 @@ class ManagerOps:
             if receipts_settings.enabled() and watch.receipt is None and not isinstance(error, _OperatorOnly):
                 receipts.record_refusal(watch, turn, tool.name, pending.arguments, error)
             await self._record(turn, tool, pending.arguments, Risk.HIGH, "error", error_code=error.code.value,
-                               result={"message": str(error)}, confirmation_id=pending.id, watch=watch)
+                               result={"message": str(error)}, confirmation_id=pending.id, watch=watch,
+                               initiator=pending.asker)
             raise _Recorded(error, watch.shown) from None
         if tool.name in TAINTING_TOOLS and (tool.name != "looper_task_update" or "requirement" in pending.arguments):
             await self._mark_task(tool.task_id(pending.arguments) or _created_task(result))
         await self._record(turn, tool, pending.arguments, Risk.HIGH, "ok", result=result, confirmation_id=pending.id,
-                           watch=watch)
+                           watch=watch, initiator=pending.asker)
         return result
 
     # --- Confirmation cards (``card_actions``) ---
@@ -908,7 +909,9 @@ class ManagerOps:
         asker = pending.asker or Turn(channel=key[0], chat=key[2], channel_id=key[1])
         turn = Turn(channel=asker.channel, chat=asker.chat, message_id=pending.asked_in or f"card:{row['token']}",
                     sender=event.presser, group=asker.group, envelope=asker.envelope, channel_id=asker.channel_id,
-                    client_id=asker.client_id, client_name=asker.client_name)
+                    client_id=asker.client_id, client_name=asker.client_name,
+                    # The presser is who the press check let in; their class is the asker's only when they are the asker.
+                    recorded_kind=_asker_kind(asker) if event.presser == asker.sender else None)
         return card_actions.Answer("已确认，正在执行", "success", card=card.settled("⏳ 已确认，正在执行…"),
                                    later=self._run_pressed(pending, turn, card))
 
@@ -1003,8 +1006,10 @@ class ManagerOps:
 
     async def _record(self, turn: Turn, tool: Tool, arguments: Mapping[str, Any], risk: Risk, status: str, *,
                       error_code: str | None = None, result: Any = None,
-                      confirmation_id: str | None = None, watch: receipts.Watch | None = None) -> int | None:
-        """Record the call; its row's id (None when it could not be written)."""
+                      confirmation_id: str | None = None, watch: receipts.Watch | None = None,
+                      initiator: Turn | None = None) -> int | None:
+        """Record the call; its row's id (None when it could not be written). It names the turn's trusted sender
+        and audience class, and for a confirmed call (``initiator``: the turn that asked) the asker's too."""
         task_id = tool.task_id(arguments)
         turn.task_ids.add(task_id)
         task_id = task_id or _created_task(result)
@@ -1013,7 +1018,7 @@ class ManagerOps:
                 channel=turn.channel, chat=turn.chat, message_id=turn.message_id, tool=tool.name,
                 arguments=arguments, risk=risk.value, status=status, error_code=error_code, result=result,
                 confirmation_id=confirmation_id, task_id=task_id, manager_id=self._scope.manager_id,
-                client_id=turn.client_id, **receipts.row_fields(watch),
+                client_id=turn.client_id, **receipts.row_fields(watch), **_senders(turn, initiator),
             )
             if watch is not None and watch.receipt is not None:
                 watch.receipt = replace(watch.receipt, action_id=action_id)
@@ -1662,10 +1667,40 @@ def _digest(pending: _Pending) -> str:
     return card_actions.digest([pending.tool.name, pending.arguments, pending.confirmation])
 
 
+def sender_kind(turn: Turn) -> str | None:
+    """The audience class a turn's calls are recorded under, from what Looper classified (never model text):
+    ``autonomous`` for a turn no user started, ``client`` for an API client's, else the speaker's kind; None while
+    nothing classified it."""
+    if turn.recorded_kind is not None:
+        return turn.recorded_kind
+    if turn.autonomous:
+        return "autonomous"
+    if turn.client_id is not None:
+        return SpeakerKind.CLIENT.value
+    return turn.speaker.value if turn.speaker is not None else None
+
+
+def _asker_kind(asker: Turn) -> str | None:
+    """The class of the turn that asked for a confirmation. A user's turn is never autonomous: an asker restored
+    from a row that kept no class (``_turn_from`` has no message id) only looks it, so it is unknown."""
+    kind = sender_kind(asker)
+    return None if kind == "autonomous" else kind
+
+
+def _senders(turn: Turn, initiator: Turn | None) -> dict[str, str | None]:
+    """The sender columns of ``manager_actions``: the turn's channel sender id (None in a turn no user started)
+    and kind, and the asking turn's when ``initiator`` is given."""
+    fields = {"sender_id": None if turn.autonomous else turn.sender, "sender_kind": sender_kind(turn)}
+    if initiator is not None:
+        fields |= {"initiator_sender_id": initiator.sender, "initiator_kind": _asker_kind(initiator)}
+    return fields
+
+
 def _turn_record(turn: Turn) -> dict[str, Any]:
     """What a confirmation's row keeps of the turn that asked, so a button runs the call as in it after a restart."""
     return {"channel": turn.channel, "chat": turn.chat, "channel_id": turn.channel_id, "sender": turn.sender,
             "group": turn.group, "client_id": turn.client_id, "client_name": turn.client_name,
+            **({"recorded_kind": kind} if (kind := _asker_kind(turn)) is not None else {}),
             "envelope": turn.envelope.to_dict() if turn.envelope is not None else None}
 
 
@@ -1673,7 +1708,7 @@ def _turn_from(record: Mapping[str, Any]) -> Turn:
     envelope = record.get("envelope")
     return Turn(channel=record.get("channel"), chat=record.get("chat"), channel_id=record.get("channel_id"),
                 sender=record.get("sender"), group=bool(record.get("group")), client_id=record.get("client_id"),
-                client_name=record.get("client_name"),
+                client_name=record.get("client_name"), recorded_kind=record.get("recorded_kind"),
                 envelope=MessageEnvelope.from_dict(envelope) if isinstance(envelope, dict) else None)
 
 
