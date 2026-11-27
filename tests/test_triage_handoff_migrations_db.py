@@ -29,6 +29,7 @@ async def values(conn, table, column):
     ("main_session_egress", "manager_events", "reason", {"withheld_not_operator"}, {"future_reason"}),
     ("completion_session_allowlist", "manager_events", "reason", {"session_allowlist"}, {"future_reason"}),
     ("main_session_egress", "manager_events", "kind", {"autonomous"}, {"future_kind"}),
+    ("manager_session_client_kind", "manager_sessions", "kind", {"client"}, {"future_kind"}),
 ])
 def test_a_widening_adds_its_values_to_the_check_the_database_has_now(name, table, column, added, others):
     import asyncio

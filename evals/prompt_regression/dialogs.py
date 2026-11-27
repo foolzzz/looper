@@ -1437,6 +1437,12 @@ def _cancelled_on_confirmation(look: Look) -> str | None:
     return None if confirmed else "the task ended without a confirmed cancel"
 
 
+def _client_confirm_refused(look: Look) -> str | None:
+    """The API client's session has no confirmation tool: its call was refused, and nothing was confirmed."""
+    refused = [a for a in _writes(look, status="error", tool="looper_confirm")]
+    return None if refused else "the client's confirmation call was not refused"
+
+
 def _task_owners(database_url: str, task_ids: list[str]) -> dict[str, dict[str, Any]]:
     """The API client and the conversation each task in ``task_ids`` was created through (None for none)."""
     import asyncpg
@@ -3612,7 +3618,8 @@ DIALOGS: tuple[Dialog, ...] = (
     Dialog("client_relay_cancel", (
         Say("用户要取消任务 <task>。", _asked_to_confirm,
             (("looper_task_control", {"task_id": "<task>", "action": "cancel"}),)),
-        Say("用户确认取消。", _both(_cancelled_on_confirmation, _by_the_client),
+        # A client session cannot confirm: the call is refused and the task keeps running until the operator confirms.
+        Say("用户确认取消。", _both(_client_confirm_refused, _still_running),
             (("looper_confirm", {"confirmation_id": "<confirmation>"}),)),
     ), running_task=True, client=True),
 )
@@ -3632,22 +3639,20 @@ FAILURE_DIALOGS = tuple(_hold_dialog(action) for action in ("retry", "planner", 
 
 
 FAKE_DIALOGS: tuple[Dialog, ...] = (
-    # The third turn must resend the whole block because the client turn was another audience, in the same
-    # resident. A new process would also resend it, and would pass a view-only check on a build without the
-    # pending-whole recovery.
-    Dialog("stable_whole_after_client", (
+    # An API client's turn runs in a session of its own: it starts its own whole block (no operator profile), and
+    # the operator's session is neither told to resend its block nor shown the client's.
+    Dialog("stable_client_session_apart", (
         Say("请说出我的称呼和你的名字。", _stable_audience(("whole", "new session")),
             (("__reply__", {"text": "你是 Eval Operator，我是 Atlas。"}),)),
         Say("作为 API 客户端，只查询你叫什么。", _stable_audience(
-            ("whole", "new session"), ("whole", "operator profile omitted for client turn")),
+            ("whole", "new session"), ("whole", "new session")),
             (("__reply__", {"text": "我是 Atlas。"}),), client=True),
         Say("再说一次我的称呼和你的名字。", _stable_audience(
-            ("whole", "new session"), ("whole", "operator profile omitted for client turn"),
-            ("whole", "another audience's block came after the last shown state")),
+            ("whole", "new session"), ("whole", "new session"), ("unchanged", "unchanged")),
             (("__reply__", {"text": "你是 Eval Operator，我是 Atlas。"}),)),
         Say("继续保持当前称呼。", _stable_audience(
-            ("whole", "new session"), ("whole", "operator profile omitted for client turn"),
-            ("whole", "another audience's block came after the last shown state"), ("unchanged", "unchanged")),
+            ("whole", "new session"), ("whole", "new session"), ("unchanged", "unchanged"),
+            ("unchanged", "unchanged")),
             (("__reply__", {"text": "好的。"}),)),
     ), seed=_seed_stable_audience, tags=("manager", "stable_context", "audience")),
     Dialog("scoped_group_activity", (
@@ -4263,7 +4268,7 @@ def run_dialog(api: Api, dialog: Dialog, *, database_url: str, project_id: str, 
             api.post("/api/v1/session_budget/update", {"turn_budget_usd": 4})
             api.post("/api/v1/scheduler_settings/update", {"session_context_max_tokens": 40000})
             _seed_session_bound_task(database_url, project_id)
-        if dialog.id == "stable_whole_after_client":
+        if dialog.id == "stable_client_session_apart":
             _turn_on(database_url, "manager.stable_context")
         registry_before = api.post("/api/v1/registry/view", {})["result"] if dialog.id in {
             "model_login_runtime", "model_missing_endpoint"} else None

@@ -108,7 +108,7 @@ def fingerprint(prepared, tools, root):
 OFF_BASELINE = {
     "turn": "4e9d6108033e75dc5e2144612dd4f12e1876e4a2c7943716a2268615d7d49f74",
     "command": "7525d496fea853ca24a731eff0f7034169a77b754142e1f1815d1398f6a91104",
-    "signature": "f03dc4dc86fdb0995e69fc081bbb262ff17f4a5ef88486114e92d2d819caae5f",
+    "signature": "c8f5e811a7f1a0995dc50567775a1cbd3e8976eb046e70c3af86604b61cea6af",  # the MCP entry gained -I on purpose; turn and command are unchanged
 }
 
 
