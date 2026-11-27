@@ -105,8 +105,7 @@ def test_read_deny_paths_cover_credentials_and_trust_roots_as_real_paths(tmp_pat
     real = os.path.realpath
     for expected in (home / ".ssh", home / ".aws", home / ".gnupg", home / ".netrc", home / ".git-credentials",
                      home / ".config/gh", home / ".config/hub", home / ".config/gcloud",
-                     home / ".config/git/credentials", config / ".credentials.json",
-                     config / ".claude.json", runtime):
+                     home / ".config/git/credentials", home / "Library/Keychains", config, runtime):
         assert real(expected) in found, expected
     assert len(found) == len(set(found)) and all(os.path.isabs(path) for path in found)
     # Not the whole configuration directory: git keeps its configuration in ~/.config/git.
@@ -118,7 +117,7 @@ def test_xdg_config_home_replaces_the_default_and_home_is_the_claude_default(tmp
     found = sandbox.read_deny_paths({"HOME": str(home), "XDG_CONFIG_HOME": str(xdg)}, runtime)
     real = os.path.realpath
     assert real(xdg / "gh") in found and real(home / ".config/gh") not in found
-    assert real(home / ".claude/.credentials.json") in found and real(home / ".claude.json") in found
+    assert real(home / ".claude") in found and real(home / ".claude.json") in found
 
 
 def test_platform_problem(monkeypatch):
@@ -139,3 +138,53 @@ def test_dropped_environment_covers_proxies_in_both_cases_and_the_ssh_agent():
     for name in sandbox.FORBIDDEN_ENV:
         assert name in sandbox.DIRECT_DROPPED_ENV and name.lower() in sandbox.DIRECT_DROPPED_ENV
     assert "SSH_AUTH_SOCK" in sandbox.DIRECT_DROPPED_ENV
+
+
+def test_whole_claude_config_dir_and_the_default_one_are_denied(tmp_path):
+    home, config = tmp_path / "home", tmp_path / "custom-claude"
+    found = sandbox.read_deny_paths({"HOME": str(home), "CLAUDE_CONFIG_DIR": str(config)}, tmp_path / "runtime")
+    real = os.path.realpath
+    # The custom directory whole (settings with `env`, transcripts), and the default one an old login may remain in.
+    assert {real(config), real(home / ".claude"), real(home / ".claude.json")} <= set(found)
+    assert real(config / "settings.json") not in found  # covered by the directory entry, not listed alone
+
+
+@pytest.mark.parametrize("relative", [
+    ".docker", ".kube", ".azure", ".terraform.d", ".npmrc", ".pypirc", ".vault-token", ".cargo/credentials.toml",
+    ".config/Bitwarden CLI", "Library/Application Support/Firefox"])
+def test_p0_credential_locations_are_denied(tmp_path, relative):
+    home = tmp_path / "home"
+    assert os.path.realpath(home / relative) in sandbox.read_deny_paths({"HOME": str(home)}, tmp_path / "runtime")
+
+
+@pytest.mark.parametrize("relative", [
+    ".zsh_history", ".bash_history", "Library/Application Support/Google/Chrome",
+    "Library/Application Support/Microsoft Edge", "Library/Application Support/BraveSoftware",
+    "Library/Application Support/Arc", "Library/Cookies", ".looper"])
+def test_p1_history_browser_and_default_looper_locations_are_denied(tmp_path, relative):
+    home = tmp_path / "home"
+    assert os.path.realpath(home / relative) in sandbox.read_deny_paths({"HOME": str(home)}, tmp_path / "runtime")
+
+
+def test_not_the_shell_startup_file(tmp_path):
+    home = tmp_path / "home"  # sourced before every command: denying it would break each one (a follow-up)
+    assert os.path.realpath(home / ".zshenv") not in sandbox.read_deny_paths({"HOME": str(home)}, tmp_path / "runtime")
+
+
+def test_agent_runtime_logins_are_denied_by_default_and_where_a_variable_points(tmp_path):
+    home, elsewhere = tmp_path / "home", tmp_path / "elsewhere"
+    real = os.path.realpath
+    found = sandbox.read_deny_paths({"HOME": str(home)}, tmp_path / "runtime")
+    assert {real(home / ".codex"), real(home / ".grok"), real(home / ".trae")} <= set(found)
+    env = {"HOME": str(home), "CODEX_HOME": str(elsewhere / "c"), "GROK_HOME": str(elsewhere / "g"),
+           "TRAE_HOME": str(elsewhere / "t")}
+    found = sandbox.read_deny_paths(env, tmp_path / "runtime")
+    assert {real(elsewhere / "c"), real(elsewhere / "g"), real(elsewhere / "t")} <= set(found)  # the homes, not auth files
+
+
+def test_every_non_anthropic_provider_credential_is_dropped_from_a_direct_session():
+    from looper import child_env
+
+    expected = {"CODEX_API_KEY", "CODEX_ACCESS_TOKEN", "XAI_API_KEY", "GROK_CODE_XAI_API_KEY", "GROK_AUTH"}
+    assert expected <= set(sandbox.DIRECT_DROPPED_ENV) and set(sandbox.PROVIDER_CREDENTIAL_ENV) <= set(child_env.RUNTIMES)
+    assert not any(name.startswith(("ANTHROPIC", "CLAUDE")) for name in sandbox.PROVIDER_CREDENTIAL_ENV)

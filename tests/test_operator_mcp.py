@@ -185,6 +185,11 @@ def test_the_wrapper_starts_the_command_in_the_private_directory_not_the_task_di
     ({"command": "/opt/bin/uv", "args": ["run", "x"]}, "uv run"),
     ({"command": "/opt/bin/pnpm", "args": ["dlx", "x"]}, "pnpm dlx"),
     ({"command": "/opt/bin/yarn", "args": ["dlx", "x"]}, "yarn dlx"),
+    ({"command": "/opt/bin/yarn", "args": ["exec", "x"]}, "yarn exec"),
+    ({"command": "/opt/bin/pnpm", "args": ["exec", "x"]}, "pnpm exec"),
+    ({"command": "/opt/bin/npm", "args": ["exec", "--", "x"]}, "npm exec"),
+    ({"command": "/opt/bin/npm", "args": ["x", "pkg"]}, "npm x"),
+    ({"command": "/usr/bin/node", "args": ["/opt/lib/node_modules/npm/bin/npx-cli.js", "pkg"]}, "npx"),
     ({"command": "/opt/bin/deno", "args": ["run", "x.ts"]}, "deno run"),
     ({"command": "/opt/bin/bundle", "args": ["exec", "srv"]}, "bundle exec"),
     ({"command": "/opt/bin/go", "args": ["run", "."]}, "go run"),
@@ -348,3 +353,10 @@ def test_reset_cwd_empties_the_start_directory(tmp_path):
     operator_mcp.reset_cwd(directory)
     assert not directory.exists()
     assert operator_mcp.private_cwd(tmp_path / "t" / "mcp-cwd").is_dir()
+
+
+def test_a_shell_is_refused_and_named_as_configured_whatever_it_resolves_to(tmp_path):
+    named = tmp_path / "sh"
+    named.symlink_to("/bin/bash")
+    assert operator_mcp.launcher_problem({"command": str(named)}) == "sh (starts another program)"
+    assert operator_mcp.launcher_problem({"command": "/bin/sh", "args": ["-c", "x"]}) == "sh (starts another program)"

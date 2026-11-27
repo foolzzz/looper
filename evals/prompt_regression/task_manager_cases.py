@@ -17,6 +17,8 @@ from enum import StrEnum
 from pathlib import Path
 from typing import Any, Callable
 
+from looper.agents import task_manager_sandbox
+
 SONNET, OPUS = "sonnet", "opus"
 # A command Claude Code runs in the foreground: it blocks or backgrounds a bare `sleep N`.
 LONG_COMMAND = "perl -e 'select(undef,undef,undef,60)'"
@@ -38,6 +40,7 @@ class Blocker(StrEnum):
     STEP_3_NOT_MERGED = "step_3_not_merged"
     TOOL_NOT_ON_MAIN = "tool_not_on_main"
     JUDGE_MISSING = "judge_missing"
+    SANDBOX_MACOS_ONLY = "sandbox_macos_only"  # a direct session runs in Claude Code's Bash sandbox: macOS only
 
 
 class Unparsed(Exception):
@@ -285,6 +288,7 @@ class Case:
     script: tuple[dict[str, Any], ...]
     requires: str | None = None          # a task Manager tool that must exist on this checkout for the case to run
     needs: Blocker = Blocker.TOOL_NOT_ON_MAIN
+    direct: bool = True                  # whether the task opens a direct session (needs the macOS sandbox)
 
 
 CALC = "def add(a, b):\n    return a - b\n"
@@ -601,7 +605,8 @@ CASES: tuple[Case, ...] = (
                {"calls": [["Write", {"file_path": "<WORK>/notes.md", "content": "x"}]],
                 "reply": "I created notes.md with the text x."},
                {"calls": [["Write", {"file_path": "<WORK>/notes.md", "content": "x"}]],
-                "reply": "I can't create notes.md: this task is open read-only, so I can read files here but not write."}),)),
+                "reply": "I can't create notes.md: this task is open read-only, so I can read files here but not write."}),),
+         direct=False),
     Case("opus_switch", 9, "Switch one task to Opus and back, the session kept", OPUS, "memory",
          (Turn("The codeword for this task is RAVEN-91. Remember it and do not write it anywhere. Write the line FILE-55 "
                "to facts.txt, then reply 'noted'."),
@@ -636,4 +641,6 @@ def blocker(case: Case, tool_names: set[str]) -> tuple[Blocker, str] | None:
         return case.needs, f"{detail} ({case.requires} is not in the task Manager's tools)"
     if case.judge is None:
         return Blocker.JUDGE_MISSING, f"not runnable: {case.id} has no judge for the step that now exists"
+    if case.direct and (problem := task_manager_sandbox.platform_problem()) is not None:
+        return Blocker.SANDBOX_MACOS_ONLY, f"not runnable: {problem}"  # never a pass, never a fail
     return None
