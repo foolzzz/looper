@@ -34,12 +34,12 @@ def test_direct_instructions_exact():
         COMMON_HEAD
         + "You work directly in the task's directory: it is the user's real checkout, so your changes land in their files.\n"
         "Your only built-in tool is Bash, besides Looper's task tools and any MCP tools the user allowed; there is no Read, Edit, Write, NotebookEdit, WebFetch or WebSearch. "
-        "Read and search files through Bash (cat, sed -n, head, rg, find); images and PDFs cannot be viewed, and some credential locations cannot be read.\n"
-        'Change files with looper-edit through Bash. `looper-edit replace <file>` reads JSON {"old": ..., "new": ..., "count": ...} on stdin and replaces that exact text, failing when it matches nowhere or more often than count (default 1); an empty old creates a new file. '
+        "Read and search files through Bash (cat, sed -n, head, rg, find); images and PDFs cannot be viewed, and some locations outside the task directory, such as credentials and agent settings, cannot be read.\n"
+        'Change files with looper-edit through Bash; it changes only files inside the directory it runs in. `looper-edit replace <file>` reads JSON {"old": ..., "new": ..., "count": ...} on stdin and replaces that exact text, failing when it matches nowhere or more often than count (default 1); an empty old only creates a missing file. '
         "`looper-edit patch` reads a unified diff on stdin and applies all of it or nothing. A failed edit changes nothing and says why: look at the file again before you retry.\n"
-        "Your shell commands run in a sandbox: they can write only inside the task directory and $TMPDIR, and reach only the project's allowed domains over HTTP(S); local ports, including databases and Looper itself, are closed. "
+        "Your shell commands run in a sandbox: they can write only inside the task directory (not .git/hooks, .git/config, .git/info or .git/modules) and $TMPDIR, and reach only the project's allowed domains over HTTP(S); local ports, including databases and Looper itself, are closed. "
         "So `looper task` and Go command-line tools such as `gh` do not work here: read and change the task through your task tools, and leave pushing and opening pull requests to the user.\n"
-        "When the sandbox denies a command, Looper explains the denial to the user: do not retry it or look for a way around the sandbox; say what you could not do.\n"
+        "When the sandbox denies a command, do not retry it or look for a way around the sandbox; say what you could not do.\n"
         "Looper reports changes to branches and tags to the user, and switching the checked-out branch stops your next turn until the user sorts it out, so do not switch branches unless the user asks.\n"
         + COMMON_TAIL)
 
@@ -52,7 +52,7 @@ def test_direct_text_offers_only_allowlisted_tools_and_the_read_switch():
         assert all(name not in builtin for name in KNOWN_TOOLS if re.search(rf"\b{name}\b", denied.split(".")[0]))
     assert brief_module._direct_lines(("Bash", "Read"))[1] == (
         "Your built-in tools are Bash and Read, besides Looper's task tools and any MCP tools the user allowed; there is no Edit, Write, NotebookEdit, WebFetch or WebSearch. "
-        "Read files with Read, and search them with rg or find through Bash; some credential locations cannot be read.")
+        "Read files with Read, and search them with rg or find through Bash; some locations outside the task directory, such as credentials and agent settings, cannot be read.")
     # Everything but the tools line is the same for both allowlists.
     assert [line for i, line in enumerate(brief_module._direct_lines(("Bash", "Read"))) if i != 1] == [
         line for i, line in enumerate(brief_module._direct_lines(BUILTIN_TOOLS)) if i != 1]

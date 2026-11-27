@@ -1043,9 +1043,13 @@ them.
 **Project instructions and editing.** A direct session's fixed instructions
 (`task_manager_brief.instructions`) say what its sandbox allows: Bash is its only built-in
 tool (`BUILTIN_TOOLS`, the one switch for the wording), files are read and searched through Bash,
-changed with `looper-edit replace` or `looper-edit patch` (`looper/file_edit.py`), writes stay
-in the task directory and `$TMPDIR`, the network reaches only the project's allowed domains,
-`looper task` and Go command-line tools such as `gh` do not work, and pushing is the user's.
+changed with `looper-edit replace` or `looper-edit patch` (`looper/file_edit.py`, which changes
+only files inside the directory it runs in and uses an empty `old` only to create a missing file),
+shell writes stay in the task directory (not `.git/hooks`, `.git/config`, `.git/info` or
+`.git/modules`) and `$TMPDIR`, some locations outside the task directory (credentials, agent
+settings) cannot be read, the network reaches only the project's allowed domains, `looper task`
+and Go command-line tools such as `gh` do not work, and pushing is the user's. The text does not
+promise that Looper explains a denial: only the network allowlist's denials are explained (#1873).
 `looper-edit` is on the session's `PATH` through a private directory under the operator's cache
 (`task_manager_edit.edit_bin`: one symlink to the console script next to the interpreter, never
 under the runtime root, the task directory or `$TMPDIR`; a missing console script fails the
