@@ -153,7 +153,7 @@ def test_forbidden_env_is_refused_by_name_and_never_shows_its_value(case) -> Non
 
 
 def test_an_extra_writable_path_is_refused(case) -> None:
-    case.sandbox["restrictions"]["fs_allow_write"] = ["/Users/x/secrets"]
+    case.sandbox["restrictions"]["fs_allow_write"] = ["/srv/extra/secrets"]
     assert [m.item for m in case.compare()] == ["F3"]
     case.sandbox["restrictions"]["fs_allow_write"] = []
     case.sandbox["lists"]["rows"][0]["entries"].append("/private/tmp/shared")
