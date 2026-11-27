@@ -33,7 +33,7 @@ from evals.prompt_regression.runner import fresh_database, running_server
 from looper.agents.agent_settings import HARNESS_BOUNDARIES, WORKING_STYLE
 from looper.agents.ops.planner import ROLES_GUIDE
 from looper.agents.system_prompt import BOUNDARIES_LEAD, REVIEW_CONTRACT, WAITING_CONTRACT, WORK_CONTRACT
-from tests.db_support import DSN
+from tests.db_support import DSN, complete_records
 
 pytestmark = pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
 
@@ -56,13 +56,20 @@ variant = re.search(r"variant=(\w+)", prompt).group(1)
 TESTER, TESTER_V2, TESTER_HARNESS, SECURITY = __ROLE_TEXTS__
 
 def log(name, value):
-    with open(os.path.join(STATE, name), "a") as f:
-        f.write(json.dumps({"variant": variant, **value}) + "\n")
+    # One O_APPEND write per record, so a concurrent reader never sees a record in two pieces.
+    fd = os.open(os.path.join(STATE, name), os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o644)
+    try:
+        os.write(fd, (json.dumps({"variant": variant, **value}) + "\n").encode())
+    finally:
+        os.close(fd)
 
 def logged(name):
     path = os.path.join(STATE, name)
-    return [r for r in (json.loads(line) for line in open(path)) if r["variant"] == variant] \
-        if os.path.exists(path) else []
+    if not os.path.exists(path):
+        return []
+    # Only newline-terminated records: the last piece may be a record still being written.
+    lines = open(path, encoding="utf-8").read().split("\n")[:-1]
+    return [r for r in (json.loads(line) for line in lines) if r["variant"] == variant]
 
 def answer(session, text):
     for event in ({"type": "system", "subtype": "init", "session_id": session, "model": "fake"},
@@ -187,7 +194,7 @@ def _install(root: Path) -> tuple[Path, Path]:
 
 def _log(state: Path, name: str, variant: str) -> list[dict[str, Any]]:
     path = state / name
-    rows = [json.loads(line) for line in path.read_text().splitlines()] if path.exists() else []
+    rows = complete_records(path.read_text()) if path.exists() else []
     return [row for row in rows if row["variant"] == variant]
 
 

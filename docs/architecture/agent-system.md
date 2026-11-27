@@ -948,7 +948,8 @@ runtimes are refused rather than substituted.
 
 Direct launches append the fixed task instructions and a bounded, fenced brief.
 They run inside Claude Code's Bash sandbox with the fixed configuration described below, keep the
-operator's user-level settings, memory and skills, and load MCP servers only from
+operator's user-level settings and memory (the global instructions); `Skill` is not an allowlisted tool, so a user
+skill is not something the model can call (an operator's slash command can still run one), and load MCP servers only from
 a generated `--mcp-config` file under `--strict-mcp-config`: Looper's own server plus the
 operator's servers named in `tasks.conversations.manager_mcp` (default none; read and written
 through `task_conversations.get` and `task_conversations.update`, operator-only; up to 20 unique
@@ -1001,11 +1002,23 @@ them.
   allowlist or the read deny list restarts the session.
 - **Write scope.** The task directory and the sandbox's temporary directory; `.git/hooks`,
   `.git/config`, `.git/info` and `.git/modules` of the task directory are write-denied.
-- **Read deny list.** `read_deny_paths()`: the operator's credential directories (`~/.ssh`, `~/.aws`,
-  `~/.gnupg`, credential stores under `~/.config`, `.netrc`, `.git-credentials`), Claude's credential
-  file and `.claude.json`, and Looper's runtime root. It is a blacklist and cannot say "read only the
-  task directory"; `~/.config` as a whole is not denied because git reads `~/.config/git`. What a
-  model reads can leave through the exits listed in the task-sessions RFC (section 25.5).
+- **Read deny list.** `read_deny_paths()`: credential directories and files of the operator (`~/.ssh`,
+  `~/.aws`, `~/.gnupg`, `~/.docker`, `~/.kube`, `~/.azure`, `.netrc`, `.git-credentials`, `.npmrc`,
+  `.pypirc`, ..., credential stores under `~/.config`), the login keychain, the whole Claude
+  configuration directory (and the default one when another is set), the Codex, Grok, coco and Copilot
+  homes (and the directories their variables name), shell history, browser profiles and cookie
+  stores, the default `~/.looper`, and the active runtime root (plus an ops file outside it). It is a
+  blacklist and cannot say "read only the task directory"; `~/.config` as a whole is not denied because git
+  reads `~/.config/git`, and `~/.zshenv` is not denied because every command reads it. What a model reads
+  can leave through the exits listed in the task-sessions RFC (section 25.5).
+- **Environment.** The direct session's process environment drops proxy variables (both cases),
+  `SSH_AUTH_SOCK`, every runtime variable `child_env` lists that the Claude CLI does not need
+  (`RUNTIME_ENV_CLASS`: keep or drop, one entry per name, enforced by a test), and the names an Agent
+  Profile's `env` adds that are not the CLI's own or the provider binding's. `ANTHROPIC_API_KEY` and the other
+  Anthropic variables stay visible to the sandboxed Bash (a residual, RFC 25.5). v1 supports the Anthropic API
+  and the Claude login only: a cloud-provider backend (Bedrock, Vertex) gets no region, profile or credentials
+  from the Agent Profile's `env` (`AWS_*`, `CLOUD_ML_REGION`, `GOOGLE_APPLICATION_CREDENTIALS` are dropped), and
+  its credential files are on the read deny list, so a direct session on such a profile cannot authenticate.
 - **MCP servers.** Definitions come from the user scope only. Looper starts every stdio server,
   its own included, through a wrapper (`operator_mcp.wrap`: `/bin/sh -c 'cd "$1" && shift && exec
   "$@"'` into a private directory of the runtime root, outside every task directory), because Claude
@@ -1022,6 +1035,32 @@ them.
 - **Verification.** `tests/test_task_manager_sandbox_probe.py` runs the real command against the real
   CLI and a local scripted Messages API (`LOOPER_CLAUDE_PROBE_BIN`), with positive controls; rerun it
   before changing `VERIFIED_CLI_VERSION`.
+- **Network allowlist and denials.** By default a direct session reaches no external host. The
+  operator, and only the operator, allows external domains per project with the operator-only
+  `projects.task_manager_sandbox_get` and `projects.task_manager_sandbox_update` (`task_manager_sandbox_policies`
+  holds the list and a revision, `task_manager_sandbox_policy_audit` one row per change with the old and
+  new value). `update` replaces the whole list in one transaction; `validate_domains` accepts only
+  external names (at most 50, unique, no IP literals including `127.1`-style shorthand, no ports, paths,
+  bare or inner wildcards, no single-label or non-public names), else `network_policy_invalid` and nothing
+  is written; a stale `expected_revision` returns `conflict`. Every launch and resume reads the stored list
+  again (`allowed_domains`); an entry this version refuses refuses the launch with `network_policy_invalid`.
+  The list is `sandbox.network.allowedDomains` in the settings file, so it is part of the launch
+  signature and a change restarts the process and resumes the same session. Only commands that go
+  through the sandbox's HTTP(S) proxy are affected (`SCOPE_TEXT`): Go command-line tools such as `gh` fail
+  certificate verification inside the sandbox even for a listed domain, and Node command-line tools do not
+  use the proxy. The guarantee that nothing outside the list is reachable comes from the hostile-
+  configuration probes, not from reading the settings back (RFC task-sessions-v0, section 25.6).
+  When a Bash result ends in the CLI's `<sandbox_violations>` block, `task_manager_denials.parse` reads
+  its `deny network-outbound <host>:<port> (<reason>)` lines (the observed format on 2.1.332; a denied
+  file write carried no block at all there), and a per-turn `Observer` classifies each denial: not on the
+  project's list (`not_allowed`), on the list but a known client kind that the sandbox cannot support
+  (`unsupported_client`), or `unknown`, which names no host and does not suggest that allowing one helps.
+  Each denial writes an activity row (`sandbox_denial`: typed fields and a hash of the command, never its
+  text) and one count in `task_manager_sandbox_denials_total` of `manager_metrics.get` (category and
+  project, no host); the first denial of each category and target in a turn also sends a `sandbox_denial`
+  task event whose conversation text the dashboard writes from its fields. The event is stored for the
+  dashboard and is not part of the model's history. The task page shows the project's effective list
+  read-only; editing is in the operations.
 - **Ref reports.** In an in-place direct session the model's Bash writes the real `.git`, so a turn
   can move a branch, delete a tag or switch `HEAD`. `task_manager_refs` records `refs/heads`,
   `refs/tags` and `HEAD` before every turn in the running turn's memory (the sandbox cannot reach it;
@@ -1044,7 +1083,7 @@ them.
   anything undecidable is reported as a rewrite. A ref listing Looper cannot read safely (a name with a
   line-break character, a repeated name, a failed read) refuses the turn at its start; at its end it emits a
   `sandbox_notice` with notice `refs_unreadable` instead of a report. A task directory that is not a git
-  repository is refused as `workspace` for now (the typed `not_git` reason comes with the directory check).
+  repository is refused before the session starts (see Directory checks below).
   `ref_report` and the `refs_unreadable` notice carry the turn's `message_id`.
   Every git call goes through `git_safe`; the real-CLI rows are `tests/test_task_manager_refs_probe.py`.
 

@@ -9,6 +9,7 @@ import { WorkGates } from "@/components/work-gates";
 import { WorkRequirement } from "@/components/work-requirement";
 import { WorkSteps } from "@/components/work-steps";
 import { WorkTaskManagerModel } from "@/components/work-task-manager-model";
+import { WorkTaskSandbox } from "@/components/work-task-sandbox";
 import { WorkCost } from "@/components/work-cost";
 import { WorkControls, type WorkControlResult } from "@/components/work-controls";
 import { WorkDraft } from "@/components/work-draft";
@@ -364,6 +365,7 @@ function WorkPageContent({
           snapshot={null}
           onReread={() => Promise.reject(new Error("task manager profile read is not available"))}
         />
+        <WorkTaskSandbox projectId={selected.project_id ?? null} />
         <WorkSteps task={selected} onOpenGate={step => openGate(step.step_key)} />
         <WorkGates task={selected} onOpenGate={openGate} />
         <div className="p-4"><WorkChanges taskId={taskId} visible pendingWorkspace={isUnstartedTask(selected.status)}

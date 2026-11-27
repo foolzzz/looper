@@ -1,5 +1,6 @@
 """Transport proofs use real pipes and the production wire codec."""
 import asyncio
+from contextlib import asynccontextmanager
 from dataclasses import dataclass, replace
 import json
 from pathlib import Path
@@ -12,7 +13,20 @@ from looper.agents.runtimes.pricing import ModelPrice, usage_event
 from looper.agents.runtimes.runner import protocol as p
 from looper.agents.runtimes.runner.bridge import RpcFailure
 from looper.agents.runtimes.runner.turn import RunnerTurn
-from runner_pipe_support import connection, send
+import runner_pipe_support
+from runner_pipe_support import send
+
+HANDSHAKE_TIMEOUT = 10
+
+
+@asynccontextmanager
+async def connection(**options):
+    """Initialize and open sessions on the default budget; only later calls see the short one."""
+    short = options.pop("control_timeout", None)
+    async with runner_pipe_support.connection(**options) as opened:
+        if short is not None:
+            opened[0].control_timeout = short
+        yield opened
 
 
 def test_health_round_trip():
@@ -38,15 +52,28 @@ NEW = next(c["message"]["params"] for c in json.loads(
     if c["name"] == "new")
 
 
-async def open_turn(bridge, reader, writer, turn=None, events=None):
+async def open_turn(bridge, reader, writer, turn=None, events=None, handshake_delay=0):
+    # session/new must succeed: it never runs on the short budget a test sets for the call under test.
+    short, bridge.control_timeout = bridge.control_timeout, HANDSHAKE_TIMEOUT
     opening = asyncio.create_task(bridge.open_session(NEW))
     req = await p.read_frame(reader)
+    await asyncio.sleep(handshake_delay)
     await send(writer, p.Response(req.id, result={"session_id": "s"}))
     assert await opening == "s"
+    bridge.control_timeout = short
     turn, events = turn or Turn(), events if events is not None else []
     beginning = asyncio.create_task(bridge.begin_turn("s", "t", events.append, turn, text="hello"))
     req = await p.read_frame(reader)
     return turn, events, beginning, req
+
+
+def test_short_budget_does_not_apply_to_the_handshake():
+    async def exercise():
+        async with connection(control_timeout=0.02) as (bridge, reader, writer, failures):
+            _, _, beginning, req = await open_turn(bridge, reader, writer, handshake_delay=0.2)
+            assert bridge.control_timeout == 0.02 and not failures
+            beginning.cancel()
+    run(exercise())
 
 
 async def accept(writer, req):
