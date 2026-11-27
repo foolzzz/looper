@@ -1015,7 +1015,10 @@ them.
   `SSH_AUTH_SOCK`, every runtime variable `child_env` lists that the Claude CLI does not need
   (`RUNTIME_ENV_CLASS`: keep or drop, one entry per name, enforced by a test), and the names an Agent
   Profile's `env` adds that are not the CLI's own or the provider binding's. `ANTHROPIC_API_KEY` and the other
-  Anthropic variables stay visible to the sandboxed Bash (a residual, RFC 25.5).
+  Anthropic variables stay visible to the sandboxed Bash (a residual, RFC 25.5). v1 supports the Anthropic API
+  and the Claude login only: a cloud-provider backend (Bedrock, Vertex) gets no region, profile or credentials
+  from the Agent Profile's `env` (`AWS_*`, `CLOUD_ML_REGION`, `GOOGLE_APPLICATION_CREDENTIALS` are dropped), and
+  its credential files are on the read deny list, so a direct session on such a profile cannot authenticate.
 - **MCP servers.** Definitions come from the user scope only. Looper starts every stdio server,
   its own included, through a wrapper (`operator_mcp.wrap`: `/bin/sh -c 'cd "$1" && shift && exec
   "$@"'` into a private directory of the runtime root, outside every task directory), because Claude
