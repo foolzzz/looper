@@ -273,7 +273,7 @@ describe("task conversation", () => {
       { kind: "sandbox_notice", notice: "refs_unreadable", detail: "server detail" },
       { kind: "sandbox_notice", notice: "project_instructions_skipped", detail: "AGENTS.md: not_utf8; CLAUDE.md: outside_workdir" },
       { kind: "sandbox_notice", notice: "project_instructions_skipped", detail: "CLAUDE.local.md: some_new_reason; AGENTS.md: hard_linked" },
-      { kind: "ref_report", report_id: 7, own_commits: 2, needs_you: true,
+      { kind: "ref_report", message_id: "turn-1", report_id: 7, own_commits: 2, needs_you: true,
         head: { before: "refs/heads/main", after: null }, info: [change("refs/heads/looper/t2/task", "moved", old, moved, "git update-ref refs/heads/looper/t2/task A B")],
         changes: [change("refs/heads/oth\\u202eer", "moved", old, moved, `git update-ref refs/heads/other ${old} ${moved}`),
           change("refs/heads/main", "non_fast_forward", moved, old, `git update-ref refs/heads/main ${moved} ${old}`)] },
@@ -307,6 +307,20 @@ describe("task conversation", () => {
       `git update-ref refs/heads/other ${old} ${moved}`, `git update-ref refs/heads/main ${moved} ${old}`,
       "git update-ref refs/heads/looper/t2/task A B"]);
     for (const index of [5, 6, 7]) expect(container.querySelector(`[data-feed-key="task-event:r${index}"]`)?.textContent).toContain("无法读取这条事件");
+  });
+
+  it("keeps repeated identical sandbox notices of different turns apart, and folds one turn's copy", async () => {
+    const notice = (messageId: string) => ({ kind: "sandbox_notice", notice: "refs_unreadable", detail: "d", message_id: messageId });
+    api.fetchChatHistory.mockResolvedValue(idle([
+      row("n1", "event", JSON.stringify(notice("turn-1")), "2026-11-25T00:00:01Z"),
+      row("n2", "event", JSON.stringify(notice("turn-2")), "2026-11-25T00:00:02Z"),
+    ]));
+    await show(<TaskWorkConversation taskId="t1" task={taskOf("t1")} />);
+    await flush();
+    expect(container.querySelectorAll('[data-feed-key^="task-event:"]')).toHaveLength(2);
+    act(() => threadEmit({ kind: "task.event", payload: notice("turn-2") }));
+    await flush();
+    expect(container.querySelectorAll('[data-feed-key^="task-event:"]')).toHaveLength(2);
   });
 
   it("shows a live model switch without sending, and reloads it as the same row", async () => {

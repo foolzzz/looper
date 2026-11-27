@@ -667,7 +667,7 @@ Manager has no tool for it. The dashboard shows the task page's 指标 card and 
   shared resident session's history.
   `looper profile show [--runtime-root …] [--config …]` reads the same file with the same compiler and prints
   exactly the resident section's body, with no added newline, whether injection is on or off. It makes no model
-  call or schema/cache write. Its worker has a 1-second deadline covering imports, settings and file I/O;
+  call or schema/cache write. Its worker bounds its database and settings reads to 0.7 seconds after its imports, and the parent waits at most 4.5 seconds for the worker to exit;
   missing settings, an unavailable database, an invalid profile or timeout prints nothing and exits 0.
   Output is bounded by the compiler's 1500-character cap (at most 6000 UTF-8 bytes).
   `looper claude-code profile` prints the same text for the operator's own Claude Code
@@ -1027,7 +1027,8 @@ them.
   `refs/tags` and `HEAD` before every turn in the running turn's memory (the sandbox cannot reach it;
   `refs/remotes` and anything else are never read, and packed refs, `gc` and reflogs show no change
   because values are compared, not files), compares them after, and says what changed in the task
-  conversation with one `git update-ref` restore command per ref. It never restores anything and
+  conversation with one restore command per ref (`git update-ref --no-deref`, or `git symbolic-ref` for a
+  symbolic ref). Names are shown with control and format characters written as `\uXXXX`. It never restores anything and
   raises no alert: a ref change is not an invariant violation. The `ref_report` event carries
   `report_id`, `changes`, `info`, `head`, `own_commits` and `needs_you`. A fast-forward of the task
   branch is the Manager's own commits (`own_commits`) and is not listed; a reset, rewrite or delete of it
@@ -1038,6 +1039,12 @@ them.
   `sandbox_notice` event that the real checkout is edited directly); a detached `HEAD` then refuses the
   first turn (`head_detached`), and every later turn refuses while `HEAD` is not on that branch
   (`head_moved`) until it is checked out again or the operator runs `tasks.task_manager_branch_set`.
+  A fast-forward is decided from the raw commit objects (grafts and replace refs are not honoured) and
+  anything undecidable is reported as a rewrite. A ref listing Looper cannot read safely (a name with a
+  line-break character, a repeated name, a failed read) refuses the turn at its start; at its end it emits a
+  `sandbox_notice` with notice `refs_unreadable` instead of a report. A task directory that is not a git
+  repository is refused as `workspace` for now (the typed `not_git` reason comes with the directory check).
+  `ref_report` and the `refs_unreadable` notice carry the turn's `message_id`.
   Every git call goes through `git_safe`; the real-CLI rows are `tests/test_task_manager_refs_probe.py`.
 
 **Project instructions and editing.** A direct session's fixed instructions
@@ -1844,7 +1851,7 @@ runs without the shared leader; OMP 18.4.3).
 `looper claude-code profile` reuses `looper profile show` and the Manager's single compiler; it reads the
 configured vault note locally through the database, without an HTTP request, model call or cache write.
 `--hook` returns SessionStart JSON whose `additionalContext` is that same text, capped at 3000 characters.
-The shared reader has a 1-second deadline (within the 2-second hook budget); an unavailable or empty profile,
+The shared reader gives its worker 4.5 seconds in total, including imports (the hook itself is cut off at 5 seconds); an unavailable or empty profile,
 errors and timeouts produce no stdout or stderr and exit 0. A stopped HTTP server alone does not prevent a read.
 Nothing is installed by default. `looper claude-code install hook --runtime-root <runtime root>` shows its
 user-settings path, added command and diff, asks for confirmation, backs up existing bytes and writes atomically.

@@ -14,7 +14,10 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 import shlex
+import unicodedata
+from collections import deque
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
 from enum import Enum
@@ -38,10 +41,16 @@ REFS_UNREADABLE_NOTICE = "refs_unreadable"
 NOTICES = (FIRST_ENABLE_NOTICE, REFS_UNREADABLE_NOTICE)
 REFS_UNREADABLE_DETAIL = ("The branches and tags could not be read again after this turn, so any change this turn made "
                           "to them is not reported. Check them yourself.")
-# What ``str.splitlines`` splits on (besides \n), and the bidirectional controls that reorder displayed text.
+# What ``str.splitlines`` splits on (besides \n).
 _LINE_BREAKS = frozenset("\r\x0b\x0c\x1c\x1d\x1e\x85\u2028\u2029")
-_BIDI = frozenset("\u202a\u202b\u202c\u202d\u202e\u2066\u2067\u2068\u2069")
-WALK_LIMIT = 10000  # commits read when deciding fast-forward
+WALK_LIMIT = 20000  # commits read when deciding fast-forward
+OBJECT_LIMIT = 1 << 20  # a commit object larger than this ends the walk undecided
+_OID = re.compile(r"[0-9a-f]{40}(?:[0-9a-f]{24})?")
+
+
+def _odd(ch: str) -> bool:
+    """A control or format character (bidirectional controls, zero-width characters): invisible or reordering."""
+    return unicodedata.category(ch) in ("Cc", "Cf")
 FIRST_ENABLE_DETAIL = ("The task Manager edits files directly in your real checkout. v1 only reports changes to "
                        "branches and tags; it never restores them, and deleted objects cannot be recovered. Push or "
                        "back up important branches first.")
@@ -93,18 +102,19 @@ class Report:
 
 
 def display(name: str | None) -> str | None:
-    """A ref name for the conversation: bidirectional controls written as ``\\uXXXX``."""
+    """A ref name for the conversation: control and format characters (bidirectional controls, zero-width
+    characters) written as ``\\uXXXX``."""
     if name is None:
         return None
-    return "".join(f"\\u{ord(ch):04x}" if ch in _BIDI else ch for ch in name)
+    return "".join(f"\\u{ord(ch):04x}" if _odd(ch) else ch for ch in name)
 
 
 def _quote(name: str) -> str:
-    """``name`` as one shell word; bidirectional controls are spelled out in a ``$'...'`` word."""
-    if not any(ch in _BIDI for ch in name):
+    """``name`` as one shell word; control and format characters are spelled out in a ``$'...'`` word."""
+    if not any(_odd(ch) for ch in name):
         return shlex.quote(name)
     # UTF-8 bytes as \\xHH: the one spelling every POSIX shell (bash 3.2 included) reads inside $'...'.
-    body = "".join("".join(f"\\x{byte:02x}" for byte in ch.encode()) if ch in _BIDI
+    body = "".join("".join(f"\\x{byte:02x}" for byte in ch.encode()) if _odd(ch)
                    else ("\\" + ch if ch in "'\\" else ch) for ch in name)
     return f"$'{body}'"
 
@@ -189,7 +199,9 @@ async def snapshot(work_dir: str | Path) -> Snapshot:
         if target:
             symrefs[ref] = target
     code, head = await _git(work_dir, "symbolic-ref", "-q", "HEAD")
-    return Snapshot(refs, head.strip() if code == 0 and head.strip() else None, symrefs)
+    # Only the trailing newline goes: ref names may end in (or hold) Unicode whitespace.
+    head = head.removesuffix("\n") if code == 0 else ""
+    return Snapshot(refs, head if head.startswith(HEADS) else None, symrefs)
 
 
 async def branch_problem(work_dir: str | Path, branch: str) -> str | None:
@@ -201,47 +213,62 @@ async def branch_problem(work_dir: str | Path, branch: str) -> str | None:
     return None if code == 0 else "git does not accept this as a branch name"
 
 
-async def _walk(work_dir: str | Path, start: str, stop: str | None) -> tuple[set[str], bool, bool, bool]:
-    """Commits reachable from ``start`` without passing ``stop``, read as raw objects (``cat-file --batch`` honours
-    neither ``info/grafts`` nor replace refs): ``(visited, reached_stop, complete, reached_root)``. ``complete`` is
-    false when the walk hit ``WALK_LIMIT`` or an object it could not read as a commit."""
+def _parents(body: bytes) -> list[str] | None:
+    """The parents of a raw commit object, read the way git does: the first line is ``tree <oid>`` and the
+    ``parent <oid>`` lines are the consecutive ones right after it. None when the header is not that shape."""
+    lines = body.split(b"\n\n", 1)[0].decode("utf-8", "replace").split("\n")
+    if not lines or not re.fullmatch(r"tree " + _OID.pattern, lines[0]):
+        return None
+    parents = []
+    for line in lines[1:]:
+        if not line.startswith("parent "):
+            break
+        oid = line[len("parent "):]
+        if not _OID.fullmatch(oid):
+            return None
+        parents.append(oid)
+    return parents
+
+
+async def _reaches(work_dir: str | Path, new: str, old: str) -> bool:
+    """Whether ``old`` is an ancestor of ``new``, from the raw commit objects (``cat-file --batch`` honours neither
+    ``info/grafts`` nor replace refs), breadth first so a merge finds ``old`` among its first parents. False also
+    when the walk could not decide (a limit, an object that is not a well-formed commit)."""
     process = await git_safe.spawn(work_dir, "-c", "core.useReplaceRefs=false", "cat-file", "--batch",
                                    extra_env=_LOCKLESS, stdin=asyncio.subprocess.PIPE,
                                    stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL)
-    visited: set[str] = set()
-    reached_stop = reached_root = False
-    complete = True
+    found = False
 
-    async def read() -> None:
-        nonlocal reached_stop, reached_root, complete
-        stack = [start]
-        while stack and complete:
-            sha = stack.pop()
-            if sha in visited:
+    async def read() -> bool:
+        seen: set[str] = set()
+        queue = deque([new])
+        while queue:
+            sha = queue.popleft()
+            if sha == old:
+                return True
+            if sha in seen:
                 continue
-            if sha == stop:
-                reached_stop = True
-                continue
-            if len(visited) >= WALK_LIMIT:
-                complete = False
-                break
+            if len(seen) >= WALK_LIMIT:
+                return False
+            seen.add(sha)
             process.stdin.write(sha.encode() + b"\n")
             await process.stdin.drain()
             header = (await process.stdout.readline()).decode("ascii", "replace").split()
-            if len(header) != 3 or header[1] != "commit":
-                complete = False
-                break
-            body = await process.stdout.readexactly(int(header[2]) + 1)
-            visited.add(sha)
-            parents = [line.split()[1] for line in body.decode("utf-8", "replace").split("\n\n", 1)[0].split("\n")
-                       if line.startswith("parent ")]
-            reached_root = reached_root or not parents
-            stack.extend(parents)
+            if len(header) != 3 or header[1] != "commit" or not header[2].isdigit():
+                return False
+            size = int(header[2])
+            if size > OBJECT_LIMIT:
+                return False
+            parents = _parents(await process.stdout.readexactly(size + 1))
+            if parents is None:
+                return False
+            queue.extend(parents)
+        return False
 
     try:
-        await asyncio.wait_for(read(), GIT_TIMEOUT_SEC)
+        found = await asyncio.wait_for(read(), GIT_TIMEOUT_SEC)
     except (asyncio.TimeoutError, asyncio.IncompleteReadError, ValueError):
-        complete = False
+        found = False
     finally:
         try:
             process.stdin.close()
@@ -249,20 +276,18 @@ async def _walk(work_dir: str | Path, start: str, stop: str | None) -> tuple[set
             pass
         process.kill()
         await process.wait()
-    return visited, reached_stop, complete, reached_root
+    return found
 
 
 async def fast_forward(work_dir: str | Path, old: str, new: str) -> int | None:
     """The number of commits ``old..new`` when ``new`` descends from ``old``, else None (also when it cannot be
-    decided). Parents are read from the raw commit objects, so a graft cannot make a reset look like an ancestor."""
+    decided). The decision reads raw parents, so a graft or a replace ref cannot make a reset look like an
+    ancestor; only the count comes from ``rev-list`` and a graft could skew that number, never the decision."""
     try:
-        visited, reached, _, root = await _walk(work_dir, new, old)
-        if not reached:
+        if not await _reaches(work_dir, new, old):
             return None
-        if root:  # another parent path ran down to the history ``old`` also contains: take that out of the count
-            ancestors, _, _, _ = await _walk(work_dir, old, None)
-            visited = visited - ancestors - {old}
-        return len(visited)
+        code, count = await _git(work_dir, "-c", "core.useReplaceRefs=false", "rev-list", "--count", f"{old}..{new}")
+        return int(count.strip()) if code == 0 and count.strip().isdigit() else 0
     except Exception:
         logger.warning("task Manager refs: could not decide fast-forward", exc_info=True)
         return None
@@ -317,6 +342,8 @@ async def compare(work_dir: str | Path, before: Snapshot, after: Snapshot, *, ta
         old_target, new_target = before.symrefs.get(ref), after.symrefs.get(ref)
         if old == new and old_target == new_target:
             continue
+        if old_target is not None and old_target == new_target:  # a link to the same ref follows its target's moves
+            continue
         pointers = {"old_target": old_target, "new_target": new_target}
         if ref == task_ref:
             count = (await fast_forward(work_dir, old, new)
@@ -336,8 +363,9 @@ async def compare(work_dir: str | Path, before: Snapshot, after: Snapshot, *, ta
     return Report(tuple(changes), tuple(info), before.head, after.head, own_commits, needs_you)
 
 
-def payload(report: Report, report_id: int | None) -> dict[str, Any]:
-    return {"report_id": report_id, "changes": [c.to_json() for c in report.changes],
+def payload(report: Report, report_id: int | None, message_id: str | None = None) -> dict[str, Any]:
+    """The ``ref_report`` event; ``message_id`` (the turn's) keeps two otherwise identical reports apart."""
+    return {"message_id": message_id, "report_id": report_id, "changes": [c.to_json() for c in report.changes],
             "info": [c.to_json() for c in report.info],
             "head": ({"before": display(report.head_before), "after": display(report.head_after)}
                      if report.head_changed else None),
@@ -354,15 +382,15 @@ async def end_turn(task: Mapping[str, Any], work_dir: str | Path, before: Snapsh
         report = await compare(work_dir, before, await snapshot(work_dir), task_branch=branch, task_id=task_id)
     except Exception:
         await sink.event(TaskManagerEvent.SANDBOX_NOTICE, {"notice": REFS_UNREADABLE_NOTICE,
-                                                          "detail": REFS_UNREADABLE_DETAIL})
+                                                          "detail": REFS_UNREADABLE_DETAIL, "message_id": message_id})
         raise
     if not report.worth_saying:
         return report
     report_id = None
     if report.changes or report.info:
-        body = payload(report, None)
+        body = payload(report, None, message_id)
         report_id = await store.insert_report(
             task_id, message_id, {key: body[key] for key in ("changes", "info", "head", "own_commits")},
             report.needs_you)
-    await sink.event(TaskManagerEvent.REF_REPORT, payload(report, report_id))
+    await sink.event(TaskManagerEvent.REF_REPORT, payload(report, report_id, message_id))
     return report

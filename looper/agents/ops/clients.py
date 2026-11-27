@@ -210,7 +210,9 @@ class ClientOps:
 
     def _turn(self, principal: Principal, session: str) -> Turn:
         return Turn(channel=API_CHANNEL, chat=session, message_id=f"api-{uuid.uuid4().hex[:12]}",
-                    client_id=principal.client_id, client_name=principal.client_name)
+                    client_id=principal.client_id, client_name=principal.client_name,
+                    # Audit attribution only: ``speaker`` and the rest authorization reads stay unset.
+                    recorded_kind="operator" if principal.kind == "operator" else None)
 
     async def call(self, principal: Principal, session: str, name: str, raw: Any, *,
                    tool: Tool | None = None, validator: Callable[[Mapping[str, Any], Any], dict[str, Any]] = check_arguments,

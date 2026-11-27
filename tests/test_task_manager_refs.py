@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import shlex
 import subprocess
+import time
 from pathlib import Path
 
 import pytest
@@ -265,3 +266,91 @@ def test_bidirectional_controls_are_escaped_in_the_name_and_the_restore_command_
                                        ("a..b", False), ("a b", False)])
 def test_only_names_git_accepts_and_that_are_not_options_can_be_the_task_branch(repo, name, ok):
     assert (asyncio.run(refs.branch_problem(repo, name)) is None) is ok
+
+
+# --- formal review of the second version ------------------------------------------------------------------------
+
+
+def raw_commit(repo: Path, tree: str, header_lines: list[str], message: str = "rewrite") -> str:
+    ident = "A <a@example.invalid> 1700000000 +0000"
+    body = "\n".join([f"tree {tree}", f"author {ident}", f"committer {ident}", *header_lines]) + f"\n\n{message}\n"
+    return subprocess.run(["git", "-C", str(repo), "hash-object", "-t", "commit", "--literally", "-w", "--stdin"],
+                          input=body, check=True, capture_output=True, text=True).stdout.strip()
+
+
+def test_a_parent_line_after_the_other_header_lines_does_not_make_a_rewrite_a_fast_forward(repo):
+    commit(repo, "b.txt")
+    tip = git(repo, "rev-parse", "HEAD")
+    tree = git(repo, "rev-parse", "HEAD~1^{tree}")
+    crafted = raw_commit(repo, tree, [f"parent {tip}"])  # git itself sees a root commit here
+    assert git(repo, "rev-list", "--count", crafted) == "1"
+    report = run(repo, lambda: git(repo, "reset", "-q", "--hard", crafted))
+    change, = report.changes
+    assert change.change is Change.NON_FAST_FORWARD and report.own_commits == 0
+
+
+def test_a_real_parent_line_in_the_right_place_is_still_a_fast_forward(repo):
+    tip = git(repo, "rev-parse", "HEAD")
+    tree = git(repo, "rev-parse", "HEAD^{tree}")
+    ident = "A <a@example.invalid> 1700000000 +0000"
+    body = f"tree {tree}\nparent {tip}\nauthor {ident}\ncommitter {ident}\n\nchild\n"
+    child = subprocess.run(["git", "-C", str(repo), "hash-object", "-t", "commit", "-w", "--stdin"], input=body,
+                           check=True, capture_output=True, text=True).stdout.strip()
+    report = run(repo, lambda: git(repo, "reset", "-q", "--hard", child))
+    assert report.changes == () and report.own_commits == 1
+
+
+def test_a_replace_ref_cannot_make_a_reset_look_like_a_fast_forward(repo):
+    commit(repo, "b.txt")
+    tip = git(repo, "rev-parse", "HEAD")
+    first = git(repo, "rev-parse", "HEAD~1")
+    fake = git(repo, "commit-tree", "-p", tip, "-m", "fake", f"{first}^{{tree}}")
+    git(repo, "replace", first, fake)  # a read that honours replace refs sees `first` as a child of the old tip
+    report = run(repo, lambda: git(repo, "reset", "-q", "--hard", first))
+    change, = report.changes
+    assert change.change is Change.NON_FAST_FORWARD
+
+
+def test_a_commit_object_over_the_size_limit_leaves_the_decision_open_as_non_fast_forward(repo, monkeypatch):
+    monkeypatch.setattr(refs, "OBJECT_LIMIT", 10)
+    report = run(repo, lambda: commit(repo, "b.txt"))
+    change, = report.changes
+    assert change.change is Change.NON_FAST_FORWARD
+
+
+def test_an_ordinary_merge_in_a_large_history_is_still_a_fast_forward(repo, monkeypatch):
+    monkeypatch.setattr(refs, "WALK_LIMIT", 5000)  # less than the history: only a breadth-first walk finds `old`
+    stream = []
+    for number in range(12000):
+        stream.append(f"commit refs/heads/main\nmark :{number + 1}\n"
+                      f"committer T <t@example.invalid> {1700000000 + number} +0000\n"
+                      f"data 1\nx\n" + (f"from :{number}\n" if number else "") + "\n")
+    subprocess.run(["git", "-C", str(repo), "fast-import", "--quiet", "--force"], input="".join(stream),
+                   check=True, capture_output=True, text=True, timeout=120)
+    empty = git(repo, "rev-parse", "main^{tree}")
+
+    def merge():
+        main = git(repo, "rev-parse", "main")
+        side = git(repo, "commit-tree", "-p", git(repo, "rev-parse", "main~2"), "-m", "feature", empty)
+        merged = git(repo, "commit-tree", "-p", main, "-p", side, "-m", "merge", empty)
+        git(repo, "update-ref", "refs/heads/main", merged)
+    started = time.monotonic()
+    report = run(repo, merge)
+    assert report.changes == () and report.own_commits == 2 and time.monotonic() - started < 30
+
+
+def test_a_link_to_the_same_ref_does_not_report_its_targets_moves(repo):
+    git(repo, "symbolic-ref", "refs/heads/alias", "refs/heads/main")
+    report = run(repo, lambda: commit(repo, "b.txt"))
+    assert report.changes == () and report.own_commits == 1
+
+
+def test_zero_width_characters_are_escaped_and_the_restore_command_still_works(repo):
+    odd = "refs/heads/ma\u200bin2"
+    sha = git(repo, "rev-parse", "HEAD")
+    report = run(repo, lambda: git(repo, "update-ref", odd, sha))
+    change, = report.changes
+    assert change.ref == "refs/heads/ma\\u200bin2" and "\u200b" not in change.restore
+    subprocess.run(["bash", "-c", change.restore.replace("git ", f"git -C {shlex.quote(str(repo))} ", 1)], check=True,
+                   capture_output=True)
+    assert odd not in asyncio.run(refs.snapshot(repo)).refs

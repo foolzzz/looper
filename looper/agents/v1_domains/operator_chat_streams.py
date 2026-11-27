@@ -51,13 +51,13 @@ SCHEMAS = {
                  "commit": {"type": ["string", "null"]},
                  "mode": {"enum": ["direct", "orchestrated"]},
                  "uncommitted": _array(_STR), "unverified": _array(_STR)}, ["kind", "files", "commit", "mode"], closed=True),
-        _object({"kind": {"const": "ref_report"}, "report_id": {"type": ["integer", "null"]},
+        _object({"kind": {"const": "ref_report"}, "message_id": _NULL_STR, "report_id": {"type": ["integer", "null"]},
                  "changes": _array(_REF_CHANGE), "info": _array(_REF_CHANGE),
                  "head": {"oneOf": [{"type": "null"}, _object({"before": _NULL_STR, "after": _NULL_STR},
                                                               ["before", "after"], closed=True)]},
                  "own_commits": {"type": "integer", "minimum": 0}, "needs_you": {"type": "boolean"}},
-                ["kind", "report_id", "changes", "info", "head", "own_commits", "needs_you"], closed=True),
-        _object({"kind": {"const": "sandbox_notice"}, "notice": {"enum": [*NOTICES, SKIPPED_NOTICE]}, "detail": _STR},
+                ["kind", "message_id", "report_id", "changes", "info", "head", "own_commits", "needs_you"], closed=True),
+        _object({"kind": {"const": "sandbox_notice"}, "notice": {"enum": [*NOTICES, SKIPPED_NOTICE]}, "detail": _STR, "message_id": _NULL_STR},
                 ["kind", "notice", "detail"], closed=True),
         _object({"kind": {"const": "refused"}, "reason": {"const": "orchestrated"}, "status": _STR}, closed=True),
         _object({"kind": {"const": "refused"}, "reason": {"enum": [
@@ -177,7 +177,7 @@ async def stream(server, operation, arguments, principal, headers, writer):
         if owner := await server._thread_owner_elsewhere(session_id, arguments.get("manager") or "manager"):
             raise await server._foreign_thread_error(owner)
     writer.write(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-store\r\n"
-                 b"Connection: close\r\nX-Accel-Buffering: no\r\n\r\n")
+                 b"X-Content-Type-Options: nosniff\r\nConnection: close\r\nX-Accel-Buffering: no\r\n\r\n")
     events = (server._web_adapter.iter_chat_events(session_id) if correlation_id is None
               else server._web_adapter.iter_sse_events(correlation_id))
     try:

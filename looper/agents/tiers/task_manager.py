@@ -283,13 +283,14 @@ class TaskManagerAgent:
         cli = launch.runtime.environment(launch)
         return task_manager_edit.edit_bin(cli, forbidden=(work_dir, cli.get("TMPDIR") or tempfile.gettempdir(), *self.read_deny))
 
-    async def _notice_skipped(self, sink: TurnSink) -> None:
+    async def _notice_skipped(self, sink: TurnSink, message_id: str) -> None:
         """Tell the user which project instruction files were not read, when that set changes; never in a model's input."""
         current = frozenset((item.name, item.reason.value) for item in self.instructions_skipped)
         if current and current != self.instructions_notified:
             await sink.event(TaskManagerEvent.SANDBOX_NOTICE, {
                 "notice": task_manager_project_instructions.SKIPPED_NOTICE,
-                "detail": "; ".join(f"{name}: {reason}" for name, reason in sorted(current))})
+                "detail": "; ".join(f"{name}: {reason}" for name, reason in sorted(current)),
+                "message_id": message_id})
         self.instructions_notified = current
 
     def _mcp_cwd(self) -> Path:
@@ -464,7 +465,7 @@ class TaskManagerAgent:
             await activity.insert_activity(task_id=self.task_id, kind="error",
                 summary="Warning: task Manager cost is unknown for " + ", ".join(gate.unknown_models))
         task, reopened, launch, prompt = await self.prepare()
-        await self._notice_skipped(request.sink)
+        await self._notice_skipped(request.sink, request.message_id)
         # An in-place direct session writes the real checkout: record its branches and tags and settle the task branch
         # (a detached or moved HEAD refuses here, before the message is admitted).
         refs_before, task_branch = ((await task_manager_refs.begin_turn(task, reopened.work_dir, sink=request.sink, phase="turn"))
@@ -550,7 +551,7 @@ class TaskManagerAgent:
                                                 {"reason": "resume_failed", "detail": str(exc)})
                         # Re-run all configuration and review gates before the one fresh attempt.
                         task, reopened, launch, prompt = await self.prepare()
-                        await self._notice_skipped(request.sink)
+                        await self._notice_skipped(request.sink, request.message_id)
                         continue
                     text = str((result.result_event or {}).get("result") or "".join(pieces))
                     outcome = ("stopped" if result.stopped else "success"

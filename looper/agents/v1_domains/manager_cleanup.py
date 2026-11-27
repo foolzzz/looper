@@ -49,5 +49,6 @@ async def run(server, operation, arguments, principal, headers):
         # Read domains bypass ClientOps. Audit only metadata outside the target; the DB preview stays read-only.
         await manager_actions.record(channel=API_CHANNEL, chat=headers.get("x-looper-session") or DEFAULT_SESSION,
             message_id=None, tool=operation.operation_id, risk="read", status="ok",
-            arguments={"manager_id": result["manager_id"], "retention_days": result["retention_days"]})
+            arguments={"manager_id": result["manager_id"], "retention_days": result["retention_days"]},
+            sender_kind="operator" if principal.kind == "operator" else None)
     return result

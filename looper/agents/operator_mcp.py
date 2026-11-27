@@ -122,8 +122,10 @@ def launcher_problem(definition: Mapping[str, Any]) -> str | None:
     for name, argument, reason in UNSAFE_LAUNCHERS:  # named first: "npx" is more telling than "relative_command"
         if name in names and (argument is None or argument in args):
             return reason
-    if names & set(_INDIRECT):
-        return f"{sorted(names & set(_INDIRECT))[0]} (starts another program)"
+    if indirect := names & set(_INDIRECT):
+        # Named as the operator configured it (``sh``), not as a platform resolves it (``dash`` on Linux).
+        written = posixpath.basename(command).casefold()
+        return f"{written if written in indirect else sorted(indirect)[0]} (starts another program)"
     python = any(name.startswith("python") for name in names)
     if python and (at := _module_flag(args)) is not None:
         before = [*args[:at], args[at].split("m", 1)[0]]  # the options up to the module flag, its own cluster included

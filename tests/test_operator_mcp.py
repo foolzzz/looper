@@ -353,3 +353,10 @@ def test_reset_cwd_empties_the_start_directory(tmp_path):
     operator_mcp.reset_cwd(directory)
     assert not directory.exists()
     assert operator_mcp.private_cwd(tmp_path / "t" / "mcp-cwd").is_dir()
+
+
+def test_a_shell_is_refused_and_named_as_configured_whatever_it_resolves_to(tmp_path):
+    named = tmp_path / "sh"
+    named.symlink_to("/bin/bash")
+    assert operator_mcp.launcher_problem({"command": str(named)}) == "sh (starts another program)"
+    assert operator_mcp.launcher_problem({"command": "/bin/sh", "args": ["-c", "x"]}) == "sh (starts another program)"
