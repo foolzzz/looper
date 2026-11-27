@@ -929,6 +929,26 @@ it requires rerunning the local fake-model launch probe. Refusals name the file
 and key or CLI version, and increment a reason/phase/version counter visible in
 `manager_metrics.get` while work mode is enabled.
 
+**Project instructions and editing.** A direct session's fixed instructions
+(`task_manager_brief.instructions`) say what its sandbox allows: Bash is its only built-in
+tool (`BUILTIN_TOOLS`, the one switch for the wording), files are read and searched through Bash,
+changed with `looper-edit replace` or `looper-edit patch` (`looper/file_edit.py`), writes stay
+in the task directory and `$TMPDIR`, the network reaches only the project's allowed domains,
+`looper task` and Go command-line tools such as `gh` do not work, and pushing is the user's.
+`looper-edit` is on the session's `PATH` through a private directory under the operator's cache
+(`task_manager_edit.edit_bin`: one symlink to the console script next to the interpreter, never
+under the runtime root, the task directory or `$TMPDIR`; a missing console script fails the
+launch). The orchestrated session's instructions are unchanged. Because a direct session loads
+user settings only, Claude Code no longer reads the project's `CLAUDE.md` files as memory;
+Looper reads `CLAUDE.md`, `CLAUDE.local.md` and `AGENTS.md` from the task directory's root
+(`task_manager_project_instructions`: never parents or nested directories, a symlink must stay
+inside the directory, 32 KiB per file and 64 KiB in all with a truncation line, strict UTF-8,
+`@` imports kept as written) and appends them after the brief, each in an `untrusted` fence with
+source `project_instructions`, between a lead and a closing line that say they are not the
+user's requests. They are read on every launch and resume, so an edit takes effect from the
+next turn (the prompt hash in the launch signature changes and the session resumes). Project
+skills, commands and nested `CLAUDE.md` files are not available to a direct session.
+
 `tasks.managers.max_resident` defaults to 6 (1–20). Admission can reclaim the least
 recently used idle process; a 60-second ticker reclaims processes idle for 30
 minutes, measured from the last turn ending. All preparation shares the admission
