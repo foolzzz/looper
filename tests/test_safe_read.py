@@ -132,8 +132,9 @@ def test_a_file_with_another_hard_link_is_skipped(base: Path, tmp_path: Path) ->
     assert read_inside(base, base / "linked", LIMIT) == Skipped(Skip.HARD_LINKED)
 
 
+@pytest.mark.parametrize("replaced", [False, True], ids=["removed", "replaced by another file"])
 def test_removing_the_name_inside_after_the_open_does_not_hide_a_hard_link(
-    base: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    base: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, replaced: bool,
 ) -> None:
     os.link(tmp_path / "outside" / "file", base / "linked")
     fstat = os.fstat
@@ -141,6 +142,8 @@ def test_removing_the_name_inside_after_the_open_does_not_hide_a_hard_link(
     def raced(fd: int) -> os.stat_result:
         monkeypatch.setattr(os, "fstat", fstat)
         (base / "linked").unlink()  # one link is left: the file outside
+        if replaced:
+            (base / "linked").write_text("DECOY")
         return fstat(fd)
 
     monkeypatch.setattr(os, "fstat", raced)
