@@ -26,7 +26,9 @@ def test_json_responses_carry_nosniff_with_and_without_extra_headers() -> None:
 
 def _constant_text(node: ast.AST) -> str | None:
     """The text of a string or bytes expression built from literals, f-strings (``{}`` for a hole), ``+`` and
-    ``sep.join([...])`` of such parts; a part that is not a literal counts as ``{}``. None for anything else."""
+    ``sep.join([...])`` of such parts; a part that is not a literal counts as ``{}``. None for anything else.
+
+    Known blind spot, on purpose: ``%`` and ``.format`` formatting are not folded."""
     if isinstance(node, ast.Constant) and isinstance(node.value, (str, bytes)):
         return node.value.decode("latin-1") if isinstance(node.value, bytes) else node.value
     if isinstance(node, ast.JoinedStr):

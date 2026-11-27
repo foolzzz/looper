@@ -154,7 +154,10 @@ def _local_strings(function: ast.AST) -> dict[str, list[str]]:
 
 def message_write_calls(source: str) -> list[tuple[str, int]]:
     """(function, line) of every ``x.call|_request(<POST|PUT|PATCH>, "/open-apis/im/v1/messages...")``, with
-    the method and the path given directly or through a local variable."""
+    the method and the path given directly or through a local variable.
+
+    Known blind spots, on purpose: a path held in a module-level constant (``P = "..."`` then
+    ``self.call("POST", P)``), and a request helper not named call, _request, request or _call."""
     found = []
     for function in _functions(ast.parse(source)):
         env = _local_strings(function)
@@ -207,6 +210,11 @@ def test_the_scans_find_what_they_look_for() -> None:
     assert not message_write_calls('async def go(self):\n    await self.call("GET", "/open-apis/im/v1/messages")')
     assert not message_write_calls('async def go(self):\n    await self.call("POST", "/open-apis/contact/v3/x")')
     assert not message_write_calls('async def go(self):\n    path = "/open-apis/im/v1/messages"\n    await self.call("GET", path)')
+    assert markdown_builders('def f(t):\n    return {"tag": "md", "text": t}') == [("f", False)]
+    assert markdown_builders('def f(t):\n    return {"tag": "md", "text": neutralize_images(t)}') == [("f", True)]
+    assert markdown_builders('def f(t):\n    return ("--markdown", t)') == [("f", False)]
+    assert not markdown_builders('def f(t):\n    return {"tag": "plain_text", "content": t}')
+    assert cli_write_flags('def f():\n    return ["im", "+messages-send"]') == [("f", 2)]
 
 
 def test_the_write_scan_sees_a_path_in_a_variable() -> None:
@@ -223,11 +231,6 @@ def test_the_write_scan_sees_a_direct_request_call() -> None:
     via_name = 'async def go(self):\n    p = "/open-apis/im/v1/messages"\n    await self._request("POST", p)'
     assert message_write_calls(direct) == [("go", 2)]
     assert message_write_calls(via_name) == [("go", 3)]
-    assert markdown_builders('def f(t):\n    return {"tag": "md", "text": t}') == [("f", False)]
-    assert markdown_builders('def f(t):\n    return {"tag": "md", "text": neutralize_images(t)}') == [("f", True)]
-    assert markdown_builders('def f(t):\n    return ("--markdown", t)') == [("f", False)]
-    assert not markdown_builders('def f(t):\n    return {"tag": "plain_text", "content": t}')
-    assert cli_write_flags('def f():\n    return ["im", "+messages-send"]') == [("f", 2)]
 
 
 def test_every_lark_message_write_is_listed() -> None:
@@ -287,6 +290,7 @@ def test_a_malformed_mention_is_dropped_with_a_warning(mention: str, caplog: pyt
         args = record.args if isinstance(record.args, tuple) else tuple((record.args or {}).values())
         assert all(mention not in str(arg) or not mention for arg in args), record.args
         assert all(arg != mention for arg in args)
+    assert not mention or mention not in caplog.text  # nor interpolated into the message
 
 
 def test_a_long_malformed_mention_is_not_in_the_log_text(caplog: pytest.LogCaptureFixture) -> None:
