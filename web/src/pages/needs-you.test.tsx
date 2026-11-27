@@ -79,14 +79,16 @@ describe("Needs you page", () => {
     vi.mocked(fetchAttention).mockResolvedValue({ read_at: "2026-11-20T08:00:00Z", total: 1, sections: [
       { kind: "task_manager_refs", state: "ok", count: 1, error: null, items: [
         { key: "tm_refs:3", title: "任务管家改了别的分支或标签", context: "Login rewrite", since: null,
-          href: "#tasks/t1", ref: null, facts: { refs: [long, "refs/tags/v\u202e9"], count: 2 } }] },
+          href: "#tasks/t1", ref: null, facts: { refs: [long, "refs/tags/v\u202e9", "refs/heads/ma\u200bin"], count: 3 } }] },
     ] });
     await render();
     const section = host.querySelector('section[aria-label="任务管家改了别的分支或标签"]')!;
     expect(section.textContent).toContain(long);
     expect(section.textContent).not.toContain("[redacted]");
-    expect(section.textContent).toContain("refs/tags/v9");
+    expect(section.textContent).toContain("refs/tags/v\\u202e9");  // shown, not applied
+    expect(section.textContent).toContain("refs/heads/ma\\u200bin");  // distinct from refs/heads/main
     expect(section.textContent).not.toContain("\u202e");
+    expect(section.textContent).not.toContain("\u200b");
   });
 
   it("lists a changed-refs report with its task and refs, and marks it handled", async () => {
